@@ -10,7 +10,6 @@ interface ICToken {
     function mintBehalf(address receiver, uint256 mintAmount) external returns (uint256);
     function redeem(uint256 redeemTokens) external returns (uint256);
     function redeemUnderlying(uint256 redeemAmount) external returns (uint256);
-    function borrow(uint256 borrowAmount) external returns (uint256);
     function borrowBehalf(address borrower, uint256 borrowAmount) external returns (uint256);
     function repayBorrowBehalf(address borrower, uint256 repayAmount) external returns (uint256);
     function balanceOf(address owner) external view returns (uint256);
@@ -64,14 +63,9 @@ contract CompoundV2LendingModule is ILendingModule {
         external
         override
     {
-        (address cToken, uint8 variant) = abi.decode(data, (address, uint8));
+        (address cToken,) = abi.decode(data, (address, uint8));
 
-        if (variant == 0) {
-            // Venus: borrowBehalf borrows on behalf of user
-            ICToken(cToken).borrowBehalf(onBehalfOf, amount);
-        } else {
-            ICToken(cToken).borrow(amount);
-        }
+        ICToken(cToken).borrowBehalf(onBehalfOf, amount);
 
         if (to != address(this)) {
             IERC20(asset).transfer(to, amount);

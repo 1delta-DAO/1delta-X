@@ -1,0 +1,302 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {IPermit3} from "../interfaces/IPermit3.sol";
+import {IMakerModule} from "../interfaces/IMakerModule.sol";
+
+/// @notice Operation kind per item. Names mirror limit-order parlance:
+///         takers draw value out of a position, makers put value in.
+///         (Unrelated to the order's `maker` field, which names the signer.)
+///
+///         MAKE — deposit/repay-style: Settlement calls the module, the
+///                module pulls the funding token from the order maker via
+///                Permit3.
+///         TAKE — borrow/withdraw-style: Settlement calls `permit3.take`,
+///                which enforces the taker allowance gate and dispatches
+///                to the module; proceeds land at `receiver = Settlement`.
+enum ItemOp {
+    MAKE,
+    TAKE
+}
+
+/// @notice A single lending item inside a LimitOrder.
+/// @dev    `module` is a single-op adapter (`IMakerModule` for MAKE,
+///         `ITakerModule` for TAKE). `amount` is the *total* amount for a
+///         fully filled order; per-fill slices are computed pro-rata so
+///         partial fills accumulate exactly to `amount` once fully filled.
+///         `data` is the module's decode input and also the allowance
+///         preimage (`ref = keccak256(data)` for TAKE ops).
+struct Item {
+    ItemOp op;
+    address module;
+    uint256 amount;
+    bytes data;
+}
+
+/// @notice A signed limit order.
+struct LimitOrder {
+    address maker;
+    uint256 nonce;
+    uint256 deadline;
+    address tokenIn; //     maker gives (solver receives)
+    address tokenOut; //    maker receives (solver gives)
+    uint256 amountIn;
+    uint32 decayStartTime;
+    uint32 decayDuration;
+    uint256 startAmountOut; //  best for maker (at auction start / fixed price)
+    uint256 endAmountOut; //    worst for maker (at auction end)
+    Item[] items;
+}
+
+/// @title LimitOrderSettlement
+/// @notice Signed limit-order settler with partial fills, optional dutch
+///         decay, and pro-rata module-dispatched lending legs. All token
+///         and taker authority flows through Permit3 — there is no module
+///         whitelist, no admin role. A module's authority comes entirely
+///         from the maker's signature + their per-module Permit3 allowances.
+contract LimitOrderSettlement {
+    bytes32 internal constant ITEM_TYPEHASH =
+        keccak256("Item(uint8 op,address module,uint256 amount,bytes data)");
+
+    bytes32 internal constant ORDER_TYPEHASH = keccak256(
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "Item(uint8 op,address module,uint256 amount,bytes data)"
+    );
+
+    // ──────────────────── Storage ────────────────────
+
+    bytes32 public immutable DOMAIN_SEPARATOR;
+    IPermit3 public immutable PERMIT3;
+
+    /// @notice maker → word index → bitmap of cancelled nonces
+    mapping(address => mapping(uint256 => uint256)) public nonceBitmap;
+
+    /// @notice orderHash → cumulative filled amountIn
+    mapping(bytes32 => uint256) public filledAmountIn;
+
+    uint256 private _locked = 1;
+
+    // ──────────────────── Events ────────────────────
+
+    event OrderFilled(
+        bytes32 indexed orderHash,
+        address indexed maker,
+        address indexed solver,
+        uint256 fillAmountIn,
+        uint256 fillAmountOut
+    );
+    event OrdersCancelled(address indexed maker, uint256[] nonces);
+
+    // ──────────────────── Errors ────────────────────
+
+    error InvalidSignature();
+    error OrderExpired();
+    error NonceCancelled();
+    error AuctionNotStarted();
+    error InvalidAuctionParams();
+    error ZeroFill();
+    error OverFill();
+    error Reentrancy();
+
+    modifier nonReentrant() {
+        if (_locked != 1) revert Reentrancy();
+        _locked = 2;
+        _;
+        _locked = 1;
+    }
+
+    constructor(address permit3) {
+        PERMIT3 = IPermit3(permit3);
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("LimitOrderSettlement"),
+                keccak256("1"),
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
+    // ──────────────────── Maker self-service ────────────────────
+
+    function cancelOrders(uint256[] calldata noncesToCancel) external {
+        for (uint256 i; i < noncesToCancel.length; i++) {
+            _cancelNonce(msg.sender, noncesToCancel[i]);
+        }
+        emit OrdersCancelled(msg.sender, noncesToCancel);
+    }
+
+    function invalidateNonceWord(uint256 wordIndex) external {
+        nonceBitmap[msg.sender][wordIndex] = type(uint256).max;
+    }
+
+    // ──────────────────── Fill ────────────────────
+
+    /// @notice Fill (up to) `fillAmountIn` of an order. Partial fills allowed.
+    ///         Lending items are executed pro-rata for this fill's slice.
+    function fill(LimitOrder calldata order, bytes calldata sig, uint256 fillAmountIn)
+        external
+        nonReentrant
+        returns (uint256 fillAmountOut)
+    {
+        if (fillAmountIn == 0) revert ZeroFill();
+        if (block.timestamp > order.deadline) revert OrderExpired();
+
+        bytes32 orderHash = _hashOrder(order);
+        _verifySignature(orderHash, sig, order.maker);
+
+        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
+
+        uint256 prevFilled = filledAmountIn[orderHash];
+        uint256 newFilled = prevFilled + fillAmountIn;
+        if (newFilled > order.amountIn) revert OverFill();
+        filledAmountIn[orderHash] = newFilled;
+
+        uint256 currentOut = _currentAmountOut(order);
+        // ceilDiv — maker never underpaid at current auction rate
+        fillAmountOut = (fillAmountIn * currentOut + order.amountIn - 1) / order.amountIn;
+
+        // 1. Solver → maker: tokenOut (Permit3 enforces solver's allowance to this contract)
+        PERMIT3.transferFrom(msg.sender, order.maker, order.tokenOut, uint160(fillAmountOut));
+
+        // 2. Pro-rata lending items for this fill
+        _executeLendingItems(order, prevFilled, newFilled);
+
+        // 3. Settle tokenIn → solver. TAKE items route proceeds to this
+        //    contract; any shortfall is pulled from the maker via Permit3.
+        _payTokenInToSolver(order.tokenIn, order.maker, fillAmountIn);
+
+        emit OrderFilled(orderHash, order.maker, msg.sender, fillAmountIn, fillAmountOut);
+    }
+
+    // ──────────────────── Lending execution ────────────────────
+
+    /// @dev For each item, execute the slice attributable to this fill:
+    ///      slice = item.amount * newFilled / amountIn
+    ///            - item.amount * prevFilled / amountIn
+    ///      Sums to exactly item.amount once the order is fully filled.
+    function _executeLendingItems(LimitOrder calldata order, uint256 prevFilled, uint256 newFilled) internal {
+        uint256 amountIn = order.amountIn;
+        for (uint256 i; i < order.items.length; i++) {
+            Item calldata item = order.items[i];
+            uint256 slice = (item.amount * newFilled) / amountIn - (item.amount * prevFilled) / amountIn;
+            if (slice == 0) continue;
+
+            if (item.op == ItemOp.MAKE) {
+                // Maker module pulls the funding token from order.maker via Permit3 internally.
+                IMakerModule(item.module).makeOnBehalf(order.maker, slice, item.data);
+            } else {
+                // Taker: Permit3 enforces the gate and routes proceeds here.
+                PERMIT3.take(item.module, order.maker, uint160(slice), address(this), item.data);
+            }
+        }
+    }
+
+    /// @dev Pay `fillAmountIn` of tokenIn to the solver. Uses local balance
+    ///      accumulated from TAKE items first; any shortfall is pulled from
+    ///      the maker via Permit3 (the maker's token allowance to this
+    ///      contract is the gate).
+    function _payTokenInToSolver(address tokenIn, address maker, uint256 fillAmountIn) internal {
+        uint256 localBal = IERC20(tokenIn).balanceOf(address(this));
+        if (localBal >= fillAmountIn) {
+            IERC20(tokenIn).transfer(msg.sender, fillAmountIn);
+        } else {
+            if (localBal > 0) IERC20(tokenIn).transfer(msg.sender, localBal);
+            PERMIT3.transferFrom(maker, msg.sender, tokenIn, uint160(fillAmountIn - localBal));
+        }
+    }
+
+    // ──────────────────── Nonce management ────────────────────
+
+    function _cancelNonce(address maker, uint256 nonce) internal {
+        nonceBitmap[maker][nonce >> 8] |= (1 << (nonce & 0xff));
+    }
+
+    function _isNonceCancelled(address maker, uint256 nonce) internal view returns (bool) {
+        return (nonceBitmap[maker][nonce >> 8] & (1 << (nonce & 0xff))) != 0;
+    }
+
+    function isNonceCancelled(address maker, uint256 nonce) external view returns (bool) {
+        return _isNonceCancelled(maker, nonce);
+    }
+
+    // ──────────────────── Dutch decay ────────────────────
+
+    function _currentAmountOut(LimitOrder calldata order) internal view returns (uint256) {
+        if (order.startAmountOut < order.endAmountOut) revert InvalidAuctionParams();
+
+        if (order.decayDuration == 0 || order.startAmountOut == order.endAmountOut) {
+            return order.startAmountOut;
+        }
+
+        if (block.timestamp < order.decayStartTime) revert AuctionNotStarted();
+
+        uint256 elapsed = block.timestamp - order.decayStartTime;
+        if (elapsed >= order.decayDuration) return order.endAmountOut;
+
+        uint256 decay = (order.startAmountOut - order.endAmountOut) * elapsed / order.decayDuration;
+        return order.startAmountOut - decay;
+    }
+
+    // ──────────────────── Hashing & signature ────────────────────
+
+    function _hashOrder(LimitOrder calldata order) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                ORDER_TYPEHASH,
+                order.maker,
+                order.nonce,
+                order.deadline,
+                order.tokenIn,
+                order.tokenOut,
+                order.amountIn,
+                order.decayStartTime,
+                order.decayDuration,
+                order.startAmountOut,
+                order.endAmountOut,
+                _hashItems(order.items)
+            )
+        );
+    }
+
+    function _hashItems(Item[] calldata items) private pure returns (bytes32) {
+        bytes32[] memory hashes = new bytes32[](items.length);
+        for (uint256 i; i < items.length; i++) {
+            hashes[i] = keccak256(
+                abi.encode(
+                    ITEM_TYPEHASH,
+                    uint8(items[i].op),
+                    items[i].module,
+                    items[i].amount,
+                    keccak256(items[i].data)
+                )
+            );
+        }
+        return keccak256(abi.encodePacked(hashes));
+    }
+
+    function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, orderHash));
+        bytes32 r = bytes32(sig[0:32]);
+        bytes32 s = bytes32(sig[32:64]);
+        uint8 v = uint8(sig[64]);
+        address signer = ecrecover(digest, v, r, s);
+        if (signer == address(0) || signer != expected) revert InvalidSignature();
+    }
+
+    // ──────────────────── Views ────────────────────
+
+    function hashOrder(LimitOrder calldata order) external pure returns (bytes32) {
+        return _hashOrder(order);
+    }
+
+    function previewAmountOut(LimitOrder calldata order) external view returns (uint256) {
+        return _currentAmountOut(order);
+    }
+
+    function remaining(LimitOrder calldata order) external view returns (uint256) {
+        return order.amountIn - filledAmountIn[_hashOrder(order)];
+    }
+}
