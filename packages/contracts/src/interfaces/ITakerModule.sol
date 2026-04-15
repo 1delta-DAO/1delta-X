@@ -48,7 +48,14 @@ interface ITakerModule {
     /// @dev    Called ONLY by Permit3 after the allowance gate has been
     ///         decremented. The allowance ref is `keccak256(data)`, so the
     ///         bytes the module decodes here are the same bytes the user
-    ///         authorised. Modules MUST NOT expose this externally without
-    ///         their own auth — the assumption is msg.sender == permit3.
+    ///         authorised.
+    ///
+    ///         Modules MUST enforce `msg.sender == permit3` as their first
+    ///         statement. This is load-bearing: without it, a direct
+    ///         `takeOnBehalf(victim, amount, attacker, data)` call bypasses
+    ///         the Permit3 taker-allowance gate entirely and, combined with
+    ///         the victim's (usually infinite) token allowance on the
+    ///         position's receipt token, lets any caller drain the victim
+    ///         into the `receiver` address they control.
     function takeOnBehalf(address user, uint256 amount, address receiver, bytes calldata data) external;
 }
