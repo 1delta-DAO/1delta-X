@@ -27,10 +27,19 @@ enum ItemOp {
 ///         partial fills accumulate exactly to `amount` once fully filled.
 ///         `data` is the module's decode input and also the allowance
 ///         preimage (`ref = keccak256(data)` for TAKE ops).
+///
+///         `recipient` applies to TAKE items only — it is the address that
+///         receives the protocol proceeds (e.g. borrow output, withdrawn
+///         collateral). `address(0)` is the canonical default and means
+///         "send to Settlement" (classic flow — proceeds flow to the solver
+///         via `tokenIn` payout). Signing `recipient = maker` chains the
+///         output into a subsequent MAKE item via the maker's wallet.
+///         Ignored for MAKE items (set to 0 when constructing).
 struct Item {
     ItemOp op;
     address module;
     uint256 amount;
+    address recipient;
     bytes data;
 }
 
@@ -57,11 +66,11 @@ struct LimitOrder {
 ///         from the maker's signature + their per-module Permit3 allowances.
 contract LimitOrderSettlement {
     bytes32 internal constant ITEM_TYPEHASH =
-        keccak256("Item(uint8 op,address module,uint256 amount,bytes data)");
+        keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
 
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
         "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
-        "Item(uint8 op,address module,uint256 amount,bytes data)"
+        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
     );
 
     // ──────────────────── Storage ────────────────────
@@ -161,8 +170,8 @@ contract LimitOrderSettlement {
         // 1. Solver → maker: tokenOut (Permit3 enforces solver's allowance to this contract)
         PERMIT3.transferFrom(msg.sender, order.maker, order.tokenOut, uint160(fillAmountOut));
 
-        // 2. Pro-rata lending items for this fill
-        _executeLendingItems(order, prevFilled, newFilled);
+        // 2. Pro-rata operation items for this fill
+        _executeItems(order, prevFilled, newFilled);
 
         // 3. Settle tokenIn → solver. TAKE items route proceeds to this
         //    contract; any shortfall is pulled from the maker via Permit3.
@@ -171,13 +180,13 @@ contract LimitOrderSettlement {
         emit OrderFilled(orderHash, order.maker, msg.sender, fillAmountIn, fillAmountOut);
     }
 
-    // ──────────────────── Lending execution ────────────────────
+    // ──────────────────── Operation execution ────────────────────
 
     /// @dev For each item, execute the slice attributable to this fill:
     ///      slice = item.amount * newFilled / amountIn
     ///            - item.amount * prevFilled / amountIn
     ///      Sums to exactly item.amount once the order is fully filled.
-    function _executeLendingItems(LimitOrder calldata order, uint256 prevFilled, uint256 newFilled) internal {
+    function _executeItems(LimitOrder calldata order, uint256 prevFilled, uint256 newFilled) internal {
         uint256 amountIn = order.amountIn;
         for (uint256 i; i < order.items.length; i++) {
             Item calldata item = order.items[i];
@@ -188,8 +197,11 @@ contract LimitOrderSettlement {
                 // Maker module pulls the funding token from order.maker via Permit3 internally.
                 IMakerModule(item.module).makeOnBehalf(order.maker, slice, item.data);
             } else {
-                // Taker: Permit3 enforces the gate and routes proceeds here.
-                PERMIT3.take(item.module, order.maker, uint160(slice), address(this), item.data);
+                // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
+                // classic flow (proceeds to Settlement for tokenIn payout); signing a
+                // non-zero recipient (e.g. the maker) chains output into a subsequent item.
+                address to = item.recipient == address(0) ? address(this) : item.recipient;
+                PERMIT3.take(item.module, order.maker, uint160(slice), to, item.data);
             }
         }
     }
@@ -270,6 +282,7 @@ contract LimitOrderSettlement {
                     uint8(items[i].op),
                     items[i].module,
                     items[i].amount,
+                    items[i].recipient,
                     keccak256(items[i].data)
                 )
             );

@@ -33,10 +33,10 @@ pragma solidity ^0.8.28;
 ///  `permit3.transferFrom(user, address(this), token, amount)` and forwards
 ///  it to the protocol.
 interface IMakerModule {
-    /// @notice Push `amount` of value from `user` into the protocol
+    /// @notice Push `amount` of value from `onBehalfOf` into the protocol
     ///         position identified by `data`.
     /// @dev    Called by Settlement. Module MUST pull the funding token
-    ///         from `user` via `permit3.transferFrom(...)` — the token
-    ///         allowance is the gate.
-    function makeOnBehalf(address user, uint256 amount, bytes calldata data) external;
+    ///         from `onBehalfOf` via `permit3.transferFrom(...)` — the
+    ///         token allowance is the gate.
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external;
 }

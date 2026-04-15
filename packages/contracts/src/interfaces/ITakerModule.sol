@@ -41,7 +41,7 @@ pragma solidity ^0.8.28;
 ///  `permit3.transferFrom` to pull ERC20s.
 interface ITakerModule {
     /// @notice Perform the protocol-native call that removes `amount` of
-    ///         value from `user`'s position and sends it to `receiver`.
+    ///         value from `onBehalfOf`'s position and sends it to `receiver`.
     ///         The asset being moved is whatever the position's `data`
     ///         implies (often fixed by the position itself, e.g. Morpho
     ///         market loan token, Comet base asset, Lido withdrawal NFT).
@@ -57,5 +57,5 @@ interface ITakerModule {
     ///         the victim's (usually infinite) token allowance on the
     ///         position's receipt token, lets any caller drain the victim
     ///         into the `receiver` address they control.
-    function takeOnBehalf(address user, uint256 amount, address receiver, bytes calldata data) external;
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external;
 }
