@@ -1043,4 +1043,168 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             items: items
         });
     }
+
+    // ──────────────────── Single-signature fill ────────────────────
+    //
+    // The maker's wallet has done ZERO setup with Permit3 except the
+    // bare `IERC20.approve(permit3, ∞)` per token (a one-time prerequisite
+    // for any Permit3 user). They sign exactly ONE EIP-712 message that
+    // bundles:
+    //   • a PermitBatch (token allowances Settlement + the deposit module need)
+    //   • a witness binding the permits to this specific LimitOrder
+    //
+    // Solver calls `fillWithPermit(order, batch, sig, fillAmountIn)`:
+    //   1. Settlement asks Permit3 to verify the sig against
+    //      EIP-712(PermitBatchWitness, witness=orderHash) and apply the
+    //      allowances.
+    //   2. Settlement runs the normal fill core. The freshly-applied
+    //      allowances satisfy every Permit3.transferFrom inside the fill.
+    //   3. Permit's nonce is consumed. The same signature can never be
+    //      replayed (different witness → different digest; same witness +
+    //      different batch → invalid sig; same exact bundle → nonce reused).
+    //
+    function test_fillWithPermit_singleSignature() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        // ── Maker side: ONLY bare ERC20 approve to Permit3. No permit3.approveX calls. ──
+        vm.startPrank(maker);
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        IERC20(WETH).approve(address(permit3), type(uint256).max);
+        vm.stopPrank();
+
+        // Solver still needs its own one-time approval (separate user).
+        _approveSolverSide(wethOut, WETH);
+
+        // Build order.
+        Item[] memory items = new Item[](1);
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(depositModule),
+            amount: wethOut,
+            recipient: address(0),
+            data: abi.encode(AAVE_POOL, WETH)
+        });
+        LimitOrder memory order = LimitOrder({
+            maker: maker,
+            nonce: 42,
+            deadline: block.timestamp + 1 hours,
+            tokenIn: USDC,
+            tokenOut: WETH,
+            amountIn: usdcIn,
+            decayStartTime: 0,
+            decayDuration: 0,
+            startAmountOut: wethOut,
+            endAmountOut: wethOut,
+            items: items
+        });
+
+        // Build the permit batch the fill needs:
+        //   - settlement may pull USDC for tokenIn shortfall (cap = full amountIn for safety)
+        //   - depositModule pulls WETH for the supply
+        IPermit3.TokenPermit[] memory tokenPermits = new IPermit3.TokenPermit[](2);
+        tokenPermits[0] = IPermit3.TokenPermit({
+            spender: address(settlement),
+            token: USDC,
+            amount: uint160(usdcIn),
+            expiration: uint48(order.deadline)
+        });
+        tokenPermits[1] = IPermit3.TokenPermit({
+            spender: address(depositModule),
+            token: WETH,
+            amount: uint160(wethOut),
+            expiration: uint48(order.deadline)
+        });
+        IPermit3.TakerPermit[] memory takerPermits = new IPermit3.TakerPermit[](0);
+
+        IPermit3.PermitBatch memory batch = IPermit3.PermitBatch({
+            tokens: tokenPermits,
+            takers: takerPermits,
+            nonce: 1,
+            deadline: order.deadline
+        });
+
+        // Sign the witness-bound permit.
+        bytes memory sig = _signPermitBatchWitness(batch, _hashOrder(order));
+
+        // Fill — single solver call, single maker signature.
+        vm.prank(solver);
+        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn);
+
+        assertEq(paid, wethOut, "solver paid 1 WETH");
+        assertEq(IERC20(USDC).balanceOf(maker), 0, "maker USDC pulled");
+        assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received USDC");
+        assertApproxEqAbs(IERC20(aWETH).balanceOf(maker), wethOut, 2, "maker received aWETH");
+
+        // Permit nonce now used; signature non-replayable.
+        assertTrue(permit3.isPermitNonceUsed(maker, 1), "permit nonce used");
+
+        // Order nonce path is independent and untouched (no order sig was used).
+        assertFalse(settlement.isNonceCancelled(maker, order.nonce), "order nonce untouched");
+    }
+
+    // ──────────────────── Permit-witness signing helpers ────────────────────
+
+    bytes32 constant TOKEN_PERMIT_TH =
+        keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
+    bytes32 constant TAKER_PERMIT_TH =
+        keccak256("TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)");
+
+    /// @dev Must mirror Permit3's `_PERMIT_BATCH_WITNESS_STUB` + Settlement's
+    ///      `_LIMIT_ORDER_WITNESS_TYPESTRING` exactly.
+    string constant PERMIT_BATCH_WITNESS_FULL_TYPESTRING =
+        "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
+        "LimitOrder witness)"
+        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
+
+    function _hashTokenPermits(IPermit3.TokenPermit[] memory permits) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](permits.length);
+        for (uint256 i; i < permits.length; i++) {
+            h[i] = keccak256(
+                abi.encode(
+                    TOKEN_PERMIT_TH, permits[i].spender, permits[i].token, permits[i].amount, permits[i].expiration
+                )
+            );
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    function _hashTakerPermits(IPermit3.TakerPermit[] memory permits) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](permits.length);
+        for (uint256 i; i < permits.length; i++) {
+            h[i] = keccak256(
+                abi.encode(
+                    TAKER_PERMIT_TH, permits[i].module, permits[i].ref, permits[i].amount, permits[i].expiration
+                )
+            );
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    function _signPermitBatchWitness(IPermit3.PermitBatch memory batch, bytes32 witness)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 typeHash = keccak256(bytes(PERMIT_BATCH_WITNESS_FULL_TYPESTRING));
+        bytes32 hashStruct = keccak256(
+            abi.encode(
+                typeHash,
+                _hashTokenPermits(batch.tokens),
+                _hashTakerPermits(batch.takers),
+                batch.nonce,
+                batch.deadline,
+                witness
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), hashStruct));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPk, digest);
+        return abi.encodePacked(r, s, v);
+    }
 }

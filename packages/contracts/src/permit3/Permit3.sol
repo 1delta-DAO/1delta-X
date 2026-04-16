@@ -42,7 +42,44 @@ contract Permit3 is IPermit3 {
     ///      withdrawal NFT id, …).
     mapping(address => mapping(address => mapping(bytes32 => PackedAllowance))) private _takerAllowance;
 
+    /// @notice Permit replay-protection: owner → wordIndex → bitmap of used nonces.
+    mapping(address => mapping(uint256 => uint256)) public permitNonceBitmap;
+
+    /// @notice EIP-712 domain separator for signed permits.
+    bytes32 public immutable override DOMAIN_SEPARATOR;
+
     uint256 private _locked = 1;
+
+    // ──────────────────── EIP-712 typehashes ────────────────────
+
+    bytes32 private constant _TOKEN_PERMIT_TYPEHASH =
+        keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
+
+    bytes32 private constant _TAKER_PERMIT_TYPEHASH =
+        keccak256("TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)");
+
+    bytes32 private constant _PERMIT_BATCH_TYPEHASH = keccak256(
+        "PermitBatch(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline)"
+        "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+    );
+
+    /// @dev Type-string stub for the witness-bound batch. The caller appends
+    ///      its own `"<fieldName> <WitnessType>)<TYPES IN ALPHABETICAL ORDER>"`.
+    string private constant _PERMIT_BATCH_WITNESS_STUB =
+        "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,";
+
+    constructor() {
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("Permit3"),
+                keccak256("1"),
+                block.chainid,
+                address(this)
+            )
+        );
+    }
 
     modifier nonReentrant() {
         if (_locked != 1) revert Reentrancy();
@@ -121,6 +158,123 @@ contract Permit3 is IPermit3 {
         // Intent-only signal; callers sweep specific (asset, ref) pairs via
         // revokeToken / revokeTaker using their off-chain-indexed asset list.
         emit Lockdown(msg.sender, spender);
+    }
+
+    // ──────────────────── Signed permits ────────────────────
+
+    function permitBatch(address owner, PermitBatch calldata batch, bytes calldata sig) external override {
+        if (block.timestamp > batch.deadline) revert PermitExpired();
+        bytes32 hashStruct = keccak256(
+            abi.encode(
+                _PERMIT_BATCH_TYPEHASH,
+                _hashTokenPermits(batch.tokens),
+                _hashTakerPermits(batch.takers),
+                batch.nonce,
+                batch.deadline
+            )
+        );
+        _verifyPermitSig(owner, hashStruct, sig);
+        _usePermitNonce(owner, batch.nonce);
+        _applyBatch(owner, batch);
+        emit PermitBatchApplied(owner, batch.nonce);
+    }
+
+    function permitBatchWithWitness(
+        address owner,
+        PermitBatch calldata batch,
+        bytes32 witness,
+        string calldata witnessTypeString,
+        bytes calldata sig
+    ) external override {
+        if (block.timestamp > batch.deadline) revert PermitExpired();
+        bytes32 typeHash = keccak256(abi.encodePacked(_PERMIT_BATCH_WITNESS_STUB, witnessTypeString));
+        bytes32 hashStruct = keccak256(
+            abi.encode(
+                typeHash,
+                _hashTokenPermits(batch.tokens),
+                _hashTakerPermits(batch.takers),
+                batch.nonce,
+                batch.deadline,
+                witness
+            )
+        );
+        _verifyPermitSig(owner, hashStruct, sig);
+        _usePermitNonce(owner, batch.nonce);
+        _applyBatch(owner, batch);
+        emit PermitBatchApplied(owner, batch.nonce);
+    }
+
+    function isPermitNonceUsed(address owner, uint256 nonce) external view override returns (bool) {
+        return (permitNonceBitmap[owner][nonce >> 8] & (1 << (nonce & 0xff))) != 0;
+    }
+
+    // ──────────────────── Permit internals ────────────────────
+
+    function _hashTokenPermits(TokenPermit[] calldata permits) private pure returns (bytes32) {
+        bytes32[] memory hashes = new bytes32[](permits.length);
+        for (uint256 i; i < permits.length; i++) {
+            hashes[i] = keccak256(
+                abi.encode(
+                    _TOKEN_PERMIT_TYPEHASH,
+                    permits[i].spender,
+                    permits[i].token,
+                    permits[i].amount,
+                    permits[i].expiration
+                )
+            );
+        }
+        return keccak256(abi.encodePacked(hashes));
+    }
+
+    function _hashTakerPermits(TakerPermit[] calldata permits) private pure returns (bytes32) {
+        bytes32[] memory hashes = new bytes32[](permits.length);
+        for (uint256 i; i < permits.length; i++) {
+            hashes[i] = keccak256(
+                abi.encode(
+                    _TAKER_PERMIT_TYPEHASH,
+                    permits[i].module,
+                    permits[i].ref,
+                    permits[i].amount,
+                    permits[i].expiration
+                )
+            );
+        }
+        return keccak256(abi.encodePacked(hashes));
+    }
+
+    function _verifyPermitSig(address owner, bytes32 hashStruct, bytes calldata sig) private view {
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, hashStruct));
+        bytes32 r = bytes32(sig[0:32]);
+        bytes32 s = bytes32(sig[32:64]);
+        uint8 v = uint8(sig[64]);
+        address signer = ecrecover(digest, v, r, s);
+        if (signer == address(0) || signer != owner) revert InvalidPermitSignature();
+    }
+
+    function _usePermitNonce(address owner, uint256 nonce) private {
+        uint256 wordIndex = nonce >> 8;
+        uint256 bitIndex = nonce & 0xff;
+        uint256 mask = 1 << bitIndex;
+        uint256 word = permitNonceBitmap[owner][wordIndex];
+        if (word & mask != 0) revert PermitNonceUsed();
+        permitNonceBitmap[owner][wordIndex] = word | mask;
+    }
+
+    function _applyBatch(address owner, PermitBatch calldata batch) private {
+        for (uint256 i; i < batch.tokens.length; i++) {
+            TokenPermit calldata p = batch.tokens[i];
+            PackedAllowance storage a = _tokenAllowance[owner][p.spender][p.token];
+            a.amount = p.amount;
+            a.expiration = p.expiration;
+            emit TokenApproval(owner, p.spender, p.token, p.amount, p.expiration);
+        }
+        for (uint256 i; i < batch.takers.length; i++) {
+            TakerPermit calldata p = batch.takers[i];
+            PackedAllowance storage a = _takerAllowance[owner][p.module][p.ref];
+            a.amount = p.amount;
+            a.expiration = p.expiration;
+            emit TakerApproval(owner, p.module, p.ref, p.amount, p.expiration);
+        }
     }
 
     // ──────────────────── Internal ────────────────────

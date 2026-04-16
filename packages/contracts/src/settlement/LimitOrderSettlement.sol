@@ -150,11 +150,49 @@ contract LimitOrderSettlement {
         nonReentrant
         returns (uint256 fillAmountOut)
     {
-        if (fillAmountIn == 0) revert ZeroFill();
-        if (block.timestamp > order.deadline) revert OrderExpired();
-
         bytes32 orderHash = _hashOrder(order);
         _verifySignature(orderHash, sig, order.maker);
+        return _fillCore(order, orderHash, fillAmountIn);
+    }
+
+    /// @notice Single-signature fill: the maker's `sig` is over a Permit3
+    ///         `PermitBatch` bound to this order's hash as a witness, so
+    ///         one signature simultaneously authorises the order *and*
+    ///         every Permit3 token + taker allowance the fill needs.
+    ///         No standing approvals required.
+    function fillWithPermit(
+        LimitOrder calldata order,
+        IPermit3.PermitBatch calldata batch,
+        bytes calldata sig,
+        uint256 fillAmountIn
+    ) external nonReentrant returns (uint256 fillAmountOut) {
+        bytes32 orderHash = _hashOrder(order);
+        // Permit3 verifies the sig against (PermitBatchWitness + orderHash) and
+        // applies all allowances. The order itself doesn't need a separate sig
+        // — the witness binding makes the permit endorse this exact order.
+        PERMIT3.permitBatchWithWitness(
+            order.maker, batch, orderHash, _LIMIT_ORDER_WITNESS_TYPESTRING, sig
+        );
+        return _fillCore(order, orderHash, fillAmountIn);
+    }
+
+    /// @dev EIP-712 type string for the witness portion of a `PermitBatchWitness`
+    ///      whose witness is a `LimitOrder`. Permit3 prepends its standard stub
+    ///      and concatenates this. Type definitions are in alphabetical order
+    ///      (Item, LimitOrder, TakerPermit, TokenPermit).
+    string private constant _LIMIT_ORDER_WITNESS_TYPESTRING =
+        "LimitOrder witness)"
+        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
+
+    function _fillCore(LimitOrder calldata order, bytes32 orderHash, uint256 fillAmountIn)
+        internal
+        returns (uint256 fillAmountOut)
+    {
+        if (fillAmountIn == 0) revert ZeroFill();
+        if (block.timestamp > order.deadline) revert OrderExpired();
 
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
 
