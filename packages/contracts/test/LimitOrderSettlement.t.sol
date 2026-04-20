@@ -12,9 +12,11 @@ import {
     LimitOrderSettlement,
     LimitOrder,
     Item,
-    ItemOp
+    ItemOp,
+    Validator
 } from "../src/settlement/LimitOrderSettlement.sol";
 import {LimitOrderLeverageSolver} from "../src/solver/LimitOrderLeverageSolver.sol";
+import {ChainlinkPriceLte, ChainlinkPriceGte} from "../src/validators/ChainlinkPriceValidators.sol";
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "./data/LenderRegistry.sol";
 
@@ -266,7 +268,9 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
     /// @dev External self-call so a reverting `createSelectFork` can be caught
     ///      by try/catch (cheatcode reverts propagate through external boundaries).
     function __fork(string calldata rpc) external {
-        vm.createSelectFork(rpc);
+        // Pin to a block with headroom under Aave market caps for deterministic tests.
+        // drpc.org, flashbots, and the public nodes all serve this block.
+        vm.createSelectFork(rpc, 22_000_000);
     }
 
     // ──────────────────── Helpers ────────────────────
@@ -287,9 +291,11 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
 
     bytes32 constant ITEM_TH =
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
+    bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "Validator(address target,bytes data)"
     );
 
     function _hashItems(Item[] memory items) internal pure returns (bytes32) {
@@ -309,6 +315,14 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
         return keccak256(abi.encodePacked(h));
     }
 
+    function _hashValidators(Validator[] memory validators) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](validators.length);
+        for (uint256 i; i < validators.length; i++) {
+            h[i] = keccak256(abi.encode(VALIDATOR_TH, validators[i].target, keccak256(validators[i].data)));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
     function _hashOrder(LimitOrder memory o) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -323,7 +337,8 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
                 o.decayDuration,
                 o.startAmountOut,
                 o.endAmountOut,
-                _hashItems(o.items)
+                _hashItems(o.items),
+                _hashValidators(o.validators)
             )
         );
     }
@@ -375,7 +390,8 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0, //        fixed-price (start == end)
             startAmountOut: wethOut,
             endAmountOut: wethOut,
-            items: items
+            items: items,
+            validators: new Validator[](0)
         });
 
         bytes memory sig = _sign(order);
@@ -512,7 +528,8 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: usdcOut,
             endAmountOut: usdcOut,
-            items: items
+            items: items,
+            validators: new Validator[](0)
         });
     }
 
@@ -660,7 +677,8 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: collateralIn,
             endAmountOut: collateralIn,
-            items: items
+            items: items,
+            validators: new Validator[](0)
         });
     }
 
@@ -859,7 +877,8 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: bufferedAmount,
             endAmountOut: bufferedAmount,
-            items: items
+            items: items,
+            validators: new Validator[](0)
         });
     }
 
@@ -1040,7 +1059,8 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: bufferedRepay,
             endAmountOut: bufferedRepay,
-            items: items
+            items: items,
+            validators: new Validator[](0)
         });
     }
 
@@ -1099,7 +1119,8 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: wethOut,
             endAmountOut: wethOut,
-            items: items
+            items: items,
+            validators: new Validator[](0)
         });
 
         // Build the permit batch the fill needs:
@@ -1159,9 +1180,10 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "LimitOrder witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
         "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
-        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+        "Validator(address target,bytes data)";
 
     function _hashTokenPermits(IPermit3.TokenPermit[] memory permits) internal pure returns (bytes32) {
         bytes32[] memory h = new bytes32[](permits.length);
@@ -1206,5 +1228,113 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), hashStruct));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    // ──────────────────── Validators: stop-loss gating ────────────────────
+    //
+    // Maker holds an aWETH position. They sign an order to unwind it into
+    // USDC, gated by a Chainlink ETH/USD price validator.
+    //
+    // Two scenarios:
+    //   • threshold FAR BELOW current price → validator returns false → fill reverts
+    //   • threshold FAR ABOVE current price → validator returns true  → fill succeeds
+    //
+    // Both use the `ChainlinkPriceLte` validator — typical stop-loss pattern
+    // ("fill when price drops to X or lower"). Signing a threshold the market
+    // hasn't reached protects the maker from accidental early execution.
+
+    address constant ETH_USD_FEED = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
+    int256 constant FAR_BELOW_MARKET = int256(500 * 1e8); //     $500 — ETH is far above
+    int256 constant FAR_ABOVE_MARKET = int256(1_000_000 * 1e8); // $1M — never
+
+    function test_validator_rejectsWhenConditionNotMet() public {
+        ChainlinkPriceLte priceLte = new ChainlinkPriceLte();
+
+        uint256 wethIn = 1 ether;
+        uint256 usdcOut = 2_000e6;
+
+        _seedAWethPosition(wethIn + 1e15);
+        deal(USDC, solver, usdcOut);
+
+        bytes memory takerData = abi.encode(AAVE_POOL, WETH, aWETH);
+        bytes32 ref = keccak256(takerData);
+
+        _approveMakerWithdrawSide(wethIn, ref, takerData);
+        _approveSolverSide(usdcOut, USDC);
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
+
+        Validator[] memory validators = new Validator[](1);
+        validators[0] = Validator({
+            target: address(priceLte),
+            data: abi.encode(ETH_USD_FEED, FAR_BELOW_MARKET)
+        });
+
+        LimitOrder memory order = _orderWithValidators(101, WETH, USDC, wethIn, usdcOut, items, validators);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(LimitOrderSettlement.ValidationFailed.selector, uint256(0)));
+        settlement.fill(order, sig, wethIn);
+    }
+
+    function test_validator_passesWhenConditionMet() public {
+        ChainlinkPriceLte priceLte = new ChainlinkPriceLte();
+
+        uint256 wethIn = 1 ether;
+        uint256 usdcOut = 2_000e6;
+
+        _seedAWethPosition(wethIn + 1e15);
+        deal(USDC, solver, usdcOut);
+
+        bytes memory takerData = abi.encode(AAVE_POOL, WETH, aWETH);
+        bytes32 ref = keccak256(takerData);
+
+        _approveMakerWithdrawSide(wethIn, ref, takerData);
+        _approveSolverSide(usdcOut, USDC);
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
+
+        Validator[] memory validators = new Validator[](1);
+        validators[0] = Validator({
+            target: address(priceLte),
+            data: abi.encode(ETH_USD_FEED, FAR_ABOVE_MARKET)
+        });
+
+        LimitOrder memory order = _orderWithValidators(102, WETH, USDC, wethIn, usdcOut, items, validators);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, wethIn);
+
+        assertEq(paid, usdcOut, "filled when gate opened");
+        assertEq(IERC20(USDC).balanceOf(maker), usdcOut, "maker received USDC");
+    }
+
+    function _orderWithValidators(
+        uint256 nonce,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        Item[] memory items,
+        Validator[] memory validators
+    ) internal view returns (LimitOrder memory) {
+        return LimitOrder({
+            maker: maker,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours,
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            amountIn: amountIn,
+            decayStartTime: 0,
+            decayDuration: 0,
+            startAmountOut: amountOut,
+            endAmountOut: amountOut,
+            items: items,
+            validators: validators
+        });
     }
 }

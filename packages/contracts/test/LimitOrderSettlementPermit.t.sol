@@ -12,7 +12,8 @@ import {
     LimitOrderSettlement,
     LimitOrder,
     Item,
-    ItemOp
+    ItemOp,
+    Validator
 } from "../src/settlement/LimitOrderSettlement.sol";
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "./data/LenderRegistry.sol";
@@ -197,7 +198,8 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: wethOut,
             endAmountOut: wethOut,
-            items: items
+            items: items,
+            validators: new Validator[](0)
         });
 
         IPermit3.PermitBatch memory batch = _buildBatch(
@@ -439,7 +441,8 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
     }
 
     function __fork(string calldata rpc) external {
-        vm.createSelectFork(rpc);
+        // Pin to a block with headroom under Aave market caps for deterministic tests.
+        vm.createSelectFork(rpc, 22_000_000);
     }
 
     // ── Position seeding ──
@@ -494,7 +497,8 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: amountOut,
             endAmountOut: amountOut,
-            items: items
+            items: items,
+            validators: new Validator[](0)
         });
     }
 
@@ -543,9 +547,11 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
 
     bytes32 constant ITEM_TH =
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
+    bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "Validator(address target,bytes data)"
     );
     bytes32 constant TOKEN_PERMIT_TH =
         keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
@@ -556,9 +562,10 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "LimitOrder witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
         "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
-        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+        "Validator(address target,bytes data)";
 
     function _hashOrder(LimitOrder memory o) internal pure returns (bytes32) {
         return keccak256(
@@ -566,7 +573,7 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
                 ORDER_TH,
                 o.maker, o.nonce, o.deadline, o.tokenIn, o.tokenOut, o.amountIn,
                 o.decayStartTime, o.decayDuration, o.startAmountOut, o.endAmountOut,
-                _hashItems(o.items)
+                _hashItems(o.items), _hashValidators(o.validators)
             )
         );
     }
@@ -577,6 +584,14 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
             h[i] = keccak256(
                 abi.encode(ITEM_TH, uint8(items[i].op), items[i].module, items[i].amount, items[i].recipient, keccak256(items[i].data))
             );
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    function _hashValidators(Validator[] memory validators) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](validators.length);
+        for (uint256 i; i < validators.length; i++) {
+            h[i] = keccak256(abi.encode(VALIDATOR_TH, validators[i].target, keccak256(validators[i].data)));
         }
         return keccak256(abi.encodePacked(h));
     }

@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {IMakerModule} from "../interfaces/IMakerModule.sol";
+import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 
 /// @notice Operation kind per item. Names mirror limit-order parlance:
 ///         takers draw value out of a position, makers put value in.
@@ -43,6 +44,15 @@ struct Item {
     bytes data;
 }
 
+/// @notice A read-only trigger. Settlement `staticcall`s `target.validate(order, data)`
+///         and aborts the fill unless the returned bool is `true`. Multiple
+///         validators on an order are AND-composed. Both `target` and `data`
+///         are in the EIP-712 typehash → solver cannot alter.
+struct Validator {
+    address target;
+    bytes data;
+}
+
 /// @notice A signed limit order.
 struct LimitOrder {
     address maker;
@@ -56,6 +66,7 @@ struct LimitOrder {
     uint256 startAmountOut; //  best for maker (at auction start / fixed price)
     uint256 endAmountOut; //    worst for maker (at auction end)
     Item[] items;
+    Validator[] validators; //  optional trigger conditions; AND-composed
 }
 
 /// @title LimitOrderSettlement
@@ -68,9 +79,13 @@ contract LimitOrderSettlement {
     bytes32 internal constant ITEM_TYPEHASH =
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
 
+    bytes32 internal constant VALIDATOR_TYPEHASH =
+        keccak256("Validator(address target,bytes data)");
+
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "Validator(address target,bytes data)"
     );
 
     // ──────────────────── Storage ────────────────────
@@ -107,6 +122,7 @@ contract LimitOrderSettlement {
     error ZeroFill();
     error OverFill();
     error Reentrancy();
+    error ValidationFailed(uint256 index);
 
     modifier nonReentrant() {
         if (_locked != 1) revert Reentrancy();
@@ -183,9 +199,10 @@ contract LimitOrderSettlement {
     string private constant _LIMIT_ORDER_WITNESS_TYPESTRING =
         "LimitOrder witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
         "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
-        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+        "Validator(address target,bytes data)";
 
     function _fillCore(LimitOrder calldata order, bytes32 orderHash, uint256 fillAmountIn)
         internal
@@ -195,6 +212,8 @@ contract LimitOrderSettlement {
         if (block.timestamp > order.deadline) revert OrderExpired();
 
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
+
+        _runValidators(order);
 
         uint256 prevFilled = filledAmountIn[orderHash];
         uint256 newFilled = prevFilled + fillAmountIn;
@@ -306,7 +325,8 @@ contract LimitOrderSettlement {
                 order.decayDuration,
                 order.startAmountOut,
                 order.endAmountOut,
-                _hashItems(order.items)
+                _hashItems(order.items),
+                _hashValidators(order.validators)
             )
         );
     }
@@ -326,6 +346,30 @@ contract LimitOrderSettlement {
             );
         }
         return keccak256(abi.encodePacked(hashes));
+    }
+
+    function _hashValidators(Validator[] calldata validators) private pure returns (bytes32) {
+        bytes32[] memory hashes = new bytes32[](validators.length);
+        for (uint256 i; i < validators.length; i++) {
+            hashes[i] = keccak256(
+                abi.encode(VALIDATOR_TYPEHASH, validators[i].target, keccak256(validators[i].data))
+            );
+        }
+        return keccak256(abi.encodePacked(hashes));
+    }
+
+    // ──────────────────── Validators ────────────────────
+
+    function _runValidators(LimitOrder calldata order) internal view {
+        for (uint256 i; i < order.validators.length; i++) {
+            Validator calldata v = order.validators[i];
+            (bool ok, bytes memory ret) = v.target.staticcall(
+                abi.encodeCall(IOrderValidator.validate, (order, v.data))
+            );
+            if (!ok || ret.length < 32 || !abi.decode(ret, (bool))) {
+                revert ValidationFailed(i);
+            }
+        }
     }
 
     function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {

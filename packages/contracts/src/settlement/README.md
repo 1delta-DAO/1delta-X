@@ -235,6 +235,71 @@ The maker signs and fills. No dutch decay — decay only benefits
 solvers competing with each other. For self-solving, the user sets
 their exact desired rate and submits in one tx.
 
+### Validators (trigger conditions)
+
+An order may carry an arbitrary `Validator[]` array. Each entry is a
+read-only staticcall: Settlement invokes `target.validate(order, data)`
+before executing any item and aborts the fill unless the return is
+exactly `true`. Multiple validators are AND-composed; any single
+`false` reverts with `ValidationFailed(i)`.
+
+```solidity
+struct Validator {
+    address target;    // implements IOrderValidator
+    bytes data;        // validator-specific params, signed in the typehash
+}
+```
+
+**Safety properties:**
+
+- `staticcall` forbids state mutation, logs, and reentrancy — a broken
+  or malicious validator can do nothing beyond returning the wrong
+  boolean.
+- `target` and `data` are part of the EIP-712 typehash — the solver
+  cannot swap in a more lenient validator or rewrite thresholds.
+- All validators run *before* any item executes, so a failure is cheap.
+
+**Reference validators** in [`src/validators/`](../validators/):
+
+| Contract | Passes when |
+|---|---|
+| `ChainlinkPriceGte` | feed.latestAnswer ≥ threshold |
+| `ChainlinkPriceLte` | feed.latestAnswer ≤ threshold |
+| `PredicateStaticCall` | arbitrary staticcall returns non-zero uint256 |
+
+**Example — stop-loss on an Aave position:**
+
+```
+// "Unwind my WETH collateral into USDC, but only if ETH ≤ $1500"
+
+validators[0] = Validator({
+    target: address(chainlinkPriceLte),
+    data:   abi.encode(ETH_USD_FEED, int256(1500 * 1e8))
+});
+
+tokenIn  = WETH   amountIn = 1 ether
+tokenOut = USDC   start = end = 1500e6        // fixed price
+items:
+  [0] TAKE AaveWithdraw 1 WETH, recipient = settlement
+```
+
+Solvers monitor the feed off-chain and submit `fill()` when the gate
+opens. Submitting earlier reverts with `ValidationFailed(0)` — free
+protection for the maker against accidental early execution.
+
+**Composing multiple triggers:**
+
+```
+// Only fill if ETH ≤ $1500 AND my aWETH balance ≥ 0.5 ether AND it's after 2pm UTC
+validators[0] = Validator(chainlinkPriceLte, ...);
+validators[1] = Validator(balanceGte,        ...);
+validators[2] = Validator(timestampGte,      ...);
+```
+
+All three must return `true` for the fill to proceed. The user opts
+into exactly the conditions they want at signing time; the solver
+cannot weaken them.
+
 ### When NOT to use dutch decay
 
 | Scenario | Reason |
