@@ -19,9 +19,9 @@ import {ITakerModule} from "../interfaces/ITakerModule.sol";
 ///      Permit2-equivalent.
 ///
 ///    • taker book — keyed (user → module → bytes32 ref). An arbitrary
-///      caller invokes `take(module, user, asset, amount, receiver, data)`;
-///      Permit3 asks the module for `takerKey(asset, data)`, decrements the
-///      user's allowance on (module, ref), then invokes the module's
+///      caller invokes `take(module, user, amount, receiver, data)`;
+///      Permit3 computes `ref = keccak256(data)`, decrements the user's
+///      allowance on (module, ref), then invokes the module's
 ///      `takeOnBehalf`. The module performs the protocol-native call.
 ///
 ///  Permit3 knows nothing about lending/staking/vault protocols. Protocol
@@ -29,9 +29,10 @@ import {ITakerModule} from "../interfaces/ITakerModule.sol";
 ///  radius small: approvals on a borrow module cannot be used to withdraw,
 ///  and vice versa.
 ///
-///  This cut exposes only on-chain `approveX` flows (no EIP-712 signed
-///  permits). Signed permits with order-hash witnesses are a straight
-///  extension.
+///  Both on-chain `approveX` flows and EIP-712 signed permits are
+///  supported. Signed permits may bind an arbitrary witness (e.g. an order
+///  hash) via `permitBatchWithWitness`, so a single signature can cover
+///  both a batch of allowances and the order that will consume them.
 contract Permit3 is IPermit3 {
     /// @dev user → spender → token → (amount, expiration, nonce)
     mapping(address => mapping(address => mapping(address => PackedAllowance))) private _tokenAllowance;
@@ -155,8 +156,8 @@ contract Permit3 is IPermit3 {
     }
 
     function lockdown(address spender) external override {
-        // Intent-only signal; callers sweep specific (asset, ref) pairs via
-        // revokeToken / revokeTaker using their off-chain-indexed asset list.
+        // Intent-only signal; callers sweep specific (token, ref) pairs via
+        // revokeToken / revokeTaker using their off-chain-indexed list.
         emit Lockdown(msg.sender, spender);
     }
 
