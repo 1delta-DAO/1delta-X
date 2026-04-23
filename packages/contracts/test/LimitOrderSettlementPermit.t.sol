@@ -198,8 +198,12 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: wethOut,
             endAmountOut: wethOut,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: new Validator[](0)
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
         });
 
         IPermit3.PermitBatch memory batch = _buildBatch(
@@ -497,8 +501,12 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: amountOut,
             endAmountOut: amountOut,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: new Validator[](0)
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
         });
     }
 
@@ -549,7 +557,7 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -562,20 +570,21 @@ contract LimitOrderSettlementPermitTest is Test, LenderRegistry {
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "LimitOrder witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
 
     function _hashOrder(LimitOrder memory o) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                ORDER_TH,
-                o.maker, o.nonce, o.deadline, o.tokenIn, o.tokenOut, o.amountIn,
-                o.decayStartTime, o.decayDuration, o.startAmountOut, o.endAmountOut,
-                _hashItems(o.items), _hashValidators(o.validators)
-            )
+        bytes memory head = abi.encode(
+            ORDER_TH, o.maker, o.nonce, o.deadline, o.tokenIn, o.tokenOut, o.amountIn,
+            o.decayStartTime, o.decayDuration, o.startAmountOut, o.endAmountOut
         );
+        bytes memory tail = abi.encode(
+            o.exclusiveFiller, o.exclusivityEndTime, o.minFillAmountIn,
+            _hashItems(o.items), _hashValidators(o.validators), _hashValidators(o.invariants)
+        );
+        return keccak256(bytes.concat(head, tail));
     }
 
     function _hashItems(Item[] memory items) internal pure returns (bytes32) {

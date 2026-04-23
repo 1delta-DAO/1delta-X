@@ -17,6 +17,20 @@ import {
 } from "../src/settlement/LimitOrderSettlement.sol";
 import {LimitOrderLeverageSolver} from "../src/solver/LimitOrderLeverageSolver.sol";
 import {ChainlinkPriceLte, ChainlinkPriceGte} from "../src/validators/ChainlinkPriceValidators.sol";
+import {IOrderValidator} from "../src/interfaces/IOrderValidator.sol";
+
+// Test-only validators for invariant checks
+contract TrueInvariant is IOrderValidator {
+    function validate(LimitOrder calldata, bytes calldata) external pure returns (bool) {
+        return true;
+    }
+}
+
+contract FalseInvariant is IOrderValidator {
+    function validate(LimitOrder calldata, bytes calldata) external pure returns (bool) {
+        return false;
+    }
+}
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "./data/LenderRegistry.sol";
 
@@ -293,7 +307,7 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -324,23 +338,28 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
     }
 
     function _hashOrder(LimitOrder memory o) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                ORDER_TH,
-                o.maker,
-                o.nonce,
-                o.deadline,
-                o.tokenIn,
-                o.tokenOut,
-                o.amountIn,
-                o.decayStartTime,
-                o.decayDuration,
-                o.startAmountOut,
-                o.endAmountOut,
-                _hashItems(o.items),
-                _hashValidators(o.validators)
-            )
+        bytes memory head = abi.encode(
+            ORDER_TH,
+            o.maker,
+            o.nonce,
+            o.deadline,
+            o.tokenIn,
+            o.tokenOut,
+            o.amountIn,
+            o.decayStartTime,
+            o.decayDuration,
+            o.startAmountOut,
+            o.endAmountOut
         );
+        bytes memory tail = abi.encode(
+            o.exclusiveFiller,
+            o.exclusivityEndTime,
+            o.minFillAmountIn,
+            _hashItems(o.items),
+            _hashValidators(o.validators),
+            _hashValidators(o.invariants)
+        );
+        return keccak256(bytes.concat(head, tail));
     }
 
     function _sign(LimitOrder memory o) internal view returns (bytes memory) {
@@ -390,8 +409,12 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0, //        fixed-price (start == end)
             startAmountOut: wethOut,
             endAmountOut: wethOut,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: new Validator[](0)
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
         });
 
         bytes memory sig = _sign(order);
@@ -528,8 +551,12 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: usdcOut,
             endAmountOut: usdcOut,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: new Validator[](0)
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
         });
     }
 
@@ -677,8 +704,12 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: collateralIn,
             endAmountOut: collateralIn,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: new Validator[](0)
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
         });
     }
 
@@ -877,8 +908,12 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: bufferedAmount,
             endAmountOut: bufferedAmount,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: new Validator[](0)
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
         });
     }
 
@@ -1059,8 +1094,12 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: bufferedRepay,
             endAmountOut: bufferedRepay,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: new Validator[](0)
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
         });
     }
 
@@ -1119,8 +1158,12 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: wethOut,
             endAmountOut: wethOut,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: new Validator[](0)
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
         });
 
         // Build the permit batch the fill needs:
@@ -1180,7 +1223,7 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "LimitOrder witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -1313,6 +1356,200 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
         assertEq(IERC20(USDC).balanceOf(maker), usdcOut, "maker received USDC");
     }
 
+    // ──────────────────── Exclusivity ────────────────────
+    //
+    // `exclusiveFiller` + `exclusivityEndTime` gate the order to a single
+    // solver for a window. After the window expires, anyone may fill.
+
+    function test_exclusivity_nonExclusiveFillerReverts() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        _approveMakerSide(usdcIn, wethOut);
+        _approveSolverSide(wethOut, WETH);
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(AAVE_POOL, WETH)});
+
+        // Exclusive to a specific address that is NOT our `solver`.
+        address exclusive = address(0xCAFE);
+        LimitOrder memory order = _orderWithExclusivity(201, USDC, WETH, usdcIn, wethOut, items, exclusive, uint32(block.timestamp + 30));
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(LimitOrderSettlement.NotExclusiveFiller.selector);
+        settlement.fill(order, sig, usdcIn);
+    }
+
+    function test_exclusivity_expiresAndAnyoneCanFill() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        _approveMakerSide(usdcIn, wethOut);
+        _approveSolverSide(wethOut, WETH);
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(AAVE_POOL, WETH)});
+
+        address exclusive = address(0xCAFE);
+        // Window already expired (endTime = 0 means any block.timestamp > 0 clears the gate).
+        uint32 endTime = uint32(block.timestamp - 1);
+        LimitOrder memory order = _orderWithExclusivity(202, USDC, WETH, usdcIn, wethOut, items, exclusive, endTime);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, usdcIn);
+        assertEq(paid, wethOut, "filled after exclusivity expired");
+    }
+
+    // ──────────────────── minFillAmountIn (anti-dust) ────────────────────
+
+    function test_minFillAmountIn_rejectsTooSmall() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        _approveMakerSide(usdcIn, wethOut);
+        _approveSolverSide(wethOut, WETH);
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(AAVE_POOL, WETH)});
+
+        // Sign with minFillAmountIn = 100 USDC. Attempt a 50 USDC fill → reverts.
+        LimitOrder memory order = _orderWithMinFill(203, USDC, WETH, usdcIn, wethOut, items, 100e6);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(LimitOrderSettlement.FillTooSmall.selector);
+        settlement.fill(order, sig, 50e6);
+    }
+
+    // ──────────────────── Post-execution invariants ────────────────────
+    //
+    // Invariants run after all items execute. We demonstrate this with a
+    // `FalseInvariant` that returns false — the fill should revert and the
+    // maker's state should be fully rolled back (items undone).
+
+    function test_invariants_rollBackOnFailure() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        _approveMakerSide(usdcIn, wethOut);
+        _approveSolverSide(wethOut, WETH);
+
+        FalseInvariant failing = new FalseInvariant();
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(AAVE_POOL, WETH)});
+
+        Validator[] memory invariants = new Validator[](1);
+        invariants[0] = Validator({target: address(failing), data: ""});
+
+        LimitOrder memory order = _orderWithInvariants(204, USDC, WETH, usdcIn, wethOut, items, invariants);
+        bytes memory sig = _sign(order);
+
+        uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
+        uint256 makerAWethBefore = IERC20(aWETH).balanceOf(maker);
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(LimitOrderSettlement.InvariantFailed.selector, uint256(0)));
+        settlement.fill(order, sig, usdcIn);
+
+        // Entire fill reverted — maker's state is exactly as before.
+        assertEq(IERC20(USDC).balanceOf(maker), makerUsdcBefore, "maker USDC unchanged");
+        assertEq(IERC20(aWETH).balanceOf(maker), makerAWethBefore, "maker aWETH unchanged");
+    }
+
+    function test_invariants_passWhenTrue() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        _approveMakerSide(usdcIn, wethOut);
+        _approveSolverSide(wethOut, WETH);
+
+        TrueInvariant passing = new TrueInvariant();
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(AAVE_POOL, WETH)});
+
+        Validator[] memory invariants = new Validator[](1);
+        invariants[0] = Validator({target: address(passing), data: ""});
+
+        LimitOrder memory order = _orderWithInvariants(205, USDC, WETH, usdcIn, wethOut, items, invariants);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, usdcIn);
+        assertEq(paid, wethOut, "passing invariant lets the fill complete");
+    }
+
+    // ──────────────────── Order builders for the new fields ────────────────────
+
+    function _orderWithExclusivity(
+        uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
+        Item[] memory items, address exclusiveFiller, uint32 exclusivityEndTime
+    ) internal view returns (LimitOrder memory) {
+        return LimitOrder({
+            maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
+            tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
+            decayStartTime: 0, decayDuration: 0,
+            startAmountOut: amountOut, endAmountOut: amountOut,
+            exclusiveFiller: exclusiveFiller,
+            exclusivityEndTime: exclusivityEndTime,
+            minFillAmountIn: 0,
+            items: items,
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
+        });
+    }
+
+    function _orderWithMinFill(
+        uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
+        Item[] memory items, uint256 minFillAmountIn
+    ) internal view returns (LimitOrder memory) {
+        return LimitOrder({
+            maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
+            tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
+            decayStartTime: 0, decayDuration: 0,
+            startAmountOut: amountOut, endAmountOut: amountOut,
+            exclusiveFiller: address(0), exclusivityEndTime: 0,
+            minFillAmountIn: minFillAmountIn,
+            items: items,
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
+        });
+    }
+
+    function _orderWithInvariants(
+        uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
+        Item[] memory items, Validator[] memory invariants
+    ) internal view returns (LimitOrder memory) {
+        return LimitOrder({
+            maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
+            tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
+            decayStartTime: 0, decayDuration: 0,
+            startAmountOut: amountOut, endAmountOut: amountOut,
+            exclusiveFiller: address(0), exclusivityEndTime: 0, minFillAmountIn: 0,
+            items: items,
+            validators: new Validator[](0),
+            invariants: invariants
+        });
+    }
+
     function _orderWithValidators(
         uint256 nonce,
         address tokenIn,
@@ -1333,8 +1570,12 @@ contract LimitOrderSettlementTest is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: amountOut,
             endAmountOut: amountOut,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
             items: items,
-            validators: validators
+            validators: validators,
+            invariants: new Validator[](0)
         });
     }
 }

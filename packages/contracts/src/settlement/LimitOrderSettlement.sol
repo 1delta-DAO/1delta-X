@@ -63,10 +63,14 @@ struct LimitOrder {
     uint256 amountIn;
     uint32 decayStartTime;
     uint32 decayDuration;
-    uint256 startAmountOut; //  best for maker (at auction start / fixed price)
-    uint256 endAmountOut; //    worst for maker (at auction end)
+    uint256 startAmountOut; //       best for maker (at auction start / fixed price)
+    uint256 endAmountOut; //         worst for maker (at auction end)
+    address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
+    uint32 exclusivityEndTime; //    unix timestamp; ignored if exclusiveFiller == 0
+    uint256 minFillAmountIn; //      anti-dust floor per fill; 0 = no minimum
     Item[] items;
-    Validator[] validators; //  optional trigger conditions; AND-composed
+    Validator[] validators; //       pre-execution trigger conditions; AND-composed
+    Validator[] invariants; //       post-execution invariants; AND-composed
 }
 
 /// @title LimitOrderSettlement
@@ -83,7 +87,7 @@ contract LimitOrderSettlement {
         keccak256("Validator(address target,bytes data)");
 
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -123,6 +127,9 @@ contract LimitOrderSettlement {
     error OverFill();
     error Reentrancy();
     error ValidationFailed(uint256 index);
+    error InvariantFailed(uint256 index);
+    error NotExclusiveFiller();
+    error FillTooSmall();
 
     modifier nonReentrant() {
         if (_locked != 1) revert Reentrancy();
@@ -199,7 +206,7 @@ contract LimitOrderSettlement {
     string private constant _LIMIT_ORDER_WITNESS_TYPESTRING =
         "LimitOrder witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,Item[] items,Validator[] validators)"
+        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -209,7 +216,16 @@ contract LimitOrderSettlement {
         returns (uint256 fillAmountOut)
     {
         if (fillAmountIn == 0) revert ZeroFill();
+        if (fillAmountIn < order.minFillAmountIn) revert FillTooSmall();
         if (block.timestamp > order.deadline) revert OrderExpired();
+
+        // Exclusivity window — if set, only the nominated filler may fill until
+        // `exclusivityEndTime`. After that, anyone can fill.
+        if (
+            order.exclusiveFiller != address(0)
+                && block.timestamp < order.exclusivityEndTime
+                && msg.sender != order.exclusiveFiller
+        ) revert NotExclusiveFiller();
 
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
 
@@ -233,6 +249,9 @@ contract LimitOrderSettlement {
         // 3. Settle tokenIn → solver. TAKE items route proceeds to this
         //    contract; any shortfall is pulled from the maker via Permit3.
         _payTokenInToSolver(order.tokenIn, order.maker, fillAmountIn);
+
+        // 4. Post-execution invariants (e.g. "my Aave health factor ≥ 2.0 after this fill").
+        _runInvariants(order);
 
         emit OrderFilled(orderHash, order.maker, msg.sender, fillAmountIn, fillAmountOut);
     }
@@ -312,23 +331,29 @@ contract LimitOrderSettlement {
     // ──────────────────── Hashing & signature ────────────────────
 
     function _hashOrder(LimitOrder calldata order) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                ORDER_TYPEHASH,
-                order.maker,
-                order.nonce,
-                order.deadline,
-                order.tokenIn,
-                order.tokenOut,
-                order.amountIn,
-                order.decayStartTime,
-                order.decayDuration,
-                order.startAmountOut,
-                order.endAmountOut,
-                _hashItems(order.items),
-                _hashValidators(order.validators)
-            )
+        // Split into two encodings to avoid stack-too-deep.
+        bytes memory head = abi.encode(
+            ORDER_TYPEHASH,
+            order.maker,
+            order.nonce,
+            order.deadline,
+            order.tokenIn,
+            order.tokenOut,
+            order.amountIn,
+            order.decayStartTime,
+            order.decayDuration,
+            order.startAmountOut,
+            order.endAmountOut
         );
+        bytes memory tail = abi.encode(
+            order.exclusiveFiller,
+            order.exclusivityEndTime,
+            order.minFillAmountIn,
+            _hashItems(order.items),
+            _hashValidators(order.validators),
+            _hashValidators(order.invariants)
+        );
+        return keccak256(bytes.concat(head, tail));
     }
 
     function _hashItems(Item[] calldata items) private pure returns (bytes32) {
@@ -368,6 +393,21 @@ contract LimitOrderSettlement {
             );
             if (!ok || ret.length < 32 || !abi.decode(ret, (bool))) {
                 revert ValidationFailed(i);
+            }
+        }
+    }
+
+    /// @dev Post-execution staticcall invariants. Same shape as validators but
+    ///      run AFTER items execute, so they can assert on the order's side
+    ///      effects (e.g. "maker's Aave health factor ≥ 2.0").
+    function _runInvariants(LimitOrder calldata order) internal view {
+        for (uint256 i; i < order.invariants.length; i++) {
+            Validator calldata v = order.invariants[i];
+            (bool ok, bytes memory ret) = v.target.staticcall(
+                abi.encodeCall(IOrderValidator.validate, (order, v.data))
+            );
+            if (!ok || ret.length < 32 || !abi.decode(ret, (bool))) {
+                revert InvariantFailed(i);
             }
         }
     }
