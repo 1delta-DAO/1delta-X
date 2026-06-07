@@ -3,15 +3,15 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrderSettlement, LimitOrder, Item, ItemOp, Validator} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {LimitOrderSettlement, LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
 
 import {TrueInvariant, FalseInvariant} from "../shared/Modules.sol";
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Post-execution invariants run after all items execute. A `FalseInvariant`
 /// makes the whole fill revert and rolls maker state back; a `TrueInvariant` lets
 /// it complete.
-contract InvariantsTest is LimitOrderSettlementBase {
+contract InvariantsTest is AaveModulesBase {
     function test_invariants_rollBackOnFailure() public {
         uint256 usdcIn = 2_000e6;
         uint256 wethOut = 1 ether;

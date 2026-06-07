@@ -4,12 +4,12 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IAaveV3Pool, AaveV3WithdrawModule} from "../shared/Modules.sol";
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Taker module security. The `msg.sender == permit3` check is load-bearing:
 /// without it, a direct takeOnBehalf call would bypass the Permit3 taker-allowance
 /// gate and drain the victim via their token allowance.
-contract TakerModuleAuthTest is LimitOrderSettlementBase {
+contract TakerModuleAuthTest is AaveModulesBase {
     function test_takeOnBehalf_rejectsDirectCall() public {
         // Seed position so a successful drain would actually move tokens.
         deal(WETH, maker, 1 ether);

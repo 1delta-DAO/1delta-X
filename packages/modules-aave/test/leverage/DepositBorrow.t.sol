@@ -3,12 +3,12 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {IPermit3} from "../../../src/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {Chains, Lenders} from "../../data/LenderRegistry.sol";
+import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 import {IAaveCreditDelegation} from "../shared/Modules.sol";
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Deposit X + borrow Y in one order: maker deposits 1 WETH as collateral
 /// and borrows USDC against it. The solver funds the WETH collateral and
@@ -22,7 +22,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 /// Items:
 ///   [0] MAKE  AaveV3DepositModule   supply WETH
 ///   [1] TAKE  AaveV3BorrowModule    borrow USDC (variable rate)
-contract DepositBorrowTest is LimitOrderSettlementBase {
+contract DepositBorrowTest is AaveModulesBase {
     // ──────────────────── Direct fill ────────────────────
 
     function test_depositX_borrowY_aaveV3() public {

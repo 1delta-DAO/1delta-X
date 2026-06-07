@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {LimitOrderSettlement, LimitOrder, Item, ItemOp} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {LimitOrderSettlement, LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Exclusivity: `exclusiveFiller` + `exclusivityEndTime` gate the order to a
 /// single solver for a window. After the window expires, anyone may fill.
-contract ExclusivityTest is LimitOrderSettlementBase {
+contract ExclusivityTest is AaveModulesBase {
     function test_exclusivity_nonExclusiveFillerReverts() public {
         uint256 usdcIn = 2_000e6;
         uint256 wethOut = 1 ether;

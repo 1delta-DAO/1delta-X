@@ -3,11 +3,11 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {IPermit3} from "../../../src/interfaces/IPermit3.sol";
-import {IMakerModule} from "../../../src/interfaces/IMakerModule.sol";
-import {ITakerModule} from "../../../src/interfaces/ITakerModule.sol";
-import {IOrderValidator} from "../../../src/interfaces/IOrderValidator.sol";
-import {LimitOrder} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
+import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
+import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
 
 // ──────────────────── Minimal Aave V3 pool surface ────────────────────
 

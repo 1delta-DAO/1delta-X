@@ -3,10 +3,10 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {IPermit3} from "../../../src/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp, Validator} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Swap + deposit: maker sells USDC for WETH at a fixed rate; the
 /// received WETH is supplied to Aave v3 on the maker's behalf as a single
@@ -14,7 +14,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 ///
 ///   tokenIn  = USDC   (maker gives, solver receives)
 ///   tokenOut = WETH   (solver gives, maker receives — then deposited)
-contract SwapAndDepositTest is LimitOrderSettlementBase {
+contract SwapAndDepositTest is AaveModulesBase {
     // ──────────────────── Direct fill ────────────────────
 
     function test_swap_and_deposit_aaveV3() public {

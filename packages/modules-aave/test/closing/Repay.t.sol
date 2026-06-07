@@ -3,11 +3,11 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {IPermit3} from "../../../src/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {Chains, Lenders} from "../../data/LenderRegistry.sol";
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Repay with over-repay dust refund: maker has an open Aave USDC debt and
 /// signs a repay amount that intentionally over-shoots (`currentDebt + buffer`)
@@ -23,7 +23,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 /// Trust model for the refund: `makeOnBehalf`'s `user` argument is the *only*
 /// place the refund can go — no attacker-controlled redirection is possible,
 /// because `refundTo` is not a field of `data`.
-contract RepayTest is LimitOrderSettlementBase {
+contract RepayTest is AaveModulesBase {
     // ──────────────────── Direct fill ────────────────────
 
     function test_repay_with_dust_refund_aaveV3() public {

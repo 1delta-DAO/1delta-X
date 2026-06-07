@@ -3,10 +3,10 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrderSettlement, LimitOrder, Item, ItemOp, Validator} from "../../../src/settlement/LimitOrderSettlement.sol";
-import {ChainlinkPriceLte} from "../../../src/validators/ChainlinkPriceValidators.sol";
+import {LimitOrderSettlement, LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {ChainlinkPriceLte} from "@core/validators/ChainlinkPriceValidators.sol";
 
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Validators: stop-loss gating. Maker holds an aWETH position and signs an
 /// order to unwind it into USDC, gated by a Chainlink ETH/USD price validator.
@@ -15,7 +15,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 /// drops to X or lower"):
 ///   • threshold FAR BELOW current price → validator returns false → fill reverts
 ///   • threshold FAR ABOVE current price → validator returns true  → fill succeeds
-contract ValidatorsTest is LimitOrderSettlementBase {
+contract ValidatorsTest is AaveModulesBase {
     address constant ETH_USD_FEED = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
     int256 constant FAR_BELOW_MARKET = int256(500 * 1e8); //      $500 — ETH is far above
     int256 constant FAR_ABOVE_MARKET = int256(1_000_000 * 1e8); // $1M — never

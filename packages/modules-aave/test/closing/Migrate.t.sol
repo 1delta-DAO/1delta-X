@@ -3,12 +3,12 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {IPermit3} from "../../../src/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {Chains, Lenders} from "../../data/LenderRegistry.sol";
+import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 import {IAaveCreditDelegation} from "../shared/Modules.sol";
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Migrate Aave v3 → Spark in ONE order. Maker has an open Aave v3 position
 /// (10 WETH collateral, 3000 USDC debt). They sign one 4-item order that closes
@@ -21,7 +21,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 ///   [1] TAKE  AaveV3WithdrawModule      withdraw `exactWeth` WETH, recipient = maker
 ///   [2] MAKE  AaveV3DepositModule→Spark deposit `exactWeth` WETH onto Spark
 ///   [3] TAKE  AaveV3BorrowModule→Spark  borrow USDC on Spark, recipient = Settlement
-contract MigrateTest is LimitOrderSettlementBase {
+contract MigrateTest is AaveModulesBase {
     // ──────────────────── Direct fill (4-item order, exact amounts) ────────────────────
 
     function test_migrate_aaveV3_to_spark() public {

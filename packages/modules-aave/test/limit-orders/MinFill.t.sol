@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {LimitOrderSettlement, LimitOrder, Item, ItemOp} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {LimitOrderSettlement, LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev minFillAmountIn (anti-dust): a fill smaller than the maker-signed floor
 /// is rejected.
-contract MinFillTest is LimitOrderSettlementBase {
+contract MinFillTest is AaveModulesBase {
     function test_minFillAmountIn_rejectsTooSmall() public {
         uint256 usdcIn = 2_000e6;
         uint256 wethOut = 1 ether;

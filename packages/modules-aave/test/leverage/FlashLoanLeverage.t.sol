@@ -3,10 +3,10 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {Chains, Lenders} from "../../data/LenderRegistry.sol";
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Leverage via flash loan + DEX (no inventory). Same maker intent as
 /// DepositBorrow, but the solver owns zero WETH and zero USDC. The
@@ -22,7 +22,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 /// The maker's order is *identical* in shape to the deposit+borrow test —
 /// nothing on-chain distinguishes leverage from plain deposit+borrow. The
 /// difference lives entirely in how the solver sources the tokenOut inventory.
-contract FlashLoanLeverageTest is LimitOrderSettlementBase {
+contract FlashLoanLeverageTest is AaveModulesBase {
     function test_leverage_via_flashLoan_aaveV3() public {
         uint256 collateralIn = 1 ether; //     deposit leg (flash-loaned by solver)
         uint256 borrowOut = 5_000e6; //         borrow leg — sized so the 5000 USDC swap

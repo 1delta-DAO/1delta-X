@@ -3,10 +3,10 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {IPermit3} from "../../../src/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp, Validator} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Single-signature fill. The maker's wallet has done ZERO setup with
 /// Permit3 except the bare `IERC20.approve(permit3, ∞)` per token. They sign
@@ -20,7 +20,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 ///   2. Settlement runs the normal fill core; the freshly-applied allowances
 ///      satisfy every Permit3.transferFrom inside the fill.
 ///   3. Permit's nonce is consumed; the same signature can never be replayed.
-contract FillWithPermitTest is LimitOrderSettlementBase {
+contract FillWithPermitTest is AaveModulesBase {
     function test_fillWithPermit_singleSignature() public {
         uint256 usdcIn = 2_000e6;
         uint256 wethOut = 1 ether;

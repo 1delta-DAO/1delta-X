@@ -3,10 +3,10 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {IPermit3} from "../../../src/interfaces/IPermit3.sol";
-import {LimitOrder, Item, Validator} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {LimitOrder, Item, Validator} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev Plain swap: the maker sells tokenIn for tokenOut with NO lending items.
 /// tokenOut lands directly in the maker's wallet; tokenIn is pulled from the
@@ -16,7 +16,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 ///
 ///   tokenIn  = USDC   (maker gives, solver receives)
 ///   tokenOut = WETH   (solver gives, maker receives — straight to wallet)
-contract PlainSwapTest is LimitOrderSettlementBase {
+contract PlainSwapTest is CoreSettlementBase {
     /// @dev Maker only needs to let Settlement pull tokenIn; the bare ERC20
     ///      approve to Permit3 is already granted in `setUp`.
     function _approveMakerPlainSwap(uint256 usdcCap) internal {

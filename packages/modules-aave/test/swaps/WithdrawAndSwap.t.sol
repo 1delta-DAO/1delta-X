@@ -3,10 +3,10 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {IPermit3} from "../../../src/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "../../../src/settlement/LimitOrderSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
 
-import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol";
+import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Withdraw + swap: maker already has an aWETH position, unwinds WETH and
 /// sells it for USDC.
@@ -18,7 +18,7 @@ import {LimitOrderSettlementBase} from "../shared/LimitOrderSettlementBase.t.sol
 /// allowance gate enforces the exact (user, module, ref) amount. aWETH proceeds
 /// flow: user aWETH → module (via token allowance) → pool.withdraw burns + sends
 /// WETH → settlement.
-contract WithdrawAndSwapTest is LimitOrderSettlementBase {
+contract WithdrawAndSwapTest is AaveModulesBase {
     // ──────────────────── Direct fill ────────────────────
 
     function test_withdraw_and_swap_aaveV3() public {
