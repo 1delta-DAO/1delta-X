@@ -38,6 +38,31 @@ interface IPermit3 {
         uint256 deadline;
     }
 
+    // ──────────────────── Batch-transfer / lockdown structs ────────────────────
+
+    /// @notice Mirrors Permit2's `AllowanceTransferDetails` — one leg of a
+    ///         batched `transferFrom`.
+    struct AllowanceTransferDetails {
+        address from;
+        address to;
+        uint160 amount;
+        address token;
+    }
+
+    /// @notice Mirrors Permit2's `TokenSpenderPair` — a (token, spender) pair to
+    ///         revoke in a token-book `lockdown`.
+    struct TokenSpenderPair {
+        address token;
+        address spender;
+    }
+
+    /// @notice Taker-book analogue of `TokenSpenderPair` — a (module, ref) pair
+    ///         to revoke in a taker-book `lockdownTakers`.
+    struct ModuleRefPair {
+        address module;
+        bytes32 ref;
+    }
+
     // ──────────────────── Events ────────────────────
 
     event TokenApproval(
@@ -47,7 +72,13 @@ interface IPermit3 {
         address indexed user, address indexed module, bytes32 indexed ref, uint160 amount, uint48 expiration
     );
     event PermitBatchApplied(address indexed owner, uint256 indexed nonce);
-    event Lockdown(address indexed user, address spender);
+    /// @dev Token-book lockdown. Matches Permit2's `Lockdown` event shape.
+    event Lockdown(address indexed owner, address token, address spender);
+    /// @dev Taker-book lockdown (Permit3 extension).
+    event TakerLockdown(address indexed owner, address module, bytes32 ref);
+    /// @dev Emitted when an unordered permit nonce word/mask is invalidated.
+    ///      Matches Permit2's `UnorderedNonceInvalidation` event shape.
+    event UnorderedNonceInvalidation(address indexed owner, uint256 word, uint256 mask);
 
     // ──────────────────── Errors ────────────────────
 
@@ -55,7 +86,6 @@ interface IPermit3 {
     error InsufficientAllowance(uint160 amount);
     error Reentrancy();
     error PermitExpired();
-    error InvalidPermitSignature();
     error PermitNonceUsed();
 
     // ──────────────────── Token side ────────────────────
@@ -63,6 +93,11 @@ interface IPermit3 {
     function approveToken(address spender, address token, uint160 amount, uint48 expiration) external;
 
     function transferFrom(address user, address to, address token, uint160 amount) external;
+
+    /// @notice Batched token-book transfer. Mirrors Permit2's
+    ///         `transferFrom(AllowanceTransferDetails[])`. Each leg is gated by
+    ///         the (from, msg.sender, token) allowance independently.
+    function transferFrom(AllowanceTransferDetails[] calldata transferDetails) external;
 
     function tokenAllowance(address user, address spender, address token)
         external
@@ -96,7 +131,14 @@ interface IPermit3 {
 
     function revokeTaker(address module, bytes32 ref) external;
 
-    function lockdown(address spender) external;
+    /// @notice Atomically zero a batch of token-book allowances. Ported from
+    ///         Permit2's `lockdown(TokenSpenderPair[])` — actually revokes
+    ///         on-chain (not an event-only signal).
+    function lockdown(TokenSpenderPair[] calldata approvals) external;
+
+    /// @notice Taker-book analogue of `lockdown` — atomically zero a batch of
+    ///         taker allowances (Permit3 extension).
+    function lockdownTakers(ModuleRefPair[] calldata approvals) external;
 
     // ──────────────────── Signed permits ────────────────────
 
@@ -126,4 +168,10 @@ interface IPermit3 {
     ) external;
 
     function isPermitNonceUsed(address owner, uint256 nonce) external view returns (bool);
+
+    /// @notice Invalidate unordered permit nonces in bulk by OR-ing `mask` into
+    ///         the bitmap word at `wordPos`. Ported from Permit2's
+    ///         `invalidateUnorderedNonces` — lets a signer cancel signed
+    ///         permits before they are consumed.
+    function invalidateUnorderedNonces(uint256 wordPos, uint256 mask) external;
 }

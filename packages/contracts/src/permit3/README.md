@@ -232,8 +232,11 @@ Two practical tips:
 Revocation:
 - `revokeToken(spender, token)` — zero a token allowance.
 - `revokeTaker(module, ref)` — zero a taker allowance.
-- `lockdown(spender)` — event-only signal; the caller sweeps specific
-  pairs via `revokeToken` / `revokeTaker` using their indexed asset list.
+- `lockdown(TokenSpenderPair[])` — atomically zero a batch of token
+  allowances on-chain (ported from Permit2's `lockdown`).
+- `lockdownTakers(ModuleRefPair[])` — taker-book analogue (Permit3 extension).
+- `invalidateUnorderedNonces(wordPos, mask)` — cancel signed permits before
+  they are consumed (ported from Permit2's `invalidateUnorderedNonces`).
 
 ## Security properties
 
@@ -265,10 +268,17 @@ Revocation:
 ## Status
 
 Implemented:
-- [x] Token book (`approveToken`, `transferFrom`, `revokeToken`).
+- [x] Token book (`approveToken`, `transferFrom` single + batch, `revokeToken`).
 - [x] Taker book (`approveTaker`, `take`, `revokeTaker`).
 - [x] `take()` dispatch with `nonReentrant` + `ref = keccak256(data)` + `_spend`.
 - [x] `uint160.max` infinite semantics; `expiration == 0` sentinel.
+- [x] EIP-712 signed permits (`permitBatch`, `permitBatchWithWitness`) with
+      unordered (bitmap) nonces.
+- [x] Permit2-ported signature stack: `SignatureVerification` (EOA 65-byte +
+      EIP-2098 compact + EIP-1271 contract signatures) and fork-safe `EIP712`
+      domain separator (recomputed if `block.chainid` changes).
+- [x] `lockdown` / `lockdownTakers` (atomic batch revocation) and
+      `invalidateUnorderedNonces` (cancel signed permits).
 - [x] `ITakerModule` interface — single-method surface (`takeOnBehalf`).
 - [x] `IMakerModule` interface — symmetric single-method surface
       (`makeOnBehalf`) for deposit/repay-style ops. (Name mirrors
@@ -279,8 +289,6 @@ Implemented:
       module whitelist, no admin role.
 
 Not yet implemented:
-- [ ] EIP-712 signed permits (`permitToken`, `permitTaker`) with
-      order-hash witnesses — straight Permit2-style extension.
 - [ ] Concrete taker modules (AaveV3Borrow/Withdraw, Comet, Morpho
       Blue, Compound V2, Lido unstake/claim).
 - [ ] `revokeAll(module)` helper that also calls the module's

@@ -4,6 +4,8 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {ITakerModule} from "../interfaces/ITakerModule.sol";
+import {EIP712} from "./EIP712.sol";
+import {SignatureVerification} from "./SignatureVerification.sol";
 
 /// @title Permit3
 /// @notice Unified allowance hub for ERC20 transfers *and* protocol taker ops
@@ -33,7 +35,9 @@ import {ITakerModule} from "../interfaces/ITakerModule.sol";
 ///  supported. Signed permits may bind an arbitrary witness (e.g. an order
 ///  hash) via `permitBatchWithWitness`, so a single signature can cover
 ///  both a batch of allowances and the order that will consume them.
-contract Permit3 is IPermit3 {
+contract Permit3 is IPermit3, EIP712 {
+    using SignatureVerification for bytes;
+
     /// @dev user → spender → token → (amount, expiration, nonce)
     mapping(address => mapping(address => mapping(address => PackedAllowance))) private _tokenAllowance;
 
@@ -45,9 +49,6 @@ contract Permit3 is IPermit3 {
 
     /// @notice Permit replay-protection: owner → wordIndex → bitmap of used nonces.
     mapping(address => mapping(uint256 => uint256)) public permitNonceBitmap;
-
-    /// @notice EIP-712 domain separator for signed permits.
-    bytes32 public immutable override DOMAIN_SEPARATOR;
 
     uint256 private _locked = 1;
 
@@ -70,16 +71,10 @@ contract Permit3 is IPermit3 {
     string private constant _PERMIT_BATCH_WITNESS_STUB =
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,";
 
-    constructor() {
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256("Permit3"),
-                keccak256("1"),
-                block.chainid,
-                address(this)
-            )
-        );
+    /// @dev Resolves the diamond between IPermit3 (declares it) and EIP712
+    ///      (implements it). Delegates to the EIP712 base.
+    function DOMAIN_SEPARATOR() public view override(IPermit3, EIP712) returns (bytes32) {
+        return EIP712.DOMAIN_SEPARATOR();
     }
 
     modifier nonReentrant() {
@@ -99,9 +94,17 @@ contract Permit3 is IPermit3 {
     }
 
     function transferFrom(address user, address to, address token, uint160 amount) external override {
-        PackedAllowance storage a = _tokenAllowance[user][msg.sender][token];
-        _spend(a, amount);
-        IERC20(token).transferFrom(user, to, amount);
+        _transferFrom(user, to, token, amount);
+    }
+
+    function transferFrom(AllowanceTransferDetails[] calldata transferDetails) external override {
+        unchecked {
+            uint256 length = transferDetails.length;
+            for (uint256 i; i < length; ++i) {
+                AllowanceTransferDetails calldata d = transferDetails[i];
+                _transferFrom(d.from, d.to, d.token, d.amount);
+            }
+        }
     }
 
     function tokenAllowance(address user, address spender, address token)
@@ -155,10 +158,32 @@ contract Permit3 is IPermit3 {
         emit TakerApproval(msg.sender, module, ref, 0, 0);
     }
 
-    function lockdown(address spender) external override {
-        // Intent-only signal; callers sweep specific (token, ref) pairs via
-        // revokeToken / revokeTaker using their off-chain-indexed list.
-        emit Lockdown(msg.sender, spender);
+    /// @dev Token-book lockdown. Ported from Permit2's `lockdown`.
+    function lockdown(TokenSpenderPair[] calldata approvals) external override {
+        address owner = msg.sender;
+        unchecked {
+            uint256 length = approvals.length;
+            for (uint256 i; i < length; ++i) {
+                address token = approvals[i].token;
+                address spender = approvals[i].spender;
+                _tokenAllowance[owner][spender][token].amount = 0;
+                emit Lockdown(owner, token, spender);
+            }
+        }
+    }
+
+    /// @dev Taker-book analogue of `lockdown` (Permit3 extension).
+    function lockdownTakers(ModuleRefPair[] calldata approvals) external override {
+        address owner = msg.sender;
+        unchecked {
+            uint256 length = approvals.length;
+            for (uint256 i; i < length; ++i) {
+                address module = approvals[i].module;
+                bytes32 ref = approvals[i].ref;
+                _takerAllowance[owner][module][ref].amount = 0;
+                emit TakerLockdown(owner, module, ref);
+            }
+        }
     }
 
     // ──────────────────── Signed permits ────────────────────
@@ -209,6 +234,12 @@ contract Permit3 is IPermit3 {
         return (permitNonceBitmap[owner][nonce >> 8] & (1 << (nonce & 0xff))) != 0;
     }
 
+    /// @dev Ported from Permit2's `invalidateUnorderedNonces`.
+    function invalidateUnorderedNonces(uint256 wordPos, uint256 mask) external override {
+        permitNonceBitmap[msg.sender][wordPos] |= mask;
+        emit UnorderedNonceInvalidation(msg.sender, wordPos, mask);
+    }
+
     // ──────────────────── Permit internals ────────────────────
 
     function _hashTokenPermits(TokenPermit[] calldata permits) private pure returns (bytes32) {
@@ -244,12 +275,10 @@ contract Permit3 is IPermit3 {
     }
 
     function _verifyPermitSig(address owner, bytes32 hashStruct, bytes calldata sig) private view {
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, hashStruct));
-        bytes32 r = bytes32(sig[0:32]);
-        bytes32 s = bytes32(sig[32:64]);
-        uint8 v = uint8(sig[64]);
-        address signer = ecrecover(digest, v, r, s);
-        if (signer == address(0) || signer != owner) revert InvalidPermitSignature();
+        // SignatureVerification (ported from Permit2) handles EOA (65-byte &
+        // EIP-2098 compact) and EIP-1271 contract signatures, and enforces
+        // length / signer checks.
+        sig.verify(_hashTypedData(hashStruct), owner);
     }
 
     function _usePermitNonce(address owner, uint256 nonce) private {
@@ -279,6 +308,11 @@ contract Permit3 is IPermit3 {
     }
 
     // ──────────────────── Internal ────────────────────
+
+    function _transferFrom(address from, address to, address token, uint160 amount) private {
+        _spend(_tokenAllowance[from][msg.sender][token], amount);
+        IERC20(token).transferFrom(from, to, amount);
+    }
 
     function _spend(PackedAllowance storage a, uint160 amount) private {
         uint48 exp = a.expiration;
