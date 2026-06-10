@@ -5,6 +5,9 @@ USDRIF → USDT0 exit via `LimitOrderSettlement`, implementing the integration i
 holder exits to USDT0 in one signed intent, filled by competing solvers, by
 tokenising MoC's native redemption and auctioning the resulting RIF.
 
+> 📊 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for sequence / flow / component
+> diagrams of how the pieces fit together.
+
 ## Flow (plan variant 1)
 
 ```

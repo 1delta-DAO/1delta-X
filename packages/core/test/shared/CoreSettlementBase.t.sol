@@ -21,7 +21,7 @@ import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.so
 /// module-free order builders. Pure-protocol tests (plain swaps, partial fills,
 /// dutch decay, exclusivity, min-fill, validators, invariants, single-signature
 /// permits) inherit this directly. Module integration harnesses extend it and
-/// layer their adapters on top (see the modules-aave package).
+/// layer their adapters on top (see the modules-aave-v3 / modules-aave-v4 packages).
 abstract contract CoreSettlementBase is Test, LenderRegistry {
     Permit3 permit3;
     LimitOrderSettlement settlement;
@@ -108,8 +108,14 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     /// @dev External self-call so a reverting `createSelectFork` can be caught
     ///      by try/catch (cheatcode reverts propagate through external boundaries).
     function __fork(string calldata rpc) external {
-        // Pin to a block with headroom under Aave market caps for deterministic tests.
-        vm.createSelectFork(rpc, 22_000_000);
+        vm.createSelectFork(rpc, _forkBlock());
+    }
+
+    /// @dev Block to pin the mainnet fork to. Default has headroom under Aave v3
+    ///      market caps for deterministic tests; harnesses needing a later state
+    ///      (e.g. Aave v4, deployed after this block) override it.
+    function _forkBlock() internal view virtual returns (uint256) {
+        return 22_000_000;
     }
 
     // ──────────────────── Approvals ────────────────────
