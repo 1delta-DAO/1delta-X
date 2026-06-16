@@ -6,6 +6,8 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
 
+import {DustHandler} from "@core/dust/DustHandler.sol";
+
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
@@ -31,8 +33,6 @@ contract RepayTest is AaveModulesBase {
         uint256 buffer = 50e6; //              over-repay buffer for accrual
         uint256 bufferedAmount = debtAmount + buffer;
         uint256 wethForSolver = 1 ether;
-
-        address usdcDebtToken = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][USDC].debt;
 
         _openUsdcDebt(debtAmount);
 
@@ -89,7 +89,9 @@ contract RepayTest is AaveModulesBase {
         deal(USDC, solver, buffered);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.MAKE, address(repayModule), buffered, address(0), abi.encode(AAVE_POOL, USDC, uint256(2)));
+        items[0] = Item(
+            ItemOp.MAKE, address(repayModule), buffered, address(0), abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
+        );
 
         LimitOrder memory order = _order(maker, 3, WETH, USDC, 1 ether, buffered, items);
 
@@ -112,5 +114,66 @@ contract RepayTest is AaveModulesBase {
         );
         assertGt(IERC20(USDC).balanceOf(maker), 0, "dust refunded");
         assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "module drained");
+    }
+
+    // ──────────────────── Recycle opt-in: best-effort, never strands ────────────────────
+
+    /// @dev The maker-signed `data` opts into `DustAction.Recycle` (trailing
+    /// field), asking the module to re-supply the over-repay surplus into the
+    /// user's Aave position instead of sweeping it to the wallet. The re-supply
+    /// is best-effort: USDC on mainnet may be at its supply cap (or frozen), in
+    /// which case the module's `try/catch` falls back to the wallet sweep.
+    ///
+    /// This test pins the SAFETY INVARIANT that holds either way: the debt is
+    /// closed, the module/settlement end empty, and the maker is made whole —
+    /// the surplus lands as aUSDC (recycle) OR as wallet USDC (fallback), but is
+    /// never stranded. It deterministically exercises the recycle code path
+    /// (approve → external call → approval reset → post-balance sweep).
+    function test_repay_with_dust_recycle_or_fallback_aaveV3() public {
+        address aUSDC = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][USDC].collateral;
+
+        uint256 debtAmount = 3_000e6;
+        uint256 buffer = 50e6;
+        uint256 bufferedAmount = debtAmount + buffer;
+        uint256 wethForSolver = 1 ether;
+
+        _openUsdcDebt(debtAmount);
+        deal(USDC, solver, bufferedAmount);
+
+        _approveMakerRepaySide(bufferedAmount, wethForSolver);
+        _approveSolverSide(bufferedAmount, USDC);
+
+        uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
+        uint256 makerAUsdcBefore = IERC20(aUSDC).balanceOf(maker);
+        uint256 makerDebtBefore = IERC20(usdcDebtToken).balanceOf(maker);
+
+        // Repay item with the dust action appended: Recycle (1).
+        Item[] memory items = new Item[](1);
+        items[0] = Item(
+            ItemOp.MAKE,
+            address(repayModule),
+            bufferedAmount,
+            address(0),
+            abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken, uint8(DustHandler.DustAction.Recycle))
+        );
+        LimitOrder memory order = _order(maker, 3, WETH, USDC, wethForSolver, bufferedAmount, items);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        settlement.fill(order, sig, wethForSolver);
+
+        // Debt closed.
+        assertEq(IERC20(usdcDebtToken).balanceOf(maker), 0, "debt zeroed");
+
+        // Maker made whole: surplus is in the wallet (fallback) or as aUSDC
+        // (recycle), summed it equals the expected dust — never stranded.
+        uint256 expectedDust = bufferedAmount - makerDebtBefore;
+        uint256 walletDelta = IERC20(USDC).balanceOf(maker) - makerUsdcBefore;
+        uint256 aUsdcDelta = IERC20(aUSDC).balanceOf(maker) - makerAUsdcBefore;
+        assertApproxEqAbs(walletDelta + aUsdcDelta, expectedDust, 1e6, "maker made whole via one path");
+
+        // Module + settlement end empty regardless of the disposal branch.
+        assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "module drained");
+        assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement drained");
     }
 }

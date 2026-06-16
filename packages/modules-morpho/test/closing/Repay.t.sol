@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {DustHandler} from "@core/dust/DustHandler.sol";
 
 import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 
@@ -103,5 +104,56 @@ contract RepayTest is MorphoModulesBase {
         assertEq(_position(maker).borrowShares, 0, "debt shares zeroed");
         assertGt(IERC20(USDC).balanceOf(maker), 0, "dust refunded");
         assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "module drained");
+    }
+
+    // ──────────────────── Recycle dust back into the position ────────────────────
+
+    /// @dev Same over-repay setup, but `data` opts into `DustAction.Recycle`. The
+    /// module takes custody of the full signed ceiling, repays the shares with
+    /// empty callback data (Morpho pulls the exact accrued assets straight from
+    /// the module), and re-supplies the surplus as a lend balance into the same
+    /// market — instead of leaving it in the maker's wallet. Morpho supply has no
+    /// cap, so the recycle always lands.
+    function test_repay_with_dust_recycle_morpho() public {
+        uint256 debtAmount = 3_000e6;
+        uint256 buffer = 50e6;
+        uint256 bufferedAmount = debtAmount + buffer;
+        uint256 wstethForSolver = 1 ether;
+
+        _openPosition(2 ether, debtAmount);
+        deal(WSTETH, maker, wstethForSolver);
+        deal(USDC, solver, bufferedAmount);
+
+        _approveMakerRepaySide(bufferedAmount, wstethForSolver);
+        _approveSolverSide(bufferedAmount, USDC);
+
+        uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
+        assertEq(_position(maker).supplyShares, 0, "pre: no lend position");
+
+        // Repay item with the dust action appended: Recycle (1).
+        Item[] memory items = new Item[](1);
+        items[0] = Item(
+            ItemOp.MAKE,
+            address(repayModule),
+            bufferedAmount,
+            address(0),
+            abi.encode(marketParams, uint8(DustHandler.DustAction.Recycle))
+        );
+        LimitOrder memory order = _order(maker, 3, WSTETH, USDC, wstethForSolver, bufferedAmount, items);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        settlement.fill(order, sig, wstethForSolver);
+
+        // Debt closed.
+        assertEq(_position(maker).borrowShares, 0, "debt shares zeroed");
+
+        // Surplus recycled into a Morpho lend position, not swept to the wallet.
+        assertApproxEqAbs(IERC20(USDC).balanceOf(maker), makerUsdcBefore, 2, "wallet unchanged (no sweep)");
+        assertGt(_position(maker).supplyShares, 0, "dust recycled as lend supply");
+
+        // Module + settlement end empty regardless of disposal path.
+        assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "module drained");
+        assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement drained");
     }
 }

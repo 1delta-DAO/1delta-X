@@ -29,11 +29,9 @@ contract DepositBorrowTest is AaveModulesBase {
         uint256 collateralIn = 1 ether; //    maker receives + deposits
         uint256 borrowOut = 1_500e6; //        maker borrows → solver receives
 
-        address usdcDebtToken = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][USDC].debt;
-
         deal(WETH, solver, collateralIn);
 
-        _approveMakerDepositBorrowSide(collateralIn, borrowOut, usdcDebtToken);
+        _approveMakerDepositBorrowSide(collateralIn, borrowOut);
         _approveSolverSide(collateralIn, WETH);
 
         LimitOrder memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);

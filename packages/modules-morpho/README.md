@@ -174,6 +174,7 @@ permit fill:
 | [`swaps/WithdrawAndSwap`](test/swaps/WithdrawAndSwap.t.sol) | withdraw collateral + swap | no receipt-token pull — taker gate + `setAuthorization` only |
 | [`closing/Repay`](test/closing/Repay.t.sol) | buffered repay + dust refund | repay-by-**shares** (full close), residual swept to maker |
 | [`closing/Migrate`](test/closing/Migrate.t.sol) | Morpho → Aave v3 | cross-protocol: Morpho repay/withdraw + Aave deposit/borrow in one order |
+| [`closing/MigrateAaveToMorpho`](test/closing/MigrateAaveToMorpho.t.sol) | Aave v3 → Morpho | the reverse: Aave repay/withdraw + Morpho supply/borrow in one order |
 | [`security/TakerModuleAuth`](test/security/TakerModuleAuth.t.sol) | direct-call rejection | `OnlyPermit3` on both taker modules — load-bearing under coarse Morpho auth |
 
 > Only one wstETH/USDC market exists at the pinned fork block, so the migration

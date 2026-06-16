@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {DustHandler} from "@core/dust/DustHandler.sol";
 
 import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 
@@ -32,20 +33,29 @@ contract AaveV3DepositModule is IMakerModule {
 
 // ──────────────────── Aave v3 repay maker module ────────────────────
 //
-// Handles interest-accrual over-repay cleanly:
+// Handles interest-accrual over-repay cleanly with a pull-exact strategy:
 //
-//   1. Pulls `amount` (a user-signed buffered value) from the user via Permit3.
-//   2. Calls `pool.repay(asset, amount, rateMode, user)`. Aave v3 caps
-//      internally at `min(amount, currentDebt)` and only pulls
-//      `paybackAmount` from this contract via its own transferFrom.
-//   3. Any residual left in this contract is swept back to `user` —
-//      never to an attacker-controlled address, because the refund
-//      destination is the `user` function argument, not a field of
-//      `data`. That closes the "anyone can call this and redirect dust"
-//      attack vector without requiring a `msg.sender == permit3` gate.
+//   1. Read the user's live debt — `IERC20(debtToken).balanceOf(user)`, where
+//      `debtToken` is the variable/stable debt token matching `rateMode` — and
+//      compute `toRepay = min(amount, debt)` (`amount` = maker-signed ceiling).
+//   2. Pull exactly `toRepay` from the user via Permit3 and
+//      `pool.repay(asset, toRepay, rateMode, user)`.
+//
+// In the default (SweepToUser) mode the over-repay buffer is never pulled, so no
+// dust is created and nothing sits in this contract for a caller to redirect —
+// the "anyone can call this and redirect dust" vector is removed at the source,
+// without a `msg.sender == permit3` gate. When the maker-signed `data` opts into
+// Recycle, the module instead takes custody of the full signed ceiling and, after
+// repaying, re-supplies the surplus into the user's Aave position (best-effort,
+// with a guaranteed sweep fallback if the supply reverts — cap reached, frozen,
+// paused). Either way disposal is locked to `onBehalfOf` / the pool, never a
+// caller-chosen address, so the redirect vector stays closed. The debt token
+// lives in `data` (so it is maker-signed) rather than being derived from a
+// version-fragile `getReserveData` layout.
 //
 // `nonReentrant` guards against weird-token transfer hooks.
-// `data = abi.encode(pool, asset, rateMode)`.
+// `data = abi.encode(pool, asset, rateMode, debtToken[, DustHandler.DustAction])`
+// — the trailing dust action is optional; absent ⇒ SweepToUser.
 //
 contract AaveV3RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -62,19 +72,68 @@ contract AaveV3RepayModule is IMakerModule {
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
-        (address pool, address asset, uint256 rateMode) = abi.decode(data, (address, address, uint256));
+        // Decode only (pool, asset) here — both are needed for the dust step
+        // below. The pull+repay runs in its own frame so its locals don't pile up
+        // on the stack (avoids stack-too-deep). The base tuple is all-static, so a
+        // prefix decode is sound.
+        (address pool, address asset) = abi.decode(data, (address, address));
+        DustHandler.DustAction action = DustHandler.readAction(data, 128); // base = (address,address,uint256,address)
 
-        permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
-        IERC20(asset).approve(pool, amount);
-        IAaveV3Pool(pool).repay(asset, amount, rateMode, onBehalfOf);
+        _pullAndRepay(data, amount, onBehalfOf, asset, pool, action == DustHandler.DustAction.Recycle);
 
-        // Sweep residual (over-repay dust) back to the user. `balanceOf` avoids
-        // depending on the pool's return value and handles protocols that round
-        // differently from their own accounting.
-        uint256 residual = IERC20(asset).balanceOf(address(this));
-        if (residual > 0) IERC20(asset).transfer(onBehalfOf, residual);
+        _disposeResidual(pool, asset, onBehalfOf, action);
 
         _locked = 1;
+    }
+
+    /// @dev Pull the funding token and repay. SweepToUser pulls only what the
+    ///      debt needs — the over-repay buffer is never pulled, so the surplus
+    ///      stays in the maker's wallet (the solver paid `tokenOut` straight to
+    ///      them). Recycle takes custody of the full signed ceiling so the surplus
+    ///      can be redirected into the user's position by `_disposeResidual`;
+    ///      disposal stays locked to `onBehalfOf` / the pool, never a caller.
+    function _pullAndRepay(
+        bytes calldata data,
+        uint256 amount,
+        address onBehalfOf,
+        address asset,
+        address pool,
+        bool recycle
+    ) private {
+        uint256 rateMode;
+        uint256 toRepay;
+        {
+            address debtToken;
+            (,, rateMode, debtToken) = abi.decode(data, (address, address, uint256, address));
+            uint256 debt = IERC20(debtToken).balanceOf(onBehalfOf);
+            toRepay = amount < debt ? amount : debt;
+        }
+        {
+            uint256 toPull = recycle ? amount : toRepay;
+            if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
+        }
+        if (toRepay > 0) {
+            IERC20(asset).approve(pool, toRepay);
+            IAaveV3Pool(pool).repay(asset, toRepay, rateMode, onBehalfOf);
+        }
+    }
+
+    /// @dev Dispose of any residual: re-supply into the user's Aave position
+    ///      (Recycle, best-effort with a guaranteed sweep fallback) or sweep to
+    ///      the user (default). In its own frame to keep the stack shallow.
+    function _disposeResidual(address pool, address asset, address onBehalfOf, DustHandler.DustAction action)
+        private
+    {
+        uint256 residual = IERC20(asset).balanceOf(address(this));
+        if (residual == 0) return;
+        DustHandler.disposeResidual(
+            asset,
+            residual,
+            onBehalfOf,
+            action,
+            pool,
+            abi.encodeCall(IAaveV3Pool.supply, (asset, residual, onBehalfOf, 0))
+        );
     }
 }
 
@@ -86,7 +145,12 @@ contract AaveV3RepayModule is IMakerModule {
 // approves the aToken to this module), then calls `pool.withdraw` which
 // burns the module's aTokens and sends the underlying to `receiver`.
 //
-// `data = abi.encode(pool, asset, aToken)`.
+// Optional `BalanceMode.Full` (trailing field): withdraw the user's ENTIRE
+// (rebasing) aToken balance, forward the signed `amount` to `receiver`, and
+// sweep the accrued excess back to `onBehalfOf` — the TAKE-side mirror of the
+// over-repay refund. Fill-or-kill only, and only after debt is cleared.
+//
+// `data = abi.encode(pool, asset, aToken[, DustHandler.BalanceMode])`.
 //
 contract AaveV3WithdrawModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -102,8 +166,19 @@ contract AaveV3WithdrawModule is ITakerModule {
 
         (address pool, address asset, address aToken) = abi.decode(data, (address, address, address));
 
-        permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(amount));
-        IAaveV3Pool(pool).withdraw(asset, amount, receiver);
+        if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
+            // Pull the user's entire (rebasing) aToken balance and withdraw it all
+            // to this module; `withdraw(max)` mops up any 1-wei transfer rounding.
+            uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
+            permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(bal));
+            uint256 withdrawn = IAaveV3Pool(pool).withdraw(asset, type(uint256).max, address(this));
+            // Order flow gets `amount`; the accrued excess returns to the user.
+            IERC20(asset).transfer(receiver, amount);
+            if (withdrawn > amount) IERC20(asset).transfer(onBehalfOf, withdrawn - amount);
+        } else {
+            permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(amount));
+            IAaveV3Pool(pool).withdraw(asset, amount, receiver);
+        }
     }
 }
 

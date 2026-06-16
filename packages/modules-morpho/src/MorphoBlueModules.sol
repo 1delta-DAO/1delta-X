@@ -6,8 +6,16 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {DustHandler} from "@core/dust/DustHandler.sol";
 
-import {IMorphoBlue, MarketParams, Position, Id, MarketParamsLib} from "./interfaces/IMorphoBlue.sol";
+import {
+    IMorphoBlue,
+    IMorphoRepayCallback,
+    MarketParams,
+    Position,
+    Id,
+    MarketParamsLib
+} from "./interfaces/IMorphoBlue.sol";
 
 // ──────────────────── Morpho Blue supply-collateral maker module ────────────────────
 //
@@ -37,22 +45,33 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
 // ──────────────────── Morpho Blue repay maker module ────────────────────
 //
 // Closes the user's borrow in a market, handling interest-accrual over-repay
-// cleanly. Unlike Aave, Morpho's `repay(assets=…)` does NOT cap at the live
-// debt — overshooting by assets reverts (share underflow). So a full close must
-// repay by *shares*:
+// cleanly with a pull-exact strategy. Unlike Aave, Morpho's `repay(assets=…)`
+// does NOT cap at the live debt — overshooting by assets reverts (share
+// underflow). So a full close repays by *shares*, and the exact asset amount is
+// only known after Morpho accrues interest. We use Morpho's repay callback to
+// pull precisely that amount:
 //
-//   1. Pull `amount` (a user-signed buffered value) from the user via Permit3.
-//   2. Read the live `borrowShares` and `repay(shares = borrowShares)`. Morpho
-//      accrues interest, converts shares→assets (rounding up) and pulls exactly
-//      that from this contract — never more than the buffer.
-//   3. Any residual buffer left here is swept back to `onBehalfOf` — the refund
-//      destination is the function argument, not a field of `data`, closing the
-//      "anyone can redirect the dust" vector without a sender gate.
+//   1. Read the live `borrowShares` and `repay(shares = borrowShares, data≠"")`.
+//   2. Morpho accrues, converts shares→assets (rounding up), then calls back
+//      `onMorphoRepay(assets, …)`. There we pull exactly `assets` from the user
+//      via Permit3 (capped by the maker-signed `amount`) and approve Morpho.
+//   3. Morpho pulls exactly `assets` from this contract.
+//
+// In the default (SweepToUser) mode the over-repay buffer is never pulled (the
+// callback funds exactly what Morpho needs), so nothing sits in this contract for
+// a caller to redirect — removing that vector at the source without a `msg.sender
+// == permit3` gate. When `data` opts into Recycle, the module instead takes
+// custody of the full signed ceiling, repays with empty callback data (Morpho
+// pulls the exact accrued assets from the module), and re-supplies the surplus as
+// a lend balance into the same market — best-effort with a guaranteed sweep
+// fallback. Either way disposal is locked to `onBehalfOf` / morpho, never a
+// caller-chosen address.
 //
 // `nonReentrant` guards against weird-token transfer hooks.
-// `data = abi.encode(MarketParams)`.
+// `data = abi.encode(MarketParams[, DustHandler.DustAction])` — the trailing dust
+// action is optional; absent ⇒ SweepToUser.
 //
-contract MorphoBlueRepayModule is IMakerModule {
+contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
     using MarketParamsLib for MarketParams;
 
     IPermit3 public immutable permit3;
@@ -61,6 +80,8 @@ contract MorphoBlueRepayModule is IMakerModule {
     uint256 private _locked = 1;
 
     error Reentrancy();
+    error OnlyMorpho();
+    error BufferTooSmall();
 
     constructor(address _permit3, address _morpho) {
         permit3 = IPermit3(_permit3);
@@ -73,25 +94,71 @@ contract MorphoBlueRepayModule is IMakerModule {
 
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
         address loanToken = marketParams.loanToken;
+        DustHandler.DustAction action = DustHandler.readAction(data, 160); // base = MarketParams (5 static fields)
 
-        permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(amount));
-        IERC20(loanToken).approve(address(morpho), amount);
-
-        // Repay the entire debt by shares. Morpho accrues first, so reading the
-        // shares here and repaying them closes the position exactly; the buffered
-        // pull covers the assets Morpho rounds up to.
+        // Repay the entire debt by shares. The exact asset amount is only known
+        // after Morpho accrues interest.
         Id id = marketParams.id();
         uint256 borrowShares = morpho.position(id, onBehalfOf).borrowShares;
         if (borrowShares > 0) {
-            morpho.repay(marketParams, 0, borrowShares, onBehalfOf, "");
+            if (action == DustHandler.DustAction.Recycle) {
+                // Take custody of the full signed ceiling, then repay with empty
+                // callback data so Morpho pulls the exact accrued assets straight
+                // from this module. The unpulled surplus stays here as residual to
+                // be recycled below. Reset the leftover allowance afterwards.
+                permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(amount));
+                IERC20(loanToken).approve(address(morpho), amount);
+                morpho.repay(marketParams, 0, borrowShares, onBehalfOf, "");
+                IERC20(loanToken).approve(address(morpho), 0);
+            } else {
+                // Pull-exact via `onMorphoRepay`: no buffer is pre-pulled, so the
+                // surplus stays in the maker's wallet and nothing sits here.
+                morpho.repay(marketParams, 0, borrowShares, onBehalfOf, abi.encode(onBehalfOf, amount, loanToken));
+            }
         }
 
-        // Sweep residual (over-repay buffer) back to the user. `balanceOf` avoids
-        // depending on Morpho's return value.
-        uint256 residual = IERC20(loanToken).balanceOf(address(this));
-        if (residual > 0) IERC20(loanToken).transfer(onBehalfOf, residual);
+        // Dispose of any residual: re-supplied as a lend balance into the same
+        // market (Recycle, best-effort with sweep fallback) or swept to the user
+        // (default), never to a caller. In its own frame to keep the decoded
+        // locals from overflowing the stack.
+        _disposeResidual(marketParams, loanToken, onBehalfOf, action);
 
         _locked = 1;
+    }
+
+    /// @dev Re-supply (opt-in) the residual loan token as a lend balance in the
+    ///      same market, else sweep to the user. `base = MarketParams` (5 static
+    ///      fields) ⇒ trailing action at byte 160.
+    function _disposeResidual(
+        MarketParams memory marketParams,
+        address loanToken,
+        address onBehalfOf,
+        DustHandler.DustAction action
+    ) private {
+        uint256 residual = IERC20(loanToken).balanceOf(address(this));
+        if (residual == 0) return;
+        DustHandler.disposeResidual(
+            loanToken,
+            residual,
+            onBehalfOf,
+            action,
+            address(morpho),
+            abi.encodeCall(IMorphoBlue.supply, (marketParams, residual, 0, onBehalfOf, ""))
+        );
+    }
+
+    /// @notice Morpho repay callback. Pulls exactly `assets` (capped by the
+    ///         maker-signed ceiling) from the user and approves Morpho to take
+    ///         it. Only Morpho may invoke this; the funds it can move are bounded
+    ///         by the user's Permit3 allowance, so a stray call cannot do harm.
+    function onMorphoRepay(uint256 assets, bytes calldata data) external override {
+        if (msg.sender != address(morpho)) revert OnlyMorpho();
+
+        (address user, uint256 cap, address loanToken) = abi.decode(data, (address, uint256, address));
+        if (assets > cap) revert BufferTooSmall();
+
+        permit3.transferFrom(user, address(this), loanToken, uint160(assets));
+        IERC20(loanToken).approve(address(morpho), assets);
     }
 }
 
@@ -104,9 +171,17 @@ contract MorphoBlueRepayModule is IMakerModule {
 // the maker's prior `setAuthorization(module, true)` and sends straight to
 // `receiver`.
 //
-// `data = abi.encode(MarketParams)`.
+// Optional `BalanceMode.Full` (trailing field): withdraw the user's ENTIRE
+// collateral balance (`position(id).collateral`), forward the signed `amount` to
+// `receiver`, and sweep the excess back to `onBehalfOf`. (Morpho collateral does
+// not accrue, so "full" here is the lender-agnostic "exit without naming the
+// exact number" leg.) Fill-or-kill only, and only after debt is cleared.
+//
+// `data = abi.encode(MarketParams[, DustHandler.BalanceMode])`.
 //
 contract MorphoBlueWithdrawCollateralModule is ITakerModule {
+    using MarketParamsLib for MarketParams;
+
     IPermit3 public immutable permit3;
     IMorphoBlue public immutable morpho;
 
@@ -121,7 +196,17 @@ contract MorphoBlueWithdrawCollateralModule is ITakerModule {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
-        morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
+
+        if (DustHandler.readBalanceMode(data, 160) == DustHandler.BalanceMode.Full) {
+            // Withdraw the user's entire collateral to this module; forward the
+            // signed `amount` to the order, sweep the excess to the user.
+            uint256 bal = morpho.position(marketParams.id(), onBehalfOf).collateral;
+            morpho.withdrawCollateral(marketParams, bal, onBehalfOf, address(this));
+            IERC20(marketParams.collateralToken).transfer(receiver, amount);
+            if (bal > amount) IERC20(marketParams.collateralToken).transfer(onBehalfOf, bal - amount);
+        } else {
+            morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
+        }
     }
 }
 

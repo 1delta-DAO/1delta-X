@@ -33,12 +33,14 @@ abstract contract AaveModulesBase is CoreSettlementBase {
 
     address AAVE_POOL;
     address aWETH;
+    address usdcDebtToken;
 
     function setUp() public virtual override {
         super.setUp();
 
         AAVE_POOL = lendingControllers[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3];
         aWETH = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][WETH].collateral;
+        usdcDebtToken = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][USDC].debt;
 
         depositModule = new AaveV3DepositModule(address(permit3));
         withdrawModule = new AaveV3WithdrawModule(address(permit3));
@@ -126,7 +128,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         vm.stopPrank();
     }
 
-    function _approveMakerDepositBorrowSide(uint256 collateralIn, uint256 borrowOut, address usdcDebtToken) internal {
+    function _approveMakerDepositBorrowSide(uint256 collateralIn, uint256 borrowOut) internal {
         bytes memory borrowData = abi.encode(AAVE_POOL, USDC, uint256(2));
         bytes32 borrowRef = keccak256(borrowData);
 
@@ -246,7 +248,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             module: address(repayModule),
             amount: bufferedAmount,
             recipient: address(0),
-            data: abi.encode(AAVE_POOL, USDC, uint256(2))
+            data: abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
         });
         order = _order(maker, 3, WETH, USDC, wethForSolver, bufferedAmount, items);
     }
@@ -264,7 +266,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             module: address(repayModule),
             amount: bufferedRepay,
             recipient: address(0),
-            data: abi.encode(AAVE_POOL, USDC, uint256(2))
+            data: abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
         });
         items[1] = Item({
             op: ItemOp.TAKE,
