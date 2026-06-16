@@ -84,6 +84,15 @@ interface IMorphoBlue {
     function accrueInterest(MarketParams memory marketParams) external;
 }
 
+/// @notice Callback invoked by `Morpho.repay` when called with non-empty `data`.
+///         Morpho computes the exact `assets` for the requested shares, fires
+///         this callback, then pulls `assets` from the caller via transferFrom.
+///         Lets the repayer fund the exact amount instead of pre-pulling a
+///         buffer. See Morpho Blue `IMorphoRepayCallback`.
+interface IMorphoRepayCallback {
+    function onMorphoRepay(uint256 assets, bytes calldata data) external;
+}
+
 // ──────────────────── Market id helper ────────────────────
 
 library MarketParamsLib {

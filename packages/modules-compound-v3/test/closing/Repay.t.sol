@@ -6,6 +6,8 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
 
+import {DustHandler} from "@core/dust/DustHandler.sol";
+
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
@@ -110,5 +112,57 @@ contract RepayTest is CompoundV3ModulesBase {
         assertApproxEqAbs(_usdcDebt(maker), 0, 2, "debt zeroed");
         assertGt(IERC20(USDC).balanceOf(maker), 0, "dust refunded");
         assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "module drained");
+    }
+
+    // ──────────────────── Recycle dust back into the position ────────────────────
+
+    /// @dev Same over-repay setup, but the maker-signed `data` opts into
+    /// `DustAction.Recycle` (trailing field). Instead of the surplus landing in
+    /// the maker's wallet, the module re-supplies it into the same Comet as a
+    /// base supply balance — the CoW × Aave "leftover back into the position"
+    /// pattern. Comet's base supply has no cap, so the recycle always succeeds.
+    function test_repay_with_dust_recycle_cometV3() public {
+        uint256 debtAmount = 3_000e6;
+        uint256 buffer = 50e6;
+        uint256 bufferedAmount = debtAmount + buffer;
+        uint256 wethForSolver = 1 ether;
+
+        _openUsdcDebt(debtAmount);
+        deal(USDC, solver, bufferedAmount);
+
+        _approveMakerRepaySide(bufferedAmount, wethForSolver);
+        _approveSolverSide(bufferedAmount, USDC);
+
+        uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
+        uint256 makerDebtBefore = _usdcDebt(maker);
+        assertEq(IComet(COMET).balanceOf(maker), 0, "pre: no base supply position");
+
+        // Repay item with the dust action appended: Recycle (1).
+        Item[] memory items = new Item[](1);
+        items[0] = Item(
+            ItemOp.MAKE,
+            address(repayModule),
+            bufferedAmount,
+            address(0),
+            abi.encode(COMET, USDC, uint8(DustHandler.DustAction.Recycle))
+        );
+        LimitOrder memory order = _order(maker, 3, WETH, USDC, wethForSolver, bufferedAmount, items);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        settlement.fill(order, sig, wethForSolver);
+
+        // Debt closed.
+        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "debt zeroed");
+
+        // Surplus was NOT swept to the wallet — it was recycled into the position.
+        uint256 expectedDust = bufferedAmount - makerDebtBefore;
+        assertApproxEqAbs(IERC20(USDC).balanceOf(maker), makerUsdcBefore, 2, "wallet unchanged (no sweep)");
+        assertApproxEqAbs(IComet(COMET).balanceOf(maker), expectedDust, 1e6, "dust recycled as base supply");
+        assertGt(IComet(COMET).balanceOf(maker), 0, "recycle actually happened");
+
+        // Module + settlement end empty regardless of disposal path.
+        assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "module drained");
+        assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement drained");
     }
 }

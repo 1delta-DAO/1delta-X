@@ -34,8 +34,7 @@ contract FlashLoanLeverageTest is AaveModulesBase {
         _seedAWethPosition(10 ether);
 
         // Register maker-side authorisations.
-        address usdcDebtToken = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][USDC].debt;
-        _approveMakerDepositBorrowSide(collateralIn, borrowOut, usdcDebtToken);
+        _approveMakerDepositBorrowSide(collateralIn, borrowOut);
 
         // Solver-side: register ERC20 + Permit3 allowance for WETH.
         //   (The solver's WETH originates from the flash loan inside executeFill,

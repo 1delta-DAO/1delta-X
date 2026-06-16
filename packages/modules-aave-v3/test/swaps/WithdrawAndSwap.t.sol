@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {DustHandler} from "@core/dust/DustHandler.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
@@ -92,5 +93,59 @@ contract WithdrawAndSwapTest is AaveModulesBase {
 
         assertEq(IERC20(WETH).balanceOf(solver), wethIn, "solver received WETH");
         assertEq(IERC20(USDC).balanceOf(maker), usdcOut, "maker received USDC");
+    }
+
+    // ──────────────────── Full-balance withdrawal ────────────────────
+
+    /// @dev `BalanceMode.Full`: the maker holds an aWETH position LARGER than the
+    /// order amount (the surplus stands in for accrued interest). The withdraw
+    /// module pulls the entire rebasing balance, forwards the signed `wethIn` to
+    /// the solver, and sweeps the accrued excess back to the maker in-kind — the
+    /// TAKE-side mirror of the over-repay refund. The position is fully exited.
+    function test_withdraw_full_balance_sweeps_excess_aaveV3() public {
+        uint256 wethIn = 1 ether; //          amount that flows to the solver
+        uint256 excess = 0.3 ether; //        surplus beyond the order amount
+        uint256 usdcOut = 2_000e6;
+
+        _seedAWethPosition(wethIn + excess);
+        deal(USDC, solver, usdcOut);
+
+        // Full-balance flag appended → distinct taker-allowance ref.
+        bytes memory takerData = abi.encode(AAVE_POOL, WETH, aWETH, uint8(DustHandler.BalanceMode.Full));
+        bytes32 ref = keccak256(takerData);
+
+        vm.startPrank(maker);
+        IERC20(WETH).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), WETH, uint160(wethIn), 0);
+        // Full-balance pull needs an uncapped aWETH token allowance to the module.
+        IERC20(aWETH).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(withdrawModule), aWETH, type(uint160).max, 0);
+        // Taker gate still bounds the order slice that reaches the solver.
+        permit3.approveTaker(address(withdrawModule), ref, uint160(wethIn), 0);
+        vm.stopPrank();
+        _approveSolverSide(usdcOut, USDC);
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
+        LimitOrder memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
+        bytes memory sig = _sign(order);
+
+        uint256 makerWethBefore = IERC20(WETH).balanceOf(maker); // 0 — all supplied
+
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, wethIn);
+
+        assertEq(paid, usdcOut, "solver paid usdcOut");
+        // Position fully exited (≤1 wei rebasing rounding).
+        assertApproxEqAbs(IERC20(aWETH).balanceOf(maker), 0, 2, "aWETH position fully closed");
+        // Solver got exactly the signed order slice.
+        assertEq(IERC20(WETH).balanceOf(solver), wethIn, "solver received exactly wethIn");
+        // Maker got the swap output AND the accrued excess swept back in-kind.
+        assertEq(IERC20(USDC).balanceOf(maker), usdcOut, "maker received USDC");
+        assertApproxEqAbs(IERC20(WETH).balanceOf(maker) - makerWethBefore, excess, 1e12, "excess WETH swept to maker");
+        // Nothing stranded anywhere.
+        assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
+        assertEq(IERC20(WETH).balanceOf(address(withdrawModule)), 0, "module WETH drained");
+        assertEq(IERC20(aWETH).balanceOf(address(withdrawModule)), 0, "module aWETH drained");
     }
 }

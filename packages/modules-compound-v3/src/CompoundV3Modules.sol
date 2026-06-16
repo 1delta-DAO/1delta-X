@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {DustHandler} from "@core/dust/DustHandler.sol";
 
 import {IComet} from "./interfaces/ICompoundV3.sol";
 
@@ -52,17 +53,24 @@ contract CometDepositModule is IMakerModule {
 // Handles interest-accrual over-repay cleanly. Unlike Aave's `repay`, Comet's
 // `supplyTo` does NOT cap at the outstanding debt — any excess silently becomes
 // a positive base *supply* balance. So to preserve the maker's intent ("close
-// my debt, give me back the rest") this module caps explicitly:
+// my debt") this module reads the live debt up front and pulls only what it
+// needs:
 //
-//   1. Pulls `amount` (a user-signed buffered value) from the user via Permit3.
-//   2. Reads the live debt and supplies only `min(amount, debt)` — never
-//      converting over-repay into a supply position.
-//   3. Sweeps the residual back to `onBehalfOf` (the function argument, never a
-//      field of `data`) — closing the "anyone can redirect dust" vector without
-//      a `msg.sender == permit3` gate, exactly as the Aave repay module does.
+//   1. Read the live debt and compute `toRepay = min(amount, debt)`, where
+//      `amount` is the maker-signed ceiling.
+//   2. Pull exactly `toRepay` from the user via Permit3 and `supplyTo` it.
+//
+// In the default (SweepToUser) mode the over-repay buffer is never pulled, so no
+// surplus sits in this module — there is nothing for a caller to redirect, which
+// removes that vector at the source without a `msg.sender == permit3` gate. When
+// `data` opts into Recycle, the module takes custody of the full signed ceiling
+// and, after repaying, re-supplies the surplus into the user's Comet position (a
+// positive base balance), best-effort with a guaranteed sweep fallback. Either
+// way disposal is locked to `onBehalfOf` / comet, never a caller-chosen address.
 //
 // `nonReentrant` guards against weird-token transfer hooks.
-// `data = abi.encode(comet, asset)`  (asset = the market's base token).
+// `data = abi.encode(comet, asset[, DustHandler.DustAction])`  (asset = the
+// market's base token). The trailing dust action is optional; absent ⇒ SweepToUser.
 //
 contract CometRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -80,24 +88,56 @@ contract CometRepayModule is IMakerModule {
         _locked = 2;
 
         (address comet, address asset) = abi.decode(data, (address, address));
+        DustHandler.DustAction action = DustHandler.readAction(data, 64); // base = (address,address)
 
-        permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
+        _pullAndRepay(comet, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
 
-        // Cap the repay at the live debt so surplus is refunded, not turned into
-        // a supply position the maker never asked for.
-        uint256 debt = IComet(comet).borrowBalanceOf(onBehalfOf);
-        uint256 toRepay = amount < debt ? amount : debt;
+        // Dispose of any residual: re-supplied into the user's position (Recycle,
+        // best-effort with sweep fallback) or swept to the user (default), never
+        // to a caller-controlled address.
+        _disposeResidual(comet, asset, onBehalfOf, action);
+
+        _locked = 1;
+    }
+
+    /// @dev Pull the funding token and repay (a `supplyTo` that pays down debt).
+    ///      SweepToUser pulls only what the debt needs — the buffer is never
+    ///      pulled and the surplus stays in the maker's wallet. Recycle takes
+    ///      custody of the full signed ceiling so the surplus can be redirected
+    ///      into the user's Comet position by `_disposeResidual`; disposal stays
+    ///      locked to `onBehalfOf` / comet, never a caller.
+    function _pullAndRepay(address comet, address asset, uint256 amount, address onBehalfOf, bool recycle) private {
+        uint256 toRepay;
+        {
+            uint256 debt = IComet(comet).borrowBalanceOf(onBehalfOf);
+            toRepay = amount < debt ? amount : debt;
+        }
+        {
+            uint256 toPull = recycle ? amount : toRepay;
+            if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
+        }
         if (toRepay > 0) {
             IERC20(asset).approve(comet, toRepay);
             IComet(comet).supplyTo(onBehalfOf, asset, toRepay);
         }
+    }
 
-        // Sweep residual (the over-repay buffer) back to the user. `balanceOf`
-        // avoids depending on Comet's rounding.
+    /// @dev Re-supply (opt-in) the residual into the user's Comet position (a
+    ///      positive base balance), else sweep to the user. Best-effort recycle
+    ///      with a guaranteed sweep fallback.
+    function _disposeResidual(address comet, address asset, address onBehalfOf, DustHandler.DustAction action)
+        private
+    {
         uint256 residual = IERC20(asset).balanceOf(address(this));
-        if (residual > 0) IERC20(asset).transfer(onBehalfOf, residual);
-
-        _locked = 1;
+        if (residual == 0) return;
+        DustHandler.disposeResidual(
+            asset,
+            residual,
+            onBehalfOf,
+            action,
+            comet,
+            abi.encodeCall(IComet.supplyTo, (onBehalfOf, asset, residual))
+        );
     }
 }
 
@@ -123,7 +163,11 @@ abstract contract CometTakeBase is ITakerModule {
         permit3 = IPermit3(_permit3);
     }
 
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
+        external
+        virtual
+        override
+    {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         (address comet, address asset) = abi.decode(data, (address, address));
@@ -139,8 +183,36 @@ abstract contract CometTakeBase is ITakerModule {
 // Withdraw collateral on the maker's behalf. `data`'s `asset` is a collateral
 // token of the market.
 //
+// Optional `BalanceMode.Full` (trailing field): withdraw the user's ENTIRE
+// collateral balance (`collateralBalanceOf`), forward the signed `amount` to
+// `receiver`, and sweep the excess back to `onBehalfOf`. Fill-or-kill only, and
+// only after debt is cleared. (Borrow has no full-balance mode, so the override
+// lives here, not in the shared base.)
+//
+// `data = abi.encode(comet, asset[, DustHandler.BalanceMode])`.
+//
 contract CometWithdrawModule is CometTakeBase {
     constructor(address _permit3) CometTakeBase(_permit3) {}
+
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
+        external
+        override
+    {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        (address comet, address asset) = abi.decode(data, (address, address));
+
+        if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
+            // Withdraw the user's entire collateral balance to this module; forward
+            // the signed `amount` to the order, sweep the excess to the user.
+            uint256 bal = IComet(comet).collateralBalanceOf(onBehalfOf, asset);
+            IComet(comet).withdrawFrom(onBehalfOf, address(this), asset, bal);
+            IERC20(asset).transfer(receiver, amount);
+            if (bal > amount) IERC20(asset).transfer(onBehalfOf, bal - amount);
+        } else {
+            IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
+        }
+    }
 }
 
 // ──────────────────── Comet borrow taker module ────────────────────
