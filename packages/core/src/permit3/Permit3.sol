@@ -275,9 +275,9 @@ contract Permit3 is IPermit3, EIP712 {
     }
 
     function _verifyPermitSig(address owner, bytes32 hashStruct, bytes calldata sig) private view {
-        // SignatureVerification (ported from Permit2) handles EOA (65-byte &
-        // EIP-2098 compact) and EIP-1271 contract signatures, and enforces
-        // length / signer checks.
+        // SignatureVerification handles EOA (65-byte & EIP-2098 compact),
+        // EIP-1271 contract signatures, and EIP-7702 accounts (raw-key or
+        // delegated-1271), and enforces length / signer checks.
         sig.verify(_hashTypedData(hashStruct), owner);
     }
 

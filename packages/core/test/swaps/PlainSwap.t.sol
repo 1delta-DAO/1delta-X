@@ -4,9 +4,34 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {IERC1271} from "@core/interfaces/IERC1271.sol";
 import {LimitOrder, Item, Validator} from "@core/settlement/LimitOrderSettlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
+
+/// @dev EIP-1271 smart-account wallet controlled by a single EOA key — the
+///      maker is a contract, signatures come from `owner`'s key.
+contract MockMakerWallet is IERC1271 {
+    address public immutable owner;
+
+    constructor(address _owner) {
+        owner = _owner;
+    }
+
+    function isValidSignature(bytes32 hash, bytes memory signature) external view override returns (bytes4) {
+        require(signature.length == 65, "len");
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(signature, 0x20))
+            s := mload(add(signature, 0x40))
+            v := byte(0, mload(add(signature, 0x60)))
+        }
+        if (ecrecover(hash, v, r, s) == owner) return IERC1271.isValidSignature.selector;
+        return 0xffffffff;
+    }
+}
 
 /// @dev Plain swap: the maker sells tokenIn for tokenOut with NO lending items.
 /// tokenOut lands directly in the maker's wallet; tokenIn is pulled from the
@@ -177,6 +202,103 @@ contract PlainSwapTest is CoreSettlementBase {
 
         assertEq(paid, wethOut, "solver paid exactly wethOut");
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH in wallet");
+        assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received USDC");
+    }
+
+    // ──────────────────── Contract-signer maker (EIP-1271) ────────────────────
+
+    /// @dev The maker is a smart-account wallet. Order verification now falls
+    ///      back to EIP-1271, so a contract maker can sell via direct `fill`
+    ///      (previously rejected — order sigs were ecrecover-only).
+    function test_plain_swap_contractSigner_eip1271() public {
+        MockMakerWallet wallet = new MockMakerWallet(maker); // validates makerPk sigs
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, address(wallet), usdcIn);
+        deal(WETH, solver, wethOut);
+
+        // Contract maker grants Permit3 the pull + per-token settlement cap.
+        vm.startPrank(address(wallet));
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), USDC, uint160(usdcIn), 0);
+        vm.stopPrank();
+        _approveSolverSide(wethOut, WETH);
+
+        LimitOrder memory order = _order(address(wallet), 0, USDC, WETH, usdcIn, wethOut, new Item[](0));
+        bytes memory sig = _sign(order); // signed by makerPk → validated by wallet
+
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, usdcIn);
+
+        assertEq(paid, wethOut, "solver paid exactly wethOut");
+        assertEq(IERC20(WETH).balanceOf(address(wallet)), wethOut, "contract maker received WETH");
+        assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received USDC");
+    }
+
+    // ──────────────────── EIP-7702 delegated-1271 maker ────────────────────
+
+    /// @dev A 7702 maker whose delegate implements EIP-1271: the raw recovery
+    ///      misses the account address, so verification falls through to the
+    ///      delegate's `isValidSignature`. Exercises the 1271-fallback branch
+    ///      end-to-end through `fill` for a delegated account.
+    function test_plain_swap_eip7702_delegated1271Maker() public {
+        MockMakerWallet impl = new MockMakerWallet(maker); // validates makerPk sigs
+        address acct = address(0x77020D); // the 7702 account
+        vm.etch(acct, address(impl).code); // delegate's 1271 logic runs in acct's context
+        vm.label(acct, "7702-delegated-maker");
+
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, acct, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        // Delegated maker grants Permit3 the pull + per-token settlement cap.
+        vm.startPrank(acct);
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), USDC, uint160(usdcIn), 0);
+        vm.stopPrank();
+        _approveSolverSide(wethOut, WETH);
+
+        LimitOrder memory order = _order(acct, 0, USDC, WETH, usdcIn, wethOut, new Item[](0));
+        bytes memory sig = _sign(order); // signed by makerPk → validated by delegate code
+
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, usdcIn);
+
+        assertEq(paid, wethOut, "solver paid exactly wethOut");
+        assertEq(IERC20(WETH).balanceOf(acct), wethOut, "7702 delegated maker received WETH");
+        assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received USDC");
+    }
+
+    // ──────────────────── EIP-7702 raw-key maker ────────────────────
+
+    /// @dev A 7702 maker carries delegate code but signs with its own key; the
+    ///      order signature still recovers to the account address. Confirms the
+    ///      shared verifier keeps this path working through `fill`.
+    function test_plain_swap_eip7702_rawKeyMaker() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        // Delegation designator on the maker EOA: 0xef0100 ‖ delegate address.
+        vm.etch(maker, bytes.concat(hex"ef0100", abi.encodePacked(address(0xDE1E6A7E))));
+        assertGt(maker.code.length, 0, "maker now carries delegate code");
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        _approveMakerPlainSwap(usdcIn);
+        _approveSolverSide(wethOut, WETH);
+
+        LimitOrder memory order = _plainSwapOrder(0, usdcIn, wethOut);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, usdcIn);
+
+        assertEq(paid, wethOut, "solver paid exactly wethOut");
+        assertEq(IERC20(WETH).balanceOf(maker), wethOut, "7702 maker received WETH");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received USDC");
     }
 }

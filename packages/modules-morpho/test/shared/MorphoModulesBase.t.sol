@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 import {Chains, Tokens} from "@coretest/data/LenderRegistry.sol";
@@ -37,6 +38,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
     MorphoBlueRepayModule repayModule;
     MorphoBlueWithdrawCollateralModule withdrawModule;
     MorphoBlueBorrowModule borrowModule;
+    LimitOrderLeverageSolver leverageSolver;
 
     address WSTETH;
 
@@ -60,8 +62,16 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         repayModule = new MorphoBlueRepayModule(address(permit3), address(MORPHO));
         withdrawModule = new MorphoBlueWithdrawCollateralModule(address(permit3), address(MORPHO));
         borrowModule = new MorphoBlueBorrowModule(address(permit3), address(MORPHO));
+        // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
+        leverageSolver = new LimitOrderLeverageSolver(
+            address(permit3),
+            address(settlement),
+            0xBA12222222228d8Ba445958a75a0704d566BF2C8,
+            0xE592427A0AEce92De3Edee1F18E0157C05861564
+        );
 
         vm.label(address(MORPHO), "morphoBlue");
+        vm.label(address(leverageSolver), "leverageSolver");
         vm.label(address(supplyModule), "morphoSupplyCollateralModule");
         vm.label(address(repayModule), "morphoRepayModule");
         vm.label(address(withdrawModule), "morphoWithdrawCollateralModule");
