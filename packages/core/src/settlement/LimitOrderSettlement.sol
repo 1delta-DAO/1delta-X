@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {IMakerModule} from "../interfaces/IMakerModule.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
+import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 
 /// @notice Operation kind per item. Names mirror limit-order parlance:
 ///         takers draw value out of a position, makers put value in.
@@ -414,11 +415,9 @@ contract LimitOrderSettlement {
 
     function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, orderHash));
-        bytes32 r = bytes32(sig[0:32]);
-        bytes32 s = bytes32(sig[32:64]);
-        uint8 v = uint8(sig[64]);
-        address signer = ecrecover(digest, v, r, s);
-        if (signer == address(0) || signer != expected) revert InvalidSignature();
+        // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
+        // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
+        SignatureVerification.verify(sig, digest, expected);
     }
 
     // ──────────────────── Views ────────────────────

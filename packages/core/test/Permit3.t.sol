@@ -370,6 +370,43 @@ contract Permit3Test is Test {
         permit3.permitBatch(address(wallet), batch, sig);
     }
 
+    // ════════════════ EIP-7702 (delegated EOA) ════════════════
+
+    /// @dev An EIP-7702 account carries delegate code yet keeps its key: a raw
+    ///      ECDSA signature still recovers to the account address. The port now
+    ///      tries ecrecover first, so this must succeed even though the signer
+    ///      has code (the old `code.length == 0` gate rejected it).
+    function test_permitBatch_eip7702_rawKeySigner() public {
+        // 7702 delegation designator: 0xef0100 ‖ delegate address.
+        vm.etch(owner, bytes.concat(hex"ef0100", abi.encodePacked(address(0xDE1E6A7E))));
+        assertGt(owner.code.length, 0, "owner now carries delegate code");
+
+        IPermit3.PermitBatch memory batch = _batchSingleToken(spender, address(token), 11e18, 0, 0);
+        bytes memory sig = _signBatch(batch, ownerPk);
+
+        permit3.permitBatch(owner, batch, sig);
+
+        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        assertEq(amount, 11e18, "7702 raw-key permit applied");
+    }
+
+    /// @dev A 7702 account whose delegate implements EIP-1271 must still be
+    ///      honoured via the contract path when the raw recovery does not match.
+    function test_permitBatch_eip7702_delegated1271() public {
+        MockERC1271Wallet impl = new MockERC1271Wallet(owner);
+        // Copy the delegate's runtime code onto the account, mirroring a 7702
+        // account that delegates to a 1271 wallet implementation.
+        vm.etch(spender, address(impl).code);
+
+        IPermit3.PermitBatch memory batch = _batchSingleToken(recipient, address(token), 5e18, 0, 0);
+        bytes memory sig = _signBatch(batch, ownerPk); // signed by the delegate's controlling key
+
+        permit3.permitBatch(spender, batch, sig);
+
+        (uint160 amount,,) = permit3.tokenAllowance(spender, recipient, address(token));
+        assertEq(amount, 5e18, "7702 delegated-1271 permit applied");
+    }
+
     // ════════════════ Witness binding ════════════════
 
     function test_permitBatchWithWitness_setsAllowances() public {

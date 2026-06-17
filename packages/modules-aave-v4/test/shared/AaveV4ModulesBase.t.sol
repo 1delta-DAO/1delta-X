@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
@@ -41,6 +42,7 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
     AaveV4WithdrawModule withdrawModule;
     AaveV4BorrowModule borrowModule;
     AaveV4RepayModule repayModule;
+    LimitOrderLeverageSolver leverageSolver;
 
     // Aave V4 Ethereum mainnet addresses (live; position managers activated on the
     // Main Spoke). Mirrors the composer's AaveV4Lending fork test.
@@ -65,6 +67,14 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
         withdrawModule = new AaveV4WithdrawModule(address(permit3));
         borrowModule = new AaveV4BorrowModule(address(permit3));
         repayModule = new AaveV4RepayModule(address(permit3));
+        // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
+        leverageSolver = new LimitOrderLeverageSolver(
+            address(permit3),
+            address(settlement),
+            0xBA12222222228d8Ba445958a75a0704d566BF2C8,
+            0xE592427A0AEce92De3Edee1F18E0157C05861564
+        );
+        vm.label(address(leverageSolver), "leverageSolver");
 
         // Resolve reserve ids dynamically (avoids pinning to a block).
         usdcReserveId = ISpokeReserves(MAIN_SPOKE).getReserveId(CORE_HUB, IHubV4(CORE_HUB).getAssetId(USDC));

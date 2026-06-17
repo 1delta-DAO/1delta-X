@@ -1,0 +1,344 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
+
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
+import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {DustHandler} from "@core/dust/DustHandler.sol";
+
+import {
+    IDolomiteMargin,
+    AccountInfo,
+    AssetAmount,
+    AssetDenomination,
+    AssetReference,
+    WeiBalance,
+    ActionType,
+    ActionArgs
+} from "./interfaces/IDolomite.sol";
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Dolomite (DolomiteMargin) modules
+//
+//  Every Dolomite state change flows through `operate(accounts, actions)`, which
+//  applies a batch of actions and runs ONE collateralisation check at the end.
+//  The single-op modules each submit a one-action `operate`; the Level B
+//  `DolomiteOperateModule` submits a two-action `operate` (deposit+borrow or
+//  repay+withdraw) so the legs share that single check — the payoff of
+//  Dolomite's architecture.
+//
+//  Authorisation: `operate` requires `msg.sender` to be a local operator of each
+//  referenced account, so the user must `setOperators([{module, true}])` once for
+//  EVERY module here (deposit included) — Dolomite has no permissionless
+//  value-in path. The Permit3 token/taker allowance bounds the per-fill amount.
+//
+//  `data` (single-op) = abi.encode(address dolomite, uint256 marketId,
+//  address token, uint256 accountNumber[, DustAction|BalanceMode]) — baseLen 128.
+//  `marketId`/`token` are maker-signed (pinned into the order hash / taker ref)
+//  rather than looked up, so the position the user authorised is fixed.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// @dev Shared helpers for building and submitting `operate` calls.
+abstract contract DolomiteBase {
+    IPermit3 public immutable permit3;
+
+    constructor(address _permit3) {
+        permit3 = IPermit3(_permit3);
+    }
+
+    /// @dev A positive (supply) delta in `marketId`, funded from `otherAddress`.
+    function _depositAction(uint256 marketId, uint256 amount, address from) internal pure returns (ActionArgs memory) {
+        return ActionArgs({
+            actionType: ActionType.Deposit,
+            accountId: 0,
+            amount: AssetAmount(true, AssetDenomination.Wei, AssetReference.Delta, amount),
+            primaryMarketId: marketId,
+            secondaryMarketId: 0,
+            otherAddress: from,
+            otherAccountId: 0,
+            data: ""
+        });
+    }
+
+    /// @dev A negative (withdraw/borrow) delta in `marketId`, sent to `to`.
+    function _withdrawAction(uint256 marketId, uint256 amount, address to) internal pure returns (ActionArgs memory) {
+        return ActionArgs({
+            actionType: ActionType.Withdraw,
+            accountId: 0,
+            amount: AssetAmount(false, AssetDenomination.Wei, AssetReference.Delta, amount),
+            primaryMarketId: marketId,
+            secondaryMarketId: 0,
+            otherAddress: to,
+            otherAccountId: 0,
+            data: ""
+        });
+    }
+
+    function _operate(address dolomite, address user, uint256 accountNumber, ActionArgs memory action) internal {
+        AccountInfo[] memory accounts = new AccountInfo[](1);
+        accounts[0] = AccountInfo(user, accountNumber);
+        ActionArgs[] memory actions = new ActionArgs[](1);
+        actions[0] = action;
+        IDolomiteMargin(dolomite).operate(accounts, actions);
+    }
+
+    /// @dev The account's debt in `marketId` (0 if the balance is non-negative).
+    function _debtOf(address dolomite, address user, uint256 accountNumber, uint256 marketId)
+        internal
+        view
+        returns (uint256)
+    {
+        WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(user, accountNumber), marketId);
+        return w.sign ? 0 : w.value;
+    }
+}
+
+// ──────────────────── Dolomite deposit maker module ────────────────────
+//
+// Single-op module: pulls `token` from the user via Permit3 and supplies it into
+// the user's Dolomite account as a one-action `operate`. The module is the
+// Deposit action's funding source (`otherAddress`), so it must be a local
+// operator of the user. `data = abi.encode(dolomite, marketId, token, accountNumber)`.
+//
+contract DolomiteDepositModule is DolomiteBase, IMakerModule {
+    constructor(address _permit3) DolomiteBase(_permit3) {}
+
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        (address dolomite, uint256 marketId, address token, uint256 accountNumber) =
+            abi.decode(data, (address, uint256, address, uint256));
+
+        permit3.transferFrom(onBehalfOf, address(this), token, uint160(amount));
+        IERC20(token).approve(dolomite, amount);
+        _operate(dolomite, onBehalfOf, accountNumber, _depositAction(marketId, amount, address(this)));
+    }
+}
+
+// ──────────────────── Dolomite repay maker module ────────────────────
+//
+// Closes the user's borrow in `marketId`, handling interest-accrual over-repay
+// with a pull-exact strategy: read the live debt and repay `min(amount, debt)`.
+// In SweepToUser the over-repay buffer is never pulled, so nothing sits in this
+// module for a caller to redirect. On Recycle the module takes the full signed
+// ceiling, repays, and re-supplies the surplus into the user's Dolomite account
+// (best-effort, sweep fallback). The module is the Deposit funding source, so it
+// must be a local operator of the user.
+//
+// `nonReentrant` guards weird-token transfer hooks.
+// `data = abi.encode(dolomite, marketId, token, accountNumber[, DustHandler.DustAction])`.
+//
+contract DolomiteRepayModule is DolomiteBase, IMakerModule {
+    uint256 private _locked = 1;
+
+    error Reentrancy();
+
+    constructor(address _permit3) DolomiteBase(_permit3) {}
+
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (_locked != 1) revert Reentrancy();
+        _locked = 2;
+
+        (address dolomite, uint256 marketId, address token, uint256 accountNumber) =
+            abi.decode(data, (address, uint256, address, uint256));
+        DustHandler.DustAction action = DustHandler.readAction(data, 128); // base = (address,uint256,address,uint256)
+
+        _pullAndRepay(dolomite, marketId, token, accountNumber, amount, onBehalfOf, action);
+        _disposeResidual(dolomite, marketId, token, accountNumber, onBehalfOf, action);
+
+        _locked = 1;
+    }
+
+    function _pullAndRepay(
+        address dolomite,
+        uint256 marketId,
+        address token,
+        uint256 accountNumber,
+        uint256 amount,
+        address onBehalfOf,
+        DustHandler.DustAction action
+    ) private {
+        uint256 debt = _debtOf(dolomite, onBehalfOf, accountNumber, marketId);
+        uint256 toRepay = amount < debt ? amount : debt;
+
+        uint256 toPull = action == DustHandler.DustAction.Recycle ? amount : toRepay;
+        if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), token, uint160(toPull));
+
+        if (toRepay > 0) {
+            IERC20(token).approve(dolomite, toRepay);
+            _operate(dolomite, onBehalfOf, accountNumber, _depositAction(marketId, toRepay, address(this)));
+        }
+    }
+
+    /// @dev Re-supply (opt-in) the residual into the user's Dolomite account via a
+    ///      one-action deposit `operate`, else sweep to the user.
+    function _disposeResidual(
+        address dolomite,
+        uint256 marketId,
+        address token,
+        uint256 accountNumber,
+        address onBehalfOf,
+        DustHandler.DustAction action
+    ) private {
+        uint256 residual = IERC20(token).balanceOf(address(this));
+        if (residual == 0) return;
+
+        AccountInfo[] memory accounts = new AccountInfo[](1);
+        accounts[0] = AccountInfo(onBehalfOf, accountNumber);
+        ActionArgs[] memory actions = new ActionArgs[](1);
+        actions[0] = _depositAction(marketId, residual, address(this));
+
+        DustHandler.disposeResidual(
+            token,
+            residual,
+            onBehalfOf,
+            action,
+            dolomite,
+            abi.encodeCall(IDolomiteMargin.operate, (accounts, actions))
+        );
+    }
+}
+
+// ──────────────────── Dolomite take base (withdraw / borrow) ────────────────────
+//
+// Withdrawing collateral and borrowing are the SAME `operate` Withdraw action
+// (a negative delta sent to `otherAddress`); a borrow simply drives the balance
+// past zero, which Dolomite permits and checks at the end of `operate`. Both
+// taker modules share this body. The user must have `setOperators([{module,
+// true}])`; the Permit3 taker allowance caps the fill.
+//
+// `data = abi.encode(dolomite, marketId, token, accountNumber)`.
+//
+abstract contract DolomiteTakeBase is DolomiteBase, ITakerModule {
+    error OnlyPermit3();
+
+    constructor(address _permit3) DolomiteBase(_permit3) {}
+
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
+        external
+        virtual
+        override
+    {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        (address dolomite, uint256 marketId,, uint256 accountNumber) =
+            abi.decode(data, (address, uint256, address, uint256));
+        _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, amount, receiver));
+    }
+}
+
+// ──────────────────── Dolomite withdraw taker module ────────────────────
+//
+// Withdraw collateral on the maker's behalf. Optional `BalanceMode.Full`:
+// withdraw the user's ENTIRE balance in `marketId` to this module, forward the
+// signed `amount` to `receiver`, and sweep the excess back to the user.
+// Fill-or-kill only, and only after debt is cleared.
+//
+// `data = abi.encode(dolomite, marketId, token, accountNumber[, DustHandler.BalanceMode])`.
+//
+contract DolomiteWithdrawModule is DolomiteTakeBase {
+    constructor(address _permit3) DolomiteTakeBase(_permit3) {}
+
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
+        external
+        override
+    {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        (address dolomite, uint256 marketId, address token, uint256 accountNumber) =
+            abi.decode(data, (address, uint256, address, uint256));
+
+        if (DustHandler.readBalanceMode(data, 128) == DustHandler.BalanceMode.Full) {
+            WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(onBehalfOf, accountNumber), marketId);
+            uint256 bal = w.sign ? w.value : 0;
+            _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, bal, address(this)));
+            IERC20(token).transfer(receiver, amount);
+            if (bal > amount) IERC20(token).transfer(onBehalfOf, bal - amount);
+        } else {
+            _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, amount, receiver));
+        }
+    }
+}
+
+// ──────────────────── Dolomite borrow taker module ────────────────────
+//
+// Borrow on the maker's behalf — the same Withdraw action driving the balance
+// negative. A distinct contract from the withdraw module purely so the two legs
+// occupy separate Permit3 module namespaces (the Comet withdraw/borrow split).
+//
+contract DolomiteBorrowModule is DolomiteTakeBase {
+    constructor(address _permit3) DolomiteTakeBase(_permit3) {}
+}
+
+// ──────────────────── Dolomite operate module (Level B) ────────────────────
+//
+// Composite module that fuses a value-in and a value-out leg into ONE `operate`
+// so they share Dolomite's single end-of-call collateralisation check. Two
+// shapes:
+//
+//   • Open  — deposit `sideAmount` collateral (module-funded via Permit3) +
+//             withdraw/borrow `amount` to `receiver`, drawn against the freshly
+//             deposited collateral under one check.
+//   • Close — repay up to `sideAmount` of the user's borrow (module-funded,
+//             capped at live debt) + withdraw `amount` collateral to `receiver`,
+//             the check seeing the debt reduced before the collateral leaves.
+//
+// Trade-off vs single-op: one module signs a whole batch under one
+// `keccak256(data)` taker ref — still fully maker-signed and amount-gated, but it
+// gives up the one-action-per-module blast-radius invariant. The user must
+// `setOperators([{module, true}])` once.
+//
+// `data = abi.encode(BatchData)` (see struct); `amount`/`receiver` carry the
+// value-out leg.
+//
+contract DolomiteOperateModule is DolomiteBase, ITakerModule {
+    enum BatchMode {
+        Open, // 0 — deposit collateral + borrow
+        Close // 1 — repay debt + withdraw collateral
+
+    }
+
+    struct BatchData {
+        uint256 mode;
+        address dolomite;
+        uint256 collMarketId;
+        address collToken;
+        uint256 borrowMarketId;
+        address borrowToken;
+        uint256 accountNumber;
+        uint256 sideAmount;
+    }
+
+    error OnlyPermit3();
+
+    constructor(address _permit3) DolomiteBase(_permit3) {}
+
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        BatchData memory p = abi.decode(data, (BatchData));
+
+        ActionArgs[] memory actions = new ActionArgs[](2);
+        if (BatchMode(uint8(p.mode)) == BatchMode.Open) {
+            // Pull collateral to fund the deposit leg, then deposit + borrow.
+            permit3.transferFrom(onBehalfOf, address(this), p.collToken, uint160(p.sideAmount));
+            IERC20(p.collToken).approve(p.dolomite, p.sideAmount);
+            actions[0] = _depositAction(p.collMarketId, p.sideAmount, address(this));
+            actions[1] = _withdrawAction(p.borrowMarketId, amount, receiver);
+        } else {
+            // Pull the (capped) repay funding, then repay + withdraw collateral.
+            uint256 debt = _debtOf(p.dolomite, onBehalfOf, p.accountNumber, p.borrowMarketId);
+            uint256 toRepay = p.sideAmount < debt ? p.sideAmount : debt;
+            if (toRepay > 0) {
+                permit3.transferFrom(onBehalfOf, address(this), p.borrowToken, uint160(toRepay));
+                IERC20(p.borrowToken).approve(p.dolomite, toRepay);
+            }
+            actions[0] = _depositAction(p.borrowMarketId, toRepay, address(this));
+            actions[1] = _withdrawAction(p.collMarketId, amount, receiver);
+        }
+
+        AccountInfo[] memory accounts = new AccountInfo[](1);
+        accounts[0] = AccountInfo(onBehalfOf, p.accountNumber);
+        IDolomiteMargin(p.dolomite).operate(accounts, actions);
+    }
+}

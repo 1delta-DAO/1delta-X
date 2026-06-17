@@ -274,8 +274,9 @@ Implemented:
 - [x] `uint160.max` infinite semantics; `expiration == 0` sentinel.
 - [x] EIP-712 signed permits (`permitBatch`, `permitBatchWithWitness`) with
       unordered (bitmap) nonces.
-- [x] Permit2-ported signature stack: `SignatureVerification` (EOA 65-byte +
-      EIP-2098 compact + EIP-1271 contract signatures) and fork-safe `EIP712`
+- [x] Permit2-derived signature stack: `SignatureVerification` (EOA 65-byte +
+      EIP-2098 compact + EIP-1271 contract signatures + EIP-7702 accounts,
+      verified ecrecover-first then EIP-1271 fallback) and fork-safe `EIP712`
       domain separator (recomputed if `block.chainid` changes).
 - [x] `lockdown` / `lockdownTakers` (atomic batch revocation) and
       `invalidateUnorderedNonces` (cancel signed permits).
