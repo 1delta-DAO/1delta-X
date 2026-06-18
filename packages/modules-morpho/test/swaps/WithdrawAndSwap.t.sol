@@ -89,7 +89,7 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
         tp[0] = IPermit3.TokenPermit(address(settlement), WSTETH, uint160(wstethIn), uint48(order.deadline));
 
         IPermit3.PermitBatch memory batch =
-            _buildBatch(tp, _takerPermits1(address(withdrawModule), keccak256(takerData), wstethIn), 0, order.deadline);
+            _buildBatch(tp, _takerPermits1(address(settlement), keccak256(takerData), wstethIn), 0, order.deadline);
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 

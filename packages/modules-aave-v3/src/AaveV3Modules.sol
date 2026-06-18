@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
@@ -17,16 +18,22 @@ import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 //
 contract AaveV3DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
-    constructor(address _permit3) {
+    error NotSettlement();
+
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
         (address pool, address asset) = abi.decode(data, (address, address));
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
-        IERC20(asset).approve(pool, amount);
+        SafeTransferLib.forceApprove(asset, pool, amount);
         IAaveV3Pool(pool).supply(asset, amount, onBehalfOf, 0);
     }
 }
@@ -59,16 +66,20 @@ contract AaveV3DepositModule is IMakerModule {
 //
 contract AaveV3RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
     uint256 private _locked = 1;
 
     error Reentrancy();
+    error NotSettlement();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -113,7 +124,7 @@ contract AaveV3RepayModule is IMakerModule {
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
         }
         if (toRepay > 0) {
-            IERC20(asset).approve(pool, toRepay);
+            SafeTransferLib.forceApprove(asset, pool, toRepay);
             IAaveV3Pool(pool).repay(asset, toRepay, rateMode, onBehalfOf);
         }
     }
@@ -169,12 +180,17 @@ contract AaveV3WithdrawModule is ITakerModule {
         if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
             // Pull the user's entire (rebasing) aToken balance and withdraw it all
             // to this module; `withdraw(max)` mops up any 1-wei transfer rounding.
+            // Measure the actually-received underlying via a balanceOf snapshot —
+            // never trust the static `amount` against the pool's return value.
             uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
             permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(bal));
-            uint256 withdrawn = IAaveV3Pool(pool).withdraw(asset, type(uint256).max, address(this));
+            uint256 beforeBal = IERC20(asset).balanceOf(address(this));
+            IAaveV3Pool(pool).withdraw(asset, type(uint256).max, address(this));
+            uint256 received = IERC20(asset).balanceOf(address(this)) - beforeBal;
+            require(received >= amount, "insufficient withdrawn");
             // Order flow gets `amount`; the accrued excess returns to the user.
-            IERC20(asset).transfer(receiver, amount);
-            if (withdrawn > amount) IERC20(asset).transfer(onBehalfOf, withdrawn - amount);
+            SafeTransferLib.safeTransfer(asset, receiver, amount);
+            if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
             permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(amount));
             IAaveV3Pool(pool).withdraw(asset, amount, receiver);
@@ -208,6 +224,6 @@ contract AaveV3BorrowModule is ITakerModule {
         // Borrow lands `amount` of `asset` at `msg.sender` (this module).
         IAaveV3Pool(pool).borrow(asset, amount, rateMode, 0, onBehalfOf);
         // Forward to Permit3's requested receiver (Settlement in our flow).
-        IERC20(asset).transfer(receiver, amount);
+        SafeTransferLib.safeTransfer(asset, receiver, amount);
     }
 }

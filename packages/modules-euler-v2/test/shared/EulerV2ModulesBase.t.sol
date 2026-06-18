@@ -42,8 +42,8 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
     function setUp() public virtual override {
         super.setUp();
 
-        depositModule = new EulerV2DepositModule(address(permit3));
-        repayModule = new EulerV2RepayModule(address(permit3));
+        depositModule = new EulerV2DepositModule(address(permit3), address(settlement));
+        repayModule = new EulerV2RepayModule(address(permit3), address(settlement));
         borrowModule = new EulerV2BorrowModule(address(permit3));
         withdrawModule = new EulerV2WithdrawModule(address(permit3));
         batchModule = new EulerV2BatchModule(address(permit3));
@@ -130,7 +130,7 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(depositModule), WETH, uint160(collateralIn), 0);
-        permit3.approveTaker(address(borrowModule), keccak256(abi.encode(address(EUSDC))), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), keccak256(abi.encode(address(EUSDC))), uint160(borrowOut), 0);
         // USDC fallback for the tokenIn shortfall path (never triggers here).
         IERC20(USDC).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), USDC, uint160(borrowOut), 0);

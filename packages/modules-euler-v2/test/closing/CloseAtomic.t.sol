@@ -39,7 +39,7 @@ contract EulerCloseAtomicTest is EulerV2ModulesBase {
         vm.startPrank(maker);
         IERC20(USDC).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(batchModule), USDC, uint160(REPAY_CEIL), 0);
-        permit3.approveTaker(address(batchModule), keccak256(data), uint160(WETH_OUT), 0);
+        permit3.approveTaker(address(settlement), keccak256(data), uint160(WETH_OUT), 0);
         vm.stopPrank();
 
         _approveSolverSide(REPAY_CEIL, USDC);

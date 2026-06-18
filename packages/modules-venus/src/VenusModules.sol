@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {IVToken} from "./interfaces/IVenus.sol";
 
@@ -48,19 +49,26 @@ import {IVToken} from "./interfaces/IVenus.sol";
 // behalf of the user — no delegation needed. `data = abi.encode(vToken, underlying)`.
 //
 contract VenusDepositModule is IMakerModule {
+    using SafeTransferLib for address;
+
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
     error VenusError(uint256 code);
+    error NotSettlement();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
         (address vToken, address underlying) = abi.decode(data, (address, address));
 
         permit3.transferFrom(onBehalfOf, address(this), underlying, uint160(amount));
-        IERC20(underlying).approve(vToken, amount);
+        underlying.forceApprove(vToken, amount);
         uint256 err = IVToken(vToken).mintBehalf(onBehalfOf, amount);
         if (err != 0) revert VenusError(err);
     }
@@ -81,18 +89,24 @@ contract VenusDepositModule is IMakerModule {
 // action optional; absent ⇒ SweepToUser.
 //
 contract VenusRepayModule is IMakerModule {
+    using SafeTransferLib for address;
+
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
     uint256 private _locked = 1;
 
     error Reentrancy();
     error VenusError(uint256 code);
+    error NotSettlement();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -121,7 +135,7 @@ contract VenusRepayModule is IMakerModule {
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), underlying, uint160(toPull));
         }
         if (toRepay > 0) {
-            IERC20(underlying).approve(vToken, toRepay);
+            underlying.forceApprove(vToken, toRepay);
             uint256 err = IVToken(vToken).repayBorrowBehalf(onBehalfOf, toRepay);
             if (err != 0) revert VenusError(err);
         }
@@ -177,6 +191,8 @@ abstract contract VenusTakeBase is ITakerModule {
 // user's `updateDelegate`. `data = abi.encode(vToken, underlying)`.
 //
 contract VenusBorrowModule is VenusTakeBase {
+    using SafeTransferLib for address;
+
     constructor(address _permit3) VenusTakeBase(_permit3) {}
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
@@ -189,7 +205,7 @@ contract VenusBorrowModule is VenusTakeBase {
 
         uint256 err = IVToken(vToken).borrowBehalf(onBehalfOf, amount);
         if (err != 0) revert VenusError(err);
-        IERC20(underlying).transfer(receiver, amount);
+        underlying.safeTransfer(receiver, amount);
     }
 }
 
@@ -208,6 +224,10 @@ contract VenusBorrowModule is VenusTakeBase {
 // `data = abi.encode(vToken, underlying[, DustHandler.BalanceMode])`.
 //
 contract VenusWithdrawModule is VenusTakeBase {
+    using SafeTransferLib for address;
+
+    error InsufficientWithdrawn();
+
     constructor(address _permit3) VenusTakeBase(_permit3) {}
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
@@ -221,16 +241,21 @@ contract VenusWithdrawModule is VenusTakeBase {
         if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
             // Redeem the user's entire vToken balance to this module, forward the
             // signed `amount` to the order, sweep the underlying excess to the user.
+            // Measure the actually-received underlying via a balanceOf snapshot
+            // around the redeem (the vToken credits this module), so a fee-on-transfer
+            // or rounding shortfall can't silently forward more than was received.
             uint256 vBal = IVToken(vToken).balanceOf(onBehalfOf);
+            uint256 balBefore = IERC20(underlying).balanceOf(address(this));
             uint256 err = IVToken(vToken).redeemBehalf(onBehalfOf, vBal);
             if (err != 0) revert VenusError(err);
-            uint256 got = IERC20(underlying).balanceOf(address(this));
-            IERC20(underlying).transfer(receiver, amount);
-            if (got > amount) IERC20(underlying).transfer(onBehalfOf, got - amount);
+            uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+            if (received < amount) revert InsufficientWithdrawn();
+            underlying.safeTransfer(receiver, amount);
+            if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
         } else {
             uint256 err = IVToken(vToken).redeemUnderlyingBehalf(onBehalfOf, amount);
             if (err != 0) revert VenusError(err);
-            IERC20(underlying).transfer(receiver, amount);
+            underlying.safeTransfer(receiver, amount);
         }
     }
 }

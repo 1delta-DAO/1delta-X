@@ -6,6 +6,7 @@ import {IPermit3} from "../interfaces/IPermit3.sol";
 import {IMakerModule} from "../interfaces/IMakerModule.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
+import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
 /// @notice Operation kind per item. Names mirror limit-order parlance:
 ///         takers draw value out of a position, makers put value in.
@@ -208,7 +209,7 @@ contract LimitOrderSettlement {
         "LimitOrder witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
-        "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
 
@@ -244,12 +245,16 @@ contract LimitOrderSettlement {
         // 1. Solver → maker: tokenOut (Permit3 enforces solver's allowance to this contract)
         PERMIT3.transferFrom(msg.sender, order.maker, order.tokenOut, uint160(fillAmountOut));
 
+        // Snapshot tokenIn before items so the payout uses ONLY this fill's TAKE
+        // proceeds — never any pre-existing/donated balance held by Settlement.
+        uint256 tokenInBefore = IERC20(order.tokenIn).balanceOf(address(this));
+
         // 2. Pro-rata operation items for this fill
         _executeItems(order, prevFilled, newFilled);
 
         // 3. Settle tokenIn → solver. TAKE items route proceeds to this
         //    contract; any shortfall is pulled from the maker via Permit3.
-        _payTokenInToSolver(order.tokenIn, order.maker, fillAmountIn);
+        _payTokenInToSolver(order.tokenIn, order.maker, fillAmountIn, tokenInBefore);
 
         // 4. Post-execution invariants (e.g. "my Aave health factor ≥ 2.0 after this fill").
         _runInvariants(order);
@@ -283,17 +288,23 @@ contract LimitOrderSettlement {
         }
     }
 
-    /// @dev Pay `fillAmountIn` of tokenIn to the solver. Uses local balance
-    ///      accumulated from TAKE items first; any shortfall is pulled from
-    ///      the maker via Permit3 (the maker's token allowance to this
-    ///      contract is the gate).
-    function _payTokenInToSolver(address tokenIn, address maker, uint256 fillAmountIn) internal {
-        uint256 localBal = IERC20(tokenIn).balanceOf(address(this));
-        if (localBal >= fillAmountIn) {
-            IERC20(tokenIn).transfer(msg.sender, fillAmountIn);
+    /// @dev Pay `fillAmountIn` of tokenIn to the solver. Uses ONLY the TAKE
+    ///      proceeds produced by THIS fill (measured as the balance delta since
+    ///      `tokenInBefore`) — so a pre-existing/donated Settlement balance can
+    ///      never be redirected to the solver. Any shortfall is pulled from the
+    ///      maker via Permit3 (the maker's token allowance is the gate); any
+    ///      surplus proceeds are returned to the maker, not stranded.
+    function _payTokenInToSolver(address tokenIn, address maker, uint256 fillAmountIn, uint256 tokenInBefore)
+        internal
+    {
+        uint256 proceeds = IERC20(tokenIn).balanceOf(address(this)) - tokenInBefore;
+        if (proceeds >= fillAmountIn) {
+            SafeTransferLib.safeTransfer(tokenIn, msg.sender, fillAmountIn);
+            uint256 surplus = proceeds - fillAmountIn;
+            if (surplus > 0) SafeTransferLib.safeTransfer(tokenIn, maker, surplus);
         } else {
-            if (localBal > 0) IERC20(tokenIn).transfer(msg.sender, localBal);
-            PERMIT3.transferFrom(maker, msg.sender, tokenIn, uint160(fillAmountIn - localBal));
+            if (proceeds > 0) SafeTransferLib.safeTransfer(tokenIn, msg.sender, proceeds);
+            PERMIT3.transferFrom(maker, msg.sender, tokenIn, uint160(fillAmountIn - proceeds));
         }
     }
 

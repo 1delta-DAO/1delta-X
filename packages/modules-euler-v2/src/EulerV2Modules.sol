@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {IEulerVault, IEVC} from "./interfaces/IEulerV2.sol";
 
@@ -44,17 +45,22 @@ import {IEulerVault, IEVC} from "./interfaces/IEulerV2.sol";
 //
 contract EulerV2DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
-    constructor(address _permit3) {
+    error NotSettlement();
+
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         address vault = abi.decode(data, (address));
         address asset = IEulerVault(vault).asset();
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
-        IERC20(asset).approve(vault, amount);
+        SafeTransferLib.forceApprove(asset, vault, amount);
         IEulerVault(vault).deposit(amount, onBehalfOf);
     }
 }
@@ -78,16 +84,20 @@ contract EulerV2DepositModule is IMakerModule {
 //
 contract EulerV2RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
     uint256 private _locked = 1;
 
     error Reentrancy();
+    error NotSettlement();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -115,7 +125,7 @@ contract EulerV2RepayModule is IMakerModule {
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
         }
         if (toRepay > 0) {
-            IERC20(asset).approve(vault, toRepay);
+            SafeTransferLib.forceApprove(asset, vault, toRepay);
             IEulerVault(vault).repay(toRepay, onBehalfOf);
         }
     }
@@ -189,19 +199,32 @@ contract EulerV2WithdrawModule is ITakerModule {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         address vault = abi.decode(data, (address));
-        IEVC evc = IEVC(IEulerVault(vault).EVC());
 
         if (DustHandler.readBalanceMode(data, 32) == DustHandler.BalanceMode.Full) {
-            // Withdraw the user's entire withdrawable balance to this module, then
-            // forward `amount` to the order and sweep the excess back to the user.
-            uint256 bal = IEulerVault(vault).maxWithdraw(onBehalfOf);
-            evc.call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), onBehalfOf)));
-            address asset = IEulerVault(vault).asset();
-            IERC20(asset).transfer(receiver, amount);
-            if (bal > amount) IERC20(asset).transfer(onBehalfOf, bal - amount);
+            _withdrawFull(vault, onBehalfOf, amount, receiver);
         } else {
-            evc.call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf)));
+            IEVC(IEulerVault(vault).EVC()).call(
+                vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf))
+            );
         }
+    }
+
+    /// @dev Full mode: withdraw the user's entire withdrawable balance to this
+    ///      module, forward the signed `amount` to `receiver`, and sweep the
+    ///      excess back to the user. Measures what actually landed (the vault may
+    ///      credit less than the pre-call `maxWithdraw` estimate) and requires it
+    ///      to cover the order. Its own frame keeps the stack shallow.
+    function _withdrawFull(address vault, address onBehalfOf, uint256 amount, address receiver) private {
+        address asset = IEulerVault(vault).asset();
+        uint256 bal = IEulerVault(vault).maxWithdraw(onBehalfOf);
+        uint256 balBefore = IERC20(asset).balanceOf(address(this));
+        IEVC(IEulerVault(vault).EVC()).call(
+            vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), onBehalfOf))
+        );
+        uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+        require(received >= amount, "insufficient withdrawn");
+        SafeTransferLib.safeTransfer(asset, receiver, amount);
+        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }
 }
 
@@ -270,7 +293,7 @@ contract EulerV2BatchModule is ITakerModule {
     function _open(BatchData memory p, address user, address receiver, uint256 borrowAmount) private {
         address collateralAsset = IEulerVault(p.collateralVault).asset();
         permit3.transferFrom(user, address(this), collateralAsset, uint160(p.sideAmount));
-        IERC20(collateralAsset).approve(p.collateralVault, p.sideAmount);
+        SafeTransferLib.forceApprove(collateralAsset, p.collateralVault, p.sideAmount);
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
         items[0] = IEVC.BatchItem({
@@ -297,7 +320,7 @@ contract EulerV2BatchModule is ITakerModule {
 
         if (toRepay > 0) {
             permit3.transferFrom(user, address(this), borrowAsset, uint160(toRepay));
-            IERC20(borrowAsset).approve(p.borrowVault, toRepay);
+            SafeTransferLib.forceApprove(borrowAsset, p.borrowVault, toRepay);
         }
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);

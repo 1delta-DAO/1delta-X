@@ -50,8 +50,8 @@ abstract contract FluidModulesBase is CoreSettlementBase {
     function setUp() public virtual override {
         super.setUp();
 
-        depositModule = new FluidDepositModule(address(permit3));
-        repayModule = new FluidRepayModule(address(permit3));
+        depositModule = new FluidDepositModule(address(permit3), address(settlement));
+        repayModule = new FluidRepayModule(address(permit3), address(settlement));
         borrowModule = new FluidBorrowModule(address(permit3));
         withdrawModule = new FluidWithdrawModule(address(permit3));
         operateModule = new FluidOperateModule(address(permit3));

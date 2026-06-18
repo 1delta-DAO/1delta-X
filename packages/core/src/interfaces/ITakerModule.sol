@@ -30,8 +30,10 @@ pragma solidity ^0.8.28;
 ///       - Comet:    `allow(module, true)`
 ///       - Morpho:   `setAuthorization(module, true)`
 ///
-///    2. An amount-gated allowance held by Permit3:
-///       - `permit3.approveTaker(module, takerKey(asset, data), amount, expiry)`
+///    2. An amount-gated allowance held by Permit3, keyed by the SPENDER that
+///       will call `take` (the Settlement contract) — exactly like the token
+///       book is keyed by spender:
+///       - `permit3.approveTaker(settlement, keccak256(data), amount, expiry)`
 ///       - `permit3.approveToken(module, token, amount, expiry)` — if the module
 ///         also pulls ERC20s from the user mid-op (fees, collateral legs, etc.)
 ///
@@ -57,5 +59,11 @@ interface ITakerModule {
     ///         the victim's (usually infinite) token allowance on the
     ///         position's receipt token, lets any caller drain the victim
     ///         into the `receiver` address they control.
+    ///
+    ///         Note this gate is necessary but not sufficient on its own: it
+    ///         funnels all calls through `Permit3.take`, whose own safety comes
+    ///         from the taker book being keyed by SPENDER (only an approved
+    ///         spender — Settlement — can consume an allowance and choose
+    ///         `receiver`). See `Permit3.take` / `IPermit3`.
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external;
 }

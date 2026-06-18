@@ -40,7 +40,7 @@ contract ValidatorsTest is CompoundV3ModulesBase {
         items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
 
         Validator[] memory validators = new Validator[](1);
-        validators[0] = Validator({target: address(priceLte), data: abi.encode(ETH_USD_FEED, FAR_BELOW_MARKET)});
+        validators[0] = Validator({target: address(priceLte), data: abi.encode(ETH_USD_FEED, FAR_BELOW_MARKET, type(uint256).max)});
 
         LimitOrder memory order = _orderWithValidators(101, WETH, USDC, wethIn, usdcOut, items, validators);
         bytes memory sig = _sign(order);
@@ -69,7 +69,7 @@ contract ValidatorsTest is CompoundV3ModulesBase {
         items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
 
         Validator[] memory validators = new Validator[](1);
-        validators[0] = Validator({target: address(priceLte), data: abi.encode(ETH_USD_FEED, FAR_ABOVE_MARKET)});
+        validators[0] = Validator({target: address(priceLte), data: abi.encode(ETH_USD_FEED, FAR_ABOVE_MARKET, type(uint256).max)});
 
         LimitOrder memory order = _orderWithValidators(102, WETH, USDC, wethIn, usdcOut, items, validators);
         bytes memory sig = _sign(order);

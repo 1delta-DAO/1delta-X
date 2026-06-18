@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {
     IMorphoBlue,
@@ -27,17 +28,23 @@ import {
 contract MorphoBlueSupplyCollateralModule is IMakerModule {
     IPermit3 public immutable permit3;
     IMorphoBlue public immutable morpho;
+    address public immutable settlement;
 
-    constructor(address _permit3, address _morpho) {
+    error NotSettlement();
+
+    constructor(address _permit3, address _morpho, address _settlement) {
         permit3 = IPermit3(_permit3);
         morpho = IMorphoBlue(_morpho);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
 
         permit3.transferFrom(onBehalfOf, address(this), marketParams.collateralToken, uint160(amount));
-        IERC20(marketParams.collateralToken).approve(address(morpho), amount);
+        SafeTransferLib.forceApprove(marketParams.collateralToken, address(morpho), amount);
         morpho.supplyCollateral(marketParams, amount, onBehalfOf, "");
     }
 }
@@ -76,19 +83,23 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 
     IPermit3 public immutable permit3;
     IMorphoBlue public immutable morpho;
+    address public immutable settlement;
 
     uint256 private _locked = 1;
 
     error Reentrancy();
     error OnlyMorpho();
     error BufferTooSmall();
+    error NotSettlement();
 
-    constructor(address _permit3, address _morpho) {
+    constructor(address _permit3, address _morpho, address _settlement) {
         permit3 = IPermit3(_permit3);
         morpho = IMorphoBlue(_morpho);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -107,9 +118,9 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
                 // from this module. The unpulled surplus stays here as residual to
                 // be recycled below. Reset the leftover allowance afterwards.
                 permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(amount));
-                IERC20(loanToken).approve(address(morpho), amount);
+                SafeTransferLib.forceApprove(loanToken, address(morpho), amount);
                 morpho.repay(marketParams, 0, borrowShares, onBehalfOf, "");
-                IERC20(loanToken).approve(address(morpho), 0);
+                SafeTransferLib.forceApprove(loanToken, address(morpho), 0);
             } else {
                 // Pull-exact via `onMorphoRepay`: no buffer is pre-pulled, so the
                 // surplus stays in the maker's wallet and nothing sits here.
@@ -158,7 +169,7 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
         if (assets > cap) revert BufferTooSmall();
 
         permit3.transferFrom(user, address(this), loanToken, uint160(assets));
-        IERC20(loanToken).approve(address(morpho), assets);
+        SafeTransferLib.forceApprove(loanToken, address(morpho), assets);
     }
 }
 
@@ -199,11 +210,19 @@ contract MorphoBlueWithdrawCollateralModule is ITakerModule {
 
         if (DustHandler.readBalanceMode(data, 160) == DustHandler.BalanceMode.Full) {
             // Withdraw the user's entire collateral to this module; forward the
-            // signed `amount` to the order, sweep the excess to the user.
+            // signed `amount` to the order, sweep the excess to the user. Measure
+            // the actually-received amount via a balance snapshot rather than
+            // trusting the position read, then bound the forwarded leg by it.
+            address collateralToken = marketParams.collateralToken;
             uint256 bal = morpho.position(marketParams.id(), onBehalfOf).collateral;
+            uint256 before = IERC20(collateralToken).balanceOf(address(this));
             morpho.withdrawCollateral(marketParams, bal, onBehalfOf, address(this));
-            IERC20(marketParams.collateralToken).transfer(receiver, amount);
-            if (bal > amount) IERC20(marketParams.collateralToken).transfer(onBehalfOf, bal - amount);
+            uint256 received = IERC20(collateralToken).balanceOf(address(this)) - before;
+            require(received >= amount, "insufficient withdrawn");
+            SafeTransferLib.safeTransfer(collateralToken, receiver, amount);
+            if (received > amount) {
+                SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
+            }
         } else {
             morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
         }

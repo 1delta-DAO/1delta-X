@@ -114,10 +114,10 @@ contract Permit3Test is Test {
     bytes32 constant TOKEN_PERMIT_TH =
         keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
     bytes32 constant TAKER_PERMIT_TH =
-        keccak256("TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)");
+        keccak256("TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)");
     bytes32 constant PERMIT_BATCH_TH = keccak256(
         "PermitBatch(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline)"
-        "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
     );
     string constant WITNESS_STUB =
@@ -125,7 +125,7 @@ contract Permit3Test is Test {
     // Witness is a bare bytes32; type defs in alphabetical order after the field.
     string constant WITNESS_TYPE_STRING =
         "bytes32 witness)"
-        "TakerPermit(address module,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
     function setUp() public {
@@ -235,15 +235,18 @@ contract Permit3Test is Test {
 
     function test_lockdownTakers_zeroesTakerAllowances() public {
         bytes32 ref = keccak256("pos");
-        vm.startPrank(owner);
-        permit3.approveTaker(address(taker), ref, 100e18, 0);
+        // Taker book is keyed by SPENDER (the caller of `take`); this test's
+        // `take` would be called by address(this), so approve that spender.
+        address sp = address(this);
+        vm.prank(owner);
+        permit3.approveTaker(sp, ref, 100e18, 0);
 
-        IPermit3.ModuleRefPair[] memory pairs = new IPermit3.ModuleRefPair[](1);
-        pairs[0] = IPermit3.ModuleRefPair(address(taker), ref);
+        IPermit3.SpenderRefPair[] memory pairs = new IPermit3.SpenderRefPair[](1);
+        pairs[0] = IPermit3.SpenderRefPair(sp, ref);
+        vm.prank(owner);
         permit3.lockdownTakers(pairs);
-        vm.stopPrank();
 
-        (uint160 amount,,) = permit3.takerAllowance(owner, address(taker), ref);
+        (uint160 amount,,) = permit3.takerAllowance(owner, sp, ref);
         assertEq(amount, 0);
     }
 
@@ -253,23 +256,50 @@ contract Permit3Test is Test {
         bytes memory data = abi.encode(address(0x1111), uint256(2));
         bytes32 ref = keccak256(data);
 
+        // Spender = address(this) since this test calls `take` directly.
         vm.prank(owner);
-        permit3.approveTaker(address(taker), ref, 100e18, 0);
+        permit3.approveTaker(address(this), ref, 100e18, 0);
 
         permit3.take(address(taker), owner, 40e18, recipient, data);
 
         assertEq(taker.lastUser(), owner);
         assertEq(taker.lastAmount(), 40e18);
         assertEq(taker.lastReceiver(), recipient);
-        (uint160 amount,,) = permit3.takerAllowance(owner, address(taker), ref);
+        (uint160 amount,,) = permit3.takerAllowance(owner, address(this), ref);
         assertEq(amount, 60e18, "taker allowance decremented");
+    }
+
+    /// @notice C-1 regression: the taker book is keyed by SPENDER (msg.sender of
+    ///         `take`), mirroring the token book — so a standing taker allowance
+    ///         granted to one spender (e.g. Settlement) CANNOT be consumed by an
+    ///         attacker calling `take` directly with the same `data`/ref and a
+    ///         receiver they control. Before the fix, `take` was permissionless
+    ///         and keyed by module, letting anyone drain borrow/withdraw proceeds.
+    function test_take_revert_unauthorizedSpender_C1() public {
+        bytes memory data = abi.encode(address(0x1111), uint256(2));
+        bytes32 ref = keccak256(data);
+
+        address goodSpender = address(0x5E771E); // stand-in for Settlement
+        vm.prank(owner);
+        permit3.approveTaker(goodSpender, ref, 100e18, 0);
+
+        // Attacker is not the approved spender → no allowance under their key.
+        address attacker = address(0xBAD);
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(IPermit3.InsufficientAllowance.selector, uint160(0)));
+        permit3.take(address(taker), owner, 40e18, attacker, data);
+
+        // The approved spender can still consume it (gate is not over-broad).
+        vm.prank(goodSpender);
+        permit3.take(address(taker), owner, 40e18, recipient, data);
+        assertEq(taker.lastReceiver(), recipient, "approved spender succeeds");
     }
 
     function test_take_revert_insufficient() public {
         bytes memory data = abi.encode(uint256(1));
         bytes32 ref = keccak256(data);
         vm.prank(owner);
-        permit3.approveTaker(address(taker), ref, 5e18, 0);
+        permit3.approveTaker(address(this), ref, 5e18, 0);
 
         vm.expectRevert(abi.encodeWithSelector(IPermit3.InsufficientAllowance.selector, uint160(5e18)));
         permit3.take(address(taker), owner, 6e18, recipient, data);
@@ -279,8 +309,10 @@ contract Permit3Test is Test {
         ReentrantTakerModule evil = new ReentrantTakerModule(address(permit3));
         bytes memory data = abi.encode(uint256(7));
         bytes32 ref = keccak256(data);
+        // Outer `take` is called by address(this); its allowance must pass so the
+        // re-entrant inner call is what trips the guard.
         vm.prank(owner);
-        permit3.approveTaker(address(evil), ref, type(uint160).max, 0);
+        permit3.approveTaker(address(this), ref, type(uint160).max, 0);
 
         vm.expectRevert(IPermit3.Reentrancy.selector);
         permit3.take(address(evil), owner, 1e18, recipient, data);
@@ -482,7 +514,7 @@ contract Permit3Test is Test {
     function _hashTakerPermits(IPermit3.TakerPermit[] memory p) internal pure returns (bytes32) {
         bytes32[] memory h = new bytes32[](p.length);
         for (uint256 i; i < p.length; i++) {
-            h[i] = keccak256(abi.encode(TAKER_PERMIT_TH, p[i].module, p[i].ref, p[i].amount, p[i].expiration));
+            h[i] = keccak256(abi.encode(TAKER_PERMIT_TH, p[i].spender, p[i].ref, p[i].amount, p[i].expiration));
         }
         return keccak256(abi.encodePacked(h));
     }

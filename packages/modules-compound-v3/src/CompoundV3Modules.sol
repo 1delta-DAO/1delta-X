@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {IComet} from "./interfaces/ICompoundV3.sol";
 
@@ -34,16 +35,22 @@ import {IComet} from "./interfaces/ICompoundV3.sol";
 //
 contract CometDepositModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
-    constructor(address _permit3) {
+    error NotSettlement();
+
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
         (address comet, address asset) = abi.decode(data, (address, address));
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
-        IERC20(asset).approve(comet, amount);
+        SafeTransferLib.forceApprove(asset, comet, amount);
         IComet(comet).supplyTo(onBehalfOf, asset, amount);
     }
 }
@@ -74,16 +81,20 @@ contract CometDepositModule is IMakerModule {
 //
 contract CometRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
     uint256 private _locked = 1;
 
     error Reentrancy();
+    error NotSettlement();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -117,7 +128,7 @@ contract CometRepayModule is IMakerModule {
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
         }
         if (toRepay > 0) {
-            IERC20(asset).approve(comet, toRepay);
+            SafeTransferLib.forceApprove(asset, comet, toRepay);
             IComet(comet).supplyTo(onBehalfOf, asset, toRepay);
         }
     }
@@ -204,11 +215,16 @@ contract CometWithdrawModule is CometTakeBase {
 
         if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
             // Withdraw the user's entire collateral balance to this module; forward
-            // the signed `amount` to the order, sweep the excess to the user.
+            // the signed `amount` to the order, sweep the excess to the user. Measure
+            // the actually-received asset rather than trusting the requested `bal`
+            // (Comet's withdrawFrom returns nothing).
             uint256 bal = IComet(comet).collateralBalanceOf(onBehalfOf, asset);
+            uint256 beforeBal = IERC20(asset).balanceOf(address(this));
             IComet(comet).withdrawFrom(onBehalfOf, address(this), asset, bal);
-            IERC20(asset).transfer(receiver, amount);
-            if (bal > amount) IERC20(asset).transfer(onBehalfOf, bal - amount);
+            uint256 received = IERC20(asset).balanceOf(address(this)) - beforeBal;
+            require(received >= amount, "insufficient withdrawn");
+            SafeTransferLib.safeTransfer(asset, receiver, amount);
+            if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
             IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
         }

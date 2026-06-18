@@ -63,10 +63,10 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
     function setUp() public virtual override {
         super.setUp();
 
-        depositModule = new AaveV4DepositModule(address(permit3));
+        depositModule = new AaveV4DepositModule(address(permit3), address(settlement));
         withdrawModule = new AaveV4WithdrawModule(address(permit3));
         borrowModule = new AaveV4BorrowModule(address(permit3));
-        repayModule = new AaveV4RepayModule(address(permit3));
+        repayModule = new AaveV4RepayModule(address(permit3), address(settlement));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
             address(permit3),
@@ -143,7 +143,7 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
         ITakerPositionManager(TAKER_PM).approveBorrow(MAIN_SPOKE, usdcReserveId, address(borrowModule), borrowOut);
 
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(borrowModule), borrowRef, uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), borrowRef, uint160(borrowOut), 0);
 
         // USDC fallback for _payTokenInToSolver — never triggers here.
         IERC20(USDC).approve(address(permit3), type(uint256).max);
@@ -161,7 +161,7 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
 
         // Withdraw PM grant + Permit3 taker gate on the exact position.
         ITakerPositionManager(TAKER_PM).approveWithdraw(MAIN_SPOKE, wethReserveId, address(withdrawModule), wethIn);
-        permit3.approveTaker(address(withdrawModule), ref, uint160(wethIn), 0);
+        permit3.approveTaker(address(settlement), ref, uint160(wethIn), 0);
         vm.stopPrank();
     }
 
