@@ -58,8 +58,8 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
             lltv: 860000000000000000
         });
 
-        supplyModule = new MorphoBlueSupplyCollateralModule(address(permit3), address(MORPHO));
-        repayModule = new MorphoBlueRepayModule(address(permit3), address(MORPHO));
+        supplyModule = new MorphoBlueSupplyCollateralModule(address(permit3), address(MORPHO), address(settlement));
+        repayModule = new MorphoBlueRepayModule(address(permit3), address(MORPHO), address(settlement));
         withdrawModule = new MorphoBlueWithdrawCollateralModule(address(permit3), address(MORPHO));
         borrowModule = new MorphoBlueBorrowModule(address(permit3), address(MORPHO));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
@@ -151,7 +151,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         MORPHO.setAuthorization(address(borrowModule), true);
 
         // Permit3 taker gate on the exact market + amount.
-        permit3.approveTaker(address(borrowModule), borrowRef, uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), borrowRef, uint160(borrowOut), 0);
 
         // USDC fallback allowance for the tokenIn shortfall path — never triggers
         // here since the borrow fully funds tokenIn, but keeps it safe.
@@ -169,7 +169,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         // Morpho-native authorisation for the withdraw module. No token pull: the
         // collateral is not tokenised, so the taker allowance is the only cap.
         MORPHO.setAuthorization(address(withdrawModule), true);
-        permit3.approveTaker(address(withdrawModule), ref, uint160(wstethIn), 0);
+        permit3.approveTaker(address(settlement), ref, uint160(wstethIn), 0);
         vm.stopPrank();
     }
 

@@ -8,6 +8,8 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+
 import {ICErc20} from "./interfaces/ICompoundV2.sol";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -46,23 +48,28 @@ import {ICErc20} from "./interfaces/ICompoundV2.sol";
 //
 contract CompoundV2DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
     error CompoundV2Error(uint256 code);
+    error NotSettlement();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
         (address cToken, address underlying) = abi.decode(data, (address, address));
 
         permit3.transferFrom(onBehalfOf, address(this), underlying, uint160(amount));
-        IERC20(underlying).approve(cToken, amount);
+        SafeTransferLib.forceApprove(underlying, cToken, amount);
         uint256 err = ICErc20(cToken).mint(amount);
         if (err != 0) revert CompoundV2Error(err);
 
         // cTokens were minted to this module — forward the receipt to the user.
-        IERC20(cToken).transfer(onBehalfOf, IERC20(cToken).balanceOf(address(this)));
+        SafeTransferLib.safeTransfer(cToken, onBehalfOf, IERC20(cToken).balanceOf(address(this)));
     }
 }
 
@@ -83,17 +90,21 @@ contract CompoundV2DepositModule is IMakerModule {
 //
 contract CompoundV2RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
     uint256 private _locked = 1;
 
     error Reentrancy();
     error CompoundV2Error(uint256 code);
+    error NotSettlement();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -122,7 +133,7 @@ contract CompoundV2RepayModule is IMakerModule {
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), underlying, uint160(toPull));
         }
         if (toRepay > 0) {
-            IERC20(underlying).approve(cToken, toRepay);
+            SafeTransferLib.forceApprove(underlying, cToken, toRepay);
             uint256 err = ICErc20(cToken).repayBorrowBehalf(onBehalfOf, toRepay);
             if (err != 0) revert CompoundV2Error(err);
         }
@@ -143,24 +154,24 @@ contract CompoundV2RepayModule is IMakerModule {
         if (residual == 0) return;
 
         if (action == DustHandler.DustAction.Recycle) {
-            IERC20(underlying).approve(cToken, residual);
+            SafeTransferLib.forceApprove(underlying, cToken, residual);
             (bool ok, bytes memory ret) = cToken.call(abi.encodeCall(ICErc20.mint, (residual)));
-            IERC20(underlying).approve(cToken, 0); // never leave a dangling allowance
+            SafeTransferLib.forceApprove(underlying, cToken, 0); // never leave a dangling allowance
 
             if (ok && (ret.length < 32 || abi.decode(ret, (uint256)) == 0)) {
                 // Forward the freshly-minted cToken receipt to the user, then sweep
                 // any underlying the mint didn't consume so the module ends empty.
                 uint256 cBal = IERC20(cToken).balanceOf(address(this));
-                if (cBal != 0) IERC20(cToken).transfer(onBehalfOf, cBal);
+                if (cBal != 0) SafeTransferLib.safeTransfer(cToken, onBehalfOf, cBal);
                 uint256 left = IERC20(underlying).balanceOf(address(this));
-                if (left != 0) IERC20(underlying).transfer(onBehalfOf, left);
+                if (left != 0) SafeTransferLib.safeTransfer(underlying, onBehalfOf, left);
                 return;
             }
             // Mint reverted / returned an error (paused, deprecated market) — the
             // underlying was not consumed; fall through to the sweep floor.
         }
 
-        IERC20(underlying).transfer(onBehalfOf, residual);
+        SafeTransferLib.safeTransfer(underlying, onBehalfOf, residual);
     }
 }
 
@@ -204,13 +215,18 @@ contract CompoundV2WithdrawModule is ITakerModule {
         if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
             // Pull the user's entire cToken balance and redeem it all to this module;
             // forward the signed `amount`, sweep the underlying excess to the user.
+            // Measure the underlying ACTUALLY received via a balanceOf snapshot around
+            // the redeem (fee-on-transfer / non-standard underlyings can deliver less
+            // than the nominal redeem), and require it covers the signed amount.
             uint256 cBal = IERC20(cToken).balanceOf(onBehalfOf);
             permit3.transferFrom(onBehalfOf, address(this), cToken, uint160(cBal));
+            uint256 balBefore = IERC20(underlying).balanceOf(address(this));
             uint256 err = ICErc20(cToken).redeem(cBal);
             if (err != 0) revert CompoundV2Error(err);
-            uint256 got = IERC20(underlying).balanceOf(address(this));
-            IERC20(underlying).transfer(receiver, amount);
-            if (got > amount) IERC20(underlying).transfer(onBehalfOf, got - amount);
+            uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+            require(received >= amount, "insufficient withdrawn");
+            SafeTransferLib.safeTransfer(underlying, receiver, amount);
+            if (received > amount) SafeTransferLib.safeTransfer(underlying, onBehalfOf, received - amount);
         } else {
             // Pull the ceiling cTokens needed for `amount` underlying (rate accrued
             // to now == the rate `redeemUnderlying` will use this block), redeem
@@ -220,9 +236,9 @@ contract CompoundV2WithdrawModule is ITakerModule {
             permit3.transferFrom(onBehalfOf, address(this), cToken, uint160(cAmount));
             uint256 err = ICErc20(cToken).redeemUnderlying(amount);
             if (err != 0) revert CompoundV2Error(err);
-            IERC20(underlying).transfer(receiver, amount);
+            SafeTransferLib.safeTransfer(underlying, receiver, amount);
             uint256 leftC = IERC20(cToken).balanceOf(address(this));
-            if (leftC != 0) IERC20(cToken).transfer(onBehalfOf, leftC);
+            if (leftC != 0) SafeTransferLib.safeTransfer(cToken, onBehalfOf, leftC);
         }
     }
 }

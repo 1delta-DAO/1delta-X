@@ -50,10 +50,10 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         COMET_USDS = lendingControllers[Chains.ETHEREUM_MAINNET][Lenders.COMPOUND_V3_USDS];
         USDS = IComet(COMET_USDS).baseToken();
 
-        depositModule = new CometDepositModule(address(permit3));
+        depositModule = new CometDepositModule(address(permit3), address(settlement));
         withdrawModule = new CometWithdrawModule(address(permit3));
         borrowModule = new CometBorrowModule(address(permit3));
-        repayModule = new CometRepayModule(address(permit3));
+        repayModule = new CometRepayModule(address(permit3), address(settlement));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
             address(permit3),
@@ -146,7 +146,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         // No receipt-token pull on Comet: `comet.allow(withdrawModule)` (set in
         // setUp) is the protocol-native gate; the Permit3 taker allowance caps
         // the fill on the exact position.
-        permit3.approveTaker(address(withdrawModule), ref, uint160(wethIn), 0);
+        permit3.approveTaker(address(settlement), ref, uint160(wethIn), 0);
         vm.stopPrank();
     }
 
@@ -161,7 +161,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
 
         // Comet account-manager flag for the borrow module is granted in setUp;
         // the Permit3 taker allowance is what caps this borrow.
-        permit3.approveTaker(address(borrowModule), borrowRef, uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), borrowRef, uint160(borrowOut), 0);
 
         // USDC fallback allowance for _payTokenInToSolver — never triggers here
         // since the borrow fully funds tokenIn, but keeps the shortfall path safe.
@@ -194,7 +194,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         permit3.approveToken(address(settlement), WETH, uint160(exactWeth), 0);
         permit3.approveToken(address(settlement), USDC, uint160(bufferedRepay), 0);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
-        permit3.approveTaker(address(withdrawModule), keccak256(withdrawData), uint160(exactWeth), 0);
+        permit3.approveTaker(address(settlement), keccak256(withdrawData), uint160(exactWeth), 0);
 
         // [2] USDS-Comet deposit leg: depositModule pulls WETH from maker.
         permit3.approveToken(address(depositModule), WETH, uint160(exactWeth), 0);
@@ -202,7 +202,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         // [3] USDS-Comet borrow leg: Comet account-manager flag + Permit3 cap.
         IComet(COMET_USDS).allow(address(borrowModule), true);
         bytes memory borrowData = abi.encode(COMET_USDS, USDS);
-        permit3.approveTaker(address(borrowModule), keccak256(borrowData), uint160(borrowUsds), 0);
+        permit3.approveTaker(address(settlement), keccak256(borrowData), uint160(borrowUsds), 0);
 
         vm.stopPrank();
     }

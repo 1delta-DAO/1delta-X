@@ -10,6 +10,13 @@ decay, and pro-rata lending-item execution. No module whitelist; no
 admin role. All authority flows through Permit3 allowances + the
 maker's EIP-712 signature.
 
+> **Settlement is the system's only trusted spender.** Makers approve it as
+> their Permit3 taker/token spender; TAKE legs go through `permit3.take`
+> (spender-keyed, so only Settlement can consume the allowance and it enforces
+> the signed `recipient`), and MAKE legs call modules that require
+> `msg.sender == settlement`. Settlement pays the solver only from the proceeds
+> produced by the current fill. See [`/SECURITY.md`](../../../../SECURITY.md).
+
 ### Dutch auctions — how they work
 
 The auction applies **only to the conversion** (`tokenIn ↔ tokenOut`),
@@ -203,11 +210,17 @@ struct Validator {
 
 **Reference validators** in [`src/validators/`](../validators/):
 
-| Contract | Passes when |
-|---|---|
-| `ChainlinkPriceGte` | feed.latestAnswer ≥ threshold |
-| `ChainlinkPriceLte` | feed.latestAnswer ≤ threshold |
-| `PredicateStaticCall` | arbitrary staticcall returns non-zero uint256 |
+| Contract | Passes when | `data` |
+|---|---|---|
+| `ChainlinkPriceGte` | fresh feed price ≥ threshold | `abi.encode(feed, threshold, maxStaleness)` |
+| `ChainlinkPriceLte` | fresh feed price ≤ threshold | `abi.encode(feed, threshold, maxStaleness)` |
+| `PredicateStaticCall` | arbitrary staticcall returns non-zero uint256 | `abi.encode(target, callData)` |
+
+The Chainlink validators read the full round and **reject stale or invalid
+data**: `price > 0`, `answeredInRound >= roundId`, and
+`block.timestamp - updatedAt <= maxStaleness` (the heartbeat is signed into the
+order, so each feed binds its own freshness bound). A stalled or zero feed
+reverts the fill rather than executing a stop-loss/take-profit at a wrong price.
 
 **Example — stop-loss on an Aave position:**
 
@@ -216,7 +229,7 @@ struct Validator {
 
 validators[0] = Validator({
     target: address(chainlinkPriceLte),
-    data:   abi.encode(ETH_USD_FEED, int256(1500 * 1e8))
+    data:   abi.encode(ETH_USD_FEED, int256(1500 * 1e8), uint256(3600)) // feed, threshold, maxStaleness (s)
 });
 
 tokenIn  = WETH   amountIn = 1 ether

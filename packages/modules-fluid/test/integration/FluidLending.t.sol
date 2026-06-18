@@ -30,7 +30,9 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         bytes memory data = abi.encode(VAULT, USDC, nftId);
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
 
-        // makeOnBehalf is permissionless; the Permit3 token allowance is the gate.
+        // makeOnBehalf is gated to the settlement contract; the Permit3 token
+        // allowance is the value gate.
+        vm.prank(address(settlement));
         repayModule.makeOnBehalf(maker, repayAmount, data);
 
         assertEq(makerUsdcBefore - IERC20(USDC).balanceOf(maker), repayAmount, "maker spent the repay amount");
@@ -45,12 +47,13 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         bytes memory data = abi.encode(VAULT, VAULT_FACTORY, nftId);
 
         vm.prank(maker);
-        permit3.approveTaker(address(borrowModule), keccak256(data), uint160(borrowAmount), 0);
+        permit3.approveTaker(address(settlement), keccak256(data), uint160(borrowAmount), 0);
 
         uint256 recvBefore = IERC20(USDC).balanceOf(recv);
 
-        // Any caller may invoke take(); the maker's taker allowance is the gate.
-        vm.prank(solver);
+        // The taker book is keyed by spender (settlement); the maker's taker
+        // allowance on (settlement, ref) is the gate.
+        vm.prank(address(settlement));
         permit3.take(address(borrowModule), maker, uint160(borrowAmount), recv, data);
 
         assertEq(IERC20(USDC).balanceOf(recv) - recvBefore, borrowAmount, "receiver got the borrow");
@@ -65,11 +68,11 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         bytes memory data = abi.encode(VAULT, VAULT_FACTORY, nftId);
 
         vm.prank(maker);
-        permit3.approveTaker(address(withdrawModule), keccak256(data), uint160(withdrawAmount), 0);
+        permit3.approveTaker(address(settlement), keccak256(data), uint160(withdrawAmount), 0);
 
         uint256 recvEthBefore = recv.balance;
 
-        vm.prank(solver);
+        vm.prank(address(settlement));
         permit3.take(address(withdrawModule), maker, uint160(withdrawAmount), recv, data);
 
         assertEq(recv.balance - recvEthBefore, withdrawAmount, "receiver got withdrawn ETH");
@@ -97,14 +100,14 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
 
         vm.startPrank(maker);
         permit3.approveToken(address(operateModule), USDC, uint160(ceiling), 0);
-        permit3.approveTaker(address(operateModule), keccak256(data), uint160(withdrawCol), 0);
+        permit3.approveTaker(address(settlement), keccak256(data), uint160(withdrawCol), 0);
         vm.stopPrank();
 
         uint256 recvEthBefore = recv.balance;
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
 
         // `amount` is the collateral-withdraw leg (value-out); the debt leg repays all.
-        vm.prank(solver);
+        vm.prank(address(settlement));
         permit3.take(address(operateModule), maker, uint160(withdrawCol), recv, data);
 
         assertEq(recv.balance - recvEthBefore, withdrawCol, "receiver got withdrawn collateral");

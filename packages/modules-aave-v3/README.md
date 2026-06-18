@@ -49,11 +49,15 @@ the maker beforehand — Settlement and the solver can never widen them:
 | Gate | Who enforces | What it caps |
 |---|---|---|
 | Permit3 **token** allowance (`approveToken(module, token, cap)`) | Permit3 | how much of *this token* the module may pull from the maker |
-| Permit3 **taker** allowance (`approveTaker(module, ref, cap)`) | Permit3, TAKE only | how much the module may draw on *this exact position* (`ref = keccak256(data)`) |
+| Permit3 **taker** allowance (`approveTaker(settlement, ref, cap)`) | Permit3, TAKE only | how much may be drawn on *this exact position* (`ref = keccak256(data)`). Keyed by **spender = Settlement**, so only Settlement can consume it. |
 | Aave **credit delegation** (`approveDelegation(module, cap)`) | Aave | borrow only — Aave's own permission for the module to incur debt |
 
 For a borrow leg all three apply: credit delegation lets Aave mint debt to the
 module, while the Permit3 taker allowance is what actually caps the fill size.
+
+> **Security:** the taker book is keyed by spender (Settlement), so a standing
+> taker allowance cannot be drained by an arbitrary caller; MAKE modules
+> additionally enforce `msg.sender == settlement`. See [`/SECURITY.md`](../../SECURITY.md).
 
 ## Modules (`src/`)
 

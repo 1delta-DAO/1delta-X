@@ -48,7 +48,7 @@ The Permit3 gating is identical to v3 — only the **protocol-native** gate diff
 | Gate | Who enforces | What it caps |
 |---|---|---|
 | Permit3 **token** allowance (`approveToken(module, token, cap)`) | Permit3 | how much of the funding token a MAKE module may pull from the maker |
-| Permit3 **taker** allowance (`approveTaker(module, ref, cap)`) | Permit3, TAKE only | how much a TAKE module may draw on `ref = keccak256(data)` |
+| Permit3 **taker** allowance (`approveTaker(settlement, ref, cap)`) | Permit3, TAKE only | how much may be drawn on `ref = keccak256(data)`; keyed by **spender = Settlement** (only Settlement can consume it). See [`/SECURITY.md`](../../SECURITY.md). |
 | v4 **position-manager** approval (`spoke.setUserPositionManager(pm, true)`) | the spoke | lets the PM act for the maker at all (MAKE + TAKE) |
 | v4 **taker grant** (`TakerPM.approveBorrow` / `approveWithdraw(spoke, reserveId, module, cap)`) | the taker PM | TAKE only — the v4-native analogue of v3's aToken pull / `approveDelegation` |
 

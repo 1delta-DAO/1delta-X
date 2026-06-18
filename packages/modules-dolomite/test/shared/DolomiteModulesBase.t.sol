@@ -94,8 +94,8 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
         COLL = WETH;
         DEBT = USDC;
 
-        depositModule = new DolomiteDepositModule(address(permit3));
-        repayModule = new DolomiteRepayModule(address(permit3));
+        depositModule = new DolomiteDepositModule(address(permit3), address(settlement));
+        repayModule = new DolomiteRepayModule(address(permit3), address(settlement));
         withdrawModule = new DolomiteWithdrawModule(address(permit3));
         borrowModule = new DolomiteBorrowModule(address(permit3));
         operateModule = new DolomiteOperateModule(address(permit3));
@@ -227,7 +227,7 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(COLL).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(depositModule), COLL, uint160(collateralIn), 0);
-        permit3.approveTaker(address(borrowModule), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), keccak256(_borrowData()), uint160(borrowOut), 0);
         IERC20(DEBT).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), DEBT, uint160(borrowOut), 0);
         vm.stopPrank();

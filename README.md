@@ -78,11 +78,24 @@ The Settlement never touches flash loans — it only validates the signed lendin
 
 ## Safety model
 
-- **Only signed ops execute** — the maker's EIP-712 signature commits to exact lending items, modules, assets, amounts, and protocol-specific `data` params
+> Authoritative security documentation lives in [`SECURITY.md`](SECURITY.md);
+> the per-package READMEs ([`permit3`](packages/core/src/permit3/README.md),
+> [`settlement`](packages/core/src/settlement/README.md)) document the current
+> Permit3-based design. (The architecture sketch above predates the Permit3
+> rewrite and is being updated.)
+
+- **No admin, no module whitelist** — authority comes solely from the maker's
+  EIP-712 signature plus their Permit3 allowances. (The earlier owner-approved
+  module whitelist has been removed.)
+- **Permit3 allowances are spender-keyed** — both the token and taker books are
+  keyed by the approved spender (the Settlement contract), so a standing
+  allowance can only be consumed by Settlement, which enforces the maker-signed
+  `recipient`. TAKE modules require `msg.sender == permit3`; MAKE modules require
+  `msg.sender == settlement`.
+- **Only signed ops execute** — the signature commits to exact items, modules, assets, amounts, and protocol-specific `data` params
 - **Bitmap nonces** — 256 nonces per storage slot, replay-proof. `cancelOrders()` for individual cancellation, `invalidateNonceWord()` for bulk emergency cancel
-- **Module whitelist** — only owner-approved lending modules can be called
 - **Dutch auction guarantee** — conversion rates are validated against the signed auction parameters
-- **No drainage risk** — solvers can only execute what the maker signed, with the exact protocol params
+- **Safe token movement** — all ERC20 transfers/approvals go through `SafeTransferLib`; oracle validators enforce price freshness
 
 ## Generic `bytes data` for lending modules
 

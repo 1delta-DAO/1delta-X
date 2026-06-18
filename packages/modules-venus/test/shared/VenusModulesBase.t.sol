@@ -41,8 +41,8 @@ abstract contract VenusModulesBase is CoreSettlementBase {
     function setUp() public virtual override {
         super.setUp();
 
-        depositModule = new VenusDepositModule(address(permit3));
-        repayModule = new VenusRepayModule(address(permit3));
+        depositModule = new VenusDepositModule(address(permit3), address(settlement));
+        repayModule = new VenusRepayModule(address(permit3), address(settlement));
         borrowModule = new VenusBorrowModule(address(permit3));
         withdrawModule = new VenusWithdrawModule(address(permit3));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
@@ -144,7 +144,7 @@ abstract contract VenusModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(depositModule), WETH, uint160(collateralIn), 0);
-        permit3.approveTaker(address(borrowModule), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), keccak256(_borrowData()), uint160(borrowOut), 0);
         // USDC fallback for the tokenIn shortfall path (never triggers here).
         IERC20(USDC).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), USDC, uint160(borrowOut), 0);

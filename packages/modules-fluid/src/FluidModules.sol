@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
@@ -69,7 +70,7 @@ abstract contract FluidBase {
     ///      `transferFrom(module → Liquidity)`, so the vault is the ERC20 spender.
     function _pullAndApprove(address token, uint256 amount, address user, address vault) internal {
         permit3.transferFrom(user, address(this), token, uint160(amount));
-        IERC20(token).approve(vault, amount);
+        SafeTransferLib.forceApprove(token, vault, amount);
     }
 
     /// @dev `uint256 → int256` guarding the high bit (always true for real amounts).
@@ -96,9 +97,17 @@ abstract contract FluidBase {
 // `data = abi.encode(address vault, address collateralToken, uint256 nftId)`.
 //
 contract FluidDepositModule is IMakerModule, FluidBase {
-    constructor(address _permit3) FluidBase(_permit3) {}
+    error NotSettlement();
+
+    address public immutable settlement;
+
+    constructor(address _permit3, address _settlement) FluidBase(_permit3) {
+        settlement = _settlement;
+    }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
         (address vault, address collateralToken, uint256 nftId) = abi.decode(data, (address, address, uint256));
 
         _pullAndApprove(collateralToken, amount, onBehalfOf, vault);
@@ -122,10 +131,16 @@ contract FluidRepayModule is IMakerModule, FluidBase {
     uint256 private _locked = 1;
 
     error Reentrancy();
+    error NotSettlement();
 
-    constructor(address _permit3) FluidBase(_permit3) {}
+    address public immutable settlement;
+
+    constructor(address _permit3, address _settlement) FluidBase(_permit3) {
+        settlement = _settlement;
+    }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -284,6 +299,6 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         // Sweep any over-pulled repay buffer back to the user (always the user,
         // never a caller-chosen address).
         uint256 left = IERC20(p.fundingToken).balanceOf(address(this));
-        if (left > 0) IERC20(p.fundingToken).transfer(user, left);
+        if (left > 0) SafeTransferLib.safeTransfer(p.fundingToken, user, left);
     }
 }

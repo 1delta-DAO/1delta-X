@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {
     IDolomiteMargin,
@@ -103,14 +104,22 @@ abstract contract DolomiteBase {
 // operator of the user. `data = abi.encode(dolomite, marketId, token, accountNumber)`.
 //
 contract DolomiteDepositModule is DolomiteBase, IMakerModule {
-    constructor(address _permit3) DolomiteBase(_permit3) {}
+    error NotSettlement();
+
+    address public immutable settlement;
+
+    constructor(address _permit3, address _settlement) DolomiteBase(_permit3) {
+        settlement = _settlement;
+    }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
         (address dolomite, uint256 marketId, address token, uint256 accountNumber) =
             abi.decode(data, (address, uint256, address, uint256));
 
         permit3.transferFrom(onBehalfOf, address(this), token, uint160(amount));
-        IERC20(token).approve(dolomite, amount);
+        SafeTransferLib.forceApprove(token, dolomite, amount);
         _operate(dolomite, onBehalfOf, accountNumber, _depositAction(marketId, amount, address(this)));
     }
 }
@@ -132,10 +141,16 @@ contract DolomiteRepayModule is DolomiteBase, IMakerModule {
     uint256 private _locked = 1;
 
     error Reentrancy();
+    error NotSettlement();
 
-    constructor(address _permit3) DolomiteBase(_permit3) {}
+    address public immutable settlement;
+
+    constructor(address _permit3, address _settlement) DolomiteBase(_permit3) {
+        settlement = _settlement;
+    }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -165,7 +180,7 @@ contract DolomiteRepayModule is DolomiteBase, IMakerModule {
         if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), token, uint160(toPull));
 
         if (toRepay > 0) {
-            IERC20(token).approve(dolomite, toRepay);
+            SafeTransferLib.forceApprove(token, dolomite, toRepay);
             _operate(dolomite, onBehalfOf, accountNumber, _depositAction(marketId, toRepay, address(this)));
         }
     }
@@ -251,9 +266,16 @@ contract DolomiteWithdrawModule is DolomiteTakeBase {
         if (DustHandler.readBalanceMode(data, 128) == DustHandler.BalanceMode.Full) {
             WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(onBehalfOf, accountNumber), marketId);
             uint256 bal = w.sign ? w.value : 0;
+
+            // Measure the token actually received from the withdraw (fee-on-transfer
+            // / rebasing safe) and never forward more than that.
+            uint256 snapshot = IERC20(token).balanceOf(address(this));
             _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, bal, address(this)));
-            IERC20(token).transfer(receiver, amount);
-            if (bal > amount) IERC20(token).transfer(onBehalfOf, bal - amount);
+            uint256 received = IERC20(token).balanceOf(address(this)) - snapshot;
+
+            require(received >= amount, "insufficient withdrawn");
+            SafeTransferLib.safeTransfer(token, receiver, amount);
+            if (received > amount) SafeTransferLib.safeTransfer(token, onBehalfOf, received - amount);
         } else {
             _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, amount, receiver));
         }
@@ -322,7 +344,7 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
         if (BatchMode(uint8(p.mode)) == BatchMode.Open) {
             // Pull collateral to fund the deposit leg, then deposit + borrow.
             permit3.transferFrom(onBehalfOf, address(this), p.collToken, uint160(p.sideAmount));
-            IERC20(p.collToken).approve(p.dolomite, p.sideAmount);
+            SafeTransferLib.forceApprove(p.collToken, p.dolomite, p.sideAmount);
             actions[0] = _depositAction(p.collMarketId, p.sideAmount, address(this));
             actions[1] = _withdrawAction(p.borrowMarketId, amount, receiver);
         } else {
@@ -331,7 +353,7 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
             uint256 toRepay = p.sideAmount < debt ? p.sideAmount : debt;
             if (toRepay > 0) {
                 permit3.transferFrom(onBehalfOf, address(this), p.borrowToken, uint160(toRepay));
-                IERC20(p.borrowToken).approve(p.dolomite, toRepay);
+                SafeTransferLib.forceApprove(p.borrowToken, p.dolomite, toRepay);
             }
             actions[0] = _depositAction(p.borrowMarketId, toRepay, address(this));
             actions[1] = _withdrawAction(p.collMarketId, amount, receiver);

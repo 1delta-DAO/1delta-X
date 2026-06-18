@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {IGiverPositionManager, ITakerPositionManager, ISpokeV4} from "./interfaces/IAaveV4.sol";
 
@@ -29,17 +30,23 @@ import {IGiverPositionManager, ITakerPositionManager, ISpokeV4} from "./interfac
 //
 contract AaveV4DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
-    constructor(address _permit3) {
+    error NotSettlement();
+
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
         (address spoke, address positionManager, uint256 reserveId, address asset) =
             abi.decode(data, (address, address, uint256, address));
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
-        IERC20(asset).approve(positionManager, amount);
+        SafeTransferLib.forceApprove(asset, positionManager, amount);
         IGiverPositionManager(positionManager).supplyOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
     }
 }
@@ -67,16 +74,20 @@ contract AaveV4DepositModule is IMakerModule {
 //
 contract AaveV4RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
+    address public immutable settlement;
 
     uint256 private _locked = 1;
 
     error Reentrancy();
+    error NotSettlement();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -118,7 +129,7 @@ contract AaveV4RepayModule is IMakerModule {
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
         }
         if (toRepay > 0) {
-            IERC20(asset).approve(positionManager, toRepay);
+            SafeTransferLib.forceApprove(asset, positionManager, toRepay);
             IGiverPositionManager(positionManager).repayOnBehalfOf(spoke, reserveId, toRepay, onBehalfOf);
         }
     }
@@ -179,15 +190,19 @@ contract AaveV4WithdrawModule is ITakerModule {
         if (DustHandler.readBalanceMode(data, 128) == DustHandler.BalanceMode.Full) {
             // Withdraw the user's entire supplied balance to this module; forward
             // the signed `amount` to the order, sweep the accrued excess to user.
+            // Measure the actually-received underlying via a balanceOf snapshot
+            // rather than trusting the PM's reported amount.
             uint256 supplied = ISpokeV4(spoke).getUserSuppliedAssets(reserveId, onBehalfOf);
-            (, uint256 withdrawn) =
-                ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, supplied, onBehalfOf);
-            IERC20(asset).transfer(receiver, amount);
-            if (withdrawn > amount) IERC20(asset).transfer(onBehalfOf, withdrawn - amount);
+            uint256 balBefore = IERC20(asset).balanceOf(address(this));
+            ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, supplied, onBehalfOf);
+            uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+            require(received >= amount, "insufficient withdrawn");
+            SafeTransferLib.safeTransfer(asset, receiver, amount);
+            if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
             (, uint256 assets) =
                 ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
-            IERC20(asset).transfer(receiver, assets);
+            SafeTransferLib.safeTransfer(asset, receiver, assets);
         }
     }
 }
@@ -218,6 +233,6 @@ contract AaveV4BorrowModule is ITakerModule {
         // Borrow lands `amount` of `asset` at this module (the caller).
         ITakerPositionManager(positionManager).borrowOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
         // Forward to Permit3's requested receiver (Settlement in our flow).
-        IERC20(asset).transfer(receiver, amount);
+        SafeTransferLib.safeTransfer(asset, receiver, amount);
     }
 }

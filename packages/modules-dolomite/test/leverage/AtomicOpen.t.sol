@@ -39,7 +39,7 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
         vm.startPrank(maker);
         IERC20(COLL).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(operateModule), COLL, uint160(COLLATERAL_IN), 0);
-        permit3.approveTaker(address(operateModule), keccak256(data), uint160(BORROW_OUT), 0);
+        permit3.approveTaker(address(settlement), keccak256(data), uint160(BORROW_OUT), 0);
         IERC20(DEBT).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), DEBT, uint160(BORROW_OUT), 0);
         vm.stopPrank();

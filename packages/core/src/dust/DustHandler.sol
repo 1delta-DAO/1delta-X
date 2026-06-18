@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
 /// @title DustHandler
 /// @notice Shared residual-disposal logic for maker modules (repay, etc.).
@@ -92,21 +93,21 @@ library DustHandler {
         if (residual == 0) return;
 
         if (action == DustAction.Recycle && recycleTarget.code.length != 0) {
-            IERC20(token).approve(recycleTarget, residual);
+            SafeTransferLib.forceApprove(token, recycleTarget, residual);
             (bool ok,) = recycleTarget.call(recycleCall);
-            IERC20(token).approve(recycleTarget, 0); // never leave a dangling allowance
+            SafeTransferLib.forceApprove(token, recycleTarget, 0); // never leave a dangling allowance
 
             if (ok) {
                 // Recycle may consume all or part of the residual; sweep whatever
                 // remains so the module always ends empty.
                 uint256 left = IERC20(token).balanceOf(address(this));
-                if (left != 0) IERC20(token).transfer(onBehalfOf, left);
+                if (left != 0) SafeTransferLib.safeTransfer(token, onBehalfOf, left);
                 return;
             }
             // Recycle reverted (cap / frozen / paused / non-depositable / pause) —
             // fall through to the sweep floor.
         }
 
-        IERC20(token).transfer(onBehalfOf, residual);
+        SafeTransferLib.safeTransfer(token, onBehalfOf, residual);
     }
 }

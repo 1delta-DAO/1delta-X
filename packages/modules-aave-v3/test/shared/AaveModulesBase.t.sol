@@ -42,10 +42,10 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         aWETH = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][WETH].collateral;
         usdcDebtToken = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][USDC].debt;
 
-        depositModule = new AaveV3DepositModule(address(permit3));
+        depositModule = new AaveV3DepositModule(address(permit3), address(settlement));
         withdrawModule = new AaveV3WithdrawModule(address(permit3));
         borrowModule = new AaveV3BorrowModule(address(permit3));
-        repayModule = new AaveV3RepayModule(address(permit3));
+        repayModule = new AaveV3RepayModule(address(permit3), address(settlement));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
             address(permit3),
@@ -124,7 +124,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         IERC20(aWETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(withdrawModule), aWETH, uint160(wethIn), 0);
         // Taker-allowance gate on the exact position.
-        permit3.approveTaker(address(withdrawModule), ref, uint160(wethIn), 0);
+        permit3.approveTaker(address(settlement), ref, uint160(wethIn), 0);
         vm.stopPrank();
     }
 
@@ -143,7 +143,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(borrowModule), type(uint256).max);
 
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(borrowModule), borrowRef, uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), borrowRef, uint160(borrowOut), 0);
 
         // USDC fallback allowance for _payTokenInToSolver — never triggers here
         // since the borrow fully funds tokenIn, but keeps the shortfall path safe.
@@ -182,7 +182,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         IERC20(aWETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(withdrawModule), aWETH, uint160(exactWeth), 0);
         bytes memory aaveWithdrawData = abi.encode(AAVE_POOL, WETH, aWETH);
-        permit3.approveTaker(address(withdrawModule), keccak256(aaveWithdrawData), uint160(exactWeth), 0);
+        permit3.approveTaker(address(settlement), keccak256(aaveWithdrawData), uint160(exactWeth), 0);
 
         // [2] Spark deposit leg: depositModule pulls WETH from maker via Permit3.
         IERC20(WETH).approve(address(permit3), type(uint256).max);
@@ -191,7 +191,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         // [3] Spark borrow leg: protocol-native credit delegation + Permit3 taker cap.
         IAaveCreditDelegation(sparkUsdcDebt).approveDelegation(address(borrowModule), type(uint256).max);
         bytes memory sparkBorrowData = abi.encode(SPARK_POOL, USDC, uint256(2));
-        permit3.approveTaker(address(borrowModule), keccak256(sparkBorrowData), uint160(debt), 0);
+        permit3.approveTaker(address(settlement), keccak256(sparkBorrowData), uint160(debt), 0);
 
         vm.stopPrank();
     }

@@ -39,8 +39,8 @@ abstract contract CompoundV2ModulesBase is CoreSettlementBase {
     function setUp() public virtual override {
         super.setUp();
 
-        depositModule = new CompoundV2DepositModule(address(permit3));
-        repayModule = new CompoundV2RepayModule(address(permit3));
+        depositModule = new CompoundV2DepositModule(address(permit3), address(settlement));
+        repayModule = new CompoundV2RepayModule(address(permit3), address(settlement));
         withdrawModule = new CompoundV2WithdrawModule(address(permit3));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(

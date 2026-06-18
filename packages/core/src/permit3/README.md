@@ -36,13 +36,13 @@ thereafter — the same ergonomic as Permit2, extended to debt/withdrawal/etc.
        transferFrom  │    (user, spender, tok)  │
     ────────────────▶│                          │
                      │  takerAllowance          │
-       approveTaker  │    (user, module, ref)   │
+       approveTaker  │    (user, spender, ref)  │
            take      │                          │
     ────────────────▶│  take(...) ──────┐       │
                      └──────────────────┼───────┘
                                         │
                                         │  1. ref = keccak256(data)
-                                        │  2. _spend allowance on ref
+                                        │  2. _spend (user, msg.sender, ref)
                                         │  3. takeOnBehalf(...)
                                         ▼
                      ┌──────────────────────────┐
@@ -59,14 +59,24 @@ thereafter — the same ergonomic as Permit2, extended to debt/withdrawal/etc.
 ### Two allowance books
 
 - **Token book** — keyed `(user, spender, token)`. Permit2-equivalent.
-  Spender calls `permit3.transferFrom(user, to, token, amount)`.
+  Spender calls `permit3.transferFrom(user, to, token, amount)`; the
+  allowance gates on `msg.sender == spender`.
 
-- **Taker book** — keyed `(user, module, bytes32 ref)` where
-  `ref = keccak256(data)`. Any caller invokes
+- **Taker book** — keyed `(user, spender, bytes32 ref)` where
+  `ref = keccak256(data)`. The **spender** is the address allowed to call
+  `take` (the Settlement contract), exactly mirroring the token book. An
+  approved spender invokes
   `permit3.take(module, user, amount, receiver, data)`; Permit3
-  decrements the allowance on that ref and calls
+  decrements the `(user, msg.sender, ref)` allowance and calls
   `module.takeOnBehalf(...)`. Asset identity lives inside `data` (or
   is implicit to the position for protocols like Morpho/Comet).
+
+  Because the book is spender-keyed, a standing taker allowance can only
+  ever be consumed by the spender the maker approved — a third party
+  calling `take` with the same `data` has no allowance under its own
+  address and reverts. The dispatched `module` is bound by the maker's
+  signed order (Settlement only ever calls the order's own `item.module`),
+  so it does not need to enter `ref`.
 
   The bytes that produce the ref are the *exact* bytes the module
   decodes — so whatever the user authorised is byte-for-byte what
@@ -109,21 +119,27 @@ interface do not change.
 
 ### Maker (per-order, amount-gated)
 
+The taker allowance is granted to the **spender** that will call `take` — the
+Settlement contract — not to the module:
+
 ```solidity
 bytes32 ref = keccak256(data);     // same bytes the solver will pass to `take`
-permit3.approveTaker(borrowModule, ref, 1_000e6, uint48(block.timestamp + 1 hours));
+permit3.approveTaker(settlement, ref, 1_000e6, uint48(block.timestamp + 1 hours));
 ```
 
-Sign the order and hand it to a solver (or self-solve).
+Sign the order and hand it to a solver (or self-solve). (In the single-signature
+flow, the maker instead signs a `TakerPermit{spender: settlement, ref, ...}`
+inside a witness-bound permit batch — see `fillWithPermit`.)
 
 ### Settlement / solver (per fill)
 
 ```solidity
-permit3.take(borrowModule, maker, 1_000e6, settlement, data);
+// msg.sender == settlement (the approved spender)
+permit3.take(borrowModule, maker, 1_000e6, receiver, data);
 // internally:
 //   ref = keccak256(data)
-//   _spend(takerAllowance[maker][borrowModule][ref], 1_000e6)
-//   borrowModule.takeOnBehalf(maker, 1_000e6, settlement, data)
+//   _spend(takerAllowance[maker][msg.sender /* settlement */][ref], 1_000e6)
+//   borrowModule.takeOnBehalf(maker, 1_000e6, receiver, data)
 ```
 
 Inside `takeOnBehalf` the module is free to call
@@ -231,15 +247,23 @@ Two practical tips:
 
 Revocation:
 - `revokeToken(spender, token)` — zero a token allowance.
-- `revokeTaker(module, ref)` — zero a taker allowance.
+- `revokeTaker(spender, ref)` — zero a taker allowance.
 - `lockdown(TokenSpenderPair[])` — atomically zero a batch of token
   allowances on-chain (ported from Permit2's `lockdown`).
-- `lockdownTakers(ModuleRefPair[])` — taker-book analogue (Permit3 extension).
+- `lockdownTakers(SpenderRefPair[])` — taker-book analogue (Permit3 extension).
 - `invalidateUnorderedNonces(wordPos, mask)` — cancel signed permits before
   they are consumed (ported from Permit2's `invalidateUnorderedNonces`).
 
 ## Security properties
 
+- **Taker authority is spender-keyed** (`_takerAllowance[user][msg.sender][ref]`),
+  exactly like the token book. Only the spender the maker approved (Settlement)
+  can consume a taker allowance and choose the proceeds `receiver` — a third
+  party calling `take` directly has no allowance under its own address and
+  reverts. Settlement, in turn, enforces the maker-signed `recipient`. This is
+  the load-bearing taker-side gate; the module's `msg.sender == permit3` check is
+  necessary but not sufficient on its own (it funnels all calls through `take`).
+  *(See finding C-1 in [`/SECURITY.md`](../../../../SECURITY.md).)*
 - **Consume-then-call invariant is enforced by Permit3**, not by the
   module. A buggy module cannot silently bypass the allowance gate.
 - **`nonReentrant` guards `take()`** — a module cannot re-enter Permit3
