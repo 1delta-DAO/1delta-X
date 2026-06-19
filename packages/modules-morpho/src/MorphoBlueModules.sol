@@ -9,6 +9,8 @@ import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
+import {PermitHelper} from "@core/utils/PermitHelper.sol";
+
 import {
     IMorphoBlue,
     IMorphoRepayCallback,
@@ -23,7 +25,10 @@ import {
 // Single-op module: pulls `collateralToken` from the user via Permit3, then
 // supplies it as collateral into the market on the user's behalf. Morpho's
 // `supplyCollateral` has no shares variant and never accrues interest, so the
-// pulled amount maps 1:1 to deposited collateral. `data = abi.encode(MarketParams)`.
+// pulled amount maps 1:1 to deposited collateral.
+//
+// Optional EIP-2612 permit replay for gasless collateral deposits.
+// `data = abi.encode(MarketParams[, deadline, v, r, s])` — base = 160 bytes.
 //
 contract MorphoBlueSupplyCollateralModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -42,6 +47,11 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
         if (msg.sender != settlement) revert NotSettlement();
 
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
+
+        // Optional permit. MarketParams = 5 addresses = 160 bytes.
+        PermitHelper.replayIfPresent(
+            data, 160, marketParams.collateralToken, onBehalfOf, address(permit3), amount
+        );
 
         permit3.transferFrom(onBehalfOf, address(this), marketParams.collateralToken, uint160(amount));
         SafeTransferLib.forceApprove(marketParams.collateralToken, address(morpho), amount);
@@ -75,8 +85,8 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
 // caller-chosen address.
 //
 // `nonReentrant` guards against weird-token transfer hooks.
-// `data = abi.encode(MarketParams[, DustHandler.DustAction])` — the trailing dust
-// action is optional; absent ⇒ SweepToUser.
+// `data = abi.encode(MarketParams[, DustHandler.DustAction[, deadline, v, r, s]])` —
+// dust action optional (absent ⇒ SweepToUser); permit block optional after it.
 //
 contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
     using MarketParamsLib for MarketParams;
@@ -105,7 +115,9 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
         address loanToken = marketParams.loanToken;
-        DustHandler.DustAction action = DustHandler.readAction(data, 160); // base = MarketParams (5 static fields)
+        // base = MarketParams (5 addresses) = 160 bytes; DustAction at 160, permit at 192.
+        DustHandler.DustAction action = DustHandler.readAction(data, 160);
+        PermitHelper.replayIfPresent(data, 192, loanToken, onBehalfOf, address(permit3), amount);
 
         // Repay the entire debt by shares. The exact asset amount is only known
         // after Morpho accrues interest.

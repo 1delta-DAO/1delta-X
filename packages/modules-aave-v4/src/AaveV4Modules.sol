@@ -9,6 +9,8 @@ import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
+import {PermitHelper} from "@core/utils/PermitHelper.sol";
+
 import {IGiverPositionManager, ITakerPositionManager, ISpokeV4} from "./interfaces/IAaveV4.sol";
 
 // These are the Aave v4 counterparts of the v3 adapters in the sibling package
@@ -28,6 +30,10 @@ import {IGiverPositionManager, ITakerPositionManager, ISpokeV4} from "./interfac
 // the user's behalf through the GiverPositionManager. The user must have
 // approved the giver PM on the spoke beforehand (`spoke.setUserPositionManager`).
 //
+// Optional EIP-2612 permit replay: if the caller appends permit fields to `data`,
+// the module replays them before `permit3.transferFrom` (gasless deposits).
+//
+// `data = abi.encode(spoke, positionManager, reserveId, asset[, deadline, v, r, s])`
 contract AaveV4DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -44,6 +50,9 @@ contract AaveV4DepositModule is IMakerModule {
 
         (address spoke, address positionManager, uint256 reserveId, address asset) =
             abi.decode(data, (address, address, uint256, address));
+
+        // Optional permit. base = (address,address,uint256,address) = 128 bytes.
+        PermitHelper.replayIfPresent(data, 128, asset, onBehalfOf, address(permit3), amount);
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, positionManager, amount);
@@ -69,8 +78,9 @@ contract AaveV4DepositModule is IMakerModule {
 // the PM, never a caller-chosen address.
 //
 // `nonReentrant` guards against weird-token transfer hooks.
-// `data = abi.encode(spoke, positionManager, reserveId, asset[, DustHandler.DustAction])`
-// — the trailing dust action is optional; absent ⇒ SweepToUser.
+// `data = abi.encode(spoke, positionManager, reserveId, asset[, DustHandler.DustAction[, deadline, v, r, s]])`
+// — the trailing dust action is optional (absent ⇒ SweepToUser);
+//   the permit block (128 bytes) is optional after the dust action slot.
 //
 contract AaveV4RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -93,7 +103,9 @@ contract AaveV4RepayModule is IMakerModule {
 
         (address spoke, address positionManager, uint256 reserveId, address asset) =
             abi.decode(data, (address, address, uint256, address));
-        DustHandler.DustAction action = DustHandler.readAction(data, 128); // base = (address,address,uint256,address)
+        // base = (address,address,uint256,address) = 128 bytes; DustAction at 128, permit at 160.
+        DustHandler.DustAction action = DustHandler.readAction(data, 128);
+        PermitHelper.replayIfPresent(data, 160, asset, onBehalfOf, address(permit3), amount);
 
         _pullAndRepay(spoke, positionManager, reserveId, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
 

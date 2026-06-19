@@ -9,6 +9,8 @@ import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
+import {PermitHelper} from "@core/utils/PermitHelper.sol";
+
 import {IComet} from "./interfaces/ICompoundV3.sol";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -31,7 +33,8 @@ import {IComet} from "./interfaces/ICompoundV3.sol";
 // into `comet` on the user's behalf as collateral (or as base lend). Pool-
 // agnostic — the same module drives any Comet market via `data`.
 //
-// `data = abi.encode(comet, asset)`.
+// Optional EIP-2612 permit replay for gasless deposits.
+// `data = abi.encode(comet, asset[, deadline, v, r, s])`.
 //
 contract CometDepositModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -48,6 +51,9 @@ contract CometDepositModule is IMakerModule {
         if (msg.sender != settlement) revert NotSettlement();
 
         (address comet, address asset) = abi.decode(data, (address, address));
+
+        // Optional permit. base = (address,address) = 64 bytes.
+        PermitHelper.replayIfPresent(data, 64, asset, onBehalfOf, address(permit3), amount);
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, comet, amount);
@@ -76,8 +82,8 @@ contract CometDepositModule is IMakerModule {
 // way disposal is locked to `onBehalfOf` / comet, never a caller-chosen address.
 //
 // `nonReentrant` guards against weird-token transfer hooks.
-// `data = abi.encode(comet, asset[, DustHandler.DustAction])`  (asset = the
-// market's base token). The trailing dust action is optional; absent ⇒ SweepToUser.
+// `data = abi.encode(comet, asset[, DustHandler.DustAction[, deadline, v, r, s]])`.
+// Dust action optional (absent ⇒ SweepToUser); permit block optional after it.
 //
 contract CometRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -99,7 +105,9 @@ contract CometRepayModule is IMakerModule {
         _locked = 2;
 
         (address comet, address asset) = abi.decode(data, (address, address));
-        DustHandler.DustAction action = DustHandler.readAction(data, 64); // base = (address,address)
+        // base = (address,address) = 64 bytes; DustAction at 64, permit at 96.
+        DustHandler.DustAction action = DustHandler.readAction(data, 64);
+        PermitHelper.replayIfPresent(data, 96, asset, onBehalfOf, address(permit3), amount);
 
         _pullAndRepay(comet, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
 
