@@ -2,8 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {MorphoBlueBorrowModule, MorphoBlueWithdrawCollateralModule} from "../src/MorphoBlueModules.sol";
-import {MarketParams} from "../src/interfaces/IMorphoBlue.sol";
+import {MorphoBlueBorrowModule, MorphoBlueWithdrawCollateralModule} from "../../src/MorphoBlueModules.sol";
+import {MarketParams} from "../../src/interfaces/IMorphoBlue.sol";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 

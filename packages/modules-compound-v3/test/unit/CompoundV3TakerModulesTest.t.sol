@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {CometBorrowModule, CometWithdrawModule} from "../src/CompoundV3Modules.sol";
+import {CometBorrowModule, CometWithdrawModule, CometTakeBase} from "../../src/CompoundV3Modules.sol";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -15,6 +15,11 @@ contract MockERC20 {
     function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
+        return true;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
         return true;
     }
 
@@ -144,7 +149,7 @@ contract CometBorrowModuleTest is Test {
 
     function test_borrow_revertsIfNotPermit3() public {
         bytes memory data = abi.encode(address(comet), address(asset));
-        vm.expectRevert(CometBorrowModule.OnlyPermit3.selector);
+        vm.expectRevert(CometTakeBase.OnlyPermit3.selector);
         module.takeOnBehalf(user, AMOUNT, receiver, data);
     }
 }
@@ -205,7 +210,7 @@ contract CometWithdrawModuleTest is Test {
 
     function test_withdraw_revertsIfNotPermit3() public {
         bytes memory data = abi.encode(address(comet), address(asset));
-        vm.expectRevert(CometWithdrawModule.OnlyPermit3.selector);
+        vm.expectRevert(CometTakeBase.OnlyPermit3.selector);
         module.takeOnBehalf(user, AMOUNT, receiver, data);
     }
 }
