@@ -9,6 +9,7 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
+import {DelegationHelper} from "@core/utils/DelegationHelper.sol";
 
 import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 
@@ -171,10 +172,19 @@ contract AaveV3RepayModule is IMakerModule {
 //
 // Optional `BalanceMode.Full` (trailing field): withdraw the user's ENTIRE
 // (rebasing) aToken balance, forward the signed `amount` to `receiver`, and
-// sweep the accrued excess back to `onBehalfOf` — the TAKE-side mirror of the
-// over-repay refund. Fill-or-kill only, and only after debt is cleared.
+// sweep the accrued excess back to `onBehalfOf`. Fill-or-kill only, and only
+// after debt is cleared.
 //
-// `data = abi.encode(pool, asset, aToken[, DustHandler.BalanceMode])`.
+// Optional EIP-2612 permit replay (EXACT mode only): aTokens implement
+// EIP-2612. Appending a permit block to `data` lets Permit3 pull aTokens
+// without a prior on-chain `approve`. The BalanceMode slot MUST be encoded
+// explicitly (as 0 = Exact) when including the permit block so the offsets
+// are unambiguous.
+//
+// `data = abi.encode(pool, asset, aToken[, BalanceMode[, deadline, v, r, s]])`
+//   — BalanceMode at 96, permit block at 128 (EXACT mode only).
+//   — Full mode is incompatible with gasless permit (rebasing balance unknown
+//     at signing time); use a standing ERC-20 approval in that case.
 //
 contract AaveV3WithdrawModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -191,20 +201,21 @@ contract AaveV3WithdrawModule is ITakerModule {
         (address pool, address asset, address aToken) = abi.decode(data, (address, address, address));
 
         if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
+            // Full mode: user must have a standing ERC-20 approval on aToken.
             // Pull the user's entire (rebasing) aToken balance and withdraw it all
             // to this module; `withdraw(max)` mops up any 1-wei transfer rounding.
-            // Measure the actually-received underlying via a balanceOf snapshot —
-            // never trust the static `amount` against the pool's return value.
             uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
             permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(bal));
             uint256 beforeBal = IERC20(asset).balanceOf(address(this));
             IAaveV3Pool(pool).withdraw(asset, type(uint256).max, address(this));
             uint256 received = IERC20(asset).balanceOf(address(this)) - beforeBal;
             require(received >= amount, "insufficient withdrawn");
-            // Order flow gets `amount`; the accrued excess returns to the user.
             SafeTransferLib.safeTransfer(asset, receiver, amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
+            // Exact mode: optional EIP-2612 permit on aToken at offset 128.
+            // Approves Permit3 to pull exactly `amount` aTokens from the user.
+            PermitHelper.replayIfPresent(data, 128, aToken, onBehalfOf, address(permit3), amount);
             permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(amount));
             IAaveV3Pool(pool).withdraw(asset, amount, receiver);
         }
@@ -214,11 +225,19 @@ contract AaveV3WithdrawModule is ITakerModule {
 // ──────────────────── Aave v3 borrow taker module ────────────────────
 //
 // Single-op taker module. Issues a variable-rate borrow on behalf of the
-// user and forwards proceeds to `receiver`. The user must have called
-// `approveDelegation(module, cap)` on the relevant Aave variableDebtToken
-// so Aave itself permits the module to incur debt on their account.
+// user and forwards proceeds to `receiver`.
 //
-// `data = abi.encode(pool, asset, rateMode)`  (rateMode: 2 = variable)
+// Optional EIP-712 delegation-with-sig replay: appending a delegation block
+// to `data` grants this module credit delegation on-the-fly — no prior
+// on-chain `approveDelegation` needed. The user signs a `delegationWithSig`
+// on the variable/stable debt token and includes the sig + the debt token
+// address in the order data. The delegation cap is set to `amount`.
+//
+// `data = abi.encode(pool, asset, rateMode[, debtToken, deadline, v, r, s])`
+//   — base = 96 bytes (pool, asset, rateMode).
+//   — delegation block at 96: (address debtToken, uint256 deadline, uint8 v,
+//     bytes32 r, bytes32 s) = 160 bytes.
+//   — rateMode: 1 = stable, 2 = variable (must match the debt token passed).
 //
 contract AaveV3BorrowModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -234,9 +253,12 @@ contract AaveV3BorrowModule is ITakerModule {
 
         (address pool, address asset, uint256 rateMode) = abi.decode(data, (address, address, uint256));
 
-        // Borrow lands `amount` of `asset` at `msg.sender` (this module).
+        // Optional delegation-with-sig: grants this module borrow rights on
+        // the debt token without a prior on-chain `approveDelegation`.
+        // Block at 96: (debtToken, deadline, v, r, s) = 160 bytes.
+        DelegationHelper.replayAaveDelegation(data, 96, onBehalfOf, address(this), amount);
+
         IAaveV3Pool(pool).borrow(asset, amount, rateMode, 0, onBehalfOf);
-        // Forward to Permit3's requested receiver (Settlement in our flow).
         SafeTransferLib.safeTransfer(asset, receiver, amount);
     }
 }
