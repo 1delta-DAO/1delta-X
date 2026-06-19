@@ -49,6 +49,13 @@ test   = "packages/modules-aave-v3/test/unit"
 script = "packages/modules-aave-v3/script"
 out    = "out/modules-aave-v3"
 
+[profile.modules-aave-v3-fork]
+src       = "packages/modules-aave-v3/src"
+test      = "packages/modules-aave-v3/test"
+script    = "packages/modules-aave-v3/script"
+out       = "out/modules-aave-v3"
+optimizer = false
+
 [profile.modules-aave-v4]
 src    = "packages/modules-aave-v4/src"
 test   = "packages/modules-aave-v4/test"
@@ -64,6 +71,12 @@ out    = "out/modules-compound-v2"
 [profile.modules-compound-v3]
 src    = "packages/modules-compound-v3/src"
 test   = "packages/modules-compound-v3/test/unit"
+script = "packages/modules-compound-v3/script"
+out    = "out/modules-compound-v3"
+
+[profile.modules-compound-v3-fork]
+src    = "packages/modules-compound-v3/src"
+test   = "packages/modules-compound-v3/test"
 script = "packages/modules-compound-v3/script"
 out    = "out/modules-compound-v3"
 
@@ -94,6 +107,12 @@ out    = "out/modules-fluid"
 [profile.modules-morpho]
 src    = "packages/modules-morpho/src"
 test   = "packages/modules-morpho/test/unit"
+script = "packages/modules-morpho/script"
+out    = "out/modules-morpho"
+
+[profile.modules-morpho-fork]
+src    = "packages/modules-morpho/src"
+test   = "packages/modules-morpho/test"
 script = "packages/modules-morpho/script"
 out    = "out/modules-morpho"
 
