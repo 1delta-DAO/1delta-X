@@ -10,6 +10,7 @@ import {DustHandler} from "@core/dust/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
+import {DelegationHelper} from "@core/utils/DelegationHelper.sol";
 
 import {IComet} from "./interfaces/ICompoundV3.sol";
 
@@ -167,9 +168,9 @@ contract CometRepayModule is IMakerModule {
 // the taker allowance on `keccak256(data)` and then invokes `takeOnBehalf`;
 // `withdrawFrom` sends the asset straight to `receiver`.
 //
-// The maker must have called `comet.allow(module, true)` so Comet itself
-// permits this module to act on their position. The Permit3 taker allowance is
-// what actually caps the fill size.
+// The maker must have called `comet.allow(module, true)` — or included an
+// `allowBySig` block in `data` (see CometBorrowModule / CometWithdrawModule) —
+// so Comet permits this module to act on their position.
 //
 // `data = abi.encode(comet, asset)`.
 //
@@ -191,8 +192,6 @@ abstract contract CometTakeBase is ITakerModule {
 
         (address comet, address asset) = abi.decode(data, (address, address));
 
-        // Withdraws collateral, or borrows base when `amount` exceeds the base
-        // supply. Proceeds land directly at `receiver` (Settlement by default).
         IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
     }
 }
@@ -203,12 +202,16 @@ abstract contract CometTakeBase is ITakerModule {
 // token of the market.
 //
 // Optional `BalanceMode.Full` (trailing field): withdraw the user's ENTIRE
-// collateral balance (`collateralBalanceOf`), forward the signed `amount` to
-// `receiver`, and sweep the excess back to `onBehalfOf`. Fill-or-kill only, and
-// only after debt is cleared. (Borrow has no full-balance mode, so the override
-// lives here, not in the shared base.)
+// collateral balance, forward the signed `amount` to `receiver`, and sweep the
+// excess back to `onBehalfOf`. Fill-or-kill only, after debt is cleared.
 //
-// `data = abi.encode(comet, asset[, DustHandler.BalanceMode])`.
+// Optional EIP-712 allow-by-sig: appending an allow block grants this module
+// `withdrawFrom` rights on-the-fly — no prior on-chain `allow(module, true)`.
+// The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when including
+// the allow block so offsets are unambiguous.
+//
+// `data = abi.encode(comet, asset[, BalanceMode[, nonce, expiry, v, r, s]])`
+//   — BalanceMode at 64, allow-by-sig block at 96 (5 × 32 = 160 bytes).
 //
 contract CometWithdrawModule is CometTakeBase {
     constructor(address _permit3) CometTakeBase(_permit3) {}
@@ -221,11 +224,10 @@ contract CometWithdrawModule is CometTakeBase {
 
         (address comet, address asset) = abi.decode(data, (address, address));
 
+        // Optional Comet allow-by-sig at offset 96 (after BalanceMode slot at 64).
+        DelegationHelper.replayCometAllow(data, 96, comet, onBehalfOf, address(this));
+
         if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
-            // Withdraw the user's entire collateral balance to this module; forward
-            // the signed `amount` to the order, sweep the excess to the user. Measure
-            // the actually-received asset rather than trusting the requested `bal`
-            // (Comet's withdrawFrom returns nothing).
             uint256 bal = IComet(comet).collateralBalanceOf(onBehalfOf, asset);
             uint256 beforeBal = IERC20(asset).balanceOf(address(this));
             IComet(comet).withdrawFrom(onBehalfOf, address(this), asset, bal);
@@ -243,9 +245,29 @@ contract CometWithdrawModule is CometTakeBase {
 //
 // Borrow the market's base asset on the maker's behalf (a base `withdrawFrom`
 // past the supply balance). `data`'s `asset` is the market's base token. A
-// distinct contract from the withdraw module purely so the two legs occupy
-// separate Permit3 module namespaces — the on-chain call is identical.
+// distinct contract from the withdraw module so the two legs have separate
+// Permit3 module namespaces.
+//
+// Optional EIP-712 allow-by-sig: appending an allow block grants this module
+// `withdrawFrom` rights on-the-fly — no prior on-chain `allow(module, true)`.
+//
+// `data = abi.encode(comet, asset[, nonce, expiry, v, r, s])`
+//   — base = 64 bytes, allow-by-sig block at 64 (5 × 32 = 160 bytes).
 //
 contract CometBorrowModule is CometTakeBase {
     constructor(address _permit3) CometTakeBase(_permit3) {}
+
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
+        external
+        override
+    {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        (address comet, address asset) = abi.decode(data, (address, address));
+
+        // Optional Comet allow-by-sig at offset 64 (base = (comet, asset) = 64 bytes).
+        DelegationHelper.replayCometAllow(data, 64, comet, onBehalfOf, address(this));
+
+        IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
+    }
 }
