@@ -8,13 +8,20 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {PermitHelper} from "@core/utils/PermitHelper.sol";
 
 import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 
 // ──────────────────── Aave v3 deposit maker module ────────────────────
 //
 // Single-op module: pulls `asset` from the user via Permit3, then supplies
-// on the user's behalf. `data = abi.encode(pool, asset)`.
+// on the user's behalf.
+//
+// Optional EIP-2612 permit replay: if the caller appends permit fields to
+// `data`, the module replays them before `permit3.transferFrom` so the user
+// never needs a prior on-chain `approve` (gasless deposits for EIP-2612 tokens).
+//
+// `data = abi.encode(pool, asset[, deadline, v, r, s])`
 //
 contract AaveV3DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -31,6 +38,9 @@ contract AaveV3DepositModule is IMakerModule {
         if (msg.sender != settlement) revert NotSettlement();
 
         (address pool, address asset) = abi.decode(data, (address, address));
+
+        // Optional permit: approves Permit3 at ERC-20 level. base = (address,address) = 64 bytes.
+        PermitHelper.replayIfPresent(data, 64, asset, onBehalfOf, address(permit3), amount);
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, pool, amount);
@@ -61,8 +71,9 @@ contract AaveV3DepositModule is IMakerModule {
 // version-fragile `getReserveData` layout.
 //
 // `nonReentrant` guards against weird-token transfer hooks.
-// `data = abi.encode(pool, asset, rateMode, debtToken[, DustHandler.DustAction])`
-// — the trailing dust action is optional; absent ⇒ SweepToUser.
+// `data = abi.encode(pool, asset, rateMode, debtToken[, DustHandler.DustAction[, deadline, v, r, s]])`
+// — the trailing dust action is optional (absent ⇒ SweepToUser);
+//   the permit block (128 bytes) is optional after the dust action slot.
 //
 contract AaveV3RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -88,7 +99,9 @@ contract AaveV3RepayModule is IMakerModule {
         // on the stack (avoids stack-too-deep). The base tuple is all-static, so a
         // prefix decode is sound.
         (address pool, address asset) = abi.decode(data, (address, address));
-        DustHandler.DustAction action = DustHandler.readAction(data, 128); // base = (address,address,uint256,address)
+        // base = (address,address,uint256,address) = 128 bytes; DustAction at 128, permit at 160.
+        DustHandler.DustAction action = DustHandler.readAction(data, 128);
+        PermitHelper.replayIfPresent(data, 160, asset, onBehalfOf, address(permit3), amount);
 
         _pullAndRepay(data, amount, onBehalfOf, asset, pool, action == DustHandler.DustAction.Recycle);
 
