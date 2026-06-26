@@ -18,3 +18,118 @@ runs = 256
 line_length = 120
 tab_width = 4
 bracket_spacing = false
+
+# ── Per-package profiles ──────────────────────────────────────────────────────
+#
+# Scope compilation to a single package + its @core/ transitive imports.
+# Unrelated packages are never touched, so RAM usage stays bounded.
+#
+# Usage:
+#   FOUNDRY_PROFILE=modules-aave-v3 forge test -vv
+#   make test-modules-aave-v3
+#   make test-all          # all packages sequentially
+#
+# Each profile inherits solc / optimizer / libs / remappings from [default].
+
+[profile.core]
+src    = "packages/core/src"
+test   = "packages/core/test"
+script = "packages/core/script"
+out    = "out/core"
+
+[profile.modules-aave-v2]
+src    = "packages/modules-aave-v2/src"
+test   = "packages/modules-aave-v2/test"
+script = "packages/modules-aave-v2/script"
+out    = "out/modules-aave-v2"
+
+[profile.modules-aave-v3]
+src    = "packages/modules-aave-v3/src"
+test   = "packages/modules-aave-v3/test/unit"
+script = "packages/modules-aave-v3/script"
+out    = "out/modules-aave-v3"
+
+[profile.modules-aave-v3-fork]
+src       = "packages/modules-aave-v3/src"
+test      = "packages/modules-aave-v3/test"
+script    = "packages/modules-aave-v3/script"
+out       = "out/modules-aave-v3"
+optimizer = false
+
+[profile.modules-aave-v4]
+src    = "packages/modules-aave-v4/src"
+test   = "packages/modules-aave-v4/test"
+script = "packages/modules-aave-v4/script"
+out    = "out/modules-aave-v4"
+
+[profile.modules-compound-v2]
+src    = "packages/modules-compound-v2/src"
+test   = "packages/modules-compound-v2/test"
+script = "packages/modules-compound-v2/script"
+out    = "out/modules-compound-v2"
+
+[profile.modules-compound-v3]
+src    = "packages/modules-compound-v3/src"
+test   = "packages/modules-compound-v3/test/unit"
+script = "packages/modules-compound-v3/script"
+out    = "out/modules-compound-v3"
+
+[profile.modules-compound-v3-fork]
+src    = "packages/modules-compound-v3/src"
+test   = "packages/modules-compound-v3/test"
+script = "packages/modules-compound-v3/script"
+out    = "out/modules-compound-v3"
+
+[profile.modules-dolomite]
+src    = "packages/modules-dolomite/src"
+test   = "packages/modules-dolomite/test"
+script = "packages/modules-dolomite/script"
+out    = "out/modules-dolomite"
+
+[profile.modules-euler-v2]
+src    = "packages/modules-euler-v2/src"
+test   = "packages/modules-euler-v2/test"
+script = "packages/modules-euler-v2/script"
+out    = "out/modules-euler-v2"
+
+[profile.modules-erc4626]
+src    = "packages/modules-erc4626/src"
+test   = "packages/modules-erc4626/test"
+script = "packages/modules-erc4626/script"
+out    = "out/modules-erc4626"
+
+[profile.modules-fluid]
+src    = "packages/modules-fluid/src"
+test   = "packages/modules-fluid/test"
+script = "packages/modules-fluid/script"
+out    = "out/modules-fluid"
+
+[profile.modules-morpho]
+src    = "packages/modules-morpho/src"
+test   = "packages/modules-morpho/test/unit"
+script = "packages/modules-morpho/script"
+out    = "out/modules-morpho"
+
+[profile.modules-morpho-fork]
+src    = "packages/modules-morpho/src"
+test   = "packages/modules-morpho/test"
+script = "packages/modules-morpho/script"
+out    = "out/modules-morpho"
+
+[profile.modules-permit-transfer]
+src    = "packages/modules-permit-transfer/src"
+test   = "packages/modules-permit-transfer/test"
+script = "packages/modules-permit-transfer/script"
+out    = "out/modules-permit-transfer"
+
+[profile.modules-usdrif]
+src    = "packages/modules-usdrif/src"
+test   = "packages/modules-usdrif/test"
+script = "packages/modules-usdrif/script"
+out    = "out/modules-usdrif"
+
+[profile.modules-venus]
+src    = "packages/modules-venus/src"
+test   = "packages/modules-venus/test"
+script = "packages/modules-venus/script"
+out    = "out/modules-venus"

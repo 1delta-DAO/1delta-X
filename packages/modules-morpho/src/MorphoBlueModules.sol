@@ -9,6 +9,9 @@ import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
+import {PermitHelper} from "@core/utils/PermitHelper.sol";
+import {DelegationHelper} from "@core/utils/DelegationHelper.sol";
+
 import {
     IMorphoBlue,
     IMorphoRepayCallback,
@@ -23,7 +26,10 @@ import {
 // Single-op module: pulls `collateralToken` from the user via Permit3, then
 // supplies it as collateral into the market on the user's behalf. Morpho's
 // `supplyCollateral` has no shares variant and never accrues interest, so the
-// pulled amount maps 1:1 to deposited collateral. `data = abi.encode(MarketParams)`.
+// pulled amount maps 1:1 to deposited collateral.
+//
+// Optional EIP-2612 permit replay for gasless collateral deposits.
+// `data = abi.encode(MarketParams[, deadline, v, r, s])` — base = 160 bytes.
 //
 contract MorphoBlueSupplyCollateralModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -42,6 +48,11 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
         if (msg.sender != settlement) revert NotSettlement();
 
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
+
+        // Optional permit. MarketParams = 5 addresses = 160 bytes.
+        PermitHelper.replayIfPresent(
+            data, 160, marketParams.collateralToken, onBehalfOf, address(permit3), amount
+        );
 
         permit3.transferFrom(onBehalfOf, address(this), marketParams.collateralToken, uint160(amount));
         SafeTransferLib.forceApprove(marketParams.collateralToken, address(morpho), amount);
@@ -75,8 +86,8 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
 // caller-chosen address.
 //
 // `nonReentrant` guards against weird-token transfer hooks.
-// `data = abi.encode(MarketParams[, DustHandler.DustAction])` — the trailing dust
-// action is optional; absent ⇒ SweepToUser.
+// `data = abi.encode(MarketParams[, DustHandler.DustAction[, deadline, v, r, s]])` —
+// dust action optional (absent ⇒ SweepToUser); permit block optional after it.
 //
 contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
     using MarketParamsLib for MarketParams;
@@ -105,7 +116,9 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
         address loanToken = marketParams.loanToken;
-        DustHandler.DustAction action = DustHandler.readAction(data, 160); // base = MarketParams (5 static fields)
+        // base = MarketParams (5 addresses) = 160 bytes; DustAction at 160, permit at 192.
+        DustHandler.DustAction action = DustHandler.readAction(data, 160);
+        PermitHelper.replayIfPresent(data, 192, loanToken, onBehalfOf, address(permit3), amount);
 
         // Repay the entire debt by shares. The exact asset amount is only known
         // after Morpho accrues interest.
@@ -177,18 +190,20 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 //
 // Single-op taker module. Permit3 decrements the taker allowance on
 // `keccak256(data)`, then invokes `takeOnBehalf` here. Morpho collateral is not
-// tokenised, so — unlike the Aave withdraw module — there is NO receipt token to
-// pull: the module simply calls `withdrawCollateral`, which Morpho authorises via
-// the maker's prior `setAuthorization(module, true)` and sends straight to
-// `receiver`.
+// tokenised — the module calls `withdrawCollateral` directly and Morpho sends
+// collateral straight to `receiver` (or this module in Full mode).
 //
 // Optional `BalanceMode.Full` (trailing field): withdraw the user's ENTIRE
-// collateral balance (`position(id).collateral`), forward the signed `amount` to
-// `receiver`, and sweep the excess back to `onBehalfOf`. (Morpho collateral does
-// not accrue, so "full" here is the lender-agnostic "exit without naming the
-// exact number" leg.) Fill-or-kill only, and only after debt is cleared.
+// collateral balance, forward the signed `amount` to `receiver`, and sweep the
+// excess back to `onBehalfOf`. Fill-or-kill only, after debt is cleared.
 //
-// `data = abi.encode(MarketParams[, DustHandler.BalanceMode])`.
+// Optional EIP-712 authorization-with-sig: appending an auth block grants this
+// module Morpho authorization on-the-fly — no prior `setAuthorization` call.
+// The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when including
+// the auth block so offsets are unambiguous.
+//
+// `data = abi.encode(MarketParams[, BalanceMode[, nonce, deadline, v, r, s]])`
+//   — BalanceMode at 160, auth block at 192 (5 × 32 = 160 bytes).
 //
 contract MorphoBlueWithdrawCollateralModule is ITakerModule {
     using MarketParamsLib for MarketParams;
@@ -208,11 +223,10 @@ contract MorphoBlueWithdrawCollateralModule is ITakerModule {
 
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
 
+        // Optional auth-with-sig at offset 192 (after BalanceMode slot at 160).
+        DelegationHelper.replayMorphoAuth(data, 192, address(morpho), onBehalfOf, address(this));
+
         if (DustHandler.readBalanceMode(data, 160) == DustHandler.BalanceMode.Full) {
-            // Withdraw the user's entire collateral to this module; forward the
-            // signed `amount` to the order, sweep the excess to the user. Measure
-            // the actually-received amount via a balance snapshot rather than
-            // trusting the position read, then bound the forwarded leg by it.
             address collateralToken = marketParams.collateralToken;
             uint256 bal = morpho.position(marketParams.id(), onBehalfOf).collateral;
             uint256 before = IERC20(collateralToken).balanceOf(address(this));
@@ -232,11 +246,15 @@ contract MorphoBlueWithdrawCollateralModule is ITakerModule {
 // ──────────────────── Morpho Blue borrow taker module ────────────────────
 //
 // Single-op taker module. Issues a borrow on behalf of the user and Morpho
-// sends the loan token straight to `receiver` — no intermediate forwarding.
-// The user must have called `morpho.setAuthorization(module, true)` so Morpho
-// permits the module to incur debt on their account.
+// sends the loan token straight to `receiver`.
 //
-// `data = abi.encode(MarketParams)`.
+// Optional EIP-712 authorization-with-sig: appending an auth block grants this
+// module Morpho authorization on-the-fly — no prior `setAuthorization` call.
+// Authorization is coarse (all markets); the Permit3 taker allowance caps the
+// per-fill amount.
+//
+// `data = abi.encode(MarketParams[, nonce, deadline, v, r, s])`
+//   — base = 160 bytes (MarketParams), auth block at 160 (5 × 32 = 160 bytes).
 //
 contract MorphoBlueBorrowModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -253,7 +271,10 @@ contract MorphoBlueBorrowModule is ITakerModule {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
-        // Morpho delivers `amount` of loanToken directly to `receiver`.
+
+        // Optional auth-with-sig at offset 160 (base = MarketParams = 160 bytes).
+        DelegationHelper.replayMorphoAuth(data, 160, address(morpho), onBehalfOf, address(this));
+
         morpho.borrow(marketParams, amount, 0, onBehalfOf, receiver);
     }
 }
