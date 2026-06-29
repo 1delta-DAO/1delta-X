@@ -186,32 +186,45 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
     }
 }
 
-// ──────────────────── Morpho Blue withdraw-collateral taker module ────────────────────
+// ──────────────────── Morpho Blue combined taker module ────────────────────
 //
-// Single-op taker module. Permit3 decrements the taker allowance on
-// `keccak256(data)`, then invokes `takeOnBehalf` here. Morpho collateral is not
-// tokenised — the module calls `withdrawCollateral` directly and Morpho sends
-// collateral straight to `receiver` (or this module in Full mode).
+// Fuses the borrow and withdraw-collateral taker legs into a SINGLE contract. A
+// leading `op` flag in `data` selects the leg, so a user who
+// runs the full leverage round-trip authorizes ONE module address instead of two
+// — a single `setAuthorization(this, true)` (or one auth-with-sig) covers both
+// borrow and withdraw, and the EVC/Morpho operator surface shrinks accordingly.
 //
-// Optional `BalanceMode.Full` (trailing field): withdraw the user's ENTIRE
-// collateral balance, forward the signed `amount` to `receiver`, and sweep the
-// excess back to `onBehalfOf`. Fill-or-kill only, after debt is cleared.
+// Safety is unchanged from the split modules: the Permit3 taker allowance is
+// keyed by `ref = keccak256(data)`, and `op` is the first word of `data`, so
+// borrow-data and withdraw-data hash to DIFFERENT refs. The user therefore still
+// grants a separate amount-gated allowance per leg — the flag cannot be flipped
+// to spend a borrow allowance on a withdraw (or vice-versa). The only thing
+// shared is the coarse Morpho authorization boolean, which is per-address by
+// construction.
 //
-// Optional EIP-712 authorization-with-sig: appending an auth block grants this
-// module Morpho authorization on-the-fly — no prior `setAuthorization` call.
-// The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when including
-// the auth block so offsets are unambiguous.
+//   op = 0 (Borrow):
+//     data = abi.encode(uint8(0), MarketParams[, nonce, deadline, v, r, s])
+//       — op@0, MarketParams@32 (base = 192); auth block (160B) optional at 192.
 //
-// `data = abi.encode(MarketParams[, BalanceMode[, nonce, deadline, v, r, s]])`
-//   — BalanceMode at 160, auth block at 192 (5 × 32 = 160 bytes).
+//   op = 1 (WithdrawCollateral):
+//     data = abi.encode(uint8(1), MarketParams[, BalanceMode[, nonce, deadline, v, r, s]])
+//       — op@0, MarketParams@32 (base = 192); BalanceMode@192; auth@224.
+//       The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when an
+//       auth block follows, so the block starts at a fixed offset.
 //
-contract MorphoBlueWithdrawCollateralModule is ITakerModule {
+contract MorphoBlueTakerModule is ITakerModule {
     using MarketParamsLib for MarketParams;
 
     IPermit3 public immutable permit3;
     IMorphoBlue public immutable morpho;
 
+    enum Op {
+        Borrow, // 0
+        WithdrawCollateral // 1
+    }
+
     error OnlyPermit3();
+    error BadOp(uint8 op);
 
     constructor(address _permit3, address _morpho) {
         permit3 = IPermit3(_permit3);
@@ -221,60 +234,44 @@ contract MorphoBlueWithdrawCollateralModule is ITakerModule {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        MarketParams memory marketParams = abi.decode(data, (MarketParams));
+        // op@0, MarketParams@32 — both static, so a prefix decode is sound even
+        // when op-specific trailing fields follow. An out-of-range enum reverts.
+        (uint8 op, MarketParams memory marketParams) = abi.decode(data, (uint8, MarketParams));
 
-        // Optional auth-with-sig at offset 192 (after BalanceMode slot at 160).
-        DelegationHelper.replayMorphoAuth(data, 192, address(morpho), onBehalfOf, address(this));
+        if (op == uint8(Op.Borrow)) {
+            // Optional auth-with-sig at offset 192 (op@0 + MarketParams@32 = 192).
+            DelegationHelper.replayMorphoAuth(data, 192, address(morpho), onBehalfOf, address(this));
+            morpho.borrow(marketParams, amount, 0, onBehalfOf, receiver);
+        } else if (op == uint8(Op.WithdrawCollateral)) {
+            // Optional auth-with-sig at offset 224 (after BalanceMode slot at 192).
+            DelegationHelper.replayMorphoAuth(data, 224, address(morpho), onBehalfOf, address(this));
 
-        if (DustHandler.readBalanceMode(data, 160) == DustHandler.BalanceMode.Full) {
-            address collateralToken = marketParams.collateralToken;
-            uint256 bal = morpho.position(marketParams.id(), onBehalfOf).collateral;
-            uint256 before = IERC20(collateralToken).balanceOf(address(this));
-            morpho.withdrawCollateral(marketParams, bal, onBehalfOf, address(this));
-            uint256 received = IERC20(collateralToken).balanceOf(address(this)) - before;
-            require(received >= amount, "insufficient withdrawn");
-            SafeTransferLib.safeTransfer(collateralToken, receiver, amount);
-            if (received > amount) {
-                SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
+            if (DustHandler.readBalanceMode(data, 192) == DustHandler.BalanceMode.Full) {
+                _withdrawFull(marketParams, onBehalfOf, amount, receiver);
+            } else {
+                morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
             }
         } else {
-            morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
+            revert BadOp(op);
         }
     }
-}
 
-// ──────────────────── Morpho Blue borrow taker module ────────────────────
-//
-// Single-op taker module. Issues a borrow on behalf of the user and Morpho
-// sends the loan token straight to `receiver`.
-//
-// Optional EIP-712 authorization-with-sig: appending an auth block grants this
-// module Morpho authorization on-the-fly — no prior `setAuthorization` call.
-// Authorization is coarse (all markets); the Permit3 taker allowance caps the
-// per-fill amount.
-//
-// `data = abi.encode(MarketParams[, nonce, deadline, v, r, s])`
-//   — base = 160 bytes (MarketParams), auth block at 160 (5 × 32 = 160 bytes).
-//
-contract MorphoBlueBorrowModule is ITakerModule {
-    IPermit3 public immutable permit3;
-    IMorphoBlue public immutable morpho;
-
-    error OnlyPermit3();
-
-    constructor(address _permit3, address _morpho) {
-        permit3 = IPermit3(_permit3);
-        morpho = IMorphoBlue(_morpho);
-    }
-
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
-        if (msg.sender != address(permit3)) revert OnlyPermit3();
-
-        MarketParams memory marketParams = abi.decode(data, (MarketParams));
-
-        // Optional auth-with-sig at offset 160 (base = MarketParams = 160 bytes).
-        DelegationHelper.replayMorphoAuth(data, 160, address(morpho), onBehalfOf, address(this));
-
-        morpho.borrow(marketParams, amount, 0, onBehalfOf, receiver);
+    /// @dev Full mode: withdraw the user's entire collateral to this module,
+    ///      forward the signed `amount` to `receiver`, and sweep the excess back
+    ///      to the user — always to `onBehalfOf`, never a caller-chosen address.
+    ///      Measures what actually landed rather than trusting the static `amount`.
+    function _withdrawFull(MarketParams memory marketParams, address onBehalfOf, uint256 amount, address receiver)
+        private
+    {
+        address collateralToken = marketParams.collateralToken;
+        uint256 bal = morpho.position(marketParams.id(), onBehalfOf).collateral;
+        uint256 before = IERC20(collateralToken).balanceOf(address(this));
+        morpho.withdrawCollateral(marketParams, bal, onBehalfOf, address(this));
+        uint256 received = IERC20(collateralToken).balanceOf(address(this)) - before;
+        require(received >= amount, "insufficient withdrawn");
+        SafeTransferLib.safeTransfer(collateralToken, receiver, amount);
+        if (received > amount) {
+            SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
+        }
     }
 }

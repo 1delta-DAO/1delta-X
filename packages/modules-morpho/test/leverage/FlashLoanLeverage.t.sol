@@ -12,7 +12,7 @@ import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 ///   1. Flash-loans `collateralIn` wstETH from Balancer v2.
 ///   2. Settlement pulls it via Permit3 → maker → MorphoBlueSupplyCollateralModule
 ///      supplies it as collateral on the wstETH/USDC market.
-///   3. MorphoBlueBorrowModule borrows USDC against it; proceeds land at the solver.
+///   3. MorphoBlueTakerModule (op=Borrow) borrows USDC against it; proceeds land at the solver.
 ///   4. Solver swaps the USDC back to wstETH on Uniswap v3 (USDC/wstETH 0.05% pool).
 ///   5. Solver repays the flash loan; residual wstETH is profit.
 contract MorphoFlashLoanLeverageTest is MorphoModulesBase {
@@ -45,6 +45,6 @@ contract MorphoFlashLoanLeverageTest is MorphoModulesBase {
         assertEq(IERC20(WSTETH).balanceOf(address(settlement)), 0, "settlement wstETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WSTETH).balanceOf(address(supplyModule)), 0, "supply module wstETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 }

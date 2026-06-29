@@ -14,9 +14,9 @@ import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 ///   tokenIn  = WETH   (maker gives — sourced from the withdraw item)
 ///   tokenOut = USDC   (solver gives, maker receives)
 ///
-/// One TAKE item: CometWithdrawModule, routed via `permit3.take` so the taker
-/// allowance gate enforces the exact (user, module, ref) amount. There is no
-/// receipt token: `comet.allow(withdrawModule)` (set in setUp) lets the module
+/// One TAKE item: CometTakerModule (Withdraw leg), routed via `permit3.take` so
+/// the taker allowance gate enforces the exact (user, module, ref) amount. There
+/// is no receipt token: `comet.allow(takerModule)` (set in setUp) lets the module
 /// call `withdrawFrom`, which burns the maker's collateral and sends WETH
 /// straight to Settlement.
 contract WithdrawAndSwapTest is CompoundV3ModulesBase {
@@ -29,7 +29,7 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
         _seedWethCollateral(wethIn + 1e15); // small cushion
         deal(USDC, solver, usdcOut);
 
-        bytes memory takerData = abi.encode(COMET, WETH);
+        bytes memory takerData = _withdrawData(COMET, WETH);
         bytes32 ref = keccak256(takerData);
 
         _approveMakerWithdrawSide(wethIn, ref, takerData);
@@ -51,9 +51,9 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
 
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
-        assertEq(IERC20(WETH).balanceOf(address(withdrawModule)), 0, "module WETH drained");
+        assertEq(IERC20(WETH).balanceOf(address(takerModule)), 0, "module WETH drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(withdrawModule), ref);
+        (uint160 remaining,,) = permit3.takerAllowance(maker, address(takerModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 
@@ -66,12 +66,12 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
         _seedWethCollateral(wethIn + 1e15);
         deal(USDC, solver, usdcOut);
 
-        bytes memory takerData = abi.encode(COMET, WETH);
+        bytes memory takerData = _withdrawData(COMET, WETH);
 
         Item[] memory items = new Item[](1);
         items[0] = Item({
             op: ItemOp.TAKE,
-            module: address(withdrawModule),
+            module: address(takerModule),
             amount: wethIn,
             recipient: address(0),
             data: takerData

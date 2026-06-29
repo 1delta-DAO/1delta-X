@@ -214,56 +214,63 @@ contract DolomiteRepayModule is DolomiteBase, IMakerModule {
     }
 }
 
-// ──────────────────── Dolomite take base (withdraw / borrow) ────────────────────
+// ──────────────────── Dolomite combined taker module ────────────────────
+//
+// Fuses the borrow and withdraw taker legs into a SINGLE contract. A leading
+// `op` flag in `data` selects the leg, so a user who runs the full leverage
+// round-trip authorizes ONE module address instead of two — a single
+// `setOperators([{module, true}])` covers both borrow and withdraw, and the
+// Dolomite operator surface shrinks accordingly.
 //
 // Withdrawing collateral and borrowing are the SAME `operate` Withdraw action
 // (a negative delta sent to `otherAddress`); a borrow simply drives the balance
-// past zero, which Dolomite permits and checks at the end of `operate`. Both
-// taker modules share this body. The user must have `setOperators([{module,
-// true}])`; the Permit3 taker allowance caps the fill.
+// past zero, which Dolomite permits and checks at the end of `operate`. So op 0
+// (Borrow) and op-1-Exact (Withdraw) share the same `_withdrawAction(marketId,
+// amount, receiver)` path; only op-1-Full takes the custody+sweep branch.
 //
-// `data = abi.encode(dolomite, marketId, token, accountNumber)`.
+// Safety is unchanged from the split modules: the Permit3 taker allowance is
+// keyed by `ref = keccak256(data)`, and `op` is the first word of `data`, so
+// borrow-data and withdraw-data hash to DIFFERENT refs. The user therefore still
+// grants a separate amount-gated allowance per leg — the flag cannot be flipped
+// to spend a borrow allowance on a withdraw (or vice-versa). The only thing
+// shared is the coarse Dolomite operator boolean, which is per-address by
+// construction.
 //
-abstract contract DolomiteTakeBase is DolomiteBase, ITakerModule {
+//   byte map (base — op first; all old offsets shift +32):
+//     op            @ 0    (uint8)
+//     dolomite      @ 32   (address)
+//     marketId      @ 64   (uint256)
+//     token         @ 96   (address)
+//     accountNumber @ 128  (uint256)   → base length 160
+//
+//   op = 0 (Borrow):
+//     data = abi.encode(uint8(0), dolomite, marketId, token, accountNumber)
+//
+//   op = 1 (Withdraw):
+//     data = abi.encode(uint8(1), dolomite, marketId, token, accountNumber[, BalanceMode])
+//       — BalanceMode slot at offset 160. `Full` ⇒ custody+sweep branch.
+//
+contract DolomiteTakerModule is DolomiteBase, ITakerModule {
+    enum Op {
+        Borrow, // 0
+        Withdraw // 1
+    }
+
     error OnlyPermit3();
+    error BadOp(uint8 op);
 
     constructor(address _permit3) DolomiteBase(_permit3) {}
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
         external
-        virtual
         override
     {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        (address dolomite, uint256 marketId,, uint256 accountNumber) =
-            abi.decode(data, (address, uint256, address, uint256));
-        _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, amount, receiver));
-    }
-}
+        (uint8 op, address dolomite, uint256 marketId, address token, uint256 accountNumber) =
+            abi.decode(data, (uint8, address, uint256, address, uint256));
 
-// ──────────────────── Dolomite withdraw taker module ────────────────────
-//
-// Withdraw collateral on the maker's behalf. Optional `BalanceMode.Full`:
-// withdraw the user's ENTIRE balance in `marketId` to this module, forward the
-// signed `amount` to `receiver`, and sweep the excess back to the user.
-// Fill-or-kill only, and only after debt is cleared.
-//
-// `data = abi.encode(dolomite, marketId, token, accountNumber[, DustHandler.BalanceMode])`.
-//
-contract DolomiteWithdrawModule is DolomiteTakeBase {
-    constructor(address _permit3) DolomiteTakeBase(_permit3) {}
-
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
-        if (msg.sender != address(permit3)) revert OnlyPermit3();
-
-        (address dolomite, uint256 marketId, address token, uint256 accountNumber) =
-            abi.decode(data, (address, uint256, address, uint256));
-
-        if (DustHandler.readBalanceMode(data, 128) == DustHandler.BalanceMode.Full) {
+        if (op == uint8(Op.Withdraw) && DustHandler.readBalanceMode(data, 160) == DustHandler.BalanceMode.Full) {
             WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(onBehalfOf, accountNumber), marketId);
             uint256 bal = w.sign ? w.value : 0;
 
@@ -276,20 +283,13 @@ contract DolomiteWithdrawModule is DolomiteTakeBase {
             require(received >= amount, "insufficient withdrawn");
             SafeTransferLib.safeTransfer(token, receiver, amount);
             if (received > amount) SafeTransferLib.safeTransfer(token, onBehalfOf, received - amount);
-        } else {
+        } else if (op == uint8(Op.Borrow) || op == uint8(Op.Withdraw)) {
+            // Borrow == exact withdraw: a single negative delta sent to `receiver`.
             _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, amount, receiver));
+        } else {
+            revert BadOp(op);
         }
     }
-}
-
-// ──────────────────── Dolomite borrow taker module ────────────────────
-//
-// Borrow on the maker's behalf — the same Withdraw action driving the balance
-// negative. A distinct contract from the withdraw module purely so the two legs
-// occupy separate Permit3 module namespaces (the Comet withdraw/borrow split).
-//
-contract DolomiteBorrowModule is DolomiteTakeBase {
-    constructor(address _permit3) DolomiteTakeBase(_permit3) {}
 }
 
 // ──────────────────── Dolomite operate module (Level B) ────────────────────

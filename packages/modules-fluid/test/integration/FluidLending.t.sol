@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {FluidModulesBase} from "../shared/FluidModulesBase.t.sol";
-import {FluidOperateModule} from "../../src/FluidModules.sol";
+import {FluidOperateModule, FluidTakerModule} from "../../src/FluidModules.sol";
 
 /// @dev Integration tests for the Fluid modules against the real ETH-USDC T1 vault
 /// on a mainnet fork — the same cases the 1delta composer's FluidLending test covers,
@@ -44,7 +44,7 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         uint256 nftId = _openPosition(maker, 1 ether, 1000e6);
 
         uint256 borrowAmount = 200e6;
-        bytes memory data = abi.encode(VAULT, VAULT_FACTORY, nftId);
+        bytes memory data = abi.encode(uint8(FluidTakerModule.Op.Borrow), VAULT, VAULT_FACTORY, nftId);
 
         vm.prank(maker);
         permit3.approveTaker(address(settlement), keccak256(data), uint160(borrowAmount), 0);
@@ -54,18 +54,18 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         // The taker book is keyed by spender (settlement); the maker's taker
         // allowance on (settlement, ref) is the gate.
         vm.prank(address(settlement));
-        permit3.take(address(borrowModule), maker, uint160(borrowAmount), recv, data);
+        permit3.take(address(takerModule), maker, uint160(borrowAmount), recv, data);
 
         assertEq(IERC20(USDC).balanceOf(recv) - recvBefore, borrowAmount, "receiver got the borrow");
         assertEq(_ownerOf(nftId), maker, "position NFT returned to maker");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module clean");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "taker module clean");
     }
 
     function test_fluid_withdraw_jit_custody_native_collateral() public {
         uint256 nftId = _openPosition(maker, 1 ether, 1000e6);
 
         uint256 withdrawAmount = 0.1 ether;
-        bytes memory data = abi.encode(VAULT, VAULT_FACTORY, nftId);
+        bytes memory data = abi.encode(uint8(FluidTakerModule.Op.Withdraw), VAULT, VAULT_FACTORY, nftId);
 
         vm.prank(maker);
         permit3.approveTaker(address(settlement), keccak256(data), uint160(withdrawAmount), 0);
@@ -73,11 +73,11 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         uint256 recvEthBefore = recv.balance;
 
         vm.prank(address(settlement));
-        permit3.take(address(withdrawModule), maker, uint160(withdrawAmount), recv, data);
+        permit3.take(address(takerModule), maker, uint160(withdrawAmount), recv, data);
 
         assertEq(recv.balance - recvEthBefore, withdrawAmount, "receiver got withdrawn ETH");
         assertEq(_ownerOf(nftId), maker, "position NFT returned to maker");
-        assertEq(address(withdrawModule).balance, 0, "withdraw module holds no ETH");
+        assertEq(address(takerModule).balance, 0, "taker module holds no ETH");
     }
 
     function test_fluid_operate_full_close_repay_all_and_withdraw() public {

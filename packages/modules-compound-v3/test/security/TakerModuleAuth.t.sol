@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {CometTakeBase} from "../../src/CompoundV3Modules.sol";
+import {CometTakerModule} from "../../src/CompoundV3Modules.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
 /// @dev Taker module security. The `msg.sender == permit3` check is load-bearing:
@@ -11,15 +11,15 @@ import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 contract TakerModuleAuthTest is CompoundV3ModulesBase {
     function test_takeOnBehalf_rejectsDirectCall() public {
         // Seed position so a successful drain would actually move tokens. The
-        // maker already granted `comet.allow(withdrawModule, true)` in setUp.
+        // maker already granted `comet.allow(takerModule, true)` in setUp.
         _seedWethCollateral(1 ether);
 
-        bytes memory data = abi.encode(COMET, WETH);
+        bytes memory data = _withdrawData(COMET, WETH);
 
         // Attacker tries to invoke the module directly, pointing `receiver` at themselves.
         address attacker = address(0xDEAD);
         vm.prank(attacker);
-        vm.expectRevert(CometTakeBase.OnlyPermit3.selector);
-        withdrawModule.takeOnBehalf(maker, 1 ether, attacker, data);
+        vm.expectRevert(CometTakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(maker, 1 ether, attacker, data);
     }
 }

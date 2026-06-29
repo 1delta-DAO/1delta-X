@@ -11,12 +11,7 @@ import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
-import {
-    CometDepositModule,
-    CometRepayModule,
-    CometWithdrawModule,
-    CometBorrowModule
-} from "../../src/CompoundV3Modules.sol";
+import {CometDepositModule, CometRepayModule, CometTakerModule} from "../../src/CompoundV3Modules.sol";
 
 /// @dev Compound v3 (Comet) integration harness. Mirrors the Aave harness but
 /// over Comet's position model: there are no aToken/debtToken ERC20s — supply,
@@ -34,10 +29,23 @@ import {
 /// reverse.
 abstract contract CompoundV3ModulesBase is CoreSettlementBase {
     CometDepositModule depositModule;
-    CometWithdrawModule withdrawModule;
-    CometBorrowModule borrowModule;
+    CometTakerModule takerModule; //  combined withdraw + borrow (op-prefixed data)
     CometRepayModule repayModule;
     LimitOrderLeverageSolver leverageSolver;
+
+    // op flags for the combined taker module's `data` prefix.
+    uint8 internal constant OP_BORROW = uint8(CometTakerModule.Op.Borrow); //     0
+    uint8 internal constant OP_WITHDRAW = uint8(CometTakerModule.Op.Withdraw); // 1
+
+    /// @dev op-prefixed taker `data` for the borrow / withdraw legs. The op byte
+    /// is the first word, so the two legs hash to distinct Permit3 refs.
+    function _borrowData(address comet, address asset) internal pure returns (bytes memory) {
+        return abi.encode(OP_BORROW, comet, asset);
+    }
+
+    function _withdrawData(address comet, address asset) internal pure returns (bytes memory) {
+        return abi.encode(OP_WITHDRAW, comet, asset);
+    }
 
     address COMET; //       USDC Comet — base USDC, WETH collateral
     address COMET_USDS; //  USDS Comet — migration target (base USDS, WETH collateral)
@@ -51,8 +59,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         USDS = IComet(COMET_USDS).baseToken();
 
         depositModule = new CometDepositModule(address(permit3), address(settlement));
-        withdrawModule = new CometWithdrawModule(address(permit3));
-        borrowModule = new CometBorrowModule(address(permit3));
+        takerModule = new CometTakerModule(address(permit3));
         repayModule = new CometRepayModule(address(permit3), address(settlement));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
@@ -63,22 +70,20 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         );
 
         vm.label(address(depositModule), "cometDepositModule");
-        vm.label(address(withdrawModule), "cometWithdrawModule");
-        vm.label(address(borrowModule), "cometBorrowModule");
+        vm.label(address(takerModule), "cometTakerModule");
         vm.label(address(repayModule), "cometRepayModule");
         vm.label(address(leverageSolver), "leverageSolver");
         vm.label(COMET, "cometUSDC");
         vm.label(COMET_USDS, "cometUSDS");
         vm.label(USDS, "USDS");
 
-        // Comet-native authorisation: let the withdraw/borrow modules act on the
-        // maker's USDC-Comet position. The Permit3 taker allowance still caps
-        // each fill; this is just Comet's permission boolean (infinite scope —
-        // see the README's note on `allow`'s breadth).
-        vm.startPrank(maker);
-        IComet(COMET).allow(address(withdrawModule), true);
-        IComet(COMET).allow(address(borrowModule), true);
-        vm.stopPrank();
+        // Comet-native authorisation: let the combined taker module act on the
+        // maker's USDC-Comet position (covers both withdraw and borrow legs). The
+        // Permit3 taker allowance still caps each fill; this is just Comet's
+        // permission boolean (infinite scope — see the README's note on `allow`'s
+        // breadth).
+        vm.prank(maker);
+        IComet(COMET).allow(address(takerModule), true);
     }
 
     // ──────────────────── Position reads (no receipt tokens on Comet) ────────────────────
@@ -151,7 +156,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
     }
 
     function _approveMakerDepositBorrowSide(uint256 collateralIn, uint256 borrowOut) internal {
-        bytes memory borrowData = abi.encode(COMET, USDC);
+        bytes memory borrowData = _borrowData(COMET, USDC);
         bytes32 borrowRef = keccak256(borrowData);
 
         vm.startPrank(maker);
@@ -188,9 +193,9 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         IERC20(USDC).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(repayModule), USDC, uint160(bufferedRepay), 0);
 
-        // [1] USDC-Comet withdraw leg: comet.allow(withdrawModule) set in setUp;
+        // [1] USDC-Comet withdraw leg: comet.allow(takerModule) set in setUp;
         //     Permit3 taker allowance caps the WETH pulled out.
-        bytes memory withdrawData = abi.encode(COMET, WETH);
+        bytes memory withdrawData = _withdrawData(COMET, WETH);
         permit3.approveToken(address(settlement), WETH, uint160(exactWeth), 0);
         permit3.approveToken(address(settlement), USDC, uint160(bufferedRepay), 0);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
@@ -200,8 +205,8 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         permit3.approveToken(address(depositModule), WETH, uint160(exactWeth), 0);
 
         // [3] USDS-Comet borrow leg: Comet account-manager flag + Permit3 cap.
-        IComet(COMET_USDS).allow(address(borrowModule), true);
-        bytes memory borrowData = abi.encode(COMET_USDS, USDS);
+        IComet(COMET_USDS).allow(address(takerModule), true);
+        bytes memory borrowData = _borrowData(COMET_USDS, USDS);
         permit3.approveTaker(address(settlement), keccak256(borrowData), uint160(borrowUsds), 0);
 
         vm.stopPrank();
@@ -217,7 +222,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         Item[] memory items = new Item[](1);
         items[0] = Item({
             op: ItemOp.TAKE,
-            module: address(withdrawModule),
+            module: address(takerModule),
             amount: wethIn,
             recipient: address(0),
             data: takerData
@@ -240,10 +245,10 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         });
         items[1] = Item({
             op: ItemOp.TAKE,
-            module: address(borrowModule),
+            module: address(takerModule),
             amount: borrowOut,
             recipient: address(0),
-            data: abi.encode(COMET, USDC)
+            data: _borrowData(COMET, USDC)
         });
         order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
     }
@@ -284,10 +289,10 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         });
         items[1] = Item({
             op: ItemOp.TAKE,
-            module: address(withdrawModule),
+            module: address(takerModule),
             amount: exactWeth,
             recipient: maker, //          chain WETH into the deposit item
-            data: abi.encode(COMET, WETH)
+            data: _withdrawData(COMET, WETH)
         });
         items[2] = Item({
             op: ItemOp.MAKE,
@@ -298,10 +303,10 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         });
         items[3] = Item({
             op: ItemOp.TAKE,
-            module: address(borrowModule),
+            module: address(takerModule),
             amount: borrowUsds,
             recipient: address(0), //      default = Settlement for tokenIn payout
-            data: abi.encode(COMET_USDS, USDS)
+            data: _borrowData(COMET_USDS, USDS)
         });
 
         order = LimitOrder({

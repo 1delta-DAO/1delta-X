@@ -13,7 +13,7 @@ import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
 ///   1. Flash-loans `collateralIn` WETH from Balancer v2.
 ///   2. Settlement pulls it via Permit3 → maker → EulerV2DepositModule supplies it
 ///      into eWETH-2 as collateral.
-///   3. EulerV2BorrowModule borrows USDC from eUSDC-2 (routed via the EVC); proceeds
+///   3. EulerV2TakerModule (Borrow) borrows USDC from eUSDC-2 (via the EVC); proceeds
 ///      land at the solver.
 ///   4. Solver swaps the USDC back to WETH on Uniswap v3.
 ///   5. Solver repays the flash loan; residual WETH is profit.
@@ -54,6 +54,6 @@ contract EulerFlashLoanLeverageTest is EulerV2ModulesBase {
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module WETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 }

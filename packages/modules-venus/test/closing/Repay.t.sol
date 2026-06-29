@@ -42,9 +42,10 @@ contract VenusRepayTest is VenusModulesBase {
         uint256 makerDebtBefore = _usdcDebt(maker);
         assertGt(makerDebtBefore, 0, "pre: maker should have debt");
 
-        // data = abi.encode(vUSDC, USDC) (== _borrowData), 64 bytes ⇒ SweepToUser.
+        // data = abi.encode(vUSDC, USDC), 64 bytes ⇒ SweepToUser. (The repay maker
+        // takes bare market data — not the op-prefixed taker encoding.)
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.MAKE, address(repayModule), buffered, address(0), _borrowData());
+        items[0] = Item(ItemOp.MAKE, address(repayModule), buffered, address(0), abi.encode(address(VUSDC), USDC));
         LimitOrder memory order = _order(maker, 1, WETH, USDC, wethForSolver, buffered, items);
         bytes memory sig = _sign(order);
 

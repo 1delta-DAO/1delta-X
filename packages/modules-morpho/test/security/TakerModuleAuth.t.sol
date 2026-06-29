@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {MorphoBlueWithdrawCollateralModule, MorphoBlueBorrowModule} from "../../src/MorphoBlueModules.sol";
+import {MorphoBlueTakerModule} from "../../src/MorphoBlueModules.sol";
 import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 
 /// @dev Taker module security. The `msg.sender == permit3` check is load-bearing:
@@ -16,23 +16,23 @@ contract TakerModuleAuthTest is MorphoModulesBase {
         // maker who has authorised the withdraw module but signed no taker permit.
         _seedCollateral(1 ether);
         vm.prank(maker);
-        MORPHO.setAuthorization(address(withdrawModule), true);
+        MORPHO.setAuthorization(address(takerModule), true);
 
         address attacker = address(0xDEAD);
         vm.prank(attacker);
-        vm.expectRevert(MorphoBlueWithdrawCollateralModule.OnlyPermit3.selector);
-        withdrawModule.takeOnBehalf(maker, 1 ether, attacker, _marketData());
+        vm.expectRevert(MorphoBlueTakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(maker, 1 ether, attacker, _withdrawData());
     }
 
     function test_borrow_takeOnBehalf_rejectsDirectCall() public {
         // Collateral + authorization but no taker permit.
         _seedCollateral(2 ether);
         vm.prank(maker);
-        MORPHO.setAuthorization(address(borrowModule), true);
+        MORPHO.setAuthorization(address(takerModule), true);
 
         address attacker = address(0xDEAD);
         vm.prank(attacker);
-        vm.expectRevert(MorphoBlueBorrowModule.OnlyPermit3.selector);
-        borrowModule.takeOnBehalf(maker, 1_000e6, attacker, _marketData());
+        vm.expectRevert(MorphoBlueTakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(maker, 1_000e6, attacker, _borrowData());
     }
 }

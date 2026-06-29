@@ -8,12 +8,7 @@ import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.so
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
 import {IVToken, IVenusComptroller} from "../../src/interfaces/IVenus.sol";
-import {
-    VenusDepositModule,
-    VenusRepayModule,
-    VenusBorrowModule,
-    VenusWithdrawModule
-} from "../../src/VenusModules.sol";
+import {VenusDepositModule, VenusRepayModule, VenusTakerModule} from "../../src/VenusModules.sol";
 
 /// @dev Venus (expanded Compound v2) integration harness. Forks mainnet at the
 /// default block — the Venus Core pool is live there — and drives a WETH-collateral
@@ -34,8 +29,7 @@ abstract contract VenusModulesBase is CoreSettlementBase {
 
     VenusDepositModule depositModule;
     VenusRepayModule repayModule;
-    VenusBorrowModule borrowModule;
-    VenusWithdrawModule withdrawModule;
+    VenusTakerModule takerModule;
     LimitOrderLeverageSolver leverageSolver;
 
     function setUp() public virtual override {
@@ -43,8 +37,7 @@ abstract contract VenusModulesBase is CoreSettlementBase {
 
         depositModule = new VenusDepositModule(address(permit3), address(settlement));
         repayModule = new VenusRepayModule(address(permit3), address(settlement));
-        borrowModule = new VenusBorrowModule(address(permit3));
-        withdrawModule = new VenusWithdrawModule(address(permit3));
+        takerModule = new VenusTakerModule(address(permit3));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
             address(permit3),
@@ -58,8 +51,7 @@ abstract contract VenusModulesBase is CoreSettlementBase {
         vm.label(address(VUSDC), "vUSDC");
         vm.label(address(depositModule), "venusDepositModule");
         vm.label(address(repayModule), "venusRepayModule");
-        vm.label(address(borrowModule), "venusBorrowModule");
-        vm.label(address(withdrawModule), "venusWithdrawModule");
+        vm.label(address(takerModule), "venusTakerModule");
         vm.label(address(leverageSolver), "leverageSolver");
 
         // Venus-native authorisation: enter the collateral market, then delegate the
@@ -70,8 +62,7 @@ abstract contract VenusModulesBase is CoreSettlementBase {
         markets[0] = address(VWETH);
         markets[1] = address(VUSDC);
         COMPTROLLER.enterMarkets(markets);
-        COMPTROLLER.updateDelegate(address(borrowModule), true);
-        COMPTROLLER.updateDelegate(address(withdrawModule), true);
+        COMPTROLLER.updateDelegate(address(takerModule), true);
         vm.stopPrank();
     }
 
@@ -123,8 +114,14 @@ abstract contract VenusModulesBase is CoreSettlementBase {
         return abi.encode(address(VWETH), WETH);
     }
 
+    /// @dev Combined taker data, op-prefixed. op = 0 (Borrow), 1 (Withdraw); the
+    ///      op flag makes borrow/withdraw refs (keccak256(data)) distinct.
     function _borrowData() internal view returns (bytes memory) {
-        return abi.encode(address(VUSDC), USDC);
+        return abi.encode(uint8(VenusTakerModule.Op.Borrow), address(VUSDC), USDC);
+    }
+
+    function _withdrawData() internal view returns (bytes memory) {
+        return abi.encode(uint8(VenusTakerModule.Op.Withdraw), address(VWETH), WETH);
     }
 
     /// @dev Deposit `collateralIn` WETH + borrow `borrowOut` USDC in one order.
@@ -136,7 +133,7 @@ abstract contract VenusModulesBase is CoreSettlementBase {
     {
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), _depositData());
-        items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), _borrowData());
+        items[1] = Item(ItemOp.TAKE, address(takerModule), borrowOut, address(0), _borrowData());
         return _order(maker, 1, USDC, WETH, borrowOut, collateralIn, items);
     }
 

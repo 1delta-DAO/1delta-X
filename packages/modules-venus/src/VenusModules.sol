@@ -32,9 +32,12 @@ import {IVToken} from "./interfaces/IVenus.sol";
 //   • value-out (borrow/withdraw): the user must once call
 //     `comptroller.updateDelegate(module, true)`. Venus then routes the proceeds
 //     to `msg.sender` (this module), which forwards them to `receiver`. The
-//     Permit3 taker allowance is what caps the per-fill amount.
+//     Permit3 taker allowance is what caps the per-fill amount. Both value-out
+//     legs are fused into a single `VenusTakerModule`, multiplexed by a leading
+//     `uint8 op` flag, so one delegation covers the whole leverage round-trip.
 //
-//  `data` for every module is `abi.encode(vToken, underlying)` — `underlying` is
+//  Maker `data` is `abi.encode(vToken, underlying)`; taker `data` is op-prefixed:
+//  `abi.encode(uint8 op, vToken, underlying[, BalanceMode])`. `underlying` is
 //  pinned into the order/taker ref so the user signs exactly which token moves,
 //  saving a `vToken.underlying()` call.
 //
@@ -161,39 +164,60 @@ contract VenusRepayModule is IMakerModule {
     }
 }
 
-// ──────────────────── Venus take base (withdraw / borrow) ────────────────────
+// ──────────────────── Venus combined taker module ────────────────────
 //
-// Shared scaffolding for the value-out modules. Unlike Comet (where withdraw and
-// borrow are the same `withdrawFrom` call) Venus splits them across distinct
-// vToken calls, so each taker contract carries its own body; the base only holds
-// the Permit3 gate and shared errors. Venus sends value-out proceeds to
-// `msg.sender` (this module), so each body forwards them on to `receiver`.
+// Fuses the Venus borrow and withdraw value-out legs into a SINGLE contract. A
+// leading `op` flag in `data` selects the leg, so a user who runs the full
+// leverage round-trip delegates ONE module address instead of two — a single
+// `comptroller.updateDelegate(this, true)` covers both `borrowBehalf` and the
+// `redeem*Behalf` calls. Unlike Comet (where withdraw and borrow are the same
+// `withdrawFrom` call) Venus splits them across distinct vToken calls, so each
+// leg carries its own body; Venus sends value-out proceeds to `msg.sender` (this
+// module), so each body forwards them on to `receiver`.
 //
 // The user must have called `comptroller.updateDelegate(module, true)`. The
 // `msg.sender == permit3` gate stops a direct `takeOnBehalf` from spending the
 // victim's delegation outside the Permit3 allowance.
 //
-abstract contract VenusTakeBase is ITakerModule {
+// Safety is unchanged from the split modules: the Permit3 taker allowance is
+// keyed by `ref = keccak256(data)`, and `op` is the first word of `data`, so
+// borrow-data and withdraw-data hash to DIFFERENT refs. The user therefore still
+// grants a separate amount-gated allowance per leg — the flag cannot be flipped
+// to spend a borrow allowance on a withdraw (or vice-versa). The only thing
+// shared is the coarse Venus delegation boolean, which is per-address.
+//
+//   byte-map (op first; old single-op offsets shift +32):
+//     op@0, vToken@32, underlying@64 — base = 96 bytes.
+//
+//   op = 0 (Borrow):
+//     data = abi.encode(uint8(0), vToken, underlying)            — base = 96.
+//       → `borrowBehalf(user, amount)` → forward `amount` to `receiver`.
+//
+//   op = 1 (Withdraw):
+//     data = abi.encode(uint8(1), vToken, underlying[, BalanceMode])
+//       — BalanceMode slot at byte 96.
+//       → Exact: `redeemUnderlyingBehalf(user, amount)` → forward `amount`.
+//       → Full:  `redeemBehalf(user, balanceOf)` to this module, forward the
+//         signed `amount`, sweep the underlying excess back to the user.
+//
+contract VenusTakerModule is ITakerModule {
+    using SafeTransferLib for address;
+
     IPermit3 public immutable permit3;
+
+    enum Op {
+        Borrow, // 0
+        Withdraw // 1
+    }
 
     error OnlyPermit3();
     error VenusError(uint256 code);
+    error InsufficientWithdrawn();
+    error BadOp(uint8 op);
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
     }
-}
-
-// ──────────────────── Venus borrow taker module ────────────────────
-//
-// Borrow the underlying on the user's behalf via `borrowBehalf` (debt recorded
-// on the user, proceeds to this module) and forward to `receiver`. Requires the
-// user's `updateDelegate`. `data = abi.encode(vToken, underlying)`.
-//
-contract VenusBorrowModule is VenusTakeBase {
-    using SafeTransferLib for address;
-
-    constructor(address _permit3) VenusTakeBase(_permit3) {}
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
         external
@@ -201,61 +225,37 @@ contract VenusBorrowModule is VenusTakeBase {
     {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        (address vToken, address underlying) = abi.decode(data, (address, address));
+        // op@0, vToken@32, underlying@64 — all static, so a prefix decode is sound
+        // even when op-specific trailing fields follow. An out-of-range op reverts.
+        (uint8 op, address vToken, address underlying) = abi.decode(data, (uint8, address, address));
 
-        uint256 err = IVToken(vToken).borrowBehalf(onBehalfOf, amount);
-        if (err != 0) revert VenusError(err);
-        underlying.safeTransfer(receiver, amount);
-    }
-}
-
-// ──────────────────── Venus withdraw taker module ────────────────────
-//
-// Redeem collateral on the user's behalf and forward to `receiver`. Requires the
-// user's `updateDelegate`.
-//
-// Default (Exact): `redeemUnderlyingBehalf(user, amount)` → forward `amount`.
-//
-// Optional `BalanceMode.Full` (trailing field): redeem the user's ENTIRE vToken
-// balance (`redeemBehalf` of `balanceOf`), forward the signed `amount` to
-// `receiver`, and sweep the underlying excess back to the user. Fill-or-kill
-// only, and only after debt is cleared — the close-flow withdraw leg.
-//
-// `data = abi.encode(vToken, underlying[, DustHandler.BalanceMode])`.
-//
-contract VenusWithdrawModule is VenusTakeBase {
-    using SafeTransferLib for address;
-
-    error InsufficientWithdrawn();
-
-    constructor(address _permit3) VenusTakeBase(_permit3) {}
-
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
-        if (msg.sender != address(permit3)) revert OnlyPermit3();
-
-        (address vToken, address underlying) = abi.decode(data, (address, address));
-
-        if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
-            // Redeem the user's entire vToken balance to this module, forward the
-            // signed `amount` to the order, sweep the underlying excess to the user.
-            // Measure the actually-received underlying via a balanceOf snapshot
-            // around the redeem (the vToken credits this module), so a fee-on-transfer
-            // or rounding shortfall can't silently forward more than was received.
-            uint256 vBal = IVToken(vToken).balanceOf(onBehalfOf);
-            uint256 balBefore = IERC20(underlying).balanceOf(address(this));
-            uint256 err = IVToken(vToken).redeemBehalf(onBehalfOf, vBal);
+        if (op == uint8(Op.Borrow)) {
+            uint256 err = IVToken(vToken).borrowBehalf(onBehalfOf, amount);
             if (err != 0) revert VenusError(err);
-            uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
-            if (received < amount) revert InsufficientWithdrawn();
             underlying.safeTransfer(receiver, amount);
-            if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
+        } else if (op == uint8(Op.Withdraw)) {
+            // BalanceMode slot at byte 96 (op@0 + vToken@32 + underlying@64).
+            if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
+                // Redeem the user's entire vToken balance to this module, forward the
+                // signed `amount` to the order, sweep the underlying excess to the user.
+                // Measure the actually-received underlying via a balanceOf snapshot
+                // around the redeem (the vToken credits this module), so a fee-on-transfer
+                // or rounding shortfall can't silently forward more than was received.
+                uint256 vBal = IVToken(vToken).balanceOf(onBehalfOf);
+                uint256 balBefore = IERC20(underlying).balanceOf(address(this));
+                uint256 err = IVToken(vToken).redeemBehalf(onBehalfOf, vBal);
+                if (err != 0) revert VenusError(err);
+                uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+                if (received < amount) revert InsufficientWithdrawn();
+                underlying.safeTransfer(receiver, amount);
+                if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
+            } else {
+                uint256 err = IVToken(vToken).redeemUnderlyingBehalf(onBehalfOf, amount);
+                if (err != 0) revert VenusError(err);
+                underlying.safeTransfer(receiver, amount);
+            }
         } else {
-            uint256 err = IVToken(vToken).redeemUnderlyingBehalf(onBehalfOf, amount);
-            if (err != 0) revert VenusError(err);
-            underlying.safeTransfer(receiver, amount);
+            revert BadOp(op);
         }
     }
 }

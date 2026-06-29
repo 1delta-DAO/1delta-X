@@ -20,7 +20,7 @@ import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 ///
 /// Items:
 ///   [0] MAKE  CometDepositModule   supply WETH collateral
-///   [1] TAKE  CometBorrowModule    borrow USDC (base withdraw past supply)
+///   [1] TAKE  CometTakerModule(Borrow)  borrow USDC (base withdraw past supply)
 contract DepositBorrowTest is CompoundV3ModulesBase {
     // borrowOut sits comfortably under the USDC-Comet WETH collateral factor for
     // 1 WETH at the pinned block, leaving headroom for ETH price.
@@ -64,7 +64,7 @@ contract DepositBorrowTest is CompoundV3ModulesBase {
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module WETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 
     // ──────────────────── Single-signature permit fill ────────────────────
@@ -77,13 +77,13 @@ contract DepositBorrowTest is CompoundV3ModulesBase {
 
         // Comet account-manager flag: Comet-native, separate from Permit3.
         vm.prank(maker);
-        IComet(COMET).allow(address(borrowModule), true);
+        IComet(COMET).allow(address(takerModule), true);
 
-        bytes memory borrowData = abi.encode(COMET, USDC);
+        bytes memory borrowData = _borrowData(COMET, USDC);
 
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(COMET, WETH));
-        items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), borrowData);
+        items[1] = Item(ItemOp.TAKE, address(takerModule), borrowOut, address(0), borrowData);
 
         LimitOrder memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
 
