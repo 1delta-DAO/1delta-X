@@ -155,55 +155,62 @@ contract FluidRepayModule is IMakerModule, FluidBase {
     }
 }
 
-// ──────────────────── Fluid borrow taker module ────────────────────
+// ──────────────────── Fluid combined taker module ────────────────────
 //
-// Single-op taker: borrows `amount` against the user's position and sends it to
-// `receiver`. Value-out ⇒ just-in-time custody: pull the position NFT in, borrow,
-// hand it back. Needs the user's one-time `factory.setApprovalForAll(module, true)`
-// plus a Permit3 taker allowance keyed on `keccak256(data)` (so the pinned `nftId`
-// is the position the user authorised).
+// Fuses the borrow and withdraw value-out legs into a SINGLE contract. A leading
+// `op` flag in `data` selects the leg, so a user who runs the full leverage
+// round-trip authorises ONE module address instead of two — a single
+// `factory.setApprovalForAll(this, true)` covers both borrow and withdraw, and the
+// broad ERC721 operator grant the value-out modules rely on is granted just once.
 //
-// `data = abi.encode(address vault, address factory, uint256 nftId)`.
+// Both legs use the same just-in-time NFT custody: pull the position NFT in,
+// `operate`, hand it back. Borrow sends the borrowed debt token to `receiver`;
+// withdraw sends collateral straight to `receiver` (Fluid sends it via `operate`'s
+// `to_`, so the module never holds the token — native-collateral vaults work too).
+// The withdrawal is exact; a true "withdraw all" is the `FluidOperateModule` Close
+// path (where the debt leg's repay-all clears the position first).
 //
-contract FluidBorrowModule is ITakerModule, FluidBase {
-    error OnlyPermit3();
+// Safety is unchanged from the split modules: the Permit3 taker allowance is keyed
+// by `ref = keccak256(data)`, and `op` is the first word of `data`, so borrow-data
+// and withdraw-data hash to DIFFERENT refs. The user therefore still grants a
+// separate amount-gated allowance per leg — the pinned `nftId` is the position the
+// user authorised, and the flag cannot be flipped to spend a borrow allowance on a
+// withdraw (or vice-versa).
+//
+//   data byte-map (op first; old single-op offsets shift +32):
+//     op@0, vault@32, factory@64, nftId@96  → base length 128 (no trailing fields).
+//
+//   op = 0 (Borrow):   operate(nftId, 0, +amount, receiver)            — borrow debt.
+//   op = 1 (Withdraw): operate(nftId, -amount, 0, receiver)            — withdraw collateral.
+//
+//   data = abi.encode(uint8 op, address vault, address factory, uint256 nftId).
+//
+contract FluidTakerModule is ITakerModule, FluidBase {
+    enum Op {
+        Borrow, // 0 — borrow debt to receiver
+        Withdraw // 1 — withdraw collateral to receiver
 
-    constructor(address _permit3) FluidBase(_permit3) {}
-
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
-        if (msg.sender != address(permit3)) revert OnlyPermit3();
-
-        (address vault, address factory, uint256 nftId) = abi.decode(data, (address, address, uint256));
-
-        IFluidVaultFactory(factory).transferFrom(onBehalfOf, address(this), nftId);
-        IFluidVault(vault).operate(nftId, 0, _signed(amount), receiver);
-        IFluidVaultFactory(factory).transferFrom(address(this), onBehalfOf, nftId);
     }
-}
 
-// ──────────────────── Fluid withdraw taker module ────────────────────
-//
-// Single-op taker: withdraws `amount` collateral from the user's position straight
-// to `receiver` (Fluid sends it via `operate`'s `to_`, so the module never holds
-// the token — native-collateral vaults work too), via the same just-in-time NFT
-// custody as the borrow module. The withdrawal is exact and gated by the Permit3
-// taker allowance; a true "withdraw all" is the `FluidOperateModule` Close path
-// (where the debt leg's repay-all clears the position first).
-//
-// `data = abi.encode(address vault, address factory, uint256 nftId)`.
-//
-contract FluidWithdrawModule is ITakerModule, FluidBase {
     error OnlyPermit3();
+    error BadOp(uint8 op);
 
     constructor(address _permit3) FluidBase(_permit3) {}
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        (address vault, address factory, uint256 nftId) = abi.decode(data, (address, address, uint256));
+        (uint8 op, address vault, address factory, uint256 nftId) =
+            abi.decode(data, (uint8, address, address, uint256));
 
         IFluidVaultFactory(factory).transferFrom(onBehalfOf, address(this), nftId);
-        IFluidVault(vault).operate(nftId, -_signed(amount), 0, receiver);
+        if (op == uint8(Op.Borrow)) {
+            IFluidVault(vault).operate(nftId, 0, _signed(amount), receiver);
+        } else if (op == uint8(Op.Withdraw)) {
+            IFluidVault(vault).operate(nftId, -_signed(amount), 0, receiver);
+        } else {
+            revert BadOp(op);
+        }
         IFluidVaultFactory(factory).transferFrom(address(this), onBehalfOf, nftId);
     }
 }

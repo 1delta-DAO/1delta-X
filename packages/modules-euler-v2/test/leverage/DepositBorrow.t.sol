@@ -8,7 +8,7 @@ import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
 
 /// @dev Deposit WETH collateral + borrow USDC against it in one Euler order.
 ///   [0] MAKE EulerV2DepositModule  supply WETH into eWETH-2 (direct vault call)
-///   [1] TAKE EulerV2BorrowModule   borrow USDC from eUSDC-2 (routed via the EVC)
+///   [1] TAKE EulerV2TakerModule (Borrow)  borrow USDC from eUSDC-2 (via the EVC)
 contract EulerDepositBorrowTest is EulerV2ModulesBase {
     uint256 constant BORROW_OUT = 1_000e6; // comfortably under 84% LTV for 1 WETH
 
@@ -44,6 +44,6 @@ contract EulerDepositBorrowTest is EulerV2ModulesBase {
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module WETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 }

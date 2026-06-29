@@ -23,9 +23,9 @@ import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 ///
 /// Items (strictly ordered):
 ///   [0] MAKE  CometRepayModule          repay USDC (debt + buffer), dust → maker
-///   [1] TAKE  CometWithdrawModule        withdraw `exactWeth` WETH, recipient = maker
+///   [1] TAKE  CometTakerModule(Withdraw)  withdraw `exactWeth` WETH, recipient = maker
 ///   [2] MAKE  CometDepositModule→USDS     deposit `exactWeth` WETH onto the USDS Comet
-///   [3] TAKE  CometBorrowModule→USDS      borrow USDS, recipient = Settlement
+///   [3] TAKE  CometTakerModule(Borrow)→USDS  borrow USDS, recipient = Settlement
 contract MigrateTest is CompoundV3ModulesBase {
     // ──────────────────── Direct fill (4-item order, exact amounts) ────────────────────
 
@@ -81,8 +81,8 @@ contract MigrateTest is CompoundV3ModulesBase {
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "repay module drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module drained");
-        assertEq(IERC20(WETH).balanceOf(address(withdrawModule)), 0, "withdraw module drained");
-        assertEq(IERC20(USDS).balanceOf(address(borrowModule)), 0, "borrow module drained");
+        assertEq(IERC20(WETH).balanceOf(address(takerModule)), 0, "taker module WETH drained");
+        assertEq(IERC20(USDS).balanceOf(address(takerModule)), 0, "taker module USDS drained");
     }
 
     // ──────────────────── Single-signature permit fill (4-item order, one signature) ────────────────────
@@ -106,7 +106,7 @@ contract MigrateTest is CompoundV3ModulesBase {
         // pre-setting Aave credit delegation. USDC-Comet withdraw is already
         // allowed in setUp; here we allow the USDS-Comet borrow.
         vm.prank(maker);
-        IComet(COMET_USDS).allow(address(borrowModule), true);
+        IComet(COMET_USDS).allow(address(takerModule), true);
     }
 
     function _buildMigrationOrderAndBatch()
@@ -114,15 +114,15 @@ contract MigrateTest is CompoundV3ModulesBase {
         view
         returns (LimitOrder memory order, IPermit3.PermitBatch memory batch)
     {
-        bytes memory withdrawData = abi.encode(COMET, WETH);
-        bytes memory borrowData = abi.encode(COMET_USDS, USDS);
+        bytes memory withdrawData = _withdrawData(COMET, WETH);
+        bytes memory borrowData = _borrowData(COMET_USDS, USDS);
         uint48 exp = uint48(block.timestamp + 1 hours);
 
         Item[] memory items = new Item[](4);
         items[0] = Item(ItemOp.MAKE, address(repayModule), 3_050e6, address(0), abi.encode(COMET, USDC));
-        items[1] = Item(ItemOp.TAKE, address(withdrawModule), 9 ether, maker, withdrawData);
+        items[1] = Item(ItemOp.TAKE, address(takerModule), 9 ether, maker, withdrawData);
         items[2] = Item(ItemOp.MAKE, address(depositModule), 9 ether, address(0), abi.encode(COMET_USDS, WETH));
-        items[3] = Item(ItemOp.TAKE, address(borrowModule), 3_000e18, address(0), borrowData);
+        items[3] = Item(ItemOp.TAKE, address(takerModule), 3_000e18, address(0), borrowData);
 
         order = LimitOrder({
             maker: maker,

@@ -21,8 +21,7 @@ import {
 import {
     DolomiteDepositModule,
     DolomiteRepayModule,
-    DolomiteWithdrawModule,
-    DolomiteBorrowModule,
+    DolomiteTakerModule,
     DolomiteOperateModule
 } from "../../src/DolomiteModules.sol";
 
@@ -59,8 +58,7 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
 
     DolomiteDepositModule depositModule;
     DolomiteRepayModule repayModule;
-    DolomiteWithdrawModule withdrawModule;
-    DolomiteBorrowModule borrowModule;
+    DolomiteTakerModule takerModule;
     DolomiteOperateModule operateModule;
     LimitOrderLeverageSolver leverageSolver;
 
@@ -96,8 +94,7 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
 
         depositModule = new DolomiteDepositModule(address(permit3), address(settlement));
         repayModule = new DolomiteRepayModule(address(permit3), address(settlement));
-        withdrawModule = new DolomiteWithdrawModule(address(permit3));
-        borrowModule = new DolomiteBorrowModule(address(permit3));
+        takerModule = new DolomiteTakerModule(address(permit3));
         operateModule = new DolomiteOperateModule(address(permit3));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
@@ -111,20 +108,18 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
         vm.label(address(leverageSolver), "leverageSolver");
         vm.label(address(depositModule), "dolomiteDepositModule");
         vm.label(address(repayModule), "dolomiteRepayModule");
-        vm.label(address(withdrawModule), "dolomiteWithdrawModule");
-        vm.label(address(borrowModule), "dolomiteBorrowModule");
+        vm.label(address(takerModule), "dolomiteTakerModule");
         vm.label(address(operateModule), "dolomiteOperateModule");
 
         // Dolomite-native authorisation: the maker makes each module a local
         // operator of their account. `operate` rejects any other caller; the
         // Permit3 allowance caps the per-fill amount.
         vm.startPrank(maker);
-        OperatorArg[] memory ops = new OperatorArg[](5);
+        OperatorArg[] memory ops = new OperatorArg[](4);
         ops[0] = OperatorArg(address(depositModule), true);
         ops[1] = OperatorArg(address(repayModule), true);
-        ops[2] = OperatorArg(address(withdrawModule), true);
-        ops[3] = OperatorArg(address(borrowModule), true);
-        ops[4] = OperatorArg(address(operateModule), true);
+        ops[2] = OperatorArg(address(takerModule), true);
+        ops[3] = OperatorArg(address(operateModule), true);
         DOLOMITE.setOperators(ops);
         vm.stopPrank();
     }
@@ -208,8 +203,14 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
         return abi.encode(address(DOLOMITE), COLL_MARKET, COLL, ACCOUNT);
     }
 
+    // Taker data is op-prefixed: op 0 = Borrow, op 1 = Withdraw. The op makes the
+    // borrow/withdraw refs (keccak256(data)) distinct under the single module.
     function _borrowData() internal view returns (bytes memory) {
-        return abi.encode(address(DOLOMITE), DEBT_MARKET, DEBT, ACCOUNT);
+        return abi.encode(uint8(DolomiteTakerModule.Op.Borrow), address(DOLOMITE), DEBT_MARKET, DEBT, ACCOUNT);
+    }
+
+    function _withdrawData() internal view returns (bytes memory) {
+        return abi.encode(uint8(DolomiteTakerModule.Op.Withdraw), address(DOLOMITE), COLL_MARKET, COLL, ACCOUNT);
     }
 
     function _buildDepositBorrowOrder(uint256 collateralIn, uint256 borrowOut)
@@ -219,7 +220,7 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
     {
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), _depositData());
-        items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), _borrowData());
+        items[1] = Item(ItemOp.TAKE, address(takerModule), borrowOut, address(0), _borrowData());
         return _order(maker, 1, DEBT, COLL, borrowOut, collateralIn, items);
     }
 

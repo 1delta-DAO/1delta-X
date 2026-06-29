@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Test} from "forge-std/Test.sol";
-import {MorphoBlueBorrowModule, MorphoBlueWithdrawCollateralModule} from "../../src/MorphoBlueModules.sol";
 import {MarketParams} from "../../src/interfaces/IMorphoBlue.sol";
+
+// ── Shared mocks + helper for the Morpho taker-module unit tests ──────────────
+//
+// This file holds the mocks (`MockERC20`, `MockMorpho`, `MockPermit3`) and the
+// `dummyMarketParams` helper imported by `MorphoBlueCombinedTakerModule.t.sol`.
+// Keep the symbols + import path stable so that test still compiles.
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -108,137 +112,4 @@ function dummyMarketParams(address loanToken, address collateralToken) pure retu
         irm: address(0x0002),
         lltv: 0.8e18
     });
-}
-
-// ── MorphoBlueBorrowModule tests ──────────────────────────────────────────────
-
-contract MorphoBlueBorrowModuleTest is Test {
-    MockERC20 loanToken;
-    MockERC20 collateralToken;
-    MockMorpho morpho;
-    MockPermit3 permit3;
-    MorphoBlueBorrowModule module;
-    MarketParams market;
-
-    address user = address(0xABCD);
-    address receiver = address(0xCAFE);
-    uint256 constant AMOUNT = 1000e6;
-
-    function setUp() public {
-        loanToken = new MockERC20();
-        collateralToken = new MockERC20();
-        morpho = new MockMorpho(loanToken, collateralToken);
-        permit3 = new MockPermit3();
-        module = new MorphoBlueBorrowModule(address(permit3), address(morpho));
-        market = dummyMarketParams(address(loanToken), address(collateralToken));
-    }
-
-    function test_borrow_withAuthSig() public {
-        // data = abi.encode(MarketParams, nonce, deadline, v, r, s)
-        bytes memory data = abi.encode(market, uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0));
-
-        vm.prank(address(permit3));
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-
-        assertTrue(morpho.authWithSigCalled(), "setAuthorizationWithSig not called");
-        assertEq(morpho.lastAuthorizer(), user);
-        assertEq(morpho.lastAuthorized(), address(module));
-        assertEq(loanToken.balanceOf(receiver), AMOUNT);
-    }
-
-    function test_borrow_withoutSig_standingAuth() public {
-        // Pre-authorize via on-chain call.
-        vm.prank(user);
-        morpho.setAuthorization(address(module), true);
-
-        bytes memory data = abi.encode(market);
-
-        vm.prank(address(permit3));
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-
-        assertFalse(morpho.authWithSigCalled());
-        assertEq(loanToken.balanceOf(receiver), AMOUNT);
-    }
-
-    function test_borrow_revertsIfNotAuthorizedAndNoSig() public {
-        bytes memory data = abi.encode(market);
-        vm.prank(address(permit3));
-        vm.expectRevert("morpho: not authorized");
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-    }
-
-    function test_borrow_revertsIfNotPermit3() public {
-        bytes memory data = abi.encode(market);
-        vm.expectRevert(MorphoBlueBorrowModule.OnlyPermit3.selector);
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-    }
-}
-
-// ── MorphoBlueWithdrawCollateralModule tests ──────────────────────────────────
-
-contract MorphoBlueWithdrawCollateralModuleTest is Test {
-    MockERC20 loanToken;
-    MockERC20 collateralToken;
-    MockMorpho morpho;
-    MockPermit3 permit3;
-    MorphoBlueWithdrawCollateralModule module;
-    MarketParams market;
-
-    address user = address(0xABCD);
-    address receiver = address(0xCAFE);
-    uint256 constant AMOUNT = 500e18;
-
-    function setUp() public {
-        loanToken = new MockERC20();
-        collateralToken = new MockERC20();
-        morpho = new MockMorpho(loanToken, collateralToken);
-        permit3 = new MockPermit3();
-        module = new MorphoBlueWithdrawCollateralModule(address(permit3), address(morpho));
-        market = dummyMarketParams(address(loanToken), address(collateralToken));
-
-        morpho.setPositionCollateral(market, user, uint128(AMOUNT * 10));
-    }
-
-    function test_withdrawCollateral_withAuthSig() public {
-        // data = abi.encode(MarketParams, BalanceMode=0, nonce, deadline, v, r, s)
-        bytes memory data = abi.encode(
-            market,
-            uint8(0), // BalanceMode = Exact, explicit slot required
-            uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
-        );
-
-        vm.prank(address(permit3));
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-
-        assertTrue(morpho.authWithSigCalled());
-        assertEq(morpho.lastAuthorizer(), user);
-        assertEq(morpho.lastAuthorized(), address(module));
-        assertEq(collateralToken.balanceOf(receiver), AMOUNT);
-    }
-
-    function test_withdrawCollateral_withoutSig_standingAuth() public {
-        vm.prank(user);
-        morpho.setAuthorization(address(module), true);
-
-        bytes memory data = abi.encode(market);
-
-        vm.prank(address(permit3));
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-
-        assertFalse(morpho.authWithSigCalled());
-        assertEq(collateralToken.balanceOf(receiver), AMOUNT);
-    }
-
-    function test_withdrawCollateral_revertsIfNotAuthorizedAndNoSig() public {
-        bytes memory data = abi.encode(market);
-        vm.prank(address(permit3));
-        vm.expectRevert("morpho: not authorized");
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-    }
-
-    function test_withdrawCollateral_revertsIfNotPermit3() public {
-        bytes memory data = abi.encode(market);
-        vm.expectRevert(MorphoBlueWithdrawCollateralModule.OnlyPermit3.selector);
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-    }
 }

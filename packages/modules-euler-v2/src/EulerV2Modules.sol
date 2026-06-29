@@ -29,10 +29,11 @@ import {IEulerVault, IEVC} from "./interfaces/IEulerV2.sol";
 //      (`EVC.setAccountOperator(user, module, true)`) and enabled the controller
 //      / collateral — the Euler analogue of Aave `approveDelegation`.
 //
-//  Level A = four single-op modules (deposit/repay makers, borrow/withdraw
-//  takers). Level B = `EulerV2BatchModule`, which fuses a value-in and a
-//  value-out leg into ONE `EVC.batch` so they share a single deferred liquidity
-//  check — the payoff of Euler's architecture.
+//  Level A = deposit/repay makers + a single combined `EulerV2TakerModule` that
+//  multiplexes the two value-out legs (borrow/withdraw) behind a leading `op`
+//  flag. Level B = `EulerV2BatchModule`, which fuses a value-in and a value-out
+//  leg into ONE `EVC.batch` so they share a single deferred liquidity check — the
+//  payoff of Euler's architecture.
 // ════════════════════════════════════════════════════════════════════════════
 
 // ──────────────────── Euler V2 deposit maker module ────────────────────
@@ -148,19 +149,43 @@ contract EulerV2RepayModule is IMakerModule {
     }
 }
 
-// ──────────────────── Euler V2 borrow taker module ────────────────────
+// ──────────────────── Euler V2 combined taker module ────────────────────
 //
-// Single-op taker module. Routes a borrow through the EVC as the user account so
-// the vault authenticates the maker as the on-behalf-of account, then sends the
-// borrowed asset straight to `receiver`. The user must have enabled `vault` as
-// their controller and granted this module operator rights
-// (`EVC.setAccountOperator(user, module, true)`); the Permit3 taker allowance
-// caps the per-fill size. `data = abi.encode(vault)`.
+// Fuses the borrow and withdraw value-out legs into a SINGLE contract. A leading
+// `op` flag in `data` selects the leg, so a user who runs the full leverage
+// round-trip authorizes ONE module address instead of two — a single
+// `EVC.setAccountOperator(user, module, true)` covers both borrow and withdraw,
+// and the EVC operator surface shrinks accordingly.
 //
-contract EulerV2BorrowModule is ITakerModule {
+// Safety is unchanged from the split modules: the Permit3 taker allowance is
+// keyed by `ref = keccak256(data)`, and `op` is the first word of `data`, so
+// borrow-data and withdraw-data hash to DIFFERENT refs. The user therefore still
+// grants a separate amount-gated allowance per leg — the flag cannot be flipped
+// to spend a borrow allowance on a withdraw (or vice-versa). The only thing
+// shared is the coarse EVC operator grant, which is per-address by construction.
+//
+// Both legs route value-out through the EVC as the user account; the user must
+// have enabled the borrow vault as their controller / the collateral vault in
+// their set, and granted this module operator rights once.
+//
+// Byte map (op first; old single-op offsets shift +32):
+//   base:           op@0, vault@32                     (base length 64)
+//   op = 0 (Borrow):
+//     data = abi.encode(uint8(0), vault)
+//   op = 1 (Withdraw):
+//     data = abi.encode(uint8(1), vault[, BalanceMode]) — BalanceMode@64
+//
+contract EulerV2TakerModule is ITakerModule {
     IPermit3 public immutable permit3;
 
+    enum Op {
+        Borrow, // 0
+        Withdraw // 1
+
+    }
+
     error OnlyPermit3();
+    error BadOp(uint8 op);
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
@@ -169,43 +194,25 @@ contract EulerV2BorrowModule is ITakerModule {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        address vault = abi.decode(data, (address));
-        IEVC(IEulerVault(vault).EVC()).call(
-            vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.borrow, (amount, receiver))
-        );
-    }
-}
+        // op@0, vault@32 — both static, so a prefix decode is sound even when
+        // op-specific trailing fields follow.
+        (uint8 op, address vault) = abi.decode(data, (uint8, address));
 
-// ──────────────────── Euler V2 withdraw taker module ────────────────────
-//
-// Single-op taker module. Withdraws collateral on the user's behalf, routed via
-// the EVC. Optional `BalanceMode.Full`: withdraw the user's entire withdrawable
-// balance (`maxWithdraw`) to this module, forward the signed `amount` to
-// `receiver`, and sweep the excess back to the user — the TAKE-side mirror of the
-// over-repay refund. Fill-or-kill only, and only after debt is cleared.
-//
-// `data = abi.encode(vault[, DustHandler.BalanceMode])`.
-//
-contract EulerV2WithdrawModule is ITakerModule {
-    IPermit3 public immutable permit3;
-
-    error OnlyPermit3();
-
-    constructor(address _permit3) {
-        permit3 = IPermit3(_permit3);
-    }
-
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
-        if (msg.sender != address(permit3)) revert OnlyPermit3();
-
-        address vault = abi.decode(data, (address));
-
-        if (DustHandler.readBalanceMode(data, 32) == DustHandler.BalanceMode.Full) {
-            _withdrawFull(vault, onBehalfOf, amount, receiver);
-        } else {
+        if (op == uint8(Op.Borrow)) {
             IEVC(IEulerVault(vault).EVC()).call(
-                vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf))
+                vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.borrow, (amount, receiver))
             );
+        } else if (op == uint8(Op.Withdraw)) {
+            // BalanceMode slot at offset 64 (op@0 + vault@32).
+            if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
+                _withdrawFull(vault, onBehalfOf, amount, receiver);
+            } else {
+                IEVC(IEulerVault(vault).EVC()).call(
+                    vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf))
+                );
+            }
+        } else {
+            revert BadOp(op);
         }
     }
 

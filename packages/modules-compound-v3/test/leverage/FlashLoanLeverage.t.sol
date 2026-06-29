@@ -73,6 +73,6 @@ contract FlashLoanLeverageTest is CompoundV3ModulesBase {
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module WETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 }

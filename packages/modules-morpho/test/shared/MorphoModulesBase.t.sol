@@ -14,8 +14,7 @@ import {IMorphoBlue, MarketParams, Position, Id} from "../../src/interfaces/IMor
 import {
     MorphoBlueSupplyCollateralModule,
     MorphoBlueRepayModule,
-    MorphoBlueWithdrawCollateralModule,
-    MorphoBlueBorrowModule
+    MorphoBlueTakerModule
 } from "../../src/MorphoBlueModules.sol";
 
 /// @dev Morpho Blue integration harness. Mirrors `AaveModulesBase` but binds to a
@@ -36,9 +35,14 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
 
     MorphoBlueSupplyCollateralModule supplyModule;
     MorphoBlueRepayModule repayModule;
-    MorphoBlueWithdrawCollateralModule withdrawModule;
-    MorphoBlueBorrowModule borrowModule;
+    // Combined borrow + withdraw-collateral taker module. A leading `op` flag in
+    // `data` selects the leg (0 = Borrow, 1 = WithdrawCollateral).
+    MorphoBlueTakerModule takerModule;
     LimitOrderLeverageSolver leverageSolver;
+
+    // Op flags consumed by `MorphoBlueTakerModule` as the leading word of `data`.
+    uint8 constant OP_BORROW = 0;
+    uint8 constant OP_WITHDRAW = 1;
 
     address WSTETH;
 
@@ -60,8 +64,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
 
         supplyModule = new MorphoBlueSupplyCollateralModule(address(permit3), address(MORPHO), address(settlement));
         repayModule = new MorphoBlueRepayModule(address(permit3), address(MORPHO), address(settlement));
-        withdrawModule = new MorphoBlueWithdrawCollateralModule(address(permit3), address(MORPHO));
-        borrowModule = new MorphoBlueBorrowModule(address(permit3), address(MORPHO));
+        takerModule = new MorphoBlueTakerModule(address(permit3), address(MORPHO));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
             address(permit3),
@@ -74,8 +77,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         vm.label(address(leverageSolver), "leverageSolver");
         vm.label(address(supplyModule), "morphoSupplyCollateralModule");
         vm.label(address(repayModule), "morphoRepayModule");
-        vm.label(address(withdrawModule), "morphoWithdrawCollateralModule");
-        vm.label(address(borrowModule), "morphoBorrowModule");
+        vm.label(address(takerModule), "morphoTakerModule");
         vm.label(WSTETH, "wstETH");
 
         // Maker bare-approves wstETH to Permit3 (the supply module pulls it).
@@ -87,6 +89,18 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
 
     function _marketData() internal view returns (bytes memory) {
         return abi.encode(marketParams);
+    }
+
+    /// @dev Taker `data` for the combined module's borrow leg: the op flag is the
+    ///      first word, so this hashes to a different Permit3 ref than the withdraw
+    ///      leg even on the same market.
+    function _borrowData() internal view returns (bytes memory) {
+        return abi.encode(OP_BORROW, marketParams);
+    }
+
+    /// @dev Taker `data` for the combined module's withdraw-collateral leg.
+    function _withdrawData() internal view returns (bytes memory) {
+        return abi.encode(OP_WITHDRAW, marketParams);
     }
 
     function _marketId() internal view returns (Id) {
@@ -139,16 +153,17 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
     // ──────────────────── Approval helpers ────────────────────
 
     function _approveMakerSupplyBorrowSide(uint256 collateralIn, uint256 borrowOut) internal {
-        bytes32 borrowRef = keccak256(_marketData());
+        // op-prefixed borrow data, so the ref is distinct from the withdraw leg.
+        bytes32 borrowRef = keccak256(_borrowData());
 
         vm.startPrank(maker);
         // wstETH: supply module pulls the collateral via Permit3 during MAKE.
         IERC20(WSTETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(supplyModule), WSTETH, uint160(collateralIn), 0);
 
-        // Morpho-native authorisation: lets the borrow module incur USDC debt on
-        // the maker's behalf. The Permit3 taker allowance is what caps the fill.
-        MORPHO.setAuthorization(address(borrowModule), true);
+        // Morpho-native authorisation: lets the combined taker module incur USDC
+        // debt on the maker's behalf. The Permit3 taker allowance caps the fill.
+        MORPHO.setAuthorization(address(takerModule), true);
 
         // Permit3 taker gate on the exact market + amount.
         permit3.approveTaker(address(settlement), borrowRef, uint160(borrowOut), 0);
@@ -166,9 +181,9 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         IERC20(WSTETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), WSTETH, uint160(wstethIn), 0);
 
-        // Morpho-native authorisation for the withdraw module. No token pull: the
-        // collateral is not tokenised, so the taker allowance is the only cap.
-        MORPHO.setAuthorization(address(withdrawModule), true);
+        // Morpho-native authorisation for the combined taker module. No token pull:
+        // the collateral is not tokenised, so the taker allowance is the only cap.
+        MORPHO.setAuthorization(address(takerModule), true);
         permit3.approveTaker(address(settlement), ref, uint160(wstethIn), 0);
         vm.stopPrank();
     }
@@ -194,10 +209,10 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         Item[] memory items = new Item[](1);
         items[0] = Item({
             op: ItemOp.TAKE,
-            module: address(withdrawModule),
+            module: address(takerModule),
             amount: wstethIn,
             recipient: address(0),
-            data: _marketData()
+            data: _withdrawData()
         });
         order = _order(maker, 1, WSTETH, USDC, wstethIn, usdcOut, items);
     }
@@ -217,10 +232,10 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         });
         items[1] = Item({
             op: ItemOp.TAKE,
-            module: address(borrowModule),
+            module: address(takerModule),
             amount: borrowOut,
             recipient: address(0),
-            data: _marketData()
+            data: _borrowData()
         });
         order = _order(maker, 2, USDC, WSTETH, borrowOut, collateralIn, items);
     }

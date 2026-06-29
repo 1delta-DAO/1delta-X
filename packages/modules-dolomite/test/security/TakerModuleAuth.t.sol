@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
-import {DolomiteTakeBase, DolomiteOperateModule} from "../../src/DolomiteModules.sol";
+import {DolomiteTakerModule, DolomiteOperateModule} from "../../src/DolomiteModules.sol";
 
 /// @dev The taker modules MUST reject any caller other than Permit3 — otherwise a
 /// direct `takeOnBehalf(victim, amount, attacker, data)` would bypass the Permit3
@@ -12,14 +12,14 @@ contract DolomiteTakerModuleAuthTest is DolomiteModulesBase {
 
     function test_withdraw_rejects_non_permit3() public {
         vm.prank(attacker);
-        vm.expectRevert(DolomiteTakeBase.OnlyPermit3.selector);
-        withdrawModule.takeOnBehalf(maker, 1 ether, attacker, _depositData());
+        vm.expectRevert(DolomiteTakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(maker, 1 ether, attacker, _withdrawData());
     }
 
     function test_borrow_rejects_non_permit3() public {
         vm.prank(attacker);
-        vm.expectRevert(DolomiteTakeBase.OnlyPermit3.selector);
-        borrowModule.takeOnBehalf(maker, 1_000e6, attacker, _borrowData());
+        vm.expectRevert(DolomiteTakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(maker, 1_000e6, attacker, _borrowData());
     }
 
     function test_operate_rejects_non_permit3() public {

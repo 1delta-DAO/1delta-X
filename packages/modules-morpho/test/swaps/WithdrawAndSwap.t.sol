@@ -14,7 +14,7 @@ import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 ///   tokenIn  = wstETH   (maker gives — sourced from the withdraw item)
 ///   tokenOut = USDC     (solver gives, maker receives)
 ///
-/// One TAKE item: MorphoBlueWithdrawCollateralModule, routed via `permit3.take` so
+/// One TAKE item: MorphoBlueTakerModule (op=Withdraw), routed via `permit3.take` so
 /// the taker allowance gate enforces the exact (user, module, ref) amount. Unlike
 /// Aave there is NO receipt token to pull — Morpho authorisation + the taker gate
 /// is the whole authorization story, and `withdrawCollateral` sends straight to
@@ -29,7 +29,7 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
         _seedCollateral(wstethIn); //          collateral is exact — no cushion needed
         deal(USDC, solver, usdcOut);
 
-        bytes memory takerData = _marketData();
+        bytes memory takerData = _withdrawData();
         bytes32 ref = keccak256(takerData);
 
         _approveMakerWithdrawSide(wstethIn, ref);
@@ -51,9 +51,9 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
 
         assertEq(IERC20(WSTETH).balanceOf(address(settlement)), 0, "settlement wstETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
-        assertEq(IERC20(WSTETH).balanceOf(address(withdrawModule)), 0, "module wstETH drained");
+        assertEq(IERC20(WSTETH).balanceOf(address(takerModule)), 0, "module wstETH drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(withdrawModule), ref);
+        (uint160 remaining,,) = permit3.takerAllowance(maker, address(takerModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 
@@ -68,14 +68,14 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
 
         // Morpho-native authorisation: not part of the signed batch.
         vm.prank(maker);
-        MORPHO.setAuthorization(address(withdrawModule), true);
+        MORPHO.setAuthorization(address(takerModule), true);
 
-        bytes memory takerData = _marketData();
+        bytes memory takerData = _withdrawData();
 
         Item[] memory items = new Item[](1);
         items[0] = Item({
             op: ItemOp.TAKE,
-            module: address(withdrawModule),
+            module: address(takerModule),
             amount: wstethIn,
             recipient: address(0),
             data: takerData

@@ -13,12 +13,19 @@ the module itself — the same shape as the Comet/Euler/Dolomite packages.
 | ----------------------- | ---- | -------------------------------- | ------------- |
 | `VenusDepositModule`    | MAKE | `mintBehalf(user, amount)`       | none (permissionless value-in) |
 | `VenusRepayModule`      | MAKE | `repayBorrowBehalf(user, amount)`| none; pull-exact + DustHandler recycle/sweep |
-| `VenusBorrowModule`     | TAKE | `borrowBehalf(user, amount)`     | `comptroller.updateDelegate(module, true)` |
-| `VenusWithdrawModule`   | TAKE | `redeemUnderlyingBehalf` / `redeemBehalf` (Full mode) | `comptroller.updateDelegate(module, true)` |
+| `VenusTakerModule` (op 0, Borrow)   | TAKE | `borrowBehalf(user, amount)`     | `comptroller.updateDelegate(module, true)` |
+| `VenusTakerModule` (op 1, Withdraw) | TAKE | `redeemUnderlyingBehalf` / `redeemBehalf` (Full mode) | `comptroller.updateDelegate(module, true)` |
 
-`data = abi.encode(vToken, underlying)` for every module (`underlying` is pinned
-into the order / taker ref). Repay accepts an optional trailing
-`DustHandler.DustAction`; withdraw accepts an optional trailing
+The two value-out legs are fused into a single `VenusTakerModule`, selected by a
+leading `uint8 op` flag, so the user delegates ONE module address for the whole
+leverage round-trip. The op flag is the first word of `data`, so borrow-data and
+withdraw-data hash to different `keccak256(data)` taker refs — each leg still gets
+its own amount-gated Permit3 allowance.
+
+Maker `data = abi.encode(vToken, underlying)`; taker
+`data = abi.encode(uint8 op, vToken, underlying[, BalanceMode])` (`underlying`
+pinned into the order / taker ref). Repay accepts an optional trailing
+`DustHandler.DustAction`; withdraw (op 1) accepts an optional trailing
 `DustHandler.BalanceMode` (`Full` redeems the entire balance and sweeps the
 excess to the user).
 

@@ -9,8 +9,7 @@ import {IFluidVault} from "../../src/interfaces/IFluid.sol";
 import {
     FluidDepositModule,
     FluidRepayModule,
-    FluidBorrowModule,
-    FluidWithdrawModule,
+    FluidTakerModule,
     FluidOperateModule
 } from "../../src/FluidModules.sol";
 
@@ -40,8 +39,7 @@ abstract contract FluidModulesBase is CoreSettlementBase {
 
     FluidDepositModule depositModule;
     FluidRepayModule repayModule;
-    FluidBorrowModule borrowModule;
-    FluidWithdrawModule withdrawModule;
+    FluidTakerModule takerModule;
     FluidOperateModule operateModule;
 
     /// @dev A plain EOA that receives value-out proceeds (USDC / native ETH).
@@ -52,23 +50,20 @@ abstract contract FluidModulesBase is CoreSettlementBase {
 
         depositModule = new FluidDepositModule(address(permit3), address(settlement));
         repayModule = new FluidRepayModule(address(permit3), address(settlement));
-        borrowModule = new FluidBorrowModule(address(permit3));
-        withdrawModule = new FluidWithdrawModule(address(permit3));
+        takerModule = new FluidTakerModule(address(permit3));
         operateModule = new FluidOperateModule(address(permit3));
 
         vm.label(VAULT, "FluidEthUsdcVault");
         vm.label(VAULT_FACTORY, "FluidVaultFactory");
         vm.label(address(depositModule), "fluidDepositModule");
         vm.label(address(repayModule), "fluidRepayModule");
-        vm.label(address(borrowModule), "fluidBorrowModule");
-        vm.label(address(withdrawModule), "fluidWithdrawModule");
+        vm.label(address(takerModule), "fluidTakerModule");
         vm.label(address(operateModule), "fluidOperateModule");
         vm.label(recv, "receiver");
 
         // One-time ERC721 operator grant for the value-out (JIT-custody) modules.
         vm.startPrank(maker);
-        IFluidVaultFactory721(VAULT_FACTORY).setApprovalForAll(address(borrowModule), true);
-        IFluidVaultFactory721(VAULT_FACTORY).setApprovalForAll(address(withdrawModule), true);
+        IFluidVaultFactory721(VAULT_FACTORY).setApprovalForAll(address(takerModule), true);
         IFluidVaultFactory721(VAULT_FACTORY).setApprovalForAll(address(operateModule), true);
         vm.stopPrank();
     }

@@ -26,7 +26,7 @@ import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 ///   [0] MAKE  AaveV3RepayModule                  repay Aave debt (debt + buffer), dust → maker
 ///   [1] TAKE  AaveV3WithdrawModule               withdraw `exactWeth` wstETH from Aave, recipient = maker
 ///   [2] MAKE  MorphoBlueSupplyCollateralModule   supply `exactWeth` wstETH onto Morpho
-///   [3] TAKE  MorphoBlueBorrowModule             borrow USDC on Morpho, recipient = Settlement
+///   [3] TAKE  MorphoBlueTakerModule (op=Borrow)   borrow USDC on Morpho, recipient = Settlement
 contract MigrateAaveToMorphoTest is MorphoModulesBase {
     AaveV3RepayModule aaveRepayModule;
     AaveV3WithdrawModule aaveWithdrawModule;
@@ -116,7 +116,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(aaveRepayModule)), 0, "aave repay module drained");
         assertEq(IERC20(WSTETH).balanceOf(address(aaveWithdrawModule)), 0, "aave withdraw module drained");
         assertEq(IERC20(WSTETH).balanceOf(address(supplyModule)), 0, "morpho supply module drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "morpho borrow module drained");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "morpho taker module drained");
     }
 
     // ──────────────────── Single-signature permit fill ────────────────────
@@ -131,7 +131,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
 
         // Native delegation (outside the signed batch): Morpho authorises the borrow.
         vm.prank(maker);
-        MORPHO.setAuthorization(address(borrowModule), true);
+        MORPHO.setAuthorization(address(takerModule), true);
 
         (LimitOrder memory order, IPermit3.PermitBatch memory batch) =
             _buildMigrationOrderAndBatch(bufferedRepay, exactWeth, debt);
@@ -175,8 +175,8 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         permit3.approveToken(address(supplyModule), WSTETH, uint160(exactWeth), 0);
 
         // [3] Morpho borrow: Morpho-native auth + Permit3 taker cap.
-        MORPHO.setAuthorization(address(borrowModule), true);
-        permit3.approveTaker(address(settlement), keccak256(_marketData()), uint160(debt), 0);
+        MORPHO.setAuthorization(address(takerModule), true);
+        permit3.approveTaker(address(settlement), keccak256(_borrowData()), uint160(debt), 0);
 
         vm.stopPrank();
     }
@@ -190,7 +190,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         items[0] = Item(ItemOp.MAKE, address(aaveRepayModule), bufferedRepay, address(0), _aaveRepayData());
         items[1] = Item(ItemOp.TAKE, address(aaveWithdrawModule), exactWeth, maker, _aaveWithdrawData());
         items[2] = Item(ItemOp.MAKE, address(supplyModule), exactWeth, address(0), _marketData());
-        items[3] = Item(ItemOp.TAKE, address(borrowModule), debt, address(0), _marketData());
+        items[3] = Item(ItemOp.TAKE, address(takerModule), debt, address(0), _borrowData());
         order = _order(maker, 8, USDC, USDC, debt, bufferedRepay, items);
     }
 
@@ -212,7 +212,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
 
         IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](2);
         tkp[0] = IPermit3.TakerPermit(address(settlement), keccak256(_aaveWithdrawData()), uint160(exactWeth), exp);
-        tkp[1] = IPermit3.TakerPermit(address(settlement), keccak256(_marketData()), uint160(debt), exp);
+        tkp[1] = IPermit3.TakerPermit(address(settlement), keccak256(_borrowData()), uint160(debt), exp);
 
         batch = _buildBatch(tp, tkp, 4, order.deadline);
     }

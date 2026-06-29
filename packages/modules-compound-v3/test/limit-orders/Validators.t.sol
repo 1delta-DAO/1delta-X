@@ -30,14 +30,14 @@ contract ValidatorsTest is CompoundV3ModulesBase {
         _seedWethCollateral(wethIn + 1e15);
         deal(USDC, solver, usdcOut);
 
-        bytes memory takerData = abi.encode(COMET, WETH);
+        bytes memory takerData = _withdrawData(COMET, WETH);
         bytes32 ref = keccak256(takerData);
 
         _approveMakerWithdrawSide(wethIn, ref, takerData);
         _approveSolverSide(usdcOut, USDC);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
+        items[0] = Item({op: ItemOp.TAKE, module: address(takerModule), amount: wethIn, recipient: address(0), data: takerData});
 
         Validator[] memory validators = new Validator[](1);
         validators[0] = Validator({target: address(priceLte), data: abi.encode(ETH_USD_FEED, FAR_BELOW_MARKET, type(uint256).max)});
@@ -59,14 +59,14 @@ contract ValidatorsTest is CompoundV3ModulesBase {
         _seedWethCollateral(wethIn + 1e15);
         deal(USDC, solver, usdcOut);
 
-        bytes memory takerData = abi.encode(COMET, WETH);
+        bytes memory takerData = _withdrawData(COMET, WETH);
         bytes32 ref = keccak256(takerData);
 
         _approveMakerWithdrawSide(wethIn, ref, takerData);
         _approveSolverSide(usdcOut, USDC);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
+        items[0] = Item({op: ItemOp.TAKE, module: address(takerModule), amount: wethIn, recipient: address(0), data: takerData});
 
         Validator[] memory validators = new Validator[](1);
         validators[0] = Validator({target: address(priceLte), data: abi.encode(ETH_USD_FEED, FAR_ABOVE_MARKET, type(uint256).max)});

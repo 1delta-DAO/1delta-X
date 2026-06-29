@@ -74,16 +74,17 @@ beforehand — Settlement and the solver can never widen them:
 |---|---|---|---|
 | [`CometDepositModule`](src/CompoundV3Modules.sol) | MAKE | pull asset from maker → `supplyTo(dst = maker)` (collateral or base) | `abi.encode(comet, asset)` |
 | [`CometRepayModule`](src/CompoundV3Modules.sol) | MAKE | pull buffered base → `supplyTo` capped at live debt; sweep over-repay back to maker | `abi.encode(comet, base)` |
-| [`CometWithdrawModule`](src/CompoundV3Modules.sol) | TAKE | `withdrawFrom(src = maker)` collateral → `receiver` | `abi.encode(comet, asset)` |
-| [`CometBorrowModule`](src/CompoundV3Modules.sol) | TAKE | `withdrawFrom(src = maker)` base (a borrow) → `receiver` | `abi.encode(comet, base)` |
+| [`CometTakerModule`](src/CompoundV3Modules.sol) | TAKE | `withdrawFrom(src = maker)` → `receiver`; leg selected by leading `op` (Borrow=0 base, Withdraw=1 collateral) | `abi.encode(uint8 op, comet, asset)` |
 | [`interfaces/ICompoundV3.sol`](src/interfaces/ICompoundV3.sol) | — | minimal Comet surface | — |
 
-`CometWithdrawModule` and `CometBorrowModule` share a `CometTakeBase` body —
-withdrawing collateral and borrowing base are the same `withdrawFrom` call; the
-two contracts exist only to separate the Permit3 namespaces. Because the modules
-are market-address-agnostic, the **same** deposit/borrow modules drive any Comet
-market by passing a different `comet` in `data` — which is exactly what the
-migration flow exploits.
+`CometTakerModule` fuses borrow and withdraw into one contract — both are the
+same `withdrawFrom` call. A leading `op` flag in `data` selects the leg, so a
+maker authorises ONE module address (`comet.allow(takerModule, true)`, or one
+allow-by-sig) for both. The op byte is the first word of `data`, so the two legs
+still hash to **different** Permit3 refs (`keccak256(data)`) and each gets its own
+amount-gated taker allowance. Because the modules are market-address-agnostic,
+the **same** modules drive any Comet market by passing a different `comet` in
+`data` — which is exactly what the migration flow exploits.
 
 ## Flows
 
@@ -96,7 +97,7 @@ puts WETH in and the borrowed USDC funds the `tokenIn` the solver is paid with.
 order: tokenIn = USDC, tokenOut = WETH      items = [MAKE deposit, TAKE borrow]
 
   [0] MAKE  CometDepositModule   maker ──WETH──▶ comet.supplyTo(dst = maker)
-  [1] TAKE  CometBorrowModule    comet.withdrawFrom(src = maker, USDC) ──▶ Settlement
+  [1] TAKE  CometTakerModule(Borrow)    comet.withdrawFrom(src = maker, USDC) ──▶ Settlement
                                  └─ comet.allow authorises the module
   settle:   Settlement ──USDC──▶ solver        (entirely from borrow proceeds)
             solver     ──WETH──▶ maker         (tokenOut, the added collateral)
@@ -113,7 +114,7 @@ WETH that goes straight to the solver, who pays USDC back as `tokenOut`.
 ```
 order: tokenIn = WETH, tokenOut = USDC      items = [TAKE withdraw]
 
-  [0] TAKE  CometWithdrawModule  comet.withdrawFrom(src = maker, WETH) ──▶ Settlement
+  [0] TAKE  CometTakerModule(Withdraw)  comet.withdrawFrom(src = maker, WETH) ──▶ Settlement
   settle:   Settlement ──WETH──▶ solver
             solver     ──USDC──▶ maker
 ```

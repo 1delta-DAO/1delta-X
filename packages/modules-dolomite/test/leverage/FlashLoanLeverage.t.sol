@@ -12,7 +12,7 @@ import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 ///   1. Flash-loans `collateralIn` WETH from Balancer v2.
 ///   2. Settlement pulls it via Permit3 → maker → DolomiteDepositModule supplies it
 ///      (one-action `operate`) into the borrow-position sub-account.
-///   3. DolomiteBorrowModule borrows USDC against it; proceeds land at the solver.
+///   3. DolomiteTakerModule (op 0, Borrow) borrows USDC against it; proceeds land at the solver.
 ///   4. Solver swaps the USDC back to WETH on Uniswap v3.
 ///   5. Solver repays the flash loan; residual WETH is profit.
 ///
@@ -50,6 +50,6 @@ contract DolomiteFlashLoanLeverageTest is DolomiteModulesBase {
         assertEq(IERC20(COLL).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(DEBT).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(COLL).balanceOf(address(depositModule)), 0, "deposit module WETH drained");
-        assertEq(IERC20(DEBT).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(DEBT).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 }

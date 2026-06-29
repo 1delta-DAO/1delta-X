@@ -4,8 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 
 import {
-    FluidBorrowModule,
-    FluidWithdrawModule,
+    FluidTakerModule,
     FluidOperateModule
 } from "../../src/FluidModules.sol";
 
@@ -26,26 +25,28 @@ contract FluidTakerModuleAuthTest is Test {
     address maker = address(0xA11CE);
     address attacker = address(0xBAD);
 
-    FluidBorrowModule borrowModule;
-    FluidWithdrawModule withdrawModule;
+    FluidTakerModule takerModule;
     FluidOperateModule operateModule;
 
     function setUp() public {
-        borrowModule = new FluidBorrowModule(PERMIT3);
-        withdrawModule = new FluidWithdrawModule(PERMIT3);
+        takerModule = new FluidTakerModule(PERMIT3);
         operateModule = new FluidOperateModule(PERMIT3);
     }
 
     function test_borrow_rejects_non_permit3() public {
         vm.prank(attacker);
-        vm.expectRevert(FluidBorrowModule.OnlyPermit3.selector);
-        borrowModule.takeOnBehalf(maker, 1_000e6, attacker, abi.encode(VAULT, FACTORY, uint256(42)));
+        vm.expectRevert(FluidTakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(
+            maker, 1_000e6, attacker, abi.encode(uint8(FluidTakerModule.Op.Borrow), VAULT, FACTORY, uint256(42))
+        );
     }
 
     function test_withdraw_rejects_non_permit3() public {
         vm.prank(attacker);
-        vm.expectRevert(FluidWithdrawModule.OnlyPermit3.selector);
-        withdrawModule.takeOnBehalf(maker, 1 ether, attacker, abi.encode(VAULT, FACTORY, uint256(42)));
+        vm.expectRevert(FluidTakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(
+            maker, 1 ether, attacker, abi.encode(uint8(FluidTakerModule.Op.Withdraw), VAULT, FACTORY, uint256(42))
+        );
     }
 
     function test_operate_rejects_non_permit3() public {

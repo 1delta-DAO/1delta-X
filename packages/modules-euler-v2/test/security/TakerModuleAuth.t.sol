@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
-import {EulerV2BorrowModule, EulerV2WithdrawModule, EulerV2BatchModule} from "../../src/EulerV2Modules.sol";
+import {EulerV2TakerModule, EulerV2BatchModule} from "../../src/EulerV2Modules.sol";
 
 /// @dev The taker modules MUST reject any caller other than Permit3 — otherwise a
 /// direct `takeOnBehalf(victim, amount, attacker, data)` would bypass the Permit3
@@ -12,14 +12,18 @@ contract EulerTakerModuleAuthTest is EulerV2ModulesBase {
 
     function test_borrow_rejects_non_permit3() public {
         vm.prank(attacker);
-        vm.expectRevert(EulerV2BorrowModule.OnlyPermit3.selector);
-        borrowModule.takeOnBehalf(maker, 1_000e6, attacker, abi.encode(address(EUSDC)));
+        vm.expectRevert(EulerV2TakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(
+            maker, 1_000e6, attacker, abi.encode(uint8(EulerV2TakerModule.Op.Borrow), address(EUSDC))
+        );
     }
 
     function test_withdraw_rejects_non_permit3() public {
         vm.prank(attacker);
-        vm.expectRevert(EulerV2WithdrawModule.OnlyPermit3.selector);
-        withdrawModule.takeOnBehalf(maker, 1 ether, attacker, abi.encode(address(EWETH)));
+        vm.expectRevert(EulerV2TakerModule.OnlyPermit3.selector);
+        takerModule.takeOnBehalf(
+            maker, 1 ether, attacker, abi.encode(uint8(EulerV2TakerModule.Op.Withdraw), address(EWETH))
+        );
     }
 
     function test_batch_rejects_non_permit3() public {

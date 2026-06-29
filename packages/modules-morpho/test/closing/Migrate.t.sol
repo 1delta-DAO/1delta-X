@@ -24,7 +24,7 @@ import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 ///
 /// Items (strictly ordered):
 ///   [0] MAKE  MorphoBlueRepayModule             repay (debt + buffer), dust → maker
-///   [1] TAKE  MorphoBlueWithdrawCollateralModule withdraw `exactWeth` wstETH, recipient = maker
+///   [1] TAKE  MorphoBlueTakerModule (op=Withdraw)  withdraw `exactWeth` wstETH, recipient = maker
 ///   [2] MAKE  AaveV3DepositModule               deposit `exactWeth` wstETH onto Aave
 ///   [3] TAKE  AaveV3BorrowModule                borrow USDC on Aave, recipient = Settlement
 contract MigrateTest is MorphoModulesBase {
@@ -110,7 +110,7 @@ contract MigrateTest is MorphoModulesBase {
 
         // Native delegations (outside the signed batch).
         vm.startPrank(maker);
-        MORPHO.setAuthorization(address(withdrawModule), true);
+        MORPHO.setAuthorization(address(takerModule), true);
         IAaveCreditDelegation(aaveUsdcDebt).approveDelegation(address(aaveBorrowModule), type(uint256).max);
         vm.stopPrank();
 
@@ -142,8 +142,8 @@ contract MigrateTest is MorphoModulesBase {
         permit3.approveToken(address(settlement), USDC, uint160(bufferedRepay), 0);
 
         // [1] Morpho withdraw: Morpho-native auth + Permit3 taker cap. No token pull.
-        MORPHO.setAuthorization(address(withdrawModule), true);
-        permit3.approveTaker(address(settlement), keccak256(_marketData()), uint160(exactWeth), 0);
+        MORPHO.setAuthorization(address(takerModule), true);
+        permit3.approveTaker(address(settlement), keccak256(_withdrawData()), uint160(exactWeth), 0);
 
         // [2] Aave deposit: depositModule pulls wstETH from maker via Permit3.
         IERC20(WSTETH).approve(address(permit3), type(uint256).max);
@@ -163,7 +163,7 @@ contract MigrateTest is MorphoModulesBase {
     {
         Item[] memory items = new Item[](4);
         items[0] = Item(ItemOp.MAKE, address(repayModule), bufferedRepay, address(0), _marketData());
-        items[1] = Item(ItemOp.TAKE, address(withdrawModule), exactWeth, maker, _marketData());
+        items[1] = Item(ItemOp.TAKE, address(takerModule), exactWeth, maker, _withdrawData());
         items[2] = Item(ItemOp.MAKE, address(aaveDepositModule), exactWeth, address(0), abi.encode(AAVE_POOL, WSTETH));
         items[3] = Item(ItemOp.TAKE, address(aaveBorrowModule), debt, address(0), _aaveBorrowData());
         order = _order(maker, 7, USDC, USDC, debt, bufferedRepay, items);
@@ -184,7 +184,7 @@ contract MigrateTest is MorphoModulesBase {
         tp[2] = IPermit3.TokenPermit(address(settlement), USDC, uint160(bufferedRepay), exp);
 
         IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](2);
-        tkp[0] = IPermit3.TakerPermit(address(settlement), keccak256(_marketData()), uint160(exactWeth), exp);
+        tkp[0] = IPermit3.TakerPermit(address(settlement), keccak256(_withdrawData()), uint160(exactWeth), exp);
         tkp[1] = IPermit3.TakerPermit(address(settlement), keccak256(_aaveBorrowData()), uint160(debt), exp);
 
         batch = _buildBatch(tp, tkp, 3, order.deadline);

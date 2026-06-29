@@ -17,7 +17,7 @@ import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 ///
 /// Items:
 ///   [0] MAKE  MorphoBlueSupplyCollateralModule   supply wstETH
-///   [1] TAKE  MorphoBlueBorrowModule             borrow USDC
+///   [1] TAKE  MorphoBlueTakerModule (op=Borrow)   borrow USDC
 contract SupplyBorrowTest is MorphoModulesBase {
     // ──────────────────── Direct fill ────────────────────
 
@@ -57,7 +57,7 @@ contract SupplyBorrowTest is MorphoModulesBase {
         assertEq(IERC20(WSTETH).balanceOf(address(settlement)), 0, "settlement wstETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WSTETH).balanceOf(address(supplyModule)), 0, "supply module wstETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 
     // ──────────────────── Single-signature permit fill ────────────────────
@@ -74,13 +74,15 @@ contract SupplyBorrowTest is MorphoModulesBase {
         // Morpho-native authorisation: separate from Permit3, like Aave's credit
         // delegation — not part of the signed batch.
         vm.prank(maker);
-        MORPHO.setAuthorization(address(borrowModule), true);
+        MORPHO.setAuthorization(address(takerModule), true);
 
+        // Supply MAKE uses bare market data; the borrow TAKE uses op-prefixed data.
         bytes memory marketData = _marketData();
+        bytes memory borrowData = _borrowData();
 
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(supplyModule), collateralIn, address(0), marketData);
-        items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), marketData);
+        items[1] = Item(ItemOp.TAKE, address(takerModule), borrowOut, address(0), borrowData);
 
         LimitOrder memory order = _order(maker, 2, USDC, WSTETH, borrowOut, collateralIn, items);
 
@@ -89,7 +91,7 @@ contract SupplyBorrowTest is MorphoModulesBase {
         tp[1] = IPermit3.TokenPermit(address(supplyModule), WSTETH, uint160(collateralIn), uint48(order.deadline));
 
         IPermit3.PermitBatch memory batch =
-            _buildBatch(tp, _takerPermits1(address(settlement), keccak256(marketData), borrowOut), 1, order.deadline);
+            _buildBatch(tp, _takerPermits1(address(settlement), keccak256(borrowData), borrowOut), 1, order.deadline);
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 

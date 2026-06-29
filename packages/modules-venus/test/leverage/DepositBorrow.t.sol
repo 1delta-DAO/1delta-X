@@ -8,7 +8,7 @@ import {VenusModulesBase} from "../shared/VenusModulesBase.t.sol";
 
 /// @dev Deposit WETH collateral + borrow USDC against it in one Venus order.
 ///   [0] MAKE VenusDepositModule  mint vWETH for the maker (permissionless `mintBehalf`)
-///   [1] TAKE VenusBorrowModule   borrow USDC for the maker (delegated `borrowBehalf`)
+///   [1] TAKE VenusTakerModule (op 0) borrow USDC for the maker (delegated `borrowBehalf`)
 contract VenusDepositBorrowTest is VenusModulesBase {
     uint256 constant BORROW_OUT = 1_000e6; // comfortably under vWETH collateral factor for 1 WETH
 
@@ -45,6 +45,6 @@ contract VenusDepositBorrowTest is VenusModulesBase {
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module WETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 }

@@ -9,7 +9,7 @@ import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 /// @dev Deposit WETH collateral + borrow USDC against it in one Dolomite order,
 /// into a borrow-position sub-account (see the harness note on account numbers).
 ///   [0] MAKE DolomiteDepositModule  one-action `operate` Deposit (WETH)
-///   [1] TAKE DolomiteBorrowModule   one-action `operate` Withdraw past zero (USDC)
+///   [1] TAKE DolomiteTakerModule    op 0 (Borrow): one-action `operate` Withdraw past zero (USDC)
 contract DolomiteDepositBorrowTest is DolomiteModulesBase {
     uint256 constant COLLATERAL_IN = 1 ether;
     uint256 constant BORROW_OUT = 1_000e6;
@@ -39,6 +39,6 @@ contract DolomiteDepositBorrowTest is DolomiteModulesBase {
         assertEq(IERC20(COLL).balanceOf(maker), 0, "maker WETH forwarded into deposit");
         assertEq(IERC20(DEBT).balanceOf(maker), 0, "maker USDC forwarded out via borrow");
         assertEq(IERC20(COLL).balanceOf(address(depositModule)), 0, "deposit module WETH drained");
-        assertEq(IERC20(DEBT).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(DEBT).balanceOf(address(takerModule)), 0, "taker module USDC drained");
     }
 }

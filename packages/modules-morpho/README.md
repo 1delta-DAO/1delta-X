@@ -1,9 +1,11 @@
 # @1delta-x/modules-morpho
 
-Morpho Blue lending adapters for `LimitOrderSettlement`. Each contract is a
-**single-op module** — a thin, stateless adapter that performs exactly one Morpho
-action (supply-collateral, withdraw-collateral, borrow, repay) on the order
-maker's behalf when Settlement processes an order item. Composed together inside
+Morpho Blue lending adapters for `LimitOrderSettlement`. Each contract is a thin,
+stateless adapter that performs Morpho actions (supply-collateral,
+withdraw-collateral, borrow, repay) on the order maker's behalf when Settlement
+processes an order item. The two taker legs (borrow, withdraw-collateral) are
+fused into the combined `MorphoBlueTakerModule`, selected per-item by a leading
+`op` flag in `data`. Composed together inside
 one signed order, they express leverage, deleverage and cross-protocol migration
 as a single atomic intent that any solver can fill.
 
@@ -57,11 +59,13 @@ the maker beforehand — Settlement and the solver can never widen them:
 
 > **Note on Morpho's coarse auth.** `setAuthorization(module, true)` grants the
 > module full control of the maker's position — both borrow *and*
-> withdraw-collateral. Because each op is a **separate module address** whose code
-> can only ever perform its one action, authorizing `MorphoBlueBorrowModule`
-> permits only borrows, and the per-market Permit3 taker allowance is what
-> actually caps the fill. Keep the modules single-op; that is the blast-radius
-> boundary.
+> withdraw-collateral. The combined `MorphoBlueTakerModule` multiplexes both legs
+> behind a leading `op` flag, so a single authorization covers the whole leverage
+> round-trip. The op flag is the first word of `data`, so borrow-data and
+> withdraw-data hash to **different** Permit3 taker refs (`ref = keccak256(data)`)
+> — each leg therefore still carries its own per-market, amount-gated taker
+> allowance. The flag can't be flipped to spend a borrow allowance on a withdraw
+> (or vice-versa); only the coarse Morpho authorization boolean is shared.
 
 ## Modules (`src/`)
 
@@ -69,8 +73,7 @@ the maker beforehand — Settlement and the solver can never widen them:
 |---|---|---|---|
 | [`MorphoBlueSupplyCollateralModule`](src/MorphoBlueModules.sol) | MAKE | pull collateral from maker → `supplyCollateral(onBehalf = maker)` | `abi.encode(MarketParams)` |
 | [`MorphoBlueRepayModule`](src/MorphoBlueModules.sol) | MAKE | pull buffered loan token → `repay(shares = borrowShares)`; sweep dust back to maker | `abi.encode(MarketParams)` |
-| [`MorphoBlueWithdrawCollateralModule`](src/MorphoBlueModules.sol) | TAKE | `withdrawCollateral(onBehalf = maker)` → `receiver` (no token pull) | `abi.encode(MarketParams)` |
-| [`MorphoBlueBorrowModule`](src/MorphoBlueModules.sol) | TAKE | `borrow(onBehalf = maker, receiver)` — Morpho sends loan token straight to `receiver` | `abi.encode(MarketParams)` |
+| [`MorphoBlueTakerModule`](src/MorphoBlueModules.sol) | TAKE | combined: `op=0` → `borrow(onBehalf = maker, receiver)`; `op=1` → `withdrawCollateral(onBehalf = maker)` → `receiver` (no token pull) | `abi.encode(uint8 op, MarketParams, …)` |
 | [`interfaces/IMorphoBlue.sol`](src/interfaces/IMorphoBlue.sol) | — | minimal Morpho singleton surface + `MarketParamsLib.id` | — |
 
 Constructors take `(permit3, morpho)` — the Morpho singleton address is fixed at

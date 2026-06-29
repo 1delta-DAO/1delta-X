@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {CometBorrowModule, CometWithdrawModule, CometTakeBase} from "../../src/CompoundV3Modules.sol";
+import {CometTakerModule} from "../../src/CompoundV3Modules.sol";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -85,33 +85,43 @@ contract MockPermit3 {
     }
 }
 
-// ── CometBorrowModule tests ───────────────────────────────────────────────────
-
-contract CometBorrowModuleTest is Test {
+// ── CometTakerModule (combined borrow + withdraw) tests ───────────────────────
+//
+// The combined module multiplexes both taker legs behind a leading `op` flag.
+// These tests assert: (1) each op reaches the right Comet `withdrawFrom`, (2) the
+// op flag shifts every downstream offset by 32 bytes (allow block / BalanceMode),
+// and (3) an unknown op fails closed.
+contract CometTakerModuleTest is Test {
     MockERC20 asset;
     MockComet comet;
     MockPermit3 permit3;
-    CometBorrowModule module;
+    CometTakerModule module;
 
     address user = address(0xABCD);
     address receiver = address(0xCAFE);
-    uint256 constant AMOUNT = 1000e6;
+    uint256 constant AMOUNT = 800e6;
+
+    uint8 constant OP_BORROW = 0;
+    uint8 constant OP_WITHDRAW = 1;
 
     function setUp() public {
         asset = new MockERC20();
         comet = new MockComet(asset);
         permit3 = new MockPermit3();
-        module = new CometBorrowModule(address(permit3));
+        module = new CometTakerModule(address(permit3));
 
         asset.mint(user, AMOUNT * 10);
+        comet.setCollateral(user, address(asset), uint128(AMOUNT * 10));
         vm.prank(user);
         asset.approve(address(comet), type(uint256).max);
     }
 
+    // ── Borrow leg (op = 0) ───────────────────────────────────────────────────
+
     function test_borrow_withAllowBySig() public {
-        // data = abi.encode(comet, asset, nonce, expiry, v, r, s)
+        // data = abi.encode(op, comet, asset, nonce, expiry, v, r, s)
         bytes memory data = abi.encode(
-            address(comet), address(asset),
+            OP_BORROW, address(comet), address(asset),
             uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
         );
 
@@ -129,7 +139,7 @@ contract CometBorrowModuleTest is Test {
         vm.prank(user);
         comet.allow(address(module), true);
 
-        bytes memory data = abi.encode(address(comet), address(asset));
+        bytes memory data = abi.encode(OP_BORROW, address(comet), address(asset));
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, AMOUNT, receiver, data);
@@ -140,49 +150,20 @@ contract CometBorrowModuleTest is Test {
 
     function test_borrow_revertsIfNotAuthorizedAndNoSig() public {
         // No delegation and no standing allow — comet should revert.
-        bytes memory data = abi.encode(address(comet), address(asset));
+        bytes memory data = abi.encode(OP_BORROW, address(comet), address(asset));
 
         vm.prank(address(permit3));
         vm.expectRevert("comet: not authorized");
         module.takeOnBehalf(user, AMOUNT, receiver, data);
     }
 
-    function test_borrow_revertsIfNotPermit3() public {
-        bytes memory data = abi.encode(address(comet), address(asset));
-        vm.expectRevert(CometTakeBase.OnlyPermit3.selector);
-        module.takeOnBehalf(user, AMOUNT, receiver, data);
-    }
-}
-
-// ── CometWithdrawModule tests ─────────────────────────────────────────────────
-
-contract CometWithdrawModuleTest is Test {
-    MockERC20 asset;
-    MockComet comet;
-    MockPermit3 permit3;
-    CometWithdrawModule module;
-
-    address user = address(0xABCD);
-    address receiver = address(0xCAFE);
-    uint256 constant AMOUNT = 800e6;
-
-    function setUp() public {
-        asset = new MockERC20();
-        comet = new MockComet(asset);
-        permit3 = new MockPermit3();
-        module = new CometWithdrawModule(address(permit3));
-
-        asset.mint(user, AMOUNT * 10);
-        comet.setCollateral(user, address(asset), uint128(AMOUNT * 10));
-        vm.prank(user);
-        asset.approve(address(comet), type(uint256).max);
-    }
+    // ── Withdraw leg (op = 1) ─────────────────────────────────────────────────
 
     function test_withdraw_withAllowBySig() public {
-        // data = abi.encode(comet, asset, BalanceMode=0, nonce, expiry, v, r, s)
+        // data = abi.encode(op, comet, asset, BalanceMode=0, nonce, expiry, v, r, s)
         bytes memory data = abi.encode(
-            address(comet), address(asset),
-            uint8(0), // explicit BalanceMode = Exact
+            OP_WITHDRAW, address(comet), address(asset),
+            uint8(0), // explicit BalanceMode = Exact, slot required ahead of the allow block
             uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
         );
 
@@ -199,7 +180,7 @@ contract CometWithdrawModuleTest is Test {
         vm.prank(user);
         comet.allow(address(module), true);
 
-        bytes memory data = abi.encode(address(comet), address(asset));
+        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(asset));
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, AMOUNT, receiver, data);
@@ -208,9 +189,47 @@ contract CometWithdrawModuleTest is Test {
         assertEq(asset.balanceOf(receiver), AMOUNT);
     }
 
-    function test_withdraw_revertsIfNotPermit3() public {
-        bytes memory data = abi.encode(address(comet), address(asset));
-        vm.expectRevert(CometTakeBase.OnlyPermit3.selector);
+    function test_withdraw_fullMode_sweepsExcess() public {
+        vm.prank(user);
+        comet.allow(address(module), true);
+
+        // BalanceMode = Full (1): withdraw the entire collateral, forward `amount`,
+        // sweep the rest back to the user. Collateral seeded = AMOUNT * 10.
+        // In this Comet mock the user's collateral IS their wallet balance
+        // (withdrawFrom pulls via transferFrom), so a full withdraw removes the
+        // whole balance and sweeps the excess back. Assert absolute end-balances:
+        // the user nets out at total − AMOUNT, receiver gets AMOUNT, module keeps 0.
+        uint256 total = AMOUNT * 10;
+        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(asset), uint8(1));
+
+        vm.prank(address(permit3));
         module.takeOnBehalf(user, AMOUNT, receiver, data);
+
+        assertEq(asset.balanceOf(receiver), AMOUNT, "receiver got signed amount");
+        assertEq(asset.balanceOf(user), total - AMOUNT, "excess swept to user");
+        assertEq(asset.balanceOf(address(module)), 0, "module retains nothing");
+    }
+
+    // ── Cross-cutting ─────────────────────────────────────────────────────────
+
+    function test_revertsIfNotPermit3() public {
+        bytes memory data = abi.encode(OP_BORROW, address(comet), address(asset));
+        vm.expectRevert(CometTakerModule.OnlyPermit3.selector);
+        module.takeOnBehalf(user, AMOUNT, receiver, data);
+    }
+
+    function test_revertsOnUnknownOp() public {
+        bytes memory data = abi.encode(uint8(2), address(comet), address(asset));
+        vm.prank(address(permit3));
+        vm.expectRevert(abi.encodeWithSelector(CometTakerModule.BadOp.selector, uint8(2)));
+        module.takeOnBehalf(user, AMOUNT, receiver, data);
+    }
+
+    /// @dev Borrow-data and withdraw-data must hash to different Permit3 refs —
+    ///      the whole point of putting the op flag inside `data`.
+    function test_opFlagSeparatesRefs() public view {
+        bytes memory borrowData = abi.encode(OP_BORROW, address(comet), address(asset));
+        bytes memory withdrawData = abi.encode(OP_WITHDRAW, address(comet), address(asset));
+        assertTrue(keccak256(borrowData) != keccak256(withdrawData), "refs must differ by op");
     }
 }
