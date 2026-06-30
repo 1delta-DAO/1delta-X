@@ -14,7 +14,7 @@ two order validators (`RedemptionSettledValidator`, `DepegGuardValidator`).
         ───────────────────────────────────────────────         ───────────────────────────────
   ┌──────┐  redeemTP (recipient = self)   ┌───────────┐
   │ USER │ ─────────────────────────────▶ │  MoC core │
-  └──────┘  + signs RIF→USDT0 LimitOrder  └─────┬─────┘
+  └──────┘  + signs RIF→USDT0 Order  └─────┬─────┘
      ▲                                          │ queues RedeemTP op
      │ RIF delivered                            ▼
      │ (~30–90s later)                    ┌───────────┐  execute()   ┌──────────────┐
@@ -45,7 +45,7 @@ sequenceDiagram
     participant Queue as MoC queue
     participant Exec as MoC executor (guard)
     actor Solver
-    participant Settle as LimitOrderSettlement
+    participant Settle as UniversalSettlement
     participant P3 as Permit3
     participant V as Validators
 
@@ -53,7 +53,7 @@ sequenceDiagram
     note over User,Queue: PHASE 1 — initiate redemption (recipient == msg.sender)
     User->>Core: redeemTP(USDRIF, qTP, qACmin, recipient=User){value: getExecFee}
     Core->>Queue: queue RedeemTP op  → returns opId
-    note right of User: User signs LimitOrder<br/>tokenIn=RIF, tokenOut=USDT0<br/>amountIn=qACmin, dutch decay<br/>validators=[settled(opId), depeg]
+    note right of User: User signs Order<br/>tokenIn=RIF, tokenOut=USDT0<br/>amountIn=qACmin, dutch decay<br/>validators=[settled(opId), depeg]
     end
 
     rect rgb(235,255,235)
@@ -79,7 +79,7 @@ sequenceDiagram
 ## 3. Token & authority flow during `fill`
 
 ```
-                         LimitOrderSettlement.fill(order, sig, amountIn)
+                         UniversalSettlement.fill(order, sig, amountIn)
                                           │
             ┌─────────────────────────────┼──────────────────────────────┐
             │ 1. run validators (staticcall, AND-composed)                │
@@ -114,7 +114,7 @@ flowchart LR
         IMOC["interfaces/IMoc.sol\nIMocRif · IMocQueue · IPriceProvider"]
     end
     subgraph core["packages/core"]
-        SETTLE["LimitOrderSettlement"]
+        SETTLE["UniversalSettlement"]
         P3["Permit3"]
         IOV["IOrderValidator"]
     end

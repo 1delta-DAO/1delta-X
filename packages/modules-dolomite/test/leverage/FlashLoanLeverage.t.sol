@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 
 /// @dev Leverage loop via flash loan + DEX (no solver inventory). The
@@ -32,7 +32,7 @@ contract DolomiteFlashLoanLeverageTest is DolomiteModulesBase {
         _approveDepositBorrowSide(collateralIn, borrowOut);
         leverageSolver.setupTokenApproval(COLL);
 
-        LimitOrder memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
+        Order memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
         order.nonce = 99; // avoid colliding with the deposit+borrow test
         bytes memory sig = _sign(order);
 

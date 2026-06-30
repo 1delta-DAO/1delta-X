@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {DustHandler} from "@core/dust/DustHandler.sol";
 
@@ -48,7 +48,7 @@ contract RepayTest is AaveModulesBase {
         uint256 makerDebtBefore = IERC20(usdcDebtToken).balanceOf(maker);
         assertGt(makerDebtBefore, 0, "pre: maker should have debt");
 
-        LimitOrder memory order = _buildRepayOrder(bufferedAmount, wethForSolver);
+        Order memory order = _buildRepayOrder(bufferedAmount, wethForSolver);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -93,7 +93,7 @@ contract RepayTest is AaveModulesBase {
             ItemOp.MAKE, address(repayModule), buffered, address(0), abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
         );
 
-        LimitOrder memory order = _order(maker, 3, WETH, USDC, 1 ether, buffered, items);
+        Order memory order = _order(maker, 3, WETH, USDC, 1 ether, buffered, items);
 
         IPermit3.PermitBatch memory batch = _buildBatch(
             _tokenPermits(address(settlement), WETH, 1 ether, address(repayModule), USDC, buffered),
@@ -156,7 +156,7 @@ contract RepayTest is AaveModulesBase {
             address(0),
             abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken, uint8(DustHandler.DustAction.Recycle))
         );
-        LimitOrder memory order = _order(maker, 3, WETH, USDC, wethForSolver, bufferedAmount, items);
+        Order memory order = _order(maker, 3, WETH, USDC, wethForSolver, bufferedAmount, items);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

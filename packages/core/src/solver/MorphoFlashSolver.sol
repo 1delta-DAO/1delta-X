@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {LimitOrder} from "../settlement/LimitOrderSettlement.sol";
+import {Order} from "../settlement/UniversalSettlement.sol";
 import {BaseFlashSolver} from "./BaseFlashSolver.sol";
 
 /// @notice Morpho Blue flash-loan surface. `flashLoan` transfers `assets` of
@@ -33,7 +33,7 @@ contract MorphoFlashSolver is BaseFlashSolver {
     function executeFill(
         address flashToken,
         uint256 flashAmount,
-        LimitOrder calldata order,
+        Order calldata order,
         bytes calldata sig,
         uint256 fillAmountIn,
         uint24 dexFee,
@@ -49,8 +49,8 @@ contract MorphoFlashSolver is BaseFlashSolver {
         if (msg.sender != address(morpho)) revert OnlyMorpho();
         _requireInFlash();
 
-        (address flashToken, LimitOrder memory order, bytes memory sig, uint256 fillAmountIn, uint24 dexFee, uint256 minSwapOut)
-        = abi.decode(data, (address, LimitOrder, bytes, uint256, uint24, uint256));
+        (address flashToken, Order memory order, bytes memory sig, uint256 fillAmountIn, uint24 dexFee, uint256 minSwapOut)
+        = abi.decode(data, (address, Order, bytes, uint256, uint24, uint256));
 
         _fillAndSwap(order, sig, fillAmountIn, flashToken, dexFee, minSwapOut);
 

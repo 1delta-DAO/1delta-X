@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
@@ -204,7 +204,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
     function _buildWithdrawOrder(uint256 wstethIn, uint256 usdcOut)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({
@@ -220,7 +220,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
     function _buildSupplyBorrowOrder(uint256 collateralIn, uint256 borrowOut)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](2);
         items[0] = Item({
@@ -243,7 +243,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
     function _buildRepayOrder(uint256 bufferedAmount, uint256 wstethForSolver)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({

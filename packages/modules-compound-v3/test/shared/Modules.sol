@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 
 // The Comet maker/taker modules and their interfaces live in the package `src/`
 // tree (`src/CompoundV3Modules.sol`, `src/interfaces/ICompoundV3.sol`). Only the
@@ -11,13 +11,13 @@ import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
 // ──────────────────── Test-only validators for invariant checks ────────────────────
 
 contract TrueInvariant is IOrderValidator {
-    function validate(LimitOrder calldata, bytes calldata) external pure returns (bool) {
+    function validate(Order calldata, bytes calldata) external pure returns (bool) {
         return true;
     }
 }
 
 contract FalseInvariant is IOrderValidator {
-    function validate(LimitOrder calldata, bytes calldata) external pure returns (bool) {
+    function validate(Order calldata, bytes calldata) external pure returns (bool) {
         return false;
     }
 }

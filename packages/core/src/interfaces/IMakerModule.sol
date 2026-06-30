@@ -6,7 +6,7 @@ pragma solidity ^0.8.28;
 ///         inverse of `ITakerModule`. Used for deposit and repay ops.
 ///
 ///         Naming mirrors limit-order parlance: takers draw value out, makers
-///         put value in. (Unrelated to the `maker` field on a `LimitOrder`,
+///         put value in. (Unrelated to the `maker` field on a `Order`,
 ///         which names the order's signer.)
 ///
 ///  A maker module performs exactly one operation that moves value from the

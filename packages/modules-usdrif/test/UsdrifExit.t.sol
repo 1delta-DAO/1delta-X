@@ -4,11 +4,11 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {
-    LimitOrderSettlement,
-    LimitOrder,
+    UniversalSettlement,
+    Order,
     Item,
     Validator
-} from "@core/settlement/LimitOrderSettlement.sol";
+} from "@core/settlement/UniversalSettlement.sol";
 
 import {UsdrifForkBase} from "./shared/UsdrifForkBase.t.sol";
 import {RedemptionSettledValidator} from "../src/RedemptionSettledValidator.sol";
@@ -63,9 +63,9 @@ contract UsdrifExitTest is UsdrifForkBase {
     function _exitOrder(uint256 nonce, uint256 amountIn, uint256 amountOut, Validator[] memory validators)
         internal
         view
-        returns (LimitOrder memory)
+        returns (Order memory)
     {
-        return LimitOrder({
+        return Order({
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -132,7 +132,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         Validator[] memory validators = new Validator[](1);
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
 
-        LimitOrder memory order = _exitOrder(1, rifIn, usdtOut, validators);
+        Order memory order = _exitOrder(1, rifIn, usdtOut, validators);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -157,11 +157,11 @@ contract UsdrifExitTest is UsdrifForkBase {
         Validator[] memory validators = new Validator[](1);
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
 
-        LimitOrder memory order = _exitOrder(2, rifIn, usdtOut, validators);
+        Order memory order = _exitOrder(2, rifIn, usdtOut, validators);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(LimitOrderSettlement.ValidationFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.ValidationFailed.selector, uint256(0)));
         settlement.fill(order, sig, rifIn);
     }
 
@@ -174,7 +174,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         uint256 usdtOut = 950e6;
         _approveExitSides(rifIn, usdtOut);
 
-        LimitOrder memory order = _exitOrder(3, rifIn, usdtOut, new Validator[](0));
+        Order memory order = _exitOrder(3, rifIn, usdtOut, new Validator[](0));
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -199,11 +199,11 @@ contract UsdrifExitTest is UsdrifForkBase {
             data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e18), uint256(2e18))
         });
 
-        LimitOrder memory order = _exitOrder(4, rifIn, usdtOut, validators);
+        Order memory order = _exitOrder(4, rifIn, usdtOut, validators);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(LimitOrderSettlement.ValidationFailed.selector, uint256(1)));
+        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.ValidationFailed.selector, uint256(1)));
         settlement.fill(order, sig, rifIn);
     }
 
@@ -224,7 +224,7 @@ contract UsdrifExitTest is UsdrifForkBase {
             data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e16), uint256(1e18))
         });
 
-        LimitOrder memory order = _exitOrder(5, rifIn, usdtOut, validators);
+        Order memory order = _exitOrder(5, rifIn, usdtOut, validators);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

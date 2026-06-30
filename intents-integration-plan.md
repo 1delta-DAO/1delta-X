@@ -1,12 +1,12 @@
 # Plan: USDRIF→USDT exit via the intent settlement (module integration)
 
-**Audience:** the intents / `LimitOrderSettlement` repository.
+**Audience:** the intents / `UniversalSettlement` repository.
 **Goal:** let a USDRIF holder exit to USDT0 in one signed intent, filled by competing
 solvers, by tokenising the protocol's *native redemption* and auctioning the result. No new
 AMM, no LP pool required in the base design — the settlement is the marketplace; solvers bring
 the capital.
 
-This plan targets the existing `LimitOrderSettlement` (signed orders, partial fills, dutch
+This plan targets the existing `UniversalSettlement` (signed orders, partial fills, dutch
 decay, Permit3 auth, `IMakerModule` / `ITakerModule` / `IOrderValidator` plug-ins).
 
 ---
@@ -17,7 +17,7 @@ decay, Permit3 auth, `IMakerModule` / `ITakerModule` / `IOrderValidator` plug-in
 STEP 1  (user, one tx + one signature)
   user ──USDRIF──▶ RedeemInitiator
                      └─ calls MoC redeemTP(recipient = user, qACmin)   [escrows USDRIF, queues redemption]
-  user signs a LimitOrder:  tokenIn = RIF,  tokenOut = USDT0,
+  user signs a Order:  tokenIn = RIF,  tokenOut = USDT0,
                             amountIn = qACmin (guaranteed floor),
                             startAmountOut → endAmountOut (the haircut, dutch decay),
                             decayStartTime ≈ now + 90s
@@ -79,7 +79,7 @@ implicitly, an explicit validator gives a clean revert and lets the seller bind 
 ```solidity
 // staticcalled by Settlement: validate(order, data) returns bool
 // data = abi.encode(mocQueue, opId, address user, uint256 minRif)
-function validate(LimitOrder calldata order, bytes calldata data)
+function validate(Order calldata order, bytes calldata data)
     external view returns (bool);
     // true iff: opId no longer pending in mocQueue (executed)  AND
     //           IERC20(RIF).balanceOf(user) >= minRif
@@ -99,7 +99,7 @@ cut** — variant 1 (redeem-to-user, plain RIF order) is strictly simpler.
 
 ---
 
-## 4. The intent (LimitOrder) shape
+## 4. The intent (Order) shape
 
 ```
 maker            = USDRIF seller

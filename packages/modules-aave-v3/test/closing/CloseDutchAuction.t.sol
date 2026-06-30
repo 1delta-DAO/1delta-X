@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
@@ -41,7 +41,7 @@ contract CloseDutchAuctionTest is AaveModulesBase {
         items[0] = Item({op: ItemOp.MAKE, module: address(repayModule), amount: repayCeiling, recipient: address(0), data: repayData});
         items[1] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: withdrawData});
 
-        LimitOrder memory order = LimitOrder({
+        Order memory order = Order({
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
@@ -45,7 +45,7 @@ contract MigrateTest is CompoundV3ModulesBase {
         _approveMakerMigrationSide(bufferedRepay, exactWeth, borrowUsds);
         _approveSolverSide(bufferedRepay, USDC);
 
-        LimitOrder memory order = _buildMigrationOrder(bufferedRepay, exactWeth, borrowUsds);
+        Order memory order = _buildMigrationOrder(bufferedRepay, exactWeth, borrowUsds);
         bytes memory sig = _sign(order);
 
         uint256 makerUsdcCollatBefore = _wethCollateral(maker);
@@ -89,7 +89,7 @@ contract MigrateTest is CompoundV3ModulesBase {
 
     function test_permit_migrate_cometUSDC_to_cometUSDS() public {
         _setupMigration();
-        (LimitOrder memory order, IPermit3.PermitBatch memory batch) = _buildMigrationOrderAndBatch();
+        (Order memory order, IPermit3.PermitBatch memory batch) = _buildMigrationOrderAndBatch();
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
@@ -112,7 +112,7 @@ contract MigrateTest is CompoundV3ModulesBase {
     function _buildMigrationOrderAndBatch()
         internal
         view
-        returns (LimitOrder memory order, IPermit3.PermitBatch memory batch)
+        returns (Order memory order, IPermit3.PermitBatch memory batch)
     {
         bytes memory withdrawData = _withdrawData(COMET, WETH);
         bytes memory borrowData = _borrowData(COMET_USDS, USDS);
@@ -124,7 +124,7 @@ contract MigrateTest is CompoundV3ModulesBase {
         items[2] = Item(ItemOp.MAKE, address(depositModule), 9 ether, address(0), abi.encode(COMET_USDS, WETH));
         items[3] = Item(ItemOp.TAKE, address(takerModule), 3_000e18, address(0), borrowData);
 
-        order = LimitOrder({
+        order = Order({
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,

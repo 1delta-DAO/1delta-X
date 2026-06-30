@@ -7,24 +7,24 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {
-    LimitOrderSettlement,
-    LimitOrder,
+    UniversalSettlement,
+    Order,
     Item,
     ItemOp,
     Validator
-} from "@core/settlement/LimitOrderSettlement.sol";
+} from "@core/settlement/UniversalSettlement.sol";
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.sol";
 
 /// @dev Core test harness with NO module dependency. Deploys only Permit3 +
-/// LimitOrderSettlement and provides the order/permit EIP-712 machinery plus the
+/// UniversalSettlement and provides the order/permit EIP-712 machinery plus the
 /// module-free order builders. Pure-protocol tests (plain swaps, partial fills,
 /// dutch decay, exclusivity, min-fill, validators, invariants, single-signature
 /// permits) inherit this directly. Module integration harnesses extend it and
 /// layer their adapters on top (see the modules-aave-v3 / modules-aave-v4 packages).
 abstract contract CoreSettlementBase is Test, LenderRegistry {
     Permit3 permit3;
-    LimitOrderSettlement settlement;
+    UniversalSettlement settlement;
 
     uint256 makerPk = 0xA11CE;
     address maker = vm.addr(makerPk);
@@ -40,7 +40,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         USDC = tokens[Chains.ETHEREUM_MAINNET][Tokens.USDC];
 
         permit3 = new Permit3();
-        settlement = new LimitOrderSettlement(address(permit3));
+        settlement = new UniversalSettlement(address(permit3));
 
         vm.label(maker, "maker");
         vm.label(solver, "solver");
@@ -146,8 +146,8 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         uint256 amountIn,
         uint256 amountOut,
         Item[] memory items
-    ) internal view returns (LimitOrder memory) {
-        return LimitOrder({
+    ) internal view returns (Order memory) {
+        return Order({
             maker: _maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -170,8 +170,8 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     function _orderWithExclusivity(
         uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
         Item[] memory items, address exclusiveFiller, uint32 exclusivityEndTime
-    ) internal view returns (LimitOrder memory) {
-        return LimitOrder({
+    ) internal view returns (Order memory) {
+        return Order({
             maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
             tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
             decayStartTime: 0, decayDuration: 0,
@@ -188,8 +188,8 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     function _orderWithMinFill(
         uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
         Item[] memory items, uint256 minFillAmountIn
-    ) internal view returns (LimitOrder memory) {
-        return LimitOrder({
+    ) internal view returns (Order memory) {
+        return Order({
             maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
             tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
             decayStartTime: 0, decayDuration: 0,
@@ -205,8 +205,8 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     function _orderWithInvariants(
         uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
         Item[] memory items, Validator[] memory invariants
-    ) internal view returns (LimitOrder memory) {
-        return LimitOrder({
+    ) internal view returns (Order memory) {
+        return Order({
             maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
             tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
             decayStartTime: 0, decayDuration: 0,
@@ -226,8 +226,8 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         uint256 amountOut,
         Item[] memory items,
         Validator[] memory validators
-    ) internal view returns (LimitOrder memory) {
-        return LimitOrder({
+    ) internal view returns (Order memory) {
+        return Order({
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -290,13 +290,13 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
 
     // ──────────────────── EIP-712 hashing + signing ────────────────────
     //
-    // Type hashes must match LimitOrderSettlement / Permit3 exactly.
+    // Type hashes must match UniversalSettlement / Permit3 exactly.
 
     bytes32 constant ITEM_TH =
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -306,12 +306,12 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         keccak256("TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)");
 
     /// @dev Must mirror Permit3's `_PERMIT_BATCH_WITNESS_STUB` + Settlement's
-    ///      `_LIMIT_ORDER_WITNESS_TYPESTRING` exactly.
+    ///      `_ORDER_WITNESS_TYPESTRING` exactly.
     string constant PERMIT_BATCH_WITNESS_FULL =
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
-        "LimitOrder witness)"
+        "Order witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -341,7 +341,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         return keccak256(abi.encodePacked(h));
     }
 
-    function _hashOrder(LimitOrder memory o) internal pure returns (bytes32) {
+    function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
             ORDER_TH,
             o.maker,
@@ -367,7 +367,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     }
 
     /// @dev Signs the order with the maker's key against Settlement's domain.
-    function _sign(LimitOrder memory o) internal view returns (bytes memory) {
+    function _sign(Order memory o) internal view returns (bytes memory) {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), _hashOrder(o)));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPk, digest);
         return abi.encodePacked(r, s, v);

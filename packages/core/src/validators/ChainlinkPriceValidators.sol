@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
-import {LimitOrder} from "../settlement/LimitOrderSettlement.sol";
+import {Order} from "../settlement/UniversalSettlement.sol";
 import {IAggregatorV3} from "../interfaces/IAggregatorV3.sol";
 
 /// @dev Shared, hardened Chainlink read. Reverts the validator (→ fill aborts)
@@ -29,7 +29,7 @@ library ChainlinkRead {
 ///         Typical use: take-profit orders — only fill when price rises to X.
 /// @dev    `data = abi.encode(address feed, int256 threshold, uint256 maxStaleness)`
 contract ChainlinkPriceGte is IOrderValidator {
-    function validate(LimitOrder calldata, bytes calldata data) external view override returns (bool) {
+    function validate(Order calldata, bytes calldata data) external view override returns (bool) {
         (address feed, int256 threshold, uint256 maxStaleness) = abi.decode(data, (address, int256, uint256));
         return ChainlinkRead.read(feed, maxStaleness) >= threshold;
     }
@@ -40,7 +40,7 @@ contract ChainlinkPriceGte is IOrderValidator {
 ///         Typical use: stop-loss orders — only fill when price drops to X.
 /// @dev    `data = abi.encode(address feed, int256 threshold, uint256 maxStaleness)`
 contract ChainlinkPriceLte is IOrderValidator {
-    function validate(LimitOrder calldata, bytes calldata data) external view override returns (bool) {
+    function validate(Order calldata, bytes calldata data) external view override returns (bool) {
         (address feed, int256 threshold, uint256 maxStaleness) = abi.decode(data, (address, int256, uint256));
         return ChainlinkRead.read(feed, maxStaleness) <= threshold;
     }

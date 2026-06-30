@@ -1,6 +1,6 @@
 # @1delta-x/modules-morpho
 
-Morpho Blue lending adapters for `LimitOrderSettlement`. Each contract is a thin,
+Morpho Blue lending adapters for `UniversalSettlement`. Each contract is a thin,
 stateless adapter that performs Morpho actions (supply-collateral,
 withdraw-collateral, borrow, repay) on the order maker's behalf when Settlement
 processes an order item. The two taker legs (borrow, withdraw-collateral) are

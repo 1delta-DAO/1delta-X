@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
@@ -34,7 +34,7 @@ contract DepositBorrowTest is AaveModulesBase {
         _approveMakerDepositBorrowSide(collateralIn, borrowOut);
         _approveSolverSide(collateralIn, WETH);
 
-        LimitOrder memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
+        Order memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
         bytes memory sig = _sign(order);
 
         uint256 makerAWethBefore = IERC20(aWETH).balanceOf(maker);
@@ -84,7 +84,7 @@ contract DepositBorrowTest is AaveModulesBase {
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(AAVE_POOL, WETH));
         items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), borrowData);
 
-        LimitOrder memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
+        Order memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
 
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](2);
         tp[0] = IPermit3.TokenPermit(address(settlement), USDC, uint160(borrowOut), uint48(order.deadline));

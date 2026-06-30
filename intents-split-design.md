@@ -47,7 +47,7 @@ Two on-chain facts from the verified mechanics drive every decision:
    way to put redemption behind a contract — and it works: the escrow is `msg.sender`, RIF lands
    in the escrow.
 2. **The settlement verifies the maker with raw `ecrecover` — no EIP‑1271**
-   ([`LimitOrderSettlement._verifySignature`](./packages/core/src/settlement/LimitOrderSettlement.sol#L415-L420)).
+   ([`UniversalSettlement._verifySignature`](./packages/core/src/settlement/UniversalSettlement.sol#L415-L420)).
    → the **escrow cannot be the order `maker`**. The **user stays the EOA signer**; the escrow only
    *releases* the user's RIF into the fill via a TAKE item. No settlement change is needed.
 
@@ -68,7 +68,7 @@ And the one that makes "instant" cost money:
 | `ZvRedeemTakerModule` | `ITakerModule` | **new** | `takeOnBehalf(user, amount, receiver=settlement, data)` releases the user's auction RIF share out of `ZvEscrow` into the settlement. Permit3-gated, `msg.sender == permit3`. |
 | `RedemptionSettledValidator` | `IOrderValidator` | **reuse** | gate the auction order on `opId < firstOperId()` **and** escrow holds ≥ the claim. |
 | `DepegGuardValidator` | `IOrderValidator` | **reuse** | gate both the **instant quote** (escrow reads it internally) and the **auction fill** to a MoC price band. |
-| `LimitOrderSettlement` | core | **unchanged** | user is maker; TAKE item + `_payTokenInToSolver` local-balance path already supports module-funded `tokenIn`. |
+| `UniversalSettlement` | core | **unchanged** | user is maker; TAKE item + `_payTokenInToSolver` local-balance path already supports module-funded `tokenIn`. |
 
 The whole instant/float subsystem (capital, NAV, keeper) lives in `ZvEscrow`. The auction leg is
 *exactly* variant 1, only with the RIF sourced from the escrow via a TAKE item instead of from the
@@ -109,7 +109,7 @@ deposit*, so the same user can exit 90/10 today and 0/100 tomorrow.
 
 ## 5. Auction leg = variant 1 with escrow-sourced RIF
 
-The user signs the **same** RIF→USDT0 `LimitOrder` as today, with three deltas:
+The user signs the **same** RIF→USDT0 `Order` as today, with three deltas:
 
 ```
 maker          = USER (EOA — must stay the signer; settlement is ecrecover-only)
@@ -127,7 +127,7 @@ On `fill`, the settlement:
 2. pays USDT0 solver→user,
 3. **executes the TAKE item** → `ZvRedeemTakerModule.takeOnBehalf` moves the user's auction RIF
    share out of escrow into the settlement (escrow debits `ledger[user][opId]`),
-4. [`_payTokenInToSolver`](./packages/core/src/settlement/LimitOrderSettlement.sol#L285-L296) pays
+4. [`_payTokenInToSolver`](./packages/core/src/settlement/UniversalSettlement.sol#L285-L296) pays
    the solver from that settlement-local RIF — no wallet pull needed, user never custodies RIF.
 
 The user authorises the taker once via `permit3.approveTaker(module, key(opId,user), amount, exp)` —
@@ -201,7 +201,7 @@ through the escrow, so the escrow can ship before the float is funded.
 
 ## 10. Reused vs new
 
-- **Reused unchanged**: `LimitOrderSettlement`, `Permit3`, `RedemptionSettledValidator`,
+- **Reused unchanged**: `UniversalSettlement`, `Permit3`, `RedemptionSettledValidator`,
   `DepegGuardValidator`, the dutch-auction + TAKE-item machinery, the MoC interfaces.
 - **New**: `ZvEscrow` (deposit/redeem-to-self/float/ledger/claim), `ZvRedeemTakerModule`, the
   keeper sale path, and SDK helpers. No core/settlement edits.

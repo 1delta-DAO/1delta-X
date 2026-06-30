@@ -1,6 +1,6 @@
 # @1delta-x/modules-aave-v4
 
-Aave **v4** lending adapters for `LimitOrderSettlement`. Same single-op module
+Aave **v4** lending adapters for `UniversalSettlement`. Same single-op module
 shape as [`@1delta-x/modules-aave-v3`](../modules-aave-v3) — a thin, stateless
 adapter that performs exactly one Aave action (supply, withdraw, borrow, repay)
 on the order maker's behalf when Settlement processes an order item — but the

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {LimitOrder} from "../settlement/LimitOrderSettlement.sol";
+import {Order} from "../settlement/UniversalSettlement.sol";
 import {BaseFlashSolver} from "./BaseFlashSolver.sol";
 
 /// @notice Euler EVK vault flash-loan surface. `flashLoan` transfers `amount` of
@@ -31,7 +31,7 @@ contract EulerFlashSolver is BaseFlashSolver {
     function executeFill(
         address flashVault,
         uint256 flashAmount,
-        LimitOrder calldata order,
+        Order calldata order,
         bytes calldata sig,
         uint256 fillAmountIn,
         uint24 dexFee,
@@ -49,12 +49,12 @@ contract EulerFlashSolver is BaseFlashSolver {
         (
             address flashVault,
             uint256 flashAmount,
-            LimitOrder memory order,
+            Order memory order,
             bytes memory sig,
             uint256 fillAmountIn,
             uint24 dexFee,
             uint256 minSwapOut
-        ) = abi.decode(data, (address, uint256, LimitOrder, bytes, uint256, uint24, uint256));
+        ) = abi.decode(data, (address, uint256, Order, bytes, uint256, uint24, uint256));
 
         if (msg.sender != flashVault) revert OnlyFlashVault();
 

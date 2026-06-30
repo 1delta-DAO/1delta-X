@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 
 import {ISpokeV4} from "../../src/interfaces/IAaveV4.sol";
 import {AaveV4ModulesBase} from "../shared/AaveV4ModulesBase.t.sol";
@@ -39,7 +39,7 @@ contract RepayV4Test is AaveV4ModulesBase {
         uint256 makerDebtBefore = ISpokeV4(MAIN_SPOKE).getUserTotalDebt(usdcReserveId, maker);
         assertGt(makerDebtBefore, 0, "pre: maker should have debt");
 
-        LimitOrder memory order = _buildV4RepayOrder(bufferedAmount, wethForSolver);
+        Order memory order = _buildV4RepayOrder(bufferedAmount, wethForSolver);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
@@ -12,7 +12,7 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 /// Permit3 except the bare `IERC20.approve(permit3, ∞)` per token. They sign
 /// exactly ONE EIP-712 message that bundles:
 ///   • a PermitBatch (token allowances Settlement + the deposit module need)
-///   • a witness binding the permits to this specific LimitOrder
+///   • a witness binding the permits to this specific Order
 ///
 /// Solver calls `fillWithPermit(order, batch, sig, fillAmountIn)`:
 ///   1. Settlement asks Permit3 to verify the sig against
@@ -38,7 +38,7 @@ contract FillWithPermitTest is AaveModulesBase {
             recipient: address(0),
             data: abi.encode(AAVE_POOL, WETH)
         });
-        LimitOrder memory order = LimitOrder({
+        Order memory order = Order({
             maker: maker,
             nonce: 42,
             deadline: block.timestamp + 1 hours,

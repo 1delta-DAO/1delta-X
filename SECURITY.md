@@ -22,7 +22,7 @@ allowances.
    maker (EIP-712 order + permits)
         │
         ▼
-   LimitOrderSettlement ──── the only trusted "spender" ────┐
+   UniversalSettlement ──── the only trusted "spender" ────┐
         │  fill(order, sig, amount)                          │
         │                                                    │
         ├─ MAKE item ─▶ IMakerModule.makeOnBehalf(...)       │  gated: msg.sender == settlement
@@ -61,7 +61,7 @@ be used to withdraw collateral. Modules come in two shapes:
 
 ### Settlement — the only trusted spender
 
-`LimitOrderSettlement` is the sole address makers approve as their taker/token
+`UniversalSettlement` is the sole address makers approve as their taker/token
 spender. It verifies the EIP-712 order, runs pre-execution validators, executes
 items pro-rata, runs post-execution invariants, and pays the solver from the
 proceeds **produced by that fill only**.
@@ -90,7 +90,7 @@ proceeds **produced by that fill only**.
    dispatched module is bound by the maker's signed order, so it need not enter
    `ref`.
 
-5. **Reentrancy.** `Permit3.take`, `LimitOrderSettlement.fill`, and the
+5. **Reentrancy.** `Permit3.take`, `UniversalSettlement.fill`, and the
    repay/operate modules carry `nonReentrant` guards. Flash-solver callbacks are
    authenticated (`msg.sender == provider` + an in-flight flag + Aave
    `initiator == self`).
@@ -128,7 +128,7 @@ including fork tests).
 | M-2 | Medium | All modules + core | Raw ERC20 calls ignored return values (USDT-class break / silent failure). | Introduced `SafeTransferLib` and applied it repo-wide. |
 | M-3 | Medium | `RedemptionSettledValidator` | "Settled" was inferred from the FIFO queue head (`firstOperId`), which only proves the op was *dequeued*, not that it cleared. | Now reads the op's final state via `opersInfo(opId)` / `operIdCount()`. |
 | M-4 | Medium | Full-mode withdraws | Trusted a stale pre-read balance / static amount; could over-forward or leak a stray balance. | Forward a **measured** balance delta with `require(received >= amount)`; sweep only the real excess to the user. |
-| L-1 | Low | `LimitOrderSettlement` | Solver payout used the whole contract balance (could scoop donated funds). | Pay from the current fill's measured proceeds only; return surplus to the maker. |
+| L-1 | Low | `UniversalSettlement` | Solver payout used the whole contract balance (could scoop donated funds). | Pay from the current fill's measured proceeds only; return surplus to the maker. |
 | L-2 | Low | DepegGuard | No `minPrice <= maxPrice` validation (self-DoS). | Reverts `InvalidBand` on a reversed band. |
 
 **Confirmed-safe (no change needed):** flash-solver callback authentication;

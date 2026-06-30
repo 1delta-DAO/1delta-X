@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
@@ -39,7 +39,7 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             data: abi.encode(COMET, WETH)
         });
 
-        LimitOrder memory order = LimitOrder({
+        Order memory order = Order({
             maker: maker,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
@@ -104,7 +104,7 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             data: abi.encode(COMET, WETH)
         });
 
-        LimitOrder memory order = LimitOrder({
+        Order memory order = Order({
             maker: maker,
             nonce: 0,
             deadline: block.timestamp + 1 hours,

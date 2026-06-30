@@ -3,7 +3,7 @@
 Core entry point for the lending intent system. Verifies maker-signed
 EIP-712 orders and orchestrates lending operations and conversions.
 
-## LimitOrderSettlement.sol
+## UniversalSettlement.sol
 
 Permit3-native limit-order settler with partial fills, optional dutch
 decay, and pro-rata lending-item execution. No module whitelist; no

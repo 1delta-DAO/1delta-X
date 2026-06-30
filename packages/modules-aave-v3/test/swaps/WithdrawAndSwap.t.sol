@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
@@ -35,7 +35,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
         _approveMakerWithdrawSide(wethIn, ref, takerData);
         _approveSolverSide(usdcOut, USDC);
 
-        LimitOrder memory order = _buildWithdrawOrder(wethIn, usdcOut, takerData);
+        Order memory order = _buildWithdrawOrder(wethIn, usdcOut, takerData);
         bytes memory sig = _sign(order);
 
         uint256 makerAWethBefore = IERC20(aWETH).balanceOf(maker);
@@ -77,7 +77,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
             data: takerData
         });
 
-        LimitOrder memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
+        Order memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
 
         IPermit3.PermitBatch memory batch = _buildBatch(
             _tokenPermitsWithTaker(address(settlement), WETH, wethIn, address(withdrawModule), aWETH, wethIn),
@@ -127,7 +127,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
 
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
-        LimitOrder memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
+        Order memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
         bytes memory sig = _sign(order);
 
         uint256 makerWethBefore = IERC20(WETH).balanceOf(maker); // 0 — all supplied

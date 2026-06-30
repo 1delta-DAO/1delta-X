@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
@@ -37,7 +37,7 @@ contract DepositBorrowTest is CompoundV3ModulesBase {
         _approveMakerDepositBorrowSide(collateralIn, borrowOut);
         _approveSolverSide(collateralIn, WETH);
 
-        LimitOrder memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
+        Order memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
         bytes memory sig = _sign(order);
 
         uint256 makerCollatBefore = _wethCollateral(maker);
@@ -85,7 +85,7 @@ contract DepositBorrowTest is CompoundV3ModulesBase {
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(COMET, WETH));
         items[1] = Item(ItemOp.TAKE, address(takerModule), borrowOut, address(0), borrowData);
 
-        LimitOrder memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
+        Order memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
 
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](2);
         tp[0] = IPermit3.TokenPermit(address(settlement), USDC, uint160(borrowOut), uint48(order.deadline));

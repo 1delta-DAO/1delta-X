@@ -26,7 +26,7 @@ import {PermitHelper} from "@core/utils/PermitHelper.sol";
 //   4. Send `amount - transferAmount` (solver fee) to `receiver` (Settlement).
 //      Settlement's `_payTokenInToSolver` forwards it to the solver.
 //
-// Matching LimitOrder shape
+// Matching Order shape
 // ─────────────────────────
 //   tokenIn  = token,  amountIn  = fee                  ← solver earns
 //   tokenOut = token,  amountOut = 0                    ← solver provides nothing
