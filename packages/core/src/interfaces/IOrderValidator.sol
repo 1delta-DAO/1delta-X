@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {LimitOrder} from "../settlement/LimitOrderSettlement.sol";
+import {Order} from "../settlement/UniversalSettlement.sol";
 
 /// @title IOrderValidator
 /// @notice Read-only trigger for limit orders. Settlement calls `validate`
@@ -21,7 +21,7 @@ interface IOrderValidator {
     /// @notice Return `true` iff the order is allowed to execute now.
     /// @param  order The full signed order (the validator may inspect any field).
     /// @param  data  Opaque validator-specific parameters, signed with the order.
-    function validate(LimitOrder calldata order, bytes calldata data)
+    function validate(Order calldata order, bytes calldata data)
         external
         view
         returns (bool);

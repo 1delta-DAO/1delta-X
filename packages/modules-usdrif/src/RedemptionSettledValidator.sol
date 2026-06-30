@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 
 import {IMocQueue} from "./interfaces/IMoc.sol";
 
@@ -40,7 +40,7 @@ contract RedemptionSettledValidator is IOrderValidator {
         rif = rif_;
     }
 
-    function validate(LimitOrder calldata, bytes calldata data) external view override returns (bool) {
+    function validate(Order calldata, bytes calldata data) external view override returns (bool) {
         (address mocQueue, uint256 opId, address user, uint256 minRif) =
             abi.decode(data, (address, uint256, address, uint256));
 

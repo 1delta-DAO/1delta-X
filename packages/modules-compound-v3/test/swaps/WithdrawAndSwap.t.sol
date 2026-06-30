@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
@@ -35,7 +35,7 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
         _approveMakerWithdrawSide(wethIn, ref, takerData);
         _approveSolverSide(usdcOut, USDC);
 
-        LimitOrder memory order = _buildWithdrawOrder(wethIn, usdcOut, takerData);
+        Order memory order = _buildWithdrawOrder(wethIn, usdcOut, takerData);
         bytes memory sig = _sign(order);
 
         uint256 makerCollatBefore = _wethCollateral(maker);
@@ -77,7 +77,7 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
             data: takerData
         });
 
-        LimitOrder memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
+        Order memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
 
         // Only the WETH tokenIn-shortfall fallback + the taker allowance are
         // needed — Comet's `allow` (set in setUp) covers the protocol side, so

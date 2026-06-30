@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 
 /// @dev Deposit WETH collateral + borrow USDC against it in one Dolomite order,
@@ -21,7 +21,7 @@ contract DolomiteDepositBorrowTest is DolomiteModulesBase {
         _approveDepositBorrowSide(COLLATERAL_IN, BORROW_OUT);
         _approveSolverSide(COLLATERAL_IN, COLL);
 
-        LimitOrder memory order = _buildDepositBorrowOrder(COLLATERAL_IN, BORROW_OUT);
+        Order memory order = _buildDepositBorrowOrder(COLLATERAL_IN, BORROW_OUT);
         bytes memory sig = _sign(order);
 
         uint256 collatBefore = _collateralOf(maker);

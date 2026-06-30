@@ -1,6 +1,6 @@
 # @1delta-x/modules-aave-v3
 
-Aave v3 lending adapters for `LimitOrderSettlement`. Each contract is a
+Aave v3 lending adapters for `UniversalSettlement`. Each contract is a
 **single-op module** — a thin, stateless adapter that performs exactly one Aave
 action (supply, withdraw, borrow, repay) on the order maker's behalf when
 Settlement processes an order item. Composed together inside one signed order,
@@ -12,12 +12,12 @@ reverse. The modules live in [`src/`](src/); the fork tests in [`test/`](test/).
 
 ## How a module plugs into a fill
 
-A maker signs one `LimitOrder` carrying an `Item[]`. Each item names a `module`
+A maker signs one `Order` carrying an `Item[]`. Each item names a `module`
 and an `op` (`MAKE` or `TAKE`). Settlement walks the items in order, then settles
 the `tokenIn → tokenOut` swap leg between maker and solver.
 
 ```
-            ┌─────────────────────── LimitOrderSettlement.fill ───────────────────────┐
+            ┌─────────────────────── UniversalSettlement.fill ───────────────────────┐
             │                                                                          │
  solver ────┤ 1. solver ──tokenOut──▶ maker            (Permit3 pulls solver's funds)  │
             │ 2. for each Item in order:                                               │

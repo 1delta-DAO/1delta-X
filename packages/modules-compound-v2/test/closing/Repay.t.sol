@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 
 import {CompoundV2ModulesBase} from "../shared/CompoundV2ModulesBase.t.sol";
@@ -42,7 +42,7 @@ contract CompoundV2RepayTest is CompoundV2ModulesBase {
 
         Item[] memory items = new Item[](1);
         items[0] = Item(ItemOp.MAKE, address(repayModule), buffered, address(0), _repayDaiData());
-        LimitOrder memory order = _order(maker, 1, USDC, DAI, usdcForSolver, buffered, items);
+        Order memory order = _order(maker, 1, USDC, DAI, usdcForSolver, buffered, items);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -100,7 +100,7 @@ contract CompoundV2RepayTest is CompoundV2ModulesBase {
             address(0),
             abi.encode(address(CDAI), DAI, uint8(DustHandler.DustAction.Recycle))
         );
-        LimitOrder memory order = _order(maker, 1, USDC, DAI, usdcForSolver, buffered, items);
+        Order memory order = _order(maker, 1, USDC, DAI, usdcForSolver, buffered, items);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

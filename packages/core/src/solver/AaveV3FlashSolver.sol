@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {LimitOrder} from "../settlement/LimitOrderSettlement.sol";
+import {Order} from "../settlement/UniversalSettlement.sol";
 import {BaseFlashSolver} from "./BaseFlashSolver.sol";
 
 /// @notice Aave v3 single-asset flash-loan surface.
@@ -37,7 +37,7 @@ contract AaveV3FlashSolver is BaseFlashSolver {
     function executeFill(
         address flashToken,
         uint256 flashAmount,
-        LimitOrder calldata order,
+        Order calldata order,
         bytes calldata sig,
         uint256 fillAmountIn,
         uint24 dexFee,
@@ -60,8 +60,8 @@ contract AaveV3FlashSolver is BaseFlashSolver {
         if (initiator != address(this)) revert BadInitiator();
         _requireInFlash();
 
-        (LimitOrder memory order, bytes memory sig, uint256 fillAmountIn, uint24 dexFee, uint256 minSwapOut) =
-            abi.decode(params, (LimitOrder, bytes, uint256, uint24, uint256));
+        (Order memory order, bytes memory sig, uint256 fillAmountIn, uint24 dexFee, uint256 minSwapOut) =
+            abi.decode(params, (Order, bytes, uint256, uint24, uint256));
 
         _fillAndSwap(order, sig, fillAmountIn, asset, dexFee, minSwapOut);
 

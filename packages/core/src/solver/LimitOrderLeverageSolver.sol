@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {LimitOrder} from "../settlement/LimitOrderSettlement.sol";
+import {Order} from "../settlement/UniversalSettlement.sol";
 import {BaseFlashSolver} from "./BaseFlashSolver.sol";
 
 /// @notice Balancer v2 vault flash-loan callback shape.
@@ -13,7 +13,7 @@ interface IBalancerVault {
 
 /// @title LimitOrderLeverageSolver
 /// @notice Balancer v2 implementation of the leverage-fill solver family
-///         (`BaseFlashSolver`). Fills a `LimitOrderSettlement` order with no
+///         (`BaseFlashSolver`). Fills a `UniversalSettlement` order with no
 ///         inventory by flash-loaning the collateral from Balancer (fee-free on
 ///         mainnet), letting Settlement route it through the maker's deposit leg,
 ///         then repaying via a Uniswap v3 swap of the borrow proceeds.
@@ -52,7 +52,7 @@ contract LimitOrderLeverageSolver is BaseFlashSolver {
     function executeFill(
         address flashToken,
         uint256 flashAmount,
-        LimitOrder calldata order,
+        Order calldata order,
         bytes calldata sig,
         uint256 fillAmountIn,
         uint24 dexFee,
@@ -77,8 +77,8 @@ contract LimitOrderLeverageSolver is BaseFlashSolver {
         if (msg.sender != address(vault)) revert OnlyVault();
         _requireInFlash();
 
-        (LimitOrder memory order, bytes memory sig, uint256 fillAmountIn, uint24 dexFee, uint256 minSwapOut) =
-            abi.decode(userData, (LimitOrder, bytes, uint256, uint24, uint256));
+        (Order memory order, bytes memory sig, uint256 fillAmountIn, uint24 dexFee, uint256 minSwapOut) =
+            abi.decode(userData, (Order, bytes, uint256, uint24, uint256));
 
         address tokenOut = tokens[0]; // collateral the solver is fronting
         uint256 owed = amounts[0] + feeAmounts[0]; // Balancer v2 mainnet fee: 0

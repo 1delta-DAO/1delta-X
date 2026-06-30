@@ -23,7 +23,7 @@ enum ItemOp {
     TAKE
 }
 
-/// @notice A single lending item inside a LimitOrder.
+/// @notice A single lending item inside a Order.
 /// @dev    `module` is a single-op adapter (`IMakerModule` for MAKE,
 ///         `ITakerModule` for TAKE). `amount` is the *total* amount for a
 ///         fully filled order; per-fill slices are computed pro-rata so
@@ -56,7 +56,7 @@ struct Validator {
 }
 
 /// @notice A signed limit order.
-struct LimitOrder {
+struct Order {
     address maker;
     uint256 nonce;
     uint256 deadline;
@@ -75,13 +75,13 @@ struct LimitOrder {
     Validator[] invariants; //       post-execution invariants; AND-composed
 }
 
-/// @title LimitOrderSettlement
+/// @title UniversalSettlement
 /// @notice Signed limit-order settler with partial fills, optional dutch
 ///         decay, and pro-rata module-dispatched lending legs. All token
 ///         and taker authority flows through Permit3 — there is no module
 ///         whitelist, no admin role. A module's authority comes entirely
 ///         from the maker's signature + their per-module Permit3 allowances.
-contract LimitOrderSettlement {
+contract UniversalSettlement {
     bytes32 internal constant ITEM_TYPEHASH =
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
 
@@ -89,7 +89,7 @@ contract LimitOrderSettlement {
         keccak256("Validator(address target,bytes data)");
 
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -145,7 +145,7 @@ contract LimitOrderSettlement {
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256("LimitOrderSettlement"),
+                keccak256("UniversalSettlement"),
                 keccak256("1"),
                 block.chainid,
                 address(this)
@@ -170,7 +170,7 @@ contract LimitOrderSettlement {
 
     /// @notice Fill (up to) `fillAmountIn` of an order. Partial fills allowed.
     ///         Lending items are executed pro-rata for this fill's slice.
-    function fill(LimitOrder calldata order, bytes calldata sig, uint256 fillAmountIn)
+    function fill(Order calldata order, bytes calldata sig, uint256 fillAmountIn)
         external
         nonReentrant
         returns (uint256 fillAmountOut)
@@ -186,7 +186,7 @@ contract LimitOrderSettlement {
     ///         every Permit3 token + taker allowance the fill needs.
     ///         No standing approvals required.
     function fillWithPermit(
-        LimitOrder calldata order,
+        Order calldata order,
         IPermit3.PermitBatch calldata batch,
         bytes calldata sig,
         uint256 fillAmountIn
@@ -196,24 +196,24 @@ contract LimitOrderSettlement {
         // applies all allowances. The order itself doesn't need a separate sig
         // — the witness binding makes the permit endorse this exact order.
         PERMIT3.permitBatchWithWitness(
-            order.maker, batch, orderHash, _LIMIT_ORDER_WITNESS_TYPESTRING, sig
+            order.maker, batch, orderHash, _ORDER_WITNESS_TYPESTRING, sig
         );
         return _fillCore(order, orderHash, fillAmountIn);
     }
 
     /// @dev EIP-712 type string for the witness portion of a `PermitBatchWitness`
-    ///      whose witness is a `LimitOrder`. Permit3 prepends its standard stub
+    ///      whose witness is a `Order`. Permit3 prepends its standard stub
     ///      and concatenates this. Type definitions are in alphabetical order
-    ///      (Item, LimitOrder, TakerPermit, TokenPermit).
-    string private constant _LIMIT_ORDER_WITNESS_TYPESTRING =
-        "LimitOrder witness)"
+    ///      (Item, Order, TakerPermit, TokenPermit).
+    string private constant _ORDER_WITNESS_TYPESTRING =
+        "Order witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
 
-    function _fillCore(LimitOrder calldata order, bytes32 orderHash, uint256 fillAmountIn)
+    function _fillCore(Order calldata order, bytes32 orderHash, uint256 fillAmountIn)
         internal
         returns (uint256 fillAmountOut)
     {
@@ -268,7 +268,7 @@ contract LimitOrderSettlement {
     ///      slice = item.amount * newFilled / amountIn
     ///            - item.amount * prevFilled / amountIn
     ///      Sums to exactly item.amount once the order is fully filled.
-    function _executeItems(LimitOrder calldata order, uint256 prevFilled, uint256 newFilled) internal {
+    function _executeItems(Order calldata order, uint256 prevFilled, uint256 newFilled) internal {
         uint256 amountIn = order.amountIn;
         for (uint256 i; i < order.items.length; i++) {
             Item calldata item = order.items[i];
@@ -324,7 +324,7 @@ contract LimitOrderSettlement {
 
     // ──────────────────── Dutch decay ────────────────────
 
-    function _currentAmountOut(LimitOrder calldata order) internal view returns (uint256) {
+    function _currentAmountOut(Order calldata order) internal view returns (uint256) {
         if (order.startAmountOut < order.endAmountOut) revert InvalidAuctionParams();
 
         if (order.decayDuration == 0 || order.startAmountOut == order.endAmountOut) {
@@ -342,7 +342,7 @@ contract LimitOrderSettlement {
 
     // ──────────────────── Hashing & signature ────────────────────
 
-    function _hashOrder(LimitOrder calldata order) internal pure returns (bytes32) {
+    function _hashOrder(Order calldata order) internal pure returns (bytes32) {
         // Split into two encodings to avoid stack-too-deep.
         bytes memory head = abi.encode(
             ORDER_TYPEHASH,
@@ -397,7 +397,7 @@ contract LimitOrderSettlement {
 
     // ──────────────────── Validators ────────────────────
 
-    function _runValidators(LimitOrder calldata order) internal view {
+    function _runValidators(Order calldata order) internal view {
         for (uint256 i; i < order.validators.length; i++) {
             Validator calldata v = order.validators[i];
             (bool ok, bytes memory ret) = v.target.staticcall(
@@ -412,7 +412,7 @@ contract LimitOrderSettlement {
     /// @dev Post-execution staticcall invariants. Same shape as validators but
     ///      run AFTER items execute, so they can assert on the order's side
     ///      effects (e.g. "maker's Aave health factor ≥ 2.0").
-    function _runInvariants(LimitOrder calldata order) internal view {
+    function _runInvariants(Order calldata order) internal view {
         for (uint256 i; i < order.invariants.length; i++) {
             Validator calldata v = order.invariants[i];
             (bool ok, bytes memory ret) = v.target.staticcall(
@@ -433,15 +433,15 @@ contract LimitOrderSettlement {
 
     // ──────────────────── Views ────────────────────
 
-    function hashOrder(LimitOrder calldata order) external pure returns (bytes32) {
+    function hashOrder(Order calldata order) external pure returns (bytes32) {
         return _hashOrder(order);
     }
 
-    function previewAmountOut(LimitOrder calldata order) external view returns (uint256) {
+    function previewAmountOut(Order calldata order) external view returns (uint256) {
         return _currentAmountOut(order);
     }
 
-    function remaining(LimitOrder calldata order) external view returns (uint256) {
+    function remaining(Order calldata order) external view returns (uint256) {
         return order.amountIn - filledAmountIn[_hashOrder(order)];
     }
 }

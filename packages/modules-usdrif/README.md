@@ -1,6 +1,6 @@
 # @1delta-x/modules-usdrif
 
-USDRIF → USDT0 exit via `LimitOrderSettlement`, implementing the integration in
+USDRIF → USDT0 exit via `UniversalSettlement`, implementing the integration in
 [`intents-integration-plan.md`](../../intents-integration-plan.md). A USDRIF
 holder exits to USDT0 in one signed intent, filled by competing solvers, by
 tokenising MoC's native redemption and auctioning the resulting RIF.
@@ -14,7 +14,7 @@ tokenising MoC's native redemption and auctioning the resulting RIF.
 STEP 1  user calls MoC redeemTP(USDRIF, qTP, qACmin, recipient = user)
           → escrows USDRIF, queues a RedeemTP op; ~30–90s later the MoC
             executor delivers a fixed amount of RIF to the user.
-        user signs a LimitOrder: tokenIn = RIF, tokenOut = USDT0,
+        user signs a Order: tokenIn = RIF, tokenOut = USDT0,
           amountIn = qACmin, startAmountOut → endAmountOut (dutch decay),
           decayStartTime ≈ now + 90s, validators = [settled, depeg].
 

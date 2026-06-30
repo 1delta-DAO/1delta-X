@@ -5,7 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
-import {LimitOrder, Item, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -52,7 +52,7 @@ contract PlainSwapTest is CoreSettlementBase {
     function _plainSwapOrder(uint256 nonce, uint256 usdcIn, uint256 wethOut)
         internal
         view
-        returns (LimitOrder memory)
+        returns (Order memory)
     {
         return _order(maker, nonce, USDC, WETH, usdcIn, wethOut, new Item[](0));
     }
@@ -69,7 +69,7 @@ contract PlainSwapTest is CoreSettlementBase {
         _approveMakerPlainSwap(usdcIn);
         _approveSolverSide(wethOut, WETH);
 
-        LimitOrder memory order = _plainSwapOrder(0, usdcIn, wethOut);
+        Order memory order = _plainSwapOrder(0, usdcIn, wethOut);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -102,7 +102,7 @@ contract PlainSwapTest is CoreSettlementBase {
         _approveMakerPlainSwap(usdcIn);
         _approveSolverSide(wethOut, WETH);
 
-        LimitOrder memory order = _plainSwapOrder(1, usdcIn, wethOut);
+        Order memory order = _plainSwapOrder(1, usdcIn, wethOut);
         bytes memory sig = _sign(order);
 
         // First fill: half the order.
@@ -141,7 +141,7 @@ contract PlainSwapTest is CoreSettlementBase {
         _approveSolverSide(startOut, WETH);
 
         Item[] memory items = new Item[](0);
-        LimitOrder memory order = LimitOrder({
+        Order memory order = Order({
             maker: maker,
             nonce: 2,
             deadline: block.timestamp + 1 hours,
@@ -183,7 +183,7 @@ contract PlainSwapTest is CoreSettlementBase {
         deal(USDC, maker, usdcIn);
         deal(WETH, solver, wethOut);
 
-        LimitOrder memory order = _plainSwapOrder(3, usdcIn, wethOut);
+        Order memory order = _plainSwapOrder(3, usdcIn, wethOut);
 
         // Single token permit: Settlement may pull the maker's USDC.
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](1);
@@ -225,7 +225,7 @@ contract PlainSwapTest is CoreSettlementBase {
         vm.stopPrank();
         _approveSolverSide(wethOut, WETH);
 
-        LimitOrder memory order = _order(address(wallet), 0, USDC, WETH, usdcIn, wethOut, new Item[](0));
+        Order memory order = _order(address(wallet), 0, USDC, WETH, usdcIn, wethOut, new Item[](0));
         bytes memory sig = _sign(order); // signed by makerPk → validated by wallet
 
         vm.prank(solver);
@@ -261,7 +261,7 @@ contract PlainSwapTest is CoreSettlementBase {
         vm.stopPrank();
         _approveSolverSide(wethOut, WETH);
 
-        LimitOrder memory order = _order(acct, 0, USDC, WETH, usdcIn, wethOut, new Item[](0));
+        Order memory order = _order(acct, 0, USDC, WETH, usdcIn, wethOut, new Item[](0));
         bytes memory sig = _sign(order); // signed by makerPk → validated by delegate code
 
         vm.prank(solver);
@@ -291,7 +291,7 @@ contract PlainSwapTest is CoreSettlementBase {
         _approveMakerPlainSwap(usdcIn);
         _approveSolverSide(wethOut, WETH);
 
-        LimitOrder memory order = _plainSwapOrder(0, usdcIn, wethOut);
+        Order memory order = _plainSwapOrder(0, usdcIn, wethOut);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {LimitOrderSettlement, LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {UniversalSettlement, Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
@@ -23,12 +23,12 @@ contract ExclusivityTest is CompoundV3ModulesBase {
 
         // Exclusive to a specific address that is NOT our `solver`.
         address exclusive = address(0xCAFE);
-        LimitOrder memory order =
+        Order memory order =
             _orderWithExclusivity(201, USDC, WETH, usdcIn, wethOut, items, exclusive, uint32(block.timestamp + 30));
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(LimitOrderSettlement.NotExclusiveFiller.selector);
+        vm.expectRevert(UniversalSettlement.NotExclusiveFiller.selector);
         settlement.fill(order, sig, usdcIn);
     }
 
@@ -48,7 +48,7 @@ contract ExclusivityTest is CompoundV3ModulesBase {
         address exclusive = address(0xCAFE);
         // Window already expired (endTime in the past clears the gate).
         uint32 endTime = uint32(block.timestamp - 1);
-        LimitOrder memory order = _orderWithExclusivity(202, USDC, WETH, usdcIn, wethOut, items, exclusive, endTime);
+        Order memory order = _orderWithExclusivity(202, USDC, WETH, usdcIn, wethOut, items, exclusive, endTime);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

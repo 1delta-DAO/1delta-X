@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 import {DolomiteOperateModule} from "../../src/DolomiteModules.sol";
 
@@ -48,7 +48,7 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
 
         Item[] memory items = new Item[](1);
         items[0] = Item(ItemOp.TAKE, address(operateModule), BORROW_OUT, address(0), data);
-        LimitOrder memory order = _order(maker, 2, DEBT, COLL, BORROW_OUT, COLLATERAL_IN, items);
+        Order memory order = _order(maker, 2, DEBT, COLL, BORROW_OUT, COLLATERAL_IN, items);
         bytes memory sig = _sign(order);
 
         uint256 collatBefore = _collateralOf(maker);

@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
 import {EulerV2BatchModule} from "../../src/EulerV2Modules.sol";
 
@@ -46,7 +46,7 @@ contract EulerCloseAtomicTest is EulerV2ModulesBase {
 
         Item[] memory items = new Item[](1);
         items[0] = Item(ItemOp.TAKE, address(batchModule), WETH_OUT, address(0), data);
-        LimitOrder memory order = _order(maker, 2, WETH, USDC, WETH_OUT, REPAY_CEIL, items);
+        Order memory order = _order(maker, 2, WETH, USDC, WETH_OUT, REPAY_CEIL, items);
         bytes memory sig = _sign(order);
 
         uint256 debtBefore = _usdcDebt(maker);

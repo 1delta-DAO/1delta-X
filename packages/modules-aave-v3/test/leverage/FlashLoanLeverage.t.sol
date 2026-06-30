@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
@@ -42,7 +42,7 @@ contract FlashLoanLeverageTest is AaveModulesBase {
         leverageSolver.setupTokenApproval(WETH);
 
         // Build the order — same schema as deposit+borrow.
-        LimitOrder memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
+        Order memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
         // Bump nonce so it doesn't collide with the deposit+borrow test's nonce 2.
         order.nonce = 99;
         bytes memory sig = _sign(order);

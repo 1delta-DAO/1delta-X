@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {LimitOrderSettlement, LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {UniversalSettlement, Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
@@ -22,11 +22,11 @@ contract MinFillTest is AaveModulesBase {
         items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(AAVE_POOL, WETH)});
 
         // Sign with minFillAmountIn = 100 USDC. Attempt a 50 USDC fill → reverts.
-        LimitOrder memory order = _orderWithMinFill(203, USDC, WETH, usdcIn, wethOut, items, 100e6);
+        Order memory order = _orderWithMinFill(203, USDC, WETH, usdcIn, wethOut, items, 100e6);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(LimitOrderSettlement.FillTooSmall.selector);
+        vm.expectRevert(UniversalSettlement.FillTooSmall.selector);
         settlement.fill(order, sig, 50e6);
     }
 }

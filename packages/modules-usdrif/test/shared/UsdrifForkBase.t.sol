@@ -6,16 +6,16 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {
-    LimitOrderSettlement,
-    LimitOrder,
+    UniversalSettlement,
+    Order,
     Item,
     Validator
-} from "@core/settlement/LimitOrderSettlement.sol";
+} from "@core/settlement/UniversalSettlement.sol";
 
 import {IMocRif, IMocQueue} from "../../src/interfaces/IMoc.sol";
 
 /// @dev Rootstock-mainnet fork harness for the USDRIF→USDT0 exit flow. Forks RSK
-/// (chain id 30), deploys a fresh Permit3 + LimitOrderSettlement, and provides
+/// (chain id 30), deploys a fresh Permit3 + UniversalSettlement, and provides
 /// the verified MoC / token addresses plus the order EIP-712 signing helpers.
 ///
 /// All on-chain facts verified against Rootstock mainnet (see
@@ -36,7 +36,7 @@ abstract contract UsdrifForkBase is Test {
     uint8 internal constant OPER_REDEEM_TP = 4;
 
     Permit3 internal permit3;
-    LimitOrderSettlement internal settlement;
+    UniversalSettlement internal settlement;
 
     uint256 internal makerPk = 0xA11CE;
     address internal maker = vm.addr(makerPk);
@@ -46,7 +46,7 @@ abstract contract UsdrifForkBase is Test {
         _forkRootstock();
 
         permit3 = new Permit3();
-        settlement = new LimitOrderSettlement(address(permit3));
+        settlement = new UniversalSettlement(address(permit3));
 
         vm.label(maker, "maker");
         vm.label(solver, "solver");
@@ -97,7 +97,7 @@ abstract contract UsdrifForkBase is Test {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 internal constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 internal constant ORDER_TH = keccak256(
-        "LimitOrder(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -127,7 +127,7 @@ abstract contract UsdrifForkBase is Test {
         return keccak256(abi.encodePacked(h));
     }
 
-    function _hashOrder(LimitOrder memory o) internal pure returns (bytes32) {
+    function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
             ORDER_TH, o.maker, o.nonce, o.deadline, o.tokenIn, o.tokenOut, o.amountIn,
             o.decayStartTime, o.decayDuration, o.startAmountOut, o.endAmountOut
@@ -139,7 +139,7 @@ abstract contract UsdrifForkBase is Test {
         return keccak256(bytes.concat(head, tail));
     }
 
-    function _sign(LimitOrder memory o) internal view returns (bytes memory) {
+    function _sign(Order memory o) internal view returns (bytes memory) {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), _hashOrder(o)));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPk, digest);
         return abi.encodePacked(r, s, v);

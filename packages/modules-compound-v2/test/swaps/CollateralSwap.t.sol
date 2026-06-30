@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 import {CompoundV2ModulesBase} from "../shared/CompoundV2ModulesBase.t.sol";
 
 /// @dev Collateral swap that exercises BOTH the withdraw and deposit modules with
@@ -37,7 +37,7 @@ contract CompoundV2CollateralSwapTest is CompoundV2ModulesBase {
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.TAKE, address(withdrawModule), usdcOut, address(0), _withdrawUsdcData());
         items[1] = Item(ItemOp.MAKE, address(depositModule), daiIn, address(0), _depositDaiData());
-        LimitOrder memory order = _order(maker, 1, USDC, DAI, usdcOut, daiIn, items);
+        Order memory order = _order(maker, 1, USDC, DAI, usdcOut, daiIn, items);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

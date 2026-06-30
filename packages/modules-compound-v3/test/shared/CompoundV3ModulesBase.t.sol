@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
@@ -217,7 +217,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
     function _buildWithdrawOrder(uint256 wethIn, uint256 usdcOut, bytes memory takerData)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({
@@ -233,7 +233,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
     function _buildDepositBorrowOrder(uint256 collateralIn, uint256 borrowOut)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](2);
         items[0] = Item({
@@ -256,7 +256,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
     function _buildRepayOrder(uint256 bufferedAmount, uint256 wethForSolver)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({
@@ -276,7 +276,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
     function _buildMigrationOrder(uint256 bufferedRepay, uint256 exactWeth, uint256 borrowUsds)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](4);
 
@@ -309,7 +309,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
             data: _borrowData(COMET_USDS, USDS)
         });
 
-        order = LimitOrder({
+        order = Order({
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,

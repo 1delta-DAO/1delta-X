@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 
 import {IPriceProvider} from "./interfaces/IMoc.sol";
 
@@ -29,7 +29,7 @@ import {IPriceProvider} from "./interfaces/IMoc.sol";
 contract DepegGuardValidator is IOrderValidator {
     error InvalidBand();
 
-    function validate(LimitOrder calldata, bytes calldata data) external view override returns (bool) {
+    function validate(Order calldata, bytes calldata data) external view override returns (bool) {
         (address priceProvider, uint256 minPrice, uint256 maxPrice) =
             abi.decode(data, (address, uint256, uint256));
 

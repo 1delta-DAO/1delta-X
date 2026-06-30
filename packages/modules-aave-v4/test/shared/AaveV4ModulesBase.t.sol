@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
@@ -182,7 +182,7 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
     function _buildV4DepositBorrowOrder(uint256 collateralIn, uint256 borrowOut)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](2);
         items[0] = Item({
@@ -205,7 +205,7 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
     function _buildV4WithdrawOrder(uint256 wethIn, uint256 usdcOut, bytes memory takerData)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({
@@ -221,7 +221,7 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
     function _buildV4RepayOrder(uint256 bufferedAmount, uint256 wethForSolver)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({

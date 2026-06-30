@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 import {AaveV3FlashSolver} from "@core/solver/AaveV3FlashSolver.sol";
 import {EulerFlashSolver} from "@core/solver/EulerFlashSolver.sol";
 import {MorphoFlashSolver} from "@core/solver/MorphoFlashSolver.sol";
@@ -17,7 +17,7 @@ interface ILeverageFlashSolver {
     function executeFill(
         address flashSource,
         uint256 flashAmount,
-        LimitOrder calldata order,
+        Order calldata order,
         bytes calldata sig,
         uint256 fillAmountIn,
         uint24 dexFee,
@@ -70,7 +70,7 @@ contract AaveFlashProvidersTest is AaveModulesBase {
         _approveMakerDepositBorrowSide(collateralIn, borrowOut);
         ILeverageFlashSolver(solver).setupTokenApproval(WETH);
 
-        LimitOrder memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
+        Order memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
         order.nonce = 99;
         bytes memory sig = _sign(order);
 

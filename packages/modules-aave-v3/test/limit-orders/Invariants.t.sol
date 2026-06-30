@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrderSettlement, LimitOrder, Item, ItemOp, Validator} from "@core/settlement/LimitOrderSettlement.sol";
+import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 
 import {TrueInvariant, FalseInvariant} from "../shared/Modules.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
@@ -30,14 +30,14 @@ contract InvariantsTest is AaveModulesBase {
         Validator[] memory invariants = new Validator[](1);
         invariants[0] = Validator({target: address(failing), data: ""});
 
-        LimitOrder memory order = _orderWithInvariants(204, USDC, WETH, usdcIn, wethOut, items, invariants);
+        Order memory order = _orderWithInvariants(204, USDC, WETH, usdcIn, wethOut, items, invariants);
         bytes memory sig = _sign(order);
 
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
         uint256 makerAWethBefore = IERC20(aWETH).balanceOf(maker);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(LimitOrderSettlement.InvariantFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.InvariantFailed.selector, uint256(0)));
         settlement.fill(order, sig, usdcIn);
 
         // Entire fill reverted — maker's state is exactly as before.
@@ -63,7 +63,7 @@ contract InvariantsTest is AaveModulesBase {
         Validator[] memory invariants = new Validator[](1);
         invariants[0] = Validator({target: address(passing), data: ""});
 
-        LimitOrder memory order = _orderWithInvariants(205, USDC, WETH, usdcIn, wethOut, items, invariants);
+        Order memory order = _orderWithInvariants(205, USDC, WETH, usdcIn, wethOut, items, invariants);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

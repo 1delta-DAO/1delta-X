@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 
@@ -83,7 +83,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         _approveMigrationSide(bufferedRepay, exactWeth, debt);
         _approveSolverSide(bufferedRepay, USDC);
 
-        LimitOrder memory order = _buildMigrationOrder(bufferedRepay, exactWeth, debt);
+        Order memory order = _buildMigrationOrder(bufferedRepay, exactWeth, debt);
         bytes memory sig = _sign(order);
 
         uint256 makerAWstethBefore = IERC20(aWstETH).balanceOf(maker);
@@ -133,7 +133,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         vm.prank(maker);
         MORPHO.setAuthorization(address(takerModule), true);
 
-        (LimitOrder memory order, IPermit3.PermitBatch memory batch) =
+        (Order memory order, IPermit3.PermitBatch memory batch) =
             _buildMigrationOrderAndBatch(bufferedRepay, exactWeth, debt);
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
@@ -184,7 +184,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
     function _buildMigrationOrder(uint256 bufferedRepay, uint256 exactWeth, uint256 debt)
         internal
         view
-        returns (LimitOrder memory order)
+        returns (Order memory order)
     {
         Item[] memory items = new Item[](4);
         items[0] = Item(ItemOp.MAKE, address(aaveRepayModule), bufferedRepay, address(0), _aaveRepayData());
@@ -197,7 +197,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
     function _buildMigrationOrderAndBatch(uint256 bufferedRepay, uint256 exactWeth, uint256 debt)
         internal
         view
-        returns (LimitOrder memory order, IPermit3.PermitBatch memory batch)
+        returns (Order memory order, IPermit3.PermitBatch memory batch)
     {
         order = _buildMigrationOrder(bufferedRepay, exactWeth, debt);
         uint48 exp = uint48(order.deadline);

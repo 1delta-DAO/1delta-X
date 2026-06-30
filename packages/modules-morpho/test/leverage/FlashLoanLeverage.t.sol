@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 
 /// @dev Leverage loop via flash loan + DEX (no solver inventory). The
@@ -27,7 +27,7 @@ contract MorphoFlashLoanLeverageTest is MorphoModulesBase {
         _approveMakerSupplyBorrowSide(collateralIn, borrowOut);
         leverageSolver.setupTokenApproval(WSTETH);
 
-        LimitOrder memory order = _buildSupplyBorrowOrder(collateralIn, borrowOut);
+        Order memory order = _buildSupplyBorrowOrder(collateralIn, borrowOut);
         order.nonce = 99; // avoid colliding with the supply+borrow test
         bytes memory sig = _sign(order);
 

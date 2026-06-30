@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
 import {VenusModulesBase} from "../shared/VenusModulesBase.t.sol";
 
 /// @dev Deposit WETH collateral + borrow USDC against it in one Venus order.
@@ -21,7 +21,7 @@ contract VenusDepositBorrowTest is VenusModulesBase {
         _approveDepositBorrowSide(collateralIn, borrowOut);
         _approveSolverSide(collateralIn, WETH);
 
-        LimitOrder memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
+        Order memory order = _buildDepositBorrowOrder(collateralIn, borrowOut);
         bytes memory sig = _sign(order);
 
         uint256 collatBefore = _wethCollateral(maker);

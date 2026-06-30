@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 
 import {VenusModulesBase} from "../shared/VenusModulesBase.t.sol";
@@ -46,7 +46,7 @@ contract VenusRepayTest is VenusModulesBase {
         // takes bare market data — not the op-prefixed taker encoding.)
         Item[] memory items = new Item[](1);
         items[0] = Item(ItemOp.MAKE, address(repayModule), buffered, address(0), abi.encode(address(VUSDC), USDC));
-        LimitOrder memory order = _order(maker, 1, WETH, USDC, wethForSolver, buffered, items);
+        Order memory order = _order(maker, 1, WETH, USDC, wethForSolver, buffered, items);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -106,7 +106,7 @@ contract VenusRepayTest is VenusModulesBase {
             address(0),
             abi.encode(address(VUSDC), USDC, uint8(DustHandler.DustAction.Recycle))
         );
-        LimitOrder memory order = _order(maker, 1, WETH, USDC, wethForSolver, buffered, items);
+        Order memory order = _order(maker, 1, WETH, USDC, wethForSolver, buffered, items);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

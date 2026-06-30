@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 
@@ -35,7 +35,7 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
         _approveMakerWithdrawSide(wstethIn, ref);
         _approveSolverSide(usdcOut, USDC);
 
-        LimitOrder memory order = _buildWithdrawOrder(wstethIn, usdcOut);
+        Order memory order = _buildWithdrawOrder(wstethIn, usdcOut);
         bytes memory sig = _sign(order);
 
         uint256 makerCollatBefore = _collateral(maker);
@@ -81,7 +81,7 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
             data: takerData
         });
 
-        LimitOrder memory order = _order(maker, 1, WSTETH, USDC, wstethIn, usdcOut, items);
+        Order memory order = _order(maker, 1, WSTETH, USDC, wstethIn, usdcOut, items);
 
         // Only one token permit needed (the tokenIn shortfall fallback); the
         // withdraw needs no token allowance at all — just the taker permit.

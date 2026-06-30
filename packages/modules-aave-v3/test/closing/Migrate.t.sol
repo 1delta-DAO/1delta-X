@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {LimitOrder, Item, ItemOp} from "@core/settlement/LimitOrderSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
@@ -48,7 +48,7 @@ contract MigrateTest is AaveModulesBase {
         _approveMakerMigrationSide(bufferedRepay, exactWeth, debt, SPARK_POOL, sparkUsdcDebt);
         _approveSolverSide(bufferedRepay, USDC);
 
-        LimitOrder memory order = _buildMigrationOrder(bufferedRepay, exactWeth, debt, SPARK_POOL);
+        Order memory order = _buildMigrationOrder(bufferedRepay, exactWeth, debt, SPARK_POOL);
         bytes memory sig = _sign(order);
 
         uint256 makerAaveAWethBefore = IERC20(aWETH).balanceOf(maker);
@@ -88,7 +88,7 @@ contract MigrateTest is AaveModulesBase {
 
     function test_permit_migrate_aaveV3_to_spark() public {
         _setupMigration();
-        (LimitOrder memory order, IPermit3.PermitBatch memory batch) = _buildMigrationOrderAndBatch();
+        (Order memory order, IPermit3.PermitBatch memory batch) = _buildMigrationOrderAndBatch();
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
@@ -108,7 +108,7 @@ contract MigrateTest is AaveModulesBase {
     function _buildMigrationOrderAndBatch()
         internal
         view
-        returns (LimitOrder memory order, IPermit3.PermitBatch memory batch)
+        returns (Order memory order, IPermit3.PermitBatch memory batch)
     {
         address SPARK_POOL = lendingControllers[Chains.ETHEREUM_MAINNET][Lenders.SPARK];
         bytes memory aaveWithdrawData = abi.encode(AAVE_POOL, WETH, aWETH);
