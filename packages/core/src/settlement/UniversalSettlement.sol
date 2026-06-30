@@ -444,4 +444,38 @@ contract UniversalSettlement {
     function remaining(Order calldata order) external view returns (uint256) {
         return order.amountIn - filledAmountIn[_hashOrder(order)];
     }
+
+    /// @notice Off-chain / preview check for order well-formedness. Intentionally
+    ///         NOT called during `fill` — fills stay cheap and unopinionated — so
+    ///         call this from a maker UI, relayer, or test before signing or
+    ///         submitting, to catch self-inflicted misparameterizations. Returns
+    ///         the first problem found (`ok == false`), else `(true, "")`.
+    ///
+    /// @dev    Trust model: a malformed order can only ever harm its own maker
+    ///         (all token moves are gated by the maker's signature + Permit3
+    ///         allowances), so these are footgun guards, not protocol invariants.
+    ///         Scope: structural/economic sanity + current fillability. It does
+    ///         NOT judge whether the price is *good*.
+    ///
+    ///         Stranded-tail caveat (not flagged here, as partial-fill-with-floor
+    ///         is a legitimate config): any `0 < minFillAmountIn < amountIn` lets
+    ///         a solver leave a remainder smaller than `minFillAmountIn` that can
+    ///         then never be filled. Only `minFillAmountIn ∈ {0, amountIn}`
+    ///         guarantees no unfillable tail.
+    function validateOrder(Order calldata order) external view returns (bool ok, string memory reason) {
+        // ── structural / economic sanity (time-independent) ──
+        if (order.amountIn == 0) return (false, "amountIn is zero");
+        if (order.startAmountOut == 0) return (false, "startAmountOut is zero (giveaway)");
+        if (order.startAmountOut < order.endAmountOut) return (false, "startAmountOut < endAmountOut");
+        if (order.tokenIn == order.tokenOut) return (false, "tokenIn == tokenOut");
+        if (order.minFillAmountIn > order.amountIn) return (false, "minFillAmountIn > amountIn (unfillable)");
+        if (order.decayDuration != 0 && order.decayStartTime == 0) return (false, "decay set without decayStartTime");
+
+        // ── current fillability (time/state-dependent) ──
+        if (order.deadline < block.timestamp) return (false, "order expired");
+        if (_isNonceCancelled(order.maker, order.nonce)) return (false, "nonce cancelled");
+        if (filledAmountIn[_hashOrder(order)] >= order.amountIn) return (false, "order fully filled");
+
+        return (true, "");
+    }
 }
