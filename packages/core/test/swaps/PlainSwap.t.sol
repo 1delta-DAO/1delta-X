@@ -73,7 +73,7 @@ contract PlainSwapTest is CoreSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
 
         assertEq(paid, wethOut, "solver paid exactly wethOut");
 
@@ -107,14 +107,14 @@ contract PlainSwapTest is CoreSettlementBase {
 
         // First fill: half the order.
         vm.prank(solver);
-        uint256 paid1 = settlement.fill(order, sig, usdcIn / 2);
+        uint256 paid1 = settlement.fill(order, sig, usdcIn / 2)[0];
         assertEq(paid1, wethOut / 2, "first fill pays half the output");
         assertEq(settlement.filledAmountIn(settlement.hashOrder(order)), usdcIn / 2, "half filled");
         assertEq(settlement.remaining(order), usdcIn / 2, "half remaining");
 
         // Second fill: the rest. Pro-rata slices accumulate exactly to the totals.
         vm.prank(solver);
-        uint256 paid2 = settlement.fill(order, sig, usdcIn - usdcIn / 2);
+        uint256 paid2 = settlement.fill(order, sig, usdcIn - usdcIn / 2)[0];
         assertEq(paid1 + paid2, wethOut, "two fills sum to full output");
         assertEq(settlement.remaining(order), 0, "fully filled");
 
@@ -145,13 +145,13 @@ contract PlainSwapTest is CoreSettlementBase {
             maker: maker,
             nonce: 2,
             deadline: block.timestamp + 1 hours,
-            tokenIn: USDC,
-            tokenOut: WETH,
-            amountIn: usdcIn,
+            tokenIn: _a1(USDC),
+            tokenOut: _a1(WETH),
+            amountIn: _u1(usdcIn),
             decayStartTime: uint32(block.timestamp),
             decayDuration: 100,
-            startAmountOut: startOut,
-            endAmountOut: endOut,
+            startAmountOut: _u1(startOut),
+            endAmountOut: _u1(endOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,
@@ -164,10 +164,10 @@ contract PlainSwapTest is CoreSettlementBase {
         // Warp to the auction midpoint → output decays halfway from start to end.
         vm.warp(block.timestamp + 50);
         uint256 expectedOut = startOut - (startOut - endOut) / 2; // 0.9 ether
-        assertEq(settlement.previewAmountOut(order), expectedOut, "preview matches midpoint price");
+        assertEq(settlement.previewAmountOut(order)[0], expectedOut, "preview matches midpoint price");
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
 
         assertEq(paid, expectedOut, "solver paid the decayed price");
         assertEq(IERC20(WETH).balanceOf(maker), expectedOut, "maker received decayed WETH");
@@ -198,7 +198,7 @@ contract PlainSwapTest is CoreSettlementBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn);
+        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn)[0];
 
         assertEq(paid, wethOut, "solver paid exactly wethOut");
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH in wallet");
@@ -229,7 +229,7 @@ contract PlainSwapTest is CoreSettlementBase {
         bytes memory sig = _sign(order); // signed by makerPk → validated by wallet
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
 
         assertEq(paid, wethOut, "solver paid exactly wethOut");
         assertEq(IERC20(WETH).balanceOf(address(wallet)), wethOut, "contract maker received WETH");
@@ -265,7 +265,7 @@ contract PlainSwapTest is CoreSettlementBase {
         bytes memory sig = _sign(order); // signed by makerPk → validated by delegate code
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
 
         assertEq(paid, wethOut, "solver paid exactly wethOut");
         assertEq(IERC20(WETH).balanceOf(acct), wethOut, "7702 delegated maker received WETH");
@@ -295,7 +295,7 @@ contract PlainSwapTest is CoreSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
 
         assertEq(paid, wethOut, "solver paid exactly wethOut");
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "7702 maker received WETH");

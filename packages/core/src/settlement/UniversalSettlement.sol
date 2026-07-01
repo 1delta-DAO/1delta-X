@@ -56,20 +56,28 @@ struct Validator {
 }
 
 /// @notice A signed limit order.
+/// @dev    The conversion leg is multi-asset: the maker gives a basket
+///         (`tokenIn[]`/`amountIn[]`) and receives a basket
+///         (`tokenOut[]`/`startAmountOut[]`/`endAmountOut[]`). Partial fills are
+///         driven by a SINGLE scalar fraction `f = fillAmountIn / amountIn[0]`;
+///         `amountIn[0]` is the fill denominator and `fillAmountIn` is expressed
+///         in `tokenIn[0]` units. Every other input, every output, and every
+///         item slice scale by the same `f`, so the whole basket fills
+///         proportionally (the solver cannot size each leg independently).
 struct Order {
     address maker;
     uint256 nonce;
     uint256 deadline;
-    address tokenIn; //     maker gives (solver receives)
-    address tokenOut; //    maker receives (solver gives)
-    uint256 amountIn;
+    address[] tokenIn; //   maker gives (solver receives); tokenIn[0] anchors the fill
+    uint256[] amountIn; //  amountIn[0] is the fill denominator
     uint32 decayStartTime;
     uint32 decayDuration;
-    uint256 startAmountOut; //       best for maker (at auction start / fixed price)
-    uint256 endAmountOut; //         worst for maker (at auction end)
+    address[] tokenOut; //  maker receives (solver gives)
+    uint256[] startAmountOut; //     per output: best for maker (auction start / fixed price)
+    uint256[] endAmountOut; //       per output: worst for maker (auction end floor)
     address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
     uint32 exclusivityEndTime; //    unix timestamp; ignored if exclusiveFiller == 0
-    uint256 minFillAmountIn; //      anti-dust floor per fill; 0 = no minimum
+    uint256 minFillAmountIn; //      anti-dust floor per fill (tokenIn[0] units); 0 = no minimum
     Item[] items;
     Validator[] validators; //       pre-execution trigger conditions; AND-composed
     Validator[] invariants; //       post-execution invariants; AND-composed
@@ -89,7 +97,7 @@ contract UniversalSettlement {
         keccak256("Validator(address target,bytes data)");
 
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -114,7 +122,7 @@ contract UniversalSettlement {
         address indexed maker,
         address indexed solver,
         uint256 fillAmountIn,
-        uint256 fillAmountOut
+        uint256[] fillAmountsOut
     );
     event OrdersCancelled(address indexed maker, uint256[] nonces);
 
@@ -173,7 +181,7 @@ contract UniversalSettlement {
     function fill(Order calldata order, bytes calldata sig, uint256 fillAmountIn)
         external
         nonReentrant
-        returns (uint256 fillAmountOut)
+        returns (uint256[] memory fillAmountsOut)
     {
         bytes32 orderHash = _hashOrder(order);
         _verifySignature(orderHash, sig, order.maker);
@@ -190,7 +198,7 @@ contract UniversalSettlement {
         IPermit3.PermitBatch calldata batch,
         bytes calldata sig,
         uint256 fillAmountIn
-    ) external nonReentrant returns (uint256 fillAmountOut) {
+    ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
         bytes32 orderHash = _hashOrder(order);
         // Permit3 verifies the sig against (PermitBatchWitness + orderHash) and
         // applies all allowances. The order itself doesn't need a separate sig
@@ -208,14 +216,14 @@ contract UniversalSettlement {
     string private constant _ORDER_WITNESS_TYPESTRING =
         "Order witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
 
     function _fillCore(Order calldata order, bytes32 orderHash, uint256 fillAmountIn)
         internal
-        returns (uint256 fillAmountOut)
+        returns (uint256[] memory fillAmountsOut)
     {
         if (fillAmountIn == 0) revert ZeroFill();
         if (fillAmountIn < order.minFillAmountIn) revert FillTooSmall();
@@ -233,33 +241,64 @@ contract UniversalSettlement {
 
         _runValidators(order);
 
+        // amountIn[0] is the fill denominator; fillAmountIn is in tokenIn[0] units.
+        uint256 amountIn0 = order.amountIn[0];
         uint256 prevFilled = filledAmountIn[orderHash];
         uint256 newFilled = prevFilled + fillAmountIn;
-        if (newFilled > order.amountIn) revert OverFill();
+        if (newFilled > amountIn0) revert OverFill();
         filledAmountIn[orderHash] = newFilled;
 
-        uint256 currentOut = _currentAmountOut(order);
-        // ceilDiv — maker never underpaid at current auction rate
-        fillAmountOut = (fillAmountIn * currentOut + order.amountIn - 1) / order.amountIn;
+        // 1. Solver → maker: each tokenOut, auction-priced, pro-rata this fill.
+        fillAmountsOut = _deliverOutputs(order, fillAmountIn, amountIn0);
 
-        // 1. Solver → maker: tokenOut (Permit3 enforces solver's allowance to this contract)
-        PERMIT3.transferFrom(msg.sender, order.maker, order.tokenOut, uint160(fillAmountOut));
-
-        // Snapshot tokenIn before items so the payout uses ONLY this fill's TAKE
-        // proceeds — never any pre-existing/donated balance held by Settlement.
-        uint256 tokenInBefore = IERC20(order.tokenIn).balanceOf(address(this));
+        // Snapshot each tokenIn before items so the payout uses ONLY this fill's
+        // TAKE proceeds — never any pre-existing/donated balance held by
+        // Settlement. Output delivery is a direct solver→maker transfer, so it
+        // never touches Settlement's tokenIn balance.
+        uint256[] memory tokenInBefore = _snapshotInputs(order.tokenIn);
 
         // 2. Pro-rata operation items for this fill
         _executeItems(order, prevFilled, newFilled);
 
-        // 3. Settle tokenIn → solver. TAKE items route proceeds to this
+        // 3. Settle each tokenIn → solver. TAKE items route proceeds to this
         //    contract; any shortfall is pulled from the maker via Permit3.
-        _payTokenInToSolver(order.tokenIn, order.maker, fillAmountIn, tokenInBefore);
+        _payInputsToSolver(order, prevFilled, newFilled, amountIn0, tokenInBefore);
 
         // 4. Post-execution invariants (e.g. "my Aave health factor ≥ 2.0 after this fill").
         _runInvariants(order);
 
-        emit OrderFilled(orderHash, order.maker, msg.sender, fillAmountIn, fillAmountOut);
+        emit OrderFilled(orderHash, order.maker, msg.sender, fillAmountIn, fillAmountsOut);
+    }
+
+    /// @dev Deliver every output leg solver→maker for this fill. Each output is
+    ///      priced at its current auction tick and scaled by the fill fraction
+    ///      `fillAmountIn / amountIn0`, ceil-rounded so the maker is never
+    ///      underpaid. Permit3 enforces the solver's token allowance to this
+    ///      contract on each leg.
+    function _deliverOutputs(Order calldata order, uint256 fillAmountIn, uint256 amountIn0)
+        internal
+        returns (uint256[] memory outs)
+    {
+        uint256 n = order.tokenOut.length;
+        outs = new uint256[](n);
+        for (uint256 j; j < n; j++) {
+            uint256 currentOut = _currentAmountOutAt(order, j);
+            // ceilDiv — maker never underpaid at current auction rate
+            uint256 amt = (fillAmountIn * currentOut + amountIn0 - 1) / amountIn0;
+            outs[j] = amt;
+            if (amt != 0) {
+                PERMIT3.transferFrom(msg.sender, order.maker, order.tokenOut[j], uint160(amt));
+            }
+        }
+    }
+
+    /// @dev Snapshot Settlement's balance of every input token before items run.
+    function _snapshotInputs(address[] calldata tokens) internal view returns (uint256[] memory bals) {
+        uint256 n = tokens.length;
+        bals = new uint256[](n);
+        for (uint256 i; i < n; i++) {
+            bals[i] = IERC20(tokens[i]).balanceOf(address(this));
+        }
     }
 
     // ──────────────────── Operation execution ────────────────────
@@ -269,7 +308,7 @@ contract UniversalSettlement {
     ///            - item.amount * prevFilled / amountIn
     ///      Sums to exactly item.amount once the order is fully filled.
     function _executeItems(Order calldata order, uint256 prevFilled, uint256 newFilled) internal {
-        uint256 amountIn = order.amountIn;
+        uint256 amountIn = order.amountIn[0];
         for (uint256 i; i < order.items.length; i++) {
             Item calldata item = order.items[i];
             uint256 slice = (item.amount * newFilled) / amountIn - (item.amount * prevFilled) / amountIn;
@@ -288,23 +327,41 @@ contract UniversalSettlement {
         }
     }
 
-    /// @dev Pay `fillAmountIn` of tokenIn to the solver. Uses ONLY the TAKE
-    ///      proceeds produced by THIS fill (measured as the balance delta since
-    ///      `tokenInBefore`) — so a pre-existing/donated Settlement balance can
-    ///      never be redirected to the solver. Any shortfall is pulled from the
-    ///      maker via Permit3 (the maker's token allowance is the gate); any
-    ///      surplus proceeds are returned to the maker, not stranded.
-    function _payTokenInToSolver(address tokenIn, address maker, uint256 fillAmountIn, uint256 tokenInBefore)
-        internal
-    {
-        uint256 proceeds = IERC20(tokenIn).balanceOf(address(this)) - tokenInBefore;
-        if (proceeds >= fillAmountIn) {
-            SafeTransferLib.safeTransfer(tokenIn, msg.sender, fillAmountIn);
-            uint256 surplus = proceeds - fillAmountIn;
-            if (surplus > 0) SafeTransferLib.safeTransfer(tokenIn, maker, surplus);
-        } else {
-            if (proceeds > 0) SafeTransferLib.safeTransfer(tokenIn, msg.sender, proceeds);
-            PERMIT3.transferFrom(maker, msg.sender, tokenIn, uint160(fillAmountIn - proceeds));
+    /// @dev Pay every input leg to the solver for this fill. Each `tokenIn[i]`
+    ///      owes a cumulative pro-rata slice
+    ///          owed_i = amountIn[i]·newFilled/amountIn0 - amountIn[i]·prevFilled/amountIn0
+    ///      which sums exactly to `amountIn[i]` at full fill; for i==0 it equals
+    ///      `fillAmountIn` exactly (no rounding, since amountIn0 == amountIn[0]).
+    ///
+    ///      Each leg uses ONLY the TAKE proceeds produced by THIS fill (the
+    ///      balance delta since `tokenInBefore[i]`) — so a pre-existing/donated
+    ///      Settlement balance can never be redirected to the solver. Any
+    ///      shortfall is pulled from the maker via Permit3 (the maker's token
+    ///      allowance is the gate); any surplus proceeds are returned to the
+    ///      maker, not stranded.
+    function _payInputsToSolver(
+        Order calldata order,
+        uint256 prevFilled,
+        uint256 newFilled,
+        uint256 amountIn0,
+        uint256[] memory tokenInBefore
+    ) internal {
+        address maker = order.maker;
+        for (uint256 i; i < order.tokenIn.length; i++) {
+            uint256 amt = order.amountIn[i];
+            uint256 owed = (amt * newFilled) / amountIn0 - (amt * prevFilled) / amountIn0;
+            if (owed == 0) continue;
+
+            address tokenIn = order.tokenIn[i];
+            uint256 proceeds = IERC20(tokenIn).balanceOf(address(this)) - tokenInBefore[i];
+            if (proceeds >= owed) {
+                SafeTransferLib.safeTransfer(tokenIn, msg.sender, owed);
+                uint256 surplus = proceeds - owed;
+                if (surplus > 0) SafeTransferLib.safeTransfer(tokenIn, maker, surplus);
+            } else {
+                if (proceeds > 0) SafeTransferLib.safeTransfer(tokenIn, msg.sender, proceeds);
+                PERMIT3.transferFrom(maker, msg.sender, tokenIn, uint160(owed - proceeds));
+            }
         }
     }
 
@@ -324,20 +381,33 @@ contract UniversalSettlement {
 
     // ──────────────────── Dutch decay ────────────────────
 
-    function _currentAmountOut(Order calldata order) internal view returns (uint256) {
-        if (order.startAmountOut < order.endAmountOut) revert InvalidAuctionParams();
+    /// @dev Current auction tick for output leg `j`. All legs share one clock
+    ///      (`decayStartTime`/`decayDuration`) but decay between their own
+    ///      `startAmountOut[j]` → `endAmountOut[j]` bounds.
+    function _currentAmountOutAt(Order calldata order, uint256 j) internal view returns (uint256) {
+        uint256 startOut = order.startAmountOut[j];
+        uint256 endOut = order.endAmountOut[j];
+        if (startOut < endOut) revert InvalidAuctionParams();
 
-        if (order.decayDuration == 0 || order.startAmountOut == order.endAmountOut) {
-            return order.startAmountOut;
+        if (order.decayDuration == 0 || startOut == endOut) {
+            return startOut;
         }
 
         if (block.timestamp < order.decayStartTime) revert AuctionNotStarted();
 
         uint256 elapsed = block.timestamp - order.decayStartTime;
-        if (elapsed >= order.decayDuration) return order.endAmountOut;
+        if (elapsed >= order.decayDuration) return endOut;
 
-        uint256 decay = (order.startAmountOut - order.endAmountOut) * elapsed / order.decayDuration;
-        return order.startAmountOut - decay;
+        uint256 decay = (startOut - endOut) * elapsed / order.decayDuration;
+        return startOut - decay;
+    }
+
+    function _currentAmountOut(Order calldata order) internal view returns (uint256[] memory outs) {
+        uint256 n = order.tokenOut.length;
+        outs = new uint256[](n);
+        for (uint256 j; j < n; j++) {
+            outs[j] = _currentAmountOutAt(order, j);
+        }
     }
 
     // ──────────────────── Hashing & signature ────────────────────
@@ -349,13 +419,13 @@ contract UniversalSettlement {
             order.maker,
             order.nonce,
             order.deadline,
-            order.tokenIn,
-            order.tokenOut,
-            order.amountIn,
+            _hashAddresses(order.tokenIn),
+            _hashUints(order.amountIn),
             order.decayStartTime,
             order.decayDuration,
-            order.startAmountOut,
-            order.endAmountOut
+            _hashAddresses(order.tokenOut),
+            _hashUints(order.startAmountOut),
+            _hashUints(order.endAmountOut)
         );
         bytes memory tail = abi.encode(
             order.exclusiveFiller,
@@ -366,6 +436,23 @@ contract UniversalSettlement {
             _hashValidators(order.invariants)
         );
         return keccak256(bytes.concat(head, tail));
+    }
+
+    /// @dev EIP-712 encoding of a dynamic array of `address`: keccak256 over the
+    ///      32-byte left-padded elements (NOT abi.encodePacked, which would pack
+    ///      addresses to 20 bytes).
+    function _hashAddresses(address[] calldata a) private pure returns (bytes32) {
+        bytes32[] memory words = new bytes32[](a.length);
+        for (uint256 i; i < a.length; i++) {
+            words[i] = bytes32(uint256(uint160(a[i])));
+        }
+        return keccak256(abi.encodePacked(words));
+    }
+
+    /// @dev EIP-712 encoding of a dynamic array of `uint256`: keccak256 over the
+    ///      32-byte elements (abi.encodePacked already pads uint256 to 32 bytes).
+    function _hashUints(uint256[] calldata a) private pure returns (bytes32) {
+        return keccak256(abi.encodePacked(a));
     }
 
     function _hashItems(Item[] calldata items) private pure returns (bytes32) {
@@ -437,12 +524,12 @@ contract UniversalSettlement {
         return _hashOrder(order);
     }
 
-    function previewAmountOut(Order calldata order) external view returns (uint256) {
+    function previewAmountOut(Order calldata order) external view returns (uint256[] memory) {
         return _currentAmountOut(order);
     }
 
     function remaining(Order calldata order) external view returns (uint256) {
-        return order.amountIn - filledAmountIn[_hashOrder(order)];
+        return order.amountIn[0] - filledAmountIn[_hashOrder(order)];
     }
 
     /// @notice Off-chain / preview check for order well-formedness. Intentionally
@@ -463,18 +550,42 @@ contract UniversalSettlement {
     ///         then never be filled. Only `minFillAmountIn ∈ {0, amountIn}`
     ///         guarantees no unfillable tail.
     function validateOrder(Order calldata order) external view returns (bool ok, string memory reason) {
+        // ── array shape ──
+        uint256 nIn = order.tokenIn.length;
+        if (nIn == 0 || nIn != order.amountIn.length) return (false, "tokenIn/amountIn length mismatch");
+        uint256 nOut = order.tokenOut.length;
+        if (nOut == 0 || nOut != order.startAmountOut.length || nOut != order.endAmountOut.length) {
+            return (false, "tokenOut/amountOut length mismatch");
+        }
+
         // ── structural / economic sanity (time-independent) ──
-        if (order.amountIn == 0) return (false, "amountIn is zero");
-        if (order.startAmountOut == 0) return (false, "startAmountOut is zero (giveaway)");
-        if (order.startAmountOut < order.endAmountOut) return (false, "startAmountOut < endAmountOut");
-        if (order.tokenIn == order.tokenOut) return (false, "tokenIn == tokenOut");
-        if (order.minFillAmountIn > order.amountIn) return (false, "minFillAmountIn > amountIn (unfillable)");
+        if (order.amountIn[0] == 0) return (false, "amountIn is zero");
+        for (uint256 j; j < nOut; j++) {
+            if (order.startAmountOut[j] == 0) return (false, "startAmountOut is zero (giveaway)");
+            if (order.startAmountOut[j] < order.endAmountOut[j]) return (false, "startAmountOut < endAmountOut");
+        }
+        // Distinct within each array and disjoint across — the per-token proceeds
+        // snapshot double-counts a shared balance, so overlap is forbidden in v1.
+        for (uint256 i; i < nIn; i++) {
+            for (uint256 k = i + 1; k < nIn; k++) {
+                if (order.tokenIn[i] == order.tokenIn[k]) return (false, "duplicate tokenIn");
+            }
+            for (uint256 j; j < nOut; j++) {
+                if (order.tokenIn[i] == order.tokenOut[j]) return (false, "tokenIn == tokenOut");
+            }
+        }
+        for (uint256 j; j < nOut; j++) {
+            for (uint256 k = j + 1; k < nOut; k++) {
+                if (order.tokenOut[j] == order.tokenOut[k]) return (false, "duplicate tokenOut");
+            }
+        }
+        if (order.minFillAmountIn > order.amountIn[0]) return (false, "minFillAmountIn > amountIn (unfillable)");
         if (order.decayDuration != 0 && order.decayStartTime == 0) return (false, "decay set without decayStartTime");
 
         // ── current fillability (time/state-dependent) ──
         if (order.deadline < block.timestamp) return (false, "order expired");
         if (_isNonceCancelled(order.maker, order.nonce)) return (false, "nonce cancelled");
-        if (filledAmountIn[_hashOrder(order)] >= order.amountIn) return (false, "order fully filled");
+        if (filledAmountIn[_hashOrder(order)] >= order.amountIn[0]) return (false, "order fully filled");
 
         return (true, "");
     }

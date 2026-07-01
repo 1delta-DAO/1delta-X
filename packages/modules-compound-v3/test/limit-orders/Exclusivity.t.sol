@@ -52,7 +52,7 @@ contract ExclusivityTest is CompoundV3ModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
         assertEq(paid, wethOut, "filled after exclusivity expired");
     }
 }

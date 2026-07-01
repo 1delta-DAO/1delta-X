@@ -55,7 +55,7 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
         uint256 debtBefore = _debtOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, BORROW_OUT);
+        uint256 paid = settlement.fill(order, sig, BORROW_OUT)[0];
 
         assertEq(paid, COLLATERAL_IN, "solver funded the WETH collateral");
         assertApproxEqAbs(_collateralOf(maker) - collatBefore, COLLATERAL_IN, 2, "collateral up ~1 WETH");

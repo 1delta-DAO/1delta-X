@@ -28,7 +28,7 @@ contract DolomiteDepositBorrowTest is DolomiteModulesBase {
         uint256 debtBefore = _debtOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, BORROW_OUT);
+        uint256 paid = settlement.fill(order, sig, BORROW_OUT)[0];
 
         assertEq(paid, COLLATERAL_IN, "solver paid 1 WETH of collateral");
         assertApproxEqAbs(_collateralOf(maker) - collatBefore, COLLATERAL_IN, 2, "maker collateral up ~1 WETH");

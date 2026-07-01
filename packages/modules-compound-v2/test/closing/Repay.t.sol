@@ -46,7 +46,7 @@ contract CompoundV2RepayTest is CompoundV2ModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcForSolver);
+        uint256 paid = settlement.fill(order, sig, usdcForSolver)[0];
         assertEq(paid, buffered, "solver paid buffered DAI");
 
         // Debt fully closed.

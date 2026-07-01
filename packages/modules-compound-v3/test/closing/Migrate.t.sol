@@ -51,7 +51,7 @@ contract MigrateTest is CompoundV3ModulesBase {
         uint256 makerUsdcCollatBefore = _wethCollateral(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, borrowUsds);
+        uint256 paid = settlement.fill(order, sig, borrowUsds)[0];
 
         assertEq(paid, bufferedRepay, "solver paid bufferedRepay tokenOut");
 
@@ -128,13 +128,13 @@ contract MigrateTest is CompoundV3ModulesBase {
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
-            tokenIn: USDS,
-            tokenOut: USDC,
-            amountIn: 3_000e18,
+            tokenIn: _a1(USDS),
+            tokenOut: _a1(USDC),
+            amountIn: _u1(3_000e18),
             decayStartTime: 0,
             decayDuration: 0,
-            startAmountOut: 3_050e6,
-            endAmountOut: 3_050e6,
+            startAmountOut: _u1(3_050e6),
+            endAmountOut: _u1(3_050e6),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,

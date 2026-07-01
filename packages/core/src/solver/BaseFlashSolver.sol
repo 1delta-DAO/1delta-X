@@ -101,7 +101,9 @@ abstract contract BaseFlashSolver {
     ) internal {
         settlement.fill(order, sig, fillAmountIn);
 
-        address tokenIn = order.tokenIn;
+        // Leverage solvers consume single-debt orders: the borrow proceeds are
+        // the first (and only) input leg.
+        address tokenIn = order.tokenIn[0];
         uint256 tokenInBal = IERC20(tokenIn).balanceOf(address(this));
         IERC20(tokenIn).approve(address(router), tokenInBal);
 

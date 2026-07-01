@@ -51,7 +51,7 @@ contract RepayTest is MorphoModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wstethForSolver);
+        uint256 paid = settlement.fill(order, sig, wstethForSolver)[0];
 
         assertEq(paid, bufferedAmount, "solver paid buffered USDC");
 

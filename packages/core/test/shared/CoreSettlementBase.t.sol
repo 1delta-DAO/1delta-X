@@ -151,13 +151,13 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             maker: _maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn,
-            tokenOut: tokenOut,
-            amountIn: amountIn,
+            tokenIn: _a1(tokenIn),
+            tokenOut: _a1(tokenOut),
+            amountIn: _u1(amountIn),
             decayStartTime: 0,
             decayDuration: 0,
-            startAmountOut: amountOut,
-            endAmountOut: amountOut,
+            startAmountOut: _u1(amountOut),
+            endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,
@@ -173,9 +173,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ) internal view returns (Order memory) {
         return Order({
             maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
+            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut), amountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
-            startAmountOut: amountOut, endAmountOut: amountOut,
+            startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
             exclusiveFiller: exclusiveFiller,
             exclusivityEndTime: exclusivityEndTime,
             minFillAmountIn: 0,
@@ -191,9 +191,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ) internal view returns (Order memory) {
         return Order({
             maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
+            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut), amountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
-            startAmountOut: amountOut, endAmountOut: amountOut,
+            startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0), exclusivityEndTime: 0,
             minFillAmountIn: minFillAmountIn,
             items: items,
@@ -208,9 +208,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ) internal view returns (Order memory) {
         return Order({
             maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn,
+            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut), amountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
-            startAmountOut: amountOut, endAmountOut: amountOut,
+            startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0), exclusivityEndTime: 0, minFillAmountIn: 0,
             items: items,
             validators: new Validator[](0),
@@ -231,13 +231,13 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn,
-            tokenOut: tokenOut,
-            amountIn: amountIn,
+            tokenIn: _a1(tokenIn),
+            tokenOut: _a1(tokenOut),
+            amountIn: _u1(amountIn),
             decayStartTime: 0,
             decayDuration: 0,
-            startAmountOut: amountOut,
-            endAmountOut: amountOut,
+            startAmountOut: _u1(amountOut),
+            endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,
@@ -245,6 +245,18 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             validators: validators,
             invariants: new Validator[](0)
         });
+    }
+
+    // ──────────────────── Array helpers (single-asset wrap) ────────────────────
+
+    function _a1(address a) internal pure returns (address[] memory arr) {
+        arr = new address[](1);
+        arr[0] = a;
+    }
+
+    function _u1(uint256 x) internal pure returns (uint256[] memory arr) {
+        arr = new uint256[](1);
+        arr[0] = x;
     }
 
     // ──────────────────── Permit-batch builders ────────────────────
@@ -296,7 +308,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -311,7 +323,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint256 nonce,uint256 deadline,address tokenIn,address tokenOut,uint256 amountIn,uint32 decayStartTime,uint32 decayDuration,uint256 startAmountOut,uint256 endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -341,19 +353,31 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         return keccak256(abi.encodePacked(h));
     }
 
+    function _hashAddresses(address[] memory a) internal pure returns (bytes32) {
+        bytes32[] memory words = new bytes32[](a.length);
+        for (uint256 i; i < a.length; i++) {
+            words[i] = bytes32(uint256(uint160(a[i])));
+        }
+        return keccak256(abi.encodePacked(words));
+    }
+
+    function _hashUints(uint256[] memory a) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(a));
+    }
+
     function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
             ORDER_TH,
             o.maker,
             o.nonce,
             o.deadline,
-            o.tokenIn,
-            o.tokenOut,
-            o.amountIn,
+            _hashAddresses(o.tokenIn),
+            _hashUints(o.amountIn),
             o.decayStartTime,
             o.decayDuration,
-            o.startAmountOut,
-            o.endAmountOut
+            _hashAddresses(o.tokenOut),
+            _hashUints(o.startAmountOut),
+            _hashUints(o.endAmountOut)
         );
         bytes memory tail = abi.encode(
             o.exclusiveFiller,
