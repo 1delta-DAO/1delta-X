@@ -50,7 +50,7 @@ contract VenusRepayTest is VenusModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wethForSolver);
+        uint256 paid = settlement.fill(order, sig, wethForSolver)[0];
         assertEq(paid, buffered, "solver paid buffered USDC");
 
         // Debt fully closed (Compound rounding tolerated).

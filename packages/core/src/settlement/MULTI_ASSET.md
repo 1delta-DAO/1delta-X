@@ -1,9 +1,11 @@
 # Multi-asset conversion leg — design
 
-Status: **proposal** (no implementation yet). This documents extending the
-`UniversalSettlement` conversion leg from single `tokenIn → tokenOut` to
-**multi-in / multi-out**, JAM-style, while preserving the single-fraction
-partial-fill invariant.
+Status: **implemented**. The `UniversalSettlement` conversion leg was extended
+from single `tokenIn → tokenOut` to **multi-in / multi-out**, JAM-style, while
+preserving the single-fraction partial-fill invariant. `fill`/`fillWithPermit`
+return `uint256[]` (per output leg) and `OrderFilled` carries `uint256[]
+fillAmountsOut`. Coverage: `test/swaps/MultiAssetSwap.t.sol` (multi-in,
+multi-out, partial-fill basket scaling, validate guards).
 
 ## Scope
 

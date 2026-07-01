@@ -10,6 +10,14 @@ decay, and pro-rata lending-item execution. No module whitelist; no
 admin role. All authority flows through Permit3 allowances + the
 maker's EIP-712 signature.
 
+> **Multi-asset conversion.** The conversion leg is a basket on both sides:
+> the maker gives `tokenIn[]`/`amountIn[]` and receives
+> `tokenOut[]`/`startAmountOut[]`/`endAmountOut[]`. Partial fills are driven by
+> the single fraction `fillAmountIn / amountIn[0]`, so every input, output, and
+> lending-item leg scales together. The single-asset examples below are the
+> `length == 1` case. See [`MULTI_ASSET.md`](./MULTI_ASSET.md) for the full
+> design (struct, typehash, token flow, guards).
+
 > **Settlement is the system's only trusted spender.** Makers approve it as
 > their Permit3 taker/token spender; TAKE legs go through `permit3.take`
 > (spender-keyed, so only Settlement can consume the allowance and it enforces

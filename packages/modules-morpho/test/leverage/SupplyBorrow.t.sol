@@ -37,7 +37,7 @@ contract SupplyBorrowTest is MorphoModulesBase {
         uint256 makerDebtBefore = _borrowAssets(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, borrowOut);
+        uint256 paid = settlement.fill(order, sig, borrowOut)[0];
 
         assertEq(paid, collateralIn, "solver paid 1 wstETH of collateral");
 

@@ -45,13 +45,13 @@ contract CloseDutchAuctionTest is AaveModulesBase {
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
-            tokenIn: WETH,
-            tokenOut: USDC,
-            amountIn: wethIn,
+            tokenIn: _a1(WETH),
+            tokenOut: _a1(USDC),
+            amountIn: _u1(wethIn),
             decayStartTime: uint32(block.timestamp),
             decayDuration: 100,
-            startAmountOut: startOut,
-            endAmountOut: endOut,
+            startAmountOut: _u1(startOut),
+            endAmountOut: _u1(endOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,
@@ -67,7 +67,7 @@ contract CloseDutchAuctionTest is AaveModulesBase {
         uint256 makerAWethBefore = IERC20(aWETH).balanceOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wethIn);
+        uint256 paid = settlement.fill(order, sig, wethIn)[0];
 
         // Dutch price applied.
         assertEq(paid, expectedOut, "solver paid the decayed USDC price");

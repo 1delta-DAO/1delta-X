@@ -313,13 +313,13 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
-            tokenIn: USDS, //              Settlement pays solver from the USDS borrow proceeds
-            tokenOut: USDC, //             solver funds the USDC repay
-            amountIn: borrowUsds,
+            tokenIn: _a1(USDS), //              Settlement pays solver from the USDS borrow proceeds
+            tokenOut: _a1(USDC), //             solver funds the USDC repay
+            amountIn: _u1(borrowUsds),
             decayStartTime: 0,
             decayDuration: 0,
-            startAmountOut: bufferedRepay,
-            endAmountOut: bufferedRepay,
+            startAmountOut: _u1(bufferedRepay),
+            endAmountOut: _u1(bufferedRepay),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,

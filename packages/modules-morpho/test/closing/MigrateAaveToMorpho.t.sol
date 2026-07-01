@@ -89,7 +89,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         uint256 makerAWstethBefore = IERC20(aWstETH).balanceOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, debt);
+        uint256 paid = settlement.fill(order, sig, debt)[0];
 
         assertEq(paid, bufferedRepay, "solver paid bufferedRepay tokenOut");
 

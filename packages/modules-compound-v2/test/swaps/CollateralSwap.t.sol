@@ -41,7 +41,7 @@ contract CompoundV2CollateralSwapTest is CompoundV2ModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcOut);
+        uint256 paid = settlement.fill(order, sig, usdcOut)[0];
         assertEq(paid, daiIn, "solver paid 500 DAI");
 
         // Maker collateral rebalanced: USDC down ~500, DAI up ~500.

@@ -69,13 +69,13 @@ contract UsdrifExitTest is UsdrifForkBase {
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: RIF,
-            tokenOut: USDT0,
-            amountIn: amountIn,
+            tokenIn: _a1(RIF),
+            tokenOut: _a1(USDT0),
+            amountIn: _u1(amountIn),
             decayStartTime: 0,
             decayDuration: 0,
-            startAmountOut: amountOut,
-            endAmountOut: amountOut,
+            startAmountOut: _u1(amountOut),
+            endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,
@@ -136,7 +136,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, rifIn);
+        uint256 paid = settlement.fill(order, sig, rifIn)[0];
 
         assertEq(paid, usdtOut, "solver paid the seller's USDT0 floor");
         assertEq(IERC20(USDT0).balanceOf(maker), usdtOut, "seller exited to USDT0");
@@ -228,7 +228,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, rifIn);
+        uint256 paid = settlement.fill(order, sig, rifIn)[0];
         assertEq(paid, usdtOut, "in-band fill succeeds");
         assertEq(IERC20(USDT0).balanceOf(maker), usdtOut, "seller exited to USDT0");
     }

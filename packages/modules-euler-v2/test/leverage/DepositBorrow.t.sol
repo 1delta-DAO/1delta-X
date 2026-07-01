@@ -28,7 +28,7 @@ contract EulerDepositBorrowTest is EulerV2ModulesBase {
         uint256 debtBefore = _usdcDebt(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, borrowOut);
+        uint256 paid = settlement.fill(order, sig, borrowOut)[0];
 
         assertEq(paid, collateralIn, "solver paid 1 WETH of collateral");
         assertApproxEqAbs(_wethCollateral(maker) - collatBefore, collateralIn, 2, "maker collateral up ~1 WETH");
