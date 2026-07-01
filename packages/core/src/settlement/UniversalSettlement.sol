@@ -8,80 +8,11 @@ import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
-/// @notice Operation kind per item. Names mirror limit-order parlance:
-///         takers draw value out of a position, makers put value in.
-///         (Unrelated to the order's `maker` field, which names the signer.)
-///
-///         MAKE — deposit/repay-style: Settlement calls the module, the
-///                module pulls the funding token from the order maker via
-///                Permit3.
-///         TAKE — borrow/withdraw-style: Settlement calls `permit3.take`,
-///                which enforces the taker allowance gate and dispatches
-///                to the module; proceeds land at `receiver = Settlement`.
-enum ItemOp {
-    MAKE,
-    TAKE
-}
-
-/// @notice A single lending item inside a Order.
-/// @dev    `module` is a single-op adapter (`IMakerModule` for MAKE,
-///         `ITakerModule` for TAKE). `amount` is the *total* amount for a
-///         fully filled order; per-fill slices are computed pro-rata so
-///         partial fills accumulate exactly to `amount` once fully filled.
-///         `data` is the module's decode input and also the allowance
-///         preimage (`ref = keccak256(data)` for TAKE ops).
-///
-///         `recipient` applies to TAKE items only — it is the address that
-///         receives the protocol proceeds (e.g. borrow output, withdrawn
-///         collateral). `address(0)` is the canonical default and means
-///         "send to Settlement" (classic flow — proceeds flow to the solver
-///         via `tokenIn` payout). Signing `recipient = maker` chains the
-///         output into a subsequent MAKE item via the maker's wallet.
-///         Ignored for MAKE items (set to 0 when constructing).
-struct Item {
-    ItemOp op;
-    address module;
-    uint256 amount;
-    address recipient;
-    bytes data;
-}
-
-/// @notice A read-only trigger. Settlement `staticcall`s `target.validate(order, data)`
-///         and aborts the fill unless the returned bool is `true`. Multiple
-///         validators on an order are AND-composed. Both `target` and `data`
-///         are in the EIP-712 typehash → solver cannot alter.
-struct Validator {
-    address target;
-    bytes data;
-}
-
-/// @notice A signed limit order.
-/// @dev    The conversion leg is multi-asset: the maker gives a basket
-///         (`tokenIn[]`/`amountIn[]`) and receives a basket
-///         (`tokenOut[]`/`startAmountOut[]`/`endAmountOut[]`). Partial fills are
-///         driven by a SINGLE scalar fraction `f = fillAmountIn / amountIn[0]`;
-///         `amountIn[0]` is the fill denominator and `fillAmountIn` is expressed
-///         in `tokenIn[0]` units. Every other input, every output, and every
-///         item slice scale by the same `f`, so the whole basket fills
-///         proportionally (the solver cannot size each leg independently).
-struct Order {
-    address maker;
-    uint256 nonce;
-    uint256 deadline;
-    address[] tokenIn; //   maker gives (solver receives); tokenIn[0] anchors the fill
-    uint256[] amountIn; //  amountIn[0] is the fill denominator
-    uint32 decayStartTime;
-    uint32 decayDuration;
-    address[] tokenOut; //  maker receives (solver gives)
-    uint256[] startAmountOut; //     per output: best for maker (auction start / fixed price)
-    uint256[] endAmountOut; //       per output: worst for maker (auction end floor)
-    address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
-    uint32 exclusivityEndTime; //    unix timestamp; ignored if exclusiveFiller == 0
-    uint256 minFillAmountIn; //      anti-dust floor per fill (tokenIn[0] units); 0 = no minimum
-    Item[] items;
-    Validator[] validators; //       pre-execution trigger conditions; AND-composed
-    Validator[] invariants; //       post-execution invariants; AND-composed
-}
+// Re-exported so downstream files can keep importing the order types from here.
+import {Order, Item, ItemOp, Validator} from "./SettlementStructs.sol";
+import {OrderHash} from "./OrderHash.sol";
+import {DutchAuction} from "./DutchAuction.sol";
+import {NonceManager} from "./NonceManager.sol";
 
 /// @title UniversalSettlement
 /// @notice Signed limit-order settler with partial fills, optional dutch
@@ -89,26 +20,19 @@ struct Order {
 ///         and taker authority flows through Permit3 — there is no module
 ///         whitelist, no admin role. A module's authority comes entirely
 ///         from the maker's signature + their per-module Permit3 allowances.
-contract UniversalSettlement {
-    bytes32 internal constant ITEM_TYPEHASH =
-        keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
-
-    bytes32 internal constant VALIDATOR_TYPEHASH =
-        keccak256("Validator(address target,bytes data)");
-
-    bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
-        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Validator(address target,bytes data)"
-    );
+///
+///  Structure: order types live in {SettlementStructs}, EIP-712 hashing in
+///  {OrderHash}, auction pricing in {DutchAuction}, and cancellation in
+///  {NonceManager} (inherited). This contract owns the fill flow, the
+///  validator/invariant gates, and settlement accounting.
+contract UniversalSettlement is NonceManager {
+    using OrderHash for Order;
+    using DutchAuction for Order;
 
     // ──────────────────── Storage ────────────────────
 
     bytes32 public immutable DOMAIN_SEPARATOR;
     IPermit3 public immutable PERMIT3;
-
-    /// @notice maker → word index → bitmap of cancelled nonces
-    mapping(address => mapping(uint256 => uint256)) public nonceBitmap;
 
     /// @notice orderHash → cumulative filled amountIn
     mapping(bytes32 => uint256) public filledAmountIn;
@@ -124,15 +48,11 @@ contract UniversalSettlement {
         uint256 fillAmountIn,
         uint256[] fillAmountsOut
     );
-    event OrdersCancelled(address indexed maker, uint256[] nonces);
 
     // ──────────────────── Errors ────────────────────
 
-    error InvalidSignature();
     error OrderExpired();
     error NonceCancelled();
-    error AuctionNotStarted();
-    error InvalidAuctionParams();
     error ZeroFill();
     error OverFill();
     error Reentrancy();
@@ -161,19 +81,6 @@ contract UniversalSettlement {
         );
     }
 
-    // ──────────────────── Maker self-service ────────────────────
-
-    function cancelOrders(uint256[] calldata noncesToCancel) external {
-        for (uint256 i; i < noncesToCancel.length; i++) {
-            _cancelNonce(msg.sender, noncesToCancel[i]);
-        }
-        emit OrdersCancelled(msg.sender, noncesToCancel);
-    }
-
-    function invalidateNonceWord(uint256 wordIndex) external {
-        nonceBitmap[msg.sender][wordIndex] = type(uint256).max;
-    }
-
     // ──────────────────── Fill ────────────────────
 
     /// @notice Fill (up to) `fillAmountIn` of an order. Partial fills allowed.
@@ -183,7 +90,7 @@ contract UniversalSettlement {
         nonReentrant
         returns (uint256[] memory fillAmountsOut)
     {
-        bytes32 orderHash = _hashOrder(order);
+        bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         return _fillCore(order, orderHash, fillAmountIn);
     }
@@ -199,27 +106,15 @@ contract UniversalSettlement {
         bytes calldata sig,
         uint256 fillAmountIn
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
-        bytes32 orderHash = _hashOrder(order);
+        bytes32 orderHash = order.hash();
         // Permit3 verifies the sig against (PermitBatchWitness + orderHash) and
         // applies all allowances. The order itself doesn't need a separate sig
         // — the witness binding makes the permit endorse this exact order.
         PERMIT3.permitBatchWithWitness(
-            order.maker, batch, orderHash, _ORDER_WITNESS_TYPESTRING, sig
+            order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig
         );
         return _fillCore(order, orderHash, fillAmountIn);
     }
-
-    /// @dev EIP-712 type string for the witness portion of a `PermitBatchWitness`
-    ///      whose witness is a `Order`. Permit3 prepends its standard stub
-    ///      and concatenates this. Type definitions are in alphabetical order
-    ///      (Item, Order, TakerPermit, TokenPermit).
-    string private constant _ORDER_WITNESS_TYPESTRING =
-        "Order witness)"
-        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
-        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
-        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
-        "Validator(address target,bytes data)";
 
     function _fillCore(Order calldata order, bytes32 orderHash, uint256 fillAmountIn)
         internal
@@ -282,7 +177,7 @@ contract UniversalSettlement {
         uint256 n = order.tokenOut.length;
         outs = new uint256[](n);
         for (uint256 j; j < n; j++) {
-            uint256 currentOut = _currentAmountOutAt(order, j);
+            uint256 currentOut = order.currentAmountOutAt(j);
             // ceilDiv — maker never underpaid at current auction rate
             uint256 amt = (fillAmountIn * currentOut + amountIn0 - 1) / amountIn0;
             outs[j] = amt;
@@ -300,8 +195,6 @@ contract UniversalSettlement {
             bals[i] = IERC20(tokens[i]).balanceOf(address(this));
         }
     }
-
-    // ──────────────────── Operation execution ────────────────────
 
     /// @dev For each item, execute the slice attributable to this fill:
     ///      slice = item.amount * newFilled / amountIn
@@ -365,124 +258,7 @@ contract UniversalSettlement {
         }
     }
 
-    // ──────────────────── Nonce management ────────────────────
-
-    function _cancelNonce(address maker, uint256 nonce) internal {
-        nonceBitmap[maker][nonce >> 8] |= (1 << (nonce & 0xff));
-    }
-
-    function _isNonceCancelled(address maker, uint256 nonce) internal view returns (bool) {
-        return (nonceBitmap[maker][nonce >> 8] & (1 << (nonce & 0xff))) != 0;
-    }
-
-    function isNonceCancelled(address maker, uint256 nonce) external view returns (bool) {
-        return _isNonceCancelled(maker, nonce);
-    }
-
-    // ──────────────────── Dutch decay ────────────────────
-
-    /// @dev Current auction tick for output leg `j`. All legs share one clock
-    ///      (`decayStartTime`/`decayDuration`) but decay between their own
-    ///      `startAmountOut[j]` → `endAmountOut[j]` bounds.
-    function _currentAmountOutAt(Order calldata order, uint256 j) internal view returns (uint256) {
-        uint256 startOut = order.startAmountOut[j];
-        uint256 endOut = order.endAmountOut[j];
-        if (startOut < endOut) revert InvalidAuctionParams();
-
-        if (order.decayDuration == 0 || startOut == endOut) {
-            return startOut;
-        }
-
-        if (block.timestamp < order.decayStartTime) revert AuctionNotStarted();
-
-        uint256 elapsed = block.timestamp - order.decayStartTime;
-        if (elapsed >= order.decayDuration) return endOut;
-
-        uint256 decay = (startOut - endOut) * elapsed / order.decayDuration;
-        return startOut - decay;
-    }
-
-    function _currentAmountOut(Order calldata order) internal view returns (uint256[] memory outs) {
-        uint256 n = order.tokenOut.length;
-        outs = new uint256[](n);
-        for (uint256 j; j < n; j++) {
-            outs[j] = _currentAmountOutAt(order, j);
-        }
-    }
-
-    // ──────────────────── Hashing & signature ────────────────────
-
-    function _hashOrder(Order calldata order) internal pure returns (bytes32) {
-        // Split into two encodings to avoid stack-too-deep.
-        bytes memory head = abi.encode(
-            ORDER_TYPEHASH,
-            order.maker,
-            order.nonce,
-            order.deadline,
-            _hashAddresses(order.tokenIn),
-            _hashUints(order.amountIn),
-            order.decayStartTime,
-            order.decayDuration,
-            _hashAddresses(order.tokenOut),
-            _hashUints(order.startAmountOut),
-            _hashUints(order.endAmountOut)
-        );
-        bytes memory tail = abi.encode(
-            order.exclusiveFiller,
-            order.exclusivityEndTime,
-            order.minFillAmountIn,
-            _hashItems(order.items),
-            _hashValidators(order.validators),
-            _hashValidators(order.invariants)
-        );
-        return keccak256(bytes.concat(head, tail));
-    }
-
-    /// @dev EIP-712 encoding of a dynamic array of `address`: keccak256 over the
-    ///      32-byte left-padded elements (NOT abi.encodePacked, which would pack
-    ///      addresses to 20 bytes).
-    function _hashAddresses(address[] calldata a) private pure returns (bytes32) {
-        bytes32[] memory words = new bytes32[](a.length);
-        for (uint256 i; i < a.length; i++) {
-            words[i] = bytes32(uint256(uint160(a[i])));
-        }
-        return keccak256(abi.encodePacked(words));
-    }
-
-    /// @dev EIP-712 encoding of a dynamic array of `uint256`: keccak256 over the
-    ///      32-byte elements (abi.encodePacked already pads uint256 to 32 bytes).
-    function _hashUints(uint256[] calldata a) private pure returns (bytes32) {
-        return keccak256(abi.encodePacked(a));
-    }
-
-    function _hashItems(Item[] calldata items) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](items.length);
-        for (uint256 i; i < items.length; i++) {
-            hashes[i] = keccak256(
-                abi.encode(
-                    ITEM_TYPEHASH,
-                    uint8(items[i].op),
-                    items[i].module,
-                    items[i].amount,
-                    items[i].recipient,
-                    keccak256(items[i].data)
-                )
-            );
-        }
-        return keccak256(abi.encodePacked(hashes));
-    }
-
-    function _hashValidators(Validator[] calldata validators) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](validators.length);
-        for (uint256 i; i < validators.length; i++) {
-            hashes[i] = keccak256(
-                abi.encode(VALIDATOR_TYPEHASH, validators[i].target, keccak256(validators[i].data))
-            );
-        }
-        return keccak256(abi.encodePacked(hashes));
-    }
-
-    // ──────────────────── Validators ────────────────────
+    // ──────────────────── Validators / invariants ────────────────────
 
     function _runValidators(Order calldata order) internal view {
         for (uint256 i; i < order.validators.length; i++) {
@@ -521,15 +297,15 @@ contract UniversalSettlement {
     // ──────────────────── Views ────────────────────
 
     function hashOrder(Order calldata order) external pure returns (bytes32) {
-        return _hashOrder(order);
+        return order.hash();
     }
 
     function previewAmountOut(Order calldata order) external view returns (uint256[] memory) {
-        return _currentAmountOut(order);
+        return order.currentAmountOut();
     }
 
     function remaining(Order calldata order) external view returns (uint256) {
-        return order.amountIn[0] - filledAmountIn[_hashOrder(order)];
+        return order.amountIn[0] - filledAmountIn[order.hash()];
     }
 
     /// @notice Off-chain / preview check for order well-formedness. Intentionally
@@ -585,7 +361,7 @@ contract UniversalSettlement {
         // ── current fillability (time/state-dependent) ──
         if (order.deadline < block.timestamp) return (false, "order expired");
         if (_isNonceCancelled(order.maker, order.nonce)) return (false, "nonce cancelled");
-        if (filledAmountIn[_hashOrder(order)] >= order.amountIn[0]) return (false, "order fully filled");
+        if (filledAmountIn[order.hash()] >= order.amountIn[0]) return (false, "order fully filled");
 
         return (true, "");
     }
