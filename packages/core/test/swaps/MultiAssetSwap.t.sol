@@ -180,6 +180,67 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver got full USDC");
     }
 
+    // ──────────────────── Multi-out dutch auction + partial fill ────────────────────
+
+    /// @dev Every output leg auctions simultaneously on ONE shared clock, each
+    ///      decaying between its own start/end bounds — and a partial fill still
+    ///      slices the whole basket by fillAmountIn / amountIn[0].
+    function test_multiOut_dutchDecay_partialFill() public {
+        uint256 usdcIn = 2_000e6;
+        // Two DIFFERENT decay curves, one clock.
+        uint256 wethStart = 1 ether;
+        uint256 wethEnd = 0.8 ether;
+        uint256 daiStart = 1_000e18;
+        uint256 daiEnd = 900e18;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethStart);
+        deal(DAI, solver, daiStart);
+
+        _approveMakerToSettlement(USDC, usdcIn);
+        _approveSolverSide(wethStart, WETH);
+        _approveSolverSide(daiStart, DAI);
+
+        Order memory order = Order({
+            maker: maker,
+            nonce: 6,
+            deadline: block.timestamp + 1 hours,
+            tokenIn: _a1(USDC),
+            amountIn: _u1(usdcIn),
+            decayStartTime: uint32(block.timestamp),
+            decayDuration: 100,
+            tokenOut: _addr2(WETH, DAI),
+            startAmountOut: _uint2(wethStart, daiStart),
+            endAmountOut: _uint2(wethEnd, daiEnd),
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
+            items: new Item[](0),
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
+        });
+        bytes memory sig = _sign(order);
+
+        // Warp to the auction midpoint → each leg decays halfway.
+        vm.warp(block.timestamp + 50);
+        uint256 wethMid = wethStart - (wethStart - wethEnd) / 2; // 0.9 ether
+        uint256 daiMid = daiStart - (daiStart - daiEnd) / 2; //    950e18
+
+        uint256[] memory preview = settlement.previewAmountOut(order);
+        assertEq(preview[0], wethMid, "WETH midpoint price");
+        assertEq(preview[1], daiMid, "DAI midpoint price");
+
+        // Partial fill: half the order at the midpoint tick → half of each leg.
+        vm.prank(solver);
+        uint256[] memory paid = settlement.fill(order, sig, usdcIn / 2);
+        assertEq(paid[0], wethMid / 2, "WETH leg = half of midpoint");
+        assertEq(paid[1], daiMid / 2, "DAI leg = half of midpoint");
+        assertEq(settlement.remaining(order), usdcIn / 2, "half remaining");
+
+        assertEq(IERC20(WETH).balanceOf(maker), wethMid / 2, "maker got half WETH");
+        assertEq(IERC20(DAI).balanceOf(maker), daiMid / 2, "maker got half DAI");
+    }
+
     // ──────────────────── validateOrder guards ────────────────────
 
     function test_validate_rejectsLengthMismatch() public view {
