@@ -102,17 +102,48 @@ abstract contract BaseFlashSolver {
         uint24 dexFee,
         uint256 minSwapOut
     ) internal {
-        // Leverage solvers consume single-debt orders: the borrow proceeds are
-        // the first (and only) input leg. A multi-input order would collect only
-        // tokenIn[0] here and turn legs [1..] into maker shortfalls, so reject it.
+        // Single-debt core: the borrow proceeds are the first (and only) input
+        // leg. A multi-input order would collect only tokenIn[0] here and turn
+        // legs [1..] into maker shortfalls, so reject it (see _fillAndSwapAll for
+        // the multi-input variant).
         if (order.tokenIn.length != 1) revert MultiInputUnsupported();
 
         settlement.fill(order, sig, fillAmountIn);
 
         address tokenIn = order.tokenIn[0];
-        uint256 tokenInBal = IERC20(tokenIn).balanceOf(address(this));
-        IERC20(tokenIn).approve(address(router), tokenInBal);
+        _swapExactIn(tokenIn, tokenOut, IERC20(tokenIn).balanceOf(address(this)), dexFee, minSwapOut);
+    }
 
+    /// @dev Multi-input leverage core: run the maker fill, then swap EVERY
+    ///      received input leg back to `tokenOut` (the flash-loaned collateral)
+    ///      so the caller can repay. Input legs already denominated in `tokenOut`
+    ///      are left as-is. `dexFees`/`minSwapOuts` are aligned with
+    ///      `order.tokenIn`; entries for a skipped leg are ignored.
+    function _fillAndSwapAll(
+        Order memory order,
+        bytes memory sig,
+        uint256 fillAmountIn,
+        address tokenOut,
+        uint24[] memory dexFees,
+        uint256[] memory minSwapOuts
+    ) internal {
+        settlement.fill(order, sig, fillAmountIn);
+
+        uint256 n = order.tokenIn.length;
+        for (uint256 i; i < n; i++) {
+            address tokenIn = order.tokenIn[i];
+            if (tokenIn == tokenOut) continue; // already the collateral asset
+            uint256 bal = IERC20(tokenIn).balanceOf(address(this));
+            if (bal == 0) continue;
+            _swapExactIn(tokenIn, tokenOut, bal, dexFees[i], minSwapOuts[i]);
+        }
+    }
+
+    /// @dev Swap `amountIn` of `tokenIn` → `tokenOut` on Uniswap v3 (single hop).
+    function _swapExactIn(address tokenIn, address tokenOut, uint256 amountIn, uint24 dexFee, uint256 minOut)
+        internal
+    {
+        IERC20(tokenIn).approve(address(router), amountIn);
         router.exactInputSingle(
             IUniV3Router.ExactInputSingleParams({
                 tokenIn: tokenIn,
@@ -120,8 +151,8 @@ abstract contract BaseFlashSolver {
                 fee: dexFee,
                 recipient: address(this),
                 deadline: block.timestamp,
-                amountIn: tokenInBal,
-                amountOutMinimum: minSwapOut,
+                amountIn: amountIn,
+                amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
         );
