@@ -75,7 +75,7 @@ contract ValidatorsTest is CompoundV3ModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wethIn);
+        uint256 paid = settlement.fill(order, sig, wethIn)[0];
 
         assertEq(paid, usdcOut, "filled when gate opened");
         assertEq(IERC20(USDC).balanceOf(maker), usdcOut, "maker received USDC");

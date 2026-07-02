@@ -294,13 +294,13 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
-            tokenIn: USDC,
-            tokenOut: USDC,
-            amountIn: debt, //             Settlement pays solver entirely from the borrow proceeds
+            tokenIn: _a1(USDC),
+            tokenOut: _a1(USDC),
+            amountIn: _u1(debt), //             Settlement pays solver entirely from the borrow proceeds
             decayStartTime: 0,
             decayDuration: 0,
-            startAmountOut: bufferedRepay,
-            endAmountOut: bufferedRepay,
+            startAmountOut: _u1(bufferedRepay),
+            endAmountOut: _u1(bufferedRepay),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,

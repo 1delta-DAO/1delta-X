@@ -42,7 +42,7 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wstethIn);
+        uint256 paid = settlement.fill(order, sig, wstethIn)[0];
 
         assertEq(paid, usdcOut, "solver paid exactly usdcOut");
         assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, usdcOut, "maker received USDC");

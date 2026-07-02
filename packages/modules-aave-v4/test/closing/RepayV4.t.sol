@@ -43,7 +43,7 @@ contract RepayV4Test is AaveV4ModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wethForSolver);
+        uint256 paid = settlement.fill(order, sig, wethForSolver)[0];
 
         assertEq(paid, bufferedAmount, "solver paid buffered USDC");
 

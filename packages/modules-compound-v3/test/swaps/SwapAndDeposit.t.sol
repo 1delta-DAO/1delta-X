@@ -43,13 +43,13 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             maker: maker,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            tokenIn: USDC,
-            tokenOut: WETH,
-            amountIn: usdcIn,
+            tokenIn: _a1(USDC),
+            tokenOut: _a1(WETH),
+            amountIn: _u1(usdcIn),
             decayStartTime: 0,
             decayDuration: 0, //        fixed-price (start == end)
-            startAmountOut: wethOut,
-            endAmountOut: wethOut,
+            startAmountOut: _u1(wethOut),
+            endAmountOut: _u1(wethOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,
@@ -69,7 +69,7 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
 
         // Solver fills the full order in one shot.
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
 
         // Post-state assertions.
         assertEq(paid, wethOut, "solver paid exactly wethOut");
@@ -108,13 +108,13 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             maker: maker,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            tokenIn: USDC,
-            tokenOut: WETH,
-            amountIn: usdcIn,
+            tokenIn: _a1(USDC),
+            tokenOut: _a1(WETH),
+            amountIn: _u1(usdcIn),
             decayStartTime: 0,
             decayDuration: 0,
-            startAmountOut: wethOut,
-            endAmountOut: wethOut,
+            startAmountOut: _u1(wethOut),
+            endAmountOut: _u1(wethOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,

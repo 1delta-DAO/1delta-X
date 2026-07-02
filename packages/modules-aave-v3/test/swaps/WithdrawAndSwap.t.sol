@@ -42,7 +42,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wethIn);
+        uint256 paid = settlement.fill(order, sig, wethIn)[0];
 
         assertEq(paid, usdcOut, "solver paid exactly usdcOut");
         assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, usdcOut, "maker received USDC");
@@ -133,7 +133,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
         uint256 makerWethBefore = IERC20(WETH).balanceOf(maker); // 0 — all supplied
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wethIn);
+        uint256 paid = settlement.fill(order, sig, wethIn)[0];
 
         assertEq(paid, usdcOut, "solver paid usdcOut");
         // Position fully exited (≤1 wei rebasing rounding).

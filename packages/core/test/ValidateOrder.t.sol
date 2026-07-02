@@ -32,25 +32,25 @@ contract ValidateOrderTest is CoreSettlementBase {
         Order memory o;
 
         o = _base();
-        o.amountIn = 0;
+        o.amountIn[0] = 0;
         _assertInvalid(o, "amountIn is zero");
 
         o = _base();
-        o.startAmountOut = 0;
-        o.endAmountOut = 0;
+        o.startAmountOut[0] = 0;
+        o.endAmountOut[0] = 0;
         _assertInvalid(o, "startAmountOut is zero (giveaway)");
 
         o = _base();
-        o.startAmountOut = 1 ether;
-        o.endAmountOut = 2 ether; // start < end
+        o.startAmountOut[0] = 1 ether;
+        o.endAmountOut[0] = 2 ether; // start < end
         _assertInvalid(o, "startAmountOut < endAmountOut");
 
         o = _base();
-        o.tokenOut = o.tokenIn; // self-trade
+        o.tokenOut[0] = o.tokenIn[0]; // self-trade
         _assertInvalid(o, "tokenIn == tokenOut");
 
         o = _base();
-        o.minFillAmountIn = o.amountIn + 1;
+        o.minFillAmountIn = o.amountIn[0] + 1;
         _assertInvalid(o, "minFillAmountIn > amountIn (unfillable)");
 
         o = _base();

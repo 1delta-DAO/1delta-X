@@ -42,13 +42,13 @@ contract FillWithPermitTest is CompoundV3ModulesBase {
             maker: maker,
             nonce: 42,
             deadline: block.timestamp + 1 hours,
-            tokenIn: USDC,
-            tokenOut: WETH,
-            amountIn: usdcIn,
+            tokenIn: _a1(USDC),
+            tokenOut: _a1(WETH),
+            amountIn: _u1(usdcIn),
             decayStartTime: 0,
             decayDuration: 0,
-            startAmountOut: wethOut,
-            endAmountOut: wethOut,
+            startAmountOut: _u1(wethOut),
+            endAmountOut: _u1(wethOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAmountIn: 0,
@@ -87,7 +87,7 @@ contract FillWithPermitTest is CompoundV3ModulesBase {
 
         // Fill — single solver call, single maker signature.
         vm.prank(solver);
-        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn);
+        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn)[0];
 
         assertEq(paid, wethOut, "solver paid 1 WETH");
         assertEq(IERC20(USDC).balanceOf(maker), 0, "maker USDC pulled");

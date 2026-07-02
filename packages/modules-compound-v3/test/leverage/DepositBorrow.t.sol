@@ -44,7 +44,7 @@ contract DepositBorrowTest is CompoundV3ModulesBase {
         uint256 makerDebtBefore = _usdcDebt(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, borrowOut);
+        uint256 paid = settlement.fill(order, sig, borrowOut)[0];
 
         assertEq(paid, collateralIn, "solver paid 1 WETH of collateral");
 

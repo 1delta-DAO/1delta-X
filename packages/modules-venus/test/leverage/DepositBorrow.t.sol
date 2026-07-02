@@ -28,7 +28,7 @@ contract VenusDepositBorrowTest is VenusModulesBase {
         uint256 debtBefore = _usdcDebt(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, borrowOut);
+        uint256 paid = settlement.fill(order, sig, borrowOut)[0];
 
         assertEq(paid, collateralIn, "solver paid 1 WETH of collateral");
         // vToken rounding is coarser than Aave/Comet's; allow a small relative band.

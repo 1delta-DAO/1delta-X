@@ -39,7 +39,7 @@ contract WithdrawV4Test is AaveV4ModulesBase {
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, wethIn);
+        uint256 paid = settlement.fill(order, sig, wethIn)[0];
 
         assertEq(paid, usdcOut, "solver paid exactly usdcOut");
         assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, usdcOut, "maker received USDC");
