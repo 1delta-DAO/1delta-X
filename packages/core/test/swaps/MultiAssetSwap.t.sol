@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {stdError} from "forge-std/StdError.sol";
 
 import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
 
@@ -266,5 +267,79 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         (bool ok, string memory reason) = settlement.validateOrder(order);
         assertFalse(ok, "duplicate tokenIn rejected");
         assertEq(reason, "duplicate tokenIn");
+    }
+
+    // ──────────────────── On-chain safe-fail of malformed orders ────────────────────
+    //
+    // `validateOrder` is view-only and NOT called during `fill`. These lock in the
+    // trust-model claim: a malformed order that slips past off-chain validation can
+    // only ever harm its own maker — protocol funds and the solver stay safe, and
+    // shape mismatches revert rather than misbehave.
+
+    /// @dev A duplicate `tokenIn` entry is a maker footgun, not a protocol bug: the
+    ///      order simply sells the SUM of the two duplicate legs. Every move is still
+    ///      gated by the maker's own Permit3 allowance, Settlement is never drained,
+    ///      and the solver receives exactly what it paid for.
+    function test_fill_duplicateTokenIn_onlyChargesMaker() public {
+        uint256 a = 500e6;
+        uint256 b = 300e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, maker, a + b);
+        deal(WETH, solver, wethOut);
+
+        _approveMakerToSettlement(USDC, a + b);
+        _approveSolverSide(wethOut, WETH);
+
+        // Duplicate USDC leg — rejected off-chain, but nothing stops an on-chain fill.
+        Order memory order =
+            _multiOrder(10, _addr2(USDC, USDC), _uint2(a, b), _a1(WETH), _u1(wethOut));
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        uint256[] memory paid = settlement.fill(order, sig, a); // fillAmountIn == amountIn[0]
+
+        assertEq(paid[0], wethOut, "maker paid the full output leg");
+        // Maker is charged the SUM of both duplicate legs — the footgun, self-inflicted.
+        assertEq(IERC20(USDC).balanceOf(maker), 0, "maker debited a + b");
+        assertEq(IERC20(USDC).balanceOf(solver), a + b, "solver received exactly a + b");
+        // Protocol invariant: Settlement never accumulates or leaks value.
+        assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement drained");
+        assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received the output");
+    }
+
+    /// @dev A tokenOut/amountOut length mismatch safe-fails: `_deliverOutputs`
+    ///      indexes the shorter price array and reverts (array OOB) instead of
+    ///      silently mispricing.
+    function test_fill_outputLengthMismatch_reverts() public {
+        deal(USDC, maker, 1_000e6);
+        deal(WETH, solver, 1 ether); //   fund leg 0 so we reach the OOB on leg 1
+        _approveMakerToSettlement(USDC, 1_000e6);
+        _approveSolverSide(1 ether, WETH);
+
+        // 2 tokenOut, 1 price entry — leg 0 (WETH) delivers, leg 1 indexes startAmountOut[1].
+        Order memory order = _multiOrder(11, _a1(USDC), _u1(1_000e6), _addr2(WETH, DAI), _u1(1 ether));
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(stdError.indexOOBError);
+        settlement.fill(order, sig, 1_000e6);
+    }
+
+    /// @dev A tokenIn/amountIn length mismatch safe-fails: `_payInputsToSolver`
+    ///      indexes the shorter amount array and reverts (array OOB).
+    function test_fill_inputLengthMismatch_reverts() public {
+        deal(USDC, maker, 1_000e6);
+        deal(WETH, solver, 1 ether);
+        _approveMakerToSettlement(USDC, 1_000e6);
+        _approveSolverSide(1 ether, WETH);
+
+        // 2 tokenIn, 1 amount entry.
+        Order memory order = _multiOrder(12, _addr2(USDC, DAI), _u1(1_000e6), _a1(WETH), _u1(1 ether));
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(stdError.indexOOBError);
+        settlement.fill(order, sig, 1_000e6);
     }
 }

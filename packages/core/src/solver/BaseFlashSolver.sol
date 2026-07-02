@@ -57,6 +57,9 @@ abstract contract BaseFlashSolver {
 
     error FlashLoanNotRepaid();
     error NotInFlash();
+    /// @dev This solver only routes a single debt leg (`tokenIn[0]`); a
+    ///      multi-input order would strand legs [1..] as maker shortfalls.
+    error MultiInputUnsupported();
 
     constructor(address _permit3, address _settlement, address _router) {
         permit3 = IPermit3(_permit3);
@@ -99,10 +102,13 @@ abstract contract BaseFlashSolver {
         uint24 dexFee,
         uint256 minSwapOut
     ) internal {
+        // Leverage solvers consume single-debt orders: the borrow proceeds are
+        // the first (and only) input leg. A multi-input order would collect only
+        // tokenIn[0] here and turn legs [1..] into maker shortfalls, so reject it.
+        if (order.tokenIn.length != 1) revert MultiInputUnsupported();
+
         settlement.fill(order, sig, fillAmountIn);
 
-        // Leverage solvers consume single-debt orders: the borrow proceeds are
-        // the first (and only) input leg.
         address tokenIn = order.tokenIn[0];
         uint256 tokenInBal = IERC20(tokenIn).balanceOf(address(this));
         IERC20(tokenIn).approve(address(router), tokenInBal);
