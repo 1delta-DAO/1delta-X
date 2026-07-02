@@ -163,6 +163,33 @@ witness type string, and all off-chain signing/SDK. Batch it with the SDK
 release that carries the Permit3 spender-keying change rather than shipping two
 separate breaking off-chain migrations.
 
+## Flexibility: proportional basket vs independent legs
+
+A multi-asset order fills as **one atomic basket** — a single fraction
+`f = fillAmountIn / amountIn[0]` moves every input, output, and item leg
+together. The solver chooses *how much* (any fraction ≥ `minFillAmountIn`), never
+the *ratio*. This is the point of a basket: the maker signs a fixed shape.
+
+If you instead want each asset to fill at its **own rate and fraction**
+(independent legs), do **not** decouple legs inside one order — sign **separate
+orders**, one per asset (or per sub-basket). Each order has its own hash, nonce,
+and fill counter, so:
+
+- a solver fills any subset independently, at independent fractions;
+- cancelling one order's nonce leaves the others fillable.
+
+This needs no contract change and is the recommended pattern. Reference /
+executable spec: `test/swaps/IndependentOrders.t.sol`.
+
+Why not independent legs *inside* one order (JAM's `filledAmounts[]`)? Decoupling
+the inputs and outputs of a single swap lets a solver take the maker's inputs
+while under-delivering outputs, so you would have to re-introduce a signed
+coupling constraint to stay safe — rebuilding the proportional guarantee by hand,
+and breaking the clean dutch-decay coupling. "Sign N orders" gives the same
+independence for free. (A one-signature *bundle of independent, self-contained
+swap legs* is safe and possible, but it is a distinct construct with per-leg fill
+accounting and another breaking schema change — out of scope here.)
+
 ## Explicitly rejected alternatives
 
 - **Per-token `filledAmounts[]` (JAM)** — breaks the single-fraction invariant;
