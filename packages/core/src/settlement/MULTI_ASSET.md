@@ -97,9 +97,16 @@ bytes32 internal constant ORDER_TYPEHASH = keccak256(
 `_hashValidators`:
 
 ```solidity
+// address[] must be encoded as 32-byte LEFT-PADDED words — NOT
+// abi.encodePacked(address[]), which packs each to 20 bytes and breaks EIP-712.
 function _hashAddresses(address[] calldata a) private pure returns (bytes32) {
-    return keccak256(abi.encodePacked(a));
+    bytes32[] memory words = new bytes32[](a.length);
+    for (uint256 i; i < a.length; i++) {
+        words[i] = bytes32(uint256(uint160(a[i])));
+    }
+    return keccak256(abi.encodePacked(words));
 }
+// uint256[] is already 32-byte-aligned, so encodePacked is correct here.
 function _hashUints(uint256[] calldata a) private pure returns (bytes32) {
     return keccak256(abi.encodePacked(a));
 }
