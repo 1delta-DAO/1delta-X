@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
 import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement} from "@core/settlement/UniversalSettlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -300,5 +301,129 @@ contract PlainSwapTest is CoreSettlementBase {
         assertEq(paid, wethOut, "solver paid exactly wethOut");
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "7702 maker received WETH");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received USDC");
+    }
+
+    // ──────────────────── Partial fills across DIFFERENT dutch ticks ────────────────────
+
+    /// @dev The realistic dutch flow: fill part early (high price), let the
+    ///      auction decay, fill the rest later (lower price). Each fill is priced
+    ///      at its OWN tick; the two output slices are independent, not a single
+    ///      averaged rate.
+    /// @dev Builds a linear-decay swap order: USDC → WETH, decaying startOut →
+    ///      endOut over 100s from `block.timestamp`.
+    function _dutchSwapOrder(uint256 nonce, uint256 usdcIn, uint256 startOut, uint256 endOut)
+        internal
+        view
+        returns (Order memory)
+    {
+        return Order({
+            maker: maker,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours,
+            tokenIn: _a1(USDC),
+            tokenOut: _a1(WETH),
+            amountIn: _u1(usdcIn),
+            decayStartTime: uint32(block.timestamp),
+            decayDuration: 100,
+            startAmountOut: _u1(startOut),
+            endAmountOut: _u1(endOut),
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
+            items: new Item[](0),
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
+        });
+    }
+
+    function test_plain_swap_partialFills_acrossDutchTicks() public {
+        uint256 usdcIn = 2_000e6;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, 1 ether); // enough for the worst case
+        _approveMakerPlainSwap(usdcIn);
+        _approveSolverSide(1 ether, WETH);
+
+        Order memory order = _dutchSwapOrder(7, usdcIn, 1 ether, 0.8 ether);
+        bytes memory sig = _sign(order);
+
+        // First half at t+25 → price 0.95.
+        vm.warp(block.timestamp + 25);
+        vm.prank(solver);
+        uint256 paid1 = settlement.fill(order, sig, usdcIn / 2)[0];
+        assertEq(paid1, (usdcIn / 2 * 0.95 ether + usdcIn - 1) / usdcIn, "first half at 0.95 tick");
+        assertEq(settlement.remaining(order), usdcIn / 2, "half remaining");
+
+        // Second half at t+75 → price 0.85 (strictly cheaper for the solver).
+        vm.warp(block.timestamp + 50);
+        vm.prank(solver);
+        uint256 paid2 = settlement.fill(order, sig, usdcIn - usdcIn / 2)[0];
+        assertEq(paid2, ((usdcIn - usdcIn / 2) * 0.85 ether + usdcIn - 1) / usdcIn, "second half at 0.85 tick");
+
+        assertLt(paid2, paid1, "later fill priced strictly lower");
+        assertEq(settlement.remaining(order), 0, "fully filled");
+        assertEq(IERC20(WETH).balanceOf(maker), paid1 + paid2, "maker WETH = sum of two ticks");
+        assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver paid full USDC across fills");
+    }
+
+    // ──────────────────── Exclusive filler fills DURING the window ────────────────────
+
+    /// @dev Positive case: the nominated exclusive filler CAN fill inside the
+    ///      window (the blocked/after-window cases are covered elsewhere).
+    function test_plain_swap_exclusiveFiller_fillsDuringWindow() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+        _approveMakerPlainSwap(usdcIn);
+        _approveSolverSide(wethOut, WETH);
+
+        Order memory order = _plainSwapOrder(8, usdcIn, wethOut);
+        order.exclusiveFiller = solver;
+        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        bytes memory sig = _sign(order);
+
+        // Still inside the exclusivity window — the nominated filler fills fine.
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
+        assertEq(paid, wethOut, "exclusive filler filled during window");
+        assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH");
+    }
+
+    // ──────────────────── Stranded tail (0 < minFill < amountIn) ────────────────────
+
+    /// @dev Documented caveat lock-in: a partial fill can leave a remainder
+    ///      smaller than `minFillAmountIn`, which is then permanently unfillable —
+    ///      too small to pass the floor, and filling more would over-fill.
+    function test_plain_swap_strandedTail_belowMinFill() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+        uint256 minFill = 1_500e6; // 0 < minFill < amountIn
+
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+        _approveMakerPlainSwap(usdcIn);
+        _approveSolverSide(wethOut, WETH);
+
+        Order memory order = _plainSwapOrder(9, usdcIn, wethOut);
+        order.minFillAmountIn = minFill;
+        bytes memory sig = _sign(order);
+
+        // Fill the minimum → leaves a 500e6 tail, below the floor.
+        vm.prank(solver);
+        settlement.fill(order, sig, minFill);
+        uint256 tail = settlement.remaining(order);
+        assertEq(tail, usdcIn - minFill, "500 USDC tail remains");
+
+        // The tail can't be filled: below the min-fill floor …
+        vm.prank(solver);
+        vm.expectRevert(UniversalSettlement.FillTooSmall.selector);
+        settlement.fill(order, sig, tail);
+
+        // … and filling the floor amount would over-fill the order.
+        vm.prank(solver);
+        vm.expectRevert(UniversalSettlement.OverFill.selector);
+        settlement.fill(order, sig, minFill);
     }
 }
