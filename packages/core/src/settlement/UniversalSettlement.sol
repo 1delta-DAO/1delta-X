@@ -13,6 +13,7 @@ import {Order, Item, ItemOp, Validator} from "./SettlementStructs.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 import {NonceManager} from "./NonceManager.sol";
+import {SolverCallbackExecutor} from "./SolverCallbackExecutor.sol";
 
 /// @title UniversalSettlement
 /// @notice Signed limit-order settler with partial fills, optional dutch
@@ -33,6 +34,11 @@ contract UniversalSettlement is NonceManager {
 
     bytes32 public immutable DOMAIN_SEPARATOR;
     IPermit3 public immutable PERMIT3;
+
+    /// @notice Allowance-less trampoline for `fillWithCallback` (see the contract
+    ///         for the security rationale). Deployed here so it is dedicated to
+    ///         this Settlement and can never be an approved Permit3 spender.
+    SolverCallbackExecutor public immutable EXECUTOR;
 
     /// @notice orderHash → cumulative filled amountIn
     mapping(bytes32 => uint256) public filledAmountIn;
@@ -70,6 +76,7 @@ contract UniversalSettlement is NonceManager {
 
     constructor(address permit3) {
         PERMIT3 = IPermit3(permit3);
+        EXECUTOR = new SolverCallbackExecutor();
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
@@ -92,7 +99,34 @@ contract UniversalSettlement is NonceManager {
     {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn);
+        return _fillCore(order, orderHash, fillAmountIn, address(0), "");
+    }
+
+    /// @notice Fill with a solver-supplied callback that runs just before output
+    ///         delivery — the taker-interaction analogue. Lets a zero-inventory
+    ///         solver source `tokenOut` just-in-time (flash / swap / route)
+    ///         without a bespoke solver contract: the callback runs while the
+    ///         fill's reentrancy guard is held, then Settlement pulls the outputs
+    ///         the solver just acquired.
+    ///
+    ///  Safety: the `(callbackTarget, callbackData)` call is made by
+    ///  {SolverCallbackExecutor} — an allowance-less trampoline — NOT by
+    ///  Settlement, so it cannot abuse Settlement's Permit3 spender status to
+    ///  move a maker's funds (e.g. `callbackTarget = PERMIT3` gains nothing). The
+    ///  callback is filler-supplied and NOT part of the maker's signed order, so
+    ///  it can only act with its own authority; the maker's funds stay gated by
+    ///  their signature + Permit3 allowances exactly as in a plain `fill`.
+    ///  Reentrancy into any fill is blocked by `nonReentrant`.
+    function fillWithCallback(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmountIn,
+        address callbackTarget,
+        bytes calldata callbackData
+    ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+        bytes32 orderHash = order.hash();
+        _verifySignature(orderHash, sig, order.maker);
+        return _fillCore(order, orderHash, fillAmountIn, callbackTarget, callbackData);
     }
 
     /// @notice Single-signature fill: the maker's `sig` is over a Permit3
@@ -110,16 +144,17 @@ contract UniversalSettlement is NonceManager {
         // Permit3 verifies the sig against (PermitBatchWitness + orderHash) and
         // applies all allowances. The order itself doesn't need a separate sig
         // — the witness binding makes the permit endorse this exact order.
-        PERMIT3.permitBatchWithWitness(
-            order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig
-        );
-        return _fillCore(order, orderHash, fillAmountIn);
+        PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
+        return _fillCore(order, orderHash, fillAmountIn, address(0), "");
     }
 
-    function _fillCore(Order calldata order, bytes32 orderHash, uint256 fillAmountIn)
-        internal
-        returns (uint256[] memory fillAmountsOut)
-    {
+    function _fillCore(
+        Order calldata order,
+        bytes32 orderHash,
+        uint256 fillAmountIn,
+        address callbackTarget,
+        bytes memory callbackData
+    ) internal returns (uint256[] memory fillAmountsOut) {
         if (fillAmountIn == 0) revert ZeroFill();
         if (fillAmountIn < order.minFillAmountIn) revert FillTooSmall();
         if (block.timestamp > order.deadline) revert OrderExpired();
@@ -127,8 +162,7 @@ contract UniversalSettlement is NonceManager {
         // Exclusivity window — if set, only the nominated filler may fill until
         // `exclusivityEndTime`. After that, anyone can fill.
         if (
-            order.exclusiveFiller != address(0)
-                && block.timestamp < order.exclusivityEndTime
+            order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime
                 && msg.sender != order.exclusiveFiller
         ) revert NotExclusiveFiller();
 
@@ -142,6 +176,15 @@ contract UniversalSettlement is NonceManager {
         uint256 newFilled = prevFilled + fillAmountIn;
         if (newFilled > amountIn0) revert OverFill();
         filledAmountIn[orderHash] = newFilled;
+
+        // 0. Optional solver callback (taker-interaction analogue). Runs BEFORE
+        //    any funds move, so a zero-inventory solver can source `tokenOut`
+        //    just-in-time. Routed through EXECUTOR (allowance-less), never called
+        //    from Settlement itself, so it cannot leverage Settlement's Permit3
+        //    spender status. Under `nonReentrant`, so it cannot re-enter a fill.
+        if (callbackTarget != address(0)) {
+            EXECUTOR.execute(callbackTarget, callbackData);
+        }
 
         // 1. Solver → maker: each tokenOut, auction-priced, pro-rata this fill.
         fillAmountsOut = _deliverOutputs(order, fillAmountIn, amountIn0);
@@ -263,9 +306,7 @@ contract UniversalSettlement is NonceManager {
     function _runValidators(Order calldata order) internal view {
         for (uint256 i; i < order.validators.length; i++) {
             Validator calldata v = order.validators[i];
-            (bool ok, bytes memory ret) = v.target.staticcall(
-                abi.encodeCall(IOrderValidator.validate, (order, v.data))
-            );
+            (bool ok, bytes memory ret) = v.target.staticcall(abi.encodeCall(IOrderValidator.validate, (order, v.data)));
             if (!ok || ret.length < 32 || !abi.decode(ret, (bool))) {
                 revert ValidationFailed(i);
             }
@@ -278,9 +319,7 @@ contract UniversalSettlement is NonceManager {
     function _runInvariants(Order calldata order) internal view {
         for (uint256 i; i < order.invariants.length; i++) {
             Validator calldata v = order.invariants[i];
-            (bool ok, bytes memory ret) = v.target.staticcall(
-                abi.encodeCall(IOrderValidator.validate, (order, v.data))
-            );
+            (bool ok, bytes memory ret) = v.target.staticcall(abi.encodeCall(IOrderValidator.validate, (order, v.data)));
             if (!ok || ret.length < 32 || !abi.decode(ret, (bool))) {
                 revert InvariantFailed(i);
             }
