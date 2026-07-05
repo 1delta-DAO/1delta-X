@@ -11,7 +11,17 @@ abstract contract NonceManager {
     /// @notice maker → word index → bitmap of cancelled nonces
     mapping(address => mapping(uint256 => uint256)) public nonceBitmap;
 
+    /// @notice maker → rollback floor. Any order whose `nonce < minValidNonce`
+    ///         is treated as cancelled. Lets a maker invalidate every outstanding
+    ///         order below a threshold in ONE write (the 0x `minValidSalt`
+    ///         "rollback" primitive), instead of flipping bits one word at a time.
+    ///         Monotonic — can only ever advance.
+    mapping(address => uint256) public minValidNonce;
+
     event OrdersCancelled(address indexed maker, uint256[] nonces);
+    event NoncesRolledBack(address indexed maker, uint256 minValidNonce);
+
+    error RollbackTooLow();
 
     /// @notice Cancel a list of the caller's order nonces.
     function cancelOrders(uint256[] calldata noncesToCancel) external {
@@ -26,6 +36,15 @@ abstract contract NonceManager {
         nonceBitmap[msg.sender][wordIndex] = type(uint256).max;
     }
 
+    /// @notice Roll the caller's nonce floor forward to `newMinValidNonce`,
+    ///         cancelling every outstanding order with a lower nonce in one write.
+    ///         Reverts if it would move the floor backwards.
+    function rollbackNonces(uint256 newMinValidNonce) external {
+        if (newMinValidNonce < minValidNonce[msg.sender]) revert RollbackTooLow();
+        minValidNonce[msg.sender] = newMinValidNonce;
+        emit NoncesRolledBack(msg.sender, newMinValidNonce);
+    }
+
     function isNonceCancelled(address maker, uint256 nonce) external view returns (bool) {
         return _isNonceCancelled(maker, nonce);
     }
@@ -35,6 +54,7 @@ abstract contract NonceManager {
     }
 
     function _isNonceCancelled(address maker, uint256 nonce) internal view returns (bool) {
+        if (nonce < minValidNonce[maker]) return true;
         return (nonceBitmap[maker][nonce >> 8] & (1 << (nonce & 0xff))) != 0;
     }
 }

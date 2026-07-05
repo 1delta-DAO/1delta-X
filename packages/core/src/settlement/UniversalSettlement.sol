@@ -66,6 +66,19 @@ contract UniversalSettlement is NonceManager {
     error InvariantFailed(uint256 index);
     error NotExclusiveFiller();
     error FillTooSmall();
+    error OnlySelf();
+    error BatchFillIncomplete(uint256 index);
+
+    /// @notice Lifecycle status for the solver-preflight view. Mirrors 0x's
+    ///         `OrderStatus` so an off-chain filler can classify an order from a
+    ///         single `getOrderRelevantState` call.
+    enum OrderStatus {
+        Invalid, // malformed (bad array shape) — can never fill
+        Fillable, // open, at least one unit still fillable
+        Filled, // fully filled
+        Cancelled, // nonce bit set, or below the maker's rollback floor
+        Expired // past deadline
+    }
 
     modifier nonReentrant() {
         if (_locked != 1) revert Reentrancy();
@@ -99,7 +112,7 @@ contract UniversalSettlement is NonceManager {
     {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn, address(0), "");
+        return _fillCore(order, orderHash, fillAmountIn, msg.sender, address(0), "");
     }
 
     /// @notice Fill with a solver-supplied callback that runs just before output
@@ -126,7 +139,7 @@ contract UniversalSettlement is NonceManager {
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn, callbackTarget, callbackData);
+        return _fillCore(order, orderHash, fillAmountIn, msg.sender, callbackTarget, callbackData);
     }
 
     /// @notice Single-signature fill: the maker's `sig` is over a Permit3
@@ -145,13 +158,57 @@ contract UniversalSettlement is NonceManager {
         // applies all allowances. The order itself doesn't need a separate sig
         // — the witness binding makes the permit endorse this exact order.
         PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
-        return _fillCore(order, orderHash, fillAmountIn, address(0), "");
+        return _fillCore(order, orderHash, fillAmountIn, msg.sender, address(0), "");
+    }
+
+    /// @notice Fill a batch of orders in one transaction. Each order is attempted
+    ///         independently; an order that reverts (expired, cancelled,
+    ///         under-funded, over-fill, …) is SKIPPED and its `success[i]` is
+    ///         false — unless `revertIfIncomplete`, in which case the first
+    ///         failure reverts the whole batch. Mirrors 0x's `batchFill*` with
+    ///         the `revertIfIncomplete` flag.
+    /// @dev    Each fill runs via a `this.fillSelf` self-call so a revert unwinds
+    ///         only that order, not the batch. The real filler (`msg.sender`) is
+    ///         threaded through, so a skipped order costs the caller nothing and a
+    ///         filled one settles against the caller exactly as a direct `fill`.
+    function batchFill(
+        Order[] calldata orders,
+        bytes[] calldata sigs,
+        uint256[] calldata fillAmounts,
+        bool revertIfIncomplete
+    ) external nonReentrant returns (uint256[][] memory fillAmountsOut, bool[] memory success) {
+        uint256 n = orders.length;
+        fillAmountsOut = new uint256[][](n);
+        success = new bool[](n);
+        address filler = msg.sender;
+        for (uint256 i; i < n; i++) {
+            try this.fillSelf(orders[i], sigs[i], fillAmounts[i], filler) returns (uint256[] memory outs) {
+                fillAmountsOut[i] = outs;
+                success[i] = true;
+            } catch {
+                if (revertIfIncomplete) revert BatchFillIncomplete(i);
+            }
+        }
+    }
+
+    /// @notice Self-call fill target for {batchFill}. Verifies the maker signature
+    ///         and runs the fill for an explicit `filler`. `onlySelf` — external
+    ///         callers must use `fill`.
+    function fillSelf(Order calldata order, bytes calldata sig, uint256 fillAmountIn, address filler)
+        external
+        returns (uint256[] memory)
+    {
+        if (msg.sender != address(this)) revert OnlySelf();
+        bytes32 orderHash = order.hash();
+        _verifySignature(orderHash, sig, order.maker);
+        return _fillCore(order, orderHash, fillAmountIn, filler, address(0), "");
     }
 
     function _fillCore(
         Order calldata order,
         bytes32 orderHash,
         uint256 fillAmountIn,
+        address filler,
         address callbackTarget,
         bytes memory callbackData
     ) internal returns (uint256[] memory fillAmountsOut) {
@@ -163,7 +220,7 @@ contract UniversalSettlement is NonceManager {
         // `exclusivityEndTime`. After that, anyone can fill.
         if (
             order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime
-                && msg.sender != order.exclusiveFiller
+                && filler != order.exclusiveFiller
         ) revert NotExclusiveFiller();
 
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
@@ -187,7 +244,7 @@ contract UniversalSettlement is NonceManager {
         }
 
         // 1. Solver → maker: each tokenOut, auction-priced, pro-rata this fill.
-        fillAmountsOut = _deliverOutputs(order, fillAmountIn, amountIn0);
+        fillAmountsOut = _deliverOutputs(order, fillAmountIn, amountIn0, filler);
 
         // Snapshot each tokenIn before items so the payout uses ONLY this fill's
         // TAKE proceeds — never any pre-existing/donated balance held by
@@ -200,12 +257,12 @@ contract UniversalSettlement is NonceManager {
 
         // 3. Settle each tokenIn → solver. TAKE items route proceeds to this
         //    contract; any shortfall is pulled from the maker via Permit3.
-        _payInputsToSolver(order, prevFilled, newFilled, amountIn0, tokenInBefore);
+        _payInputsToSolver(order, prevFilled, newFilled, amountIn0, tokenInBefore, filler);
 
         // 4. Post-execution invariants (e.g. "my Aave health factor ≥ 2.0 after this fill").
         _runInvariants(order);
 
-        emit OrderFilled(orderHash, order.maker, msg.sender, fillAmountIn, fillAmountsOut);
+        emit OrderFilled(orderHash, order.maker, filler, fillAmountIn, fillAmountsOut);
     }
 
     /// @dev Deliver every output leg solver→maker for this fill. Each output is
@@ -213,7 +270,7 @@ contract UniversalSettlement is NonceManager {
     ///      `fillAmountIn / amountIn0`, ceil-rounded so the maker is never
     ///      underpaid. Permit3 enforces the solver's token allowance to this
     ///      contract on each leg.
-    function _deliverOutputs(Order calldata order, uint256 fillAmountIn, uint256 amountIn0)
+    function _deliverOutputs(Order calldata order, uint256 fillAmountIn, uint256 amountIn0, address filler)
         internal
         returns (uint256[] memory outs)
     {
@@ -225,7 +282,7 @@ contract UniversalSettlement is NonceManager {
             uint256 amt = (fillAmountIn * currentOut + amountIn0 - 1) / amountIn0;
             outs[j] = amt;
             if (amt != 0) {
-                PERMIT3.transferFrom(msg.sender, order.maker, order.tokenOut[j], uint160(amt));
+                PERMIT3.transferFrom(filler, order.maker, order.tokenOut[j], uint160(amt));
             }
         }
     }
@@ -280,7 +337,8 @@ contract UniversalSettlement is NonceManager {
         uint256 prevFilled,
         uint256 newFilled,
         uint256 amountIn0,
-        uint256[] memory tokenInBefore
+        uint256[] memory tokenInBefore,
+        address filler
     ) internal {
         address maker = order.maker;
         for (uint256 i; i < order.tokenIn.length; i++) {
@@ -291,12 +349,12 @@ contract UniversalSettlement is NonceManager {
             address tokenIn = order.tokenIn[i];
             uint256 proceeds = IERC20(tokenIn).balanceOf(address(this)) - tokenInBefore[i];
             if (proceeds >= owed) {
-                SafeTransferLib.safeTransfer(tokenIn, msg.sender, owed);
+                SafeTransferLib.safeTransfer(tokenIn, filler, owed);
                 uint256 surplus = proceeds - owed;
                 if (surplus > 0) SafeTransferLib.safeTransfer(tokenIn, maker, surplus);
             } else {
-                if (proceeds > 0) SafeTransferLib.safeTransfer(tokenIn, msg.sender, proceeds);
-                PERMIT3.transferFrom(maker, msg.sender, tokenIn, uint160(owed - proceeds));
+                if (proceeds > 0) SafeTransferLib.safeTransfer(tokenIn, filler, proceeds);
+                PERMIT3.transferFrom(maker, filler, tokenIn, uint160(owed - proceeds));
             }
         }
     }
@@ -345,6 +403,110 @@ contract UniversalSettlement is NonceManager {
 
     function remaining(Order calldata order) external view returns (uint256) {
         return order.amountIn[0] - filledAmountIn[order.hash()];
+    }
+
+    // ──────────────────── Solver preflight ────────────────────
+
+    /// @notice One-call preflight for a solver/filler: classify the order, report
+    ///         how much is ACTUALLY fillable right now (capped by the maker's live
+    ///         Permit3 allowance + balance for plain orders), and whether the
+    ///         signature recovers to the maker. The 0x `getOrderRelevantState`
+    ///         analogue — lets a filler skip orders that would revert without
+    ///         simulating the whole fill.
+    /// @dev    `fillableAmountIn` is in `tokenIn[0]` units (the fill denominator).
+    ///         For orders WITH items the tokenIn is (partly) produced on-chain by
+    ///         TAKE legs, which can't be known statically, so the allowance/balance
+    ///         cap is applied only to plain (item-free) orders; item orders report
+    ///         the full remaining amount. This is a best-effort hint, not a
+    ///         guarantee — the fill itself remains the source of truth.
+    function getOrderRelevantState(Order calldata order, bytes calldata sig)
+        external
+        view
+        returns (OrderStatus status, uint256 fillableAmountIn, bool isSignatureValid)
+    {
+        bytes32 orderHash = order.hash();
+        try this.checkSignature(orderHash, sig, order.maker) {
+            isSignatureValid = true;
+        } catch {
+            isSignatureValid = false;
+        }
+        (status, fillableAmountIn) = _orderState(order, orderHash);
+    }
+
+    /// @notice Batch preflight. Any order that reverts (malformed, etc.) degrades
+    ///         to `Invalid` / 0 / false instead of failing the whole call — the 0x
+    ///         "swallows reverts" batch-state behaviour.
+    function getOrderRelevantStates(Order[] calldata orders, bytes[] calldata sigs)
+        external
+        view
+        returns (OrderStatus[] memory statuses, uint256[] memory fillableAmounts, bool[] memory sigValids)
+    {
+        uint256 n = orders.length;
+        statuses = new OrderStatus[](n);
+        fillableAmounts = new uint256[](n);
+        sigValids = new bool[](n);
+        for (uint256 i; i < n; i++) {
+            try this.getOrderRelevantState(orders[i], sigs[i]) returns (OrderStatus s, uint256 f, bool v) {
+                statuses[i] = s;
+                fillableAmounts[i] = f;
+                sigValids[i] = v;
+            } catch {
+                statuses[i] = OrderStatus.Invalid;
+            }
+        }
+    }
+
+    /// @notice External wrapper so the (reverting) signature check can be caught
+    ///         by `try/catch` from a `view`. Reverts iff the signature is invalid.
+    function checkSignature(bytes32 orderHash, bytes calldata sig, address expected) external view {
+        _verifySignature(orderHash, sig, expected);
+    }
+
+    /// @dev Status + live-fillable amount, without touching the signature.
+    function _orderState(Order calldata order, bytes32 orderHash)
+        internal
+        view
+        returns (OrderStatus status, uint256 fillableAmountIn)
+    {
+        // Malformed shape → Invalid (guards the array indexing below).
+        if (order.tokenIn.length == 0 || order.amountIn.length != order.tokenIn.length || order.tokenOut.length == 0) {
+            return (OrderStatus.Invalid, 0);
+        }
+        if (block.timestamp > order.deadline) return (OrderStatus.Expired, 0);
+        if (_isNonceCancelled(order.maker, order.nonce)) return (OrderStatus.Cancelled, 0);
+
+        uint256 amountIn0 = order.amountIn[0];
+        uint256 filled = filledAmountIn[orderHash];
+        if (filled >= amountIn0) return (OrderStatus.Filled, 0);
+
+        fillableAmountIn = amountIn0 - filled;
+        // Plain orders: the maker funds tokenIn from their wallet, so cap the
+        // fillable amount by their live capacity across every input leg.
+        if (order.items.length == 0) {
+            uint256 cap = _makerFillableCap(order, amountIn0);
+            if (cap < fillableAmountIn) fillableAmountIn = cap;
+        }
+        status = OrderStatus.Fillable;
+    }
+
+    /// @dev Max fillable (in tokenIn[0] units) the maker can currently fund across
+    ///      all input legs: min_i( capacity_i · amountIn0 / amountIn[i] ), where
+    ///      capacity_i = min(live Permit3 allowance to this contract, balance).
+    function _makerFillableCap(Order calldata order, uint256 amountIn0) internal view returns (uint256 cap) {
+        cap = type(uint256).max;
+        for (uint256 i; i < order.tokenIn.length; i++) {
+            address token = order.tokenIn[i];
+            (uint160 allowed, uint48 expiration,) = PERMIT3.tokenAllowance(order.maker, address(this), token);
+            uint256 capacity = allowed;
+            if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
+            uint256 bal = IERC20(token).balanceOf(order.maker);
+            if (bal < capacity) capacity = bal;
+
+            uint256 amt = order.amountIn[i];
+            // Scale leg-i capacity back into tokenIn[0] (fill-denominator) units.
+            uint256 inUnits = amt == 0 ? type(uint256).max : (capacity * amountIn0) / amt;
+            if (inUnits < cap) cap = inUnits;
+        }
     }
 
     /// @notice Off-chain / preview check for order well-formedness. Intentionally
