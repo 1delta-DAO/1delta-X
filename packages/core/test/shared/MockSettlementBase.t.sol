@@ -130,6 +130,120 @@ abstract contract MockSettlementBase is Test {
         });
     }
 
+    /// @dev Multi-output plain order (no items). `tokenIn`/`amountIn` single-leg;
+    ///      `tokenOut`/`amountOut` arbitrary length. Used for duplicate-output and
+    ///      multi-output reverse-mode coverage.
+    function _plainOrderMultiOut(
+        uint256 nonce,
+        address tokenIn,
+        uint256 amountIn,
+        address[] memory tokenOut,
+        uint256[] memory amountOut
+    ) internal view returns (Order memory) {
+        return Order({
+            maker: maker,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours,
+            tokenIn: _a1(tokenIn),
+            amountIn: _u1(amountIn),
+            decayStartTime: 0,
+            decayDuration: 0,
+            tokenOut: tokenOut,
+            startAmountOut: amountOut,
+            endAmountOut: amountOut,
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAmountIn: 0,
+            items: new Item[](0),
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
+        });
+    }
+
+    // ──────────────────── Permit-batch (witness) builders ────────────────────
+    //
+    // Mirror the CoreSettlementBase helpers so the single-signature `fillWithPermit`
+    // path can be exercised without a fork.
+
+    bytes32 constant TOKEN_PERMIT_TH =
+        keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
+    bytes32 constant TAKER_PERMIT_TH =
+        keccak256("TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)");
+
+    /// @dev Must mirror Permit3's `_PERMIT_BATCH_WITNESS_STUB` + Settlement's
+    ///      `OrderHash.WITNESS_TYPESTRING` exactly.
+    string constant PERMIT_BATCH_WITNESS_FULL =
+        "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
+        "Order witness)"
+        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+        "Validator(address target,bytes data)";
+
+    function _buildBatch(
+        IPermit3.TokenPermit[] memory tp,
+        uint256 nonce,
+        uint256 deadline
+    ) internal pure returns (IPermit3.PermitBatch memory) {
+        return IPermit3.PermitBatch({tokens: tp, takers: new IPermit3.TakerPermit[](0), nonce: nonce, deadline: deadline});
+    }
+
+    function _tokenPermit1(address spender, address token, uint256 amt, uint48 exp)
+        internal
+        pure
+        returns (IPermit3.TokenPermit[] memory tp)
+    {
+        tp = new IPermit3.TokenPermit[](1);
+        tp[0] = IPermit3.TokenPermit(spender, token, uint160(amt), exp);
+    }
+
+    function _hashTokenPermits(IPermit3.TokenPermit[] memory p) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](p.length);
+        for (uint256 i; i < p.length; i++) {
+            h[i] = keccak256(abi.encode(TOKEN_PERMIT_TH, p[i].spender, p[i].token, p[i].amount, p[i].expiration));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    function _hashTakerPermits(IPermit3.TakerPermit[] memory p) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](p.length);
+        for (uint256 i; i < p.length; i++) {
+            h[i] = keccak256(abi.encode(TAKER_PERMIT_TH, p[i].spender, p[i].ref, p[i].amount, p[i].expiration));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    /// @dev Signs the witness-bound permit batch against Permit3's domain with `pk`.
+    function _signPermitWitnessWith(IPermit3.PermitBatch memory batch, bytes32 witness, uint256 pk)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 typeHash = keccak256(bytes(PERMIT_BATCH_WITNESS_FULL));
+        bytes32 hashStruct = keccak256(
+            abi.encode(
+                typeHash,
+                _hashTokenPermits(batch.tokens),
+                _hashTakerPermits(batch.takers),
+                batch.nonce,
+                batch.deadline,
+                witness
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), hashStruct));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _signPermitWitness(IPermit3.PermitBatch memory batch, bytes32 witness)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _signPermitWitnessWith(batch, witness, makerPk);
+    }
+
     // ──────────────────── EIP-712: Order (mirrors OrderHash.sol) ────────────────────
 
     bytes32 constant ITEM_TH = keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");

@@ -32,8 +32,18 @@ contract UniversalSettlement is NonceManager {
 
     // ──────────────────── Storage ────────────────────
 
-    bytes32 public immutable DOMAIN_SEPARATOR;
     IPermit3 public immutable PERMIT3;
+
+    /// @dev EIP-712 domain, cached at deploy but recomputed if `block.chainid`
+    ///      changes (chain fork) so an order signature can never be replayed
+    ///      against the wrong domain after a split. Mirrors Permit3's EIP712
+    ///      base; exposed via the `DOMAIN_SEPARATOR()` view below.
+    bytes32 private immutable _CACHED_DOMAIN_SEPARATOR;
+    uint256 private immutable _CACHED_CHAIN_ID;
+    bytes32 private constant _DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant _HASHED_NAME = keccak256("UniversalSettlement");
+    bytes32 private constant _HASHED_VERSION = keccak256("1");
 
     /// @notice Allowance-less trampoline for `fillWithCallback` (see the contract
     ///         for the security rationale). Deployed here so it is dedicated to
@@ -98,15 +108,19 @@ contract UniversalSettlement is NonceManager {
     constructor(address permit3) {
         PERMIT3 = IPermit3(permit3);
         EXECUTOR = new SolverCallbackExecutor();
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256("UniversalSettlement"),
-                keccak256("1"),
-                block.chainid,
-                address(this)
-            )
-        );
+        _CACHED_CHAIN_ID = block.chainid;
+        _CACHED_DOMAIN_SEPARATOR = _buildDomainSeparator();
+    }
+
+    /// @notice EIP-712 domain separator for the current chain. Returns the cached
+    ///         value unless `block.chainid` has changed since deployment (fork),
+    ///         in which case it is rebuilt so signatures stay domain-bound.
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        return block.chainid == _CACHED_CHAIN_ID ? _CACHED_DOMAIN_SEPARATOR : _buildDomainSeparator();
+    }
+
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(abi.encode(_DOMAIN_TYPEHASH, _HASHED_NAME, _HASHED_VERSION, block.chainid, address(this)));
     }
 
     // ──────────────────── Fill ────────────────────
@@ -432,7 +446,7 @@ contract UniversalSettlement is NonceManager {
     }
 
     function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, orderHash));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), orderHash));
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
         SignatureVerification.verify(sig, digest, expected);
@@ -551,7 +565,19 @@ contract UniversalSettlement is NonceManager {
 
             uint256 amt = order.amountIn[i];
             // Scale leg-i capacity back into tokenIn[0] (fill-denominator) units.
-            uint256 inUnits = amt == 0 ? type(uint256).max : (capacity * amountIn0) / amt;
+            // Guard the multiply: an unbounded (e.g. max) allowance times a large
+            // `amountIn0` can exceed uint256 — treat an overflowing product as
+            // "this leg imposes no binding cap" so this preflight view never
+            // reverts (a stray revert would blind a solver to an otherwise
+            // fillable order). `capacity == 0` still falls through to a binding 0.
+            uint256 inUnits;
+            if (amt == 0) {
+                inUnits = type(uint256).max; // leg needs nothing → no constraint
+            } else if (amountIn0 != 0 && capacity > type(uint256).max / amountIn0) {
+                inUnits = type(uint256).max; // product overflows → non-binding
+            } else {
+                inUnits = (capacity * amountIn0) / amt;
+            }
             if (inUnits < cap) cap = inUnits;
         }
     }
