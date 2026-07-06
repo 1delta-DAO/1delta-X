@@ -25,10 +25,13 @@ contract MultiOutputFlashTest is CoreSettlementBase {
     address constant UNI_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
 
     // Priced generously so the buybacks comfortably cover the flash (this is
-    // about the filler mechanics, not the maker's P&L).
+    // about the filler mechanics, not the maker's P&L). At the pinned fork block
+    // 1 WETH buys ~2143 USDC / ~2141 DAI, so each 1-WETH buyback (minOut below)
+    // clears the 2_000 it must repay with headroom; the maker sells 3 WETH, so
+    // ~1 WETH is left as solver profit.
     uint256 constant WETH_IN = 3 ether;
-    uint256 constant USDC_OUT = 3_000e6;
-    uint256 constant DAI_OUT = 3_000e18;
+    uint256 constant USDC_OUT = 2_000e6;
+    uint256 constant DAI_OUT = 2_000e18;
 
     MultiOutputFlashSolver flashSolver;
 

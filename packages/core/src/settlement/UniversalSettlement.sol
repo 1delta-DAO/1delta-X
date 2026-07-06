@@ -68,6 +68,14 @@ contract UniversalSettlement is NonceManager {
     error FillTooSmall();
     error OnlySelf();
     error BatchFillIncomplete(uint256 index);
+    error ReverseModeRequiresNoItems();
+
+    /// @notice Where the solver callback runs relative to settlement, chosen by
+    ///         the filler in `fillWithCallback`.
+    enum CallbackMode {
+        PreDelivery, // callback → deliver outputs → items → pay inputs (works for any order)
+        PostInputs // pay inputs → callback → deliver outputs (item-free only; JIT-from-proceeds)
+    }
 
     /// @notice Lifecycle status for the solver-preflight view. Mirrors 0x's
     ///         `OrderStatus` so an off-chain filler can classify an order from a
@@ -112,7 +120,7 @@ contract UniversalSettlement is NonceManager {
     {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn, msg.sender, address(0), "");
+        return _fillCore(order, orderHash, fillAmountIn, msg.sender, address(0), "", CallbackMode.PreDelivery);
     }
 
     /// @notice Fill with a solver-supplied callback that runs just before output
@@ -130,16 +138,32 @@ contract UniversalSettlement is NonceManager {
     ///  it can only act with its own authority; the maker's funds stay gated by
     ///  their signature + Permit3 allowances exactly as in a plain `fill`.
     ///  Reentrancy into any fill is blocked by `nonReentrant`.
+    ///
+    ///  `mode` (filler-chosen) picks where the callback runs:
+    ///    • PreDelivery — callback → deliver outputs → items → pay inputs. Works
+    ///      for any order; the solver must source `tokenOut` from something that
+    ///      does NOT depend on this fill's proceeds (flash / credit / inventory).
+    ///    • PostInputs  — pay inputs → callback → deliver outputs. Item-free
+    ///      orders only. The solver is paid its `tokenIn` FIRST, converts it in
+    ///      the callback, then delivers `tokenOut` — a genuinely zero-inventory,
+    ///      zero-flash plain-swap fill (the Fusion `takerInteraction` ordering).
+    ///
+    ///  The `mode` flag only permutes solver-side transfer order; it cannot change
+    ///  the maker's signed outcome. In both modes the tx can only succeed if the
+    ///  maker pays exactly the signed input and receives the signed output (a
+    ///  mandatory, reverting delivery) and every invariant passes — so it is safe
+    ///  for the filler, not the maker, to choose it.
     function fillWithCallback(
         Order calldata order,
         bytes calldata sig,
         uint256 fillAmountIn,
         address callbackTarget,
-        bytes calldata callbackData
+        bytes calldata callbackData,
+        CallbackMode mode
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn, msg.sender, callbackTarget, callbackData);
+        return _fillCore(order, orderHash, fillAmountIn, msg.sender, callbackTarget, callbackData, mode);
     }
 
     /// @notice Single-signature fill: the maker's `sig` is over a Permit3
@@ -158,7 +182,7 @@ contract UniversalSettlement is NonceManager {
         // applies all allowances. The order itself doesn't need a separate sig
         // — the witness binding makes the permit endorse this exact order.
         PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
-        return _fillCore(order, orderHash, fillAmountIn, msg.sender, address(0), "");
+        return _fillCore(order, orderHash, fillAmountIn, msg.sender, address(0), "", CallbackMode.PreDelivery);
     }
 
     /// @notice Fill a batch of orders in one transaction. Each order is attempted
@@ -201,7 +225,7 @@ contract UniversalSettlement is NonceManager {
         if (msg.sender != address(this)) revert OnlySelf();
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn, filler, address(0), "");
+        return _fillCore(order, orderHash, fillAmountIn, filler, address(0), "", CallbackMode.PreDelivery);
     }
 
     function _fillCore(
@@ -210,7 +234,8 @@ contract UniversalSettlement is NonceManager {
         uint256 fillAmountIn,
         address filler,
         address callbackTarget,
-        bytes memory callbackData
+        bytes memory callbackData,
+        CallbackMode mode
     ) internal returns (uint256[] memory fillAmountsOut) {
         if (fillAmountIn == 0) revert ZeroFill();
         if (fillAmountIn < order.minFillAmountIn) revert FillTooSmall();
@@ -233,6 +258,28 @@ contract UniversalSettlement is NonceManager {
         uint256 newFilled = prevFilled + fillAmountIn;
         if (newFilled > amountIn0) revert OverFill();
         filledAmountIn[orderHash] = newFilled;
+
+        // ── Reverse (PostInputs) ordering: pay the solver its tokenIn FIRST, let
+        //    the callback convert it, THEN deliver tokenOut. Enables a
+        //    zero-inventory / zero-flash plain swap (the Fusion takerInteraction
+        //    order). Restricted to item-free orders: item flows have
+        //    deposit→borrow data dependencies that assume the forward order.
+        //    Safety is unchanged — delivery + invariants are still mandatory and
+        //    reverting, so the maker is made whole or the whole tx unwinds.
+        if (mode == CallbackMode.PostInputs) {
+            if (order.items.length != 0) revert ReverseModeRequiresNoItems();
+            // No items ⇒ no TAKE proceeds; the snapshot delta is 0 so
+            // `_payInputsToSolver` pulls exactly `owed` from the maker → solver.
+            uint256[] memory before = _snapshotInputs(order.tokenIn);
+            _payInputsToSolver(order, prevFilled, newFilled, amountIn0, before, filler);
+            if (callbackTarget != address(0)) {
+                EXECUTOR.execute(callbackTarget, callbackData);
+            }
+            fillAmountsOut = _deliverOutputs(order, fillAmountIn, amountIn0, filler);
+            _runInvariants(order);
+            emit OrderFilled(orderHash, order.maker, filler, fillAmountIn, fillAmountsOut);
+            return fillAmountsOut;
+        }
 
         // 0. Optional solver callback (taker-interaction analogue). Runs BEFORE
         //    any funds move, so a zero-inventory solver can source `tokenOut`
