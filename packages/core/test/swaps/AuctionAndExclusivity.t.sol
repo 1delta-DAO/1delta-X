@@ -1,10 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {UniversalSettlement, Order, Validator, OrderSide, CurvePoint} from "@core/settlement/UniversalSettlement.sol";
+import {stdError} from "forge-std/StdError.sol";
+
+import {UniversalSettlement, Order, Item, Validator, OrderSide, CurvePoint} from "@core/settlement/UniversalSettlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
-import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
+import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol";
+
+/// @dev Hands the solver output inventory just-in-time (PreDelivery callback).
+contract Supplier {
+    function supply(address to, address token, uint256 amount) external {
+        MockERC20(token).transfer(to, amount);
+    }
+}
+
+/// @dev Pulls the solver's just-received input and returns the fixed output
+///      (PostInputs callback).
+contract SwapHelper {
+    function swap(address who, address tokenIn, uint256 amtIn, address tokenOut, uint256 amtOut) external {
+        MockERC20(tokenIn).transferFrom(who, address(this), amtIn);
+        MockERC20(tokenOut).transfer(who, amtOut);
+    }
+}
 
 /// @title AuctionAndExclusivity
 /// @notice Coverage for soft-exclusivity override, the piecewise-linear auction
@@ -274,5 +292,344 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         (bool b3, string memory r3) = settlement.validateOrder(o3);
         assertFalse(b3, "gas bump needs gasPriceRef");
         assertEq(r3, "gasBump without gasPriceRef");
+    }
+
+    function test_validateOrder_moreRejects() public view {
+        // exclusivityOverrideBps > 10000
+        Order memory o1 = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        o1.exclusiveFiller = EX;
+        o1.exclusivityOverrideBps = 10_001;
+        (bool b1, string memory r1) = settlement.validateOrder(o1);
+        assertFalse(b1);
+        assertEq(r1, "exclusivityOverrideBps > 10000");
+
+        // curve bumpBps > 10000
+        Order memory o2 = _plainOrder(2, address(tA), address(tB), SELL_IN, SELL_OUT);
+        o2.decayStartTime = uint32(block.timestamp);
+        CurvePoint[] memory c2 = new CurvePoint[](1);
+        c2[0] = CurvePoint({timeDelta: 0, bumpBps: 10_001});
+        o2.curve = c2;
+        (bool b2, string memory r2) = settlement.validateOrder(o2);
+        assertFalse(b2);
+        assertEq(r2, "curve bumpBps > 10000");
+
+        // curve set without decayStartTime
+        Order memory o3 = _plainOrder(3, address(tA), address(tB), SELL_IN, SELL_OUT);
+        CurvePoint[] memory c3 = new CurvePoint[](1);
+        c3[0] = CurvePoint({timeDelta: 0, bumpBps: 5_000});
+        o3.curve = c3; // decayStartTime left 0
+        (bool b3, string memory r3) = settlement.validateOrder(o3);
+        assertFalse(b3);
+        assertEq(r3, "curve set without decayStartTime");
+
+        // gasBumpBps > 10000
+        Order memory o4 = _plainOrder(4, address(tA), address(tB), SELL_IN, SELL_OUT);
+        o4.gasBumpBps = 10_001;
+        o4.gasPriceRef = 30 gwei;
+        (bool b4, string memory r4) = settlement.validateOrder(o4);
+        assertFalse(b4);
+        assertEq(r4, "gasBumpBps > 10000");
+    }
+
+    // ════════════════════ gas bump composed with a decaying auction ════════════════════
+
+    function test_gasBump_plusTimeDecay_sumsAndFills() public {
+        uint256 start = SELL_OUT; // 2e18
+        uint256 end = 1e18;
+        uint64 ref = 30 gwei;
+
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
+        order.endAmountOut = _u1(end);
+        order.decayStartTime = uint32(block.timestamp);
+        order.decayDuration = 100;
+        order.gasBumpBps = 1_000;
+        order.gasPriceRef = ref;
+        bytes memory sig = _sign(order);
+
+        // t+50 → auction bump 5000; basefee = half ref → gas add 500; total 5500.
+        uint256 exp = start - ((start - end) * 5_500) / 10_000; // 1.45e18
+        _fundSell(exp);
+
+        vm.warp(block.timestamp + 50);
+        vm.fee(ref / 2);
+        assertEq(settlement.previewAmountOut(order)[0], exp, "auction + gas bump compose");
+
+        vm.prank(solver);
+        assertEq(settlement.fill(order, sig, SELL_IN)[0], exp, "fill uses the composed price");
+    }
+
+    function test_gasBump_plusTimeDecay_saturatesToEnd() public {
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.endAmountOut = _u1(1e18);
+        order.decayStartTime = uint32(block.timestamp);
+        order.decayDuration = 100;
+        order.gasBumpBps = 3_000;
+        order.gasPriceRef = 30 gwei;
+
+        // t+80 (auction 8000) + full gas 3000 = 11000 → clamped to 10000 → end price.
+        vm.warp(block.timestamp + 80);
+        vm.fee(30 gwei);
+        assertEq(settlement.previewAmountOut(order)[0], 1e18, "bump clamps at 10000 -> end");
+    }
+
+    // ════════════════════ non-monotonic / plateau / edge curves ════════════════════
+
+    function test_curve_decreasingAndPlateauSegments() public {
+        // Dips 8000→2000, plateaus at 2000, then rises 2000→6000.
+        CurvePoint[] memory c = new CurvePoint[](4);
+        c[0] = CurvePoint({timeDelta: 0, bumpBps: 8_000});
+        c[1] = CurvePoint({timeDelta: 100, bumpBps: 2_000});
+        c[2] = CurvePoint({timeDelta: 200, bumpBps: 2_000});
+        c[3] = CurvePoint({timeDelta: 300, bumpBps: 6_000});
+
+        uint256 start = SELL_OUT;
+        uint256 end = 1e18;
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
+        order.endAmountOut = _u1(end);
+        order.decayStartTime = uint32(block.timestamp);
+        order.curve = c;
+
+        uint256 t0 = block.timestamp;
+        vm.warp(t0 + 50); // decreasing: 8000 - 6000*50/100 = 5000
+        assertEq(settlement.previewAmountOut(order)[0], start - ((start - end) * 5_000) / 10_000, "decreasing segment");
+        vm.warp(t0 + 150); // plateau: 2000
+        assertEq(settlement.previewAmountOut(order)[0], start - ((start - end) * 2_000) / 10_000, "plateau segment");
+        vm.warp(t0 + 250); // rising: 2000 + 4000*50/100 = 4000
+        assertEq(settlement.previewAmountOut(order)[0], start - ((start - end) * 4_000) / 10_000, "rising segment");
+    }
+
+    function test_curve_firstPointNonZeroTime_clampsToFirstBump() public {
+        CurvePoint[] memory c = new CurvePoint[](2);
+        c[0] = CurvePoint({timeDelta: 50, bumpBps: 2_000});
+        c[1] = CurvePoint({timeDelta: 150, bumpBps: 8_000});
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.endAmountOut = _u1(1e18);
+        order.decayStartTime = uint32(block.timestamp);
+        order.curve = c;
+
+        vm.warp(block.timestamp + 20); // before first point → clamp to 2000
+        assertEq(
+            settlement.previewAmountOut(order)[0], SELL_OUT - ((SELL_OUT - 1e18) * 2_000) / 10_000, "clamp to first bump"
+        );
+    }
+
+    function test_curve_singlePoint() public {
+        CurvePoint[] memory c = new CurvePoint[](1);
+        c[0] = CurvePoint({timeDelta: 0, bumpBps: 4_000});
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.endAmountOut = _u1(1e18);
+        order.decayStartTime = uint32(block.timestamp);
+        order.curve = c;
+
+        vm.warp(block.timestamp + 50);
+        assertEq(
+            settlement.previewAmountOut(order)[0], SELL_OUT - ((SELL_OUT - 1e18) * 4_000) / 10_000, "single-point curve"
+        );
+    }
+
+    function test_curve_fillRevertsBeforeStart() public {
+        _fundSell(SELL_OUT);
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.endAmountOut = _u1(1e18);
+        order.decayStartTime = uint32(block.timestamp + 100);
+        order.curve = _curve3();
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(DutchAuction.AuctionNotStarted.selector);
+        settlement.fill(order, sig, SELL_IN);
+    }
+
+    // ════════════════════ partial fills + multi-leg under a curve ════════════════════
+
+    function test_curve_partialFills_perTickPricing() public {
+        uint256 start = SELL_OUT;
+        uint256 end = 1e18;
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
+        order.endAmountOut = _u1(end);
+        order.decayStartTime = uint32(block.timestamp);
+        order.curve = _curve3(); // [(0,0),(100,5000),(200,10000)]
+        bytes memory sig = _sign(order);
+
+        uint256 t0 = block.timestamp;
+        uint256 price1 = start - ((start - end) * 2_500) / 10_000; // bump 2500 at t+50
+        uint256 out1 = ((SELL_IN / 2) * price1) / SELL_IN;
+        uint256 price2 = start - ((start - end) * 7_500) / 10_000; // bump 7500 at t+150
+        uint256 out2 = ((SELL_IN / 2) * price2) / SELL_IN;
+        _fundSell(out1 + out2);
+
+        vm.warp(t0 + 50);
+        vm.prank(solver);
+        assertEq(settlement.fill(order, sig, SELL_IN / 2)[0], out1, "first partial priced at its tick");
+
+        vm.warp(t0 + 150);
+        vm.prank(solver);
+        assertEq(settlement.fill(order, sig, SELL_IN / 2)[0], out2, "second partial priced at its later tick");
+        assertEq(tB.balanceOf(maker), out1 + out2, "maker received both partials");
+    }
+
+    function test_curve_multiOutput_sharedBump() public {
+        address[] memory tokenOut = new address[](2);
+        tokenOut[0] = address(tB);
+        tokenOut[1] = address(tC);
+        uint256[] memory startO = new uint256[](2);
+        startO[0] = 2e18;
+        startO[1] = 4e18;
+        uint256[] memory endO = new uint256[](2);
+        endO[0] = 1e18;
+        endO[1] = 2e18;
+
+        Order memory order = _plainOrderMultiOut(1, address(tA), SELL_IN, tokenOut, startO);
+        order.endAmountOut = endO;
+        order.decayStartTime = uint32(block.timestamp);
+        order.curve = _curve3();
+        bytes memory sig = _sign(order);
+
+        uint256 outB = 2e18 - (1e18 * 2_500) / 10_000; // shared bump 2500
+        uint256 outC = 4e18 - (2e18 * 2_500) / 10_000;
+        tA.mint(maker, SELL_IN);
+        _makerApprove(address(settlement), address(tA), SELL_IN);
+        tB.mint(solver, outB);
+        tC.mint(solver, outC);
+        _solverApprove(address(settlement), address(tB), outB);
+        _solverApprove(address(settlement), address(tC), outC);
+
+        vm.warp(block.timestamp + 50);
+        vm.prank(solver);
+        uint256[] memory outs = settlement.fill(order, sig, SELL_IN);
+        assertEq(outs[0], outB, "leg B shares the bump");
+        assertEq(outs[1], outC, "leg C shares the bump");
+    }
+
+    // ════════════════════ override composed with auction / callbacks / batch ════════════════════
+
+    function test_override_onDecayedPrice() public {
+        uint256 priced = SELL_OUT - ((SELL_OUT - 1e18) * 5_000) / 10_000; // midpoint 1.5e18
+        uint256 bumped = (priced * 10_100) / 10_000;
+        _fundSell(bumped);
+
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.endAmountOut = _u1(1e18);
+        order.decayStartTime = uint32(block.timestamp);
+        order.decayDuration = 100;
+        order.exclusiveFiller = EX;
+        order.exclusivityEndTime = uint32(block.timestamp + 1_000);
+        order.exclusivityOverrideBps = 100;
+        bytes memory sig = _sign(order);
+
+        vm.warp(block.timestamp + 50);
+        vm.prank(solver);
+        assertEq(settlement.fill(order, sig, SELL_IN)[0], bumped, "override applied on top of the auction price");
+    }
+
+    function test_override_fillWithCallback_preDelivery() public {
+        uint256 bumped = (SELL_OUT * 10_100) / 10_000;
+        Supplier supplier = new Supplier();
+        tA.mint(maker, SELL_IN);
+        _makerApprove(address(settlement), address(tA), SELL_IN);
+        _solverApprove(address(settlement), address(tB), bumped);
+        tB.mint(address(supplier), bumped);
+
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.exclusiveFiller = EX;
+        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        order.exclusivityOverrideBps = 100;
+        bytes memory sig = _sign(order);
+        bytes memory cb = abi.encodeCall(Supplier.supply, (solver, address(tB), bumped));
+
+        vm.prank(solver);
+        settlement.fillWithCallback(
+            order, sig, SELL_IN, address(supplier), cb, UniversalSettlement.CallbackMode.PreDelivery
+        );
+        assertEq(tB.balanceOf(maker), bumped, "override honored in PreDelivery callback");
+    }
+
+    function test_override_fillWithCallback_postInputs_buy() public {
+        uint256 discounted = (BUY_IN * 9_900) / 10_000;
+        SwapHelper helper = new SwapHelper();
+        tA.mint(maker, BUY_IN);
+        _makerApprove(address(settlement), address(tA), BUY_IN);
+        _solverApprove(address(settlement), address(tB), BUY_OUT);
+        tB.mint(address(helper), BUY_OUT);
+        vm.prank(solver);
+        tA.approve(address(helper), type(uint256).max);
+
+        Order memory order = _buyOrder(1, address(tA), address(tB), BUY_IN, BUY_IN, BUY_OUT);
+        order.exclusiveFiller = EX;
+        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        order.exclusivityOverrideBps = 100;
+        bytes memory sig = _sign(order);
+        bytes memory cb = abi.encodeCall(SwapHelper.swap, (solver, address(tA), discounted, address(tB), BUY_OUT));
+
+        vm.prank(solver);
+        settlement.fillWithCallback(
+            order, sig, BUY_OUT, address(helper), cb, UniversalSettlement.CallbackMode.PostInputs
+        );
+        assertEq(tB.balanceOf(maker), BUY_OUT, "maker got exact output");
+        assertEq(tA.balanceOf(maker), BUY_IN - discounted, "maker paid only the discounted input");
+    }
+
+    function test_override_batchFill_threadsFillerAndOverride() public {
+        uint256 bumped = (SELL_OUT * 10_100) / 10_000;
+        tA.mint(maker, 2 * SELL_IN);
+        _makerApprove(address(settlement), address(tA), 2 * SELL_IN);
+        tB.mint(solver, bumped);
+        _solverApprove(address(settlement), address(tB), bumped);
+
+        Order memory soft = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        soft.exclusiveFiller = EX;
+        soft.exclusivityEndTime = uint32(block.timestamp + 100);
+        soft.exclusivityOverrideBps = 100;
+
+        Order memory hard = _plainOrder(2, address(tA), address(tB), SELL_IN, SELL_OUT);
+        hard.exclusiveFiller = EX;
+        hard.exclusivityEndTime = uint32(block.timestamp + 100);
+        hard.exclusivityOverrideBps = 0; // hard → skipped
+
+        Order[] memory orders = new Order[](2);
+        orders[0] = soft;
+        orders[1] = hard;
+        bytes[] memory sigs = new bytes[](2);
+        sigs[0] = _sign(soft);
+        sigs[1] = _sign(hard);
+        uint256[] memory amts = new uint256[](2);
+        amts[0] = SELL_IN;
+        amts[1] = SELL_IN;
+
+        vm.prank(solver);
+        (, bool[] memory success) = settlement.batchFill(orders, sigs, amts, false);
+        assertTrue(success[0], "soft-exclusivity order filled with override");
+        assertFalse(success[1], "hard-exclusivity order skipped");
+        assertEq(tB.balanceOf(maker), bumped, "override delivered via batchFill");
+    }
+
+    function test_override_buy_over10000_reverts() public {
+        _fundBuy(BUY_IN);
+        Order memory order = _buyOrder(1, address(tA), address(tB), BUY_IN, BUY_IN, BUY_OUT);
+        order.exclusiveFiller = EX;
+        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        order.exclusivityOverrideBps = 10_001; // malformed; validateOrder would reject it
+        bytes memory sig = _sign(order);
+
+        // A non-exclusive filler triggers the override; (10000 - 10001) underflows.
+        vm.prank(solver);
+        vm.expectRevert(stdError.arithmeticError);
+        settlement.fill(order, sig, BUY_OUT);
+    }
+
+    // ════════════════════ fuzz ════════════════════
+
+    function testFuzz_gasBump_withinBounds(uint256 basefee) public {
+        basefee = bound(basefee, 0, 1_000 gwei);
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.endAmountOut = _u1(1e18);
+        order.gasBumpBps = 2_000;
+        order.gasPriceRef = 30 gwei;
+
+        vm.fee(basefee);
+        uint256 out = settlement.previewAmountOut(order)[0];
+        // The gas bump only decays the maker's output toward `end`, never past it.
+        assertLe(out, SELL_OUT, "never above start");
+        assertGe(out, 1e18, "never below end");
     }
 }
