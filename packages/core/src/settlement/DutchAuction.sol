@@ -39,4 +39,36 @@ library DutchAuction {
             outs[j] = currentAmountOutAt(order, j);
         }
     }
+
+    /// @notice Current auction tick for input leg `i` (BUY orders). Mirror of the
+    ///         output curve but RISING: the maker's paid input climbs from
+    ///         `startAmountIn` (best for maker) to `endAmountIn` (the signed
+    ///         ceiling — "pay up to"), so a solver fills once the offered input is
+    ///         high enough to be profitable.
+    function currentAmountInAt(Order calldata order, uint256 i) internal view returns (uint256) {
+        uint256 startIn = order.startAmountIn[i];
+        uint256 endIn = order.endAmountIn[i];
+        if (startIn > endIn) revert InvalidAuctionParams();
+
+        if (order.decayDuration == 0 || startIn == endIn) {
+            return startIn;
+        }
+
+        if (block.timestamp < order.decayStartTime) revert AuctionNotStarted();
+
+        uint256 elapsed = block.timestamp - order.decayStartTime;
+        if (elapsed >= order.decayDuration) return endIn;
+
+        uint256 rise = (endIn - startIn) * elapsed / order.decayDuration;
+        return startIn + rise;
+    }
+
+    /// @notice Current auction tick for every input leg.
+    function currentAmountIn(Order calldata order) internal view returns (uint256[] memory ins) {
+        uint256 n = order.tokenIn.length;
+        ins = new uint256[](n);
+        for (uint256 i; i < n; i++) {
+            ins[i] = currentAmountInAt(order, i);
+        }
+    }
 }

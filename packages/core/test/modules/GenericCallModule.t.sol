@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, ItemOp, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 import {GenericCallModule} from "@core/modules/GenericCallModule.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -99,10 +99,12 @@ contract GenericCallModuleTest is CoreSettlementBase {
         items[0] = it;
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(USDC),
-            amountIn: _u1(USDC_IN),
+            startAmountIn: _u1(USDC_IN),
+            endAmountIn: _u1(USDC_IN),
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: _a1(WETH),
@@ -110,7 +112,7 @@ contract GenericCallModuleTest is CoreSettlementBase {
             endAmountOut: _u1(WETH_OUT),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: items,
             validators: new Validator[](0),
             invariants: new Validator[](0)

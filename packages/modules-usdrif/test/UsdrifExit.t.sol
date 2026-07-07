@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {
     UniversalSettlement,
     Order,
+    OrderSide,
     Item,
     Validator
 } from "@core/settlement/UniversalSettlement.sol";
@@ -67,18 +68,20 @@ contract UsdrifExitTest is UsdrifForkBase {
     {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(RIF),
             tokenOut: _a1(USDT0),
-            amountIn: _u1(amountIn),
+            startAmountIn: _u1(amountIn),
+            endAmountIn: _u1(amountIn),
             decayStartTime: 0,
             decayDuration: 0,
             startAmountOut: _u1(amountOut),
             endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: validators,
             invariants: new Validator[](0)

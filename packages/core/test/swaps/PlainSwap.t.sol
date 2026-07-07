@@ -5,7 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
-import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 import {UniversalSettlement} from "@core/settlement/UniversalSettlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -110,7 +110,7 @@ contract PlainSwapTest is CoreSettlementBase {
         vm.prank(solver);
         uint256 paid1 = settlement.fill(order, sig, usdcIn / 2)[0];
         assertEq(paid1, wethOut / 2, "first fill pays half the output");
-        assertEq(settlement.filledAmountIn(settlement.hashOrder(order)), usdcIn / 2, "half filled");
+        assertEq(settlement.filled(settlement.hashOrder(order)), usdcIn / 2, "half filled");
         assertEq(settlement.remaining(order), usdcIn / 2, "half remaining");
 
         // Second fill: the rest. Pro-rata slices accumulate exactly to the totals.
@@ -144,18 +144,20 @@ contract PlainSwapTest is CoreSettlementBase {
         Item[] memory items = new Item[](0);
         Order memory order = Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: 2,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(USDC),
             tokenOut: _a1(WETH),
-            amountIn: _u1(usdcIn),
+            startAmountIn: _u1(usdcIn),
+            endAmountIn: _u1(usdcIn),
             decayStartTime: uint32(block.timestamp),
             decayDuration: 100,
             startAmountOut: _u1(startOut),
             endAmountOut: _u1(endOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: items,
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -318,18 +320,20 @@ contract PlainSwapTest is CoreSettlementBase {
     {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(USDC),
             tokenOut: _a1(WETH),
-            amountIn: _u1(usdcIn),
+            startAmountIn: _u1(usdcIn),
+            endAmountIn: _u1(usdcIn),
             decayStartTime: uint32(block.timestamp),
             decayDuration: 100,
             startAmountOut: _u1(startOut),
             endAmountOut: _u1(endOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -407,7 +411,7 @@ contract PlainSwapTest is CoreSettlementBase {
         _approveSolverSide(wethOut, WETH);
 
         Order memory order = _plainSwapOrder(9, usdcIn, wethOut);
-        order.minFillAmountIn = minFill;
+        order.minFillAnchor = minFill;
         bytes memory sig = _sign(order);
 
         // Fill the minimum → leaves a 500e6 tail, below the floor.

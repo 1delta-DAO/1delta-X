@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement, Order, Item, ItemOp, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 
 /// @dev No-fork golden test: pins the EIP-712 struct hash of a canonical order.
 ///      The TypeScript SDK asserts the SAME value, cross-verifying its typed-data
@@ -51,10 +51,12 @@ contract HashGoldenTest is Test {
 
         o = Order({
             maker: MAKER,
+            side: OrderSide.SELL,
             nonce: 1,
             deadline: 1_000_000,
             tokenIn: tokenIn,
-            amountIn: amountIn,
+            startAmountIn: amountIn,
+            endAmountIn: amountIn,
             decayStartTime: 111,
             decayDuration: 222,
             tokenOut: tokenOut,
@@ -62,7 +64,7 @@ contract HashGoldenTest is Test {
             endAmountOut: endOut,
             exclusiveFiller: FILLER,
             exclusivityEndTime: 333,
-            minFillAmountIn: 100e6,
+            minFillAnchor: 100e6,
             items: items,
             validators: validators,
             invariants: invariants
@@ -71,7 +73,7 @@ contract HashGoldenTest is Test {
 
     /// @dev The TypeScript SDK (`packages/sdk`) asserts this SAME constant for the
     ///      same canonical order — cross-verifying its EIP-712 typed-data defs.
-    bytes32 constant GOLDEN_ORDER_HASH = 0x5cfb6b7a1e995448bbf500b3c9f5761fff38638cf532d24522d79fd07f04b7b2;
+    bytes32 constant GOLDEN_ORDER_HASH = 0x95d6af839695566cded188dbc4361f7ba22aa108e80ba3c633988069a335a210;
 
     function test_goldenOrderHash() public view {
         assertEq(settlement.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");

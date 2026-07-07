@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, Validator} from "./SettlementStructs.sol";
+import {Order, Item, Validator, OrderSide} from "./SettlementStructs.sol";
 
 /// @title OrderHash
 /// @notice EIP-712 struct hashing for {Order} and its nested types, plus the
@@ -16,7 +16,7 @@ library OrderHash {
         keccak256("Validator(address target,bytes data)");
 
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -28,7 +28,7 @@ library OrderHash {
     string internal constant WITNESS_TYPESTRING =
         "Order witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -39,20 +39,22 @@ library OrderHash {
         bytes memory head = abi.encode(
             ORDER_TYPEHASH,
             order.maker,
+            uint8(order.side),
             order.nonce,
             order.deadline,
             _hashAddresses(order.tokenIn),
-            _hashUints(order.amountIn),
+            _hashUints(order.startAmountIn),
+            _hashUints(order.endAmountIn),
             order.decayStartTime,
-            order.decayDuration,
-            _hashAddresses(order.tokenOut),
-            _hashUints(order.startAmountOut),
-            _hashUints(order.endAmountOut)
+            order.decayDuration
         );
         bytes memory tail = abi.encode(
+            _hashAddresses(order.tokenOut),
+            _hashUints(order.startAmountOut),
+            _hashUints(order.endAmountOut),
             order.exclusiveFiller,
             order.exclusivityEndTime,
-            order.minFillAmountIn,
+            order.minFillAnchor,
             _hashItems(order.items),
             _hashValidators(order.validators),
             _hashValidators(order.invariants)

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
@@ -126,18 +126,20 @@ contract MigrateTest is CompoundV3ModulesBase {
 
         order = Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(USDS),
             tokenOut: _a1(USDC),
-            amountIn: _u1(3_000e18),
+            startAmountIn: _u1(3_000e18),
+            endAmountIn: _u1(3_000e18),
             decayStartTime: 0,
             decayDuration: 0,
             startAmountOut: _u1(3_050e6),
             endAmountOut: _u1(3_050e6),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: items,
             validators: new Validator[](0),
             invariants: new Validator[](0)

@@ -11,7 +11,8 @@ import {
     Order,
     Item,
     ItemOp,
-    Validator
+    Validator,
+    OrderSide
 } from "@core/settlement/UniversalSettlement.sol";
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.sol";
@@ -149,18 +150,20 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ) internal view returns (Order memory) {
         return Order({
             maker: _maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(tokenIn),
             tokenOut: _a1(tokenOut),
-            amountIn: _u1(amountIn),
+            startAmountIn: _u1(amountIn),
+            endAmountIn: _u1(amountIn),
             decayStartTime: 0,
             decayDuration: 0,
             startAmountOut: _u1(amountOut),
             endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: items,
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -172,13 +175,14 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         Item[] memory items, address exclusiveFiller, uint32 exclusivityEndTime
     ) internal view returns (Order memory) {
         return Order({
-            maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut), amountIn: _u1(amountIn),
+            maker: maker, side: OrderSide.SELL, nonce: nonce, deadline: block.timestamp + 1 hours,
+            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut),
+            startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
             startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
             exclusiveFiller: exclusiveFiller,
             exclusivityEndTime: exclusivityEndTime,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: items,
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -190,12 +194,13 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         Item[] memory items, uint256 minFillAmountIn
     ) internal view returns (Order memory) {
         return Order({
-            maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut), amountIn: _u1(amountIn),
+            maker: maker, side: OrderSide.SELL, nonce: nonce, deadline: block.timestamp + 1 hours,
+            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut),
+            startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
             startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0), exclusivityEndTime: 0,
-            minFillAmountIn: minFillAmountIn,
+            minFillAnchor: minFillAmountIn,
             items: items,
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -207,11 +212,12 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         Item[] memory items, Validator[] memory invariants
     ) internal view returns (Order memory) {
         return Order({
-            maker: maker, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut), amountIn: _u1(amountIn),
+            maker: maker, side: OrderSide.SELL, nonce: nonce, deadline: block.timestamp + 1 hours,
+            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut),
+            startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
             startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
-            exclusiveFiller: address(0), exclusivityEndTime: 0, minFillAmountIn: 0,
+            exclusiveFiller: address(0), exclusivityEndTime: 0, minFillAnchor: 0,
             items: items,
             validators: new Validator[](0),
             invariants: invariants
@@ -229,18 +235,20 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ) internal view returns (Order memory) {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(tokenIn),
             tokenOut: _a1(tokenOut),
-            amountIn: _u1(amountIn),
+            startAmountIn: _u1(amountIn),
+            endAmountIn: _u1(amountIn),
             decayStartTime: 0,
             decayDuration: 0,
             startAmountOut: _u1(amountOut),
             endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: items,
             validators: validators,
             invariants: new Validator[](0)
@@ -308,7 +316,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -323,7 +331,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -369,20 +377,22 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         bytes memory head = abi.encode(
             ORDER_TH,
             o.maker,
+            uint8(o.side),
             o.nonce,
             o.deadline,
             _hashAddresses(o.tokenIn),
-            _hashUints(o.amountIn),
+            _hashUints(o.startAmountIn),
+            _hashUints(o.endAmountIn),
             o.decayStartTime,
-            o.decayDuration,
-            _hashAddresses(o.tokenOut),
-            _hashUints(o.startAmountOut),
-            _hashUints(o.endAmountOut)
+            o.decayDuration
         );
         bytes memory tail = abi.encode(
+            _hashAddresses(o.tokenOut),
+            _hashUints(o.startAmountOut),
+            _hashUints(o.endAmountOut),
             o.exclusiveFiller,
             o.exclusivityEndTime,
-            o.minFillAmountIn,
+            o.minFillAnchor,
             _hashItems(o.items),
             _hashValidators(o.validators),
             _hashValidators(o.invariants)

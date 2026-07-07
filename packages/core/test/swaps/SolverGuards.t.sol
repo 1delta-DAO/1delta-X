@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 import {BaseFlashSolver} from "@core/solver/BaseFlashSolver.sol";
 import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
 import {MultiOutputFlashSolver, OutputLeg} from "@core/solver/MultiOutputFlashSolver.sol";
@@ -105,10 +105,12 @@ contract SolverGuardsTest is CoreSettlementBase {
 
         o = Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
             tokenIn: tokenIn,
-            amountIn: amountIn,
+            startAmountIn: amountIn,
+            endAmountIn: amountIn,
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: _a1(WETH),
@@ -116,7 +118,7 @@ contract SolverGuardsTest is CoreSettlementBase {
             endAmountOut: _u1(1 ether),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -143,10 +145,12 @@ contract SolverGuardsTest is CoreSettlementBase {
     function _singleOutputOrder() internal view returns (Order memory o) {
         o = Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(WETH),
-            amountIn: _u1(3 ether),
+            startAmountIn: _u1(3 ether),
+            endAmountIn: _u1(3 ether),
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: _a1(USDC),
@@ -154,7 +158,7 @@ contract SolverGuardsTest is CoreSettlementBase {
             endAmountOut: _u1(3_000e6),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)

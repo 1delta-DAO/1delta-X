@@ -87,7 +87,7 @@ Dynamic arrays of value types hash as `keccak256(abi.encodePacked(elements))`;
 
 ```solidity
 bytes32 internal constant ORDER_TYPEHASH = keccak256(
-    "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+    "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
     "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
     "Validator(address target,bytes data)"
 );

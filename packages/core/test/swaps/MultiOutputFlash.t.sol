@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 import {MultiOutputFlashSolver, OutputLeg} from "@core/solver/MultiOutputFlashSolver.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -67,10 +67,12 @@ contract MultiOutputFlashTest is CoreSettlementBase {
     function _order() internal view returns (Order memory) {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(WETH),
-            amountIn: _u1(WETH_IN),
+            startAmountIn: _u1(WETH_IN),
+            endAmountIn: _u1(WETH_IN),
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: _a2(USDC, DAI),
@@ -78,7 +80,7 @@ contract MultiOutputFlashTest is CoreSettlementBase {
             endAmountOut: _u2(USDC_OUT, DAI_OUT),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)

@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 import {UniversalSettlement} from "@core/settlement/UniversalSettlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
@@ -45,10 +45,12 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
     ) internal view returns (Order memory) {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: tokenIn,
-            amountIn: amountIn,
+            startAmountIn: amountIn,
+            endAmountIn: amountIn,
             decayStartTime: decayStart,
             decayDuration: decayDur,
             tokenOut: tokenOut,
@@ -56,7 +58,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
             endAmountOut: endOut,
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)

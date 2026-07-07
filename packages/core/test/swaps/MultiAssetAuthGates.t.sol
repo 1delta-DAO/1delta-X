@@ -6,7 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 import {UniversalSettlement} from "@core/settlement/UniversalSettlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -83,10 +83,12 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
     {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(USDC),
-            amountIn: _u1(2_000e6),
+            startAmountIn: _u1(2_000e6),
+            endAmountIn: _u1(2_000e6),
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: _a2(WETH, DAI),
@@ -94,7 +96,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             endAmountOut: _u2(1 ether, 1_000e18),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: validators,
             invariants: invariants
@@ -142,10 +144,12 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
 
         Order memory order = Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a2(WETH, USDC),
-            amountIn: _u2(wethIn, usdcIn),
+            startAmountIn: _u2(wethIn, usdcIn),
+            endAmountIn: _u2(wethIn, usdcIn),
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: _a1(DAI),
@@ -153,7 +157,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             endAmountOut: _u1(daiOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: _noV(),
             invariants: _noV()
@@ -290,7 +294,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
     function test_multiOut_minFill() public {
         _fundMultiOut();
         Order memory order = _multiOut(9, _noV(), _noV());
-        order.minFillAmountIn = 2_000e6; // all-or-nothing
+        order.minFillAnchor = 2_000e6; // all-or-nothing
         bytes memory sig = _sign(order);
         vm.prank(solver);
         vm.expectRevert(UniversalSettlement.FillTooSmall.selector);

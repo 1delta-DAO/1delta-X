@@ -9,7 +9,7 @@ import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
 // Re-exported so downstream files can keep importing the order types from here.
-import {Order, Item, ItemOp, Validator} from "./SettlementStructs.sol";
+import {Order, Item, ItemOp, Validator, OrderSide} from "./SettlementStructs.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 import {NonceManager} from "./NonceManager.sol";
@@ -50,8 +50,9 @@ contract UniversalSettlement is NonceManager {
     ///         this Settlement and can never be an approved Permit3 spender.
     SolverCallbackExecutor public immutable EXECUTOR;
 
-    /// @notice orderHash → cumulative filled amountIn
-    mapping(bytes32 => uint256) public filledAmountIn;
+    /// @notice orderHash → cumulative filled amount, in the order's ANCHOR units
+    ///         (`tokenIn[0]` for SELL, `tokenOut[0]` for BUY).
+    mapping(bytes32 => uint256) public filled;
 
     uint256 private _locked = 1;
 
@@ -125,16 +126,17 @@ contract UniversalSettlement is NonceManager {
 
     // ──────────────────── Fill ────────────────────
 
-    /// @notice Fill (up to) `fillAmountIn` of an order. Partial fills allowed.
+    /// @notice Fill (up to) `fillAmount` of an order — in `tokenIn[0]` units for a
+    ///         SELL, `tokenOut[0]` units for a BUY. Partial fills allowed.
     ///         Lending items are executed pro-rata for this fill's slice.
-    function fill(Order calldata order, bytes calldata sig, uint256 fillAmountIn)
+    function fill(Order calldata order, bytes calldata sig, uint256 fillAmount)
         external
         nonReentrant
         returns (uint256[] memory fillAmountsOut)
     {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn, msg.sender, address(0), "", CallbackMode.PreDelivery);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, address(0), "", CallbackMode.PreDelivery);
     }
 
     /// @notice Fill with a solver-supplied callback that runs just before output
@@ -170,14 +172,14 @@ contract UniversalSettlement is NonceManager {
     function fillWithCallback(
         Order calldata order,
         bytes calldata sig,
-        uint256 fillAmountIn,
+        uint256 fillAmount,
         address callbackTarget,
         bytes calldata callbackData,
         CallbackMode mode
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn, msg.sender, callbackTarget, callbackData, mode);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, callbackTarget, callbackData, mode);
     }
 
     /// @notice Single-signature fill: the maker's `sig` is over a Permit3
@@ -189,14 +191,14 @@ contract UniversalSettlement is NonceManager {
         Order calldata order,
         IPermit3.PermitBatch calldata batch,
         bytes calldata sig,
-        uint256 fillAmountIn
+        uint256 fillAmount
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
         bytes32 orderHash = order.hash();
         // Permit3 verifies the sig against (PermitBatchWitness + orderHash) and
         // applies all allowances. The order itself doesn't need a separate sig
         // — the witness binding makes the permit endorse this exact order.
         PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
-        return _fillCore(order, orderHash, fillAmountIn, msg.sender, address(0), "", CallbackMode.PreDelivery);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, address(0), "", CallbackMode.PreDelivery);
     }
 
     /// @notice Fill a batch of orders in one transaction. Each order is attempted
@@ -232,27 +234,27 @@ contract UniversalSettlement is NonceManager {
     /// @notice Self-call fill target for {batchFill}. Verifies the maker signature
     ///         and runs the fill for an explicit `filler`. `onlySelf` — external
     ///         callers must use `fill`.
-    function fillSelf(Order calldata order, bytes calldata sig, uint256 fillAmountIn, address filler)
+    function fillSelf(Order calldata order, bytes calldata sig, uint256 fillAmount, address filler)
         external
         returns (uint256[] memory)
     {
         if (msg.sender != address(this)) revert OnlySelf();
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmountIn, filler, address(0), "", CallbackMode.PreDelivery);
+        return _fillCore(order, orderHash, fillAmount, filler, address(0), "", CallbackMode.PreDelivery);
     }
 
     function _fillCore(
         Order calldata order,
         bytes32 orderHash,
-        uint256 fillAmountIn,
+        uint256 fillAmount,
         address filler,
         address callbackTarget,
         bytes memory callbackData,
         CallbackMode mode
     ) internal returns (uint256[] memory fillAmountsOut) {
-        if (fillAmountIn == 0) revert ZeroFill();
-        if (fillAmountIn < order.minFillAmountIn) revert FillTooSmall();
+        if (fillAmount == 0) revert ZeroFill();
+        if (fillAmount < order.minFillAnchor) revert FillTooSmall();
         if (block.timestamp > order.deadline) revert OrderExpired();
 
         // Exclusivity window — if set, only the nominated filler may fill until
@@ -266,12 +268,13 @@ contract UniversalSettlement is NonceManager {
 
         _runValidators(order);
 
-        // amountIn[0] is the fill denominator; fillAmountIn is in tokenIn[0] units.
-        uint256 amountIn0 = order.amountIn[0];
-        uint256 prevFilled = filledAmountIn[orderHash];
-        uint256 newFilled = prevFilled + fillAmountIn;
-        if (newFilled > amountIn0) revert OverFill();
-        filledAmountIn[orderHash] = newFilled;
+        // The anchor is the FIXED side's leg 0 — `tokenIn[0]` for SELL, `tokenOut[0]`
+        // for BUY — and `fillAmount` is expressed in those units.
+        uint256 anchor = _anchorTotal(order);
+        uint256 prevFilled = filled[orderHash];
+        uint256 newFilled = prevFilled + fillAmount;
+        if (newFilled > anchor) revert OverFill();
+        filled[orderHash] = newFilled;
 
         // ── Reverse (PostInputs) ordering: pay the solver its tokenIn FIRST, let
         //    the callback convert it, THEN deliver tokenOut. Enables a
@@ -285,13 +288,13 @@ contract UniversalSettlement is NonceManager {
             // No items ⇒ no TAKE proceeds; the snapshot delta is 0 so
             // `_payInputsToSolver` pulls exactly `owed` from the maker → solver.
             uint256[] memory before = _snapshotInputs(order.tokenIn);
-            _payInputsToSolver(order, prevFilled, newFilled, amountIn0, before, filler);
+            _payInputsToSolver(order, fillAmount, prevFilled, newFilled, anchor, before, filler);
             if (callbackTarget != address(0)) {
                 EXECUTOR.execute(callbackTarget, callbackData);
             }
-            fillAmountsOut = _deliverOutputs(order, fillAmountIn, amountIn0, filler);
+            fillAmountsOut = _deliverOutputs(order, fillAmount, prevFilled, newFilled, anchor, filler);
             _runInvariants(order);
-            emit OrderFilled(orderHash, order.maker, filler, fillAmountIn, fillAmountsOut);
+            emit OrderFilled(orderHash, order.maker, filler, fillAmount, fillAmountsOut);
             return fillAmountsOut;
         }
 
@@ -304,8 +307,9 @@ contract UniversalSettlement is NonceManager {
             EXECUTOR.execute(callbackTarget, callbackData);
         }
 
-        // 1. Solver → maker: each tokenOut, auction-priced, pro-rata this fill.
-        fillAmountsOut = _deliverOutputs(order, fillAmountIn, amountIn0, filler);
+        // 1. Solver → maker: each tokenOut, priced for this fill (auction for
+        //    SELL, fixed for BUY), pro-rata.
+        fillAmountsOut = _deliverOutputs(order, fillAmount, prevFilled, newFilled, anchor, filler);
 
         // Snapshot each tokenIn before items so the payout uses ONLY this fill's
         // TAKE proceeds — never any pre-existing/donated balance held by
@@ -314,33 +318,56 @@ contract UniversalSettlement is NonceManager {
         uint256[] memory tokenInBefore = _snapshotInputs(order.tokenIn);
 
         // 2. Pro-rata operation items for this fill
-        _executeItems(order, prevFilled, newFilled);
+        _executeItems(order, prevFilled, newFilled, anchor);
 
         // 3. Settle each tokenIn → solver. TAKE items route proceeds to this
         //    contract; any shortfall is pulled from the maker via Permit3.
-        _payInputsToSolver(order, prevFilled, newFilled, amountIn0, tokenInBefore, filler);
+        _payInputsToSolver(order, fillAmount, prevFilled, newFilled, anchor, tokenInBefore, filler);
 
         // 4. Post-execution invariants (e.g. "my Aave health factor ≥ 2.0 after this fill").
         _runInvariants(order);
 
-        emit OrderFilled(orderHash, order.maker, filler, fillAmountIn, fillAmountsOut);
+        emit OrderFilled(orderHash, order.maker, filler, fillAmount, fillAmountsOut);
     }
 
-    /// @dev Deliver every output leg solver→maker for this fill. Each output is
-    ///      priced at its current auction tick and scaled by the fill fraction
-    ///      `fillAmountIn / amountIn0`, ceil-rounded so the maker is never
-    ///      underpaid. Permit3 enforces the solver's token allowance to this
-    ///      contract on each leg.
-    function _deliverOutputs(Order calldata order, uint256 fillAmountIn, uint256 amountIn0, address filler)
-        internal
-        returns (uint256[] memory outs)
-    {
+    /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —
+    ///      `startAmountIn[0]` (SELL) or `startAmountOut[0]` (BUY).
+    function _anchorTotal(Order calldata order) internal pure returns (uint256) {
+        return order.side == OrderSide.BUY ? order.startAmountOut[0] : order.startAmountIn[0];
+    }
+
+    /// @dev ceil(a / b), b > 0.
+    function _ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a == 0 ? 0 : (a - 1) / b + 1;
+    }
+
+    /// @dev Deliver every output leg solver→maker for this fill.
+    ///      • SELL: outputs are auction-priced — each leg is `ceil(fillAmount ·
+    ///        currentAmountOut / anchor)` at the current tick, so the maker is
+    ///        never underpaid.
+    ///      • BUY: outputs are FIXED — each leg is the cumulative ceil slice of
+    ///        `startAmountOut[j]`, summing to exactly `startAmountOut[j]` at full
+    ///        fill (and to `fillAmount` for j==0). Permit3 enforces the solver's
+    ///        token allowance on each leg.
+    function _deliverOutputs(
+        Order calldata order,
+        uint256 fillAmount,
+        uint256 prevFilled,
+        uint256 newFilled,
+        uint256 anchor,
+        address filler
+    ) internal returns (uint256[] memory outs) {
         uint256 n = order.tokenOut.length;
         outs = new uint256[](n);
+        bool buy = order.side == OrderSide.BUY;
         for (uint256 j; j < n; j++) {
-            uint256 currentOut = order.currentAmountOutAt(j);
-            // ceilDiv — maker never underpaid at current auction rate
-            uint256 amt = (fillAmountIn * currentOut + amountIn0 - 1) / amountIn0;
+            uint256 amt;
+            if (buy) {
+                uint256 fixedOut = order.startAmountOut[j];
+                amt = _ceilDiv(fixedOut * newFilled, anchor) - _ceilDiv(fixedOut * prevFilled, anchor);
+            } else {
+                amt = _ceilDiv(fillAmount * order.currentAmountOutAt(j), anchor);
+            }
             outs[j] = amt;
             if (amt != 0) {
                 PERMIT3.transferFrom(filler, order.maker, order.tokenOut[j], uint160(amt));
@@ -358,14 +385,13 @@ contract UniversalSettlement is NonceManager {
     }
 
     /// @dev For each item, execute the slice attributable to this fill:
-    ///      slice = item.amount * newFilled / amountIn
-    ///            - item.amount * prevFilled / amountIn
+    ///      slice = item.amount * newFilled / anchor
+    ///            - item.amount * prevFilled / anchor
     ///      Sums to exactly item.amount once the order is fully filled.
-    function _executeItems(Order calldata order, uint256 prevFilled, uint256 newFilled) internal {
-        uint256 amountIn = order.amountIn[0];
+    function _executeItems(Order calldata order, uint256 prevFilled, uint256 newFilled, uint256 anchor) internal {
         for (uint256 i; i < order.items.length; i++) {
             Item calldata item = order.items[i];
-            uint256 slice = (item.amount * newFilled) / amountIn - (item.amount * prevFilled) / amountIn;
+            uint256 slice = (item.amount * newFilled) / anchor - (item.amount * prevFilled) / anchor;
             if (slice == 0) continue;
 
             if (item.op == ItemOp.MAKE) {
@@ -381,11 +407,13 @@ contract UniversalSettlement is NonceManager {
         }
     }
 
-    /// @dev Pay every input leg to the solver for this fill. Each `tokenIn[i]`
-    ///      owes a cumulative pro-rata slice
-    ///          owed_i = amountIn[i]·newFilled/amountIn0 - amountIn[i]·prevFilled/amountIn0
-    ///      which sums exactly to `amountIn[i]` at full fill; for i==0 it equals
-    ///      `fillAmountIn` exactly (no rounding, since amountIn0 == amountIn[0]).
+    /// @dev Pay every input leg to the solver for this fill.
+    ///      • SELL: inputs are FIXED — `owed_i` is the cumulative floor slice of
+    ///        `startAmountIn[i]`, summing to exactly `startAmountIn[i]` at full
+    ///        fill (and to `fillAmount` for i==0).
+    ///      • BUY: inputs are auction-priced — `owed_i = floor(fillAmount ·
+    ///        currentAmountIn / anchor)` at the current tick, so the maker is
+    ///        never overcharged and the total never exceeds `endAmountIn[i]`.
     ///
     ///      Each leg uses ONLY the TAKE proceeds produced by THIS fill (the
     ///      balance delta since `tokenInBefore[i]`) — so a pre-existing/donated
@@ -395,16 +423,23 @@ contract UniversalSettlement is NonceManager {
     ///      maker, not stranded.
     function _payInputsToSolver(
         Order calldata order,
+        uint256 fillAmount,
         uint256 prevFilled,
         uint256 newFilled,
-        uint256 amountIn0,
+        uint256 anchor,
         uint256[] memory tokenInBefore,
         address filler
     ) internal {
         address maker = order.maker;
+        bool buy = order.side == OrderSide.BUY;
         for (uint256 i; i < order.tokenIn.length; i++) {
-            uint256 amt = order.amountIn[i];
-            uint256 owed = (amt * newFilled) / amountIn0 - (amt * prevFilled) / amountIn0;
+            uint256 owed;
+            if (buy) {
+                owed = (fillAmount * order.currentAmountInAt(i)) / anchor;
+            } else {
+                uint256 amt = order.startAmountIn[i];
+                owed = (amt * newFilled) / anchor - (amt * prevFilled) / anchor;
+            }
             if (owed == 0) continue;
 
             address tokenIn = order.tokenIn[i];
@@ -458,12 +493,22 @@ contract UniversalSettlement is NonceManager {
         return order.hash();
     }
 
+    /// @notice Current output tick for every leg — the auction price for SELL, the
+    ///         fixed output for BUY.
     function previewAmountOut(Order calldata order) external view returns (uint256[] memory) {
         return order.currentAmountOut();
     }
 
+    /// @notice Current input tick for every leg — the rising auction price for BUY,
+    ///         the fixed input for SELL.
+    function previewAmountIn(Order calldata order) external view returns (uint256[] memory) {
+        return order.currentAmountIn();
+    }
+
+    /// @notice Remaining fillable amount, in anchor units (`tokenIn[0]` for SELL,
+    ///         `tokenOut[0]` for BUY).
     function remaining(Order calldata order) external view returns (uint256) {
-        return order.amountIn[0] - filledAmountIn[order.hash()];
+        return _anchorTotal(order) - filled[order.hash()];
     }
 
     // ──────────────────── Solver preflight ────────────────────
@@ -474,16 +519,18 @@ contract UniversalSettlement is NonceManager {
     ///         signature recovers to the maker. The 0x `getOrderRelevantState`
     ///         analogue — lets a filler skip orders that would revert without
     ///         simulating the whole fill.
-    /// @dev    `fillableAmountIn` is in `tokenIn[0]` units (the fill denominator).
-    ///         For orders WITH items the tokenIn is (partly) produced on-chain by
-    ///         TAKE legs, which can't be known statically, so the allowance/balance
-    ///         cap is applied only to plain (item-free) orders; item orders report
-    ///         the full remaining amount. This is a best-effort hint, not a
-    ///         guarantee — the fill itself remains the source of truth.
+    /// @dev    `fillableAmount` is in anchor units (`tokenIn[0]` for SELL,
+    ///         `tokenOut[0]` for BUY). For orders WITH items the tokenIn is
+    ///         (partly) produced on-chain by TAKE legs, which can't be known
+    ///         statically, so the allowance/balance cap is applied only to plain
+    ///         (item-free) orders; item orders report the full remaining amount.
+    ///         For BUY orders the maker-capacity cap uses each leg's worst-case
+    ///         (ceiling) input tick, so it is a conservative lower bound. This is a
+    ///         best-effort hint, not a guarantee — the fill remains the truth.
     function getOrderRelevantState(Order calldata order, bytes calldata sig)
         external
         view
-        returns (OrderStatus status, uint256 fillableAmountIn, bool isSignatureValid)
+        returns (OrderStatus status, uint256 fillableAmount, bool isSignatureValid)
     {
         bytes32 orderHash = order.hash();
         try this.checkSignature(orderHash, sig, order.maker) {
@@ -491,7 +538,7 @@ contract UniversalSettlement is NonceManager {
         } catch {
             isSignatureValid = false;
         }
-        (status, fillableAmountIn) = _orderState(order, orderHash);
+        (status, fillableAmount) = _orderState(order, orderHash);
     }
 
     /// @notice Batch preflight. Any order that reverts (malformed, etc.) degrades
@@ -523,38 +570,48 @@ contract UniversalSettlement is NonceManager {
         _verifySignature(orderHash, sig, expected);
     }
 
-    /// @dev Status + live-fillable amount, without touching the signature.
+    /// @dev Status + live-fillable amount (anchor units), without touching the sig.
     function _orderState(Order calldata order, bytes32 orderHash)
         internal
         view
-        returns (OrderStatus status, uint256 fillableAmountIn)
+        returns (OrderStatus status, uint256 fillableAmount)
     {
         // Malformed shape → Invalid (guards the array indexing below).
-        if (order.tokenIn.length == 0 || order.amountIn.length != order.tokenIn.length || order.tokenOut.length == 0) {
+        uint256 nIn = order.tokenIn.length;
+        uint256 nOut = order.tokenOut.length;
+        if (
+            nIn == 0 || order.startAmountIn.length != nIn || order.endAmountIn.length != nIn || nOut == 0
+                || order.startAmountOut.length != nOut || order.endAmountOut.length != nOut
+        ) {
             return (OrderStatus.Invalid, 0);
         }
         if (block.timestamp > order.deadline) return (OrderStatus.Expired, 0);
         if (_isNonceCancelled(order.maker, order.nonce)) return (OrderStatus.Cancelled, 0);
 
-        uint256 amountIn0 = order.amountIn[0];
-        uint256 filled = filledAmountIn[orderHash];
-        if (filled >= amountIn0) return (OrderStatus.Filled, 0);
+        uint256 anchor = _anchorTotal(order);
+        uint256 done = filled[orderHash];
+        if (done >= anchor) return (OrderStatus.Filled, 0);
 
-        fillableAmountIn = amountIn0 - filled;
+        fillableAmount = anchor - done;
         // Plain orders: the maker funds tokenIn from their wallet, so cap the
         // fillable amount by their live capacity across every input leg.
         if (order.items.length == 0) {
-            uint256 cap = _makerFillableCap(order, amountIn0);
-            if (cap < fillableAmountIn) fillableAmountIn = cap;
+            uint256 cap = _makerFillableCap(order, anchor);
+            if (cap < fillableAmount) fillableAmount = cap;
         }
         status = OrderStatus.Fillable;
     }
 
-    /// @dev Max fillable (in tokenIn[0] units) the maker can currently fund across
-    ///      all input legs: min_i( capacity_i · amountIn0 / amountIn[i] ), where
-    ///      capacity_i = min(live Permit3 allowance to this contract, balance).
-    function _makerFillableCap(Order calldata order, uint256 amountIn0) internal view returns (uint256 cap) {
+    /// @dev Max fillable (anchor units) the maker can currently fund across all
+    ///      input legs: min_i( capacity_i · anchor / perUnitIn_i ), where
+    ///      capacity_i = min(live Permit3 allowance to this contract, balance) and
+    ///      perUnitIn_i is the input cost of one anchor unit — the fixed
+    ///      `startAmountIn[i]` for SELL, or the worst-case `endAmountIn[i]` for BUY
+    ///      (so the BUY cap is a conservative lower bound and never depends on the
+    ///      not-yet-started auction tick).
+    function _makerFillableCap(Order calldata order, uint256 anchor) internal view returns (uint256 cap) {
         cap = type(uint256).max;
+        bool buy = order.side == OrderSide.BUY;
         for (uint256 i; i < order.tokenIn.length; i++) {
             address token = order.tokenIn[i];
             (uint160 allowed, uint48 expiration,) = PERMIT3.tokenAllowance(order.maker, address(this), token);
@@ -563,20 +620,19 @@ contract UniversalSettlement is NonceManager {
             uint256 bal = IERC20(token).balanceOf(order.maker);
             if (bal < capacity) capacity = bal;
 
-            uint256 amt = order.amountIn[i];
-            // Scale leg-i capacity back into tokenIn[0] (fill-denominator) units.
-            // Guard the multiply: an unbounded (e.g. max) allowance times a large
-            // `amountIn0` can exceed uint256 — treat an overflowing product as
-            // "this leg imposes no binding cap" so this preflight view never
-            // reverts (a stray revert would blind a solver to an otherwise
-            // fillable order). `capacity == 0` still falls through to a binding 0.
+            uint256 perUnitIn = buy ? order.endAmountIn[i] : order.startAmountIn[i];
+            // Scale leg-i capacity back into anchor units. Guard the multiply: an
+            // unbounded (e.g. max) allowance times a large `anchor` can exceed
+            // uint256 — treat an overflowing product as "this leg imposes no
+            // binding cap" so this preflight view never reverts. `capacity == 0`
+            // still falls through to a binding 0.
             uint256 inUnits;
-            if (amt == 0) {
+            if (perUnitIn == 0) {
                 inUnits = type(uint256).max; // leg needs nothing → no constraint
-            } else if (amountIn0 != 0 && capacity > type(uint256).max / amountIn0) {
+            } else if (capacity > type(uint256).max / anchor) {
                 inUnits = type(uint256).max; // product overflows → non-binding
             } else {
-                inUnits = (capacity * amountIn0) / amt;
+                inUnits = (capacity * anchor) / perUnitIn;
             }
             if (inUnits < cap) cap = inUnits;
         }
@@ -595,24 +651,43 @@ contract UniversalSettlement is NonceManager {
     ///         NOT judge whether the price is *good*.
     ///
     ///         Stranded-tail caveat (not flagged here, as partial-fill-with-floor
-    ///         is a legitimate config): any `0 < minFillAmountIn < amountIn` lets
-    ///         a solver leave a remainder smaller than `minFillAmountIn` that can
-    ///         then never be filled. Only `minFillAmountIn ∈ {0, amountIn}`
+    ///         is a legitimate config): any `0 < minFillAnchor < anchor` lets
+    ///         a solver leave a remainder smaller than `minFillAnchor` that can
+    ///         then never be filled. Only `minFillAnchor ∈ {0, anchor}`
     ///         guarantees no unfillable tail.
     function validateOrder(Order calldata order) external view returns (bool ok, string memory reason) {
         // ── array shape ──
         uint256 nIn = order.tokenIn.length;
-        if (nIn == 0 || nIn != order.amountIn.length) return (false, "tokenIn/amountIn length mismatch");
+        if (nIn == 0 || nIn != order.startAmountIn.length || nIn != order.endAmountIn.length) {
+            return (false, "tokenIn/amountIn length mismatch");
+        }
         uint256 nOut = order.tokenOut.length;
         if (nOut == 0 || nOut != order.startAmountOut.length || nOut != order.endAmountOut.length) {
             return (false, "tokenOut/amountOut length mismatch");
         }
 
         // ── structural / economic sanity (time-independent) ──
-        if (order.amountIn[0] == 0) return (false, "amountIn is zero");
-        for (uint256 j; j < nOut; j++) {
-            if (order.startAmountOut[j] == 0) return (false, "startAmountOut is zero (giveaway)");
-            if (order.startAmountOut[j] < order.endAmountOut[j]) return (false, "startAmountOut < endAmountOut");
+        uint256 anchor = _anchorTotal(order);
+        if (anchor == 0) return (false, "anchor amount is zero");
+        if (order.side == OrderSide.SELL) {
+            // Inputs fixed (start == end); outputs decay downward from a positive start.
+            for (uint256 i; i < nIn; i++) {
+                if (order.startAmountIn[i] != order.endAmountIn[i]) return (false, "sell input must be fixed");
+            }
+            for (uint256 j; j < nOut; j++) {
+                if (order.startAmountOut[j] == 0) return (false, "startAmountOut is zero (giveaway)");
+                if (order.startAmountOut[j] < order.endAmountOut[j]) return (false, "startAmountOut < endAmountOut");
+            }
+        } else {
+            // Outputs fixed (start == end, positive); inputs rise upward to a ceiling.
+            for (uint256 j; j < nOut; j++) {
+                if (order.startAmountOut[j] == 0) return (false, "amountOut is zero (giveaway)");
+                if (order.startAmountOut[j] != order.endAmountOut[j]) return (false, "buy output must be fixed");
+            }
+            for (uint256 i; i < nIn; i++) {
+                if (order.endAmountIn[i] == 0) return (false, "endAmountIn is zero");
+                if (order.endAmountIn[i] < order.startAmountIn[i]) return (false, "endAmountIn < startAmountIn");
+            }
         }
         // Distinct within each array and disjoint across — the per-token proceeds
         // snapshot double-counts a shared balance, so overlap is forbidden in v1.
@@ -629,13 +704,13 @@ contract UniversalSettlement is NonceManager {
                 if (order.tokenOut[j] == order.tokenOut[k]) return (false, "duplicate tokenOut");
             }
         }
-        if (order.minFillAmountIn > order.amountIn[0]) return (false, "minFillAmountIn > amountIn (unfillable)");
+        if (order.minFillAnchor > anchor) return (false, "minFillAnchor > anchor (unfillable)");
         if (order.decayDuration != 0 && order.decayStartTime == 0) return (false, "decay set without decayStartTime");
 
         // ── current fillability (time/state-dependent) ──
         if (order.deadline < block.timestamp) return (false, "order expired");
         if (_isNonceCancelled(order.maker, order.nonce)) return (false, "nonce cancelled");
-        if (filledAmountIn[order.hash()] >= order.amountIn[0]) return (false, "order fully filled");
+        if (filled[order.hash()] >= anchor) return (false, "order fully filled");
 
         return (true, "");
     }

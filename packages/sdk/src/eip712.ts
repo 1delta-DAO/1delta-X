@@ -23,10 +23,12 @@ export const VALIDATOR_TYPE = [
 
 export const ORDER_TYPE = [
   { name: "maker", type: "address" },
+  { name: "side", type: "uint8" },
   { name: "nonce", type: "uint256" },
   { name: "deadline", type: "uint256" },
   { name: "tokenIn", type: "address[]" },
-  { name: "amountIn", type: "uint256[]" },
+  { name: "startAmountIn", type: "uint256[]" },
+  { name: "endAmountIn", type: "uint256[]" },
   { name: "decayStartTime", type: "uint32" },
   { name: "decayDuration", type: "uint32" },
   { name: "tokenOut", type: "address[]" },
@@ -34,7 +36,7 @@ export const ORDER_TYPE = [
   { name: "endAmountOut", type: "uint256[]" },
   { name: "exclusiveFiller", type: "address" },
   { name: "exclusivityEndTime", type: "uint32" },
-  { name: "minFillAmountIn", type: "uint256" },
+  { name: "minFillAnchor", type: "uint256" },
   { name: "items", type: "Item[]" },
   { name: "validators", type: "Validator[]" },
   { name: "invariants", type: "Validator[]" },

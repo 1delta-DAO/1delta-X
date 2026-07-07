@@ -97,7 +97,7 @@ abstract contract UsdrifForkBase is Test {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 internal constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 internal constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -151,11 +151,13 @@ abstract contract UsdrifForkBase is Test {
 
     function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
-            ORDER_TH, o.maker, o.nonce, o.deadline, _hashAddresses(o.tokenIn), _hashUints(o.amountIn),
-            o.decayStartTime, o.decayDuration, _hashAddresses(o.tokenOut), _hashUints(o.startAmountOut), _hashUints(o.endAmountOut)
+            ORDER_TH, o.maker, uint8(o.side), o.nonce, o.deadline, _hashAddresses(o.tokenIn),
+            _hashUints(o.startAmountIn), _hashUints(o.endAmountIn),
+            o.decayStartTime, o.decayDuration
         );
         bytes memory tail = abi.encode(
-            o.exclusiveFiller, o.exclusivityEndTime, o.minFillAmountIn,
+            _hashAddresses(o.tokenOut), _hashUints(o.startAmountOut), _hashUints(o.endAmountOut),
+            o.exclusiveFiller, o.exclusivityEndTime, o.minFillAnchor,
             _hashItems(o.items), _hashValidators(o.validators), _hashValidators(o.invariants)
         );
         return keccak256(bytes.concat(head, tail));

@@ -24,16 +24,28 @@ export interface Validator {
 
 /**
  * A signed limit order. The conversion leg is multi-asset: the maker gives a
- * basket (`tokenIn`/`amountIn`) and receives a basket
- * (`tokenOut`/`startAmountOut`/`endAmountOut`). Partial fills scale every leg by
- * the single fraction `fillAmountIn / amountIn[0]`.
+ * basket (`tokenIn`/`startAmountIn`/`endAmountIn`) and receives a basket
+ * (`tokenOut`/`startAmountOut`/`endAmountOut`). One side is fixed and the other
+ * is a dutch auction (`side` selects which). Partial fills scale every leg by the
+ * single fraction `fillAmount / anchor[0]` (anchor = tokenIn[0] for SELL,
+ * tokenOut[0] for BUY).
  */
+export enum OrderSide {
+  SELL = 0,
+  BUY = 1,
+}
+
 export interface Order {
   maker: Address;
+  /// SELL (fixed input, outputs decay) or BUY (fixed output, inputs rise).
+  side: OrderSide;
   nonce: bigint;
   deadline: bigint;
   tokenIn: readonly Address[];
-  amountIn: readonly bigint[];
+  /// SELL: fixed input (== endAmountIn). BUY: auction start (best for maker).
+  startAmountIn: readonly bigint[];
+  /// SELL: == startAmountIn. BUY: auction ceiling / "pay up to".
+  endAmountIn: readonly bigint[];
   decayStartTime: number;
   decayDuration: number;
   tokenOut: readonly Address[];
@@ -41,7 +53,8 @@ export interface Order {
   endAmountOut: readonly bigint[];
   exclusiveFiller: Address;
   exclusivityEndTime: number;
-  minFillAmountIn: bigint;
+  /// Anti-dust floor per fill, in anchor units (tokenIn[0] for SELL, tokenOut[0] for BUY).
+  minFillAnchor: bigint;
   items: readonly Item[];
   validators: readonly Validator[];
   invariants: readonly Validator[];

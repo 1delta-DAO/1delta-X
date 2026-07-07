@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {UniversalSettlement, Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement, Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
 /// @dev Port of 0x's `getLimitOrderRelevantState` / `batchGet...RelevantStates`
@@ -99,7 +99,7 @@ contract OrderRelevantStateTest is MockSettlementBase {
     function test_state_invalid_malformed() public view {
         Order memory o = _order(1);
         o.tokenIn = new address[](0); // malformed shape
-        o.amountIn = new uint256[](0);
+        o.startAmountIn = new uint256[](0);
         (UniversalSettlement.OrderStatus status,,) = _state(o, _sign(_order(1)));
         assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Invalid), "invalid");
     }

@@ -16,6 +16,24 @@ enum ItemOp {
     TAKE
 }
 
+/// @notice Which leg of the order is the auction (variable) side and which is
+///         the fixed anchor that the fill amount is denominated in.
+///
+///         SELL — the maker gives a FIXED input basket and receives an
+///                auction-priced output basket (outputs decay
+///                `startAmountOut → endAmountOut`, best-for-maker first). The
+///                fill is denominated in `tokenIn[0]` units. The classic
+///                "sell exactly X, take what the auction clears" order.
+///         BUY  — the maker receives a FIXED output basket and pays an
+///                auction-priced input basket (inputs rise
+///                `startAmountIn → endAmountIn`, best-for-maker first). The
+///                fill is denominated in `tokenOut[0]` units. The exact-output
+///                "buy exactly X, pay up to Y" order.
+enum OrderSide {
+    SELL,
+    BUY
+}
+
 /// @notice A single lending item inside a Order.
 /// @dev    `module` is a single-op adapter (`IMakerModule` for MAKE,
 ///         `ITakerModule` for TAKE). `amount` is the *total* amount for a
@@ -48,29 +66,36 @@ struct Validator {
     bytes data;
 }
 
-/// @notice A signed limit order.
+/// @notice A signed limit order (SELL or BUY — see {OrderSide}).
 /// @dev    The conversion leg is multi-asset: the maker gives a basket
-///         (`tokenIn[]`/`amountIn[]`) and receives a basket
-///         (`tokenOut[]`/`startAmountOut[]`/`endAmountOut[]`). Partial fills are
-///         driven by a SINGLE scalar fraction `f = fillAmountIn / amountIn[0]`;
-///         `amountIn[0]` is the fill denominator and `fillAmountIn` is expressed
-///         in `tokenIn[0]` units. Every other input, every output, and every
-///         item slice scale by the same `f`, so the whole basket fills
-///         proportionally (the solver cannot size each leg independently).
+///         (`tokenIn[]`/`startAmountIn[]`/`endAmountIn[]`) and receives a basket
+///         (`tokenOut[]`/`startAmountOut[]`/`endAmountOut[]`). One side is FIXED
+///         (`start == end`) and the other decays as a dutch auction; `side`
+///         selects which:
+///           • SELL — inputs fixed, outputs decay; anchor = `startAmountIn[0]`,
+///                    fill amount is in `tokenIn[0]` units.
+///           • BUY  — outputs fixed, inputs rise; anchor = `startAmountOut[0]`,
+///                    fill amount is in `tokenOut[0]` units.
+///         Partial fills are driven by a SINGLE scalar fraction
+///         `f = fillAmount / anchor[0]`. Every leg (both baskets) and every item
+///         slice scale by the same `f`, so the whole order fills proportionally
+///         (the solver cannot size each leg independently).
 struct Order {
     address maker;
+    OrderSide side; //      SELL (outputs decay) or BUY (inputs rise)
     uint256 nonce;
     uint256 deadline;
-    address[] tokenIn; //   maker gives (solver receives); tokenIn[0] anchors the fill
-    uint256[] amountIn; //  amountIn[0] is the fill denominator
+    address[] tokenIn; //   maker gives (solver receives)
+    uint256[] startAmountIn; //      per input: SELL fixed amount (== end); BUY auction start (best for maker)
+    uint256[] endAmountIn; //        per input: SELL == start; BUY auction ceiling (worst for maker / "pay up to")
     uint32 decayStartTime;
     uint32 decayDuration;
     address[] tokenOut; //  maker receives (solver gives)
-    uint256[] startAmountOut; //     per output: best for maker (auction start / fixed price)
-    uint256[] endAmountOut; //       per output: worst for maker (auction end floor)
+    uint256[] startAmountOut; //     per output: SELL auction start (best for maker); BUY fixed amount (== end)
+    uint256[] endAmountOut; //       per output: SELL auction floor (worst for maker); BUY == start
     address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
     uint32 exclusivityEndTime; //    unix timestamp; ignored if exclusiveFiller == 0
-    uint256 minFillAmountIn; //      anti-dust floor per fill (tokenIn[0] units); 0 = no minimum
+    uint256 minFillAnchor; //        anti-dust floor per fill (anchor units); 0 = no minimum
     Item[] items;
     Validator[] validators; //       pre-execution trigger conditions; AND-composed
     Validator[] invariants; //       post-execution invariants; AND-composed

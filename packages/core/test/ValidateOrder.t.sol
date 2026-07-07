@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 
 import {CoreSettlementBase} from "./shared/CoreSettlementBase.t.sol";
 
@@ -32,8 +32,9 @@ contract ValidateOrderTest is CoreSettlementBase {
         Order memory o;
 
         o = _base();
-        o.amountIn[0] = 0;
-        _assertInvalid(o, "amountIn is zero");
+        o.startAmountIn[0] = 0;
+        o.endAmountIn[0] = 0;
+        _assertInvalid(o, "anchor amount is zero");
 
         o = _base();
         o.startAmountOut[0] = 0;
@@ -50,8 +51,8 @@ contract ValidateOrderTest is CoreSettlementBase {
         _assertInvalid(o, "tokenIn == tokenOut");
 
         o = _base();
-        o.minFillAmountIn = o.amountIn[0] + 1;
-        _assertInvalid(o, "minFillAmountIn > amountIn (unfillable)");
+        o.minFillAnchor = o.startAmountIn[0] + 1;
+        _assertInvalid(o, "minFillAnchor > anchor (unfillable)");
 
         o = _base();
         o.decayDuration = 100;

@@ -6,7 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement, Order, Item, ItemOp, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 
 /// @dev Minimal, freely-mintable ERC20. Enough for Permit3's transfer paths —
 ///      no fork / real tokens, so the pure-protocol suites run fast and are
@@ -112,10 +112,12 @@ abstract contract MockSettlementBase is Test {
     {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(tokenIn),
-            amountIn: _u1(amountIn),
+            startAmountIn: _u1(amountIn),
+            endAmountIn: _u1(amountIn),
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: _a1(tokenOut),
@@ -123,7 +125,40 @@ abstract contract MockSettlementBase is Test {
             endAmountOut: _u1(amountOut),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
+            items: new Item[](0),
+            validators: new Validator[](0),
+            invariants: new Validator[](0)
+        });
+    }
+
+    /// @dev Exact-output (BUY) plain order: fixed single output, rising input
+    ///      auction `startAmountIn → endAmountIn` (best-for-maker first). Fill is
+    ///      denominated in tokenOut[0] units.
+    function _buyOrder(
+        uint256 nonce,
+        address tokenIn,
+        address tokenOut,
+        uint256 startAmountIn,
+        uint256 endAmountIn,
+        uint256 amountOut
+    ) internal view returns (Order memory) {
+        return Order({
+            maker: maker,
+            side: OrderSide.BUY,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours,
+            tokenIn: _a1(tokenIn),
+            startAmountIn: _u1(startAmountIn),
+            endAmountIn: _u1(endAmountIn),
+            decayStartTime: 0,
+            decayDuration: 0,
+            tokenOut: _a1(tokenOut),
+            startAmountOut: _u1(amountOut),
+            endAmountOut: _u1(amountOut),
+            exclusiveFiller: address(0),
+            exclusivityEndTime: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -142,10 +177,12 @@ abstract contract MockSettlementBase is Test {
     ) internal view returns (Order memory) {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(tokenIn),
-            amountIn: _u1(amountIn),
+            startAmountIn: _u1(amountIn),
+            endAmountIn: _u1(amountIn),
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: tokenOut,
@@ -153,7 +190,7 @@ abstract contract MockSettlementBase is Test {
             endAmountOut: amountOut,
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -176,7 +213,7 @@ abstract contract MockSettlementBase is Test {
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -249,7 +286,7 @@ abstract contract MockSettlementBase is Test {
     bytes32 constant ITEM_TH = keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] amountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAmountIn,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -295,20 +332,22 @@ abstract contract MockSettlementBase is Test {
         bytes memory head = abi.encode(
             ORDER_TH,
             o.maker,
+            uint8(o.side),
             o.nonce,
             o.deadline,
             _hashAddresses(o.tokenIn),
-            _hashUints(o.amountIn),
+            _hashUints(o.startAmountIn),
+            _hashUints(o.endAmountIn),
             o.decayStartTime,
-            o.decayDuration,
-            _hashAddresses(o.tokenOut),
-            _hashUints(o.startAmountOut),
-            _hashUints(o.endAmountOut)
+            o.decayDuration
         );
         bytes memory tail = abi.encode(
+            _hashAddresses(o.tokenOut),
+            _hashUints(o.startAmountOut),
+            _hashUints(o.endAmountOut),
             o.exclusiveFiller,
             o.exclusivityEndTime,
-            o.minFillAmountIn,
+            o.minFillAnchor,
             _hashItems(o.items),
             _hashValidators(o.validators),
             _hashValidators(o.invariants)

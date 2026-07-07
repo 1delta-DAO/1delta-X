@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {stdError} from "forge-std/StdError.sol";
 
-import {Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -37,10 +37,12 @@ contract MultiAssetSwapTest is CoreSettlementBase {
     ) internal view returns (Order memory) {
         return Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             tokenIn: tokenIn,
-            amountIn: amountIn,
+            startAmountIn: amountIn,
+            endAmountIn: amountIn,
             decayStartTime: 0,
             decayDuration: 0,
             tokenOut: tokenOut,
@@ -48,7 +50,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             endAmountOut: amountOut,
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -204,10 +206,12 @@ contract MultiAssetSwapTest is CoreSettlementBase {
 
         Order memory order = Order({
             maker: maker,
+            side: OrderSide.SELL,
             nonce: 6,
             deadline: block.timestamp + 1 hours,
             tokenIn: _a1(USDC),
-            amountIn: _u1(usdcIn),
+            startAmountIn: _u1(usdcIn),
+            endAmountIn: _u1(usdcIn),
             decayStartTime: uint32(block.timestamp),
             decayDuration: 100,
             tokenOut: _addr2(WETH, DAI),
@@ -215,7 +219,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             endAmountOut: _uint2(wethEnd, daiEnd),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
-            minFillAmountIn: 0,
+            minFillAnchor: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
