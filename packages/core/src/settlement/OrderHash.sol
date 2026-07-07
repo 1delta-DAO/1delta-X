@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, Validator, OrderSide} from "./SettlementStructs.sol";
+import {Order, Item, Validator, OrderSide, CurvePoint} from "./SettlementStructs.sol";
 
 /// @title OrderHash
 /// @notice EIP-712 struct hashing for {Order} and its nested types, plus the
@@ -9,14 +9,18 @@ import {Order, Item, Validator, OrderSide} from "./SettlementStructs.sol";
 ///         Pure and self-contained — the resulting hash must match the maker's
 ///         off-chain signer byte-for-byte.
 library OrderHash {
+    bytes32 internal constant CURVE_POINT_TYPEHASH = keccak256("CurvePoint(uint32 timeDelta,uint32 bumpBps)");
+
     bytes32 internal constant ITEM_TYPEHASH =
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
 
     bytes32 internal constant VALIDATOR_TYPEHASH =
         keccak256("Validator(address target,bytes data)");
 
+    // Referenced types are appended in alphabetical order: CurvePoint, Item, Validator.
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -27,8 +31,9 @@ library OrderHash {
     ///         (Item, Order, TakerPermit, TokenPermit, Validator).
     string internal constant WITNESS_TYPESTRING =
         "Order witness)"
+        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -48,18 +53,32 @@ library OrderHash {
             order.decayStartTime,
             order.decayDuration
         );
-        bytes memory tail = abi.encode(
+        bytes memory mid = abi.encode(
             _hashAddresses(order.tokenOut),
             _hashUints(order.startAmountOut),
             _hashUints(order.endAmountOut),
             order.exclusiveFiller,
             order.exclusivityEndTime,
             order.minFillAnchor,
+            order.exclusivityOverrideBps
+        );
+        bytes memory tail = abi.encode(
+            _hashCurve(order.curve),
+            order.gasBumpBps,
+            order.gasPriceRef,
             _hashItems(order.items),
             _hashValidators(order.validators),
             _hashValidators(order.invariants)
         );
-        return keccak256(bytes.concat(head, tail));
+        return keccak256(bytes.concat(head, mid, tail));
+    }
+
+    function _hashCurve(CurvePoint[] calldata curve) private pure returns (bytes32) {
+        bytes32[] memory hashes = new bytes32[](curve.length);
+        for (uint256 i; i < curve.length; i++) {
+            hashes[i] = keccak256(abi.encode(CURVE_POINT_TYPEHASH, curve[i].timeDelta, curve[i].bumpBps));
+        }
+        return keccak256(abi.encodePacked(hashes));
     }
 
     /// @dev EIP-712 encoding of a dynamic array of `address`: keccak256 over the

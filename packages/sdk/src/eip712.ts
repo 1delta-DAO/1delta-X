@@ -21,6 +21,11 @@ export const VALIDATOR_TYPE = [
   { name: "data", type: "bytes" },
 ] as const;
 
+export const CURVE_POINT_TYPE = [
+  { name: "timeDelta", type: "uint32" },
+  { name: "bumpBps", type: "uint32" },
+] as const;
+
 export const ORDER_TYPE = [
   { name: "maker", type: "address" },
   { name: "side", type: "uint8" },
@@ -37,6 +42,10 @@ export const ORDER_TYPE = [
   { name: "exclusiveFiller", type: "address" },
   { name: "exclusivityEndTime", type: "uint32" },
   { name: "minFillAnchor", type: "uint256" },
+  { name: "exclusivityOverrideBps", type: "uint256" },
+  { name: "curve", type: "CurvePoint[]" },
+  { name: "gasBumpBps", type: "uint256" },
+  { name: "gasPriceRef", type: "uint256" },
   { name: "items", type: "Item[]" },
   { name: "validators", type: "Validator[]" },
   { name: "invariants", type: "Validator[]" },
@@ -59,6 +68,7 @@ export const TAKER_PERMIT_TYPE = [
 /// Types for signing/hashing a bare `Order` (Settlement domain).
 export const ORDER_TYPES = {
   Order: ORDER_TYPE,
+  CurvePoint: CURVE_POINT_TYPE,
   Item: ITEM_TYPE,
   Validator: VALIDATOR_TYPE,
 } as const;
@@ -77,6 +87,7 @@ export const PERMIT_WITNESS_TYPES = {
   TokenPermit: TOKEN_PERMIT_TYPE,
   TakerPermit: TAKER_PERMIT_TYPE,
   Order: ORDER_TYPE,
+  CurvePoint: CURVE_POINT_TYPE,
   Item: ITEM_TYPE,
   Validator: VALIDATOR_TYPE,
 } as const;

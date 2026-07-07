@@ -1,33 +1,85 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order} from "./SettlementStructs.sol";
+import {Order, CurvePoint} from "./SettlementStructs.sol";
 
 /// @title DutchAuction
-/// @notice Per-output-leg dutch decay pricing. Every output leg shares one
-///         clock (`decayStartTime`/`decayDuration`) but decays between its own
-///         `startAmountOut[j]` → `endAmountOut[j]` bounds. The auction prices
-///         only the output legs; inputs and lending items are fixed.
+/// @notice Dutch decay pricing. Every leg shares ONE clock and ONE normalized
+///         decay `bumpBps ∈ [0, 10000]` (0 = the `start` price / best for maker,
+///         10000 = the `end` price / worst). Each leg maps that shared bump
+///         through its own `start`/`end` bounds. The shape of the bump over time
+///         is either a single linear segment (`decayStartTime`/`decayDuration`)
+///         or, if `curve` is non-empty, a piecewise-linear interpolation over the
+///         signed `CurvePoint[]`. An optional gas bump adds decay proportional to
+///         `block.basefee`, so the maker clears for less when gas is high.
+///
+///         SELL orders decay the OUTPUT legs (falling); BUY orders decay the
+///         INPUT legs (rising). Fixed legs (`start == end`) ignore the bump.
 library DutchAuction {
     error AuctionNotStarted();
     error InvalidAuctionParams();
 
-    /// @notice Current auction tick for output leg `j`.
+    uint256 internal constant BPS = 10_000;
+
+    /// @notice The shared normalized decay for this order at the current time,
+    ///         in [0, 10000]. Piecewise if `curve` is set, else a single linear
+    ///         segment; then the optional gas bump is added and the sum clamped.
+    function bumpBps(Order calldata order) internal view returns (uint256 bps) {
+        CurvePoint[] calldata curve = order.curve;
+        uint256 n = curve.length;
+
+        if (n == 0) {
+            // Classic single linear segment.
+            if (order.decayDuration != 0) {
+                if (block.timestamp < order.decayStartTime) revert AuctionNotStarted();
+                uint256 elapsed = block.timestamp - order.decayStartTime;
+                bps = elapsed >= order.decayDuration ? BPS : (BPS * elapsed) / order.decayDuration;
+            }
+            // decayDuration == 0 ⇒ bps stays 0 (start price, no time decay).
+        } else {
+            // Piecewise-linear curve, timeDeltas relative to decayStartTime.
+            if (block.timestamp < order.decayStartTime) revert AuctionNotStarted();
+            uint256 elapsed = block.timestamp - order.decayStartTime;
+            if (elapsed <= curve[0].timeDelta) {
+                bps = curve[0].bumpBps;
+            } else if (elapsed >= curve[n - 1].timeDelta) {
+                bps = curve[n - 1].bumpBps;
+            } else {
+                for (uint256 k; k < n - 1; k++) {
+                    uint256 t1 = curve[k + 1].timeDelta;
+                    if (elapsed < t1) {
+                        uint256 t0 = curve[k].timeDelta;
+                        uint256 b0 = curve[k].bumpBps;
+                        uint256 b1 = curve[k + 1].bumpBps;
+                        uint256 span = t1 - t0; // > 0 for a well-formed (increasing) curve
+                        // Interpolate; the curve may rise or fall between points.
+                        bps = b1 >= b0
+                            ? b0 + ((b1 - b0) * (elapsed - t0)) / span
+                            : b0 - ((b0 - b1) * (elapsed - t0)) / span;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Gas bump: extra decay proportional to basefee, capped at gasBumpBps.
+        uint256 gb = order.gasBumpBps;
+        if (gb != 0 && order.gasPriceRef != 0) {
+            uint256 gasAdd = (gb * block.basefee) / order.gasPriceRef;
+            if (gasAdd > gb) gasAdd = gb;
+            bps += gasAdd;
+        }
+        if (bps > BPS) bps = BPS;
+    }
+
+    /// @notice Current auction tick for output leg `j` (SELL: falling; BUY: fixed).
     function currentAmountOutAt(Order calldata order, uint256 j) internal view returns (uint256) {
         uint256 startOut = order.startAmountOut[j];
         uint256 endOut = order.endAmountOut[j];
         if (startOut < endOut) revert InvalidAuctionParams();
+        if (startOut == endOut) return startOut; // fixed leg — no bump
 
-        if (order.decayDuration == 0 || startOut == endOut) {
-            return startOut;
-        }
-
-        if (block.timestamp < order.decayStartTime) revert AuctionNotStarted();
-
-        uint256 elapsed = block.timestamp - order.decayStartTime;
-        if (elapsed >= order.decayDuration) return endOut;
-
-        uint256 decay = (startOut - endOut) * elapsed / order.decayDuration;
+        uint256 decay = ((startOut - endOut) * bumpBps(order)) / BPS;
         return startOut - decay;
     }
 
@@ -40,26 +92,16 @@ library DutchAuction {
         }
     }
 
-    /// @notice Current auction tick for input leg `i` (BUY orders). Mirror of the
-    ///         output curve but RISING: the maker's paid input climbs from
-    ///         `startAmountIn` (best for maker) to `endAmountIn` (the signed
-    ///         ceiling — "pay up to"), so a solver fills once the offered input is
-    ///         high enough to be profitable.
+    /// @notice Current auction tick for input leg `i` (BUY: rising; SELL: fixed).
+    ///         The maker's paid input climbs from `startAmountIn` (best for maker)
+    ///         toward `endAmountIn` (the signed ceiling — "pay up to").
     function currentAmountInAt(Order calldata order, uint256 i) internal view returns (uint256) {
         uint256 startIn = order.startAmountIn[i];
         uint256 endIn = order.endAmountIn[i];
         if (startIn > endIn) revert InvalidAuctionParams();
+        if (startIn == endIn) return startIn; // fixed leg — no bump
 
-        if (order.decayDuration == 0 || startIn == endIn) {
-            return startIn;
-        }
-
-        if (block.timestamp < order.decayStartTime) revert AuctionNotStarted();
-
-        uint256 elapsed = block.timestamp - order.decayStartTime;
-        if (elapsed >= order.decayDuration) return endIn;
-
-        uint256 rise = (endIn - startIn) * elapsed / order.decayDuration;
+        uint256 rise = ((endIn - startIn) * bumpBps(order)) / BPS;
         return startIn + rise;
     }
 

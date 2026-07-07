@@ -6,7 +6,15 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {UniversalSettlement, Order, Item, ItemOp, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {
+    UniversalSettlement,
+    Order,
+    Item,
+    ItemOp,
+    Validator,
+    OrderSide,
+    CurvePoint
+} from "@core/settlement/UniversalSettlement.sol";
 
 /// @dev Minimal, freely-mintable ERC20. Enough for Permit3's transfer paths —
 ///      no fork / real tokens, so the pure-protocol suites run fast and are
@@ -103,6 +111,10 @@ abstract contract MockSettlementBase is Test {
         arr[0] = x;
     }
 
+    function _noCurve() internal pure returns (CurvePoint[] memory) {
+        return new CurvePoint[](0);
+    }
+
     // ──────────────────── Order builder ────────────────────
 
     function _plainOrder(uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut)
@@ -126,6 +138,10 @@ abstract contract MockSettlementBase is Test {
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -159,6 +175,10 @@ abstract contract MockSettlementBase is Test {
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -191,6 +211,10 @@ abstract contract MockSettlementBase is Test {
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
             invariants: new Validator[](0)
@@ -212,8 +236,9 @@ abstract contract MockSettlementBase is Test {
     string constant PERMIT_BATCH_WITNESS_FULL =
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
+        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -283,10 +308,12 @@ abstract contract MockSettlementBase is Test {
 
     // ──────────────────── EIP-712: Order (mirrors OrderHash.sol) ────────────────────
 
+    bytes32 constant CURVE_POINT_TH = keccak256("CurvePoint(uint32 timeDelta,uint32 bumpBps)");
     bytes32 constant ITEM_TH = keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
     );
@@ -328,6 +355,14 @@ abstract contract MockSettlementBase is Test {
         return keccak256(abi.encodePacked(h));
     }
 
+    function _hashCurve(CurvePoint[] memory curve) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](curve.length);
+        for (uint256 i; i < curve.length; i++) {
+            h[i] = keccak256(abi.encode(CURVE_POINT_TH, curve[i].timeDelta, curve[i].bumpBps));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
     function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
             ORDER_TH,
@@ -341,18 +376,24 @@ abstract contract MockSettlementBase is Test {
             o.decayStartTime,
             o.decayDuration
         );
-        bytes memory tail = abi.encode(
+        bytes memory mid = abi.encode(
             _hashAddresses(o.tokenOut),
             _hashUints(o.startAmountOut),
             _hashUints(o.endAmountOut),
             o.exclusiveFiller,
             o.exclusivityEndTime,
             o.minFillAnchor,
+            o.exclusivityOverrideBps
+        );
+        bytes memory tail = abi.encode(
+            _hashCurve(o.curve),
+            o.gasBumpBps,
+            o.gasPriceRef,
             _hashItems(o.items),
             _hashValidators(o.validators),
             _hashValidators(o.invariants)
         );
-        return keccak256(bytes.concat(head, tail));
+        return keccak256(bytes.concat(head, mid, tail));
     }
 
     function _sign(Order memory o) internal view returns (bytes memory) {

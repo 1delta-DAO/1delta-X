@@ -14,6 +14,11 @@ const validatorComponents = [
   { name: "data", type: "bytes" },
 ] as const;
 
+const curvePointComponents = [
+  { name: "timeDelta", type: "uint32" },
+  { name: "bumpBps", type: "uint32" },
+] as const;
+
 export const orderComponents = [
   { name: "maker", type: "address" },
   { name: "side", type: "uint8" },
@@ -30,6 +35,10 @@ export const orderComponents = [
   { name: "exclusiveFiller", type: "address" },
   { name: "exclusivityEndTime", type: "uint32" },
   { name: "minFillAnchor", type: "uint256" },
+  { name: "exclusivityOverrideBps", type: "uint256" },
+  { name: "curve", type: "tuple[]", components: curvePointComponents },
+  { name: "gasBumpBps", type: "uint256" },
+  { name: "gasPriceRef", type: "uint256" },
   { name: "items", type: "tuple[]", components: itemComponents },
   { name: "validators", type: "tuple[]", components: validatorComponents },
   { name: "invariants", type: "tuple[]", components: validatorComponents },

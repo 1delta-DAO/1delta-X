@@ -306,6 +306,10 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
             invariants: new Validator[](0)

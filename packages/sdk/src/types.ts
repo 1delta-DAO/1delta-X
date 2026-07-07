@@ -35,6 +35,13 @@ export enum OrderSide {
   BUY = 1,
 }
 
+/// One point on the piecewise-linear auction curve: `bumpBps` (0..10000) is the
+/// normalized decay at `timeDelta` seconds after `decayStartTime`.
+export interface CurvePoint {
+  timeDelta: number;
+  bumpBps: number;
+}
+
 export interface Order {
   maker: Address;
   /// SELL (fixed input, outputs decay) or BUY (fixed output, inputs rise).
@@ -55,6 +62,14 @@ export interface Order {
   exclusivityEndTime: number;
   /// Anti-dust floor per fill, in anchor units (tokenIn[0] for SELL, tokenOut[0] for BUY).
   minFillAnchor: bigint;
+  /// Soft exclusivity: bps a non-exclusive in-window filler must improve the maker by (0 = hard).
+  exclusivityOverrideBps: bigint;
+  /// Optional piecewise decay shape (shared clock); empty = single linear segment.
+  curve: readonly CurvePoint[];
+  /// Max extra decay (bps) the gas bump adds at/above `gasPriceRef` basefee; 0 = off.
+  gasBumpBps: bigint;
+  /// Reference basefee (wei) at which the gas bump reaches `gasBumpBps`.
+  gasPriceRef: bigint;
   items: readonly Item[];
   validators: readonly Validator[];
   invariants: readonly Validator[];

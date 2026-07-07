@@ -97,6 +97,10 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
             items: new Item[](0),
             validators: validators,
             invariants: invariants
@@ -158,6 +162,10 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
             items: new Item[](0),
             validators: _noV(),
             invariants: _noV()

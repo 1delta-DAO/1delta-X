@@ -9,7 +9,7 @@ import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
 // Re-exported so downstream files can keep importing the order types from here.
-import {Order, Item, ItemOp, Validator, OrderSide} from "./SettlementStructs.sol";
+import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint} from "./SettlementStructs.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 import {NonceManager} from "./NonceManager.sol";
@@ -244,6 +244,18 @@ contract UniversalSettlement is NonceManager {
         return _fillCore(order, orderHash, fillAmount, filler, address(0), "", CallbackMode.PreDelivery);
     }
 
+    /// @dev Per-fill context, bundled so the settlement helpers take one memory
+    ///      pointer and each settle flow runs in its own stack frame (keeps the
+    ///      fill under the EVM stack limit).
+    struct FillCtx {
+        bytes32 orderHash;
+        uint256 anchor; //       fill denominator (fixed-side leg 0)
+        uint256 prevFilled; //   cumulative filled before this fill
+        uint256 newFilled; //    cumulative filled after this fill
+        uint256 overrideBps; //  soft-exclusivity improvement (0 = none)
+        address filler; //       who is paid / delivers
+    }
+
     function _fillCore(
         Order calldata order,
         bytes32 orderHash,
@@ -252,82 +264,98 @@ contract UniversalSettlement is NonceManager {
         address callbackTarget,
         bytes memory callbackData,
         CallbackMode mode
-    ) internal returns (uint256[] memory fillAmountsOut) {
+    ) internal returns (uint256[] memory) {
         if (fillAmount == 0) revert ZeroFill();
         if (fillAmount < order.minFillAnchor) revert FillTooSmall();
         if (block.timestamp > order.deadline) revert OrderExpired();
 
-        // Exclusivity window — if set, only the nominated filler may fill until
-        // `exclusivityEndTime`. After that, anyone can fill.
+        uint256 overrideBps = _exclusivity(order, filler);
+        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
+        _runValidators(order);
+
+        FillCtx memory ctx = _openFill(order, orderHash, fillAmount, overrideBps, filler);
+
+        return mode == CallbackMode.PostInputs
+            ? _settlePostInputs(order, ctx, callbackTarget, callbackData)
+            : _settleForward(order, ctx, callbackTarget, callbackData);
+    }
+
+    /// @dev Exclusivity gate. Inside the window only the nominated filler fills
+    ///      for free; a non-exclusive filler is blocked (hard exclusivity) or
+    ///      allowed against an `exclusivityOverrideBps` price improvement it must
+    ///      pay the maker (soft exclusivity). Returns the override, 0 otherwise.
+    function _exclusivity(Order calldata order, address filler) internal view returns (uint256 overrideBps) {
         if (
             order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime
                 && filler != order.exclusiveFiller
-        ) revert NotExclusiveFiller();
+        ) {
+            if (order.exclusivityOverrideBps == 0) revert NotExclusiveFiller();
+            overrideBps = order.exclusivityOverrideBps;
+        }
+    }
 
-        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
-
-        _runValidators(order);
-
-        // The anchor is the FIXED side's leg 0 — `tokenIn[0]` for SELL, `tokenOut[0]`
-        // for BUY — and `fillAmount` is expressed in those units.
+    /// @dev Reserve this fill's slice: check over-fill and bump the cumulative
+    ///      counter, then package the context. The anchor is the FIXED side's leg
+    ///      0 (`tokenIn[0]` for SELL, `tokenOut[0]` for BUY).
+    function _openFill(
+        Order calldata order,
+        bytes32 orderHash,
+        uint256 fillAmount,
+        uint256 overrideBps,
+        address filler
+    ) internal returns (FillCtx memory ctx) {
         uint256 anchor = _anchorTotal(order);
         uint256 prevFilled = filled[orderHash];
         uint256 newFilled = prevFilled + fillAmount;
         if (newFilled > anchor) revert OverFill();
         filled[orderHash] = newFilled;
+        ctx = FillCtx(orderHash, anchor, prevFilled, newFilled, overrideBps, filler);
+    }
 
-        // ── Reverse (PostInputs) ordering: pay the solver its tokenIn FIRST, let
-        //    the callback convert it, THEN deliver tokenOut. Enables a
-        //    zero-inventory / zero-flash plain swap (the Fusion takerInteraction
-        //    order). Restricted to item-free orders: item flows have
-        //    deposit→borrow data dependencies that assume the forward order.
-        //    Safety is unchanged — delivery + invariants are still mandatory and
-        //    reverting, so the maker is made whole or the whole tx unwinds.
-        if (mode == CallbackMode.PostInputs) {
-            if (order.items.length != 0) revert ReverseModeRequiresNoItems();
-            // No items ⇒ no TAKE proceeds; the snapshot delta is 0 so
-            // `_payInputsToSolver` pulls exactly `owed` from the maker → solver.
-            uint256[] memory before = _snapshotInputs(order.tokenIn);
-            _payInputsToSolver(order, fillAmount, prevFilled, newFilled, anchor, before, filler);
-            if (callbackTarget != address(0)) {
-                EXECUTOR.execute(callbackTarget, callbackData);
-            }
-            fillAmountsOut = _deliverOutputs(order, fillAmount, prevFilled, newFilled, anchor, filler);
-            _runInvariants(order);
-            emit OrderFilled(orderHash, order.maker, filler, fillAmount, fillAmountsOut);
-            return fillAmountsOut;
-        }
+    /// @dev Forward flow: optional callback → deliver outputs → items → pay
+    ///      inputs → invariants. The callback runs BEFORE any funds move, routed
+    ///      through the allowance-less EXECUTOR (cannot leverage Settlement's
+    ///      Permit3 spender status) and under `nonReentrant`.
+    function _settleForward(
+        Order calldata order,
+        FillCtx memory ctx,
+        address callbackTarget,
+        bytes memory callbackData
+    ) internal returns (uint256[] memory outs) {
+        if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
 
-        // 0. Optional solver callback (taker-interaction analogue). Runs BEFORE
-        //    any funds move, so a zero-inventory solver can source `tokenOut`
-        //    just-in-time. Routed through EXECUTOR (allowance-less), never called
-        //    from Settlement itself, so it cannot leverage Settlement's Permit3
-        //    spender status. Under `nonReentrant`, so it cannot re-enter a fill.
-        if (callbackTarget != address(0)) {
-            EXECUTOR.execute(callbackTarget, callbackData);
-        }
-
-        // 1. Solver → maker: each tokenOut, priced for this fill (auction for
-        //    SELL, fixed for BUY), pro-rata.
-        fillAmountsOut = _deliverOutputs(order, fillAmount, prevFilled, newFilled, anchor, filler);
+        outs = _deliverOutputs(order, ctx);
 
         // Snapshot each tokenIn before items so the payout uses ONLY this fill's
-        // TAKE proceeds — never any pre-existing/donated balance held by
-        // Settlement. Output delivery is a direct solver→maker transfer, so it
-        // never touches Settlement's tokenIn balance.
+        // TAKE proceeds — never a pre-existing/donated Settlement balance.
         uint256[] memory tokenInBefore = _snapshotInputs(order.tokenIn);
-
-        // 2. Pro-rata operation items for this fill
-        _executeItems(order, prevFilled, newFilled, anchor);
-
-        // 3. Settle each tokenIn → solver. TAKE items route proceeds to this
-        //    contract; any shortfall is pulled from the maker via Permit3.
-        _payInputsToSolver(order, fillAmount, prevFilled, newFilled, anchor, tokenInBefore, filler);
-
-        // 4. Post-execution invariants (e.g. "my Aave health factor ≥ 2.0 after this fill").
+        _executeItems(order, ctx);
+        _payInputsToSolver(order, ctx, tokenInBefore);
         _runInvariants(order);
+        emit OrderFilled(ctx.orderHash, order.maker, ctx.filler, ctx.newFilled - ctx.prevFilled, outs);
+    }
 
-        emit OrderFilled(orderHash, order.maker, filler, fillAmount, fillAmountsOut);
+    /// @dev Reverse (PostInputs) flow: pay the solver its tokenIn FIRST, let the
+    ///      callback convert it, THEN deliver tokenOut — a zero-inventory /
+    ///      zero-flash swap (the Fusion takerInteraction order). Item-free only:
+    ///      item flows have deposit→borrow dependencies that assume the forward
+    ///      order. Delivery + invariants stay mandatory and reverting, so the
+    ///      maker is made whole or the whole tx unwinds.
+    function _settlePostInputs(
+        Order calldata order,
+        FillCtx memory ctx,
+        address callbackTarget,
+        bytes memory callbackData
+    ) internal returns (uint256[] memory outs) {
+        if (order.items.length != 0) revert ReverseModeRequiresNoItems();
+        // No items ⇒ no TAKE proceeds; the snapshot delta is 0 so
+        // `_payInputsToSolver` pulls exactly `owed` from the maker → solver.
+        uint256[] memory before = _snapshotInputs(order.tokenIn);
+        _payInputsToSolver(order, ctx, before);
+        if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
+        outs = _deliverOutputs(order, ctx);
+        _runInvariants(order);
+        emit OrderFilled(ctx.orderHash, order.maker, ctx.filler, ctx.newFilled - ctx.prevFilled, outs);
     }
 
     /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —
@@ -349,28 +377,27 @@ contract UniversalSettlement is NonceManager {
     ///        `startAmountOut[j]`, summing to exactly `startAmountOut[j]` at full
     ///        fill (and to `fillAmount` for j==0). Permit3 enforces the solver's
     ///        token allowance on each leg.
-    function _deliverOutputs(
-        Order calldata order,
-        uint256 fillAmount,
-        uint256 prevFilled,
-        uint256 newFilled,
-        uint256 anchor,
-        address filler
-    ) internal returns (uint256[] memory outs) {
+    function _deliverOutputs(Order calldata order, FillCtx memory ctx) internal returns (uint256[] memory outs) {
         uint256 n = order.tokenOut.length;
         outs = new uint256[](n);
         bool buy = order.side == OrderSide.BUY;
+        uint256 anchor = ctx.anchor;
+        uint256 fillAmount = ctx.newFilled - ctx.prevFilled;
         for (uint256 j; j < n; j++) {
             uint256 amt;
             if (buy) {
+                // Fixed output — the exact-output guarantee; never overridden.
                 uint256 fixedOut = order.startAmountOut[j];
-                amt = _ceilDiv(fixedOut * newFilled, anchor) - _ceilDiv(fixedOut * prevFilled, anchor);
+                amt = _ceilDiv(fixedOut * ctx.newFilled, anchor) - _ceilDiv(fixedOut * ctx.prevFilled, anchor);
             } else {
                 amt = _ceilDiv(fillAmount * order.currentAmountOutAt(j), anchor);
+                // Soft-exclusivity override: a non-exclusive in-window filler must
+                // deliver MORE output (the auction leg moves toward the maker).
+                if (ctx.overrideBps != 0) amt = _ceilDiv(amt * (10_000 + ctx.overrideBps), 10_000);
             }
             outs[j] = amt;
             if (amt != 0) {
-                PERMIT3.transferFrom(filler, order.maker, order.tokenOut[j], uint160(amt));
+                PERMIT3.transferFrom(ctx.filler, order.maker, order.tokenOut[j], uint160(amt));
             }
         }
     }
@@ -388,10 +415,10 @@ contract UniversalSettlement is NonceManager {
     ///      slice = item.amount * newFilled / anchor
     ///            - item.amount * prevFilled / anchor
     ///      Sums to exactly item.amount once the order is fully filled.
-    function _executeItems(Order calldata order, uint256 prevFilled, uint256 newFilled, uint256 anchor) internal {
+    function _executeItems(Order calldata order, FillCtx memory ctx) internal {
         for (uint256 i; i < order.items.length; i++) {
             Item calldata item = order.items[i];
-            uint256 slice = (item.amount * newFilled) / anchor - (item.amount * prevFilled) / anchor;
+            uint256 slice = (item.amount * ctx.newFilled) / ctx.anchor - (item.amount * ctx.prevFilled) / ctx.anchor;
             if (slice == 0) continue;
 
             if (item.op == ItemOp.MAKE) {
@@ -421,24 +448,23 @@ contract UniversalSettlement is NonceManager {
     ///      shortfall is pulled from the maker via Permit3 (the maker's token
     ///      allowance is the gate); any surplus proceeds are returned to the
     ///      maker, not stranded.
-    function _payInputsToSolver(
-        Order calldata order,
-        uint256 fillAmount,
-        uint256 prevFilled,
-        uint256 newFilled,
-        uint256 anchor,
-        uint256[] memory tokenInBefore,
-        address filler
-    ) internal {
+    function _payInputsToSolver(Order calldata order, FillCtx memory ctx, uint256[] memory tokenInBefore) internal {
         address maker = order.maker;
+        address filler = ctx.filler;
+        uint256 anchor = ctx.anchor;
         bool buy = order.side == OrderSide.BUY;
+        uint256 fillAmount = ctx.newFilled - ctx.prevFilled;
         for (uint256 i; i < order.tokenIn.length; i++) {
             uint256 owed;
             if (buy) {
                 owed = (fillAmount * order.currentAmountInAt(i)) / anchor;
+                // Soft-exclusivity override: a non-exclusive in-window filler must
+                // charge LESS input (the auction leg moves toward the maker).
+                if (ctx.overrideBps != 0) owed = (owed * (10_000 - ctx.overrideBps)) / 10_000;
             } else {
+                // Fixed input — the exact-input guarantee; never overridden.
                 uint256 amt = order.startAmountIn[i];
-                owed = (amt * newFilled) / anchor - (amt * prevFilled) / anchor;
+                owed = (amt * ctx.newFilled) / anchor - (amt * ctx.prevFilled) / anchor;
             }
             if (owed == 0) continue;
 
@@ -706,6 +732,25 @@ contract UniversalSettlement is NonceManager {
         }
         if (order.minFillAnchor > anchor) return (false, "minFillAnchor > anchor (unfillable)");
         if (order.decayDuration != 0 && order.decayStartTime == 0) return (false, "decay set without decayStartTime");
+
+        // ── soft exclusivity override ──
+        if (order.exclusivityOverrideBps != 0) {
+            if (order.exclusiveFiller == address(0)) return (false, "override without exclusiveFiller");
+            if (order.exclusivityOverrideBps > 10_000) return (false, "exclusivityOverrideBps > 10000");
+        }
+        // ── piecewise auction curve (monotonic time, bounded bump) ──
+        for (uint256 c; c < order.curve.length; c++) {
+            if (order.curve[c].bumpBps > 10_000) return (false, "curve bumpBps > 10000");
+            if (c != 0 && order.curve[c].timeDelta <= order.curve[c - 1].timeDelta) {
+                return (false, "curve timeDelta not increasing");
+            }
+        }
+        if (order.curve.length != 0 && order.decayStartTime == 0) return (false, "curve set without decayStartTime");
+        // ── gas bump ──
+        if (order.gasBumpBps != 0) {
+            if (order.gasPriceRef == 0) return (false, "gasBump without gasPriceRef");
+            if (order.gasBumpBps > 10_000) return (false, "gasBumpBps > 10000");
+        }
 
         // ── current fillability (time/state-dependent) ──
         if (order.deadline < block.timestamp) return (false, "order expired");

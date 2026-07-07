@@ -57,6 +57,19 @@ struct Item {
     bytes data;
 }
 
+/// @notice One point on a piecewise-linear auction curve. `timeDelta` is seconds
+///         after the order's `decayStartTime`; `bumpBps` is the normalized decay
+///         at that instant — 0 = the `start` price (best for maker), 10000 = the
+///         `end` price (worst). The current bump is linearly interpolated between
+///         adjacent points and clamped outside the range. The whole curve is
+///         shared by every leg (one clock); each leg maps it through its own
+///         `start`/`end` bounds. An empty curve means the classic single linear
+///         segment over `decayDuration`.
+struct CurvePoint {
+    uint32 timeDelta;
+    uint32 bumpBps;
+}
+
 /// @notice A read-only trigger. Settlement `staticcall`s `target.validate(order, data)`
 ///         and aborts the fill unless the returned bool is `true`. Multiple
 ///         validators on an order are AND-composed. Both `target` and `data`
@@ -96,6 +109,11 @@ struct Order {
     address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
     uint32 exclusivityEndTime; //    unix timestamp; ignored if exclusiveFiller == 0
     uint256 minFillAnchor; //        anti-dust floor per fill (anchor units); 0 = no minimum
+    uint256 exclusivityOverrideBps; //  0 = hard exclusivity; else the bps a non-exclusive
+    //                                  in-window filler must improve the maker's auction leg by
+    CurvePoint[] curve; //           optional piecewise decay shape (shared clock); empty = linear
+    uint256 gasBumpBps; //           max extra decay (bps) the gas bump adds at/above gasPriceRef; 0 = off
+    uint256 gasPriceRef; //          reference basefee (wei) at which the gas bump reaches gasBumpBps
     Item[] items;
     Validator[] validators; //       pre-execution trigger conditions; AND-composed
     Validator[] invariants; //       post-execution invariants; AND-composed

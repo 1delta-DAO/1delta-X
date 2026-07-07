@@ -2,7 +2,15 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {UniversalSettlement, Order, Item, ItemOp, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {
+    UniversalSettlement,
+    Order,
+    Item,
+    ItemOp,
+    Validator,
+    OrderSide,
+    CurvePoint
+} from "@core/settlement/UniversalSettlement.sol";
 
 /// @dev No-fork golden test: pins the EIP-712 struct hash of a canonical order.
 ///      The TypeScript SDK asserts the SAME value, cross-verifying its typed-data
@@ -49,6 +57,11 @@ contract HashGoldenTest is Test {
         Validator[] memory invariants = new Validator[](1);
         invariants[0] = Validator({target: VAL2, data: hex"beef"});
 
+        // Non-trivial curve so the golden also cross-checks CurvePoint hashing.
+        CurvePoint[] memory curve = new CurvePoint[](2);
+        curve[0] = CurvePoint({timeDelta: 0, bumpBps: 1_000});
+        curve[1] = CurvePoint({timeDelta: 200, bumpBps: 9_000});
+
         o = Order({
             maker: MAKER,
             side: OrderSide.SELL,
@@ -65,6 +78,10 @@ contract HashGoldenTest is Test {
             exclusiveFiller: FILLER,
             exclusivityEndTime: 333,
             minFillAnchor: 100e6,
+            exclusivityOverrideBps: 25,
+            curve: curve,
+            gasBumpBps: 50,
+            gasPriceRef: 30_000_000_000,
             items: items,
             validators: validators,
             invariants: invariants
@@ -73,7 +90,7 @@ contract HashGoldenTest is Test {
 
     /// @dev The TypeScript SDK (`packages/sdk`) asserts this SAME constant for the
     ///      same canonical order — cross-verifying its EIP-712 typed-data defs.
-    bytes32 constant GOLDEN_ORDER_HASH = 0x95d6af839695566cded188dbc4361f7ba22aa108e80ba3c633988069a335a210;
+    bytes32 constant GOLDEN_ORDER_HASH = 0x37bcfdb7b3c44e91f77ea7f45229565a73c19c2502411ab374f27ec906a22f01;
 
     function test_goldenOrderHash() public view {
         assertEq(settlement.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");

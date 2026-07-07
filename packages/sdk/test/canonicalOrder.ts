@@ -20,6 +20,13 @@ export const CANONICAL_ORDER: Order = {
   exclusiveFiller: A("0x0000000000000000000000000000000000000b0b"),
   exclusivityEndTime: 333,
   minFillAnchor: 100_000_000n,
+  exclusivityOverrideBps: 25n,
+  curve: [
+    { timeDelta: 0, bumpBps: 1_000 },
+    { timeDelta: 200, bumpBps: 9_000 },
+  ],
+  gasBumpBps: 50n,
+  gasPriceRef: 30_000_000_000n,
   items: [
     {
       op: ItemOp.MAKE,
@@ -41,4 +48,4 @@ export const CANONICAL_ORDER: Order = {
 };
 
 /// Emitted by `HashGolden.t.sol` (Solidity `settlement.hashOrder`).
-export const GOLDEN_ORDER_HASH = "0x95d6af839695566cded188dbc4361f7ba22aa108e80ba3c633988069a335a210";
+export const GOLDEN_ORDER_HASH = "0x37bcfdb7b3c44e91f77ea7f45229565a73c19c2502411ab374f27ec906a22f01";
