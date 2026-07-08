@@ -7,6 +7,7 @@ import {IMakerModule} from "../interfaces/IMakerModule.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
+import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 
 // Re-exported so downstream files can keep importing the order types from here.
 import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint} from "./SettlementStructs.sol";
@@ -375,8 +376,10 @@ contract UniversalSettlement is NonceManager {
     ///        never underpaid.
     ///      • BUY: outputs are FIXED — each leg is the cumulative ceil slice of
     ///        `startAmountOut[j]`, summing to exactly `startAmountOut[j]` at full
-    ///        fill (and to `fillAmount` for j==0). Permit3 enforces the solver's
-    ///        token allowance on each leg.
+    ///        fill (and to `fillAmount` for j==0). Each leg pulls the solver's
+    ///        `tokenOut` via Permit3, falling back to a direct ERC20 transferFrom
+    ///        when the solver approved Settlement directly (see
+    ///        `_transferFromWithFallback`).
     function _deliverOutputs(Order calldata order, FillCtx memory ctx) internal returns (uint256[] memory outs) {
         uint256 n = order.tokenOut.length;
         outs = new uint256[](n);
@@ -397,7 +400,7 @@ contract UniversalSettlement is NonceManager {
             }
             outs[j] = amt;
             if (amt != 0) {
-                PERMIT3.transferFrom(ctx.filler, order.maker, order.tokenOut[j], uint160(amt));
+                Permit3TransferLib.transferFromWithFallback(PERMIT3, order.tokenOut[j], ctx.filler, order.maker, amt);
             }
         }
     }
@@ -445,9 +448,9 @@ contract UniversalSettlement is NonceManager {
     ///      Each leg uses ONLY the TAKE proceeds produced by THIS fill (the
     ///      balance delta since `tokenInBefore[i]`) — so a pre-existing/donated
     ///      Settlement balance can never be redirected to the solver. Any
-    ///      shortfall is pulled from the maker via Permit3 (the maker's token
-    ///      allowance is the gate); any surplus proceeds are returned to the
-    ///      maker, not stranded.
+    ///      shortfall is pulled from the maker via Permit3 (falling back to a
+    ///      direct ERC20 transferFrom if the maker approved Settlement directly);
+    ///      any surplus proceeds are returned to the maker, not stranded.
     function _payInputsToSolver(Order calldata order, FillCtx memory ctx, uint256[] memory tokenInBefore) internal {
         address maker = order.maker;
         address filler = ctx.filler;
@@ -476,7 +479,7 @@ contract UniversalSettlement is NonceManager {
                 if (surplus > 0) SafeTransferLib.safeTransfer(tokenIn, maker, surplus);
             } else {
                 if (proceeds > 0) SafeTransferLib.safeTransfer(tokenIn, filler, proceeds);
-                PERMIT3.transferFrom(maker, filler, tokenIn, uint160(owed - proceeds));
+                Permit3TransferLib.transferFromWithFallback(PERMIT3, tokenIn, maker, filler, owed - proceeds);
             }
         }
     }

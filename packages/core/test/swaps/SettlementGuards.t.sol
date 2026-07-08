@@ -7,6 +7,7 @@ import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlem
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
 import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 
 import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol";
@@ -217,8 +218,13 @@ contract SettlementGuardsTest is MockSettlementBase {
         (IPermit3.PermitBatch memory batch, bytes memory sig) =
             _permitFor(order, AMOUNT_IN / 2, 1, block.timestamp + 1 hours);
 
+        // The maker's tokenIn pull exceeds the granted Permit3 allowance. Delivery
+        // legs use the direct-approval fallback (Euler EVK pattern), so the Permit3
+        // InsufficientAllowance is caught and a plain transferFrom is attempted;
+        // the maker granted no direct approval either, so the terminal revert is
+        // the fallback's TransferFromFailed and the whole fill unwinds.
         vm.prank(solver);
-        vm.expectPartialRevert(IPermit3.InsufficientAllowance.selector);
+        vm.expectRevert(SafeTransferLib.TransferFromFailed.selector);
         settlement.fillWithPermit(order, batch, sig, AMOUNT_IN);
     }
 
