@@ -111,6 +111,44 @@ itemSlice     = item.amount  × fillAmountIn    / amountIn    (cumulative)
 Both scale by the same `fillAmountIn / amountIn` fraction, so items
 and the auction stay in sync across partial fills.
 
+### Fee-on-transfer & rebasing tokens
+
+Settlement moves **nominal, computed** amounts on the delivery and
+solver-payout legs — it does not re-measure balances after a transfer to
+confirm what actually arrived. (The one exception is TAKE proceeds *into*
+Settlement, which are measured by balance delta for anti-donation.)
+
+For a fee-on-transfer or rebasing token this means the recipient receives
+**less than the recorded amount**, exactly as with common swap aggregators:
+
+- **Solver bears the fee** (FoT on the leg the solver receives): the solver
+  chooses to fill and can price the fee in — self-protected.
+- **Maker bears the fee** (FoT on `tokenOut`): the maker is the passive party
+  and is **silently underpaid**. `startAmountOut`/`endAmountOut` set the
+  *computed* transfer amount, not a floor on the maker's actual received
+  balance, so there is no automatic `minReturn`-style revert.
+- **Accounting**: `filled` and the `OrderFilled` event report nominal amounts,
+  so they **overstate** what moved for FoT tokens. No funds are lost or
+  stranded — the numbers are simply pre-fee.
+
+There is **no built-in FoT validation** — trading such tokens is the
+maker's/solver's responsibility. A maker who wants aggregator-style protection
+can attach a post-execution **invariant** asserting *"my `tokenOut` balance
+increased by ≥ N"* (see Validators/invariants), which reverts the whole fill if
+the fee eats into the floor.
+
+### Funding: Permit3 or direct approval
+
+Regular transfer legs (`tokenOut` delivery, `tokenIn` shortfall) try Permit3
+first and **fall back to a plain ERC20 `transferFrom`** when the payer approved
+Settlement directly instead of routing through Permit3 (the Euler EVK
+`SafeERC20Lib` pattern, in `Permit3TransferLib`). Only the payer's own tokens
+move, and only to the leg's fixed recipient, so the fallback grants no new
+authority. A maker/solver holding a **standing direct approval** to Settlement
+therefore opts out of Permit3's per-order allowance cap for that token — the
+signed order amount remains the ceiling. The taker book (`take`, i.e. borrow/
+withdraw dispatch) is **not** covered by the fallback and stays Permit3-gated.
+
 ### Worked examples
 
 #### Pure swap (no lending items)
