@@ -1,0 +1,10 @@
+{
+  "name": "@1delta-x/modules-erc4626",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "forge build --root ../../.. ",
+    "test": "forge test -vvv --root ../../.. --match-path 'packages/modules/erc4626/**'",
+    "snapshot": "forge snapshot --root ../../.. --match-path 'packages/modules/erc4626/**'"
+  }
+}

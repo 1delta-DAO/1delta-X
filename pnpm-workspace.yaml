@@ -1,4 +1,5 @@
 packages:
   - "packages/*"
-  - "packages/modules-lending/*"
-  - "packages/modules-redeem/*"
+  - "packages/modules/*"
+  - "packages/modules/lending/*"
+  - "packages/modules/redeem/*"
