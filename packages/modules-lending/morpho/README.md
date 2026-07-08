@@ -13,7 +13,7 @@ The dependency points one way: this package depends on `@core`, never the
 reverse. The modules live in [`src/`](src/); the fork tests in [`test/`](test/).
 
 This package is the Morpho-Blue sibling of
-[`@1delta-x/modules-aave-v3`](../modules-aave-v3). The plug-in shape (MAKE / TAKE,
+[`@1delta-x/modules-aave-v3`](../aave-v3). The plug-in shape (MAKE / TAKE,
 Permit3 token + taker gates, post-fill invariants) is identical; what differs is
 how Morpho models a position. Read the Aave README for the Settlement fill
 mechanics — below we only cover **what Morpho does differently**.
@@ -184,5 +184,5 @@ permit fill:
 > test crosses protocols (Morpho → Aave) — the faithful analog of the Aave
 > package's Aave → Spark migration — and doubles as the composability proof that
 > the Morpho and Aave modules compose in a single signed order. It pulls the Aave
-> modules from [`../modules-aave-v3`](../modules-aave-v3); that is the test tree's
+> modules from [`../aave-v3`](../aave-v3); that is the test tree's
 > only cross-package dependency.

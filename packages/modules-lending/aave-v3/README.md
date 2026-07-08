@@ -74,7 +74,7 @@ modules drive Aave v3, Spark, or any Aave-v3-fork by passing a different `pool`
 in `data` — which is exactly what the migration flow exploits.
 
 > Aave **v4** ships as a separate package,
-> [`@1delta-x/modules-aave-v4`](../modules-aave-v4), because v4's Hub/Spoke +
+> [`@1delta-x/modules-aave-v4`](../aave-v4), because v4's Hub/Spoke +
 > position-manager architecture is a different integration surface from v3's
 > pool. The module *shape* (MAKE/TAKE, Permit3-gated) is identical.
 

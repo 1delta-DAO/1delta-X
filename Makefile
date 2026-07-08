@@ -24,7 +24,7 @@ PACKAGES := \
 	modules-euler-v2 \
 	modules-fluid \
 	modules-morpho \
-	modules-permit-transfer \
+	modules-transfer \
 	modules-usdrif \
 	modules-venus
 

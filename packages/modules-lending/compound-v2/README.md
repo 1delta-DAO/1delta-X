@@ -2,7 +2,7 @@
 
 Permit3 maker/taker modules for **vanilla Compound v2** — all ops **except borrow**.
 
-Unlike Venus (see [`modules-venus`](../modules-venus)), vanilla Compound v2 has no
+Unlike Venus (see [`modules-venus`](../venus)), vanilla Compound v2 has no
 `borrowBehalf` and no delegation: `mint` / `redeem` / `borrow` all act on
 `msg.sender`, and only `repayBorrowBehalf` is a native on-behalf call. A router
 therefore **cannot borrow on a user's behalf**, so this package ships no borrow

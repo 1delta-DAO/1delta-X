@@ -3,8 +3,8 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "build": "forge build --root ../..",
-    "test": "forge test -vvv --root ../.. --match-path 'packages/modules-venus/**'",
-    "snapshot": "forge snapshot --root ../.. --match-path 'packages/modules-venus/**'"
+    "build": "forge build --root ../../..",
+    "test": "forge test -vvv --root ../../.. --match-path 'packages/modules-lending/venus/**'",
+    "snapshot": "forge snapshot --root ../../.. --match-path 'packages/modules-lending/venus/**'"
   }
 }

@@ -11,8 +11,8 @@ import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 // Cross-protocol: the SOURCE legs are the Aave v3 modules, the DESTINATION legs
 // are the Morpho modules. The reverse of Migrate.t.sol — same composability claim,
 // other direction.
-import {IAaveV3Pool, IAaveCreditDelegation} from "../../../modules-aave-v3/src/interfaces/IAaveV3.sol";
-import {AaveV3RepayModule, AaveV3WithdrawModule} from "../../../modules-aave-v3/src/AaveV3Modules.sol";
+import {IAaveV3Pool, IAaveCreditDelegation} from "../../../aave-v3/src/interfaces/IAaveV3.sol";
+import {AaveV3RepayModule, AaveV3WithdrawModule} from "../../../aave-v3/src/AaveV3Modules.sol";
 
 import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 

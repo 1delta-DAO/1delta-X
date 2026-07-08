@@ -21,7 +21,7 @@ of **collateral assets**. Two methods cover every position move:
 | `withdrawFrom(src, to, asset, amt)` | **borrow** (withdraw past supply) | **withdraw** collateral |
 
 So Aave's four modules collapse onto two underlying calls here. For 1:1 symmetry
-with [`@1delta-x/modules-aave-v3`](../modules-aave-v3) we still ship **four named
+with [`@1delta-x/modules-aave-v3`](../aave-v3) we still ship **four named
 modules** — deposit and repay both `supplyTo`, withdraw and borrow both
 `withdrawFrom`. The distinct addresses give each leg its own Permit3
 module/ref namespace, exactly like the Aave package.

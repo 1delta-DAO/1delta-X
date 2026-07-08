@@ -1,10 +1,10 @@
 {
-  "name": "@1delta-x/modules-permit-transfer",
+  "name": "@1delta-x/modules-transfer",
   "version": "0.0.1",
   "private": true,
   "scripts": {
     "build": "forge build --root ../.. ",
-    "test": "forge test -vvv --root ../.. --match-path 'packages/modules-permit-transfer/**'",
-    "snapshot": "forge snapshot --root ../.. --match-path 'packages/modules-permit-transfer/**'"
+    "test": "forge test -vvv --root ../.. --match-path 'packages/modules-transfer/**'",
+    "snapshot": "forge snapshot --root ../.. --match-path 'packages/modules-transfer/**'"
   }
 }

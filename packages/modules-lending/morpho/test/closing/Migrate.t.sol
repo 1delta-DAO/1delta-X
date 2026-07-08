@@ -11,8 +11,8 @@ import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 // Cross-protocol: reuse the Aave v3 modules for the destination legs. This is the
 // composability claim made concrete — the Morpho repay/withdraw modules and the
 // Aave deposit/borrow modules plug into one signed order.
-import {IAaveV3Pool, IAaveCreditDelegation} from "../../../modules-aave-v3/src/interfaces/IAaveV3.sol";
-import {AaveV3DepositModule, AaveV3BorrowModule} from "../../../modules-aave-v3/src/AaveV3Modules.sol";
+import {IAaveV3Pool, IAaveCreditDelegation} from "../../../aave-v3/src/interfaces/IAaveV3.sol";
+import {AaveV3DepositModule, AaveV3BorrowModule} from "../../../aave-v3/src/AaveV3Modules.sol";
 
 import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 
