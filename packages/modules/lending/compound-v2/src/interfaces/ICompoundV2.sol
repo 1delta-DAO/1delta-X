@@ -55,3 +55,32 @@ interface ICompoundV2Comptroller {
     /// @notice Enter markets so supplied cTokens count as collateral.
     function enterMarkets(address[] calldata cTokens) external returns (uint256[] memory);
 }
+
+// ──────────────────── cEther (the native pool) ────────────────────
+//
+// The native-currency market (cETH and fork equivalents). Its value-IN calls take
+// NATIVE ETH via `msg.value` (no ERC20/amount arg) and REVERT on error (unlike the
+// cErc20 code-returning convention); value-OUT (`redeem*`) still returns a code and
+// sends ETH to the caller. cEther is itself an ERC20 cToken, so its receipt balance
+// and transfers go through the standard `IERC20` surface.
+interface ICEther {
+    /// @notice Supplies `msg.value` ETH, mints cTokens to msg.sender. Reverts on error.
+    function mint() external payable;
+    /// @notice Repays `borrower`'s ETH debt, funded by `msg.value` (on-behalf). Reverts
+    ///         on error. cEther caps at the debt via SafeMath, so an over-send reverts —
+    ///         the caller must send exactly `min(intended, liveDebt)`.
+    function repayBorrowBehalf(address borrower) external payable;
+
+    // ── value out (act on msg.sender; ETH sent to caller) ──
+    function redeem(uint256 redeemTokens) external returns (uint256);
+    function redeemUnderlying(uint256 redeemAmount) external returns (uint256);
+
+    // ── borrow (self only — no delegation; used by tests to seed a debt) ──
+    function borrow(uint256 borrowAmount) external returns (uint256);
+
+    // ── views / accruers ──
+    function borrowBalanceCurrent(address account) external returns (uint256);
+    function borrowBalanceStored(address account) external view returns (uint256);
+    function exchangeRateCurrent() external returns (uint256);
+    function exchangeRateStored() external view returns (uint256);
+}
