@@ -1,0 +1,40 @@
+name: gas
+
+# Regression gate for the committed core gas baseline (`.gas-snapshot`).
+# `make gas-check` runs `forge snapshot --check` for the core package: it re-runs
+# every core test and fails if any test's gas differs from the baseline. Because
+# it runs the tests, a *failing* test also fails this job — so it doubles as a
+# core correctness check.
+#
+# If a change intentionally moves gas, regenerate + commit the baseline with
+# `make gas` and the diff will show up in the PR.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gas-check:
+    name: core gas snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # lib/forge-std is vendored (committed), not a submodule — nothing to fetch.
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pin the toolchain: gas metering + the default EVM version must match the
+          # environment the committed baseline was generated with. `evm_version` is
+          # also pinned in foundry.toml, so this is belt-and-suspenders.
+          version: "1.5.1"
+
+      - name: Check core gas snapshot
+        env:
+          # The core suite includes mainnet-fork tests. Set this repo secret for a
+          # reliable archive RPC; without it the harness falls back to its baked-in
+          # list of public endpoints (works, but can be rate-limited in CI).
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+        run: make gas-check

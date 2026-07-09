@@ -28,7 +28,7 @@ PACKAGES := \
 	modules-usdrif \
 	modules-venus
 
-.PHONY: test build test-all build-all $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
+.PHONY: test build test-all build-all gas gas-check gas-diff $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -81,6 +81,41 @@ build-all:
 	done; \
 	printf "\n\033[1;32m✓ All packages built\033[0m\n"
 
+# ── Gas snapshot (core package) ───────────────────────────────────────────────
+#
+# Records per-test gas into `.gas-snapshot` (committed) for the CORE package — where
+# all the settlement / Permit3 / hashing / transfer-lib logic (and every gas
+# optimization) lives. Scoped to `core` on purpose: `forge snapshot` keys entries by
+# `Contract::test` WITHOUT the file path, and several module packages reuse test
+# contract names (InvariantsTest, WithdrawAndSwapTest, …), which collide in a
+# whole-monorepo snapshot. Core's 25 test contracts are all uniquely named, so this
+# baseline is deterministic and `--check`-safe.
+#
+# Fork tests are block-pinned (deterministic gas); the few fuzz tests are pinned to a
+# fixed `--fuzz-seed` here ONLY — the global config stays seedless so normal
+# `forge test` keeps exploring.
+#
+#   make gas         # regenerate the committed baseline after an intended change
+#   make gas-check   # CI gate: fail if any core test's gas moved from the baseline
+#   make gas-diff    # show per-test gas deltas vs the baseline (no fail)
+#
+# Per-module gas gates, if ever needed, follow the same pattern:
+#   FOUNDRY_PROFILE=modules-aave-v3-fork forge snapshot --snap gas/aave-v3.gas-snapshot
+
+GAS_SEED ?= 0x1de17a
+
+## Regenerate the committed gas baseline (.gas-snapshot) for the core package.
+gas:
+	FOUNDRY_PROFILE=core $(FORGE) snapshot --fuzz-seed $(GAS_SEED)
+
+## Fail if any core test's gas moved from the committed baseline.
+gas-check:
+	FOUNDRY_PROFILE=core $(FORGE) snapshot --check --fuzz-seed $(GAS_SEED)
+
+## Show per-test gas deltas vs the committed baseline.
+gas-diff:
+	FOUNDRY_PROFILE=core $(FORGE) snapshot --diff --fuzz-seed $(GAS_SEED)
+
 # ── Help ──────────────────────────────────────────────────────────────────────
 
 help:
@@ -91,5 +126,8 @@ help:
 	@echo "  build-<name>          Shorthand"
 	@echo "  test-all              All packages sequentially"
 	@echo "  build-all             Compile-check all packages"
+	@echo "  gas                   Regenerate the committed .gas-snapshot baseline"
+	@echo "  gas-check             Fail if any test's gas moved from the baseline"
+	@echo "  gas-diff              Show per-test gas deltas vs the baseline"
 	@echo ""
 	@echo "Packages: $(PACKAGES)"

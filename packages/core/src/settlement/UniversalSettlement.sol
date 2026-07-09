@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {IMakerModule} from "../interfaces/IMakerModule.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
@@ -60,13 +59,15 @@ contract UniversalSettlement is NonceManager {
 
     // ──────────────────── Events ────────────────────
 
-    event OrderFilled(
-        bytes32 indexed orderHash,
-        address indexed maker,
-        address indexed solver,
-        uint256 fillAmountIn,
-        uint256[] fillAmountsOut
-    );
+    /// @notice A fill occurred. Intentionally data-less: every amount is
+    ///         recoverable from the ERC20 `Transfer` / protocol events in the same
+    ///         tx (`tokenOut` legs are solver→maker transfers; the anchor
+    ///         `fillAmountIn` is the `tokenIn[0]`/`tokenOut[0]` leg), and on-chain
+    ///         callers get the per-leg outputs from the function return value. The
+    ///         event exists only to bind those transfers to an `orderHash` (which
+    ///         Transfer events don't carry) and to make fills filterable by
+    ///         maker/solver — so it emits just those three topics, no log data.
+    event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed solver);
 
     // ──────────────────── Errors ────────────────────
 
@@ -226,12 +227,15 @@ contract UniversalSettlement is NonceManager {
         fillAmountsOut = new uint256[][](n);
         success = new bool[](n);
         address filler = msg.sender;
-        for (uint256 i; i < n; i++) {
+        for (uint256 i; i < n;) {
             try this.fillSelf(orders[i], sigs[i], fillAmounts[i], filler) returns (uint256[] memory outs) {
                 fillAmountsOut[i] = outs;
                 success[i] = true;
             } catch {
                 if (revertIfIncomplete) revert BatchFillIncomplete(i);
+            }
+            unchecked {
+                ++i;
             }
         }
     }
@@ -344,7 +348,7 @@ contract UniversalSettlement is NonceManager {
         _executeItems(order, ctx);
         _payInputsToSolver(order, ctx, tokenInBefore, hasItems);
         _runInvariants(order);
-        emit OrderFilled(ctx.orderHash, order.maker, ctx.filler, ctx.newFilled - ctx.prevFilled, outs);
+        emit OrderFilled(ctx.orderHash, order.maker, ctx.filler);
     }
 
     /// @dev Reverse (PostInputs) flow: pay the solver its tokenIn FIRST, let the
@@ -367,7 +371,7 @@ contract UniversalSettlement is NonceManager {
         if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
         outs = _deliverOutputs(order, ctx);
         _runInvariants(order);
-        emit OrderFilled(ctx.orderHash, order.maker, ctx.filler, ctx.newFilled - ctx.prevFilled, outs);
+        emit OrderFilled(ctx.orderHash, order.maker, ctx.filler);
     }
 
     /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —
@@ -409,7 +413,7 @@ contract UniversalSettlement is NonceManager {
         // compute it at most once — sentinel uint256.max = "not yet computed" (a real
         // bump is always ≤ 10000). Lazy so an all-fixed order never calls bumpBps.
         uint256 bump = type(uint256).max;
-        for (uint256 j; j < n; j++) {
+        for (uint256 j; j < n;) {
             uint256 amt;
             if (buy) {
                 // Fixed output — the exact-output guarantee; never overridden.
@@ -441,6 +445,9 @@ contract UniversalSettlement is NonceManager {
                     );
                 }
             }
+            unchecked {
+                ++j;
+            }
         }
     }
 
@@ -448,8 +455,11 @@ contract UniversalSettlement is NonceManager {
     function _snapshotInputs(address[] calldata tokens) internal view returns (uint256[] memory bals) {
         uint256 n = tokens.length;
         bals = new uint256[](n);
-        for (uint256 i; i < n; i++) {
-            bals[i] = IERC20(tokens[i]).balanceOf(address(this));
+        for (uint256 i; i < n;) {
+            bals[i] = SafeTransferLib.balanceOf(tokens[i], address(this));
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -526,14 +536,18 @@ contract UniversalSettlement is NonceManager {
             // Item-free orders have no TAKE proceeds ⇒ proceeds are 0 without a
             // balanceOf (the snapshot was skipped upstream). Item orders measure
             // this fill's proceeds as the balance delta since the snapshot.
-            uint256 proceeds = hasItems ? IERC20(tokenIn).balanceOf(address(this)) - tokenInBefore[i] : 0;
+            uint256 proceeds = hasItems ? SafeTransferLib.balanceOf(tokenIn, address(this)) - tokenInBefore[i] : 0;
             if (proceeds >= owed) {
                 SafeTransferLib.safeTransfer(tokenIn, filler, owed);
-                uint256 surplus = proceeds - owed;
-                if (surplus > 0) SafeTransferLib.safeTransfer(tokenIn, maker, surplus);
+                unchecked {
+                    uint256 surplus = proceeds - owed; // proceeds >= owed
+                    if (surplus > 0) SafeTransferLib.safeTransfer(tokenIn, maker, surplus);
+                }
             } else {
                 if (proceeds > 0) SafeTransferLib.safeTransfer(tokenIn, filler, proceeds);
-                Permit3TransferLib.transferFromWithFallback(PERMIT3, tokenIn, maker, filler, owed - proceeds);
+                unchecked {
+                    Permit3TransferLib.transferFromWithFallback(PERMIT3, tokenIn, maker, filler, owed - proceeds); // owed > proceeds
+                }
             }
         }
     }
@@ -541,12 +555,30 @@ contract UniversalSettlement is NonceManager {
     // ──────────────────── Validators / invariants ────────────────────
 
     function _runValidators(Order calldata order) internal view {
-        for (uint256 i; i < order.validators.length; i++) {
+        uint256 len = order.validators.length;
+        for (uint256 i; i < len;) {
             Validator calldata v = order.validators[i];
-            (bool ok, bytes memory ret) = v.target.staticcall(abi.encodeCall(IOrderValidator.validate, (order, v.data)));
-            if (!ok || ret.length < 32 || !abi.decode(ret, (bool))) {
-                revert ValidationFailed(i);
+            if (!_gatePasses(v.target, order, v.data)) revert ValidationFailed(i);
+            unchecked {
+                ++i;
             }
+        }
+    }
+
+    /// @dev Staticcall `target.validate(order, data)` and return whether it passed
+    ///      (call ok AND ≥32 bytes returned AND the bool word == 1). The single-word
+    ///      return is read into scratch space, avoiding the `bytes memory` return
+    ///      allocation the abstract call would make.
+    function _gatePasses(address target, Order calldata order, bytes calldata data)
+        private
+        view
+        returns (bool pass)
+    {
+        bytes memory cd = abi.encodeCall(IOrderValidator.validate, (order, data));
+        /// @solidity memory-safe-assembly
+        assembly {
+            let ok := staticcall(gas(), target, add(cd, 0x20), mload(cd), 0x00, 0x20)
+            pass := and(and(ok, gt(returndatasize(), 31)), eq(mload(0x00), 1))
         }
     }
 
@@ -554,11 +586,12 @@ contract UniversalSettlement is NonceManager {
     ///      run AFTER items execute, so they can assert on the order's side
     ///      effects (e.g. "maker's Aave health factor ≥ 2.0").
     function _runInvariants(Order calldata order) internal view {
-        for (uint256 i; i < order.invariants.length; i++) {
+        uint256 len = order.invariants.length;
+        for (uint256 i; i < len;) {
             Validator calldata v = order.invariants[i];
-            (bool ok, bytes memory ret) = v.target.staticcall(abi.encodeCall(IOrderValidator.validate, (order, v.data)));
-            if (!ok || ret.length < 32 || !abi.decode(ret, (bool))) {
-                revert InvariantFailed(i);
+            if (!_gatePasses(v.target, order, v.data)) revert InvariantFailed(i);
+            unchecked {
+                ++i;
             }
         }
     }
@@ -700,7 +733,7 @@ contract UniversalSettlement is NonceManager {
             (uint160 allowed, uint48 expiration,) = PERMIT3.tokenAllowance(order.maker, address(this), token);
             uint256 capacity = allowed;
             if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
-            uint256 bal = IERC20(token).balanceOf(order.maker);
+            uint256 bal = SafeTransferLib.balanceOf(token, order.maker);
             if (bal < capacity) capacity = bal;
 
             uint256 perUnitIn = buy ? order.endAmountIn[i] : order.startAmountIn[i];

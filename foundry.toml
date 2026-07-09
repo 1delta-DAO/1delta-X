@@ -8,6 +8,11 @@ script = "packages"
 out = "out"
 libs = ["lib"]
 solc = "0.8.28"
+# Pinned so compiled bytecode + measured gas are identical across environments
+# (local vs CI) — required for the committed `.gas-snapshot` baseline / `make
+# gas-check` to be deterministic. This is already forge's current default; change
+# it only alongside a `make gas` baseline regeneration.
+evm_version = "prague"
 optimizer = true
 optimizer_runs = 200
 

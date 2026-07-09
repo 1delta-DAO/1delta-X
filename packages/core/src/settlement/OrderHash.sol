@@ -39,45 +39,62 @@ library OrderHash {
         "Validator(address target,bytes data)";
 
     /// @notice EIP-712 `hashStruct` of an order.
+    /// @dev The struct hash is `keccak256(abi.encode(TYPEHASH, <22 fields>))`; every
+    ///      dynamic member is pre-hashed to a single word, so the encoding is a flat
+    ///      run of 24 static words. We write them straight into one raw buffer and
+    ///      hash once — equivalent to `abi.encode` of the same 24 fields but without
+    ///      the 3 intermediate encodings + `bytes.concat` copy, and it sidesteps the
+    ///      stack-too-deep that forced the old split. Writing every word means no
+    ///      zero-init is needed. The golden hash test (+ SDK cross-check) pins this
+    ///      byte-for-byte, so any layout mistake fails loudly.
     function hash(Order calldata order) internal pure returns (bytes32) {
-        // Split into two encodings to avoid stack-too-deep.
-        bytes memory head = abi.encode(
-            ORDER_TYPEHASH,
-            order.maker,
-            uint8(order.side),
-            order.nonce,
-            order.deadline,
-            _hashAddresses(order.tokenIn),
-            _hashUints(order.startAmountIn),
-            _hashUints(order.endAmountIn),
-            order.decayStartTime,
-            order.decayDuration
-        );
-        bytes memory mid = abi.encode(
-            _hashAddresses(order.tokenOut),
-            _hashUints(order.startAmountOut),
-            _hashUints(order.endAmountOut),
-            order.exclusiveFiller,
-            order.exclusivityEndTime,
-            order.minFillAnchor,
-            order.exclusivityOverrideBps
-        );
-        bytes memory tail = abi.encode(
-            _hashCurve(order.curve),
-            order.gasBumpBps,
-            order.gasPriceRef,
-            _hashItems(order.items),
-            _hashValidators(order.validators),
-            _hashValidators(order.invariants),
-            order.feeConfig
-        );
-        return keccak256(bytes.concat(head, mid, tail));
+        bytes memory buf;
+        assembly {
+            buf := mload(0x40)
+            mstore(buf, 768) // 24 words
+            mstore(0x40, add(buf, 800)) // bump free-memory pointer past [len(0x20) + 768]
+        }
+        _w(buf, 0, ORDER_TYPEHASH);
+        _w(buf, 1, bytes32(uint256(uint160(order.maker))));
+        _w(buf, 2, bytes32(uint256(uint8(order.side))));
+        _w(buf, 3, bytes32(order.nonce));
+        _w(buf, 4, bytes32(order.deadline));
+        _w(buf, 5, _hashAddresses(order.tokenIn));
+        _w(buf, 6, _hashUints(order.startAmountIn));
+        _w(buf, 7, _hashUints(order.endAmountIn));
+        _w(buf, 8, bytes32(uint256(order.decayStartTime)));
+        _w(buf, 9, bytes32(uint256(order.decayDuration)));
+        _w(buf, 10, _hashAddresses(order.tokenOut));
+        _w(buf, 11, _hashUints(order.startAmountOut));
+        _w(buf, 12, _hashUints(order.endAmountOut));
+        _w(buf, 13, bytes32(uint256(uint160(order.exclusiveFiller))));
+        _w(buf, 14, bytes32(uint256(order.exclusivityEndTime)));
+        _w(buf, 15, bytes32(order.minFillAnchor));
+        _w(buf, 16, bytes32(order.exclusivityOverrideBps));
+        _w(buf, 17, _hashCurve(order.curve));
+        _w(buf, 18, bytes32(order.gasBumpBps));
+        _w(buf, 19, bytes32(order.gasPriceRef));
+        _w(buf, 20, _hashItems(order.items));
+        _w(buf, 21, _hashValidators(order.validators));
+        _w(buf, 22, _hashValidators(order.invariants));
+        _w(buf, 23, order.feeConfig);
+        return keccak256(buf);
+    }
+
+    /// @dev Write `val` as word `idx` of `buf`'s data region.
+    function _w(bytes memory buf, uint256 idx, bytes32 val) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(add(add(buf, 0x20), mul(idx, 0x20)), val)
+        }
     }
 
     function _hashCurve(CurvePoint[] calldata curve) private pure returns (bytes32) {
         bytes32[] memory hashes = new bytes32[](curve.length);
-        for (uint256 i; i < curve.length; i++) {
+        uint256 len = curve.length;
+        for (uint256 i; i < len;) {
             hashes[i] = keccak256(abi.encode(CURVE_POINT_TYPEHASH, curve[i].timeDelta, curve[i].bumpBps));
+            unchecked { ++i; }
         }
         return keccak256(abi.encodePacked(hashes));
     }
@@ -87,8 +104,10 @@ library OrderHash {
     ///      addresses to 20 bytes).
     function _hashAddresses(address[] calldata a) private pure returns (bytes32) {
         bytes32[] memory words = new bytes32[](a.length);
-        for (uint256 i; i < a.length; i++) {
+        uint256 len = a.length;
+        for (uint256 i; i < len;) {
             words[i] = bytes32(uint256(uint160(a[i])));
+            unchecked { ++i; }
         }
         return keccak256(abi.encodePacked(words));
     }
@@ -101,7 +120,8 @@ library OrderHash {
 
     function _hashItems(Item[] calldata items) private pure returns (bytes32) {
         bytes32[] memory hashes = new bytes32[](items.length);
-        for (uint256 i; i < items.length; i++) {
+        uint256 len = items.length;
+        for (uint256 i; i < len;) {
             hashes[i] = keccak256(
                 abi.encode(
                     ITEM_TYPEHASH,
@@ -112,16 +132,19 @@ library OrderHash {
                     keccak256(items[i].data)
                 )
             );
+            unchecked { ++i; }
         }
         return keccak256(abi.encodePacked(hashes));
     }
 
     function _hashValidators(Validator[] calldata validators) private pure returns (bytes32) {
         bytes32[] memory hashes = new bytes32[](validators.length);
-        for (uint256 i; i < validators.length; i++) {
+        uint256 len = validators.length;
+        for (uint256 i; i < len;) {
             hashes[i] = keccak256(
                 abi.encode(VALIDATOR_TYPEHASH, validators[i].target, keccak256(validators[i].data))
             );
+            unchecked { ++i; }
         }
         return keccak256(abi.encodePacked(hashes));
     }

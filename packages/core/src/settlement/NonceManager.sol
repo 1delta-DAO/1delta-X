@@ -25,8 +25,10 @@ abstract contract NonceManager {
 
     /// @notice Cancel a list of the caller's order nonces.
     function cancelOrders(uint256[] calldata noncesToCancel) external {
-        for (uint256 i; i < noncesToCancel.length; i++) {
+        uint256 len = noncesToCancel.length;
+        for (uint256 i; i < len;) {
             _cancelNonce(msg.sender, noncesToCancel[i]);
+            unchecked { ++i; }
         }
         emit OrdersCancelled(msg.sender, noncesToCancel);
     }

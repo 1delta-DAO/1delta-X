@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {ITakerModule} from "../interfaces/ITakerModule.sol";
 import {EIP712} from "./EIP712.sol";
 import {SignatureVerification} from "./SignatureVerification.sol";
+import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
 /// @title Permit3
 /// @notice Unified allowance hub for ERC20 transfers *and* protocol taker ops
@@ -256,7 +256,8 @@ contract Permit3 is IPermit3, EIP712 {
 
     function _hashTokenPermits(TokenPermit[] calldata permits) private pure returns (bytes32) {
         bytes32[] memory hashes = new bytes32[](permits.length);
-        for (uint256 i; i < permits.length; i++) {
+        uint256 len = permits.length;
+        for (uint256 i; i < len;) {
             hashes[i] = keccak256(
                 abi.encode(
                     _TOKEN_PERMIT_TYPEHASH,
@@ -266,13 +267,15 @@ contract Permit3 is IPermit3, EIP712 {
                     permits[i].expiration
                 )
             );
+            unchecked { ++i; }
         }
         return keccak256(abi.encodePacked(hashes));
     }
 
     function _hashTakerPermits(TakerPermit[] calldata permits) private pure returns (bytes32) {
         bytes32[] memory hashes = new bytes32[](permits.length);
-        for (uint256 i; i < permits.length; i++) {
+        uint256 len = permits.length;
+        for (uint256 i; i < len;) {
             hashes[i] = keccak256(
                 abi.encode(
                     _TAKER_PERMIT_TYPEHASH,
@@ -282,6 +285,7 @@ contract Permit3 is IPermit3, EIP712 {
                     permits[i].expiration
                 )
             );
+            unchecked { ++i; }
         }
         return keccak256(abi.encodePacked(hashes));
     }
@@ -303,18 +307,22 @@ contract Permit3 is IPermit3, EIP712 {
     }
 
     function _applyBatch(address owner, PermitBatch calldata batch) private {
-        for (uint256 i; i < batch.tokens.length; i++) {
+        uint256 tokensLen = batch.tokens.length;
+        for (uint256 i; i < tokensLen;) {
             TokenPermit calldata p = batch.tokens[i];
             // Single packed store per leg — see `approveToken`.
             _tokenAllowance[owner][p.spender][p.token] =
                 PackedAllowance({amount: p.amount, expiration: p.expiration, nonce: 0});
             emit TokenApproval(owner, p.spender, p.token, p.amount, p.expiration);
+            unchecked { ++i; }
         }
-        for (uint256 i; i < batch.takers.length; i++) {
+        uint256 takersLen = batch.takers.length;
+        for (uint256 i; i < takersLen;) {
             TakerPermit calldata p = batch.takers[i];
             _takerAllowance[owner][p.spender][p.ref] =
                 PackedAllowance({amount: p.amount, expiration: p.expiration, nonce: 0});
             emit TakerApproval(owner, p.spender, p.ref, p.amount, p.expiration);
+            unchecked { ++i; }
         }
     }
 
@@ -322,7 +330,10 @@ contract Permit3 is IPermit3, EIP712 {
 
     function _transferFrom(address from, address to, address token, uint160 amount) private {
         _spend(_tokenAllowance[from][msg.sender][token], amount);
-        IERC20(token).transferFrom(from, to, amount);
+        // Assembly safe-transfer: reverts on a `false` return or a no-code token,
+        // and allocates no memory (previously a raw `IERC20.transferFrom` with no
+        // success check).
+        SafeTransferLib.safeTransferFrom(token, from, to, amount);
     }
 
     function _spend(PackedAllowance storage a, uint160 amount) private {

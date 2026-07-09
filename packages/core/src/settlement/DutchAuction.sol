@@ -104,12 +104,15 @@ library DutchAuction {
         outs = new uint256[](n);
         uint256 bump;
         bool bumpSet;
-        for (uint256 j; j < n; j++) {
+        for (uint256 j; j < n;) {
             if (order.startAmountOut[j] != order.endAmountOut[j] && !bumpSet) {
                 bump = bumpBps(order);
                 bumpSet = true;
             }
             outs[j] = amountOutAt(order, j, bump);
+            unchecked {
+                ++j;
+            }
         }
     }
 
@@ -143,12 +146,15 @@ library DutchAuction {
         ins = new uint256[](n);
         uint256 bump;
         bool bumpSet;
-        for (uint256 i; i < n; i++) {
+        for (uint256 i; i < n;) {
             if (order.startAmountIn[i] != order.endAmountIn[i] && !bumpSet) {
                 bump = bumpBps(order);
                 bumpSet = true;
             }
             ins[i] = amountInAt(order, i, bump);
+            unchecked {
+                ++i;
+            }
         }
     }
 }
