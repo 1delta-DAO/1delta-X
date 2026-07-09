@@ -331,7 +331,8 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            feeConfig: bytes32(0)
         });
     }
 }

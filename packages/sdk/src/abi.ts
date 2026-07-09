@@ -42,6 +42,7 @@ export const orderComponents = [
   { name: "items", type: "tuple[]", components: itemComponents },
   { name: "validators", type: "tuple[]", components: validatorComponents },
   { name: "invariants", type: "tuple[]", components: validatorComponents },
+  { name: "feeConfig", type: "bytes32" },
 ] as const;
 
 const tokenPermitComponents = [

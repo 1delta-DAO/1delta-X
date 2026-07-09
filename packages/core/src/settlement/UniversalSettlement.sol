@@ -8,6 +8,7 @@ import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
+import {FeeConfig} from "../utils/FeeConfig.sol";
 
 // Re-exported so downstream files can keep importing the order types from here.
 import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint} from "./SettlementStructs.sol";
@@ -81,6 +82,9 @@ contract UniversalSettlement is NonceManager {
     error OnlySelf();
     error BatchFillIncomplete(uint256 index);
     error ReverseModeRequiresNoItems();
+    /// @dev Fee over `MAX_FEE_BPS`, or a non-zero fee with a zero recipient
+    ///      (which would otherwise burn the skim to `address(0)`).
+    error InvalidFee();
 
     /// @notice Where the solver callback runs relative to settlement, chosen by
     ///         the filler in `fillWithCallback`.
@@ -386,6 +390,15 @@ contract UniversalSettlement is NonceManager {
         bool buy = order.side == OrderSide.BUY;
         uint256 anchor = ctx.anchor;
         uint256 fillAmount = ctx.newFilled - ctx.prevFilled;
+        // Optional sourcing fee: skim `feeBps` of each delivered leg to the fee
+        // recipient. The solver's total delivery is unchanged (amt = maker + fee);
+        // the maker forgoes the fee, having signed `feeConfig`. `outs[j]` records
+        // the GROSS `amt` so events/previews stay solver-denominated.
+        (address feeRecipient, uint256 feeBps) = FeeConfig.unpack(order.feeConfig);
+        // Bound the fee and forbid a non-zero fee with no recipient (would burn
+        // the skim to address(0)). feeBps == 0 disables the skim entirely.
+        if (feeBps > FeeConfig.MAX_FEE_BPS) revert InvalidFee();
+        if (feeBps != 0 && feeRecipient == address(0)) revert InvalidFee();
         for (uint256 j; j < n; j++) {
             uint256 amt;
             if (buy) {
@@ -400,7 +413,18 @@ contract UniversalSettlement is NonceManager {
             }
             outs[j] = amt;
             if (amt != 0) {
-                Permit3TransferLib.transferFromWithFallback(PERMIT3, order.tokenOut[j], ctx.filler, order.maker, amt);
+                // fee floors, so the maker keeps the rounding remainder.
+                uint256 fee = feeBps == 0 ? 0 : (amt * feeBps) / 10_000;
+                if (amt - fee != 0) {
+                    Permit3TransferLib.transferFromWithFallback(
+                        PERMIT3, order.tokenOut[j], ctx.filler, order.maker, amt - fee
+                    );
+                }
+                if (fee != 0) {
+                    Permit3TransferLib.transferFromWithFallback(
+                        PERMIT3, order.tokenOut[j], ctx.filler, feeRecipient, fee
+                    );
+                }
             }
         }
     }
@@ -753,6 +777,12 @@ contract UniversalSettlement is NonceManager {
         if (order.gasBumpBps != 0) {
             if (order.gasPriceRef == 0) return (false, "gasBump without gasPriceRef");
             if (order.gasBumpBps > 10_000) return (false, "gasBumpBps > 10000");
+        }
+        // ── sourcing fee ──
+        {
+            (address feeRecipient, uint256 feeBps) = FeeConfig.unpack(order.feeConfig);
+            if (feeBps > FeeConfig.MAX_FEE_BPS) return (false, "feeBps > MAX_FEE_BPS");
+            if (feeBps != 0 && feeRecipient == address(0)) return (false, "fee set without recipient");
         }
 
         // ── current fillability (time/state-dependent) ──

@@ -49,6 +49,7 @@ export const ORDER_TYPE = [
   { name: "items", type: "Item[]" },
   { name: "validators", type: "Validator[]" },
   { name: "invariants", type: "Validator[]" },
+  { name: "feeConfig", type: "bytes32" },
 ] as const;
 
 export const TOKEN_PERMIT_TYPE = [

@@ -75,11 +75,12 @@ pays). These pull from the maker's wallet, which holds `tokenOut`
 only because the solver just paid it there.
 
 ```
-item.amount ≤ endAmountOut   (for MAKE items funded by tokenOut)
+item.amount ≤ endAmountOut · (1 − feeBps/10000)   (for MAKE items funded by tokenOut)
 ```
 
-If `item.amount > endAmountOut`, a late fill (when the solver pays
-only `endAmountOut`) can't fund the module's pull → tx reverts.
+(Without a sourcing fee, `feeBps = 0` and this is just `item.amount ≤
+endAmountOut`.) If `item.amount` exceeds this, a late fill (when the solver pays
+only `endAmountOut` and the fee is then skimmed) can't fund the module's pull → tx reverts.
 This is a malformed order, not a security issue — the revert
 protects the user.
 
@@ -136,6 +137,40 @@ maker's/solver's responsibility. A maker who wants aggregator-style protection
 can attach a post-execution **invariant** asserting *"my `tokenOut` balance
 increased by ≥ N"* (see Validators/invariants), which reverts the whole fill if
 the fee eats into the floor.
+
+### Optional order-sourcing fee (`feeConfig`)
+
+An order may carry an **optional** fee that rewards whoever *sourced* it (a
+frontend/app), packed into a single `bytes32 feeConfig`:
+
+```
+bits   0..159  → fee recipient (address)   — low 20 bytes
+bits 160..255  → fee in bps                — high 12 bytes
+bytes32(0)     → no fee
+```
+
+The fee is **skimmed from the maker's `tokenOut` delivery**: for each output
+leg, `feeBps` goes to the recipient and the maker receives the rest. The
+**solver's total delivery is unchanged** (`amt` = maker share + fee) — the maker
+forgoes the fee, having signed `feeConfig` into the order. Properties:
+
+- **No fee switch.** There is no protocol owner, no global toggle, no default
+  fee. The fee lives entirely in the signed order; a solver can neither inject
+  nor inflate it.
+- **Optional & bounded.** `feeConfig == 0` → zero overhead, identical to no fee.
+  `feeBps` is capped at `FeeConfig.MAX_FEE_BPS` (10%); a larger value reverts
+  with `FeeTooHigh` at fill and is flagged by `validateOrder`.
+- **Pro-rata for free.** The fee is a bps of each fill's delivered amount, so it
+  scales correctly across partial fills with no extra accounting. `filled`,
+  `OrderFilled`, and `previewAmountOut` stay **gross** (solver-denominated); the
+  maker nets `amt · (1 − feeBps/10000)`.
+- **Compatible with lending items.** The skim touches only the conversion
+  `tokenOut` delivery — MAKE funding, TAKE proceeds, item chaining, and the
+  solver `tokenIn` payout are untouched. The only interaction is the tightened
+  MAKE-item sizing bound above (a fee reduces the `tokenOut` available to fund a
+  tokenOut-funded deposit).
+
+Build the value with `FeeConfig.pack(recipient, feeBps)`.
 
 ### Funding: Permit3 or direct approval
 

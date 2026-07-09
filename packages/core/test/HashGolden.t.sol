@@ -84,13 +84,15 @@ contract HashGoldenTest is Test {
             gasPriceRef: 30_000_000_000,
             items: items,
             validators: validators,
-            invariants: invariants
+            invariants: invariants,
+            // Non-zero fee: recipient 0xFEE with 50 bps — cross-checks feeConfig packing.
+            feeConfig: bytes32((uint256(50) << 160) | uint256(0xFEE))
         });
     }
 
     /// @dev The TypeScript SDK (`packages/sdk`) asserts this SAME constant for the
     ///      same canonical order — cross-verifying its EIP-712 typed-data defs.
-    bytes32 constant GOLDEN_ORDER_HASH = 0x37bcfdb7b3c44e91f77ea7f45229565a73c19c2502411ab374f27ec906a22f01;
+    bytes32 constant GOLDEN_ORDER_HASH = 0x83b0a830463e9914771bd5b3263107a8f7a894b32f5aa4ed0d91acc16631aba4;
 
     function test_goldenOrderHash() public view {
         assertEq(settlement.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");

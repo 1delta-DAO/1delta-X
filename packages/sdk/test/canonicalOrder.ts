@@ -45,7 +45,9 @@ export const CANONICAL_ORDER: Order = {
   ],
   validators: [{ target: A("0x0000000000000000000000000000000000000e01"), data: "0xdead" }],
   invariants: [{ target: A("0x0000000000000000000000000000000000000e02"), data: "0xbeef" }],
+  // Non-zero fee: recipient 0xFEE with 50 bps (high bits = bps, low 160 = recipient).
+  feeConfig: "0x0000000000000000000000320000000000000000000000000000000000000fee",
 };
 
 /// Emitted by `HashGolden.t.sol` (Solidity `settlement.hashOrder`).
-export const GOLDEN_ORDER_HASH = "0x37bcfdb7b3c44e91f77ea7f45229565a73c19c2502411ab374f27ec906a22f01";
+export const GOLDEN_ORDER_HASH = "0x83b0a830463e9914771bd5b3263107a8f7a894b32f5aa4ed0d91acc16631aba4";

@@ -73,6 +73,12 @@ export interface Order {
   items: readonly Item[];
   validators: readonly Validator[];
   invariants: readonly Validator[];
+  /**
+   * Optional order-sourcing fee, packed into one word: low 160 bits = fee
+   * recipient (address), high bits = fee in bps. `0x00…0` (bytes32 zero) = no
+   * fee. The fee is skimmed from the maker's tokenOut delivery to the recipient.
+   */
+  feeConfig: `0x${string}`;
 }
 
 /// Permit3 token-book permit (Settlement/module may pull `token`).

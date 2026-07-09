@@ -88,7 +88,8 @@ contract UsdrifExitTest is UsdrifForkBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: validators,
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            feeConfig: bytes32(0)
         });
     }
 

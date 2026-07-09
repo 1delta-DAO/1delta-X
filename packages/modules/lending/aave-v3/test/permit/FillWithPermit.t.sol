@@ -60,7 +60,8 @@ contract FillWithPermitTest is AaveModulesBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            feeConfig: bytes32(0)
         });
 
         // Build the permit batch the fill needs:

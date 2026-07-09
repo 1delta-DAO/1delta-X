@@ -117,4 +117,7 @@ struct Order {
     Item[] items;
     Validator[] validators; //       pre-execution trigger conditions; AND-composed
     Validator[] invariants; //       post-execution invariants; AND-composed
+    bytes32 feeConfig; //            optional order-sourcing fee, packed: low 160 bits =
+    //                               recipient, high bits = fee in bps. bytes32(0) = no fee.
+    //                               Skimmed from the maker's tokenOut delivery. See {FeeConfig}.
 }

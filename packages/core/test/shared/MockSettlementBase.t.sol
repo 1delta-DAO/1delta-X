@@ -144,7 +144,8 @@ abstract contract MockSettlementBase is Test {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            feeConfig: bytes32(0)
         });
     }
 
@@ -181,7 +182,8 @@ abstract contract MockSettlementBase is Test {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            feeConfig: bytes32(0)
         });
     }
 
@@ -217,7 +219,8 @@ abstract contract MockSettlementBase is Test {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            feeConfig: bytes32(0)
         });
     }
 
@@ -238,7 +241,7 @@ abstract contract MockSettlementBase is Test {
         "Order witness)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,bytes32 feeConfig)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -312,7 +315,7 @@ abstract contract MockSettlementBase is Test {
     bytes32 constant ITEM_TH = keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,bytes32 feeConfig)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
@@ -391,7 +394,8 @@ abstract contract MockSettlementBase is Test {
             o.gasPriceRef,
             _hashItems(o.items),
             _hashValidators(o.validators),
-            _hashValidators(o.invariants)
+            _hashValidators(o.invariants),
+            o.feeConfig
         );
         return keccak256(bytes.concat(head, mid, tail));
     }

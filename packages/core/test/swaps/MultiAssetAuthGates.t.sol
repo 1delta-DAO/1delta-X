@@ -103,7 +103,8 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: validators,
-            invariants: invariants
+            invariants: invariants,
+            feeConfig: bytes32(0)
         });
     }
 
@@ -168,7 +169,8 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: _noV(),
-            invariants: _noV()
+            invariants: _noV(),
+            feeConfig: bytes32(0)
         });
 
         // Two token permits — one per input leg — all endorsed by the order witness.
