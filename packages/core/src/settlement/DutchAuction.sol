@@ -72,24 +72,55 @@ library DutchAuction {
         if (bps > BPS) bps = BPS;
     }
 
+    /// @notice Output tick for leg `j` given a PRECOMPUTED shared `bump` (bps).
+    ///         `pure` — the caller computes `bumpBps(order)` once per fill and
+    ///         reuses it across every leg (the bump is shared by all legs), so a
+    ///         basket doesn't recompute the curve/gas-bump per leg. Fixed legs
+    ///         (`start == end`) ignore `bump` entirely.
+    function amountOutAt(Order calldata order, uint256 j, uint256 bump) internal pure returns (uint256) {
+        uint256 startOut = order.startAmountOut[j];
+        uint256 endOut = order.endAmountOut[j];
+        if (startOut < endOut) revert InvalidAuctionParams();
+        if (startOut == endOut) return startOut; // fixed leg — no bump
+        return startOut - ((startOut - endOut) * bump) / BPS;
+    }
+
     /// @notice Current auction tick for output leg `j` (SELL: falling; BUY: fixed).
     function currentAmountOutAt(Order calldata order, uint256 j) internal view returns (uint256) {
         uint256 startOut = order.startAmountOut[j];
         uint256 endOut = order.endAmountOut[j];
         if (startOut < endOut) revert InvalidAuctionParams();
-        if (startOut == endOut) return startOut; // fixed leg — no bump
+        if (startOut == endOut) return startOut; // fixed leg — no bump (skip bumpBps)
 
         uint256 decay = ((startOut - endOut) * bumpBps(order)) / BPS;
         return startOut - decay;
     }
 
-    /// @notice Current auction tick for every output leg.
+    /// @notice Current auction tick for every output leg. Computes the shared
+    ///         `bump` at most ONCE (lazily, only if some leg actually decays — so
+    ///         an all-fixed order never calls `bumpBps`, preserving its behavior).
     function currentAmountOut(Order calldata order) internal view returns (uint256[] memory outs) {
         uint256 n = order.tokenOut.length;
         outs = new uint256[](n);
+        uint256 bump;
+        bool bumpSet;
         for (uint256 j; j < n; j++) {
-            outs[j] = currentAmountOutAt(order, j);
+            if (order.startAmountOut[j] != order.endAmountOut[j] && !bumpSet) {
+                bump = bumpBps(order);
+                bumpSet = true;
+            }
+            outs[j] = amountOutAt(order, j, bump);
         }
+    }
+
+    /// @notice Input tick for leg `i` given a PRECOMPUTED shared `bump` (bps).
+    ///         `pure` counterpart of `amountOutAt` — see it for the rationale.
+    function amountInAt(Order calldata order, uint256 i, uint256 bump) internal pure returns (uint256) {
+        uint256 startIn = order.startAmountIn[i];
+        uint256 endIn = order.endAmountIn[i];
+        if (startIn > endIn) revert InvalidAuctionParams();
+        if (startIn == endIn) return startIn; // fixed leg — no bump
+        return startIn + ((endIn - startIn) * bump) / BPS;
     }
 
     /// @notice Current auction tick for input leg `i` (BUY: rising; SELL: fixed).
@@ -99,18 +130,25 @@ library DutchAuction {
         uint256 startIn = order.startAmountIn[i];
         uint256 endIn = order.endAmountIn[i];
         if (startIn > endIn) revert InvalidAuctionParams();
-        if (startIn == endIn) return startIn; // fixed leg — no bump
+        if (startIn == endIn) return startIn; // fixed leg — no bump (skip bumpBps)
 
         uint256 rise = ((endIn - startIn) * bumpBps(order)) / BPS;
         return startIn + rise;
     }
 
-    /// @notice Current auction tick for every input leg.
+    /// @notice Current auction tick for every input leg. Shared `bump` computed at
+    ///         most once (lazily), as in `currentAmountOut`.
     function currentAmountIn(Order calldata order) internal view returns (uint256[] memory ins) {
         uint256 n = order.tokenIn.length;
         ins = new uint256[](n);
+        uint256 bump;
+        bool bumpSet;
         for (uint256 i; i < n; i++) {
-            ins[i] = currentAmountInAt(order, i);
+            if (order.startAmountIn[i] != order.endAmountIn[i] && !bumpSet) {
+                bump = bumpBps(order);
+                bumpSet = true;
+            }
+            ins[i] = amountInAt(order, i, bump);
         }
     }
 }

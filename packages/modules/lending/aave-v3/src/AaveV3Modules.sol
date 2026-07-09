@@ -128,8 +128,11 @@ contract AaveV3RepayModule is IMakerModule {
         uint256 rateMode;
         uint256 toRepay;
         {
+            // (pool, asset) already decoded by the caller — decode only the tail
+            // (rateMode @64, debtToken @96) via a calldata slice instead of
+            // re-decoding all four fields.
             address debtToken;
-            (,, rateMode, debtToken) = abi.decode(data, (address, address, uint256, address));
+            (rateMode, debtToken) = abi.decode(data[64:], (uint256, address));
             uint256 debt = IERC20(debtToken).balanceOf(onBehalfOf);
             toRepay = amount < debt ? amount : debt;
         }

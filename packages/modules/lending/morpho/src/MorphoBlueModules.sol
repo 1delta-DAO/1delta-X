@@ -55,7 +55,9 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
         );
 
         permit3.transferFrom(onBehalfOf, address(this), marketParams.collateralToken, uint160(amount));
-        SafeTransferLib.forceApprove(marketParams.collateralToken, address(morpho), amount);
+        // `morpho` is an immutable, trusted target → a standing max approval is safe
+        // and skips the approve SSTORE on repeat supplies.
+        SafeTransferLib.ensureApproval(marketParams.collateralToken, address(morpho), amount);
         morpho.supplyCollateral(marketParams, amount, onBehalfOf, "");
     }
 }
@@ -129,11 +131,11 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
                 // Take custody of the full signed ceiling, then repay with empty
                 // callback data so Morpho pulls the exact accrued assets straight
                 // from this module. The unpulled surplus stays here as residual to
-                // be recycled below. Reset the leftover allowance afterwards.
+                // be recycled below. `morpho` is immutable/trusted, so we leave the
+                // standing max approval (no reset) to skip the SSTORE churn.
                 permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(amount));
-                SafeTransferLib.forceApprove(loanToken, address(morpho), amount);
+                SafeTransferLib.ensureApproval(loanToken, address(morpho), amount);
                 morpho.repay(marketParams, 0, borrowShares, onBehalfOf, "");
-                SafeTransferLib.forceApprove(loanToken, address(morpho), 0);
             } else {
                 // Pull-exact via `onMorphoRepay`: no buffer is pre-pulled, so the
                 // surplus stays in the maker's wallet and nothing sits here.
@@ -182,7 +184,7 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
         if (assets > cap) revert BufferTooSmall();
 
         permit3.transferFrom(user, address(this), loanToken, uint160(assets));
-        SafeTransferLib.forceApprove(loanToken, address(morpho), assets);
+        SafeTransferLib.ensureApproval(loanToken, address(morpho), assets);
     }
 }
 

@@ -41,4 +41,18 @@ library SafeTransferLib {
         (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20.approve, (spender, amount)));
         return ok && (ret.length == 0 || abi.decode(ret, (bool)));
     }
+
+    /// @dev Idempotent max-approval: if the current allowance already covers
+    ///      `amount`, do nothing (skips the SSTORE on repeat calls); otherwise set
+    ///      an infinite allowance once. Saves the per-call approve churn.
+    ///
+    ///      SECURITY: only safe when `spender` is a TRUSTED, PINNED address (e.g. an
+    ///      immutable protocol). Do NOT use with a spender decoded from caller/order
+    ///      data on a shared contract — a standing max allowance to an
+    ///      attacker-chosen spender lets it drain any future balance of `token`.
+    function ensureApproval(address token, address spender, uint256 amount) internal {
+        if (IERC20(token).allowance(address(this), spender) < amount) {
+            forceApprove(token, spender, type(uint256).max);
+        }
+    }
 }

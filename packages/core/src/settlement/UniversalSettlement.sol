@@ -259,6 +259,9 @@ contract UniversalSettlement is NonceManager {
         uint256 newFilled; //    cumulative filled after this fill
         uint256 overrideBps; //  soft-exclusivity improvement (0 = none)
         address filler; //       who is paid / delivers
+        bool fullFill; //        prevFilled == 0 && newFilled == anchor: the whole
+        //                       order in one shot ⇒ every pro-rata slice is the
+        //                       leg's full amount, skipping the mul/div.
     }
 
     function _fillCore(
@@ -314,7 +317,7 @@ contract UniversalSettlement is NonceManager {
         uint256 newFilled = prevFilled + fillAmount;
         if (newFilled > anchor) revert OverFill();
         filled[orderHash] = newFilled;
-        ctx = FillCtx(orderHash, anchor, prevFilled, newFilled, overrideBps, filler);
+        ctx = FillCtx(orderHash, anchor, prevFilled, newFilled, overrideBps, filler, prevFilled == 0 && newFilled == anchor);
     }
 
     /// @dev Forward flow: optional callback → deliver outputs → items → pay
@@ -332,10 +335,14 @@ contract UniversalSettlement is NonceManager {
         outs = _deliverOutputs(order, ctx);
 
         // Snapshot each tokenIn before items so the payout uses ONLY this fill's
-        // TAKE proceeds — never a pre-existing/donated Settlement balance.
-        uint256[] memory tokenInBefore = _snapshotInputs(order.tokenIn);
+        // TAKE proceeds — never a pre-existing/donated Settlement balance. Skipped
+        // for item-free orders: with no TAKE legs there are no proceeds, so the
+        // snapshot + the balanceOf re-read in `_payInputsToSolver` would just burn
+        // two STATICCALLs per input leg on every plain swap.
+        bool hasItems = order.items.length != 0;
+        uint256[] memory tokenInBefore = hasItems ? _snapshotInputs(order.tokenIn) : new uint256[](0);
         _executeItems(order, ctx);
-        _payInputsToSolver(order, ctx, tokenInBefore);
+        _payInputsToSolver(order, ctx, tokenInBefore, hasItems);
         _runInvariants(order);
         emit OrderFilled(ctx.orderHash, order.maker, ctx.filler, ctx.newFilled - ctx.prevFilled, outs);
     }
@@ -353,10 +360,10 @@ contract UniversalSettlement is NonceManager {
         bytes memory callbackData
     ) internal returns (uint256[] memory outs) {
         if (order.items.length != 0) revert ReverseModeRequiresNoItems();
-        // No items ⇒ no TAKE proceeds; the snapshot delta is 0 so
-        // `_payInputsToSolver` pulls exactly `owed` from the maker → solver.
-        uint256[] memory before = _snapshotInputs(order.tokenIn);
-        _payInputsToSolver(order, ctx, before);
+        // No items ⇒ no TAKE proceeds ⇒ proceeds are 0 by construction, so
+        // `_payInputsToSolver` (hasItems=false) pulls exactly `owed` from the
+        // maker → solver with no balance snapshot needed.
+        _payInputsToSolver(order, ctx, new uint256[](0), false);
         if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
         outs = _deliverOutputs(order, ctx);
         _runInvariants(order);
@@ -389,7 +396,6 @@ contract UniversalSettlement is NonceManager {
         outs = new uint256[](n);
         bool buy = order.side == OrderSide.BUY;
         uint256 anchor = ctx.anchor;
-        uint256 fillAmount = ctx.newFilled - ctx.prevFilled;
         // Optional sourcing fee: skim `feeBps` of each delivered leg to the fee
         // recipient. The solver's total delivery is unchanged (amt = maker + fee);
         // the maker forgoes the fee, having signed `feeConfig`. `outs[j]` records
@@ -399,14 +405,23 @@ contract UniversalSettlement is NonceManager {
         // the skim to address(0)). feeBps == 0 disables the skim entirely.
         if (feeBps > FeeConfig.MAX_FEE_BPS) revert InvalidFee();
         if (feeBps != 0 && feeRecipient == address(0)) revert InvalidFee();
+        // SELL outputs are auction-priced; the decay bump is shared by all legs, so
+        // compute it at most once — sentinel uint256.max = "not yet computed" (a real
+        // bump is always ≤ 10000). Lazy so an all-fixed order never calls bumpBps.
+        uint256 bump = type(uint256).max;
         for (uint256 j; j < n; j++) {
             uint256 amt;
             if (buy) {
                 // Fixed output — the exact-output guarantee; never overridden.
                 uint256 fixedOut = order.startAmountOut[j];
-                amt = _ceilDiv(fixedOut * ctx.newFilled, anchor) - _ceilDiv(fixedOut * ctx.prevFilled, anchor);
+                amt = ctx.fullFill
+                    ? fixedOut
+                    : _ceilDiv(fixedOut * ctx.newFilled, anchor) - _ceilDiv(fixedOut * ctx.prevFilled, anchor);
             } else {
-                amt = _ceilDiv(fillAmount * order.currentAmountOutAt(j), anchor);
+                if (order.startAmountOut[j] != order.endAmountOut[j] && bump == type(uint256).max) {
+                    bump = order.bumpBps();
+                }
+                amt = _ceilDiv((ctx.newFilled - ctx.prevFilled) * order.amountOutAt(j, bump), anchor);
                 // Soft-exclusivity override: a non-exclusive in-window filler must
                 // deliver MORE output (the auction leg moves toward the maker).
                 if (ctx.overrideBps != 0) amt = _ceilDiv(amt * (10_000 + ctx.overrideBps), 10_000);
@@ -445,7 +460,9 @@ contract UniversalSettlement is NonceManager {
     function _executeItems(Order calldata order, FillCtx memory ctx) internal {
         for (uint256 i; i < order.items.length; i++) {
             Item calldata item = order.items[i];
-            uint256 slice = (item.amount * ctx.newFilled) / ctx.anchor - (item.amount * ctx.prevFilled) / ctx.anchor;
+            uint256 slice = ctx.fullFill
+                ? item.amount
+                : (item.amount * ctx.newFilled) / ctx.anchor - (item.amount * ctx.prevFilled) / ctx.anchor;
             if (slice == 0) continue;
 
             if (item.op == ItemOp.MAKE) {
@@ -475,28 +492,41 @@ contract UniversalSettlement is NonceManager {
     ///      shortfall is pulled from the maker via Permit3 (falling back to a
     ///      direct ERC20 transferFrom if the maker approved Settlement directly);
     ///      any surplus proceeds are returned to the maker, not stranded.
-    function _payInputsToSolver(Order calldata order, FillCtx memory ctx, uint256[] memory tokenInBefore) internal {
+    function _payInputsToSolver(
+        Order calldata order,
+        FillCtx memory ctx,
+        uint256[] memory tokenInBefore,
+        bool hasItems
+    ) internal {
         address maker = order.maker;
         address filler = ctx.filler;
         uint256 anchor = ctx.anchor;
         bool buy = order.side == OrderSide.BUY;
         uint256 fillAmount = ctx.newFilled - ctx.prevFilled;
+        // BUY inputs are auction-priced; shared bump computed once (sentinel = max).
+        uint256 bump = type(uint256).max;
         for (uint256 i; i < order.tokenIn.length; i++) {
             uint256 owed;
             if (buy) {
-                owed = (fillAmount * order.currentAmountInAt(i)) / anchor;
+                if (order.startAmountIn[i] != order.endAmountIn[i] && bump == type(uint256).max) {
+                    bump = order.bumpBps();
+                }
+                owed = (fillAmount * order.amountInAt(i, bump)) / anchor;
                 // Soft-exclusivity override: a non-exclusive in-window filler must
                 // charge LESS input (the auction leg moves toward the maker).
                 if (ctx.overrideBps != 0) owed = (owed * (10_000 - ctx.overrideBps)) / 10_000;
             } else {
                 // Fixed input — the exact-input guarantee; never overridden.
                 uint256 amt = order.startAmountIn[i];
-                owed = (amt * ctx.newFilled) / anchor - (amt * ctx.prevFilled) / anchor;
+                owed = ctx.fullFill ? amt : (amt * ctx.newFilled) / anchor - (amt * ctx.prevFilled) / anchor;
             }
             if (owed == 0) continue;
 
             address tokenIn = order.tokenIn[i];
-            uint256 proceeds = IERC20(tokenIn).balanceOf(address(this)) - tokenInBefore[i];
+            // Item-free orders have no TAKE proceeds ⇒ proceeds are 0 without a
+            // balanceOf (the snapshot was skipped upstream). Item orders measure
+            // this fill's proceeds as the balance delta since the snapshot.
+            uint256 proceeds = hasItems ? IERC20(tokenIn).balanceOf(address(this)) - tokenInBefore[i] : 0;
             if (proceeds >= owed) {
                 SafeTransferLib.safeTransfer(tokenIn, filler, owed);
                 uint256 surplus = proceeds - owed;

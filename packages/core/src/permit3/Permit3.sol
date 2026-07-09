@@ -89,9 +89,12 @@ contract Permit3 is IPermit3, EIP712 {
     // ──────────────────── Token side ────────────────────
 
     function approveToken(address spender, address token, uint160 amount, uint48 expiration) external override {
-        PackedAllowance storage a = _tokenAllowance[msg.sender][spender][token];
-        a.amount = amount;
-        a.expiration = expiration;
+        // Single packed store (amount+expiration+nonce share one slot). The
+        // allowance-level `nonce` is unused here — replay of signed batches is
+        // guarded by `permitNonceBitmap` — so writing 0 is behavior-preserving and
+        // costs one SSTORE instead of two field-level read-modify-writes.
+        _tokenAllowance[msg.sender][spender][token] =
+            PackedAllowance({amount: amount, expiration: expiration, nonce: 0});
         emit TokenApproval(msg.sender, spender, token, amount, expiration);
     }
 
@@ -122,9 +125,9 @@ contract Permit3 is IPermit3, EIP712 {
     // ──────────────────── Taker side ────────────────────
 
     function approveTaker(address spender, bytes32 ref, uint160 amount, uint48 expiration) external override {
-        PackedAllowance storage a = _takerAllowance[msg.sender][spender][ref];
-        a.amount = amount;
-        a.expiration = expiration;
+        // Single packed store — see `approveToken`.
+        _takerAllowance[msg.sender][spender][ref] =
+            PackedAllowance({amount: amount, expiration: expiration, nonce: 0});
         emit TakerApproval(msg.sender, spender, ref, amount, expiration);
     }
 
@@ -302,16 +305,15 @@ contract Permit3 is IPermit3, EIP712 {
     function _applyBatch(address owner, PermitBatch calldata batch) private {
         for (uint256 i; i < batch.tokens.length; i++) {
             TokenPermit calldata p = batch.tokens[i];
-            PackedAllowance storage a = _tokenAllowance[owner][p.spender][p.token];
-            a.amount = p.amount;
-            a.expiration = p.expiration;
+            // Single packed store per leg — see `approveToken`.
+            _tokenAllowance[owner][p.spender][p.token] =
+                PackedAllowance({amount: p.amount, expiration: p.expiration, nonce: 0});
             emit TokenApproval(owner, p.spender, p.token, p.amount, p.expiration);
         }
         for (uint256 i; i < batch.takers.length; i++) {
             TakerPermit calldata p = batch.takers[i];
-            PackedAllowance storage a = _takerAllowance[owner][p.spender][p.ref];
-            a.amount = p.amount;
-            a.expiration = p.expiration;
+            _takerAllowance[owner][p.spender][p.ref] =
+                PackedAllowance({amount: p.amount, expiration: p.expiration, nonce: 0});
             emit TakerApproval(owner, p.spender, p.ref, p.amount, p.expiration);
         }
     }
