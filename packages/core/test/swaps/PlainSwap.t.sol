@@ -110,14 +110,14 @@ contract PlainSwapTest is CoreSettlementBase {
         vm.prank(solver);
         uint256 paid1 = settlement.fill(order, sig, usdcIn / 2)[0];
         assertEq(paid1, wethOut / 2, "first fill pays half the output");
-        assertEq(settlement.filled(settlement.hashOrder(order)), usdcIn / 2, "half filled");
-        assertEq(settlement.remaining(order), usdcIn / 2, "half remaining");
+        assertEq(settlement.filled(lens.hashOrder(order)), usdcIn / 2, "half filled");
+        assertEq(lens.remaining(order), usdcIn / 2, "half remaining");
 
         // Second fill: the rest. Pro-rata slices accumulate exactly to the totals.
         vm.prank(solver);
         uint256 paid2 = settlement.fill(order, sig, usdcIn - usdcIn / 2)[0];
         assertEq(paid1 + paid2, wethOut, "two fills sum to full output");
-        assertEq(settlement.remaining(order), 0, "fully filled");
+        assertEq(lens.remaining(order), 0, "fully filled");
 
         // A third fill must revert — order is exhausted.
         vm.prank(solver);
@@ -172,7 +172,7 @@ contract PlainSwapTest is CoreSettlementBase {
         // Warp to the auction midpoint → output decays halfway from start to end.
         vm.warp(block.timestamp + 50);
         uint256 expectedOut = startOut - (startOut - endOut) / 2; // 0.9 ether
-        assertEq(settlement.previewAmountOut(order)[0], expectedOut, "preview matches midpoint price");
+        assertEq(lens.previewAmountOut(order)[0], expectedOut, "preview matches midpoint price");
 
         vm.prank(solver);
         uint256 paid = settlement.fill(order, sig, usdcIn)[0];
@@ -366,7 +366,7 @@ contract PlainSwapTest is CoreSettlementBase {
         vm.prank(solver);
         uint256 paid1 = settlement.fill(order, sig, usdcIn / 2)[0];
         assertEq(paid1, (usdcIn / 2 * 0.95 ether + usdcIn - 1) / usdcIn, "first half at 0.95 tick");
-        assertEq(settlement.remaining(order), usdcIn / 2, "half remaining");
+        assertEq(lens.remaining(order), usdcIn / 2, "half remaining");
 
         // Second half at t+75 → price 0.85 (strictly cheaper for the solver).
         vm.warp(block.timestamp + 50);
@@ -375,7 +375,7 @@ contract PlainSwapTest is CoreSettlementBase {
         assertEq(paid2, ((usdcIn - usdcIn / 2) * 0.85 ether + usdcIn - 1) / usdcIn, "second half at 0.85 tick");
 
         assertLt(paid2, paid1, "later fill priced strictly lower");
-        assertEq(settlement.remaining(order), 0, "fully filled");
+        assertEq(lens.remaining(order), 0, "fully filled");
         assertEq(IERC20(WETH).balanceOf(maker), paid1 + paid2, "maker WETH = sum of two ticks");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver paid full USDC across fills");
     }
@@ -427,7 +427,7 @@ contract PlainSwapTest is CoreSettlementBase {
         // Fill the minimum → leaves a 500e6 tail, below the floor.
         vm.prank(solver);
         settlement.fill(order, sig, minFill);
-        uint256 tail = settlement.remaining(order);
+        uint256 tail = lens.remaining(order);
         assertEq(tail, usdcIn - minFill, "500 USDC tail remains");
 
         // The tail can't be filled: below the min-fill floor …

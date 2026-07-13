@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {UniversalSettlement, Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
 /// @dev Port of 0x's `getLimitOrderRelevantState` / `batchGet...RelevantStates`
@@ -28,17 +29,17 @@ contract OrderRelevantStateTest is MockSettlementBase {
     function _state(Order memory o, bytes memory sig)
         internal
         view
-        returns (UniversalSettlement.OrderStatus status, uint256 fillable, bool sigValid)
+        returns (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid)
     {
-        return settlement.getOrderRelevantState(o, sig);
+        return lens.getOrderRelevantState(o, sig);
     }
 
     // ──────────────────── Status matrix ────────────────────
 
     function test_state_fillable_fresh() public view {
         Order memory o = _order(1);
-        (UniversalSettlement.OrderStatus status, uint256 fillable, bool sigValid) = _state(o, _sign(o));
-        assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Fillable), "fillable");
+        (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid) = _state(o, _sign(o));
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Fillable), "fillable");
         assertEq(fillable, AMOUNT_IN, "full amount fillable");
         assertTrue(sigValid, "sig valid");
     }
@@ -49,8 +50,8 @@ contract OrderRelevantStateTest is MockSettlementBase {
         vm.prank(solver);
         settlement.fill(o, sig, AMOUNT_IN);
 
-        (UniversalSettlement.OrderStatus status, uint256 fillable,) = _state(o, sig);
-        assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Filled), "filled");
+        (SettlementLens.OrderStatus status, uint256 fillable,) = _state(o, sig);
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Filled), "filled");
         assertEq(fillable, 0, "nothing left");
     }
 
@@ -60,8 +61,8 @@ contract OrderRelevantStateTest is MockSettlementBase {
         vm.prank(solver);
         settlement.fill(o, sig, AMOUNT_IN / 4);
 
-        (UniversalSettlement.OrderStatus status, uint256 fillable,) = _state(o, sig);
-        assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Fillable), "still fillable");
+        (SettlementLens.OrderStatus status, uint256 fillable,) = _state(o, sig);
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Fillable), "still fillable");
         assertEq(fillable, AMOUNT_IN - AMOUNT_IN / 4, "remaining fillable");
     }
 
@@ -69,8 +70,8 @@ contract OrderRelevantStateTest is MockSettlementBase {
         Order memory o = _order(1);
         bytes memory sig = _sign(o);
         vm.warp(o.deadline + 1);
-        (UniversalSettlement.OrderStatus status, uint256 fillable,) = _state(o, sig);
-        assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Expired), "expired");
+        (SettlementLens.OrderStatus status, uint256 fillable,) = _state(o, sig);
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Expired), "expired");
         assertEq(fillable, 0, "nothing fillable");
     }
 
@@ -82,8 +83,8 @@ contract OrderRelevantStateTest is MockSettlementBase {
         vm.prank(maker);
         settlement.cancelOrders(nonces);
 
-        (UniversalSettlement.OrderStatus status,,) = _state(o, sig);
-        assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Cancelled), "cancelled");
+        (SettlementLens.OrderStatus status,,) = _state(o, sig);
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Cancelled), "cancelled");
     }
 
     function test_state_cancelled_byRollback() public {
@@ -92,16 +93,16 @@ contract OrderRelevantStateTest is MockSettlementBase {
         vm.prank(maker);
         settlement.rollbackNonces(10); // floor above nonce 5
 
-        (UniversalSettlement.OrderStatus status,,) = _state(o, sig);
-        assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Cancelled), "rolled back");
+        (SettlementLens.OrderStatus status,,) = _state(o, sig);
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Cancelled), "rolled back");
     }
 
     function test_state_invalid_malformed() public view {
         Order memory o = _order(1);
         o.tokenIn = new address[](0); // malformed shape
         o.startAmountIn = new uint256[](0);
-        (UniversalSettlement.OrderStatus status,,) = _state(o, _sign(_order(1)));
-        assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Invalid), "invalid");
+        (SettlementLens.OrderStatus status,,) = _state(o, _sign(_order(1)));
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Invalid), "invalid");
     }
 
     // ──────────────────── Under-funded cap (0x "actualFillable") ────────────────────
@@ -135,8 +136,8 @@ contract OrderRelevantStateTest is MockSettlementBase {
     function test_state_badSignature_stillFillableButInvalidSig() public view {
         Order memory o = _order(1);
         bytes memory badSig = _signWith(o, solverPk); // wrong signer
-        (UniversalSettlement.OrderStatus status,, bool sigValid) = _state(o, badSig);
-        assertEq(uint8(status), uint8(UniversalSettlement.OrderStatus.Fillable), "status independent of sig");
+        (SettlementLens.OrderStatus status,, bool sigValid) = _state(o, badSig);
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Fillable), "status independent of sig");
         assertFalse(sigValid, "signature invalid");
     }
 
@@ -163,12 +164,12 @@ contract OrderRelevantStateTest is MockSettlementBase {
         sigs[1] = filledSig;
         sigs[2] = _sign(_order(3));
 
-        (UniversalSettlement.OrderStatus[] memory statuses, uint256[] memory fillable,) =
-            settlement.getOrderRelevantStates(orders, sigs);
+        (SettlementLens.OrderStatus[] memory statuses, uint256[] memory fillable,) =
+            lens.getOrderRelevantStates(orders, sigs);
 
-        assertEq(uint8(statuses[0]), uint8(UniversalSettlement.OrderStatus.Fillable), "0 fillable");
+        assertEq(uint8(statuses[0]), uint8(SettlementLens.OrderStatus.Fillable), "0 fillable");
         assertEq(fillable[0], AMOUNT_IN, "0 full");
-        assertEq(uint8(statuses[1]), uint8(UniversalSettlement.OrderStatus.Filled), "1 filled");
-        assertEq(uint8(statuses[2]), uint8(UniversalSettlement.OrderStatus.Invalid), "2 invalid, no revert");
+        assertEq(uint8(statuses[1]), uint8(SettlementLens.OrderStatus.Filled), "1 filled");
+        assertEq(uint8(statuses[2]), uint8(SettlementLens.OrderStatus.Invalid), "2 invalid, no revert");
     }
 }

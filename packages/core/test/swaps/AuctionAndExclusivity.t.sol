@@ -135,12 +135,12 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         // t=50 → halfway into [0,100] → bump 2500 → out = start - (start-end)*2500/10000.
         vm.warp(block.timestamp + 50);
         uint256 exp1 = start - ((start - end) * 2_500) / 10_000;
-        assertEq(settlement.previewAmountOut(order)[0], exp1, "interp in first segment");
+        assertEq(lens.previewAmountOut(order)[0], exp1, "interp in first segment");
 
         // t=150 → halfway into [100,200] → bump 7500.
         vm.warp(block.timestamp + 100);
         uint256 exp2 = start - ((start - end) * 7_500) / 10_000;
-        assertEq(settlement.previewAmountOut(order)[0], exp2, "interp in second segment");
+        assertEq(lens.previewAmountOut(order)[0], exp2, "interp in second segment");
 
         vm.prank(solver);
         uint256[] memory outs = settlement.fill(order, sig, SELL_IN);
@@ -154,7 +154,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         order.curve = _curve3();
 
         vm.warp(block.timestamp + 10_000); // well past the last point
-        assertEq(settlement.previewAmountOut(order)[0], 1e18, "clamped to end (bump 10000)");
+        assertEq(lens.previewAmountOut(order)[0], 1e18, "clamped to end (bump 10000)");
     }
 
     function test_curve_revertsBeforeStart() public {
@@ -164,7 +164,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         order.curve = _curve3();
 
         vm.expectRevert(DutchAuction.AuctionNotStarted.selector);
-        settlement.previewAmountOut(order);
+        lens.previewAmountOut(order);
     }
 
     function test_curve_buy_risesWithBump() public {
@@ -179,7 +179,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.warp(block.timestamp + 50); // bump 2500
         uint256 expIn = startIn + ((endIn - startIn) * 2_500) / 10_000;
-        assertEq(settlement.previewAmountIn(order)[0], expIn, "input rises along the curve");
+        assertEq(lens.previewAmountIn(order)[0], expIn, "input rises along the curve");
 
         vm.prank(solver);
         settlement.fill(order, sig, BUY_OUT);
@@ -203,7 +203,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.fee(ref); // basefee == ref → full 1000 bps of gas bump
         uint256 exp = start - ((start - end) * 1_000) / 10_000;
-        assertEq(settlement.previewAmountOut(order)[0], exp, "gas bump at ref basefee");
+        assertEq(lens.previewAmountOut(order)[0], exp, "gas bump at ref basefee");
 
         vm.prank(solver);
         uint256[] memory outs = settlement.fill(order, sig, SELL_IN);
@@ -218,7 +218,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.fee(90 gwei); // 3× ref → gas add would be 3000, capped to 1000
         uint256 exp = SELL_OUT - ((SELL_OUT - 1e18) * 1_000) / 10_000;
-        assertEq(settlement.previewAmountOut(order)[0], exp, "gas bump capped");
+        assertEq(lens.previewAmountOut(order)[0], exp, "gas bump capped");
     }
 
     function test_gasBump_belowRef_partial() public {
@@ -229,7 +229,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.fee(15 gwei); // half of ref → 500 bps
         uint256 exp = SELL_OUT - ((SELL_OUT - 1e18) * 500) / 10_000;
-        assertEq(settlement.previewAmountOut(order)[0], exp, "gas bump scales below ref");
+        assertEq(lens.previewAmountOut(order)[0], exp, "gas bump scales below ref");
     }
 
     function test_gasBump_buy_raisesInput() public {
@@ -245,7 +245,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.fee(ref); // full 1000 bps
         uint256 expIn = startIn + ((endIn - startIn) * 1_000) / 10_000;
-        assertEq(settlement.previewAmountIn(order)[0], expIn, "gas bump raises buy input");
+        assertEq(lens.previewAmountIn(order)[0], expIn, "gas bump raises buy input");
 
         vm.prank(solver);
         settlement.fill(order, sig, BUY_OUT);
@@ -265,13 +265,13 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         ok.curve = _curve3();
         ok.gasBumpBps = 500;
         ok.gasPriceRef = 30 gwei;
-        (bool good,) = settlement.validateOrder(ok);
+        (bool good,) = lens.validateOrder(ok);
         assertTrue(good, "well-formed advanced order validates");
 
         // override without exclusiveFiller
         Order memory o1 = _plainOrder(2, address(tA), address(tB), SELL_IN, SELL_OUT);
         o1.exclusivityOverrideBps = 50;
-        (bool b1, string memory r1) = settlement.validateOrder(o1);
+        (bool b1, string memory r1) = lens.validateOrder(o1);
         assertFalse(b1, "override needs exclusiveFiller");
         assertEq(r1, "override without exclusiveFiller");
 
@@ -282,14 +282,14 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         bad[0] = CurvePoint({timeDelta: 100, bumpBps: 0});
         bad[1] = CurvePoint({timeDelta: 100, bumpBps: 5_000}); // not strictly increasing
         o2.curve = bad;
-        (bool b2, string memory r2) = settlement.validateOrder(o2);
+        (bool b2, string memory r2) = lens.validateOrder(o2);
         assertFalse(b2, "curve time must increase");
         assertEq(r2, "curve timeDelta not increasing");
 
         // gas bump without reference price
         Order memory o3 = _plainOrder(4, address(tA), address(tB), SELL_IN, SELL_OUT);
         o3.gasBumpBps = 500;
-        (bool b3, string memory r3) = settlement.validateOrder(o3);
+        (bool b3, string memory r3) = lens.validateOrder(o3);
         assertFalse(b3, "gas bump needs gasPriceRef");
         assertEq(r3, "gasBump without gasPriceRef");
     }
@@ -299,7 +299,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory o1 = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         o1.exclusiveFiller = EX;
         o1.exclusivityOverrideBps = 10_001;
-        (bool b1, string memory r1) = settlement.validateOrder(o1);
+        (bool b1, string memory r1) = lens.validateOrder(o1);
         assertFalse(b1);
         assertEq(r1, "exclusivityOverrideBps > 10000");
 
@@ -309,7 +309,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         CurvePoint[] memory c2 = new CurvePoint[](1);
         c2[0] = CurvePoint({timeDelta: 0, bumpBps: 10_001});
         o2.curve = c2;
-        (bool b2, string memory r2) = settlement.validateOrder(o2);
+        (bool b2, string memory r2) = lens.validateOrder(o2);
         assertFalse(b2);
         assertEq(r2, "curve bumpBps > 10000");
 
@@ -318,7 +318,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         CurvePoint[] memory c3 = new CurvePoint[](1);
         c3[0] = CurvePoint({timeDelta: 0, bumpBps: 5_000});
         o3.curve = c3; // decayStartTime left 0
-        (bool b3, string memory r3) = settlement.validateOrder(o3);
+        (bool b3, string memory r3) = lens.validateOrder(o3);
         assertFalse(b3);
         assertEq(r3, "curve set without decayStartTime");
 
@@ -326,7 +326,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory o4 = _plainOrder(4, address(tA), address(tB), SELL_IN, SELL_OUT);
         o4.gasBumpBps = 10_001;
         o4.gasPriceRef = 30 gwei;
-        (bool b4, string memory r4) = settlement.validateOrder(o4);
+        (bool b4, string memory r4) = lens.validateOrder(o4);
         assertFalse(b4);
         assertEq(r4, "gasBumpBps > 10000");
     }
@@ -352,7 +352,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.warp(block.timestamp + 50);
         vm.fee(ref / 2);
-        assertEq(settlement.previewAmountOut(order)[0], exp, "auction + gas bump compose");
+        assertEq(lens.previewAmountOut(order)[0], exp, "auction + gas bump compose");
 
         vm.prank(solver);
         assertEq(settlement.fill(order, sig, SELL_IN)[0], exp, "fill uses the composed price");
@@ -369,7 +369,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         // t+80 (auction 8000) + full gas 3000 = 11000 → clamped to 10000 → end price.
         vm.warp(block.timestamp + 80);
         vm.fee(30 gwei);
-        assertEq(settlement.previewAmountOut(order)[0], 1e18, "bump clamps at 10000 -> end");
+        assertEq(lens.previewAmountOut(order)[0], 1e18, "bump clamps at 10000 -> end");
     }
 
     // ════════════════════ non-monotonic / plateau / edge curves ════════════════════
@@ -391,11 +391,11 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         uint256 t0 = block.timestamp;
         vm.warp(t0 + 50); // decreasing: 8000 - 6000*50/100 = 5000
-        assertEq(settlement.previewAmountOut(order)[0], start - ((start - end) * 5_000) / 10_000, "decreasing segment");
+        assertEq(lens.previewAmountOut(order)[0], start - ((start - end) * 5_000) / 10_000, "decreasing segment");
         vm.warp(t0 + 150); // plateau: 2000
-        assertEq(settlement.previewAmountOut(order)[0], start - ((start - end) * 2_000) / 10_000, "plateau segment");
+        assertEq(lens.previewAmountOut(order)[0], start - ((start - end) * 2_000) / 10_000, "plateau segment");
         vm.warp(t0 + 250); // rising: 2000 + 4000*50/100 = 4000
-        assertEq(settlement.previewAmountOut(order)[0], start - ((start - end) * 4_000) / 10_000, "rising segment");
+        assertEq(lens.previewAmountOut(order)[0], start - ((start - end) * 4_000) / 10_000, "rising segment");
     }
 
     function test_curve_firstPointNonZeroTime_clampsToFirstBump() public {
@@ -409,7 +409,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.warp(block.timestamp + 20); // before first point → clamp to 2000
         assertEq(
-            settlement.previewAmountOut(order)[0], SELL_OUT - ((SELL_OUT - 1e18) * 2_000) / 10_000, "clamp to first bump"
+            lens.previewAmountOut(order)[0], SELL_OUT - ((SELL_OUT - 1e18) * 2_000) / 10_000, "clamp to first bump"
         );
     }
 
@@ -423,7 +423,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.warp(block.timestamp + 50);
         assertEq(
-            settlement.previewAmountOut(order)[0], SELL_OUT - ((SELL_OUT - 1e18) * 4_000) / 10_000, "single-point curve"
+            lens.previewAmountOut(order)[0], SELL_OUT - ((SELL_OUT - 1e18) * 4_000) / 10_000, "single-point curve"
         );
     }
 
@@ -627,7 +627,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         order.gasPriceRef = 30 gwei;
 
         vm.fee(basefee);
-        uint256 out = settlement.previewAmountOut(order)[0];
+        uint256 out = lens.previewAmountOut(order)[0];
         // The gas bump only decays the maker's output toward `end`, never past it.
         assertLe(out, SELL_OUT, "never above start");
         assertGe(out, 1e18, "never below end");

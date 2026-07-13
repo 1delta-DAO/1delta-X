@@ -15,6 +15,7 @@ import {
     OrderSide,
     CurvePoint
 } from "@core/settlement/UniversalSettlement.sol";
+import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.sol";
 
@@ -27,6 +28,7 @@ import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.so
 abstract contract CoreSettlementBase is Test, LenderRegistry {
     Permit3 permit3;
     UniversalSettlement settlement;
+    SettlementLens lens;
 
     uint256 makerPk = 0xA11CE;
     address maker = vm.addr(makerPk);
@@ -43,6 +45,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
 
         permit3 = new Permit3();
         settlement = new UniversalSettlement(address(permit3));
+        lens = new SettlementLens(address(settlement));
 
         vm.label(maker, "maker");
         vm.label(solver, "solver");

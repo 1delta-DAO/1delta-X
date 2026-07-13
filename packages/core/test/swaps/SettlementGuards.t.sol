@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
 import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -400,10 +401,10 @@ contract SettlementGuardsTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), huge, AMOUNT_OUT);
         bytes memory sig = _sign(order);
 
-        (UniversalSettlement.OrderStatus status, uint256 fillable, bool sigValid) =
-            settlement.getOrderRelevantState(order, sig);
+        (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid) =
+            lens.getOrderRelevantState(order, sig);
 
-        assertEq(uint256(status), uint256(UniversalSettlement.OrderStatus.Fillable), "still fillable");
+        assertEq(uint256(status), uint256(SettlementLens.OrderStatus.Fillable), "still fillable");
         assertEq(fillable, huge, "overflowing leg treated as non-binding");
         assertTrue(sigValid, "signature valid");
     }

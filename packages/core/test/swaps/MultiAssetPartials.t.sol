@@ -115,7 +115,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
         assertEq(p1[0], daiOut / 2, "DAI half");
         assertEq(IERC20(WETH).balanceOf(solver), wethIn / 2, "solver got half WETH");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn / 2, "solver got half USDC");
-        assertEq(settlement.remaining(order), wethIn / 2, "half remaining");
+        assertEq(lens.remaining(order), wethIn / 2, "half remaining");
 
         vm.prank(solver);
         settlement.fill(order, sig, wethIn - wethIn / 2);
@@ -158,7 +158,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
 
         vm.prank(solver);
         settlement.fill(order, sig, 0.7 ether);
-        assertEq(settlement.remaining(order), 0, "filled");
+        assertEq(lens.remaining(order), 0, "filled");
         // All four legs accumulate exactly to their signed totals.
         assertEq(IERC20(WETH).balanceOf(solver), wethIn, "WETH exact");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "USDC exact");
@@ -194,7 +194,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
         vm.prank(solver);
         got += settlement.fill(order, sig, 1_000e6)[0];
 
-        assertEq(settlement.remaining(order), 0, "fully filled");
+        assertEq(lens.remaining(order), 0, "fully filled");
         // Inputs: exact cumulative totals.
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "USDC exact");
         assertEq(IERC20(DAI).balanceOf(solver), daiIn, "DAI exact");
@@ -225,7 +225,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
 
         vm.warp(block.timestamp + 50);
         uint256 mid = daiStart - (daiStart - daiEnd) / 2; // 1500e18
-        assertEq(settlement.previewAmountOut(order)[0], mid, "midpoint price");
+        assertEq(lens.previewAmountOut(order)[0], mid, "midpoint price");
 
         vm.prank(solver);
         uint256[] memory paid = settlement.fill(order, sig, wethIn);

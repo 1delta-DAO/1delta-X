@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {UniversalSettlement, Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
 import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol";
@@ -70,7 +71,7 @@ contract BuyOrdersTest is MockSettlementBase {
         assertEq(tB.balanceOf(maker), OUT, "maker received exact output");
         assertEq(tA.balanceOf(maker), 0, "maker paid the price");
         assertEq(tA.balanceOf(solver), PRICE, "solver received the input");
-        assertEq(settlement.remaining(order), 0, "fully filled");
+        assertEq(lens.remaining(order), 0, "fully filled");
     }
 
     function test_buy_partialFill_exactOutputConserved() public {
@@ -83,14 +84,14 @@ contract BuyOrdersTest is MockSettlementBase {
         // Two partials of OUT/2 each → maker ends with exactly OUT, pays exactly PRICE.
         vm.prank(solver);
         settlement.fill(order, sig, OUT / 2);
-        assertEq(settlement.remaining(order), OUT / 2, "half remaining");
+        assertEq(lens.remaining(order), OUT / 2, "half remaining");
 
         vm.prank(solver);
         settlement.fill(order, sig, OUT / 2);
 
         assertEq(tB.balanceOf(maker), OUT, "output conserved across partials");
         assertEq(tA.balanceOf(solver), PRICE, "input summed to price");
-        assertEq(settlement.remaining(order), 0, "filled");
+        assertEq(lens.remaining(order), 0, "filled");
     }
 
     function test_buy_overFill_reverts() public {
@@ -120,7 +121,7 @@ contract BuyOrdersTest is MockSettlementBase {
 
         vm.warp(block.timestamp + 50); // halfway → price halfway between start and end
         uint256 mid = (START_IN + END_IN) / 2;
-        assertEq(settlement.previewAmountIn(order)[0], mid, "preview midpoint input");
+        assertEq(lens.previewAmountIn(order)[0], mid, "preview midpoint input");
 
         vm.prank(solver);
         settlement.fill(order, sig, OUT);
@@ -139,7 +140,7 @@ contract BuyOrdersTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.warp(block.timestamp + 500); // well past duration → ceiling price
-        assertEq(settlement.previewAmountIn(order)[0], END_IN, "preview at ceiling");
+        assertEq(lens.previewAmountIn(order)[0], END_IN, "preview at ceiling");
 
         vm.prank(solver);
         settlement.fill(order, sig, OUT);
@@ -213,10 +214,10 @@ contract BuyOrdersTest is MockSettlementBase {
         Order memory order = _buyOrder(1, address(tA), address(tB), START_IN, END_IN, OUT);
         bytes memory sig = _sign(order);
 
-        (UniversalSettlement.OrderStatus status, uint256 fillable, bool sigValid) =
-            settlement.getOrderRelevantState(order, sig);
+        (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid) =
+            lens.getOrderRelevantState(order, sig);
 
-        assertEq(uint256(status), uint256(UniversalSettlement.OrderStatus.Fillable), "fillable");
+        assertEq(uint256(status), uint256(SettlementLens.OrderStatus.Fillable), "fillable");
         assertTrue(sigValid, "sig valid");
         // capacity (END_IN/2) buys floor(capacity * OUT / END_IN) = OUT/2 output units.
         assertEq(fillable, OUT / 2, "capped by maker input at the ceiling tick");
@@ -224,19 +225,19 @@ contract BuyOrdersTest is MockSettlementBase {
 
     function test_buy_validateOrder_acceptsAndRejects() public view {
         Order memory ok = _buyOrder(1, address(tA), address(tB), START_IN, END_IN, OUT);
-        (bool good,) = settlement.validateOrder(ok);
+        (bool good,) = lens.validateOrder(ok);
         assertTrue(good, "well-formed buy validates");
 
         // Non-fixed output → rejected.
         Order memory badOut = _buyOrder(2, address(tA), address(tB), START_IN, END_IN, OUT);
         badOut.endAmountOut[0] = OUT - 1;
-        (bool ok2, string memory r2) = settlement.validateOrder(badOut);
+        (bool ok2, string memory r2) = lens.validateOrder(badOut);
         assertFalse(ok2, "non-fixed output rejected");
         assertEq(r2, "buy output must be fixed");
 
         // Falling input (end < start) → rejected.
         Order memory badIn = _buyOrder(3, address(tA), address(tB), END_IN, START_IN, OUT);
-        (bool ok3, string memory r3) = settlement.validateOrder(badIn);
+        (bool ok3, string memory r3) = lens.validateOrder(badIn);
         assertFalse(ok3, "falling input rejected");
         assertEq(r3, "endAmountIn < startAmountIn");
     }

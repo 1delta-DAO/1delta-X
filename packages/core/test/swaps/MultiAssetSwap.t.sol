@@ -174,14 +174,14 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         uint256[] memory p1 = settlement.fill(order, sig, usdcIn / 2);
         assertEq(p1[0], wethOut / 2, "WETH half");
         assertEq(p1[1], daiOut / 2, "DAI half");
-        assertEq(settlement.remaining(order), usdcIn / 2, "half remaining");
+        assertEq(lens.remaining(order), usdcIn / 2, "half remaining");
 
         // Second fill: the rest. Legs accumulate exactly to the signed totals.
         vm.prank(solver);
         uint256[] memory p2 = settlement.fill(order, sig, usdcIn - usdcIn / 2);
         assertEq(p1[0] + p2[0], wethOut, "WETH legs sum to total");
         assertEq(p1[1] + p2[1], daiOut, "DAI legs sum to total");
-        assertEq(settlement.remaining(order), 0, "fully filled");
+        assertEq(lens.remaining(order), 0, "fully filled");
 
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker got full WETH");
         assertEq(IERC20(DAI).balanceOf(maker), daiOut, "maker got full DAI");
@@ -241,7 +241,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         uint256 wethMid = wethStart - (wethStart - wethEnd) / 2; // 0.9 ether
         uint256 daiMid = daiStart - (daiStart - daiEnd) / 2; //    950e18
 
-        uint256[] memory preview = settlement.previewAmountOut(order);
+        uint256[] memory preview = lens.previewAmountOut(order);
         assertEq(preview[0], wethMid, "WETH midpoint price");
         assertEq(preview[1], daiMid, "DAI midpoint price");
 
@@ -250,7 +250,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         uint256[] memory paid = settlement.fill(order, sig, usdcIn / 2);
         assertEq(paid[0], wethMid / 2, "WETH leg = half of midpoint");
         assertEq(paid[1], daiMid / 2, "DAI leg = half of midpoint");
-        assertEq(settlement.remaining(order), usdcIn / 2, "half remaining");
+        assertEq(lens.remaining(order), usdcIn / 2, "half remaining");
 
         assertEq(IERC20(WETH).balanceOf(maker), wethMid / 2, "maker got half WETH");
         assertEq(IERC20(DAI).balanceOf(maker), daiMid / 2, "maker got half DAI");
@@ -261,7 +261,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
     function test_validate_rejectsLengthMismatch() public view {
         Order memory order =
             _multiOrder(3, _a1(USDC), _u1(1e6), _addr2(WETH, DAI), _u1(1 ether)); // 2 tokenOut, 1 amount
-        (bool ok, string memory reason) = settlement.validateOrder(order);
+        (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, "length mismatch rejected");
         assertEq(reason, "tokenOut/amountOut length mismatch");
     }
@@ -270,7 +270,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         // WETH appears in both the input and output baskets.
         Order memory order =
             _multiOrder(4, _addr2(WETH, USDC), _uint2(1 ether, 1e6), _a1(WETH), _u1(1 ether));
-        (bool ok, string memory reason) = settlement.validateOrder(order);
+        (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, "in/out overlap rejected");
         assertEq(reason, "tokenIn == tokenOut");
     }
@@ -278,7 +278,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
     function test_validate_rejectsDuplicateTokenIn() public view {
         Order memory order =
             _multiOrder(5, _addr2(USDC, USDC), _uint2(1e6, 2e6), _a1(WETH), _u1(1 ether));
-        (bool ok, string memory reason) = settlement.validateOrder(order);
+        (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, "duplicate tokenIn rejected");
         assertEq(reason, "duplicate tokenIn");
     }

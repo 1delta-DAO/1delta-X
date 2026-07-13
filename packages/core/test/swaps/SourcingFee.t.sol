@@ -214,17 +214,17 @@ contract SourcingFeeTest is CoreSettlementBase {
     // ── validateOrder flags an over-cap fee and a recipient-less fee ──
     function test_fee_validateOrder() public view {
         Order memory good = _feeOrder(4, 2_000e6, 1 ether, FeeConfig.MAX_FEE_BPS);
-        (bool ok,) = settlement.validateOrder(good);
+        (bool ok,) = lens.validateOrder(good);
         assertTrue(ok, "fee at the cap is valid");
 
         Order memory tooHigh = _feeOrder(5, 2_000e6, 1 ether, FeeConfig.MAX_FEE_BPS + 1);
-        (bool ok2, string memory reason2) = settlement.validateOrder(tooHigh);
+        (bool ok2, string memory reason2) = lens.validateOrder(tooHigh);
         assertFalse(ok2, "over-cap fee rejected");
         assertEq(reason2, "feeBps > MAX_FEE_BPS");
 
         Order memory noRecipient = _order(maker, 6, USDC, WETH, 2_000e6, 1 ether, new Item[](0));
         noRecipient.feeConfig = FeeConfig.pack(address(0), 100); // bps set, recipient zero
-        (bool ok3, string memory reason3) = settlement.validateOrder(noRecipient);
+        (bool ok3, string memory reason3) = lens.validateOrder(noRecipient);
         assertFalse(ok3, "fee without recipient rejected");
         assertEq(reason3, "fee set without recipient");
     }

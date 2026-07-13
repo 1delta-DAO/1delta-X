@@ -112,6 +112,19 @@ export const SETTLEMENT_ABI = [
   },
   {
     type: "function",
+    name: "filledAmountIn",
+    stateMutability: "view",
+    inputs: [{ name: "orderHash", type: "bytes32" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+/// Read-only preflight/preview surface. These live on {SettlementLens}, a
+/// separate view contract, NOT on the settlement — calling them against the
+/// settlement address reverts. Point these at the deployed lens address.
+export const SETTLEMENT_LENS_ABI = [
+  {
+    type: "function",
     name: "hashOrder",
     stateMutability: "pure",
     inputs: [orderArg],
@@ -120,6 +133,13 @@ export const SETTLEMENT_ABI = [
   {
     type: "function",
     name: "previewAmountOut",
+    stateMutability: "view",
+    inputs: [orderArg],
+    outputs: [{ name: "", type: "uint256[]" }],
+  },
+  {
+    type: "function",
+    name: "previewAmountIn",
     stateMutability: "view",
     inputs: [orderArg],
     outputs: [{ name: "", type: "uint256[]" }],
@@ -143,10 +163,28 @@ export const SETTLEMENT_ABI = [
   },
   {
     type: "function",
-    name: "filledAmountIn",
+    name: "getOrderRelevantState",
     stateMutability: "view",
-    inputs: [{ name: "orderHash", type: "bytes32" }],
-    outputs: [{ name: "", type: "uint256" }],
+    inputs: [orderArg, { name: "sig", type: "bytes" }],
+    outputs: [
+      { name: "status", type: "uint8" },
+      { name: "fillableAmount", type: "uint256" },
+      { name: "isSignatureValid", type: "bool" },
+    ],
+  },
+  {
+    type: "function",
+    name: "getOrderRelevantStates",
+    stateMutability: "view",
+    inputs: [
+      { name: "orders", type: "tuple[]", components: orderComponents },
+      { name: "sigs", type: "bytes[]" },
+    ],
+    outputs: [
+      { name: "statuses", type: "uint8[]" },
+      { name: "fillableAmounts", type: "uint256[]" },
+      { name: "sigValids", type: "bool[]" },
+    ],
   },
 ] as const;
 

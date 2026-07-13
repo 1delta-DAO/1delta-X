@@ -15,6 +15,7 @@ import {
     OrderSide,
     CurvePoint
 } from "@core/settlement/UniversalSettlement.sol";
+import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 /// @dev Minimal, freely-mintable ERC20. Enough for Permit3's transfer paths —
 ///      no fork / real tokens, so the pure-protocol suites run fast and are
@@ -59,6 +60,7 @@ contract MockERC20 {
 abstract contract MockSettlementBase is Test {
     Permit3 permit3;
     UniversalSettlement settlement;
+    SettlementLens lens;
 
     uint256 makerPk = 0xA11CE;
     address maker = vm.addr(makerPk);
@@ -72,6 +74,7 @@ abstract contract MockSettlementBase is Test {
     function setUp() public virtual {
         permit3 = new Permit3();
         settlement = new UniversalSettlement(address(permit3));
+        lens = new SettlementLens(address(settlement));
 
         tA = new MockERC20("tA");
         tB = new MockERC20("tB");

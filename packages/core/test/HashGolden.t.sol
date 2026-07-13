@@ -11,6 +11,7 @@ import {
     OrderSide,
     CurvePoint
 } from "@core/settlement/UniversalSettlement.sol";
+import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 /// @dev No-fork golden test: pins the EIP-712 struct hash of a canonical order.
 ///      The TypeScript SDK asserts the SAME value, cross-verifying its typed-data
@@ -18,6 +19,7 @@ import {
 ///      domain-independent hashStruct, so no fork / addresses / chainId needed.
 contract HashGoldenTest is Test {
     UniversalSettlement settlement;
+    SettlementLens lens;
 
     address constant MAKER = address(0xA1);
     address constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
@@ -31,6 +33,7 @@ contract HashGoldenTest is Test {
 
     function setUp() public {
         settlement = new UniversalSettlement(address(0xdead));
+        lens = new SettlementLens(address(settlement));
     }
 
     function _canonical() internal pure returns (Order memory o) {
@@ -95,6 +98,6 @@ contract HashGoldenTest is Test {
     bytes32 constant GOLDEN_ORDER_HASH = 0x83b0a830463e9914771bd5b3263107a8f7a894b32f5aa4ed0d91acc16631aba4;
 
     function test_goldenOrderHash() public view {
-        assertEq(settlement.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");
+        assertEq(lens.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");
     }
 }

@@ -17,13 +17,13 @@ contract ValidateOrderTest is CoreSettlementBase {
     }
 
     function _assertInvalid(Order memory order, string memory expected) internal view {
-        (bool ok, string memory reason) = settlement.validateOrder(order);
+        (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, expected);
         assertEq(reason, expected, "reason mismatch");
     }
 
     function test_validateOrder_acceptsWellFormed() public view {
-        (bool ok, string memory reason) = settlement.validateOrder(_base());
+        (bool ok, string memory reason) = lens.validateOrder(_base());
         assertTrue(ok, "well-formed order should validate");
         assertEq(reason, "", "no reason on success");
     }
@@ -80,7 +80,7 @@ contract ValidateOrderTest is CoreSettlementBase {
         Order memory o = _order(maker, 9, USDC, WETH, usdcIn, wethOut, new Item[](0));
 
         // Valid before filling.
-        (bool ok,) = settlement.validateOrder(o);
+        (bool ok,) = lens.validateOrder(o);
         assertTrue(ok, "valid before fill");
 
         // Fully fill it (plain swap).

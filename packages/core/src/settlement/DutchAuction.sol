@@ -85,17 +85,6 @@ library DutchAuction {
         return startOut - ((startOut - endOut) * bump) / BPS;
     }
 
-    /// @notice Current auction tick for output leg `j` (SELL: falling; BUY: fixed).
-    function currentAmountOutAt(Order calldata order, uint256 j) internal view returns (uint256) {
-        uint256 startOut = order.startAmountOut[j];
-        uint256 endOut = order.endAmountOut[j];
-        if (startOut < endOut) revert InvalidAuctionParams();
-        if (startOut == endOut) return startOut; // fixed leg — no bump (skip bumpBps)
-
-        uint256 decay = ((startOut - endOut) * bumpBps(order)) / BPS;
-        return startOut - decay;
-    }
-
     /// @notice Current auction tick for every output leg. Computes the shared
     ///         `bump` at most ONCE (lazily, only if some leg actually decays — so
     ///         an all-fixed order never calls `bumpBps`, preserving its behavior).
@@ -124,19 +113,6 @@ library DutchAuction {
         if (startIn > endIn) revert InvalidAuctionParams();
         if (startIn == endIn) return startIn; // fixed leg — no bump
         return startIn + ((endIn - startIn) * bump) / BPS;
-    }
-
-    /// @notice Current auction tick for input leg `i` (BUY: rising; SELL: fixed).
-    ///         The maker's paid input climbs from `startAmountIn` (best for maker)
-    ///         toward `endAmountIn` (the signed ceiling — "pay up to").
-    function currentAmountInAt(Order calldata order, uint256 i) internal view returns (uint256) {
-        uint256 startIn = order.startAmountIn[i];
-        uint256 endIn = order.endAmountIn[i];
-        if (startIn > endIn) revert InvalidAuctionParams();
-        if (startIn == endIn) return startIn; // fixed leg — no bump (skip bumpBps)
-
-        uint256 rise = ((endIn - startIn) * bumpBps(order)) / BPS;
-        return startIn + rise;
     }
 
     /// @notice Current auction tick for every input leg. Shared `bump` computed at

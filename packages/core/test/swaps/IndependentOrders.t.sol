@@ -67,15 +67,15 @@ contract IndependentOrdersTest is CoreSettlementBase {
         vm.prank(solver);
         uint256 paidA = settlement.fill(a, sigA, USDC_IN / 2)[0];
         assertEq(paidA, WETH_OUT_A / 2, "A pays half its WETH");
-        assertEq(settlement.remaining(a), USDC_IN / 2, "A half remaining");
-        assertEq(settlement.remaining(b), DAI_IN, "B untouched by A's fill");
+        assertEq(lens.remaining(a), USDC_IN / 2, "A half remaining");
+        assertEq(lens.remaining(b), DAI_IN, "B untouched by A's fill");
 
         // Fill B fully — independent of A's state.
         vm.prank(solver);
         uint256 paidB = settlement.fill(b, sigB, DAI_IN)[0];
         assertEq(paidB, WETH_OUT_B, "B pays full WETH");
-        assertEq(settlement.remaining(b), 0, "B fully filled");
-        assertEq(settlement.remaining(a), USDC_IN / 2, "A still half after B fully fills");
+        assertEq(lens.remaining(b), 0, "B fully filled");
+        assertEq(lens.remaining(a), USDC_IN / 2, "A still half after B fully fills");
 
         // Maker received WETH from both; solver received each input token.
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT_A / 2 + WETH_OUT_B, "maker WETH = A(half)+B(full)");
