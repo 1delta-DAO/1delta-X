@@ -214,6 +214,12 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 //       The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when an
 //       auth block follows, so the block starts at a fixed offset.
 //
+//   op = 2 (Withdraw — loan asset):
+//     data = abi.encode(uint8(2), MarketParams[, BalanceMode[, nonce, deadline, v, r, s]])
+//       — same byte map as op 1; unwinds the maker's supplied LOAN token (the
+//       earn position) via `morpho.withdraw` instead of collateral. Full mode
+//       redeems by shares, so the accrued-interest excess sweeps back in-kind.
+//
 contract MorphoBlueTakerModule is ITakerModule {
     using MarketParamsLib for MarketParams;
 
@@ -222,7 +228,8 @@ contract MorphoBlueTakerModule is ITakerModule {
 
     enum Op {
         Borrow, // 0
-        WithdrawCollateral // 1
+        WithdrawCollateral, // 1
+        Withdraw // 2 — supplied loan asset (earn position)
     }
 
     error OnlyPermit3();
@@ -253,6 +260,16 @@ contract MorphoBlueTakerModule is ITakerModule {
             } else {
                 morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
             }
+        } else if (op == uint8(Op.Withdraw)) {
+            // Same byte map as WithdrawCollateral: BalanceMode@192, auth@224.
+            DelegationHelper.replayMorphoAuth(data, 224, address(morpho), onBehalfOf, address(this));
+
+            if (DustHandler.readBalanceMode(data, 192) == DustHandler.BalanceMode.Full) {
+                _withdrawLoanFull(marketParams, onBehalfOf, amount, receiver);
+            } else {
+                // Exact-assets withdrawal of the supplied loan token (shares = 0).
+                morpho.withdraw(marketParams, amount, 0, onBehalfOf, receiver);
+            }
         } else {
             revert BadOp(op);
         }
@@ -274,6 +291,26 @@ contract MorphoBlueTakerModule is ITakerModule {
         SafeTransferLib.safeTransfer(collateralToken, receiver, amount);
         if (received > amount) {
             SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
+        }
+    }
+
+    /// @dev Full mode for the loan leg: redeem the user's ENTIRE supply by
+    ///      shares (assets drift upward as interest accrues, shares don't),
+    ///      forward the signed `amount` to `receiver`, and sweep the accrued
+    ///      excess back to the user — always to `onBehalfOf`, never a
+    ///      caller-chosen address.
+    function _withdrawLoanFull(MarketParams memory marketParams, address onBehalfOf, uint256 amount, address receiver)
+        private
+    {
+        address loanToken = marketParams.loanToken;
+        uint256 shares = morpho.position(marketParams.id(), onBehalfOf).supplyShares;
+        uint256 before = IERC20(loanToken).balanceOf(address(this));
+        morpho.withdraw(marketParams, 0, shares, onBehalfOf, address(this));
+        uint256 received = IERC20(loanToken).balanceOf(address(this)) - before;
+        require(received >= amount, "insufficient withdrawn");
+        SafeTransferLib.safeTransfer(loanToken, receiver, amount);
+        if (received > amount) {
+            SafeTransferLib.safeTransfer(loanToken, onBehalfOf, received - amount);
         }
     }
 }

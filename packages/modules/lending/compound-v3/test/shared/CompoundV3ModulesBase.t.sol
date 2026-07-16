@@ -92,6 +92,11 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         return uint256(IComet(COMET).collateralBalanceOf(who, WETH));
     }
 
+    /// @dev Positive base (USDC) balance — the lend/earn position.
+    function _baseSupply(address who) internal view returns (uint256) {
+        return IComet(COMET).balanceOf(who);
+    }
+
     function _usdcDebt(address who) internal view returns (uint256) {
         return IComet(COMET).borrowBalanceOf(who);
     }
@@ -103,6 +108,15 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(COMET, amount);
         IComet(COMET).supply(WETH, amount);
+        vm.stopPrank();
+    }
+
+    /// @dev Maker supplies `amount` USDC as BASE asset (the earn position).
+    function _seedBaseSupply(uint256 amount) internal {
+        deal(USDC, maker, amount);
+        vm.startPrank(maker);
+        IERC20(USDC).approve(COMET, amount);
+        IComet(COMET).supply(USDC, amount);
         vm.stopPrank();
     }
 

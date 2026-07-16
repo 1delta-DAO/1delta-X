@@ -43,6 +43,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
     // Op flags consumed by `MorphoBlueTakerModule` as the leading word of `data`.
     uint8 constant OP_BORROW = 0;
     uint8 constant OP_WITHDRAW = 1;
+    uint8 constant OP_WITHDRAW_LOAN = 2;
 
     address WSTETH;
 
@@ -103,6 +104,12 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         return abi.encode(OP_WITHDRAW, marketParams);
     }
 
+    /// @dev Taker `data` for the combined module's loan-asset withdraw leg (the
+    ///      earn-position exit). Distinct op word → distinct Permit3 ref.
+    function _loanWithdrawData() internal view returns (bytes memory) {
+        return abi.encode(OP_WITHDRAW_LOAN, marketParams);
+    }
+
     function _marketId() internal view returns (Id) {
         return Id.wrap(keccak256(abi.encode(marketParams)));
     }
@@ -113,6 +120,15 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
 
     function _collateral(address user) internal view returns (uint256) {
         return _position(user).collateral;
+    }
+
+    /// @dev Convert the user's live supply shares to assets with rounding-down,
+    ///      the same way Morpho values a lend position internally.
+    function _supplyAssets(address user) internal view returns (uint256) {
+        uint256 shares = _position(user).supplyShares;
+        if (shares == 0) return 0;
+        (uint128 totalSupplyAssets, uint128 totalSupplyShares,,,,) = MORPHO.market(_marketId());
+        return shares * (uint256(totalSupplyAssets) + VIRTUAL_ASSETS) / (uint256(totalSupplyShares) + VIRTUAL_SHARES);
     }
 
     /// @dev Convert the user's live borrow shares to assets with rounding-up, the
@@ -134,6 +150,15 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(WSTETH).approve(address(MORPHO), amount);
         MORPHO.supplyCollateral(marketParams, amount, maker, "");
+        vm.stopPrank();
+    }
+
+    /// @dev Maker supplies `amount` USDC as LOAN asset (the earn position).
+    function _seedLoanSupply(uint256 amount) internal {
+        deal(USDC, maker, amount);
+        vm.startPrank(maker);
+        IERC20(USDC).approve(address(MORPHO), amount);
+        MORPHO.supply(marketParams, amount, 0, maker, "");
         vm.stopPrank();
     }
 

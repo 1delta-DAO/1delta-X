@@ -63,6 +63,11 @@ contract MockMorpho {
         positions[keccak256(abi.encode(mp))][user].collateral = amount;
     }
 
+    // Test helper: seed loan-supply state (1 share == 1 asset in this mock).
+    function setPositionSupplyShares(MarketParams memory mp, address user, uint256 shares) external {
+        positions[keccak256(abi.encode(mp))][user].supplyShares = shares;
+    }
+
     // EIP-712 auth-with-sig: skip sig verification, just record and set flag.
     function setAuthorizationWithSig(Authorization calldata auth, Signature calldata) external {
         authWithSigCalled = true;
@@ -88,6 +93,20 @@ contract MockMorpho {
         require(authorization[onBehalf][msg.sender], "morpho: not authorized");
         positions[keccak256(abi.encode(mp))][onBehalf].collateral -= uint128(assets);
         collateralToken.mint(receiver, assets);
+    }
+
+    // Loan-asset withdraw: exact-assets XOR by-shares, like the real singleton.
+    // 1 share == 1 asset keeps the unit math trivial.
+    function withdraw(MarketParams memory mp, uint256 assets, uint256 shares, address onBehalf, address receiver)
+        external
+        returns (uint256, uint256)
+    {
+        require(authorization[onBehalf][msg.sender], "morpho: not authorized");
+        require((assets == 0) != (shares == 0), "morpho: inconsistent input");
+        uint256 out = assets != 0 ? assets : shares;
+        positions[keccak256(abi.encode(mp))][onBehalf].supplyShares -= out;
+        loanToken.mint(receiver, out);
+        return (out, out);
     }
 
     // Called by the module as: morpho.position(marketParams.id(), user)
