@@ -47,9 +47,10 @@ contract UsdrifExitTest is UsdrifForkBase {
 
     function _initiateRedemption() internal returns (uint256 opId) {
         deal(USDRIF, maker, USDRIF_IN);
-        // MoC requires msg.value == execCost * tx.gasprice. Pin a realistic RSK
-        // gas price so the fee is non-zero and `getExecFee` reflects it.
-        vm.txGasPrice(0.06 gwei);
+        // MoC requires msg.value == execCost × block.basefee (RSK's minimumGasPrice
+        // via RSKIP-412 BASEFEE). Forge forks default basefee to 0 — pin the real
+        // ~0.024 gwei minimum so the fee is non-zero and `getExecFee` reflects it.
+        vm.fee(0.024 gwei);
         uint256 fee = IMocQueue(MOC_QUEUE).getExecFee(OPER_REDEEM_TP);
         vm.deal(maker, fee);
 

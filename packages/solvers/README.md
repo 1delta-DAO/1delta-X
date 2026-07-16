@@ -2,13 +2,18 @@
 
 Off-chain filler / solver reference implementations for `UniversalSettlement`.
 
-These contracts are permissionless fillers: anyone may run one to fill an order.
-They hold no funds between fills — each fill sources its collateral inventory
-from a flash-loan provider, routes it through Settlement to satisfy the order,
-swaps the borrow proceeds back to the collateral asset, and repays the flash in
-the same transaction. The shared fill → swap → repay machinery lives in
-`base/BaseFlashSolver.sol`; each concrete solver only differs in which flash
-provider it draws inventory from.
+Most of these contracts are permissionless fillers: anyone may run one to fill
+an order. They hold no funds between fills — each fill sources its collateral
+inventory from a flash-loan provider, routes it through Settlement to satisfy
+the order, swaps the borrow proceeds back to the collateral asset, and repays
+the flash in the same transaction. The shared fill → swap → repay machinery
+lives in `base/BaseFlashSolver.sol`; each concrete solver only differs in which
+flash provider it draws inventory from.
+
+The exception is the **`inventory/`** group: fills whose recycle leg cannot
+complete inside the fill transaction (so flash capital is impossible). Those
+solvers are principals — they hold real inventory between fills and every
+entrypoint is owner/operator-gated.
 
 ## Layout
 
@@ -30,6 +35,17 @@ provider it draws inventory from.
   - `EulerMultiInputFlashSolver.sol` — **Euler EVK**
 - **`multi-output/`** — solvers for multi-output orders:
   - `MultiOutputFlashSolver.sol` — **Balancer v2**
+- **`inventory/`** — inventory-funded (non-flash) fillers:
+  - `UsdrifInventorySolver.sol` — **USDRIF→USDT0 exits on Rootstock**. Fills a
+    maker's direct USDRIF→USDT0 order from its own USDT0 inventory and, in the
+    same tx, escrows the USDRIF into MoC's native redemption (`redeemTP` to
+    itself — allowed for a principal, unlike a user-side wrapper). The queue
+    delivers RIF ~30–90s later; an operator then `sell`s it back to USDT0
+    through any owner-whitelisted venue (Uni v3 router, aggregators — opaque
+    calldata, with the output floor enforced by balance delta). This is the
+    one-signature variant of the two-phase flow in
+    `packages/modules/redeem/usdrif` (there the user redeems first and the
+    order needs settlement/depeg validators; here the order needs none).
 
 The single-input Aave/Morpho/Euler solvers each define the provider interface
 (`IAaveV3Pool`, `IMorphoFlash`, `IEulerFlashVault`); their multi-input

@@ -60,8 +60,10 @@ EIP‑712 hash, so the solver cannot alter them.
 | Multi-collateral guard (executes the queue) | `0x0237Ad1f0831b479a344E56646BC48B0885cF46F` |
 
 - `redeemTP(tp, qTP, qACmin, recipient, vendor)` is **payable**; `msg.value` must
-  equal `MocQueue.getExecFee(OperType.redeemTP)` = `execCost * tx.gasprice`
-  (`OperType.redeemTP == 4`). `recipient` must equal `msg.sender`.
+  equal `MocQueue.getExecFee(OperType.redeemTP)` = `execCost × block.basefee`
+  (`OperType.redeemTP == 4`; on Rootstock BASEFEE returns the block's
+  minimumGasPrice per RSKIP-412 — the fee does NOT track `tx.gasprice`, so pin
+  it with `vm.fee` in fork tests). `recipient` must equal `msg.sender`.
 - Operations execute FIFO via `MocQueue.execute(...)`, which is restricted to the
   multi-collateral guard — the fork tests impersonate it. `firstOperId` advances
   past executed ops, which is the settlement signal.
@@ -85,5 +87,11 @@ pull), fill succeeds after settlement, and the depeg guard gates by price band.
 ## Out of scope (first cut)
 
 Variant‑2 escrow + `zvClaim` token (a contract-mediated redeem that delivers a
-fungible claim as `tokenIn`); single-tx bundled redemption + fill; an LP
-backstop solver. See the plan's §3.4 / §6 / §10.
+fungible claim as `tokenIn`); single-tx bundled redemption + fill. See the
+plan's §3.4 / §6 / §10.
+
+An inventory-funded solver now exists at
+`packages/solvers/src/inventory/UsdrifInventorySolver.sol`: it fills a direct
+USDRIF→USDT0 order from its own USDT0 inventory and recycles the USDRIF via
+MoC redemption itself — the one-signature alternative to the two-phase flow
+above (and the stepping stone to the plan's LP "backstop solver").

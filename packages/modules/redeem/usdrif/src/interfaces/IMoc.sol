@@ -37,13 +37,15 @@ interface IMocQueue {
     ///         op has been executed and deleted.
     function opersInfo(uint256 operId) external view returns (uint8 operType, uint248 queuedBlk);
 
-    /// @notice Base exec-cost unit per operation of `operType_` (scaled by gas
-    ///         price to get the actual fee). `OperType.redeemTP == 4`.
+    /// @notice Base exec-cost unit per operation of `operType_` (scaled by the
+    ///         block's minimum gas price to get the actual fee). `OperType.redeemTP == 4`.
     function execCost(uint8 operType_) external view returns (uint256);
 
-    /// @notice Native exec fee (wei) required to queue an op of `operType_` at the
-    ///         current `tx.gasprice` — this is the exact `msg.value` `redeemTP`
-    ///         expects (`execCost * tx.gasprice`).
+    /// @notice Native exec fee (wei) required to queue an op of `operType_` —
+    ///         this is the exact `msg.value` `redeemTP` expects:
+    ///         `execCost × block.basefee` (on Rootstock, BASEFEE returns the
+    ///         block's minimumGasPrice per RSKIP-412; verified on-fork — it does
+    ///         NOT track `tx.gasprice`, so pin it with `vm.fee` in tests).
     function getExecFee(uint8 operType_) external view returns (uint256);
 
     /// @notice True once the head operation has waited long enough to execute.
