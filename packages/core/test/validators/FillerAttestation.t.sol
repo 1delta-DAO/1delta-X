@@ -3,9 +3,35 @@ pragma solidity ^0.8.28;
 
 import {UniversalSettlement, Order, Validator} from "@core/settlement/UniversalSettlement.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
+import {IERC1271} from "@core/interfaces/IERC1271.sol";
 import {FillerAttestationValidator} from "@core/validators/FillerAttestationValidator.sol";
 
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
+
+/// @dev Minimal EIP-1271 smart-account wallet controlled by a single EOA key —
+///      stands in for a multisig / Gnosis Safe attester. Validates any signature
+///      the `owner` key produces over the queried hash.
+contract MockAttesterWallet is IERC1271 {
+    address public immutable owner;
+
+    constructor(address o) {
+        owner = o;
+    }
+
+    function isValidSignature(bytes32 hash, bytes memory sig) external view override returns (bytes4) {
+        if (sig.length != 65) return 0xffffffff;
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(sig, 0x20))
+            s := mload(add(sig, 0x40))
+            v := byte(0, mload(add(sig, 0x60)))
+        }
+        if (ecrecover(hash, v, r, s) == owner) return IERC1271.isValidSignature.selector;
+        return 0xffffffff;
+    }
+}
 
 /// @dev Tiny validator that passes iff the shared `takerData` blob hashes to a
 ///      pinned value. Proves takerData is threaded from the fill entrypoint into
@@ -73,10 +99,16 @@ contract FillerAttestationTest is MockSettlementBase {
 
     /// @dev Order gated by `av` under `attester` / `LIST_ID` / `openAfter`.
     function _gated(uint256 nonce, uint256 openAfter) internal view returns (Order memory o) {
+        return _gatedBy(nonce, openAfter, attester);
+    }
+
+    /// @dev Same, but with an explicit `att` address as the maker-trusted attester —
+    ///      lets a test point the gate at a contract-wallet / 7702 attester.
+    function _gatedBy(uint256 nonce, uint256 openAfter, address att) internal view returns (Order memory o) {
         o = _plainOrder(nonce, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         o.deadline = block.timestamp + 3 hours; // survive warps in the fallback/expiry tests
         Validator[] memory v = new Validator[](1);
-        v[0] = Validator({target: address(av), data: abi.encode(attester, LIST_ID, openAfter)});
+        v[0] = Validator({target: address(av), data: abi.encode(att, LIST_ID, openAfter)});
         o.validators = v;
     }
 
@@ -110,6 +142,55 @@ contract FillerAttestationTest is MockSettlementBase {
         settlement.fill(o, sig, AMOUNT_IN, takerData);
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker got output");
         assertEq(tA.balanceOf(solver), AMOUNT_IN, "attested solver got input");
+    }
+
+    // ──────────────────── Contract-signer / EIP-7702 attesters ────────────────────
+
+    /// @dev The attester is a smart-account wallet (multisig / Gnosis Safe stand-in)
+    ///      that validates via EIP-1271. The credential is signed by the wallet's
+    ///      owner key; the validator's ecrecover recovers the owner (≠ the wallet
+    ///      address), then falls through to `wallet.isValidSignature` which accepts.
+    function test_attest_contractSignerAttester_eip1271() public {
+        MockAttesterWallet wallet = new MockAttesterWallet(attester);
+        Order memory o = _gatedBy(1, 0, address(wallet)); // gate trusts the WALLET
+        bytes memory sig = _sign(o);
+        // Credential signed by the wallet's owner key over the (filler, listId, expiry) digest.
+        bytes memory takerData = _credential(av, solver, block.timestamp + 1 hours, attesterPk);
+
+        vm.prank(solver);
+        settlement.fill(o, sig, AMOUNT_IN, takerData);
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "1271 attester: maker got output");
+        assertEq(tA.balanceOf(solver), AMOUNT_IN, "1271-attested solver got input");
+    }
+
+    /// @dev A wrong key signing for a 1271 attester wallet is rejected: the owner
+    ///      check inside `isValidSignature` fails → magic value not returned → gate false.
+    function test_attest_contractSignerAttester_wrongKeyReverts() public {
+        MockAttesterWallet wallet = new MockAttesterWallet(attester);
+        Order memory o = _gatedBy(1, 0, address(wallet));
+        bytes memory sig = _sign(o);
+        bytes memory takerData = _credential(av, solver, block.timestamp + 1 hours, badPk);
+
+        vm.prank(solver);
+        _expectValidationFailed();
+        settlement.fill(o, sig, AMOUNT_IN, takerData);
+    }
+
+    /// @dev THE Permit2 7702 failure mode, guarded: the attester is an EIP-7702
+    ///      account — same address as its signing key, but now carrying bytecode.
+    ///      Because ecrecover is tried FIRST, its regular signature is honoured and
+    ///      the 1271 path is never consulted. We etch STOP code (which would return
+    ///      empty → 1271 false) precisely so a pass proves the ecrecover-first path.
+    function test_attest_eip7702RawKeyAttester() public {
+        vm.etch(attester, hex"00"); // non-empty code at the key's own address; not a 1271 impl
+        Order memory o = _gated(1, 0); // gate still trusts `attester`
+        bytes memory sig = _sign(o);
+        bytes memory takerData = _credential(av, solver, block.timestamp + 1 hours, attesterPk);
+
+        vm.prank(solver);
+        settlement.fill(o, sig, AMOUNT_IN, takerData);
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "7702 raw-key attester: maker got output");
+        assertEq(tA.balanceOf(solver), AMOUNT_IN, "7702 raw-key attester accepted");
     }
 
     // ──────────────────── Rejections ────────────────────

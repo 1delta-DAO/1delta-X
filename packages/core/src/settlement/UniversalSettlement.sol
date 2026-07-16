@@ -55,6 +55,18 @@ contract UniversalSettlement is NonceManager {
     ///         (`tokenIn[0]` for SELL, `tokenOut[0]` for BUY).
     mapping(bytes32 => uint256) public filled;
 
+    /// @notice maker → orderHash → on-chain order authorization. The signature-less
+    ///         alternative to signing: a maker that cannot produce a verifiable
+    ///         signature at all — a classic multisig with no EIP-1271
+    ///         `isValidSignature`, for which neither the ECDSA nor the 1271 branch
+    ///         of the verifier can ever succeed — instead records intent on-chain via
+    ///         {approveOrder}. Fillers then pass an EMPTY `sig` and the fill
+    ///         authorizes against this mapping. Funding still flows through the
+    ///         maker's standing Permit3 allowances, and the fill is still gated by
+    ///         the shared nonce/deadline/validator machinery — this only replaces the
+    ///         signature check, nothing else.
+    mapping(address => mapping(bytes32 => bool)) public orderApproved;
+
     uint256 private _locked = 1;
 
     // ──────────────────── Events ────────────────────
@@ -68,6 +80,11 @@ contract UniversalSettlement is NonceManager {
     ///         Transfer events don't carry) and to make fills filterable by
     ///         maker/solver — so it emits just those three topics, no log data.
     event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed solver);
+
+    /// @notice A maker authorized an order on-chain via {approveOrder} — the
+    ///         signature-less order path — or withdrew it via {revokeOrderApproval}.
+    event OrderApproved(address indexed maker, bytes32 indexed orderHash);
+    event OrderApprovalRevoked(address indexed maker, bytes32 indexed orderHash);
 
     // ──────────────────── Errors ────────────────────
 
@@ -88,6 +105,11 @@ contract UniversalSettlement is NonceManager {
     /// @dev Fee over `MAX_FEE_BPS`, or a non-zero fee with a zero recipient
     ///      (which would otherwise burn the skim to `address(0)`).
     error InvalidFee();
+    /// @dev An empty `sig` was supplied for a fill, but the maker has no matching
+    ///      on-chain {approveOrder} record for this order.
+    error OrderNotApproved();
+    /// @dev {approveOrder} called with an order whose `maker` is not the caller.
+    error NotOrderMaker();
 
     /// @notice Where the solver callback runs relative to settlement, chosen by
     ///         the filler in `fillWithCallback`.
@@ -333,6 +355,45 @@ contract UniversalSettlement is NonceManager {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         return _fillCore(order, orderHash, fillAmount, filler, address(0), "", CallbackMode.PreDelivery, takerData);
+    }
+
+    // ──────────────────── On-chain order authorization ────────────────────
+
+    /// @notice Signature-less order authorization. Instead of signing the order
+    ///         off-chain, the maker (`msg.sender`) records approval on-chain here;
+    ///         fillers then fill with an EMPTY `sig`. This is the path for makers
+    ///         that cannot produce a verifiable signature at all — a classic
+    ///         multisig with no EIP-1271 `isValidSignature`, for which neither the
+    ///         ECDSA nor the 1271 branch of {SignatureVerification} can succeed.
+    ///         (Signers that CAN produce a signature — EOA, EIP-1271 wallet, Safe,
+    ///         EIP-7702 account — should just sign; they need no on-chain write.)
+    ///
+    ///         The mapping is keyed by `msg.sender` and checked at fill time against
+    ///         `order.maker`, so a caller can only ever authorize an order that names
+    ///         itself as maker — no one can approve on another maker's behalf. The
+    ///         `order.maker == msg.sender` guard makes that explicit and fails fast.
+    ///
+    ///         Nothing else about the fill changes: the maker must still hold the
+    ///         standing Permit3 allowances the fill consumes, and every fill remains
+    ///         gated by the order's deadline, nonce (see {NonceManager}), validators,
+    ///         and invariants. Approval is the exact analogue of a signature — it
+    ///         authorizes the order for partial fills up to its size, not a single use.
+    /// @return orderHash The EIP-712 order hash now authorized (handy for indexing).
+    function approveOrder(Order calldata order) external returns (bytes32 orderHash) {
+        if (order.maker != msg.sender) revert NotOrderMaker();
+        orderHash = order.hash();
+        orderApproved[msg.sender][orderHash] = true;
+        emit OrderApproved(msg.sender, orderHash);
+    }
+
+    /// @notice Withdraw a prior {approveOrder}. Keyed by `msg.sender`, so a maker can
+    ///         only clear its own approval. Cancelling the order's nonce
+    ///         ({cancelOrders}/{rollbackNonces}) also blocks the fill — the nonce gate
+    ///         runs on every fill regardless — but leaves this flag set; use this to
+    ///         un-approve without burning the nonce, or to reclaim the storage.
+    function revokeOrderApproval(bytes32 orderHash) external {
+        orderApproved[msg.sender][orderHash] = false;
+        emit OrderApprovalRevoked(msg.sender, orderHash);
     }
 
     /// @dev Per-fill context, bundled so the settlement helpers take one memory
@@ -694,6 +755,15 @@ contract UniversalSettlement is NonceManager {
     }
 
     function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {
+        // Signature-less path: an EMPTY `sig` authorizes against the maker's on-chain
+        // {approveOrder} record instead of a signature. No valid signature has zero
+        // length (the shared verifier rejects it), so the sentinel can never collide
+        // with a real one. This lets a maker that cannot sign — e.g. a multisig
+        // without EIP-1271 — still place orders. Every other fill gate is unchanged.
+        if (sig.length == 0) {
+            if (!orderApproved[expected][orderHash]) revert OrderNotApproved();
+            return;
+        }
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), orderHash));
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
