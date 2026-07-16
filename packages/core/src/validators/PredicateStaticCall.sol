@@ -10,7 +10,7 @@ import {Order} from "../settlement/UniversalSettlement.sol";
 ///         first 32 bytes decode to a non-zero uint256.
 /// @dev    `data = abi.encode(address target, bytes calldata)`
 contract PredicateStaticCall is IOrderValidator {
-    function validate(Order calldata, bytes calldata data) external view override returns (bool) {
+    function validate(Order calldata, address, bytes calldata data, bytes calldata) external view override returns (bool) {
         (address target, bytes memory call) = abi.decode(data, (address, bytes));
         (bool ok, bytes memory ret) = target.staticcall(call);
         return ok && ret.length >= 32 && abi.decode(ret, (uint256)) != 0;

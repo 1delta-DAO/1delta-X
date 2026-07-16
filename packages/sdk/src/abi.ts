@@ -84,6 +84,21 @@ export const SETTLEMENT_ABI = [
     inputs: [orderArg, { name: "sig", type: "bytes" }, { name: "fillAmountIn", type: "uint256" }],
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
   },
+  // Overload carrying a filler-supplied `takerData` blob (unsigned, adversarial —
+  // a validator must independently verify it). Distinct selector; the 3-arg form
+  // above stays for callers that don't use it.
+  {
+    type: "function",
+    name: "fill",
+    stateMutability: "nonpayable",
+    inputs: [
+      orderArg,
+      { name: "sig", type: "bytes" },
+      { name: "fillAmountIn", type: "uint256" },
+      { name: "takerData", type: "bytes" },
+    ],
+    outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
+  },
   {
     type: "function",
     name: "fillWithPermit",
@@ -93,6 +108,20 @@ export const SETTLEMENT_ABI = [
       { name: "batch", type: "tuple", components: permitBatchComponents },
       { name: "sig", type: "bytes" },
       { name: "fillAmountIn", type: "uint256" },
+    ],
+    outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
+  },
+  // fillWithPermit overload with a trailing `takerData` blob (see the fill overload).
+  {
+    type: "function",
+    name: "fillWithPermit",
+    stateMutability: "nonpayable",
+    inputs: [
+      orderArg,
+      { name: "batch", type: "tuple", components: permitBatchComponents },
+      { name: "sig", type: "bytes" },
+      { name: "fillAmountIn", type: "uint256" },
+      { name: "takerData", type: "bytes" },
     ],
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
   },
@@ -165,25 +194,37 @@ export const SETTLEMENT_LENS_ABI = [
     type: "function",
     name: "getOrderRelevantState",
     stateMutability: "view",
-    inputs: [orderArg, { name: "sig", type: "bytes" }],
+    // `takerData`: the filler-supplied blob the filler intends to submit with the
+    // fill, previewed through the validators exactly as the settlement passes it.
+    inputs: [
+      orderArg,
+      { name: "sig", type: "bytes" },
+      { name: "filler", type: "address" },
+      { name: "takerData", type: "bytes" },
+    ],
     outputs: [
       { name: "status", type: "uint8" },
       { name: "fillableAmount", type: "uint256" },
       { name: "isSignatureValid", type: "bool" },
+      { name: "validatorsPass", type: "bool" },
     ],
   },
   {
     type: "function",
     name: "getOrderRelevantStates",
     stateMutability: "view",
+    // `takerDatas`: per-order filler blobs, aligned 1:1 with `orders`.
     inputs: [
       { name: "orders", type: "tuple[]", components: orderComponents },
       { name: "sigs", type: "bytes[]" },
+      { name: "filler", type: "address" },
+      { name: "takerDatas", type: "bytes[]" },
     ],
     outputs: [
       { name: "statuses", type: "uint8[]" },
       { name: "fillableAmounts", type: "uint256[]" },
       { name: "sigValids", type: "bool[]" },
+      { name: "validatorsPass", type: "bool[]" },
     ],
   },
 ] as const;

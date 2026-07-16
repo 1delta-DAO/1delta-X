@@ -11,13 +11,13 @@ import {Order} from "@core/settlement/UniversalSettlement.sol";
 // ──────────────────── Test-only validators for invariant checks ────────────────────
 
 contract TrueInvariant is IOrderValidator {
-    function validate(Order calldata, bytes calldata) external pure returns (bool) {
+    function validate(Order calldata, address, bytes calldata, bytes calldata) external pure returns (bool) {
         return true;
     }
 }
 
 contract FalseInvariant is IOrderValidator {
-    function validate(Order calldata, bytes calldata) external pure returns (bool) {
+    function validate(Order calldata, address, bytes calldata, bytes calldata) external pure returns (bool) {
         return false;
     }
 }

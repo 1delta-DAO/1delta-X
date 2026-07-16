@@ -305,6 +305,24 @@ contract Permit3Test is Test {
         permit3.take(address(taker), owner, 6e18, recipient, data);
     }
 
+    /// @notice A zero-amount `take` is rejected before dispatch. `_spend(bucket, 0)`
+    ///         does NOT revert even against an empty allowance, so without the guard
+    ///         an unauthorised caller (no taker allowance under their key) could
+    ///         reach `module.takeOnBehalf(victim, 0, attacker, data)`. The guard
+    ///         closes that path for every present and future module.
+    function test_take_revert_zeroAmount_unauthorized() public {
+        bytes memory data = abi.encode(uint256(1));
+        // Attacker holds NO allowance for `owner` under their own key, yet a
+        // zero-amount spend would otherwise pass — the guard must still reject it.
+        address attacker = address(0xBAD);
+        vm.prank(attacker);
+        vm.expectRevert(IPermit3.ZeroAmount.selector);
+        permit3.take(address(taker), owner, 0, attacker, data);
+
+        // The module was never invoked.
+        assertEq(taker.lastUser(), address(0), "module not dispatched on zero-amount take");
+    }
+
     function test_take_nonReentrant() public {
         ReentrantTakerModule evil = new ReentrantTakerModule(address(permit3));
         bytes memory data = abi.encode(uint256(7));

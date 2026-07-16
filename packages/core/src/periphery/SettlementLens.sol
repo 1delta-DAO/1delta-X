@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IPermit3} from "../interfaces/IPermit3.sol";
+import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {FeeConfig} from "../utils/FeeConfig.sol";
@@ -85,10 +86,11 @@ contract SettlementLens {
 
     /// @notice One-call preflight for a solver/filler: classify the order, report
     ///         how much is ACTUALLY fillable right now (capped by the maker's live
-    ///         Permit3 allowance + balance for plain orders), and whether the
-    ///         signature recovers to the maker. The 0x `getOrderRelevantState`
-    ///         analogue — lets a filler skip orders that would revert without
-    ///         simulating the whole fill.
+    ///         Permit3 allowance + balance for plain orders), whether the
+    ///         signature recovers to the maker, and whether the order's
+    ///         pre-execution validators currently pass for `filler`. The 0x
+    ///         `getOrderRelevantState` analogue — lets a filler skip orders that
+    ///         would revert without simulating the whole fill.
     /// @dev    `fillableAmount` is in anchor units (`tokenIn[0]` for SELL,
     ///         `tokenOut[0]` for BUY). For orders WITH items the tokenIn is
     ///         (partly) produced on-chain by TAKE legs, which can't be known
@@ -97,10 +99,21 @@ contract SettlementLens {
     ///         For BUY orders the maker-capacity cap uses each leg's worst-case
     ///         (ceiling) input tick, so it is a conservative lower bound. This is a
     ///         best-effort hint, not a guarantee — the fill remains the truth.
-    function getOrderRelevantState(Order calldata order, bytes calldata sig)
+    /// @param  filler The would-be filler the validators are previewed for
+    ///         (validators receive the filler address, so filler-conditional
+    ///         orders — e.g. per-order solver whitelists — preview correctly).
+    ///         `validatorsPass` covers `order.validators` only; post-execution
+    ///         invariants depend on the fill's side effects and are not
+    ///         previewable statically.
+    /// @param  takerData The filler-supplied blob the filler intends to submit with
+    ///         the fill (unsigned/adversarial — see {IOrderValidator}); previewed
+    ///         through the validators exactly as the settlement would pass it, so a
+    ///         takerData-consuming validator (e.g. an off-chain attestation gate)
+    ///         previews correctly. Pass empty (`""`) for orders that don't use it.
+    function getOrderRelevantState(Order calldata order, bytes calldata sig, address filler, bytes calldata takerData)
         external
         view
-        returns (OrderStatus status, uint256 fillableAmount, bool isSignatureValid)
+        returns (OrderStatus status, uint256 fillableAmount, bool isSignatureValid, bool validatorsPass)
     {
         bytes32 orderHash = order.hash();
         try this.checkSignature(orderHash, sig, order.maker) {
@@ -109,25 +122,44 @@ contract SettlementLens {
             isSignatureValid = false;
         }
         (status, fillableAmount) = _orderState(order, orderHash);
+        validatorsPass = _validatorsPass(order, filler, takerData);
     }
 
-    /// @notice Batch preflight. Any order that reverts (malformed, etc.) degrades
-    ///         to `Invalid` / 0 / false instead of failing the whole call — the 0x
+    /// @notice Batch preflight (one `filler`, many orders — the common solver
+    ///         loop). Any order that reverts (malformed, etc.) degrades to
+    ///         `Invalid` / 0 / false instead of failing the whole call — the 0x
     ///         "swallows reverts" batch-state behaviour.
-    function getOrderRelevantStates(Order[] calldata orders, bytes[] calldata sigs)
+    /// @param  takerDatas Per-order filler-supplied blobs, aligned 1:1 with
+    ///         `orders` (`takerDatas[i]` previews order `i`). Pass empty entries for
+    ///         orders that don't consume it. Must be the same length as `orders`.
+    function getOrderRelevantStates(
+        Order[] calldata orders,
+        bytes[] calldata sigs,
+        address filler,
+        bytes[] calldata takerDatas
+    )
         external
         view
-        returns (OrderStatus[] memory statuses, uint256[] memory fillableAmounts, bool[] memory sigValids)
+        returns (
+            OrderStatus[] memory statuses,
+            uint256[] memory fillableAmounts,
+            bool[] memory sigValids,
+            bool[] memory validatorsPass
+        )
     {
         uint256 n = orders.length;
         statuses = new OrderStatus[](n);
         fillableAmounts = new uint256[](n);
         sigValids = new bool[](n);
+        validatorsPass = new bool[](n);
         for (uint256 i; i < n; i++) {
-            try this.getOrderRelevantState(orders[i], sigs[i]) returns (OrderStatus s, uint256 f, bool v) {
+            try this.getOrderRelevantState(orders[i], sigs[i], filler, takerDatas[i]) returns (
+                OrderStatus s, uint256 f, bool v, bool vp
+            ) {
                 statuses[i] = s;
                 fillableAmounts[i] = f;
                 sigValids[i] = v;
+                validatorsPass[i] = vp;
             } catch {
                 statuses[i] = OrderStatus.Invalid;
             }
@@ -314,6 +346,42 @@ contract SettlementLens {
     }
 
     // ──────────────────── Internal helpers ────────────────────
+
+    /// @dev Preview the order's pre-execution validators for `filler` — the same
+    ///      AND-composition the settlement runs in `_runValidators`, evaluated as
+    ///      a view. Mirrors the settlement's gate exactly: staticcall
+    ///      `target.validate(order, filler, data, takerData)`, pass iff the call
+    ///      succeeds, returns ≥32 bytes, and the bool word is 1.
+    function _validatorsPass(Order calldata order, address filler, bytes calldata takerData)
+        internal
+        view
+        returns (bool)
+    {
+        uint256 len = order.validators.length;
+        for (uint256 i; i < len; i++) {
+            Validator calldata v = order.validators[i];
+            if (!_gatePasses(v.target, order, filler, v.data, takerData)) return false;
+        }
+        return true;
+    }
+
+    /// @dev Byte-for-byte mirror of the settlement's validator gate (see
+    ///      {UniversalSettlement._gatePasses}): single-word return read into
+    ///      scratch space, no `bytes memory` return allocation.
+    function _gatePasses(
+        address target,
+        Order calldata order,
+        address filler,
+        bytes calldata data,
+        bytes calldata takerData
+    ) private view returns (bool pass) {
+        bytes memory cd = abi.encodeCall(IOrderValidator.validate, (order, filler, data, takerData));
+        /// @solidity memory-safe-assembly
+        assembly {
+            let ok := staticcall(gas(), target, add(cd, 0x20), mload(cd), 0x00, 0x20)
+            pass := and(and(ok, gt(returndatasize(), 31)), eq(mload(0x00), 1))
+        }
+    }
 
     /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —
     ///      `startAmountIn[0]` (SELL) or `startAmountOut[0]` (BUY).

@@ -29,7 +29,7 @@ import {IPriceProvider} from "./interfaces/IMoc.sol";
 contract DepegGuardValidator is IOrderValidator {
     error InvalidBand();
 
-    function validate(Order calldata, bytes calldata data) external view override returns (bool) {
+    function validate(Order calldata, address, bytes calldata data, bytes calldata) external view override returns (bool) {
         (address priceProvider, uint256 minPrice, uint256 maxPrice) =
             abi.decode(data, (address, uint256, uint256));
 

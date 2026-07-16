@@ -401,8 +401,8 @@ contract SettlementGuardsTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), huge, AMOUNT_OUT);
         bytes memory sig = _sign(order);
 
-        (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid) =
-            lens.getOrderRelevantState(order, sig);
+        (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid,) =
+            lens.getOrderRelevantState(order, sig, solver, "");
 
         assertEq(uint256(status), uint256(SettlementLens.OrderStatus.Fillable), "still fillable");
         assertEq(fillable, huge, "overflowing leg treated as non-binding");

@@ -214,8 +214,8 @@ contract BuyOrdersTest is MockSettlementBase {
         Order memory order = _buyOrder(1, address(tA), address(tB), START_IN, END_IN, OUT);
         bytes memory sig = _sign(order);
 
-        (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid) =
-            lens.getOrderRelevantState(order, sig);
+        (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid,) =
+            lens.getOrderRelevantState(order, sig, solver, "");
 
         assertEq(uint256(status), uint256(SettlementLens.OrderStatus.Fillable), "fillable");
         assertTrue(sigValid, "sig valid");

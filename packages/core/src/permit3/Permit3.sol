@@ -143,6 +143,14 @@ contract Permit3 is IPermit3, EIP712 {
         override
         nonReentrant
     {
+        // Reject zero-amount dispatches. `_spend(bucket, 0)` does not revert even
+        // against an empty allowance, so without this an unauthorised caller could
+        // reach `module.takeOnBehalf(user, 0, ...)` for any `user` — harmless for
+        // today's modules (excess always sweeps to `onBehalfOf`, so a zero `amount`
+        // nets the caller nothing) but a standing footgun for any future module
+        // that keys off a non-zero `amount`. Settlement already skips zero slices
+        // (`_executeItems`), so this is behaviour-preserving on the honest path.
+        if (amount == 0) revert ZeroAmount();
         bytes32 ref = keccak256(data);
         _spend(_takerAllowance[user][msg.sender][ref], amount);
         ITakerModule(module).takeOnBehalf(user, amount, receiver, data);

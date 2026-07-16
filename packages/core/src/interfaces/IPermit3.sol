@@ -87,6 +87,10 @@ interface IPermit3 {
     error Reentrancy();
     error PermitExpired();
     error PermitNonceUsed();
+    /// @dev A `take` with `amount == 0` — rejected so an unauthorised caller
+    ///      cannot reach a module's `takeOnBehalf` with a zero amount (the
+    ///      allowance gate does not decrement on zero and so would not stop it).
+    error ZeroAmount();
 
     // ──────────────────── Token side ────────────────────
 

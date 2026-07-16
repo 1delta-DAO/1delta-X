@@ -31,7 +31,9 @@ contract OrderRelevantStateTest is MockSettlementBase {
         view
         returns (SettlementLens.OrderStatus status, uint256 fillable, bool sigValid)
     {
-        return lens.getOrderRelevantState(o, sig);
+        // These orders carry no validators, so the previewed filler is irrelevant
+        // (`validatorsPass` is vacuously true) — thread the solver and drop it.
+        (status, fillable, sigValid,) = lens.getOrderRelevantState(o, sig, solver, "");
     }
 
     // ──────────────────── Status matrix ────────────────────
@@ -164,8 +166,8 @@ contract OrderRelevantStateTest is MockSettlementBase {
         sigs[1] = filledSig;
         sigs[2] = _sign(_order(3));
 
-        (SettlementLens.OrderStatus[] memory statuses, uint256[] memory fillable,) =
-            lens.getOrderRelevantStates(orders, sigs);
+        (SettlementLens.OrderStatus[] memory statuses, uint256[] memory fillable,,) =
+            lens.getOrderRelevantStates(orders, sigs, solver, new bytes[](orders.length));
 
         assertEq(uint8(statuses[0]), uint8(SettlementLens.OrderStatus.Fillable), "0 fillable");
         assertEq(fillable[0], AMOUNT_IN, "0 full");

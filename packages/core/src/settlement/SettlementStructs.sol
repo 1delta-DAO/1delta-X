@@ -70,10 +70,11 @@ struct CurvePoint {
     uint32 bumpBps;
 }
 
-/// @notice A read-only trigger. Settlement `staticcall`s `target.validate(order, data)`
-///         and aborts the fill unless the returned bool is `true`. Multiple
-///         validators on an order are AND-composed. Both `target` and `data`
-///         are in the EIP-712 typehash → solver cannot alter.
+/// @notice A read-only trigger. Settlement `staticcall`s
+///         `target.validate(order, filler, data)` — `filler` being the address
+///         executing the fill — and aborts the fill unless the returned bool is
+///         `true`. Multiple validators on an order are AND-composed. Both
+///         `target` and `data` are in the EIP-712 typehash → solver cannot alter.
 struct Validator {
     address target;
     bytes data;

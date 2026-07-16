@@ -103,6 +103,21 @@ proceeds **produced by that fill only**.
 7. **Validators are read-only and signer-bound.** They run via `staticcall`
    (no state change, no reentrancy), and their `target` + `data` are in the
    order's EIP-712 typehash, so a solver cannot weaken or swap them.
+   Validators also receive the filler address (the fill's `msg.sender`, or the
+   threaded caller for `batchFill`) and can express filler-conditional policy
+   such as per-order solver whitelists; the gate remains read-only and
+   signer-bound.
+   Validators additionally receive a filler-supplied `takerData` blob (the same
+   blob for every validator + invariant of a fill), threaded from the fill
+   entrypoint. `takerData` is **unsigned and adversarial** — it is NOT part of the
+   maker's signed order and any filler can set it to anything — so a validator
+   MUST independently verify anything it reads from it before trusting it (e.g.
+   recover a maker-chosen trusted signer over an EIP-712 digest bound to the
+   on-chain `filler` and the validator's own domain, as `FillerAttestationValidator`
+   does). Crucially, `takerData` cannot alter the maker's signed outcome (amounts,
+   tokens, recipients): only a validator — a read-only gate that can merely pass or
+   fail the fill — ever consumes it. Its power is bounded to letting a maker gate a
+   fill on a filler-produced proof (off-chain attestation, oracle update, ZK proof).
 
 8. **Oracle freshness is enforced.** Chainlink validators reject
    non-positive prices, incomplete rounds, and prices older than a maker-signed

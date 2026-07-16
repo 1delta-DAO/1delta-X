@@ -40,7 +40,7 @@ contract RedemptionSettledValidator is IOrderValidator {
         rif = rif_;
     }
 
-    function validate(Order calldata, bytes calldata data) external view override returns (bool) {
+    function validate(Order calldata, address, bytes calldata data, bytes calldata) external view override returns (bool) {
         (address mocQueue, uint256 opId, address user, uint256 minRif) =
             abi.decode(data, (address, uint256, address, uint256));
 

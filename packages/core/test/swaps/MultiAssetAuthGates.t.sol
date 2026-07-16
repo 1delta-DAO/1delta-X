@@ -37,7 +37,7 @@ contract MockMakerWallet is IERC1271 {
 /// @dev Trivial validator: passes iff `data` decodes to `true`. Lets a test
 ///      flip a gate on/off while keeping the target/data in the signed order.
 contract BoolValidator is IOrderValidator {
-    function validate(Order calldata, bytes calldata data) external pure override returns (bool) {
+    function validate(Order calldata, address, bytes calldata data, bytes calldata) external pure override returns (bool) {
         return abi.decode(data, (bool));
     }
 }

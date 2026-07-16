@@ -82,6 +82,8 @@ contract UniversalSettlement is NonceManager {
     error FillTooSmall();
     error OnlySelf();
     error BatchFillIncomplete(uint256 index);
+    /// @dev `batchFill`'s `takerDatas` array is not aligned 1:1 with `orders`.
+    error LengthMismatch();
     error ReverseModeRequiresNoItems();
     /// @dev Fee over `MAX_FEE_BPS`, or a non-zero fee with a zero recipient
     ///      (which would otherwise burn the skim to `address(0)`).
@@ -124,6 +126,8 @@ contract UniversalSettlement is NonceManager {
     /// @notice Fill (up to) `fillAmount` of an order — in `tokenIn[0]` units for a
     ///         SELL, `tokenOut[0]` units for a BUY. Partial fills allowed.
     ///         Lending items are executed pro-rata for this fill's slice.
+    /// @dev    Thin wrapper over the {takerData} overload with an empty blob, so
+    ///         existing 3-arg call sites (solvers, SDK) keep working unchanged.
     function fill(Order calldata order, bytes calldata sig, uint256 fillAmount)
         external
         nonReentrant
@@ -131,7 +135,27 @@ contract UniversalSettlement is NonceManager {
     {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmount, msg.sender, address(0), "", CallbackMode.PreDelivery);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, address(0), "", CallbackMode.PreDelivery, "");
+    }
+
+    /// @notice Fill overload that carries a filler-supplied `takerData` blob into
+    ///         the order's validators and invariants.
+    /// @param  takerData  Adversarial, UNSIGNED, shared-per-fill data (see
+    ///         {IOrderValidator}). It reaches every validator and invariant of this
+    ///         fill but can only be *consumed by a validator* — a read-only gate —
+    ///         so it can never alter the maker's signed outcome (amounts, tokens,
+    ///         recipients). A validator that reads it MUST independently verify it
+    ///         (e.g. recover a maker-trusted attester over a digest bound to
+    ///         `msg.sender`). Lets a maker gate a fill on a proof only the filler
+    ///         can produce (off-chain attestation, oracle update, ZK proof).
+    function fill(Order calldata order, bytes calldata sig, uint256 fillAmount, bytes calldata takerData)
+        external
+        nonReentrant
+        returns (uint256[] memory fillAmountsOut)
+    {
+        bytes32 orderHash = order.hash();
+        _verifySignature(orderHash, sig, order.maker);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, address(0), "", CallbackMode.PreDelivery, takerData);
     }
 
     /// @notice Fill with a solver-supplied callback that runs just before output
@@ -174,7 +198,24 @@ contract UniversalSettlement is NonceManager {
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmount, msg.sender, callbackTarget, callbackData, mode);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, callbackTarget, callbackData, mode, "");
+    }
+
+    /// @notice {fillWithCallback} overload carrying a filler-supplied `takerData`
+    ///         blob into the order's validators and invariants. See {fill}'s
+    ///         takerData overload for the adversarial/validator-verified rule.
+    function fillWithCallback(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        address callbackTarget,
+        bytes calldata callbackData,
+        CallbackMode mode,
+        bytes calldata takerData
+    ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+        bytes32 orderHash = order.hash();
+        _verifySignature(orderHash, sig, order.maker);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, callbackTarget, callbackData, mode, takerData);
     }
 
     /// @notice Single-signature fill: the maker's `sig` is over a Permit3
@@ -193,7 +234,22 @@ contract UniversalSettlement is NonceManager {
         // applies all allowances. The order itself doesn't need a separate sig
         // — the witness binding makes the permit endorse this exact order.
         PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
-        return _fillCore(order, orderHash, fillAmount, msg.sender, address(0), "", CallbackMode.PreDelivery);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, address(0), "", CallbackMode.PreDelivery, "");
+    }
+
+    /// @notice {fillWithPermit} overload carrying a filler-supplied `takerData`
+    ///         blob into the order's validators and invariants. See {fill}'s
+    ///         takerData overload for the adversarial/validator-verified rule.
+    function fillWithPermit(
+        Order calldata order,
+        IPermit3.PermitBatch calldata batch,
+        bytes calldata sig,
+        uint256 fillAmount,
+        bytes calldata takerData
+    ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+        bytes32 orderHash = order.hash();
+        PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
+        return _fillCore(order, orderHash, fillAmount, msg.sender, address(0), "", CallbackMode.PreDelivery, takerData);
     }
 
     /// @notice Fill a batch of orders in one transaction. Each order is attempted
@@ -217,7 +273,41 @@ contract UniversalSettlement is NonceManager {
         success = new bool[](n);
         address filler = msg.sender;
         for (uint256 i; i < n;) {
-            try this.fillSelf(orders[i], sigs[i], fillAmounts[i], filler) returns (uint256[] memory outs) {
+            // Empty takerData — the no-taker-blob path.
+            try this.fillSelf(orders[i], sigs[i], fillAmounts[i], filler, "") returns (uint256[] memory outs) {
+                fillAmountsOut[i] = outs;
+                success[i] = true;
+            } catch {
+                if (revertIfIncomplete) revert BatchFillIncomplete(i);
+            }
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice {batchFill} overload carrying a per-order filler-supplied `takerData`
+    ///         blob, aligned 1:1 with `orders` (`takerDatas[i]` threads into order
+    ///         `i`'s validators + invariants). See {fill}'s takerData overload for
+    ///         the adversarial/validator-verified rule.
+    /// @dev    Reverts {LengthMismatch} if `takerDatas.length != orders.length`.
+    ///         The loop is inlined (not shared with the 4-arg overload) to stay
+    ///         under the EVM stack limit without via-IR.
+    function batchFill(
+        Order[] calldata orders,
+        bytes[] calldata sigs,
+        uint256[] calldata fillAmounts,
+        bool revertIfIncomplete,
+        bytes[] calldata takerDatas
+    ) external nonReentrant returns (uint256[][] memory fillAmountsOut, bool[] memory success) {
+        uint256 n = orders.length;
+        if (takerDatas.length != n) revert LengthMismatch();
+        fillAmountsOut = new uint256[][](n);
+        success = new bool[](n);
+        address filler = msg.sender;
+        for (uint256 i; i < n;) {
+            try this.fillSelf(orders[i], sigs[i], fillAmounts[i], filler, takerDatas[i]) returns (uint256[] memory outs)
+            {
                 fillAmountsOut[i] = outs;
                 success[i] = true;
             } catch {
@@ -230,16 +320,19 @@ contract UniversalSettlement is NonceManager {
     }
 
     /// @notice Self-call fill target for {batchFill}. Verifies the maker signature
-    ///         and runs the fill for an explicit `filler`. `onlySelf` — external
-    ///         callers must use `fill`.
-    function fillSelf(Order calldata order, bytes calldata sig, uint256 fillAmount, address filler)
-        external
-        returns (uint256[] memory)
-    {
+    ///         and runs the fill for an explicit `filler`, carrying this order's
+    ///         `takerData`. `onlySelf` — external callers must use `fill`.
+    function fillSelf(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        address filler,
+        bytes calldata takerData
+    ) external returns (uint256[] memory) {
         if (msg.sender != address(this)) revert OnlySelf();
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        return _fillCore(order, orderHash, fillAmount, filler, address(0), "", CallbackMode.PreDelivery);
+        return _fillCore(order, orderHash, fillAmount, filler, address(0), "", CallbackMode.PreDelivery, takerData);
     }
 
     /// @dev Per-fill context, bundled so the settlement helpers take one memory
@@ -264,7 +357,8 @@ contract UniversalSettlement is NonceManager {
         address filler,
         address callbackTarget,
         bytes memory callbackData,
-        CallbackMode mode
+        CallbackMode mode,
+        bytes memory takerData
     ) internal returns (uint256[] memory) {
         if (fillAmount == 0) revert ZeroFill();
         if (fillAmount < order.minFillAnchor) revert FillTooSmall();
@@ -272,13 +366,15 @@ contract UniversalSettlement is NonceManager {
 
         uint256 overrideBps = _exclusivity(order, filler);
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
-        _runValidators(order);
+        _runValidators(order, filler, takerData);
 
         FillCtx memory ctx = _openFill(order, orderHash, fillAmount, overrideBps, filler);
 
+        // The SAME takerData feeds the post-execution invariants (via the settle
+        // helper), so a validator and an invariant see an identical filler blob.
         return mode == CallbackMode.PostInputs
-            ? _settlePostInputs(order, ctx, callbackTarget, callbackData)
-            : _settleForward(order, ctx, callbackTarget, callbackData);
+            ? _settlePostInputs(order, ctx, callbackTarget, callbackData, takerData)
+            : _settleForward(order, ctx, callbackTarget, callbackData, takerData);
     }
 
     /// @dev Exclusivity gate. Inside the window only the nominated filler fills
@@ -321,7 +417,8 @@ contract UniversalSettlement is NonceManager {
         Order calldata order,
         FillCtx memory ctx,
         address callbackTarget,
-        bytes memory callbackData
+        bytes memory callbackData,
+        bytes memory takerData
     ) internal returns (uint256[] memory outs) {
         if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
 
@@ -336,7 +433,7 @@ contract UniversalSettlement is NonceManager {
         uint256[] memory tokenInBefore = hasItems ? _snapshotInputs(order.tokenIn) : new uint256[](0);
         _executeItems(order, ctx);
         _payInputsToSolver(order, ctx, tokenInBefore, hasItems);
-        _runInvariants(order);
+        _runInvariants(order, ctx.filler, takerData);
         emit OrderFilled(ctx.orderHash, order.maker, ctx.filler);
     }
 
@@ -350,7 +447,8 @@ contract UniversalSettlement is NonceManager {
         Order calldata order,
         FillCtx memory ctx,
         address callbackTarget,
-        bytes memory callbackData
+        bytes memory callbackData,
+        bytes memory takerData
     ) internal returns (uint256[] memory outs) {
         if (order.items.length != 0) revert ReverseModeRequiresNoItems();
         // No items ⇒ no TAKE proceeds ⇒ proceeds are 0 by construction, so
@@ -359,7 +457,7 @@ contract UniversalSettlement is NonceManager {
         _payInputsToSolver(order, ctx, new uint256[](0), false);
         if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
         outs = _deliverOutputs(order, ctx);
-        _runInvariants(order);
+        _runInvariants(order, ctx.filler, takerData);
         emit OrderFilled(ctx.orderHash, order.maker, ctx.filler);
     }
 
@@ -543,27 +641,36 @@ contract UniversalSettlement is NonceManager {
 
     // ──────────────────── Validators / invariants ────────────────────
 
-    function _runValidators(Order calldata order) internal view {
+    /// @dev Pre-execution staticcall validators. `filler` is the address executing
+    ///      this fill (threaded from msg.sender, or from batchFill's caller), so a
+    ///      maker-signed validator can express filler-conditional policy. The shared
+    ///      `takerData` (filler-supplied, unsigned, adversarial — see
+    ///      {IOrderValidator}) is passed to every validator.
+    function _runValidators(Order calldata order, address filler, bytes memory takerData) internal view {
         uint256 len = order.validators.length;
         for (uint256 i; i < len;) {
             Validator calldata v = order.validators[i];
-            if (!_gatePasses(v.target, order, v.data)) revert ValidationFailed(i);
+            if (!_gatePasses(v.target, order, filler, v.data, takerData)) revert ValidationFailed(i);
             unchecked {
                 ++i;
             }
         }
     }
 
-    /// @dev Staticcall `target.validate(order, data)` and return whether it passed
-    ///      (call ok AND ≥32 bytes returned AND the bool word == 1). The single-word
-    ///      return is read into scratch space, avoiding the `bytes memory` return
-    ///      allocation the abstract call would make.
-    function _gatePasses(address target, Order calldata order, bytes calldata data)
-        private
-        view
-        returns (bool pass)
-    {
-        bytes memory cd = abi.encodeCall(IOrderValidator.validate, (order, data));
+    /// @dev Staticcall `target.validate(order, filler, data, takerData)` and return
+    ///      whether it passed (call ok AND ≥32 bytes returned AND the bool word ==
+    ///      1). The single-word return is read into scratch space, avoiding the
+    ///      `bytes memory` return allocation the abstract call would make. `data` is
+    ///      the maker-signed per-validator config; `takerData` is the shared
+    ///      filler-supplied blob (a validator must independently verify it).
+    function _gatePasses(
+        address target,
+        Order calldata order,
+        address filler,
+        bytes calldata data,
+        bytes memory takerData
+    ) private view returns (bool pass) {
+        bytes memory cd = abi.encodeCall(IOrderValidator.validate, (order, filler, data, takerData));
         /// @solidity memory-safe-assembly
         assembly {
             let ok := staticcall(gas(), target, add(cd, 0x20), mload(cd), 0x00, 0x20)
@@ -571,14 +678,15 @@ contract UniversalSettlement is NonceManager {
         }
     }
 
-    /// @dev Post-execution staticcall invariants. Same shape as validators but
-    ///      run AFTER items execute, so they can assert on the order's side
-    ///      effects (e.g. "maker's Aave health factor ≥ 2.0").
-    function _runInvariants(Order calldata order) internal view {
+    /// @dev Post-execution staticcall invariants. Same shape as validators
+    ///      (including the threaded `filler` and the shared `takerData`) but run
+    ///      AFTER items execute, so they can assert on the order's side effects
+    ///      (e.g. "maker's Aave health factor ≥ 2.0").
+    function _runInvariants(Order calldata order, address filler, bytes memory takerData) internal view {
         uint256 len = order.invariants.length;
         for (uint256 i; i < len;) {
             Validator calldata v = order.invariants[i];
-            if (!_gatePasses(v.target, order, v.data)) revert InvariantFailed(i);
+            if (!_gatePasses(v.target, order, filler, v.data, takerData)) revert InvariantFailed(i);
             unchecked {
                 ++i;
             }
