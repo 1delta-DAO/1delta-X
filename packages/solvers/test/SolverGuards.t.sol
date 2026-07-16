@@ -2,11 +2,11 @@
 pragma solidity ^0.8.28;
 
 import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
-import {BaseFlashSolver} from "@core/solver/BaseFlashSolver.sol";
-import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
-import {MultiOutputFlashSolver, OutputLeg} from "@core/solver/MultiOutputFlashSolver.sol";
+import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
+import {LimitOrderLeverageSolver} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
+import {MultiOutputFlashSolver, OutputLeg} from "@solvers/multi-output/MultiOutputFlashSolver.sol";
 
-import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
+import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
 /// @dev Negative / guard coverage for the flash-solver family. The happy paths
 /// live in MultiOutputFlash.t.sol (core) and the modules-* leverage suites; this

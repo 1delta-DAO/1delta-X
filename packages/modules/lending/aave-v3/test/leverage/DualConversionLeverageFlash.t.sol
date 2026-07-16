@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
-import {MultiInputLeverageSolver} from "@core/solver/MultiInputLeverageSolver.sol";
+import {MultiInputLeverageSolver} from "@solvers/multi-input/MultiInputLeverageSolver.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 

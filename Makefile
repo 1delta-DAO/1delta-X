@@ -15,6 +15,7 @@ FORGE ?= $(shell command -v forge 2>/dev/null || echo $(HOME)/.foundry/bin/forge
 # Add modules-erc4626 once that branch is merged to main.
 PACKAGES := \
 	core \
+	solvers \
 	modules-aave-v2 \
 	modules-aave-v3 \
 	modules-aave-v4 \

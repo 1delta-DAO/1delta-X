@@ -1,3 +1,4 @@
 forge-std/=lib/forge-std/src/
 @core/=packages/core/src/
 @coretest/=packages/core/test/
+@solvers/=packages/solvers/src/

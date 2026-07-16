@@ -2,9 +2,9 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {Order} from "../settlement/UniversalSettlement.sol";
-import {BaseFlashSolver} from "./BaseFlashSolver.sol";
-import {IMorphoFlash} from "./MorphoFlashSolver.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
+import {IMorphoFlash} from "@solvers/single-input/MorphoFlashSolver.sol";
 
 /// @title MorphoMultiInputFlashSolver
 /// @notice Morpho Blue flash-loan solver for MULTI-INPUT orders (see

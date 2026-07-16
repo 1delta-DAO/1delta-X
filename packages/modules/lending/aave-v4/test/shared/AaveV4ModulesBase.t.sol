@@ -5,7 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
-import {LimitOrderLeverageSolver} from "@core/solver/LimitOrderLeverageSolver.sol";
+import {LimitOrderLeverageSolver} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 

@@ -2,9 +2,9 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {Order} from "../settlement/UniversalSettlement.sol";
-import {BaseFlashSolver} from "./BaseFlashSolver.sol";
-import {IEulerFlashVault} from "./EulerFlashSolver.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
+import {IEulerFlashVault} from "@solvers/single-input/EulerFlashSolver.sol";
 
 /// @title EulerMultiInputFlashSolver
 /// @notice Euler EVK flash-loan solver for MULTI-INPUT orders (see

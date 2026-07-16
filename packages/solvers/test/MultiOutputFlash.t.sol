@@ -4,9 +4,9 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
-import {MultiOutputFlashSolver, OutputLeg} from "@core/solver/MultiOutputFlashSolver.sol";
+import {MultiOutputFlashSolver, OutputLeg} from "@solvers/multi-output/MultiOutputFlashSolver.sol";
 
-import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
+import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
 /// @dev Multi-OUTPUT fill with ZERO solver inventory. The maker sells WETH for a
 /// {USDC, DAI} basket; the solver owns neither output. MultiOutputFlashSolver:

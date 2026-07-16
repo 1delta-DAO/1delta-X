@@ -2,8 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {IPermit3} from "../interfaces/IPermit3.sol";
-import {UniversalSettlement, Order} from "../settlement/UniversalSettlement.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {UniversalSettlement, Order} from "@core/settlement/UniversalSettlement.sol";
 
 /// @notice Uniswap v3 `exactInputSingle` shape — used to swap the borrow proceeds
 ///         back to the collateral asset that sources the flash repayment.

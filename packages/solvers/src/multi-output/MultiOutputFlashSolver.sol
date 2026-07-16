@@ -2,9 +2,9 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {Order} from "../settlement/UniversalSettlement.sol";
-import {BaseFlashSolver} from "./BaseFlashSolver.sol";
-import {IBalancerVault} from "./LimitOrderLeverageSolver.sol";
+import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
+import {IBalancerVault} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
 
 /// @notice One output leg's flash + buyback plan.
 /// @dev  `token`/`flashAmount` describe the Balancer flash (legs MUST be sorted

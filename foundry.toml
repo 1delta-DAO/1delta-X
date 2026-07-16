@@ -42,6 +42,12 @@ test   = "packages/core/test"
 script = "packages/core/script"
 out    = "out/core"
 
+[profile.solvers]
+src    = "packages/solvers/src"
+test   = "packages/solvers/test"
+script = "packages/solvers/script"
+out    = "out/solvers"
+
 [profile.modules-aave-v2]
 src    = "packages/modules/lending/aave-v2/src"
 test   = "packages/modules/lending/aave-v2/test"
