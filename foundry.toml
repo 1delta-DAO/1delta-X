@@ -115,17 +115,17 @@ test   = "packages/modules/lending/fluid/test"
 script = "packages/modules/lending/fluid/script"
 out    = "out/modules-fluid"
 
-[profile.modules-morpho]
-src    = "packages/modules/lending/morpho/src"
-test   = "packages/modules/lending/morpho/test/unit"
-script = "packages/modules/lending/morpho/script"
-out    = "out/modules-morpho"
+[profile.modules-morpho-blue]
+src    = "packages/modules/lending/morpho-blue/src"
+test   = "packages/modules/lending/morpho-blue/test/unit"
+script = "packages/modules/lending/morpho-blue/script"
+out    = "out/modules-morpho-blue"
 
-[profile.modules-morpho-fork]
-src    = "packages/modules/lending/morpho/src"
-test   = "packages/modules/lending/morpho/test"
-script = "packages/modules/lending/morpho/script"
-out    = "out/modules-morpho"
+[profile.modules-morpho-blue-fork]
+src    = "packages/modules/lending/morpho-blue/src"
+test   = "packages/modules/lending/morpho-blue/test"
+script = "packages/modules/lending/morpho-blue/script"
+out    = "out/modules-morpho-blue"
 
 [profile.modules-transfer]
 src    = "packages/modules/transfer/src"
@@ -144,3 +144,9 @@ src    = "packages/modules/lending/venus/src"
 test   = "packages/modules/lending/venus/test"
 script = "packages/modules/lending/venus/script"
 out    = "out/modules-venus"
+
+[profile.modules-morpho-midnight]
+src    = "packages/modules/lending/morpho-midnight/src"
+test   = "packages/modules/lending/morpho-midnight/test"
+script = "packages/modules/lending/morpho-midnight/script"
+out    = "out/modules-morpho-midnight"

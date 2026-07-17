@@ -51,6 +51,7 @@ contract FillWithPermitTest is AaveModulesBase {
             decayDuration: 0,
             startAmountOut: _u1(wethOut),
             endAmountOut: _u1(wethOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -60,8 +61,7 @@ contract FillWithPermitTest is AaveModulesBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
 
         // Build the permit batch the fill needs:

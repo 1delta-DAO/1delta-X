@@ -1,4 +1,4 @@
-# @1delta-x/modules-morpho
+# @1delta-x/modules-morpho-blue
 
 Morpho Blue lending adapters for `UniversalSettlement`. Each contract is a thin,
 stateless adapter that performs Morpho actions (supply-collateral,
@@ -163,9 +163,9 @@ position isn't tokenised, collateral and debt are read straight off the singleto
 Morpho's own virtual-share math.
 
 ```
-pnpm --filter @1delta-x/modules-morpho test
+pnpm --filter @1delta-x/modules-morpho-blue test
 # or, from the repo root:
-forge test --match-path 'packages/modules-morpho/**'
+forge test --match-path 'packages/modules/lending/morpho-blue/**'
 ```
 
 Coverage mirrors the Aave package, each with a direct fill and a single-signature

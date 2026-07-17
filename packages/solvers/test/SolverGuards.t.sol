@@ -116,6 +116,7 @@ contract SolverGuardsTest is CoreSettlementBase {
             tokenOut: _a1(WETH),
             startAmountOut: _u1(1 ether),
             endAmountOut: _u1(1 ether),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -125,8 +126,7 @@ contract SolverGuardsTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 
@@ -161,6 +161,7 @@ contract SolverGuardsTest is CoreSettlementBase {
             tokenOut: _a1(USDC),
             startAmountOut: _u1(3_000e6),
             endAmountOut: _u1(3_000e6),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -170,8 +171,7 @@ contract SolverGuardsTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 

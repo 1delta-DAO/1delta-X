@@ -101,6 +101,7 @@ contract DualConversionLeverageTest is AaveModulesBase {
             tokenOut: _a1(WETH),
             startAmountOut: _u1(collateralIn),
             endAmountOut: _u1(collateralIn),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -110,8 +111,7 @@ contract DualConversionLeverageTest is AaveModulesBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
         bytes memory sig = _sign(order);
 

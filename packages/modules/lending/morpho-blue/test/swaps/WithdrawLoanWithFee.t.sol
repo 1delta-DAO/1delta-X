@@ -4,14 +4,12 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
-import {FeeConfig} from "@core/utils/FeeConfig.sol";
-
 import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 
 /// @dev Loan-deposit exit + sourcing fee: the "integrator earn product" flow.
 /// The maker has USDC supplied as LOAN asset (earning interest); on exit the
 /// originator's charge (an off-chain computed interest margin, converted to bps
-/// at order creation) is signed into `feeConfig` and skimmed from the maker's
+/// at order creation) is signed in as a fee OUTPUT LEG split off the maker's
 /// payout. Same-asset pass-through — no conversion, the solver's compensation is
 /// the in/out spread:
 ///
@@ -63,17 +61,17 @@ contract WithdrawLoanWithFeeTest is MorphoModulesBase {
         _approveSolverSide(usdcOut, USDC);
 
         Order memory order = _buildLoanWithdrawOrder(usdcIn, usdcOut);
-        order.feeConfig = FeeConfig.pack(feeRecipient, feeBps);
+        _splitFeeLeg(order, feeRecipient, fee); // fee as its own output leg
         bytes memory sig = _sign(order);
 
         uint256 makerSupplyBefore = _supplyAssets(maker);
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
+        uint256[] memory outs = settlement.fill(order, sig, usdcIn);
 
         // Solver still pays the full gross output; only the split changed.
-        assertEq(paid, usdcOut, "solver paid full gross usdcOut");
+        assertEq(outs[0] + outs[1], usdcOut, "solver paid full gross usdcOut");
         assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, makerNet, "maker received net of fee");
         assertEq(IERC20(USDC).balanceOf(feeRecipient), fee, "sourcer received the fee");
 
@@ -106,7 +104,7 @@ contract WithdrawLoanWithFeeTest is MorphoModulesBase {
         _approveSolverSide(usdcOut, USDC);
 
         Order memory order = _buildLoanWithdrawOrder(usdcIn, usdcOut);
-        order.feeConfig = FeeConfig.pack(feeRecipient, feeBps);
+        _splitFeeLeg(order, feeRecipient, fee); // fee as its own output leg
         bytes memory sig = _sign(order);
 
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);

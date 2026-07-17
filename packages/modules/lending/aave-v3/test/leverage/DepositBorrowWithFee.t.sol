@@ -4,19 +4,16 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
-import {FeeConfig} from "@core/utils/FeeConfig.sol";
-
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
-/// @dev Lending-action compatibility for the optional sourcing fee: the fee is
-/// skimmed from the conversion `tokenOut` delivery only — the MAKE deposit and
-/// TAKE borrow items run untouched. Here the collateral leg (`tokenOut = WETH`)
-/// funds a deposit, so the deposit item is sized to the POST-fee amount
-/// (`item.amount ≤ endAmountOut·(1 − feeBps/1e4)`, the documented tightened
-/// bound); the borrow (TAKE) is entirely independent of the fee.
+/// @dev Lending-action compatibility for the sourcing fee LEG: the fee is an
+/// extra output leg addressed to the sourcer — the MAKE deposit and TAKE borrow
+/// items run untouched. Here the collateral leg (`tokenOut = WETH`) funds a
+/// deposit, so the deposit item is sized to the MAKER leg's amount (the net of
+/// the fee split); the borrow (TAKE) is entirely independent of the fee.
 ///
 ///   tokenIn  = USDC   (maker gives — sourced from the borrow item)
-///   tokenOut = WETH   (solver gives → split maker/sourcer → net deposited)
+///   tokenOut = WETH   [net → maker → deposited, fee → sourcer]
 contract DepositBorrowWithFeeTest is AaveModulesBase {
     address feeRecipient = address(0x50FCE);
 
@@ -48,17 +45,17 @@ contract DepositBorrowWithFeeTest is AaveModulesBase {
             data: abi.encode(AAVE_POOL, USDC, uint256(2))
         });
         Order memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
-        order.feeConfig = FeeConfig.pack(feeRecipient, feeBps);
+        _splitFeeLeg(order, feeRecipient, fee); // fee as its own output leg
         bytes memory sig = _sign(order);
 
         uint256 makerAWethBefore = IERC20(aWETH).balanceOf(maker);
         uint256 makerDebtBefore = IERC20(usdcDebtToken).balanceOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, borrowOut)[0];
+        uint256[] memory outs = settlement.fill(order, sig, borrowOut);
 
         // Solver still pays the full gross collateral; only the split changed.
-        assertEq(paid, collateralIn, "solver paid full gross collateral");
+        assertEq(outs[0] + outs[1], collateralIn, "solver paid full gross collateral");
         assertEq(IERC20(WETH).balanceOf(feeRecipient), fee, "sourcer received the fee");
 
         // Lending legs executed on the net amounts — deposit and borrow both live.

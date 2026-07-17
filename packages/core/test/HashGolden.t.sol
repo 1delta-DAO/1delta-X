@@ -50,6 +50,9 @@ contract HashGoldenTest is Test {
         startOut[0] = 1 ether;
         uint256[] memory endOut = new uint256[](1);
         endOut[0] = 0.9 ether;
+        // Non-zero recipient — cross-checks recipientOut array hashing.
+        address[] memory recipients = new address[](1);
+        recipients[0] = address(0xFEE);
 
         Item[] memory items = new Item[](2);
         items[0] = Item({op: ItemOp.MAKE, module: MOD1, amount: 1 ether, recipient: address(0), data: hex"1234"});
@@ -78,6 +81,7 @@ contract HashGoldenTest is Test {
             tokenOut: tokenOut,
             startAmountOut: startOut,
             endAmountOut: endOut,
+            recipientOut: recipients,
             exclusiveFiller: FILLER,
             exclusivityEndTime: 333,
             minFillAnchor: 100e6,
@@ -87,15 +91,13 @@ contract HashGoldenTest is Test {
             gasPriceRef: 30_000_000_000,
             items: items,
             validators: validators,
-            invariants: invariants,
-            // Non-zero fee: recipient 0xFEE with 50 bps — cross-checks feeConfig packing.
-            feeConfig: bytes32((uint256(50) << 160) | uint256(0xFEE))
+            invariants: invariants
         });
     }
 
     /// @dev The TypeScript SDK (`packages/sdk`) asserts this SAME constant for the
     ///      same canonical order — cross-verifying its EIP-712 typed-data defs.
-    bytes32 constant GOLDEN_ORDER_HASH = 0x83b0a830463e9914771bd5b3263107a8f7a894b32f5aa4ed0d91acc16631aba4;
+    bytes32 constant GOLDEN_ORDER_HASH = 0xec762dcba462fb97e8caf4a0219afadcb2b8d00e60daef15f1f00df10f0b97a1;
 
     function test_goldenOrderHash() public view {
         assertEq(lens.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");

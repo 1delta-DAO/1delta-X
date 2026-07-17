@@ -39,6 +39,7 @@ export const ORDER_TYPE = [
   { name: "tokenOut", type: "address[]" },
   { name: "startAmountOut", type: "uint256[]" },
   { name: "endAmountOut", type: "uint256[]" },
+  { name: "recipientOut", type: "address[]" },
   { name: "exclusiveFiller", type: "address" },
   { name: "exclusivityEndTime", type: "uint32" },
   { name: "minFillAnchor", type: "uint256" },
@@ -49,7 +50,6 @@ export const ORDER_TYPE = [
   { name: "items", type: "Item[]" },
   { name: "validators", type: "Validator[]" },
   { name: "invariants", type: "Validator[]" },
-  { name: "feeConfig", type: "bytes32" },
 ] as const;
 
 export const TOKEN_PERMIT_TYPE = [

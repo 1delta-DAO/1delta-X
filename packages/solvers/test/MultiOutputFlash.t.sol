@@ -78,6 +78,7 @@ contract MultiOutputFlashTest is CoreSettlementBase {
             tokenOut: _a2(USDC, DAI),
             startAmountOut: _u2(USDC_OUT, DAI_OUT),
             endAmountOut: _u2(USDC_OUT, DAI_OUT),
+            recipientOut: new address[](2),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -87,8 +88,7 @@ contract MultiOutputFlashTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 

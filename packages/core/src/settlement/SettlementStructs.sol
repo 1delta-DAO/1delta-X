@@ -23,7 +23,9 @@ enum ItemOp {
 ///                auction-priced output basket (outputs decay
 ///                `startAmountOut → endAmountOut`, best-for-maker first). The
 ///                fill is denominated in `tokenIn[0]` units. The classic
-///                "sell exactly X, take what the auction clears" order.
+///                "sell exactly X, take what the auction clears" order. An
+///                input leg with `start != end` RISES instead of being fixed —
+///                the relayer-fee auction (see the {Order} docs).
 ///         BUY  — the maker receives a FIXED output basket and pays an
 ///                auction-priced input basket (inputs rise
 ///                `startAmountIn → endAmountIn`, best-for-maker first). The
@@ -94,19 +96,38 @@ struct Validator {
 ///         `f = fillAmount / anchor[0]`. Every leg (both baskets) and every item
 ///         slice scale by the same `f`, so the whole order fills proportionally
 ///         (the solver cannot size each leg independently).
+///
+///         Leg pricing is uniform and flag-free: a leg with `start == end` is
+///         FIXED; a leg with `start != end` is auctioned on the order's shared
+///         decay clock. Inputs may only RISE (`start ≤ end`), outputs may only
+///         FALL (`start ≥ end`). A rising SELL input leg is the relayer-fee
+///         auction for orders with no conversion output to price a filler's
+///         compensation into (e.g. a pure gasless deposit: `tokenOut` may be
+///         EMPTY and the fee leg rises until filling covers gas + margin).
+///
+///         Every output leg names its own `recipientOut` (`address(0)` = the
+///         maker). An originator/sourcing fee is simply one more output leg
+///         addressed to the originator — decaying proportionally with the main
+///         leg for a bps-of-tick fee, or fixed for an absolute fee.
 struct Order {
     address maker;
     OrderSide side; //      SELL (outputs decay) or BUY (inputs rise)
     uint256 nonce;
     uint256 deadline;
     address[] tokenIn; //   maker gives (solver receives)
-    uint256[] startAmountIn; //      per input: SELL fixed amount (== end); BUY auction start (best for maker)
-    uint256[] endAmountIn; //        per input: SELL == start; BUY auction ceiling (worst for maker / "pay up to")
+    uint256[] startAmountIn; //      per input: fixed amount when == end; else the auction floor
+    //                               (best for maker) of a RISING leg — BUY conversion inputs or a
+    //                               SELL relayer-fee leg
+    uint256[] endAmountIn; //        per input: == start (fixed) or the auction ceiling (worst for
+    //                               maker / "pay up to"); must be ≥ start — inputs only rise
     uint32 decayStartTime;
     uint32 decayDuration;
-    address[] tokenOut; //  maker receives (solver gives)
+    address[] tokenOut; //  the solver delivers (to recipientOut, default = maker)
     uint256[] startAmountOut; //     per output: SELL auction start (best for maker); BUY fixed amount (== end)
     uint256[] endAmountOut; //       per output: SELL auction floor (worst for maker); BUY == start
+    address[] recipientOut; //       per output: delivery recipient; address(0) = the maker. A fee
+    //                               leg is an output addressed to the originator (proportional
+    //                               start/end = bps-of-tick fee; start == end = absolute fee)
     address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
     uint32 exclusivityEndTime; //    unix timestamp; ignored if exclusiveFiller == 0
     uint256 minFillAnchor; //        anti-dust floor per fill (anchor units); 0 = no minimum
@@ -118,7 +139,4 @@ struct Order {
     Item[] items;
     Validator[] validators; //       pre-execution trigger conditions; AND-composed
     Validator[] invariants; //       post-execution invariants; AND-composed
-    bytes32 feeConfig; //            optional order-sourcing fee, packed: low 160 bits =
-    //                               recipient, high bits = fee in bps. bytes32(0) = no fee.
-    //                               Skimmed from the maker's tokenOut delivery. See {FeeConfig}.
 }

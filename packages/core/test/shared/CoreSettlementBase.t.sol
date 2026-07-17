@@ -165,6 +165,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: _u1(amountOut),
             endAmountOut: _u1(amountOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -174,8 +175,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 
@@ -189,6 +189,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
             startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
+            recipientOut: new address[](1),
             exclusiveFiller: exclusiveFiller,
             exclusivityEndTime: exclusivityEndTime,
             minFillAnchor: 0,
@@ -198,8 +199,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 
@@ -213,6 +213,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
             startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0), exclusivityEndTime: 0,
             minFillAnchor: minFillAmountIn,
             exclusivityOverrideBps: 0,
@@ -221,8 +222,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 
@@ -236,12 +236,12 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
             decayStartTime: 0, decayDuration: 0,
             startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0), exclusivityEndTime: 0, minFillAnchor: 0,
             exclusivityOverrideBps: 0, curve: _noCurve(), gasBumpBps: 0, gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: invariants,
-            feeConfig: bytes32(0)
+            invariants: invariants
         });
     }
 
@@ -267,6 +267,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             decayDuration: 0,
             startAmountOut: _u1(amountOut),
             endAmountOut: _u1(amountOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -276,9 +277,26 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             gasPriceRef: 0,
             items: items,
             validators: validators,
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
+    }
+
+    /// @dev Split a single-leg output into [gross − fee → maker, fee → recipient]
+    ///      — the originator/sourcing fee as an ordinary fee OUTPUT leg. Both legs
+    ///      stay fixed; for a bps-of-tick fee on a decaying order build the legs
+    ///      with proportional start/end instead.
+    function _splitFeeLeg(Order memory order, address recipient, uint256 fee) internal pure {
+        address token = order.tokenOut[0];
+        uint256 gross = order.startAmountOut[0];
+        order.tokenOut = new address[](2);
+        order.tokenOut[0] = token;
+        order.tokenOut[1] = token;
+        order.startAmountOut = new uint256[](2);
+        order.startAmountOut[0] = gross - fee;
+        order.startAmountOut[1] = fee;
+        order.endAmountOut = order.startAmountOut;
+        order.recipientOut = new address[](2);
+        order.recipientOut[1] = recipient; // [0] stays 0 ⇒ maker
     }
 
     // ──────────────────── Array helpers (single-asset wrap) ────────────────────
@@ -347,7 +365,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,bytes32 feeConfig)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
@@ -364,7 +382,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         "Order witness)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,bytes32 feeConfig)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -431,6 +449,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             _hashAddresses(o.tokenOut),
             _hashUints(o.startAmountOut),
             _hashUints(o.endAmountOut),
+            _hashAddresses(o.recipientOut),
             o.exclusiveFiller,
             o.exclusivityEndTime,
             o.minFillAnchor,
@@ -442,8 +461,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             o.gasPriceRef,
             _hashItems(o.items),
             _hashValidators(o.validators),
-            _hashValidators(o.invariants),
-            o.feeConfig
+            _hashValidators(o.invariants)
         );
         return keccak256(bytes.concat(head, mid, tail));
     }

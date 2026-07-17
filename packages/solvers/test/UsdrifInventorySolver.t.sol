@@ -127,6 +127,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
             decayDuration: 0,
             startAmountOut: _u1(USDT0_OUT),
             endAmountOut: _u1(USDT0_OUT),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -136,8 +137,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 

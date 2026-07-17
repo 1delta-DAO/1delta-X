@@ -13,8 +13,11 @@ import {Order, CurvePoint} from "./SettlementStructs.sol";
 ///         signed `CurvePoint[]`. An optional gas bump adds decay proportional to
 ///         `block.basefee`, so the maker clears for less when gas is high.
 ///
-///         SELL orders decay the OUTPUT legs (falling); BUY orders decay the
-///         INPUT legs (rising). Fixed legs (`start == end`) ignore the bump.
+///         Fixed legs (`start == end`) ignore the bump; any leg with
+///         `start != end` is auctioned — outputs FALL (`start ≥ end`), inputs
+///         RISE (`start ≤ end`). On SELL the falling outputs are the classic
+///         conversion auction and a rising input is the relayer-fee leg; on BUY
+///         the rising inputs are the conversion auction.
 library DutchAuction {
     error AuctionNotStarted();
     error InvalidAuctionParams();

@@ -138,39 +138,66 @@ can attach a post-execution **invariant** asserting *"my `tokenOut` balance
 increased by ≥ N"* (see Validators/invariants), which reverts the whole fill if
 the fee eats into the floor.
 
-### Optional order-sourcing fee (`feeConfig`)
+### Fees — two actors, two instruments, no fee subsystem
 
-An order may carry an **optional** fee that rewards whoever *sourced* it (a
-frontend/app), packed into a single `bytes32 feeConfig`:
+There is no fee machinery in the settlement at all. Both fee actors are paid
+through the order's ordinary legs, distinguished by whether the payee is known
+at signing:
+
+**Originator / sourcing fee (named payee) — a fee OUTPUT leg.** Every output
+leg names its own `recipientOut[j]` (`address(0)` = the maker), so the party
+that sourced the order is paid by simply adding one more signed leg addressed
+to it:
 
 ```
-bits   0..159  → fee recipient (address)   — low 20 bytes
-bits 160..255  → fee in bps                — high 12 bytes
-bytes32(0)     → no fee
+tokenOut       = [ WETH,        WETH        ]
+startAmountOut = [ gross − fee, fee         ]     (proportional start/end
+endAmountOut   = [ …,           …           ]      = bps-of-tick fee;
+recipientOut   = [ 0 (maker),   originator  ]      fixed = absolute fee)
 ```
 
-The fee is **skimmed from the maker's `tokenOut` delivery**: for each output
-leg, `feeBps` goes to the recipient and the maker receives the rest. The
-**solver's total delivery is unchanged** (`amt` = maker share + fee) — the maker
-forgoes the fee, having signed `feeConfig` into the order. Properties:
+- **No fee switch.** No protocol owner, no global toggle, no cap registry —
+  the fee is an ordinary maker-signed delivery a solver can neither inject nor
+  redirect. The wallet shows it as a plain amount + recipient in the EIP-712
+  prompt (not an opaque packed word).
+- **bps-of-tick fees**: give the fee leg `start/end` proportional to the main
+  leg — both decay by the shared bump, so the realized fee is exactly the bps
+  of the delivered tick. **Absolute fees**: a fixed fee leg. **Multiple
+  recipients** (originator + partner tiers): one leg each.
+- **Pro-rata for free** — legs slice like any output across partial fills.
+- **Items untouched** — MAKE funding, TAKE proceeds, chaining, and the solver
+  `tokenIn` payout ignore fee legs entirely. A `tokenOut`-funded MAKE item is
+  simply sized to the MAKER leg's amount.
+- **Soft exclusivity skips fee legs** — the `exclusivityOverrideBps` bump
+  (deliver-more) is the maker's queue-jump compensation, so it applies only to
+  legs delivered to the maker; a fee leg to a third party is never inflated (an
+  absolute fee stays absolute). `recipientOut[j] == address(this)` burns the leg
+  into the anti-donation baseline — a maker self-burn the Lens flags.
+- For **outputless orders** (pure deposits/exits/repays — nothing delivered by
+  the solver) the originator fee is a `FeeTransferModule` MAKE **item**
+  instead: absolute amount, pulled from the maker, same pro-rata slicing.
 
-- **No fee switch.** There is no protocol owner, no global toggle, no default
-  fee. The fee lives entirely in the signed order; a solver can neither inject
-  nor inflate it.
-- **Optional & bounded.** `feeConfig == 0` → zero overhead, identical to no fee.
-  `feeBps` is capped at `FeeConfig.MAX_FEE_BPS` (10%); a larger value reverts
-  with `FeeTooHigh` at fill and is flagged by `validateOrder`.
-- **Pro-rata for free.** The fee is a bps of each fill's delivered amount, so it
-  scales correctly across partial fills with no extra accounting. `filled`,
-  `OrderFilled`, and `previewAmountOut` stay **gross** (solver-denominated); the
-  maker nets `amt · (1 − feeBps/10000)`.
-- **Compatible with lending items.** The skim touches only the conversion
-  `tokenOut` delivery — MAKE funding, TAKE proceeds, item chaining, and the
-  solver `tokenIn` payout are untouched. The only interaction is the tightened
-  MAKE-item sizing bound above (a fee reduces the `tokenOut` available to fund a
-  tokenOut-funded deposit).
+**Relayer fee (anonymous payee) — a rising INPUT leg.** The filler's
+compensation is normally the conversion spread. Orders with **no conversion
+leg** — a pure gasless deposit is the canonical case — carry a dedicated input
+leg that RISES instead: any SELL input leg with `startAmountIn < endAmountIn`
+is charged at the shared auction tick (gas bump included), exactly the
+BUY-input machinery. No flag, no opt-in — leg pricing is uniform:
+`start == end` ⇒ fixed, `start != end` ⇒ auctioned (inputs may only rise,
+outputs may only fall; a falling input reverts `InvalidAuctionParams`).
 
-Build the value with `FeeConfig.pack(recipient, feeBps)`.
+```
+side      = SELL
+items     = [ MAKE deposit D ]              (the real action)
+tokenIn   = [ fee token ]  F0 → FMAX rising (the relayer fee, maker pays)
+tokenOut  = [ ]                             (may be EMPTY — nothing delivered back)
+```
+
+The fee leg rises until the first filler for whom `tick ≥ gas + margin` fills —
+auction-discovered, `gasBumpBps`-indexed, and requiring **zero filler capital**
+(nothing is fronted; the filler only collects the fee leg). The anchor is the
+fee leg (`startAmountIn[0]`), so pure deposits should be full-fill-only
+(`minFillAnchor = anchor`).
 
 ### Funding: Permit3 or direct approval
 

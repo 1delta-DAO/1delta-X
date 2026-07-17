@@ -4,15 +4,13 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
-import {FeeConfig} from "@core/utils/FeeConfig.sol";
-
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
 /// @dev Base-deposit exit + sourcing fee: the "integrator earn product" flow.
 /// The maker has USDC supplied as BASE asset (earning interest); on exit the
 /// originator's charge (an off-chain computed interest margin, converted to bps
-/// at order creation) is signed into `feeConfig` and skimmed from the maker's
+/// at order creation) is signed in as a fee OUTPUT LEG split off the maker's
 /// payout. Same-asset pass-through — no conversion, the solver's compensation is
 /// the in/out spread:
 ///
@@ -69,17 +67,25 @@ contract WithdrawWithFeeTest is CompoundV3ModulesBase {
         _approveSolverSide(usdcOut, USDC);
 
         Order memory order = _buildBaseWithdrawOrder(usdcIn, usdcOut, takerData);
-        order.feeConfig = FeeConfig.pack(feeRecipient, feeBps);
+        _splitFeeLeg(order, feeRecipient, fee); // fee as its own output leg
         bytes memory sig = _sign(order);
+
+        // Same-asset overlap (tokenIn == tokenOut == USDC) with items is a valid
+        // shape — pinned here against the lens (it used to false-negative it).
+        // Block-scoped: keeps the locals off the stack for the fill below.
+        {
+            (bool okLens, string memory lensReason) = lens.validateOrder(order);
+            assertTrue(okLens, string.concat("same-asset exit validates: ", lensReason));
+        }
 
         uint256 makerSupplyBefore = _baseSupply(maker);
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
 
         vm.prank(solver);
-        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
+        uint256[] memory outs = settlement.fill(order, sig, usdcIn);
 
         // Solver still pays the full gross output; only the split changed.
-        assertEq(paid, usdcOut, "solver paid full gross usdcOut");
+        assertEq(outs[0] + outs[1], usdcOut, "solver paid full gross usdcOut");
         assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, makerNet, "maker received net of fee");
         assertEq(IERC20(USDC).balanceOf(feeRecipient), fee, "sourcer received the fee");
 
@@ -116,7 +122,7 @@ contract WithdrawWithFeeTest is CompoundV3ModulesBase {
         _approveSolverSide(usdcOut, USDC);
 
         Order memory order = _buildBaseWithdrawOrder(usdcIn, usdcOut, takerData);
-        order.feeConfig = FeeConfig.pack(feeRecipient, feeBps);
+        _splitFeeLeg(order, feeRecipient, fee); // fee as its own output leg
         bytes memory sig = _sign(order);
 
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);

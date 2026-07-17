@@ -17,6 +17,8 @@ export const CANONICAL_ORDER: Order = {
   tokenOut: [A("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")],
   startAmountOut: [1_000_000_000_000_000_000n],
   endAmountOut: [900_000_000_000_000_000n],
+  // Non-zero recipient — cross-checks recipientOut array hashing.
+  recipientOut: [A("0x0000000000000000000000000000000000000fee")],
   exclusiveFiller: A("0x0000000000000000000000000000000000000b0b"),
   exclusivityEndTime: 333,
   minFillAnchor: 100_000_000n,
@@ -45,9 +47,7 @@ export const CANONICAL_ORDER: Order = {
   ],
   validators: [{ target: A("0x0000000000000000000000000000000000000e01"), data: "0xdead" }],
   invariants: [{ target: A("0x0000000000000000000000000000000000000e02"), data: "0xbeef" }],
-  // Non-zero fee: recipient 0xFEE with 50 bps (high bits = bps, low 160 = recipient).
-  feeConfig: "0x0000000000000000000000320000000000000000000000000000000000000fee",
 };
 
 /// Emitted by `HashGolden.t.sol` (Solidity `settlement.hashOrder`).
-export const GOLDEN_ORDER_HASH = "0x83b0a830463e9914771bd5b3263107a8f7a894b32f5aa4ed0d91acc16631aba4";
+export const GOLDEN_ORDER_HASH = "0xec762dcba462fb97e8caf4a0219afadcb2b8d00e60daef15f1f00df10f0b97a1";

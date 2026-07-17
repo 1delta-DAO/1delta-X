@@ -52,6 +52,7 @@ contract SwapAndDepositTest is AaveModulesBase {
             decayDuration: 0, //        fixed-price (start == end)
             startAmountOut: _u1(wethOut),
             endAmountOut: _u1(wethOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -61,8 +62,7 @@ contract SwapAndDepositTest is AaveModulesBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
 
         bytes memory sig = _sign(order);
@@ -129,6 +129,7 @@ contract SwapAndDepositTest is AaveModulesBase {
             decayDuration: 0,
             startAmountOut: _u1(wethOut),
             endAmountOut: _u1(wethOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -138,8 +139,7 @@ contract SwapAndDepositTest is AaveModulesBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
 
         IPermit3.PermitBatch memory batch = _buildBatch(

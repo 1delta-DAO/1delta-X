@@ -118,14 +118,23 @@ export function fillAmountsOut(order: Order, fillAmount: bigint, now: bigint, pr
 /**
  * Input owed to the solver for `tokenIn[i]` on the fill `[prevFilled, newFilled]`.
  * Mirrors `_payInputsToSolver`:
- *   • SELL — fixed input, cumulative floor slice.
- *   • BUY  — auction-priced per fill (floor; total never exceeds `endAmountIn`).
+ *   • Fixed leg (`start == end` on SELL) — cumulative floor slice, exact-input.
+ *   • Auctioned leg (any BUY input; a rising SELL relayer-fee leg) —
+ *     auction-priced per fill (floor; total never exceeds `endAmountIn`).
  */
-export function inputOwed(order: Order, i: number, prevFilled: bigint, newFilled: bigint, now: bigint): bigint {
+export function inputOwed(
+  order: Order,
+  i: number,
+  prevFilled: bigint,
+  newFilled: bigint,
+  now: bigint,
+  baseFee: bigint = 0n,
+): bigint {
   const anchor = anchorTotal(order);
-  if (order.side === OrderSide.BUY) {
+  const auctioned = order.side === OrderSide.BUY || order.startAmountIn[i]! !== order.endAmountIn[i]!;
+  if (auctioned) {
     const fillAmount = newFilled - prevFilled;
-    return (fillAmount * currentAmountInAt(order, i, now)) / anchor;
+    return (fillAmount * currentAmountInAt(order, i, now, baseFee)) / anchor;
   }
   const amt = order.startAmountIn[i]!;
   return (amt * newFilled) / anchor - (amt * prevFilled) / anchor;

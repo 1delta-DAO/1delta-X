@@ -336,6 +336,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
             decayDuration: 0,
             startAmountOut: _u1(bufferedRepay),
             endAmountOut: _u1(bufferedRepay),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -345,8 +346,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 }

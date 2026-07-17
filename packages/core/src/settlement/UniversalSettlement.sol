@@ -7,7 +7,6 @@ import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
-import {FeeConfig} from "../utils/FeeConfig.sol";
 
 // Re-exported so downstream files can keep importing the order types from here.
 import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint} from "./SettlementStructs.sol";
@@ -102,9 +101,6 @@ contract UniversalSettlement is NonceManager {
     /// @dev `batchFill`'s `takerDatas` array is not aligned 1:1 with `orders`.
     error LengthMismatch();
     error ReverseModeRequiresNoItems();
-    /// @dev Fee over `MAX_FEE_BPS`, or a non-zero fee with a zero recipient
-    ///      (which would otherwise burn the skim to `address(0)`).
-    error InvalidFee();
     /// @dev An empty `sig` was supplied for a fill, but the maker has no matching
     ///      on-chain {approveOrder} record for this order.
     error OrderNotApproved();
@@ -533,7 +529,9 @@ contract UniversalSettlement is NonceManager {
         return a == 0 ? 0 : (a - 1) / b + 1;
     }
 
-    /// @dev Deliver every output leg solver→maker for this fill.
+    /// @dev Deliver every output leg for this fill, solver → the leg's recipient
+    ///      (`recipientOut[j]`, `address(0)` = the maker — so a fee leg is just an
+    ///      output addressed to the originator).
     ///      • SELL: outputs are auction-priced — each leg is `ceil(fillAmount ·
     ///        currentAmountOut / anchor)` at the current tick, so the maker is
     ///        never underpaid.
@@ -548,15 +546,6 @@ contract UniversalSettlement is NonceManager {
         outs = new uint256[](n);
         bool buy = order.side == OrderSide.BUY;
         uint256 anchor = ctx.anchor;
-        // Optional sourcing fee: skim `feeBps` of each delivered leg to the fee
-        // recipient. The solver's total delivery is unchanged (amt = maker + fee);
-        // the maker forgoes the fee, having signed `feeConfig`. `outs[j]` records
-        // the GROSS `amt` so events/previews stay solver-denominated.
-        (address feeRecipient, uint256 feeBps) = FeeConfig.unpack(order.feeConfig);
-        // Bound the fee and forbid a non-zero fee with no recipient (would burn
-        // the skim to address(0)). feeBps == 0 disables the skim entirely.
-        if (feeBps > FeeConfig.MAX_FEE_BPS) revert InvalidFee();
-        if (feeBps != 0 && feeRecipient == address(0)) revert InvalidFee();
         // SELL outputs are auction-priced; the decay bump is shared by all legs, so
         // compute it at most once — sentinel uint256.max = "not yet computed" (a real
         // bump is always ≤ 10000). Lazy so an all-fixed order never calls bumpBps.
@@ -574,24 +563,26 @@ contract UniversalSettlement is NonceManager {
                     bump = order.bumpBps();
                 }
                 amt = _ceilDiv((ctx.newFilled - ctx.prevFilled) * order.amountOutAt(j, bump), anchor);
-                // Soft-exclusivity override: a non-exclusive in-window filler must
-                // deliver MORE output (the auction leg moves toward the maker).
-                if (ctx.overrideBps != 0) amt = _ceilDiv(amt * (10_000 + ctx.overrideBps), 10_000);
             }
-            outs[j] = amt;
             if (amt != 0) {
-                // fee floors, so the maker keeps the rounding remainder.
-                uint256 fee = feeBps == 0 ? 0 : (amt * feeBps) / 10_000;
-                if (amt - fee != 0) {
-                    Permit3TransferLib.transferFromWithFallback(
-                        PERMIT3, order.tokenOut[j], ctx.filler, order.maker, amt - fee
-                    );
+                address to = order.recipientOut[j];
+                bool makerLeg = to == address(0) || to == order.maker;
+                // Soft-exclusivity override: a non-exclusive in-window filler must
+                // deliver MORE output. The improvement is the MAKER's compensation
+                // for a bypassed exclusive filler, so it applies ONLY to the
+                // maker's own SELL output legs — never a fee leg addressed to a
+                // third party (which would leak the comp to the fee recipient and
+                // break an "absolute" fee), and never BUY (fixed exact-output).
+                // Mirrors the input side, where the override adjusts only the
+                // maker's charge (fee/relayer legs are auctioned, not overridden
+                // upward).
+                if (!buy && ctx.overrideBps != 0 && makerLeg) {
+                    amt = _ceilDiv(amt * (10_000 + ctx.overrideBps), 10_000);
                 }
-                if (fee != 0) {
-                    Permit3TransferLib.transferFromWithFallback(
-                        PERMIT3, order.tokenOut[j], ctx.filler, feeRecipient, fee
-                    );
-                }
+                outs[j] = amt;
+                Permit3TransferLib.transferFromWithFallback(
+                    PERMIT3, order.tokenOut[j], ctx.filler, makerLeg ? order.maker : to, amt
+                );
             }
             unchecked {
                 ++j;
@@ -637,12 +628,21 @@ contract UniversalSettlement is NonceManager {
     }
 
     /// @dev Pay every input leg to the solver for this fill.
-    ///      • SELL: inputs are FIXED — `owed_i` is the cumulative floor slice of
-    ///        `startAmountIn[i]`, summing to exactly `startAmountIn[i]` at full
-    ///        fill (and to `fillAmount` for i==0).
-    ///      • BUY: inputs are auction-priced — `owed_i = floor(fillAmount ·
-    ///        currentAmountIn / anchor)` at the current tick, so the maker is
-    ///        never overcharged and the total never exceeds `endAmountIn[i]`.
+    ///      • Fixed leg (`start == end`, the common SELL input): `owed_i` is the
+    ///        cumulative floor slice of `startAmountIn[i]`, summing to exactly
+    ///        `startAmountIn[i]` at full fill (and to `fillAmount` for i==0) —
+    ///        the exact-input guarantee.
+    ///      • Auctioned leg (`start != end`): `owed_i = floor(fillAmount ·
+    ///        currentAmountIn / anchor)` at the current tick — rising
+    ///        `start → end`, gas bump included; the maker is never overcharged
+    ///        and the total never exceeds `endAmountIn[i]`. Every BUY conversion
+    ///        input is such a leg; on SELL it is the relayer-fee auction for
+    ///        orders with no conversion output to price a filler's compensation
+    ///        into (e.g. a pure gasless deposit).
+    ///
+    ///      Soft exclusivity applies to every auctioned input leg: a
+    ///      non-exclusive in-window filler charges `overrideBps` less — the
+    ///      auction leg moves toward the maker.
     ///
     ///      Each leg uses ONLY the TAKE proceeds produced by THIS fill (the
     ///      balance delta since `tokenInBefore[i]`) — so a pre-existing/donated
@@ -665,7 +665,12 @@ contract UniversalSettlement is NonceManager {
         uint256 bump = type(uint256).max;
         for (uint256 i; i < order.tokenIn.length; i++) {
             uint256 owed;
-            if (buy) {
+            // Auctioned input: any leg with `start != end` (all BUY conversion
+            // inputs; on SELL, the rising relayer-fee leg). `buy` short-circuits
+            // so a fixed BUY leg still takes the auction path's amountInAt
+            // (which returns the fixed amount) — preserving BUY's per-fill
+            // floor rounding exactly as before.
+            if (buy || order.startAmountIn[i] != order.endAmountIn[i]) {
                 if (order.startAmountIn[i] != order.endAmountIn[i] && bump == type(uint256).max) {
                     bump = order.bumpBps();
                 }
@@ -678,13 +683,19 @@ contract UniversalSettlement is NonceManager {
                 uint256 amt = order.startAmountIn[i];
                 owed = ctx.fullFill ? amt : (amt * ctx.newFilled) / anchor - (amt * ctx.prevFilled) / anchor;
             }
-            if (owed == 0) continue;
-
             address tokenIn = order.tokenIn[i];
             // Item-free orders have no TAKE proceeds ⇒ proceeds are 0 without a
             // balanceOf (the snapshot was skipped upstream). Item orders measure
             // this fill's proceeds as the balance delta since the snapshot.
             uint256 proceeds = hasItems ? SafeTransferLib.balanceOf(tokenIn, address(this)) - tokenInBefore[i] : 0;
+            if (owed == 0) {
+                // Nothing owed on this leg (dust slice, or a zero-amount leg),
+                // but any TAKE proceeds for this token must still be returned to
+                // the maker — never stranded in Settlement (there is no sweep).
+                // Zero-guarded against no-op transfers on strict tokens.
+                if (proceeds != 0) SafeTransferLib.safeTransfer(tokenIn, maker, proceeds);
+                continue;
+            }
             if (proceeds >= owed) {
                 SafeTransferLib.safeTransfer(tokenIn, filler, owed);
                 unchecked {

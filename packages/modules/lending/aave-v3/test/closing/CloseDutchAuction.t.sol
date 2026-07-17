@@ -54,6 +54,7 @@ contract CloseDutchAuctionTest is AaveModulesBase {
             decayDuration: 100,
             startAmountOut: _u1(startOut),
             endAmountOut: _u1(endOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -63,8 +64,7 @@ contract CloseDutchAuctionTest is AaveModulesBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
         bytes memory sig = _sign(order);
 

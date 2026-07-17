@@ -5,7 +5,6 @@ import {IPermit3} from "../interfaces/IPermit3.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
-import {FeeConfig} from "../utils/FeeConfig.sol";
 
 import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint} from "../settlement/SettlementStructs.sol";
 import {OrderHash} from "../settlement/OrderHash.sol";
@@ -70,8 +69,9 @@ contract SettlementLens {
         return order.currentAmountOut();
     }
 
-    /// @notice Current input tick for every leg — the rising auction price for BUY,
-    ///         the fixed input for SELL.
+    /// @notice Current input tick for every leg — fixed where `start == end`,
+    ///         the rising auction price where `start != end` (BUY conversion
+    ///         inputs, SELL relayer-fee legs).
     function previewAmountIn(Order calldata order) external view returns (uint256[] memory) {
         return order.currentAmountIn();
     }
@@ -178,12 +178,15 @@ contract SettlementLens {
         view
         returns (OrderStatus status, uint256 fillableAmount)
     {
-        // Malformed shape → Invalid (guards the array indexing below).
+        // Malformed shape → Invalid (guards the array indexing below). An empty
+        // tokenOut is valid for SELL only — the pure-deposit shape whose sole
+        // economics are a rising input fee leg; BUY anchors on `tokenOut[0]`.
         uint256 nIn = order.tokenIn.length;
         uint256 nOut = order.tokenOut.length;
         if (
-            nIn == 0 || order.startAmountIn.length != nIn || order.endAmountIn.length != nIn || nOut == 0
-                || order.startAmountOut.length != nOut || order.endAmountOut.length != nOut
+            nIn == 0 || order.startAmountIn.length != nIn || order.endAmountIn.length != nIn
+                || (nOut == 0 && order.side == OrderSide.BUY) || order.startAmountOut.length != nOut
+                || order.endAmountOut.length != nOut || order.recipientOut.length != nOut
         ) {
             return (OrderStatus.Invalid, 0);
         }
@@ -207,13 +210,13 @@ contract SettlementLens {
     /// @dev Max fillable (anchor units) the maker can currently fund across all
     ///      input legs: min_i( capacity_i · anchor / perUnitIn_i ), where
     ///      capacity_i = min(live Permit3 allowance to the settlement, balance) and
-    ///      perUnitIn_i is the input cost of one anchor unit — the fixed
-    ///      `startAmountIn[i]` for SELL, or the worst-case `endAmountIn[i]` for BUY
-    ///      (so the BUY cap is a conservative lower bound and never depends on the
-    ///      not-yet-started auction tick).
+    ///      perUnitIn_i is the worst-case input cost of one anchor unit —
+    ///      `endAmountIn[i]`, which equals the fixed amount for `start == end`
+    ///      legs and the auction ceiling for rising legs (so the cap is a
+    ///      conservative lower bound that never depends on the not-yet-started
+    ///      auction tick).
     function _makerFillableCap(Order calldata order, uint256 anchor) internal view returns (uint256 cap) {
         cap = type(uint256).max;
-        bool buy = order.side == OrderSide.BUY;
         address spender = address(SETTLEMENT);
         for (uint256 i; i < order.tokenIn.length; i++) {
             address token = order.tokenIn[i];
@@ -223,7 +226,7 @@ contract SettlementLens {
             uint256 bal = SafeTransferLib.balanceOf(token, order.maker);
             if (bal < capacity) capacity = bal;
 
-            uint256 perUnitIn = buy ? order.endAmountIn[i] : order.startAmountIn[i];
+            uint256 perUnitIn = order.endAmountIn[i];
             // Scale leg-i capacity back into anchor units. Guard the multiply: an
             // unbounded (e.g. max) allowance times a large `anchor` can exceed
             // uint256 — treat an overflowing product as "this leg imposes no
@@ -267,17 +270,29 @@ contract SettlementLens {
             return (false, "tokenIn/amountIn length mismatch");
         }
         uint256 nOut = order.tokenOut.length;
-        if (nOut == 0 || nOut != order.startAmountOut.length || nOut != order.endAmountOut.length) {
+        if (nOut != order.startAmountOut.length || nOut != order.endAmountOut.length || nOut != order.recipientOut.length)
+        {
             return (false, "tokenOut/amountOut length mismatch");
+        }
+        // An empty tokenOut is the pure-deposit shape: valid for SELL only (BUY
+        // anchors on `tokenOut[0]`), and only with items — otherwise the maker
+        // gives its tokenIn away for nothing.
+        if (nOut == 0) {
+            if (order.side == OrderSide.BUY) return (false, "buy requires tokenOut");
+            if (order.items.length == 0) return (false, "no tokenOut and no items (giveaway)");
         }
 
         // ── structural / economic sanity (time-independent) ──
         uint256 anchor = _anchorTotal(order);
         if (anchor == 0) return (false, "anchor amount is zero");
         if (order.side == OrderSide.SELL) {
-            // Inputs fixed (start == end); outputs decay downward from a positive start.
+            // Inputs are fixed (start == end) or RISE to a ceiling — a
+            // `start != end` leg is the relayer-fee auction. Outputs decay
+            // downward from a positive start.
             for (uint256 i; i < nIn; i++) {
-                if (order.startAmountIn[i] != order.endAmountIn[i]) return (false, "sell input must be fixed");
+                if (order.endAmountIn[i] < order.startAmountIn[i]) {
+                    return (false, "endAmountIn < startAmountIn");
+                }
             }
             for (uint256 j; j < nOut; j++) {
                 if (order.startAmountOut[j] == 0) return (false, "startAmountOut is zero (giveaway)");
@@ -294,19 +309,38 @@ contract SettlementLens {
                 if (order.endAmountIn[i] < order.startAmountIn[i]) return (false, "endAmountIn < startAmountIn");
             }
         }
-        // Distinct within each array and disjoint across — the per-token proceeds
-        // snapshot double-counts a shared balance, so overlap is forbidden in v1.
+        // Distinct within each array — a duplicate tokenIn shares one proceeds
+        // snapshot (the first leg's payout corrupts the second leg's balance
+        // delta); a duplicate (token, recipient) OUTPUT pair is a
+        // double-delivery footgun (same token to DIFFERENT recipients — e.g. a
+        // maker leg plus a fee leg — is legitimate and common).
+        //
+        // CROSS-overlap (tokenIn[i] == tokenOut[j]) is fine for orders WITH
+        // items — the same-asset exit shape: delivery is solver→maker and runs
+        // BEFORE the proceeds snapshot, so the two legs never share a measured
+        // balance (proven by the same-asset withdraw fork tests). For item-FREE
+        // orders the overlap is a pure self-trade (the maker pays the spread
+        // for nothing) and stays flagged.
         for (uint256 i; i < nIn; i++) {
             for (uint256 k = i + 1; k < nIn; k++) {
                 if (order.tokenIn[i] == order.tokenIn[k]) return (false, "duplicate tokenIn");
             }
-            for (uint256 j; j < nOut; j++) {
-                if (order.tokenIn[i] == order.tokenOut[j]) return (false, "tokenIn == tokenOut");
+            if (order.items.length == 0) {
+                for (uint256 j; j < nOut; j++) {
+                    if (order.tokenIn[i] == order.tokenOut[j]) return (false, "tokenIn == tokenOut");
+                }
             }
         }
         for (uint256 j; j < nOut; j++) {
+            // A leg addressed to the settlement contract permanently burns that
+            // delivery (it lands in the anti-donation snapshot baseline and is
+            // never swept). On-chain it's a maker self-burn, not an exploit, but
+            // the preflight should catch the footgun.
+            if (order.recipientOut[j] == address(SETTLEMENT)) return (false, "recipientOut is settlement (burn)");
             for (uint256 k = j + 1; k < nOut; k++) {
-                if (order.tokenOut[j] == order.tokenOut[k]) return (false, "duplicate tokenOut");
+                if (order.tokenOut[j] == order.tokenOut[k] && order.recipientOut[j] == order.recipientOut[k]) {
+                    return (false, "duplicate tokenOut recipient");
+                }
             }
         }
         if (order.minFillAnchor > anchor) return (false, "minFillAnchor > anchor (unfillable)");
@@ -329,12 +363,6 @@ contract SettlementLens {
         if (order.gasBumpBps != 0) {
             if (order.gasPriceRef == 0) return (false, "gasBump without gasPriceRef");
             if (order.gasBumpBps > 10_000) return (false, "gasBumpBps > 10000");
-        }
-        // ── sourcing fee ──
-        {
-            (address feeRecipient, uint256 feeBps) = FeeConfig.unpack(order.feeConfig);
-            if (feeBps > FeeConfig.MAX_FEE_BPS) return (false, "feeBps > MAX_FEE_BPS");
-            if (feeBps != 0 && feeRecipient == address(0)) return (false, "fee set without recipient");
         }
 
         // ── current fillability (time/state-dependent) ──

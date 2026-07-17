@@ -24,7 +24,8 @@ PACKAGES := \
 	modules-dolomite \
 	modules-euler-v2 \
 	modules-fluid \
-	modules-morpho \
+	modules-morpho-blue \
+	modules-morpho-midnight \
 	modules-transfer \
 	modules-usdrif \
 	modules-venus

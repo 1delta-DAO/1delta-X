@@ -19,7 +19,7 @@ library OrderHash {
 
     // Referenced types are appended in alphabetical order: CurvePoint, Item, Validator.
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,bytes32 feeConfig)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
@@ -33,13 +33,13 @@ library OrderHash {
         "Order witness)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,bytes32 feeConfig)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
 
     /// @notice EIP-712 `hashStruct` of an order.
-    /// @dev The struct hash is `keccak256(abi.encode(TYPEHASH, <22 fields>))`; every
+    /// @dev The struct hash is `keccak256(abi.encode(TYPEHASH, <23 fields>))`; every
     ///      dynamic member is pre-hashed to a single word, so the encoding is a flat
     ///      run of 24 static words. We write them straight into one raw buffer and
     ///      hash once — equivalent to `abi.encode` of the same 24 fields but without
@@ -67,17 +67,17 @@ library OrderHash {
         _w(buf, 10, _hashAddresses(order.tokenOut));
         _w(buf, 11, _hashUints(order.startAmountOut));
         _w(buf, 12, _hashUints(order.endAmountOut));
-        _w(buf, 13, bytes32(uint256(uint160(order.exclusiveFiller))));
-        _w(buf, 14, bytes32(uint256(order.exclusivityEndTime)));
-        _w(buf, 15, bytes32(order.minFillAnchor));
-        _w(buf, 16, bytes32(order.exclusivityOverrideBps));
-        _w(buf, 17, _hashCurve(order.curve));
-        _w(buf, 18, bytes32(order.gasBumpBps));
-        _w(buf, 19, bytes32(order.gasPriceRef));
-        _w(buf, 20, _hashItems(order.items));
-        _w(buf, 21, _hashValidators(order.validators));
-        _w(buf, 22, _hashValidators(order.invariants));
-        _w(buf, 23, order.feeConfig);
+        _w(buf, 13, _hashAddresses(order.recipientOut));
+        _w(buf, 14, bytes32(uint256(uint160(order.exclusiveFiller))));
+        _w(buf, 15, bytes32(uint256(order.exclusivityEndTime)));
+        _w(buf, 16, bytes32(order.minFillAnchor));
+        _w(buf, 17, bytes32(order.exclusivityOverrideBps));
+        _w(buf, 18, _hashCurve(order.curve));
+        _w(buf, 19, bytes32(order.gasBumpBps));
+        _w(buf, 20, bytes32(order.gasPriceRef));
+        _w(buf, 21, _hashItems(order.items));
+        _w(buf, 22, _hashValidators(order.validators));
+        _w(buf, 23, _hashValidators(order.invariants));
         return keccak256(buf);
     }
 

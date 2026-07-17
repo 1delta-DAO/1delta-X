@@ -1,201 +1,205 @@
-# Originator Fees (Order-Sourcing Fee)
+# Originator Fees (Sourcing-Fee Legs)
 
 How the party that *sources* an order — a frontend, wallet, aggregator, or any
 integrator that brings the user — earns a fee on it, and how that composes with
 lending flows such as "deposit for the user, charge an interest margin on
 withdrawal".
 
-The mechanism is a single optional field on the signed order: `Order.feeConfig`.
-There is **no global fee switch, no protocol fee registry, and no governance
-surface** — every fee is maker-signed, per-order, and routed directly to the
-recipient the maker consented to.
+There is **no fee subsystem**: no global fee switch, no protocol fee registry,
+no packed fee word, and no governance surface. A fee is an **ordinary output
+leg** addressed to the originator — maker-signed, per-order, and rendered by
+wallets as a plain amount + recipient in the EIP-712 prompt.
 
 ---
 
 ## 1. The mechanism
 
-### Encoding
+### Per-leg recipients
 
-`feeConfig` is one `bytes32`, packed by `FeeConfig` (`core/src/utils/FeeConfig.sol`):
+Every output leg carries its own recipient (`recipientOut[j]`,
+`address(0)` = the maker). An originator fee is one more signed leg:
 
 ```
-bits   0..159  → fee recipient (address)   — low 20 bytes
-bits 160..255  → fee in bps    (uint96)    — high 12 bytes
-
-bytes32(0)     → no fee
+tokenOut       = [ USDC,        USDC       ]
+startAmountOut = [ gross − fee, fee        ]
+endAmountOut   = [ …,           …          ]
+recipientOut   = [ 0 (maker),   originator ]
 ```
-
-```solidity
-order.feeConfig = FeeConfig.pack(feeRecipient, feeBps);
-```
-
-or off-chain (the SDK carries the field as a plain `bytes32`):
 
 ```ts
-const feeConfig: Hex = `0x${((feeBps << 160n) | BigInt(recipient)).toString(16).padStart(64, "0")}`;
+import { feeSplitLegs } from "@1delta-x/sdk";
+// bps-of-tick fee: both legs decay proportionally on the shared clock
+const legs = feeSplitLegs(USDC, grossStart, grossEnd, originator, 100n /* 1% */);
+const order = { ...base, ...legs };
 ```
 
-Because `feeConfig` is part of the `Order` EIP-712 typehash, it is inside the
-maker's signature: a solver **cannot add, remove, or redirect** a fee. The fee
-exists only because the user signed it.
+Fee shapes:
 
-### Validation (fill-time, `_deliverOutputs`)
-
-| Rule | Effect |
+| Want | Encode |
 | --- | --- |
-| `feeBps > 1_000` (`MAX_FEE_BPS`, 10%) | fill reverts `InvalidFee` — malformed order |
-| `feeBps != 0 && recipient == 0` | fill reverts `InvalidFee` — would burn the skim |
-| `feeBps == 0` | skim disabled entirely, recipient ignored |
+| bps of the realized auction tick | fee leg with `start/end` proportional to the main leg (`feeSplitLegs`) |
+| exact absolute fee | fixed fee leg (`start == end`) |
+| multiple recipients (tiers) | one leg per recipient |
+| fee on an outputless order | a `FeeTransferModule` **item** — see §3 |
 
-`SettlementLens.validateOrder` runs the same checks statically, so a malformed
-fee is catchable before broadcast.
+Because the legs are part of the `Order` EIP-712 typehash, they are inside the
+maker's signature: a solver **cannot add, remove, or redirect** a fee.
 
 ### Settlement flow
 
-The fee is skimmed **from the maker's `tokenOut` delivery**, on every output leg:
+`_deliverOutputs` transfers each leg solver → its recipient. No skim math, no
+fee validation path — the fee is delivery. Key properties:
 
-```
-solver delivers amt (gross, unchanged)
-  ├── amt - fee → maker
-  └── fee       → feeRecipient        fee = amt * feeBps / 10_000 (floors)
-```
+- **The solver's economics are unchanged.** Solvers quote and deliver the gross
+  total across legs; the auction competes on gross. The maker nets less — the
+  fee is the maker paying the originator, with settlement doing the routing.
+- **Partial fills slice pro-rata** (ceil per leg): the accumulated fee over any
+  fill sequence equals the full-fill fee.
+- `outs[]` / fill return values report per-leg amounts; there is no dedicated
+  fee event — originator accounting reads its own leg's ERC-20 `Transfer`.
+- **Same token to different recipients is legitimate** (maker leg + fee leg);
+  `validateOrder` only rejects a duplicate `(token, recipient)` pair.
 
-Key properties:
+### Soft exclusivity leaves the fee leg alone
 
-- **The solver's economics are untouched.** Solvers quote and deliver the gross
-  amount; the auction competes on gross. The maker nets less — the fee is the
-  maker paying the originator, with settlement doing the routing. This is the
-  UniswapX-style interface-fee seam.
-- **The maker keeps the rounding remainder** (fee floors).
-- **Partial fills skim pro-rata.** Each fill's delivered slice is split with the
-  same bps, so the accumulated fee over any fill sequence equals the full-fill
-  fee.
-- `outs[]` / fill return values / previews stay **gross** (solver-denominated).
-  There is no dedicated fee event — originator accounting reconstructs the skim
-  from the config + the ERC-20 `Transfer` logs.
-- The fee applies in both settlement directions (classic and reverse/Fusion
-  flow) — delivery always goes through `_deliverOutputs`.
+Soft exclusivity (`exclusivityOverrideBps`) makes a non-exclusive in-window
+filler improve the maker's terms — deliver more on SELL, charge less on the
+input. That improvement is the **maker's** compensation for a bypassed exclusive
+filler, so settlement applies it **only to legs delivered to the maker**, never
+to a fee leg addressed to a third party. Consequences the integrator can rely
+on:
+
+- An **absolute fee leg stays absolute** even when a soft-exclusivity fill lands
+  — the originator receives exactly the signed amount, not an inflated one.
+- A **proportional fee leg** is computed on the un-bumped auction tick, so the
+  maker keeps the full override improvement on its own leg.
+
+(Symmetric with the input side, where the override adjusts only what the maker
+pays; a rising relayer-fee input leg *is* reduced by the override, i.e. the
+queue-jumping relayer gives up part of its fee to the maker.)
 
 ### What the fee does NOT touch
 
 - **`tokenIn` legs** — the solver's receipts are never skimmed.
 - **Items** — MAKE (deposit/repay) and TAKE (borrow/withdraw) legs execute on
-  their signed amounts, untouched by the fee. Only the conversion delivery is
-  split. (Corollary: an order whose items pay out directly to the maker with no
-  `tokenOut` leg has nothing to skim — the fee only attaches to flow routed
-  through settlement delivery.)
+  their signed amounts. If an output leg funds a MAKE item (delivered WETH goes
+  into a deposit), size the item to the MAKER leg's amount.
 
 ---
 
 ## 2. Originator flow
 
-1. **Quote.** Originator prices the user's intent and decides its fee rate.
-2. **Build.** Set `feeConfig = pack(feeCollector, feeBps)` on the order. If an
-   output leg funds a MAKE item (e.g. delivered WETH goes into a deposit), size
-   that item to the **post-fee** amount: `item.amount ≤ amountOut · (1 − feeBps/1e4)`.
+1. **Quote.** Originator prices the user's intent and decides its fee.
+2. **Build.** Append the fee leg (`feeSplitLegs` for bps, a fixed leg for
+   absolute) — or the fee item for outputless shapes.
 3. **Sign.** The user signs the order (single order sig, or the one-signature
-   `fillWithPermit` witness batch — the fee needs no extra approval of any kind).
-4. **Fill.** Any solver fills; the skim happens inside settlement. The
-   originator receives the fee in-kind (in `tokenOut` units) at fill time —
-   there is no claim step and no fee custody in the settlement contract.
+   `fillWithPermit` witness batch — the fee needs no extra approval; the fee
+   ITEM needs one Permit3 allowance to `FeeTransferModule`).
+4. **Fill.** Any solver fills; the originator receives the fee in-kind at fill
+   time — no claim step, no fee custody in the settlement contract.
 
-Fee determinism depends on the order side:
+Fee determinism:
 
-- **BUY (exact-output)** — outputs are fixed, so `fee = feeBps × fixed output`
-  is known exactly at signing time. Use this when the fee must be an exact
-  number (see the interest-margin pattern below).
-- **SELL (decaying output)** — the delivered amount depends on the auction tick
-  at fill, so the realized fee varies within the `[end, start]` band. The bps
-  rate is exact; the absolute amount is not.
+- **Fixed fee leg** — exact at signing (any side).
+- **Proportional fee leg on a decaying SELL** — the realized fee is the bps of
+  the auction tick at fill: rate exact, absolute amount floats in the band.
 
 ---
 
-## 3. Pattern: deposit free, charge an interest margin on exit
+## 3. Outputless orders: the fee ITEM (`FeeTransferModule`)
 
-The flow the lending modules enable: an integrator onboards users into a lending
-position (Aave/Comet/Morpho earn) at no charge, and monetizes at **withdrawal**
-— e.g. the user was shown a net rate and the integrator keeps the margin, with
-the accrued charge computed off-chain at exit time.
-
-### How it's encoded
-
-At withdrawal the originator knows principal, accrued protocol yield, and its
-margin. It converts the absolute charge into bps of the exit payout and signs it
-into the withdrawal order:
+Pure deposits, zero-capital exits (TAKE `recipient = maker`), and repays have
+no solver delivery to carry a fee leg. The originator fee there is a
+maker-signed **item**:
 
 ```
-feeBps = charge / payout · 10_000        (round in the user's favor)
+items += [ MAKE FeeTransferModule: amount = absolute fee,
+           data = abi.encode(feeToken, originator) ]
 ```
 
-The order shape is a TAKE-item withdrawal whose proceeds fund `tokenIn`, with
-the payout delivered as `tokenOut` minus the skim. Two variants:
+`core/src/modules/FeeTransferModule.sol` pulls the ABSOLUTE amount from the
+maker (via its own Permit3 allowance) straight to the recipient, slicing
+pro-rata across partial fills like any item. The relayer-fee counterpart on the
+same order is the rising `tokenIn` leg (see `relayer-fees.md`); the canonical
+outputless integrator order carries both. Working example:
+`modules/lending/aave-v3/test/swaps/DepositWithFee.t.sol::test_deposit_withRisingFee_andOriginatorFeeItem`.
+
+Design note (peer comparison): per-leg output recipients are the UniswapX
+model (an interface fee = one more signed output); the fee item is 1inch LOP's
+`FeeTaker`-extension pattern expressed in this protocol's item seam. 0x v4's
+hardcoded fee fields and CoW's driver-enforced appData policies were rejected
+as less general / operator-dependent.
+
+---
+
+## 4. Pattern: deposit free, charge an interest margin on exit
+
+The integrator onboards users into a lending position (Aave/Comet/Morpho earn)
+at no charge and monetizes at **withdrawal** — the accrued charge computed
+off-chain at exit and signed into the exit order.
 
 **Exit with conversion** (unwind collateral, receive another asset):
 
 ```
 items    = [ TAKE withdraw: 1 WETH aWETH → settlement ]
 tokenIn  = WETH  (funds the solver)
-tokenOut = USDC  (solver delivers gross; split maker / originator)
+tokenOut = USDC  [net → maker, margin → originator]
 ```
 
-**Same-asset exit** (the pure earn-product withdrawal — deposit USDC, exit
-USDC): `tokenIn = tokenOut = USDC`. The solver's compensation is the in/out
-spread; the user receives `usdcOut − fee`:
+**Same-asset exit** (deposit USDC, exit USDC — the solver's compensation is the
+in/out spread):
 
 ```
 items    = [ TAKE withdraw: 2_000 USDC supply → settlement ]
 tokenIn  = USDC 2_000e6
-tokenOut = USDC 1_990e6   (10 USDC solver spread)
-feeConfig = pack(originator, 250)   → 49.75 USDC fee, 1_940.25 USDC to user
+tokenOut = USDC [1_940.25 → maker, 49.75 → originator]   (1_990 gross, 10 spread)
 ```
+
+**Zero-capital exit** (withdraw straight to the wallet; relayer fronts
+nothing): TAKE `recipient = maker` + rising fee leg + fee ITEM for the margin —
+see `relayer-fees.md`.
 
 Practical notes:
 
-- Prefer **BUY-side encoding** when the charge must be exact (fee on the fixed
-  output); on SELL orders the realized fee floats with the auction.
-- Interest keeps accruing between signing and fill — the off-chain computation
-  goes slightly stale. Short order deadlines bound the undercharge.
-- The protocol-side "position larger than the order" case is handled by the
-  modules' `BalanceMode.Full` (withdraw everything, forward the signed amount,
-  sweep accrued excess back to the user in-kind).
+- Use a **fixed fee leg / fee item** when the charge must be exact; a
+  proportional leg floats with the auction.
+- Interest accrues between signing and fill — short deadlines bound the drift.
+- Positions larger than the order are handled by the modules'
+  `BalanceMode.Full` (withdraw everything, forward the signed amount, sweep
+  accrued excess back to the user in-kind).
 
 ### Working examples (fork tests)
 
 | Protocol | Position exited | Test |
 | --- | --- | --- |
 | Aave v3 | WETH collateral → USDC payout | `modules/lending/aave-v3/test/swaps/WithdrawWithFee.t.sol` |
-| Morpho Blue | USDC **loan supply** (earn), same-asset exit | `modules/lending/morpho/test/swaps/WithdrawLoanWithFee.t.sol` |
+| Morpho Blue | USDC **loan supply** (earn), same-asset exit | `modules/lending/morpho-blue/test/swaps/WithdrawLoanWithFee.t.sol` |
 | Compound v3 | USDC **base supply** (earn), same-asset exit | `modules/lending/compound-v3/test/swaps/WithdrawWithFee.t.sol` |
-| plain swaps | fee unit coverage (cap, rounding, partials) | `core/test/swaps/SourcingFee.t.sol` |
-| deposit+borrow | fee alongside MAKE/TAKE items | `modules/lending/aave-v3/test/leverage/DepositBorrowWithFee.t.sol` |
-
-(The Morpho case uses `MorphoBlueTakerModule` op `2` — the loan-asset withdraw
-leg; Comet needs no special op since a base-asset `withdrawFrom` *is* the
-deposit withdrawal.)
+| plain swaps | fee-leg unit coverage (proportional, absolute, tiers, partials) | `core/test/swaps/SourcingFee.t.sol` |
+| deposit+borrow | fee leg alongside MAKE/TAKE items | `modules/lending/aave-v3/test/leverage/DepositBorrowWithFee.t.sol` |
+| outputless | fee item + rising relayer leg | `core/test/modules/FeeTransferModule.t.sol` |
 
 ---
 
-## 4. Boundaries and caveats
+## 5. Boundaries and caveats
 
-Read this section before building a business model on the fee.
-
-- **The fee is consent-based, not enforceable.** Positions are user-owned
-  (on-behalf modules + Permit3 allowances). A user can always withdraw directly
-  from the underlying protocol — or via any other frontend — and pay nothing.
-  `feeConfig` monetizes **order flow you originate**, not account
-  relationships. Enforceable exit fees require the position to be held by a
-  fee-enforcing contract (an integrator fee-vault whose `redeem` takes the
-  margin) — a custody model this protocol deliberately does not impose, and a
-  separate build if wanted.
-- **10% hard cap.** `MAX_FEE_BPS = 1_000`. Fine for margins; can bind if the
-  charge is a large fraction of a long-accrued payout. Amount-padding is not a
-  workaround — any spread built into the order's amounts flows to the solver
-  via the auction, not to the originator.
-- **Output-side, percentage-only, uniform.** No absolute-amount fee, no fee on
-  `tokenIn`, and the same bps hits every `tokenOut` leg of a multi-asset order.
-- **Opaque at signing.** Wallets render `feeConfig` as a raw `bytes32` — users
-  cannot read the rate/recipient from the EIP-712 prompt. Disclose the fee in
-  the UI; `SettlementLens` previews can back a human-readable confirmation.
-- **No fee event.** Index the ERC-20 `Transfer` to the recipient (or derive
-  `fee = gross · bps / 10_000` from `OrderFilled` + the order) for revenue
-  accounting.
+- **The fee is consent-based, not enforceable.** Positions are user-owned; a
+  user can always exit the underlying protocol directly and pay nothing. Fee
+  legs monetize **order flow you originate**, not account relationships.
+  Enforceable exit fees require fee-vault custody — deliberately not built.
+  Corollary: a no-fee order is simply less attractive to fillers — it fills
+  late, at a worse tick, or not at all, unless the originator sponsors it
+  (fills it itself); that starvation is the intended market outcome, not a
+  protocol gap.
+- **No cap.** The old 10% `MAX_FEE_BPS` guard died with `feeConfig` — a fee leg
+  is an explicit signed amount the wallet displays, which is the real
+  protection. `validateOrder` still catches structural nonsense (zero legs,
+  duplicate `(token, recipient)` pairs).
+- **Never address a leg at the settlement contract.** `recipientOut[j] =
+  Settlement` delivers into the anti-donation snapshot baseline, where it is
+  permanently burned (no sweep exists). It's a maker self-burn, not an exploit —
+  but `validateOrder` flags it (`"recipientOut is settlement (burn)"`) so a
+  preflight catches the footgun. `recipientOut` is signature-bound (part of the
+  order hash), so a filler can never alter a recipient or the array length.
+- **No fee event.** Index the ERC-20 `Transfer` to the recipient, or read the
+  fee leg's entry in the fill's return value.

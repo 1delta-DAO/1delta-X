@@ -48,6 +48,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             tokenOut: tokenOut,
             startAmountOut: amountOut,
             endAmountOut: amountOut,
+            recipientOut: new address[](tokenOut.length),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -57,8 +58,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 
@@ -222,6 +222,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             tokenOut: _addr2(WETH, DAI),
             startAmountOut: _uint2(wethStart, daiStart),
             endAmountOut: _uint2(wethEnd, daiEnd),
+            recipientOut: new address[](2),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -231,8 +232,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
         bytes memory sig = _sign(order);
 

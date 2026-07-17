@@ -49,15 +49,21 @@ export interface Order {
   nonce: bigint;
   deadline: bigint;
   tokenIn: readonly Address[];
-  /// SELL: fixed input (== endAmountIn). BUY: auction start (best for maker).
+  /// Fixed amount when == endAmountIn; else the auction floor (best for maker)
+  /// of a RISING leg — BUY conversion inputs or a SELL relayer-fee leg.
   startAmountIn: readonly bigint[];
-  /// SELL: == startAmountIn. BUY: auction ceiling / "pay up to".
+  /// == startAmountIn (fixed) or the auction ceiling ("pay up to"); must be
+  /// >= startAmountIn — inputs only rise.
   endAmountIn: readonly bigint[];
   decayStartTime: number;
   decayDuration: number;
   tokenOut: readonly Address[];
   startAmountOut: readonly bigint[];
   endAmountOut: readonly bigint[];
+  /// Per-output delivery recipient; zero address = the maker. A fee leg is an
+  /// output addressed to the originator (proportional start/end = bps-of-tick
+  /// fee; start == end = absolute fee).
+  recipientOut: readonly Address[];
   exclusiveFiller: Address;
   exclusivityEndTime: number;
   /// Anti-dust floor per fill, in anchor units (tokenIn[0] for SELL, tokenOut[0] for BUY).
@@ -73,12 +79,40 @@ export interface Order {
   items: readonly Item[];
   validators: readonly Validator[];
   invariants: readonly Validator[];
-  /**
-   * Optional order-sourcing fee, packed into one word: low 160 bits = fee
-   * recipient (address), high bits = fee in bps. `0x00…0` (bytes32 zero) = no
-   * fee. The fee is skimmed from the maker's tokenOut delivery to the recipient.
-   */
-  feeConfig: `0x${string}`;
+}
+
+// ──────────────────── Fee-leg helpers ────────────────────
+
+/**
+ * Build the two output legs of a bps-of-tick sourcing fee: the maker leg and a
+ * fee leg addressed to `recipient`, each decaying in proportion so the realized
+ * fee is exactly `feeBps` of the delivered tick at any point of the auction.
+ * Spread the returned arrays into the order's output fields.
+ */
+export function feeSplitLegs(
+  token: Address,
+  startAmount: bigint,
+  endAmount: bigint,
+  recipient: Address,
+  feeBps: bigint,
+): {
+  tokenOut: Address[];
+  startAmountOut: bigint[];
+  endAmountOut: bigint[];
+  recipientOut: Address[];
+} {
+  const BPS = 10_000n;
+  if (feeBps >= BPS) throw new Error(`feeBps ${feeBps} >= 10000`);
+  if (feeBps !== 0n && BigInt(recipient) === 0n) throw new Error("fee set without recipient");
+  const startFee = (startAmount * feeBps) / BPS;
+  const endFee = (endAmount * feeBps) / BPS;
+  const zero = "0x0000000000000000000000000000000000000000" as Address;
+  return {
+    tokenOut: [token, token],
+    startAmountOut: [startAmount - startFee, startFee],
+    endAmountOut: [endAmount - endFee, endFee],
+    recipientOut: [zero, recipient], // zero = the maker
+  };
 }
 
 /// Permit3 token-book permit (Settlement/module may pull `token`).

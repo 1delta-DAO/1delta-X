@@ -93,6 +93,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
             tokenOut: tokenOut,
             startAmountOut: amountOut,
             endAmountOut: amountOut,
+            recipientOut: new address[](tokenOut.length),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -102,8 +103,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0),
-            feeConfig: bytes32(0)
+            invariants: new Validator[](0)
         });
     }
 
@@ -325,6 +325,43 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(DAI).balanceOf(address(settlement)), 0, "settlement DAI drained");
+    }
+
+    /// @dev A tokenIn leg whose `owed` floors to 0 on a partial fill, while a
+    ///      TAKE produced that same token into Settlement. The zero-owed leg must
+    ///      REFUND those proceeds to the maker — never strand them (there is no
+    ///      sweep). Regression guard for the `owed == 0` proceeds-refund fix.
+    function test_take_dustOwedZeroLeg_refundsProceedsNotStranded() public {
+        uint256 usdcAnchor = 1_000e6; // tokenIn[0] anchor
+        uint256 daiDust = 1; //         tokenIn[1] = 1 wei ⇒ owed floors to 0 on a half fill
+        uint256 wethOut = 0.1 ether;
+        uint256 daiProduced = 50e18; //  the DAI leg's TAKE proceeds
+
+        deal(WETH, solver, wethOut);
+        deal(DAI, address(taker), daiProduced); // TAKE inventory
+        deal(USDC, maker, usdcAnchor / 2); //     maker funds the anchor half-slice
+        _approveMakerToSettlement(USDC, usdcAnchor / 2);
+        _approveSolverSide(wethOut, WETH);
+
+        // TAKE deposits DAI → Settlement: the proceeds attributed to the DAI leg.
+        Item memory it = _takeItem(100e18, address(0), DAI, daiProduced);
+        _approveTake(it.data, 100e18);
+
+        Order memory order =
+            _orderItems(9, _a2(USDC, DAI), _u2(usdcAnchor, daiDust), _a1(WETH), _u1(wethOut), _one(it));
+        bytes memory sig = _sign(order);
+
+        uint256 makerDaiBefore = IERC20(DAI).balanceOf(maker);
+
+        // Half fill ⇒ DAI leg owed = floor(1 * 500e6 / 1000e6) = 0.
+        vm.prank(solver);
+        settlement.fill(order, sig, usdcAnchor / 2);
+
+        assertEq(
+            IERC20(DAI).balanceOf(maker) - makerDaiBefore, daiProduced, "zero-owed leg proceeds refunded to maker"
+        );
+        assertEq(IERC20(DAI).balanceOf(address(settlement)), 0, "no DAI stranded in settlement");
+        assertEq(IERC20(USDC).balanceOf(solver), usdcAnchor / 2, "solver paid the anchor half-slice");
     }
 
     function _a2(address a, address b) internal pure returns (address[] memory r) {

@@ -32,6 +32,7 @@ export const orderComponents = [
   { name: "tokenOut", type: "address[]" },
   { name: "startAmountOut", type: "uint256[]" },
   { name: "endAmountOut", type: "uint256[]" },
+  { name: "recipientOut", type: "address[]" },
   { name: "exclusiveFiller", type: "address" },
   { name: "exclusivityEndTime", type: "uint32" },
   { name: "minFillAnchor", type: "uint256" },
@@ -42,7 +43,6 @@ export const orderComponents = [
   { name: "items", type: "tuple[]", components: itemComponents },
   { name: "validators", type: "tuple[]", components: validatorComponents },
   { name: "invariants", type: "tuple[]", components: validatorComponents },
-  { name: "feeConfig", type: "bytes32" },
 ] as const;
 
 const tokenPermitComponents = [

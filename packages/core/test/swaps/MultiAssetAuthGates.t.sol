@@ -94,6 +94,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             tokenOut: _a2(WETH, DAI),
             startAmountOut: _u2(1 ether, 1_000e18),
             endAmountOut: _u2(1 ether, 1_000e18),
+            recipientOut: new address[](2),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -103,8 +104,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: validators,
-            invariants: invariants,
-            feeConfig: bytes32(0)
+            invariants: invariants
         });
     }
 
@@ -160,6 +160,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             tokenOut: _a1(DAI),
             startAmountOut: _u1(daiOut),
             endAmountOut: _u1(daiOut),
+            recipientOut: new address[](1),
             exclusiveFiller: address(0),
             exclusivityEndTime: 0,
             minFillAnchor: 0,
@@ -169,8 +170,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             gasPriceRef: 0,
             items: new Item[](0),
             validators: _noV(),
-            invariants: _noV(),
-            feeConfig: bytes32(0)
+            invariants: _noV()
         });
 
         // Two token permits — one per input leg — all endorsed by the order witness.
