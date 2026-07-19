@@ -37,6 +37,23 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   **filler-aware** solver↔maker exchange (an NFT sale to an open solver set, no
   exclusivity), as the module fallback behind the inline fungible fast path. The
   three module kinds, the safety model, and the pay-per-use gas story.
+- **[batch-settle.md](batch-settle.md)** — `batchSettle`, the coincidence-of-wants
+  (CoW) path: N orders netted through the Settlement pool so two mirror makers
+  clear against each other with **no AMM** and **zero solver inventory** — even for
+  an *imbalanced* batch, via the surplus pre-send (the solver swaps the surplus it
+  is handed into the deficit it owes). A *dedicated* method — the single-order hot
+  path is untouched. Covers the pull→pre-send→interact→deliver→sweep flow, the
+  whole-ness guard, the `takerDatas[]` overload, and why uniform-price improvement
+  stays an off-chain (batch-auction) concern.
+- **[item-aware-netted-settle.md](item-aware-netted-settle.md)** — `batchSettleItems`,
+  the item-aware generalization of `batchSettle`: admit MAKE/TAKE lending legs into
+  the pool so a **spot order's liquidity funds a leverage order's conversion**
+  inventory-free, callback-free, and flash-free (the pool bootstraps the collateral
+  the borrow needs). Fixes the token-accounting invariant *with items* (whole-ness
+  is invariant to items — a pure balance-delta) and the **solver-specified ordering
+  (`pullMask` + `sequence`) + whole-ness safety model** (liveness is the solver's
+  job; safety is the contract's). This is **leverage-native coincidence of wants** —
+  nothing in the swap-only market can express it.
 
 ## Gasless UX
 

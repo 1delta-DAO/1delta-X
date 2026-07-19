@@ -122,6 +122,39 @@ partial fills. The **denominator** (`total`) is the fixed-side leg 0 for a
 fungible order, or a maker-signed `fillTotal` when the fill unit isn't a fungible
 amount (an NFT, an auction lot) — see [Fill denominator & fill modules](#fill-denominator--fill-modules).
 
+Every fill above runs the solver as the counterparty: it delivers the maker's
+output and receives the maker's input. The `fill` / `fillWithCallback` /
+`batchFill` methods all share this single-order flow — the **hot path**, untouched
+by everything below.
+
+### Batch settle (coincidence of wants)
+
+`batchSettle` is a *separate* entry point that clears N orders as one **netted**
+batch. Instead of each order settling against the solver, every order's inputs are
+pooled into Settlement first, each maker's net surplus is pre-sent to the solver,
+a single solver interaction swaps that surplus into the net deficit, and every
+output is delivered from the pool:
+
+```
+batchSettle(orders, sigs, fillAmounts, [takerDatas,] interactionTarget, interactionData)
+
+1. per order: verify + open (writes `filled`) + pull inputs   makers → Settlement
+   + compute (not yet deliver) every output amount
+2. per token: PRE-SEND net surplus (pooled − owed)            Settlement → solver
+3. one interaction (allowance-less EXECUTOR)                  solver swaps surplus → deposits deficit
+4. per order: deliver outputs + run invariants               Settlement → makers/recipients
+5. per touched token: require balance ≥ pre-batch snapshot    (BatchNotWhole else) + sweep residual → solver
+```
+
+Two mirror makers (`sell WETH→USDC` and `sell USDC→WETH`) thus clear against each
+other with **no AMM** and **zero solver inventory** — even when the batch is
+*imbalanced*, because the solver swaps the surplus it is handed into the deficit it
+owes rather than fronting capital. Each maker is charged/paid its own signed curve
+(identical math to a single fill); only the counterparty (the pool) differs.
+Item-free only; the optional `takerDatas[]` threads a per-order blob into
+validators/invariants/fill-module; golden hash unchanged. Full design:
+[docs/batch-settle.md](../../../../docs/batch-settle.md).
+
 ### Item ops & module kinds
 
 Everything beyond the typed fungible legs is a maker-signed module call. There
