@@ -175,7 +175,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
         });
     }
 
@@ -199,7 +201,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
         });
     }
 
@@ -222,7 +226,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
         });
     }
 
@@ -241,7 +247,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             exclusivityOverrideBps: 0, curve: _noCurve(), gasBumpBps: 0, gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: invariants
+            invariants: invariants,
+            fillModule: address(0),
+            fillTotal: 0
         });
     }
 
@@ -277,7 +285,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             gasPriceRef: 0,
             items: items,
             validators: validators,
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
         });
     }
 
@@ -365,7 +375,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
@@ -382,7 +392,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         "Order witness)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -461,7 +471,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             o.gasPriceRef,
             _hashItems(o.items),
             _hashValidators(o.validators),
-            _hashValidators(o.invariants)
+            _hashValidators(o.invariants), o.fillModule, o.fillTotal
         );
         return keccak256(bytes.concat(head, mid, tail));
     }

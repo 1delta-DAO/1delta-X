@@ -3,6 +3,8 @@ pragma solidity ^0.8.28;
 
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {IMakerModule} from "../interfaces/IMakerModule.sol";
+import {IFillModule} from "../interfaces/IFillModule.sol";
+import {ISettlementModule} from "../interfaces/ISettlementModule.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
@@ -418,14 +420,20 @@ contract UniversalSettlement is NonceManager {
         bytes memory takerData
     ) internal returns (uint256[] memory) {
         if (fillAmount == 0) revert ZeroFill();
-        if (fillAmount < order.minFillAnchor) revert FillTooSmall();
+        // Note: the anti-dust floor is checked in _openFill against the resolved
+        // `delta` (the actual progress), not the requested `fillAmount` — for a
+        // fill-module order the two can differ, and minFillAnchor must gate the
+        // real advance. For an identity order delta == fillAmount, so behavior is
+        // unchanged.
         if (block.timestamp > order.deadline) revert OrderExpired();
 
         uint256 overrideBps = _exclusivity(order, filler);
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
         _runValidators(order, filler, takerData);
 
-        FillCtx memory ctx = _openFill(order, orderHash, fillAmount, overrideBps, filler);
+        // `takerData` doubles as the filler's fill proposal for a fill-module
+        // order (see {IFillModule}); a plain fungible order ignores it here.
+        FillCtx memory ctx = _openFill(order, orderHash, fillAmount, overrideBps, filler, takerData);
 
         // The SAME takerData feeds the post-execution invariants (via the settle
         // helper), so a validator and an invariant see an identical filler blob.
@@ -448,22 +456,47 @@ contract UniversalSettlement is NonceManager {
         }
     }
 
-    /// @dev Reserve this fill's slice: check over-fill and bump the cumulative
-    ///      counter, then package the context. The anchor is the FIXED side's leg
-    ///      0 (`tokenIn[0]` for SELL, `tokenOut[0]` for BUY).
+    /// @dev Reserve this fill's slice: resolve the denominator + this fill's
+    ///      delta, check over-fill, bump the cumulative counter, and package the
+    ///      context. The denominator (`ctx.anchor`) is the fixed-side leg 0
+    ///      (`tokenIn[0]` for SELL, `tokenOut[0]` for BUY) for a plain fungible
+    ///      order, or the maker-signed `fillTotal` when set. The delta is the
+    ///      requested `fillAmount` for the identity case, or a fill module's
+    ///      accepted amount when `order.fillModule` is set — see {IFillModule}.
+    ///
+    ///      Security: the module may only choose the DELTA; the over-fill cap
+    ///      (`newFilled <= total`) and the uniform per-leg scaling stay here, so
+    ///      a buggy/hostile module can only mis-size the fraction (which scales
+    ///      both sides of the order proportionally), never over-extract.
     function _openFill(
         Order calldata order,
         bytes32 orderHash,
         uint256 fillAmount,
         uint256 overrideBps,
-        address filler
+        address filler,
+        bytes memory takerData
     ) internal returns (FillCtx memory ctx) {
-        uint256 anchor = _anchorTotal(order);
+        // Denominator: maker-signed `fillTotal` when set, else the leg anchor.
+        // The `!= 0` branch reads a single calldata word — no leg access, so a
+        // pure non-fungible order (empty legs) still has a valid denominator.
+        uint256 total = order.fillTotal != 0 ? order.fillTotal : _anchorTotal(order);
         uint256 prevFilled = filled[orderHash];
-        uint256 newFilled = prevFilled + fillAmount;
-        if (newFilled > anchor) revert OverFill();
+        // Delta: identity (zero overhead — a calldata compare, no call) or a
+        // fill-module resolve. The module validates the filler's proposal
+        // (`takerData`) against this order and returns the accepted delta.
+        uint256 delta;
+        if (order.fillModule == address(0)) {
+            delta = fillAmount; // identity — already checked != 0 in _fillCore
+        } else {
+            delta = IFillModule(order.fillModule).resolveFill(order, prevFilled, fillAmount, takerData);
+            if (delta == 0) revert ZeroFill(); // a module can return 0; identity can't
+        }
+        // Anti-dust floor on the ACTUAL progress (delta), identity + module alike.
+        if (delta < order.minFillAnchor) revert FillTooSmall();
+        uint256 newFilled = prevFilled + delta;
+        if (newFilled > total) revert OverFill();
         filled[orderHash] = newFilled;
-        ctx = FillCtx(orderHash, anchor, prevFilled, newFilled, overrideBps, filler, prevFilled == 0 && newFilled == anchor);
+        ctx = FillCtx(orderHash, total, prevFilled, newFilled, overrideBps, filler, prevFilled == 0 && newFilled == total);
     }
 
     /// @dev Forward flow: optional callback → deliver outputs → items → pay
@@ -617,12 +650,20 @@ contract UniversalSettlement is NonceManager {
             if (item.op == ItemOp.MAKE) {
                 // Maker module pulls the funding token from order.maker via Permit3 internally.
                 IMakerModule(item.module).makeOnBehalf(order.maker, slice, item.data);
-            } else {
+            } else if (item.op == ItemOp.TAKE) {
                 // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
                 // classic flow (proceeds to Settlement for tokenIn payout); signing a
                 // non-zero recipient (e.g. the maker) chains output into a subsequent item.
                 address to = item.recipient == address(0) ? address(this) : item.recipient;
                 PERMIT3.take(item.module, order.maker, uint160(slice), to, item.data);
+            } else {
+                // SETTLE: generic solver↔maker exchange — the FILLER-AWARE fallback
+                // for exchanges the typed legs can't express (see {ISettlementModule}).
+                // The module acts under the maker's signature + its own maker approval;
+                // passing `ctx.filler` lets the maker's asset route to whoever fills. The
+                // maker's receipt is guaranteed by the mandatory tokenOut delivery (run
+                // before items) and/or an invariant, not by the module.
+                ISettlementModule(item.module).settle(order.maker, ctx.filler, slice, item.data);
             }
         }
     }

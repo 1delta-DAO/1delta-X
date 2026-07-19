@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
+
+import {Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement} from "@core/settlement/UniversalSettlement.sol";
+import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {NftSettlementModule} from "@core/modules/NftSettlementModule.sol";
+import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
+
+/// @dev Minimal ERC-721: mint + setApprovalForAll + safeTransferFrom (with the
+///      receiver hook, so a non-receiver contract can't be sold an NFT).
+contract MockERC721 {
+    mapping(uint256 => address) public ownerOf;
+    mapping(address => mapping(address => bool)) public isApprovedForAll;
+
+    function mint(address to, uint256 id) external {
+        ownerOf[id] = to;
+    }
+
+    function setApprovalForAll(address op, bool ok) external {
+        isApprovedForAll[msg.sender][op] = ok;
+    }
+
+    function safeTransferFrom(address from, address to, uint256 id) external {
+        require(ownerOf[id] == from, "not owner");
+        require(msg.sender == from || isApprovedForAll[from][msg.sender], "not approved");
+        ownerOf[id] = to;
+        if (to.code.length != 0) {
+            require(
+                IERC721Receiver(to).onERC721Received(msg.sender, from, id, "") == IERC721Receiver.onERC721Received.selector,
+                "bad receiver"
+            );
+        }
+    }
+}
+
+interface IERC721Receiver {
+    function onERC721Received(address, address, uint256, bytes calldata) external returns (bytes4);
+}
+
+/// @dev The `SETTLE` op: a generic, FILLER-AWARE solver↔maker exchange. Proven
+/// here on an NFT sale — the maker gives an ERC-721 to WHOEVER fills, and is paid
+/// USDC via an inline `tokenOut` leg. No exclusive filler, no solver callback, no
+/// ownership invariant: the maker's receipt is the mandatory fungible delivery
+/// (run before items), and the NFT hands off only after the maker is paid.
+///
+///   side     = BUY (fixed USDC output = the price / anchor)
+///   tokenOut = [USDC] → maker      (inline, mandatory delivery)
+///   items    = [ SETTLE NftSettlementModule → maker's NFT to the filler ]
+contract NftSettlementTest is CoreSettlementBase {
+    NftSettlementModule nftModule;
+    MockERC721 nft;
+    uint256 constant TOKEN_ID = 1234;
+    uint256 constant PRICE = 2_000e6; // USDC the maker wants
+
+    function setUp() public override {
+        super.setUp();
+        nftModule = new NftSettlementModule(address(settlement));
+        nft = new MockERC721();
+        vm.label(address(nftModule), "nftSettlementModule");
+        vm.label(address(nft), "mockNFT");
+
+        // Maker owns the NFT and approves the settle module to move it.
+        nft.mint(maker, TOKEN_ID);
+        vm.prank(maker);
+        nft.setApprovalForAll(address(nftModule), true);
+    }
+
+    function _nftSaleOrder(uint256 nonce) internal view returns (Order memory order) {
+        Item[] memory items = new Item[](1);
+        items[0] = Item({
+            op: ItemOp.SETTLE,
+            module: address(nftModule),
+            amount: 1, //                one NFT
+            recipient: address(0), //    unused by SETTLE (the module routes to the filler)
+            data: abi.encode(address(nft), TOKEN_ID)
+        });
+        order = Order({
+            maker: maker,
+            side: OrderSide.BUY, //      fixed output = the price
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours,
+            tokenIn: new address[](0), //   consideration is the NFT item, not a fungible input
+            startAmountIn: new uint256[](0),
+            endAmountIn: new uint256[](0),
+            decayStartTime: 0,
+            decayDuration: 0,
+            tokenOut: _a1(USDC),
+            startAmountOut: _u1(PRICE),
+            endAmountOut: _u1(PRICE),
+            recipientOut: new address[](1), // 0 => maker
+            exclusiveFiller: address(0), //  OPEN — any solver may fill
+            exclusivityEndTime: 0,
+            minFillAnchor: PRICE, //         full-fill only (indivisible)
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
+            items: items,
+            validators: new Validator[](0),
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
+        });
+    }
+
+    function _fundSolver(address who, uint256 usdc) internal {
+        deal(USDC, who, usdc);
+        vm.startPrank(who);
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), USDC, uint160(usdc), 0);
+        vm.stopPrank();
+    }
+
+    // ── The NFT goes to whoever fills; the maker is paid USDC inline. No exclusivity. ──
+    function test_nftSale_toOpenFiller() public {
+        _fundSolver(solver, PRICE);
+        Order memory order = _nftSaleOrder(1);
+        bytes memory sig = _sign(order);
+
+        assertEq(nft.ownerOf(TOKEN_ID), maker, "maker owns NFT pre-fill");
+        uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
+
+        vm.prank(solver); // a non-exclusive, unnamed filler
+        settlement.fill(order, sig, PRICE);
+
+        assertEq(nft.ownerOf(TOKEN_ID), solver, "NFT delivered to the filler");
+        assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, PRICE, "maker paid the price in USDC");
+        assertEq(IERC20(USDC).balanceOf(solver), 0, "solver spent the full price");
+    }
+
+    // ── Filler-aware: a DIFFERENT filler receives the NFT — the module routes to
+    //    ctx.filler, not a signed address, so there is no exclusivity. ──
+    function test_nftSale_differentFiller_getsNft() public {
+        address otherSolver = address(0xCAFE);
+        _fundSolver(otherSolver, PRICE);
+        Order memory order = _nftSaleOrder(2);
+        bytes memory sig = _sign(order);
+
+        vm.prank(otherSolver);
+        settlement.fill(order, sig, PRICE);
+
+        assertEq(nft.ownerOf(TOKEN_ID), otherSolver, "the actual filler got the NFT");
+    }
+
+    // ── Atomicity: if the solver can't pay, delivery reverts BEFORE the NFT
+    //    moves — the maker never loses the NFT without being paid. ──
+    function test_nftSale_unpaidSolver_reverts_nftUntouched() public {
+        // Solver has no USDC / no approval → the mandatory tokenOut delivery fails.
+        Order memory order = _nftSaleOrder(3);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert();
+        settlement.fill(order, sig, PRICE);
+
+        assertEq(nft.ownerOf(TOKEN_ID), maker, "NFT stayed with the maker on revert");
+    }
+
+    // ── Direct call to the module (bypassing Settlement) reverts. ──
+    function test_settleModule_directCall_reverts() public {
+        vm.expectRevert(NftSettlementModule.OnlySettlement.selector);
+        nftModule.settle(maker, solver, 1, abi.encode(address(nft), TOKEN_ID));
+    }
+
+    // ── Lens ACCEPTS the canonical NFT-sale order (BUY, empty tokenIn, one SETTLE
+    //    item). Regression: the empty-tokenIn preflight used to false-reject it,
+    //    making the feature undiscoverable to solvers running getOrderRelevantState. ──
+    function test_lens_acceptsNftSaleOrder() public {
+        _fundSolver(solver, PRICE);
+        Order memory order = _nftSaleOrder(4);
+        bytes memory sig = _sign(order);
+
+        (bool ok, string memory reason) = lens.validateOrder(order);
+        assertTrue(ok, string.concat("NFT sale order should validate: ", reason));
+
+        (SettlementLens.OrderStatus status, uint256 fillable,,) =
+            lens.getOrderRelevantState(order, sig, solver, "");
+        assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Fillable), "preflight: Fillable, not Invalid");
+        assertEq(fillable, PRICE, "full anchor fillable");
+    }
+
+    // ── Lens REJECTS a partial-fillable SETTLE order (footgun: a partial fill
+    //    floors the NFT slice to 0 → first filler pays and gets nothing). ──
+    function test_lens_rejectsPartialFillableSettle() public view {
+        Order memory order = _nftSaleOrder(5);
+        order.minFillAnchor = 0; // allow partial fills — the footgun
+        (bool ok, string memory reason) = lens.validateOrder(order);
+        assertFalse(ok, "partial-fillable SETTLE rejected");
+        assertEq(reason, "settle item requires full-fill");
+    }
+}

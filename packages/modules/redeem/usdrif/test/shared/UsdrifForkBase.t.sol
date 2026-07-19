@@ -99,7 +99,7 @@ abstract contract UsdrifForkBase is Test {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 internal constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 internal constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
@@ -177,7 +177,7 @@ abstract contract UsdrifForkBase is Test {
         );
         bytes memory tail = abi.encode(
             _hashCurve(o.curve), o.gasBumpBps, o.gasPriceRef,
-            _hashItems(o.items), _hashValidators(o.validators), _hashValidators(o.invariants)
+            _hashItems(o.items), _hashValidators(o.validators), _hashValidators(o.invariants), o.fillModule, o.fillTotal
         );
         return keccak256(bytes.concat(head, mid, tail));
     }

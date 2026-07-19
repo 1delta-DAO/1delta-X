@@ -9,8 +9,10 @@ import { type Order, OrderSide } from "./types";
  * `tokenOut[0]` for BUY.
  */
 
-/** Fill denominator in anchor units. Mirrors `_anchorTotal`. */
+/** Fill denominator. Mirrors the settlement `_openFill`: the maker-signed
+ *  `fillTotal` when set (module orders), else the leg anchor. */
 export function anchorTotal(order: Order): bigint {
+  if (order.fillTotal !== 0n) return order.fillTotal;
   return order.side === OrderSide.BUY ? order.startAmountOut[0]! : order.startAmountIn[0]!;
 }
 

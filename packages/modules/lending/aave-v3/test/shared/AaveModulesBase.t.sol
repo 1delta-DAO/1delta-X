@@ -313,7 +313,9 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
         });
     }
 }

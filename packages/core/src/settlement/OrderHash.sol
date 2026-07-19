@@ -19,7 +19,7 @@ library OrderHash {
 
     // Referenced types are appended in alphabetical order: CurvePoint, Item, Validator.
     bytes32 internal constant ORDER_TYPEHASH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
         "Validator(address target,bytes data)"
@@ -33,17 +33,17 @@ library OrderHash {
         "Order witness)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
 
     /// @notice EIP-712 `hashStruct` of an order.
-    /// @dev The struct hash is `keccak256(abi.encode(TYPEHASH, <23 fields>))`; every
+    /// @dev The struct hash is `keccak256(abi.encode(TYPEHASH, <25 fields>))`; every
     ///      dynamic member is pre-hashed to a single word, so the encoding is a flat
-    ///      run of 24 static words. We write them straight into one raw buffer and
-    ///      hash once — equivalent to `abi.encode` of the same 24 fields but without
-    ///      the 3 intermediate encodings + `bytes.concat` copy, and it sidesteps the
+    ///      run of 26 static words. We write them straight into one raw buffer and
+    ///      hash once — equivalent to `abi.encode` of the same 26 fields but without
+    ///      the intermediate encodings + `bytes.concat` copy, and it sidesteps the
     ///      stack-too-deep that forced the old split. Writing every word means no
     ///      zero-init is needed. The golden hash test (+ SDK cross-check) pins this
     ///      byte-for-byte, so any layout mistake fails loudly.
@@ -51,8 +51,8 @@ library OrderHash {
         bytes memory buf;
         assembly {
             buf := mload(0x40)
-            mstore(buf, 768) // 24 words
-            mstore(0x40, add(buf, 800)) // bump free-memory pointer past [len(0x20) + 768]
+            mstore(buf, 832) // 26 words
+            mstore(0x40, add(buf, 864)) // bump free-memory pointer past [len(0x20) + 832]
         }
         _w(buf, 0, ORDER_TYPEHASH);
         _w(buf, 1, bytes32(uint256(uint160(order.maker))));
@@ -78,6 +78,8 @@ library OrderHash {
         _w(buf, 21, _hashItems(order.items));
         _w(buf, 22, _hashValidators(order.validators));
         _w(buf, 23, _hashValidators(order.invariants));
+        _w(buf, 24, bytes32(uint256(uint160(order.fillModule))));
+        _w(buf, 25, bytes32(order.fillTotal));
         return keccak256(buf);
     }
 

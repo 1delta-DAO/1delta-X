@@ -175,6 +175,7 @@ Practical notes:
 | Aave v3 | WETH collateral → USDC payout | `modules/lending/aave-v3/test/swaps/WithdrawWithFee.t.sol` |
 | Morpho Blue | USDC **loan supply** (earn), same-asset exit | `modules/lending/morpho-blue/test/swaps/WithdrawLoanWithFee.t.sol` |
 | Compound v3 | USDC **base supply** (earn), same-asset exit | `modules/lending/compound-v3/test/swaps/WithdrawWithFee.t.sol` |
+| Aave v3 | **borrow** + origination fee (same-asset, TAKE) | `modules/lending/aave-v3/test/swaps/BorrowWithFee.t.sol` |
 | plain swaps | fee-leg unit coverage (proportional, absolute, tiers, partials) | `core/test/swaps/SourcingFee.t.sol` |
 | deposit+borrow | fee leg alongside MAKE/TAKE items | `modules/lending/aave-v3/test/leverage/DepositBorrowWithFee.t.sol` |
 | outputless | fee item + rising relayer leg | `core/test/modules/FeeTransferModule.t.sol` |

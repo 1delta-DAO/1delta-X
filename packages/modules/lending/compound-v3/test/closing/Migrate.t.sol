@@ -147,7 +147,9 @@ contract MigrateTest is CompoundV3ModulesBase {
             gasPriceRef: 0,
             items: items,
             validators: new Validator[](0),
-            invariants: new Validator[](0)
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
         });
 
         // No receipt-token pull on the withdraw leg — `comet.allow` covers it.

@@ -96,21 +96,64 @@ auction. They produce `tokenIn`, whose total is `amountIn` (fixed).
 ```
 fill(order, sig, fillAmountIn)
 
-1. solver → maker: fillAmountOut of tokenOut         ← auction-priced
+1. solver → recipientOut: fillAmountOut of tokenOut   ← auction-priced, inline (0 dispatch)
 2. for each item (pro-rata slice):
-     MAKE: module.makeOnBehalf(maker, slice, data)   ← pulls from maker
-     TAKE: permit3.take(module, maker, slice, to)    ← pulls from position
-3. settlement → solver: fillAmountIn of tokenIn      ← fixed
+     MAKE:   module.makeOnBehalf(maker, slice, data)  ← maker deposits/repays
+     TAKE:   permit3.take(module, maker, slice, to)   ← maker borrows/withdraws
+     SETTLE: module.settle(maker, filler, slice, data)← generic solver↔maker exchange (filler-aware)
+3. settlement → solver: fillAmountIn of tokenIn       ← fixed (or rising fee leg)
 ```
+
+The typed `tokenIn`/`tokenOut` legs are the built-in **fungible fast path** —
+settled inline, no module dispatch. Everything the fast path can't express is an
+item module: MAKE/TAKE act on the *maker's* own assets, `SETTLE` handles the
+*solver↔maker* exchange (an NFT sale, a cross-type trade) and is the only op that
+receives the `filler` — see [Item ops & module kinds](#item-ops--module-kinds).
 
 Partial fills slice everything proportionally:
 ```
-fillAmountOut = fillAmountIn × currentAmountOut / amountIn   (ceil)
-itemSlice     = item.amount  × fillAmountIn    / amountIn    (cumulative)
+fraction      = fillAmount / total          (total = fillTotal if set, else the leg anchor)
+fillAmountOut = fillAmountIn × currentAmountOut / total   (ceil)
+itemSlice     = item.amount  × fillAmount    / total      (cumulative)
 ```
 
-Both scale by the same `fillAmountIn / amountIn` fraction, so items
-and the auction stay in sync across partial fills.
+Both scale by the same `fraction`, so items and the auction stay in sync across
+partial fills. The **denominator** (`total`) is the fixed-side leg 0 for a
+fungible order, or a maker-signed `fillTotal` when the fill unit isn't a fungible
+amount (an NFT, an auction lot) — see [Fill denominator & fill modules](#fill-denominator--fill-modules).
+
+### Item ops & module kinds
+
+Everything beyond the typed fungible legs is a maker-signed module call. There
+are three module kinds, each with a distinct scope — and only `SETTLE` learns who
+the filler is:
+
+| Kind (`ItemOp` / field) | Scope | Can move | Filler-aware? | Cost |
+| --- | --- | --- | --- | --- |
+| **MAKE** | maker deposits/repays | maker's funding token → protocol | no | 1 CALL |
+| **TAKE** | maker borrows/withdraws | maker's position → `recipient` | no | 1 CALL (via Permit3) |
+| **SETTLE** | solver↔maker exchange | maker's asset → filler, or filler's → maker | **yes** | 1 CALL, pay-per-use |
+| **fillModule** | the fill *denominator* (a scalar) | nothing (view) | no | 1 STATICCALL, or 0 |
+
+Trust model is uniform: every module binds `msg.sender == settlement`, so the
+maker's order signature is the sole authority over `(module, amount, data)`, and
+the maker's own approval to the module caps what it can move. `SETTLE`'s
+`filler`-awareness lets the maker's asset route to *whoever fills* (e.g. an NFT
+sale to an open solver set, no exclusivity); the maker's *receipt* is guaranteed
+by the mandatory `tokenOut` delivery (run before items) and/or an invariant, not
+by the module. Full design: [docs/settlement-modules.md](../../../../docs/settlement-modules.md).
+
+### Fill denominator & fill modules
+
+The fill is denominated by `total` — normally the fixed-side leg 0
+(`startAmountIn[0]` for SELL, `startAmountOut[0]` for BUY). When an order's unit
+isn't a fungible amount (a 1-of-1 NFT, an RFQ lot), the maker sets `fillTotal`
+(the denominator) and optionally a `fillModule` that turns the filler's proposal
+into the accepted **delta**. The core keeps the over-fill cap
+(`filled + delta ≤ total`) and the single-fraction scaling; the module only picks
+the delta (and can gate the taker↔maker match by reverting). Identity default —
+`fillModule == 0` and `fillTotal == 0` — is byte-for-byte the classic fungible
+fill, zero overhead. Full design + gas model: [docs/fill-modules.md](../../../../docs/fill-modules.md).
 
 ### Fee-on-transfer & rebasing tokens
 

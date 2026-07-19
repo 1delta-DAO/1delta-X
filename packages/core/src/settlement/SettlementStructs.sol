@@ -11,9 +11,21 @@ pragma solidity ^0.8.28;
 ///         TAKE — borrow/withdraw-style: Settlement calls `permit3.take`,
 ///                which enforces the taker allowance gate and dispatches
 ///                to the module; proceeds land at `receiver = Settlement`.
+///         SETTLE — generic solver↔maker exchange: Settlement calls
+///                `module.settle(maker, filler, amount, data)`. Unlike MAKE/TAKE
+///                (which only touch the maker's own assets/positions), SETTLE is
+///                FILLER-AWARE — the module receives `ctx.filler`, so the maker's
+///                asset can be routed to whoever fills (e.g. an NFT sale to an
+///                open solver set, with no exclusivity). This is the generic
+///                fallback for exchanges the typed `tokenIn`/`tokenOut` fast path
+///                can't express; the typed legs stay inline (zero dispatch) and
+///                SETTLE pays one CALL only when used. The maker's RECEIPT is
+///                guaranteed by the order's mandatory `tokenOut` delivery and/or
+///                a post-execution invariant. See {ISettlementModule}.
 enum ItemOp {
     MAKE,
-    TAKE
+    TAKE,
+    SETTLE
 }
 
 /// @notice Which leg of the order is the auction (variable) side and which is
@@ -139,4 +151,13 @@ struct Order {
     Item[] items;
     Validator[] validators; //       pre-execution trigger conditions; AND-composed
     Validator[] invariants; //       post-execution invariants; AND-composed
+    address fillModule; //           optional fill denominator/matcher; address(0) = identity
+    //                               (the fill delta is the requested `fillAmount`, denominated in
+    //                               the leg anchor — the classic fungible fill). When set, the module
+    //                               validates the filler's proposal (carried in the shared takerData)
+    //                               against this order and returns the accepted delta; the core keeps
+    //                               the over-fill cap and the uniform per-leg scaling. See {IFillModule}.
+    uint256 fillTotal; //            fill denominator when the unit isn't a fungible leg; 0 = derive
+    //                               from the leg anchor (startAmountIn[0]/startAmountOut[0]). Maker-
+    //                               signed so the cap `filled + delta <= fillTotal` stays in the core.
 }

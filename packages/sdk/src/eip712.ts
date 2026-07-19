@@ -50,6 +50,8 @@ export const ORDER_TYPE = [
   { name: "items", type: "Item[]" },
   { name: "validators", type: "Validator[]" },
   { name: "invariants", type: "Validator[]" },
+  { name: "fillModule", type: "address" },
+  { name: "fillTotal", type: "uint256" },
 ] as const;
 
 export const TOKEN_PERMIT_TYPE = [

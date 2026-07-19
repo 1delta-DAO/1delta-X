@@ -1,9 +1,11 @@
 import type { Address, Hex } from "viem";
 
-/// Operation kind per lending item. Mirrors the Solidity `ItemOp` enum.
+/// Operation kind per item. Mirrors the Solidity `ItemOp` enum.
+/// SETTLE is the filler-aware generic solver↔maker exchange (e.g. an NFT sale).
 export enum ItemOp {
   MAKE = 0,
   TAKE = 1,
+  SETTLE = 2,
 }
 
 /// A single lending item inside an order (deposit/repay = MAKE, borrow/withdraw = TAKE).
@@ -79,6 +81,21 @@ export interface Order {
   items: readonly Item[];
   validators: readonly Validator[];
   invariants: readonly Validator[];
+  /**
+   * Optional fill matcher — the generalized fill denominator. `0x0` (zero
+   * address) = identity: the fill delta is the requested `fillAmount` in leg-
+   * anchor units (classic fungible fill). When set, the module validates the
+   * filler's proposal (carried in the shared `takerData`) against the order and
+   * returns the accepted delta; the core keeps the over-fill cap + uniform
+   * per-leg scaling. See `docs/fill-modules.md`.
+   */
+  fillModule: Address;
+  /**
+   * Fill denominator when the unit isn't a fungible leg (an NFT, an auction
+   * lot). `0n` = derive from the leg anchor (startAmountIn[0]/startAmountOut[0]).
+   * Maker-signed so the cap `filled + delta <= fillTotal` stays in the core.
+   */
+  fillTotal: bigint;
 }
 
 // ──────────────────── Fee-leg helpers ────────────────────

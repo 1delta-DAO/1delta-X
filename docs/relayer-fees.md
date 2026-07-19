@@ -115,5 +115,6 @@ spread exit, which needs solver inventory). Proven in
 | Deposit + **originator fee item** + rising relayer leg (full integrator shape) | same file, `test_deposit_withRisingFee_andOriginatorFeeItem` |
 | **Zero-capital exit**: TAKE withdraw to wallet, fee self-funded by proceeds | `modules/lending/aave-v3/test/swaps/WithdrawWithFee.t.sol::test_withdrawToWallet_withRisingFee` |
 | Compound v3 USDC **base supply** entry (earn on-ramp) | `modules/lending/compound-v3/test/swaps/DepositWithFee.t.sol` |
+| Aave v3 gasless **repay** (MAKE) + rising relayer fee | `modules/lending/aave-v3/test/swaps/RepayWithFee.t.sol` |
 | Rising-leg ticks, gas bump, empty-`tokenOut`, exclusivity, Lens | `core/test/swaps/RisingInputFee.t.sol` |
 | Fee item mechanics + Lens same-asset overlap | `core/test/modules/FeeTransferModule.t.sol` |

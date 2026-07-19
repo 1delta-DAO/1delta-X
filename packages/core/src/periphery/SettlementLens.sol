@@ -76,10 +76,10 @@ contract SettlementLens {
         return order.currentAmountIn();
     }
 
-    /// @notice Remaining fillable amount, in anchor units (`tokenIn[0]` for SELL,
-    ///         `tokenOut[0]` for BUY).
+    /// @notice Remaining fillable amount, in denominator units (`fillTotal` when
+    ///         set, else `tokenIn[0]` for SELL / `tokenOut[0]` for BUY).
     function remaining(Order calldata order) external view returns (uint256) {
-        return _anchorTotal(order) - SETTLEMENT.filled(order.hash());
+        return _fillDenominator(order) - SETTLEMENT.filled(order.hash());
     }
 
     // ──────────────────── Solver preflight ────────────────────
@@ -178,29 +178,35 @@ contract SettlementLens {
         view
         returns (OrderStatus status, uint256 fillableAmount)
     {
-        // Malformed shape → Invalid (guards the array indexing below). An empty
-        // tokenOut is valid for SELL only — the pure-deposit shape whose sole
-        // economics are a rising input fee leg; BUY anchors on `tokenOut[0]`.
+        // Malformed shape → Invalid (guards the array indexing below). Each side
+        // needs the leg its anchor reads: SELL anchors on `tokenIn[0]`, BUY on
+        // `tokenOut[0]`. So a BUY may have empty tokenIn (consideration supplied
+        // by items — e.g. an NFT-sale SETTLE) and a SELL may have empty tokenOut
+        // (a gasless deposit). A `fillTotal != 0` order is denominated by
+        // `fillTotal`, not a leg, so it may have both empty (a pure NFT swap).
+        bool moduleFill = order.fillTotal != 0;
         uint256 nIn = order.tokenIn.length;
         uint256 nOut = order.tokenOut.length;
         if (
-            nIn == 0 || order.startAmountIn.length != nIn || order.endAmountIn.length != nIn
-                || (nOut == 0 && order.side == OrderSide.BUY) || order.startAmountOut.length != nOut
-                || order.endAmountOut.length != nOut || order.recipientOut.length != nOut
+            order.startAmountIn.length != nIn || order.endAmountIn.length != nIn
+                || order.startAmountOut.length != nOut || order.endAmountOut.length != nOut
+                || order.recipientOut.length != nOut
+                || (!moduleFill && ((nIn == 0 && order.side == OrderSide.SELL) || (nOut == 0 && order.side == OrderSide.BUY)))
         ) {
             return (OrderStatus.Invalid, 0);
         }
         if (block.timestamp > order.deadline) return (OrderStatus.Expired, 0);
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (OrderStatus.Cancelled, 0);
 
-        uint256 anchor = _anchorTotal(order);
+        uint256 anchor = _fillDenominator(order);
         uint256 done = SETTLEMENT.filled(orderHash);
         if (done >= anchor) return (OrderStatus.Filled, 0);
 
         fillableAmount = anchor - done;
         // Plain orders: the maker funds tokenIn from their wallet, so cap the
-        // fillable amount by their live capacity across every input leg.
-        if (order.items.length == 0) {
+        // fillable amount by their live capacity across every input leg. Skipped
+        // for module orders — the fillable is in `fillTotal` units, not leg units.
+        if (order.items.length == 0 && order.fillModule == address(0)) {
             uint256 cap = _makerFillableCap(order, anchor);
             if (cap < fillableAmount) fillableAmount = cap;
         }
@@ -264,9 +270,14 @@ contract SettlementLens {
     ///         then never be filled. Only `minFillAnchor ∈ {0, anchor}`
     ///         guarantees no unfillable tail.
     function validateOrder(Order calldata order) external view returns (bool ok, string memory reason) {
+        // A fill-module order is denominated by the maker-signed `fillTotal`, not
+        // a leg, so it may carry empty tokenIn/tokenOut (a pure NFT swap). The
+        // leg-shape economics below still apply to whatever legs it does have.
+        bool moduleFill = order.fillTotal != 0;
+
         // ── array shape ──
         uint256 nIn = order.tokenIn.length;
-        if (nIn == 0 || nIn != order.startAmountIn.length || nIn != order.endAmountIn.length) {
+        if (nIn != order.startAmountIn.length || nIn != order.endAmountIn.length) {
             return (false, "tokenIn/amountIn length mismatch");
         }
         uint256 nOut = order.tokenOut.length;
@@ -274,16 +285,29 @@ contract SettlementLens {
         {
             return (false, "tokenOut/amountOut length mismatch");
         }
-        // An empty tokenOut is the pure-deposit shape: valid for SELL only (BUY
-        // anchors on `tokenOut[0]`), and only with items — otherwise the maker
-        // gives its tokenIn away for nothing.
-        if (nOut == 0) {
-            if (order.side == OrderSide.BUY) return (false, "buy requires tokenOut");
-            if (order.items.length == 0) return (false, "no tokenOut and no items (giveaway)");
+        // Anchor-leg presence. The fill denominator is the anchor side's leg 0 —
+        // SELL reads `tokenIn[0]`, BUY reads `tokenOut[0]` — unless a maker-signed
+        // `fillTotal` supplies it directly. So a BUY may have EMPTY tokenIn (its
+        // consideration comes from items — e.g. an NFT-sale SETTLE), and a SELL
+        // may have empty tokenOut (a gasless deposit). A fill module with
+        // `fillTotal == 0` still derives its total from the anchor leg, so it
+        // needs that leg too.
+        if (!moduleFill) {
+            if (order.side == OrderSide.SELL && nIn == 0) {
+                return (false, order.fillModule != address(0) ? "fill module without denominator" : "sell requires tokenIn");
+            }
+            if (order.side == OrderSide.BUY && nOut == 0) {
+                return (false, order.fillModule != address(0) ? "fill module without denominator" : "buy requires tokenOut");
+            }
+            // Empty tokenOut on a SELL is the deposit shape — legit only with
+            // items; otherwise the maker gives its tokenIn away for nothing.
+            if (order.side == OrderSide.SELL && nOut == 0 && order.items.length == 0) {
+                return (false, "no tokenOut and no items (giveaway)");
+            }
         }
 
         // ── structural / economic sanity (time-independent) ──
-        uint256 anchor = _anchorTotal(order);
+        uint256 anchor = _fillDenominator(order);
         if (anchor == 0) return (false, "anchor amount is zero");
         if (order.side == OrderSide.SELL) {
             // Inputs are fixed (start == end) or RISE to a ceiling — a
@@ -344,6 +368,15 @@ contract SettlementLens {
             }
         }
         if (order.minFillAnchor > anchor) return (false, "minFillAnchor > anchor (unfillable)");
+        // A SETTLE item settles an indivisible exchange (an NFT): on a partial
+        // fill its slice floors to 0 and delivers nothing, while the maker is
+        // still paid pro-rata — a first filler pays and gets nothing. Unless a
+        // fill module fixes the unit, require full-fill (minFillAnchor == anchor).
+        if (order.fillModule == address(0) && order.minFillAnchor != anchor) {
+            for (uint256 s; s < order.items.length; s++) {
+                if (order.items[s].op == ItemOp.SETTLE) return (false, "settle item requires full-fill");
+            }
+        }
         if (order.decayDuration != 0 && order.decayStartTime == 0) return (false, "decay set without decayStartTime");
 
         // ── soft exclusivity override ──
@@ -411,10 +444,18 @@ contract SettlementLens {
         }
     }
 
-    /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —
-    ///      `startAmountIn[0]` (SELL) or `startAmountOut[0]` (BUY).
+    /// @dev The leg anchor: the FIXED side's leg 0 — `startAmountIn[0]` (SELL) or
+    ///      `startAmountOut[0]` (BUY). Reverts on empty legs; only call when a
+    ///      fungible anchor is known to exist.
     function _anchorTotal(Order calldata order) internal pure returns (uint256) {
         return order.side == OrderSide.BUY ? order.startAmountOut[0] : order.startAmountIn[0];
+    }
+
+    /// @dev The fill denominator: the maker-signed `fillTotal` when set (module
+    ///      orders — no leg access, so it's safe for empty-leg NFT swaps), else
+    ///      the leg anchor. Mirrors the settlement's `_openFill`.
+    function _fillDenominator(Order calldata order) internal pure returns (uint256) {
+        return order.fillTotal != 0 ? order.fillTotal : _anchorTotal(order);
     }
 
     /// @dev Recompute the settlement's EIP-712 order digest and verify `sig`

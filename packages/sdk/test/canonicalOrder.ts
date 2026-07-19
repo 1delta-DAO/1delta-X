@@ -47,7 +47,10 @@ export const CANONICAL_ORDER: Order = {
   ],
   validators: [{ target: A("0x0000000000000000000000000000000000000e01"), data: "0xdead" }],
   invariants: [{ target: A("0x0000000000000000000000000000000000000e02"), data: "0xbeef" }],
+  // Non-zero fill fields — cross-check the two new tail words hash.
+  fillModule: A("0x000000000000000000000000000000000000f111"),
+  fillTotal: 42n,
 };
 
 /// Emitted by `HashGolden.t.sol` (Solidity `settlement.hashOrder`).
-export const GOLDEN_ORDER_HASH = "0xec762dcba462fb97e8caf4a0219afadcb2b8d00e60daef15f1f00df10f0b97a1";
+export const GOLDEN_ORDER_HASH = "0x06820983e57fd11791b058fb7d86e38a0818fd3fea8354b2eb44c747402b782c";

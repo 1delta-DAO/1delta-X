@@ -91,13 +91,16 @@ contract HashGoldenTest is Test {
             gasPriceRef: 30_000_000_000,
             items: items,
             validators: validators,
-            invariants: invariants
+            invariants: invariants,
+            // Non-zero fill fields — cross-check the two new tail words hash.
+            fillModule: address(0xF111),
+            fillTotal: 42
         });
     }
 
     /// @dev The TypeScript SDK (`packages/sdk`) asserts this SAME constant for the
     ///      same canonical order — cross-verifying its EIP-712 typed-data defs.
-    bytes32 constant GOLDEN_ORDER_HASH = 0xec762dcba462fb97e8caf4a0219afadcb2b8d00e60daef15f1f00df10f0b97a1;
+    bytes32 constant GOLDEN_ORDER_HASH = 0x06820983e57fd11791b058fb7d86e38a0818fd3fea8354b2eb44c747402b782c;
 
     function test_goldenOrderHash() public view {
         assertEq(lens.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");

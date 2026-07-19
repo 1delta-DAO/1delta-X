@@ -81,8 +81,9 @@ The Settlement never touches flash loans — it only validates the signed lendin
 > Authoritative security documentation lives in [`SECURITY.md`](SECURITY.md);
 > the per-package READMEs ([`permit3`](packages/core/src/permit3/README.md),
 > [`settlement`](packages/core/src/settlement/README.md)) document the current
-> Permit3-based design. (The architecture sketch above predates the Permit3
-> rewrite and is being updated.)
+> Permit3-based design, and [`docs/`](docs/README.md) holds the topic-level
+> design notes (fees, fill modules, settlement modules, gasless relay). (The
+> architecture sketch above predates the Permit3 rewrite and is being updated.)
 
 - **No admin, no module whitelist** — authority comes solely from the maker's
   EIP-712 signature plus their Permit3 allowances. (The earlier owner-approved
