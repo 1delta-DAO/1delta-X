@@ -118,10 +118,24 @@ the only extraction risk — advancing past 100% — is caught by the core cap.
 | ERC-1155 batch | `qty` | `delta = requestedQty`, bounded by remaining |
 | RFQ / signed quote | `1` | verify the quote's signature/params, return `1` |
 | Sealed/English auction settle | `1` | verify `fillData` is the winning bid ≥ reserve |
+| **TWAP / DCA / iceberg** (shipped: `TwapFillModule`) | total | release `partsOpen·partSize − prevFilled` — one signed order, time-sliced into equal parts; no fill runs ahead of schedule, catch-up allowed, core caps at total |
 
 The fungible case is literally the identity module, so this **subsumes** today's
 behavior rather than replacing it; the earlier "anchor on an item" idea is a
 ~10-line `ItemFillModule`.
+
+**Shipped example — `TwapFillModule`** (`core/src/modules/TwapFillModule.sol`,
+tested in `core/test/swaps/TwapFillModule.t.sol`). A CoW-style TWAP with **no
+watchtower and no generated sub-orders**: one signed order is released in N equal
+time-sliced parts, the schedule riding existing signed fields (`fillTotal` =
+total, `minFillAnchor` = part size, `decayStartTime`/`decayDuration` = window).
+`resolveFill` admits only the parts whose window has opened, so a fill can't run
+ahead of schedule, one part per window is steady state, a skipped-window solver
+can catch up, and the core's cap bounds total at `fillTotal`. Pricing stays
+orthogonal (fixed limit per part today; a market-tracking limit layers on with an
+oracle validator over the `takerData` seam — the same split maps DCA, iceberg,
+stop-loss, and oracle-limit orders). Zero-inventory still works per window (the
+solver flash-sources each part's output in the callback).
 
 ## 5. Gas — the design is built around a zero-overhead default
 
