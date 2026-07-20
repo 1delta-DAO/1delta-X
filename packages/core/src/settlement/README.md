@@ -210,9 +210,18 @@ For a fee-on-transfer or rebasing token this means the recipient receives
 
 There is **no built-in FoT validation** — trading such tokens is the
 maker's/solver's responsibility. A maker who wants aggregator-style protection
-can attach a post-execution **invariant** asserting *"my `tokenOut` balance
-increased by ≥ N"* (see Validators/invariants), which reverts the whole fill if
-the fee eats into the floor.
+attaches the ready-made **`MinBalanceInvariant`** (`src/validators/`) — a
+post-execution invariant asserting *"my `token` balance is ≥ floor"* — which
+reverts the whole fill if the fee eats past the floor (`data = abi.encode(token,
+account, minBalance)`, floor = pre-fill balance + the minimum net accepted). This
+is the Seaport/0x "minimum balance after" pattern.
+
+**Scope: simple single-order swaps only.** A plain buy/sell of a FoT/rebasing
+token is **functional** — the receiving party simply nets the post-fee amount
+(`FeeOnTransfer.t.sol`). The **netted batch modes** (`batchSettle`,
+`batchSettleItems`) rely on `balanceOf`-delta pool accounting, so a FoT/rebasing
+token there trips the whole-check (`BatchNotWhole`) or an underflow and **reverts
+safely** — they are not supported for such tokens, by design.
 
 ### Fees — two actors, two instruments, no fee subsystem
 

@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {UniversalSettlement, Order, Item, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement, CallbackMode, Order, Item, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
 import {TwapFillModule} from "@core/modules/TwapFillModule.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -182,7 +182,7 @@ contract TwapFillModuleTest is CoreSettlementBase {
         // Part 1, PostInputs: paid PART USDC → swap → deliver WETH_PART.
         bytes memory cb = abi.encodeCall(TwapSwapHelper.swap, (solver, USDC, PART, WETH, WETH_PART));
         vm.prank(solver);
-        settlement.fillWithCallback(o, sig, PART, address(swapHelper), cb, UniversalSettlement.CallbackMode.PostInputs);
+        settlement.fillWithCallback(o, sig, PART, address(swapHelper), cb, CallbackMode.PostInputs);
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_PART, "maker received the part's WETH");
         assertEq(IERC20(USDC).balanceOf(maker), TOTAL - PART, "maker spent one part of USDC");

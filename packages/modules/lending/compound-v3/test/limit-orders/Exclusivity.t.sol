@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {UniversalSettlement, Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
 
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
@@ -28,7 +29,7 @@ contract ExclusivityTest is CompoundV3ModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.NotExclusiveFiller.selector);
+        vm.expectRevert(SettlementBase.NotExclusiveFiller.selector);
         settlement.fill(order, sig, usdcIn);
     }
 

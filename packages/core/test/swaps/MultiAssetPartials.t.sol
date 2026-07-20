@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
@@ -297,7 +298,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
         vm.prank(solver);
         settlement.fill(order, sig, 1_000e6); // full
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.OverFill.selector);
+        vm.expectRevert(SettlementBase.OverFill.selector);
         settlement.fill(order, sig, 1);
     }
 
@@ -305,7 +306,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
         Order memory order = _fixed(8, _a1(USDC), _u1(1_000e6), _a1(WETH), _u1(1 ether));
         bytes memory sig = _sign(order);
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.ZeroFill.selector);
+        vm.expectRevert(SettlementBase.ZeroFill.selector);
         settlement.fill(order, sig, 0);
     }
 }

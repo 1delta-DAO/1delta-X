@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
@@ -46,7 +47,7 @@ contract ValidatorsTest is CompoundV3ModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.ValidationFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(SettlementBase.ValidationFailed.selector, uint256(0)));
         settlement.fill(order, sig, wethIn);
     }
 

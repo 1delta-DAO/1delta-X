@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement, CallbackMode, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
 import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
@@ -104,7 +105,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.Reentrancy.selector);
+        vm.expectRevert(SettlementBase.Reentrancy.selector);
         settlement.fill(order, sig, AMOUNT_IN);
     }
 
@@ -123,7 +124,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         // on the selector only.
         vm.expectPartialRevert(SolverCallbackExecutor.CallbackFailed.selector);
         settlement.fillWithCallback(
-            order, sig, AMOUNT_IN, address(rc), cb, UniversalSettlement.CallbackMode.PreDelivery
+            order, sig, AMOUNT_IN, address(rc), cb, CallbackMode.PreDelivery
         );
     }
 
@@ -161,7 +162,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
         settlement.fillWithCallback(
-            order, badSig, AMOUNT_IN, address(supplier), cb, UniversalSettlement.CallbackMode.PreDelivery
+            order, badSig, AMOUNT_IN, address(supplier), cb, CallbackMode.PreDelivery
         );
     }
 
@@ -384,7 +385,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         vm.prank(solver);
         vm.expectPartialRevert(SolverCallbackExecutor.CallbackFailed.selector);
         settlement.fillWithCallback(
-            order, sig, AMOUNT_IN, address(rev), cb, UniversalSettlement.CallbackMode.PreDelivery
+            order, sig, AMOUNT_IN, address(rev), cb, CallbackMode.PreDelivery
         );
     }
 

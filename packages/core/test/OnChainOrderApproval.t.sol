@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {UniversalSettlement, Order} from "@core/settlement/UniversalSettlement.sol";
 
 import {MockSettlementBase} from "./shared/MockSettlementBase.t.sol";
@@ -62,7 +63,7 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
 
     /// @dev The maker authorizes `o` on-chain (returns the order hash it recorded).
     function _approve(Order memory o) internal returns (bytes32) {
-        bytes memory ret = cm.exec(address(settlement), abi.encodeCall(UniversalSettlement.approveOrder, (o)));
+        bytes memory ret = cm.exec(address(settlement), abi.encodeCall(SettlementBase.approveOrder, (o)));
         return abi.decode(ret, (bytes32));
     }
 
@@ -87,7 +88,7 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
     function test_fill_emptySig_withoutApproval_reverts() public {
         Order memory o = _order(1); // never approved
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.OrderNotApproved.selector);
+        vm.expectRevert(SettlementBase.OrderNotApproved.selector);
         settlement.fill(o, "", AMOUNT_IN);
     }
 
@@ -97,7 +98,7 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
     function test_approveOrder_wrongMaker_reverts() public {
         Order memory o = _order(1); // maker == cm
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.NotOrderMaker.selector);
+        vm.expectRevert(SettlementBase.NotOrderMaker.selector);
         settlement.approveOrder(o);
     }
 
@@ -105,11 +106,11 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
         Order memory o = _order(1);
         bytes32 hash = _approve(o);
 
-        cm.exec(address(settlement), abi.encodeCall(UniversalSettlement.revokeOrderApproval, (hash)));
+        cm.exec(address(settlement), abi.encodeCall(SettlementBase.revokeOrderApproval, (hash)));
         assertFalse(settlement.orderApproved(address(cm), hash), "approval cleared");
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.OrderNotApproved.selector);
+        vm.expectRevert(SettlementBase.OrderNotApproved.selector);
         settlement.fill(o, "", AMOUNT_IN);
     }
 
@@ -125,7 +126,7 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
         cm.exec(address(settlement), abi.encodeWithSignature("cancelOrders(uint256[])", nonces));
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.NonceCancelled.selector);
+        vm.expectRevert(SettlementBase.NonceCancelled.selector);
         settlement.fill(o, "", AMOUNT_IN);
     }
 

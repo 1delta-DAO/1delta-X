@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {UniversalSettlement, Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
@@ -240,7 +241,7 @@ contract BatchSettleTest is CoreSettlementBase {
         fills[0] = WETH_AMT;
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.BatchSettleNoItems.selector);
+        vm.expectRevert(SettlementBase.BatchSettleNoItems.selector);
         settlement.batchSettle(os, sigs, fills, address(0), "");
     }
 
@@ -271,7 +272,7 @@ contract BatchSettleTest is CoreSettlementBase {
         // No interaction ⇒ the 500 USDC deficit is uncovered. Delivery succeeds by
         // eating the donation, but the delta check reverts the whole tx.
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.BatchNotWhole.selector, USDC));
+        vm.expectRevert(abi.encodeWithSelector(SettlementBase.BatchNotWhole.selector, USDC));
         settlement.batchSettle(_two(a, b), sigs, fills, address(0), "");
 
         // The donation is untouched (tx reverted atomically).
@@ -358,7 +359,7 @@ contract BatchSettleTest is CoreSettlementBase {
         badTd[0] = abi.encode(uint256(1));
         badTd[1] = "";
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.ValidationFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(SettlementBase.ValidationFailed.selector, uint256(0)));
         settlement.batchSettle(_two(a, b), sigs, fills, badTd, address(0), "");
 
         // Correct blob (42) → the batch clears.

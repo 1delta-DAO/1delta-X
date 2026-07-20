@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {UniversalSettlement, Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
@@ -87,7 +88,7 @@ contract BatchFillTest is MockSettlementBase {
         settlement.cancelOrders(nonces);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.BatchFillIncomplete.selector, 1));
+        vm.expectRevert(abi.encodeWithSelector(SettlementBase.BatchFillIncomplete.selector, 1));
         settlement.batchFill(orders, sigs, amounts, true);
     }
 
@@ -99,7 +100,7 @@ contract BatchFillTest is MockSettlementBase {
         settlement.fill(orders[0], sigs[0], AMOUNT_IN / 2);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.BatchFillIncomplete.selector, 0));
+        vm.expectRevert(abi.encodeWithSelector(SettlementBase.BatchFillIncomplete.selector, 0));
         settlement.batchFill(orders, sigs, amounts, true); // amounts[0] = full > remaining
     }
 
@@ -115,7 +116,7 @@ contract BatchFillTest is MockSettlementBase {
         Order memory o = _order(0);
         bytes memory sig = _sign(o);
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.OnlySelf.selector);
+        vm.expectRevert(SettlementBase.OnlySelf.selector);
         settlement.fillSelf(o, sig, AMOUNT_IN, solver, "");
     }
 }

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
-import {UniversalSettlement, Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement, Order, Item, ItemOp, ItemsBatch, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev TAKE mock = a borrow/withdraw: on dispatch it transfers a pre-set `produce`
@@ -165,7 +166,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
     function _batch(Order memory a, Order memory b, uint256[] memory pullMask, uint256[] memory sequence)
         internal
         view
-        returns (UniversalSettlement.ItemsBatch memory bat)
+        returns (ItemsBatch memory bat)
     {
         Order[] memory orders = new Order[](2);
         orders[0] = a;
@@ -176,7 +177,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         uint256[] memory fills = new uint256[](2);
         fills[0] = a.startAmountIn[0]; // Alice anchor = WETH
         fills[1] = b.startAmountIn[0]; // Bob anchor   = USDC borrow
-        bat = UniversalSettlement.ItemsBatch({
+        bat = ItemsBatch({
             orders: orders,
             sigs: sigs,
             fillAmounts: fills,
@@ -211,7 +212,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
 
         // pullMask: pull Alice's WETH (seed); Bob's USDC is item-funded (borrow).
         // sequence: Bob first (borrow lands USDC), then Alice (paid from it).
-        UniversalSettlement.ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
+        ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
 
         vm.prank(solver);
         settlement.batchSettleItems(bat);
@@ -239,7 +240,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         Order memory b = _leverageOrder(2, WETH_AMT, USDC_AMT, USDC_AMT);
         _fund(b, USDC_AMT);
 
-        UniversalSettlement.ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(0, 1)); // Alice first
+        ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(0, 1)); // Alice first
 
         vm.prank(solver);
         vm.expectRevert(); // pool has no USDC yet → Alice's delivery transfer reverts
@@ -252,10 +253,10 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         Order memory b = _leverageOrder(2, WETH_AMT, USDC_AMT, USDC_AMT);
         _fund(b, USDC_AMT);
 
-        UniversalSettlement.ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 1)); // dup
+        ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 1)); // dup
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.BatchItemsBadSequence.selector);
+        vm.expectRevert(SettlementBase.BatchItemsBadSequence.selector);
         settlement.batchSettleItems(bat);
     }
 
@@ -267,10 +268,10 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         Order memory b = _leverageOrder(2, WETH_AMT, USDC_AMT, 1_500e6);
         _fund(b, 1_500e6);
 
-        UniversalSettlement.ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
+        ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.BatchItemsInputUnfunded.selector);
+        vm.expectRevert(SettlementBase.BatchItemsInputUnfunded.selector);
         settlement.batchSettleItems(bat);
     }
 
@@ -286,10 +287,10 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         b.items = items;
         _fund(_leverageOrder(2, WETH_AMT, USDC_AMT, USDC_AMT), USDC_AMT); // approvals harmless
 
-        UniversalSettlement.ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
+        ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.BatchItemsSettleUnsupported.selector);
+        vm.expectRevert(SettlementBase.BatchItemsSettleUnsupported.selector);
         settlement.batchSettleItems(bat);
     }
 
@@ -308,10 +309,10 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         b.endAmountIn = b.startAmountIn;
         _fund(_leverageOrder(2, WETH_AMT, USDC_AMT, USDC_AMT), USDC_AMT);
 
-        UniversalSettlement.ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
+        ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.BatchItemsDuplicateInput.selector);
+        vm.expectRevert(SettlementBase.BatchItemsDuplicateInput.selector);
         settlement.batchSettleItems(bat);
     }
 }

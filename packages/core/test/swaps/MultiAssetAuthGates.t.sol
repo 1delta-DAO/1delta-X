@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -258,7 +259,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         Order memory order = _multiOut(5, _oneV(false), _noV());
         bytes memory sig = _sign(order);
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.ValidationFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(SettlementBase.ValidationFailed.selector, uint256(0)));
         settlement.fill(order, sig, 2_000e6);
     }
 
@@ -278,7 +279,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         Order memory order = _multiOut(7, _noV(), _oneV(false));
         bytes memory sig = _sign(order);
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.InvariantFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(SettlementBase.InvariantFailed.selector, uint256(0)));
         settlement.fill(order, sig, 2_000e6);
     }
 
@@ -293,7 +294,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
 
         // Non-exclusive solver blocked during the window.
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.NotExclusiveFiller.selector);
+        vm.expectRevert(SettlementBase.NotExclusiveFiller.selector);
         settlement.fill(order, sig, 2_000e6);
 
         // After the window, anyone can fill.
@@ -311,7 +312,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         order.minFillAnchor = 2_000e6; // all-or-nothing
         bytes memory sig = _sign(order);
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.FillTooSmall.selector);
+        vm.expectRevert(SettlementBase.FillTooSmall.selector);
         settlement.fill(order, sig, 1_000e6);
     }
 
@@ -323,7 +324,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         bytes memory sig = _sign(order);
         vm.warp(order.deadline + 1);
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.OrderExpired.selector);
+        vm.expectRevert(SettlementBase.OrderExpired.selector);
         settlement.fill(order, sig, 2_000e6);
     }
 }

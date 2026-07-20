@@ -28,6 +28,13 @@ enum ItemOp {
     SETTLE
 }
 
+/// @notice Where the solver callback runs relative to settlement, chosen by the
+///         filler in `fillWithCallback` (single-order path).
+enum CallbackMode {
+    PreDelivery, // callback → deliver outputs → items → pay inputs (works for any order)
+    PostInputs // pay inputs → callback → deliver outputs (item-free only; JIT-from-proceeds)
+}
+
 /// @notice Which leg of the order is the auction (variable) side and which is
 ///         the fixed anchor that the fill amount is denominated in.
 ///
@@ -160,4 +167,35 @@ struct Order {
     uint256 fillTotal; //            fill denominator when the unit isn't a fungible leg; 0 = derive
     //                               from the leg anchor (startAmountIn[0]/startAmountOut[0]). Maker-
     //                               signed so the cap `filled + delta <= fillTotal` stays in the core.
+}
+
+/// @notice Per-fill execution context — the resolved, in-memory state of ONE fill.
+///         NOT a signed type: it is derived at fill time (never hashed) and passed
+///         by memory pointer to the settlement helpers so each settle flow runs in
+///         its own stack frame (keeps a fill under the EVM stack limit). Shared by
+///         the settlement contracts and {SettlementPricing} so the per-leg slice
+///         math has a single home.
+struct FillCtx {
+    bytes32 orderHash;
+    uint256 anchor; //       fill denominator (fixed-side leg 0, or signed fillTotal)
+    uint256 prevFilled; //   cumulative filled before this fill
+    uint256 newFilled; //    cumulative filled after this fill
+    uint256 overrideBps; //  soft-exclusivity improvement (0 = none)
+    address filler; //       who is paid / delivers
+    bool fullFill; //        prevFilled == 0 && newFilled == anchor: the whole order in
+    //                       one shot ⇒ every pro-rata slice is the leg's full amount,
+    //                       skipping the mul/div.
+}
+
+/// @notice The `batchSettleItems` call bundle — one calldata struct so the external
+///         ABI decode stays under the stack limit without via-IR (seven dynamic
+///         params would overflow it). Arrays are aligned 1:1 with `orders`.
+struct ItemsBatch {
+    Order[] orders;
+    bytes[] sigs;
+    uint256[] fillAmounts;
+    uint256[] pullMask; //          bit j of [i] ⇒ pull order i's input leg j up front
+    uint256[] sequence; //          execution order (a permutation of [0, n))
+    address interactionTarget; //   optional (0 = skip) solver seed call
+    bytes interactionData;
 }

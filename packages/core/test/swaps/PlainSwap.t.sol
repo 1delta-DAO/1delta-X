@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -436,12 +437,12 @@ contract PlainSwapTest is CoreSettlementBase {
 
         // The tail can't be filled: below the min-fill floor …
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.FillTooSmall.selector);
+        vm.expectRevert(SettlementBase.FillTooSmall.selector);
         settlement.fill(order, sig, tail);
 
         // … and filling the floor amount would over-fill the order.
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.OverFill.selector);
+        vm.expectRevert(SettlementBase.OverFill.selector);
         settlement.fill(order, sig, minFill);
     }
 }

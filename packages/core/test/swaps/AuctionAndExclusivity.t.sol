@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {stdError} from "forge-std/StdError.sol";
 
-import {UniversalSettlement, Order, Item, Validator, OrderSide, CurvePoint} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement, CallbackMode, Order, Item, Validator, OrderSide, CurvePoint} from "@core/settlement/UniversalSettlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
 import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol";
@@ -108,7 +109,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.NotExclusiveFiller.selector);
+        vm.expectRevert(SettlementBase.NotExclusiveFiller.selector);
         settlement.fill(order, sig, SELL_IN);
     }
 
@@ -539,7 +540,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.prank(solver);
         settlement.fillWithCallback(
-            order, sig, SELL_IN, address(supplier), cb, UniversalSettlement.CallbackMode.PreDelivery
+            order, sig, SELL_IN, address(supplier), cb, CallbackMode.PreDelivery
         );
         assertEq(tB.balanceOf(maker), bumped, "override honored in PreDelivery callback");
     }
@@ -563,7 +564,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         vm.prank(solver);
         settlement.fillWithCallback(
-            order, sig, BUY_OUT, address(helper), cb, UniversalSettlement.CallbackMode.PostInputs
+            order, sig, BUY_OUT, address(helper), cb, CallbackMode.PostInputs
         );
         assertEq(tB.balanceOf(maker), BUY_OUT, "maker got exact output");
         assertEq(tA.balanceOf(maker), BUY_IN - discounted, "maker paid only the discounted input");

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {UniversalSettlement, CallbackMode, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -78,7 +79,7 @@ contract SolverCallbackTest is CoreSettlementBase {
 
         vm.prank(solver);
         settlement.fillWithCallback(
-            order, sig, USDC_IN, address(source), cb, UniversalSettlement.CallbackMode.PreDelivery
+            order, sig, USDC_IN, address(source), cb, CallbackMode.PreDelivery
         );
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "maker received WETH");
@@ -136,7 +137,7 @@ contract SolverCallbackTest is CoreSettlementBase {
         vm.prank(attacker);
         vm.expectRevert(); // executor is not an approved spender → Permit3 reverts → CallbackFailed
         settlement.fillWithCallback(
-            order, sig, USDC_IN, address(permit3), drain, UniversalSettlement.CallbackMode.PreDelivery
+            order, sig, USDC_IN, address(permit3), drain, CallbackMode.PreDelivery
         );
 
         assertEq(IERC20(USDC).balanceOf(victim), victimBal, "victim funds untouched");
@@ -177,7 +178,7 @@ contract SolverCallbackTest is CoreSettlementBase {
 
         vm.prank(solver);
         settlement.fillWithCallback(
-            order, sig, USDC_IN, address(swapHelper), cb, UniversalSettlement.CallbackMode.PostInputs
+            order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs
         );
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "maker received WETH");
@@ -200,9 +201,9 @@ contract SolverCallbackTest is CoreSettlementBase {
         bytes memory cb = abi.encodeCall(SwapHelper.swap, (solver, USDC, USDC_IN, WETH, WETH_OUT));
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.ReverseModeRequiresNoItems.selector);
+        vm.expectRevert(SettlementBase.ReverseModeRequiresNoItems.selector);
         settlement.fillWithCallback(
-            order, sig, USDC_IN, address(swapHelper), cb, UniversalSettlement.CallbackMode.PostInputs
+            order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs
         );
     }
 
@@ -221,7 +222,7 @@ contract SolverCallbackTest is CoreSettlementBase {
         vm.prank(solver);
         vm.expectRevert(); // delivery pulls WETH_OUT from solver who only has WETH_OUT-1
         settlement.fillWithCallback(
-            order, sig, USDC_IN, address(swapHelper), cb, UniversalSettlement.CallbackMode.PostInputs
+            order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs
         );
 
         assertEq(IERC20(USDC).balanceOf(maker), USDC_IN, "maker still holds its USDC");
@@ -252,7 +253,7 @@ contract SolverCallbackTest is CoreSettlementBase {
         vm.prank(solver);
         vm.expectRevert();
         settlement.fillWithCallback(
-            order, sig, USDC_IN, address(permit3), drain, UniversalSettlement.CallbackMode.PostInputs
+            order, sig, USDC_IN, address(permit3), drain, CallbackMode.PostInputs
         );
 
         assertEq(IERC20(USDC).balanceOf(victim), victimBal, "victim untouched in reverse mode");

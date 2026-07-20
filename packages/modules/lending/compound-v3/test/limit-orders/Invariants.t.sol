@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {UniversalSettlement, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
@@ -37,7 +38,7 @@ contract InvariantsTest is CompoundV3ModulesBase {
         uint256 makerCollatBefore = _wethCollateral(maker);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(UniversalSettlement.InvariantFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(SettlementBase.InvariantFailed.selector, uint256(0)));
         settlement.fill(order, sig, usdcIn);
 
         // Entire fill reverted — maker's state is exactly as before.

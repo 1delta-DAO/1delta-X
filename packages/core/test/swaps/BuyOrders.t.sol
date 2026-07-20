@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {UniversalSettlement, Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {UniversalSettlement, CallbackMode, Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
@@ -104,7 +105,7 @@ contract BuyOrdersTest is MockSettlementBase {
         settlement.fill(order, sig, OUT);
 
         vm.prank(solver);
-        vm.expectRevert(UniversalSettlement.OverFill.selector);
+        vm.expectRevert(SettlementBase.OverFill.selector);
         settlement.fill(order, sig, 1);
     }
 
@@ -175,7 +176,7 @@ contract BuyOrdersTest is MockSettlementBase {
 
         assertEq(tB.balanceOf(solver), 0, "solver starts with no output");
         vm.prank(solver);
-        settlement.fillWithCallback(order, sig, OUT, address(supplier), cb, UniversalSettlement.CallbackMode.PreDelivery);
+        settlement.fillWithCallback(order, sig, OUT, address(supplier), cb, CallbackMode.PreDelivery);
 
         assertEq(tB.balanceOf(maker), OUT, "maker got exact output");
         assertEq(tA.balanceOf(solver), PRICE, "solver paid the input");
@@ -197,7 +198,7 @@ contract BuyOrdersTest is MockSettlementBase {
 
         assertEq(tB.balanceOf(solver), 0, "no output inventory");
         vm.prank(solver);
-        settlement.fillWithCallback(order, sig, OUT, address(swapHelper), cb, UniversalSettlement.CallbackMode.PostInputs);
+        settlement.fillWithCallback(order, sig, OUT, address(swapHelper), cb, CallbackMode.PostInputs);
 
         assertEq(tB.balanceOf(maker), OUT, "maker got exact output");
         assertEq(tA.balanceOf(maker), 0, "maker paid the input");

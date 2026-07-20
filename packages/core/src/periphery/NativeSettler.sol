@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {UniversalSettlement, Order} from "../settlement/UniversalSettlement.sol";
+import {UniversalSettlement, Order, CallbackMode} from "../settlement/UniversalSettlement.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
 interface IWETH {
@@ -71,7 +71,7 @@ contract NativeSettler {
 
         // 3) Self-settle as the filler.
         outs = settlement.fillWithCallback(
-            order, sig, fillAmount, dexTarget, dexCallData, UniversalSettlement.CallbackMode.PostInputs
+            order, sig, fillAmount, dexTarget, dexCallData, CallbackMode.PostInputs
         );
     }
 }
