@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
-import {Order} from "../settlement/UniversalSettlement.sol";
+import {Order} from "../settlement/Settlement.sol";
 import {IAggregatorV3} from "../interfaces/IAggregatorV3.sol";
 
 /// @dev Shared, hardened Chainlink read. Reverts the validator (→ fill aborts)

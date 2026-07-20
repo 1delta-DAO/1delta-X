@@ -3,11 +3,11 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item} from "@core/settlement/Settlement.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev Direct-approval fallback — the Euler EVK `SafeERC20Lib.safeTransferFrom`
-///      pattern ported into `UniversalSettlement._transferFromWithFallback`. The
+///      pattern ported into `Settlement._transferFromWithFallback`. The
 ///      two REGULAR transfer legs (solver→maker `tokenOut` delivery and
 ///      maker→solver `tokenIn` shortfall) try Permit3 first and fall back to a
 ///      plain ERC20 `transferFrom` when the payer approved Settlement directly

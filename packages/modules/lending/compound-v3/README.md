@@ -1,6 +1,6 @@
 # @1delta-x/modules-compound-v3
 
-Compound v3 (Comet) lending adapters for `UniversalSettlement`. Each contract is
+Compound v3 (Comet) lending adapters for `Settlement`. Each contract is
 a **single-op module** — a thin, stateless adapter that performs exactly one
 Comet action (supply, withdraw, borrow, repay) on the order maker's behalf when
 Settlement processes an order item. Composed together inside one signed order,

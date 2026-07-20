@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
-import {UniversalSettlement, Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Base} from "@core/settlement/Base.sol";
+import {Settlement, Order, Item, Validator} from "@core/settlement/Settlement.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
 /// @dev Port of 0x's `batch_fill_native_orders_test.ts` against our `batchFill`:
@@ -88,7 +88,7 @@ contract BatchFillTest is MockSettlementBase {
         settlement.cancelOrders(nonces);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(SettlementBase.BatchFillIncomplete.selector, 1));
+        vm.expectRevert(abi.encodeWithSelector(Base.BatchFillIncomplete.selector, 1));
         settlement.batchFill(orders, sigs, amounts, true);
     }
 
@@ -100,7 +100,7 @@ contract BatchFillTest is MockSettlementBase {
         settlement.fill(orders[0], sigs[0], AMOUNT_IN / 2);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(SettlementBase.BatchFillIncomplete.selector, 0));
+        vm.expectRevert(abi.encodeWithSelector(Base.BatchFillIncomplete.selector, 0));
         settlement.batchFill(orders, sigs, amounts, true); // amounts[0] = full > remaining
     }
 
@@ -116,7 +116,7 @@ contract BatchFillTest is MockSettlementBase {
         Order memory o = _order(0);
         bytes memory sig = _sign(o);
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.OnlySelf.selector);
+        vm.expectRevert(Base.OnlySelf.selector);
         settlement.fillSelf(o, sig, AMOUNT_IN, solver, "");
     }
 }

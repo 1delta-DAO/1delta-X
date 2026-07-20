@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {Order} from "@core/settlement/Settlement.sol";
 
 import {IPriceProvider} from "./interfaces/IMoc.sol";
 

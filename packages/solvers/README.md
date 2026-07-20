@@ -1,6 +1,6 @@
 # @1delta-x/solvers
 
-Off-chain filler / solver reference implementations for `UniversalSettlement`.
+Off-chain filler / solver reference implementations for `Settlement`.
 
 Most of these contracts are permissionless fillers: anyone may run one to fill
 an order. They hold no funds between fills — each fill sources its collateral

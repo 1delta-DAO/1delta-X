@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 /// @title SolverCallbackExecutor
-/// @notice Privilege-less trampoline for {UniversalSettlement}.fillWithCallback.
+/// @notice Privilege-less trampoline for {Settlement}.fillWithCallback.
 ///         Settlement routes a solver-supplied `(target, data)` call THROUGH this
 ///         contract instead of making it itself, so the arbitrary call executes
 ///         from an identity that holds no Permit3 allowances and is an approved

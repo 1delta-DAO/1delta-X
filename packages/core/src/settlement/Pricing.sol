@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, FillCtx, OrderSide} from "./SettlementStructs.sol";
+import {Order, FillCtx, OrderSide} from "./Structs.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 
-/// @title SettlementPricing
+/// @title Pricing
 /// @notice The per-leg slice math for a single fill, factored into ONE place so
 ///         auditors read the input/output pricing rules once instead of diffing
 ///         the copies that used to live in `_deliverOutputs`, `_payInputsToSolver`,
@@ -27,8 +27,8 @@ import {DutchAuction} from "./DutchAuction.sol";
 ///         The auction `bump` is resolved here per leg — only when the leg
 ///         actually decays, so a fixed leg never touches `bumpBps` (preserving the
 ///         "no bump on a fixed order" gas shape). Callers use it via
-///         `using SettlementPricing for Order` → `order.outputAt(ctx, j)`.
-library SettlementPricing {
+///         `using Pricing for Order` → `order.outputAt(ctx, j)`.
+library Pricing {
     using DutchAuction for Order;
 
     /// @dev ceil(a / b), b > 0.

@@ -173,7 +173,7 @@ struct Order {
 ///         NOT a signed type: it is derived at fill time (never hashed) and passed
 ///         by memory pointer to the settlement helpers so each settle flow runs in
 ///         its own stack frame (keeps a fill under the EVM stack limit). Shared by
-///         the settlement contracts and {SettlementPricing} so the per-leg slice
+///         the settlement contracts and {Pricing} so the per-leg slice
 ///         math has a single home.
 struct FillCtx {
     bytes32 orderHash;

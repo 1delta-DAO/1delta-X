@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {OrderState} from "@core/settlement/OrderState.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item} from "@core/settlement/UniversalSettlement.sol";
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {Order, Item} from "@core/settlement/Settlement.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev Per-order-hash cancellation ({cancelOrder}) — the 0x-orderbook "nonce OR
@@ -44,7 +45,7 @@ contract CancelOrderTest is CoreSettlementBase {
 
         // A is dead.
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.OrderCancelled.selector);
+        vm.expectRevert(OrderState.OrderCancelled.selector);
         settlement.fill(a, sigA, WETH_IN);
 
         // B — same maker, same nonce 5 — is untouched and fills.
@@ -78,7 +79,7 @@ contract CancelOrderTest is CoreSettlementBase {
     function test_cancelOrder_onlyMaker() public {
         Order memory a = _orderA();
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.NotOrderMaker.selector);
+        vm.expectRevert(OrderState.NotOrderMaker.selector);
         settlement.cancelOrder(a);
     }
 
@@ -96,7 +97,7 @@ contract CancelOrderTest is CoreSettlementBase {
         settlement.cancelOrder(o);
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.OrderCancelled.selector);
+        vm.expectRevert(OrderState.OrderCancelled.selector);
         settlement.fill(o, sig, 1 ether); // remaining half now dead
     }
 }

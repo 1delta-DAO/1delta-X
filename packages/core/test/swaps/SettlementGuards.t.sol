@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {UniversalSettlement, CallbackMode, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, CallbackMode, Order, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
 import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
@@ -19,9 +19,9 @@ import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol"
 ///      empty arrays: the reentrancy modifier reverts BEFORE the (empty) body,
 ///      so no valid inner order is needed.
 contract ReentrantMakerModule is IMakerModule {
-    UniversalSettlement immutable settlement;
+    Settlement immutable settlement;
 
-    constructor(UniversalSettlement s) {
+    constructor(Settlement s) {
         settlement = s;
     }
 
@@ -32,9 +32,9 @@ contract ReentrantMakerModule is IMakerModule {
 
 /// @dev Re-enters Settlement from inside a `fillWithCallback` solver callback.
 contract ReentrantCallback {
-    UniversalSettlement immutable settlement;
+    Settlement immutable settlement;
 
-    constructor(UniversalSettlement s) {
+    constructor(Settlement s) {
         settlement = s;
     }
 
@@ -105,7 +105,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.Reentrancy.selector);
+        vm.expectRevert(Base.Reentrancy.selector);
         settlement.fill(order, sig, AMOUNT_IN);
     }
 

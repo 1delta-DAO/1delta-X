@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {UniversalSettlement, CallbackMode, Order, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, CallbackMode, Order, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -201,7 +201,7 @@ contract SolverCallbackTest is CoreSettlementBase {
         bytes memory cb = abi.encodeCall(SwapHelper.swap, (solver, USDC, USDC_IN, WETH, WETH_OUT));
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.ReverseModeRequiresNoItems.selector);
+        vm.expectRevert(Base.ReverseModeRequiresNoItems.selector);
         settlement.fillWithCallback(
             order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs
         );

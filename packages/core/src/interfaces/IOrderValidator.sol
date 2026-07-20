@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order} from "../settlement/UniversalSettlement.sol";
+import {Order} from "../settlement/Settlement.sol";
 
 /// @title IOrderValidator
 /// @notice Read-only trigger for limit orders. Settlement calls `validate`

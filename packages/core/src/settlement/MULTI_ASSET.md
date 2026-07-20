@@ -1,6 +1,6 @@
 # Multi-asset conversion leg — design
 
-Status: **implemented**. The `UniversalSettlement` conversion leg was extended
+Status: **implemented**. The `Settlement` conversion leg was extended
 from single `tokenIn → tokenOut` to **multi-in / multi-out**, JAM-style, while
 preserving the single-fraction partial-fill invariant. `fill`/`fillWithPermit`
 return `uint256[]` (per output leg) and `OrderFilled` carries `uint256[]

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {
-    UniversalSettlement,
+    Settlement,
     Order,
     OrderSide,
     Item,
     Validator
-} from "@core/settlement/UniversalSettlement.sol";
+} from "@core/settlement/Settlement.sol";
 
 import {UsdrifForkBase} from "./shared/UsdrifForkBase.t.sol";
 import {RedemptionSettledValidator} from "../src/RedemptionSettledValidator.sol";
@@ -173,7 +173,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(SettlementBase.ValidationFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(Base.ValidationFailed.selector, uint256(0)));
         settlement.fill(order, sig, rifIn);
     }
 
@@ -215,7 +215,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(SettlementBase.ValidationFailed.selector, uint256(1)));
+        vm.expectRevert(abi.encodeWithSelector(Base.ValidationFailed.selector, uint256(1)));
         settlement.fill(order, sig, rifIn);
     }
 

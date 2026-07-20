@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
-import {UniversalSettlement, Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
+import {Base} from "@core/settlement/Base.sol";
+import {Settlement, Order, Item, Validator} from "@core/settlement/Settlement.sol";
 import {NonceManager} from "@core/settlement/NonceManager.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
@@ -47,7 +48,7 @@ contract NonceCancellationTest is MockSettlementBase {
         bytes memory sig = _sign(o);
         _cancel(7);
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.NonceCancelled.selector);
+        vm.expectRevert(OrderState.NonceCancelled.selector);
         settlement.fill(o, sig, AMOUNT_IN);
     }
 
@@ -78,7 +79,7 @@ contract NonceCancellationTest is MockSettlementBase {
         Order memory low = _order(5); // word 0 → cancelled
         bytes memory lowSig = _sign(low);
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.NonceCancelled.selector);
+        vm.expectRevert(OrderState.NonceCancelled.selector);
         settlement.fill(low, lowSig, AMOUNT_IN);
 
         Order memory high = _order(300); // word 1 → untouched
@@ -95,7 +96,7 @@ contract NonceCancellationTest is MockSettlementBase {
         Order memory below = _order(50);
         bytes memory belowSig = _sign(below);
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.NonceCancelled.selector);
+        vm.expectRevert(OrderState.NonceCancelled.selector);
         settlement.fill(below, belowSig, AMOUNT_IN);
     }
 
@@ -125,7 +126,7 @@ contract NonceCancellationTest is MockSettlementBase {
 
         _cancel(7);
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.NonceCancelled.selector);
+        vm.expectRevert(OrderState.NonceCancelled.selector);
         settlement.fill(o, sig, AMOUNT_IN / 2); // remainder blocked
     }
 }

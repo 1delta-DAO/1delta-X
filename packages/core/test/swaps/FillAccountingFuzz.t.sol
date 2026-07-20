@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {UniversalSettlement, Order, Item, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, Order, Item, Validator} from "@core/settlement/Settlement.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
 /// @dev Property/fuzz coverage for the partial-fill accounting — the trickiest

@@ -7,27 +7,27 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {
-    UniversalSettlement,
+    Settlement,
     Order,
     Item,
     ItemOp,
     Validator,
     OrderSide,
     CurvePoint
-} from "@core/settlement/UniversalSettlement.sol";
+} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.sol";
 
 /// @dev Core test harness with NO module dependency. Deploys only Permit3 +
-/// UniversalSettlement and provides the order/permit EIP-712 machinery plus the
+/// Settlement and provides the order/permit EIP-712 machinery plus the
 /// module-free order builders. Pure-protocol tests (plain swaps, partial fills,
 /// dutch decay, exclusivity, min-fill, validators, invariants, single-signature
 /// permits) inherit this directly. Module integration harnesses extend it and
 /// layer their adapters on top (see the modules-aave-v3 / modules-aave-v4 packages).
 abstract contract CoreSettlementBase is Test, LenderRegistry {
     Permit3 permit3;
-    UniversalSettlement settlement;
+    Settlement settlement;
     SettlementLens lens;
 
     uint256 makerPk = 0xA11CE;
@@ -44,7 +44,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         USDC = tokens[Chains.ETHEREUM_MAINNET][Tokens.USDC];
 
         permit3 = new Permit3();
-        settlement = new UniversalSettlement(address(permit3));
+        settlement = new Settlement(address(permit3));
         lens = new SettlementLens(address(settlement));
 
         vm.label(maker, "maker");
@@ -368,7 +368,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
 
     // ──────────────────── EIP-712 hashing + signing ────────────────────
     //
-    // Type hashes must match UniversalSettlement / Permit3 exactly.
+    // Type hashes must match Settlement / Permit3 exactly.
 
     bytes32 constant CURVE_POINT_TH = keccak256("CurvePoint(uint32 timeDelta,uint32 bumpBps)");
     bytes32 constant ITEM_TH =

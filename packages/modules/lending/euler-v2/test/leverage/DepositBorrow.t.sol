@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {Order} from "@core/settlement/Settlement.sol";
 import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
 
 /// @dev Deposit WETH collateral + borrow USDC against it in one Euler order.

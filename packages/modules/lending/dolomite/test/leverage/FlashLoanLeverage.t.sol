@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {Order} from "@core/settlement/Settlement.sol";
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 
 /// @dev Leverage loop via flash loan + DEX (no solver inventory). The

@@ -45,7 +45,7 @@ sequenceDiagram
     participant Queue as MoC queue
     participant Exec as MoC executor (guard)
     actor Solver
-    participant Settle as UniversalSettlement
+    participant Settle as Settlement
     participant P3 as Permit3
     participant V as Validators
 
@@ -79,7 +79,7 @@ sequenceDiagram
 ## 3. Token & authority flow during `fill`
 
 ```
-                         UniversalSettlement.fill(order, sig, amountIn)
+                         Settlement.fill(order, sig, amountIn)
                                           │
             ┌─────────────────────────────┼──────────────────────────────┐
             │ 1. run validators (staticcall, AND-composed)                │
@@ -114,7 +114,7 @@ flowchart LR
         IMOC["interfaces/IMoc.sol\nIMocRif · IMocQueue · IPriceProvider"]
     end
     subgraph core["packages/core"]
-        SETTLE["UniversalSettlement"]
+        SETTLE["Settlement"]
         P3["Permit3"]
         IOV["IOrderValidator"]
     end

@@ -19,7 +19,7 @@ import {IMidnight, Market, Offer, MidnightIdLib} from "./interfaces/IMidnight.so
 //  lifecycle is `supplyCollateral` / `withdrawCollateral` / `repay` / `withdraw`
 //  (credit redemption).
 //
-//  These adapters expose Midnight to `UniversalSettlement` in the same MAKE/TAKE
+//  These adapters expose Midnight to `Settlement` in the same MAKE/TAKE
 //  idiom as the Aave/Morpho/Venus packages:
 //
 //    MAKE (value-in, Permit3 token allowance gate):

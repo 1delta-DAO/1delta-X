@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
-import {Order} from "../settlement/UniversalSettlement.sol";
+import {Order} from "../settlement/Settlement.sol";
 
 /// @title FillerWhitelistValidator
 /// @notice Combined filler registry + order validator: gate an order so only

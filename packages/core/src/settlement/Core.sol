@@ -4,21 +4,21 @@ pragma solidity ^0.8.28;
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
-import {Order, OrderSide, CallbackMode, FillCtx} from "./SettlementStructs.sol";
+import {Order, OrderSide, CallbackMode, FillCtx} from "./Structs.sol";
 import {OrderHash} from "./OrderHash.sol";
-import {SettlementPricing} from "./SettlementPricing.sol";
-import {SettlementBase} from "./SettlementBase.sol";
+import {Pricing} from "./Pricing.sol";
+import {Base} from "./Base.sol";
 
-/// @title SettlementCore
+/// @title Core
 /// @notice The single-order fill path — the HOT PATH. Public entrypoints (`fill`,
 ///         `fillWithCallback`, `fillWithPermit`, `batchFill`, `fillSelf`) and the
 ///         per-order settle flow (`_fillCore` → `_settleForward`/`_settlePostInputs`
 ///         → `_deliverOutputs`/`_payInputsToSolver`). One order settles against the
-///         solver as counterparty; per-leg pricing is {SettlementPricing}. The
-///         netted-batch modes live in {SettlementBatch}, one level up.
-abstract contract SettlementCore is SettlementBase {
+///         solver as counterparty; per-leg pricing is {Pricing}. The
+///         netted-batch modes live in {Batch}, one level up.
+abstract contract Core is Base {
     using OrderHash for Order;
-    using SettlementPricing for Order;
+    using Pricing for Order;
 
 
 
@@ -352,7 +352,7 @@ abstract contract SettlementCore is SettlementBase {
         outs = new uint256[](n);
         for (uint256 j; j < n;) {
             // Amount (incl. the maker-leg soft-exclusivity override) — see
-            // {SettlementPricing.outputAt}. The maker-leg test is recomputed here
+            // {Pricing.outputAt}. The maker-leg test is recomputed here
             // only to route the transfer (never a fee leg's comp to a third party).
             uint256 amt = order.outputAt(ctx, j);
             if (amt != 0) {
@@ -402,7 +402,7 @@ abstract contract SettlementCore is SettlementBase {
         address maker = order.maker;
         address filler = ctx.filler;
         for (uint256 i; i < order.tokenIn.length; i++) {
-            uint256 owed = order.inputOwed(ctx, i); // see {SettlementPricing.inputOwed}
+            uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}
             address tokenIn = order.tokenIn[i];
             // Item-free orders have no TAKE proceeds ⇒ proceeds are 0 without a
             // balanceOf (the snapshot was skipped upstream). Item orders measure

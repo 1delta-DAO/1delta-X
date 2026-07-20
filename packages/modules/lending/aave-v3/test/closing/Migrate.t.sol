@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";

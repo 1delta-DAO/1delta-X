@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
 import {LimitOrderLeverageSolver} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
 import {MultiOutputFlashSolver, OutputLeg} from "@solvers/multi-output/MultiOutputFlashSolver.sol";

@@ -6,17 +6,17 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {
-    UniversalSettlement,
+    Settlement,
     Order,
     Item,
     Validator,
     CurvePoint
-} from "@core/settlement/UniversalSettlement.sol";
+} from "@core/settlement/Settlement.sol";
 
 import {IMocRif, IMocQueue} from "../../src/interfaces/IMoc.sol";
 
 /// @dev Rootstock-mainnet fork harness for the USDRIF→USDT0 exit flow. Forks RSK
-/// (chain id 30), deploys a fresh Permit3 + UniversalSettlement, and provides
+/// (chain id 30), deploys a fresh Permit3 + Settlement, and provides
 /// the verified MoC / token addresses plus the order EIP-712 signing helpers.
 ///
 /// All on-chain facts verified against Rootstock mainnet (see
@@ -37,7 +37,7 @@ abstract contract UsdrifForkBase is Test {
     uint8 internal constant OPER_REDEEM_TP = 4;
 
     Permit3 internal permit3;
-    UniversalSettlement internal settlement;
+    Settlement internal settlement;
 
     uint256 internal makerPk = 0xA11CE;
     address internal maker = vm.addr(makerPk);
@@ -47,7 +47,7 @@ abstract contract UsdrifForkBase is Test {
         _forkRootstock();
 
         permit3 = new Permit3();
-        settlement = new UniversalSettlement(address(permit3));
+        settlement = new Settlement(address(permit3));
 
         vm.label(maker, "maker");
         vm.label(solver, "solver");

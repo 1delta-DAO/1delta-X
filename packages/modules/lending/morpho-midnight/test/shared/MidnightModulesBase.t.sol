@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Item, ItemOp, Order, UniversalSettlement} from "@core/settlement/UniversalSettlement.sol";
+import {Item, ItemOp, Order, Settlement} from "@core/settlement/Settlement.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
@@ -80,7 +80,7 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
     /// @dev Replicates CoreSettlementBase's core deploy without the fork.
     function _deployCore() internal {
         permit3 = new Permit3();
-        settlement = new UniversalSettlement(address(permit3));
+        settlement = new Settlement(address(permit3));
         vm.label(maker, "maker");
         vm.label(solver, "solver");
     }

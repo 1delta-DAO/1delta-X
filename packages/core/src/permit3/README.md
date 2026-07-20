@@ -308,7 +308,7 @@ Implemented:
 - [x] `IMakerModule` interface — symmetric single-method surface
       (`makeOnBehalf`) for deposit/repay-style ops. (Name mirrors
       limit-order parlance: takers draw value out, makers put it in.)
-- [x] [`UniversalSettlement`](../settlement/UniversalSettlement.sol)
+- [x] [`Settlement`](../settlement/Settlement.sol)
       rewired to Permit3: taker legs via `permit3.take`, maker legs via
       `module.makeOnBehalf`, token legs via `permit3.transferFrom`, no
       module whitelist, no admin role.

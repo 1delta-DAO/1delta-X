@@ -6,11 +6,11 @@ import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
-import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint} from "../settlement/SettlementStructs.sol";
+import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint} from "../settlement/Structs.sol";
 import {OrderHash} from "../settlement/OrderHash.sol";
 import {DutchAuction} from "../settlement/DutchAuction.sol";
 
-/// @dev The subset of {UniversalSettlement}'s public/external surface this lens
+/// @dev The subset of {Settlement}'s public/external surface this lens
 ///      reads. All are views on the live settlement, so the lens never needs the
 ///      settler's internal storage layout — only its already-exposed getters.
 interface ISettlementState {
@@ -21,7 +21,7 @@ interface ISettlementState {
 }
 
 /// @title SettlementLens
-/// @notice Read-only companion to {UniversalSettlement}. Holds the entire
+/// @notice Read-only companion to {Settlement}. Holds the entire
 ///         off-chain preflight / preview / well-formedness surface a solver,
 ///         relayer, or maker UI calls BEFORE signing or submitting an order.
 ///         None of it runs during a fill, so it lives out here to keep the core
@@ -427,7 +427,7 @@ contract SettlementLens {
     }
 
     /// @dev Byte-for-byte mirror of the settlement's validator gate (see
-    ///      {UniversalSettlement._gatePasses}): single-word return read into
+    ///      {Settlement._gatePasses}): single-word return read into
     ///      scratch space, no `bytes memory` return allocation.
     function _gatePasses(
         address target,

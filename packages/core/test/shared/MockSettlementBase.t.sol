@@ -7,14 +7,14 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {
-    UniversalSettlement,
+    Settlement,
     Order,
     Item,
     ItemOp,
     Validator,
     OrderSide,
     CurvePoint
-} from "@core/settlement/UniversalSettlement.sol";
+} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 /// @dev Minimal, freely-mintable ERC20. Enough for Permit3's transfer paths —
@@ -59,7 +59,7 @@ contract MockERC20 {
 ///      {OrderHash} byte-for-byte.
 abstract contract MockSettlementBase is Test {
     Permit3 permit3;
-    UniversalSettlement settlement;
+    Settlement settlement;
     SettlementLens lens;
 
     uint256 makerPk = 0xA11CE;
@@ -73,7 +73,7 @@ abstract contract MockSettlementBase is Test {
 
     function setUp() public virtual {
         permit3 = new Permit3();
-        settlement = new UniversalSettlement(address(permit3));
+        settlement = new Settlement(address(permit3));
         lens = new SettlementLens(address(settlement));
 
         tA = new MockERC20("tA");

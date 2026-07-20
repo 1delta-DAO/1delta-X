@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, OrderSide} from "@core/settlement/Settlement.sol";
 
 import {CoreSettlementBase} from "./shared/CoreSettlementBase.t.sol";
 

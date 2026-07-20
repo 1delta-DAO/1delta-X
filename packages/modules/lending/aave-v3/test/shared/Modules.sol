@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {Order} from "@core/settlement/Settlement.sol";
 
 // The Aave v3 maker/taker modules and their interfaces now live in the package
 // `src/` tree (`src/AaveV3Modules.sol`, `src/interfaces/IAaveV3.sol`). Only the

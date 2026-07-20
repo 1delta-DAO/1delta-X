@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {Order} from "@core/settlement/Settlement.sol";
 
 import {IMocQueue} from "./interfaces/IMoc.sol";
 

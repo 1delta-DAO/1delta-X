@@ -1,6 +1,6 @@
 # @1delta-x/modules-morpho-midnight
 
-Morpho **Midnight** lending adapters for `UniversalSettlement`. Each contract is
+Morpho **Midnight** lending adapters for `Settlement`. Each contract is
 a thin, stateless adapter that performs a Midnight action on the order maker's
 behalf when Settlement processes an order item. Composed inside one signed order,
 they express leverage, deleverage, lend and redeem as a single atomic intent that
@@ -143,7 +143,7 @@ seed on a live fork — so, like the composer's Midnight suite, the tests drive 
 faithful [`MidnightMock`](test/shared/MidnightMock.sol) (real selectors, real
 token flows, real `setIsAuthorized` gating, positions keyed by the same
 `MidnightIdLib.toId` the modules compute) with mock ERC20s, over the **real**
-`UniversalSettlement` + `Permit3`. No fork.
+`Settlement` + `Permit3`. No fork.
 
 ```
 FOUNDRY_PROFILE=modules-morpho-midnight forge test

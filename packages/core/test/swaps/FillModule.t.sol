@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
-import {UniversalSettlement} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/Settlement.sol";
+import {Settlement} from "@core/settlement/Settlement.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
 import {FullFillModule} from "@core/modules/FullFillModule.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -98,7 +99,7 @@ contract FillModuleTest is CoreSettlementBase {
 
         // A second fill: delta = fillTotal - prevFilled = 0 ⇒ ZeroFill.
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.ZeroFill.selector);
+        vm.expectRevert(OrderState.ZeroFill.selector);
         settlement.fill(o, sig, 1, "");
     }
 
@@ -144,7 +145,7 @@ contract FillModuleTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.OverFill.selector);
+        vm.expectRevert(OrderState.OverFill.selector);
         settlement.fill(o, sig, usdcIn, "");
     }
 
@@ -169,7 +170,7 @@ contract FillModuleTest is CoreSettlementBase {
         // floor → FillTooSmall (previously this slipped through — the check was on
         // fillAmount, not delta).
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.FillTooSmall.selector);
+        vm.expectRevert(OrderState.FillTooSmall.selector);
         settlement.fill(o, sig, usdcIn, "");
     }
 
@@ -182,7 +183,7 @@ contract FillModuleTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.ZeroFill.selector);
+        vm.expectRevert(OrderState.ZeroFill.selector);
         settlement.fill(o, sig, 2_000e6, "");
     }
 

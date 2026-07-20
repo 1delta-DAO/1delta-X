@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, CurvePoint} from "./SettlementStructs.sol";
+import {Order, CurvePoint} from "./Structs.sol";
 
 /// @title DutchAuction
 /// @notice Dutch decay pricing. Every leg shares ONE clock and ONE normalized

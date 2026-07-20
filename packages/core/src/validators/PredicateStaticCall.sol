@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
-import {Order} from "../settlement/UniversalSettlement.sol";
+import {Order} from "../settlement/Settlement.sol";
 
 /// @title PredicateStaticCall
 /// @notice Escape-hatch validator for arbitrary read-only predicates.

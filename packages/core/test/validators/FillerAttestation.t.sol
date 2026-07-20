@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
-import {UniversalSettlement, Order, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Base} from "@core/settlement/Base.sol";
+import {Settlement, Order, Validator} from "@core/settlement/Settlement.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
 import {FillerAttestationValidator} from "@core/validators/FillerAttestationValidator.sol";
@@ -129,7 +129,7 @@ contract FillerAttestationTest is MockSettlementBase {
     }
 
     function _expectValidationFailed() internal {
-        vm.expectRevert(abi.encodeWithSelector(SettlementBase.ValidationFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(Base.ValidationFailed.selector, uint256(0)));
     }
 
     // ──────────────────── Happy path ────────────────────
@@ -346,7 +346,7 @@ contract FillerAttestationTest is MockSettlementBase {
         bytes[] memory takerDatas = new bytes[](2); // misaligned
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.LengthMismatch.selector);
+        vm.expectRevert(Base.LengthMismatch.selector);
         settlement.batchFill(orders, sigs, amts, false, takerDatas);
     }
 
@@ -363,7 +363,7 @@ contract FillerAttestationTest is MockSettlementBase {
 
         // No credential → the invariant unwinds the whole fill AFTER transfers.
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(SettlementBase.InvariantFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(Base.InvariantFailed.selector, uint256(0)));
         settlement.fill(o, sig, AMOUNT_IN, "");
         assertEq(tB.balanceOf(maker), 0, "unwound: maker kept nothing");
 

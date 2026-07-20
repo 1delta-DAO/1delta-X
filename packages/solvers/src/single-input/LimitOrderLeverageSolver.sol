@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {Order} from "@core/settlement/UniversalSettlement.sol";
+import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
 
 /// @notice Balancer v2 vault flash-loan callback shape.
@@ -13,7 +13,7 @@ interface IBalancerVault {
 
 /// @title LimitOrderLeverageSolver
 /// @notice Balancer v2 implementation of the leverage-fill solver family
-///         (`BaseFlashSolver`). Fills a `UniversalSettlement` order with no
+///         (`BaseFlashSolver`). Fills a `Settlement` order with no
 ///         inventory by flash-loaning the collateral from Balancer (fee-free on
 ///         mainnet), letting Settlement route it through the maker's deposit leg,
 ///         then repaying via a Uniswap v3 swap of the borrow proceeds.

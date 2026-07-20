@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {stdError} from "forge-std/StdError.sol";
 
-import {UniversalSettlement, CallbackMode, Order, Item, Validator, OrderSide, CurvePoint} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, CallbackMode, Order, Item, Validator, OrderSide, CurvePoint} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
 import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol";
@@ -109,7 +109,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.NotExclusiveFiller.selector);
+        vm.expectRevert(Base.NotExclusiveFiller.selector);
         settlement.fill(order, sig, SELL_IN);
     }
 

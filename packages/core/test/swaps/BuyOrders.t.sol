@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
-import {UniversalSettlement, CallbackMode, Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
+import {Base} from "@core/settlement/Base.sol";
+import {Settlement, CallbackMode, Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
@@ -105,7 +106,7 @@ contract BuyOrdersTest is MockSettlementBase {
         settlement.fill(order, sig, OUT);
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.OverFill.selector);
+        vm.expectRevert(OrderState.OverFill.selector);
         settlement.fill(order, sig, 1);
     }
 

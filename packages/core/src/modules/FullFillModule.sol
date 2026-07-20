@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IFillModule} from "../interfaces/IFillModule.sol";
-import {Order} from "../settlement/SettlementStructs.sol";
+import {Order} from "../settlement/Structs.sol";
 
 /// @title FullFillModule
 /// @notice The canonical indivisible / all-or-nothing fill module: an order

@@ -1,6 +1,6 @@
 # @1delta-x/modules-usdrif
 
-USDRIF → USDT0 exit via `UniversalSettlement`, implementing the integration in
+USDRIF → USDT0 exit via `Settlement`, implementing the integration in
 [`intents-integration-plan.md`](../../intents-integration-plan.md). A USDRIF
 holder exits to USDT0 in one signed intent, filled by competing solvers, by
 tokenising MoC's native redemption and auctioning the resulting RIF.

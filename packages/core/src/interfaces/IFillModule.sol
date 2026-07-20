@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order} from "../settlement/SettlementStructs.sol";
+import {Order} from "../settlement/Structs.sol";
 
 /// @title IFillModule
 /// @notice A pluggable fill *matcher* — the generalization of the fungible fill

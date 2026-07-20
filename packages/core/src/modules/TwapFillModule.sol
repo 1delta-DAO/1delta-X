@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IFillModule} from "../interfaces/IFillModule.sol";
-import {Order} from "../settlement/SettlementStructs.sol";
+import {Order} from "../settlement/Structs.sol";
 
 /// @title TwapFillModule
 /// @notice A time-weighted (TWAP) fill schedule as a fill module: one signed

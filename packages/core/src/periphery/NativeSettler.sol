@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {UniversalSettlement, Order, CallbackMode} from "../settlement/UniversalSettlement.sol";
+import {Settlement, Order, CallbackMode} from "../settlement/Settlement.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
 interface IWETH {
@@ -35,14 +35,14 @@ interface IWETH {
 ///         by Settlement's mandatory, reverting delivery.
 contract NativeSettler {
     IWETH public immutable weth;
-    UniversalSettlement public immutable settlement;
+    Settlement public immutable settlement;
 
     error NotMaker();
     error TokenInNotWeth();
 
     constructor(address _weth, address _settlement) {
         weth = IWETH(_weth);
-        settlement = UniversalSettlement(_settlement);
+        settlement = Settlement(_settlement);
     }
 
     /// @param order        maker == msg.sender; single-asset SELL with tokenIn[0] == WETH.

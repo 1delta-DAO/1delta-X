@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {UniversalSettlement, Order, Item, Validator, OrderSide} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 

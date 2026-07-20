@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item} from "@core/settlement/UniversalSettlement.sol";
-import {UniversalSettlement} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item} from "@core/settlement/Settlement.sol";
+import {Settlement} from "@core/settlement/Settlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -101,7 +102,7 @@ contract IndependentOrdersTest is CoreSettlementBase {
 
         // A can no longer be filled.
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.NonceCancelled.selector);
+        vm.expectRevert(OrderState.NonceCancelled.selector);
         settlement.fill(a, sigA, USDC_IN);
 
         // B is unaffected — fills normally.

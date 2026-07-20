@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, ItemOp, ItemsBatch, FillCtx} from "./SettlementStructs.sol";
+import {Order, Item, ItemOp, ItemsBatch, FillCtx} from "./Structs.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 import {OrderHash} from "./OrderHash.sol";
-import {SettlementPricing} from "./SettlementPricing.sol";
-import {SettlementCore} from "./SettlementCore.sol";
+import {Pricing} from "./Pricing.sol";
+import {Core} from "./Core.sol";
 
-/// @title SettlementBatch
+/// @title Batch
 /// @notice The netted-batch settlement modes — coincidence of wants. `batchSettle`
 ///         (item-free CoW: pull inputs → pre-send surplus → interaction → deliver →
 ///         whole-check) and `batchSettleItems` (the item-aware generalization: a
 ///         spot order's pooled liquidity funds a leverage order's items). The pool
 ///         (Settlement itself) is the counterparty, not the solver. Reuses the
-///         base primitives (`_openFill`, `_executeItems`) and {SettlementPricing}
-///         verbatim; the single-order hot path in {SettlementCore} is untouched.
-abstract contract SettlementBatch is SettlementCore {
+///         base primitives (`_openFill`, `_executeItems`) and {Pricing}
+///         verbatim; the single-order hot path in {Core} is untouched.
+abstract contract Batch is Core {
     using OrderHash for Order;
-    using SettlementPricing for Order;
+    using Pricing for Order;
 
 
     // ──────────────────── Batch settle (coincidence of wants) ────────────────────
@@ -330,7 +330,7 @@ abstract contract SettlementBatch is SettlementCore {
     function _batchPullInputs(Order calldata order, FillCtx memory ctx) internal {
         address maker = order.maker;
         for (uint256 i; i < order.tokenIn.length;) {
-            uint256 owed = order.inputOwed(ctx, i); // see {SettlementPricing.inputOwed}
+            uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}
             if (owed != 0) {
                 Permit3TransferLib.transferFromWithFallback(PERMIT3, order.tokenIn[i], maker, address(this), owed);
             }
@@ -599,7 +599,7 @@ abstract contract SettlementBatch is SettlementCore {
 
 
     /// @dev Pull ONLY the input legs whose `mask` bit is set (the self-funded
-    ///      seeds), maker → pool. `owed` uses the shared {SettlementPricing.inputOwed} slice math.
+    ///      seeds), maker → pool. `owed` uses the shared {Pricing.inputOwed} slice math.
     function _pullMaskedInputs(Order calldata order, FillCtx memory ctx, uint256 mask) internal {
         for (uint256 i; i < order.tokenIn.length;) {
             if ((mask >> i) & 1 == 1) {

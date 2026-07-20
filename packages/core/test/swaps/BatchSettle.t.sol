@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {UniversalSettlement, Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -14,9 +14,9 @@ import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 ///      holds no Permit3 allowance — batch deliveries come from the pool, so the
 ///      solver only ever PUSHES the residual in.
 contract MockSolver {
-    UniversalSettlement immutable settlement;
+    Settlement immutable settlement;
 
-    constructor(UniversalSettlement s) {
+    constructor(Settlement s) {
         settlement = s;
     }
 
@@ -50,10 +50,10 @@ contract MockDex {
 ///      net surplus (pre-send), swaps that surplus into the deficit via `dex`, and
 ///      deposits the deficit into Settlement — never fronting a cent of its own.
 contract PresendSolver {
-    UniversalSettlement immutable settlement;
+    Settlement immutable settlement;
     MockDex immutable dex;
 
-    constructor(UniversalSettlement s, MockDex d) {
+    constructor(Settlement s, MockDex d) {
         settlement = s;
         dex = d;
     }
@@ -241,7 +241,7 @@ contract BatchSettleTest is CoreSettlementBase {
         fills[0] = WETH_AMT;
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.BatchSettleNoItems.selector);
+        vm.expectRevert(Base.BatchSettleNoItems.selector);
         settlement.batchSettle(os, sigs, fills, address(0), "");
     }
 
@@ -272,7 +272,7 @@ contract BatchSettleTest is CoreSettlementBase {
         // No interaction ⇒ the 500 USDC deficit is uncovered. Delivery succeeds by
         // eating the donation, but the delta check reverts the whole tx.
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(SettlementBase.BatchNotWhole.selector, USDC));
+        vm.expectRevert(abi.encodeWithSelector(Base.BatchNotWhole.selector, USDC));
         settlement.batchSettle(_two(a, b), sigs, fills, address(0), "");
 
         // The donation is untouched (tx reverted atomically).
@@ -359,7 +359,7 @@ contract BatchSettleTest is CoreSettlementBase {
         badTd[0] = abi.encode(uint256(1));
         badTd[1] = "";
         vm.prank(solver);
-        vm.expectRevert(abi.encodeWithSelector(SettlementBase.ValidationFailed.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(Base.ValidationFailed.selector, uint256(0)));
         settlement.batchSettle(_two(a, b), sigs, fills, badTd, address(0), "");
 
         // Correct blob (42) → the batch clears.

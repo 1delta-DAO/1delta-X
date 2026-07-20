@@ -45,7 +45,7 @@ They **compose** — an order can carry inline fungible legs *and* a `SETTLE` it
 when empty. A mixed NFT-plus-cash trade is exactly: an inline USDC `tokenOut`
 leg + a `SETTLE` NFT item.
 
-Dispatch ([`_executeItems`](../packages/core/src/settlement/UniversalSettlement.sol)):
+Dispatch ([`_executeItems`](../packages/core/src/settlement/Settlement.sol)):
 
 ```solidity
 if      (op == MAKE) IMakerModule(module).makeOnBehalf(maker, slice, data);      // maker deposits/repays

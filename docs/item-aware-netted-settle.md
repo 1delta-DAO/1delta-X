@@ -1,6 +1,6 @@
 # Item-aware netted settle — leverage ⋈ spot coincidence of wants
 
-> **Status: IMPLEMENTED** (`UniversalSettlement.batchSettleItems`, core 299 green).
+> **Status: IMPLEMENTED** (`Settlement.batchSettleItems`, core 299 green).
 > Extends [`batchSettle`](batch-settle.md) to admit item-bearing orders (MAKE/TAKE
 > lending legs) into the netted pool, so a spot order's liquidity funds a leverage
 > order's conversion **inventory-free, callback-free, and — in the match case —

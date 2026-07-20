@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Item, ItemOp, Order} from "@core/settlement/UniversalSettlement.sol";
+import {Item, ItemOp, Order} from "@core/settlement/Settlement.sol";
 
 import {MidnightModulesBase} from "./shared/MidnightModulesBase.t.sol";
 

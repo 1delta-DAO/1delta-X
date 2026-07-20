@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
 import {AaveV3MultiInputFlashSolver} from "@solvers/multi-input/AaveV3MultiInputFlashSolver.sol";
 import {EulerMultiInputFlashSolver} from "@solvers/multi-input/EulerMultiInputFlashSolver.sol";
 import {MorphoMultiInputFlashSolver} from "@solvers/multi-input/MorphoMultiInputFlashSolver.sol";

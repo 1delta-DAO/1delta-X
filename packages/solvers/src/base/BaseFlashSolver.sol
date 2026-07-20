@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {UniversalSettlement, Order} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, Order} from "@core/settlement/Settlement.sol";
 
 /// @notice Uniswap v3 `exactInputSingle` shape — used to swap the borrow proceeds
 ///         back to the collateral asset that sources the flash repayment.
@@ -49,7 +49,7 @@ interface IUniV3Router {
 ///  ensures a provider callback can only run inside a flash THIS solver started.
 abstract contract BaseFlashSolver {
     IPermit3 public immutable permit3;
-    UniversalSettlement public immutable settlement;
+    Settlement public immutable settlement;
     IUniV3Router public immutable router;
 
     /// @dev 1 = idle, 2 = inside a flash this solver initiated.
@@ -63,7 +63,7 @@ abstract contract BaseFlashSolver {
 
     constructor(address _permit3, address _settlement, address _router) {
         permit3 = IPermit3(_permit3);
-        settlement = UniversalSettlement(_settlement);
+        settlement = Settlement(_settlement);
         router = IUniV3Router(_router);
     }
 

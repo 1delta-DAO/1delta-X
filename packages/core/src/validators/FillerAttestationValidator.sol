@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {IERC1271} from "../interfaces/IERC1271.sol";
-import {Order} from "../settlement/UniversalSettlement.sol";
+import {Order} from "../settlement/Settlement.sol";
 
 /// @title FillerAttestationValidator
 /// @notice Reference validator that gates an order on an OFF-CHAIN attestation

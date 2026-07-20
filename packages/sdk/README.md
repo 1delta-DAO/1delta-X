@@ -1,7 +1,7 @@
 # @1delta-x/sdk
 
 TypeScript SDK for building **order** and **solver** calldata for
-`UniversalSettlement`. Zero-dependency beyond [viem](https://viem.sh).
+`Settlement`. Zero-dependency beyond [viem](https://viem.sh).
 
 It covers both sides of a fill:
 

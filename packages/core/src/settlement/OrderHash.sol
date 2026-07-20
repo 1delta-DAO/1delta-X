@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, Validator, OrderSide, CurvePoint} from "./SettlementStructs.sol";
+import {Order, Item, Validator, OrderSide, CurvePoint} from "./Structs.sol";
 
 /// @title OrderHash
 /// @notice EIP-712 struct hashing for {Order} and its nested types, plus the

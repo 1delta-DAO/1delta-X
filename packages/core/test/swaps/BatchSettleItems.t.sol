@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
-import {UniversalSettlement, Order, Item, ItemOp, ItemsBatch, OrderSide, Validator} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, Order, Item, ItemOp, ItemsBatch, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev TAKE mock = a borrow/withdraw: on dispatch it transfers a pre-set `produce`
@@ -256,7 +256,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 1)); // dup
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.BatchItemsBadSequence.selector);
+        vm.expectRevert(Base.BatchItemsBadSequence.selector);
         settlement.batchSettleItems(bat);
     }
 
@@ -271,7 +271,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.BatchItemsInputUnfunded.selector);
+        vm.expectRevert(Base.BatchItemsInputUnfunded.selector);
         settlement.batchSettleItems(bat);
     }
 
@@ -290,7 +290,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.BatchItemsSettleUnsupported.selector);
+        vm.expectRevert(Base.BatchItemsSettleUnsupported.selector);
         settlement.batchSettleItems(bat);
     }
 
@@ -312,7 +312,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.BatchItemsDuplicateInput.selector);
+        vm.expectRevert(Base.BatchItemsDuplicateInput.selector);
         settlement.batchSettleItems(bat);
     }
 }

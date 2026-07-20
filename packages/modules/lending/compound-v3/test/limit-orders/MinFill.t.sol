@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {SettlementBase} from "@core/settlement/SettlementBase.sol";
-import {UniversalSettlement, Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
+import {Base} from "@core/settlement/Base.sol";
+import {Settlement, Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
@@ -27,7 +28,7 @@ contract MinFillTest is CompoundV3ModulesBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(SettlementBase.FillTooSmall.selector);
+        vm.expectRevert(OrderState.FillTooSmall.selector);
         settlement.fill(order, sig, 50e6);
     }
 }

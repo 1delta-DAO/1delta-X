@@ -3,14 +3,14 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {
-    UniversalSettlement,
+    Settlement,
     Order,
     Item,
     ItemOp,
     Validator,
     OrderSide,
     CurvePoint
-} from "@core/settlement/UniversalSettlement.sol";
+} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 /// @dev No-fork golden test: pins the EIP-712 struct hash of a canonical order.
@@ -18,7 +18,7 @@ import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 ///      definitions against the contract byte-for-byte. `hashOrder` is the
 ///      domain-independent hashStruct, so no fork / addresses / chainId needed.
 contract HashGoldenTest is Test {
-    UniversalSettlement settlement;
+    Settlement settlement;
     SettlementLens lens;
 
     address constant MAKER = address(0xA1);
@@ -32,7 +32,7 @@ contract HashGoldenTest is Test {
     address constant FILLER = address(0xB0B);
 
     function setUp() public {
-        settlement = new UniversalSettlement(address(0xdead));
+        settlement = new Settlement(address(0xdead));
         lens = new SettlementLens(address(settlement));
     }
 

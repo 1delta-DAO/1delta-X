@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, ItemOp} from "@core/settlement/UniversalSettlement.sol";
+import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 import {DolomiteOperateModule} from "../../src/DolomiteModules.sol";
 

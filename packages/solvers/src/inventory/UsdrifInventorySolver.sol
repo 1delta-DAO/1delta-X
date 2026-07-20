@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {UniversalSettlement, Order} from "@core/settlement/UniversalSettlement.sol";
+import {Settlement, Order} from "@core/settlement/Settlement.sol";
 
 /// @notice Minimal MoC surfaces (duplicated from `packages/modules/redeem/usdrif`
 ///         so `core` stays this package's only cross-package dependency).
@@ -59,7 +59,7 @@ interface IMocQueueFees {
 ///  a failed op refunds the escrowed USDRIF here, ready to re-initiate.
 contract UsdrifInventorySolver {
     IPermit3 public immutable permit3;
-    UniversalSettlement public immutable settlement;
+    Settlement public immutable settlement;
     IMocRifCore public immutable mocCore;
     IMocQueueFees public immutable mocQueue;
     address public immutable usdrif;
@@ -115,7 +115,7 @@ contract UsdrifInventorySolver {
         address usdt0
     ) {
         permit3 = IPermit3(_permit3);
-        settlement = UniversalSettlement(_settlement);
+        settlement = Settlement(_settlement);
         mocCore = IMocRifCore(_mocCore);
         mocQueue = IMocQueueFees(_mocQueue);
         usdrif = _usdrif;
