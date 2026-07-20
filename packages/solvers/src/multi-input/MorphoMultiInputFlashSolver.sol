@@ -35,6 +35,10 @@ contract MorphoMultiInputFlashSolver is BaseFlashSolver {
     ) external initiatesFlash {
         bytes memory data = abi.encode(flashToken, order, sig, fillAmountIn, dexFees, minSwapOuts);
         morpho.flashLoan(flashToken, flashAmount, data);
+
+        // Surplus collateral is the fill's profit — sweep it to the caller so no
+        // balance accumulates in this permissionless solver.
+        _sweep(order.legsOut[0].token, msg.sender);
     }
 
     function onMorphoFlashLoan(uint256 assets, bytes calldata data) external {

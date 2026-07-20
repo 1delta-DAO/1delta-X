@@ -32,6 +32,10 @@ contract EulerMultiInputFlashSolver is BaseFlashSolver {
         bytes memory data =
             abi.encode(flashVault, flashAmount, order, sig, fillAmountIn, dexFees, minSwapOuts);
         IEulerFlashVault(flashVault).flashLoan(flashAmount, data);
+
+        // Surplus collateral is the fill's profit — sweep it to the caller so no
+        // balance accumulates in this permissionless solver.
+        _sweep(order.legsOut[0].token, msg.sender);
     }
 
     function onFlashLoan(bytes calldata data) external {

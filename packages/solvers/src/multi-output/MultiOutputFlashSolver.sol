@@ -35,7 +35,7 @@ struct OutputLeg {
 ///            Permit3, delivers it to the maker, and pays us the input token.
 ///         b. For each leg, swap `spendIn` of the input → that output on Uniswap
 ///            v3, then repay the flashed amount.
-///    3. Leftover input / surplus outputs stay here as solver profit.
+///    3. `executeFill` sweeps the leftover input / surplus outputs to the caller.
 ///
 ///  The input side is single-source: `order.legsIn[0].token` funds every buyback.
 ///  Holds no funds between fills; callable by anyone.
@@ -65,6 +65,11 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
         }
         bytes memory userData = abi.encode(order, sig, fillAmountIn, legs);
         vault.flashLoan(address(this), tokens, amounts, userData);
+
+        // Sweep the fill's surplus — leftover buyback currency + any output overage
+        // — to the caller so no balance accumulates in this permissionless solver.
+        _sweep(order.legsIn[0].token, msg.sender);
+        for (uint256 i; i < n; i++) _sweep(tokens[i], msg.sender);
     }
 
     /// @dev Balancer v2 callback.
@@ -96,6 +101,6 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
             _ensureRepayable(leg.token, owed);
             IERC20(leg.token).transfer(address(vault), owed);
         }
-        // Leftover input + surplus outputs stay here as solver profit.
+        // Leftover input + surplus outputs are swept to the executeFill caller (see _sweep).
     }
 }

@@ -41,6 +41,10 @@ contract MorphoFlashSolver is BaseFlashSolver {
     ) external initiatesFlash {
         bytes memory data = abi.encode(flashToken, order, sig, fillAmountIn, dexFee, minSwapOut);
         morpho.flashLoan(flashToken, flashAmount, data);
+
+        // Surplus collateral is the fill's profit — sweep it to the caller so no
+        // balance accumulates in this permissionless solver.
+        _sweep(order.legsOut[0].token, msg.sender);
     }
 
     /// @dev Morpho Blue callback. `assets` of `flashToken` are here; Morpho pulls

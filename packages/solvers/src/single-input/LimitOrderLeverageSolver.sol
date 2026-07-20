@@ -25,8 +25,8 @@ interface IBalancerVault {
 ///         a. `_fillAndSwap` — Settlement pulls the flash-loaned WETH via Permit3,
 ///            supplies it as the maker's collateral, borrows `tokenIn` (USDC) on
 ///            the maker's behalf, hands it back, and we swap USDC → WETH on Uni v3.
-///         b. Transfer `flashAmount` back to the vault. Surplus WETH stays here as
-///            solver profit.
+///         b. Transfer `flashAmount` back to the vault. `executeFill` then sweeps
+///            the surplus WETH to the caller (no residue accumulates here).
 ///
 ///  Holds no funds between fills; callable by anyone (the maker's signed order +
 ///  Permit3 allowances are the only gate).
@@ -65,6 +65,10 @@ contract LimitOrderLeverageSolver is BaseFlashSolver {
 
         bytes memory userData = abi.encode(order, sig, fillAmountIn, dexFee, minSwapOut);
         vault.flashLoan(address(this), tokens, amounts, userData);
+
+        // Surplus collateral is the fill's profit — sweep it to the caller so no
+        // balance accumulates in this permissionless solver.
+        _sweep(order.legsOut[0].token, msg.sender);
     }
 
     /// @dev Balancer v2 callback.
@@ -87,6 +91,6 @@ contract LimitOrderLeverageSolver is BaseFlashSolver {
 
         _ensureRepayable(tokenOut, owed);
         IERC20(tokenOut).transfer(address(vault), owed);
-        // Any surplus `tokenOut` stays here as solver profit.
+        // Surplus `tokenOut` is swept to the executeFill caller (see _sweep).
     }
 }

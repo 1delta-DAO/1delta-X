@@ -39,7 +39,7 @@ The protocol doesn't hardcode lending operations. It defines a universal module 
 | Silo V2 | All Silo markets |
 | Universal | Routes to any of the above via a single address |
 
-Adding a new protocol is one contract: implement seven functions (four actions + three balance views), deploy, whitelist. The settlement contract doesn't change. The order format doesn't change. Solvers don't need updates. Users don't notice.
+Adding a new protocol is one contract: implement seven functions (four actions + three balance views) and deploy. There's no registry or whitelist to update — a maker just references the new module's address in the order they sign. The settlement contract doesn't change. The order format doesn't change. Solvers don't need updates. Users don't notice.
 
 **Every module carries a `bytes data` parameter** — an opaque blob that the maker commits to in their signature. This is where protocol-specific configuration lives: Aave's interest rate mode, Morpho's full MarketParams (5 fields), Compound's comet address, Silo's collateral type. No lowest-common-denominator compression. Each protocol gets its native parameterization, signed and validated on-chain.
 
@@ -106,7 +106,7 @@ Solvers in 1delta-x aren't charities — they're rational profit-seeking agents,
 
 **Users cannot be drained.** The settlement contract only executes operations that the maker explicitly signed via EIP-712. Every lending item — the protocol module, the asset, the amount, and the protocol-specific parameters — is committed in the signature hash. A solver cannot change the pool, the interest rate mode, or the market params.
 
-**Modules are whitelisted.** Only owner-approved lending modules can be called. A rogue module address in an order is rejected before any tokens move.
+**The maker's signature is the module authority — no whitelist needed.** The module address is committed in the signed order hash, so a solver can never substitute one. There is no admin allowlist; instead, every module can only move funds through the maker's own Permit3 allowances. A rogue module a maker signed can therefore only ever touch *that maker's* approved assets — never another user's funds and never the protocol's.
 
 **Bitmap nonces prevent replay.** Each order uses a unique nonce tracked in a gas-efficient bitmap (256 nonces per storage slot). Makers can cancel individual orders or bulk-invalidate 256 nonces in a single transaction.
 

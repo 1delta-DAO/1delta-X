@@ -99,8 +99,14 @@ contract MultiOutputFlashTest is CoreSettlementBase {
         assertEq(IERC20(DAI).balanceOf(maker), DAI_OUT, "maker received DAI");
         assertEq(IERC20(WETH).balanceOf(maker), 0, "maker WETH spent");
 
-        // Flash repaid (tx didn't revert); leftover WETH is solver profit.
-        assertGe(IERC20(WETH).balanceOf(address(flashSolver)), 0, "solver WETH profit non-negative");
+        // SECURITY (profit-residue theft fix): the permissionless solver keeps NO
+        // balance after the fill — the surplus is swept to the caller — so a later
+        // attacker-crafted order can't drain accumulated residue via the standing
+        // max Permit3 allowance.
+        assertEq(IERC20(WETH).balanceOf(address(flashSolver)), 0, "no WETH residue in solver");
+        assertEq(IERC20(USDC).balanceOf(address(flashSolver)), 0, "no USDC residue in solver");
+        assertEq(IERC20(DAI).balanceOf(address(flashSolver)), 0, "no DAI residue in solver");
+        assertGt(IERC20(WETH).balanceOf(address(this)), 0, "surplus swept to the caller");
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(DAI).balanceOf(address(settlement)), 0, "settlement DAI drained");

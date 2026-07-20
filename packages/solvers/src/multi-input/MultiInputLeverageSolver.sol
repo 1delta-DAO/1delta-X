@@ -60,6 +60,10 @@ contract MultiInputLeverageSolver is BaseFlashSolver {
 
         bytes memory userData = abi.encode(order, sig, fillAmountIn, dexFees, minSwapOuts);
         vault.flashLoan(address(this), tokens, amounts, userData);
+
+        // Surplus collateral is the fill's profit — sweep it to the caller so no
+        // balance accumulates in this permissionless solver.
+        _sweep(order.legsOut[0].token, msg.sender);
     }
 
     /// @dev Balancer v2 callback.
@@ -87,6 +91,6 @@ contract MultiInputLeverageSolver is BaseFlashSolver {
 
         _ensureRepayable(tokenOut, owed);
         IERC20(tokenOut).transfer(address(vault), owed);
-        // Any surplus `tokenOut` stays here as solver profit.
+        // Surplus `tokenOut` is swept to the executeFill caller (see _sweep).
     }
 }

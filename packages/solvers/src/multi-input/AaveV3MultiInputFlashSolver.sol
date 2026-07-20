@@ -36,6 +36,10 @@ contract AaveV3MultiInputFlashSolver is BaseFlashSolver {
     ) external initiatesFlash {
         bytes memory params = abi.encode(order, sig, fillAmountIn, dexFees, minSwapOuts);
         pool.flashLoanSimple(address(this), flashToken, flashAmount, params, 0);
+
+        // Surplus collateral is the fill's profit — sweep it to the caller so no
+        // balance accumulates in this permissionless solver.
+        _sweep(order.legsOut[0].token, msg.sender);
     }
 
     function executeOperation(

@@ -1,54 +1,71 @@
 # Interfaces
 
-Shared interfaces used across the settlement system.
+Shared interfaces used across the settlement system. Modules are **not**
+whitelisted or registered — a maker authorizes each module by committing its
+address (and its `bytes data`) inside the EIP-712 order hash they sign, and
+Permit3 allowances bound what any module can pull. There is no admin, no
+`setModule`, and no module registry.
 
-## ILendingModule.sol
+## Module interfaces
 
-The core adapter interface that each lending protocol must implement. The Settlement calls these modules to execute lending operations on behalf of makers.
+An order's `Item[]` dispatches to one of three module shapes, selected by the
+item's `op` (`MAKE` / `TAKE` / `SETTLE`). All three touch funds only through
+Permit3, keyed by the maker's signed allowances.
 
-**Mutative functions:**
-| Function | Description |
-|----------|-------------|
-| `deposit(asset, amount, onBehalfOf, data)` | Deposit collateral into the lending protocol |
-| `withdraw(asset, amount, onBehalfOf, to, data)` | Withdraw collateral to a recipient |
-| `borrow(asset, amount, onBehalfOf, to, data)` | Borrow on behalf of user, send proceeds to recipient |
-| `repay(asset, amount, onBehalfOf, data)` | Repay debt on behalf of user |
-
-**Balance views:**
-| Function | Description |
-|----------|-------------|
-| `getCollateralBalance(asset, user, data)` | User's collateral position in underlying units |
-| `getDebtBalance(asset, user, data)` | User's debt in underlying units |
-| `getLendingBalance(asset, user, data)` | User's supply/lending balance (e.g. Morpho loan-token supply) |
-
-The `bytes data` parameter carries protocol-specific configuration (pool address, market params, interest rate mode, cToken address, etc.). Each module defines its own encoding.
-
-**Prerequisites for modules:**
-- Must be whitelisted via `Settlement.setModule(address, true)`
-- Users must pre-approve the module (or the settlement) for token transfers
-- For borrow operations, users must set up credit delegation (Aave) or `allow()` (Compound V3)
-
-## IFlashLoanProvider.sol
-
-Minimal Aave V3-style flash loan interface used by solver contracts.
-
+### IMakerModule.sol — `MAKE` items
 ```solidity
-function flashLoan(address receiver, address[] assets, uint256[] amounts, bytes params) external;
+function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external;
 ```
+Spends the maker's own assets (deposit / supply collateral / repay debt). Only
+touches `onBehalfOf`'s position.
 
-The `IFlashLoanReceiver` callback interface:
+### ITakerModule.sol — `TAKE` items
 ```solidity
-function executeOperation(address[] assets, uint256[] amounts, uint256[] premiums, address initiator, bytes params)
-    external returns (bool);
+function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external;
 ```
+Draws proceeds on the maker's behalf (borrow / withdraw) and routes `amount` to
+`receiver` (`address(0)` → Settlement, which nets it into the fill).
 
-## IDexAggregator.sol
-
-Minimal DEX aggregator interface (1inch / 0x style) used by solver contracts.
-
+### ISettlementModule.sol — `SETTLE` items
 ```solidity
-function swap(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut, bytes routeData)
-    external returns (uint256 amountOut);
+function settle(address maker, address filler, uint256 amount, bytes calldata data) external;
 ```
+The **filler-aware** generic exchange (e.g. an NFT sale to an open solver set):
+the module receives `filler`, so the maker's asset can be routed to whoever
+fills. Used when the typed `legsIn`/`legsOut` fast path can't express the trade.
 
-The `routeData` is opaque — constructed off-chain by the solver using the DEX aggregator's API.
+In every case the `bytes data` blob carries the protocol-specific configuration
+(pool address, Morpho `MarketParams`, interest-rate mode, cToken address, …),
+committed in the order signature so a solver cannot alter it. Each module defines
+its own `data` encoding.
+
+## IFillModule.sol
+
+Optional fill-denominator module (`Order.fillModule`). Decouples "how much does
+this fill advance?" from a fungible leg, for any↔any intents (NFTs, auction lots).
+```solidity
+function resolveFill(Order order, uint256 prevFilled, uint256 fillAmount, bytes takerData)
+    external returns (uint256 delta);
+```
+The core keeps the over-fill cap and the single-fraction per-leg scaling; the
+module only picks the accepted `delta` (and may gate the counterparty match via
+`takerData`).
+
+## IOrderValidator.sol
+
+Read-only pre-execution trigger (`Order.validators`) or post-execution invariant
+(`Order.invariants`).
+```solidity
+function validate(Order order, address filler, bytes data, bytes takerData)
+    external view returns (bool ok);
+```
+Used for filler gating (whitelist / attestation), min-balance invariants (FoT
+protection), and similar policy checks — all maker-signed.
+
+## Ambient interfaces
+
+`IPermit3` (allowance book + witness permits), `IERC1271` / `IERC2612`
+(contract-signer + EIP-2612 permit), `IAggregatorV3` (Chainlink-style price feed
+for depeg guards), and the protocol-auth shims `ICometAllow` /
+`ICreditDelegationToken` / `IMorphoAuth` used by the lending modules to arrange
+on-behalf authority.

@@ -53,6 +53,10 @@ contract MidnightFlashSolver is BaseFlashSolver {
         assets[0] = flashAmount;
         bytes memory data = abi.encode(flashToken, order, sig, fillAmountIn, dexFee, minSwapOut);
         midnight.flashLoan(tokens, assets, address(this), data);
+
+        // Surplus collateral is the fill's profit — sweep it to the caller so no
+        // balance accumulates in this permissionless solver.
+        _sweep(order.legsOut[0].token, msg.sender);
     }
 
     /// @dev Midnight callback. `assets[0]` of `tokens[0]` is here; Midnight pulls

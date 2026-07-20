@@ -162,4 +162,18 @@ abstract contract BaseFlashSolver {
     function _ensureRepayable(address token, uint256 owed) internal view {
         if (IERC20(token).balanceOf(address(this)) < owed) revert FlashLoanNotRepaid();
     }
+
+    /// @dev Sweep the solver's ENTIRE residual balance of `token` to `to` (no-op
+    ///      if zero). Run at the end of every `executeFill` so this contract never
+    ///      carries a balance between fills. `executeFill` is permissionless and
+    ///      `setupTokenApproval` leaves Settlement a standing max Permit3 allowance,
+    ///      so any surplus left parked here could be drained by a later attacker-
+    ///      crafted order routed through the same permissionless entrypoint. Sending
+    ///      the fill's profit to the caller (`msg.sender`) closes that window — the
+    ///      `initiatesFlash` guard already blocks a transfer-hook reentry into
+    ///      `executeFill` during the sweep.
+    function _sweep(address token, address to) internal {
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (bal != 0) IERC20(token).transfer(to, bal);
+    }
 }
