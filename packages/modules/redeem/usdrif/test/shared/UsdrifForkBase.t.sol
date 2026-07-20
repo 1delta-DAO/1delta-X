@@ -193,28 +193,6 @@ abstract contract UsdrifForkBase is Test {
         o.timing = (o.timing & ~(uint256(type(uint32).max) << 64)) | (uint256(uint32(v)) << 64);
     }
 
-    function _a1(address a) internal pure returns (address[] memory arr) {
-        arr = new address[](1);
-        arr[0] = a;
-    }
-
-    function _u1(uint256 x) internal pure returns (uint256[] memory arr) {
-        arr = new uint256[](1);
-        arr[0] = x;
-    }
-
-    function _hashAddresses(address[] memory a) internal pure returns (bytes32) {
-        bytes32[] memory words = new bytes32[](a.length);
-        for (uint256 i; i < a.length; i++) {
-            words[i] = bytes32(uint256(uint160(a[i])));
-        }
-        return keccak256(abi.encodePacked(words));
-    }
-
-    function _hashUints(uint256[] memory a) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(a));
-    }
-
     function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
             ORDER_TH,

@@ -23,7 +23,7 @@ interface IERC20BalanceOf {
 ///  ─────
 ///  Attach to `order.invariants` with
 ///      data = abi.encode(address token, address account, uint256 minBalance)
-///  where `account` is usually `order.maker` (or a `recipientOut`) and
+///  where `account` is usually `order.maker` (or a `LegOut.recipient`) and
 ///      minBalance = account's balance BEFORE the fill  +  the minimum net amount
 ///                   the maker will accept.
 ///

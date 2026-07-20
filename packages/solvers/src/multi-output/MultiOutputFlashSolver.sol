@@ -23,7 +23,7 @@ struct OutputLeg {
 /// @title MultiOutputFlashSolver
 /// @notice Fills a MULTI-OUTPUT order with no inventory. Where the leverage
 ///         solvers flash a single collateral, this one flash-loans the whole
-///         OUTPUT basket (`tokenOut[]`) from Balancer, lets Settlement deliver it
+///         OUTPUT basket (`legsOut`) from Balancer, lets Settlement deliver it
 ///         to the maker, receives the maker's input, and buys each output token
 ///         back from that input to repay the flash.
 ///

@@ -319,18 +319,6 @@ abstract contract MockSettlementBase is Test {
         "Validator(address target,bytes data)"
     );
 
-    function _hashAddresses(address[] memory a) internal pure returns (bytes32) {
-        bytes32[] memory w = new bytes32[](a.length);
-        for (uint256 i; i < a.length; i++) {
-            w[i] = bytes32(uint256(uint160(a[i])));
-        }
-        return keccak256(abi.encodePacked(w));
-    }
-
-    function _hashUints(uint256[] memory a) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(a));
-    }
-
     function _hashItems(Item[] memory items) internal pure returns (bytes32) {
         bytes32[] memory h = new bytes32[](items.length);
         for (uint256 i; i < items.length; i++) {

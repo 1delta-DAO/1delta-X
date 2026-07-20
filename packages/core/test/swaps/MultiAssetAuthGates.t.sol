@@ -65,18 +65,6 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         vm.stopPrank();
     }
 
-    function _a2(address a, address b) internal pure returns (address[] memory r) {
-        r = new address[](2);
-        r[0] = a;
-        r[1] = b;
-    }
-
-    function _u2(uint256 a, uint256 b) internal pure returns (uint256[] memory r) {
-        r = new uint256[](2);
-        r[0] = a;
-        r[1] = b;
-    }
-
     /// @dev Multi-out fixed-price order (USDC → {WETH, DAI}) with optional gates.
     function _multiOut(uint256 nonce, Validator[] memory validators, Validator[] memory invariants)
         internal

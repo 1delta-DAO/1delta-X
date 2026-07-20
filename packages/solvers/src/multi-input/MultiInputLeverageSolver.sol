@@ -9,7 +9,7 @@ import {IBalancerVault} from "@solvers/single-input/LimitOrderLeverageSolver.sol
 /// @title MultiInputLeverageSolver
 /// @notice Balancer v2 leverage-fill solver for MULTI-INPUT orders. Unlike
 ///         `LimitOrderLeverageSolver` (single debt leg), this one accepts an
-///         order whose `tokenIn[]` carries several legs — e.g. a "dual
+///         order whose `legsIn` carries several legs — e.g. a "dual
 ///         conversion": borrow proceeds (USDC) *and* the maker's equity (DAI)
 ///         both flow to the solver in exchange for the collateral it fronts.
 ///
@@ -39,7 +39,7 @@ contract MultiInputLeverageSolver is BaseFlashSolver {
     /// @notice Fill a multi-input leverage order with no starting inventory.
     /// @param flashToken   the collateral asset (equals `order.legsOut[0].token`)
     /// @param flashAmount  amount to flash-loan — should cover Settlement's pull
-    /// @param order        the maker's signed order (may have many `tokenIn[]`)
+    /// @param order        the maker's signed order (may have many `legsIn`)
     /// @param sig          EIP-712 signature
     /// @param fillAmountIn slice of amountIn[0] to fill this call
     /// @param dexFees      per-input Uniswap v3 fee tiers (aligned with tokenIn)

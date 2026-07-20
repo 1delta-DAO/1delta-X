@@ -11,7 +11,7 @@ interface IERC721 {
 /// @title NftSettlementModule
 /// @notice The canonical `SETTLE` module: delivers the maker's ERC-721 to the
 ///         FILLER — an NFT *sale* to an open solver set, no exclusive filler.
-///         The maker is paid on the same order via an inline `tokenOut`
+///         The maker is paid on the same order via an inline `legsOut`
 ///         (fungible) leg, whose delivery is mandatory and runs BEFORE items, so
 ///         the maker is paid first or the whole fill reverts; only then does this
 ///         module hand the NFT to whoever filled.

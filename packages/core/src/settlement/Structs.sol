@@ -17,10 +17,10 @@ pragma solidity ^0.8.28;
 ///                FILLER-AWARE — the module receives `ctx.filler`, so the maker's
 ///                asset can be routed to whoever fills (e.g. an NFT sale to an
 ///                open solver set, with no exclusivity). This is the generic
-///                fallback for exchanges the typed `tokenIn`/`tokenOut` fast path
+///                fallback for exchanges the typed `legsIn`/`legsOut` fast path
 ///                can't express; the typed legs stay inline (zero dispatch) and
 ///                SETTLE pays one CALL only when used. The maker's RECEIPT is
-///                guaranteed by the order's mandatory `tokenOut` delivery and/or
+///                guaranteed by the order's mandatory `legsOut` delivery and/or
 ///                a post-execution invariant. See {ISettlementModule}.
 enum ItemOp {
     MAKE,
@@ -39,16 +39,16 @@ enum CallbackMode {
 ///         the fixed anchor that the fill amount is denominated in.
 ///
 ///         SELL — the maker gives a FIXED input basket and receives an
-///                auction-priced output basket (outputs decay
-///                `startAmountOut → endAmountOut`, best-for-maker first). The
-///                fill is denominated in `tokenIn[0]` units. The classic
+///                auction-priced output basket (each output leg decays
+///                `legsOut[j].start → .end`, best-for-maker first). The
+///                fill is denominated in `legsIn[0].start` units. The classic
 ///                "sell exactly X, take what the auction clears" order. An
-///                input leg with `start != end` RISES instead of being fixed —
+///                input leg with `end != 0` RISES instead of being fixed —
 ///                the relayer-fee auction (see the {Order} docs).
 ///         BUY  — the maker receives a FIXED output basket and pays an
-///                auction-priced input basket (inputs rise
-///                `startAmountIn → endAmountIn`, best-for-maker first). The
-///                fill is denominated in `tokenOut[0]` units. The exact-output
+///                auction-priced input basket (each input leg rises
+///                `legsIn[i].start → .end`, best-for-maker first). The
+///                fill is denominated in `legsOut[0].start` units. The exact-output
 ///                "buy exactly X, pay up to Y" order.
 enum OrderSide {
     SELL,

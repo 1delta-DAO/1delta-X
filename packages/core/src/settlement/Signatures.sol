@@ -26,7 +26,7 @@ abstract contract Signatures is OrderState {
     uint256 private immutable _CACHED_CHAIN_ID;
     bytes32 private constant _DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 private constant _HASHED_NAME = keccak256("UniversalSettlement");
+    bytes32 private constant _HASHED_NAME = keccak256("Settlement");
     bytes32 private constant _HASHED_VERSION = keccak256("1");
 
     /// @dev An empty `sig` was supplied for a fill, but the maker has no matching

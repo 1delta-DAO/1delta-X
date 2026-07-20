@@ -8,7 +8,7 @@ import {IPermit3} from "../interfaces/IPermit3.sol";
 /// @notice Originator-fee item: a MAKE module that pulls an ABSOLUTE fee amount
 ///         from the maker and forwards it to a named recipient. The
 ///         MAKER-funded fee channel for orders where a fee OUTPUT leg
-///         (`recipientOut`) doesn't fit — outputless shapes (pure deposits,
+///         (a `LegOut.recipient`) doesn't fit — outputless shapes (pure deposits,
 ///         zero-capital exits, repays) where nothing is delivered by the
 ///         solver, so a fee must come from the maker's wallet directly.
 ///

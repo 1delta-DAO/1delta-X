@@ -386,18 +386,6 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         return keccak256(abi.encodePacked(h));
     }
 
-    function _hashAddresses(address[] memory a) internal pure returns (bytes32) {
-        bytes32[] memory words = new bytes32[](a.length);
-        for (uint256 i; i < a.length; i++) {
-            words[i] = bytes32(uint256(uint160(a[i])));
-        }
-        return keccak256(abi.encodePacked(words));
-    }
-
-    function _hashUints(uint256[] memory a) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(a));
-    }
-
     function _hashCurve(CurvePoint[] memory curve) internal pure returns (bytes32) {
         bytes32[] memory h = new bytes32[](curve.length);
         for (uint256 i; i < curve.length; i++) {

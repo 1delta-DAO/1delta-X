@@ -45,9 +45,9 @@ contract NativeSettler {
         settlement = Settlement(_settlement);
     }
 
-    /// @param order        maker == msg.sender; single-asset SELL with tokenIn[0] == WETH.
+    /// @param order        maker == msg.sender; single-asset SELL with legsIn[0].token == WETH.
     /// @param sig           the maker's EIP-712 order signature.
-    /// @param fillAmount    anchor units (tokenIn[0]) to fill.
+    /// @param fillAmount    anchor units (legsIn[0]) to fill.
     /// @param dexTarget     the frontend's route target (invoked in the fill callback).
     /// @param dexCallData   route calldata; must pull our WETH and return `tokenOut` to us.
     function settleFromNative(

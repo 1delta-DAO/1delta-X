@@ -57,7 +57,7 @@ abstract contract BaseFlashSolver {
 
     error FlashLoanNotRepaid();
     error NotInFlash();
-    /// @dev This solver only routes a single debt leg (`tokenIn[0]`); a
+    /// @dev This solver only routes a single debt leg (`legsIn[0]`); a
     ///      multi-input order would strand legs [1..] as maker shortfalls.
     error MultiInputUnsupported();
 
@@ -103,7 +103,7 @@ abstract contract BaseFlashSolver {
         uint256 minSwapOut
     ) internal {
         // Single-debt core: the borrow proceeds are the first (and only) input
-        // leg. A multi-input order would collect only tokenIn[0] here and turn
+        // leg. A multi-input order would collect only legsIn[0] here and turn
         // legs [1..] into maker shortfalls, so reject it (see _fillAndSwapAll for
         // the multi-input variant).
         if (order.legsIn.length != 1) revert MultiInputUnsupported();

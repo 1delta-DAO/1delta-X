@@ -35,18 +35,6 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 contract DualConversionLeverageTest is AaveModulesBase {
     address constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
 
-    function _a2(address a, address b) internal pure returns (address[] memory r) {
-        r = new address[](2);
-        r[0] = a;
-        r[1] = b;
-    }
-
-    function _u2(uint256 a, uint256 b) internal pure returns (uint256[] memory r) {
-        r = new uint256[](2);
-        r[0] = a;
-        r[1] = b;
-    }
-
     function test_dualConversion_swapToDeposit_plusLeverage_aaveV3() public {
         uint256 collateralIn = 1 ether; //   WETH the solver fronts → deposited
         uint256 borrowOut = 1_500e6; //       USDC borrowed → solver (amountIn[0])

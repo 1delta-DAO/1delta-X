@@ -54,12 +54,6 @@ contract MultiInputFlashProvidersTest is AaveModulesBase {
         _runDualVia(address(s), WETH);
     }
 
-    function _a2(address a, address b) internal pure returns (address[] memory r) {
-        r = new address[](2);
-        r[0] = a;
-        r[1] = b;
-    }
-
     function _u2(uint256 a, uint256 b) internal pure returns (uint256[] memory r) {
         r = new uint256[](2);
         r[0] = a;

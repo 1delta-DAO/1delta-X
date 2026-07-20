@@ -110,7 +110,7 @@ export const PERMIT_WITNESS_TYPES = {
   Validator: VALIDATOR_TYPE,
 } as const;
 
-export const SETTLEMENT_DOMAIN_NAME = "UniversalSettlement";
+export const SETTLEMENT_DOMAIN_NAME = "Settlement";
 export const PERMIT3_DOMAIN_NAME = "Permit3";
 export const DOMAIN_VERSION = "1";
 
