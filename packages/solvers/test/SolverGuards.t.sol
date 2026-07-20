@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, Item, Validator, OrderSide, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
 import {LimitOrderLeverageSolver} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
 import {MultiOutputFlashSolver, OutputLeg} from "@solvers/multi-output/MultiOutputFlashSolver.sol";
@@ -96,29 +96,19 @@ contract SolverGuardsTest is CoreSettlementBase {
     // lending market needed to trip it).
 
     function _multiInputOrder() internal view returns (Order memory o) {
-        address[] memory tokenIn = new address[](2);
-        tokenIn[0] = USDC;
-        tokenIn[1] = DAI;
-        uint256[] memory amountIn = new uint256[](2);
-        amountIn[0] = 2_000e6;
-        amountIn[1] = 500e18;
+        LegIn[] memory legsIn = new LegIn[](2);
+        legsIn[0] = LegIn(USDC, 2_000e6, 0);
+        legsIn[1] = LegIn(DAI, 500e18, 0);
 
         o = Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn,
-            startAmountIn: amountIn,
-            endAmountIn: amountIn,
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a1(WETH),
-            startAmountOut: _u1(1 ether),
-            endAmountOut: _u1(1 ether),
-            recipientOut: new address[](1),
+            legsIn: legsIn,
+            legsOut: _legsOut1(WETH, 1 ether),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -155,17 +145,10 @@ contract SolverGuardsTest is CoreSettlementBase {
             side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(WETH),
-            startAmountIn: _u1(3 ether),
-            endAmountIn: _u1(3 ether),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a1(USDC),
-            startAmountOut: _u1(3_000e6),
-            endAmountOut: _u1(3_000e6),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(WETH, 3 ether),
+            legsOut: _legsOut1(USDC, 3_000e6),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

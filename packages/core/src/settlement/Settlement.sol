@@ -5,7 +5,19 @@ import {Base} from "./Base.sol";
 import {Batch} from "./Batch.sol";
 
 // Re-exported so downstream files can keep importing the order types from here.
-import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint, CallbackMode, ItemsBatch, FillCtx} from "./Structs.sol";
+import {
+    Order,
+    Item,
+    ItemOp,
+    Validator,
+    LegIn,
+    LegOut,
+    OrderSide,
+    CurvePoint,
+    CallbackMode,
+    ItemsBatch,
+    FillCtx
+} from "./Structs.sol";
 
 /// @title Settlement
 /// @notice Signed limit-order settler with partial fills, optional dutch decay,

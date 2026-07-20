@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
@@ -46,17 +46,10 @@ contract CloseDutchAuctionTest is AaveModulesBase {
             side: OrderSide.SELL,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(WETH),
-            tokenOut: _a1(USDC),
-            startAmountIn: _u1(wethIn),
-            endAmountIn: _u1(wethIn),
-            decayStartTime: uint32(block.timestamp),
-            decayDuration: 100,
-            startAmountOut: _u1(startOut),
-            endAmountOut: _u1(endOut),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(WETH, wethIn),
+            legsOut: _legsOut1Falling(USDC, startOut, endOut, address(0)),
+            timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

@@ -6,7 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
-import {Order, Item, ItemOp, Validator, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, LegIn, LegOut, Validator, OrderSide} from "@core/settlement/Settlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -80,22 +80,23 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         uint256[] memory amountOut,
         Item[] memory items
     ) internal view returns (Order memory) {
+        LegIn[] memory legsIn = new LegIn[](tokenIn.length);
+        for (uint256 i; i < tokenIn.length; i++) {
+            legsIn[i] = LegIn(tokenIn[i], amountIn[i], 0);
+        }
+        LegOut[] memory legsOut = new LegOut[](tokenOut.length);
+        for (uint256 j; j < tokenOut.length; j++) {
+            legsOut[j] = LegOut(tokenOut[j], amountOut[j], 0, address(0));
+        }
         return Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn,
-            startAmountIn: amountIn,
-            endAmountIn: amountIn,
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: tokenOut,
-            startAmountOut: amountOut,
-            endAmountOut: amountOut,
-            recipientOut: new address[](tokenOut.length),
+            legsIn: legsIn,
+            legsOut: legsOut,
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

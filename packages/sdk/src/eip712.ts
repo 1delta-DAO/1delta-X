@@ -1,11 +1,12 @@
 import type { Address, TypedDataDomain } from "viem";
 
 /**
- * EIP-712 typed-data definitions. Field ORDER and names match the Solidity
+ * EIP-712 typed-data definitions. Field order and names match the Solidity
  * structs exactly, so viem's typed-data hashing reproduces the contract's
  * `hashOrder` / Permit3 witness digest byte-for-byte. (The contract hashes
- * `address[]`/`uint256[]` as standard EIP-712 arrays and `Item[]`/`Validator[]`
- * as struct arrays — which is precisely what viem does.)
+ * `LegIn[]`/`LegOut[]`/`Item[]`/`Validator[]`/`CurvePoint[]` as struct arrays
+ * and the packed `timing` word as a single `uint256` — which is precisely what
+ * viem does.)
  */
 
 export const ITEM_TYPE = [
@@ -26,22 +27,32 @@ export const CURVE_POINT_TYPE = [
   { name: "bumpBps", type: "uint32" },
 ] as const;
 
+/// One input leg: `token` given by the maker, `start`→`end` amounts (end == 0 =
+/// fixed at `start`; else a RISING auction, start <= end).
+export const LEG_IN_TYPE = [
+  { name: "token", type: "address" },
+  { name: "start", type: "uint256" },
+  { name: "end", type: "uint256" },
+] as const;
+
+/// One output leg: `token` delivered to `recipient` (0x0 = maker), `start`→`end`
+/// amounts (end == 0 = fixed at `start`; else a FALLING auction, start >= end).
+export const LEG_OUT_TYPE = [
+  { name: "token", type: "address" },
+  { name: "start", type: "uint256" },
+  { name: "end", type: "uint256" },
+  { name: "recipient", type: "address" },
+] as const;
+
 export const ORDER_TYPE = [
   { name: "maker", type: "address" },
   { name: "side", type: "uint8" },
   { name: "nonce", type: "uint256" },
   { name: "deadline", type: "uint256" },
-  { name: "tokenIn", type: "address[]" },
-  { name: "startAmountIn", type: "uint256[]" },
-  { name: "endAmountIn", type: "uint256[]" },
-  { name: "decayStartTime", type: "uint32" },
-  { name: "decayDuration", type: "uint32" },
-  { name: "tokenOut", type: "address[]" },
-  { name: "startAmountOut", type: "uint256[]" },
-  { name: "endAmountOut", type: "uint256[]" },
-  { name: "recipientOut", type: "address[]" },
+  { name: "legsIn", type: "LegIn[]" },
+  { name: "legsOut", type: "LegOut[]" },
+  { name: "timing", type: "uint256" },
   { name: "exclusiveFiller", type: "address" },
-  { name: "exclusivityEndTime", type: "uint32" },
   { name: "minFillAnchor", type: "uint256" },
   { name: "exclusivityOverrideBps", type: "uint256" },
   { name: "curve", type: "CurvePoint[]" },
@@ -73,6 +84,8 @@ export const ORDER_TYPES = {
   Order: ORDER_TYPE,
   CurvePoint: CURVE_POINT_TYPE,
   Item: ITEM_TYPE,
+  LegIn: LEG_IN_TYPE,
+  LegOut: LEG_OUT_TYPE,
   Validator: VALIDATOR_TYPE,
 } as const;
 
@@ -92,6 +105,8 @@ export const PERMIT_WITNESS_TYPES = {
   Order: ORDER_TYPE,
   CurvePoint: CURVE_POINT_TYPE,
   Item: ITEM_TYPE,
+  LegIn: LEG_IN_TYPE,
+  LegOut: LEG_OUT_TYPE,
   Validator: VALIDATOR_TYPE,
 } as const;
 

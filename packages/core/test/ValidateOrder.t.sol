@@ -32,31 +32,30 @@ contract ValidateOrderTest is CoreSettlementBase {
         Order memory o;
 
         o = _base();
-        o.startAmountIn[0] = 0;
-        o.endAmountIn[0] = 0;
+        o.legsIn[0].start = 0;
+        o.legsIn[0].end = 0;
         _assertInvalid(o, "anchor amount is zero");
 
         o = _base();
-        o.startAmountOut[0] = 0;
-        o.endAmountOut[0] = 0;
-        _assertInvalid(o, "startAmountOut is zero (giveaway)");
+        o.legsOut[0].start = 0;
+        o.legsOut[0].end = 0;
+        _assertInvalid(o, "output start is zero (giveaway)");
 
         o = _base();
-        o.startAmountOut[0] = 1 ether;
-        o.endAmountOut[0] = 2 ether; // start < end
-        _assertInvalid(o, "startAmountOut < endAmountOut");
+        o.legsOut[0].start = 1 ether;
+        o.legsOut[0].end = 2 ether; // start < end (output must fall)
+        _assertInvalid(o, "output start < end (must fall)");
 
         o = _base();
-        o.tokenOut[0] = o.tokenIn[0]; // self-trade
-        _assertInvalid(o, "tokenIn == tokenOut");
+        o.legsOut[0].token = o.legsIn[0].token; // self-trade
+        _assertInvalid(o, "input token == output token");
 
         o = _base();
-        o.minFillAnchor = o.startAmountIn[0] + 1;
+        o.minFillAnchor = o.legsIn[0].start + 1;
         _assertInvalid(o, "minFillAnchor > anchor (unfillable)");
 
         o = _base();
-        o.decayDuration = 100;
-        o.decayStartTime = 0; // decay set without a start
+        o.timing = uint256(100) << 32; // decayDuration = 100, decayStartTime = 0
         _assertInvalid(o, "decay set without decayStartTime");
     }
 

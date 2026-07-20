@@ -8,7 +8,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, Item, Validator, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -83,22 +83,18 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         view
         returns (Order memory)
     {
+        LegOut[] memory legsOut = new LegOut[](2);
+        legsOut[0] = LegOut(WETH, 1 ether, 0, address(0));
+        legsOut[1] = LegOut(DAI, 1_000e18, 0, address(0));
         return Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            startAmountIn: _u1(2_000e6),
-            endAmountIn: _u1(2_000e6),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a2(WETH, DAI),
-            startAmountOut: _u2(1 ether, 1_000e18),
-            endAmountOut: _u2(1 ether, 1_000e18),
-            recipientOut: new address[](2),
+            legsIn: _legsIn1(USDC, 2_000e6),
+            legsOut: legsOut,
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -151,22 +147,18 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         deal(DAI, solver, daiOut);
         _approveSolverSide(daiOut, DAI);
 
+        LegIn[] memory legsIn = new LegIn[](2);
+        legsIn[0] = LegIn(WETH, wethIn, 0);
+        legsIn[1] = LegIn(USDC, usdcIn, 0);
         Order memory order = Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a2(WETH, USDC),
-            startAmountIn: _u2(wethIn, usdcIn),
-            endAmountIn: _u2(wethIn, usdcIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a1(DAI),
-            startAmountOut: _u1(daiOut),
-            endAmountOut: _u1(daiOut),
-            recipientOut: new address[](1),
+            legsIn: legsIn,
+            legsOut: _legsOut1(DAI, daiOut),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -290,7 +282,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         _fundMultiOut();
         Order memory order = _multiOut(8, _noV(), _noV());
         order.exclusiveFiller = address(0xE);
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         bytes memory sig = _sign(order);
 
         // Non-exclusive solver blocked during the window.

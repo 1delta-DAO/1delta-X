@@ -58,7 +58,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.exclusiveFiller = EX;
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         order.exclusivityOverrideBps = 100;
         bytes memory sig = _sign(order);
 
@@ -74,7 +74,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         Order memory order = _buyOrder(1, address(tA), address(tB), BUY_IN, BUY_IN, BUY_OUT);
         order.exclusiveFiller = EX;
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         order.exclusivityOverrideBps = 100; // maker pays 1% less
         bytes memory sig = _sign(order);
 
@@ -90,7 +90,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         _fundSell(SELL_OUT);
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.exclusiveFiller = solver; // the exclusive filler IS our solver
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         order.exclusivityOverrideBps = 100;
         bytes memory sig = _sign(order);
 
@@ -104,7 +104,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         _fundSell(SELL_OUT);
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.exclusiveFiller = EX;
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         order.exclusivityOverrideBps = 0; // hard
         bytes memory sig = _sign(order);
 
@@ -128,8 +128,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint256 end = 1e18;
 
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.endAmountOut = _u1(end);
-        order.decayStartTime = uint32(block.timestamp);
+        order.legsOut[0].end = end;
+        _setDecayStart(order, uint32(block.timestamp));
         order.curve = _curve3();
         bytes memory sig = _sign(order);
 
@@ -150,8 +150,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_curve_clampsAfterLastPoint() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
-        order.decayStartTime = uint32(block.timestamp);
+        order.legsOut[0].end = 1e18;
+        _setDecayStart(order, uint32(block.timestamp));
         order.curve = _curve3();
 
         vm.warp(block.timestamp + 10_000); // well past the last point
@@ -160,8 +160,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_curve_revertsBeforeStart() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
-        order.decayStartTime = uint32(block.timestamp + 100); // future
+        order.legsOut[0].end = 1e18;
+        _setDecayStart(order, uint32(block.timestamp + 100)); // future
         order.curve = _curve3();
 
         vm.expectRevert(DutchAuction.AuctionNotStarted.selector);
@@ -174,7 +174,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint256 endIn = 2_000e18;
 
         Order memory order = _buyOrder(1, address(tA), address(tB), startIn, endIn, BUY_OUT);
-        order.decayStartTime = uint32(block.timestamp);
+        _setDecayStart(order, uint32(block.timestamp));
         order.curve = _curve3();
         bytes memory sig = _sign(order);
 
@@ -197,7 +197,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         // No time decay (duration 0, no curve) → the ONLY bump is the gas bump.
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.endAmountOut = _u1(end);
+        order.legsOut[0].end = end;
         order.gasBumpBps = 1_000;
         order.gasPriceRef = ref;
         bytes memory sig = _sign(order);
@@ -213,7 +213,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_gasBump_cappedAtGasBumpBps() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
+        order.legsOut[0].end = 1e18;
         order.gasBumpBps = 1_000;
         order.gasPriceRef = 30 gwei;
 
@@ -224,7 +224,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_gasBump_belowRef_partial() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
+        order.legsOut[0].end = 1e18;
         order.gasBumpBps = 1_000;
         order.gasPriceRef = 30 gwei;
 
@@ -258,11 +258,11 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
     function test_validateOrder_newFields() public view {
         // Well-formed with all three features.
         Order memory ok = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        ok.endAmountOut = _u1(1e18);
+        ok.legsOut[0].end = 1e18;
         ok.exclusiveFiller = EX;
-        ok.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(ok, uint32(block.timestamp + 100));
         ok.exclusivityOverrideBps = 50;
-        ok.decayStartTime = uint32(block.timestamp);
+        _setDecayStart(ok, uint32(block.timestamp));
         ok.curve = _curve3();
         ok.gasBumpBps = 500;
         ok.gasPriceRef = 30 gwei;
@@ -278,7 +278,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         // non-increasing curve timeDelta
         Order memory o2 = _plainOrder(3, address(tA), address(tB), SELL_IN, SELL_OUT);
-        o2.decayStartTime = uint32(block.timestamp);
+        _setDecayStart(o2, uint32(block.timestamp));
         CurvePoint[] memory bad = new CurvePoint[](2);
         bad[0] = CurvePoint({timeDelta: 100, bumpBps: 0});
         bad[1] = CurvePoint({timeDelta: 100, bumpBps: 5_000}); // not strictly increasing
@@ -306,7 +306,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         // curve bumpBps > 10000
         Order memory o2 = _plainOrder(2, address(tA), address(tB), SELL_IN, SELL_OUT);
-        o2.decayStartTime = uint32(block.timestamp);
+        _setDecayStart(o2, uint32(block.timestamp));
         CurvePoint[] memory c2 = new CurvePoint[](1);
         c2[0] = CurvePoint({timeDelta: 0, bumpBps: 10_001});
         o2.curve = c2;
@@ -340,9 +340,9 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint64 ref = 30 gwei;
 
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.endAmountOut = _u1(end);
-        order.decayStartTime = uint32(block.timestamp);
-        order.decayDuration = 100;
+        order.legsOut[0].end = end;
+        _setDecayStart(order, uint32(block.timestamp));
+        _setDecayDuration(order, 100);
         order.gasBumpBps = 1_000;
         order.gasPriceRef = ref;
         bytes memory sig = _sign(order);
@@ -361,9 +361,9 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_gasBump_plusTimeDecay_saturatesToEnd() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
-        order.decayStartTime = uint32(block.timestamp);
-        order.decayDuration = 100;
+        order.legsOut[0].end = 1e18;
+        _setDecayStart(order, uint32(block.timestamp));
+        _setDecayDuration(order, 100);
         order.gasBumpBps = 3_000;
         order.gasPriceRef = 30 gwei;
 
@@ -386,8 +386,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint256 start = SELL_OUT;
         uint256 end = 1e18;
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.endAmountOut = _u1(end);
-        order.decayStartTime = uint32(block.timestamp);
+        order.legsOut[0].end = end;
+        _setDecayStart(order, uint32(block.timestamp));
         order.curve = c;
 
         uint256 t0 = block.timestamp;
@@ -404,8 +404,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         c[0] = CurvePoint({timeDelta: 50, bumpBps: 2_000});
         c[1] = CurvePoint({timeDelta: 150, bumpBps: 8_000});
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
-        order.decayStartTime = uint32(block.timestamp);
+        order.legsOut[0].end = 1e18;
+        _setDecayStart(order, uint32(block.timestamp));
         order.curve = c;
 
         vm.warp(block.timestamp + 20); // before first point → clamp to 2000
@@ -418,8 +418,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         CurvePoint[] memory c = new CurvePoint[](1);
         c[0] = CurvePoint({timeDelta: 0, bumpBps: 4_000});
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
-        order.decayStartTime = uint32(block.timestamp);
+        order.legsOut[0].end = 1e18;
+        _setDecayStart(order, uint32(block.timestamp));
         order.curve = c;
 
         vm.warp(block.timestamp + 50);
@@ -431,8 +431,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
     function test_curve_fillRevertsBeforeStart() public {
         _fundSell(SELL_OUT);
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
-        order.decayStartTime = uint32(block.timestamp + 100);
+        order.legsOut[0].end = 1e18;
+        _setDecayStart(order, uint32(block.timestamp + 100));
         order.curve = _curve3();
         bytes memory sig = _sign(order);
 
@@ -447,8 +447,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint256 start = SELL_OUT;
         uint256 end = 1e18;
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.endAmountOut = _u1(end);
-        order.decayStartTime = uint32(block.timestamp);
+        order.legsOut[0].end = end;
+        _setDecayStart(order, uint32(block.timestamp));
         order.curve = _curve3(); // [(0,0),(100,5000),(200,10000)]
         bytes memory sig = _sign(order);
 
@@ -481,8 +481,10 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         endO[1] = 2e18;
 
         Order memory order = _plainOrderMultiOut(1, address(tA), SELL_IN, tokenOut, startO);
-        order.endAmountOut = endO;
-        order.decayStartTime = uint32(block.timestamp);
+        for (uint256 j; j < endO.length; j++) {
+            order.legsOut[j].end = endO[j];
+        }
+        _setDecayStart(order, uint32(block.timestamp));
         order.curve = _curve3();
         bytes memory sig = _sign(order);
 
@@ -510,11 +512,11 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         _fundSell(bumped);
 
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
-        order.decayStartTime = uint32(block.timestamp);
-        order.decayDuration = 100;
+        order.legsOut[0].end = 1e18;
+        _setDecayStart(order, uint32(block.timestamp));
+        _setDecayDuration(order, 100);
         order.exclusiveFiller = EX;
-        order.exclusivityEndTime = uint32(block.timestamp + 1_000);
+        _setExclusivityEnd(order, uint32(block.timestamp + 1_000));
         order.exclusivityOverrideBps = 100;
         bytes memory sig = _sign(order);
 
@@ -533,7 +535,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.exclusiveFiller = EX;
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         order.exclusivityOverrideBps = 100;
         bytes memory sig = _sign(order);
         bytes memory cb = abi.encodeCall(Supplier.supply, (solver, address(tB), bumped));
@@ -557,7 +559,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         Order memory order = _buyOrder(1, address(tA), address(tB), BUY_IN, BUY_IN, BUY_OUT);
         order.exclusiveFiller = EX;
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         order.exclusivityOverrideBps = 100;
         bytes memory sig = _sign(order);
         bytes memory cb = abi.encodeCall(SwapHelper.swap, (solver, address(tA), discounted, address(tB), BUY_OUT));
@@ -579,12 +581,12 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         Order memory soft = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         soft.exclusiveFiller = EX;
-        soft.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(soft, uint32(block.timestamp + 100));
         soft.exclusivityOverrideBps = 100;
 
         Order memory hard = _plainOrder(2, address(tA), address(tB), SELL_IN, SELL_OUT);
         hard.exclusiveFiller = EX;
-        hard.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(hard, uint32(block.timestamp + 100));
         hard.exclusivityOverrideBps = 0; // hard → skipped
 
         Order[] memory orders = new Order[](2);
@@ -608,7 +610,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         _fundBuy(BUY_IN);
         Order memory order = _buyOrder(1, address(tA), address(tB), BUY_IN, BUY_IN, BUY_OUT);
         order.exclusiveFiller = EX;
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         order.exclusivityOverrideBps = 10_001; // malformed; validateOrder would reject it
         bytes memory sig = _sign(order);
 
@@ -623,7 +625,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
     function testFuzz_gasBump_withinBounds(uint256 basefee) public {
         basefee = bound(basefee, 0, 1_000 gwei);
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.endAmountOut = _u1(1e18);
+        order.legsOut[0].end = 1e18;
         order.gasBumpBps = 2_000;
         order.gasPriceRef = 30 gwei;
 

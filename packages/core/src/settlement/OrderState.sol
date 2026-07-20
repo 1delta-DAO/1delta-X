@@ -177,6 +177,6 @@ abstract contract OrderState is NonceManager {
     /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —
     ///      `startAmountIn[0]` (SELL) or `startAmountOut[0]` (BUY).
     function _anchorTotal(Order calldata order) internal pure returns (uint256) {
-        return order.side == OrderSide.BUY ? order.startAmountOut[0] : order.startAmountIn[0];
+        return order.side == OrderSide.BUY ? order.legsOut[0].start : order.legsIn[0].start;
     }
 }

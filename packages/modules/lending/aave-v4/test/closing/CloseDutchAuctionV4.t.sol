@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 
 import {ISpokeV4} from "../../src/interfaces/IAaveV4.sol";
 import {AaveV4ModulesBase} from "../shared/AaveV4ModulesBase.t.sol";
@@ -36,37 +36,7 @@ contract CloseDutchAuctionV4Test is AaveV4ModulesBase {
         _approveMakerWithdrawSide(wethIn, keccak256(withdrawData));
         _approveSolverSide(startOut, USDC);
 
-        Item[] memory items = new Item[](2);
-        items[0] = Item({op: ItemOp.MAKE, module: address(repayModule), amount: repayCeiling, recipient: address(0), data: repayData});
-        items[1] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: withdrawData});
-
-        Order memory order = Order({
-            maker: maker,
-            side: OrderSide.SELL,
-            nonce: 7,
-            deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(WETH),
-            tokenOut: _a1(USDC),
-            startAmountIn: _u1(wethIn),
-            endAmountIn: _u1(wethIn),
-            decayStartTime: uint32(block.timestamp),
-            decayDuration: 100,
-            startAmountOut: _u1(startOut),
-            endAmountOut: _u1(endOut),
-            recipientOut: new address[](1),
-            exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
-            minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
-            curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
-            fillModule: address(0),
-            fillTotal: 0
-        });
+        Order memory order = _buildCloseOrder(wethIn, startOut, endOut, repayCeiling, repayData, withdrawData);
         bytes memory sig = _sign(order);
 
         vm.warp(block.timestamp + 50);
@@ -93,5 +63,45 @@ contract CloseDutchAuctionV4Test is AaveV4ModulesBase {
         // Nothing stranded.
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
+    }
+
+    /// @dev Extracted to keep the test body under the stack-too-deep limit.
+    function _buildCloseOrder(
+        uint256 wethIn,
+        uint256 startOut,
+        uint256 endOut,
+        uint256 repayCeiling,
+        bytes memory repayData,
+        bytes memory withdrawData
+    ) internal view returns (Order memory order) {
+        Item[] memory items = new Item[](2);
+        items[0] = Item({op: ItemOp.MAKE, module: address(repayModule), amount: repayCeiling, recipient: address(0), data: repayData});
+        items[1] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: withdrawData});
+
+        LegIn[] memory legsIn = new LegIn[](1);
+        legsIn[0] = LegIn(WETH, wethIn, 0); // fixed input
+        LegOut[] memory legsOut = new LegOut[](1);
+        legsOut[0] = LegOut(USDC, startOut, endOut, address(0)); // Dutch-decaying output → maker
+
+        order = Order({
+            maker: maker,
+            side: OrderSide.SELL,
+            nonce: 7,
+            deadline: block.timestamp + 1 hours,
+            legsIn: legsIn,
+            legsOut: legsOut,
+            timing: _packTiming(uint32(block.timestamp), 100, 0),
+            exclusiveFiller: address(0),
+            minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
+            items: items,
+            validators: new Validator[](0),
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
+        });
     }
 }

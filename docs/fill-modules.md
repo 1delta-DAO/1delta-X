@@ -21,7 +21,7 @@ hardcoded coupling remains — **the fill is denominated in a fungible leg
 amount**:
 
 ```
-f = fillAmount / anchor          anchor = startAmountIn[0] (SELL) | startAmountOut[0] (BUY)
+f = fillAmount / anchor          anchor = legsIn[0].start (SELL) | legsOut[0].start (BUY)
 ```
 
 Every leg and every item slice scales by that single fraction `f`. This is fine
@@ -128,7 +128,8 @@ behavior rather than replacing it; the earlier "anchor on an item" idea is a
 tested in `core/test/swaps/TwapFillModule.t.sol`). A CoW-style TWAP with **no
 watchtower and no generated sub-orders**: one signed order is released in N equal
 time-sliced parts, the schedule riding existing signed fields (`fillTotal` =
-total, `minFillAnchor` = part size, `decayStartTime`/`decayDuration` = window).
+total, `minFillAnchor` = part size, and the `timing` word's packed decay clock
+= window).
 `resolveFill` admits only the parts whose window has opened, so a fill can't run
 ahead of schedule, one part per window is steady state, a skipped-window solver
 can catch up, and the core's cap bounds total at `fillTotal`. Pricing stays
@@ -169,7 +170,7 @@ two zero words); everything heavier is pay-per-use and opt-in.
 
 - **Breaking wire change.** Two new fields ⇒ new `ORDER_TYPEHASH`, new witness
   typestring, new golden order hash, SDK type/ABI/hash updates, and every test
-  `Order` literal. Same break-class as the `recipientOut`/`feeConfig` reworks —
+  `Order` literal. Same break-class as the per-leg-recipient / `feeConfig` reworks —
   fine pre-mainnet, but it is a typehash bump, not a silent addition.
 - **Trust model.** `fillModule` is **consensus-critical**: it gates every fill's
   progress. It is maker-signed (chosen per order), must be `view`, and must be

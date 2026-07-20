@@ -9,7 +9,9 @@ import {
     Order,
     OrderSide,
     Item,
-    Validator
+    Validator,
+    LegIn,
+    LegOut
 } from "@core/settlement/Settlement.sol";
 
 import {UsdrifForkBase} from "./shared/UsdrifForkBase.t.sol";
@@ -73,17 +75,10 @@ contract UsdrifExitTest is UsdrifForkBase {
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(RIF),
-            tokenOut: _a1(USDT0),
-            startAmountIn: _u1(amountIn),
-            endAmountIn: _u1(amountIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            startAmountOut: _u1(amountOut),
-            endAmountOut: _u1(amountOut),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(RIF, amountIn),
+            legsOut: _legsOut1(USDT0, amountOut),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

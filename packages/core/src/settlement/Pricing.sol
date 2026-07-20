@@ -41,36 +41,37 @@ library Pricing {
     function outputAt(Order calldata o, FillCtx memory ctx, uint256 j) internal view returns (uint256 amt) {
         if (o.side == OrderSide.BUY) {
             // Fixed output — the exact-output guarantee; never overridden.
-            uint256 fixedOut = o.startAmountOut[j];
+            uint256 fixedOut = o.legsOut[j].start;
             amt = ctx.fullFill
                 ? fixedOut
                 : ceilDiv(fixedOut * ctx.newFilled, ctx.anchor) - ceilDiv(fixedOut * ctx.prevFilled, ctx.anchor);
         } else {
-            uint256 bump = o.startAmountOut[j] != o.endAmountOut[j] ? o.bumpBps() : 0;
+            uint256 bump = o.legsOut[j].end != 0 ? o.bumpBps() : 0;
             amt = ceilDiv((ctx.newFilled - ctx.prevFilled) * o.amountOutAt(j, bump), ctx.anchor);
             // Soft-exclusivity override lifts ONLY the maker's own SELL legs — never
             // a fee leg to a third party (would leak the comp) — mirroring the input
             // side, where the override lowers only the maker's charge.
             if (amt != 0 && ctx.overrideBps != 0) {
-                address to = o.recipientOut[j];
+                address to = o.legsOut[j].recipient;
                 if (to == address(0) || to == o.maker) amt = ceilDiv(amt * (10_000 + ctx.overrideBps), 10_000);
             }
         }
     }
 
     /// @notice The amount owed on input leg `i` (post-override), maker → pool/solver.
-    ///         An auctioned leg (`start != end`, and every BUY leg) rises with the
-    ///         tick; a fixed leg is the exact cumulative slice.
+    ///         An auctioned leg (`end != 0`, and every BUY leg) rises with the tick;
+    ///         a fixed leg (`end == 0`) is the exact cumulative slice of `start`.
     function inputOwed(Order calldata o, FillCtx memory ctx, uint256 i) internal view returns (uint256 owed) {
-        if (o.side == OrderSide.BUY || o.startAmountIn[i] != o.endAmountIn[i]) {
-            uint256 bump = o.startAmountIn[i] != o.endAmountIn[i] ? o.bumpBps() : 0;
+        uint256 endIn = o.legsIn[i].end;
+        if (o.side == OrderSide.BUY || endIn != 0) {
+            uint256 bump = endIn != 0 ? o.bumpBps() : 0;
             owed = (ctx.newFilled - ctx.prevFilled) * o.amountInAt(i, bump) / ctx.anchor;
             // Soft-exclusivity override: a non-exclusive in-window filler charges
             // LESS input (the auction leg moves toward the maker).
             if (ctx.overrideBps != 0) owed = owed * (10_000 - ctx.overrideBps) / 10_000;
         } else {
             // Fixed input — the exact-input guarantee; never overridden.
-            uint256 amt = o.startAmountIn[i];
+            uint256 amt = o.legsIn[i].start;
             owed = ctx.fullFill ? amt : (amt * ctx.newFilled) / ctx.anchor - (amt * ctx.prevFilled) / ctx.anchor;
         }
     }

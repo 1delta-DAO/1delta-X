@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IFillModule} from "../interfaces/IFillModule.sol";
 import {Order} from "../settlement/Structs.sol";
+import {DutchAuction} from "../settlement/DutchAuction.sol";
 
 /// @title TwapFillModule
 /// @notice A time-weighted (TWAP) fill schedule as a fill module: one signed
@@ -43,6 +44,8 @@ import {Order} from "../settlement/Structs.sol";
 ///         == 0` (equal parts, no dust remainder that would trip the core's
 ///         `delta >= minFillAnchor` floor on the last part).
 contract TwapFillModule is IFillModule {
+    using DutchAuction for Order;
+
     error TwapNotConfigured();
     error TwapPartUnavailable();
 
@@ -54,8 +57,8 @@ contract TwapFillModule is IFillModule {
     {
         uint256 total = order.fillTotal;
         uint256 partSize = order.minFillAnchor;
-        uint256 start = order.decayStartTime;
-        uint256 duration = order.decayDuration;
+        uint256 start = order.decayStartTime();
+        uint256 duration = order.decayDuration();
         // Equal parts only; a dust final part < partSize would trip the core's
         // minFillAnchor floor. total/partSize must divide evenly.
         if (total == 0 || partSize == 0 || duration == 0 || total % partSize != 0) revert TwapNotConfigured();

@@ -3,11 +3,11 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, OrderSide, Validator} from "@core/settlement/Settlement.sol";
+import {Order, Item, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
-/// @dev Originator/sourcing fee as an OUTPUT LEG: every output names its own
-/// `recipientOut` (0 = maker), so the party that sourced the order is paid by
+/// @dev Originator/sourcing fee as an OUTPUT LEG: every output leg names its own
+/// `recipient` (0 = maker), so the party that sourced the order is paid by
 /// simply adding one more signed leg. A bps-of-tick fee is a leg whose
 /// start/end decay in proportion to the main leg; an absolute fee is a fixed
 /// leg. No fee subsystem, no admin — the fee is ordinary delivery.
@@ -25,17 +25,9 @@ contract SourcingFeeTest is CoreSettlementBase {
         returns (Order memory order)
     {
         order = _order(maker, nonce, USDC, WETH, usdcIn, wethOut, new Item[](0));
-        order.tokenOut = new address[](2);
-        order.tokenOut[0] = WETH;
-        order.tokenOut[1] = WETH;
-        order.startAmountOut = new uint256[](2);
-        order.startAmountOut[0] = wethOut - fee;
-        order.startAmountOut[1] = fee;
-        order.endAmountOut = new uint256[](2);
-        order.endAmountOut[0] = wethOut - fee;
-        order.endAmountOut[1] = fee;
-        order.recipientOut = new address[](2);
-        order.recipientOut[1] = feeRecipient; // [0] stays 0 ⇒ maker
+        order.legsOut = new LegOut[](2);
+        order.legsOut[0] = LegOut(WETH, wethOut - fee, 0, address(0)); // maker
+        order.legsOut[1] = LegOut(WETH, fee, 0, feeRecipient); //         sourcer
     }
 
     function _fund(uint256 usdcIn, uint256 wethOut) internal {
@@ -115,19 +107,12 @@ contract SourcingFeeTest is CoreSettlementBase {
         _fund(usdcIn, startOut); // solver funded for the worst (start) case
 
         Order memory order = _order(maker, 3, USDC, WETH, usdcIn, startOut, new Item[](0));
-        order.decayStartTime = uint32(block.timestamp);
-        order.decayDuration = 1000;
-        order.tokenOut = new address[](2);
-        order.tokenOut[0] = WETH;
-        order.tokenOut[1] = WETH;
-        order.startAmountOut = new uint256[](2);
-        order.startAmountOut[0] = startOut * (10_000 - feeBps) / 10_000;
-        order.startAmountOut[1] = startOut * feeBps / 10_000;
-        order.endAmountOut = new uint256[](2);
-        order.endAmountOut[0] = endOut * (10_000 - feeBps) / 10_000;
-        order.endAmountOut[1] = endOut * feeBps / 10_000;
-        order.recipientOut = new address[](2);
-        order.recipientOut[1] = feeRecipient;
+        order.timing = _packTiming(uint32(block.timestamp), 1000, 0);
+        order.legsOut = new LegOut[](2);
+        order.legsOut[0] = LegOut(
+            WETH, startOut * (10_000 - feeBps) / 10_000, endOut * (10_000 - feeBps) / 10_000, address(0)
+        );
+        order.legsOut[1] = LegOut(WETH, startOut * feeBps / 10_000, endOut * feeBps / 10_000, feeRecipient);
         bytes memory sig = _sign(order);
 
         vm.warp(block.timestamp + 500); // bump = 5000 → tick = 0.95 ether
@@ -151,18 +136,10 @@ contract SourcingFeeTest is CoreSettlementBase {
         _fund(usdcIn, wethOut);
 
         Order memory order = _order(maker, 4, USDC, WETH, usdcIn, wethOut, new Item[](0));
-        order.tokenOut = new address[](3);
-        order.tokenOut[0] = WETH;
-        order.tokenOut[1] = WETH;
-        order.tokenOut[2] = WETH;
-        order.startAmountOut = new uint256[](3);
-        order.startAmountOut[0] = wethOut - fee1 - fee2;
-        order.startAmountOut[1] = fee1;
-        order.startAmountOut[2] = fee2;
-        order.endAmountOut = order.startAmountOut;
-        order.recipientOut = new address[](3);
-        order.recipientOut[1] = feeRecipient;
-        order.recipientOut[2] = partner;
+        order.legsOut = new LegOut[](3);
+        order.legsOut[0] = LegOut(WETH, wethOut - fee1 - fee2, 0, address(0));
+        order.legsOut[1] = LegOut(WETH, fee1, 0, feeRecipient);
+        order.legsOut[2] = LegOut(WETH, fee2, 0, partner);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -180,7 +157,7 @@ contract SourcingFeeTest is CoreSettlementBase {
         _fund(usdcIn, wethOut);
 
         Order memory order = _order(maker, 5, USDC, WETH, usdcIn, wethOut, new Item[](0));
-        order.recipientOut[0] = maker; // explicit instead of the 0-default
+        order.legsOut[0].recipient = maker; // explicit instead of the 0-default
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -197,45 +174,19 @@ contract SourcingFeeTest is CoreSettlementBase {
 
         // Same token to the SAME recipient twice → double-delivery footgun.
         Order memory dup = _feeLegOrder(7, 2_000e6, 1 ether, 0.01 ether);
-        dup.recipientOut[1] = address(0); // both legs now → maker
+        dup.legsOut[1].recipient = address(0); // both legs now → maker
         (bool ok2, string memory reason2) = lens.validateOrder(dup);
         assertFalse(ok2, "duplicate (token, recipient) rejected");
-        assertEq(reason2, "duplicate tokenOut recipient");
-
-        // recipientOut length mismatch → malformed.
-        Order memory bad = _feeLegOrder(8, 2_000e6, 1 ether, 0.01 ether);
-        bad.recipientOut = new address[](1);
-        (bool ok3, string memory reason3) = lens.validateOrder(bad);
-        assertFalse(ok3, "length mismatch rejected");
-        assertEq(reason3, "tokenOut/amountOut length mismatch");
+        assertEq(reason2, "duplicate output token+recipient");
     }
 
     // ── Lens: a leg addressed to the settlement contract (self-burn) is flagged ──
     function test_feeLeg_recipientSettlement_lensRejects() public view {
         Order memory o = _feeLegOrder(9, 2_000e6, 1 ether, 0.01 ether);
-        o.recipientOut[1] = address(settlement); // burn the fee leg
+        o.legsOut[1].recipient = address(settlement); // burn the fee leg
         (bool ok, string memory reason) = lens.validateOrder(o);
         assertFalse(ok, "settlement recipient rejected");
-        assertEq(reason, "recipientOut is settlement (burn)");
-    }
-
-    // ── On-chain: a SHORT recipientOut reverts on a real (non-zero) delivery leg
-    //    (calldata OOB) — the fill fails closed; the Lens is the preflight guard. ──
-    function test_feeLeg_shortRecipientOut_onchainReverts() public {
-        uint256 usdcIn = 2_000e6;
-        uint256 wethOut = 1 ether;
-        _fund(usdcIn, wethOut);
-
-        Order memory order = _feeLegOrder(10, usdcIn, wethOut, wethOut / 100);
-        // Sign a version whose recipientOut is one short — the hash commits to it,
-        // so the maker is signing a self-unfillable order. leg 1 (fee) delivers a
-        // non-zero amount ⇒ `recipientOut[1]` OOB access panics.
-        order.recipientOut = new address[](1);
-        bytes memory sig = _sign(order);
-
-        vm.prank(solver);
-        vm.expectRevert(); // Panic(0x32) array out-of-bounds in _deliverOutputs
-        settlement.fill(order, sig, usdcIn);
+        assertEq(reason, "recipient is settlement (burn)");
     }
 
     // ── Soft-exclusivity override bumps ONLY the maker's leg, never the fee leg ──
@@ -257,18 +208,12 @@ contract SourcingFeeTest is CoreSettlementBase {
 
         Order memory order = _order(maker, 11, USDC, WETH, usdcIn, makerLeg, new Item[](0));
         // Two fixed output legs: maker + originator fee.
-        order.tokenOut = new address[](2);
-        order.tokenOut[0] = WETH;
-        order.tokenOut[1] = WETH;
-        order.startAmountOut = new uint256[](2);
-        order.startAmountOut[0] = makerLeg;
-        order.startAmountOut[1] = fee;
-        order.endAmountOut = order.startAmountOut;
-        order.recipientOut = new address[](2);
-        order.recipientOut[1] = feeRecipient;
+        order.legsOut = new LegOut[](2);
+        order.legsOut[0] = LegOut(WETH, makerLeg, 0, address(0));
+        order.legsOut[1] = LegOut(WETH, fee, 0, feeRecipient);
         // Soft exclusivity: a nominated filler, but the solver is NOT it → override.
         order.exclusiveFiller = address(0xE0E0);
-        order.exclusivityEndTime = uint32(block.timestamp + 1 hours);
+        _setExclusivityEnd(order, uint32(block.timestamp + 1 hours));
         order.exclusivityOverrideBps = overrideBps;
         bytes memory sig = _sign(order);
 
@@ -287,7 +232,7 @@ contract SourcingFeeTest is CoreSettlementBase {
     function test_feeLeg_onBuyOrder() public {
         address originator = feeRecipient;
         uint256 usdcIn = 2_000e6; //     fixed-price BUY input
-        uint256 makerOut = 0.95 ether; //  anchor (tokenOut[0])
+        uint256 makerOut = 0.95 ether; //  anchor (legsOut[0])
         uint256 fee = 0.05 ether; //       fee leg (fixed)
 
         deal(USDC, maker, usdcIn);
@@ -296,31 +241,19 @@ contract SourcingFeeTest is CoreSettlementBase {
         permit3.approveToken(address(settlement), USDC, uint160(usdcIn), 0);
         _approveSolverSide(makerOut + fee, WETH);
 
-        address[] memory tOut = new address[](2);
-        tOut[0] = WETH;
-        tOut[1] = WETH;
-        uint256[] memory aOut = new uint256[](2);
-        aOut[0] = makerOut;
-        aOut[1] = fee;
-        address[] memory recips = new address[](2);
-        recips[1] = originator;
+        LegOut[] memory legsOut = new LegOut[](2);
+        legsOut[0] = LegOut(WETH, makerOut, 0, address(0)); // anchor → maker
+        legsOut[1] = LegOut(WETH, fee, 0, originator); //      fee → originator
 
         Order memory order = Order({
             maker: maker,
             side: OrderSide.BUY,
             nonce: 12,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            startAmountIn: _u1(usdcIn),
-            endAmountIn: _u1(usdcIn), // fixed-price input
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: tOut,
-            startAmountOut: aOut,
-            endAmountOut: aOut, // BUY outputs are fixed
-            recipientOut: recips,
+            legsIn: _legsIn1(USDC, usdcIn), // fixed-price input (end == 0)
+            legsOut: legsOut,
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -334,7 +267,7 @@ contract SourcingFeeTest is CoreSettlementBase {
         });
         bytes memory sig = _sign(order);
 
-        // Full fill (denominated in tokenOut[0] units = the maker anchor).
+        // Full fill (denominated in legsOut[0] units = the maker anchor).
         vm.prank(solver);
         settlement.fill(order, sig, makerOut);
 
@@ -356,31 +289,19 @@ contract SourcingFeeTest is CoreSettlementBase {
         permit3.approveToken(address(settlement), USDC, uint160(usdcIn), 0);
         _approveSolverSide(makerOut + fee, WETH);
 
-        address[] memory tOut = new address[](2);
-        tOut[0] = WETH;
-        tOut[1] = WETH;
-        uint256[] memory aOut = new uint256[](2);
-        aOut[0] = makerOut;
-        aOut[1] = fee;
-        address[] memory recips = new address[](2);
-        recips[1] = feeRecipient;
+        LegOut[] memory legsOut = new LegOut[](2);
+        legsOut[0] = LegOut(WETH, makerOut, 0, address(0));
+        legsOut[1] = LegOut(WETH, fee, 0, feeRecipient);
 
         Order memory order = Order({
             maker: maker,
             side: OrderSide.BUY,
             nonce: 13,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            startAmountIn: _u1(usdcIn),
-            endAmountIn: _u1(usdcIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: tOut,
-            startAmountOut: aOut,
-            endAmountOut: aOut,
-            recipientOut: recips,
+            legsIn: _legsIn1(USDC, usdcIn),
+            legsOut: legsOut,
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

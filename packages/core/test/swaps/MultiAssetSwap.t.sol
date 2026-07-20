@@ -2,9 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
-import {stdError} from "forge-std/StdError.sol";
 
-import {Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, Item, Validator, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -35,22 +34,23 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         address[] memory tokenOut,
         uint256[] memory amountOut
     ) internal view returns (Order memory) {
+        LegIn[] memory legsIn = new LegIn[](tokenIn.length);
+        for (uint256 i; i < tokenIn.length; i++) {
+            legsIn[i] = LegIn(tokenIn[i], amountIn[i], 0); // fixed input (end == 0)
+        }
+        LegOut[] memory legsOut = new LegOut[](tokenOut.length);
+        for (uint256 j; j < tokenOut.length; j++) {
+            legsOut[j] = LegOut(tokenOut[j], amountOut[j], 0, address(0)); // fixed output (end == 0)
+        }
         return Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn,
-            startAmountIn: amountIn,
-            endAmountIn: amountIn,
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: tokenOut,
-            startAmountOut: amountOut,
-            endAmountOut: amountOut,
-            recipientOut: new address[](tokenOut.length),
+            legsIn: legsIn,
+            legsOut: legsOut,
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -195,6 +195,39 @@ contract MultiAssetSwapTest is CoreSettlementBase {
     /// @dev Every output leg auctions simultaneously on ONE shared clock, each
     ///      decaying between its own start/end bounds — and a partial fill still
     ///      slices the whole basket by fillAmountIn / amountIn[0].
+    /// @dev Two output legs on one shared decay clock (100s from now).
+    function _twoCurveOrder(
+        uint256 usdcIn,
+        uint256 wethStart,
+        uint256 wethEnd,
+        uint256 daiStart,
+        uint256 daiEnd
+    ) internal view returns (Order memory order) {
+        LegOut[] memory legsOut = new LegOut[](2);
+        legsOut[0] = LegOut(WETH, wethStart, wethEnd, address(0));
+        legsOut[1] = LegOut(DAI, daiStart, daiEnd, address(0));
+        order = Order({
+            maker: maker,
+            side: OrderSide.SELL,
+            nonce: 6,
+            deadline: block.timestamp + 1 hours,
+            legsIn: _legsIn1(USDC, usdcIn),
+            legsOut: legsOut,
+            timing: _packTiming(uint32(block.timestamp), 100, 0),
+            exclusiveFiller: address(0),
+            minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
+            items: new Item[](0),
+            validators: new Validator[](0),
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
+        });
+    }
+
     function test_multiOut_dutchDecay_partialFill() public {
         uint256 usdcIn = 2_000e6;
         // Two DIFFERENT decay curves, one clock.
@@ -211,33 +244,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         _approveSolverSide(wethStart, WETH);
         _approveSolverSide(daiStart, DAI);
 
-        Order memory order = Order({
-            maker: maker,
-            side: OrderSide.SELL,
-            nonce: 6,
-            deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            startAmountIn: _u1(usdcIn),
-            endAmountIn: _u1(usdcIn),
-            decayStartTime: uint32(block.timestamp),
-            decayDuration: 100,
-            tokenOut: _addr2(WETH, DAI),
-            startAmountOut: _uint2(wethStart, daiStart),
-            endAmountOut: _uint2(wethEnd, daiEnd),
-            recipientOut: new address[](2),
-            exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
-            minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
-            curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
-            fillModule: address(0),
-            fillTotal: 0
-        });
+        Order memory order = _twoCurveOrder(usdcIn, wethStart, wethEnd, daiStart, daiEnd);
         bytes memory sig = _sign(order);
 
         // Warp to the auction midpoint → each leg decays halfway.
@@ -262,13 +269,9 @@ contract MultiAssetSwapTest is CoreSettlementBase {
 
     // ──────────────────── validateOrder guards ────────────────────
 
-    function test_validate_rejectsLengthMismatch() public view {
-        Order memory order =
-            _multiOrder(3, _a1(USDC), _u1(1e6), _addr2(WETH, DAI), _u1(1 ether)); // 2 tokenOut, 1 amount
-        (bool ok, string memory reason) = lens.validateOrder(order);
-        assertFalse(ok, "length mismatch rejected");
-        assertEq(reason, "tokenOut/amountOut length mismatch");
-    }
+    // NB: `tokenIn/amountIn` (and `tokenOut/amountOut`) length-mismatch cases are
+    // gone — each leg now bundles its token with its amounts in one LegIn/LegOut
+    // struct, so a parallel-array mismatch is structurally impossible to express.
 
     function test_validate_rejectsInOutOverlap() public view {
         // WETH appears in both the input and output baskets.
@@ -276,7 +279,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             _multiOrder(4, _addr2(WETH, USDC), _uint2(1 ether, 1e6), _a1(WETH), _u1(1 ether));
         (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, "in/out overlap rejected");
-        assertEq(reason, "tokenIn == tokenOut");
+        assertEq(reason, "input token == output token");
     }
 
     function test_validate_rejectsDuplicateTokenIn() public view {
@@ -284,7 +287,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             _multiOrder(5, _addr2(USDC, USDC), _uint2(1e6, 2e6), _a1(WETH), _u1(1 ether));
         (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, "duplicate tokenIn rejected");
-        assertEq(reason, "duplicate tokenIn");
+        assertEq(reason, "duplicate input token");
     }
 
     // ──────────────────── On-chain safe-fail of malformed orders ────────────────────
@@ -326,38 +329,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received the output");
     }
 
-    /// @dev A tokenOut/amountOut length mismatch safe-fails: `_deliverOutputs`
-    ///      indexes the shorter price array and reverts (array OOB) instead of
-    ///      silently mispricing.
-    function test_fill_outputLengthMismatch_reverts() public {
-        deal(USDC, maker, 1_000e6);
-        deal(WETH, solver, 1 ether); //   fund leg 0 so we reach the OOB on leg 1
-        _approveMakerToSettlement(USDC, 1_000e6);
-        _approveSolverSide(1 ether, WETH);
-
-        // 2 tokenOut, 1 price entry — leg 0 (WETH) delivers, leg 1 indexes startAmountOut[1].
-        Order memory order = _multiOrder(11, _a1(USDC), _u1(1_000e6), _addr2(WETH, DAI), _u1(1 ether));
-        bytes memory sig = _sign(order);
-
-        vm.prank(solver);
-        vm.expectRevert(stdError.indexOOBError);
-        settlement.fill(order, sig, 1_000e6);
-    }
-
-    /// @dev A tokenIn/amountIn length mismatch safe-fails: `_payInputsToSolver`
-    ///      indexes the shorter amount array and reverts (array OOB).
-    function test_fill_inputLengthMismatch_reverts() public {
-        deal(USDC, maker, 1_000e6);
-        deal(WETH, solver, 1 ether);
-        _approveMakerToSettlement(USDC, 1_000e6);
-        _approveSolverSide(1 ether, WETH);
-
-        // 2 tokenIn, 1 amount entry.
-        Order memory order = _multiOrder(12, _addr2(USDC, DAI), _u1(1_000e6), _a1(WETH), _u1(1 ether));
-        bytes memory sig = _sign(order);
-
-        vm.prank(solver);
-        vm.expectRevert(stdError.indexOOBError);
-        settlement.fill(order, sig, 1_000e6);
-    }
+    // NB: the former `test_fill_{output,input}LengthMismatch_reverts` cases are
+    // obsolete — bundling token+amounts per leg removes the parallel-array shape
+    // that could desynchronize, so there is no longer an on-chain OOB to guard.
 }

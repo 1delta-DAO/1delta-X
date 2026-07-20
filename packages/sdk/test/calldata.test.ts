@@ -24,12 +24,12 @@ describe("calldata builders round-trip", () => {
     const { functionName, args } = decodeFunctionData({ abi: SETTLEMENT_ABI, data });
     expect(functionName).toBe("fill");
     expect((args as any)[2]).toBe(123n);
-    expect((args as any)[0].tokenIn.length).toBe(2);
+    expect((args as any)[0].legsIn.length).toBe(2);
     expect((args as any)[0].items.length).toBe(2);
   });
 
   it("fillWithPermit encodes and decodes", () => {
-    const batch = permitBatch([tokenPermit(CANONICAL_ORDER.maker, CANONICAL_ORDER.tokenIn[0]!, 1n, 1)], [], 0n, 9n);
+    const batch = permitBatch([tokenPermit(CANONICAL_ORDER.maker, CANONICAL_ORDER.legsIn[0]!.token, 1n, 1)], [], 0n, 9n);
     const data = encodeFillWithPermit(CANONICAL_ORDER, batch, SIG, 456n);
     const { functionName, args } = decodeFunctionData({ abi: SETTLEMENT_ABI, data });
     expect(functionName).toBe("fillWithPermit");
@@ -46,7 +46,7 @@ describe("calldata builders round-trip", () => {
 
   it("multi-input executeFill encodes and decodes", () => {
     const data = encodeExecuteFillMultiInput({
-      flashSource: CANONICAL_ORDER.tokenOut[0]!,
+      flashSource: CANONICAL_ORDER.legsOut[0]!.token,
       flashAmount: 1n,
       order: CANONICAL_ORDER,
       sig: SIG,
@@ -61,7 +61,7 @@ describe("calldata builders round-trip", () => {
 
   it("multi-output executeFill encodes and decodes", () => {
     const legs: OutputLeg[] = [
-      { token: CANONICAL_ORDER.tokenOut[0]!, flashAmount: 1n, dexFee: 500, spendIn: 2n, minOut: 1n },
+      { token: CANONICAL_ORDER.legsOut[0]!.token, flashAmount: 1n, dexFee: 500, spendIn: 2n, minOut: 1n },
     ];
     const data = encodeExecuteFillMultiOutput({ order: CANONICAL_ORDER, sig: SIG, fillAmountIn: 7n, legs });
     const { functionName, args } = decodeFunctionData({ abi: MULTI_OUTPUT_SOLVER_ABI, data });

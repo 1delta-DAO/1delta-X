@@ -7,7 +7,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
-import {Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, Item, Validator, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -144,22 +144,17 @@ contract PlainSwapTest is CoreSettlementBase {
         _approveSolverSide(startOut, WETH);
 
         Item[] memory items = new Item[](0);
+        LegOut[] memory legsOut = new LegOut[](1);
+        legsOut[0] = LegOut(WETH, startOut, endOut, address(0));
         Order memory order = Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: 2,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            tokenOut: _a1(WETH),
-            startAmountIn: _u1(usdcIn),
-            endAmountIn: _u1(usdcIn),
-            decayStartTime: uint32(block.timestamp),
-            decayDuration: 100,
-            startAmountOut: _u1(startOut),
-            endAmountOut: _u1(endOut),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDC, usdcIn),
+            legsOut: legsOut,
+            timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -327,22 +322,17 @@ contract PlainSwapTest is CoreSettlementBase {
         view
         returns (Order memory)
     {
+        LegOut[] memory legsOut = new LegOut[](1);
+        legsOut[0] = LegOut(WETH, startOut, endOut, address(0));
         return Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            tokenOut: _a1(WETH),
-            startAmountIn: _u1(usdcIn),
-            endAmountIn: _u1(usdcIn),
-            decayStartTime: uint32(block.timestamp),
-            decayDuration: 100,
-            startAmountOut: _u1(startOut),
-            endAmountOut: _u1(endOut),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDC, usdcIn),
+            legsOut: legsOut,
+            timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -401,7 +391,7 @@ contract PlainSwapTest is CoreSettlementBase {
 
         Order memory order = _plainSwapOrder(8, usdcIn, wethOut);
         order.exclusiveFiller = solver;
-        order.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(order, uint32(block.timestamp + 100));
         bytes memory sig = _sign(order);
 
         // Still inside the exclusivity window — the nominated filler fills fine.

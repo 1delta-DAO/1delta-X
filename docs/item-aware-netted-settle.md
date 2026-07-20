@@ -16,8 +16,8 @@
 A leverage order's solver-side is a swap: the solver *delivers the collateral
 asset and receives the borrowed asset* (see
 [docs README](README.md#generalizing-beyond-fungible-swaps) and the
-`DualConversionLeverage` order — `tokenIn=[USDC borrowed, DAI equity]`,
-`tokenOut=[WETH collateral]`, `items=[MAKE deposit WETH, TAKE borrow USDC]`). A
+`DualConversionLeverage` order — `legsIn=[USDC borrowed, DAI equity]`,
+`legsOut=[WETH collateral]`, `items=[MAKE deposit WETH, TAKE borrow USDC]`). A
 plain spot order that **sells WETH for USDC** is its exact mirror.
 
 But you **cannot** match them inventory-free *and* callback-free with the fill
@@ -257,7 +257,7 @@ can seed a bootstrap where the batch is short; the match case needs no interacti
    (golden hash untouched). The `inputFundingMask`-on-the-order alternative (Lens-
    validatable offline) stays available if a self-describing order is later wanted.
 2. **Deriving the token universe with items.** *Resolved: `_collectTokens` (the
-   `tokenIn`/`tokenOut` union) suffices for leverage/repay/migrate* — a TAKE's
+   `legsIn`/`legsOut` union) suffices for leverage/repay/migrate* — a TAKE's
    output token is the input leg it funds, and a MAKE's funding token is the
    delivered output, so both are in the union. **Documented scope limit:** an item
    moving a token *outside* the leg universe is out of scope (it would be
@@ -301,7 +301,7 @@ Findings and dispositions:
 
 | # | Sev | Finding | Disposition |
 | --- | --- | --- | --- |
-| F1 | Low | Duplicate `tokenIn` tokens corrupt `_settleInputsToPool`'s per-leg proceeds delta (over-refunds the maker; backstopped to revert-or-solver-self-harm, never innocent-party loss) | **Fixed** — `_assertItemBatchShape` rejects repeated input tokens (`BatchItemsDuplicateInput`); `test_duplicateInput_reverts` |
+| F1 | Low | Duplicate `legsIn` tokens corrupt `_settleInputsToPool`'s per-leg proceeds delta (over-refunds the maker; backstopped to revert-or-solver-self-harm, never innocent-party loss) | **Fixed** — `_assertItemBatchShape` rejects repeated input tokens (`BatchItemsDuplicateInput`); `test_duplicateInput_reverts` |
 | F2 | Low | `SETTLE` items silently executed despite the doc declaring them out of scope (unenforced scope claim on an untested path) | **Fixed** — `_assertItemBatchShape` rejects SETTLE (`BatchItemsSettleUnsupported`); `test_settleItem_reverts` |
 | F3 | Low/Info | A TAKE producing a token that is *not* an input leg routes to the solver, not the maker (maker misconfig; unreachable for well-formed leverage/repay/migrate) | Documented constraint: a TAKE's proceeds token must be an input leg |
 | F4 | Info | Whole-check completeness rests on "item tokens ⊆ leg universe", which holds only because Settlement grants no approvals | Documented; an "asserts-no-approvals" invariant test is a cheap future guard |

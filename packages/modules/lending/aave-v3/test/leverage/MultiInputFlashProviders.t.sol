@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {AaveV3MultiInputFlashSolver} from "@solvers/multi-input/AaveV3MultiInputFlashSolver.sol";
 import {EulerMultiInputFlashSolver} from "@solvers/multi-input/EulerMultiInputFlashSolver.sol";
 import {MorphoMultiInputFlashSolver} from "@solvers/multi-input/MorphoMultiInputFlashSolver.sol";
@@ -100,17 +100,10 @@ contract MultiInputFlashProvidersTest is AaveModulesBase {
             side: OrderSide.SELL,
             nonce: 50,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a2(USDC, DAI),
-            startAmountIn: _u2(borrowOut, equityIn),
-            endAmountIn: _u2(borrowOut, equityIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a1(WETH),
-            startAmountOut: _u1(collateralIn),
-            endAmountOut: _u1(collateralIn),
-            recipientOut: new address[](1),
+            legsIn: _legsIn2(USDC, borrowOut, DAI, equityIn),
+            legsOut: _legsOut1(WETH, collateralIn),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

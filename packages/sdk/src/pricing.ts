@@ -1,19 +1,20 @@
-import { type Order, OrderSide } from "./types";
+import { type Order, OrderSide, unpackTiming } from "./types";
 
 /**
  * Client-side mirror of the contract's dutch pricing + fill math, for off-chain
  * previews. Reverts on the same malformed inputs the contract rejects.
  *
  * One side of every order is FIXED and the other is a dutch auction; `side`
- * selects which. Fills are denominated in ANCHOR units — `tokenIn[0]` for SELL,
- * `tokenOut[0]` for BUY.
+ * selects which. Fills are denominated in ANCHOR units — `legsIn[0]` for SELL,
+ * `legsOut[0]` for BUY. A leg with `end == 0n` is fixed at `start`; otherwise it
+ * auctions (outputs FALL `start >= end`, inputs RISE `start <= end`).
  */
 
 /** Fill denominator. Mirrors the settlement `_openFill`: the maker-signed
  *  `fillTotal` when set (module orders), else the leg anchor. */
 export function anchorTotal(order: Order): bigint {
   if (order.fillTotal !== 0n) return order.fillTotal;
-  return order.side === OrderSide.BUY ? order.startAmountOut[0]! : order.startAmountIn[0]!;
+  return order.side === OrderSide.BUY ? order.legsOut[0]!.start : order.legsIn[0]!.start;
 }
 
 function ceilDiv(a: bigint, b: bigint): bigint {
@@ -25,18 +26,20 @@ const BPS = 10_000n;
 /**
  * Shared normalized decay in [0, 10000] at time `now`, given a basefee. Mirrors
  * `DutchAuction.bumpBps`: a piecewise-linear curve if `curve` is set, else a
- * single linear segment; then the optional gas bump is added and clamped.
+ * single linear segment; then the optional gas bump is added and clamped. The
+ * `decayStartTime`/`decayDuration` clocks are unpacked from `order.timing`.
  */
 export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n): bigint {
   let bps = 0n;
   const n = order.curve.length;
-  const decayStart = BigInt(order.decayStartTime);
+  const { decayStartTime, decayDuration } = unpackTiming(order.timing);
+  const decayStart = BigInt(decayStartTime);
 
   if (n === 0) {
-    if (order.decayDuration !== 0) {
+    if (decayDuration !== 0) {
       if (now < decayStart) throw new Error("AuctionNotStarted");
       const elapsed = now - decayStart;
-      const duration = BigInt(order.decayDuration);
+      const duration = BigInt(decayDuration);
       bps = elapsed >= duration ? BPS : (BPS * elapsed) / duration;
     }
   } else {
@@ -72,30 +75,30 @@ export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n): bigint
 
 /** Current output tick for leg `j` — the SELL auction price, or the fixed BUY output. */
 export function currentAmountOutAt(order: Order, j: number, now: bigint, baseFee: bigint = 0n): bigint {
-  const startOut = order.startAmountOut[j]!;
-  const endOut = order.endAmountOut[j]!;
-  if (startOut < endOut) throw new Error("InvalidAuctionParams: startAmountOut < endAmountOut");
-  if (startOut === endOut) return startOut;
+  const startOut = order.legsOut[j]!.start;
+  const endOut = order.legsOut[j]!.end;
+  if (endOut === 0n) return startOut; // fixed leg — no bump
+  if (startOut < endOut) throw new Error("InvalidAuctionParams: output start < end");
   return startOut - ((startOut - endOut) * bumpBps(order, now, baseFee)) / BPS;
 }
 
 /** Current output tick for every leg. Mirrors `previewAmountOut`. */
 export function currentAmountOut(order: Order, now: bigint, baseFee: bigint = 0n): bigint[] {
-  return order.tokenOut.map((_, j) => currentAmountOutAt(order, j, now, baseFee));
+  return order.legsOut.map((_, j) => currentAmountOutAt(order, j, now, baseFee));
 }
 
-/** Current input tick for leg `i` — the rising BUY auction price, or the fixed SELL input. */
+/** Current input tick for leg `i` — the rising BUY/fee auction price, or the fixed SELL input. */
 export function currentAmountInAt(order: Order, i: number, now: bigint, baseFee: bigint = 0n): bigint {
-  const startIn = order.startAmountIn[i]!;
-  const endIn = order.endAmountIn[i]!;
-  if (startIn > endIn) throw new Error("InvalidAuctionParams: startAmountIn > endAmountIn");
-  if (startIn === endIn) return startIn;
+  const startIn = order.legsIn[i]!.start;
+  const endIn = order.legsIn[i]!.end;
+  if (endIn === 0n) return startIn; // fixed leg — no bump
+  if (startIn > endIn) throw new Error("InvalidAuctionParams: input start > end");
   return startIn + ((endIn - startIn) * bumpBps(order, now, baseFee)) / BPS;
 }
 
 /** Current input tick for every leg. Mirrors `previewAmountIn`. */
 export function currentAmountIn(order: Order, now: bigint): bigint[] {
-  return order.tokenIn.map((_, i) => currentAmountInAt(order, i, now));
+  return order.legsIn.map((_, i) => currentAmountInAt(order, i, now));
 }
 
 /**
@@ -103,14 +106,14 @@ export function currentAmountIn(order: Order, now: bigint): bigint[] {
  * `prevFilled` is the cumulative filled anchor before this fill. Mirrors
  * `_deliverOutputs` (ceil-rounded; the maker is never underpaid):
  *   • SELL — auction-priced per fill.
- *   • BUY  — fixed output, cumulative so partials sum exactly to `startAmountOut`.
+ *   • BUY  — fixed output, cumulative so partials sum exactly to `legsOut[j].start`.
  */
 export function fillAmountsOut(order: Order, fillAmount: bigint, now: bigint, prevFilled: bigint = 0n): bigint[] {
   const anchor = anchorTotal(order);
   const newFilled = prevFilled + fillAmount;
-  return order.tokenOut.map((_, j) => {
+  return order.legsOut.map((_, j) => {
     if (order.side === OrderSide.BUY) {
-      const fixedOut = order.startAmountOut[j]!;
+      const fixedOut = order.legsOut[j]!.start;
       return ceilDiv(fixedOut * newFilled, anchor) - ceilDiv(fixedOut * prevFilled, anchor);
     }
     return ceilDiv(fillAmount * currentAmountOutAt(order, j, now), anchor);
@@ -118,11 +121,11 @@ export function fillAmountsOut(order: Order, fillAmount: bigint, now: bigint, pr
 }
 
 /**
- * Input owed to the solver for `tokenIn[i]` on the fill `[prevFilled, newFilled]`.
+ * Input owed to the solver for `legsIn[i]` on the fill `[prevFilled, newFilled]`.
  * Mirrors `_payInputsToSolver`:
- *   • Fixed leg (`start == end` on SELL) — cumulative floor slice, exact-input.
- *   • Auctioned leg (any BUY input; a rising SELL relayer-fee leg) —
- *     auction-priced per fill (floor; total never exceeds `endAmountIn`).
+ *   • Fixed leg (`end == 0n` on SELL) — cumulative floor slice, exact-input.
+ *   • Auctioned leg (any BUY input; a rising SELL relayer-fee leg, `end != 0n`) —
+ *     auction-priced per fill (floor; total never exceeds the leg's `end`).
  */
 export function inputOwed(
   order: Order,
@@ -133,11 +136,11 @@ export function inputOwed(
   baseFee: bigint = 0n,
 ): bigint {
   const anchor = anchorTotal(order);
-  const auctioned = order.side === OrderSide.BUY || order.startAmountIn[i]! !== order.endAmountIn[i]!;
+  const auctioned = order.side === OrderSide.BUY || order.legsIn[i]!.end !== 0n;
   if (auctioned) {
     const fillAmount = newFilled - prevFilled;
     return (fillAmount * currentAmountInAt(order, i, now, baseFee)) / anchor;
   }
-  const amt = order.startAmountIn[i]!;
+  const amt = order.legsIn[i]!.start;
   return (amt * newFilled) / anchor - (amt * prevFilled) / anchor;
 }

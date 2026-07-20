@@ -24,14 +24,6 @@ export interface Validator {
   data: Hex;
 }
 
-/**
- * A signed limit order. The conversion leg is multi-asset: the maker gives a
- * basket (`tokenIn`/`startAmountIn`/`endAmountIn`) and receives a basket
- * (`tokenOut`/`startAmountOut`/`endAmountOut`). One side is fixed and the other
- * is a dutch auction (`side` selects which). Partial fills scale every leg by the
- * single fraction `fillAmount / anchor[0]` (anchor = tokenIn[0] for SELL,
- * tokenOut[0] for BUY).
- */
 export enum OrderSide {
   SELL = 0,
   BUY = 1,
@@ -44,31 +36,51 @@ export interface CurvePoint {
   bumpBps: number;
 }
 
+/**
+ * One input leg the maker gives. `end == 0n` = fixed at `start`; otherwise a
+ * RISING auction leg where `start <= end` (auction floor → ceiling). Used for
+ * BUY conversion inputs and SELL relayer-fee legs.
+ */
+export interface LegIn {
+  token: Address;
+  start: bigint;
+  end: bigint;
+}
+
+/**
+ * One output leg delivered to `recipient` (zero address = the maker). `end == 0n`
+ * = fixed at `start`; otherwise a FALLING auction leg where `start >= end`
+ * (auction start → floor). A fee leg is simply an output addressed to the
+ * originator (proportional start/end = bps-of-tick fee; fixed = absolute fee).
+ */
+export interface LegOut {
+  token: Address;
+  start: bigint;
+  end: bigint;
+  recipient: Address;
+}
+
+/**
+ * A signed limit order. The conversion leg is multi-asset: the maker gives a
+ * basket of `legsIn` and receives a basket of `legsOut`. Each leg is fixed
+ * (`end == 0n`) or a dutch auction (SELL outputs fall, BUY/fee inputs rise).
+ * Partial fills scale every leg by the single fraction `fillAmount / anchor`
+ * (anchor = legsIn[0] for SELL, legsOut[0] for BUY, or `fillTotal` if set).
+ * The three auction clocks are bit-packed into `timing` — see {@link packTiming}.
+ */
 export interface Order {
   maker: Address;
   /// SELL (fixed input, outputs decay) or BUY (fixed output, inputs rise).
   side: OrderSide;
   nonce: bigint;
   deadline: bigint;
-  tokenIn: readonly Address[];
-  /// Fixed amount when == endAmountIn; else the auction floor (best for maker)
-  /// of a RISING leg — BUY conversion inputs or a SELL relayer-fee leg.
-  startAmountIn: readonly bigint[];
-  /// == startAmountIn (fixed) or the auction ceiling ("pay up to"); must be
-  /// >= startAmountIn — inputs only rise.
-  endAmountIn: readonly bigint[];
-  decayStartTime: number;
-  decayDuration: number;
-  tokenOut: readonly Address[];
-  startAmountOut: readonly bigint[];
-  endAmountOut: readonly bigint[];
-  /// Per-output delivery recipient; zero address = the maker. A fee leg is an
-  /// output addressed to the originator (proportional start/end = bps-of-tick
-  /// fee; start == end = absolute fee).
-  recipientOut: readonly Address[];
+  legsIn: readonly LegIn[];
+  legsOut: readonly LegOut[];
+  /// Packed auction clocks: decayStartTime | decayDuration<<32 | exclusivityEndTime<<64.
+  /// Build/read with {@link packTiming} / {@link unpackTiming}.
+  timing: bigint;
   exclusiveFiller: Address;
-  exclusivityEndTime: number;
-  /// Anti-dust floor per fill, in anchor units (tokenIn[0] for SELL, tokenOut[0] for BUY).
+  /// Anti-dust floor per fill, in anchor units (legsIn[0] for SELL, legsOut[0] for BUY).
   minFillAnchor: bigint;
   /// Soft exclusivity: bps a non-exclusive in-window filler must improve the maker by (0 = hard).
   exclusivityOverrideBps: bigint;
@@ -92,10 +104,40 @@ export interface Order {
   fillModule: Address;
   /**
    * Fill denominator when the unit isn't a fungible leg (an NFT, an auction
-   * lot). `0n` = derive from the leg anchor (startAmountIn[0]/startAmountOut[0]).
+   * lot). `0n` = derive from the leg anchor (legsIn[0].start/legsOut[0].start).
    * Maker-signed so the cap `filled + delta <= fillTotal` stays in the core.
    */
   fillTotal: bigint;
+}
+
+// ──────────────────── Packed timing helpers ────────────────────
+
+const U32 = 0xffff_ffffn;
+
+/**
+ * Pack the three auction clocks into the single `Order.timing` word, mirroring
+ * the Solidity layout: bits [0:32) decayStartTime, [32:64) decayDuration,
+ * [64:96) exclusivityEndTime. Each must fit in a uint32.
+ */
+export function packTiming(decayStartTime: number, decayDuration: number, exclusivityEndTime: number): bigint {
+  const s = BigInt(decayStartTime);
+  const d = BigInt(decayDuration);
+  const e = BigInt(exclusivityEndTime);
+  if ((s & ~U32) !== 0n || (d & ~U32) !== 0n || (e & ~U32) !== 0n) throw new Error("timing field exceeds uint32");
+  return s | (d << 32n) | (e << 64n);
+}
+
+/// Inverse of {@link packTiming}: unpack `Order.timing` into its three clocks.
+export function unpackTiming(timing: bigint): {
+  decayStartTime: number;
+  decayDuration: number;
+  exclusivityEndTime: number;
+} {
+  return {
+    decayStartTime: Number(timing & U32),
+    decayDuration: Number((timing >> 32n) & U32),
+    exclusivityEndTime: Number((timing >> 64n) & U32),
+  };
 }
 
 // ──────────────────── Fee-leg helpers ────────────────────
@@ -104,7 +146,8 @@ export interface Order {
  * Build the two output legs of a bps-of-tick sourcing fee: the maker leg and a
  * fee leg addressed to `recipient`, each decaying in proportion so the realized
  * fee is exactly `feeBps` of the delivered tick at any point of the auction.
- * Spread the returned arrays into the order's output fields.
+ * `endAmount == 0n` yields two fixed legs (absolute fee). Concat the returned
+ * legs into the order's `legsOut`.
  */
 export function feeSplitLegs(
   token: Address,
@@ -112,24 +155,17 @@ export function feeSplitLegs(
   endAmount: bigint,
   recipient: Address,
   feeBps: bigint,
-): {
-  tokenOut: Address[];
-  startAmountOut: bigint[];
-  endAmountOut: bigint[];
-  recipientOut: Address[];
-} {
+): [LegOut, LegOut] {
   const BPS = 10_000n;
   if (feeBps >= BPS) throw new Error(`feeBps ${feeBps} >= 10000`);
   if (feeBps !== 0n && BigInt(recipient) === 0n) throw new Error("fee set without recipient");
   const startFee = (startAmount * feeBps) / BPS;
   const endFee = (endAmount * feeBps) / BPS;
   const zero = "0x0000000000000000000000000000000000000000" as Address;
-  return {
-    tokenOut: [token, token],
-    startAmountOut: [startAmount - startFee, startFee],
-    endAmountOut: [endAmount - endFee, endFee],
-    recipientOut: [zero, recipient], // zero = the maker
-  };
+  return [
+    { token, start: startAmount - startFee, end: endAmount === 0n ? 0n : endAmount - endFee, recipient: zero },
+    { token, start: startFee, end: endAmount === 0n ? 0n : endFee, recipient },
+  ];
 }
 
 /// Permit3 token-book permit (Settlement/module may pull `token`).

@@ -37,7 +37,7 @@ struct OutputLeg {
 ///            v3, then repay the flashed amount.
 ///    3. Leftover input / surplus outputs stay here as solver profit.
 ///
-///  The input side is single-source: `order.tokenIn[0]` funds every buyback.
+///  The input side is single-source: `order.legsIn[0].token` funds every buyback.
 ///  Holds no funds between fills; callable by anyone.
 contract MultiOutputFlashSolver is BaseFlashSolver {
     IBalancerVault public immutable vault;
@@ -80,7 +80,7 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
         (Order memory order, bytes memory sig, uint256 fillAmountIn, OutputLeg[] memory legs) =
             abi.decode(userData, (Order, bytes, uint256, OutputLeg[]));
 
-        address tokenIn = order.tokenIn[0]; // single-source buyback currency
+        address tokenIn = order.legsIn[0].token; // single-source buyback currency
 
         // Delivers every output leg to the maker (from the flashed basket) and
         // pays us `tokenIn`.

@@ -36,7 +36,7 @@ describe("EIP-712 parity", () => {
 
   it("permit-witness signature recovers to the signer (fillWithPermit path)", async () => {
     const batch = permitBatch(
-      [tokenPermit(DEPLOYMENT.settlement, CANONICAL_ORDER.tokenIn[0]!, 2_000_000_000n, 2_000_000_000)],
+      [tokenPermit(DEPLOYMENT.settlement, CANONICAL_ORDER.legsIn[0]!.token, 2_000_000_000n, 2_000_000_000)],
       [takerPermit(DEPLOYMENT.settlement, refOf(CANONICAL_ORDER.items[1]!.data), 1_500_000_000n, 2_000_000_000)],
       0n,
       1_000_000n,

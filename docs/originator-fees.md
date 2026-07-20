@@ -16,21 +16,22 @@ wallets as a plain amount + recipient in the EIP-712 prompt.
 
 ### Per-leg recipients
 
-Every output leg carries its own recipient (`recipientOut[j]`,
-`address(0)` = the maker). An originator fee is one more signed leg:
+Every `LegOut` carries its own `recipient` (`address(0)` = the maker). An
+originator fee is one more signed `LegOut`:
 
 ```
-tokenOut       = [ USDC,        USDC       ]
-startAmountOut = [ gross − fee, fee        ]
-endAmountOut   = [ …,           …          ]
-recipientOut   = [ 0 (maker),   originator ]
+legsOut = [
+  LegOut{ token: USDC, start: gross − fee, end: …, recipient: 0 (maker)  },
+  LegOut{ token: USDC, start: fee,         end: …, recipient: originator },
+]
 ```
 
 ```ts
 import { feeSplitLegs } from "@1delta-x/sdk";
-// bps-of-tick fee: both legs decay proportionally on the shared clock
-const legs = feeSplitLegs(USDC, grossStart, grossEnd, originator, 100n /* 1% */);
-const order = { ...base, ...legs };
+// bps-of-tick fee: maker leg + fee leg decay proportionally on the shared clock
+const feeLegs = feeSplitLegs(USDC, grossStart, grossEnd, originator, 100n /* 1% */);
+// feeSplitLegs returns [makerLeg, feeLeg] — concat into legsOut
+const order = { ...base, legsOut: [...base.legsOut, ...feeLegs] };
 ```
 
 Fee shapes:
@@ -38,7 +39,7 @@ Fee shapes:
 | Want | Encode |
 | --- | --- |
 | bps of the realized auction tick | fee leg with `start/end` proportional to the main leg (`feeSplitLegs`) |
-| exact absolute fee | fixed fee leg (`start == end`) |
+| exact absolute fee | fixed fee leg (`end == 0`) |
 | multiple recipients (tiers) | one leg per recipient |
 | fee on an outputless order | a `FeeTransferModule` **item** — see §3 |
 
@@ -80,7 +81,7 @@ queue-jumping relayer gives up part of its fee to the maker.)
 
 ### What the fee does NOT touch
 
-- **`tokenIn` legs** — the solver's receipts are never skimmed.
+- **`legsIn`** — the solver's receipts are never skimmed.
 - **Items** — MAKE (deposit/repay) and TAKE (borrow/withdraw) legs execute on
   their signed amounts. If an output leg funds a MAKE item (delivered WETH goes
   into a deposit), size the item to the MAKER leg's amount.
@@ -120,7 +121,7 @@ items += [ MAKE FeeTransferModule: amount = absolute fee,
 `core/src/modules/FeeTransferModule.sol` pulls the ABSOLUTE amount from the
 maker (via its own Permit3 allowance) straight to the recipient, slicing
 pro-rata across partial fills like any item. The relayer-fee counterpart on the
-same order is the rising `tokenIn` leg (see `relayer-fees.md`); the canonical
+same order is the rising `LegIn` fee leg (see `relayer-fees.md`); the canonical
 outputless integrator order carries both. Working example:
 `modules/lending/aave-v3/test/swaps/DepositWithFee.t.sol::test_deposit_withRisingFee_andOriginatorFeeItem`.
 
@@ -141,18 +142,18 @@ off-chain at exit and signed into the exit order.
 **Exit with conversion** (unwind collateral, receive another asset):
 
 ```
-items    = [ TAKE withdraw: 1 WETH aWETH → settlement ]
-tokenIn  = WETH  (funds the solver)
-tokenOut = USDC  [net → maker, margin → originator]
+items   = [ TAKE withdraw: 1 WETH aWETH → settlement ]
+legsIn  = [ LegIn{ WETH, … } ]   (funds the solver)
+legsOut = [ LegOut{ USDC, …, maker }, LegOut{ USDC, …, originator } ]   (net → maker, margin → originator)
 ```
 
 **Same-asset exit** (deposit USDC, exit USDC — the solver's compensation is the
 in/out spread):
 
 ```
-items    = [ TAKE withdraw: 2_000 USDC supply → settlement ]
-tokenIn  = USDC 2_000e6
-tokenOut = USDC [1_940.25 → maker, 49.75 → originator]   (1_990 gross, 10 spread)
+items   = [ TAKE withdraw: 2_000 USDC supply → settlement ]
+legsIn  = [ LegIn{ USDC, start: 2_000e6 } ]
+legsOut = [ LegOut{ USDC, 1_940.25 → maker }, LegOut{ USDC, 49.75 → originator } ]   (1_990 gross, 10 spread)
 ```
 
 **Zero-capital exit** (withdraw straight to the wallet; relayer fronts
@@ -196,11 +197,12 @@ Practical notes:
   is an explicit signed amount the wallet displays, which is the real
   protection. `validateOrder` still catches structural nonsense (zero legs,
   duplicate `(token, recipient)` pairs).
-- **Never address a leg at the settlement contract.** `recipientOut[j] =
-  Settlement` delivers into the anti-donation snapshot baseline, where it is
-  permanently burned (no sweep exists). It's a maker self-burn, not an exploit —
-  but `validateOrder` flags it (`"recipientOut is settlement (burn)"`) so a
-  preflight catches the footgun. `recipientOut` is signature-bound (part of the
-  order hash), so a filler can never alter a recipient or the array length.
+- **Never address a leg at the settlement contract.** A `LegOut` whose
+  `recipient == Settlement` delivers into the anti-donation snapshot baseline,
+  where it is permanently burned (no sweep exists). It's a maker self-burn, not
+  an exploit — but `validateOrder` flags it (`"recipient is settlement (burn)"`)
+  so a preflight catches the footgun. Each `LegOut.recipient` is signature-bound
+  (part of the order hash), so a filler can never alter a recipient or the
+  number of legs.
 - **No fee event.** Index the ERC-20 `Transfer` to the recipient, or read the
   fee leg's entry in the fill's return value.

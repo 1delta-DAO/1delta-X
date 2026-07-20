@@ -42,7 +42,7 @@ is settled by a solver holding **zero** of either token
 
 ## Fund flow & the netting invariant
 
-Per touched token `T` (the union of every order's `tokenIn`/`tokenOut`, derived
+Per touched token `T` (the union of every order's `legsIn`/`legsOut`, derived
 on-chain — never solver-declared, so the safety check below can't be dodged):
 
 ```
@@ -96,7 +96,7 @@ deltaT = balanceOf(T) - before[T] = pulledIn[T] - preSent[T] + deposited[T] - ow
 
 * **Item-free only** (`BatchSettleNoItems` otherwise) — MAKE/TAKE/SETTLE items
   have deposit/borrow ordering dependencies that assume the single-order forward
-  flow, the same reason `PostInputs` is item-free. Fee legs (a `recipientOut`
+  flow, the same reason `PostInputs` is item-free. Fee legs (a `LegOut`
   addressed to a third party) are **supported** — they are just output legs.
 * **Fill-module orders are supported** (e.g. a TWAP part), because `_openFill`
   resolves the delta generically; the pull/deliver math keys off `ctx`, not the

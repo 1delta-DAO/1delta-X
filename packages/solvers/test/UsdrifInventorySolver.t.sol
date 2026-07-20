@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, OrderSide, Item, Validator} from "@core/settlement/Settlement.sol";
+import {Order, OrderSide, Item, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {UsdrifInventorySolver} from "@solvers/inventory/UsdrifInventorySolver.sol";
 
 import {IMocQueue} from "../../modules/redeem/usdrif/src/interfaces/IMoc.sol";
@@ -119,17 +119,10 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDRIF),
-            tokenOut: _a1(USDT0),
-            startAmountIn: _u1(USDRIF_IN),
-            endAmountIn: _u1(USDRIF_IN),
-            decayStartTime: 0,
-            decayDuration: 0,
-            startAmountOut: _u1(USDT0_OUT),
-            endAmountOut: _u1(USDT0_OUT),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDRIF, USDRIF_IN),
+            legsOut: _legsOut1(USDT0, USDT0_OUT),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

@@ -117,8 +117,8 @@ contract BuyOrdersTest is MockSettlementBase {
         _fundSolverOutput(OUT);
 
         Order memory order = _buyOrder(1, address(tA), address(tB), START_IN, END_IN, OUT);
-        order.decayStartTime = uint32(block.timestamp);
-        order.decayDuration = 100;
+        _setDecayStart(order, uint32(block.timestamp));
+        _setDecayDuration(order, 100);
         bytes memory sig = _sign(order);
 
         vm.warp(block.timestamp + 50); // halfway → price halfway between start and end
@@ -137,8 +137,8 @@ contract BuyOrdersTest is MockSettlementBase {
         _fundSolverOutput(OUT);
 
         Order memory order = _buyOrder(1, address(tA), address(tB), START_IN, END_IN, OUT);
-        order.decayStartTime = uint32(block.timestamp);
-        order.decayDuration = 100;
+        _setDecayStart(order, uint32(block.timestamp));
+        _setDecayDuration(order, 100);
         bytes memory sig = _sign(order);
 
         vm.warp(block.timestamp + 500); // well past duration → ceiling price
@@ -153,8 +153,8 @@ contract BuyOrdersTest is MockSettlementBase {
         _fundMakerInput(END_IN);
         _fundSolverOutput(OUT);
         Order memory order = _buyOrder(1, address(tA), address(tB), START_IN, END_IN, OUT);
-        order.decayStartTime = uint32(block.timestamp + 100); // future start
-        order.decayDuration = 100;
+        _setDecayStart(order, uint32(block.timestamp + 100)); // future start
+        _setDecayDuration(order, 100);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -232,16 +232,16 @@ contract BuyOrdersTest is MockSettlementBase {
 
         // Non-fixed output → rejected.
         Order memory badOut = _buyOrder(2, address(tA), address(tB), START_IN, END_IN, OUT);
-        badOut.endAmountOut[0] = OUT - 1;
+        badOut.legsOut[0].end = OUT - 1;
         (bool ok2, string memory r2) = lens.validateOrder(badOut);
         assertFalse(ok2, "non-fixed output rejected");
-        assertEq(r2, "buy output must be fixed");
+        assertEq(r2, "buy output must be fixed (end == 0)");
 
         // Falling input (end < start) → rejected.
         Order memory badIn = _buyOrder(3, address(tA), address(tB), END_IN, START_IN, OUT);
         (bool ok3, string memory r3) = lens.validateOrder(badIn);
         assertFalse(ok3, "falling input rejected");
-        assertEq(r3, "endAmountIn < startAmountIn");
+        assertEq(r3, "input end < start (must rise)");
     }
 
     // ════════════════════ fuzz: exact-output conservation ════════════════════

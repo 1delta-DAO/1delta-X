@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
@@ -43,17 +43,10 @@ contract FillWithPermitTest is AaveModulesBase {
             side: OrderSide.SELL,
             nonce: 42,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            tokenOut: _a1(WETH),
-            startAmountIn: _u1(usdcIn),
-            endAmountIn: _u1(usdcIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            startAmountOut: _u1(wethOut),
-            endAmountOut: _u1(wethOut),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDC, usdcIn),
+            legsOut: _legsOut1(WETH, wethOut),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

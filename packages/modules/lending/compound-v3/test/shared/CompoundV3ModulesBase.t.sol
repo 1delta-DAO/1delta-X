@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {LimitOrderLeverageSolver} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
@@ -328,17 +328,10 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
             side: OrderSide.SELL,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDS), //              Settlement pays solver from the USDS borrow proceeds
-            tokenOut: _a1(USDC), //             solver funds the USDC repay
-            startAmountIn: _u1(borrowUsds),
-            endAmountIn: _u1(borrowUsds),
-            decayStartTime: 0,
-            decayDuration: 0,
-            startAmountOut: _u1(bufferedRepay),
-            endAmountOut: _u1(bufferedRepay),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDS, borrowUsds), //   Settlement pays solver from the USDS borrow proceeds
+            legsOut: _legsOut1(USDC, bufferedRepay), // solver funds the USDC repay
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

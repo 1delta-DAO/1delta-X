@@ -55,6 +55,33 @@ enum OrderSide {
     BUY
 }
 
+/// @notice One INPUT leg (the maker gives, the solver receives). Consolidates the
+///         old parallel `tokenIn`/`startAmountIn`/`endAmountIn` arrays into a struct
+///         array, so token↔amount can never be length-mismatched.
+/// @dev    `end == 0` ⇒ the leg is FIXED at `start` (no decay). Otherwise the leg
+///         RISES `start → end` on the order's shared decay clock (`start ≤ end`) —
+///         a BUY conversion input or a SELL relayer-fee leg. `end == 0` is the
+///         "fixed" sentinel rather than `start == end`, so a fixed leg carries no
+///         duplicated amount word.
+struct LegIn {
+    address token;
+    uint256 start;
+    uint256 end;
+}
+
+/// @notice One OUTPUT leg (the solver delivers, the recipient receives).
+/// @dev    `end == 0` ⇒ FIXED at `start`; otherwise FALLS `start → end` (`end ≤
+///         start`) — a SELL dutch-auction output. `recipient == address(0)` = the
+///         maker; a non-zero recipient is a fee/originator leg (an output addressed
+///         elsewhere). (A decay-to-zero output is intentionally not expressible —
+///         `end == 0` means fixed, not "give it away".)
+struct LegOut {
+    address token;
+    uint256 start;
+    uint256 end;
+    address recipient;
+}
+
 /// @notice A single lending item inside a Order.
 /// @dev    `module` is a single-op adapter (`IMakerModule` for MAKE,
 ///         `ITakerModule` for TAKE). `amount` is the *total* amount for a
@@ -102,53 +129,44 @@ struct Validator {
 }
 
 /// @notice A signed limit order (SELL or BUY — see {OrderSide}).
-/// @dev    The conversion leg is multi-asset: the maker gives a basket
-///         (`tokenIn[]`/`startAmountIn[]`/`endAmountIn[]`) and receives a basket
-///         (`tokenOut[]`/`startAmountOut[]`/`endAmountOut[]`). One side is FIXED
-///         (`start == end`) and the other decays as a dutch auction; `side`
-///         selects which:
-///           • SELL — inputs fixed, outputs decay; anchor = `startAmountIn[0]`,
-///                    fill amount is in `tokenIn[0]` units.
-///           • BUY  — outputs fixed, inputs rise; anchor = `startAmountOut[0]`,
-///                    fill amount is in `tokenOut[0]` units.
+/// @dev    The conversion is multi-asset: the maker gives a basket of input legs
+///         (`legsIn` — see {LegIn}) and receives a basket of output legs
+///         (`legsOut` — see {LegOut}). One side is FIXED and the other decays as a
+///         dutch auction; `side` selects which:
+///           • SELL — inputs fixed, outputs decay; anchor = `legsIn[0].start`,
+///                    fill amount is in `legsIn[0].token` units.
+///           • BUY  — outputs fixed, inputs rise; anchor = `legsOut[0].start`,
+///                    fill amount is in `legsOut[0].token` units.
 ///         Partial fills are driven by a SINGLE scalar fraction
-///         `f = fillAmount / anchor[0]`. Every leg (both baskets) and every item
+///         `f = fillAmount / anchor`. Every leg (both baskets) and every item
 ///         slice scale by the same `f`, so the whole order fills proportionally
 ///         (the solver cannot size each leg independently).
 ///
-///         Leg pricing is uniform and flag-free: a leg with `start == end` is
-///         FIXED; a leg with `start != end` is auctioned on the order's shared
-///         decay clock. Inputs may only RISE (`start ≤ end`), outputs may only
-///         FALL (`start ≥ end`). A rising SELL input leg is the relayer-fee
-///         auction for orders with no conversion output to price a filler's
-///         compensation into (e.g. a pure gasless deposit: `tokenOut` may be
-///         EMPTY and the fee leg rises until filling covers gas + margin).
+///         Leg pricing is uniform: a leg with `end == 0` is FIXED at `start`; a
+///         leg with `end != 0` is auctioned on the order's shared decay clock —
+///         inputs RISE (`start ≤ end`), outputs FALL (`end ≤ start`). A rising
+///         input leg is the relayer-fee auction for orders with no conversion
+///         output to price a filler's compensation into (e.g. a pure gasless
+///         deposit: `legsOut` may be EMPTY and the fee leg rises until filling
+///         covers gas + margin). A fixed-price order (an exact OTC rate) simply
+///         sets `end == 0` on every leg, both sides.
 ///
-///         Every output leg names its own `recipientOut` (`address(0)` = the
-///         maker). An originator/sourcing fee is simply one more output leg
-///         addressed to the originator — decaying proportionally with the main
-///         leg for a bps-of-tick fee, or fixed for an absolute fee.
+///         Every output leg names its own `recipient` (`address(0)` = the maker).
+///         An originator/sourcing fee is one more output leg addressed to the
+///         originator — decaying with the main leg for a bps-of-tick fee, or fixed
+///         (`end == 0`) for an absolute fee.
 struct Order {
     address maker;
     OrderSide side; //      SELL (outputs decay) or BUY (inputs rise)
     uint256 nonce;
     uint256 deadline;
-    address[] tokenIn; //   maker gives (solver receives)
-    uint256[] startAmountIn; //      per input: fixed amount when == end; else the auction floor
-    //                               (best for maker) of a RISING leg — BUY conversion inputs or a
-    //                               SELL relayer-fee leg
-    uint256[] endAmountIn; //        per input: == start (fixed) or the auction ceiling (worst for
-    //                               maker / "pay up to"); must be ≥ start — inputs only rise
-    uint32 decayStartTime;
-    uint32 decayDuration;
-    address[] tokenOut; //  the solver delivers (to recipientOut, default = maker)
-    uint256[] startAmountOut; //     per output: SELL auction start (best for maker); BUY fixed amount (== end)
-    uint256[] endAmountOut; //       per output: SELL auction floor (worst for maker); BUY == start
-    address[] recipientOut; //       per output: delivery recipient; address(0) = the maker. A fee
-    //                               leg is an output addressed to the originator (proportional
-    //                               start/end = bps-of-tick fee; start == end = absolute fee)
+    LegIn[] legsIn; //      maker gives (solver receives); see {LegIn}. anchor = legsIn[0]
+    LegOut[] legsOut; //    solver delivers (to recipient, default = maker); see {LegOut}
+    uint256 timing; //      PACKED three uint32 clocks (see {DutchAuction} helpers):
+    //                        bits [0:32)   decayStartTime      (unix; auction start)
+    //                        bits [32:64)  decayDuration       (seconds; 0 = no decay window)
+    //                        bits [64:96)  exclusivityEndTime  (unix; ignored if exclusiveFiller == 0)
     address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
-    uint32 exclusivityEndTime; //    unix timestamp; ignored if exclusiveFiller == 0
     uint256 minFillAnchor; //        anti-dust floor per fill (anchor units); 0 = no minimum
     uint256 exclusivityOverrideBps; //  0 = hard exclusivity; else the bps a non-exclusive
     //                                  in-window filler must improve the maker's auction leg by
@@ -165,7 +183,7 @@ struct Order {
     //                               against this order and returns the accepted delta; the core keeps
     //                               the over-fill cap and the uniform per-leg scaling. See {IFillModule}.
     uint256 fillTotal; //            fill denominator when the unit isn't a fungible leg; 0 = derive
-    //                               from the leg anchor (startAmountIn[0]/startAmountOut[0]). Maker-
+    //                               from the leg anchor (legsIn[0].start / legsOut[0].start). Maker-
     //                               signed so the cap `filled + delta <= fillTotal` stays in the core.
 }
 

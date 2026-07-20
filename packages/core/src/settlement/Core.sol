@@ -301,7 +301,7 @@ abstract contract Core is Base {
         // snapshot + the balanceOf re-read in `_payInputsToSolver` would just burn
         // two STATICCALLs per input leg on every plain swap.
         bool hasItems = order.items.length != 0;
-        uint256[] memory tokenInBefore = hasItems ? _snapshotInputs(order.tokenIn) : new uint256[](0);
+        uint256[] memory tokenInBefore = hasItems ? _snapshotInputs(order.legsIn) : new uint256[](0);
         _executeItems(order, ctx);
         _payInputsToSolver(order, ctx, tokenInBefore, hasItems);
         _runInvariants(order, ctx.filler, takerData);
@@ -348,7 +348,7 @@ abstract contract Core is Base {
     ///        when the solver approved Settlement directly (see
     ///        `_transferFromWithFallback`).
     function _deliverOutputs(Order calldata order, FillCtx memory ctx) internal returns (uint256[] memory outs) {
-        uint256 n = order.tokenOut.length;
+        uint256 n = order.legsOut.length;
         outs = new uint256[](n);
         for (uint256 j; j < n;) {
             // Amount (incl. the maker-leg soft-exclusivity override) — see
@@ -356,11 +356,11 @@ abstract contract Core is Base {
             // only to route the transfer (never a fee leg's comp to a third party).
             uint256 amt = order.outputAt(ctx, j);
             if (amt != 0) {
-                address to = order.recipientOut[j];
+                address to = order.legsOut[j].recipient;
                 bool makerLeg = to == address(0) || to == order.maker;
                 outs[j] = amt;
                 Permit3TransferLib.transferFromWithFallback(
-                    PERMIT3, order.tokenOut[j], ctx.filler, makerLeg ? order.maker : to, amt
+                    PERMIT3, order.legsOut[j].token, ctx.filler, makerLeg ? order.maker : to, amt
                 );
             }
             unchecked {
@@ -401,9 +401,9 @@ abstract contract Core is Base {
     ) internal {
         address maker = order.maker;
         address filler = ctx.filler;
-        for (uint256 i; i < order.tokenIn.length; i++) {
+        for (uint256 i; i < order.legsIn.length; i++) {
             uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}
-            address tokenIn = order.tokenIn[i];
+            address tokenIn = order.legsIn[i].token;
             // Item-free orders have no TAKE proceeds ⇒ proceeds are 0 without a
             // balanceOf (the snapshot was skipped upstream). Item orders measure
             // this fill's proceeds as the balance delta since the snapshot.

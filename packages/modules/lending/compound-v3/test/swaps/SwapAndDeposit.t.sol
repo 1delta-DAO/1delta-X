@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
@@ -44,17 +44,10 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            tokenOut: _a1(WETH),
-            startAmountIn: _u1(usdcIn),
-            endAmountIn: _u1(usdcIn),
-            decayStartTime: 0,
-            decayDuration: 0, //        fixed-price (start == end)
-            startAmountOut: _u1(wethOut),
-            endAmountOut: _u1(wethOut),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDC, usdcIn),
+            legsOut: _legsOut1(WETH, wethOut), // fixed-price (start == end)
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -118,17 +111,10 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            tokenOut: _a1(WETH),
-            startAmountIn: _u1(usdcIn),
-            endAmountIn: _u1(usdcIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            startAmountOut: _u1(wethOut),
-            endAmountOut: _u1(wethOut),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDC, usdcIn),
+            legsOut: _legsOut1(WETH, wethOut),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

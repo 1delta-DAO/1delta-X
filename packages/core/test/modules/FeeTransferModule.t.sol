@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {FeeTransferModule} from "@core/modules/FeeTransferModule.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -43,22 +43,17 @@ contract FeeTransferModuleTest is CoreSettlementBase {
             recipient: address(0),
             data: abi.encode(USDC, originator)
         });
+        LegIn[] memory legsIn = new LegIn[](1);
+        legsIn[0] = LegIn(USDC, F0, FMAX); // rising relayer-fee input (F0 → FMAX)
         order = Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            startAmountIn: _u1(F0),
-            endAmountIn: _u1(FMAX),
-            decayStartTime: uint32(block.timestamp),
-            decayDuration: DURATION,
-            tokenOut: new address[](0),
-            startAmountOut: new uint256[](0),
-            endAmountOut: new uint256[](0),
-            recipientOut: new address[](0),
+            legsIn: legsIn,
+            legsOut: new LegOut[](0), // gasless deposit — no conversion output
+            timing: _packTiming(uint32(block.timestamp), DURATION, 0),
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -137,10 +132,8 @@ contract FeeTransferModuleTest is CoreSettlementBase {
     function test_lens_sameAssetOverlap_flaggedOnlyWithoutItems() public view {
         // Item-bearing same-asset order (the same-asset exit / fee shape) → valid.
         Order memory o = _feeOrder(3);
-        o.tokenOut = _a1(USDC);
-        o.startAmountOut = _u1(1e6);
-        o.endAmountOut = _u1(1e6);
-        o.recipientOut = new address[](1);
+        o.legsOut = new LegOut[](1);
+        o.legsOut[0] = LegOut(USDC, 1e6, 0, address(0));
         (bool ok, string memory reason) = lens.validateOrder(o);
         assertTrue(ok, string.concat("item order overlap valid: ", reason));
 
@@ -148,6 +141,6 @@ contract FeeTransferModuleTest is CoreSettlementBase {
         o.items = new Item[](0);
         (ok, reason) = lens.validateOrder(o);
         assertFalse(ok, "item-free self-trade rejected");
-        assertEq(reason, "tokenIn == tokenOut");
+        assertEq(reason, "input token == output token");
     }
 }

@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, OrderSide, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev Withdraw + sourcing fee: the "integrator exit fee" flow. The maker
@@ -140,17 +140,10 @@ contract WithdrawWithFeeTest is AaveModulesBase {
             side: OrderSide.SELL,
             nonce: 31,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(WETH),
-            startAmountIn: _u1(feeFloor),
-            endAmountIn: _u1(feeCeil),
-            decayStartTime: uint32(block.timestamp),
-            decayDuration: duration,
-            tokenOut: new address[](0),
-            startAmountOut: new uint256[](0),
-            endAmountOut: new uint256[](0),
-            recipientOut: new address[](0),
+            legsIn: _legsIn1Rising(WETH, feeFloor, feeCeil),
+            legsOut: new LegOut[](0),
+            timing: _packTiming(uint32(block.timestamp), uint32(duration), 0),
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

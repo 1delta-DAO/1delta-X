@@ -45,13 +45,12 @@ contract TwapFillModuleTest is CoreSettlementBase {
         returns (Order memory o)
     {
         o = _order(maker, nonce, USDC, WETH, total, WETH_TOTAL, new Item[](0));
-        o.startAmountOut = _u1(total * WETH_TOTAL / TOTAL); // scale WETH to `total`
-        o.endAmountOut = o.startAmountOut;
+        o.legsOut[0].start = total * WETH_TOTAL / TOTAL; // scale WETH to `total`
+        o.legsOut[0].end = 0; //        fixed output (end == 0)
         o.fillModule = address(twap);
         o.fillTotal = total; //         the TWAP total (denominator)
         o.minFillAnchor = part; //      part size ⇒ parts = total/part
-        o.decayStartTime = startTime; //TWAP start
-        o.decayDuration = DURATION; //  total window
+        o.timing = _packTiming(startTime, DURATION, 0); // TWAP start + total window
     }
 
     function _fund() internal {

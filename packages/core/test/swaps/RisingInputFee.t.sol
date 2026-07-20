@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, ItemOp, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -25,9 +25,8 @@ contract RisingInputFeeTest is CoreSettlementBase {
     ///      against a fixed WETH output.
     function _risingOrder(uint256 nonce) internal view returns (Order memory o) {
         o = _order(maker, nonce, USDC, WETH, F0, WETH_OUT, new Item[](0));
-        o.endAmountIn = _u1(FMAX);
-        o.decayStartTime = uint32(block.timestamp);
-        o.decayDuration = DURATION;
+        o.legsIn[0].end = FMAX; // rising input (start F0 → end FMAX)
+        o.timing = _packTiming(uint32(block.timestamp), DURATION, 0);
     }
 
     function _fund() internal {
@@ -41,7 +40,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
     function test_fixedLeg_unaffectedByDecay() public {
         _fund();
         Order memory o = _risingOrder(0);
-        o.endAmountIn = _u1(F0); // fixed again
+        o.legsIn[0].end = 0; // fixed again (end == 0 sentinel)
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2); // mid-decay — must not matter
@@ -100,7 +99,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
     function test_risingLeg_gasBump_widensFee() public {
         _fund();
         Order memory o = _risingOrder(3);
-        o.decayDuration = 0; //          no time decay — gas bump only
+        _setDecayDuration(o, 0); //      no time decay — gas bump only
         o.gasBumpBps = 2_000; //         max +20% of the leg span
         o.gasPriceRef = 10 gwei; //      reference basefee for the full bump
 
@@ -121,10 +120,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
         _approveMakerToSettlement(USDC, FMAX);
 
         Order memory o = _risingOrder(4);
-        o.tokenOut = new address[](0);
-        o.startAmountOut = new uint256[](0);
-        o.endAmountOut = new uint256[](0);
-        o.recipientOut = new address[](0);
+        o.legsOut = new LegOut[](0);
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2);
@@ -169,17 +165,9 @@ contract RisingInputFeeTest is CoreSettlementBase {
         uint256 skim = WETH_OUT / 100; // 1% of the delivery, as its own leg
 
         Order memory o = _risingOrder(6);
-        o.tokenOut = new address[](2);
-        o.tokenOut[0] = WETH;
-        o.tokenOut[1] = WETH;
-        o.startAmountOut = new uint256[](2);
-        o.startAmountOut[0] = WETH_OUT - skim;
-        o.startAmountOut[1] = skim;
-        o.endAmountOut = new uint256[](2);
-        o.endAmountOut[0] = WETH_OUT - skim;
-        o.endAmountOut[1] = skim;
-        o.recipientOut = new address[](2);
-        o.recipientOut[1] = feeRecipient; // [0] stays 0 ⇒ maker
+        o.legsOut = new LegOut[](2);
+        o.legsOut[0] = LegOut(WETH, WETH_OUT - skim, 0, address(0)); // maker
+        o.legsOut[1] = LegOut(WETH, skim, 0, feeRecipient); //          originator fee
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2);
@@ -203,7 +191,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
 
         Order memory o = _risingOrder(7);
         o.exclusiveFiller = address(0xE0E0);
-        o.exclusivityEndTime = uint32(block.timestamp + DURATION);
+        _setExclusivityEnd(o, uint32(block.timestamp + DURATION));
         o.exclusivityOverrideBps = overrideBps;
         bytes memory sig = _sign(o);
 
@@ -221,8 +209,8 @@ contract RisingInputFeeTest is CoreSettlementBase {
     function test_fallingInputLeg_reverts() public {
         _fund();
         Order memory o = _risingOrder(8);
-        o.startAmountIn = _u1(FMAX);
-        o.endAmountIn = _u1(F0); // falling — inputs may only rise
+        o.legsIn[0].start = FMAX;
+        o.legsIn[0].end = F0; // falling — inputs may only rise
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
@@ -239,20 +227,17 @@ contract RisingInputFeeTest is CoreSettlementBase {
         assertTrue(ok, string.concat("rising leg valid: ", reason));
 
         // Falling leg → malformed.
-        o.startAmountIn = _u1(FMAX);
-        o.endAmountIn = _u1(F0);
+        o.legsIn[0].start = FMAX;
+        o.legsIn[0].end = F0;
         (ok, reason) = lens.validateOrder(o);
         assertFalse(ok, "falling input leg rejected");
-        assertEq(reason, "endAmountIn < startAmountIn");
+        assertEq(reason, "input end < start (must rise)");
     }
 
     function test_lens_validateOrder_emptyTokenOutShapes() public view {
         // Pure-fee shape with items → well-formed.
         Order memory o = _risingOrder(10);
-        o.tokenOut = new address[](0);
-        o.startAmountOut = new uint256[](0);
-        o.endAmountOut = new uint256[](0);
-        o.recipientOut = new address[](0);
+        o.legsOut = new LegOut[](0);
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.MAKE, module: address(0xD0D0), amount: 1 ether, recipient: address(0), data: ""});
         o.items = items;
@@ -268,10 +253,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
         // BUY can never omit tokenOut (it anchors there).
         o = _risingOrder(10);
         o.side = OrderSide.BUY;
-        o.tokenOut = new address[](0);
-        o.startAmountOut = new uint256[](0);
-        o.endAmountOut = new uint256[](0);
-        o.recipientOut = new address[](0);
+        o.legsOut = new LegOut[](0);
         (ok, reason) = lens.validateOrder(o);
         assertFalse(ok, "buy without tokenOut rejected");
         assertEq(reason, "buy requires tokenOut");
@@ -316,22 +298,11 @@ contract RisingInputFeeTest is CoreSettlementBase {
         permit3.approveToken(address(settlement), DAI, uint160(daiOut), 0);
         vm.stopPrank();
 
-        address[] memory tIn = new address[](2);
-        tIn[0] = USDC; // fixed anchor
-        tIn[1] = WETH; // rising fee leg
-        uint256[] memory sIn = new uint256[](2);
-        sIn[0] = usdcFixed;
-        sIn[1] = wethFloor;
-        uint256[] memory eIn = new uint256[](2);
-        eIn[0] = usdcFixed; // start == end ⇒ fixed
-        eIn[1] = wethCeil; //  start != end ⇒ rising
-
         Order memory o = _order(maker, 20, USDC, DAI, usdcFixed, daiOut, new Item[](0));
-        o.tokenIn = tIn;
-        o.startAmountIn = sIn;
-        o.endAmountIn = eIn;
-        o.decayStartTime = uint32(block.timestamp);
-        o.decayDuration = DURATION;
+        o.legsIn = new LegIn[](2);
+        o.legsIn[0] = LegIn(USDC, usdcFixed, 0); //          end == 0 ⇒ fixed anchor
+        o.legsIn[1] = LegIn(WETH, wethFloor, wethCeil); //   start != end ⇒ rising fee leg
+        o.timing = _packTiming(uint32(block.timestamp), DURATION, 0);
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2); // bump = 5000
@@ -350,10 +321,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
 
     function test_lens_relevantState_emptyTokenOut_isFillable() public view {
         Order memory o = _risingOrder(12);
-        o.tokenOut = new address[](0);
-        o.startAmountOut = new uint256[](0);
-        o.endAmountOut = new uint256[](0);
-        o.recipientOut = new address[](0);
+        o.legsOut = new LegOut[](0);
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.MAKE, module: address(0xD0D0), amount: 1 ether, recipient: address(0), data: ""});
         o.items = items;

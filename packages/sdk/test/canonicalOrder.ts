@@ -1,5 +1,5 @@
 import { getAddress, type Address } from "viem";
-import { ItemOp, OrderSide, type Order } from "../src";
+import { ItemOp, OrderSide, packTiming, type Order } from "../src";
 
 const A = (n: string): Address => getAddress(n);
 
@@ -9,18 +9,24 @@ export const CANONICAL_ORDER: Order = {
   side: OrderSide.SELL,
   nonce: 1n,
   deadline: 1_000_000n,
-  tokenIn: [A("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), A("0x6b175474e89094c44da98b954eedeac495271d0f")],
-  startAmountIn: [2_000_000_000n, 500_000_000_000_000_000_000n],
-  endAmountIn: [2_000_000_000n, 500_000_000_000_000_000_000n],
-  decayStartTime: 111,
-  decayDuration: 222,
-  tokenOut: [A("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")],
-  startAmountOut: [1_000_000_000_000_000_000n],
-  endAmountOut: [900_000_000_000_000_000n],
-  // Non-zero recipient — cross-checks recipientOut array hashing.
-  recipientOut: [A("0x0000000000000000000000000000000000000fee")],
+  // Two fixed input legs (USDC, DAI) — end == 0 ⇒ fixed at start.
+  legsIn: [
+    { token: A("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), start: 2_000_000_000n, end: 0n },
+    { token: A("0x6b175474e89094c44da98b954eedeac495271d0f"), start: 500_000_000_000_000_000_000n, end: 0n },
+  ],
+  // One DECAYING output leg to a non-zero fee recipient — cross-checks LegOut
+  // struct-array hashing (token + start/end + recipient).
+  legsOut: [
+    {
+      token: A("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
+      start: 1_000_000_000_000_000_000n,
+      end: 900_000_000_000_000_000n,
+      recipient: A("0x0000000000000000000000000000000000000fee"),
+    },
+  ],
+  // Packed timing: decayStartTime 111 | decayDuration 222 | exclusivityEndTime 333.
+  timing: packTiming(111, 222, 333),
   exclusiveFiller: A("0x0000000000000000000000000000000000000b0b"),
-  exclusivityEndTime: 333,
   minFillAnchor: 100_000_000n,
   exclusivityOverrideBps: 25n,
   curve: [
@@ -47,10 +53,10 @@ export const CANONICAL_ORDER: Order = {
   ],
   validators: [{ target: A("0x0000000000000000000000000000000000000e01"), data: "0xdead" }],
   invariants: [{ target: A("0x0000000000000000000000000000000000000e02"), data: "0xbeef" }],
-  // Non-zero fill fields — cross-check the two new tail words hash.
+  // Non-zero fill fields — cross-check the two tail words hash.
   fillModule: A("0x000000000000000000000000000000000000f111"),
   fillTotal: 42n,
 };
 
 /// Emitted by `HashGolden.t.sol` (Solidity `settlement.hashOrder`).
-export const GOLDEN_ORDER_HASH = "0x06820983e57fd11791b058fb7d86e38a0818fd3fea8354b2eb44c747402b782c";
+export const GOLDEN_ORDER_HASH = "0x9a4bfce139ee6ec84dcf14487f56b70d0011e63988be7c7acc58a62ccb2320f0";

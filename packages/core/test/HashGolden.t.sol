@@ -8,6 +8,8 @@ import {
     Item,
     ItemOp,
     Validator,
+    LegIn,
+    LegOut,
     OrderSide,
     CurvePoint
 } from "@core/settlement/Settlement.sol";
@@ -37,22 +39,15 @@ contract HashGoldenTest is Test {
     }
 
     function _canonical() internal pure returns (Order memory o) {
-        address[] memory tokenIn = new address[](2);
-        tokenIn[0] = USDC;
-        tokenIn[1] = DAI;
-        uint256[] memory amountIn = new uint256[](2);
-        amountIn[0] = 2_000e6;
-        amountIn[1] = 500e18;
+        // Two fixed input legs (USDC, DAI) + one DECAYING output leg to a fee
+        // recipient — cross-checks LegIn/LegOut struct-array hashing + the packed
+        // `timing` word.
+        LegIn[] memory legsIn = new LegIn[](2);
+        legsIn[0] = LegIn(USDC, 2_000e6, 0);
+        legsIn[1] = LegIn(DAI, 500e18, 0);
 
-        address[] memory tokenOut = new address[](1);
-        tokenOut[0] = WETH;
-        uint256[] memory startOut = new uint256[](1);
-        startOut[0] = 1 ether;
-        uint256[] memory endOut = new uint256[](1);
-        endOut[0] = 0.9 ether;
-        // Non-zero recipient — cross-checks recipientOut array hashing.
-        address[] memory recipients = new address[](1);
-        recipients[0] = address(0xFEE);
+        LegOut[] memory legsOut = new LegOut[](1);
+        legsOut[0] = LegOut(WETH, 1 ether, 0.9 ether, address(0xFEE));
 
         Item[] memory items = new Item[](2);
         items[0] = Item({op: ItemOp.MAKE, module: MOD1, amount: 1 ether, recipient: address(0), data: hex"1234"});
@@ -68,22 +63,18 @@ contract HashGoldenTest is Test {
         curve[0] = CurvePoint({timeDelta: 0, bumpBps: 1_000});
         curve[1] = CurvePoint({timeDelta: 200, bumpBps: 9_000});
 
+        // Packed timing: decayStartTime 111 | decayDuration 222 | exclusivityEndTime 333.
+        uint256 timing = uint256(111) | (uint256(222) << 32) | (uint256(333) << 64);
+
         o = Order({
             maker: MAKER,
             side: OrderSide.SELL,
             nonce: 1,
             deadline: 1_000_000,
-            tokenIn: tokenIn,
-            startAmountIn: amountIn,
-            endAmountIn: amountIn,
-            decayStartTime: 111,
-            decayDuration: 222,
-            tokenOut: tokenOut,
-            startAmountOut: startOut,
-            endAmountOut: endOut,
-            recipientOut: recipients,
+            legsIn: legsIn,
+            legsOut: legsOut,
+            timing: timing,
             exclusiveFiller: FILLER,
-            exclusivityEndTime: 333,
             minFillAnchor: 100e6,
             exclusivityOverrideBps: 25,
             curve: curve,
@@ -92,7 +83,6 @@ contract HashGoldenTest is Test {
             items: items,
             validators: validators,
             invariants: invariants,
-            // Non-zero fill fields — cross-check the two new tail words hash.
             fillModule: address(0xF111),
             fillTotal: 42
         });
@@ -100,7 +90,7 @@ contract HashGoldenTest is Test {
 
     /// @dev The TypeScript SDK (`packages/sdk`) asserts this SAME constant for the
     ///      same canonical order — cross-verifying its EIP-712 typed-data defs.
-    bytes32 constant GOLDEN_ORDER_HASH = 0x06820983e57fd11791b058fb7d86e38a0818fd3fea8354b2eb44c747402b782c;
+    bytes32 constant GOLDEN_ORDER_HASH = 0x9a4bfce139ee6ec84dcf14487f56b70d0011e63988be7c7acc58a62ccb2320f0;
 
     function test_goldenOrderHash() public view {
         assertEq(lens.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");

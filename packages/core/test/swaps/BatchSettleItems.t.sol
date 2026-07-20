@@ -7,7 +7,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
-import {Settlement, Order, Item, ItemOp, ItemsBatch, OrderSide, Validator} from "@core/settlement/Settlement.sol";
+import {Settlement, Order, Item, ItemOp, ItemsBatch, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev TAKE mock = a borrow/withdraw: on dispatch it transfers a pre-set `produce`
@@ -114,17 +114,10 @@ contract BatchSettleItemsTest is CoreSettlementBase {
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            startAmountIn: _u1(borrowOwed),
-            endAmountIn: _u1(borrowOwed),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a1(WETH),
-            startAmountOut: _u1(collateral),
-            endAmountOut: _u1(collateral),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDC, borrowOwed),
+            legsOut: _legsOut1(WETH, collateral),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -157,7 +150,7 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         vm.startPrank(bob);
         permit3.approveToken(address(depositor), WETH, uint160(WETH_AMT), 0);
         permit3.approveTaker(
-            address(settlement), keccak256(lev.items[1].data), uint160(lev.startAmountIn[0]), uint48(block.timestamp + 1 hours)
+            address(settlement), keccak256(lev.items[1].data), uint160(lev.legsIn[0].start), uint48(block.timestamp + 1 hours)
         );
         vm.stopPrank();
         deal(USDC, address(taker), produce);
@@ -175,8 +168,8 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         sigs[0] = _sign(a);
         sigs[1] = _signAs(b, bobPk);
         uint256[] memory fills = new uint256[](2);
-        fills[0] = a.startAmountIn[0]; // Alice anchor = WETH
-        fills[1] = b.startAmountIn[0]; // Bob anchor   = USDC borrow
+        fills[0] = a.legsIn[0].start; // Alice anchor = WETH
+        fills[1] = b.legsIn[0].start; // Bob anchor   = USDC borrow
         bat = ItemsBatch({
             orders: orders,
             sigs: sigs,
@@ -300,13 +293,9 @@ contract BatchSettleItemsTest is CoreSettlementBase {
         Order memory a = _spotOrder(1);
         Order memory b = _leverageOrder(2, WETH_AMT, USDC_AMT, USDC_AMT);
         // Give Bob two USDC input legs (the corrupting shape).
-        b.tokenIn = new address[](2);
-        b.tokenIn[0] = USDC;
-        b.tokenIn[1] = USDC;
-        b.startAmountIn = new uint256[](2);
-        b.startAmountIn[0] = USDC_AMT;
-        b.startAmountIn[1] = 1;
-        b.endAmountIn = b.startAmountIn;
+        b.legsIn = new LegIn[](2);
+        b.legsIn[0] = LegIn(USDC, USDC_AMT, 0);
+        b.legsIn[1] = LegIn(USDC, 1, 0);
         _fund(_leverageOrder(2, WETH_AMT, USDC_AMT, USDC_AMT), USDC_AMT);
 
         ItemsBatch memory bat = _batch(a, b, _mask(1, 0), _seq(1, 0));

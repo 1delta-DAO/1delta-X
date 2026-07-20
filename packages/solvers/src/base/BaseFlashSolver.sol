@@ -35,11 +35,11 @@ interface IUniV3Router {
 ///  where `flashSource` is the provider-specific handle (the asset to borrow for
 ///  the singleton providers, or the EVK vault for Euler). The body always:
 ///
-///    1. flash-loan `flashAmount` of the collateral asset (`order.tokenOut`),
+///    1. flash-loan `flashAmount` of the collateral asset (`order.legsOut[0].token`),
 ///    2. inside the provider callback, run `_fillAndSwap`:
 ///         a. `settlement.fill` — Settlement pulls the collateral from this solver
 ///            via Permit3, supplies it on the maker's behalf, borrows
-///            `order.tokenIn` and routes the proceeds back here,
+///            `order.legsIn[0].token` and routes the proceeds back here,
 ///         b. swap the borrow proceeds → collateral on Uniswap v3,
 ///    3. repay the flash per the provider's convention (transfer-back or approve-pull).
 ///
@@ -92,7 +92,7 @@ abstract contract BaseFlashSolver {
     }
 
     /// @dev The leverage core: run the maker fill, then swap the borrow proceeds
-    ///      (`order.tokenIn`) back to `tokenOut` (the flash-loaned collateral) so the
+    ///      (`order.legsIn[0].token`) back to `tokenOut` (the flash-loaned collateral) so the
     ///      caller can repay. Leaves all proceeds in `tokenOut` denomination here.
     function _fillAndSwap(
         Order memory order,
@@ -106,11 +106,11 @@ abstract contract BaseFlashSolver {
         // leg. A multi-input order would collect only tokenIn[0] here and turn
         // legs [1..] into maker shortfalls, so reject it (see _fillAndSwapAll for
         // the multi-input variant).
-        if (order.tokenIn.length != 1) revert MultiInputUnsupported();
+        if (order.legsIn.length != 1) revert MultiInputUnsupported();
 
         settlement.fill(order, sig, fillAmountIn);
 
-        address tokenIn = order.tokenIn[0];
+        address tokenIn = order.legsIn[0].token;
         _swapExactIn(tokenIn, tokenOut, IERC20(tokenIn).balanceOf(address(this)), dexFee, minSwapOut);
     }
 
@@ -118,7 +118,7 @@ abstract contract BaseFlashSolver {
     ///      received input leg back to `tokenOut` (the flash-loaned collateral)
     ///      so the caller can repay. Input legs already denominated in `tokenOut`
     ///      are left as-is. `dexFees`/`minSwapOuts` are aligned with
-    ///      `order.tokenIn`; entries for a skipped leg are ignored.
+    ///      `order.legsIn[0].token`; entries for a skipped leg are ignored.
     function _fillAndSwapAll(
         Order memory order,
         bytes memory sig,
@@ -129,9 +129,9 @@ abstract contract BaseFlashSolver {
     ) internal {
         settlement.fill(order, sig, fillAmountIn);
 
-        uint256 n = order.tokenIn.length;
+        uint256 n = order.legsIn.length;
         for (uint256 i; i < n; i++) {
-            address tokenIn = order.tokenIn[i];
+            address tokenIn = order.legsIn[i].token;
             if (tokenIn == tokenOut) continue; // already the collateral asset
             uint256 bal = IERC20(tokenIn).balanceOf(address(this));
             if (bal == 0) continue;

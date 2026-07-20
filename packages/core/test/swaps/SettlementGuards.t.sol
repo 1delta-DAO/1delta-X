@@ -145,8 +145,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         bytes memory sig = _sign(order);
         // Tamper after signing: the maker never authorised this cheaper output.
-        order.startAmountOut[0] = AMOUNT_OUT / 2;
-        order.endAmountOut[0] = AMOUNT_OUT / 2;
+        order.legsOut[0].start = AMOUNT_OUT / 2;
 
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
@@ -349,11 +348,11 @@ contract SettlementGuardsTest is MockSettlementBase {
 
         Order memory mine = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         mine.exclusiveFiller = solver; // solver is the batch caller
-        mine.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(mine, uint32(block.timestamp + 100));
 
         Order memory theirs = _plainOrder(2, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         theirs.exclusiveFiller = address(0xE); // someone else
-        theirs.exclusivityEndTime = uint32(block.timestamp + 100);
+        _setExclusivityEnd(theirs, uint32(block.timestamp + 100));
 
         Order[] memory orders = new Order[](2);
         orders[0] = mine;

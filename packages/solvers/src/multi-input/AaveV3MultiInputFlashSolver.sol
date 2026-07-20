@@ -24,7 +24,7 @@ contract AaveV3MultiInputFlashSolver is BaseFlashSolver {
         pool = IAaveV3Pool(_pool);
     }
 
-    /// @param flashToken  the collateral asset to flash (equals `order.tokenOut[0]`)
+    /// @param flashToken  the collateral asset to flash (equals `order.legsOut[0].token`)
     function executeFill(
         address flashToken,
         uint256 flashAmount,

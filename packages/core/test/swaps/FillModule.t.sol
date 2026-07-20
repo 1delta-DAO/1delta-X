@@ -5,7 +5,7 @@ import {OrderState} from "@core/settlement/OrderState.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
 import {FullFillModule} from "@core/modules/FullFillModule.sol";
@@ -215,10 +215,9 @@ contract FillModuleTest is CoreSettlementBase {
         aOut[1] = daiOut;
 
         Order memory o = _order(maker, 5, USDC, WETH, usdcIn, wethOut, new Item[](0));
-        o.tokenOut = tOut;
-        o.startAmountOut = aOut;
-        o.endAmountOut = aOut;
-        o.recipientOut = new address[](2); // both → maker
+        o.legsOut = new LegOut[](2); // two fixed outputs, both → maker
+        o.legsOut[0] = LegOut(tOut[0], aOut[0], 0, address(0));
+        o.legsOut[1] = LegOut(tOut[1], aOut[1], 0, address(0));
         o.fillModule = address(mock);
         o.fillTotal = total;
         bytes memory sig = _sign(o);
@@ -252,17 +251,10 @@ contract FillModuleTest is CoreSettlementBase {
             side: OrderSide.SELL,
             nonce: 6,
             deadline: block.timestamp + 1 hours,
-            tokenIn: new address[](0),
-            startAmountIn: new uint256[](0),
-            endAmountIn: new uint256[](0),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: new address[](0),
-            startAmountOut: new uint256[](0),
-            endAmountOut: new uint256[](0),
-            recipientOut: new address[](0),
+            legsIn: new LegIn[](0),
+            legsOut: new LegOut[](0),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

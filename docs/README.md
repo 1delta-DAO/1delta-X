@@ -7,7 +7,7 @@ package READMEs are the API reference — [`settlement`](../packages/core/src/se
 
 ## The order model, in one paragraph
 
-A maker signs an intent: fungible legs it gives/receives (`tokenIn`/`tokenOut`,
+A maker signs an intent: fungible legs it gives/receives (`legsIn`/`legsOut`,
 the inline fast path), arbitrary actions on its own positions (`items` →
 MAKE/TAKE modules), a generic solver↔maker exchange for anything the legs can't
 express (`SETTLE` module), a fill denominator (`fillModule`/`fillTotal`), and
@@ -18,12 +18,12 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
 ## Fees — who gets paid, and how
 
 - **[originator-fees.md](originator-fees.md)** — the party that *sources* an order
-  earns a fee as an ordinary **output leg** (per-leg `recipientOut`), or a
+  earns a fee as an ordinary **output leg** (a `LegOut` with its own `recipient`), or a
   `FeeTransferModule` **item** for outputless orders. bps-of-tick, absolute, and
   multi-recipient tiers; soft-exclusivity and settlement-burn caveats.
 - **[relayer-fees.md](relayer-fees.md)** — the party that *fills* is paid the
   conversion spread; for orders with no spread (a gasless deposit), a **rising
-  input leg** (flagless: `startAmountIn < endAmountIn`) is an auction-discovered,
+  input leg** (flagless: a rising `LegIn`, `start < end`) is an auction-discovered,
   gas-indexed relayer fee requiring zero filler capital.
 
 ## Generalizing beyond fungible swaps

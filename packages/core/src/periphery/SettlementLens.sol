@@ -185,14 +185,13 @@ contract SettlementLens {
         // (a gasless deposit). A `fillTotal != 0` order is denominated by
         // `fillTotal`, not a leg, so it may have both empty (a pure NFT swap).
         bool moduleFill = order.fillTotal != 0;
-        uint256 nIn = order.tokenIn.length;
-        uint256 nOut = order.tokenOut.length;
-        if (
-            order.startAmountIn.length != nIn || order.endAmountIn.length != nIn
-                || order.startAmountOut.length != nOut || order.endAmountOut.length != nOut
-                || order.recipientOut.length != nOut
-                || (!moduleFill && ((nIn == 0 && order.side == OrderSide.SELL) || (nOut == 0 && order.side == OrderSide.BUY)))
-        ) {
+        uint256 nIn = order.legsIn.length;
+        uint256 nOut = order.legsOut.length;
+        // The leg structs make token↔amount length mismatch impossible; only the
+        // anchor-leg-presence check remains. SELL anchors on `legsIn[0]`, BUY on
+        // `legsOut[0]` (unless `fillTotal` supplies the denominator directly), so a
+        // BUY may have empty legsIn (an NFT-sale SETTLE) and a SELL empty legsOut.
+        if (!moduleFill && ((nIn == 0 && order.side == OrderSide.SELL) || (nOut == 0 && order.side == OrderSide.BUY))) {
             return (OrderStatus.Invalid, 0);
         }
         if (block.timestamp > order.deadline) return (OrderStatus.Expired, 0);
@@ -224,15 +223,17 @@ contract SettlementLens {
     function _makerFillableCap(Order calldata order, uint256 anchor) internal view returns (uint256 cap) {
         cap = type(uint256).max;
         address spender = address(SETTLEMENT);
-        for (uint256 i; i < order.tokenIn.length; i++) {
-            address token = order.tokenIn[i];
+        for (uint256 i; i < order.legsIn.length; i++) {
+            address token = order.legsIn[i].token;
             (uint160 allowed, uint48 expiration,) = PERMIT3.tokenAllowance(order.maker, spender, token);
             uint256 capacity = allowed;
             if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
             uint256 bal = SafeTransferLib.balanceOf(token, order.maker);
             if (bal < capacity) capacity = bal;
 
-            uint256 perUnitIn = order.endAmountIn[i];
+            // Worst-case input cost of one anchor unit: the leg ceiling (`end`), or
+            // `start` when the leg is fixed (`end == 0`).
+            uint256 perUnitIn = order.legsIn[i].end == 0 ? order.legsIn[i].start : order.legsIn[i].end;
             // Scale leg-i capacity back into anchor units. Guard the multiply: an
             // unbounded (e.g. max) allowance times a large `anchor` can exceed
             // uint256 — treat an overflowing product as "this leg imposes no
@@ -275,16 +276,9 @@ contract SettlementLens {
         // leg-shape economics below still apply to whatever legs it does have.
         bool moduleFill = order.fillTotal != 0;
 
-        // ── array shape ──
-        uint256 nIn = order.tokenIn.length;
-        if (nIn != order.startAmountIn.length || nIn != order.endAmountIn.length) {
-            return (false, "tokenIn/amountIn length mismatch");
-        }
-        uint256 nOut = order.tokenOut.length;
-        if (nOut != order.startAmountOut.length || nOut != order.endAmountOut.length || nOut != order.recipientOut.length)
-        {
-            return (false, "tokenOut/amountOut length mismatch");
-        }
+        // ── leg shape ── (token↔amount length mismatch is impossible: {LegIn}/{LegOut})
+        uint256 nIn = order.legsIn.length;
+        uint256 nOut = order.legsOut.length;
         // Anchor-leg presence. The fill denominator is the anchor side's leg 0 —
         // SELL reads `tokenIn[0]`, BUY reads `tokenOut[0]` — unless a maker-signed
         // `fillTotal` supplies it directly. So a BUY may have EMPTY tokenIn (its
@@ -309,28 +303,26 @@ contract SettlementLens {
         // ── structural / economic sanity (time-independent) ──
         uint256 anchor = _fillDenominator(order);
         if (anchor == 0) return (false, "anchor amount is zero");
+        // Input legs are FIXED (`end == 0`) or RISE to a ceiling (`end ≥ start`) —
+        // a rising leg is the relayer-fee/conversion auction. Same rule both sides.
+        for (uint256 i; i < nIn; i++) {
+            if (order.legsIn[i].end != 0 && order.legsIn[i].end < order.legsIn[i].start) {
+                return (false, "input end < start (must rise)");
+            }
+        }
         if (order.side == OrderSide.SELL) {
-            // Inputs are fixed (start == end) or RISE to a ceiling — a
-            // `start != end` leg is the relayer-fee auction. Outputs decay
-            // downward from a positive start.
-            for (uint256 i; i < nIn; i++) {
-                if (order.endAmountIn[i] < order.startAmountIn[i]) {
-                    return (false, "endAmountIn < startAmountIn");
+            // Outputs decay DOWN from a positive start (`end ≤ start`), or fixed.
+            for (uint256 j; j < nOut; j++) {
+                if (order.legsOut[j].start == 0) return (false, "output start is zero (giveaway)");
+                if (order.legsOut[j].end != 0 && order.legsOut[j].start < order.legsOut[j].end) {
+                    return (false, "output start < end (must fall)");
                 }
             }
-            for (uint256 j; j < nOut; j++) {
-                if (order.startAmountOut[j] == 0) return (false, "startAmountOut is zero (giveaway)");
-                if (order.startAmountOut[j] < order.endAmountOut[j]) return (false, "startAmountOut < endAmountOut");
-            }
         } else {
-            // Outputs fixed (start == end, positive); inputs rise upward to a ceiling.
+            // BUY outputs are FIXED (exact-output); the canonical form is `end == 0`.
             for (uint256 j; j < nOut; j++) {
-                if (order.startAmountOut[j] == 0) return (false, "amountOut is zero (giveaway)");
-                if (order.startAmountOut[j] != order.endAmountOut[j]) return (false, "buy output must be fixed");
-            }
-            for (uint256 i; i < nIn; i++) {
-                if (order.endAmountIn[i] == 0) return (false, "endAmountIn is zero");
-                if (order.endAmountIn[i] < order.startAmountIn[i]) return (false, "endAmountIn < startAmountIn");
+                if (order.legsOut[j].start == 0) return (false, "output start is zero (giveaway)");
+                if (order.legsOut[j].end != 0) return (false, "buy output must be fixed (end == 0)");
             }
         }
         // Distinct within each array — a duplicate tokenIn shares one proceeds
@@ -347,11 +339,11 @@ contract SettlementLens {
         // for nothing) and stays flagged.
         for (uint256 i; i < nIn; i++) {
             for (uint256 k = i + 1; k < nIn; k++) {
-                if (order.tokenIn[i] == order.tokenIn[k]) return (false, "duplicate tokenIn");
+                if (order.legsIn[i].token == order.legsIn[k].token) return (false, "duplicate input token");
             }
             if (order.items.length == 0) {
                 for (uint256 j; j < nOut; j++) {
-                    if (order.tokenIn[i] == order.tokenOut[j]) return (false, "tokenIn == tokenOut");
+                    if (order.legsIn[i].token == order.legsOut[j].token) return (false, "input token == output token");
                 }
             }
         }
@@ -360,10 +352,13 @@ contract SettlementLens {
             // delivery (it lands in the anti-donation snapshot baseline and is
             // never swept). On-chain it's a maker self-burn, not an exploit, but
             // the preflight should catch the footgun.
-            if (order.recipientOut[j] == address(SETTLEMENT)) return (false, "recipientOut is settlement (burn)");
+            if (order.legsOut[j].recipient == address(SETTLEMENT)) return (false, "recipient is settlement (burn)");
             for (uint256 k = j + 1; k < nOut; k++) {
-                if (order.tokenOut[j] == order.tokenOut[k] && order.recipientOut[j] == order.recipientOut[k]) {
-                    return (false, "duplicate tokenOut recipient");
+                if (
+                    order.legsOut[j].token == order.legsOut[k].token
+                        && order.legsOut[j].recipient == order.legsOut[k].recipient
+                ) {
+                    return (false, "duplicate output token+recipient");
                 }
             }
         }
@@ -377,7 +372,7 @@ contract SettlementLens {
                 if (order.items[s].op == ItemOp.SETTLE) return (false, "settle item requires full-fill");
             }
         }
-        if (order.decayDuration != 0 && order.decayStartTime == 0) return (false, "decay set without decayStartTime");
+        if (order.decayDuration() != 0 && order.decayStartTime() == 0) return (false, "decay set without decayStartTime");
 
         // ── soft exclusivity override ──
         if (order.exclusivityOverrideBps != 0) {
@@ -391,7 +386,7 @@ contract SettlementLens {
                 return (false, "curve timeDelta not increasing");
             }
         }
-        if (order.curve.length != 0 && order.decayStartTime == 0) return (false, "curve set without decayStartTime");
+        if (order.curve.length != 0 && order.decayStartTime() == 0) return (false, "curve set without decayStartTime");
         // ── gas bump ──
         if (order.gasBumpBps != 0) {
             if (order.gasPriceRef == 0) return (false, "gasBump without gasPriceRef");
@@ -448,7 +443,7 @@ contract SettlementLens {
     ///      `startAmountOut[0]` (BUY). Reverts on empty legs; only call when a
     ///      fungible anchor is known to exist.
     function _anchorTotal(Order calldata order) internal pure returns (uint256) {
-        return order.side == OrderSide.BUY ? order.startAmountOut[0] : order.startAmountIn[0];
+        return order.side == OrderSide.BUY ? order.legsOut[0].start : order.legsIn[0].start;
     }
 
     /// @dev The fill denominator: the maker-signed `fillTotal` when set (module

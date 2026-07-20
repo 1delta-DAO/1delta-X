@@ -188,9 +188,9 @@ arbitrary recipient through Permit3 in a fully gasless, atomic, single-signature
 ### Order shape
 
 ```
-tokenIn   = the ERC-20 being transferred
-tokenOut  = address(0) or the same token (no swap, fee taken as spread)
-items     = [] (no lending operations)
+legsIn   = [ LegIn{ token: the ERC-20 being transferred, … } ]
+legsOut  = [] (no output) or one LegOut in the same token (no swap, fee taken as spread)
+items    = [] (no lending operations)
 ```
 
 ### data encoding
@@ -211,7 +211,8 @@ Without the permit block the module relies on a standing Permit3 allowance.
 ### Fee model
 
 The solver earns the spread: `amountIn − amountOut`. For a zero-fee transfer
-set `startAmountOut == endAmountOut == amountIn` in the order.
+give the output `LegOut` a fixed amount equal to the input (`start == amountIn`,
+`end == 0`).
 
 ---
 

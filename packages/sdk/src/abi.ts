@@ -19,22 +19,28 @@ const curvePointComponents = [
   { name: "bumpBps", type: "uint32" },
 ] as const;
 
+const legInComponents = [
+  { name: "token", type: "address" },
+  { name: "start", type: "uint256" },
+  { name: "end", type: "uint256" },
+] as const;
+
+const legOutComponents = [
+  { name: "token", type: "address" },
+  { name: "start", type: "uint256" },
+  { name: "end", type: "uint256" },
+  { name: "recipient", type: "address" },
+] as const;
+
 export const orderComponents = [
   { name: "maker", type: "address" },
   { name: "side", type: "uint8" },
   { name: "nonce", type: "uint256" },
   { name: "deadline", type: "uint256" },
-  { name: "tokenIn", type: "address[]" },
-  { name: "startAmountIn", type: "uint256[]" },
-  { name: "endAmountIn", type: "uint256[]" },
-  { name: "decayStartTime", type: "uint32" },
-  { name: "decayDuration", type: "uint32" },
-  { name: "tokenOut", type: "address[]" },
-  { name: "startAmountOut", type: "uint256[]" },
-  { name: "endAmountOut", type: "uint256[]" },
-  { name: "recipientOut", type: "address[]" },
+  { name: "legsIn", type: "tuple[]", components: legInComponents },
+  { name: "legsOut", type: "tuple[]", components: legOutComponents },
+  { name: "timing", type: "uint256" },
   { name: "exclusiveFiller", type: "address" },
-  { name: "exclusivityEndTime", type: "uint32" },
   { name: "minFillAnchor", type: "uint256" },
   { name: "exclusivityOverrideBps", type: "uint256" },
   { name: "curve", type: "tuple[]", components: curvePointComponents },

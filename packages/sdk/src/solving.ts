@@ -6,7 +6,7 @@ import type { Order, OutputLeg } from "./types";
 /**
  * Single-input flash solver `executeFill` (LimitOrderLeverageSolver,
  * AaveV3/Euler/Morpho FlashSolver). Flash-loans `flashSource` collateral, fills,
- * swaps the single borrow leg (tokenIn[0]) back on Uniswap v3.
+ * swaps the single borrow leg (legsIn[0]) back on Uniswap v3.
  */
 export function encodeExecuteFillSingle(args: {
   flashSource: Address;
@@ -35,7 +35,7 @@ export function encodeExecuteFillSingle(args: {
 /**
  * Multi-input flash solver `executeFill` (Balancer MultiInputLeverageSolver +
  * Aave/Euler/Morpho variants). Swaps EVERY input leg back to the collateral;
- * `dexFees`/`minSwapOuts` are aligned with `order.tokenIn`.
+ * `dexFees`/`minSwapOuts` are aligned with `order.legsIn`.
  */
 export function encodeExecuteFillMultiInput(args: {
   flashSource: Address;

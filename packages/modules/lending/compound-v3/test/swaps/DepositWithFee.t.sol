@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, OrderSide, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
@@ -35,22 +35,18 @@ contract DepositWithFeeTest is CompoundV3ModulesBase {
             recipient: address(0),
             data: abi.encode(COMET, USDC)
         });
+        // Single same-asset fee leg that dutch-RISES (start < end).
+        LegIn[] memory legsIn = new LegIn[](1);
+        legsIn[0] = LegIn(USDC, F0, FMAX);
         order = Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            startAmountIn: _u1(F0),
-            endAmountIn: _u1(FMAX),
-            decayStartTime: uint32(block.timestamp),
-            decayDuration: DURATION,
-            tokenOut: new address[](0),
-            startAmountOut: new uint256[](0),
-            endAmountOut: new uint256[](0),
-            recipientOut: new address[](0),
+            legsIn: legsIn,
+            legsOut: new LegOut[](0),
+            timing: _packTiming(uint32(block.timestamp), DURATION, 0),
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

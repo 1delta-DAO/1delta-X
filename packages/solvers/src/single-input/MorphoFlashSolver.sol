@@ -29,7 +29,7 @@ contract MorphoFlashSolver is BaseFlashSolver {
         morpho = IMorphoFlash(_morpho);
     }
 
-    /// @param flashToken  the collateral asset to flash (equals `order.tokenOut`)
+    /// @param flashToken  the collateral asset to flash (equals `order.legsOut[0].token`)
     function executeFill(
         address flashToken,
         uint256 flashAmount,

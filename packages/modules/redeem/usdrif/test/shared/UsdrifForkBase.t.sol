@@ -10,6 +10,8 @@ import {
     Order,
     Item,
     Validator,
+    LegIn,
+    LegOut,
     CurvePoint
 } from "@core/settlement/Settlement.sol";
 
@@ -98,10 +100,14 @@ abstract contract UsdrifForkBase is Test {
     bytes32 internal constant ITEM_TH =
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 internal constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
+    bytes32 internal constant LEG_IN_TH = keccak256("LegIn(address token,uint256 start,uint256 end)");
+    bytes32 internal constant LEG_OUT_TH = keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 internal constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "LegIn(address token,uint256 start,uint256 end)"
+        "LegOut(address token,uint256 start,uint256 end,address recipient)"
         "Validator(address target,bytes data)"
     );
 
@@ -142,6 +148,51 @@ abstract contract UsdrifForkBase is Test {
         return keccak256(abi.encodePacked(h));
     }
 
+    function _hashLegsIn(LegIn[] memory legs) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](legs.length);
+        for (uint256 i; i < legs.length; i++) {
+            h[i] = keccak256(abi.encode(LEG_IN_TH, legs[i].token, legs[i].start, legs[i].end));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    function _hashLegsOut(LegOut[] memory legs) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](legs.length);
+        for (uint256 i; i < legs.length; i++) {
+            h[i] = keccak256(abi.encode(LEG_OUT_TH, legs[i].token, legs[i].start, legs[i].end, legs[i].recipient));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    /// @dev A single fixed input leg (`end == 0`).
+    function _legsIn1(address token, uint256 amount) internal pure returns (LegIn[] memory a) {
+        a = new LegIn[](1);
+        a[0] = LegIn(token, amount, 0);
+    }
+
+    /// @dev A single fixed output leg to the maker (`end == 0`, recipient == 0).
+    function _legsOut1(address token, uint256 amount) internal pure returns (LegOut[] memory a) {
+        a = new LegOut[](1);
+        a[0] = LegOut(token, amount, 0, address(0));
+    }
+
+    /// @dev Pack the three uint32 clocks into `Order.timing`.
+    function _packTiming(uint32 decayStart, uint32 decayDur, uint32 exclEnd) internal pure returns (uint256) {
+        return uint256(decayStart) | (uint256(decayDur) << 32) | (uint256(exclEnd) << 64);
+    }
+
+    function _setDecayStart(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~uint256(type(uint32).max)) | uint256(uint32(v));
+    }
+
+    function _setDecayDuration(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~(uint256(type(uint32).max) << 32)) | (uint256(uint32(v)) << 32);
+    }
+
+    function _setExclusivityEnd(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~(uint256(type(uint32).max) << 64)) | (uint256(uint32(v)) << 64);
+    }
+
     function _a1(address a) internal pure returns (address[] memory arr) {
         arr = new address[](1);
         arr[0] = a;
@@ -166,20 +217,29 @@ abstract contract UsdrifForkBase is Test {
 
     function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
-            ORDER_TH, o.maker, uint8(o.side), o.nonce, o.deadline, _hashAddresses(o.tokenIn),
-            _hashUints(o.startAmountIn), _hashUints(o.endAmountIn),
-            o.decayStartTime, o.decayDuration
-        );
-        bytes memory mid = abi.encode(
-            _hashAddresses(o.tokenOut), _hashUints(o.startAmountOut), _hashUints(o.endAmountOut),
-            _hashAddresses(o.recipientOut), o.exclusiveFiller, o.exclusivityEndTime, o.minFillAnchor,
-            o.exclusivityOverrideBps
+            ORDER_TH,
+            o.maker,
+            uint8(o.side),
+            o.nonce,
+            o.deadline,
+            _hashLegsIn(o.legsIn),
+            _hashLegsOut(o.legsOut),
+            o.timing,
+            o.exclusiveFiller,
+            o.minFillAnchor
         );
         bytes memory tail = abi.encode(
-            _hashCurve(o.curve), o.gasBumpBps, o.gasPriceRef,
-            _hashItems(o.items), _hashValidators(o.validators), _hashValidators(o.invariants), o.fillModule, o.fillTotal
+            o.exclusivityOverrideBps,
+            _hashCurve(o.curve),
+            o.gasBumpBps,
+            o.gasPriceRef,
+            _hashItems(o.items),
+            _hashValidators(o.validators),
+            _hashValidators(o.invariants),
+            o.fillModule,
+            o.fillTotal
         );
-        return keccak256(bytes.concat(head, mid, tail));
+        return keccak256(bytes.concat(head, tail));
     }
 
     function _sign(Order memory o) internal view returns (bytes memory) {

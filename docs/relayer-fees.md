@@ -6,10 +6,11 @@ orders whose economics give it **no conversion price to charge on**: pure
 lending deposits, zero-capital exits, repays, and other "execute my items,
 nothing converts" intents.
 
-The mechanism is leg pricing itself — no flag, no fee field: **any SELL input
-leg with `startAmountIn < endAmountIn` RISES on the order's shared auction
-clock** (curve and gas bump included), exactly like a BUY conversion input.
-`start == end` legs stay fixed. Inputs may only rise, outputs may only fall.
+The mechanism is leg pricing itself — no flag, no fee field: **any SELL `LegIn`
+with a rising band (`end != 0`, `start < end`) RISES on the order's shared
+auction clock** (curve and gas bump included), exactly like a BUY conversion
+input. A `LegIn` with `end == 0` stays fixed at `start`. Inputs may only rise,
+outputs may only fall.
 
 ---
 
@@ -19,9 +20,9 @@ Most orders need nothing: the filler's compensation is the **conversion
 spread**, discovered by the existing auction.
 
 - **Swaps** — SELL outputs decay; the first filler for whom
-  `tokenIn − tokenOut ≥ gas + margin` fills.
+  `in − out ≥ gas + margin` fills.
 - **Withdrawals / exits** — same, funded by the position: TAKE proceeds pay the
-  solver's `tokenIn`; the maker's payout decays. Works same-asset too
+  solver's input leg; the maker's payout decays. Works same-asset too
   (`USDC → USDC` earn exits — the in/out spread is the fee).
 - **Borrows, leverage, migrations** — every flow where value passes through
   settlement has a spread to price the fill into.
@@ -30,7 +31,7 @@ spread**, discovered by the existing auction.
 
 A pure deposit is a MAKE item: the module pulls the maker's funding token
 straight into the protocol. Nothing passes through settlement, no output leg,
-no spread. A fixed `tokenIn` fee leg could pay the relayer, but a fixed fee
+no spread. A fixed `LegIn` fee leg could pay the relayer, but a fixed fee
 cannot respond to the auction or to gas — the maker would have to guess it at
 signing.
 
@@ -38,19 +39,19 @@ signing.
 
 ```
 side      = SELL
-items     = [ MAKE deposit D ]               (the real action)
-tokenIn   = [ USDC ]  F0 → FMAX rising       (the relayer fee — maker pays, filler earns)
-tokenOut  = [ ]                              (EMPTY — nothing is delivered back)
-decay …   = shared clock: decayStartTime/Duration, curve, gasBumpBps/gasPriceRef
+items     = [ MAKE deposit D ]                        (the real action)
+legsIn    = [ LegIn{ USDC, start: F0, end: FMAX } ]   (rising relayer fee — maker pays, filler earns)
+legsOut   = [ ]                                       (EMPTY — nothing is delivered back)
+timing    = packTiming(decayStartTime, decayDuration, exclusivityEndTime)  (shared clock; curve + gasBumpBps/gasPriceRef too)
 ```
 
 Fill-time semantics (`_payInputsToSolver`):
 
 | Leg | Priced at |
 | --- | --- |
-| input, `start == end` | fixed `startAmountIn` (exact-input guarantee) |
-| input, `start != end` | `amountInAt(tick)` — rising, gas-bumped |
-| input, `end < start` | reverts `InvalidAuctionParams` (inputs only rise) |
+| input, `end == 0` | fixed `start` (exact-input guarantee) |
+| input, `end != 0`, `start <= end` | `amountInAt(tick)` — rising, gas-bumped |
+| input, `end != 0`, `end < start` | reverts `InvalidAuctionParams` (inputs only rise) |
 
 Soft exclusivity applies to every auctioned input leg: a non-exclusive
 in-window filler charges `exclusivityOverrideBps` less.
@@ -59,16 +60,16 @@ in-window filler charges `exclusivityOverrideBps` less.
 
 - **Auction-discovered.** The fee rises until the *first* relayer for whom
   `tick ≥ gas + margin` fills. Competition prices the fill at the marginal
-  relayer's cost; the maker's worst case is the signed `endAmountIn` ceiling.
+  relayer's cost; the maker's worst case is the signed `legsIn[0].end` ceiling.
 - **Gas-indexed.** `gasBumpBps`/`gasPriceRef` widen the fee with `basefee`, so
   a deposit stays fillable through a gas spike without a fat static fee.
-- **Zero filler capital.** With an empty `tokenOut` the relayer fronts
+- **Zero filler capital.** With an empty `legsOut` the relayer fronts
   nothing — no inventory, no flash. It pays gas and collects the fee leg.
 - **One signature, fully gasless.** `fillWithPermit` covers the deposit pull
   (module allowance) and the fee pull (settlement allowance) in one witness
   batch.
-- **Transparent.** The fee band `[F0, FMAX]` sits in plain `uint256[]` fields
-  of the EIP-712 prompt.
+- **Transparent.** The fee band `[F0, FMAX]` sits in the `LegIn`'s plain
+  `start`/`end` fields of the EIP-712 prompt.
 
 ## 5. The zero-capital exit
 
@@ -82,19 +83,19 @@ spread exit, which needs solver inventory). Proven in
 
 ## 6. Order-construction rules
 
-- **Anchor = the fee leg** for outputless SELL orders (`startAmountIn[0]`,
+- **Anchor = the fee leg** for outputless SELL orders (`legsIn[0].start`,
   must be > 0; use a dust floor like `1` for a ~zero start). Deposits should be
-  **full-fill-only**: `minFillAnchor = startAmountIn[0]`.
-- **Empty `tokenOut` is only for item-bearing SELL orders.** `validateOrder`
+  **full-fill-only**: `minFillAnchor = legsIn[0].start`.
+- **Empty `legsOut` is only for item-bearing SELL orders.** `validateOrder`
   rejects an empty-output order with no items (giveaway) and any BUY without
-  outputs (BUY anchors on `tokenOut[0]`).
+  outputs (BUY anchors on `legsOut[0]`).
 - **Approvals**: module allowance for the principal + settlement allowance for
-  the fee **ceiling** (`endAmountIn`). The Lens's fillable-amount preview caps
+  the fee **ceiling** (`legsIn[0].end`). The Lens's fillable-amount preview caps
   item-free orders at the ceiling tick (conservative).
 - **Composes with originator fees.** Named-payee fees are orthogonal: a fee
-  OUTPUT leg (`recipientOut`) on conversion orders, a `FeeTransferModule` item
-  on outputless ones (see `originator-fees.md`). The canonical outputless
-  integrator order = action item + fee item + rising leg.
+  OUTPUT leg (a `LegOut` whose `recipient` is the payee) on conversion orders, a
+  `FeeTransferModule` item on outputless ones (see `originator-fees.md`). The
+  canonical outputless integrator order = action item + fee item + rising leg.
 
 ## 7. What it does NOT do
 
@@ -116,5 +117,5 @@ spread exit, which needs solver inventory). Proven in
 | **Zero-capital exit**: TAKE withdraw to wallet, fee self-funded by proceeds | `modules/lending/aave-v3/test/swaps/WithdrawWithFee.t.sol::test_withdrawToWallet_withRisingFee` |
 | Compound v3 USDC **base supply** entry (earn on-ramp) | `modules/lending/compound-v3/test/swaps/DepositWithFee.t.sol` |
 | Aave v3 gasless **repay** (MAKE) + rising relayer fee | `modules/lending/aave-v3/test/swaps/RepayWithFee.t.sol` |
-| Rising-leg ticks, gas bump, empty-`tokenOut`, exclusivity, Lens | `core/test/swaps/RisingInputFee.t.sol` |
+| Rising-leg ticks, gas bump, empty-`legsOut`, exclusivity, Lens | `core/test/swaps/RisingInputFee.t.sol` |
 | Fee item mechanics + Lens same-asset overlap | `core/test/modules/FeeTransferModule.t.sol` |

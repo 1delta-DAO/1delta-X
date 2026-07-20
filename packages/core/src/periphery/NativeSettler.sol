@@ -58,7 +58,7 @@ contract NativeSettler {
         bytes calldata dexCallData
     ) external payable returns (uint256[] memory outs) {
         if (msg.sender != order.maker) revert NotMaker();
-        if (order.tokenIn.length != 1 || order.tokenIn[0] != address(weth)) revert TokenInNotWeth();
+        if (order.legsIn.length != 1 || order.legsIn[0].token != address(weth)) revert TokenInNotWeth();
 
         // 1) Wrap native → WETH and give it to the maker so the core can charge it.
         weth.deposit{value: msg.value}();
@@ -67,7 +67,7 @@ contract NativeSettler {
         // 2) The DEX pulls the WETH the core pays us; Settlement pulls the tokenOut we
         //    produce (via the direct-approval fallback in `_deliverOutputs`).
         SafeTransferLib.forceApprove(address(weth), dexTarget, type(uint256).max);
-        SafeTransferLib.forceApprove(order.tokenOut[0], address(settlement), type(uint256).max);
+        SafeTransferLib.forceApprove(order.legsOut[0].token, address(settlement), type(uint256).max);
 
         // 3) Self-settle as the filler.
         outs = settlement.fillWithCallback(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, ItemOp, ItemsBatch, FillCtx} from "./Structs.sol";
+import {Order, Item, ItemOp, ItemsBatch, LegIn, LegOut, FillCtx} from "./Structs.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 import {OrderHash} from "./OrderHash.sol";
@@ -231,9 +231,9 @@ abstract contract Batch is Core {
         returns (uint256 owed)
     {
         for (uint256 i; i < orders.length;) {
-            address[] calldata tOut = orders[i].tokenOut;
+            LegOut[] calldata tOut = orders[i].legsOut;
             for (uint256 j; j < tOut.length;) {
-                if (tOut[j] == token) owed += amounts[i][j];
+                if (tOut[j].token == token) owed += amounts[i][j];
                 unchecked {
                     ++j;
                 }
@@ -329,10 +329,10 @@ abstract contract Batch is Core {
     ///      exactly what a single fill would charge; only the destination differs.
     function _batchPullInputs(Order calldata order, FillCtx memory ctx) internal {
         address maker = order.maker;
-        for (uint256 i; i < order.tokenIn.length;) {
+        for (uint256 i; i < order.legsIn.length;) {
             uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}
             if (owed != 0) {
-                Permit3TransferLib.transferFromWithFallback(PERMIT3, order.tokenIn[i], maker, address(this), owed);
+                Permit3TransferLib.transferFromWithFallback(PERMIT3, order.legsIn[i].token, maker, address(this), owed);
             }
             unchecked {
                 ++i;
@@ -347,7 +347,7 @@ abstract contract Batch is Core {
     ///      only — is IDENTICAL to `_deliverOutputs`; the returned amount is final
     ///      (post-override), so `_batchDeliverStored` just moves it.
     function _batchComputeOutputs(Order calldata order, FillCtx memory ctx) internal view returns (uint256[] memory outs) {
-        uint256 n = order.tokenOut.length;
+        uint256 n = order.legsOut.length;
         outs = new uint256[](n);
         for (uint256 j; j < n;) {
             outs[j] = order.outputAt(ctx, j); // same slice math as `_deliverOutputs`
@@ -365,9 +365,9 @@ abstract contract Batch is Core {
         for (uint256 j; j < amts.length;) {
             uint256 amt = amts[j];
             if (amt != 0) {
-                address to = order.recipientOut[j];
+                address to = order.legsOut[j].recipient;
                 bool makerLeg = to == address(0) || to == order.maker;
-                SafeTransferLib.safeTransfer(order.tokenOut[j], makerLeg ? order.maker : to, amt);
+                SafeTransferLib.safeTransfer(order.legsOut[j].token, makerLeg ? order.maker : to, amt);
             }
             unchecked {
                 ++j;
@@ -383,7 +383,7 @@ abstract contract Batch is Core {
     function _collectTokens(Order[] calldata orders) internal pure returns (address[] memory tokens) {
         uint256 maxLen;
         for (uint256 i; i < orders.length;) {
-            maxLen += orders[i].tokenIn.length + orders[i].tokenOut.length;
+            maxLen += orders[i].legsIn.length + orders[i].legsOut.length;
             unchecked {
                 ++i;
             }
@@ -391,8 +391,20 @@ abstract contract Batch is Core {
         address[] memory buf = new address[](maxLen);
         uint256 count;
         for (uint256 i; i < orders.length;) {
-            count = _appendUnique(buf, count, orders[i].tokenIn);
-            count = _appendUnique(buf, count, orders[i].tokenOut);
+            LegIn[] calldata li = orders[i].legsIn;
+            for (uint256 k; k < li.length;) {
+                count = _appendToken(buf, count, li[k].token);
+                unchecked {
+                    ++k;
+                }
+            }
+            LegOut[] calldata lo = orders[i].legsOut;
+            for (uint256 k; k < lo.length;) {
+                count = _appendToken(buf, count, lo[k].token);
+                unchecked {
+                    ++k;
+                }
+            }
             unchecked {
                 ++i;
             }
@@ -406,37 +418,19 @@ abstract contract Batch is Core {
         }
     }
 
-
-    /// @dev Append each of `toks` to `buf[0..count)` if not already present; return
-    ///      the new count. Linear scan — the token universe of one batch is tiny.
-    function _appendUnique(address[] memory buf, uint256 count, address[] calldata toks)
-        private
-        pure
-        returns (uint256)
-    {
-        for (uint256 i; i < toks.length;) {
-            address t = toks[i];
-            bool seen;
-            for (uint256 k; k < count;) {
-                if (buf[k] == t) {
-                    seen = true;
-                    break;
-                }
-                unchecked {
-                    ++k;
-                }
-            }
-            if (!seen) {
-                buf[count] = t;
-                unchecked {
-                    ++count;
-                }
-            }
+    /// @dev Append `t` to `buf[0..count)` if not already present; return the new
+    ///      count. Linear scan — the token universe of one batch is tiny.
+    function _appendToken(address[] memory buf, uint256 count, address t) private pure returns (uint256) {
+        for (uint256 k; k < count;) {
+            if (buf[k] == t) return count;
             unchecked {
-                ++i;
+                ++k;
             }
         }
-        return count;
+        buf[count] = t;
+        unchecked {
+            return count + 1;
+        }
     }
 
 
@@ -583,10 +577,10 @@ abstract contract Batch is Core {
                 ++i;
             }
         }
-        address[] calldata tokenIn = order.tokenIn;
-        for (uint256 i; i < tokenIn.length;) {
-            for (uint256 j = i + 1; j < tokenIn.length;) {
-                if (tokenIn[i] == tokenIn[j]) revert BatchItemsDuplicateInput();
+        LegIn[] calldata legsIn = order.legsIn;
+        for (uint256 i; i < legsIn.length;) {
+            for (uint256 j = i + 1; j < legsIn.length;) {
+                if (legsIn[i].token == legsIn[j].token) revert BatchItemsDuplicateInput();
                 unchecked {
                     ++j;
                 }
@@ -601,11 +595,13 @@ abstract contract Batch is Core {
     /// @dev Pull ONLY the input legs whose `mask` bit is set (the self-funded
     ///      seeds), maker → pool. `owed` uses the shared {Pricing.inputOwed} slice math.
     function _pullMaskedInputs(Order calldata order, FillCtx memory ctx, uint256 mask) internal {
-        for (uint256 i; i < order.tokenIn.length;) {
+        for (uint256 i; i < order.legsIn.length;) {
             if ((mask >> i) & 1 == 1) {
                 uint256 owed = order.inputOwed(ctx, i);
                 if (owed != 0) {
-                    Permit3TransferLib.transferFromWithFallback(PERMIT3, order.tokenIn[i], order.maker, address(this), owed);
+                    Permit3TransferLib.transferFromWithFallback(
+                        PERMIT3, order.legsIn[i].token, order.maker, address(this), owed
+                    );
                 }
             }
             unchecked {
@@ -651,7 +647,7 @@ abstract contract Batch is Core {
         _batchDeliverStored(order, amounts); // pool → maker/recipient (reverts if pool short)
         // Snapshot AFTER delivery, BEFORE items, so proceeds measure THIS order's
         // TAKE production only (other pooled funds cancel in the delta).
-        uint256[] memory tokenInBefore = _snapshotInputs(order.tokenIn);
+        uint256[] memory tokenInBefore = _snapshotInputs(order.legsIn);
         _executeItems(order, ctx);
         _settleInputsToPool(order, ctx, mask, tokenInBefore);
         _runInvariants(order, solver, "");
@@ -673,8 +669,8 @@ abstract contract Batch is Core {
         uint256[] memory tokenInBefore
     ) internal {
         address maker = order.maker;
-        for (uint256 i; i < order.tokenIn.length;) {
-            address token = order.tokenIn[i];
+        for (uint256 i; i < order.legsIn.length;) {
+            address token = order.legsIn[i].token;
             uint256 proceeds = SafeTransferLib.balanceOf(token, address(this)) - tokenInBefore[i];
             if ((mask >> i) & 1 == 1) {
                 if (proceeds != 0) SafeTransferLib.safeTransfer(token, maker, proceeds);

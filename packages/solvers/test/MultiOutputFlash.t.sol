@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, Item, Validator, OrderSide, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {MultiOutputFlashSolver, OutputLeg} from "@solvers/multi-output/MultiOutputFlashSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
@@ -65,22 +65,18 @@ contract MultiOutputFlashTest is CoreSettlementBase {
     }
 
     function _order() internal view returns (Order memory) {
+        LegOut[] memory legsOut = new LegOut[](2);
+        legsOut[0] = LegOut(USDC, USDC_OUT, 0, address(0));
+        legsOut[1] = LegOut(DAI, DAI_OUT, 0, address(0));
         return Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(WETH),
-            startAmountIn: _u1(WETH_IN),
-            endAmountIn: _u1(WETH_IN),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a2(USDC, DAI),
-            startAmountOut: _u2(USDC_OUT, DAI_OUT),
-            endAmountOut: _u2(USDC_OUT, DAI_OUT),
-            recipientOut: new address[](2),
+            legsIn: _legsIn1(WETH, WETH_IN),
+            legsOut: legsOut,
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

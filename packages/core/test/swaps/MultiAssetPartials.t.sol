@@ -5,7 +5,7 @@ import {OrderState} from "@core/settlement/OrderState.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, Item, Validator, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
@@ -45,22 +45,23 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
         uint32 decayStart,
         uint32 decayDur
     ) internal view returns (Order memory) {
+        LegIn[] memory legsIn = new LegIn[](tokenIn.length);
+        for (uint256 i; i < tokenIn.length; i++) {
+            legsIn[i] = LegIn(tokenIn[i], amountIn[i], 0); // fixed input (end == 0)
+        }
+        LegOut[] memory legsOut = new LegOut[](tokenOut.length);
+        for (uint256 j; j < tokenOut.length; j++) {
+            legsOut[j] = LegOut(tokenOut[j], startOut[j], endOut[j], address(0));
+        }
         return Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: tokenIn,
-            startAmountIn: amountIn,
-            endAmountIn: amountIn,
-            decayStartTime: decayStart,
-            decayDuration: decayDur,
-            tokenOut: tokenOut,
-            startAmountOut: startOut,
-            endAmountOut: endOut,
-            recipientOut: new address[](tokenOut.length),
+            legsIn: legsIn,
+            legsOut: legsOut,
+            timing: _packTiming(decayStart, decayDur, 0),
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

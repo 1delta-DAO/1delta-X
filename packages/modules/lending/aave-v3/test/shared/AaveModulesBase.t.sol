@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {Order, OrderSide, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
+import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {LimitOrderLeverageSolver} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
@@ -253,6 +253,31 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         order = _order(maker, 3, WETH, USDC, wethForSolver, bufferedAmount, items);
     }
 
+    // ──────────────────── Leg helpers (module-package local) ────────────────────
+
+    /// @dev Two fixed input legs (`end == 0`).
+    function _legsIn2(address t0, uint256 a0, address t1, uint256 a1) internal pure returns (LegIn[] memory a) {
+        a = new LegIn[](2);
+        a[0] = LegIn(t0, a0, 0);
+        a[1] = LegIn(t1, a1, 0);
+    }
+
+    /// @dev A single rising input leg (`start <= end`, `end != 0`).
+    function _legsIn1Rising(address token, uint256 start, uint256 end) internal pure returns (LegIn[] memory a) {
+        a = new LegIn[](1);
+        a[0] = LegIn(token, start, end);
+    }
+
+    /// @dev A single falling/explicit output leg (`start >= end`, arbitrary recipient).
+    function _legsOut1Falling(address token, uint256 start, uint256 end, address recipient)
+        internal
+        pure
+        returns (LegOut[] memory a)
+    {
+        a = new LegOut[](1);
+        a[0] = LegOut(token, start, end, recipient);
+    }
+
     function _buildMigrationOrder(
         uint256 bufferedRepay,
         uint256 exactWeth,
@@ -295,17 +320,10 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             side: OrderSide.SELL,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(USDC),
-            tokenOut: _a1(USDC),
-            startAmountIn: _u1(debt), //             Settlement pays solver entirely from the borrow proceeds
-            endAmountIn: _u1(debt), //             Settlement pays solver entirely from the borrow proceeds
-            decayStartTime: 0,
-            decayDuration: 0,
-            startAmountOut: _u1(bufferedRepay),
-            endAmountOut: _u1(bufferedRepay),
-            recipientOut: new address[](1),
+            legsIn: _legsIn1(USDC, debt), //             Settlement pays solver entirely from the borrow proceeds
+            legsOut: _legsOut1(USDC, bufferedRepay),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

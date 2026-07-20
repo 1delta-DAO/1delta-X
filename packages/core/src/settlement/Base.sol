@@ -6,7 +6,8 @@ import {IMakerModule} from "../interfaces/IMakerModule.sol";
 import {ISettlementModule} from "../interfaces/ISettlementModule.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
-import {Order, Item, ItemOp, Validator, FillCtx} from "./Structs.sol";
+import {Order, Item, ItemOp, Validator, LegIn, FillCtx} from "./Structs.sol";
+import {DutchAuction} from "./DutchAuction.sol";
 import {SolverCallbackExecutor} from "./SolverCallbackExecutor.sol";
 import {Signatures} from "./Signatures.sol";
 
@@ -24,6 +25,8 @@ import {Signatures} from "./Signatures.sol";
 ///           {NonceManager} → {OrderState} → {Signatures} → this →
 ///           {Core} → {Batch} → {Settlement}.
 abstract contract Base is Signatures {
+    using DutchAuction for Order;
+
     // ──────────────────── Storage ────────────────────
 
     IPermit3 public immutable PERMIT3;
@@ -101,7 +104,7 @@ abstract contract Base is Signatures {
     ///      pay the maker (soft exclusivity). Returns the override, 0 otherwise.
     function _exclusivity(Order calldata order, address filler) internal view returns (uint256 overrideBps) {
         if (
-            order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime
+            order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime()
                 && filler != order.exclusiveFiller
         ) {
             if (order.exclusivityOverrideBps == 0) revert NotExclusiveFiller();
@@ -109,12 +112,12 @@ abstract contract Base is Signatures {
         }
     }
 
-    /// @dev Snapshot Settlement's balance of every input token before items run.
-    function _snapshotInputs(address[] calldata tokens) internal view returns (uint256[] memory bals) {
-        uint256 n = tokens.length;
+    /// @dev Snapshot Settlement's balance of every input leg's token before items run.
+    function _snapshotInputs(LegIn[] calldata legs) internal view returns (uint256[] memory bals) {
+        uint256 n = legs.length;
         bals = new uint256[](n);
         for (uint256 i; i < n;) {
-            bals[i] = SafeTransferLib.balanceOf(tokens[i], address(this));
+            bals[i] = SafeTransferLib.balanceOf(legs[i].token, address(this));
             unchecked {
                 ++i;
             }

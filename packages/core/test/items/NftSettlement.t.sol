@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, ItemOp, OrderSide, Validator} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {NftSettlementModule} from "@core/modules/NftSettlementModule.sol";
@@ -77,22 +77,17 @@ contract NftSettlementTest is CoreSettlementBase {
             recipient: address(0), //    unused by SETTLE (the module routes to the filler)
             data: abi.encode(address(nft), TOKEN_ID)
         });
+        LegOut[] memory legsOut = new LegOut[](1);
+        legsOut[0] = LegOut(USDC, PRICE, 0, address(0)); // fixed output to maker
         order = Order({
             maker: maker,
             side: OrderSide.BUY, //      fixed output = the price
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: new address[](0), //   consideration is the NFT item, not a fungible input
-            startAmountIn: new uint256[](0),
-            endAmountIn: new uint256[](0),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a1(USDC),
-            startAmountOut: _u1(PRICE),
-            endAmountOut: _u1(PRICE),
-            recipientOut: new address[](1), // 0 => maker
+            legsIn: new LegIn[](0), //   consideration is the NFT item, not a fungible input
+            legsOut: legsOut,
+            timing: 0,
             exclusiveFiller: address(0), //  OPEN — any solver may fill
-            exclusivityEndTime: 0,
             minFillAnchor: PRICE, //         full-fill only (indivisible)
             exclusivityOverrideBps: 0,
             curve: _noCurve(),

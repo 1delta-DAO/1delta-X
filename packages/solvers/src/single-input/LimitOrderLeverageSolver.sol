@@ -42,7 +42,7 @@ contract LimitOrderLeverageSolver is BaseFlashSolver {
     }
 
     /// @notice Fill a leverage-style order with no starting inventory.
-    /// @param flashToken   the collateral asset (equals `order.tokenOut`)
+    /// @param flashToken   the collateral asset (equals `order.legsOut[0].token`)
     /// @param flashAmount  amount to flash-loan — should cover Settlement's pull
     /// @param order        the maker's signed order
     /// @param sig          EIP-712 signature

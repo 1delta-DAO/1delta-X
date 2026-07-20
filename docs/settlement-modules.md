@@ -5,13 +5,13 @@
 > `NftSettlementModule` are live; covered by
 > `core/test/items/NftSettlement.t.sol`. The kernel *report-verify* extension
 > (§5) is specified here but not yet built — today's safety comes from the
-> mandatory `tokenOut` delivery + invariants (§4), which is sufficient for the
+> mandatory `legsOut` delivery + invariants (§4), which is sufficient for the
 > NFT-sale case.
 
 ## 1. Why
 
 The settlement already has two value paths: the **typed fungible fast path**
-(`tokenIn`/`tokenOut`, settled inline — zero dispatch) and the **item modules**
+(`legsIn`/`legsOut`, settled inline — zero dispatch) and the **item modules**
 (MAKE/TAKE, which act on the *maker's* own assets/positions). Missing was a
 generic settler for the **solver↔maker exchange** when the typed legs don't fit
 (an NFT sale, a cross-type trade). Previously that had to be stitched from a
@@ -36,14 +36,14 @@ The ERC-20 swap is the **built-in one, hardcoded inline**; anything else names a
 `SETTLE` module and pays one CALL:
 
 ```
-inline (0 CALL):   tokenIn/tokenOut typed legs      → the 99% fungible swap
+inline (0 CALL):   legsIn/legsOut typed legs        → the 99% fungible swap
 SETTLE (1 CALL):   item.op == SETTLE                → the exotic exchange
 ```
 
 They **compose** — an order can carry inline fungible legs *and* a `SETTLE` item
 *and* MAKE/TAKE items *and* a fill module; each section self-skips at zero cost
-when empty. A mixed NFT-plus-cash trade is exactly: an inline USDC `tokenOut`
-leg + a `SETTLE` NFT item.
+when empty. A mixed NFT-plus-cash trade is exactly: an inline USDC `LegOut`
++ a `SETTLE` NFT item.
 
 Dispatch ([`_executeItems`](../packages/core/src/settlement/Settlement.sol)):
 
@@ -75,13 +75,13 @@ No new `Order` field, no typehash change: `SETTLE` is a new value of the existin
   (assets the filler chose to put up by filling). Neither party's other assets
   are reachable.
 - **The maker's receipt is guaranteed by the order, not the module.** For an NFT
-  *sale*, the maker is paid via an inline `tokenOut` leg — a **mandatory,
+  *sale*, the maker is paid via an inline `LegOut` — a **mandatory,
   reverting delivery that runs BEFORE items**, so the maker is paid first or the
   whole fill reverts, and only then does the module hand off the NFT. For an NFT
   *purchase* (maker's receipt is non-fungible), the maker attaches an ownership
   **invariant** (`ownerOf(id) == maker`), checked after items.
 
-Atomicity worked example (from the test): an unpaid solver's `tokenOut` delivery
+Atomicity worked example (from the test): an unpaid solver's `legsOut` delivery
 reverts before the `SETTLE` item runs, so the maker never loses the NFT without
 being paid.
 
@@ -92,7 +92,7 @@ move — it is whatever a maker-signed module does, and there is **no on-chain
 filler-receipt guarantee** (invariants are maker-signed; a filler can't attach
 one). Orders are open (no filler whitelist, no module registry), so a maker
 *could* sign an "NFT sale" whose module is a no-op or a hostile collection, take
-the `tokenOut` payment, and hand over nothing. This is **not** a protocol bug —
+the `legsOut` payment, and hand over nothing. This is **not** a protocol bug —
 the maker is paid and the filler self-selected into the tx — but it means
 **solvers MUST protect themselves**:
 

@@ -12,6 +12,8 @@ import {
     Item,
     ItemOp,
     Validator,
+    LegIn,
+    LegOut,
     OrderSide,
     CurvePoint
 } from "@core/settlement/Settlement.sol";
@@ -142,6 +144,40 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
 
     // ──────────────────── Order builders (module-free) ────────────────────
 
+    /// @dev Core fixed-price SELL builder — a single fixed input leg and a single
+    ///      fixed output leg (both `end == 0`). The `_orderWith*` variants tweak one
+    ///      field of this. A decaying order sets `legsOut[0].end` (or `.start`) after.
+    function _sellOrder(
+        uint256 nonce,
+        address maker_,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        Item[] memory items
+    ) internal view returns (Order memory o) {
+        o = Order({
+            maker: maker_,
+            side: OrderSide.SELL,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours,
+            legsIn: _legsIn1(tokenIn, amountIn),
+            legsOut: _legsOut1(tokenOut, amountOut),
+            timing: 0,
+            exclusiveFiller: address(0),
+            minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: _noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
+            items: items,
+            validators: new Validator[](0),
+            invariants: new Validator[](0),
+            fillModule: address(0),
+            fillTotal: 0
+        });
+    }
+
     /// @dev Generic fixed-price single-/multi-item order with no extra gating.
     function _order(
         address _maker,
@@ -152,161 +188,83 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         uint256 amountOut,
         Item[] memory items
     ) internal view returns (Order memory) {
-        return Order({
-            maker: _maker,
-            side: OrderSide.SELL,
-            nonce: nonce,
-            deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn),
-            tokenOut: _a1(tokenOut),
-            startAmountIn: _u1(amountIn),
-            endAmountIn: _u1(amountIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            startAmountOut: _u1(amountOut),
-            endAmountOut: _u1(amountOut),
-            recipientOut: new address[](1),
-            exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
-            minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
-            curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
-            fillModule: address(0),
-            fillTotal: 0
-        });
+        return _sellOrder(nonce, _maker, tokenIn, tokenOut, amountIn, amountOut, items);
     }
 
     function _orderWithExclusivity(
         uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
         Item[] memory items, address exclusiveFiller, uint32 exclusivityEndTime
-    ) internal view returns (Order memory) {
-        return Order({
-            maker: maker, side: OrderSide.SELL, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut),
-            startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
-            decayStartTime: 0, decayDuration: 0,
-            startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
-            recipientOut: new address[](1),
-            exclusiveFiller: exclusiveFiller,
-            exclusivityEndTime: exclusivityEndTime,
-            minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
-            curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
-            fillModule: address(0),
-            fillTotal: 0
-        });
+    ) internal view returns (Order memory o) {
+        o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
+        o.exclusiveFiller = exclusiveFiller;
+        o.timing = _packTiming(0, 0, exclusivityEndTime);
     }
 
     function _orderWithMinFill(
         uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
         Item[] memory items, uint256 minFillAmountIn
-    ) internal view returns (Order memory) {
-        return Order({
-            maker: maker, side: OrderSide.SELL, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut),
-            startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
-            decayStartTime: 0, decayDuration: 0,
-            startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
-            recipientOut: new address[](1),
-            exclusiveFiller: address(0), exclusivityEndTime: 0,
-            minFillAnchor: minFillAmountIn,
-            exclusivityOverrideBps: 0,
-            curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
-            fillModule: address(0),
-            fillTotal: 0
-        });
+    ) internal view returns (Order memory o) {
+        o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
+        o.minFillAnchor = minFillAmountIn;
     }
 
     function _orderWithInvariants(
         uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
         Item[] memory items, Validator[] memory invariants
-    ) internal view returns (Order memory) {
-        return Order({
-            maker: maker, side: OrderSide.SELL, nonce: nonce, deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn), tokenOut: _a1(tokenOut),
-            startAmountIn: _u1(amountIn), endAmountIn: _u1(amountIn),
-            decayStartTime: 0, decayDuration: 0,
-            startAmountOut: _u1(amountOut), endAmountOut: _u1(amountOut),
-            recipientOut: new address[](1),
-            exclusiveFiller: address(0), exclusivityEndTime: 0, minFillAnchor: 0,
-            exclusivityOverrideBps: 0, curve: _noCurve(), gasBumpBps: 0, gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: invariants,
-            fillModule: address(0),
-            fillTotal: 0
-        });
+    ) internal view returns (Order memory o) {
+        o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
+        o.invariants = invariants;
     }
 
     function _orderWithValidators(
-        uint256 nonce,
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        uint256 amountOut,
-        Item[] memory items,
-        Validator[] memory validators
-    ) internal view returns (Order memory) {
-        return Order({
-            maker: maker,
-            side: OrderSide.SELL,
-            nonce: nonce,
-            deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn),
-            tokenOut: _a1(tokenOut),
-            startAmountIn: _u1(amountIn),
-            endAmountIn: _u1(amountIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            startAmountOut: _u1(amountOut),
-            endAmountOut: _u1(amountOut),
-            recipientOut: new address[](1),
-            exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
-            minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
-            curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
-            items: items,
-            validators: validators,
-            invariants: new Validator[](0),
-            fillModule: address(0),
-            fillTotal: 0
-        });
+        uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
+        Item[] memory items, Validator[] memory validators
+    ) internal view returns (Order memory o) {
+        o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
+        o.validators = validators;
     }
 
-    /// @dev Split a single-leg output into [gross − fee → maker, fee → recipient]
+    /// @dev A single fixed input leg (`end == 0`).
+    function _legsIn1(address token, uint256 amount) internal pure returns (LegIn[] memory a) {
+        a = new LegIn[](1);
+        a[0] = LegIn(token, amount, 0);
+    }
+
+    /// @dev A single fixed output leg to the maker (`end == 0`, recipient == 0).
+    function _legsOut1(address token, uint256 amount) internal pure returns (LegOut[] memory a) {
+        a = new LegOut[](1);
+        a[0] = LegOut(token, amount, 0, address(0));
+    }
+
+    /// @dev Pack the three uint32 clocks into `Order.timing` (mirror of {DutchAuction}).
+    function _packTiming(uint32 decayStart, uint32 decayDur, uint32 exclEnd) internal pure returns (uint256) {
+        return uint256(decayStart) | (uint256(decayDur) << 32) | (uint256(exclEnd) << 64);
+    }
+
+    // Bit-preserving setters for the packed `timing` word (used by tests that mutate
+    // one clock without disturbing the others).
+    function _setDecayStart(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~uint256(type(uint32).max)) | uint256(uint32(v));
+    }
+
+    function _setDecayDuration(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~(uint256(type(uint32).max) << 32)) | (uint256(uint32(v)) << 32);
+    }
+
+    function _setExclusivityEnd(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~(uint256(type(uint32).max) << 64)) | (uint256(uint32(v)) << 64);
+    }
+
+    /// @dev Split a single output leg into [gross − fee → maker, fee → recipient]
     ///      — the originator/sourcing fee as an ordinary fee OUTPUT leg. Both legs
-    ///      stay fixed; for a bps-of-tick fee on a decaying order build the legs
-    ///      with proportional start/end instead.
+    ///      stay fixed (`end == 0`); for a bps-of-tick fee on a decaying order set
+    ///      the legs' start/end proportionally instead.
     function _splitFeeLeg(Order memory order, address recipient, uint256 fee) internal pure {
-        address token = order.tokenOut[0];
-        uint256 gross = order.startAmountOut[0];
-        order.tokenOut = new address[](2);
-        order.tokenOut[0] = token;
-        order.tokenOut[1] = token;
-        order.startAmountOut = new uint256[](2);
-        order.startAmountOut[0] = gross - fee;
-        order.startAmountOut[1] = fee;
-        order.endAmountOut = order.startAmountOut;
-        order.recipientOut = new address[](2);
-        order.recipientOut[1] = recipient; // [0] stays 0 ⇒ maker
+        address token = order.legsOut[0].token;
+        uint256 gross = order.legsOut[0].start;
+        order.legsOut = new LegOut[](2);
+        order.legsOut[0] = LegOut(token, gross - fee, 0, address(0)); // maker
+        order.legsOut[1] = LegOut(token, fee, 0, recipient); // fee
     }
 
     // ──────────────────── Array helpers (single-asset wrap) ────────────────────
@@ -374,10 +332,14 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     bytes32 constant ITEM_TH =
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
+    bytes32 constant LEG_IN_TH = keccak256("LegIn(address token,uint256 start,uint256 end)");
+    bytes32 constant LEG_OUT_TH = keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "LegIn(address token,uint256 start,uint256 end)"
+        "LegOut(address token,uint256 start,uint256 end,address recipient)"
         "Validator(address target,bytes data)"
     );
     bytes32 constant TOKEN_PERMIT_TH =
@@ -392,7 +354,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         "Order witness)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
+        "LegIn(address token,uint256 start,uint256 end)"
+        "LegOut(address token,uint256 start,uint256 end,address recipient)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -442,6 +406,22 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         return keccak256(abi.encodePacked(h));
     }
 
+    function _hashLegsIn(LegIn[] memory legs) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](legs.length);
+        for (uint256 i; i < legs.length; i++) {
+            h[i] = keccak256(abi.encode(LEG_IN_TH, legs[i].token, legs[i].start, legs[i].end));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    function _hashLegsOut(LegOut[] memory legs) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](legs.length);
+        for (uint256 i; i < legs.length; i++) {
+            h[i] = keccak256(abi.encode(LEG_OUT_TH, legs[i].token, legs[i].start, legs[i].end, legs[i].recipient));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
     function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
             ORDER_TH,
@@ -449,31 +429,24 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             uint8(o.side),
             o.nonce,
             o.deadline,
-            _hashAddresses(o.tokenIn),
-            _hashUints(o.startAmountIn),
-            _hashUints(o.endAmountIn),
-            o.decayStartTime,
-            o.decayDuration
-        );
-        bytes memory mid = abi.encode(
-            _hashAddresses(o.tokenOut),
-            _hashUints(o.startAmountOut),
-            _hashUints(o.endAmountOut),
-            _hashAddresses(o.recipientOut),
+            _hashLegsIn(o.legsIn),
+            _hashLegsOut(o.legsOut),
+            o.timing,
             o.exclusiveFiller,
-            o.exclusivityEndTime,
-            o.minFillAnchor,
-            o.exclusivityOverrideBps
+            o.minFillAnchor
         );
         bytes memory tail = abi.encode(
+            o.exclusivityOverrideBps,
             _hashCurve(o.curve),
             o.gasBumpBps,
             o.gasPriceRef,
             _hashItems(o.items),
             _hashValidators(o.validators),
-            _hashValidators(o.invariants), o.fillModule, o.fillTotal
+            _hashValidators(o.invariants),
+            o.fillModule,
+            o.fillTotal
         );
-        return keccak256(bytes.concat(head, mid, tail));
+        return keccak256(bytes.concat(head, tail));
     }
 
     /// @dev Signs the order with the maker's key against Settlement's domain.

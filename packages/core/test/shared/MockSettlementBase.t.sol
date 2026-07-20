@@ -12,6 +12,8 @@ import {
     Item,
     ItemOp,
     Validator,
+    LegIn,
+    LegOut,
     OrderSide,
     CurvePoint
 } from "@core/settlement/Settlement.sol";
@@ -120,27 +122,40 @@ abstract contract MockSettlementBase is Test {
 
     // ──────────────────── Order builder ────────────────────
 
-    function _plainOrder(uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut)
-        internal
-        view
-        returns (Order memory)
-    {
-        return Order({
+    function _legsIn1(address token, uint256 amount) internal pure returns (LegIn[] memory a) {
+        a = new LegIn[](1);
+        a[0] = LegIn(token, amount, 0);
+    }
+
+    function _legsOut1(address token, uint256 amount) internal pure returns (LegOut[] memory a) {
+        a = new LegOut[](1);
+        a[0] = LegOut(token, amount, 0, address(0));
+    }
+
+    // Bit-preserving setters for the packed `timing` word.
+    function _setDecayStart(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~uint256(type(uint32).max)) | uint256(uint32(v));
+    }
+
+    function _setDecayDuration(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~(uint256(type(uint32).max) << 32)) | (uint256(uint32(v)) << 32);
+    }
+
+    function _setExclusivityEnd(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~(uint256(type(uint32).max) << 64)) | (uint256(uint32(v)) << 64);
+    }
+
+    /// @dev Empty-body Order with common defaults; callers set legsIn/legsOut/side.
+    function _blank(uint256 nonce) internal view returns (Order memory o) {
+        o = Order({
             maker: maker,
             side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn),
-            startAmountIn: _u1(amountIn),
-            endAmountIn: _u1(amountIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a1(tokenOut),
-            startAmountOut: _u1(amountOut),
-            endAmountOut: _u1(amountOut),
-            recipientOut: new address[](1),
+            legsIn: new LegIn[](0),
+            legsOut: new LegOut[](0),
+            timing: 0,
             exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
             curve: _noCurve(),
@@ -154,9 +169,19 @@ abstract contract MockSettlementBase is Test {
         });
     }
 
+    function _plainOrder(uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut)
+        internal
+        view
+        returns (Order memory o)
+    {
+        o = _blank(nonce);
+        o.legsIn = _legsIn1(tokenIn, amountIn);
+        o.legsOut = _legsOut1(tokenOut, amountOut);
+    }
+
     /// @dev Exact-output (BUY) plain order: fixed single output, rising input
     ///      auction `startAmountIn → endAmountIn` (best-for-maker first). Fill is
-    ///      denominated in tokenOut[0] units.
+    ///      denominated in legsOut[0] units.
     function _buyOrder(
         uint256 nonce,
         address tokenIn,
@@ -164,73 +189,31 @@ abstract contract MockSettlementBase is Test {
         uint256 startAmountIn,
         uint256 endAmountIn,
         uint256 amountOut
-    ) internal view returns (Order memory) {
-        return Order({
-            maker: maker,
-            side: OrderSide.BUY,
-            nonce: nonce,
-            deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn),
-            startAmountIn: _u1(startAmountIn),
-            endAmountIn: _u1(endAmountIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: _a1(tokenOut),
-            startAmountOut: _u1(amountOut),
-            endAmountOut: _u1(amountOut),
-            recipientOut: new address[](1),
-            exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
-            minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
-            curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
-            fillModule: address(0),
-            fillTotal: 0
-        });
+    ) internal view returns (Order memory o) {
+        o = _blank(nonce);
+        o.side = OrderSide.BUY;
+        o.legsIn = new LegIn[](1);
+        o.legsIn[0] = LegIn(tokenIn, startAmountIn, endAmountIn); // rising input (end = ceiling)
+        o.legsOut = _legsOut1(tokenOut, amountOut);
     }
 
-    /// @dev Multi-output plain order (no items). `tokenIn`/`amountIn` single-leg;
-    ///      `tokenOut`/`amountOut` arbitrary length. Used for duplicate-output and
-    ///      multi-output reverse-mode coverage.
+    /// @dev Multi-output plain order (no items). Single fixed input; `tokenOut`/
+    ///      `amountOut` arbitrary length (fixed legs). Duplicate-output + reverse-mode
+    ///      coverage.
     function _plainOrderMultiOut(
         uint256 nonce,
         address tokenIn,
         uint256 amountIn,
         address[] memory tokenOut,
         uint256[] memory amountOut
-    ) internal view returns (Order memory) {
-        return Order({
-            maker: maker,
-            side: OrderSide.SELL,
-            nonce: nonce,
-            deadline: block.timestamp + 1 hours,
-            tokenIn: _a1(tokenIn),
-            startAmountIn: _u1(amountIn),
-            endAmountIn: _u1(amountIn),
-            decayStartTime: 0,
-            decayDuration: 0,
-            tokenOut: tokenOut,
-            startAmountOut: amountOut,
-            endAmountOut: amountOut,
-            recipientOut: new address[](tokenOut.length),
-            exclusiveFiller: address(0),
-            exclusivityEndTime: 0,
-            minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
-            curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
-            fillModule: address(0),
-            fillTotal: 0
-        });
+    ) internal view returns (Order memory o) {
+        o = _blank(nonce);
+        o.legsIn = _legsIn1(tokenIn, amountIn);
+        LegOut[] memory lo = new LegOut[](tokenOut.length);
+        for (uint256 j; j < tokenOut.length; j++) {
+            lo[j] = LegOut(tokenOut[j], amountOut[j], 0, address(0));
+        }
+        o.legsOut = lo;
     }
 
     // ──────────────────── Permit-batch (witness) builders ────────────────────
@@ -250,7 +233,9 @@ abstract contract MockSettlementBase is Test {
         "Order witness)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
+        "LegIn(address token,uint256 start,uint256 end)"
+        "LegOut(address token,uint256 start,uint256 end,address recipient)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
         "Validator(address target,bytes data)";
@@ -323,10 +308,14 @@ abstract contract MockSettlementBase is Test {
     bytes32 constant CURVE_POINT_TH = keccak256("CurvePoint(uint32 timeDelta,uint32 bumpBps)");
     bytes32 constant ITEM_TH = keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
+    bytes32 constant LEG_IN_TH = keccak256("LegIn(address token,uint256 start,uint256 end)");
+    bytes32 constant LEG_OUT_TH = keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,address[] tokenIn,uint256[] startAmountIn,uint256[] endAmountIn,uint32 decayStartTime,uint32 decayDuration,address[] tokenOut,uint256[] startAmountOut,uint256[] endAmountOut,address[] recipientOut,address exclusiveFiller,uint32 exclusivityEndTime,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
         "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
         "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
+        "LegIn(address token,uint256 start,uint256 end)"
+        "LegOut(address token,uint256 start,uint256 end,address recipient)"
         "Validator(address target,bytes data)"
     );
 
@@ -375,6 +364,22 @@ abstract contract MockSettlementBase is Test {
         return keccak256(abi.encodePacked(h));
     }
 
+    function _hashLegsIn(LegIn[] memory legs) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](legs.length);
+        for (uint256 i; i < legs.length; i++) {
+            h[i] = keccak256(abi.encode(LEG_IN_TH, legs[i].token, legs[i].start, legs[i].end));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
+    function _hashLegsOut(LegOut[] memory legs) internal pure returns (bytes32) {
+        bytes32[] memory h = new bytes32[](legs.length);
+        for (uint256 i; i < legs.length; i++) {
+            h[i] = keccak256(abi.encode(LEG_OUT_TH, legs[i].token, legs[i].start, legs[i].end, legs[i].recipient));
+        }
+        return keccak256(abi.encodePacked(h));
+    }
+
     function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
             ORDER_TH,
@@ -382,31 +387,24 @@ abstract contract MockSettlementBase is Test {
             uint8(o.side),
             o.nonce,
             o.deadline,
-            _hashAddresses(o.tokenIn),
-            _hashUints(o.startAmountIn),
-            _hashUints(o.endAmountIn),
-            o.decayStartTime,
-            o.decayDuration
-        );
-        bytes memory mid = abi.encode(
-            _hashAddresses(o.tokenOut),
-            _hashUints(o.startAmountOut),
-            _hashUints(o.endAmountOut),
-            _hashAddresses(o.recipientOut),
+            _hashLegsIn(o.legsIn),
+            _hashLegsOut(o.legsOut),
+            o.timing,
             o.exclusiveFiller,
-            o.exclusivityEndTime,
-            o.minFillAnchor,
-            o.exclusivityOverrideBps
+            o.minFillAnchor
         );
         bytes memory tail = abi.encode(
+            o.exclusivityOverrideBps,
             _hashCurve(o.curve),
             o.gasBumpBps,
             o.gasPriceRef,
             _hashItems(o.items),
             _hashValidators(o.validators),
-            _hashValidators(o.invariants), o.fillModule, o.fillTotal
+            _hashValidators(o.invariants),
+            o.fillModule,
+            o.fillTotal
         );
-        return keccak256(bytes.concat(head, mid, tail));
+        return keccak256(bytes.concat(head, tail));
     }
 
     function _sign(Order memory o) internal view returns (bytes memory) {

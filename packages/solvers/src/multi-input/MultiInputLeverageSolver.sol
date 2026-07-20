@@ -15,7 +15,7 @@ import {IBalancerVault} from "@solvers/single-input/LimitOrderLeverageSolver.sol
 ///
 ///  Flow (per `executeFill`):
 ///
-///    1. Balancer flash-loan `flashToken` (the collateral, `order.tokenOut[0]`).
+///    1. Balancer flash-loan `flashToken` (the collateral, `order.legsOut[0].token`).
 ///    2. `receiveFlashLoan`:
 ///         a. `_fillAndSwapAll` — Settlement pulls the flash-loaned collateral via
 ///            Permit3, routes it through the maker's deposit leg, opens the
@@ -37,7 +37,7 @@ contract MultiInputLeverageSolver is BaseFlashSolver {
     }
 
     /// @notice Fill a multi-input leverage order with no starting inventory.
-    /// @param flashToken   the collateral asset (equals `order.tokenOut[0]`)
+    /// @param flashToken   the collateral asset (equals `order.legsOut[0].token`)
     /// @param flashAmount  amount to flash-loan — should cover Settlement's pull
     /// @param order        the maker's signed order (may have many `tokenIn[]`)
     /// @param sig          EIP-712 signature
