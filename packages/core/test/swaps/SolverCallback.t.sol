@@ -6,6 +6,8 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Settlement, CallbackMode, Order, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
+import {NonceManager} from "@core/settlement/NonceManager.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -141,6 +143,65 @@ contract SolverCallbackTest is CoreSettlementBase {
         );
 
         assertEq(IERC20(USDC).balanceOf(victim), victimBal, "victim funds untouched");
+    }
+
+    // ══════════════════════ Reentrant cancel via callback ══════════════════════
+    //
+    // Audit vector: a callback that re-enters to CANCEL an order mid-fill. The
+    // cancel primitives are caller-keyed, and the callback runs from the EXECUTOR
+    // (never the maker), so neither the per-hash cancel nor the nonce cancel can
+    // touch a maker's order. `filled` is also already written before the callback,
+    // so even the order's own maker can't un-fill it mid-flight.
+
+    /// @dev `cancelOrder(order)` from the callback runs with `msg.sender == EXECUTOR`
+    ///      ≠ `order.maker` ⇒ NotOrderMaker ⇒ CallbackFailed ⇒ the whole fill
+    ///      reverts. The order is neither filled nor cancelled; a later fill works.
+    function test_fillWithCallback_reentrantCancelOrder_rejected() public {
+        deal(USDC, maker, USDC_IN);
+        _approveMakerToSettlement(USDC, USDC_IN);
+        deal(WETH, solver, WETH_OUT);
+
+        Order memory order = _sellUsdcForWeth(0);
+        bytes memory sig = _sign(order);
+
+        // Point the callback at Settlement itself: cancelOrder(order).
+        bytes memory cb = abi.encodeCall(OrderState.cancelOrder, (order));
+
+        vm.prank(solver);
+        vm.expectRevert(); // CallbackFailed wrapping NotOrderMaker
+        settlement.fillWithCallback(order, sig, USDC_IN, address(settlement), cb, CallbackMode.PreDelivery);
+
+        // The attack reverted atomically: order neither cancelled nor filled.
+        assertTrue(settlement.filled(_hashOrder(order)) != type(uint256).max, "not cancelled");
+        assertEq(settlement.filled(_hashOrder(order)), 0, "not filled");
+
+        // And it remains fillable by a normal fill.
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN);
+        assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "victim order still fillable afterwards");
+    }
+
+    /// @dev `cancelOrders([nonce])` from the callback cancels the EXECUTOR's OWN
+    ///      nonce namespace, never the maker's — so it cannot grief a maker's order.
+    ///      The fill completes and the maker's nonce is untouched.
+    function test_fillWithCallback_reentrantNonceCancel_wrongNamespace() public {
+        deal(USDC, maker, USDC_IN);
+        _approveMakerToSettlement(USDC, USDC_IN);
+        deal(WETH, solver, WETH_OUT);
+
+        Order memory order = _sellUsdcForWeth(7); // nonce 7
+        bytes memory sig = _sign(order);
+
+        uint256[] memory nonces = new uint256[](1);
+        nonces[0] = 7;
+        bytes memory cb = abi.encodeCall(NonceManager.cancelOrders, (nonces));
+
+        // The reentrant cancel targets nonce 7 in the EXECUTOR's namespace (a no-op
+        // for the maker), so the fill succeeds and the order fills normally.
+        vm.prank(solver);
+        settlement.fillWithCallback(order, sig, USDC_IN, address(settlement), cb, CallbackMode.PreDelivery);
+        assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "fill completed; maker nonce 7 untouched");
+        assertEq(settlement.filled(_hashOrder(order)), USDC_IN, "order fully filled");
     }
 
     // ══════════════════════ Executor caller gate ══════════════════════
