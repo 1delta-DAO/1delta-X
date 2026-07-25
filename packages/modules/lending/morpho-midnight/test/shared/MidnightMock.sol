@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Market, Offer, MidnightIdLib} from "../../src/interfaces/IMidnight.sol";
+import {ISellCallback} from "../../src/interfaces/ICallbacks.sol";
 
 /// @dev Minimal mintable ERC20 for the mock-based Midnight harness (no fork).
 contract MockERC20 {
@@ -75,6 +76,9 @@ contract MidnightMock {
     mapping(bytes32 => mapping(address => mapping(uint256 => uint128))) internal _collateral;
     // onBehalf → authorized → allowed
     mapping(address => mapping(address => bool)) public isAuthorized;
+    // collateral token → price in loan-token wei per collateral wei, 1e18-scaled
+    // (0 ⇒ par, i.e. 1:1 in raw units). Only used by the modeled solvency check.
+    mapping(address => uint256) internal _price;
 
     // last-call captures (fund-path / pinning assertions)
     string public lastFn;
@@ -104,8 +108,32 @@ contract MidnightMock {
         return _collateral[id][user][index];
     }
 
-    function isHealthy(Market memory, bytes32, address) external pure returns (bool) {
-        return true;
+    /// @dev Modeled solvency check: Σ collateral_i · price_i · lltv_i ≥ debt.
+    ///      Faithful enough to exercise the loop (a borrow that isn't collateralized
+    ///      by fill time is `SellerIsLiquidatable`); real tick/discount pricing is
+    ///      Morpho's concern. Positions the modules never health-check are
+    ///      unaffected (the value-out legs don't call this).
+    function isHealthy(Market memory market, bytes32 id, address user) external view returns (bool) {
+        return _isHealthy(market, id, user);
+    }
+
+    function _isHealthy(Market memory market, bytes32 id, address user) internal view returns (bool) {
+        uint256 weightedByLltv;
+        uint256 n = market.collateralParams.length;
+        for (uint256 i; i < n; i++) {
+            uint256 c = _collateral[id][user][i];
+            if (c == 0) continue;
+            uint256 price = _price[market.collateralParams[i].token];
+            if (price == 0) price = 1e18; // par
+            uint256 valueInLoan = (c * price) / 1e18;
+            weightedByLltv += (valueInLoan * market.collateralParams[i].lltv) / 1e18;
+        }
+        return weightedByLltv >= _debt[id][user];
+    }
+
+    /// @dev Test-only: set the collateral price used by the modeled solvency check.
+    function setPrice(address collateralToken, uint256 priceWad) external {
+        _price[collateralToken] = priceWad;
     }
 
     // ──────────────────── authorization ────────────────────
@@ -195,6 +223,20 @@ contract MidnightMock {
         lastCallback = takerCallback; // modules force this to 0
         lastBuy = offer.buy;
         bytes32 id = MidnightIdLib.toId(offer.market);
+
+        // ── Maker-attached callback path (borrow-and-loop) ──
+        // The offer maker is the seller/borrower (buy == false) and attached an
+        // onSell callback. Model the borrower side the taker-centric branches below
+        // omit — and, faithful to Midnight, fire the callback AFTER moving the
+        // proceeds but BEFORE the solvency check, so the callback can collateralize
+        // the new debt in the same fill. `takerCallback` (the lender side) is out
+        // of scope here (the modules force it to 0).
+        if (!offer.buy && offer.callback != address(0)) {
+            lastCallback = offer.callback;
+            _sellCallbackFill(offer, id, units); // hoisted to stay under the stack limit
+            return (units, units);
+        }
+
         if (offer.buy) {
             // maker is buyer/lender, taker is seller/borrower: taker incurs debt,
             // receives the (zero-discount) proceeds at receiverIfTakerIsSeller.
@@ -207,6 +249,25 @@ contract MidnightMock {
             IERC20Min(offer.market.loanToken).transferFrom(msg.sender, address(this), units);
         }
         return (units, units);
+    }
+
+    /// @dev Borrow side of a maker-callback fill (buy == false). Moves proceeds,
+    ///      fires onSell, then enforces solvency — the real Midnight order.
+    ///      `msg.sender` (the lender) is preserved (private call = JUMP).
+    function _sellCallbackFill(Offer memory offer, bytes32 id, uint256 units) private {
+        address borrower = offer.maker;
+        address proceedsReceiver = offer.receiverIfMakerIsSeller;
+        _debt[id][borrower] += uint128(units);
+        // The lender (msg.sender) funds the borrow; 1:1 economics as elsewhere.
+        IERC20Min(offer.market.loanToken).transferFrom(msg.sender, address(this), units);
+        IERC20Min(offer.market.loanToken).transfer(proceedsReceiver, units);
+        require(
+            ISellCallback(offer.callback).onSell(
+                id, offer.market, units, units, 0, borrower, proceedsReceiver, offer.callbackData
+            ) == CALLBACK_SUCCESS,
+            "bad onSell callback"
+        );
+        require(_isHealthy(offer.market, id, borrower), "SellerIsLiquidatable");
     }
 
     function flashLoan(address[] memory tokens, uint256[] memory assets, address callback, bytes memory data)

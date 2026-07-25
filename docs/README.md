@@ -61,6 +61,19 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   attached to module `data` so on-chain approvals aren't required beforehand;
   replayed atomically inside the module call.
 
+## Order distribution
+
+- **[waku-orderbook.md](waku-orderbook.md)** — *design note.* A decentralized
+  transport for signed orders over [Waku](https://waku.org) P2P messaging,
+  targeted first at Rootstock. There is no on-chain orderbook — orders are
+  **self-authenticating** `(Order, sig)` tuples any node can verify against
+  `DOMAIN_SEPARATOR()`, so the mesh needs no trust, only the signature does.
+  Covers the Relay / Light Push / Filter / Store roles, content-topic design,
+  and — the crux — the **spam / unbacked-order defense**: RLN rate-limiting, a
+  cheap→expensive verification pipeline, and a per-maker negative cache that
+  keeps rejecting funds-less / no-approval orders **O(1) amortized**, with the
+  on-chain fill revert as the capital backstop.
+
 ## Reading order
 
 New to the codebase: the [settlement README](../packages/core/src/settlement/README.md)
