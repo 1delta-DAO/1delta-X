@@ -28,7 +28,14 @@ PACKAGES := \
 	modules-morpho-midnight \
 	modules-transfer \
 	modules-usdrif \
-	modules-venus
+	modules-venus \
+	modules-silo \
+	modules-exactly \
+	modules-lista \
+	modules-river \
+	modules-liquity-v2 \
+	modules-gearbox-v3 \
+	modules-teller
 
 .PHONY: test build test-all build-all gas gas-check gas-diff $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
 

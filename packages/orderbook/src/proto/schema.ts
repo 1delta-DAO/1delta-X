@@ -1,0 +1,141 @@
+/**
+ * Protobuf wire schema for order distribution — the SINGLE SOURCE OF TRUTH.
+ *
+ * `orderbook.proto` (sibling file) mirrors this string verbatim for humans and
+ * for a future non-TS (e.g. Waku Rust/Go) consumer; a unit test asserts the two
+ * never drift. The codec parses THIS string at load, so the running code and the
+ * schema can never diverge.
+ *
+ * Encoding rules (see `codec.ts`):
+ *  - every Solidity `uint256` (nonce, amounts, timing, …) → `bytes`, big-endian,
+ *    minimal (zero ⇒ empty). Reconstructed exactly on decode.
+ *  - every `address` → 20-byte `bytes`; `bytes32`/`bytes` (hashes, sigs, item
+ *    data) → raw `bytes`.
+ *  - `expiration` (Permit3 uint48) → `uint64` (always fits, no Long needed).
+ *
+ * The wire is transport-only: after decode the exact viem `Order` is rebuilt and
+ * re-hashed with the SDK's `hashOrderStruct`, so canonical hashing/verification
+ * stays in the SDK — never in this schema.
+ */
+export const SCHEMA = `
+syntax = "proto3";
+package onedelta.orderbook.v1;
+
+message LegIn {
+  bytes token = 1;
+  bytes start = 2;
+  bytes end   = 3;
+}
+
+message LegOut {
+  bytes token     = 1;
+  bytes start     = 2;
+  bytes end       = 3;
+  bytes recipient = 4;
+}
+
+message CurvePoint {
+  uint32 timeDelta = 1;
+  uint32 bumpBps   = 2;
+}
+
+message Item {
+  uint32 op        = 1;
+  bytes  module    = 2;
+  bytes  amount    = 3;
+  bytes  recipient = 4;
+  bytes  data      = 5;
+}
+
+message Validator {
+  bytes target = 1;
+  bytes data   = 2;
+}
+
+message Order {
+  bytes     maker                  = 1;
+  uint32    side                   = 2;
+  bytes     nonce                  = 3;
+  bytes     deadline               = 4;
+  repeated  LegIn legsIn           = 5;
+  repeated  LegOut legsOut         = 6;
+  bytes     timing                 = 7;
+  bytes     exclusiveFiller        = 8;
+  bytes     minFillAnchor          = 9;
+  bytes     exclusivityOverrideBps = 10;
+  repeated  CurvePoint curve       = 11;
+  bytes     gasBumpBps             = 12;
+  bytes     gasPriceRef            = 13;
+  repeated  Item items             = 14;
+  repeated  Validator validators   = 15;
+  repeated  Validator invariants   = 16;
+  bytes     fillModule             = 17;
+  bytes     fillTotal              = 18;
+}
+
+message TokenPermit {
+  bytes  spender    = 1;
+  bytes  token      = 2;
+  bytes  amount     = 3;
+  uint64 expiration = 4;
+}
+
+message TakerPermit {
+  bytes  spender    = 1;
+  bytes  ref        = 2;
+  bytes  amount     = 3;
+  uint64 expiration = 4;
+}
+
+message PermitBatch {
+  repeated TokenPermit tokens = 1;
+  repeated TakerPermit takers = 2;
+  bytes    nonce              = 3;
+  bytes    deadline           = 4;
+}
+
+// A signed order in flight. The self-authenticating unit: (order, sig) verifies
+// against the Settlement domain with zero trust in the relay. Optional
+// permitBatch carries the single-signature fillWithPermit allowances; sigless
+// marks the on-chain approveOrder path (maker cannot ECDSA-sign).
+message OrderAnnounce {
+  Order       order       = 1;
+  bytes       sig         = 2;
+  PermitBatch permitBatch = 3;
+  bool        sigless     = 4;
+}
+
+// Maker-signed soft cancel. makerSig is over the 32-byte orderHash (EIP-191);
+// an unsigned/mis-signed cancel is dropped, so you can only cancel your own.
+message OrderSoftCancel {
+  bytes orderHash = 1;
+  bytes makerSig  = 2;
+}
+
+// Advisory "I'm taking this" hint to cut wasted races. filled[orderHash]
+// on-chain stays authoritative.
+message FillNotice {
+  bytes orderHash = 1;
+  bytes filler    = 2;
+}
+
+message OrderList {
+  repeated OrderAnnounce orders = 1;
+}
+
+// WebSocket stream envelope from a centralized backend to a thin client.
+// SNAPSHOT (orders) on connect, then live ADD (order) / CANCEL (cancel).
+message StreamMessage {
+  uint32          kind   = 1; // 0 SNAPSHOT, 1 ADD, 2 CANCEL
+  repeated        OrderAnnounce orders = 2;
+  OrderAnnounce   order  = 3;
+  OrderSoftCancel cancel = 4;
+}
+`;
+
+/** Stream envelope discriminator — mirrors `StreamMessage.kind`. */
+export enum StreamKind {
+  SNAPSHOT = 0,
+  ADD = 1,
+  CANCEL = 2,
+}

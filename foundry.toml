@@ -150,3 +150,45 @@ src    = "packages/modules/lending/morpho-midnight/src"
 test   = "packages/modules/lending/morpho-midnight/test"
 script = "packages/modules/lending/morpho-midnight/script"
 out    = "out/modules-morpho-midnight"
+
+[profile.modules-silo]
+src    = "packages/modules/lending/silo/src"
+test   = "packages/modules/lending/silo/test"
+script = "packages/modules/lending/silo/script"
+out    = "out/modules-silo"
+
+[profile.modules-river]
+src    = "packages/modules/lending/river/src"
+test   = "packages/modules/lending/river/test"
+script = "packages/modules/lending/river/script"
+out    = "out/modules-river"
+
+[profile.modules-lista]
+src    = "packages/modules/lending/lista/src"
+test   = "packages/modules/lending/lista/test"
+script = "packages/modules/lending/lista/script"
+out    = "out/modules-lista"
+
+[profile.modules-liquity-v2]
+src    = "packages/modules/lending/liquity-v2/src"
+test   = "packages/modules/lending/liquity-v2/test"
+script = "packages/modules/lending/liquity-v2/script"
+out    = "out/modules-liquity-v2"
+
+[profile.modules-exactly]
+src    = "packages/modules/lending/exactly/src"
+test   = "packages/modules/lending/exactly/test"
+script = "packages/modules/lending/exactly/script"
+out    = "out/modules-exactly"
+
+[profile.modules-gearbox-v3]
+src    = "packages/modules/lending/gearbox-v3/src"
+test   = "packages/modules/lending/gearbox-v3/test"
+script = "packages/modules/lending/gearbox-v3/script"
+out    = "out/modules-gearbox-v3"
+
+[profile.modules-teller]
+src    = "packages/modules/lending/teller/src"
+test   = "packages/modules/lending/teller/test"
+script = "packages/modules/lending/teller/script"
+out    = "out/modules-teller"

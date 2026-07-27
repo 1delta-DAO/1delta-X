@@ -1,0 +1,32 @@
+{
+  "name": "@1delta-x/orderbook-server",
+  "version": "0.0.1",
+  "description": "Demo centralized orderbook backend for UniversalSettlement — a Fastify REST + WebSocket access layer over @1delta-x/orderbook's verified Book. Protobuf wire; config-driven testnet deployment.",
+  "type": "module",
+  "private": true,
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "start": "tsx src/bin.ts",
+    "dev": "tsx watch src/bin.ts",
+    "example:maker": "tsx examples/maker.ts",
+    "example:filler": "tsx examples/filler.ts"
+  },
+  "dependencies": {
+    "@1delta-x/orderbook": "workspace:*",
+    "@1delta-x/sdk": "workspace:*",
+    "@fastify/websocket": "^11.0.0",
+    "fastify": "^5.0.0",
+    "viem": "^2.21.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}

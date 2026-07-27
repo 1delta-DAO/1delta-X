@@ -1,9 +1,15 @@
 # Waku Order Distribution (P2P Orderbook)
 
-> **Status: design note, not yet implemented.** Sketches a decentralized
-> transport for signed orders, targeted first at Rootstock. Nothing here is on
-> the critical path of the settlement contract — the chain stays the source of
-> truth; this is purely how an order travels from maker to filler.
+> **Status: transport seam + centralized fill implemented; Waku transport
+> pending.** The transport-agnostic order-distribution layer this note calls for
+> now exists as [`@1delta-x/orderbook`](../packages/orderbook) (protobuf message
+> types, the L1+L2 verification pipeline, and the `Book`), with a centralized
+> demo backend in [`@1delta-x/orderbook-server`](../packages/orderbook-server)
+> running that `Book` over an in-memory transport. Waku is the remaining piece: a
+> second `Transport` implementation, dropped in with no change to `Book`,
+> verification, or the wire format. Nothing here is on the critical path of the
+> settlement contract — the chain stays the source of truth; this is purely how
+> an order travels from maker to filler.
 
 The settlement contract has **no on-chain orderbook**. Orders live entirely
 off-chain as a signed `(Order, sig)` tuple (see the SDK [`Order`](../packages/sdk/src/types.ts)
@@ -247,19 +253,28 @@ and the `takerData` channel.
 
 ## Where it lives, and open questions
 
-A new workspace package — `packages/orderbook` (or `packages/waku`) — depending
-on [`@1delta-x/sdk`](../packages/sdk) for the `Order` type + hashing/verification
-and on `@waku/sdk` (js-waku) for transport. It would export:
+This shipped as [`@1delta-x/orderbook`](../packages/orderbook), depending on
+[`@1delta-x/sdk`](../packages/sdk) for the `Order` type + hashing/verification.
+It exports exactly what this note called for:
 
-- `publishOrder(node, order, sig)` / `subscribeOrders(node, onOrder)` — thin
-  wrappers over Light Push / Relay + Filter.
-- the protobuf schema for the message types above,
+- `OrderbookClient.publishOrder` / `subscribeOrders` — thin wrappers over a
+  `Transport` (today an `HttpTransport`; a Light Push / Relay + Filter transport
+  slots in unchanged).
+- the protobuf schema + codec for the message types above (`proto/orderbook.proto`),
 - a `Book` class: Store backfill → live subscription → the Layer 1–2 pipeline →
-  an in-memory set keyed by `orderHash`, with expiry/cancel eviction and
-  event-driven cache invalidation.
+  an in-memory map keyed by `orderHash`, with expiry / signed-cancel eviction and
+  a periodic on-chain re-check.
 
-The SDK already covers everything on-chain-facing; this package is *only* the
-transport + book-reconstruction layer on top.
+The one deviation from the sketch: **Layer 2 is a single view call**, not a hand-
+rolled multicall — [`SettlementLens.getOrderRelevantStates`](../packages/core/src/periphery/SettlementLens.sol)
+already returns status + live-fillable + signature validity (incl. EIP-1271/7702)
++ validators for a whole batch. The per-maker negative cache + event invalidation
+remain the noted optimization, deferred.
+
+The SDK covers everything on-chain-facing; `@1delta-x/orderbook` is *only* the
+transport + book-reconstruction layer, and `@1delta-x/orderbook-server` is a
+centralized `Transport` + a REST/WebSocket access layer on top. Adding
+`@waku/sdk` (js-waku) as a `WakuTransport` is the remaining step.
 
 **Open questions before building:**
 
