@@ -28,6 +28,8 @@ contract GearboxV3TakerModuleAuthTest is Test {
     function test_credit_borrow_rejects_non_permit3() public {
         vm.prank(attacker);
         vm.expectRevert(GearboxCreditBorrowModule.OnlyPermit3.selector);
-        creditBorrow.takeOnBehalf(maker, 1e18, attacker, abi.encode(address(0xFACADE), address(0xCA), address(0xA55E7)));
+        // data = (creditAccount, asset) — the facade is derived on-chain, never
+        // supplied by the caller (see GearboxCreditAuth).
+        creditBorrow.takeOnBehalf(maker, 1e18, attacker, abi.encode(address(0xCA), address(0xA55E7)));
     }
 }

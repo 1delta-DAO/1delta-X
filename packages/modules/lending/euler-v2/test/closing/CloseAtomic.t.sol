@@ -30,7 +30,8 @@ contract EulerCloseAtomicTest is EulerV2ModulesBase {
             mode: uint256(EulerV2BatchModule.BatchMode.Close),
             collateralVault: address(EWETH),
             borrowVault: address(EUSDC),
-            sideAmount: REPAY_CEIL
+            sideAmount: REPAY_CEIL,
+            totalAmount: WETH_OUT // composite items are full-fill only
         });
         bytes memory data = abi.encode(p);
 

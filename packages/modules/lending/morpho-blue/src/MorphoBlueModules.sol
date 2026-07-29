@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
@@ -256,6 +257,10 @@ contract MorphoBlueTakerModule is ITakerModule {
             DelegationHelper.replayMorphoAuth(data, 224, address(morpho), onBehalfOf, address(this));
 
             if (DustHandler.readBalanceMode(data, 192) == DustHandler.BalanceMode.Full) {
+                // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+                // pro-rated — a sliced fill would unwind the whole position and brick
+                // the rest of the order. Require the slice to be the whole item.
+                FullFillGuard.requireFullFillFromData(data, 224, amount);
                 _withdrawFull(marketParams, onBehalfOf, amount, receiver);
             } else {
                 morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
@@ -265,6 +270,10 @@ contract MorphoBlueTakerModule is ITakerModule {
             DelegationHelper.replayMorphoAuth(data, 224, address(morpho), onBehalfOf, address(this));
 
             if (DustHandler.readBalanceMode(data, 192) == DustHandler.BalanceMode.Full) {
+                // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+                // pro-rated — a sliced fill would unwind the whole position and brick
+                // the rest of the order. Require the slice to be the whole item.
+                FullFillGuard.requireFullFillFromData(data, 224, amount);
                 _withdrawLoanFull(marketParams, onBehalfOf, amount, receiver);
             } else {
                 // Exact-assets withdrawal of the supplied loan token (shares = 0).

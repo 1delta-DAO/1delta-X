@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {ICEther} from "./interfaces/ICompoundV2.sol";
@@ -64,6 +65,19 @@ contract CompoundV2NativeDepositModule is IMakerModule {
         weth.withdraw(amount);
         ICEther(cEther).mint{value: amount}(); // reverts on error
         SafeTransferLib.safeTransfer(cEther, onBehalfOf, IERC20(cEther).balanceOf(address(this)));
+        _sweepNativeAsWeth(onBehalfOf);
+    }
+
+    /// @dev Wrap any residual native balance and return it to `to`. `receive()` is
+    ///      open and these modules have no owner or rescue path, so ETH left behind
+    ///      would be stranded forever. Wrapping (rather than a raw `.call{value:}`)
+    ///      keeps the sweep reentrancy-free.
+    function _sweepNativeAsWeth(address to) private {
+        uint256 bal = address(this).balance;
+        if (bal != 0) {
+            weth.deposit{value: bal}();
+            SafeTransferLib.safeTransfer(address(weth), to, bal);
+        }
     }
 
     receive() external payable {} // ETH from weth.withdraw
@@ -107,7 +121,20 @@ contract CompoundV2NativeRepayModule is IMakerModule {
             ICEther(cEther).repayBorrowBehalf{value: toRepay}(onBehalfOf); // reverts on error
         }
 
+        _sweepNativeAsWeth(onBehalfOf);
         _locked = 1;
+    }
+
+    /// @dev Wrap any residual native balance and return it to `to`. `receive()` is
+    ///      open and these modules have no owner or rescue path, so ETH left behind
+    ///      would be stranded forever. Wrapping (rather than a raw `.call{value:}`)
+    ///      keeps the sweep reentrancy-free.
+    function _sweepNativeAsWeth(address to) private {
+        uint256 bal = address(this).balance;
+        if (bal != 0) {
+            weth.deposit{value: bal}();
+            SafeTransferLib.safeTransfer(address(weth), to, bal);
+        }
     }
 
     receive() external payable {} // ETH from weth.withdraw
@@ -142,6 +169,10 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
 
         // base = (address) = 32 bytes ⇒ optional BalanceMode at offset 32.
         if (DustHandler.readBalanceMode(data, 32) == DustHandler.BalanceMode.Full) {
+            // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+            // pro-rated — a sliced fill would unwind the whole position and brick
+            // the rest of the order. Require the slice to be the whole item.
+            FullFillGuard.requireFullFillFromData(data, 64, amount);
             // Redeem the maker's ENTIRE cEther balance, wrap all, forward the signed
             // `amount`, sweep the WETH excess back to the maker.
             uint256 cBal = IERC20(cEther).balanceOf(onBehalfOf);
@@ -151,9 +182,14 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
             if (err != 0) revert CompoundV2Error(err);
             uint256 received = address(this).balance - beforeEth;
             require(received >= amount, "insufficient withdrawn");
-            weth.deposit{value: received}();
+            // Wrap the ENTIRE native balance, not just the redeem delta. `receive()`
+            // is open to anyone and this module has no owner, no rescue and no other
+            // path that touches native, so ETH left outside the delta would be
+            // stranded forever. Wrapping everything keeps the "module ends each call
+            // empty" invariant; a donor's ETH is a gift to the maker, not a loss.
+            weth.deposit{value: address(this).balance}();
             SafeTransferLib.safeTransfer(address(weth), receiver, amount);
-            if (received > amount) SafeTransferLib.safeTransfer(address(weth), onBehalfOf, received - amount);
+            _sweepWeth(onBehalfOf);
         } else {
             // Pull the ceiling cEther needed for `amount` ETH, redeem exactly `amount`,
             // wrap to WETH, forward, and return any cToken remainder to the maker.
@@ -162,11 +198,20 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
             permit3.transferFrom(onBehalfOf, address(this), cEther, uint160(cAmount));
             uint256 err = ICEther(cEther).redeemUnderlying(amount);
             if (err != 0) revert CompoundV2Error(err);
-            weth.deposit{value: amount}();
+            // Wrap everything, not just `amount` — see the Full branch.
+            weth.deposit{value: address(this).balance}();
             SafeTransferLib.safeTransfer(address(weth), receiver, amount);
             uint256 leftC = IERC20(cEther).balanceOf(address(this));
             if (leftC != 0) SafeTransferLib.safeTransfer(cEther, onBehalfOf, leftC);
+            _sweepWeth(onBehalfOf);
         }
+    }
+
+    /// @dev Return any WETH the module is holding to the maker, so it ends every
+    ///      call empty on both the native and wrapped side.
+    function _sweepWeth(address to) private {
+        uint256 left = SafeTransferLib.balanceOf(address(weth), address(this));
+        if (left != 0) SafeTransferLib.safeTransfer(address(weth), to, left);
     }
 
     receive() external payable {} // ETH from cEther.redeem*

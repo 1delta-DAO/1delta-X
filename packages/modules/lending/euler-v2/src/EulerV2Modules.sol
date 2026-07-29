@@ -8,6 +8,7 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 
 import {IEulerVault, IEVC} from "./interfaces/IEulerV2.sol";
 
@@ -205,6 +206,10 @@ contract EulerV2TakerModule is ITakerModule {
         } else if (op == uint8(Op.Withdraw)) {
             // BalanceMode slot at offset 64 (op@0 + vault@32).
             if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
+                // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+                // pro-rated — a sliced fill would unwind the whole position and brick
+                // the rest of the order. Require the slice to be the whole item.
+                FullFillGuard.requireFullFillFromData(data, 96, amount);
                 _withdrawFull(vault, onBehalfOf, amount, receiver);
             } else {
                 IEVC(IEulerVault(vault).EVC()).call(
@@ -273,6 +278,9 @@ contract EulerV2BatchModule is ITakerModule {
         address collateralVault;
         address borrowVault;
         uint256 sideAmount;
+        /// @dev The item's FULL maker-signed amount. Composite ops are full-fill
+        ///      only — see {FullFillGuard}.
+        uint256 totalAmount;
     }
 
     error OnlyPermit3();
@@ -285,6 +293,10 @@ contract EulerV2BatchModule is ITakerModule {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         BatchData memory p = abi.decode(data, (BatchData));
+
+        // Composite items execute a multi-leg position op whose side leg lives in
+        // `data` and does NOT pro-rate. Reject a sliced fill outright — see {FullFillGuard}.
+        FullFillGuard.requireFullFill(amount, p.totalAmount);
 
         if (BatchMode(uint8(p.mode)) == BatchMode.Open) {
             _open(p, onBehalfOf, receiver, amount);

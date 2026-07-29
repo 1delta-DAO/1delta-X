@@ -57,6 +57,13 @@ contract MockTimelockVault {
     uint256 private _nextId = 1;
     mapping(uint256 => Request) private _requests;
 
+    /// @dev Pin the id the next `requestRedeem` hands back, so a test can model a
+    ///      vault that reuses ids (the ERC-7540 `REQUEST_ID_0` convention, where
+    ///      every request shares id 0 and the vault tracks per-controller).
+    function setNextRequestId(uint256 id) external {
+        _nextId = id;
+    }
+
     error TooEarly();
     error NotRequester();
     error NoRequest();
@@ -183,7 +190,7 @@ contract ERC4626WithdrawModuleTest is Test {
 
         vm.warp(block.timestamp + LOCK);
 
-        bytes memory claimData = abi.encode(address(vault), address(underlyingAsset), requestId);
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
         vm.prank(address(permit3));
         module.takeOnBehalf(user, SHARES, receiver, claimData);
 
@@ -200,7 +207,7 @@ contract ERC4626WithdrawModuleTest is Test {
 
         vm.warp(block.timestamp + LOCK - 1);
 
-        bytes memory claimData = abi.encode(address(vault), address(underlyingAsset), requestId);
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
         vm.prank(address(permit3));
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -216,7 +223,7 @@ contract ERC4626WithdrawModuleTest is Test {
         uint256 requestId = _doRequest();
         vm.warp(block.timestamp + LOCK);
 
-        bytes memory claimData = abi.encode(address(vault), address(underlyingAsset), requestId);
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
         vm.expectRevert(ERC4626WithdrawModule.OnlyPermit3.selector);
         module.takeOnBehalf(user, SHARES, receiver, claimData);
     }
@@ -225,14 +232,14 @@ contract ERC4626WithdrawModuleTest is Test {
         uint256 requestId = _doRequest();
         vm.warp(block.timestamp + LOCK);
 
-        bytes memory claimData = abi.encode(address(vault), address(underlyingAsset), requestId);
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
         vm.prank(address(permit3));
         vm.expectRevert(ERC4626WithdrawModule.NotBeneficiary.selector);
         module.takeOnBehalf(address(0xDEAD), SHARES, receiver, claimData);
     }
 
     function test_claimRevertsIfNoPendingWithdrawal() public {
-        bytes memory claimData = abi.encode(address(vault), address(underlyingAsset), 99);
+        bytes memory claimData = abi.encode(address(vault), uint256(99), uint256(0));
         vm.prank(address(permit3));
         vm.expectRevert(ERC4626WithdrawModule.NoPendingWithdrawal.selector);
         module.takeOnBehalf(user, SHARES, receiver, claimData);
@@ -242,11 +249,86 @@ contract ERC4626WithdrawModuleTest is Test {
         uint256 requestId = _doRequest();
         vm.warp(block.timestamp + LOCK);
 
-        bytes memory claimData = abi.encode(address(vault), address(underlyingAsset), requestId);
+        // The slippage floor now lives in `data` (maker-signed); `amount` is the
+        // Permit3 cap, not the floor.
+        bytes memory claimData = abi.encode(address(vault), requestId, SHARES + 1);
         vm.prank(address(permit3));
         vm.expectRevert(
             abi.encodeWithSelector(ERC4626WithdrawModule.InsufficientAssets.selector, SHARES, SHARES + 1)
         );
-        module.takeOnBehalf(user, SHARES + 1, receiver, claimData);
+        module.takeOnBehalf(user, SHARES, receiver, claimData);
+    }
+
+    // ──────────────── Regression: allowance is a CAP, not a floor ────────────────
+
+    /// Permit3 decrements `amount`, so `amount` must bound what leaves. Previously
+    /// the module forwarded the ENTIRE claim regardless: a user capping their
+    /// allowance at a fraction to bound exposure was in fact authorising the whole
+    /// position. The surplus now goes back to the beneficiary.
+    function test_claimCapsAtAllowance_surplusToBeneficiary() public {
+        uint256 requestId = _doRequest();
+        vm.warp(block.timestamp + LOCK);
+
+        uint256 cap = SHARES / 4;
+        uint256 userBefore = underlyingAsset.balanceOf(user);
+
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        vm.prank(address(permit3));
+        module.takeOnBehalf(user, cap, receiver, claimData);
+
+        assertEq(underlyingAsset.balanceOf(receiver), cap, "receiver bounded by the allowance");
+        assertEq(underlyingAsset.balanceOf(user) - userBefore, SHARES - cap, "surplus returned to beneficiary");
+        assertEq(underlyingAsset.balanceOf(address(module)), 0, "module holds nothing");
+    }
+
+    // ──────────────── Regression: asset comes from the vault ────────────────
+
+    /// `asset` used to be caller-supplied, so a holder of any valid pending request
+    /// could name a token the module happened to hold and have `received` units of
+    /// it sent to their own receiver. It is now read from the vault, so `data`
+    /// cannot express a different token at all.
+    function test_assetIsReadFromVault_notCallerSupplied() public {
+        uint256 requestId = _doRequest();
+        vm.warp(block.timestamp + LOCK);
+
+        // Strand a share-token balance on the module — the balance the old bug
+        // would have handed over.
+        shareToken.mint(address(module), 5_000e18);
+
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        vm.prank(address(permit3));
+        module.takeOnBehalf(user, SHARES, receiver, claimData);
+
+        assertEq(underlyingAsset.balanceOf(receiver), SHARES, "paid in the vault's real asset");
+        assertEq(shareToken.balanceOf(receiver), 0, "not a single share token leaked");
+        assertEq(shareToken.balanceOf(address(module)), 5_000e18, "stranded balance untouched");
+    }
+
+    // ──────────────── Regression: requestId collision ────────────────
+
+    /// A vault that reuses request ids (the ERC-7540 `REQUEST_ID_0` convention)
+    /// used to silently clobber the first beneficiary, making their shares
+    /// permanently unclaimable — the module is the vault's only authorised claimer.
+    function test_requestIdCollision_failsClosed() public {
+        uint256 requestId = _doRequest();
+
+        // Force the vault to hand back the SAME id for the next request.
+        vault.setNextRequestId(requestId);
+
+        address other = address(0xB0B);
+        shareToken.mint(other, SHARES);
+        vm.prank(other);
+        shareToken.approve(address(permit3), type(uint256).max);
+
+        bytes memory data = abi.encode(address(vault), address(shareToken));
+        vm.prank(settlement);
+        vm.expectRevert(
+            abi.encodeWithSelector(ERC4626WithdrawModule.RequestIdCollision.selector, address(vault), requestId)
+        );
+        module.makeOnBehalf(other, SHARES, data);
+
+        // The first beneficiary's entry survives intact.
+        (address beneficiary,) = module.pendingWithdrawals(address(vault), requestId);
+        assertEq(beneficiary, user, "original beneficiary preserved");
     }
 }

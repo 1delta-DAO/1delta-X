@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
@@ -213,6 +214,10 @@ contract CompoundV2WithdrawModule is ITakerModule {
         (address cToken, address underlying) = abi.decode(data, (address, address));
 
         if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
+            // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+            // pro-rated — a sliced fill would unwind the whole position and brick
+            // the rest of the order. Require the slice to be the whole item.
+            FullFillGuard.requireFullFillFromData(data, 96, amount);
             // Pull the user's entire cToken balance and redeem it all to this module;
             // forward the signed `amount`, sweep the underlying excess to the user.
             // Measure the underlying ACTUALLY received via a balanceOf snapshot around

@@ -2,6 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
+
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {Settlement, Order} from "@core/settlement/Settlement.sol";
 
@@ -55,8 +57,24 @@ abstract contract BaseFlashSolver {
     /// @dev 1 = idle, 2 = inside a flash this solver initiated.
     uint256 private _flashActive = 1;
 
+    /// @dev The provider `executeFill` actually called, recorded when the flash is
+    ///      armed. Callbacks whose provider address is not an immutable MUST
+    ///      authenticate against THIS, never against a value decoded from the
+    ///      callback payload — see {_requireInFlashFrom}.
+    address private _armedProvider;
+
+    /// @dev Set by the callback, asserted after the provider call — see
+    ///      {_requireCallbackRan}.
+    bool private _callbackRan;
+
     error FlashLoanNotRepaid();
     error NotInFlash();
+    /// @dev A callback arrived from an address that is not the provider this
+    ///      solver actually called.
+    error UnexpectedFlashProvider();
+    /// @dev The provider returned without invoking the callback, so the order was
+    ///      never validated and no flash actually happened.
+    error FlashCallbackMissing();
     /// @dev This solver only routes a single debt leg (`legsIn[0]`); a
     ///      multi-input order would strand legs [1..] as maker shortfalls.
     error MultiInputUnsupported();
@@ -83,11 +101,50 @@ abstract contract BaseFlashSolver {
         if (_flashActive != 2) revert NotInFlash();
     }
 
+    /// @dev Record the provider this fill is about to call. Only needed where the
+    ///      provider is chosen per call rather than pinned as an immutable.
+    function _armProvider(address provider) internal {
+        _armedProvider = provider;
+    }
+
+    /// @dev Callback authentication for a per-call provider: in-flash AND from the
+    ///      exact address `executeFill` called.
+    ///
+    ///      This exists because deriving the expected provider from the callback's
+    ///      own payload is circular and therefore no check at all. When both the
+    ///      provider argument and the callback data are attacker-supplied — as they
+    ///      are for a per-call flash source — `msg.sender == decoded.provider` is
+    ///      trivially satisfied by a contract the attacker wrote, which then drives
+    ///      an arbitrary `settlement.fill` with THIS SOLVER as the filler and no
+    ///      repayment floor. Comparing against storage written before the external
+    ///      call closes it: an attacker can still call their own fake provider, but
+    ///      the callback then arrives from an address that matches, and it is their
+    ///      own contract they are looping through — no reach into this solver's
+    ///      identity, because the fake provider is never `_armedProvider` for any
+    ///      call the solver did not itself make.
+    function _requireInFlashFromArmed() internal {
+        if (_flashActive != 2) revert NotInFlash();
+        if (msg.sender != _armedProvider) revert UnexpectedFlashProvider();
+        _callbackRan = true;
+    }
+
+    /// @dev Assert the provider actually called back, then reset. Required after a
+    ///      per-call provider, because a "provider" that simply returns without
+    ///      invoking the callback would otherwise fall straight through to the
+    ///      profit sweep — and the sweep names a token from an `order` that, on
+    ///      that path, was NEVER signature-checked (the order is only validated
+    ///      inside the callback). That made the tail sweep a signature-free
+    ///      "send me your balance of any token I name" primitive.
+    function _requireCallbackRan() internal {
+        if (!_callbackRan) revert FlashCallbackMissing();
+        _callbackRan = false;
+    }
+
     /// @notice Grant this contract's ERC20 + Permit3 allowances for `token` so
     ///         Settlement can pull the flash-loaned collateral during `fill`.
     ///         Permissionless — only this contract's own (transient) funds are at risk.
     function setupTokenApproval(address token) external {
-        IERC20(token).approve(address(permit3), type(uint256).max);
+        SafeTransferLib.forceApprove(token, address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), token, type(uint160).max, 0);
     }
 
@@ -143,7 +200,7 @@ abstract contract BaseFlashSolver {
     function _swapExactIn(address tokenIn, address tokenOut, uint256 amountIn, uint24 dexFee, uint256 minOut)
         internal
     {
-        IERC20(tokenIn).approve(address(router), amountIn);
+        SafeTransferLib.forceApprove(tokenIn, address(router), amountIn);
         router.exactInputSingle(
             IUniV3Router.ExactInputSingleParams({
                 tokenIn: tokenIn,
@@ -174,6 +231,6 @@ abstract contract BaseFlashSolver {
     ///      `executeFill` during the sweep.
     function _sweep(address token, address to) internal {
         uint256 bal = IERC20(token).balanceOf(address(this));
-        if (bal != 0) IERC20(token).transfer(to, bal);
+        if (bal != 0) SafeTransferLib.safeTransfer(token, to, bal);
     }
 }

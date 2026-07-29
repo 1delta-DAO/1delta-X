@@ -2,6 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
+
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {Settlement, Order} from "@core/settlement/Settlement.sol";
 
@@ -75,16 +77,40 @@ contract UsdrifInventorySolver {
     ///      calldata from this contract's identity.
     mapping(address => bool) public aggregators;
 
+    /// @notice Per-token ceiling on how much inventory ONE `executeFill` call may
+    ///         pay out. Owner-set; **0 means no outflow is permitted**, so a fresh
+    ///         deployment fails closed until the owner configures a budget.
+    ///
+    ///  Why this exists: `executeFill` takes an ARBITRARY `(order, sig)` and makes
+    ///  this contract the filler while it holds a `type(uint160).max` Permit3
+    ///  allowance to Settlement on every inventory token. Without a bound, an
+    ///  operator — explicitly a lower trust tier than owner, which is the whole
+    ///  reason `sell` has an aggregator whitelist — could sign their own order with
+    ///  `legsOut[0]` set to the entire inventory and take 100% of it in one call,
+    ///  paying a token amount in. That made the operator tier owner-equivalent,
+    ///  contradicting the contract's stated design.
+    ///
+    ///  This does not make a compromised operator key harmless — they can still
+    ///  loop calls across blocks. It bounds the loss per call and gives the owner a
+    ///  revocation window, which is the difference between "instant total loss" and
+    ///  "a drain the owner can interrupt". Eliminating it entirely needs an
+    ///  order-shape allowlist, not a cap.
+    mapping(address => uint256) public maxOutflowPerFill;
+
     error NotOwner();
     error NotOperator();
     error NativeTransferFailed();
     error TransferFailed();
     error AggregatorNotAllowed();
     error InsufficientOutput(uint256 amountOut, uint256 minOut);
+    /// @dev One `executeFill` moved more of `token` out of inventory than the
+    ///      owner-set per-call budget allows.
+    error OutflowCapExceeded(address token, uint256 attempted, uint256 cap);
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OperatorSet(address indexed operator, bool allowed);
     event AggregatorSet(address indexed aggregator, bool allowed);
+    event MaxOutflowSet(address indexed token, uint256 cap);
     event RedemptionInitiated(uint256 indexed opId, uint256 qTP, uint256 qACmin, uint256 execFee);
     event Sold(
         address indexed aggregator, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut
@@ -139,7 +165,7 @@ contract UsdrifInventorySolver {
         onlyOperator
         returns (uint256[] memory paid)
     {
-        paid = settlement.fill(order, sig, fillAmountIn);
+        paid = _fillCapped(order, sig, fillAmountIn);
     }
 
     /// @notice Fill a USDRIF→USDT0 order and, in the same transaction, escrow
@@ -153,8 +179,34 @@ contract UsdrifInventorySolver {
         onlyOperator
         returns (uint256[] memory paid, uint256 opId)
     {
-        paid = settlement.fill(order, sig, fillAmountIn);
+        paid = _fillCapped(order, sig, fillAmountIn);
         opId = _initiateRedemption(IERC20(usdrif).balanceOf(address(this)), qACmin);
+    }
+
+    /// @dev Run the fill and enforce {maxOutflowPerFill} on every token this order
+    ///      pays out. Measured as a balance delta rather than read off the order,
+    ///      so a hostile order cannot understate what it moves.
+    function _fillCapped(Order calldata order, bytes calldata sig, uint256 fillAmountIn)
+        private
+        returns (uint256[] memory paid)
+    {
+        uint256 n = order.legsOut.length;
+        uint256[] memory before = new uint256[](n);
+        for (uint256 j; j < n; ++j) {
+            before[j] = IERC20(order.legsOut[j].token).balanceOf(address(this));
+        }
+
+        paid = settlement.fill(order, sig, fillAmountIn);
+
+        for (uint256 j; j < n; ++j) {
+            address token = order.legsOut[j].token;
+            uint256 nowBal = IERC20(token).balanceOf(address(this));
+            if (nowBal < before[j]) {
+                uint256 movedOut = before[j] - nowBal;
+                uint256 cap = maxOutflowPerFill[token];
+                if (movedOut > cap) revert OutflowCapExceeded(token, movedOut, cap);
+            }
+        }
     }
 
     // ──────────────────── Conversion handlers (async recycle) ────────────────────
@@ -202,14 +254,14 @@ contract UsdrifInventorySolver {
         uint256 inBefore = IERC20(tokenIn).balanceOf(address(this));
         uint256 outBefore = IERC20(tokenOut).balanceOf(address(this));
 
-        IERC20(tokenIn).approve(aggregator, amountIn);
+        SafeTransferLib.forceApprove(tokenIn, aggregator, amountIn);
         (bool ok, bytes memory ret) = aggregator.call{value: msg.value}(data);
         if (!ok) {
             assembly {
                 revert(add(ret, 32), mload(ret))
             }
         }
-        IERC20(tokenIn).approve(aggregator, 0);
+        SafeTransferLib.forceApprove(tokenIn, aggregator, 0);
 
         amountOut = IERC20(tokenOut).balanceOf(address(this)) - outBefore;
         if (amountOut < minOut) revert InsufficientOutput(amountOut, minOut);
@@ -218,7 +270,7 @@ contract UsdrifInventorySolver {
 
     function _initiateRedemption(uint256 qTP, uint256 qACmin) internal returns (uint256 opId) {
         uint256 fee = mocQueue.getExecFee(OPER_REDEEM_TP);
-        IERC20(usdrif).approve(address(mocCore), qTP);
+        SafeTransferLib.forceApprove(usdrif, address(mocCore), qTP);
         // recipient == address(this) (MoC requires recipient == msg.sender);
         // vendor 0 = no vendor markup.
         opId = mocCore.redeemTP{value: fee}(usdrif, qTP, qACmin, address(this), address(0));
@@ -239,6 +291,13 @@ contract UsdrifInventorySolver {
         emit AggregatorSet(aggregator, allowed);
     }
 
+    /// @notice Set the per-call inventory outflow budget for `token`. Owner-only —
+    ///         operators cannot raise their own ceiling.
+    function setMaxOutflowPerFill(address token, uint256 cap) external onlyOwner {
+        maxOutflowPerFill[token] = cap;
+        emit MaxOutflowSet(token, cap);
+    }
+
     function setOperator(address operator, bool allowed) external onlyOwner {
         operators[operator] = allowed;
         emit OperatorSet(operator, allowed);
@@ -255,7 +314,7 @@ contract UsdrifInventorySolver {
             (bool ok,) = to.call{value: amount}("");
             if (!ok) revert NativeTransferFailed();
         } else {
-            if (!IERC20(token).transfer(to, amount)) revert TransferFailed();
+            SafeTransferLib.safeTransfer(token, to, amount);
         }
     }
 
@@ -272,7 +331,7 @@ contract UsdrifInventorySolver {
     }
 
     function _approveSettlementPull(address token) internal {
-        IERC20(token).approve(address(permit3), type(uint256).max);
+        SafeTransferLib.forceApprove(token, address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), token, type(uint160).max, 0);
     }
 }

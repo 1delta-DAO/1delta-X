@@ -10,7 +10,87 @@ import {DustHandler} from "@core/dust/DustHandler.sol";
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
-import {ILiquityV2BorrowerOperations, ILiquityV2TroveManager, LatestTroveData} from "./interfaces/ILiquityV2.sol";
+import {
+    ILiquityV2BorrowerOperations,
+    ILiquityV2TroveManager,
+    ITroveNFT,
+    LatestTroveData
+} from "./interfaces/ILiquityV2.sol";
+
+/// @title LiquityV2TroveAuth
+/// @notice The ownership binding for every trove op. Security core of this
+///         package; read it before the modules.
+///
+///  The problem
+///  ───────────
+///  Liquity authorises the MANAGER, never the beneficiary. `withdrawBold(troveId,
+///  …)` checks "is `msg.sender` this trove's remove manager?" and has no parameter
+///  that could carry the user the module is acting for. A module is a shared
+///  singleton, granted by every user who onboards via
+///  `setRemoveManagerWithReceiver(troveId, module, module)` — so that check passes
+///  for every trove in the module's victim set.
+///
+///  Meanwhile Permit3's taker book is keyed by the APPROVER
+///  (`_takerAllowance[user][spender][ref]`, `ref = keccak256(data)`), so an
+///  attacker can self-approve a `ref` computed over a VICTIM's `troveId` and sign
+///  their own order carrying it. `ref` proves the bytes were authorised by
+///  someone; it says nothing about who owns the trove named inside them.
+///
+///  Without the check below that composition is a full drain: the attacker's order
+///  names the victim's trove, Permit3's gate passes on the attacker's own
+///  allowance, and the module runs `withdrawBold`/`withdrawColl` against the
+///  victim's trove with the proceeds forwarded to the attacker. The victim keeps
+///  the debt.
+///
+///  The fix — root the chain at `troveManager`
+///  ──────────────────────────────────────────
+///  `troveId` is a bare uint256 and proves nothing on its own, so ONE contract
+///  address has to come from `data`. Everything else — the ownership oracle AND
+///  the dispatch target — is derived from it:
+///
+///      troveNFT          := troveManager.troveNFT()
+///      ownerOf(troveId)  must equal the principal
+///      borrowerOperations := troveManager.borrowerOperations()
+///
+///  The shared root is the load-bearing part. Taking the TroveNFT from `data`
+///  instead would let an attacker pair a lying NFT contract with the REAL
+///  `borrowerOperations`, so the check would read attacker-controlled state while
+///  the withdrawal hit the victim's real trove. Deriving both from one address
+///  makes that split impossible: a fabricated root sends the op into attacker-land,
+///  where there is no real trove to drain.
+///
+///  Why the root is the TroveManager and not BorrowerOperations (which is what is
+///  actually dispatched to): mainnet BorrowerOperations exposes almost no public
+///  getters — `troveManager()`, `troveNFT()`, `boldToken()` and `collToken()` all
+///  revert. The TroveManager exposes both `troveNFT()` and `borrowerOperations()`,
+///  so it is the only viable root. Verified on Ethereum mainnet against the WETH
+///  branch (TroveManager 0x7bcb64B2c9206a5B699eD43363f6F98D4776Cf5A) and pinned by
+///  `test/fork/LiquityV2ForkAuth.t.sol`.
+///
+///  Same lesson the 1delta composer learned on Gearbox (`GEARBOX.md` rows A2/A3)
+///  and the same shape as {GearboxCreditAuth}. Do not reintroduce a second
+///  caller-supplied address on this path.
+library LiquityV2TroveAuth {
+    /// @dev The Permit3 principal does not own `troveId`.
+    error InvalidCaller();
+
+    /// @param troveManager the branch manager — the single caller-supplied root
+    /// @param troveId      the position, as an ERC-721 token id
+    /// @param principal    the user whose Permit3 allowance funds this op
+    ///                     (`onBehalfOf` — always `order.maker` from Settlement)
+    /// @return borrowerOps the derived branch entrypoint to dispatch the op to
+    function authorizeTrove(address troveManager, uint256 troveId, address principal)
+        internal
+        view
+        returns (address borrowerOps)
+    {
+        address troveNFT = ILiquityV2TroveManager(troveManager).troveNFT();
+        // Reverts for a non-existent trove (ERC-721 `ownerOf`), so a fabricated id
+        // fails closed instead of resolving to `address(0)`.
+        if (ITroveNFT(troveNFT).ownerOf(troveId) != principal) revert InvalidCaller();
+        borrowerOps = ILiquityV2TroveManager(troveManager).borrowerOperations();
+    }
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Liquity V2 CDP modules
@@ -32,8 +112,9 @@ import {ILiquityV2BorrowerOperations, ILiquityV2TroveManager, LatestTroveData} f
 // ──────────────────── Liquity V2 add-collateral maker module ────────────────────
 //
 // Pulls collateral via Permit3 and adds it to the user's trove (needs the
-// add-manager grant). `data = abi.encode(borrowerOps, troveId, collateralToken[, deadline, v, r, s])`
-//   — base = 96.
+// add-manager grant). `data = abi.encode(troveManager, troveId, collateralToken[, deadline, v, r, s])`
+//   — base = 96. BREAKING: the leading address is the TroveManager, not
+//   BorrowerOperations (which has no usable getters on mainnet).
 //
 contract LiquityV2AddCollModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -49,14 +130,24 @@ contract LiquityV2AddCollModule is IMakerModule {
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
         if (msg.sender != settlement) revert NotSettlement();
 
-        (address borrowerOps, uint256 troveId, address collateralToken) =
+        (address troveManager, uint256 troveId, address collateralToken) =
             abi.decode(data, (address, uint256, address));
+        // Bind the trove to the payer: without it an attacker could shove a
+        // victim's pre-approved collateral into a trove of the attacker's choosing.
+        // `borrowerOps` is DERIVED from the same root, never taken from `data`.
+        address borrowerOps = LiquityV2TroveAuth.authorizeTrove(troveManager, troveId, onBehalfOf);
 
         PermitHelper.replayIfPresent(data, 96, collateralToken, onBehalfOf, address(permit3), amount);
 
         permit3.transferFrom(onBehalfOf, address(this), collateralToken, uint160(amount));
         SafeTransferLib.forceApprove(collateralToken, borrowerOps, amount);
         ILiquityV2BorrowerOperations(borrowerOps).addColl(troveId, amount);
+
+        // End holding nothing and granting nothing: a standing allowance on this
+        // shared module would be a claim on any future balance it holds.
+        SafeTransferLib.forceApprove(collateralToken, borrowerOps, 0);
+        uint256 left = IERC20(collateralToken).balanceOf(address(this));
+        if (left != 0) SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, left);
     }
 }
 
@@ -69,7 +160,10 @@ contract LiquityV2AddCollModule is IMakerModule {
 // `closeTrove`, wired separately.
 //
 // `nonReentrant` guards weird-token transfer hooks.
-// `data = abi.encode(borrowerOps, troveManager, troveId, boldToken)` — base = 128.
+// `data = abi.encode(troveManager, troveId, boldToken)` — base = 96.
+// (BREAKING vs. the previous 128-byte layout: `borrowerOps` was removed — it is
+// now derived from `troveManager`, so the debt read, the repay and the ownership
+// check all share one root. See {LiquityV2TroveAuth}.)
 //
 contract LiquityV2RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -90,8 +184,10 @@ contract LiquityV2RepayModule is IMakerModule {
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
-        (address borrowerOps, address troveManager, uint256 troveId, address boldToken) =
-            abi.decode(data, (address, address, uint256, address));
+        (address troveManager, uint256 troveId, address boldToken) = abi.decode(data, (address, uint256, address));
+        // `borrowerOps` is DERIVED (it used to be a second calldata field), so the
+        // debt read, the repay and the ownership check all share one root.
+        address borrowerOps = LiquityV2TroveAuth.authorizeTrove(troveManager, troveId, onBehalfOf);
 
         LatestTroveData memory d = ILiquityV2TroveManager(troveManager).getLatestTroveData(troveId);
         uint256 toRepay = amount < d.entireDebt ? amount : d.entireDebt;
@@ -117,8 +213,11 @@ contract LiquityV2RepayModule is IMakerModule {
 // and sweeps any excess to the maker. Borrow-data and withdraw-data hash to
 // different taker refs (separate amount-gated allowances).
 //
-//   op = 0 (Borrow):       data = abi.encode(uint8(0), borrowerOps, troveId, boldToken, maxUpfrontFee)
-//   op = 1 (WithdrawColl):  data = abi.encode(uint8(1), borrowerOps, troveId, collateralToken)
+//   op = 0 (Borrow):       data = abi.encode(uint8(0), troveManager, troveId, boldToken, maxUpfrontFee)
+//   op = 1 (WithdrawColl):  data = abi.encode(uint8(1), troveManager, troveId, collateralToken)
+//
+// BREAKING: the leading address is now the TroveManager, not BorrowerOperations —
+// BorrowerOperations has no usable getters on mainnet. See {LiquityV2TroveAuth}.
 //
 contract LiquityV2TakerModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -141,14 +240,20 @@ contract LiquityV2TakerModule is ITakerModule {
         uint8 op = uint8(uint256(bytes32(data[:32])));
 
         if (op == uint8(Op.Borrow)) {
-            (, address borrowerOps, uint256 troveId, address boldToken, uint256 maxUpfrontFee) =
+            (, address troveManager, uint256 troveId, address boldToken, uint256 maxUpfrontFee) =
                 abi.decode(data, (uint8, address, uint256, address, uint256));
+            // The value-OUT legs are what an attacker wants. Liquity will happily
+            // authorise this module against ANY trove that granted it the remove-
+            // manager role, so this check is the only thing standing between a
+            // maker's trove and any filler who knows its id.
+            address borrowerOps = LiquityV2TroveAuth.authorizeTrove(troveManager, troveId, onBehalfOf);
             _withdrawAndForward(
                 boldToken, onBehalfOf, amount, receiver, borrowerOps, troveId, maxUpfrontFee, true
             );
         } else if (op == uint8(Op.WithdrawColl)) {
-            (, address borrowerOps, uint256 troveId, address collateralToken) =
+            (, address troveManager, uint256 troveId, address collateralToken) =
                 abi.decode(data, (uint8, address, uint256, address));
+            address borrowerOps = LiquityV2TroveAuth.authorizeTrove(troveManager, troveId, onBehalfOf);
             _withdrawAndForward(collateralToken, onBehalfOf, amount, receiver, borrowerOps, troveId, 0, false);
         } else {
             revert BadOp(op);

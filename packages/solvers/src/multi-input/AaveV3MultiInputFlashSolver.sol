@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
 import {IAaveV3Pool} from "@solvers/single-input/AaveV3FlashSolver.sol";
@@ -65,7 +65,7 @@ contract AaveV3MultiInputFlashSolver is BaseFlashSolver {
 
         uint256 owed = amount + premium;
         _ensureRepayable(asset, owed);
-        IERC20(asset).approve(address(pool), owed); // Pool pulls on return
+        SafeTransferLib.forceApprove(asset, address(pool), owed); // Pool pulls on return
         return true;
     }
 }

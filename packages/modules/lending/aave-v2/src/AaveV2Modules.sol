@@ -8,6 +8,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
 
 import {IAaveV2Pool} from "./interfaces/IAaveV2.sol";
@@ -175,6 +176,10 @@ contract AaveV2WithdrawModule is ITakerModule {
 
         // base = (address,address,address) = 96 bytes; BalanceMode at 96.
         if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
+            // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+            // pro-rated — a sliced fill would unwind the whole position and brick
+            // the rest of the order. Require the slice to be the whole item.
+            FullFillGuard.requireFullFillFromData(data, 128, amount);
             uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
             permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(bal));
             uint256 beforeBal = IERC20(asset).balanceOf(address(this));

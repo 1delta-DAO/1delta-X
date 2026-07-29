@@ -17,6 +17,18 @@ import {IMorphoAuth} from "@core/interfaces/IMorphoAuth.sol";
 // absent), the call is a no-op — the module falls back to requiring a prior
 // on-chain delegation from the user.
 //
+// ⚠ EVERY REPLAY IS BEST-EFFORT AND MUST NOT REVERT THE FILL.
+// All three mechanisms below are nonce-based and revert once their nonce is
+// spent. The signature bytes live inside the module's `data`, which is part of
+// the order hash AND of `ref = keccak256(data)`, so they are frozen into the
+// maker's authorization. A hard call would therefore hand anyone a cheap,
+// repeatable kill switch on gasless orders: pull `(nonce, deadline, v, r, s)`
+// from the pending calldata, land the delegation directly, and the victim's fill
+// reverts forever with no way to re-encode it. Swallowing the revert is correct —
+// the front-runner leaves exactly the delegation the fill wanted, and the real
+// gate is the protocol call that follows, which still fails if the delegation is
+// genuinely absent. Same reasoning as {PermitHelper.replayIfPresent}.
+//
 // Offset accounting for modules that have an optional DustAction / BalanceMode
 // slot between the fixed base and the delegation block:
 //
@@ -46,7 +58,9 @@ library DelegationHelper {
         if (data.length < baseLen + 160) return;
         (address debtToken, uint256 deadline, uint8 v, bytes32 r, bytes32 s) =
             abi.decode(data[baseLen:baseLen + 160], (address, uint256, uint8, bytes32, bytes32));
-        ICreditDelegationToken(debtToken).delegationWithSig(delegator, delegatee, value, deadline, v, r, s);
+        // Best-effort — see the front-run note in the header.
+        try ICreditDelegationToken(debtToken).delegationWithSig(delegator, delegatee, value, deadline, v, r, s) {}
+            catch {}
     }
 
     // ── Compound V3 (Comet) ───────────────────────────────────────────────────
@@ -69,7 +83,8 @@ library DelegationHelper {
         if (data.length < baseLen + 160) return;
         (uint256 nonce, uint256 expiry, uint8 v, bytes32 r, bytes32 s) =
             abi.decode(data[baseLen:baseLen + 160], (uint256, uint256, uint8, bytes32, bytes32));
-        ICometAllow(comet).allowBySig(owner, manager, true, nonce, expiry, v, r, s);
+        // Best-effort — see the front-run note in the header.
+        try ICometAllow(comet).allowBySig(owner, manager, true, nonce, expiry, v, r, s) {} catch {}
     }
 
     // ── Morpho Blue ───────────────────────────────────────────────────────────
@@ -93,7 +108,8 @@ library DelegationHelper {
         if (data.length < baseLen + 160) return;
         (uint256 nonce, uint256 deadline, uint8 v, bytes32 r, bytes32 s) =
             abi.decode(data[baseLen:baseLen + 160], (uint256, uint256, uint8, bytes32, bytes32));
-        IMorphoAuth(morpho).setAuthorizationWithSig(
+        // Best-effort — see the front-run note in the header.
+        try IMorphoAuth(morpho).setAuthorizationWithSig(
             IMorphoAuth.Authorization({
                 authorizer: authorizer,
                 authorized: authorized,
@@ -102,6 +118,6 @@ library DelegationHelper {
                 deadline: deadline
             }),
             IMorphoAuth.Signature({v: v, r: r, s: s})
-        );
+        ) {} catch {}
     }
 }

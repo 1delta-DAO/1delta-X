@@ -8,6 +8,7 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 
 import {
     IDolomiteMargin,
@@ -271,6 +272,10 @@ contract DolomiteTakerModule is DolomiteBase, ITakerModule {
             abi.decode(data, (uint8, address, uint256, address, uint256));
 
         if (op == uint8(Op.Withdraw) && DustHandler.readBalanceMode(data, 160) == DustHandler.BalanceMode.Full) {
+            // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+            // pro-rated — a sliced fill would unwind the whole position and brick
+            // the rest of the order. Require the slice to be the whole item.
+            FullFillGuard.requireFullFillFromData(data, 192, amount);
             WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(onBehalfOf, accountNumber), marketId);
             uint256 bal = w.sign ? w.value : 0;
 
@@ -329,6 +334,9 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
         address borrowToken;
         uint256 accountNumber;
         uint256 sideAmount;
+        /// @dev The item's FULL maker-signed amount. Composite ops are full-fill
+        ///      only — see {FullFillGuard}.
+        uint256 totalAmount;
     }
 
     error OnlyPermit3();
@@ -339,6 +347,10 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         BatchData memory p = abi.decode(data, (BatchData));
+
+        // Composite items execute a multi-leg position op whose side leg lives in
+        // `data` and does NOT pro-rate. Reject a sliced fill outright — see {FullFillGuard}.
+        FullFillGuard.requireFullFill(amount, p.totalAmount);
 
         ActionArgs[] memory actions = new ActionArgs[](2);
         if (BatchMode(uint8(p.mode)) == BatchMode.Open) {

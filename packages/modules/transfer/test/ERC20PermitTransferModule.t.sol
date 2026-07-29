@@ -199,14 +199,25 @@ contract ERC20PermitTransferModuleTest is Test {
         module.takeOnBehalf(user, GROSS, solver, data);
     }
 
-    function test_revertsOnExpiredPermit() public {
+    /// An expired permit no longer propagates its own revert: the replay is
+    /// BEST-EFFORT so that a front-runner who lands the same permit first cannot
+    /// permanently brick the order (the signature bytes are inside `data`, hence
+    /// inside `ref` and the order hash — see {PermitHelper}). The fill still fails,
+    /// but at the subsequent Permit3 pull, which is the real gate: no allowance was
+    /// ever established, so nothing moves.
+    function test_expiredPermit_isSwallowed_butTheFillStillFails() public {
         uint256 deadline = block.timestamp - 1; // already expired
         (uint8 v, bytes32 r, bytes32 s) = _permitSig(GROSS, deadline);
 
         bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT, deadline, v, r, s);
 
+        uint256 userBefore = token.balanceOf(user);
+
         vm.prank(address(permit3));
-        vm.expectRevert("permit expired");
+        vm.expectRevert(); // fails at the pull, not inside the permit replay
         module.takeOnBehalf(user, GROSS, solver, data);
+
+        assertEq(token.balanceOf(user), userBefore, "no funds moved");
+        assertEq(token.allowance(user, address(permit3)), 0, "expired permit granted nothing");
     }
 }

@@ -14,6 +14,7 @@ import {
     CurvePoint
 } from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {Permit3} from "@core/permit3/Permit3.sol";
 
 /// @dev No-fork golden test: pins the EIP-712 struct hash of a canonical order.
 ///      The TypeScript SDK asserts the SAME value, cross-verifying its typed-data
@@ -34,7 +35,10 @@ contract HashGoldenTest is Test {
     address constant FILLER = address(0xB0B);
 
     function setUp() public {
-        settlement = new Settlement(address(0xdead));
+        // A real Permit3 only because the constructor requires a hub with code —
+        // this suite exercises the domain-independent `hashOrder` and never moves a
+        // token, so the hub is otherwise unused.
+        settlement = new Settlement(address(new Permit3()));
         lens = new SettlementLens(address(settlement));
     }
 

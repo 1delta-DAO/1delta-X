@@ -94,7 +94,8 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
             fundingToken: USDC,
             nftId: nftId,
             sideAmount: type(uint256).max, // FLUID_ALL ⇒ repay the entire debt
-            repayCeiling: ceiling
+            repayCeiling: ceiling,
+            totalAmount: withdrawCol // composite items are full-fill only
         });
         bytes memory data = abi.encode(p);
 

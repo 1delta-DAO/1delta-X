@@ -62,6 +62,25 @@ abstract contract Base is Signatures {
     /// @dev `batchFill`'s `takerDatas` array is not aligned 1:1 with `orders`.
     error LengthMismatch();
     error ReverseModeRequiresNoItems();
+    /// @dev The constructor was given a `permit3` with no code. Load-bearing: every
+    ///      maker/solver token move runs through
+    ///      {Permit3TransferLib.transferFromWithFallback}, which probes Permit3 with
+    ///      a LOW-LEVEL call and treats success as "the transfer happened". A call to
+    ///      a codeless address returns success with empty returndata, so a
+    ///      misconfigured hub would make every pull and every delivery a SILENT
+    ///      no-op — orders would "settle" with no funds moving at all. Checked once
+    ///      here rather than on every transfer.
+    error InvalidPermit3();
+    /// @dev A TAKE item's per-fill slice exceeds `uint160`, the width of Permit3's
+    ///      allowance book. Amounts are maker-signed so this is not reachable
+    ///      adversarially, but the cast is on a value path: revert instead of
+    ///      silently wrapping to a smaller take.
+    error AmountOverflow();
+    /// @dev `order.exclusivityOverrideBps` exceeds 100%. Above `BPS` the input-side
+    ///      discount in {Pricing.inputOwed} underflows, so the order would be
+    ///      unfillable by any non-exclusive filler; reject it explicitly rather than
+    ///      surfacing an arithmetic panic.
+    error InvalidOverrideBps();
     /// @dev `batchSettle` was given an order carrying MAKE/TAKE/SETTLE items — the
     ///      netted flow is item-free (same rationale as `PostInputs`).
     error BatchSettleNoItems();
@@ -94,6 +113,7 @@ abstract contract Base is Signatures {
     }
 
     constructor(address permit3) {
+        if (permit3.code.length == 0) revert InvalidPermit3();
         PERMIT3 = IPermit3(permit3);
         EXECUTOR = new SolverCallbackExecutor();
     }
@@ -108,6 +128,7 @@ abstract contract Base is Signatures {
                 && filler != order.exclusiveFiller
         ) {
             if (order.exclusivityOverrideBps == 0) revert NotExclusiveFiller();
+            if (order.exclusivityOverrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
             overrideBps = order.exclusivityOverrideBps;
         }
     }
@@ -128,6 +149,24 @@ abstract contract Base is Signatures {
     ///      slice = item.amount * newFilled / anchor
     ///            - item.amount * prevFilled / anchor
     ///      Sums to exactly item.amount once the order is fully filled.
+    ///
+    ///      ⚠ MAKER CONSTRAINT — a TAKE item's proceeds token MUST appear in
+    ///      `order.legsIn`. Proceeds land here (when `item.recipient` is 0), and the
+    ///      only code that pays them back out — `_payInputsToSolver` and
+    ///      `_settleInputsToPool` — iterates `legsIn`. A token that matches no input
+    ///      leg is therefore PERMANENTLY STRANDED: Settlement has no sweep and no
+    ///      admin, so nothing can ever move it again.
+    ///
+    ///      It cannot be STOLEN — every payout is bounded by a balance delta
+    ///      measured from a snapshot taken in the same fill, and the batch paths
+    ///      additionally floor every touched token at its pre-batch balance — so a
+    ///      stranded balance is invisible to later fills. It is simply lost.
+    ///
+    ///      This is not enforceable here: an item's proceeds token is encoded inside
+    ///      the module-specific `item.data`, which the core deliberately does not
+    ///      decode (that is what keeps the core module-agnostic). Order construction
+    ///      owns it — `validateOrder` in the SDK checks it, and a maker can pin the
+    ///      outcome on-chain with a {MinBalanceInvariant} on the expected token.
     function _executeItems(Order calldata order, FillCtx memory ctx) internal {
         for (uint256 i; i < order.items.length; i++) {
             Item calldata item = order.items[i];
@@ -144,6 +183,7 @@ abstract contract Base is Signatures {
                 // classic flow (proceeds to Settlement for tokenIn payout); signing a
                 // non-zero recipient (e.g. the maker) chains output into a subsequent item.
                 address to = item.recipient == address(0) ? address(this) : item.recipient;
+                if (slice > type(uint160).max) revert AmountOverflow();
                 PERMIT3.take(item.module, order.maker, uint160(slice), to, item.data);
             } else {
                 // SETTLE: generic solver↔maker exchange — the FILLER-AWARE fallback

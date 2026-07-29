@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
 
@@ -75,7 +75,7 @@ contract MidnightFlashSolver is BaseFlashSolver {
         _fillAndSwap(order, sig, fillAmountIn, flashToken, dexFee, minSwapOut);
 
         _ensureRepayable(tokens[0], assets[0]);
-        IERC20(tokens[0]).approve(address(midnight), assets[0]); // Midnight pulls on return
+        SafeTransferLib.forceApprove(tokens[0], address(midnight), assets[0]); // Midnight pulls on return
         return CALLBACK_SUCCESS;
     }
 }

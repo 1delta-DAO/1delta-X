@@ -30,7 +30,8 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
             borrowMarketId: DEBT_MARKET,
             borrowToken: DEBT,
             accountNumber: ACCOUNT,
-            sideAmount: COLLATERAL_IN
+            sideAmount: COLLATERAL_IN,
+            totalAmount: BORROW_OUT // composite items are full-fill only
         });
         bytes memory data = abi.encode(p);
 

@@ -111,7 +111,9 @@ contract WithdrawAndSwapTest is AaveModulesBase {
         deal(USDC, solver, usdcOut);
 
         // Full-balance flag appended → distinct taker-allowance ref.
-        bytes memory takerData = abi.encode(AAVE_POOL, WETH, aWETH, uint8(DustHandler.BalanceMode.Full));
+        // `Full` is full-fill only: the trailing word is the maker-signed item total.
+        bytes memory takerData =
+            abi.encode(AAVE_POOL, WETH, aWETH, uint8(DustHandler.BalanceMode.Full), wethIn);
         bytes32 ref = keccak256(takerData);
 
         vm.startPrank(maker);

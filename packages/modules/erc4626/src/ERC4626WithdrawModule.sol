@@ -25,14 +25,32 @@ import {ITimelockERC4626} from "./interfaces/ITimelockERC4626.sol";
 //   Phase 2 — Claim  (TakerModule, Permit3-gated)
 //   ──────────────────────────────────────────────
 //   After the vault's lock duration, Permit3 calls
-//   `takeOnBehalf(user, minAssets, receiver, data)`.
+//   `takeOnBehalf(user, amount, receiver, data)`.
 //   The module verifies the caller is the original requester, checks the
 //   module-level unlock timestamp (fast early-exit), then delegates to
 //   `vault.claimRedeem` — which enforces the lock on-chain as the final gate.
-//   Received assets are forwarded to `receiver`; `minAssets` acts as a
-//   slippage / minimum-output guard.
+//   `amount` is the Permit3 CAP on value forwarded to `receiver`; anything the
+//   vault returns above it goes to the beneficiary. `minAssets` (maker-signed,
+//   inside `data`) is the separate slippage floor.
 //
-//   `data = abi.encode(vault, asset, requestId)`
+//   `data = abi.encode(vault, requestId, minAssets)`
+//
+//   BREAKING vs. the previous `abi.encode(vault, asset, requestId)`: `asset` is
+//   now READ FROM THE VAULT rather than supplied by the caller, and `minAssets`
+//   moved out of the `amount` argument into `data`. Both changes are load-bearing:
+//
+//     • A caller-supplied `asset` was a free transfer of any token this module
+//       held. `received` comes from `claimRedeem`, but the token it was paid in
+//       was whatever `data` said — so anyone holding a valid pending request could
+//       name a token with a stray module balance and have it sent to their own
+//       receiver. Reading `vault.asset()` makes the token an intrinsic property of
+//       the position.
+//     • Using `amount` as a FLOOR inverted the taker allowance. Permit3 decremented
+//       `amount` and the module then forwarded the ENTIRE claim, however large — so
+//       a user who capped their allowance at 1 wei to bound exposure was in fact
+//       authorising an unbounded claim, while a user wanting a tight slippage floor
+//       was forced to grant a maximal allowance. The two safety properties were in
+//       direct opposition. `amount` is now the cap that {ITakerModule} documents.
 //
 // Trust model
 // ───────────
@@ -83,6 +101,14 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
     error NotBeneficiary();
     error TimelockActive(uint256 unlocksAt, uint256 currentTime);
     error InsufficientAssets(uint256 received, uint256 minAssets);
+    /// @dev The vault reused a `requestId` that already has a live pending entry.
+    ///      Overwriting it would make the FIRST beneficiary's claim revert
+    ///      `NotBeneficiary` forever — and since this module is the vault's only
+    ///      authorised claimer for that request, their shares would be
+    ///      unrecoverable. Vaults following the ERC-7540 `REQUEST_ID_0` convention
+    ///      (every request shares id 0, tracked per-controller) hit this on the
+    ///      SECOND user, so failing closed is mandatory, not defensive.
+    error RequestIdCollision(address vault, uint256 requestId);
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -116,10 +142,24 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
         // and records this module as the authorized claimer for the returned requestId.
         uint256 requestId = ITimelockERC4626(vault).requestRedeem(amount);
 
+        // Leave no residue and no standing approval. A vault that clamps the
+        // request (per-epoch or queue caps) would otherwise strand un-pulled shares
+        // here alongside a live allowance — which is exactly the balance the old
+        // caller-supplied `asset` let someone else walk off with.
+        SafeTransferLib.forceApprove(shareToken, vault, 0);
+        uint256 leftShares = SafeTransferLib.balanceOf(shareToken, address(this));
+        if (leftShares != 0) SafeTransferLib.safeTransfer(shareToken, onBehalfOf, leftShares);
+
         // Record the beneficiary and the earliest valid claim time.
         // The vault's claimRedeem is the authoritative lock enforcer; this
         // timestamp gives a cheaper early-exit path and a descriptive error.
         uint256 unlocksAt = block.timestamp + ITimelockERC4626(vault).lockDuration();
+        // Never silently reassign a live request — see {RequestIdCollision}. The
+        // uniqueness of `requestId` is a property of the EXTERNAL vault, so it has
+        // to be checked here rather than assumed.
+        if (pendingWithdrawals[vault][requestId].beneficiary != address(0)) {
+            revert RequestIdCollision(vault, requestId);
+        }
         pendingWithdrawals[vault][requestId] = PendingWithdrawal({beneficiary: onBehalfOf, unlocksAt: unlocksAt});
 
         emit WithdrawRequested(vault, requestId, onBehalfOf, amount, unlocksAt);
@@ -132,18 +172,19 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
     /// @notice Claim a matured vault withdrawal and forward assets to `receiver`.
     ///         Called by Permit3 after the user's taker allowance gate is checked.
     /// @param onBehalfOf User who initiated the withdrawal (must match the stored beneficiary).
-    /// @param amount     Minimum underlying assets to accept (slippage guard).
+    /// @param amount     Permit3 allowance CAP on assets forwarded to `receiver`;
+    ///                   the surplus goes to `onBehalfOf`.
     /// @param receiver   Destination for the claimed assets.
-    /// @param data       `abi.encode(vault, asset, requestId)`
+    /// @param data       `abi.encode(vault, requestId, minAssets)`
     ///                   • vault     — ITimelockERC4626 vault address
-    ///                   • asset     — ERC-20 address of the vault's underlying asset
     ///                   • requestId — ID returned by the vault during Phase 1
+    ///                   • minAssets — maker-signed slippage floor on the claim
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
-        (address vault, address asset, uint256 requestId) = abi.decode(data, (address, address, uint256));
+        (address vault, uint256 requestId, uint256 minAssets) = abi.decode(data, (address, uint256, uint256));
 
         PendingWithdrawal storage pw = pendingWithdrawals[vault][requestId];
 
@@ -158,11 +199,22 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
         // it will revert if the lock has not elapsed on-chain.
         uint256 received = ITimelockERC4626(vault).claimRedeem(requestId, address(this));
 
-        if (received < amount) revert InsufficientAssets(received, amount);
+        if (received < minAssets) revert InsufficientAssets(received, minAssets);
 
-        SafeTransferLib.safeTransfer(asset, receiver, received);
+        // The asset is an intrinsic property of the vault, never caller-supplied.
+        address asset = ITimelockERC4626(vault).asset();
 
-        emit WithdrawClaimed(vault, requestId, onBehalfOf, received, receiver);
+        // `amount` is the Permit3 allowance CAP: forward at most that much, and
+        // return anything the vault yielded above it to the beneficiary. Yield
+        // accrues during the lock, so over-delivery is the normal case and must not
+        // revert — matching the `_withdrawFull` discipline used across the repo.
+        uint256 toReceiver = received > amount ? amount : received;
+        SafeTransferLib.safeTransfer(asset, receiver, toReceiver);
+        unchecked {
+            if (received > toReceiver) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - toReceiver);
+        }
+
+        emit WithdrawClaimed(vault, requestId, onBehalfOf, toReceiver, receiver);
 
         _locked = 1;
     }

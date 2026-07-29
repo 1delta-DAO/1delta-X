@@ -31,7 +31,8 @@ contract DolomiteTakerModuleAuthTest is DolomiteModulesBase {
             borrowMarketId: DEBT_MARKET,
             borrowToken: DEBT,
             accountNumber: ACCOUNT,
-            sideAmount: 1_000e6
+            sideAmount: 1_000e6,
+            totalAmount: 1e18
         });
         vm.prank(attacker);
         vm.expectRevert(DolomiteOperateModule.OnlyPermit3.selector);

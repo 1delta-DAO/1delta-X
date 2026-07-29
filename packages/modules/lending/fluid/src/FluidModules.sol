@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
@@ -253,6 +254,9 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         uint256 nftId; // 0 ⇒ Open a fresh position
         uint256 sideAmount; // Open: collateral to supply; Close: debt to repay (FLUID_ALL ⇒ repay-all)
         uint256 repayCeiling; // Close + repay-all only: buffer to pull (ignored otherwise)
+        /// @dev The item's FULL maker-signed amount. Composite ops are full-fill
+        ///      only — see {FullFillGuard}.
+        uint256 totalAmount;
     }
 
     error OnlyPermit3();
@@ -269,6 +273,10 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         _locked = 2;
 
         OperateData memory p = abi.decode(data, (OperateData));
+
+        // Composite items execute a multi-leg position op whose side leg lives in
+        // `data` and does NOT pro-rate. Reject a sliced fill outright — see {FullFillGuard}.
+        FullFillGuard.requireFullFill(amount, p.totalAmount);
 
         if (Mode(uint8(p.mode)) == Mode.Open) {
             _open(p, onBehalfOf, receiver, amount);

@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {IVToken} from "./interfaces/IVenus.sol";
@@ -236,6 +237,10 @@ contract VenusTakerModule is ITakerModule {
         } else if (op == uint8(Op.Withdraw)) {
             // BalanceMode slot at byte 96 (op@0 + vToken@32 + underlying@64).
             if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
+                // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+                // pro-rated — a sliced fill would unwind the whole position and brick
+                // the rest of the order. Require the slice to be the whole item.
+                FullFillGuard.requireFullFillFromData(data, 128, amount);
                 // Redeem the user's entire vToken balance to this module, forward the
                 // signed `amount` to the order, sweep the underlying excess to the user.
                 // Measure the actually-received underlying via a balanceOf snapshot

@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
@@ -183,6 +184,10 @@ contract SiloTakerModule is ITakerModule {
             ISilo(silo).borrow(amount, receiver, onBehalfOf);
         } else if (op == uint8(Op.Withdraw)) {
             if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
+                // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+                // pro-rated — a sliced fill would unwind the whole position and brick
+                // the rest of the order. Require the slice to be the whole item.
+                FullFillGuard.requireFullFillFromData(data, 128, amount);
                 _withdrawFull(silo, asset, onBehalfOf, amount, receiver);
             } else {
                 // ERC-4626 owner allowance: burns the maker's shares, sends to receiver.

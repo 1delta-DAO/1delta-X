@@ -71,6 +71,10 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
             address(permit3), address(settlement), SWAP_ROUTER_02, MOC_CORE, MOC_QUEUE, USDRIF, USDT0
         );
         inv.setOperator(operator, true);
+        // Per-call inventory budget. Defaults to 0 (fail closed), so a real
+        // deployment must set this before any operator can fill — it is what stops
+        // an operator self-signing an order that takes the whole inventory.
+        inv.setMaxOutflowPerFill(USDT0, INVENTORY);
         vm.label(address(inv), "inventorySolver");
         vm.label(operator, "operator");
         vm.label(SWAP_ROUTER_02, "swapRouter02");
@@ -301,4 +305,53 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         inv.execute(USDT0, abi.encodeCall(IERC20.transfer, (address(this), 100e6)));
         assertEq(IERC20(USDT0).balanceOf(address(this)), 600e6, "escape hatch moved funds");
     }
+
+    // ──────────────── Operator outflow cap ────────────────
+
+    /// The drain: an operator (a lower trust tier than owner — the aggregator
+    /// whitelist on `sell` exists precisely to keep it that way) signs their OWN
+    /// order taking the entire inventory for a token amount in. `executeFill`
+    /// accepts an arbitrary `(order, sig)` and the contract holds a max Permit3
+    /// allowance to Settlement, so nothing about the order itself stops this.
+    /// The per-call budget is what bounds it.
+    function test_operator_cannotDrainInventoryPastTheCap() public {
+        // Owner budgets a normal-sized fill, not the whole float.
+        inv.setMaxOutflowPerFill(USDT0, 1_000e6);
+
+        // Operator's self-signed order: pay out the FULL inventory.
+        Order memory rug = _usdrifOrder(99);
+        rug.legsOut = _legsOut1(USDT0, INVENTORY);
+        bytes memory sig = _sign(rug);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.OutflowCapExceeded.selector, USDT0, INVENTORY, uint256(1_000e6)
+            )
+        );
+        inv.executeFill(rug, sig, USDRIF_IN);
+
+        assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY, "inventory untouched");
+    }
+
+    /// A fill inside the budget still works — the cap is a bound, not a block.
+    function test_fillWithinCap_succeeds() public {
+        inv.setMaxOutflowPerFill(USDT0, USDT0_OUT);
+
+        Order memory order = _usdrifOrder(7);
+        bytes memory sig = _sign(order);
+
+        vm.prank(operator);
+        inv.executeFill(order, sig, USDRIF_IN);
+
+        assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY - USDT0_OUT, "normal fill unaffected");
+    }
+
+    /// Operators cannot raise their own ceiling.
+    function test_operator_cannotRaiseTheCap() public {
+        vm.prank(operator);
+        vm.expectRevert(UsdrifInventorySolver.NotOwner.selector);
+        inv.setMaxOutflowPerFill(USDT0, type(uint256).max);
+    }
+
 }

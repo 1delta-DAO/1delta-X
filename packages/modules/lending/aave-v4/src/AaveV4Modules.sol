@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
@@ -200,6 +201,10 @@ contract AaveV4WithdrawModule is ITakerModule {
             abi.decode(data, (address, address, uint256, address));
 
         if (DustHandler.readBalanceMode(data, 128) == DustHandler.BalanceMode.Full) {
+            // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+            // pro-rated — a sliced fill would unwind the whole position and brick
+            // the rest of the order. Require the slice to be the whole item.
+            FullFillGuard.requireFullFillFromData(data, 160, amount);
             // Withdraw the user's entire supplied balance to this module; forward
             // the signed `amount` to the order, sweep the accrued excess to user.
             // Measure the actually-received underlying via a balanceOf snapshot

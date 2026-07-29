@@ -13,7 +13,7 @@
 
 The settlement contract has **no on-chain orderbook**. Orders live entirely
 off-chain as a signed `(Order, sig)` tuple (see the SDK [`Order`](../packages/sdk/src/types.ts)
-type and [`SettlementStructs`](../packages/core/src/settlement/SettlementStructs.sol)),
+type and [`Structs`](../packages/core/src/settlement/Structs.sol)),
 and nothing in the protocol specifies how that tuple gets from the maker to a
 filler. Today that slot is open — the README just says "signed off-chain orders,
 like Fusion / CoW". A centralized relayer/API is the obvious fill; this note is
@@ -27,7 +27,7 @@ and let each filler reconstruct its own book.
 The property that makes a trustless transport possible — and that most systems
 lack — you already have: **every order is self-authenticating.** An `Order` plus
 its EIP-712 `sig` can be verified by *anyone* against
-`UniversalSettlement.DOMAIN_SEPARATOR()` with zero trust in whoever relayed it.
+`Settlement.DOMAIN_SEPARATOR()` with zero trust in whoever relayed it.
 
 So the transport does not need to be trusted, only the signature does. A
 centralized CoW-style orderbook gives you authenticity *by being a trusted
@@ -35,7 +35,7 @@ server*; Waku gives you the same *by being verifiable instead*. The message
 payload is exactly what the SDK already produces:
 
 - an `Order` + its `signOrder` output, **or**
-- the empty-sig + on-chain [`approveOrder`](../packages/core/src/settlement/UniversalSettlement.sol)
+- the empty-sig + on-chain [`approveOrder`](../packages/core/src/settlement/OrderState.sol)
   path for makers that cannot sign (multisigs without EIP-1271), **or**
 - optionally a witness-bound Permit3 `PermitBatch` for the single-signature
   `fillWithPermit` flow.
@@ -83,7 +83,8 @@ Message types:
 
 1. **`OrderAnnounce`** — `{ order, sig, permitBatch?, sigless? }`. The whole payload.
 2. **`OrderSoftCancel`** — `{ orderHash, makerSig }`. The *hard* cancel is
-   on-chain ([`cancelOrders` / `rollbackNonces`](../packages/core/src/settlement/NonceManager.sol)),
+   on-chain ([`cancelOrders` / `rollbackNonces` / `invalidateNonceWord`](../packages/core/src/settlement/NonceManager.sol),
+   plus per-hash [`cancelOrder`](../packages/core/src/settlement/OrderState.sol)),
    but that costs a Rootstock tx and a block. A signed soft-cancel lets fillers
    drop the order from their books instantly; they still treat the on-chain
    nonce as ground truth. **Must carry the maker's signature over the
@@ -116,6 +117,7 @@ for the threat model this is built against.
 | Check | Source | Catches |
 |---|---|---|
 | nonce live | [`isNonceCancelled`](../packages/core/src/settlement/NonceManager.sol) / `nonceBitmap` word | dead / cancelled / used nonce |
+| order not hash-cancelled | `filled[orderHash] == type(uint256).max` sentinel | maker cancelled this one order |
 | Permit3 taker/token permit exists | Permit3 allowance book (spender = Settlement) | **never approved Permit3** |
 | ERC20 → Permit3 allowance | `token.allowance(maker, PERMIT3)` | approved Settlement but not the underlying |
 | balance | `balanceOf(maker)` | **no funds** |
@@ -178,6 +180,13 @@ cache**:
 - Approval/balance only change when the *maker transacts*. Subscribe to
   `Transfer` / `Approval` (and Permit3) events for makers in the book and
   invalidate on change — don't re-poll per order.
+- **Cancellation events to subscribe to** (all on Settlement). Miss one and you
+  keep serving orders the maker has already killed:
+  `OrdersCancelled`, `NoncesRolledBack`, **`NonceWordInvalidated`**,
+  `OrderCancelledByHash`, and `OrderApprovalRevoked` (sig-less orders only).
+  `NonceWordInvalidated` was added in the 2026-07 audit — `invalidateNonceWord`
+  cancels 256 nonces in one write and previously emitted nothing at all, so an
+  indexer watching only the other two would silently miss a bulk cancel.
 - The first unbacked order from an address costs **one** multicall, then tags
   the address **negative**. Every later order from it is a hashmap lookup ⇒
   dropped, until an on-chain event for that address clears the tag. So an

@@ -8,6 +8,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
 import {DelegationHelper} from "@core/utils/DelegationHelper.sol";
 
@@ -204,6 +205,10 @@ contract AaveV3WithdrawModule is ITakerModule {
         (address pool, address asset, address aToken) = abi.decode(data, (address, address, address));
 
         if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
+            // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+            // pro-rated — a sliced fill would unwind the whole position and brick
+            // the rest of the order. Require the slice to be the whole item.
+            FullFillGuard.requireFullFillFromData(data, 128, amount);
             // Full mode: user must have a standing ERC-20 approval on aToken.
             // Pull the user's entire (rebasing) aToken balance and withdraw it all
             // to this module; `withdraw(max)` mops up any 1-wei transfer rounding.

@@ -200,7 +200,7 @@ contract CometTakerModuleTest is Test {
         // whole balance and sweeps the excess back. Assert absolute end-balances:
         // the user nets out at total − AMOUNT, receiver gets AMOUNT, module keeps 0.
         uint256 total = AMOUNT * 10;
-        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(asset), uint8(1));
+        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(asset), uint8(1), AMOUNT);
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, AMOUNT, receiver, data);

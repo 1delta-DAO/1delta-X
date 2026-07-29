@@ -57,7 +57,8 @@ contract FluidTakerModuleAuthTest is Test {
             fundingToken: TOKEN,
             nftId: 42,
             sideAmount: 1_000e6,
-            repayCeiling: 0
+            repayCeiling: 0,
+            totalAmount: 1e18
         });
         vm.prank(attacker);
         vm.expectRevert(FluidOperateModule.OnlyPermit3.selector);

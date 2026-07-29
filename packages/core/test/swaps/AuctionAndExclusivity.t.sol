@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import {Base} from "@core/settlement/Base.sol";
-import {stdError} from "forge-std/StdError.sol";
 
 import {Settlement, CallbackMode, Order, Item, Validator, OrderSide, CurvePoint} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
@@ -614,9 +613,12 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         order.exclusivityOverrideBps = 10_001; // malformed; validateOrder would reject it
         bytes memory sig = _sign(order);
 
-        // A non-exclusive filler triggers the override; (10000 - 10001) underflows.
+        // A non-exclusive filler triggers the override. `_exclusivity` rejects the
+        // out-of-range bps explicitly, so the caller gets a named error instead of
+        // the bare `(10000 - 10001)` underflow panic this used to surface from
+        // `Pricing.inputOwed`.
         vm.prank(solver);
-        vm.expectRevert(stdError.arithmeticError);
+        vm.expectRevert(Base.InvalidOverrideBps.selector);
         settlement.fill(order, sig, BUY_OUT);
     }
 

@@ -34,6 +34,36 @@ base_data           ← module-specific ABI encoding (variable length)
 If `data.length < base_len + 128` the helper is a no-op; the module falls back to a
 standing ERC-20 approval to Permit3.
 
+### The replay is BEST-EFFORT — and must stay that way
+
+`PermitHelper` wraps the `permit` call in `try/catch` and ignores any revert. This is
+load-bearing, not defensive coding.
+
+ERC-2612 `permit` burns a per-owner nonce and reverts once it is spent. The signature
+bytes live **inside the module's `data`**, which is part of the order hash *and* of
+`ref = keccak256(data)` for a TAKE item — so they are frozen into the maker's
+authorization and cannot be re-encoded without invalidating both.
+
+If the replay reverted on an already-used nonce, anyone could permanently kill a gasless
+order for the price of one cheap transaction: read the pending calldata from the mempool,
+pull out `(deadline, v, r, s)`, and submit `token.permit(...)` directly. The victim's fill
+would then revert forever, and re-encoding without the permit block would change `ref` and
+the order hash — so the whole signed artifact would have to be rebuilt, repeatably, by an
+attacker paying almost nothing.
+
+Swallowing the revert is the correct outcome, not a compromise: the front-runner leaves the
+chain in exactly the state the fill wanted (`allowance(owner, permit3) >= amount`). The
+permit's **effect** is what matters, not who landed it. The real gate is the
+`permit3.transferFrom` that follows, which still reverts if the allowance genuinely is not
+there.
+
+The same reasoning applies to all three delegation helpers in §2–§3 — they are equally
+nonce-based and equally front-runnable, and all three are `try/catch` for the same reason.
+
+**Consequence for integrators:** an expired or already-consumed permit no longer surfaces
+its own revert. A failing gasless fill reports the *pull* failing, not the permit. Regression
+coverage: `packages/core/test/utils/PermitReplayGriefing.t.sol`.
+
 ### Example — AaveV2 deposit with permit
 
 ```solidity
@@ -232,3 +262,20 @@ give the output `LegOut` a fixed amount equal to the input (`start == amountIn`,
 All sig blocks are 128 bytes (EIP-2612) or 160 bytes (delegation / auth) and are
 **no-ops** when absent — the module falls back to whatever standing approval already
 exists on-chain.
+
+> ⚠️ **`BalanceMode.Full` now carries one more trailing word.** Every `Full` taker leg
+> appends the item's full maker-signed amount immediately after the mode slot, and the
+> module requires this fill's slice to equal it. `Full` liquidates the user's entire live
+> protocol balance, so it cannot be pro-rated — a sliced fill would unwind the whole
+> position and brick the rest of the order. The guard fails **closed**: a `Full` payload
+> without the trailing total reverts `PartialFillUnsupported`.
+>
+> For any row above whose base length is marked "inc. BalanceMode", the sig block offset is
+> unchanged, but a `Full` payload is 32 bytes longer overall:
+>
+> ```
+> base_data | BalanceMode (32) | itemTotal (32) | [optional sig block]
+> ```
+>
+> See `FullFillGuard.requireFullFillFromData` and the per-module offsets in
+> `packages/modules/lending/*/src/*.sol`.

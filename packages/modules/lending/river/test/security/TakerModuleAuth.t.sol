@@ -36,7 +36,7 @@ contract RiverTakerModuleAuthTest is Test {
 
     function _openData() internal view returns (bytes memory) {
         return abi.encode(
-            RiverOpenModule.OpenData(xapp, tm, token, token, 1e16, 1 ether, address(0), address(0))
+            RiverOpenModule.OpenData(xapp, tm, token, token, 1e16, 1 ether, address(0), address(0), 1e18)
         );
     }
 

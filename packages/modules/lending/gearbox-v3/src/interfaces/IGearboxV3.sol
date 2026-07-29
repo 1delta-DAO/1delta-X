@@ -35,7 +35,46 @@ struct MultiCall {
 interface IGearboxCreditFacadeV3 {
     /// @notice Drive `creditAccount` through `calls`. Callable by a bot the account
     ///         owner authorised via `setBotPermissions`.
+    ///
+    ///         ⚠ Gearbox authorises the BOT, not the beneficiary: it checks
+    ///         "is `msg.sender` a bot registered on this account with these
+    ///         permissions?" and never learns on whose behalf the bot is acting.
+    ///         Since a module is a shared singleton registered against EVERY user
+    ///         who onboards, this check passes for any account in the module's
+    ///         victim set. Binding the account to the Permit3 principal is
+    ///         therefore the MODULE's job — see {ICreditManagerV3.getBorrowerOrRevert}
+    ///         and `GearboxCreditAuth.authorize`.
     function botMulticall(address creditAccount, MultiCall[] calldata calls) external;
+}
+
+/// @notice Every Gearbox credit account stores its manager immutably. This is the
+///         root of the on-chain authorization chain: `creditAccount` is the ONLY
+///         address a caller supplies; the manager and facade are derived from it,
+///         so calldata can never point authorization at one contract and dispatch
+///         at another.
+interface ICreditAccountV3 {
+    function creditManager() external view returns (address);
+}
+
+interface ICreditManagerV3 {
+    /// @notice The facade currently bound to this manager (governance-rotatable,
+    ///         not manipulable mid-tx) — the address Gearbox itself would route
+    ///         through in the same transaction.
+    function creditFacade() external view returns (address);
+
+    /// @notice The account's owner. Reverts if `creditAccount` is not a live
+    ///         account of THIS manager, which is what makes a fabricated account
+    ///         address fail closed rather than resolve to a lie.
+    function getBorrowerOrRevert(address creditAccount) external view returns (address);
+}
+
+/// @notice Gearbox's bot interface. `BotListV3.setBotPermissions` reads
+///         `requiredPermissions()` from the bot and enforces that the mask a user
+///         grants equals it EXACTLY (`IncorrectBotPermissionsException` otherwise).
+///         A contract that does not implement this cannot be registered as a bot
+///         at all, so every `botMulticall` from it reverts.
+interface IGearboxBot {
+    function requiredPermissions() external view returns (uint192);
 }
 
 /// @notice The self-call surface interpreted inside a (bot)multicall.

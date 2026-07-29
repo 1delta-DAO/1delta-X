@@ -17,6 +17,20 @@ import {SafeTransferLib} from "./SafeTransferLib.sol";
 ///         to a module (borrow/withdraw/…) and has no `transferFrom` analogue, so
 ///         that authority must stay Permit3-gated.
 ///
+/// @dev    ⚠ CONSEQUENCE FOR PAYERS — a direct ERC20 approval to the spender
+///         OVERRIDES every Permit3 control on that token. Because a failed Permit3
+///         leg silently falls through, the direct allowance is consulted whenever
+///         the Permit3 one is missing, too small, or expired. So for a payer
+///         holding both:
+///           • per-order Permit3 amount caps are not binding — the fallback pulls
+///             the full amount anyway;
+///           • `revokeToken` / `lockdown` / an expiry do NOT stop fills.
+///         This is intended (a direct approval IS the broader grant, and the payer
+///         made it deliberately), but it means REVOKING PERMIT3 IS NOT A KILL
+///         SWITCH. To actually stop settlement from moving a token, the payer must
+///         also zero the direct ERC20 allowance to the spender. Wallets and UIs
+///         surfacing a "revoke" action MUST clear both.
+///
 /// @dev    Internal functions inline into the caller, so `msg.sender` seen by
 ///         Permit3 (and by the ERC20 on the fallback) is the CALLING contract —
 ///         which must be the spender approved on Permit3. Do not convert these to

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
 import {IBalancerVault} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
@@ -99,7 +99,7 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
             }
             uint256 owed = amounts[i] + feeAmounts[i]; // Balancer v2 mainnet fee: 0
             _ensureRepayable(leg.token, owed);
-            IERC20(leg.token).transfer(address(vault), owed);
+            SafeTransferLib.safeTransfer(leg.token, address(vault), owed);
         }
         // Leftover input + surplus outputs are swept to the executeFill caller (see _sweep).
     }

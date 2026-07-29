@@ -17,6 +17,24 @@ import {IERC2612} from "../interfaces/IERC2612.sol";
 ///  If the data is shorter than `baseLen + 128` the function is a no-op; the
 ///  module falls back to whatever ERC-20 allowance already exists.
 ///
+///  ⚠ THE REPLAY MUST NOT REVERT THE FILL — it is BEST-EFFORT.
+///  ERC-2612 `permit` consumes a per-owner nonce and reverts once that nonce is
+///  used. The permit block lives inside the module's `data`, which is part of the
+///  order hash AND of `ref = keccak256(data)` for a TAKE item, so the signature
+///  bytes are frozen into the maker's authorization. If a hard call reverted on an
+///  already-used nonce, anyone could permanently kill a gasless order for ~50k gas:
+///  watch the mempool, pull `(deadline, v, r, s)` out of the pending calldata, and
+///  submit `token.permit(...)` directly. The victim's fill then reverts forever and
+///  the order cannot be re-encoded without changing `ref` and the order hash — so
+///  the whole artifact has to be re-signed, repeatably, by an attacker paying
+///  almost nothing.
+///
+///  The front-runner's call leaves the chain in exactly the state the fill wanted
+///  (`allowance(owner, spender) >= amount`), so swallowing the revert is not just
+///  safe, it is the correct outcome: the permit's *effect* is what matters, not
+///  who landed it. The real gate is the `permit3.transferFrom` that follows —
+///  which still reverts if the allowance genuinely is not there.
+///
 ///  The permit approves `spender` (always `address(permit3)` in practice) to pull
 ///  `amount` of `token` from `owner` — it does NOT touch Permit3's own allowance
 ///  book. The caller's Permit3 module allowance must be set separately (e.g. via
@@ -40,6 +58,10 @@ library PermitHelper {
         if (data.length < baseLen + 128) return;
         (uint256 deadline, uint8 v, bytes32 r, bytes32 s) =
             abi.decode(data[baseLen:baseLen + 128], (uint256, uint8, bytes32, bytes32));
-        IERC2612(token).permit(owner, spender, amount, deadline, v, r, s);
+        // Best-effort by design — see the front-run note above. A revert here means
+        // the nonce is already spent (someone else landed the same permit), which is
+        // the state we wanted anyway; the following `permit3.transferFrom` is the
+        // real gate.
+        try IERC2612(token).permit(owner, spender, amount, deadline, v, r, s) {} catch {}
     }
 }

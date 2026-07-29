@@ -20,6 +20,12 @@ abstract contract NonceManager {
 
     event OrdersCancelled(address indexed maker, uint256[] nonces);
     event NoncesRolledBack(address indexed maker, uint256 minValidNonce);
+    /// @notice A maker invalidated all 256 nonces in `wordIndex` via
+    ///         {invalidateNonceWord}. Emitted so bulk cancellation is visible to
+    ///         indexers on the SAME footing as {OrdersCancelled}/{NoncesRolledBack} —
+    ///         without it an orderbook watching only those two events would keep
+    ///         serving orders this maker has already cancelled.
+    event NonceWordInvalidated(address indexed maker, uint256 wordIndex);
 
     error RollbackTooLow();
 
@@ -36,6 +42,7 @@ abstract contract NonceManager {
     /// @notice Cancel all 256 nonces in `wordIndex` at once.
     function invalidateNonceWord(uint256 wordIndex) external {
         nonceBitmap[msg.sender][wordIndex] = type(uint256).max;
+        emit NonceWordInvalidated(msg.sender, wordIndex);
     }
 
     /// @notice Roll the caller's nonce floor forward to `newMinValidNonce`,

@@ -74,9 +74,23 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   keeps rejecting funds-less / no-approval orders **O(1) amortized**, with the
   on-chain fill revert as the capital backstop.
 
+## Security
+
+- **[SECURITY.md](../SECURITY.md)** — the authoritative security document: trust
+  model, the invariants each layer upholds, the caveats integrators get wrong
+  (revoking Permit3 is **not** a kill switch; a contract that fills on its own
+  behalf must hold no balance; position-ID modules must bind the position to
+  `onBehalfOf`), and the audit history with findings and fixes.
+
+  **Read the "Breaking change for integrators" section before touching an
+  encoder** — the 2026-07 audit changed the signing format for Gearbox, Liquity,
+  ERC4626 claims, composite items, and every `BalanceMode.Full` taker leg. Two of
+  those fail *silently* if missed.
+
 ## Reading order
 
 New to the codebase: the [settlement README](../packages/core/src/settlement/README.md)
 first (the fill flow + item-op taxonomy), then the fee notes (the common case),
 then fill-modules → settlement-modules (the generalization toward any↔any
-intents).
+intents). Before writing or changing an encoder, read
+[SECURITY.md](../SECURITY.md)'s breaking-change section.

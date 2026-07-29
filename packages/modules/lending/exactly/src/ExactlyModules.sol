@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@core/dust/DustHandler.sol";
+import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
 import {PermitHelper} from "@core/utils/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
@@ -204,6 +205,10 @@ contract ExactlyTakerModule is ITakerModule {
             if (maturity != 0) {
                 IExactlyMarket(market).withdrawAtMaturity(maturity, amount, bound, receiver, onBehalfOf);
             } else if (DustHandler.readBalanceMode(data, 160) == DustHandler.BalanceMode.Full) {
+                // `Full` liquidates the user's ENTIRE live balance, so it cannot be
+                // pro-rated — a sliced fill would unwind the whole position and brick
+                // the rest of the order. Require the slice to be the whole item.
+                FullFillGuard.requireFullFillFromData(data, 192, amount);
                 _withdrawFull(market, asset, onBehalfOf, amount, receiver);
             } else {
                 IExactlyMarket(market).withdraw(amount, receiver, onBehalfOf);

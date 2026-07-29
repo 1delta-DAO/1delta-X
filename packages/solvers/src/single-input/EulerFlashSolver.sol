@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
 
@@ -21,7 +21,6 @@ interface IEulerFlashVault {
 ///         `flashVault`. Repays by transferring the borrowed `amount` straight
 ///         back to that vault — Euler flash loans carry no fee.
 contract EulerFlashSolver is BaseFlashSolver {
-    error OnlyFlashVault();
 
     constructor(address _permit3, address _settlement, address _router)
         BaseFlashSolver(_permit3, _settlement, _router)
@@ -38,7 +37,14 @@ contract EulerFlashSolver is BaseFlashSolver {
         uint256 minSwapOut
     ) external initiatesFlash {
         bytes memory data = abi.encode(flashVault, flashAmount, order, sig, fillAmountIn, dexFee, minSwapOut);
+        // Pin the provider BEFORE the external call so the callback can be
+        // authenticated against it rather than against its own payload.
+        _armProvider(flashVault);
         IEulerFlashVault(flashVault).flashLoan(flashAmount, data);
+        // A "vault" that returns without calling back never validated the order,
+        // so falling through to the sweep below would move funds on an unsigned
+        // order. Assert the callback actually ran.
+        _requireCallbackRan();
 
         // Surplus collateral is the fill's profit — sweep it to the caller so no
         // balance accumulates in this permissionless solver.
@@ -48,7 +54,10 @@ contract EulerFlashSolver is BaseFlashSolver {
     /// @dev EVK callback. `asset()` of the vault has been transferred here; we owe
     ///      exactly `flashAmount` back to the vault.
     function onFlashLoan(bytes calldata data) external {
-        _requireInFlash();
+        // NOTE: deliberately NOT `msg.sender == <flashVault decoded from data>` —
+        // that compares an attacker-supplied value against another attacker-supplied
+        // value. Authenticate against the armed provider instead.
+        _requireInFlashFromArmed();
 
         (
             address flashVault,
@@ -60,12 +69,10 @@ contract EulerFlashSolver is BaseFlashSolver {
             uint256 minSwapOut
         ) = abi.decode(data, (address, uint256, Order, bytes, uint256, uint24, uint256));
 
-        if (msg.sender != flashVault) revert OnlyFlashVault();
-
         address tokenOut = IEulerFlashVault(flashVault).asset();
         _fillAndSwap(order, sig, fillAmountIn, tokenOut, dexFee, minSwapOut);
 
         _ensureRepayable(tokenOut, flashAmount);
-        IERC20(tokenOut).transfer(flashVault, flashAmount);
+        SafeTransferLib.safeTransfer(tokenOut, flashVault, flashAmount);
     }
 }

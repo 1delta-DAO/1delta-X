@@ -55,8 +55,11 @@ contract CompoundV2NativeSettlementTest is CompoundV2ModulesBase {
         return abi.encode(address(CETH)); // Exact mode (no trailing BalanceMode)
     }
 
-    function _withdrawEthFullData() internal pure returns (bytes memory) {
-        return abi.encode(address(CETH), uint8(DustHandler.BalanceMode.Full));
+    /// @param itemTotal the item's full maker-signed amount. `Full` mode is
+    ///        full-fill only — it liquidates the entire live balance, so it cannot
+    ///        be pro-rated (see {FullFillGuard}).
+    function _withdrawEthFullData(uint256 itemTotal) internal pure returns (bytes memory) {
+        return abi.encode(address(CETH), uint8(DustHandler.BalanceMode.Full), itemTotal);
     }
 
     function _repayUsdcData() internal view returns (bytes memory) {
@@ -170,14 +173,14 @@ contract CompoundV2NativeSettlementTest is CompoundV2ModulesBase {
         // Redeem leg: pull the maker's cETH + cap the forwarded slice.
         IERC20(address(CETH)).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(nWithdraw), address(CETH), type(uint160).max, 0);
-        permit3.approveTaker(address(settlement), keccak256(_withdrawEthFullData()), uint160(wethToSolver), 0);
+        permit3.approveTaker(address(settlement), keccak256(_withdrawEthFullData(wethToSolver)), uint160(wethToSolver), 0);
         vm.stopPrank();
 
         // Order-of-items matters: repay (MAKE) BEFORE redeem-Full (TAKE), else the
         // debt still locks the collateral and the full redeem reverts on shortfall.
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(repayModule), usdcRepay, address(0), _repayUsdcData());
-        items[1] = Item(ItemOp.TAKE, address(nWithdraw), wethToSolver, address(0), _withdrawEthFullData());
+        items[1] = Item(ItemOp.TAKE, address(nWithdraw), wethToSolver, address(0), _withdrawEthFullData(wethToSolver));
         Order memory order = _order(maker, 1, WETH, USDC, wethToSolver, usdcRepay, items);
         bytes memory sig = _sign(order);
 
