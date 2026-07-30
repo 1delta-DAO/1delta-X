@@ -3,12 +3,14 @@ pragma solidity ^0.8.28;
 
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
+import {IFillModule} from "../interfaces/IFillModule.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
-import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint} from "../settlement/Structs.sol";
+import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint, FillCtx} from "../settlement/Structs.sol";
 import {OrderHash} from "../settlement/OrderHash.sol";
 import {DutchAuction} from "../settlement/DutchAuction.sol";
+import {Pricing} from "../settlement/Pricing.sol";
 
 /// @dev The subset of {Settlement}'s public/external surface this lens
 ///      reads. All are views on the live settlement, so the lens never needs the
@@ -34,6 +36,7 @@ interface ISettlementState {
 contract SettlementLens {
     using OrderHash for Order;
     using DutchAuction for Order;
+    using Pricing for Order;
 
     /// @notice The settlement this lens reports on.
     ISettlementState public immutable SETTLEMENT;
@@ -81,6 +84,122 @@ contract SettlementLens {
     function remaining(Order calldata order) external view returns (uint256) {
         return _fillDenominator(order) - SETTLEMENT.filled(order.hash());
     }
+
+    /// @notice Preview EXACTLY what `Settlement.fillUpTo` would settle right now —
+    ///         the aggregator quote call. Runs the same clamp, the same exclusivity
+    ///         override, and the same per-leg {Pricing} math the settlement runs, so
+    ///         an `eth_call` here at block N equals a fill executed at block N.
+    /// @dev    Scope: the AMOUNT pipeline only. Lifecycle gates (deadline, nonce,
+    ///         cancellation, signature, validators, maker funding) are the job of
+    ///         {getOrderRelevantState} — call both. Mirrored execution reverts are
+    ///         kept where they change the answer: a hard-exclusive order previews as
+    ///         {NotExclusiveFiller} for an outside filler, and a clamped delta under
+    ///         the maker's floor as {FillTooSmall} — exactly as the fill would.
+    ///         Time-sensitive: decay and the gas bump price off `block.timestamp` /
+    ///         `basefee` at the call's block.
+    /// @param  fillAmount The requested size (anchor units; a proposal for a
+    ///         fill-module order). Clamped to remaining for identity orders,
+    ///         resolved through the maker's `fillModule` otherwise.
+    /// @param  filler     The would-be `msg.sender` of the fill (exclusivity).
+    /// @param  takerData  The blob the filler would submit (fill-module proposal);
+    ///         `""` for plain orders.
+    /// @return delta      Anchor-unit progress the fill would execute.
+    /// @return received   Per-`legsIn` amounts the filler would be paid.
+    /// @return paid       Per-`legsOut` amounts the filler would deliver.
+    function previewFill(Order calldata order, uint256 fillAmount, address filler, bytes calldata takerData)
+        external
+        view
+        returns (uint256 delta, uint256[] memory received, uint256[] memory paid)
+    {
+        // Split frames (ctx resolve / leg pricing) to stay under the stack limit
+        // without via-IR, like the settlement's own settle helpers.
+        FillCtx memory ctx = _previewCtx(order, fillAmount, filler, takerData);
+        unchecked {
+            delta = ctx.newFilled - ctx.prevFilled; // resolve guarantees new >= prev
+        }
+        (received, paid) = _previewAmounts(order, ctx);
+    }
+
+    /// @dev Mirror of `Core._clampToRemaining` + `OrderState._openFill`'s delta
+    ///      resolution: identity orders clamp to remaining; module orders resolve
+    ///      the proposal through the maker's (view) fill module. Packages the
+    ///      result as the same {FillCtx} the settlement would price with.
+    function _previewCtx(Order calldata order, uint256 fillAmount, address filler, bytes calldata takerData)
+        private
+        view
+        returns (FillCtx memory)
+    {
+        if (fillAmount == 0) revert ZeroFill();
+        bytes32 orderHash = order.hash();
+        uint256 total = _fillDenominator(order);
+        uint256 prevFilled = SETTLEMENT.filled(orderHash);
+        if (prevFilled == type(uint256).max) revert OrderCancelled();
+
+        uint256 delta;
+        if (order.fillModule == address(0)) {
+            if (prevFilled < total) {
+                uint256 rem = total - prevFilled;
+                if (fillAmount > rem) fillAmount = rem;
+            }
+            delta = fillAmount;
+        } else {
+            delta = IFillModule(order.fillModule).resolveFill(order, prevFilled, fillAmount, takerData);
+            if (delta == 0) revert ZeroFill();
+        }
+        if (delta < order.minFillAnchor) revert FillTooSmall();
+        uint256 newFilled = prevFilled + delta;
+        if (newFilled > total) revert OverFill();
+
+        return FillCtx(
+            orderHash,
+            total,
+            prevFilled,
+            newFilled,
+            _exclusivityOverride(order, filler),
+            filler,
+            filler,
+            prevFilled == 0 && newFilled == total
+        );
+    }
+
+    /// @dev Price every leg for the resolved ctx — the same {Pricing} calls the
+    ///      fill's delivery/payout run.
+    function _previewAmounts(Order calldata order, FillCtx memory ctx)
+        private
+        view
+        returns (uint256[] memory received, uint256[] memory paid)
+    {
+        received = new uint256[](order.legsIn.length);
+        for (uint256 i; i < received.length; i++) {
+            received[i] = order.inputOwed(ctx, i);
+        }
+        paid = new uint256[](order.legsOut.length);
+        for (uint256 j; j < paid.length; j++) {
+            paid[j] = order.outputAt(ctx, j);
+        }
+    }
+
+    /// @dev Mirror of the settlement's `Base._exclusivity` gate, error for error,
+    ///      so a preview fails exactly where the fill would.
+    function _exclusivityOverride(Order calldata order, address filler) internal view returns (uint256 overrideBps) {
+        if (
+            order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime()
+                && filler != order.exclusiveFiller
+        ) {
+            if (order.exclusivityOverrideBps == 0) revert NotExclusiveFiller();
+            if (order.exclusivityOverrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
+            overrideBps = order.exclusivityOverrideBps;
+        }
+    }
+
+    // Mirrored settlement errors (same signatures ⇒ same selectors), so preview
+    // reverts decode identically to execution reverts in any tooling.
+    error ZeroFill();
+    error OverFill();
+    error FillTooSmall();
+    error OrderCancelled();
+    error NotExclusiveFiller();
+    error InvalidOverrideBps();
 
     // ──────────────────── Solver preflight ────────────────────
 
@@ -214,12 +333,19 @@ contract SettlementLens {
 
     /// @dev Max fillable (anchor units) the maker can currently fund across all
     ///      input legs: min_i( capacity_i · anchor / perUnitIn_i ), where
-    ///      capacity_i = min(live Permit3 allowance to the settlement, balance) and
-    ///      perUnitIn_i is the worst-case input cost of one anchor unit —
-    ///      `endAmountIn[i]`, which equals the fixed amount for `start == end`
-    ///      legs and the auction ceiling for rising legs (so the cap is a
-    ///      conservative lower bound that never depends on the not-yet-started
-    ///      auction tick).
+    ///      capacity_i = min(balance, max(live Permit3 allowance, direct ERC20
+    ///      allowance to the settlement)) and perUnitIn_i is the worst-case input
+    ///      cost of one anchor unit — `endAmountIn[i]`, which equals the fixed
+    ///      amount for `start == end` legs and the auction ceiling for rising legs
+    ///      (so the cap is a conservative lower bound that never depends on the
+    ///      not-yet-started auction tick).
+    ///
+    ///      The direct-allowance leg mirrors
+    ///      {Permit3TransferLib.transferFromWithFallback}: a maker that granted a
+    ///      plain ERC20 approval to the settlement (instead of routing through
+    ///      Permit3) funds the very same pull via the fallback, so their live
+    ///      capacity is the MAX of the two books — reading only Permit3 would
+    ///      preview such makers as unfillable.
     function _makerFillableCap(Order calldata order, uint256 anchor) internal view returns (uint256 cap) {
         cap = type(uint256).max;
         address spender = address(SETTLEMENT);
@@ -228,6 +354,8 @@ contract SettlementLens {
             (uint160 allowed, uint48 expiration,) = PERMIT3.tokenAllowance(order.maker, spender, token);
             uint256 capacity = allowed;
             if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
+            uint256 direct = _erc20Allowance(token, order.maker, spender);
+            if (direct > capacity) capacity = direct; // fallback path funds the same pull
             uint256 bal = SafeTransferLib.balanceOf(token, order.maker);
             if (bal < capacity) capacity = bal;
 
@@ -437,6 +565,15 @@ contract SettlementLens {
             let ok := staticcall(gas(), target, add(cd, 0x20), mload(cd), 0x00, 0x20)
             pass := and(and(ok, gt(returndatasize(), 31)), eq(mload(0x00), 1))
         }
+    }
+
+    /// @dev Live `token.allowance(owner, spender)` — best-effort staticcall; a
+    ///      token without a readable allowance view reports 0 (never reverts the
+    ///      preflight).
+    function _erc20Allowance(address token, address owner, address spender) private view returns (uint256 a) {
+        (bool ok, bytes memory ret) =
+            token.staticcall(abi.encodeWithSignature("allowance(address,address)", owner, spender));
+        if (ok && ret.length >= 32) a = abi.decode(ret, (uint256));
     }
 
     /// @dev The leg anchor: the FIXED side's leg 0 — `startAmountIn[0]` (SELL) or

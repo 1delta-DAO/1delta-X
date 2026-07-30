@@ -185,4 +185,55 @@ describe("orderbook backend", () => {
 
     ws.close();
   });
+
+  it("GET /quote previews via the lens and returns fillUpTo calldata", async () => {
+    // Stub client: previewFill returns a fixed (delta, received, paid) triple.
+    const stubClient = {
+      readContract: async (args: { functionName: string }) => {
+        expect(args.functionName).toBe("previewFill");
+        return [500n, [500n], [450n]];
+      },
+    };
+    server = await buildServer({
+      config,
+      verifier: stubVerifier,
+      transport: new InMemoryTransport(),
+      client: stubClient as never,
+      logger: false,
+    });
+    const order = orderFor(account.address);
+    const res0 = await server.app.inject(postOrder({ order, sig: "0x" }));
+    const { orderHash } = res0.json() as { orderHash: string };
+
+    const res = await server.app.inject({
+      method: "GET",
+      url: `/quote?hash=${orderHash}&fillAmount=1000&filler=${account.address}`,
+    });
+    expect(res.statusCode).toBe(200);
+    const quote = res.json() as {
+      to: string;
+      data: string;
+      delta: string;
+      receiving: { token: string; amount: string }[];
+      paying: { token: string; amount: string }[];
+      recipient: string;
+    };
+    expect(quote.to).toBe(config.settlement);
+    expect(quote.data.startsWith("0x")).toBe(true);
+    expect(quote.delta).toBe("500");
+    expect(quote.receiving[0]).toEqual({ token: order.legsIn[0]!.token, amount: "500" });
+    expect(quote.paying[0]).toEqual({ token: order.legsOut[0]!.token, amount: "450" });
+    expect(quote.recipient).toBe(account.address); // defaults to the filler
+  });
+
+  it("GET /quote 404s an unknown order and 400s missing params", async () => {
+    server = await makeServer();
+    const missing = await server.app.inject({ method: "GET", url: "/quote?hash=0x01" });
+    expect(missing.statusCode).toBe(400);
+    const unknown = await server.app.inject({
+      method: "GET",
+      url: `/quote?hash=0x${"ab".repeat(32)}&fillAmount=1&filler=${account.address}`,
+    });
+    expect(unknown.statusCode).toBe(404);
+  });
 });

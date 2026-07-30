@@ -25,6 +25,12 @@ maker's EIP-712 signature.
 > `msg.sender == settlement`. Settlement pays the solver only from the proceeds
 > produced by the current fill. See [`/SECURITY.md`](../../../../SECURITY.md).
 
+> **Integrating fills from a router/aggregator?** Use `fillUpTo` — it clamps to
+> the order's remaining size (race-tolerant) and returns full both-sides
+> accounting `(delta, received, paid)`; quote it exactly via
+> `SettlementLens.previewFill`. The walkthrough — approvals, side/denomination
+> mapping, quoting, sharp edges — is [`INTEGRATION.md`](./INTEGRATION.md).
+
 ### Dutch auctions — how they work
 
 The auction applies **only to the conversion** (`tokenIn ↔ tokenOut`),

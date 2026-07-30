@@ -11,9 +11,10 @@ import {
   Verifier,
   type OrderbookConfig,
 } from "@1delta-x/orderbook";
+import { encodeFillUpTo, SETTLEMENT_LENS_ABI } from "@1delta-x/sdk";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
-import { createPublicClient, http, recoverMessageAddress, type Hex, type PublicClient } from "viem";
+import { createPublicClient, http, recoverMessageAddress, type Address, type Hex, type PublicClient } from "viem";
 import type { WebSocket as WsWebSocket } from "ws";
 
 const PROTOBUF_CONTENT_TYPES = ["application/x-protobuf", "application/protobuf", "application/octet-stream"];
@@ -52,6 +53,7 @@ export interface OrderbookServer {
  *   GET  /orders/:hash  → protobuf OrderAnnounce
  *   POST /cancels       protobuf OrderSoftCancel → verify maker sig → evict → 202
  *   GET  /stream (ws)   → SNAPSHOT then live ADD / CANCEL StreamMessages
+ *   GET  /quote         → JSON fill quote + ready-to-send `fillUpTo` calldata
  *   GET  /health        → chain config + book size
  */
 export async function buildServer(opts: BuildServerOptions): Promise<OrderbookServer> {
@@ -63,8 +65,11 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
   await app.register(websocket);
 
   const transport = opts.transport ?? new InMemoryTransport();
-  // Only touch the RPC when we actually need to build a verifier (tests inject a stub).
-  const verifier = opts.verifier ?? new Verifier(opts.client ?? createPublicClient({ transport: http(config.rpcUrl) }), config);
+  // Lazy so a fully-injected test setup (stub verifier, no RPC URL) never
+  // constructs a real transport; /quote guards for the no-RPC case itself.
+  let clientInst: PublicClient | undefined = opts.client;
+  const getClient = (): PublicClient => (clientInst ??= createPublicClient({ transport: http(config.rpcUrl) }));
+  const verifier = opts.verifier ?? new Verifier(getClient(), config);
   const book = opts.book ?? new Book({ transport, config, verifier });
 
   const { orders: ordersTopic, cancels: cancelsTopic } = topicsFor(config);
@@ -156,6 +161,65 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
       /* client may already be gone */
     }
     socket.on("close", () => sockets.delete(socket));
+  });
+
+  // Aggregator quote: exact-execution amounts from `SettlementLens.previewFill`
+  // (same clamp / exclusivity / pricing as the fill) + ready-to-send `fillUpTo`
+  // calldata. JSON, not protobuf — this route talks to router integrations, not
+  // book peers. The filler pays `paying.token`s (approve `to` for them) and
+  // receives `receiving` at `recipient` (default: the caller).
+  //
+  //   GET /quote?hash=0x…&fillAmount=…&filler=0x…[&recipient=0x…][&takerData=0x…]
+  app.get("/quote", async (request, reply) => {
+    const q = request.query as { hash?: string; fillAmount?: string; filler?: string; recipient?: string; takerData?: string };
+    if (!q.hash || !q.fillAmount || !q.filler) {
+      return reply.code(400).send({ error: "hash, fillAmount, filler are required" });
+    }
+    const entry = book.get(q.hash as Hex);
+    if (!entry) return reply.code(404).send({ error: "unknown order" });
+    const order = entry.announce.order;
+    let fillAmount: bigint;
+    try {
+      fillAmount = BigInt(q.fillAmount);
+    } catch {
+      return reply.code(400).send({ error: "fillAmount not an integer" });
+    }
+    const takerData = (q.takerData ?? "0x") as Hex;
+    if (!clientInst && !config.rpcUrl) return reply.code(503).send({ error: "no RPC configured for quoting" });
+
+    let delta: bigint, received: readonly bigint[], paid: readonly bigint[];
+    try {
+      [delta, received, paid] = (await getClient().readContract({
+        address: config.lens as Address,
+        abi: SETTLEMENT_LENS_ABI,
+        functionName: "previewFill",
+        args: [order as never, fillAmount, q.filler as Address, takerData],
+      })) as [bigint, readonly bigint[], readonly bigint[]];
+    } catch (err) {
+      // Preview reverts mirror execution reverts (NotExclusiveFiller, FillTooSmall,
+      // OrderCancelled, …) — surface them as an unfillable quote, not a 500.
+      const msg = err instanceof Error ? err.message.split("\n")[0] : "preview reverted";
+      return reply.code(422).send({ error: msg });
+    }
+
+    const data = encodeFillUpTo({
+      order,
+      sig: entry.announce.sig,
+      fillAmount,
+      recipient: q.recipient as Address | undefined,
+      takerData,
+    });
+    return reply.send({
+      orderHash: q.hash,
+      to: config.settlement, //   send the tx here — and approve it for `paying` tokens
+      data,
+      value: "0",
+      delta: delta.toString(),
+      receiving: order.legsIn.map((l, i) => ({ token: l.token, amount: received[i]!.toString() })),
+      paying: order.legsOut.map((l, j) => ({ token: l.token, amount: paid[j]!.toString() })),
+      filler: q.filler,
+      recipient: q.recipient ?? q.filler,
+    });
   });
 
   app.get("/health", async () => ({

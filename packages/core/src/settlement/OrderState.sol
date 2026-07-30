@@ -171,7 +171,9 @@ abstract contract OrderState is NonceManager {
         uint256 newFilled = prevFilled + delta;
         if (newFilled > total) revert OverFill();
         filled[orderHash] = newFilled;
-        ctx = FillCtx(orderHash, total, prevFilled, newFilled, overrideBps, filler, prevFilled == 0 && newFilled == total);
+        // `payTo` defaults to the filler; the aggregator entry may redirect it
+        // after this returns (payment destination only — never authority).
+        ctx = FillCtx(orderHash, total, prevFilled, newFilled, overrideBps, filler, filler, prevFilled == 0 && newFilled == total);
     }
 
     /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —

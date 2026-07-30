@@ -42,6 +42,24 @@ test   = "packages/core/test"
 script = "packages/core/script"
 out    = "out/core"
 
+# DEPLOYMENT profile for the core package: identical settings + via-IR, which
+# compiles Settlement ~20% smaller (legacy codegen puts it over EIP-170; via-IR
+# fits with ~1.3KB of margin — see `make size-check`). Kept OUT of the dev/test
+# profile because via-IR compiles are minutes, not seconds; tests/gas run on
+# [profile.core] (same semantics, gas slightly conservative vs. production).
+# Deploy scripts and the size gate MUST use this profile.
+#
+# `test` deliberately points AWAY from packages/core/test: the test tree holds
+# non-*.t.sol data contracts (LenderRegistry — ~900KB of initcode) that via-IR
+# spends the better part of an hour optimizing. Nothing in this profile ever
+# runs tests; it exists to produce deployable artifacts.
+[profile.core-deploy]
+src    = "packages/core/src"
+test   = "packages/core/script"
+script = "packages/core/script"
+out    = "out/core-deploy"
+via_ir = true
+
 [profile.solvers]
 src    = "packages/solvers/src"
 test   = "packages/solvers/test"

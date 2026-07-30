@@ -37,7 +37,7 @@ PACKAGES := \
 	modules-gearbox-v3 \
 	modules-teller
 
-.PHONY: test build test-all build-all gas gas-check gas-diff $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
+.PHONY: test build test-all build-all gas gas-check gas-diff size-check $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -125,6 +125,36 @@ gas-check:
 gas-diff:
 	FOUNDRY_PROFILE=core $(FORGE) snapshot --diff --fuzz-seed $(GAS_SEED)
 
+# ── Deploy-size gate ─────────────────────────────────────────────────────────
+#
+# Settlement exceeds the EIP-170 runtime cap under legacy codegen; the
+# DEPLOYMENT profile (`core-deploy`, via-IR — see foundry.toml) fits with
+# margin. Settlement is the ONLY contract that needs via-IR, so the deploy
+# build skips every non-settlement source dir (they still compile if imported)
+# — via-IR on the full package takes the better part of an hour, this scope
+# takes minutes. Everything else (lens, validators, modules) ships from the
+# legacy profile and is measured there. `forge build --sizes` can't be the
+# gate directly — the test-data LenderRegistry (never deployed) trips it — so
+# this measures just the production contracts via `forge inspect`.
+
+## CI gate: fail if the deployable Settlement/lens exceed the deploy size limits.
+size-check:
+	@FOUNDRY_PROFILE=core-deploy $(FORGE) build --quiet \
+		--skip 'packages/core/test/*' --skip '*.s.sol' \
+		--skip 'src/validators/*' --skip 'src/periphery/*' --skip 'src/dust/*' --skip 'src/modules/*'
+	@FOUNDRY_PROFILE=core $(FORGE) build --quiet --skip '*.t.sol' --skip '*.s.sol'
+	@fail=0; \
+	check() { \
+		rt=$$(( ($$(FOUNDRY_PROFILE=$$1 $(FORGE) inspect $$2 deployedBytecode | tr -d '[:space:]' | wc -c) - 2) / 2 )); \
+		ic=$$(( ($$(FOUNDRY_PROFILE=$$1 $(FORGE) inspect $$2 bytecode | tr -d '[:space:]' | wc -c) - 2) / 2 )); \
+		printf "%-24s (%s) runtime %6d / 24576   initcode %6d / 49152\n" $$2 $$1 $$rt $$ic; \
+		if [ $$rt -gt 24576 ]; then echo "FAIL: $$2 runtime exceeds EIP-170"; fail=1; fi; \
+		if [ $$ic -gt 49152 ]; then echo "FAIL: $$2 initcode exceeds EIP-3860"; fail=1; fi; \
+	}; \
+	check core-deploy Settlement; \
+	check core SettlementLens; \
+	exit $$fail
+
 # ── Help ──────────────────────────────────────────────────────────────────────
 
 help:
@@ -138,5 +168,6 @@ help:
 	@echo "  gas                   Regenerate the committed .gas-snapshot baseline"
 	@echo "  gas-check             Fail if any test's gas moved from the baseline"
 	@echo "  gas-diff              Show per-test gas deltas vs the baseline"
+	@echo "  size-check            Fail if Settlement/facet exceed deploy size limits"
 	@echo ""
 	@echo "Packages: $(PACKAGES)"

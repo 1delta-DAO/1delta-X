@@ -199,7 +199,13 @@ struct FillCtx {
     uint256 prevFilled; //   cumulative filled before this fill
     uint256 newFilled; //    cumulative filled after this fill
     uint256 overrideBps; //  soft-exclusivity improvement (0 = none)
-    address filler; //       who is paid / delivers
+    address filler; //       who delivers / whose authority the fill runs under
+    address payTo; //        where the filler's input-leg proceeds are sent. Defaults
+    //                       to `filler` in `_openFill`; the aggregator entry
+    //                       (`fillUpTo`) may redirect it. Payment destination ONLY —
+    //                       exclusivity, validators, and output pulls all key on
+    //                       `filler`, so this grants no new authority (it routes the
+    //                       filler's own money, which the filler could forward anyway).
     bool fullFill; //        prevFilled == 0 && newFilled == anchor: the whole order in
     //                       one shot ⇒ every pro-rata slice is the leg's full amount,
     //                       skipping the mul/div.

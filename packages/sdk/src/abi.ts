@@ -133,6 +133,26 @@ export const SETTLEMENT_ABI = [
     ],
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
   },
+  // The aggregator entry: clamps to the order's remaining size instead of the
+  // OverFill race revert, optionally redirects proceeds, and returns full
+  // both-sides accounting — (delta, received per legsIn, paid per legsOut).
+  {
+    type: "function",
+    name: "fillUpTo",
+    stateMutability: "nonpayable",
+    inputs: [
+      orderArg,
+      { name: "sig", type: "bytes" },
+      { name: "fillAmount", type: "uint256" },
+      { name: "recipient", type: "address" },
+      { name: "takerData", type: "bytes" },
+    ],
+    outputs: [
+      { name: "delta", type: "uint256" },
+      { name: "received", type: "uint256[]" },
+      { name: "paid", type: "uint256[]" },
+    ],
+  },
   {
     type: "function",
     name: "cancelOrders",
@@ -149,7 +169,7 @@ export const SETTLEMENT_ABI = [
   },
   {
     type: "function",
-    name: "filledAmountIn",
+    name: "filled",
     stateMutability: "view",
     inputs: [{ name: "orderHash", type: "bytes32" }],
     outputs: [{ name: "", type: "uint256" }],
@@ -215,6 +235,24 @@ export const SETTLEMENT_LENS_ABI = [
       { name: "fillableAmount", type: "uint256" },
       { name: "isSignatureValid", type: "bool" },
       { name: "validatorsPass", type: "bool" },
+    ],
+  },
+  // Exact-execution quote for `fillUpTo`: same clamp, same exclusivity, same
+  // per-leg pricing — an eth_call at block N equals a fill executed at block N.
+  {
+    type: "function",
+    name: "previewFill",
+    stateMutability: "view",
+    inputs: [
+      orderArg,
+      { name: "fillAmount", type: "uint256" },
+      { name: "filler", type: "address" },
+      { name: "takerData", type: "bytes" },
+    ],
+    outputs: [
+      { name: "delta", type: "uint256" },
+      { name: "received", type: "uint256[]" },
+      { name: "paid", type: "uint256[]" },
     ],
   },
   {

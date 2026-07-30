@@ -29,6 +29,14 @@ import {Order} from "../settlement/Structs.sol";
 ///  be `view` — no side effects, no fund movement. `takerData` is the same
 ///  adversarial, unsigned, filler-supplied blob the validators/invariants see,
 ///  so a module that reads it MUST independently verify it against the order.
+///
+///  Clamping: the core's race-tolerant entry (`fillUpTo`) clamps IDENTITY
+///  orders to the remaining size but passes a module order's proposal through
+///  UNTOUCHED — only the module knows what a partial acceptance of its unit
+///  means. A module SHOULD therefore clamp itself where partial acceptance is
+///  meaningful (`delta = min(resolved, order.fillTotal - prevFilled)`), and
+///  simply resolve past the cap where it is not (an indivisible lot) — the
+///  core's `filled + delta <= fillTotal` check then rejects the fill.
 interface IFillModule {
     /// @param order      the full signed order (the module reads the maker's side)
     /// @param prevFilled cumulative filled so far, in `fillTotal` units
