@@ -421,9 +421,13 @@ contract SettlementLens {
             if (order.side == OrderSide.BUY && nOut == 0) {
                 return (false, order.fillModule != address(0) ? "fill module without denominator" : "buy requires tokenOut");
             }
-            // Empty tokenOut on a SELL is the deposit shape — legit only with
-            // items; otherwise the maker gives its tokenIn away for nothing.
-            if (order.side == OrderSide.SELL && nOut == 0 && order.items.length == 0) {
+            // Empty tokenOut on a SELL is the deposit shape (items) or the
+            // invariant-protected PURCHASE shape (the maker pays the input leg
+            // and a signed invariant proves what arrived — e.g. an NFT via
+            // {Erc721OwnerInvariant}, delivered by the filler's callback). With
+            // neither items nor invariants the maker gives tokenIn away for
+            // nothing.
+            if (order.side == OrderSide.SELL && nOut == 0 && order.items.length == 0 && order.invariants.length == 0) {
                 return (false, "no tokenOut and no items (giveaway)");
             }
         }
@@ -491,13 +495,19 @@ contract SettlementLens {
             }
         }
         if (order.minFillAnchor > anchor) return (false, "minFillAnchor > anchor (unfillable)");
-        // A SETTLE item settles an indivisible exchange (an NFT): on a partial
-        // fill its slice floors to 0 and delivers nothing, while the maker is
-        // still paid pro-rata — a first filler pays and gets nothing. Unless a
-        // fill module fixes the unit, require full-fill (minFillAnchor == anchor).
+        // An INDIVISIBLE SETTLE item (`amount <= 1` — the ERC-721 sentinel, or a
+        // broken zero) cannot slice: a partial fill floors it to 0, which the
+        // core now rejects on-chain ({SettleSliceZero}) — so a partial-fillable
+        // order would simply be unfillable except in one full shot. Require
+        // full-fill unless a fill module fixes the unit. DIVISIBLE settle
+        // quantities (`amount > 1`, e.g. {Erc1155SettlementModule}) compose with
+        // partial fills — each fill transfers its exact pro-rata slice — and are
+        // deliberately allowed through.
         if (order.fillModule == address(0) && order.minFillAnchor != anchor) {
             for (uint256 s; s < order.items.length; s++) {
-                if (order.items[s].op == ItemOp.SETTLE) return (false, "settle item requires full-fill");
+                if (order.items[s].op == ItemOp.SETTLE && order.items[s].amount <= 1) {
+                    return (false, "settle item requires full-fill");
+                }
             }
         }
         if (order.decayDuration() != 0 && order.decayStartTime() == 0) return (false, "decay set without decayStartTime");

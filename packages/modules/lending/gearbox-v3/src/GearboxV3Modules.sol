@@ -235,6 +235,74 @@ contract GearboxCreditAddCollateralModule is IMakerModule, IGearboxBot {
     }
 }
 
+// ──────────────────── Gearbox credit-account repay maker module ────────────────────
+//
+// The previously-missing REPAY leg: pulls the debt `asset` via Permit3, then
+// `botMulticall([addCollateral(asset, amount), decreaseDebt(amount)])` — fund the
+// maker's `creditAccount` and burn that much debt in one atomic multicall. The
+// maker must first grant this module the bot role with a mask EXACTLY equal to
+// `requiredPermissions()`:
+//   facade.multicall(ca, [setBotPermissions(module, 0x05)])
+// `data = abi.encode(creditAccount, asset[, deadline, v, r, s])` — base = 64.
+//
+// Semantics are EXACT-amount: `amount` is the maker-signed repay size, pro-rated
+// by partial fills like every MAKE item. A slice exceeding the live debt reverts
+// inside Gearbox (`decreaseDebt` does not cap) — the conservative direction; for
+// a full close, sign the order full-fill and size `amount` off the accrued debt
+// with headroom on the collateral side instead. Approval goes to the CREDIT
+// MANAGER (it runs `addCollateral`'s transferFrom), is reset after, and any
+// unpulled residual returns to the maker — same end-holding-nothing posture as
+// the add-collateral module. Same best-effort caveat as the other credit-account
+// modules: authorization is unit-tested, the multicall fund-flow awaits fork
+// validation.
+//
+contract GearboxCreditRepayModule is IMakerModule, IGearboxBot {
+    IPermit3 public immutable permit3;
+    address public immutable settlement;
+
+    error NotSettlement();
+
+    constructor(address _permit3, address _settlement) {
+        permit3 = IPermit3(_permit3);
+        settlement = _settlement;
+    }
+
+    /// @inheritdoc IGearboxBot
+    /// @dev Repay-only: fund the account + burn debt. No borrow bit, no
+    ///      collateral-out bit — a maker granting this bot hands it strictly
+    ///      value-IN authority (Gearbox enforces the exact mask match).
+    function requiredPermissions() external pure override returns (uint192) {
+        return GearboxCreditAuth.ADD_COLLATERAL_PERMISSION | GearboxCreditAuth.DECREASE_DEBT_PERMISSION;
+    }
+
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
+        (address creditAccount, address asset) = abi.decode(data, (address, address));
+        (address creditManager, address facade) = GearboxCreditAuth.authorize(creditAccount, onBehalfOf);
+
+        PermitHelper.replayIfPresent(data, 64, asset, onBehalfOf, address(permit3), amount);
+        permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
+        SafeTransferLib.forceApprove(asset, creditManager, amount);
+
+        MultiCall[] memory calls = new MultiCall[](2);
+        calls[0] = MultiCall({
+            target: facade,
+            callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.addCollateral, (asset, amount))
+        });
+        calls[1] = MultiCall({
+            target: facade,
+            callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.decreaseDebt, (amount))
+        });
+        IGearboxCreditFacadeV3(facade).botMulticall(creditAccount, calls);
+
+        // End holding nothing and granting nothing.
+        SafeTransferLib.forceApprove(asset, creditManager, 0);
+        uint256 left = IERC20(asset).balanceOf(address(this));
+        if (left != 0) SafeTransferLib.safeTransfer(asset, onBehalfOf, left);
+    }
+}
+
 // ──────────────────── Gearbox credit-account borrow taker module ────────────────────
 //
 // `botMulticall([increaseDebt(amount), withdrawCollateral(asset, amount,

@@ -104,6 +104,12 @@ abstract contract Base is Signatures {
     ///      balance delta; two same-token legs would mis-account. Use distinct
     ///      tokens (leverage/repay/migrate orders already do).
     error BatchItemsDuplicateInput();
+    /// @dev A SETTLE item's pro-rata slice floored to 0 for this fill — the filler
+    ///      would pay the maker's pro-rata price and receive nothing (an
+    ///      indivisible exchange has no fractional delivery). Sign the order
+    ///      full-fill (`minFillAnchor == anchor`, or a {FullFillModule}) and give
+    ///      the item a non-zero `amount` sentinel; see {NftSettlementModule}.
+    error SettleSliceZero();
 
     modifier nonReentrant() {
         if (_locked != 1) revert Reentrancy();
@@ -173,7 +179,17 @@ abstract contract Base is Signatures {
             uint256 slice = ctx.fullFill
                 ? item.amount
                 : (item.amount * ctx.newFilled) / ctx.anchor - (item.amount * ctx.prevFilled) / ctx.anchor;
-            if (slice == 0) continue;
+            if (slice == 0) {
+                // A SETTLE slice that floors to 0 would charge the maker's
+                // pro-rata payment while delivering NOTHING to this filler (an
+                // indivisible exchange has no fractional delivery) — the footgun
+                // {SettlementLens.validateOrder} flags off-chain. Enforce it
+                // on-chain too: revert instead of silently skipping. MAKE/TAKE
+                // dust slices keep the historical skip (they accumulate exactly
+                // across fills). Cost: one calldata read, only on the dust branch.
+                if (item.op == ItemOp.SETTLE) revert SettleSliceZero();
+                continue;
+            }
 
             if (item.op == ItemOp.MAKE) {
                 // Maker module pulls the funding token from order.maker via Permit3 internally.

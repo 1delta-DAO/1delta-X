@@ -11,10 +11,15 @@ Delegation is a single diamond-wide boolean: the maker calls
 surface for `account`. Troves are address-keyed (≤1 per user per TroveManager, no
 id/discovery) — the cleanest of the CDPs.
 
-The twist: CDP value-out carries **no receiver** — `withdrawDebt` mints satUSD to
-`account` and `withdrawColl` returns collateral to `account`. So the taker modules
-run the op and then **Permit3-sweep** the proceeds from the maker to the order's
-`receiver` (the same mechanism the Aave withdraw module uses to pull the aToken).
+The twist: CDP value-out carries **no receiver**. ✅ **Fork-validated on the
+deployed Hemi diamond**: when a delegate drives the op, value-out is delivered
+to **`msg.sender` (the module)** — not to `account` as the Prisma-lineage docs
+suggested. The taker modules settle proceeds direction-agnostically
+(`RiverProceeds.settle`): pay the order's `receiver` first from the module's own
+measured delta, then from the maker's (Permit3 sweep — kept for deployments that
+route to `account`), and sweep module-held surplus back to the maker.
+Under-delivery reverts `InsufficientProceeds` — never funded from the maker's
+pre-existing balance.
 
 ## Modules (`src/`)
 
@@ -30,10 +35,14 @@ run the op and then **Permit3-sweep** the proceeds from the maker to the order's
 
 | Leg | Protocol grant | Permit3 |
 |---|---|---|
-| addColl / open | — | token allowance on collateral (module) |
-| repay | — | token allowance on satUSD (module) |
-| borrow (withdrawDebt) | `xapp.setDelegateApproval(module, true)` | taker allowance + token allowance on satUSD (for the sweep) |
-| withdraw (withdrawColl) | `xapp.setDelegateApproval(module, true)` | taker allowance + token allowance on collateral (for the sweep) |
+| addColl / open | `xapp.setDelegateApproval(module, true)` | token allowance on collateral (module) |
+| repay | `xapp.setDelegateApproval(module, true)` | token allowance on satUSD (module) |
+| borrow (withdrawDebt) | `xapp.setDelegateApproval(module, true)` | taker allowance (+ satUSD token allowance to the module only on `account`-routing deployments) |
+| withdraw (withdrawColl) | `xapp.setDelegateApproval(module, true)` | taker allowance (+ collateral token allowance to the module only on `account`-routing deployments) |
+
+✅ **Fork finding:** the deployed Hemi diamond enforces its caller-or-delegate
+check on EVERY op — value-in included (`addColl` reverts "Caller not approved"
+without the grant). Every module needs `setDelegateApproval`.
 
 The taker modules enforce `msg.sender == permit3`; the MAKE modules enforce
 `msg.sender == settlement`.

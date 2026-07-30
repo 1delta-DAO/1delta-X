@@ -22,8 +22,13 @@ Gearbox V3 lending adapters for `Settlement`. Depends on `@core`.
 |---|---|---|---|
 | `GearboxPoolDepositModule` | MAKE | pool `deposit` | `abi.encode(pool, asset[, permit])` |
 | `GearboxPoolWithdrawModule` | TAKE | pool `withdraw` (owner allowance) | `abi.encode(pool, asset[, BalanceMode])` |
-| `GearboxCreditAddCollateralModule` | MAKE | `botMulticall([addCollateral])` | `abi.encode(facade, creditAccount, token[, permit])` |
-| `GearboxCreditBorrowModule` | TAKE | `botMulticall([increaseDebt, withdrawCollateral→receiver])` | `abi.encode(facade, creditAccount, asset)` |
+| `GearboxCreditAddCollateralModule` | MAKE | `botMulticall([addCollateral])` | `abi.encode(creditAccount, token[, permit])` |
+| `GearboxCreditRepayModule` | MAKE | `botMulticall([addCollateral, decreaseDebt])` | `abi.encode(creditAccount, asset[, permit])` |
+| `GearboxCreditBorrowModule` | TAKE | `botMulticall([increaseDebt, withdrawCollateral→receiver])` | `abi.encode(creditAccount, asset)` |
+
+The facade is never in `data` — it is DERIVED from `creditAccount` on-chain
+(see `GearboxCreditAuth` in the source; taking it from calldata would reopen
+the authorization/dispatch split the auth chain exists to close).
 
 ## Authorization
 
@@ -32,16 +37,19 @@ Gearbox V3 lending adapters for `Settlement`. Depends on `@core`.
 | pool deposit | — | token allowance (module) |
 | pool withdraw | `pool.approve(module, max)` | taker allowance |
 | credit add-collateral | `setBotPermissions(module, ADD_COLLATERAL)` | token allowance (module) |
+| credit repay | `setBotPermissions(module, ADD_COLLATERAL \| DECREASE_DEBT)` | token allowance (module) |
 | credit borrow | `setBotPermissions(module, INCREASE_DEBT \| WITHDRAW_COLLATERAL)` | taker allowance |
 
-## ⚠️ Best-effort caveat (credit-account side)
+## Fork validation (credit-account side)
 
-The credit-account modules are **best-effort and unvalidated**: the bot-permission
-bitmask values, credit-account address resolution, `multicall` self-call
-semantics and the collateral/debt fund-flow all need confirmation on a mainnet
-fork against the deployed `CreditFacadeV3`. Ship the **pool** modules first; treat
-the credit modules as a design sketch pending fork tests. The `security/` auth
-check runs without a fork.
+The credit-account fund-flow is **validated on a mainnet fork** against the
+deployed wstETH credit suite (v3.1) — `test/fork/CreditFlow.t.sol`: real
+`openCreditAccount`, exact-mask bot grants, add-collateral, borrow
+(`increaseDebt` + `withdrawCollateral`, minding the once-per-block debt-update
+rule), partial repay, and a full close to zero debt. Notes that generalize:
+amounts must respect the suite's `debtLimits` (minDebt applies to every state
+except a full close), and quota calls are unnecessary only when the collateral
+is the underlying. The `security/` auth suites run without a fork.
 
 ```
 FOUNDRY_PROFILE=modules-gearbox-v3 forge test --root ../../../..

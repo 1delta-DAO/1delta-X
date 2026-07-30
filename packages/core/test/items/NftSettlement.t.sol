@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {NftSettlementModule} from "@core/modules/NftSettlementModule.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -185,5 +186,39 @@ contract NftSettlementTest is CoreSettlementBase {
         (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, "partial-fillable SETTLE rejected");
         assertEq(reason, "settle item requires full-fill");
+    }
+
+    // ── ON-CHAIN guard: the same footgun now reverts at fill time, not just in
+    //    the lens preflight. A partial fill of a (misparameterized) partial-
+    //    fillable SETTLE order floors the slice to 0 → {SettleSliceZero} — the
+    //    filler can never pay pro-rata and receive nothing. ──
+    function test_settleGuard_partialFill_reverts() public {
+        _fundSolver(solver, PRICE);
+        Order memory order = _nftSaleOrder(6);
+        order.minFillAnchor = 0; // maker signed away the full-fill floor anyway
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.SettleSliceZero.selector);
+        settlement.fill(order, sig, PRICE / 2);
+
+        assertEq(nft.ownerOf(TOKEN_ID), maker, "NFT untouched");
+        assertEq(IERC20(USDC).balanceOf(maker), 0, "maker not paid on the reverted fill");
+    }
+
+    // ── ON-CHAIN guard: a zero `amount` sentinel makes even a FULL fill slice 0.
+    //    Previously the maker was paid while the NFT transfer silently skipped;
+    //    now the order is simply unfillable. ──
+    function test_settleGuard_zeroAmountSentinel_reverts() public {
+        _fundSolver(solver, PRICE);
+        Order memory order = _nftSaleOrder(7);
+        order.items[0].amount = 0; // the broken sentinel
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.SettleSliceZero.selector);
+        settlement.fill(order, sig, PRICE);
+
+        assertEq(nft.ownerOf(TOKEN_ID), maker, "NFT untouched");
     }
 }

@@ -21,54 +21,74 @@ import {IRiverXApp, IRiverTroveManager} from "./interfaces/IRiver.sol";
 //  `setDelegateApproval(module, true)`, and the Permit3 allowances still cap every
 //  fill. Troves are address-keyed (≤1 per user per TroveManager).
 //
-//  CDP value-out has NO receiver: `withdrawDebt` mints satUSD to `account` and
-//  `withdrawColl` returns collateral to `account`. So the taker modules run the
-//  op and then Permit3-sweep the proceeds from the maker to the order's
-//  `receiver` (the maker grants a Permit3 TOKEN allowance on the output token to
-//  the module, exactly like the Aave withdraw module pulls the aToken).
+//  CDP value-out has NO receiver parameter. ✅ FORK-VALIDATED (Hemi diamond
+//  0x07Bb…AA4Ec): when a DELEGATE drives the op, the deployed diamond delivers
+//  value-out to **`msg.sender` (the module)**, not to `account` — `openTrove`'s
+//  mint was measured landing 100% on the delegate (see
+//  test/leverage/Leverage.t.sol, which grew out of that probe). The original
+//  Prisma-lineage transcription assumed `account`; a module built on that
+//  assumption alone can never fill on the deployed diamond.
 //
-//  ⚠️ Fund-flow direction (value-in pulled from msg.sender / value-out landing on
-//  `account`) is transcribed from the Prisma/Liquity-V1 lineage — validate on a
-//  Hemi/Base fork against the deployed diamond before mainnet use.
+//  The taker legs therefore settle proceeds DIRECTION-AGNOSTICALLY
+//  ({RiverProceeds.settle}): snapshot BOTH the module and the maker, run the op,
+//  pay `receiver` first from what landed on the module (plain transfer), then
+//  from what landed on the maker (Permit3 sweep — kept for chains whose
+//  deployment routes to `account`), and return any module-held surplus to the
+//  maker. Under-delivery — a fee netted from the mint, a silently no-op'd
+//  delegate grant — is a clean {InsufficientProceeds} revert, never a pull from
+//  the maker's pre-existing balance. Do not replace the measured deltas with the
+//  nominal `amount`.
 //
-//  Because that direction is unverified, every value-out leg MEASURES the maker's
-//  balance delta across the CDP call and forwards only what the op actually
-//  produced (`RiverProceeds.deliveredTo`). This is not defensive padding — it is
-//  what makes the modules safe under the ambiguity:
-//
-//    • The taker legs pull the payout FROM THE MAKER'S WALLET, because River's
-//      value-out ops carry no `receiver` and mint/return to `account`. Pulling a
-//      fixed `amount` without measuring means a CDP call that delivers less than
-//      expected — a borrow fee netted out of the mint, a fork whose proceeds land
-//      on the caller instead, a delegate grant that silently no-ops — is paid for
-//      out of the maker's PRE-EXISTING balance of that token. The Permit3 token
-//      allowance is the only bound, and for this flow it is realistically large.
-//    • So the failure mode was not "the fill reverts", it was "the solver is paid
-//      out of the maker's wallet and the maker eats the difference", with nothing
-//      on-chain noticing.
-//
-//  Measuring converts every one of those into a clean revert, and makes the
-//  modules correct under BOTH fund-flow directions rather than only the assumed
-//  one. Do not replace these deltas with a nominal `amount`.
+//  ✅ Also fork-validated: the deployed diamond enforces its caller-or-delegate
+//  check on EVERY op, value-IN included — `addColl` by the module reverts
+//  "Caller not approved" without `setDelegateApproval(module, true)`. Every
+//  module in this package therefore needs the delegate grant (the README's
+//  earlier "no protocol grant for value-in" was wrong for the live deployment).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// @title RiverProceeds
-/// @notice Measures what a River CDP op actually delivered to the maker.
-/// @dev Mirrors the `_withdrawAndForward` / `_withdrawFull` discipline used by
-///      every other taker package (Aave, Morpho, Liquity, Silo, Venus): snapshot,
-///      call, require the delta covers the obligation, forward only that.
+/// @notice Direction-agnostic settlement of a River CDP op's value-out.
+/// @dev Mirrors the measure-then-forward discipline used by every other taker
+///      package (Aave, Morpho, Liquity, Silo, Venus), extended to two landing
+///      spots because deployments differ on where value-out arrives (Hemi:
+///      `msg.sender`; the Prisma lineage documents `account`).
 library RiverProceeds {
     /// @dev The CDP op produced less than the fill owes. Fail closed rather than
     ///      making up the difference from the maker's own balance.
     error InsufficientProceeds(uint256 delivered, uint256 required);
 
-    function snapshot(address token, address account) internal view returns (uint256) {
-        return SafeTransferLib.balanceOf(token, account);
+    struct Snap {
+        uint256 selfBefore;
+        uint256 makerBefore;
     }
 
-    function requireDelivered(address token, address account, uint256 before, uint256 required) internal view {
-        uint256 delivered = SafeTransferLib.balanceOf(token, account) - before;
-        if (delivered < required) revert InsufficientProceeds(delivered, required);
+    function snapshot(address token, address maker) internal view returns (Snap memory s) {
+        s.selfBefore = SafeTransferLib.balanceOf(token, address(this));
+        s.makerBefore = SafeTransferLib.balanceOf(token, maker);
+    }
+
+    /// @notice Settle exactly `amount` of the op's proceeds to `receiver`:
+    ///         module-held first (plain transfer), maker-held next (Permit3
+    ///         sweep), module-held surplus back to the maker. Reverts
+    ///         {InsufficientProceeds} if the op under-delivered across BOTH.
+    function settle(
+        IPermit3 permit3,
+        address token,
+        address maker,
+        address receiver,
+        uint256 amount,
+        Snap memory s
+    ) internal {
+        uint256 gotSelf = SafeTransferLib.balanceOf(token, address(this)) - s.selfBefore;
+        uint256 gotMaker = SafeTransferLib.balanceOf(token, maker) - s.makerBefore;
+        if (gotSelf + gotMaker < amount) revert InsufficientProceeds(gotSelf + gotMaker, amount);
+
+        uint256 fromSelf = gotSelf >= amount ? amount : gotSelf;
+        if (fromSelf != 0) SafeTransferLib.safeTransfer(token, receiver, fromSelf);
+        uint256 fromMaker = amount - fromSelf;
+        if (fromMaker != 0) permit3.transferFrom(maker, receiver, token, uint160(fromMaker));
+        // Whatever landed here beyond the obligation is the maker's.
+        if (gotSelf > fromSelf) SafeTransferLib.safeTransfer(token, maker, gotSelf - fromSelf);
     }
 }
 
@@ -215,31 +235,24 @@ contract RiverTakerModule is ITakerModule {
         }
     }
 
-    /// @dev Mint satUSD to the maker, then sweep exactly `amount` to `receiver` —
-    ///      but only once the mint is shown to have delivered it. Own frame (the
-    ///      measured delta pushes the combined dispatch over the stack limit); the
-    ///      hint/router locals are scoped so they are freed before the pull.
+    /// @dev Mint satUSD via `withdrawDebt`, then settle exactly `amount` to
+    ///      `receiver` from wherever the deployment landed it (Hemi: this module;
+    ///      Prisma lineage: the maker) — see {RiverProceeds.settle}. Own frame
+    ///      (the measured deltas push the combined dispatch over the stack
+    ///      limit); struct decode keeps the frame at one pointer.
     function _borrow(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) private {
-        // Decoded as a memory STRUCT rather than a flat tuple: the measured delta
-        // pushes this frame past the stack limit otherwise, and a struct costs one
-        // pointer instead of six slots. All members are static, so the wire format
-        // is byte-identical to the previous tuple encoding — `data` is unchanged.
         BorrowParams memory p = abi.decode(data, (BorrowParams));
-        uint256 before = RiverProceeds.snapshot(p.debtToken, onBehalfOf);
+        RiverProceeds.Snap memory s = RiverProceeds.snapshot(p.debtToken, onBehalfOf);
         IRiverXApp(p.xapp).withdrawDebt(p.tm, onBehalfOf, p.maxFee, amount, p.upper, p.lower);
-        // Without this the pull below would silently draw on the maker's
-        // PRE-EXISTING satUSD whenever the CDP op under-delivered.
-        RiverProceeds.requireDelivered(p.debtToken, onBehalfOf, before, amount);
-        permit3.transferFrom(onBehalfOf, receiver, p.debtToken, uint160(amount));
+        RiverProceeds.settle(permit3, p.debtToken, onBehalfOf, receiver, amount, s);
     }
 
     /// @dev Collateral leg of the same shape — see {_borrow}.
     function _withdrawColl(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) private {
         WithdrawParams memory p = abi.decode(data, (WithdrawParams));
-        uint256 before = RiverProceeds.snapshot(p.collateralToken, onBehalfOf);
+        RiverProceeds.Snap memory s = RiverProceeds.snapshot(p.collateralToken, onBehalfOf);
         IRiverXApp(p.xapp).withdrawColl(p.tm, onBehalfOf, amount, p.upper, p.lower);
-        RiverProceeds.requireDelivered(p.collateralToken, onBehalfOf, before, amount);
-        permit3.transferFrom(onBehalfOf, receiver, p.collateralToken, uint160(amount));
+        RiverProceeds.settle(permit3, p.collateralToken, onBehalfOf, receiver, amount, s);
     }
 }
 
@@ -288,14 +301,13 @@ contract RiverOpenModule is ITakerModule {
         permit3.transferFrom(onBehalfOf, address(this), p.collateralToken, uint160(p.sideAmount));
         SafeTransferLib.forceApprove(p.collateralToken, p.xapp, p.sideAmount);
 
-        uint256 before = RiverProceeds.snapshot(p.debtToken, onBehalfOf);
+        RiverProceeds.Snap memory s = RiverProceeds.snapshot(p.debtToken, onBehalfOf);
         IRiverXApp(p.xapp).openTrove(
             p.tm, onBehalfOf, p.maxFeePercentage, p.sideAmount, amount, p.upperHint, p.lowerHint
         );
-        // satUSD minted to the maker → sweep the borrowed `amount` to `receiver`,
-        // but only what the open actually minted.
-        RiverProceeds.requireDelivered(p.debtToken, onBehalfOf, before, amount);
-        permit3.transferFrom(onBehalfOf, receiver, p.debtToken, uint160(amount));
+        // Settle the minted `amount` to `receiver` from wherever it landed
+        // (Hemi mints to this module) — only what the open actually produced.
+        RiverProceeds.settle(permit3, p.debtToken, onBehalfOf, receiver, amount, s);
 
         // Leave nothing standing and nothing held: `xapp` comes from `data`, so a
         // residual allowance would be a claim on any future balance of this shared

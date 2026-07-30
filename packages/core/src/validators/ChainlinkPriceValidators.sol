@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {Order} from "../settlement/Settlement.sol";
+import {DutchAuction} from "../settlement/DutchAuction.sol";
 import {IAggregatorV3} from "../interfaces/IAggregatorV3.sol";
 
 /// @dev Shared, hardened Chainlink read. Reverts the validator (→ fill aborts)
@@ -43,5 +44,52 @@ contract ChainlinkPriceLte is IOrderValidator {
     function validate(Order calldata, address, bytes calldata data, bytes calldata) external view override returns (bool) {
         (address feed, int256 threshold, uint256 maxStaleness) = abi.decode(data, (address, int256, uint256));
         return ChainlinkRead.read(feed, maxStaleness) <= threshold;
+    }
+}
+
+/// @title ChainlinkTickFloorValidator
+/// @notice Bounds the order's CURRENT auction tick against a LIVE oracle — the
+///         market-limit that makes long-lived schedules (TWAP) and slow decays
+///         safe when the market runs away from the signed curve. Passes iff
+///
+///             currentOut0 · 1e18  >=  currentIn0 · price(feed) · scale / 1e18
+///
+///         i.e. "the rate this fill would clear at (leg-0 out per leg-0 in, at
+///         the live decay/gas-bump tick) is no worse for the maker than the
+///         oracle rate times a signed fraction". A {TwapFillModule} order plus
+///         this validator is a complete oracle-limited TWAP: the schedule meters
+///         the size, this gates every part on the market.
+///
+/// @dev    `data = abi.encode(address feed, uint256 maxStaleness, uint256 scale)`.
+///         `scale` folds EVERYTHING the contract deliberately has no opinion on
+///         into one maker-signed number — feed decimals, the two tokens'
+///         decimals, feed orientation, and the tolerance — defined by
+///         `rate1e18 >= price(feed) · scale`, i.e.
+///
+///             scale = 1e18 · (10000 − tolBps)/10000 · 10^(dOut − dIn − dFeed)
+///
+///         (inverted-feed and BUY-side caps fold in the same way — a cap on
+///         in-per-out is a floor on out-per-in). The SDK computes it; on-chain
+///         stays a single mulDiv against the hardened {ChainlinkRead}.
+///         Anchored on leg 0 of BOTH sides — the canonical 1-in/1-out TWAP/limit
+///         shape; multi-leg baskets need a bespoke validator. Reverts (aborting
+///         the fill) on an empty leg, mirroring the conservative feed guards.
+contract ChainlinkTickFloorValidator is IOrderValidator {
+    using DutchAuction for Order;
+
+    function validate(Order calldata order, address, bytes calldata data, bytes calldata)
+        external
+        view
+        override
+        returns (bool)
+    {
+        (address feed, uint256 maxStaleness, uint256 scale) = abi.decode(data, (address, uint256, uint256));
+        uint256 bump = order.bumpBps();
+        uint256 out0 = order.amountOutAt(0, bump);
+        uint256 in0 = order.amountInAt(0, bump);
+        uint256 ref = uint256(ChainlinkRead.read(feed, maxStaleness));
+        // rate1e18 = out0·1e18/in0; pass iff rate1e18 >= ref·scale — kept in the
+        // multiplied-out form so there is no division/precision loss.
+        return out0 * 1e18 >= in0 * ref * scale;
     }
 }

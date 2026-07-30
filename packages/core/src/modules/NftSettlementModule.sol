@@ -28,13 +28,14 @@ interface IERC721 {
 ///
 ///         `amount` is ignored HERE (an ERC-721 is indivisible), BUT it is NOT
 ///         inert at the order level: the settlement computes the item slice as
-///         `amount · newFilled/anchor − …` and skips the item when the slice
-///         floors to 0. So the item's `amount` must be a NON-ZERO sentinel (use
-///         `1`) — a zero `amount` skips the NFT transfer while the maker is still
-///         paid. And the order MUST be full-fill (`minFillAnchor == anchor`, or a
-///         `FullFillModule`): a partial fill floors the slice to 0, so a first
-///         filler would pay pro-rata and receive nothing. `validateOrder`
-///         enforces both (`"settle item requires full-fill"`).
+///         `amount · newFilled/anchor − …`. Use a NON-ZERO sentinel (`1`) and
+///         sign the order full-fill (`minFillAnchor == anchor`, or a
+///         `FullFillModule`). A slice that floors to 0 — a partial fill, or a
+///         zero `amount` — now REVERTS ON-CHAIN ({SettleSliceZero} in the
+///         settlement's `_executeItems`), so a filler can never pay pro-rata and
+///         receive nothing; a misparameterized order is unfillable rather than
+///         unsafe. `validateOrder` flags the same misconfigurations in preflight
+///         (`"settle item requires full-fill"`).
 contract NftSettlementModule is ISettlementModule {
     address public immutable SETTLEMENT;
 

@@ -63,6 +63,46 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
     }
 }
 
+// ──────────────────── Morpho Blue supply (earn) maker module ────────────────────
+//
+// The EARN-side sibling of the collateral module: pulls `loanToken` from the
+// user via Permit3 and supplies it as a LEND balance (`morpho.supply`, exact
+// assets, shares = 0) on the user's behalf — the deposit leg that pairs with the
+// taker module's `Op.Withdraw` (op 2), closing the earn round-trip that
+// previously only had its exit half. Interest accrues to the position; a later
+// Full-mode withdraw redeems by shares and sweeps the accrual back to the user.
+//
+// Optional EIP-2612 permit replay for gasless deposits.
+// `data = abi.encode(MarketParams[, deadline, v, r, s])` — base = 160 bytes.
+//
+contract MorphoBlueSupplyModule is IMakerModule {
+    IPermit3 public immutable permit3;
+    IMorphoBlue public immutable morpho;
+    address public immutable settlement;
+
+    error NotSettlement();
+
+    constructor(address _permit3, address _morpho, address _settlement) {
+        permit3 = IPermit3(_permit3);
+        morpho = IMorphoBlue(_morpho);
+        settlement = _settlement;
+    }
+
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        if (msg.sender != settlement) revert NotSettlement();
+
+        MarketParams memory marketParams = abi.decode(data, (MarketParams));
+
+        // Optional permit. MarketParams = 5 addresses = 160 bytes.
+        PermitHelper.replayIfPresent(data, 160, marketParams.loanToken, onBehalfOf, address(permit3), amount);
+
+        permit3.transferFrom(onBehalfOf, address(this), marketParams.loanToken, uint160(amount));
+        // `morpho` is an immutable, trusted target → standing max approval is safe.
+        SafeTransferLib.ensureApproval(marketParams.loanToken, address(morpho), amount);
+        morpho.supply(marketParams, amount, 0, onBehalfOf, "");
+    }
+}
+
 // ──────────────────── Morpho Blue repay maker module ────────────────────
 //
 // Closes the user's borrow in a market, handling interest-accrual over-repay

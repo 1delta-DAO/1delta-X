@@ -17,6 +17,11 @@ contract MockERC20 {
 
     function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
 
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
     function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
@@ -93,6 +98,23 @@ contract MockMorpho {
         require(authorization[onBehalf][msg.sender], "morpho: not authorized");
         positions[keccak256(abi.encode(mp))][onBehalf].collateral -= uint128(assets);
         collateralToken.mint(receiver, assets);
+    }
+
+    // Earn-side supply: record the call + credit shares (1 share == 1 asset).
+    // Permissive on token custody — the unit layer tests module WIRING; real
+    // token flow is the fork suites' job.
+    address public lastSupplyOnBehalf;
+    uint256 public lastSupplyAssets;
+
+    function supply(MarketParams memory mp, uint256 assets, uint256 shares, address onBehalf, bytes calldata)
+        external
+        returns (uint256, uint256)
+    {
+        require((assets == 0) != (shares == 0), "morpho: inconsistent input");
+        positions[keccak256(abi.encode(mp))][onBehalf].supplyShares += assets;
+        lastSupplyOnBehalf = onBehalf;
+        lastSupplyAssets = assets;
+        return (assets, assets);
     }
 
     // Loan-asset withdraw: exact-assets XOR by-shares, like the real singleton.

@@ -441,18 +441,23 @@ Solvers monitor the feed off-chain and submit `fill()` when the gate
 opens. Submitting earlier reverts with `ValidationFailed(0)` — free
 protection for the maker against accidental early execution.
 
-**Composing multiple triggers:**
+**Composing multiple triggers** (all contracts exist in `src/validators/`):
 
 ```
-// Only fill if ETH ≤ $1500 AND my aWETH balance ≥ 0.5 ether AND it's after 2pm UTC
-validators[0] = Validator(chainlinkPriceLte, ...);
-validators[1] = Validator(balanceGte,        ...);
-validators[2] = Validator(timestampGte,      ...);
+// Only fill if ETH ≤ $1500 AND it's after 2pm UTC AND the signed tick is
+// within tolerance of the live oracle rate
+validators[0] = Validator(chainlinkPriceLte,          abi.encode(feed, 1500e8, 1 hours));
+validators[1] = Validator(timestampValidator,         abi.encode(twoPmUtc, 0));
+validators[2] = Validator(chainlinkTickFloorValidator, abi.encode(feed, 1 hours, scale));
 ```
 
-All three must return `true` for the fill to proceed. The user opts
-into exactly the conditions they want at signing time; the solver
-cannot weaken them.
+All must return `true` for the fill to proceed. The user opts into
+exactly the conditions they want at signing time; the solver cannot
+weaken them. The same contracts attach as post-execution `invariants`
+(e.g. `MinBalanceInvariant` / `Erc721OwnerInvariant` /
+`Erc1155BalanceInvariant` to pin what the maker must END the fill
+holding), and `PredicateStaticCall` is the escape hatch for any other
+read-only condition.
 
 ### When NOT to use dutch decay
 
