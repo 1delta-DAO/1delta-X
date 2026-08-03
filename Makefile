@@ -19,6 +19,7 @@ PACKAGES := \
 	modules-aave-v2 \
 	modules-aave-v3 \
 	modules-aave-v4 \
+	modules-bridge \
 	modules-compound-v2 \
 	modules-compound-v3 \
 	modules-dolomite \

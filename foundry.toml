@@ -210,3 +210,14 @@ src    = "packages/modules/lending/teller/src"
 test   = "packages/modules/lending/teller/test"
 script = "packages/modules/lending/teller/script"
 out    = "out/modules-teller"
+
+# via-IR: the Across `depositV3` entrypoint takes twelve arguments, which the
+# legacy codegen cannot lay out without blowing the stack. The package is small
+# (a handful of leaf contracts, no Settlement), so the compile stays in seconds
+# rather than the minutes `core-deploy` costs.
+[profile.modules-bridge]
+via_ir = true
+src    = "packages/modules/bridge/src"
+test   = "packages/modules/bridge/test"
+script = "packages/modules/bridge/script"
+out    = "out/modules-bridge"

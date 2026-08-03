@@ -125,10 +125,13 @@ export class Verifier {
       const fillableAmount = fillableAmounts[i] ?? 0n;
       const isSignatureValid = sigValids[i] ?? false;
       const vp = validatorsPass[i] ?? false;
-      // sigless orders are authorized on-chain via approveOrder, which the lens
-      // sig-check can't attest — trust the Fillable status for them.
-      const sigOk = e.sigless ? true : isSignatureValid;
-      const ok = status === OrderStatus.Fillable && sigOk && fillableAmount > 0n;
+      // No sigless special case: the lens reads the settler's own `orderApproved`
+      // record for an empty sig, so an on-chain-authorized order is attested here
+      // on exactly the terms the settler applies. Previously this branch trusted
+      // the announcer's own `sigless` claim, which is not evidence of anything.
+      // NOTE: requires a lens deployed at or after that change — an older one
+      // reports every sigless order invalid.
+      const ok = status === OrderStatus.Fillable && isSignatureValid && fillableAmount > 0n;
       return { ok, status, fillableAmount, isSignatureValid, validatorsPass: vp };
     });
   }

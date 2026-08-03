@@ -20,6 +20,10 @@ interface ISettlementState {
     function isNonceCancelled(address maker, uint256 nonce) external view returns (bool);
     function DOMAIN_SEPARATOR() external view returns (bytes32);
     function PERMIT3() external view returns (IPermit3);
+    /// @dev The signature-less authorization record ({OrderState.approveOrder}).
+    ///      Read so the lens can attest an empty-`sig` order instead of reporting
+    ///      it unauthorized — see {SettlementLens._verifySignature}.
+    function orderApproved(address maker, bytes32 orderHash) external view returns (bool);
 }
 
 /// @title SettlementLens
@@ -54,6 +58,11 @@ contract SettlementLens {
         Cancelled, // nonce bit set, or below the maker's rollback floor
         Expired // past deadline
     }
+
+    /// @dev An empty `sig` with no matching on-chain approval. Mirrors
+    ///      {Signatures.OrderNotApproved}; surfaces through `checkSignature` and
+    ///      as `isSignatureValid == false`.
+    error OrderNotApproved();
 
     constructor(address settlement) {
         SETTLEMENT = ISettlementState(settlement);
@@ -604,7 +613,18 @@ contract SettlementLens {
     ///      against it. Uses the SETTLEMENT's domain separator (name +
     ///      verifyingContract are the settler's, not this lens's), so a signature
     ///      that verifies here is exactly one the settler will accept.
+    ///
+    ///      Mirrors {Signatures._verifySignature}, INCLUDING its empty-`sig`
+    ///      branch: an order authorized on-chain via `approveOrder` carries no
+    ///      signature, and reporting it as unauthorized would force every consumer
+    ///      to special-case it. The lens reads the settler's own `orderApproved`
+    ///      record, so a sigless order is attested here on exactly the terms the
+    ///      settler will apply — not taken on trust from whoever submitted it.
     function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {
+        if (sig.length == 0) {
+            if (!SETTLEMENT.orderApproved(expected, orderHash)) revert OrderNotApproved();
+            return;
+        }
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", SETTLEMENT.DOMAIN_SEPARATOR(), orderHash));
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
