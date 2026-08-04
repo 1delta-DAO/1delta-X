@@ -1,6 +1,19 @@
 # Item-aware netted settle — leverage ⋈ spot coincidence of wants
 
-> **Status: IMPLEMENTED** (`Settlement.batchSettleItems`, core 299 green).
+> **Status: SUPERSEDED** by [`matchSettle`](deferred-match-settle.md), which
+> generalizes the order-granular `sequence` into a **step schedule** and defers
+> every per-order check to the end of the context. `batchSettleItems` and its
+> `pullMask`/`sequence` inputs no longer exist; the shape below is a special case
+> of a schedule (`PULL…, DELIVER(i), ITEM(i,0..k)…`), proven by
+> `test_spotFundsLeverage_zeroSolverCapital` in `core/test/swaps/MatchSettle.t.sol`.
+> **What carries over unchanged** — and why this note is still worth reading — is
+> the token-accounting invariant with items, the maker-fairness argument, and the
+> liveness-is-the-solver's-job / safety-is-the-contract's split (S1–S7).
+> **What changed:** the execution unit (order → step), input funding (per-order
+> proceeds delta → a per-leg credit ledger), and invariant timing (end of order →
+> end of context).
+>
+> *Original status: IMPLEMENTED (`Settlement.batchSettleItems`, core 299 green).*
 > Extends [`batchSettle`](batch-settle.md) to admit item-bearing orders (MAKE/TAKE
 > lending legs) into the netted pool, so a spot order's liquidity funds a leverage
 > order's conversion **inventory-free, callback-free, and — in the match case —

@@ -15,7 +15,9 @@ import {
     OrderSide,
     CurvePoint,
     CallbackMode,
-    ItemsBatch,
+    ItemPolicy,
+    MatchPlan,
+    MatchStep,
     FillCtx
 } from "./Structs.sol";
 
@@ -35,9 +37,10 @@ import {
 ///    • {Signatures} — the EIP-712 domain + `_verifySignature` (order
 ///                               AUTHORIZATION — signed or on-chain-approved).
 ///    • {Base}       — execution infra: Permit3 hub + callback executor,
-///                               reentrancy lock, validators, `_executeItems`.
+///                               reentrancy lock, validators, `_executeItem(s)`.
 ///    • {Core}       — the single-order hot path.
-///    • {Batch}      — the netted coincidence-of-wants modes.
+///    • {Batch}      — `matchSettle`, the netted deferred-check
+///                               coincidence-of-wants engine.
 ///    • order types in {Structs}, EIP-712 hashing in {OrderHash}, auction
 ///      pricing in {DutchAuction}, per-leg slice math in {Pricing}.
 ///  This contract only assembles them and wires the constructor.

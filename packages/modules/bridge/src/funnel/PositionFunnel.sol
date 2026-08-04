@@ -179,14 +179,17 @@ contract PositionFunnel is IERC1271 {
     ///  Why this cannot be used to drain the funnel
     ///  ───────────────────────────────────────────
     ///    1. `msg.sender` must be {GRANT_MODULE}, an immutable address.
-    ///    2. That module only runs from `Settlement._executeItems`, which it gates
+    ///    2. That module only runs from `Settlement._executeItem(s)`, which it gates
     ///       on `msg.sender == SETTLEMENT`.
     ///    3. Settlement reaches items ONLY after verifying the maker — every entry
     ///       point (`fill`, `fillUpTo`, `fillSelf`/`batchFill`, `batchSettle`,
-    ///       `batchSettleItems`) calls `_verifySignature`, and `fillWithPermit`
-    ///       binds the order hash as a Permit3 witness. For a funnel that check is
-    ///       {isValidSignature}, i.e. the owner's key.
-    ///    4. `_executeItems` passes `order.maker` as the module's `onBehalfOf`, and
+    ///       `matchSettle`) calls `_verifySignature`, and `fillWithPermit` binds the
+    ///       order hash as a Permit3 witness. For a funnel that check is
+    ///       {isValidSignature}, i.e. the owner's key. (`matchSettle` verifies in
+    ///       its contract-owned OPEN phase, before any schedule step runs — its
+    ///       solver-supplied schedule can reorder items but can never reach one
+    ///       whose order was not opened and verified first.)
+    ///    4. `_executeItem` passes `order.maker` as the module's `onBehalfOf`, and
     ///       the module targets THAT address — never one taken from item data. So a
     ///       grant item in an ATTACKER's order can only ever touch the attacker's
     ///       own funnel.

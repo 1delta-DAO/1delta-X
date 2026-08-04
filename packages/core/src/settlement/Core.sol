@@ -39,7 +39,7 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         (fillAmountsOut,) =
-            _fillCore(order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, "");
+            _fillCore(order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, "", false);
     }
 
 
@@ -61,7 +61,7 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         (fillAmountsOut,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, takerData
+            order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, takerData, false
         );
     }
 
@@ -107,7 +107,7 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         (fillAmountsOut,) =
-            _fillCore(order, orderHash, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, "");
+            _fillCore(order, orderHash, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, "", false);
     }
 
 
@@ -126,7 +126,7 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         (fillAmountsOut,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, takerData
+            order, orderHash, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, takerData, false
         );
     }
 
@@ -148,7 +148,7 @@ abstract contract Core is Base {
         // — the witness binding makes the permit endorse this exact order.
         PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
         (fillAmountsOut,) =
-            _fillCore(order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, "");
+            _fillCore(order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, "", false);
     }
 
 
@@ -165,7 +165,7 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
         (fillAmountsOut,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, takerData
+            order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, takerData, false
         );
     }
 
@@ -253,7 +253,7 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         (outs,) =
-            _fillCore(order, orderHash, fillAmount, filler, address(0), address(0), "", CallbackMode.PreDelivery, takerData);
+            _fillCore(order, orderHash, fillAmount, filler, address(0), address(0), "", CallbackMode.PreDelivery, takerData, false);
     }
 
 
@@ -284,8 +284,8 @@ abstract contract Core is Base {
     ///         fill proposal for a fill-module order); `""` for plain orders.
     /// @return delta     The anchor-unit progress actually executed (post-clamp).
     /// @return received  Per-`legsIn` amounts paid to `recipient` — the filler's
-    ///         receipts, exact (recomputed from the identical {Pricing} math the
-    ///         payout ran; the auction tick is deterministic within a tx).
+    ///         receipts, exact because they are the very words the payout moved
+    ///         (see {FillCtx.receipts}), not a second derivation of them.
     /// @return paid      Per-`legsOut` amounts the filler delivered.
     function fillUpTo(
         Order calldata order,
@@ -306,12 +306,13 @@ abstract contract Core is Base {
             address(0),
             "",
             CallbackMode.PreDelivery,
-            takerData
+            takerData,
+            true // the aggregator entry is the one caller that returns receipts
         );
         unchecked {
             delta = ctx.newFilled - ctx.prevFilled; // _openFill guarantees newFilled >= prevFilled
         }
-        received = _receivedOf(order, ctx);
+        received = ctx.receipts; // recorded by the payout itself — see {FillCtx.receipts}
     }
 
 
@@ -340,22 +341,6 @@ abstract contract Core is Base {
     }
 
 
-    /// @dev The filler's per-`legsIn` receipts for this fill — the exact amounts
-    ///      `_payInputsToSolver` just paid, recomputed through the same
-    ///      {Pricing.inputOwed} (single source; `bumpBps()` is deterministic
-    ///      within a tx, so the recompute cannot drift from the payout).
-    function _receivedOf(Order calldata order, FillCtx memory ctx) private view returns (uint256[] memory received) {
-        uint256 n = order.legsIn.length;
-        received = new uint256[](n);
-        for (uint256 i; i < n;) {
-            received[i] = order.inputOwed(ctx, i);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-
     /// @dev Also returns the fill's resolved {FillCtx} so a caller can account the
     ///      settled amounts (e.g. `fillUpTo` recomputes the filler's receipts via
     ///      {Pricing.inputOwed}) — a free memory-pointer return the classic
@@ -370,7 +355,8 @@ abstract contract Core is Base {
         address callbackTarget,
         bytes memory callbackData,
         CallbackMode mode,
-        bytes memory takerData
+        bytes memory takerData,
+        bool wantReceipts
     ) internal returns (uint256[] memory outs, FillCtx memory ctx) {
         if (fillAmount == 0) revert ZeroFill();
         // Note: the anti-dust floor is checked in _openFill against the resolved
@@ -388,6 +374,13 @@ abstract contract Core is Base {
         // order (see {IFillModule}); a plain fungible order ignores it here.
         ctx = _openFill(order, orderHash, fillAmount, overrideBps, filler, takerData);
         if (payTo != address(0)) ctx.payTo = payTo;
+        // OPT-IN. Only `fillUpTo` returns per-leg receipts, and allocating the array
+        // unconditionally measured +453 gas on every ordinary fill — more than the
+        // 795 the aggregator path saves on a simple order. Behind the flag the hot
+        // path pays one stack word and one length test per leg; `fillUpTo` skips a
+        // second {Pricing} pass worth 795 gas on a fixed leg and 3,583 on a two-leg
+        // order with a rising leg.
+        if (wantReceipts) ctx.receipts = new uint256[](order.legsIn.length);
 
         // The SAME takerData feeds the post-execution invariants (via the settle
         // helper), so a validator and an invariant see an identical filler blob.
@@ -523,6 +516,7 @@ abstract contract Core is Base {
         address payTo = ctx.payTo;
         for (uint256 i; i < order.legsIn.length; i++) {
             uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}
+            if (ctx.receipts.length != 0) ctx.receipts[i] = owed; // see {FillCtx.receipts}
             address tokenIn = order.legsIn[i].token;
             // Item-free orders have no TAKE proceeds ⇒ proceeds are 0 without a
             // balanceOf (the snapshot was skipped upstream). Item orders measure

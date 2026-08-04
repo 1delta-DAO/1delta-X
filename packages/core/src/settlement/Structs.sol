@@ -209,17 +209,95 @@ struct FillCtx {
     bool fullFill; //        prevFilled == 0 && newFilled == anchor: the whole order in
     //                       one shot ⇒ every pro-rata slice is the leg's full amount,
     //                       skipping the mul/div.
+    uint256[] receipts; //    per-`legsIn` amounts actually paid to `payTo`, recorded by
+    //                       `_payInputsToSolver` as it pays them. `fillUpTo` returns
+    //                       this instead of re-deriving it: a second {Pricing} pass
+    //                       measured 795 gas for one fixed leg and 3,583 for a
+    //                       two-leg order with a rising leg, where recording costs
+    //                       ~40. Empty on the netted path, which reconciles inputs
+    //                       against its own resolved `owed` ledger.
 }
 
-/// @notice The `batchSettleItems` call bundle — one calldata struct so the external
-///         ABI decode stays under the stack limit without via-IR (seven dynamic
-///         params would overflow it). Arrays are aligned 1:1 with `orders`.
-struct ItemsBatch {
+/// @notice The `matchSettle` call bundle — one calldata struct so the external ABI
+///         decode stays under the stack limit without via-IR (seven dynamic params
+///         would overflow it).
+/// @dev    `orders`/`sigs`/`fillAmounts` are aligned 1:1; `takerDatas` is either
+///         EMPTY (the no-blob form) or the same length. `schedule` is the only
+///         solver-ordered part of the settlement — see {MatchStep} for the packing
+///         and {Batch.matchSettle} for the phase model. `callTargets`/`callDatas`
+///         are aligned 1:1 and selected by a `CALL` step, so a plan may run several
+///         solver interactions at points of its choosing (or none).
+struct MatchPlan {
     Order[] orders;
     bytes[] sigs;
     uint256[] fillAmounts;
-    uint256[] pullMask; //          bit j of [i] ⇒ pull order i's input leg j up front
-    uint256[] sequence; //          execution order (a permutation of [0, n))
-    address interactionTarget; //   optional (0 = skip) solver seed call
-    bytes interactionData;
+    bytes[] takerDatas; //      per-order validator/invariant blob; empty = none
+    uint256[] schedule; //      packed steps, executed verbatim (see {MatchStep})
+    address[] callTargets; //   optional solver interactions, selected by CALL steps
+    bytes[] callDatas;
+    address profitRecipient; // where the final sweep lands; 0 = msg.sender
+}
+
+/// @notice The `matchSettle` step kinds, packed one per `schedule` word:
+///
+///           bits [ 0,  8)  kind — one of the constants below
+///           bits [ 8, 24)  a    — order index (PULL/DELIVER/ITEM), token index
+///                                 (PRESEND), or call index (CALL)
+///           bits [24, 40)  b    — input-leg index (PULL) or item index (ITEM)
+///
+///         One word per step keeps the decode to two shifts and a mask — the
+///         settler is bytecode-bound, and a denser packing would cost more code
+///         than it saves in calldata.
+///
+///         PULL     — maker → pool for one input leg; credits what actually arrived.
+///         DELIVER  — pool → recipients for every output leg of an order.
+///         ITEM     — execute one MAKE/TAKE item; a TAKE's proceeds are credited to
+///                    the order's input legs, measured around that single call.
+///         PRESEND  — hand the solver a token's currently UNENCUMBERED surplus
+///                    (pooled inflow minus obligations not yet delivered).
+///         CALL     — one solver interaction through the allowance-less EXECUTOR.
+/// @notice How much freedom a maker grants the solver over the ORDER in which their
+///         `items` execute. Lives in `Order.timing` bits [96:100) — see
+///         {DutchAuction.itemPolicy} for why there and not in a new field.
+///
+///         The single-order path (`fill`, `fillUpTo`, `batchFill`) always runs items
+///         in signed index order, so it satisfies every policy by construction and
+///         pays nothing for this. Only the schedule-driven {Batch.matchSettle}, where
+///         a solver picks the order, can violate one.
+///
+///         ANY     — the solver may run items in any order, interleaved with any
+///                   other step. The default, and what every order signed before this
+///                   existed means. Required to participate in a CYCLE, where an
+///                   order's borrow is deliberately hoisted ahead of its own delivery.
+///         ORDERED — items must execute in signed index order. Other steps may still
+///                   interleave. "My deposit happens before my borrow, but you may do
+///                   other things in between."
+///         ATOMIC  — items must execute in signed index order AND back-to-back, with
+///                   no other step between them. This is what a lender that checks
+///                   health inside each call needs: deposit and borrow are one
+///                   indivisible move. (It constrains the items relative to EACH
+///                   OTHER; where the group sits in the schedule, and where the
+///                   delivery that funds it sits, stay the solver's choice.)
+library ItemPolicy {
+    uint256 internal constant ANY = 0;
+    uint256 internal constant ORDERED = 1;
+    uint256 internal constant ATOMIC = 2;
+
+    /// @notice Pack a policy into a `timing` word. Off-chain builders mirror this.
+    function pack(uint256 timing, uint256 policy) internal pure returns (uint256) {
+        return (timing & ~(uint256(0xf) << 96)) | ((policy & 0xf) << 96);
+    }
+}
+
+library MatchStep {
+    uint256 internal constant PULL = 0;
+    uint256 internal constant DELIVER = 1;
+    uint256 internal constant ITEM = 2;
+    uint256 internal constant PRESEND = 3;
+    uint256 internal constant CALL = 4;
+
+    /// @notice Pack one step. Off-chain builders should mirror this exactly.
+    function pack(uint256 kind, uint256 a, uint256 b) internal pure returns (uint256) {
+        return kind | (a << 8) | (b << 24);
+    }
 }

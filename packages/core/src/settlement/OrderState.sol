@@ -173,7 +173,21 @@ abstract contract OrderState is NonceManager {
         filled[orderHash] = newFilled;
         // `payTo` defaults to the filler; the aggregator entry may redirect it
         // after this returns (payment destination only — never authority).
-        ctx = FillCtx(orderHash, total, prevFilled, newFilled, overrideBps, filler, filler, prevFilled == 0 && newFilled == total);
+        // Assigned field-by-field rather than as a struct literal: a literal would
+        // have to name `receipts`, and the only way to name it is `new uint256[](0)`
+        // — a real allocation on EVERY fill, for an array only `fillUpTo` ever sizes
+        // and only it ever reads. Zero-initialisation points it at the canonical
+        // empty-array slot for free, so the ordinary paths pay nothing.
+        ctx.orderHash = orderHash;
+        ctx.anchor = total;
+        ctx.prevFilled = prevFilled;
+        ctx.newFilled = newFilled;
+        ctx.overrideBps = overrideBps;
+        // `payTo` defaults to the filler; the aggregator entry may redirect it
+        // after this returns (payment destination only — never authority).
+        ctx.filler = filler;
+        ctx.payTo = filler;
+        ctx.fullFill = prevFilled == 0 && newFilled == total;
     }
 
     /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —

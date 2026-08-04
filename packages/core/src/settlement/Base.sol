@@ -81,29 +81,44 @@ abstract contract Base is Signatures {
     ///      unfillable by any non-exclusive filler; reject it explicitly rather than
     ///      surfacing an arithmetic panic.
     error InvalidOverrideBps();
-    /// @dev `batchSettle` was given an order carrying MAKE/TAKE/SETTLE items — the
-    ///      netted flow is item-free (same rationale as `PostInputs`).
-    error BatchSettleNoItems();
-    /// @dev A netted `batchSettle` left Settlement holding LESS of `token` than it
-    ///      did before the batch — the solver under-covered the residual, so the
-    ///      batch would have drawn down a pre-existing/donated balance. Reverts.
+    /// @dev A netted `matchSettle` left Settlement holding LESS of `token` than it
+    ///      did before the context — the solver under-covered the residual, so the
+    ///      settlement would have drawn down a pre-existing/donated balance. Reverts.
     error BatchNotWhole(address token);
-    /// @dev A `batchSettleItems` order's item-funded input leg (not in the solver's
-    ///      pull-set) produced FEWER proceeds than the leg owes — the item did not
-    ///      fund the obligation and there is no self-funded pull to make it up.
-    error BatchItemsInputUnfunded();
-    /// @dev `batchSettleItems`' `sequence` is not a permutation of `[0, n)` — it has
-    ///      the wrong length, an out-of-range index, or a duplicate.
-    error BatchItemsBadSequence();
-    /// @dev A `batchSettleItems` order carries a SETTLE item. SETTLE routes the
-    ///      maker's asset to the filler, not a pool counterparty — out of scope for
-    ///      the netted item flow (a shared-pool SETTLE needs its own design).
-    error BatchItemsSettleUnsupported();
-    /// @dev A `batchSettleItems` order repeats an input token across two `tokenIn`
-    ///      legs. The pooled input settlement attributes proceeds per token via a
-    ///      balance delta; two same-token legs would mis-account. Use distinct
-    ///      tokens (leverage/repay/migrate orders already do).
-    error BatchItemsDuplicateInput();
+    /// @dev A `matchSettle` order finished the context with LESS credit on an input
+    ///      leg than the leg owes — no `PULL` step covered it and its items did not
+    ///      produce enough. `(order, leg)` names the exact obligation that came up
+    ///      short, so a solver can fix the schedule without bisecting it.
+    error LegUnfunded(uint256 order, uint256 leg);
+    /// @dev A `matchSettle` schedule step is malformed: an unknown kind, an
+    ///      out-of-range order/leg/item/token/call index, or a REPEAT of a
+    ///      deliver-outputs or execute-item unit that already ran. The repeat guard
+    ///      is load-bearing — a second delivery drains the pool and a second item is
+    ///      a second borrow against the maker — so it fires at the step, never as a
+    ///      post-hoc completeness compare (which two executions would still pass).
+    error PlanBadStep(uint256 index);
+    /// @dev A `matchSettle` schedule ended without running every unit order `index`
+    ///      was owed: its outputs were never delivered, or one of its items never
+    ///      executed. Deliveries and items are scheduled, so completeness cannot be
+    ///      structural — it is asserted here, in the deferred flush.
+    error PlanIncomplete(uint256 index);
+    /// @dev A `matchSettle` schedule ran order `order`'s item `item` in a position
+    ///      the MAKER did not permit — out of signed sequence under
+    ///      {ItemPolicy.ORDERED}, or with a foreign step wedged between it and its
+    ///      predecessor under {ItemPolicy.ATOMIC}. Unlike the other plan errors this
+    ///      is not a bug in the schedule builder so much as a mismatch between the
+    ///      route it chose and the freedom the maker granted: the order is fillable,
+    ///      just not that way.
+    error ItemPolicyViolated(uint256 order, uint256 item);
+    /// @dev A `matchSettle` order carries a SETTLE item. SETTLE routes the maker's
+    ///      asset to the filler, not a pool counterparty — out of scope for the
+    ///      netted flow (a shared-pool SETTLE needs its own design).
+    error MatchSettleItemUnsupported();
+    /// @dev A `matchSettle` order repeats an input token across two `legsIn` legs.
+    ///      Item proceeds are attributed per token within a step window, so two
+    ///      same-token legs would mis-account. Use distinct tokens
+    ///      (leverage/repay/migrate orders already do).
+    error MatchDuplicateInput();
     /// @dev A SETTLE item's pro-rata slice floored to 0 for this fill — the filler
     ///      would pay the maker's pro-rata price and receive nothing (an
     ///      indivisible exchange has no fractional delivery). Sign the order
@@ -175,41 +190,50 @@ abstract contract Base is Signatures {
     ///      outcome on-chain with a {MinBalanceInvariant} on the expected token.
     function _executeItems(Order calldata order, FillCtx memory ctx) internal {
         for (uint256 i; i < order.items.length; i++) {
-            Item calldata item = order.items[i];
-            uint256 slice = ctx.fullFill
-                ? item.amount
-                : (item.amount * ctx.newFilled) / ctx.anchor - (item.amount * ctx.prevFilled) / ctx.anchor;
-            if (slice == 0) {
-                // A SETTLE slice that floors to 0 would charge the maker's
-                // pro-rata payment while delivering NOTHING to this filler (an
-                // indivisible exchange has no fractional delivery) — the footgun
-                // {SettlementLens.validateOrder} flags off-chain. Enforce it
-                // on-chain too: revert instead of silently skipping. MAKE/TAKE
-                // dust slices keep the historical skip (they accumulate exactly
-                // across fills). Cost: one calldata read, only on the dust branch.
-                if (item.op == ItemOp.SETTLE) revert SettleSliceZero();
-                continue;
-            }
+            _executeItem(order, ctx, i);
+        }
+    }
 
-            if (item.op == ItemOp.MAKE) {
-                // Maker module pulls the funding token from order.maker via Permit3 internally.
-                IMakerModule(item.module).makeOnBehalf(order.maker, slice, item.data);
-            } else if (item.op == ItemOp.TAKE) {
-                // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
-                // classic flow (proceeds to Settlement for tokenIn payout); signing a
-                // non-zero recipient (e.g. the maker) chains output into a subsequent item.
-                address to = item.recipient == address(0) ? address(this) : item.recipient;
-                if (slice > type(uint160).max) revert AmountOverflow();
-                PERMIT3.take(item.module, order.maker, uint160(slice), to, item.data);
-            } else {
-                // SETTLE: generic solver↔maker exchange — the FILLER-AWARE fallback
-                // for exchanges the typed legs can't express (see {ISettlementModule}).
-                // The module acts under the maker's signature + its own maker approval;
-                // passing `ctx.filler` lets the maker's asset route to whoever fills. The
-                // maker's receipt is guaranteed by the mandatory tokenOut delivery (run
-                // before items) and/or an invariant, not by the module.
-                ISettlementModule(item.module).settle(order.maker, ctx.filler, slice, item.data);
-            }
+    /// @dev ONE item's slice — the body of {_executeItems}, split out so the
+    ///      schedule-driven {Batch.matchSettle} can run items INDIVIDUALLY (an
+    ///      order's borrow before its own delivery, interleaved with another
+    ///      order's steps) while the single-order path keeps the plain loop above.
+    ///      Byte-identical semantics: same slice math, same dispatch, same guards.
+    function _executeItem(Order calldata order, FillCtx memory ctx, uint256 i) internal {
+        Item calldata item = order.items[i];
+        uint256 slice = ctx.fullFill
+            ? item.amount
+            : (item.amount * ctx.newFilled) / ctx.anchor - (item.amount * ctx.prevFilled) / ctx.anchor;
+        if (slice == 0) {
+            // A SETTLE slice that floors to 0 would charge the maker's
+            // pro-rata payment while delivering NOTHING to this filler (an
+            // indivisible exchange has no fractional delivery) — the footgun
+            // {SettlementLens.validateOrder} flags off-chain. Enforce it
+            // on-chain too: revert instead of silently skipping. MAKE/TAKE
+            // dust slices keep the historical skip (they accumulate exactly
+            // across fills). Cost: one calldata read, only on the dust branch.
+            if (item.op == ItemOp.SETTLE) revert SettleSliceZero();
+            return;
+        }
+
+        if (item.op == ItemOp.MAKE) {
+            // Maker module pulls the funding token from order.maker via Permit3 internally.
+            IMakerModule(item.module).makeOnBehalf(order.maker, slice, item.data);
+        } else if (item.op == ItemOp.TAKE) {
+            // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
+            // classic flow (proceeds to Settlement for tokenIn payout); signing a
+            // non-zero recipient (e.g. the maker) chains output into a subsequent item.
+            address to = item.recipient == address(0) ? address(this) : item.recipient;
+            if (slice > type(uint160).max) revert AmountOverflow();
+            PERMIT3.take(item.module, order.maker, uint160(slice), to, item.data);
+        } else {
+            // SETTLE: generic solver↔maker exchange — the FILLER-AWARE fallback
+            // for exchanges the typed legs can't express (see {ISettlementModule}).
+            // The module acts under the maker's signature + its own maker approval;
+            // passing `ctx.filler` lets the maker's asset route to whoever fills. The
+            // maker's receipt is guaranteed by the mandatory tokenOut delivery (run
+            // before items) and/or an invariant, not by the module.
+            ISettlementModule(item.module).settle(order.maker, ctx.filler, slice, item.data);
         }
     }
 

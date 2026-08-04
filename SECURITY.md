@@ -63,6 +63,20 @@ be used to withdraw collateral. Modules come in two shapes:
 
 - **Taker modules** (`ITakerModule.takeOnBehalf`) — borrow/withdraw. Reachable
   **only** through `Permit3.take`; they enforce `msg.sender == permit3`.
+- **FUSED modules** (also `ITakerModule`) — a deliberate, documented exception:
+  one call that performs a value-IN leg and a value-OUT leg together (supply +
+  borrow, repay + withdraw, a debt swap). They exist because some protocols check
+  health *inside* the value-out call, so the two legs are only valid back-to-back;
+  fusing makes that ordering internal instead of a scheduling obligation the solver
+  must honour. **This relaxes the one-operation rule, and the granularity is
+  recovered by the allowance key rather than by the module boundary:** the taker
+  allowance is keyed on `ref = keccak256(data)` and amount-capped, and a fused
+  module's `data` names BOTH legs (pool, both assets, both totals). So approving a
+  fused ref authorises exactly that composite at those parameters — strictly
+  narrower than approving a generic borrow module for any amount — and the value-in
+  leg is separately capped by the maker's ordinary token allowance to that module.
+  Reference implementation + the equivalence and pro-rata tests:
+  `packages/modules/lending/aave-v3/src/AaveV3FusedModules.sol`.
 - **Maker modules** (`IMakerModule.makeOnBehalf`) — deposit/repay. Called
   **only** by Settlement; they enforce `msg.sender == settlement`.
 
@@ -301,9 +315,11 @@ coverage is known to be load-bearing rather than incidental.
 | L-6 | Low | `CompoundV2Native*` (×3) | Open `receive()` with no owner or rescue, and only the redeem *delta* was wrapped — stray ETH was stranded permanently. | Wrap/sweep the full native balance; the modules end every call empty. |
 
 **Confirmed-safe (no change needed):** the `SolverCallbackExecutor` trampoline
-(callback injection via `target = PERMIT3` gains nothing); `batchSettle` /
-`batchSettleItems` netting (pre-send bounded to the batch's own inflow, `sequence`
-permutation-validated, `BatchNotWhole` backstop); `IFillModule` / `IOrderValidator`
+(callback injection via `target = PERMIT3` gains nothing); `matchSettle` netting (pre-send bounded to the batch's own inflow — in `matchSettle`
+netted further against obligations not yet delivered; every schedule step
+bounds-checked, deliver/item units guarded exactly-once AT THE STEP, per-order
+completeness and input funding asserted in the deferred flush, `BatchNotWhole`
+backstop); `IFillModule` / `IOrderValidator`
 declared `view`, so solc emits STATICCALL and neither can mutate state or reenter;
 Settlement never grants an ERC20 approval and is not payable; EIP-712 typehash
 ordering and the hand-rolled `OrderHash` buffer; signature malleability (order replay

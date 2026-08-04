@@ -1,6 +1,18 @@
 # Batch settle — coincidence-of-wants netting
 
-`batchSettle` is a **dedicated fill entry point** that clears N orders as one
+> **Status: SUPERSEDED** by [`matchSettle`](deferred-match-settle.md). The
+> `batchSettle` entry point no longer exists: its five fixed phases are now the
+> schedule `[PULL…, PRESEND…, CALL, DELIVER…]`, executed by the same engine that
+> runs item-bearing matches. Everything below about the **netting invariant**, the
+> **pre-send bound**, and the **whole-ness guard** still holds verbatim — the
+> engine reuses that machinery unchanged, and `core/test/swaps/MatchSettleCoW.t.sol`
+> carries the same six behaviours over. Two refinements came with the move: the
+> pre-send is netted against obligations **not yet delivered** (so it is correct at
+> any point in the schedule, not only before delivery), and it is a step the solver
+> places rather than a fixed phase. Read this for the *why*; read
+> [deferred-match-settle.md](deferred-match-settle.md) for the current *how*.
+
+`batchSettle` was a **dedicated fill entry point** that clears N orders as one
 netted batch, matching opposing intents against each other instead of against a
 single solver's inventory. It is the coincidence-of-wants (CoW) primitive: two
 mirror orders — `sell WETH → USDC` and `sell USDC → WETH` — settle against each

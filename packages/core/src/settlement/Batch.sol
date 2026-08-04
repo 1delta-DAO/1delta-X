@@ -1,273 +1,46 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, ItemOp, ItemsBatch, LegIn, LegOut, FillCtx} from "./Structs.sol";
+import {Order, Item, ItemOp, ItemPolicy, MatchPlan, MatchStep, LegIn, LegOut, FillCtx} from "./Structs.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {Pricing} from "./Pricing.sol";
+import {DutchAuction} from "./DutchAuction.sol";
 import {Core} from "./Core.sol";
 
 /// @title Batch
-/// @notice The netted-batch settlement modes — coincidence of wants. `batchSettle`
-///         (item-free CoW: pull inputs → pre-send surplus → interaction → deliver →
-///         whole-check) and `batchSettleItems` (the item-aware generalization: a
-///         spot order's pooled liquidity funds a leverage order's items). The pool
-///         (Settlement itself) is the counterparty, not the solver. Reuses the
-///         base primitives (`_openFill`, `_executeItems`) and {Pricing}
-///         verbatim; the single-order hot path in {Core} is untouched.
+/// @notice `matchSettle` — netted, deferred-check settlement. N orders clear
+///         against the POOL (Settlement itself) rather than against a solver's
+///         balance sheet, so a coincidence of wants needs no solver capital; the
+///         single-order hot path in {Core} is untouched, so ordinary fills pay
+///         nothing for any of this.
+///
+///         ONE engine covers both shapes that used to need their own entry point:
+///           • plain item-free CoW (the former `batchSettle`) is the schedule
+///             `[PULL…, PRESEND…, CALL, DELIVER…]`;
+///           • an item-bearing match (the former `batchSettleItems`) interleaves
+///             `ITEM` steps with deliveries — which is what its fixed per-order
+///             body could not do, and why mutually-dependent orders previously
+///             needed a flash loan or solver inventory.
+///
+///         Reuses `_openFill`, `_executeItem`, {Pricing}, and the `_sweepSurplus`
+///         whole-check verbatim.
 abstract contract Batch is Core {
     using OrderHash for Order;
     using Pricing for Order;
+    using DutchAuction for Order;
 
+    // ──────────────────── Shared netted primitives ────────────────────
+    //
+    // The pieces both the OPEN and FLUSH phases lean on: the touched-token
+    // universe and its snapshot, the authorization sequence, the per-leg output
+    // computation, and the wholeness backstop. Each is order-independent, which
+    // is what lets the schedule in between be entirely solver-chosen.
 
-    // ──────────────────── Batch settle (coincidence of wants) ────────────────────
-
-    /// @notice Settle N orders as ONE netted batch — the coincidence-of-wants
-    ///         (CoW) path. Every order's inputs are pooled into Settlement FIRST,
-    ///         each maker's net SURPLUS is handed to the solver, a single solver
-    ///         interaction converts that surplus into the net deficit, then every
-    ///         output is delivered from the pool. Two mirror orders (`sell
-    ///         WETH→USDC` and `sell USDC→WETH`) clear against each other with NO AMM
-    ///         touched and, thanks to the surplus pre-send, ZERO solver capital even
-    ///         when the batch is IMBALANCED (the solver swaps the surplus it is
-    ///         handed into the deficit it must return — never fronting inventory).
-    ///
-    ///         This is a DEDICATED method: the single-order hot path is untouched,
-    ///         so ordinary fills pay nothing for it. Unlike {batchFill} (which runs
-    ///         each order independently and forces the solver to front the transient
-    ///         peak), the pooled flow needs no solver inventory.
-    ///
-    ///         Flow (see `docs/batch-settle.md`):
-    ///           1. per order: verify + open (`filled` written here) + pull inputs
-    ///              → Settlement; then compute (not yet deliver) every output amount;
-    ///           2. per token: PRE-SEND the batch's net surplus (pooled − owed, when
-    ///              positive) to the solver — bounded to THIS batch's inputs, never a
-    ///              donated balance;
-    ///           3. one `interactionTarget` call via the allowance-less EXECUTOR —
-    ///              the solver deposits the net-deficit token into Settlement (funded
-    ///              by swapping the surplus it was just handed);
-    ///           4. per order: deliver outputs (Settlement → maker/recipient) +
-    ///              run invariants;
-    ///           5. per touched token: require the balance did not drop below its
-    ///              pre-batch snapshot (`BatchNotWhole` else) and sweep any residual.
-    ///
-    /// @dev    Item-free orders only ({BatchSettleNoItems}). Each maker is charged
-    ///         and paid its OWN signed auction curve — identical to a single fill;
-    ///         only the counterparty (the pool, not one solver) differs. This
-    ///         overload passes an empty `takerData` to validators/invariants/fill
-    ///         module; use the {batchSettle} `takerDatas` overload to thread a
-    ///         per-order blob. `nonReentrant` spans the whole batch, so neither the
-    ///         pre-send nor the interaction can re-enter, and every `filled` write
-    ///         precedes both.
-    /// @param  interactionTarget Optional (`address(0)` to skip) solver contract
-    ///         called once between pre-send and deliver; returns the residual.
-    /// @return outs `outs[i][j]` = order `i`'s delivered amount on output leg `j`.
-    function batchSettle(
-        Order[] calldata orders,
-        bytes[] calldata sigs,
-        uint256[] calldata fillAmounts,
-        address interactionTarget,
-        bytes calldata interactionData
-    ) external nonReentrant returns (uint256[][] memory outs) {
-        if (sigs.length != orders.length || fillAmounts.length != orders.length) revert LengthMismatch();
-        return _batchSettle(orders, sigs, fillAmounts, new bytes[](0), interactionTarget, interactionData);
-    }
-
-
-    /// @notice {batchSettle} carrying a per-order filler-supplied `takerData` blob,
-    ///         aligned 1:1 with `orders` — `takerDatas[i]` threads into order `i`'s
-    ///         validators, invariants, and (for a fill-module order) `resolveFill`.
-    ///         Same adversarial/validator-verified rule as {fill}'s takerData
-    ///         overload: the blob is unsigned, so a validator must independently
-    ///         verify anything it reads from it.
-    /// @dev    Reverts {LengthMismatch} unless every array is `orders.length` long.
-    function batchSettle(
-        Order[] calldata orders,
-        bytes[] calldata sigs,
-        uint256[] calldata fillAmounts,
-        bytes[] calldata takerDatas,
-        address interactionTarget,
-        bytes calldata interactionData
-    ) external nonReentrant returns (uint256[][] memory outs) {
-        uint256 n = orders.length;
-        if (sigs.length != n || fillAmounts.length != n || takerDatas.length != n) revert LengthMismatch();
-        return _batchSettle(orders, sigs, fillAmounts, takerDatas, interactionTarget, interactionData);
-    }
-
-
-    /// @dev Batch working set, bundled so `_batchSettle` holds ONE memory pointer
-    ///      across the phases instead of four named locals (keeps the netted flow
-    ///      under the EVM stack limit without via-IR).
-    struct BatchState {
-        address[] tokens; //     the touched-token universe (deduped)
-        uint256[] beforeBal; //  per-token pre-batch balance snapshot
-        FillCtx[] ctxs; //       per-order fill context (filled bookkeeping)
-        uint256[][] outs; //     per-order per-leg output amounts (compute → deliver)
-    }
-
-
-    /// @dev Shared netted-settle implementation. `takerDatas` is either empty (the
-    ///      no-blob overload) or `orders.length` long; `_td` picks per index. Runs
-    ///      under the caller's `nonReentrant` lock (both public entry points hold
-    ///      it). Phases are separate frames — the netted flow holds far more live
-    ///      memory than the single-order path and is not stack-golfed for via-IR.
-    function _batchSettle(
-        Order[] calldata orders,
-        bytes[] calldata sigs,
-        uint256[] calldata fillAmounts,
-        bytes[] memory takerDatas,
-        address interactionTarget,
-        bytes calldata interactionData
-    ) internal returns (uint256[][] memory) {
-        BatchState memory st;
-        // Derive the touched-token universe on-chain (never trust the solver — the
-        // pre-send bound and the whole-ness check both hinge on it) and snapshot.
-        st.tokens = _collectTokens(orders);
-        st.beforeBal = _snapshotBalances(st.tokens);
-
-        // Phase 1: open every order (writes `filled`) + pool its inputs; then
-        // compute — but do NOT yet deliver — every output amount, so the net
-        // surplus per token is known before the interaction.
-        st.ctxs = _batchOpenAll(orders, sigs, fillAmounts, takerDatas);
-        st.outs = _batchComputeAllOutputs(orders, st.ctxs);
-
-        // Phase 2: pre-send each token's net surplus to the solver (bounded to this
-        // batch's own pooled inputs — donated balances stay put).
-        _presendSurplus(st.tokens, st.beforeBal, orders, st.outs);
-
-        // Phase 3: single residual interaction. Allowance-less EXECUTOR — the solver
-        // returns the net-deficit token (funded by the surplus it was just handed)
-        // but can never move the pool.
-        if (interactionTarget != address(0)) EXECUTOR.execute(interactionTarget, interactionData);
-
-        // Phase 4: deliver every order's outputs from the pool + run invariants.
-        _batchDeliverAll(orders, st.ctxs, st.outs, takerDatas);
-
-        // Phase 5: enforce the batch left Settlement whole and sweep any residual.
-        _sweepSurplus(st.tokens, st.beforeBal);
-        return st.outs;
-    }
-
-
-    /// @dev `takerDatas[i]` or an empty blob when the no-taker overload is used.
-    function _td(bytes[] memory takerDatas, uint256 i) private pure returns (bytes memory) {
-        return takerDatas.length == 0 ? bytes("") : takerDatas[i];
-    }
-
-
-    /// @dev Phase 1: open + pool inputs for every order. Own frame (stack).
-    function _batchOpenAll(
-        Order[] calldata orders,
-        bytes[] calldata sigs,
-        uint256[] calldata fillAmounts,
-        bytes[] memory takerDatas
-    ) internal returns (FillCtx[] memory ctxs) {
-        uint256 n = orders.length;
-        ctxs = new FillCtx[](n);
-        address solver = msg.sender;
-        for (uint256 i; i < n;) {
-            ctxs[i] = _batchOpenAndPull(orders[i], sigs[i], fillAmounts[i], solver, _td(takerDatas, i));
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-
-    /// @dev Phase 1 (compute half): every order's per-leg output amounts, with NO
-    ///      transfer, so the pre-send can net surplus vs. owed before delivering.
-    ///      `view` — same math the delivery half replays exactly (same `ctx`, same
-    ///      block), so compute and deliver never diverge.
-    function _batchComputeAllOutputs(Order[] calldata orders, FillCtx[] memory ctxs)
-        internal
-        view
-        returns (uint256[][] memory amounts)
-    {
-        uint256 n = orders.length;
-        amounts = new uint256[][](n);
-        for (uint256 i; i < n;) {
-            amounts[i] = _batchComputeOutputs(orders[i], ctxs[i]);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-
-    /// @dev Phase 2: hand each token's net surplus (`pooled − owed`, when positive)
-    ///      to the solver so it can convert it into the deficit in the interaction —
-    ///      the zero-capital unlock for imbalanced batches. `pooled` is measured as
-    ///      the balance delta since the pre-batch snapshot, so the pre-send is
-    ///      bounded to THIS batch's inputs and can never leak a donated balance.
-    function _presendSurplus(
-        address[] memory tokens,
-        uint256[] memory beforeBal,
-        Order[] calldata orders,
-        uint256[][] memory amounts
-    ) internal {
-        address solver = msg.sender;
-        for (uint256 k; k < tokens.length;) {
-            address token = tokens[k];
-            uint256 owed = _owedForToken(orders, amounts, token);
-            uint256 pooled = SafeTransferLib.balanceOf(token, address(this)) - beforeBal[k]; // this batch only
-            if (pooled > owed) {
-                unchecked {
-                    SafeTransferLib.safeTransfer(token, solver, pooled - owed);
-                }
-            }
-            unchecked {
-                ++k;
-            }
-        }
-    }
-
-
-    /// @dev Sum of every order's output amount denominated in `token` — the pool's
-    ///      total obligation in that token, across makers and fee legs alike.
-    function _owedForToken(Order[] calldata orders, uint256[][] memory amounts, address token)
-        internal
-        pure
-        returns (uint256 owed)
-    {
-        for (uint256 i; i < orders.length;) {
-            LegOut[] calldata tOut = orders[i].legsOut;
-            for (uint256 j; j < tOut.length;) {
-                if (tOut[j].token == token) owed += amounts[i][j];
-                unchecked {
-                    ++j;
-                }
-            }
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-
-    /// @dev Phase 4: deliver the pre-computed amounts from the pool + invariants +
-    ///      event for every order. Own frame.
-    function _batchDeliverAll(
-        Order[] calldata orders,
-        FillCtx[] memory ctxs,
-        uint256[][] memory amounts,
-        bytes[] memory takerDatas
-    ) internal {
-        uint256 n = orders.length;
-        address solver = msg.sender;
-        for (uint256 i; i < n;) {
-            _batchDeliverStored(orders[i], amounts[i]);
-            _runInvariants(orders[i], solver, _td(takerDatas, i));
-            emit OrderFilled(ctxs[i].orderHash, orders[i].maker, solver);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-
-    /// @dev Snapshot Settlement's balance of each token in a MEMORY list (the batch
-    ///      token universe). Sibling of `_snapshotInputs`, which takes calldata legs.
+    /// @dev Snapshot Settlement's balance of each token in a MEMORY list (the
+    ///      context's token universe). Sibling of `_snapshotInputs`, which takes
+    ///      calldata legs.
     function _snapshotBalances(address[] memory tokens) internal view returns (uint256[] memory bals) {
         bals = new uint256[](tokens.length);
         for (uint256 k; k < tokens.length;) {
@@ -279,37 +52,54 @@ abstract contract Batch is Core {
     }
 
 
-    /// @dev Phase 5: require the batch left Settlement no worse off on any touched
-    ///      token ({BatchNotWhole} else) and sweep any residual — the solver's
-    ///      compensation, ~0 after a clean pre-send + interaction — to the caller.
-    ///      Never touches `beforeBal` (pre-existing / donated balances stay put).
-    function _sweepSurplus(address[] memory tokens, uint256[] memory beforeBal) internal {
-        address solver = msg.sender;
-        for (uint256 k; k < tokens.length;) {
+    /// @dev The wholeness backstop, run last: require the context left Settlement
+    ///      no worse off on any touched token ({BatchNotWhole} else) and sweep any
+    ///      residual — the filler's compensation, ~0 after a clean pre-send — to
+    ///      `to`. Never touches `beforeBal`, so a pre-existing / donated balance is
+    ///      unreachable. This check is END-STATE and therefore independent of the
+    ///      schedule that produced it.
+    ///
+    ///      `to` is a DESTINATION ONLY, exactly as `fillUpTo`'s `recipient` is on the
+    ///      single-order path: exclusivity, validators, item authority and every pull
+    ///      still key on `msg.sender`, so naming another address grants no authority —
+    ///      it routes money the filler received and could forward itself, saving a
+    ///      contract filler a second transfer per token.
+    /// @return swept `swept[k]` = the residual moved in `tokens[k]` — the filler's
+    ///      realised P&L, returned so a caller need not diff its own balances.
+    function _sweepSurplus(address[] memory tokens, uint256[] memory beforeBal, address to)
+        internal
+        returns (uint256[] memory swept)
+    {
+        uint256 n = tokens.length;
+        swept = new uint256[](n);
+        for (uint256 k; k < n;) {
             uint256 nowBal = SafeTransferLib.balanceOf(tokens[k], address(this));
             if (nowBal < beforeBal[k]) revert BatchNotWhole(tokens[k]);
             unchecked {
                 uint256 surplus = nowBal - beforeBal[k]; // nowBal >= beforeBal[k]
-                if (surplus != 0) SafeTransferLib.safeTransfer(tokens[k], solver, surplus);
+                if (surplus != 0) {
+                    swept[k] = surplus;
+                    SafeTransferLib.safeTransfer(tokens[k], to, surplus);
+                }
                 ++k;
             }
         }
     }
 
 
-    /// @dev Phase-1 body for one order: the full `_fillCore` gate set (item-free
-    ///      guard, deadline, signature/approval, exclusivity, nonce, validators),
-    ///      then `_openFill` (writes `filled`) and pool this order's inputs into
-    ///      Settlement. `takerData` threads into the validators and the fill module.
-    ///      Split out so the batch loop stays under the stack limit.
-    function _batchOpenAndPull(
+    /// @dev The `_fillCore` gate set WITHOUT moving any funds: zero fill, deadline,
+    ///      signature/approval, exclusivity, nonce, validators — then `_openFill`,
+    ///      which writes `filled` before any external call in the context. Split out
+    ///      so the authorization sequence exists once and is audited once,
+    ///      independent of the shape assertions a caller layers on top. `takerData`
+    ///      threads into the validators and (for a module order) `resolveFill`.
+    function _openGated(
         Order calldata order,
         bytes calldata sig,
         uint256 fillAmount,
         address solver,
         bytes memory takerData
     ) internal returns (FillCtx memory ctx) {
-        if (order.items.length != 0) revert BatchSettleNoItems();
         if (fillAmount == 0) revert ZeroFill();
         if (block.timestamp > order.deadline) revert OrderExpired();
         bytes32 orderHash = order.hash();
@@ -318,34 +108,15 @@ abstract contract Batch is Core {
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
         _runValidators(order, solver, takerData);
         ctx = _openFill(order, orderHash, fillAmount, overrideBps, solver, takerData);
-        _batchPullInputs(order, ctx);
     }
 
 
-    /// @dev Pool this fill's input legs `maker → Settlement`. The owed-per-leg math
-    ///      is IDENTICAL to `_payInputsToSolver` (fixed + auctioned legs, soft
-    ///      exclusivity) minus the TAKE-proceeds branch — batch orders are
-    ///      item-free, so proceeds are zero by construction. The maker is charged
-    ///      exactly what a single fill would charge; only the destination differs.
-    function _batchPullInputs(Order calldata order, FillCtx memory ctx) internal {
-        address maker = order.maker;
-        for (uint256 i; i < order.legsIn.length;) {
-            uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}
-            if (owed != 0) {
-                Permit3TransferLib.transferFromWithFallback(PERMIT3, order.legsIn[i].token, maker, address(this), owed);
-            }
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-
-    /// @dev Compute this fill's per-leg output amounts WITHOUT transferring — the
-    ///      pre-send needs the totals before delivery. The per-leg math — BUY
-    ///      fixed-output slices, SELL auction-priced, soft exclusivity on maker legs
-    ///      only — is IDENTICAL to `_deliverOutputs`; the returned amount is final
-    ///      (post-override), so `_batchDeliverStored` just moves it.
+    /// @dev This fill's per-leg output amounts, WITHOUT transferring — computed at
+    ///      open so `outstanding` (and hence the PRESEND bound) is known before any
+    ///      delivery. The per-leg math — BUY fixed-output slices, SELL
+    ///      auction-priced, soft exclusivity on maker legs only — is IDENTICAL to
+    ///      the single-order `_deliverOutputs`; the amount is final (post-override),
+    ///      so a DELIVER step just moves it.
     function _batchComputeOutputs(Order calldata order, FillCtx memory ctx) internal view returns (uint256[] memory outs) {
         uint256 n = order.legsOut.length;
         outs = new uint256[](n);
@@ -356,30 +127,26 @@ abstract contract Batch is Core {
             }
         }
     }
-
-
-    /// @dev Deliver the pre-computed output amounts `Settlement → recipient` via
-    ///      plain `transfer` (the pool, not the solver, is the source). A short pool
-    ///      reverts here (atomic). `recipientOut[j] == 0` ⇒ the maker.
-    function _batchDeliverStored(Order calldata order, uint256[] memory amts) internal {
-        for (uint256 j; j < amts.length;) {
-            uint256 amt = amts[j];
-            if (amt != 0) {
-                address to = order.legsOut[j].recipient;
-                bool makerLeg = to == address(0) || to == order.maker;
-                SafeTransferLib.safeTransfer(order.legsOut[j].token, makerLeg ? order.maker : to, amt);
-            }
+    /// @dev This fill's per-INPUT-leg owed amounts — the mirror of
+    ///      {_batchComputeOutputs}, resolved at open for the same reason and from
+    ///      the same frozen {FillCtx}. The per-leg math (fixed cumulative slice,
+    ///      auctioned tick, soft-exclusivity discount) is {Pricing.inputOwed}
+    ///      unchanged; this only decides WHEN it runs.
+    function _computeOwed(Order calldata order, FillCtx memory ctx) internal view returns (uint256[] memory owed) {
+        uint256 n = order.legsIn.length;
+        owed = new uint256[](n);
+        for (uint256 j; j < n;) {
+            owed[j] = order.inputOwed(ctx, j);
             unchecked {
                 ++j;
             }
         }
     }
 
-
-    /// @dev The de-duplicated union of every order's `tokenIn`/`tokenOut`. Derived
-    ///      on-chain (not solver-supplied) so the `BatchNotWhole` guard covers every
-    ///      token the batch could move. O(legs²) — batches are small, and this runs
-    ///      only on the deliberate CoW path, never the single-order hot path.
+    /// @dev The de-duplicated union of every order's `legsIn`/`legsOut` tokens.
+    ///      Derived ON-CHAIN, never solver-declared, so the `BatchNotWhole` guard
+    ///      and the PRESEND bound both cover every token the context can move.
+    ///      O(legs²) — a match is small, and this never runs on the hot path.
     function _collectTokens(Order[] calldata orders) internal pure returns (address[] memory tokens) {
         uint256 maxLen;
         for (uint256 i; i < orders.length;) {
@@ -409,13 +176,16 @@ abstract contract Batch is Core {
                 ++i;
             }
         }
-        tokens = new address[](count);
-        for (uint256 k; k < count;) {
-            tokens[k] = buf[k];
-            unchecked {
-                ++k;
-            }
+        // Shrink `buf` in place rather than allocating a second array and copying
+        // into it: the dedup already left the survivors contiguous at the front, so
+        // the copy was pure overhead — one word write replaces `count` iterations
+        // plus an allocation. Truncating a memory array's length is safe (the tail
+        // stays allocated, just unreferenced) and `count <= maxLen` by construction.
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(buf, count)
         }
+        tokens = buf;
     }
 
     /// @dev Append `t` to `buf[0..count)` if not already present; return the new
@@ -434,153 +204,166 @@ abstract contract Batch is Core {
     }
 
 
-    // ─────────────── Item-aware netted settle (leverage ⋈ spot) ───────────────
+    // ──────────── Deferred match settle (schedule-driven, checks deferred) ────────────
 
-    /// @notice The item-aware generalization of {batchSettle}: settle N orders as
-    ///         one netted batch WHERE ORDERS MAY CARRY MAKE/TAKE ITEMS. This lets a
-    ///         spot order's pooled liquidity fund a leverage order's conversion with
-    ///         NO solver inventory, NO callback, and — in the match case — NO flash:
-    ///         the spot order's input is delivered as the leverage order's collateral
-    ///         and deposited BEFORE the borrow, bootstrapping it; the borrow proceeds
-    ///         then pay the spot order out of the pool.
-    ///
-    ///         Because deliveries interleave with item execution (an order's output
-    ///         is delivered, then its MAKE deposits it, then its TAKE borrows the
-    ///         funding token into the pool), there is no "pull all → deliver all"
-    ///         order. The solver supplies two hints the contract executes verbatim:
-    ///
-    ///           • `pullMask[i]` — bit `j` set ⇒ pull order `i`'s input leg `j` into
-    ///             the pool up front (its SELF-FUNDED seeds: spot sells, equity
-    ///             margin). Legs left unset are ITEM-FUNDED — satisfied by that
-    ///             order's own TAKE proceeds during execution.
-    ///           • `sequence` — a permutation of `[0, n)`: the order in which to run
-    ///             each order's deliver-outputs + items + settle-inputs.
-    ///
-    ///         Neither hint can make an UNSAFE settlement succeed (see below); a bad
-    ///         hint only reverts. Scheduling is thus the solver's job (liveness); the
-    ///         contract owns correctness (safety):
-    ///           - every output leg is a transfer that fully succeeds or reverts (no
-    ///             maker under-delivered);
-    ///           - each maker is charged its OWN signed slice, unchanged by netting;
-    ///           - items run under the maker's signature + the maker's own Permit3
-    ///             allowances (`_executeItems` is byte-identical to the single-order
-    ///             path), `filled` written before any of it;
-    ///           - the same pool whole-ness guard as {batchSettle}: every touched
-    ///             token must end ≥ its pre-batch balance (`BatchNotWhole` else), so
-    ///             a donated balance is never consumed and the solver can never
-    ///             extract past the batch's genuine surplus.
-    ///
-    /// @dev    Flow: (1) open every order (writes `filled`) + pull `pullMask` legs →
-    ///         pool; (2) one optional `interactionTarget` call (the solver seeds any
-    ///         residual it must front, e.g. a dual-conversion equity leg); (3) run
-    ///         orders in `sequence` — deliver outputs from pool, `_executeItems`
-    ///         (TAKE proceeds → pool), settle inputs to pool (item-funded legs keep
-    ///         `owed` in the pool from proceeds and return the surplus to the maker;
-    ///         `BatchItemsInputUnfunded` if a non-pulled leg under-produces); (4)
-    ///         whole-check + sweep. `nonReentrant`; SETTLE items are out of scope
-    ///         (they route to the filler — a shared-pool version needs its own
-    ///         design). Item tokens must lie within the orders' leg-token universe
-    ///         (true for leverage/repay/migrate). v1 passes empty `takerData`.
-    /// @return outs `outs[i][j]` = order `i`'s delivered amount on output leg `j`.
-    function batchSettleItems(ItemsBatch calldata b) external nonReentrant returns (uint256[][] memory) {
-        uint256 n = b.orders.length;
-        if (b.sigs.length != n || b.fillAmounts.length != n || b.pullMask.length != n || n > 256) {
-            revert LengthMismatch();
-        }
-        return _batchSettleItems(b);
+    /// @dev The `matchSettle` working set — the WHOLE deferred context, and the
+    ///      reason this feature needs neither storage nor transient storage. It is
+    ///      one memory struct threaded by pointer through the phase helpers; it
+    ///      never crosses a call boundary, so nothing outside this frame can read
+    ///      or corrupt it. (EVC's checks-deferred context must live in transient
+    ///      storage precisely because it DOES cross frames — arbitrary vaults call
+    ///      back into it. Declaring the participants in calldata buys us the
+    ///      cheaper home.) ~100 words for a 4-order match; the expansion cost is
+    ///      noise next to one ERC20 transfer.
+    struct MatchCtx {
+        address[] tokens; //      touched-token universe (deduped, derived on-chain)
+        uint256[] beforeBal; //   per-token pre-context balance snapshot
+        uint256[] outstanding; // per-token output obligations NOT YET delivered
+        FillCtx[] fills; //       per-order resolved fill context
+        uint256[][] outs; //      per-order per-OUTPUT-leg amount (computed at open)
+        uint256[][] owed; //      per-order per-INPUT-leg amount  (computed at open)
+        uint256[][] credit; //    per-order per-input-leg credited value
+        uint256[] done; //        per-order progress mask (item bits + DELIVERED_BIT)
+        uint256 lastItem; //      `(order+1) << 16 | item` of the PREVIOUS step, 0 if
+        //                        it was not an ITEM — all {ItemPolicy.ATOMIC} needs
+        //                        to know, and the dispatcher is its only writer.
     }
 
+    /// @dev `done[i]` bit marking "this order's outputs have been delivered". Item
+    ///      `k` takes bit `k`, so an order is capped at 255 items (`_assertMatchShape`)
+    ///      and the two ranges can never collide.
+    uint256 private constant DELIVERED_BIT = 1 << 255;
 
-    function _batchSettleItems(ItemsBatch calldata b) internal returns (uint256[][] memory) {
-        BatchState memory st;
-        st.tokens = _collectTokens(b.orders);
+    /// @notice Settle N orders as one netted match with DEFERRED CHECKS — the
+    ///         inventory-free, callback-free, re-entrancy-free order-matching path.
+    ///
+    ///         The two entry points this replaces could only permute whole ORDERS
+    ///         (`batchSettleItems`) or nothing at all (`batchSettle`'s fixed
+    ///         phases): each order ran `deliver → items → settle inputs` as a fixed
+    ///         body, so an order's borrow could never precede its own delivery and
+    ///         a mutually-dependent pair (A's collateral funded by B's borrow *and*
+    ///         B's collateral funded by A's borrow) had no valid ordering at all.
+    ///         The escape was a flash loan or solver inventory.
+    ///
+    ///         Here the execution unit is a STEP. The solver supplies a flat
+    ///         `schedule` (see {MatchStep}) and the settler runs it verbatim, then
+    ///         performs every per-order check ONCE, at the end:
+    ///
+    ///           PHASE 1  OPEN      per order: gates → `_openFill` (writes `filled`)
+    ///                              → compute outputs. Token universe + snapshot.
+    ///           PHASE 2  SCHEDULE  the solver's steps, in order. The ONLY
+    ///                              solver-controlled region.
+    ///           PHASE 3  FLUSH     deferred: completeness → input reconciliation →
+    ///                              invariants → pool whole-check → sweep.
+    ///
+    ///         Phases 1 and 3 are contract-owned loops over EVERY order, so a
+    ///         schedule cannot skip a gate or a check — it can only choose the
+    ///         order in which the middle happens.
+    ///
+    ///  Why there is no re-entrancy here to reason about
+    ///  ────────────────────────────────────────────────
+    ///  The composition a solver would otherwise express by re-entering `fill` from
+    ///  a callback is expressed as a schedule instead. `nonReentrant` still spans
+    ///  the whole call, unweakened — and it is now SUFFICIENT, because every
+    ///  balance-delta window in this file (`PULL`, `ITEM`, `PRESEND`, the final
+    ///  sweep) is measured inside this frame, where nothing else can run.
+    ///
+    ///  Deferring the checks (vs. running them per order)
+    ///  ─────────────────────────────────────────────────
+    ///  • INPUT FUNDING moves from "cover your legs at your own step" to a per-leg
+    ///    CREDIT LEDGER reconciled in Phase 3. Credits are measured around the
+    ///    single call that produces them, so attribution stays exact however the
+    ///    solver interleaves orders — a strictly TIGHTER window than the
+    ///    per-order one it replaces.
+    ///  • INVARIANTS move to Phase 3, so they assert the end of the CONTEXT rather
+    ///    than the end of an order. An invariant broken by one order and restored
+    ///    by another now passes — the EVC account-status-check analogue, and what
+    ///    makes a same-maker migration batchable. (Note this is a semantic change:
+    ///    a maker appearing in two orders is judged on its final state.)
+    ///  • `validators` deliberately do NOT move. They are pre-gates; deferring one
+    ///    would run a fill whose precondition was never true.
+    ///
+    /// @dev  Safety is unchanged and order-independent, so any schedule yields a
+    ///       correct settlement or a revert — never a wrong-but-successful one:
+    ///       every delivery is a transfer that fully succeeds or reverts AND is
+    ///       asserted to have happened ({PlanIncomplete}); every maker is charged
+    ///       its own signed slice ({Pricing}, untouched); items run under the
+    ///       maker's signature with `filled` written first; the pool must end at or
+    ///       above its pre-context balance ({BatchNotWhole}); and the solver can
+    ///       only ever receive `balanceOf − before` (pre-send and sweep alike), so
+    ///       a donated balance is unreachable. The load-bearing NEW guard is
+    ///       exactly-once execution ({PlanBadStep}) — a second delivery would drain
+    ///       the pool and a second item would borrow twice against the maker, and
+    ///       neither is catchable by a completeness compare after the fact.
+    /// @return outs   `outs[i][j]` = order `i`'s delivered amount on output leg `j`.
+    /// @return tokens the on-chain-derived touched-token universe.
+    /// @return swept  `swept[k]` = the residual paid out in `tokens[k]` — the
+    ///         filler's realised P&L. Returned (rather than left to a `balanceOf`
+    ///         diff) so a settlement accounts for BOTH sides on its own, mirroring
+    ///         `fillUpTo`'s `(delta, received, paid)`.
+    function matchSettle(MatchPlan calldata p)
+        external
+        nonReentrant
+        returns (uint256[][] memory outs, address[] memory tokens, uint256[] memory swept)
+    {
+        uint256 n = p.orders.length;
+        if (p.sigs.length != n || p.fillAmounts.length != n || n > 256) revert LengthMismatch();
+        // `takerDatas` is all-or-nothing: empty (no blob) or aligned 1:1.
+        if (p.takerDatas.length != 0 && p.takerDatas.length != n) revert LengthMismatch();
+        if (p.callTargets.length != p.callDatas.length) revert LengthMismatch();
+
+        MatchCtx memory st;
+        // The universe is derived on-chain, never solver-declared — the whole-check
+        // and the pre-send bound both hinge on it covering every token that moves.
+        st.tokens = _collectTokens(p.orders);
         st.beforeBal = _snapshotBalances(st.tokens);
 
-        // Phase 1: open every order (writes `filled`) + pull the self-funded seeds.
-        _openAndPullAll(b.orders, b.sigs, b.fillAmounts, b.pullMask, st);
+        _matchOpenAll(p, st); //     PHASE 1 — contract-owned
+        _matchRunSchedule(p, st); // PHASE 2 — solver-ordered
+        _matchFlush(p, st); //       PHASE 3 — contract-owned
 
-        // Phase 2: optional solver interaction — seed any residual the solver must
-        // front (e.g. a dual-conversion equity leg). Allowance-less EXECUTOR.
-        if (b.interactionTarget != address(0)) EXECUTOR.execute(b.interactionTarget, b.interactionData);
-
-        // Phase 3: run each order against the pool in the solver-given sequence.
-        _execSequence(b.orders, st, b.pullMask, b.sequence);
-
-        // Phase 4: enforce the batch left Settlement whole and sweep any residual.
-        _sweepSurplus(st.tokens, st.beforeBal);
-        return st.outs;
+        // Destination only (see {_sweepSurplus}); `PRESEND` deliberately still pays
+        // `msg.sender`, because that is working capital a `CALL` step must spend.
+        swept = _sweepSurplus(
+            st.tokens, st.beforeBal, p.profitRecipient == address(0) ? msg.sender : p.profitRecipient
+        );
+        return (st.outs, st.tokens, swept);
     }
 
-
-    /// @dev Phase 1: open + pull-seed every order. Item-bearing orders allowed.
-    function _openAndPullAll(
-        Order[] calldata orders,
-        bytes[] calldata sigs,
-        uint256[] calldata fillAmounts,
-        uint256[] calldata pullMask,
-        BatchState memory st
-    ) internal {
-        uint256 n = orders.length;
-        st.ctxs = new FillCtx[](n);
+    /// @dev PHASE 1. Open every order — the full gate set (shape, deadline,
+    ///      signature, exclusivity, nonce, validators) then `_openFill`, which
+    ///      writes `filled` BEFORE any external call in the context.
+    ///
+    ///      It also RESOLVES BOTH SIDES' AMOUNTS here, once: `outs[i][j]` per output
+    ///      leg (which seeds `outstanding`, so a mid-schedule `PRESEND` knows what
+    ///      the pool still owes) and `owed[i][j]` per input leg. Both are pure
+    ///      functions of the {FillCtx} frozen a line above, so computing them at open
+    ///      is result-identical to computing them at use — and it gives each side a
+    ///      SINGLE source. An auditor never has to ask whether two copies of the
+    ///      pricing agree, because there is only ever one.
+    function _matchOpenAll(MatchPlan calldata p, MatchCtx memory st) internal {
+        uint256 n = p.orders.length;
+        st.fills = new FillCtx[](n);
         st.outs = new uint256[][](n);
+        st.owed = new uint256[][](n);
+        st.credit = new uint256[][](n);
+        st.done = new uint256[](n);
+        st.outstanding = new uint256[](st.tokens.length);
         address solver = msg.sender;
         for (uint256 i; i < n;) {
-            st.ctxs[i] = _openItemOrder(orders[i], sigs[i], fillAmounts[i], solver);
-            _pullMaskedInputs(orders[i], st.ctxs[i], pullMask[i]);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-
-    /// @dev The `_fillCore` gate set (deadline/sig/exclusivity/nonce/validators) +
-    ///      `_openFill` (writes `filled`), WITHOUT pulling inputs or forbidding
-    ///      items — the item-aware sibling of `_batchOpenAndPull`.
-    function _openItemOrder(Order calldata order, bytes calldata sig, uint256 fillAmount, address solver)
-        internal
-        returns (FillCtx memory ctx)
-    {
-        if (fillAmount == 0) revert ZeroFill();
-        if (block.timestamp > order.deadline) revert OrderExpired();
-        _assertItemBatchShape(order);
-        bytes32 orderHash = order.hash();
-        _verifySignature(orderHash, sig, order.maker);
-        uint256 overrideBps = _exclusivity(order, solver);
-        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
-        _runValidators(order, solver, "");
-        ctx = _openFill(order, orderHash, fillAmount, overrideBps, solver, "");
-    }
-
-
-    /// @dev Enforce the two shape constraints the netted item flow relies on (both
-    ///      documented, now also checked): no SETTLE item (it routes to the filler,
-    ///      not the pool — `BatchItemsSettleUnsupported`) and no repeated input token
-    ///      (the pooled proceeds attribution keys on the token — a duplicate leg
-    ///      would mis-account; `BatchItemsDuplicateInput`). Runs once per order at
-    ///      open. O(items + tokenIn²), tiny — the deliberate CoW path.
-    ///
-    ///      The duplicate-input guard is INTENTIONALLY item-path-only. The single-
-    ///      order (`_payInputsToSolver`) and item-free (`_batchPullInputs`) paths
-    ///      handle a repeated tokenIn correctly: they move each leg's `owed` OUT of
-    ///      Settlement (to the solver, or pull it fresh), so the per-leg
-    ///      `balanceOf − snapshot` delta stays attributable and the totals conserve.
-    ///      Only `_settleInputsToPool` RETAINS `owed` in the pool, so a second
-    ///      same-token leg would re-read the first leg's retained balance as its own
-    ///      proceeds and under-retain — hence the guard lives here, not on the hot
-    ///      path (where adding it would reject valid orders and cost gas for nothing).
-    function _assertItemBatchShape(Order calldata order) internal pure {
-        Item[] calldata items = order.items;
-        for (uint256 i; i < items.length;) {
-            if (items[i].op == ItemOp.SETTLE) revert BatchItemsSettleUnsupported();
-            unchecked {
-                ++i;
-            }
-        }
-        LegIn[] calldata legsIn = order.legsIn;
-        for (uint256 i; i < legsIn.length;) {
-            for (uint256 j = i + 1; j < legsIn.length;) {
-                if (legsIn[i].token == legsIn[j].token) revert BatchItemsDuplicateInput();
+            Order calldata order = p.orders[i];
+            _assertMatchShape(order); // items allowed here — that is the point
+            st.fills[i] = _openGated(order, p.sigs[i], p.fillAmounts[i], solver, _tdc(p.takerDatas, i));
+            st.outs[i] = _batchComputeOutputs(order, st.fills[i]);
+            st.owed[i] = _computeOwed(order, st.fills[i]);
+            st.credit[i] = new uint256[](order.legsIn.length);
+            uint256 m = order.legsOut.length;
+            // An order with no outputs (a pure gasless deposit) has nothing to
+            // deliver, so its bit is pre-set and the schedule need not carry a
+            // no-op DELIVER step for it.
+            if (m == 0) st.done[i] = DELIVERED_BIT;
+            for (uint256 j; j < m;) {
+                st.outstanding[_tokenIndex(st.tokens, order.legsOut[j].token)] += st.outs[i][j];
                 unchecked {
                     ++j;
                 }
@@ -591,17 +374,32 @@ abstract contract Batch is Core {
         }
     }
 
-
-    /// @dev Pull ONLY the input legs whose `mask` bit is set (the self-funded
-    ///      seeds), maker → pool. `owed` uses the shared {Pricing.inputOwed} slice math.
-    function _pullMaskedInputs(Order calldata order, FillCtx memory ctx, uint256 mask) internal {
-        for (uint256 i; i < order.legsIn.length;) {
-            if ((mask >> i) & 1 == 1) {
-                uint256 owed = order.inputOwed(ctx, i);
-                if (owed != 0) {
-                    Permit3TransferLib.transferFromWithFallback(
-                        PERMIT3, order.legsIn[i].token, order.maker, address(this), owed
-                    );
+    /// @dev The three shape constraints the netted match relies on:
+    ///        • no SETTLE item — it routes the maker's asset to the filler, not the
+    ///          pool ({MatchSettleItemUnsupported});
+    ///        • no repeated input token — item proceeds are attributed per token
+    ///          within a step window, so a duplicate leg would double-count the
+    ///          same arrival ({MatchDuplicateInput});
+    ///        • at most 255 items, so item bit `k` can never collide with
+    ///          {DELIVERED_BIT} and the Phase-3 completeness mask stays exact.
+    ///      Runs once per order at open. O(items + legsIn²), tiny — and this is the
+    ///      deliberate CoW path, never the single-order hot path (where the same
+    ///      shapes are handled correctly and the guard would only cost gas).
+    function _assertMatchShape(Order calldata order) internal pure {
+        Item[] calldata items = order.items;
+        if (items.length > 255) revert LengthMismatch();
+        for (uint256 i; i < items.length;) {
+            if (items[i].op == ItemOp.SETTLE) revert MatchSettleItemUnsupported();
+            unchecked {
+                ++i;
+            }
+        }
+        LegIn[] calldata legsIn = order.legsIn;
+        for (uint256 i; i < legsIn.length;) {
+            for (uint256 j = i + 1; j < legsIn.length;) {
+                if (legsIn[i].token == legsIn[j].token) revert MatchDuplicateInput();
+                unchecked {
+                    ++j;
                 }
             }
             unchecked {
@@ -610,81 +408,251 @@ abstract contract Batch is Core {
         }
     }
 
+    /// @dev PHASE 2. Run the solver's steps verbatim. Every index is bounds-checked
+    ///      and every repeatable unit is guarded at execution time, so a malformed
+    ///      or hostile schedule reverts ({PlanBadStep}) — it can never mis-settle.
+    function _matchRunSchedule(MatchPlan calldata p, MatchCtx memory st) internal {
+        uint256 len = p.schedule.length;
+        for (uint256 s; s < len;) {
+            uint256 w = p.schedule[s];
+            uint256 kind = w & 0xff;
+            uint256 a = (w >> 8) & 0xffff;
+            uint256 b = (w >> 24) & 0xffff;
+            if (kind == MatchStep.ITEM) {
+                _stepItem(p.orders, st, a, b, s);
+                // Recorded AFTER the step so a revert cannot leave it stale; cleared
+                // by every other kind, which is what makes "back-to-back" checkable
+                // with one word instead of a scan.
+                st.lastItem = ((a + 1) << 16) | b;
+                unchecked {
+                    ++s;
+                }
+                continue;
+            }
+            st.lastItem = 0;
+            if (kind == MatchStep.PULL) {
+                _stepPull(p.orders, st, a, b, s);
+            } else if (kind == MatchStep.DELIVER) {
+                _stepDeliver(p.orders, st, a, s);
+            } else if (kind == MatchStep.PRESEND) {
+                _stepPresend(st, a, s);
+            } else if (kind == MatchStep.CALL) {
+                // Allowance-less EXECUTOR — the solver's own contract, acting with
+                // its own authority; it can never move the pool, and `nonReentrant`
+                // blocks it from calling back into any fill.
+                if (a >= p.callTargets.length) revert PlanBadStep(s);
+                EXECUTOR.execute(p.callTargets[a], p.callDatas[a]);
+            } else {
+                revert PlanBadStep(s);
+            }
+            unchecked {
+                ++s;
+            }
+        }
+    }
 
-    /// @dev Phase 3: run each order once, in the solver-given `sequence` (validated
-    ///      to be a permutation of `[0, n)` — wrong length, out-of-range, or a
-    ///      duplicate reverts `BatchItemsBadSequence`).
-    function _execSequence(
-        Order[] calldata orders,
-        BatchState memory st,
-        uint256[] calldata pullMask,
-        uint256[] calldata sequence
-    ) internal {
-        uint256 n = orders.length;
-        if (sequence.length != n) revert BatchItemsBadSequence();
+    /// @dev PULL — maker → pool for one input leg, at the amount resolved at open.
+    ///
+    ///      The credit is the NOMINAL `owed`, not a measured balance delta. This is
+    ///      the single-order path's own convention: `_payInputsToSolver` moves
+    ///      nominal amounts, and `_settleForward` skips its balance snapshot entirely
+    ///      for an item-free order precisely because measuring what cannot have been
+    ///      produced "would just burn two STATICCALLs per input leg on every plain
+    ///      swap". A pull produces nothing — it moves a known amount — so there is
+    ///      nothing to measure, and doing so costs two STATICCALLs per leg for a
+    ///      number already known. Measurement is reserved for {_stepItem}, where a
+    ///      module genuinely produces an amount the settler cannot predict.
+    ///
+    ///      Consequence for non-standard tokens: a fee-on-transfer input credits more
+    ///      than arrives, the pool ends short, and the context reverts
+    ///      {BatchNotWhole} rather than {LegUnfunded}. Both revert, and such tokens
+    ///      are already out of scope on the netted path (see the settlement README).
+    ///
+    ///      A duplicate PULL needs no exactly-once guard: the extra lands in `credit`
+    ///      and Phase 3 returns it to the MAKER, so it costs the solver gas and the
+    ///      maker nothing.
+    function _stepPull(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 j, uint256 s) internal {
+        if (i >= orders.length) revert PlanBadStep(s);
+        Order calldata order = orders[i];
+        if (j >= order.legsIn.length) revert PlanBadStep(s);
+        uint256 owed = st.owed[i][j]; // resolved at open — single source
+        if (owed != 0) {
+            Permit3TransferLib.transferFromWithFallback(
+                PERMIT3, order.legsIn[j].token, order.maker, address(this), owed
+            );
+            unchecked {
+                st.credit[i][j] += owed;
+            }
+        }
+    }
+
+    /// @dev DELIVER — pool → recipients for every output leg, and discharge that
+    ///      much of the pool's `outstanding` obligation. The repeat guard is
+    ///      load-bearing: a second delivery pays the maker twice out of funds the
+    ///      other orders are owed.
+    function _stepDeliver(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 s) internal {
+        if (i >= orders.length) revert PlanBadStep(s);
+        if (st.done[i] & DELIVERED_BIT != 0) revert PlanBadStep(s);
+        st.done[i] |= DELIVERED_BIT;
+        Order calldata order = orders[i];
+        uint256[] memory amts = st.outs[i];
+        for (uint256 j; j < amts.length;) {
+            uint256 amt = amts[j];
+            if (amt != 0) {
+                address token = order.legsOut[j].token;
+                address to = order.legsOut[j].recipient;
+                bool makerLeg = to == address(0) || to == order.maker;
+                SafeTransferLib.safeTransfer(token, makerLeg ? order.maker : to, amt);
+                unchecked {
+                    st.outstanding[_tokenIndex(st.tokens, token)] -= amt; // seeded at open
+                }
+            }
+            unchecked {
+                ++j;
+            }
+        }
+    }
+
+    /// @dev ITEM — execute ONE of an order's items. A TAKE produces value into the
+    ///      pool, so its proceeds are measured around that single call and credited
+    ///      to the order's input legs; a MAKE only consumes the maker's own funds,
+    ///      so it needs no snapshot. Measuring per CALL rather than per ORDER is
+    ///      what makes interleaving sound: the window is atomic with respect to the
+    ///      schedule, so another order running in between cannot be misattributed.
+    ///      The repeat guard is load-bearing — a second item is a second borrow
+    ///      against the maker's credit.
+    function _stepItem(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 k, uint256 s) internal {
+        if (i >= orders.length) revert PlanBadStep(s);
+        Order calldata order = orders[i];
+        if (k >= order.items.length) revert PlanBadStep(s);
+        uint256 bit = uint256(1) << k; // k < 255 by `_assertMatchShape`
+        if (st.done[i] & bit != 0) revert PlanBadStep(s);
+
+        // The maker's item-execution policy (see {ItemPolicy}). ANY — the default,
+        // and what every pre-existing order carries — costs one shifted mask and no
+        // branch beyond this test.
+        uint256 policy = order.itemPolicy();
+        if (policy != ItemPolicy.ANY) {
+            unchecked {
+                uint256 lower = bit - 1; // every item below k
+                // ORDERED: all of them must already have run.
+                if (st.done[i] & lower != lower) revert ItemPolicyViolated(i, k);
+                // ATOMIC: and k-1 must have been the step IMMEDIATELY before this one.
+                if (policy == ItemPolicy.ATOMIC && k != 0 && st.lastItem != (((i + 1) << 16) | (k - 1))) {
+                    revert ItemPolicyViolated(i, k);
+                }
+            }
+        }
+        st.done[i] |= bit;
+
+        if (order.items[k].op != ItemOp.TAKE) {
+            _executeItem(order, st.fills[i], k);
+            return;
+        }
+        uint256[] memory pre = _snapshotInputs(order.legsIn);
+        _executeItem(order, st.fills[i], k);
+        uint256 m = order.legsIn.length;
+        for (uint256 j; j < m;) {
+            // A module can only ADD to Settlement's balance (the pool grants no
+            // approvals), so this cannot underflow on any honest path — and a
+            // checked revert is the right outcome if one ever did.
+            st.credit[i][j] += SafeTransferLib.balanceOf(order.legsIn[j].token, address(this)) - pre[j];
+            unchecked {
+                ++j;
+            }
+        }
+    }
+
+    /// @dev PRESEND — hand the solver token `t`'s UNENCUMBERED surplus so it can
+    ///      convert it into the batch's deficit, the zero-capital unlock for an
+    ///      imbalanced match. Bounded twice over: the pooled amount is measured
+    ///      from the pre-context snapshot (a donated balance is unreachable), and
+    ///      obligations not yet delivered are netted out first — so unlike a
+    ///      fixed-phase pre-send (which nets against ALL obligations before any
+    ///      delivery has happened), this is correct at ANY point in the schedule.
+    function _stepPresend(MatchCtx memory st, uint256 t, uint256 s) internal {
+        if (t >= st.tokens.length) revert PlanBadStep(s);
+        address token = st.tokens[t];
+        uint256 bal = SafeTransferLib.balanceOf(token, address(this));
+        // A schedule that already spent past the baseline fails HERE with the
+        // wholeness error rather than as an arithmetic panic.
+        if (bal < st.beforeBal[t]) revert BatchNotWhole(token);
+        unchecked {
+            uint256 avail = bal - st.beforeBal[t];
+            uint256 owed = st.outstanding[t];
+            if (avail > owed) SafeTransferLib.safeTransfer(token, msg.sender, avail - owed);
+        }
+    }
+
+    /// @dev PHASE 3 — the deferred flush. Contract-owned, over EVERY order, so
+    ///      nothing the schedule did (or failed to do) can escape it.
+    function _matchFlush(MatchPlan calldata p, MatchCtx memory st) internal {
+        uint256 n = p.orders.length;
         address solver = msg.sender;
-        uint256 seen;
-        for (uint256 k; k < n;) {
-            uint256 idx = sequence[k];
-            if (idx >= n || (seen >> idx) & 1 == 1) revert BatchItemsBadSequence();
-            seen |= (uint256(1) << idx);
-            st.outs[idx] = _execOrderNetted(orders[idx], st.ctxs[idx], pullMask[idx], solver);
+        for (uint256 i; i < n;) {
+            Order calldata order = p.orders[i];
+            // Completeness: outputs delivered, and every item ran. Deliveries and
+            // items are scheduled, so this cannot be structural — it is asserted.
+            uint256 full = ((uint256(1) << order.items.length) - 1) | DELIVERED_BIT;
+            if (st.done[i] != full) revert PlanIncomplete(i);
+            _matchReconcileInputs(order, st.owed[i], st.credit[i], i);
+            // The deferred check itself: the order's post-conditions, judged on the
+            // end state of the whole context.
+            _runInvariants(order, solver, _tdc(p.takerDatas, i));
+            emit OrderFilled(st.fills[i].orderHash, order.maker, solver);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @dev ONE reconciliation rule for every input leg, pulled and item-funded
+    ///      alike: the leg must have been credited at least what the maker owes.
+    ///      `owed` STAYS in the pool (it is what funds the other orders'
+    ///      deliveries) and any excess — an over-borrow, a duplicate pull — goes
+    ///      back to the maker, never to the solver.
+    ///
+    ///      Takes the `owed` resolved at open rather than recomputing {Pricing}: the
+    ///      amount charged and the amount checked are then the SAME WORD, not two
+    ///      computations an auditor has to prove equal.
+    function _matchReconcileInputs(
+        Order calldata order,
+        uint256[] memory owedOf,
+        uint256[] memory credit,
+        uint256 idx
+    ) internal {
+        for (uint256 j; j < order.legsIn.length;) {
+            uint256 owed = owedOf[j];
+            uint256 have = credit[j];
+            if (have < owed) revert LegUnfunded(idx, j);
+            unchecked {
+                uint256 surplus = have - owed; // have >= owed
+                if (surplus != 0) SafeTransferLib.safeTransfer(order.legsIn[j].token, order.maker, surplus);
+            }
+            unchecked {
+                ++j;
+            }
+        }
+    }
+
+    /// @dev Index of `token` in the derived universe. Every leg token is present by
+    ///      construction (`_collectTokens` is the union of exactly these legs), so
+    ///      the fall-through is unreachable — it reverts rather than returning a
+    ///      sentinel, so a future caller that widens the universe fails loudly
+    ///      instead of silently attributing to slot 0. A linear scan over a handful
+    ///      of entries beats any on-chain map.
+    function _tokenIndex(address[] memory tokens, address token) private pure returns (uint256) {
+        for (uint256 k; k < tokens.length;) {
+            if (tokens[k] == token) return k;
             unchecked {
                 ++k;
             }
         }
+        revert LengthMismatch();
     }
 
-
-    /// @dev One order's netted forward flow: deliver outputs from the pool → run
-    ///      items (TAKE proceeds → pool) → settle inputs into the pool → invariants.
-    ///      The pool is the counterparty throughout; the solver never touches it.
-    function _execOrderNetted(Order calldata order, FillCtx memory ctx, uint256 mask, address solver)
-        internal
-        returns (uint256[] memory amounts)
-    {
-        amounts = _batchComputeOutputs(order, ctx);
-        _batchDeliverStored(order, amounts); // pool → maker/recipient (reverts if pool short)
-        // Snapshot AFTER delivery, BEFORE items, so proceeds measure THIS order's
-        // TAKE production only (other pooled funds cancel in the delta).
-        uint256[] memory tokenInBefore = _snapshotInputs(order.legsIn);
-        _executeItems(order, ctx);
-        _settleInputsToPool(order, ctx, mask, tokenInBefore);
-        _runInvariants(order, solver, "");
-        emit OrderFilled(ctx.orderHash, order.maker, solver);
-    }
-
-
-    /// @dev Settle one order's input legs INTO the pool (not to a solver):
-    ///      • self-funded leg (mask bit set) — `owed` was already pulled in Phase 1;
-    ///        return any stray proceeds for the token to the maker (never strand).
-    ///      • item-funded leg (mask bit unset) — its TAKE proceeds (the balance
-    ///        delta since `tokenInBefore`) must cover `owed`; `owed` STAYS in the
-    ///        pool (it funds other orders' deliveries) and the surplus returns to the
-    ///        maker. `BatchItemsInputUnfunded` if proceeds < owed.
-    function _settleInputsToPool(
-        Order calldata order,
-        FillCtx memory ctx,
-        uint256 mask,
-        uint256[] memory tokenInBefore
-    ) internal {
-        address maker = order.maker;
-        for (uint256 i; i < order.legsIn.length;) {
-            address token = order.legsIn[i].token;
-            uint256 proceeds = SafeTransferLib.balanceOf(token, address(this)) - tokenInBefore[i];
-            if ((mask >> i) & 1 == 1) {
-                if (proceeds != 0) SafeTransferLib.safeTransfer(token, maker, proceeds);
-            } else {
-                uint256 owed = order.inputOwed(ctx, i);
-                if (proceeds < owed) revert BatchItemsInputUnfunded();
-                unchecked {
-                    uint256 surplus = proceeds - owed; // owed stays pooled
-                    if (surplus != 0) SafeTransferLib.safeTransfer(token, maker, surplus);
-                }
-            }
-            unchecked {
-                ++i;
-            }
-        }
+    /// @dev `takerDatas[i]`, or an empty blob when the plan carries none.
+    function _tdc(bytes[] calldata takerDatas, uint256 i) private pure returns (bytes memory) {
+        return takerDatas.length == 0 ? bytes("") : takerDatas[i];
     }
 }

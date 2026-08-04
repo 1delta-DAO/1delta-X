@@ -94,8 +94,29 @@ protects the user.
 deposited asset ≠ `tokenOut`), there is no constraint from the
 auction. The item executes at its signed amount regardless.
 
-**TAKE items** (borrow, withdraw) are never constrained by the
-auction. They produce `tokenIn`, whose total is `amountIn` (fixed).
+**TAKE items** (borrow, withdraw) produce `tokenIn`. On a SELL, `amountIn` is
+fixed and there is nothing to size against. On a **BUY** — where the input leg
+RISES with the tick — the dual of the MAKE rule applies:
+
+```
+item.amount ≥ endAmountIn            (for TAKE items funding a rising input leg)
+```
+
+i.e. **size a TAKE item at the auction CEILING**, not the floor. `_payInputsToSolver`
+pays the solver `inputOwed` out of the item's proceeds and refunds the remainder to
+the maker, so a ceiling-sized item is self-correcting: an early fill simply returns
+more cash. Sized at the floor instead, a late fill owes more than the item produced
+and the shortfall is pulled from the maker's own wallet — or, with no balance and no
+standing allowance, the order is unfillable late. Pinned by
+`modules/lending/aave-v3/test/leverage/FusedDutchAuction.t.sol`.
+
+This is what makes a **dutch-auctioned leverage order** work: sign it as a BUY with
+fixed collateral out and a rising debt leg in, and size the borrow item at the
+ceiling. The position (collateral and debt) is then fixed and known at signing,
+while the auction decides how much of the borrowed asset the solver keeps — the
+maker's edge arrives as cash back rather than as less debt. It also makes a
+[fused deposit+borrow module](../../../../docs/settlement-modules.md) exact, since
+both of its totals are fixed legs.
 
 ### Token flow during a fill
 
@@ -133,32 +154,70 @@ output and receives the maker's input. The `fill` / `fillWithCallback` /
 `batchFill` methods all share this single-order flow — the **hot path**, untouched
 by everything below.
 
-### Batch settle (coincidence of wants)
+### Netted settle — coincidence of wants (`matchSettle`)
 
-`batchSettle` is a *separate* entry point that clears N orders as one **netted**
-batch. Instead of each order settling against the solver, every order's inputs are
-pooled into Settlement first, each maker's net surplus is pre-sent to the solver,
-a single solver interaction swaps that surplus into the net deficit, and every
-output is delivered from the pool:
+Every fill above runs one order against the solver. `matchSettle` is a *separate*
+entry point that clears N orders as one **netted** settlement against the
+**pool** (Settlement itself): each order's inputs are pooled, each maker's output
+is delivered from that pool, and the solver never has to hold the transient peak.
+Two mirror makers (`sell WETH→USDC` and `sell USDC→WETH`) thus clear with **no
+AMM** and **zero solver inventory**.
+
+Rather than fixed phases, the solver supplies a flat **step schedule**, and every
+per-order check is **deferred** to a single flush at the end:
 
 ```
-batchSettle(orders, sigs, fillAmounts, [takerDatas,] interactionTarget, interactionData)
+matchSettle(MatchPlan{orders, sigs, fillAmounts, takerDatas, schedule,
+                      callTargets, callDatas, profitRecipient})
+  → (outs, tokens, swept)     makers' deliveries · token universe · filler P&L
 
-1. per order: verify + open (writes `filled`) + pull inputs   makers → Settlement
-   + compute (not yet deliver) every output amount
-2. per token: PRE-SEND net surplus (pooled − owed)            Settlement → solver
-3. one interaction (allowance-less EXECUTOR)                  solver swaps surplus → deposits deficit
-4. per order: deliver outputs + run invariants               Settlement → makers/recipients
-5. per touched token: require balance ≥ pre-batch snapshot    (BatchNotWhole else) + sweep residual → solver
+PHASE 1  OPEN      per order: gates → _openFill (writes `filled`) → compute outputs
+                   + derive the touched-token universe on-chain and snapshot it
+PHASE 2  SCHEDULE  the solver's packed steps, verbatim:            ← the only
+                     PULL(i,j)  maker → pool, credits what arrived    solver-ordered
+                     DELIVER(i) pool → recipients, all output legs    region
+                     ITEM(i,k)  one MAKE/TAKE; a TAKE's proceeds are credited
+                     PRESEND(t) pool → solver, surplus net of UNDELIVERED obligations
+                     CALL(x)    one interaction (allowance-less EXECUTOR)
+PHASE 3  FLUSH     per order: completeness → credit ≥ owed (surplus → maker)
+                   → invariants → whole-check + sweep
 ```
 
-Two mirror makers (`sell WETH→USDC` and `sell USDC→WETH`) thus clear against each
-other with **no AMM** and **zero solver inventory** — even when the batch is
-*imbalanced*, because the solver swaps the surplus it is handed into the deficit it
-owes rather than fronting capital. Each maker is charged/paid its own signed curve
-(identical math to a single fill); only the counterparty (the pool) differs.
-Item-free only; the optional `takerDatas[]` threads a per-order blob into
-validators/invariants/fill-module; golden hash unchanged. Full design:
+Phases 1 and 3 are contract-owned loops over *every* order, so a schedule can only
+choose the order of the middle — never skip a gate or a check. Each maker is
+charged and paid its OWN signed auction curve, identical math to a single fill;
+only the counterparty (the pool) differs.
+
+**A plain CoW** is the schedule `[PULL…, PRESEND…, CALL, DELIVER…]` — the five
+fixed phases the retired `batchSettle` hard-coded. **An item-bearing match**
+interleaves `ITEM` steps with deliveries, which its fixed per-order body could not
+do: a maker's borrow can now run *before* its own collateral is delivered, so two
+mutually-dependent leverage orders (A's collateral funded by B's borrow *and* vice
+versa) settle with **no flash loan and no solver inventory** — previously
+impossible at any ordering.
+
+Two consequences worth knowing:
+
+* **No re-entrancy is involved.** The composition a solver would otherwise express
+  by re-entering `fill` from a callback is a schedule instead, so `nonReentrant`
+  stays intact and every balance-delta window is measured inside one frame. The
+  whole deferred context is a single **memory** struct — no storage, no transient
+  storage.
+* **Invariants assert the end of the CONTEXT, not the end of an order.** One
+  broken by order *i* and restored by order *j* now passes (the EVC
+  account-status-check analogue). A maker appearing in two orders of one match is
+  judged on its final state — note this if you rely on `MinBalanceInvariant` or
+  `OwnershipInvariants`.
+
+`profitRecipient` (0 = `msg.sender`) is where the final sweep lands — a
+destination only, exactly like `fillUpTo`'s `recipient`: exclusivity, validators,
+item authority and every pull still key on `msg.sender`, so naming another address
+grants no authority and saves a contract filler a transfer per token. `PRESEND`
+still pays `msg.sender`, since that is working capital a `CALL` step must spend.
+
+Golden order hash unchanged — `matchSettle` adds no `Order` field. Full design:
+[docs/deferred-match-settle.md](../../../../docs/deferred-match-settle.md); the
+netting invariant and pre-send bound it inherits are in
 [docs/batch-settle.md](../../../../docs/batch-settle.md).
 
 ### Item ops & module kinds
@@ -224,10 +283,11 @@ is the Seaport/0x "minimum balance after" pattern.
 
 **Scope: simple single-order swaps only.** A plain buy/sell of a FoT/rebasing
 token is **functional** — the receiving party simply nets the post-fee amount
-(`FeeOnTransfer.t.sol`). The **netted batch modes** (`batchSettle`,
-`batchSettleItems`) rely on `balanceOf`-delta pool accounting, so a FoT/rebasing
-token there trips the whole-check (`BatchNotWhole`) or an underflow and **reverts
-safely** — they are not supported for such tokens, by design.
+(`FeeOnTransfer.t.sol`). The **netted mode** (`matchSettle`) relies on
+`balanceOf`-delta pool accounting throughout — the credit ledger measures what
+actually arrived on every `PULL` and every TAKE item — so a FoT/rebasing token
+there trips `LegUnfunded` (the leg that came up short) or the whole-check
+(`BatchNotWhole`) and **reverts safely**. Not supported for such tokens, by design.
 
 ### Fees — two actors, two instruments, no fee subsystem
 

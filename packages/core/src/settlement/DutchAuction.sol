@@ -45,6 +45,18 @@ library DutchAuction {
         return uint32(order.timing >> 64);
     }
 
+    /// @notice The maker's ITEM EXECUTION POLICY — bits [96:100). See {ItemPolicy}.
+    /// @dev    `timing`'s three clocks occupy bits [0:96) and every accessor above
+    ///         masks to `uint32`, so bits [96:256) were dead space in a word the
+    ///         maker ALREADY SIGNS. Putting the policy there buys maker-enforced item
+    ///         ordering with no new `Order` field, no EIP-712 typehash change, and no
+    ///         golden-hash break — and every order signed before this existed reads
+    ///         back {ItemPolicy.ANY}, which is exactly the behaviour it was signed
+    ///         under. Bits [100:256) remain free for whatever comes next.
+    function itemPolicy(Order calldata order) internal pure returns (uint256) {
+        return (order.timing >> 96) & 0xf;
+    }
+
     // ──────────────────── Decay clock ────────────────────
 
     /// @notice The shared normalized decay for this order at the current time,

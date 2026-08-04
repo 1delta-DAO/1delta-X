@@ -155,7 +155,62 @@ hot path never becomes a module call; it stays the built-in default.
 - **Mixed trades** (NFT + cash, token + NFT) compose from inline legs + a
   `SETTLE` item.
 
-## 8. Open / next
+## 8. Fused (composite) ops — one item, two legs
+
+A leverage order carries `[MAKE deposit, TAKE borrow]`. Aave, Comet and Morpho all
+check health *inside* the borrow, so the deposit must come first — which makes the
+ordering a **scheduling obligation**: the solver has to keep the pair adjacent and
+in sequence, and `matchSettle` can only enforce that if the maker opted into
+[`ItemPolicy.ATOMIC`](deferred-match-settle.md). Fusing the pair into one module
+call moves the ordering inside the module, where no schedule can reach it.
+
+**Shape.** A fused op is always a **TAKE**, because the gated leg is always the
+value-OUT one and Permit3's taker book is what authorises it. `amount` is
+denominated in that leg; the value-IN leg is derived. This covers the four
+pairs worth having:
+
+| fused op | gated leg | replaces |
+| --- | --- | --- |
+| deposit + borrow | borrow | open a levered position |
+| repay + withdraw | withdraw | close one |
+| repay A + borrow B | borrow | debt swap |
+| withdraw A + deposit B | withdraw | collateral swap / migrate |
+
+**No core change.** `ITakerModule.takeOnBehalf(user, amount, receiver, data)` is
+already sufficient — a fused module is a modules-package contract, nothing else.
+
+**Deriving the second leg.** Settlement pro-rates `item.amount` but never tells a
+module the fill fraction, so a fused item cannot carry two independent amounts. It
+carries the maker's intended TOTALS and re-derives:
+`collateral = ceil(amount · collateralTotal / borrowTotal)`. At a full fill
+`amount == borrowTotal`, so the second leg is exact; across partial fills the
+rounding is per-fill and rounds toward MORE collateral, never less.
+
+**Measured** (`aave-v3/test/leverage/FusedLeverage.t.sol`, both runs from an
+identical fork state via `snapshotState`/`revertToState`):
+
+| | gas |
+| --- | --- |
+| `[MAKE deposit, TAKE borrow]` | 628,667 |
+| fused item | **619,054** |
+| saved | 9,613 (−1.5%) |
+
+The saving is one `Settlement→module` CALL plus the item-loop and slice overhead —
+the protocol calls underneath are identical. On the netted path it also costs one
+fewer schedule step, one fewer completeness bit, and one fewer `ItemPolicy`
+constraint to satisfy.
+
+> **Measure fused vs. paired from the same state.** Run back-to-back, whichever
+> goes second finds the reserve, the aToken balance and the debt token warm and
+> non-zero — worth ~280k here, which swamps the ~10k being measured.
+
+**Cost to weigh:** four shapes × ~20 protocols is a lot of module code, and each
+fused module relaxes the one-operation rule (see
+[SECURITY.md](../SECURITY.md#architecture--trust-model) for why the allowance key
+recovers the granularity). Ship fused variants for the venues where leverage volume
+justifies them, behind a shared per-shape base — not blanket.
+
+## 9. Open / next
 
 - Build the §5 report-verify for fungible-delivering settle modules.
 - An `NftBuySettlementModule` (filler's NFT → maker) + the ownership-invariant

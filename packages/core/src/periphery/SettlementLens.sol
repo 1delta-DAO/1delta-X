@@ -167,7 +167,8 @@ contract SettlementLens {
             _exclusivityOverride(order, filler),
             filler,
             filler,
-            prevFilled == 0 && newFilled == total
+            prevFilled == 0 && newFilled == total,
+            new uint256[](0) // preview prices legs directly; no payout ledger to record
         );
     }
 
