@@ -262,40 +262,94 @@ contract Permit3 is IPermit3, EIP712 {
 
     // ──────────────────── Permit internals ────────────────────
 
-    function _hashTokenPermits(TokenPermit[] calldata permits) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](permits.length);
-        uint256 len = permits.length;
-        for (uint256 i; i < len;) {
-            hashes[i] = keccak256(
-                abi.encode(
-                    _TOKEN_PERMIT_TYPEHASH,
-                    permits[i].spender,
-                    permits[i].token,
-                    permits[i].amount,
-                    permits[i].expiration
-                )
-            );
-            unchecked { ++i; }
+    // Both permit-array hashers below use the same STATIC-STRUCT CALLDATA WALK as
+    // {OrderHash}'s leg hashers — `TokenPermit` and `TakerPermit` are static structs,
+    // so each is a flat run of 4 calldata words, already laid out exactly as the
+    // `abi.encode` of its fields. Element hashes accumulate into a raw contiguous run
+    // in scratch memory (above the free-memory pointer, never bumped — the run is
+    // consumed by the final `keccak256`), with a 5-word element buffer parked just
+    // past it. That removes the `bytes32[]` allocation, its bounds-checked stores, the
+    // per-element `abi.encode` buffer, and the `encodePacked` copy.
+    //
+    // ⚠ Every non-`bytes32` word is MASKED to its declared width, because `abi.encode`
+    // cleans/zero-extends and raw calldata words need not be clean. See
+    // {OrderHash._hashLegsIn} for the full reasoning — in short, an unmasked copy is
+    // not exploitable (a digest the owner never signed authorizes nothing, and
+    // `_applyBatch` reads every field back through Solidity) but it would make the
+    // digest depend on padding a well-formed encoder never varies, so a batch could
+    // hash differently on-chain than off-chain and simply fail to verify. `ref` is a
+    // full `bytes32` and so is copied verbatim.
+
+    /// @dev EQUIVALENT SOLIDITY:
+    ///
+    ///          bytes32[] memory h = new bytes32[](permits.length);
+    ///          for (uint256 i; i < permits.length; ++i) {
+    ///              h[i] = keccak256(
+    ///                  abi.encode(
+    ///                      _TOKEN_PERMIT_TYPEHASH,
+    ///                      permits[i].spender,
+    ///                      permits[i].token,
+    ///                      permits[i].amount,
+    ///                      permits[i].expiration
+    ///                  )
+    ///              );
+    ///          }
+    ///          return keccak256(abi.encodePacked(h));
+    function _hashTokenPermits(TokenPermit[] calldata permits) private pure returns (bytes32 out) {
+        bytes32 typeHash = _TOKEN_PERMIT_TYPEHASH;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let hashes := mload(0x40)
+            let end := add(hashes, shl(5, permits.length))
+            let buf := end
+            mstore(buf, typeHash) // loop-invariant word 0
+            let src := permits.offset
+            for { let dst := hashes } lt(dst, end) { dst := add(dst, 0x20) } {
+                mstore(add(buf, 0x20), and(calldataload(src), 0xffffffffffffffffffffffffffffffffffffffff)) // spender
+                mstore(add(buf, 0x40), and(calldataload(add(src, 0x20)), 0xffffffffffffffffffffffffffffffffffffffff)) // token
+                mstore(add(buf, 0x60), and(calldataload(add(src, 0x40)), 0xffffffffffffffffffffffffffffffffffffffff)) // uint160
+                mstore(add(buf, 0x80), and(calldataload(add(src, 0x60)), 0xffffffffffff)) // uint48
+                mstore(dst, keccak256(buf, 0xa0))
+                src := add(src, 0x80) // 4 static words per TokenPermit
+            }
+            out := keccak256(hashes, sub(end, hashes))
         }
-        return keccak256(abi.encodePacked(hashes));
     }
 
-    function _hashTakerPermits(TakerPermit[] calldata permits) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](permits.length);
-        uint256 len = permits.length;
-        for (uint256 i; i < len;) {
-            hashes[i] = keccak256(
-                abi.encode(
-                    _TAKER_PERMIT_TYPEHASH,
-                    permits[i].spender,
-                    permits[i].ref,
-                    permits[i].amount,
-                    permits[i].expiration
-                )
-            );
-            unchecked { ++i; }
+    /// @dev EQUIVALENT SOLIDITY:
+    ///
+    ///          bytes32[] memory h = new bytes32[](permits.length);
+    ///          for (uint256 i; i < permits.length; ++i) {
+    ///              h[i] = keccak256(
+    ///                  abi.encode(
+    ///                      _TAKER_PERMIT_TYPEHASH,
+    ///                      permits[i].spender,
+    ///                      permits[i].ref,
+    ///                      permits[i].amount,
+    ///                      permits[i].expiration
+    ///                  )
+    ///              );
+    ///          }
+    ///          return keccak256(abi.encodePacked(h));
+    function _hashTakerPermits(TakerPermit[] calldata permits) private pure returns (bytes32 out) {
+        bytes32 typeHash = _TAKER_PERMIT_TYPEHASH;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let hashes := mload(0x40)
+            let end := add(hashes, shl(5, permits.length))
+            let buf := end
+            mstore(buf, typeHash)
+            let src := permits.offset
+            for { let dst := hashes } lt(dst, end) { dst := add(dst, 0x20) } {
+                mstore(add(buf, 0x20), and(calldataload(src), 0xffffffffffffffffffffffffffffffffffffffff)) // spender
+                mstore(add(buf, 0x40), calldataload(add(src, 0x20))) // ref — full bytes32, no mask
+                mstore(add(buf, 0x60), and(calldataload(add(src, 0x40)), 0xffffffffffffffffffffffffffffffffffffffff)) // uint160
+                mstore(add(buf, 0x80), and(calldataload(add(src, 0x60)), 0xffffffffffff)) // uint48
+                mstore(dst, keccak256(buf, 0xa0))
+                src := add(src, 0x80) // 4 static words per TakerPermit
+            }
+            out := keccak256(hashes, sub(end, hashes))
         }
-        return keccak256(abi.encodePacked(hashes));
     }
 
     function _verifyPermitSig(address owner, bytes32 hashStruct, bytes calldata sig) private view {
@@ -344,17 +398,47 @@ contract Permit3 is IPermit3, EIP712 {
         SafeTransferLib.safeTransferFrom(token, from, to, amount);
     }
 
+    /// @dev `amount`/`expiration`/`nonce` share ONE slot, so the whole allowance is
+    ///      read with a single SLOAD and written back as a single word. Reading the
+    ///      fields individually made solc emit one SLOAD per field plus a third for
+    ///      the decrement's read-modify-write; the packed form is the same three
+    ///      accesses collapsed into one load and one store.
+    ///
+    ///      EQUIVALENT SOLIDITY:
+    ///
+    ///          uint48 exp = a.expiration;
+    ///          if (exp != 0 && block.timestamp > exp) revert AllowanceExpired(exp);
+    ///          uint160 cur = a.amount;
+    ///          if (cur != type(uint160).max) {
+    ///              if (cur < amount) revert InsufficientAllowance(cur);
+    ///              unchecked { a.amount = cur - amount; }
+    ///          }
+    ///
+    ///      `nonce` is preserved verbatim by the masked write-back, so the field-level
+    ///      form above and this one leave identical storage.
     function _spend(PackedAllowance storage a, uint160 amount) private {
-        uint48 exp = a.expiration;
+        uint256 packed;
+        /// @solidity memory-safe-assembly
+        assembly {
+            packed := sload(a.slot)
+        }
+        // Layout (see {IPermit3.PackedAllowance}): amount [0,160) | expiration
+        // [160,208) | nonce [208,256).
+        uint48 exp = uint48(packed >> 160);
         // expiration == 0 means "no expiration" — matches Permit2 ergonomics
         if (exp != 0 && block.timestamp > exp) revert AllowanceExpired(exp);
 
-        uint160 cur = a.amount;
+        uint160 cur = uint160(packed);
         // type(uint160).max == "infinite, do not decrement"
         if (cur != type(uint160).max) {
             if (cur < amount) revert InsufficientAllowance(cur);
             unchecked {
-                a.amount = cur - amount;
+                // Replace the low 160 bits; expiration + nonce carry over untouched.
+                uint256 next = (packed & ~uint256(type(uint160).max)) | uint256(cur - amount);
+                /// @solidity memory-safe-assembly
+                assembly {
+                    sstore(a.slot, next)
+                }
             }
         }
     }

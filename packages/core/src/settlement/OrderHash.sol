@@ -92,73 +92,268 @@ library OrderHash {
         }
     }
 
-    function _hashLegsIn(LegIn[] calldata legs) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](legs.length);
-        uint256 len = legs.length;
-        for (uint256 i; i < len;) {
-            hashes[i] = keccak256(abi.encode(LEG_IN_TYPEHASH, legs[i].token, legs[i].start, legs[i].end));
-            unchecked {
-                ++i;
+    // ──────────────────── EIP-712 array members ────────────────────
+    //
+    // Every `_hash*` helper below hashes an EIP-712 array member the same way:
+    // accumulate the per-element struct hashes into a raw contiguous run in scratch
+    // memory (above the free-memory pointer, never bumped — the run is consumed by
+    // the final `keccak256` and never needs to outlive it), then hash that run in
+    // place. That is exactly `keccak256(abi.encodePacked(elementHashes))`, minus the
+    // `bytes32[]` allocation, its per-element bounds-checked stores, and the
+    // `encodePacked` copy. Each element's preimage is built in a fixed scratch buffer
+    // parked just past the run, so no allocation scales with array length.
+    //
+    // READING THESE: each helper carries the plain-Solidity version it replaces, as
+    // an `EQUIVALENT SOLIDITY` block — that is the specification, and the assembly is
+    // an optimization of it. The equivalence is not merely asserted in prose: those
+    // exact bodies are re-implemented as the reference in
+    // `test/HashDifferential.t.sol`, which fuzzes them against these across every
+    // array-length shape (including empty) and mutation-tests that the comparison
+    // actually bites. `test/HashGolden.t.sol` additionally pins one canonical order
+    // to a committed digest that the TypeScript SDK asserts too.
+    //
+    // The one place the assembly is NOT a literal transcription is address (and
+    // `uint32`) MASKING — see {_hashLegsIn}.
+    //
+    /// @dev `LegIn` is a STATIC struct, so `legs` is a contiguous run of 3 calldata
+    ///      words per element — already laid out exactly as the `abi.encode` of its
+    ///      three fields. So the whole helper collapses to: one 4-word scratch buffer
+    ///      (typehash written once, before the loop), three `calldataload`s per
+    ///      element, and the element hashes accumulated into a raw memory run that is
+    ///      hashed in place. That drops, per element, the `abi.encode` allocation and
+    ///      the bounds-checked `bytes32[]` store — and drops the array allocation
+    ///      entirely.
+    ///
+    ///      EQUIVALENT SOLIDITY:
+    ///
+    ///          bytes32[] memory h = new bytes32[](legs.length);
+    ///          for (uint256 i; i < legs.length; ++i) {
+    ///              h[i] = keccak256(
+    ///                  abi.encode(LEG_IN_TYPEHASH, legs[i].token, legs[i].start, legs[i].end)
+    ///              );
+    ///          }
+    ///          return keccak256(abi.encodePacked(h));
+    ///
+    ///      ⚠ THE ONE NON-TRANSCRIPTION — the `token` word is MASKED, not copied
+    ///      verbatim. `abi.encode` cleans an address's upper 12 bytes; raw calldata
+    ///      words need not be clean, and Solidity's calldata decoder does NOT reject
+    ///      dirty padding here (verified by mutation test), so a plain `calldatacopy`
+    ///      would let those junk bits reach the digest.
+    ///
+    ///      To be precise about the consequence: this is a COMPATIBILITY break, not a
+    ///      theft vector. An unmasked hash still cannot be exploited — a digest the
+    ///      maker never signed authorizes nothing, and every field the fill acts on is
+    ///      read back through Solidity (i.e. masked), so the hash and the execution
+    ///      can never disagree about a value. What it WOULD do is make the on-chain
+    ///      hash depend on padding that a well-formed encoder never varies: the same
+    ///      logical order submitted with dirty padding would hash differently from
+    ///      what the maker and the TypeScript SDK computed, and the fill would revert
+    ///      as unsigned. Masking keeps this byte-identical to `abi.encode` for EVERY
+    ///      input, well-formed or not — which is exactly the property the golden hash
+    ///      and the SDK cross-check assume. Same reasoning for `LegOut.recipient` and
+    ///      for `CurvePoint`'s `uint32`s (`abi.encode` zero-extends those).
+    ///      `test_dirtyAddressPadding_doesNotChangeHash` is the regression guard.
+    function _hashLegsIn(LegIn[] calldata legs) private pure returns (bytes32 out) {
+        bytes32 typeHash = LEG_IN_TYPEHASH;
+        /// @solidity memory-safe-assembly
+        assembly {
+            // Scratch above the free-memory pointer, never bumped: the element-hash
+            // run lives at [hashes, end), the 4-word element buffer just past it.
+            let hashes := mload(0x40)
+            let end := add(hashes, shl(5, legs.length))
+            let buf := end
+            mstore(buf, typeHash) // loop-invariant word 0
+            let src := legs.offset
+            for { let dst := hashes } lt(dst, end) { dst := add(dst, 0x20) } {
+                mstore(add(buf, 0x20), and(calldataload(src), 0xffffffffffffffffffffffffffffffffffffffff))
+                mstore(add(buf, 0x40), calldataload(add(src, 0x20)))
+                mstore(add(buf, 0x60), calldataload(add(src, 0x40)))
+                mstore(dst, keccak256(buf, 0x80))
+                src := add(src, 0x60) // 3 static words per LegIn
             }
+            out := keccak256(hashes, sub(end, hashes))
         }
-        return keccak256(abi.encodePacked(hashes));
     }
 
-    function _hashLegsOut(LegOut[] calldata legs) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](legs.length);
-        uint256 len = legs.length;
-        for (uint256 i; i < len;) {
-            hashes[i] =
-                keccak256(abi.encode(LEG_OUT_TYPEHASH, legs[i].token, legs[i].start, legs[i].end, legs[i].recipient));
-            unchecked {
-                ++i;
+    /// @dev Static-struct calldata walk — see {_hashLegsIn}. `LegOut` is 4 words per
+    ///      element; words 0 (`token`) and 3 (`recipient`) are addresses and so are
+    ///      masked to match `abi.encode`.
+    ///
+    ///      EQUIVALENT SOLIDITY:
+    ///
+    ///          bytes32[] memory h = new bytes32[](legs.length);
+    ///          for (uint256 i; i < legs.length; ++i) {
+    ///              h[i] = keccak256(
+    ///                  abi.encode(
+    ///                      LEG_OUT_TYPEHASH, legs[i].token, legs[i].start, legs[i].end, legs[i].recipient
+    ///                  )
+    ///              );
+    ///          }
+    ///          return keccak256(abi.encodePacked(h));
+    function _hashLegsOut(LegOut[] calldata legs) private pure returns (bytes32 out) {
+        bytes32 typeHash = LEG_OUT_TYPEHASH;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let hashes := mload(0x40)
+            let end := add(hashes, shl(5, legs.length))
+            let buf := end
+            mstore(buf, typeHash)
+            let src := legs.offset
+            for { let dst := hashes } lt(dst, end) { dst := add(dst, 0x20) } {
+                mstore(add(buf, 0x20), and(calldataload(src), 0xffffffffffffffffffffffffffffffffffffffff))
+                mstore(add(buf, 0x40), calldataload(add(src, 0x20)))
+                mstore(add(buf, 0x60), calldataload(add(src, 0x40)))
+                mstore(add(buf, 0x80), and(calldataload(add(src, 0x60)), 0xffffffffffffffffffffffffffffffffffffffff))
+                mstore(dst, keccak256(buf, 0xa0))
+                src := add(src, 0x80) // 4 static words per LegOut
             }
+            out := keccak256(hashes, sub(end, hashes))
         }
-        return keccak256(abi.encodePacked(hashes));
     }
 
-    function _hashCurve(CurvePoint[] calldata curve) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](curve.length);
-        uint256 len = curve.length;
-        for (uint256 i; i < len;) {
-            hashes[i] = keccak256(abi.encode(CURVE_POINT_TYPEHASH, curve[i].timeDelta, curve[i].bumpBps));
-            unchecked {
-                ++i;
+    /// @dev Static-struct calldata walk — see {_hashLegsIn}. `CurvePoint` is 2 words
+    ///      per element, both `uint32`, so both are masked to match `abi.encode`'s
+    ///      zero-extension.
+    ///
+    ///      EQUIVALENT SOLIDITY:
+    ///
+    ///          bytes32[] memory h = new bytes32[](curve.length);
+    ///          for (uint256 i; i < curve.length; ++i) {
+    ///              h[i] = keccak256(
+    ///                  abi.encode(CURVE_POINT_TYPEHASH, curve[i].timeDelta, curve[i].bumpBps)
+    ///              );
+    ///          }
+    ///          return keccak256(abi.encodePacked(h));
+    function _hashCurve(CurvePoint[] calldata curve) private pure returns (bytes32 out) {
+        bytes32 typeHash = CURVE_POINT_TYPEHASH;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let hashes := mload(0x40)
+            let end := add(hashes, shl(5, curve.length))
+            let buf := end
+            mstore(buf, typeHash)
+            let src := curve.offset
+            for { let dst := hashes } lt(dst, end) { dst := add(dst, 0x20) } {
+                mstore(add(buf, 0x20), and(calldataload(src), 0xffffffff))
+                mstore(add(buf, 0x40), and(calldataload(add(src, 0x20)), 0xffffffff))
+                mstore(dst, keccak256(buf, 0x60))
+                src := add(src, 0x40) // 2 static words per CurvePoint
             }
+            out := keccak256(hashes, sub(end, hashes))
         }
-        return keccak256(abi.encodePacked(hashes));
     }
 
-    function _hashItems(Item[] calldata items) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](items.length);
+    /// @dev Same shape as {_hashValidators} — `Item` carries a dynamic `bytes`, so
+    ///      fields are read through Solidity (which also range-checks the `op` enum)
+    ///      and only the encoding is hand-rolled into scratch memory. No masking is
+    ///      needed here: values read through Solidity arrive already cleaned.
+    ///
+    ///      EQUIVALENT SOLIDITY:
+    ///
+    ///          bytes32[] memory h = new bytes32[](items.length);
+    ///          for (uint256 i; i < items.length; ++i) {
+    ///              h[i] = keccak256(
+    ///                  abi.encode(
+    ///                      ITEM_TYPEHASH,
+    ///                      uint8(items[i].op),
+    ///                      items[i].module,
+    ///                      items[i].amount,
+    ///                      items[i].recipient,
+    ///                      keccak256(items[i].data)
+    ///                  )
+    ///              );
+    ///          }
+    ///          return keccak256(abi.encodePacked(h));
+    function _hashItems(Item[] calldata items) private pure returns (bytes32 out) {
+        bytes32 typeHash = ITEM_TYPEHASH;
         uint256 len = items.length;
+        uint256 hashes;
+        uint256 buf;
+        /// @solidity memory-safe-assembly
+        assembly {
+            hashes := mload(0x40)
+            buf := add(hashes, shl(5, len))
+        }
         for (uint256 i; i < len;) {
-            hashes[i] = keccak256(
-                abi.encode(
-                    ITEM_TYPEHASH,
-                    uint8(items[i].op),
-                    items[i].module,
-                    items[i].amount,
-                    items[i].recipient,
-                    keccak256(items[i].data)
-                )
-            );
+            Item calldata item = items[i];
+            uint256 op = uint8(item.op); // Solidity range-checks the enum here
+            address module = item.module;
+            uint256 amount = item.amount;
+            address recipient = item.recipient;
+            bytes calldata data = item.data;
+            /// @solidity memory-safe-assembly
+            assembly {
+                calldatacopy(buf, data.offset, data.length)
+                let dataHash := keccak256(buf, data.length)
+                mstore(buf, typeHash)
+                mstore(add(buf, 0x20), op)
+                mstore(add(buf, 0x40), module)
+                mstore(add(buf, 0x60), amount)
+                mstore(add(buf, 0x80), recipient)
+                mstore(add(buf, 0xa0), dataHash)
+                mstore(add(hashes, shl(5, i)), keccak256(buf, 0xc0))
+            }
             unchecked {
                 ++i;
             }
         }
-        return keccak256(abi.encodePacked(hashes));
+        /// @solidity memory-safe-assembly
+        assembly {
+            out := keccak256(hashes, shl(5, len))
+        }
     }
 
-    function _hashValidators(Validator[] calldata validators) private pure returns (bytes32) {
-        bytes32[] memory hashes = new bytes32[](validators.length);
+    /// @dev `Validator` carries a dynamic `bytes`, so its calldata is not a flat run
+    ///      and {_hashLegsIn}'s pure-calldata walk does not apply. The fields are
+    ///      still read through Solidity — keeping the ABI decoder's offset/bounds
+    ///      validation — and only the ENCODING moves to assembly: the element
+    ///      preimage is built in scratch above the free-memory pointer, and the
+    ///      element hashes accumulate into a raw run instead of an allocated
+    ///      `bytes32[]`. That removes, per element, the `abi.encode` buffer and the
+    ///      memory `keccak256(data)` copy, plus the array allocation once.
+    ///
+    ///      EQUIVALENT SOLIDITY:
+    ///
+    ///          bytes32[] memory h = new bytes32[](validators.length);
+    ///          for (uint256 i; i < validators.length; ++i) {
+    ///              h[i] = keccak256(
+    ///                  abi.encode(
+    ///                      VALIDATOR_TYPEHASH, validators[i].target, keccak256(validators[i].data)
+    ///                  )
+    ///              );
+    ///          }
+    ///          return keccak256(abi.encodePacked(h));
+    function _hashValidators(Validator[] calldata validators) private pure returns (bytes32 out) {
+        bytes32 typeHash = VALIDATOR_TYPEHASH;
         uint256 len = validators.length;
+        uint256 hashes;
+        uint256 buf;
+        /// @solidity memory-safe-assembly
+        assembly {
+            hashes := mload(0x40)
+            buf := add(hashes, shl(5, len)) // element scratch, past the hash run
+        }
         for (uint256 i; i < len;) {
-            hashes[i] = keccak256(abi.encode(VALIDATOR_TYPEHASH, validators[i].target, keccak256(validators[i].data)));
+            address target = validators[i].target;
+            bytes calldata data = validators[i].data;
+            /// @solidity memory-safe-assembly
+            assembly {
+                // Hash `data` straight out of calldata (keccak has no calldata form,
+                // so it must be copied — but into scratch, not an allocation).
+                calldatacopy(buf, data.offset, data.length)
+                let dataHash := keccak256(buf, data.length)
+                mstore(buf, typeHash)
+                mstore(add(buf, 0x20), target) // read via Solidity ⇒ already masked
+                mstore(add(buf, 0x40), dataHash)
+                mstore(add(hashes, shl(5, i)), keccak256(buf, 0x60))
+            }
             unchecked {
                 ++i;
             }
         }
-        return keccak256(abi.encodePacked(hashes));
+        /// @solidity memory-safe-assembly
+        assembly {
+            out := keccak256(hashes, shl(5, len))
+        }
     }
 }

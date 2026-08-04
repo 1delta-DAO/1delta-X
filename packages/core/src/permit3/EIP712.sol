@@ -39,7 +39,24 @@ contract EIP712 {
     }
 
     /// @notice Creates an EIP-712 typed data hash
-    function _hashTypedData(bytes32 dataHash) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), dataHash));
+    /// @dev Built in SCRATCH SPACE rather than an allocated 66-byte buffer: the
+    ///      preimage is a fixed 66 bytes, so `abi.encodePacked`'s allocation + copy
+    ///      was pure overhead. Writes at 0x1e..0x60 (borrowing the free-memory-pointer
+    ///      word, then restoring it) and hashes in place. Identical digest.
+    ///
+    ///      EQUIVALENT SOLIDITY:
+    ///
+    ///          return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), dataHash));
+    function _hashTypedData(bytes32 dataHash) internal view returns (bytes32 digest) {
+        bytes32 domain = DOMAIN_SEPARATOR();
+        /// @solidity memory-safe-assembly
+        assembly {
+            let fmp := mload(0x40)
+            mstore(0x00, 0x1901)
+            mstore(0x20, domain)
+            mstore(0x40, dataHash)
+            digest := keccak256(0x1e, 0x42)
+            mstore(0x40, fmp)
+        }
     }
 }

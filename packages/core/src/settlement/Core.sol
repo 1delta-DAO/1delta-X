@@ -514,7 +514,8 @@ abstract contract Core is Base {
         // `recipient` when redirected (see {FillCtx.payTo}). Destination only:
         // authority (exclusivity, validators, output pulls) stays on `ctx.filler`.
         address payTo = ctx.payTo;
-        for (uint256 i; i < order.legsIn.length; i++) {
+        uint256 n = order.legsIn.length;
+        for (uint256 i; i < n;) {
             uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}
             if (ctx.receipts.length != 0) ctx.receipts[i] = owed; // see {FillCtx.receipts}
             address tokenIn = order.legsIn[i].token;
@@ -528,9 +529,7 @@ abstract contract Core is Base {
                 // the maker — never stranded in Settlement (there is no sweep).
                 // Zero-guarded against no-op transfers on strict tokens.
                 if (proceeds != 0) SafeTransferLib.safeTransfer(tokenIn, maker, proceeds);
-                continue;
-            }
-            if (proceeds >= owed) {
+            } else if (proceeds >= owed) {
                 SafeTransferLib.safeTransfer(tokenIn, payTo, owed);
                 unchecked {
                     uint256 surplus = proceeds - owed; // proceeds >= owed
@@ -541,6 +540,9 @@ abstract contract Core is Base {
                 unchecked {
                     Permit3TransferLib.transferFromWithFallback(PERMIT3, tokenIn, maker, payTo, owed - proceeds); // owed > proceeds
                 }
+            }
+            unchecked {
+                ++i;
             }
         }
     }

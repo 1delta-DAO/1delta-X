@@ -48,10 +48,39 @@ library Permit3TransferLib {
         if (amount <= type(uint160).max) {
             // Low-level call so a Permit3 failure is caught rather than reverting,
             // exactly as Euler wraps the Permit2 leg. `transferFrom` is overloaded
-            // on IPermit3, so the single-leg selector is pinned explicitly.
-            (ok,) = address(permit3).call(
-                abi.encodeWithSignature("transferFrom(address,address,address,uint160)", from, to, token, uint160(amount))
-            );
+            // on IPermit3, so the single-leg selector is pinned explicitly:
+            // `transferFrom(address,address,address,uint160)` == 0x9fc0d7da.
+            //
+            // Built in scratch memory ABOVE the free-memory pointer WITHOUT bumping
+            // it (permitted for memory-safe assembly — the bytes are consumed by the
+            // CALL and never need to outlive it). The `abi.encodeWithSignature` this
+            // replaces allocated a fresh 132-byte buffer on EVERY output delivery and
+            // every input shortfall pull; this allocates nothing.
+            //
+            // EQUIVALENT SOLIDITY:
+            //
+            //     (ok,) = address(permit3).call(
+            //         abi.encodeWithSignature(
+            //             "transferFrom(address,address,address,uint160)",
+            //             from, to, token, uint160(amount)
+            //         )
+            //     );
+            //
+            // (Return data is ignored in both forms — a successful call means the
+            // transfer happened; see the `InvalidPermit3` constructor check that makes
+            // "success with empty returndata" safe to trust.)
+            /// @solidity memory-safe-assembly
+            assembly {
+                let p := mload(0x40)
+                mstore(p, 0x9fc0d7da)
+                mstore(add(p, 0x20), and(from, 0xffffffffffffffffffffffffffffffffffffffff))
+                mstore(add(p, 0x40), and(to, 0xffffffffffffffffffffffffffffffffffffffff))
+                mstore(add(p, 0x60), and(token, 0xffffffffffffffffffffffffffffffffffffffff))
+                mstore(add(p, 0x80), amount) // already <= type(uint160).max
+                // Selector occupies the LAST 4 bytes of the first word, so the
+                // calldata starts at p+0x1c and runs 4 + 4*32 = 0x84 bytes.
+                ok := call(gas(), permit3, 0, add(p, 0x1c), 0x84, 0x00, 0x00)
+            }
         }
         if (!ok) SafeTransferLib.safeTransferFrom(token, from, to, amount);
     }

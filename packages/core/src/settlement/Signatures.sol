@@ -49,6 +49,28 @@ abstract contract Signatures is OrderState {
         return keccak256(abi.encode(_DOMAIN_TYPEHASH, _HASHED_NAME, _HASHED_VERSION, block.chainid, address(this)));
     }
 
+    /// @dev `keccak256(abi.encodePacked("\x19\x01", domain, structHash))` built in
+    ///      SCRATCH SPACE instead of an allocated 66-byte buffer. `encodePacked`
+    ///      allocated + copied on every fill for a fixed 66-byte preimage; this
+    ///      writes it at 0x1e..0x60 (borrowing the free-memory-pointer word, then
+    ///      restoring it) and hashes in place. Identical digest.
+    ///
+    ///      EQUIVALENT SOLIDITY:
+    ///
+    ///          return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
+    function _hashTypedData(bytes32 structHash) private view returns (bytes32 digest) {
+        bytes32 domain = DOMAIN_SEPARATOR();
+        /// @solidity memory-safe-assembly
+        assembly {
+            let fmp := mload(0x40)
+            mstore(0x00, 0x1901)
+            mstore(0x20, domain)
+            mstore(0x40, structHash)
+            digest := keccak256(0x1e, 0x42)
+            mstore(0x40, fmp) // restore the free-memory pointer
+        }
+    }
+
     /// @dev Authorize `orderHash` for `expected` (the order's maker). Either the
     ///      empty-sig on-chain-approval path or a real signature over the domain-
     ///      bound digest; reverts if neither authorizes.
@@ -62,7 +84,7 @@ abstract contract Signatures is OrderState {
             if (!orderApproved[expected][orderHash]) revert OrderNotApproved();
             return;
         }
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), orderHash));
+        bytes32 digest = _hashTypedData(orderHash);
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
         SignatureVerification.verify(sig, digest, expected);

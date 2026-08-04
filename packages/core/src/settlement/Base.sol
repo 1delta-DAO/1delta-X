@@ -189,8 +189,12 @@ abstract contract Base is Signatures {
     ///      owns it — `validateOrder` in the SDK checks it, and a maker can pin the
     ///      outcome on-chain with a {MinBalanceInvariant} on the expected token.
     function _executeItems(Order calldata order, FillCtx memory ctx) internal {
-        for (uint256 i; i < order.items.length; i++) {
+        uint256 n = order.items.length;
+        for (uint256 i; i < n;) {
             _executeItem(order, ctx, i);
+            unchecked {
+                ++i;
+            }
         }
     }
 
