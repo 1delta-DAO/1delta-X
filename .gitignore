@@ -2,3 +2,8 @@ node_modules/
 out/
 cache/
 broadcast/
+
+# Fundraising / positioning material — kept locally, never published with the
+# protocol source. Also excluded from the pnpm workspace so a fresh clone (where
+# this directory does not exist) still resolves the lockfile cleanly.
+packages/pitch-deck/
