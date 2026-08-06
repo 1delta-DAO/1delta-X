@@ -53,15 +53,27 @@ library DustHandler {
         Full // 1 — withdraw the full live balance, sweep the excess to the user
     }
 
+    /// @dev A trailing mode word carries a value outside its enum's range. Raised
+    ///      instead of letting the `uint8` narrowing silently discard the high
+    ///      248 bits: `uint256(256)` would otherwise truncate to `0` and read as a
+    ///      well-formed `SweepToUser` / `Exact`, so a malformed (or
+    ///      differently-encoded) blob would be accepted as the DEFAULT mode rather
+    ///      than rejected. The value is part of `ref = keccak256(data)`, so this is
+    ///      a maker-authored encoding error, not a filler-reachable one — but the
+    ///      whole point of the trailing field is that its meaning is unambiguous.
+    error InvalidModeWord(uint256 word);
+
     /// @notice Decode the optional trailing `DustAction` appended after a
     ///         module's `baseLen`-byte fixed base layout. Absent ⇒ SweepToUser.
     /// @dev    Only valid when the base layout is fully static (all the repay
     ///         modules are: addresses / uint256 / a static MarketParams struct),
     ///         so a trailing 32-byte word is unambiguous. An out-of-range value
-    ///         reverts on the enum conversion — acceptable for a malformed blob.
+    ///         reverts {InvalidModeWord} — the check is on the FULL word, before
+    ///         any narrowing.
     function readAction(bytes calldata data, uint256 baseLen) internal pure returns (DustAction) {
         if (data.length < baseLen + 32) return DustAction.SweepToUser;
         uint256 word = uint256(bytes32(data[baseLen:baseLen + 32]));
+        if (word > uint256(type(DustAction).max)) revert InvalidModeWord(word);
         return DustAction(uint8(word));
     }
 
@@ -69,9 +81,15 @@ library DustHandler {
     ///         module's `baseLen`-byte fixed base layout. Absent ⇒ Exact.
     /// @dev    Since a taker item's allowance ref is `keccak256(data)`, the mode
     ///         is part of the maker-approved bytes — authorized by construction.
+    ///         Out-of-range reverts {InvalidModeWord}; see `readAction`. Silently
+    ///         truncating to `Exact` would be the more dangerous default here — a
+    ///         maker who encoded `Full` in a wider word would get an exact
+    ///         withdraw, and the `FullFillGuard` total they appended after the
+    ///         mode slot would go unread.
     function readBalanceMode(bytes calldata data, uint256 baseLen) internal pure returns (BalanceMode) {
         if (data.length < baseLen + 32) return BalanceMode.Exact;
         uint256 word = uint256(bytes32(data[baseLen:baseLen + 32]));
+        if (word > uint256(type(BalanceMode).max)) revert InvalidModeWord(word);
         return BalanceMode(uint8(word));
     }
 

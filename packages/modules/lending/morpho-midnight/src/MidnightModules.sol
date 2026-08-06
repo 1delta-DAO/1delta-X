@@ -77,10 +77,17 @@ contract MidnightSupplyCollateralModule is IMakerModule {
         address collateralToken = market.collateralParams[collateralIndex].token;
 
         permit3.transferFrom(onBehalfOf, address(this), collateralToken, uint160(amount));
-        // `midnight` is an immutable, trusted target → a standing max approval is
-        // safe and skips the approve SSTORE on repeat supplies.
-        SafeTransferLib.ensureApproval(collateralToken, address(midnight), amount);
+        // Scoped approve + clear, NOT a standing max approval. `midnight` being an
+        // immutable, trusted target is not sufficient here: Midnight's `take` pulls
+        // the buy-side assets from a payer that the CALLER names (`takerCallback`,
+        // falling back to `msg.sender` only when it is zero). So any external
+        // account can call `take` designating THIS module as the payer, and a
+        // standing allowance is what would let that pull succeed against whatever
+        // the module holds. Approving exactly what this call funds — and clearing
+        // the remainder — removes the standing grant the attack depends on.
+        SafeTransferLib.forceApprove(collateralToken, address(midnight), amount);
         midnight.supplyCollateral(market, collateralIndex, amount, onBehalfOf);
+        SafeTransferLib.forceApprove(collateralToken, address(midnight), 0);
     }
 }
 
@@ -126,9 +133,12 @@ contract MidnightRepayModule is IMakerModule {
         if (toRepay > 0) {
             address loanToken = market.loanToken;
             permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(toRepay));
-            SafeTransferLib.ensureApproval(loanToken, address(midnight), toRepay);
+            // Scoped, then cleared — see the supply module for why a standing max
+            // approval to Midnight is not safe despite `midnight` being immutable.
+            SafeTransferLib.forceApprove(loanToken, address(midnight), toRepay);
             // callback = 0 ⇒ Midnight pulls the loan token from this module.
             midnight.repay(market, toRepay, onBehalfOf, address(0), "");
+            SafeTransferLib.forceApprove(loanToken, address(midnight), 0);
         }
 
         _locked = 1;
@@ -159,6 +169,7 @@ contract MidnightLendModule is IMakerModule {
 
     error Reentrancy();
     error NotSettlement();
+    error WrongOfferSide();
 
     constructor(address _permit3, address _midnight, address _settlement) {
         permit3 = IPermit3(_permit3);
@@ -172,15 +183,32 @@ contract MidnightLendModule is IMakerModule {
         _locked = 2;
 
         (Offer memory offer, bytes memory ratifierData, uint256 units) = abi.decode(data, (Offer, bytes, uint256));
+        // This module is the LEND leg: the taker must be the buyer/lender, which
+        // Midnight selects with `offer.buy == false`. The flag is decoded from the
+        // order's `data` and drives the entire meaning of the `take` below, but
+        // nothing downstream re-derives it — so an order carrying `buy == true`
+        // silently inverts the leg. The maker would become the SELLER/borrower:
+        // they would take on debt instead of lending, and the `sellerAssets`
+        // proceeds would route to `receiverIfTakerIsSeller`, which this call
+        // hard-codes to `address(0)` — the borrowed funds are burned and the
+        // maker keeps the debt. Assert the side rather than trusting the encoder.
+        if (offer.buy) revert WrongOfferSide();
         address loanToken = offer.market.loanToken;
 
         // Pull the maker-signed loan-token budget; Midnight pulls the exact
         // `buyerAssets` (≤ budget) from this module via the zero-callback path.
         permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(amount));
-        SafeTransferLib.ensureApproval(loanToken, address(midnight), amount);
+        // Approve EXACTLY the budget and clear the remainder afterwards. A standing
+        // max approval would let any later `take` — under a different maker's offer
+        // in a different fill — pull this module's whole balance, and `take`'s payer
+        // on the buy side is simply `msg.sender`, i.e. this module. Scoping the
+        // allowance to the amount actually funded keeps a fill's exposure to the
+        // funds that fill pulled in.
+        SafeTransferLib.forceApprove(loanToken, address(midnight), amount);
         // taker = maker (gains the credit); receiver arg is the seller-side sink,
         // unused on the buy side; takerCallback = 0 ⇒ module is the payer.
         midnight.take(offer, ratifierData, units, onBehalfOf, address(0), address(0), "");
+        SafeTransferLib.forceApprove(loanToken, address(midnight), 0);
 
         // Sweep the unspent budget back to the maker (never to a caller).
         uint256 residual = IERC20(loanToken).balanceOf(address(this));
@@ -316,6 +344,7 @@ contract MidnightBorrowModule is ITakerModule {
 
     error OnlyPermit3();
     error InsufficientProceeds();
+    error WrongOfferSide();
 
     constructor(address _permit3, address _midnight) {
         permit3 = IPermit3(_permit3);
@@ -329,6 +358,14 @@ contract MidnightBorrowModule is ITakerModule {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         (Offer memory offer, bytes memory ratifierData, uint256 units) = abi.decode(data, (Offer, bytes, uint256));
+        // The BORROW leg's mirror of the lend-side assertion: the taker must be the
+        // seller/borrower, i.e. `offer.buy == true`. With `buy == false` the maker
+        // becomes the buyer/lender and Midnight pulls `buyerAssets` from the payer
+        // (`msg.sender` — this module) instead of paying out, so a value-OUT leg
+        // silently turns into a value-IN one. It only fails closed today by
+        // accident: the module keeps no allowance to Midnight, so the pull reverts.
+        // Assert the side so the leg's direction never rests on that.
+        if (!offer.buy) revert WrongOfferSide();
         address loanToken = offer.market.loanToken;
 
         uint256 before = IERC20(loanToken).balanceOf(address(this));

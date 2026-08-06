@@ -325,12 +325,41 @@ Settlement never grants an ERC20 approval and is not payable; EIP-712 typehash
 ordering and the hand-rolled `OrderHash` buffer; signature malleability (order replay
 is bounded by `filled[orderHash]`, permit replay by the nonce bitmap).
 
-**Known open items** are tracked separately — see the repository issue list. The
-notable ones: the Midnight pair (unchecked `offer.buy`; `ensureApproval` with a
-caller-designatable payer), Aave v4 forwarding nominal rather than measured amounts,
-Fluid's `nftId == 0` stranding a deposit, `DustHandler` truncating with `uint8(word)`
-*before* the enum bounds check, and solver F3/F4/F5. `RiverModules` still needs
-fork validation against a live deployment.
+---
+
+## Audit (2026-08-06): the remaining open items
+
+The items previously carried as "known open" are now closed. All five code defects
+are fixed in the working tree, each with a regression test; the two marked ✓mut
+were **mutation-tested** — the guard was removed and the test confirmed to fail —
+so the coverage is known to be load-bearing. The whole repo is green
+(**758 tests across 119 suites, 23 packages**), fork tests included. The core gas
+baseline is unchanged: every deterministic entry in `.gas-snapshot` held, so none
+of these guards sit on the settlement hot path.
+
+| ID | Severity | Component | Finding | Fix |
+|----|----------|-----------|---------|-----|
+| M-9 | Medium | `MidnightSupplyCollateral/Repay/Lend`, `MidnightLoopCallback` | The modules granted Midnight a standing `type(uint256).max` allowance via `ensureApproval`, on the usual "immutable, trusted singleton" reasoning. That reasoning does not hold for Midnight: `take` lets the CALLER nominate the payer (`takerCallback`, falling back to `msg.sender` only when zero), so any external account can call `take` designating a module as the payer. The standing allowance is the enabling condition for that pull. | Approvals scoped to the amount each call funds and cleared afterwards (`forceApprove(…, amount)` → call → `forceApprove(…, 0)`). Asserted directly: no module retains an allowance to Midnight after any maker leg. |
+| M-10 | Medium | `AaveV4WithdrawModule` (Exact), `AaveV4BorrowModule` | Both forwarded NOMINAL amounts — the PM's reported `assets`, and for borrow the requested `amount` with the return value ignored outright. Neither figure is a claim about the module's balance, so an under-delivering op was silently topped up from any balance the module happened to hold and paid to the order, while the user kept the full debt. The H-3 River shape; the module's own `Full` branch already measured. | Measure the balance delta on both legs, `require` at or above the signed amount, route any surplus to `onBehalfOf`. |
+| M-11 | Medium | `MidnightLendModule`, `MidnightBorrowModule` | `offer.buy` was decoded and used but never checked against the leg's role, and Midnight derives who pays and who receives entirely from that flag. An order carrying the wrong value inverted the leg: the lend leg would make the maker a *borrower* and send the proceeds to the hard-coded `address(0)` — debt kept, funds burned. The borrow leg would flip a value-OUT leg into a value-IN pull. | Each leg asserts its side (`WrongOfferSide`); the lend-side check fires before the module takes custody. |
+| L-7 | Low | `FluidDepositModule`, `FluidRepayModule` | Fluid overloads `nftId == 0` as "open a NEW position", and `operate` mints it to `msg.sender` — the module. The single-op legs have no NFT custody or hand-off step, so a deposit signed with the sentinel supplied the user's collateral into a position owned by the module forever. Not theft (nobody can reach it), but the funds are gone. | `FluidBase._requireExistingPosition` rejects the sentinel before the Permit3 pull. Opening a position remains `FluidOperateModule`'s Open path, which captures the minted id and hands the NFT to the user. |
+| L-8 | Low ✓mut | `DustHandler` | `readAction` / `readBalanceMode` narrowed the trailing mode word with `uint8(word)` *before* the enum conversion, so the high 248 bits were discarded and never range-checked. `word = 256` did not revert as out-of-range — it truncated to `0` and read as a well-formed *default* mode, contradicting the library's own docstring. Maker-authored (the value is inside `ref = keccak256(data)`), not filler-reachable. | Range-check the FULL word before narrowing; out-of-range reverts `InvalidModeWord`. |
+
+**Solver F3/F4/F5** (from the item-aware netted-settle review) are resolved as
+documentation and test, not code: F3 is the documented constraint above ([A TAKE
+item's proceeds token must appear in `order.legsIn`](#a-take-items-proceeds-token-must-appear-in-orderlegsin));
+F4's "cheap future guard" is now `NoApprovalsInvariantTest`, which pins the
+Settlement-grants-no-approval assumption the batch completeness argument rests on;
+F5 is an accepted gas cost on a deliberate non-hot path.
+
+**`RiverModules` fork validation** is in place — `test/leverage/Leverage.t.sol`
+forks Hemi (River's live deployment) at the real `XAPP` / `TroveManager` /
+`satUSD` addresses and exercises open, leverage, partial-fill and the
+missing-delegate revert. All four pass.
+
+**No open items remain from the 06-18 / 07-29 audits.** Note that all three audits
+to date are **internal**; the protocol has not been reviewed by an external firm,
+and nothing in this repository is deployed.
 
 ---
 

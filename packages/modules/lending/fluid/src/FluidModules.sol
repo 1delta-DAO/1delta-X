@@ -74,6 +74,24 @@ abstract contract FluidBase {
         SafeTransferLib.forceApprove(token, vault, amount);
     }
 
+    /// @dev A single-op module was handed the "open a fresh position" sentinel.
+    error FreshPositionUnsupported();
+
+    /// @dev Reject `nftId == 0` on the single-op legs. Fluid treats `0` as "mint a
+    ///      NEW position", and `operate` mints it to `msg.sender` — this module.
+    ///      These legs never take NFT custody and have no hand-off step, so the
+    ///      freshly minted position (and the collateral just supplied into it)
+    ///      would be stranded in the module permanently, owned by a contract with
+    ///      no transfer path. It is not a theft — nobody can reach it either — but
+    ///      the user's funds are gone, which is worse than a revert.
+    ///
+    ///      Opening a position is `FluidOperateModule`'s Open path, which is built
+    ///      for it: it captures the minted `id` from `operate`'s return value and
+    ///      hands the NFT to the user in the same call.
+    function _requireExistingPosition(uint256 nftId) internal pure {
+        if (nftId == 0) revert FreshPositionUnsupported();
+    }
+
     /// @dev `uint256 → int256` guarding the high bit (always true for real amounts).
     function _signed(uint256 x) internal pure returns (int256) {
         require(x <= uint256(type(int256).max), "amount overflow");
@@ -92,8 +110,10 @@ abstract contract FluidBase {
 // Single-op maker: pulls the vault's collateral token from the user via Permit3,
 // then supplies it into the user's existing position. Permissionless on Fluid's
 // side — no NFT grant needed; only a Permit3 token allowance. `nftId` must be an
-// existing position (a fresh position would mint to this module; open a new one
-// via `FluidOperateModule` Open instead). ERC20 collateral only.
+// existing position — `nftId == 0` (Fluid's "mint a fresh position" sentinel) is
+// REJECTED, since the new NFT would mint to this module and strand the supplied
+// collateral; open a new position via `FluidOperateModule` Open instead. ERC20
+// collateral only.
 //
 // `data = abi.encode(address vault, address collateralToken, uint256 nftId)`.
 //
@@ -110,6 +130,7 @@ contract FluidDepositModule is IMakerModule, FluidBase {
         if (msg.sender != settlement) revert NotSettlement();
 
         (address vault, address collateralToken, uint256 nftId) = abi.decode(data, (address, address, uint256));
+        _requireExistingPosition(nftId);
 
         _pullAndApprove(collateralToken, amount, onBehalfOf, vault);
         IFluidVault(vault).operate(nftId, _signed(amount), 0, address(0));
@@ -146,6 +167,7 @@ contract FluidRepayModule is IMakerModule, FluidBase {
         _locked = 2;
 
         (address vault, address debtToken, uint256 nftId) = abi.decode(data, (address, address, uint256));
+        _requireExistingPosition(nftId);
 
         if (amount > 0) {
             _pullAndApprove(debtToken, amount, onBehalfOf, vault);

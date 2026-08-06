@@ -87,8 +87,14 @@ contract MidnightLoopCallback is ISellCallback {
         // ...and supply it into the borrower's position BEFORE Midnight's solvency
         // check, so the new debt is collateralized within the same fill.
         // `supplyCollateral` is a benign inflow → no borrower authorization needed.
-        SafeTransferLib.ensureApproval(collateralToken, address(midnight), collateralOut);
+        // Scoped approve + clear rather than a standing max grant: Midnight's
+        // `take` lets an arbitrary caller nominate the payer via `takerCallback`,
+        // so a lingering allowance from this contract to Midnight is pullable by
+        // anyone. This contract is meant to hold no funds between fills, and the
+        // cleared approval is what keeps that true even if a swap leaves residue.
+        SafeTransferLib.forceApprove(collateralToken, address(midnight), collateralOut);
         midnight.supplyCollateral(market, collateralIndex, collateralOut, seller);
+        SafeTransferLib.forceApprove(collateralToken, address(midnight), 0);
 
         return CALLBACK_SUCCESS;
     }
@@ -99,7 +105,10 @@ contract MidnightLoopCallback is ISellCallback {
         private
         returns (uint256)
     {
-        SafeTransferLib.ensureApproval(tokenIn, address(router), amountIn);
+        // `router` is immutable, but the allowance is still scoped to this swap and
+        // cleared by the router consuming exactly `amountIn`; approving max here
+        // would leave a permanent grant over a token this contract may later hold.
+        SafeTransferLib.forceApprove(tokenIn, address(router), amountIn);
         return router.exactInputSingle(
             IUniV3Router.ExactInputSingleParams({
                 tokenIn: tokenIn,

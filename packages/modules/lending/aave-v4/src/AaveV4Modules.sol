@@ -217,9 +217,24 @@ contract AaveV4WithdrawModule is ITakerModule {
             SafeTransferLib.safeTransfer(asset, receiver, amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
-            (, uint256 assets) =
-                ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
-            SafeTransferLib.safeTransfer(asset, receiver, assets);
+            // Measure what actually landed rather than forwarding the PM's
+            // REPORTED `assets`. The two can differ (fee-on-transfer underlying,
+            // share→asset rounding, a spoke that partially fills), and the
+            // reported figure is not a claim about this module's balance: on a
+            // short delivery a nominal transfer silently covers the gap from
+            // whatever else the module happens to hold, paying the order out of a
+            // stray balance. Same rule as the `Full` branch above and the M-4 fix
+            // applied to the other packages — forward a measured delta, fail
+            // closed below it.
+            uint256 balBefore = IERC20(asset).balanceOf(address(this));
+            ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
+            uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+            require(received >= amount, "insufficient withdrawn");
+            SafeTransferLib.safeTransfer(asset, receiver, amount);
+            // A withdraw that over-delivers (rounding in the user's favour) must
+            // not leave the surplus parked in the module for the next fill to
+            // sweep — it belongs to the position owner.
+            if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         }
     }
 }
@@ -247,9 +262,19 @@ contract AaveV4BorrowModule is ITakerModule {
         (address spoke, address positionManager, uint256 reserveId, address asset) =
             abi.decode(data, (address, address, uint256, address));
 
-        // Borrow lands `amount` of `asset` at this module (the caller).
+        // Borrow lands the proceeds of `asset` at this module (the caller). Measure
+        // the delta rather than assuming the requested `amount` arrived: an
+        // under-delivering borrow (fee-on-transfer underlying, a capped or
+        // partially-filled spoke) would otherwise be topped up from any balance
+        // the module happens to hold and paid to the solver, while the user keeps
+        // the full debt — the H-3 River shape. Fail closed instead.
+        uint256 balBefore = IERC20(asset).balanceOf(address(this));
         ITakerPositionManager(positionManager).borrowOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
+        uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+        require(received >= amount, "insufficient borrowed");
         // Forward to Permit3's requested receiver (Settlement in our flow).
         SafeTransferLib.safeTransfer(asset, receiver, amount);
+        // Any excess is the user's, not the next fill's.
+        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }
 }
