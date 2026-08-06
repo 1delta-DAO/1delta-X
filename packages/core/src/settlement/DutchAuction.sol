@@ -85,7 +85,12 @@ library DutchAuction {
             } else if (elapsed >= curve[n - 1].timeDelta) {
                 bps = curve[n - 1].bumpBps;
             } else {
-                for (uint256 k; k < n - 1; k++) {
+                // `n - 1` is deliberately left IN the condition. Hoisting it to a
+                // local measured WORSE: this loop almost always matches on its first
+                // iteration (curves are a handful of points), so the extra local
+                // costs more than the re-subtraction it saves. The unchecked
+                // increment is a clean win — `k < n - 1` cannot overflow.
+                for (uint256 k; k < n - 1;) {
                     uint256 t1 = curve[k + 1].timeDelta;
                     if (elapsed < t1) {
                         uint256 t0 = curve[k].timeDelta;
@@ -97,6 +102,9 @@ library DutchAuction {
                             ? b0 + ((b1 - b0) * (elapsed - t0)) / span
                             : b0 - ((b0 - b1) * (elapsed - t0)) / span;
                         break;
+                    }
+                    unchecked {
+                        ++k;
                     }
                 }
             }

@@ -42,8 +42,9 @@ abstract contract Batch is Core {
     ///      context's token universe). Sibling of `_snapshotInputs`, which takes
     ///      calldata legs.
     function _snapshotBalances(address[] memory tokens) internal view returns (uint256[] memory bals) {
-        bals = new uint256[](tokens.length);
-        for (uint256 k; k < tokens.length;) {
+        uint256 n = tokens.length;
+        bals = new uint256[](n);
+        for (uint256 k; k < n;) {
             bals[k] = SafeTransferLib.balanceOf(tokens[k], address(this));
             unchecked {
                 ++k;
@@ -496,7 +497,8 @@ abstract contract Batch is Core {
         st.done[i] |= DELIVERED_BIT;
         Order calldata order = orders[i];
         uint256[] memory amts = st.outs[i];
-        for (uint256 j; j < amts.length;) {
+        uint256 n = amts.length;
+        for (uint256 j; j < n;) {
             uint256 amt = amts[j];
             if (amt != 0) {
                 address token = order.legsOut[j].token;
@@ -621,7 +623,9 @@ abstract contract Batch is Core {
         uint256[] memory credit,
         uint256 idx
     ) internal {
-        for (uint256 j; j < order.legsIn.length;) {
+        uint256 n = order.legsIn.length; // hoisted: a calldata STRUCT member's
+        // `.length` costs an offset load plus a length load on every re-read
+        for (uint256 j; j < n;) {
             uint256 owed = owedOf[j];
             uint256 have = credit[j];
             if (have < owed) revert LegUnfunded(idx, j);
@@ -642,7 +646,8 @@ abstract contract Batch is Core {
     ///      instead of silently attributing to slot 0. A linear scan over a handful
     ///      of entries beats any on-chain map.
     function _tokenIndex(address[] memory tokens, address token) private pure returns (uint256) {
-        for (uint256 k; k < tokens.length;) {
+        uint256 n = tokens.length;
+        for (uint256 k; k < n;) {
             if (tokens[k] == token) return k;
             unchecked {
                 ++k;

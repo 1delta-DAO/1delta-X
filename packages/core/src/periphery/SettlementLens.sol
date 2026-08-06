@@ -359,7 +359,8 @@ contract SettlementLens {
     function _makerFillableCap(Order calldata order, uint256 anchor) internal view returns (uint256 cap) {
         cap = type(uint256).max;
         address spender = address(SETTLEMENT);
-        for (uint256 i; i < order.legsIn.length; i++) {
+        uint256 nLegsIn = order.legsIn.length;
+        for (uint256 i; i < nLegsIn; i++) {
             address token = order.legsIn[i].token;
             (uint160 allowed, uint48 expiration,) = PERMIT3.tokenAllowance(order.maker, spender, token);
             uint256 capacity = allowed;
@@ -514,7 +515,8 @@ contract SettlementLens {
         // partial fills — each fill transfers its exact pro-rata slice — and are
         // deliberately allowed through.
         if (order.fillModule == address(0) && order.minFillAnchor != anchor) {
-            for (uint256 s; s < order.items.length; s++) {
+            uint256 nItems = order.items.length;
+            for (uint256 s; s < nItems; s++) {
                 if (order.items[s].op == ItemOp.SETTLE && order.items[s].amount <= 1) {
                     return (false, "settle item requires full-fill");
                 }
@@ -528,7 +530,8 @@ contract SettlementLens {
             if (order.exclusivityOverrideBps > 10_000) return (false, "exclusivityOverrideBps > 10000");
         }
         // ── piecewise auction curve (monotonic time, bounded bump) ──
-        for (uint256 c; c < order.curve.length; c++) {
+        uint256 nCurve = order.curve.length;
+        for (uint256 c; c < nCurve; c++) {
             if (order.curve[c].bumpBps > 10_000) return (false, "curve bumpBps > 10000");
             if (c != 0 && order.curve[c].timeDelta <= order.curve[c - 1].timeDelta) {
                 return (false, "curve timeDelta not increasing");
