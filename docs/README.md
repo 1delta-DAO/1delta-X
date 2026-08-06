@@ -86,6 +86,22 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   keeps rejecting funds-less / no-approval orders **O(1) amortized**, with the
   on-chain fill revert as the capital backstop.
 
+## Deployment
+
+- **[deterministic-deployment.md](deterministic-deployment.md)** — landing
+  Permit3, the core, and the bridge package on **identical addresses on every
+  chain** via the shared CREATE2 `DeployFactory`. Covers the constructor-arg
+  dependency chain (and the two contracts that necessarily diverge), the
+  measured fact that our source has only **three** distinct bytecodes across all
+  EVM versions — so portability reduces to **PUSH0 + MCOPY** — and why the
+  `evm_version` is therefore a **global** choice, not a per-chain one. Verdict:
+  compile at **`cancun`**, which puts 38 of the 43 surveyed chains in one
+  address family; only Metis/Taiko/PulseChain/Telos sit a tier below.
+  Includes the dated survey, the compiler settings that must be pinned before
+  the first deploy, the three non-identical factory bytecodes (verified
+  address-equivalent), and an RPC probe that works where the obvious
+  state-override approach silently lies.
+
 ## Security
 
 - **[SECURITY.md](../SECURITY.md)** — the authoritative security document: trust
