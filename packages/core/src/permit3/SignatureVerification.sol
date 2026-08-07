@@ -48,13 +48,27 @@ library SignatureVerification {
             bytes32 r;
             bytes32 s;
             uint8 v;
+            // Read the words STRAIGHT OUT OF CALLDATA. `abi.decode` on a `bytes
+            // calldata` copies the payload into a fresh memory buffer and decodes it
+            // back out; the words are already 32-byte aligned at `signature.offset`,
+            // so the copy was pure overhead — on a path every fill and every permit
+            // runs. `signature[64]` likewise carried a bounds check the enclosing
+            // length test has already made redundant.
             if (signature.length == 65) {
-                (r, s) = abi.decode(signature, (bytes32, bytes32));
-                v = uint8(signature[64]);
+                /// @solidity memory-safe-assembly
+                assembly {
+                    r := calldataload(signature.offset)
+                    s := calldataload(add(signature.offset, 0x20))
+                    v := byte(0, calldataload(add(signature.offset, 0x40)))
+                }
             } else {
                 // EIP-2098 compact
                 bytes32 vs;
-                (r, vs) = abi.decode(signature, (bytes32, bytes32));
+                /// @solidity memory-safe-assembly
+                assembly {
+                    r := calldataload(signature.offset)
+                    vs := calldataload(add(signature.offset, 0x20))
+                }
                 s = vs & UPPER_BIT_MASK;
                 v = uint8(uint256(vs >> 255)) + 27;
             }

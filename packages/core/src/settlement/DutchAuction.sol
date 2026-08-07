@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, CurvePoint} from "./Structs.sol";
+import {Order, CurvePoint, LegIn, LegOut} from "./Structs.sol";
 
 /// @title DutchAuction
 /// @notice Dutch decay pricing. Every leg shares ONE clock and ONE normalized
@@ -127,8 +127,16 @@ library DutchAuction {
     ///         reuses it across every leg. A FIXED leg (`end == 0`) returns `start`
     ///         and ignores `bump`.
     function amountOutAt(Order calldata order, uint256 j, uint256 bump) internal pure returns (uint256) {
-        uint256 startOut = order.legsOut[j].start;
-        uint256 endOut = order.legsOut[j].end;
+        return amountOutAt(order.legsOut[j], bump);
+    }
+
+    /// @notice Leg-pointer form of {amountOutAt}. Identical math; it just lets a
+    ///         caller that has ALREADY resolved `legsOut[j]` reuse that pointer
+    ///         instead of re-resolving the array offset, the length bounds check, and
+    ///         the element offset on every field read. {Pricing} uses this one.
+    function amountOutAt(LegOut calldata leg, uint256 bump) internal pure returns (uint256) {
+        uint256 startOut = leg.start;
+        uint256 endOut = leg.end;
         if (endOut == 0) return startOut; // fixed leg — no bump
         if (startOut < endOut) revert InvalidAuctionParams(); // outputs must FALL
         return startOut - ((startOut - endOut) * bump) / BPS;
@@ -158,8 +166,13 @@ library DutchAuction {
     ///         `pure` counterpart of `amountOutAt`. FIXED leg (`end == 0`) returns
     ///         `start`.
     function amountInAt(Order calldata order, uint256 i, uint256 bump) internal pure returns (uint256) {
-        uint256 startIn = order.legsIn[i].start;
-        uint256 endIn = order.legsIn[i].end;
+        return amountInAt(order.legsIn[i], bump);
+    }
+
+    /// @notice Leg-pointer form of {amountInAt} — see {amountOutAt}'s counterpart.
+    function amountInAt(LegIn calldata leg, uint256 bump) internal pure returns (uint256) {
+        uint256 startIn = leg.start;
+        uint256 endIn = leg.end;
         if (endIn == 0) return startIn; // fixed leg — no bump
         if (startIn > endIn) revert InvalidAuctionParams(); // inputs must RISE
         return startIn + ((endIn - startIn) * bump) / BPS;

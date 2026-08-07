@@ -501,8 +501,9 @@ abstract contract Batch is Core {
         for (uint256 j; j < n;) {
             uint256 amt = amts[j];
             if (amt != 0) {
-                address token = order.legsOut[j].token;
-                address to = order.legsOut[j].recipient;
+                LegOut calldata leg = order.legsOut[j]; // one resolve for both reads
+                address token = leg.token;
+                address to = leg.recipient;
                 bool makerLeg = to == address(0) || to == order.maker;
                 SafeTransferLib.safeTransfer(token, makerLeg ? order.maker : to, amt);
                 unchecked {

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
-import {Order, OrderSide, CallbackMode, FillCtx} from "./Structs.sol";
+import {Order, OrderSide, CallbackMode, FillCtx, LegOut} from "./Structs.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {Pricing} from "./Pricing.sol";
 import {Base} from "./Base.sol";
@@ -466,11 +466,13 @@ abstract contract Core is Base {
             // only to route the transfer (never a fee leg's comp to a third party).
             uint256 amt = order.outputAt(ctx, j);
             if (amt != 0) {
-                address to = order.legsOut[j].recipient;
+                // One leg-pointer resolve for both field reads — see {Pricing.outputAt}.
+                LegOut calldata leg = order.legsOut[j];
+                address to = leg.recipient;
                 bool makerLeg = to == address(0) || to == order.maker;
                 outs[j] = amt;
                 Permit3TransferLib.transferFromWithFallback(
-                    PERMIT3, order.legsOut[j].token, ctx.filler, makerLeg ? order.maker : to, amt
+                    PERMIT3, leg.token, ctx.filler, makerLeg ? order.maker : to, amt
                 );
             }
             unchecked {
@@ -518,7 +520,7 @@ abstract contract Core is Base {
         for (uint256 i; i < n;) {
             uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}
             if (ctx.receipts.length != 0) ctx.receipts[i] = owed; // see {FillCtx.receipts}
-            address tokenIn = order.legsIn[i].token;
+            address tokenIn = order.legsIn[i].token; // single resolve, reused below
             // Item-free orders have no TAKE proceeds ⇒ proceeds are 0 without a
             // balanceOf (the snapshot was skipped upstream). Item orders measure
             // this fill's proceeds as the balance delta since the snapshot.
