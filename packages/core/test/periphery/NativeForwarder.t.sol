@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Order, LegOut} from "@core/settlement/Settlement.sol";
 import {NativeForwarderFactory, WethUnwrapForwarder} from "@core/periphery/NativeForwarderFactory.sol";
 
@@ -43,7 +45,8 @@ contract MockWETH {
 
 contract EthRejecter {
     // no receive/fallback — plain ETH transfers revert
-}
+
+    }
 
 /// @title NativeForwarder
 /// @notice Maker receives NATIVE ETH from a WETH output leg: the signed
@@ -76,7 +79,7 @@ contract NativeForwarderTest is MockSettlementBase {
 
     function _orderPayingForwarder(uint256 nonce) internal view returns (Order memory o) {
         o = _plainOrder(nonce, address(tA), address(weth), IN_, OUT_);
-        o.legsOut[0].recipient = factory.forwarderFor(maker); // signed BEFORE deployment
+        o.legsOut = PackedEncode.setLegOutRecipient(o.legsOut, 0, factory.forwarderFor(maker)); // signed BEFORE deployment
     }
 
     function test_nativeOut_fill_thenDeployAndSweep() public {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -99,7 +101,6 @@ contract GenericCallModuleTest is CoreSettlementBase {
         items[0] = it;
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, USDC_IN),
@@ -108,12 +109,12 @@ contract GenericCallModuleTest is CoreSettlementBase {
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

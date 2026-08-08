@@ -146,18 +146,11 @@ contract CometRepayModule is IMakerModule {
     /// @dev Re-supply (opt-in) the residual into the user's Comet position (a
     ///      positive base balance), else sweep to the user. Best-effort recycle
     ///      with a guaranteed sweep fallback.
-    function _disposeResidual(address comet, address asset, address onBehalfOf, DustHandler.DustAction action)
-        private
-    {
+    function _disposeResidual(address comet, address asset, address onBehalfOf, DustHandler.DustAction action) private {
         uint256 residual = IERC20(asset).balanceOf(address(this));
         if (residual == 0) return;
         DustHandler.disposeResidual(
-            asset,
-            residual,
-            onBehalfOf,
-            action,
-            comet,
-            abi.encodeCall(IComet.supplyTo, (onBehalfOf, asset, residual))
+            asset, residual, onBehalfOf, action, comet, abi.encodeCall(IComet.supplyTo, (onBehalfOf, asset, residual))
         );
     }
 }
@@ -207,10 +200,7 @@ contract CometTakerModule is ITakerModule {
         permit3 = IPermit3(_permit3);
     }
 
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         // op@0, comet@32, asset@64 — all static, so a prefix decode is sound even

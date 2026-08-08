@@ -110,11 +110,7 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
 
     /// @dev Deposit `collateralIn` WETH + borrow `borrowOut` USDC in one order.
     ///      tokenIn = USDC (from the borrow), tokenOut = WETH (from the solver).
-    function _buildDepositBorrowOrder(uint256 collateralIn, uint256 borrowOut)
-        internal
-        view
-        returns (Order memory)
-    {
+    function _buildDepositBorrowOrder(uint256 collateralIn, uint256 borrowOut) internal view returns (Order memory) {
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(address(EWETH)));
         items[1] = Item(

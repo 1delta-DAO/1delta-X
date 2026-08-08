@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Order, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
@@ -10,11 +12,7 @@ import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 /// @dev Pass-through matcher: accepts the solver's requested amount verbatim.
 ///      Used to prove the core does NOT clamp a module order's proposal.
 contract EchoFillModule is IFillModule {
-    function resolveFill(Order calldata, uint256, uint256 fillAmount, bytes calldata)
-        external
-        pure
-        returns (uint256)
-    {
+    function resolveFill(Order calldata, uint256, uint256 fillAmount, bytes calldata) external pure returns (uint256) {
         return fillAmount;
     }
 }
@@ -253,9 +251,13 @@ contract FillUpToTest is MockSettlementBase {
 
         Order memory order = _plainOrder(12, address(tA), address(tB), IN_, OUT_);
         LegIn[] memory legs = new LegIn[](2);
-        legs[0] = order.legsIn[0];
+        legs[0] = LegIn(
+            PackedEncode.getLegInToken(order.legsIn, 0),
+            PackedEncode.getLegInStart(order.legsIn, 0),
+            PackedEncode.getLegInEnd(order.legsIn, 0)
+        );
         legs[1] = LegIn(address(tC), 10e18, 30e18);
-        order.legsIn = legs;
+        order.legsIn = PackedEncode.legsIn(legs);
         _setDecayStart(order, block.timestamp);
         _setDecayDuration(order, 1000);
         bytes memory sig = _sign(order);
@@ -323,7 +325,7 @@ contract FillUpToTest is MockSettlementBase {
 
         _fund(IN_, 2 * outStart); // solver funded for both fills at worst tick
         Order memory order = _plainOrder(15, address(tA), address(tB), IN_, outStart);
-        order.legsOut[0].end = outEnd;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, outEnd);
         _setDecayStart(order, block.timestamp);
         _setDecayDuration(order, 1000);
         bytes memory sig = _sign(order);

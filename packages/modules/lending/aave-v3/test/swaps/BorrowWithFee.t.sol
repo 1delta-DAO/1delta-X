@@ -88,7 +88,8 @@ contract BorrowWithFeeTest is AaveModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(borrowModule), keccak256(abi.encode(AAVE_POOL, USDC, uint256(2))));
+        (uint160 remaining,,) =
+            permit3.takerAllowance(maker, address(borrowModule), keccak256(abi.encode(AAVE_POOL, USDC, uint256(2))));
         assertEq(remaining, 0, "taker allowance spent");
     }
 }

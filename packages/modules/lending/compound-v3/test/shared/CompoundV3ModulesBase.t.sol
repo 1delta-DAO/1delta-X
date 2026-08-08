@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -157,7 +159,13 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         vm.stopPrank();
     }
 
-    function _approveMakerWithdrawSide(uint256 wethIn, bytes32 ref, bytes memory /* takerData */) internal {
+    function _approveMakerWithdrawSide(
+        uint256 wethIn,
+        bytes32 ref,
+        bytes memory /* takerData */
+    )
+        internal
+    {
         vm.startPrank(maker);
         // Fallback for _payTokenInToSolver — never triggers in this flow.
         IERC20(WETH).approve(address(permit3), type(uint256).max);
@@ -235,11 +243,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({
-            op: ItemOp.TAKE,
-            module: address(takerModule),
-            amount: wethIn,
-            recipient: address(0),
-            data: takerData
+            op: ItemOp.TAKE, module: address(takerModule), amount: wethIn, recipient: address(0), data: takerData
         });
         order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
     }
@@ -325,7 +329,6 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
 
         order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDS, borrowUsds), //   Settlement pays solver from the USDS borrow proceeds
@@ -337,9 +340,9 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

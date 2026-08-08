@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
@@ -101,7 +103,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.MAKE, module: address(mod), amount: 1, recipient: address(0), data: ""});
-        order.items = items;
+        order.items = PackedEncode.items(items);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -123,9 +125,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         // CallbackFailed carries the inner revert (Reentrancy) as data, so match
         // on the selector only.
         vm.expectPartialRevert(SolverCallbackExecutor.CallbackFailed.selector);
-        settlement.fillWithCallback(
-            order, sig, AMOUNT_IN, address(rc), cb, CallbackMode.PreDelivery
-        );
+        settlement.fillWithCallback(order, sig, AMOUNT_IN, address(rc), cb, CallbackMode.PreDelivery);
     }
 
     // ════════════════════ B. Write-path signature rejection ════════════════════
@@ -145,7 +145,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         bytes memory sig = _sign(order);
         // Tamper after signing: the maker never authorised this cheaper output.
-        order.legsOut[0].start = AMOUNT_OUT / 2;
+        order.legsOut = PackedEncode.setLegOutStart(order.legsOut, 0, AMOUNT_OUT / 2);
 
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
@@ -160,9 +160,7 @@ contract SettlementGuardsTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
-        settlement.fillWithCallback(
-            order, badSig, AMOUNT_IN, address(supplier), cb, CallbackMode.PreDelivery
-        );
+        settlement.fillWithCallback(order, badSig, AMOUNT_IN, address(supplier), cb, CallbackMode.PreDelivery);
     }
 
     // ════════════════════ C. fillWithPermit failure modes ════════════════════
@@ -383,9 +381,7 @@ contract SettlementGuardsTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectPartialRevert(SolverCallbackExecutor.CallbackFailed.selector);
-        settlement.fillWithCallback(
-            order, sig, AMOUNT_IN, address(rev), cb, CallbackMode.PreDelivery
-        );
+        settlement.fillWithCallback(order, sig, AMOUNT_IN, address(rev), cb, CallbackMode.PreDelivery);
     }
 
     // ════════════════════ G. Overflow-safe preflight (finding #1) ════════════════════

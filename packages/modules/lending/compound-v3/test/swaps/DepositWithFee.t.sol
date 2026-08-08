@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, OrderSide, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
@@ -40,11 +42,10 @@ contract DepositWithFeeTest is CompoundV3ModulesBase {
         legsIn[0] = LegIn(USDC, F0, FMAX);
         order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
-            legsOut: new LegOut[](0),
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)),
             timing: _packTiming(uint32(block.timestamp), DURATION, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
@@ -52,9 +53,9 @@ contract DepositWithFeeTest is CompoundV3ModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

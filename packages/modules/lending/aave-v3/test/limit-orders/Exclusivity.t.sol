@@ -20,7 +20,13 @@ contract ExclusivityTest is AaveModulesBase {
         _approveSolverSide(wethOut, WETH);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(AAVE_POOL, WETH)});
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(depositModule),
+            amount: wethOut,
+            recipient: address(0),
+            data: abi.encode(AAVE_POOL, WETH)
+        });
 
         // Exclusive to a specific address that is NOT our `solver`.
         address exclusive = address(0xCAFE);
@@ -44,7 +50,13 @@ contract ExclusivityTest is AaveModulesBase {
         _approveSolverSide(wethOut, WETH);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(AAVE_POOL, WETH)});
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(depositModule),
+            amount: wethOut,
+            recipient: address(0),
+            data: abi.encode(AAVE_POOL, WETH)
+        });
 
         address exclusive = address(0xCAFE);
         // Window already expired (endTime in the past clears the gate).

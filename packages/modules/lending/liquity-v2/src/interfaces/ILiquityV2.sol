@@ -35,6 +35,7 @@ interface ILiquityV2BorrowerOperations {
     function setAddManager(uint256 _troveId, address _manager) external;
     function setRemoveManagerWithReceiver(uint256 _troveId, address _manager, address _receiver) external;
 }
+
 // NOTE: BorrowerOperations exposes almost no public getters on mainnet — in
 // particular `troveManager()`, `troveNFT()`, `boldToken()` and `collToken()` all
 // REVERT (verified against 0x372ABD1810eAF23Cb9D941BbE7596DFb2c46BC65). The

@@ -117,9 +117,8 @@ contract GearboxV3ForkAuthTest is Test {
         permit3.approveTaker(settlement, keccak256(data), type(uint160).max, 0);
 
         vm.prank(settlement);
-        (bool ok, bytes memory ret) = address(permit3).call(
-            abi.encodeCall(Permit3.take, (address(borrowModule), BORROWER, uint160(1e18), BORROWER, data))
-        );
+        (bool ok, bytes memory ret) = address(permit3)
+            .call(abi.encodeCall(Permit3.take, (address(borrowModule), BORROWER, uint160(1e18), BORROWER, data)));
         assertFalse(ok, "not registered as a bot, so the dispatch still fails");
 
         bytes4 sel;

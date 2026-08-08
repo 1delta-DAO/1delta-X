@@ -265,10 +265,7 @@ contract MidnightTakerModule is ITakerModule {
         midnight = IMidnight(_midnight);
     }
 
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         (uint8 op, Market memory market, uint256 collateralIndex, uint8 balanceMode) =
@@ -351,10 +348,7 @@ contract MidnightBorrowModule is ITakerModule {
         midnight = IMidnight(_midnight);
     }
 
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         (Offer memory offer, bytes memory ratifierData, uint256 units) = abi.decode(data, (Offer, bytes, uint256));

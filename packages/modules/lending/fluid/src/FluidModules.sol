@@ -212,7 +212,6 @@ contract FluidTakerModule is ITakerModule, FluidBase {
     enum Op {
         Borrow, // 0 — borrow debt to receiver
         Withdraw // 1 — withdraw collateral to receiver
-
     }
 
     error OnlyPermit3();
@@ -223,8 +222,7 @@ contract FluidTakerModule is ITakerModule, FluidBase {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        (uint8 op, address vault, address factory, uint256 nftId) =
-            abi.decode(data, (uint8, address, address, uint256));
+        (uint8 op, address vault, address factory, uint256 nftId) = abi.decode(data, (uint8, address, address, uint256));
 
         IFluidVaultFactory(factory).transferFrom(onBehalfOf, address(this), nftId);
         if (op == uint8(Op.Borrow)) {
@@ -265,7 +263,6 @@ contract FluidOperateModule is ITakerModule, FluidBase {
     enum Mode {
         Open, // 0 — supply collateral + borrow
         Close // 1 — payback debt + withdraw collateral
-
     }
 
     struct OperateData {

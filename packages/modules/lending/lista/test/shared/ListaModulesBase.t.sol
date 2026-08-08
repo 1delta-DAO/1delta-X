@@ -224,11 +224,7 @@ abstract contract ListaModulesBase is CoreSettlementBase {
             data: _supplyData()
         });
         items[1] = Item({
-            op: ItemOp.TAKE,
-            module: address(takerModule),
-            amount: borrowOut,
-            recipient: address(0),
-            data: _borrowData()
+            op: ItemOp.TAKE, module: address(takerModule), amount: borrowOut, recipient: address(0), data: _borrowData()
         });
         order = _order(maker, 1, USD1, BTCB, borrowOut, collateralIn, items);
     }

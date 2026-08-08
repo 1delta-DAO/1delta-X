@@ -47,9 +47,8 @@ contract MorphoBlueCombinedTakerModuleTest is Test {
 
     function test_borrow_withAuthSig() public {
         // data = abi.encode(op, MarketParams, nonce, deadline, v, r, s)
-        bytes memory data = abi.encode(
-            OP_BORROW, market, uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
-        );
+        bytes memory data =
+            abi.encode(OP_BORROW, market, uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0));
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, BORROW, receiver, data);
@@ -88,7 +87,11 @@ contract MorphoBlueCombinedTakerModuleTest is Test {
             OP_WITHDRAW,
             market,
             uint8(0), // BalanceMode = Exact, explicit slot required ahead of the auth block
-            uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
+            uint256(0),
+            block.timestamp + 1 hours,
+            uint8(27),
+            bytes32(0),
+            bytes32(0)
         );
 
         vm.prank(address(permit3));
@@ -138,7 +141,11 @@ contract MorphoBlueCombinedTakerModuleTest is Test {
             OP_WITHDRAW_LOAN,
             market,
             uint8(0), // BalanceMode = Exact, explicit slot required ahead of the auth block
-            uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
+            uint256(0),
+            block.timestamp + 1 hours,
+            uint8(27),
+            bytes32(0),
+            bytes32(0)
         );
 
         vm.prank(address(permit3));

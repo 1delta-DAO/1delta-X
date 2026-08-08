@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Settlement, Order, CallbackMode} from "../settlement/Settlement.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
+import {PackedArrays} from "../settlement/PackedArrays.sol";
 
 interface IWETH {
     function deposit() external payable;
@@ -101,10 +102,13 @@ contract NativeSettler {
         bytes calldata dexCallData
     ) external payable returns (uint256[] memory outs) {
         if (msg.sender != order.maker) revert NotMaker();
-        if (order.legsIn.length != 1 || order.legsIn[0].token != address(weth)) revert TokenInNotWeth();
-        if (order.legsOut.length != 1) revert SingleOutputLegRequired();
+        if (PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE) != 1) revert TokenInNotWeth();
+        if (PackedArrays.legInToken(order.legsIn, 0) != address(weth)) revert TokenInNotWeth();
+        if (PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE) != 1) {
+            revert SingleOutputLegRequired();
+        }
 
-        address tokenOut = order.legsOut[0].token;
+        (address tokenOut, uint256 outStart,,) = PackedArrays.legOut(order.legsOut, 0);
 
         // 0) Floor every touched token at what we hold right now, BEFORE anything
         //    moves, so the fill can only ever spend what it itself produces. Taken
@@ -122,12 +126,10 @@ contract NativeSettler {
         //    at most `legsOut[0].start`: a SELL output decays DOWN from `start` and a
         //    BUY output is fixed at it, so `start` is the ceiling on either side.
         SafeTransferLib.forceApprove(address(weth), dexTarget, msg.value);
-        SafeTransferLib.forceApprove(tokenOut, address(settlement), order.legsOut[0].start);
+        SafeTransferLib.forceApprove(tokenOut, address(settlement), outStart);
 
         // 3) Self-settle as the filler.
-        outs = settlement.fillWithCallback(
-            order, sig, fillAmount, dexTarget, dexCallData, CallbackMode.PostInputs
-        );
+        outs = settlement.fillWithCallback(order, sig, fillAmount, dexTarget, dexCallData, CallbackMode.PostInputs);
 
         // 4) Leave nothing standing, enforce the floor, and return what this call
         //    produced. A residual approval or a residual balance would be drainable

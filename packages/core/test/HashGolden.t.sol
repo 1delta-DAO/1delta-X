@@ -15,6 +15,7 @@ import {
 } from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
+import {PackedEncode} from "./shared/PackedEncode.sol";
 
 /// @dev No-fork golden test: pins the EIP-712 struct hash of a canonical order.
 ///      The TypeScript SDK asserts the SAME value, cross-verifying its typed-data
@@ -72,21 +73,20 @@ contract HashGoldenTest is Test {
 
         o = Order({
             maker: MAKER,
-            side: OrderSide.SELL,
             nonce: 1,
             deadline: 1_000_000,
-            legsIn: legsIn,
-            legsOut: legsOut,
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: timing,
             exclusiveFiller: FILLER,
             minFillAnchor: 100e6,
             exclusivityOverrideBps: 25,
-            curve: curve,
+            curve: PackedEncode.curve(curve),
             gasBumpBps: 50,
             gasPriceRef: 30_000_000_000,
-            items: items,
-            validators: validators,
-            invariants: invariants,
+            items: PackedEncode.items(items),
+            validators: PackedEncode.validators(validators),
+            invariants: PackedEncode.validators(invariants),
             fillModule: address(0xF111),
             fillTotal: 42
         });
@@ -94,7 +94,7 @@ contract HashGoldenTest is Test {
 
     /// @dev The TypeScript SDK (`packages/sdk`) asserts this SAME constant for the
     ///      same canonical order — cross-verifying its EIP-712 typed-data defs.
-    bytes32 constant GOLDEN_ORDER_HASH = 0x9a4bfce139ee6ec84dcf14487f56b70d0011e63988be7c7acc58a62ccb2320f0;
+    bytes32 constant GOLDEN_ORDER_HASH = 0x51e64365d966affedcd2cc04a116dc98dfc6dd54bdf5a9ed298fef732101a7c3;
 
     function test_goldenOrderHash() public view {
         assertEq(lens.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");

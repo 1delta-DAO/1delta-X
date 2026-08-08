@@ -117,7 +117,11 @@ contract MigrateTest is AaveModulesBase {
 
         Item[] memory items = new Item[](4);
         items[0] = Item(
-            ItemOp.MAKE, address(repayModule), 3_050e6, address(0), abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
+            ItemOp.MAKE,
+            address(repayModule),
+            3_050e6,
+            address(0),
+            abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
         );
         items[1] = Item(ItemOp.TAKE, address(withdrawModule), 9 ether, maker, aaveWithdrawData);
         items[2] = Item(ItemOp.MAKE, address(depositModule), 9 ether, address(0), abi.encode(SPARK_POOL, WETH));

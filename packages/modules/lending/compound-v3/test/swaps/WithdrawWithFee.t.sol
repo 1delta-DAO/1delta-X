@@ -30,11 +30,7 @@ contract WithdrawWithFeeTest is CompoundV3ModulesBase {
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({
-            op: ItemOp.TAKE,
-            module: address(takerModule),
-            amount: usdcIn,
-            recipient: address(0),
-            data: takerData
+            op: ItemOp.TAKE, module: address(takerModule), amount: usdcIn, recipient: address(0), data: takerData
         });
         order = _order(maker, 1, USDC, USDC, usdcIn, usdcOut, items);
     }

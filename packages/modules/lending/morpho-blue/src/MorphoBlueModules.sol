@@ -51,9 +51,7 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
         MarketParams memory marketParams = abi.decode(data, (MarketParams));
 
         // Optional permit. MarketParams = 5 addresses = 160 bytes.
-        PermitHelper.replayIfPresent(
-            data, 160, marketParams.collateralToken, onBehalfOf, address(permit3), amount
-        );
+        PermitHelper.replayIfPresent(data, 160, marketParams.collateralToken, onBehalfOf, address(permit3), amount);
 
         permit3.transferFrom(onBehalfOf, address(this), marketParams.collateralToken, uint160(amount));
         // `morpho` is an immutable, trusted target → a standing max approval is safe

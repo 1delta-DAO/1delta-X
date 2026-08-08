@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, OrderSide, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
@@ -137,11 +139,10 @@ contract WithdrawWithFeeTest is AaveModulesBase {
         });
         Order memory order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 31,
             deadline: block.timestamp + 1 hours,
-            legsIn: _legsIn1Rising(WETH, feeFloor, feeCeil),
-            legsOut: new LegOut[](0),
+            legsIn: PackedEncode.legsIn(_legsIn1Rising(WETH, feeFloor, feeCeil)),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)),
             timing: _packTiming(uint32(block.timestamp), uint32(duration), 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
@@ -149,9 +150,9 @@ contract WithdrawWithFeeTest is AaveModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

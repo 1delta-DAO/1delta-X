@@ -113,8 +113,9 @@ contract GearboxCreditFlowTest is Test {
         try vm.envString("ETH_RPC_URL") returns (string memory v) {
             if (bytes(v).length > 0 && _tryFork(v)) return;
         } catch {}
-        string[3] memory rpcs =
-            ["https://gateway.tenderly.co/public/mainnet", "https://eth.drpc.org", "https://ethereum-rpc.publicnode.com"];
+        string[3] memory rpcs = [
+            "https://gateway.tenderly.co/public/mainnet", "https://eth.drpc.org", "https://ethereum-rpc.publicnode.com"
+        ];
         for (uint256 i = 0; i < rpcs.length; i++) {
             if (_tryFork(rpcs[i])) return;
         }
@@ -175,8 +176,7 @@ contract GearboxCreditFlowTest is Test {
     function _grantBot(address bot, uint192 mask) internal {
         MultiCall[] memory calls = new MultiCall[](1);
         calls[0] = MultiCall({
-            target: CREDIT_FACADE,
-            callData: abi.encodeCall(ICreditFacadeV31Multicall.setBotPermissions, (bot, mask))
+            target: CREDIT_FACADE, callData: abi.encodeCall(ICreditFacadeV31Multicall.setBotPermissions, (bot, mask))
         });
         vm.prank(user);
         ICreditFacadeV31(CREDIT_FACADE).multicall(creditAccount, calls);

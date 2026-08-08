@@ -226,11 +226,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
 
     // ──────────────────── Module order builders ────────────────────
 
-    function _buildWithdrawOrder(uint256 wstethIn, uint256 usdcOut)
-        internal
-        view
-        returns (Order memory order)
-    {
+    function _buildWithdrawOrder(uint256 wstethIn, uint256 usdcOut) internal view returns (Order memory order) {
         Item[] memory items = new Item[](1);
         items[0] = Item({
             op: ItemOp.TAKE,
@@ -256,11 +252,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
             data: _marketData()
         });
         items[1] = Item({
-            op: ItemOp.TAKE,
-            module: address(takerModule),
-            amount: borrowOut,
-            recipient: address(0),
-            data: _borrowData()
+            op: ItemOp.TAKE, module: address(takerModule), amount: borrowOut, recipient: address(0), data: _borrowData()
         });
         order = _order(maker, 2, USDC, WSTETH, borrowOut, collateralIn, items);
     }

@@ -53,9 +53,8 @@ contract PositionFunnelFactory {
     ///         the init code, which literally contains the address. Either alone
     ///         would suffice; both is cheap.
     function funnelFor(address owner, bytes32 userSalt) public view returns (address) {
-        bytes32 h = keccak256(
-            abi.encodePacked(bytes1(0xff), address(this), _salt(owner, userSalt), _initCodeHash(owner))
-        );
+        bytes32 h =
+            keccak256(abi.encodePacked(bytes1(0xff), address(this), _salt(owner, userSalt), _initCodeHash(owner)));
         return address(uint160(uint256(h)));
     }
 

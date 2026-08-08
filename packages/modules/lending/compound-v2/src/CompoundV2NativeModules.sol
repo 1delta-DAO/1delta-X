@@ -159,10 +159,7 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
         weth = IWETH(_weth);
     }
 
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         address cEther = abi.decode(data, (address));

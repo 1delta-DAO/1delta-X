@@ -130,8 +130,7 @@ contract LiquityV2AddCollModule is IMakerModule {
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
         if (msg.sender != settlement) revert NotSettlement();
 
-        (address troveManager, uint256 troveId, address collateralToken) =
-            abi.decode(data, (address, uint256, address));
+        (address troveManager, uint256 troveId, address collateralToken) = abi.decode(data, (address, uint256, address));
         // Bind the trove to the payer: without it an attacker could shove a
         // victim's pre-approved collateral into a trove of the attacker's choosing.
         // `borrowerOps` is DERIVED from the same root, never taken from `data`.
@@ -247,9 +246,7 @@ contract LiquityV2TakerModule is ITakerModule {
             // manager role, so this check is the only thing standing between a
             // maker's trove and any filler who knows its id.
             address borrowerOps = LiquityV2TroveAuth.authorizeTrove(troveManager, troveId, onBehalfOf);
-            _withdrawAndForward(
-                boldToken, onBehalfOf, amount, receiver, borrowerOps, troveId, maxUpfrontFee, true
-            );
+            _withdrawAndForward(boldToken, onBehalfOf, amount, receiver, borrowerOps, troveId, maxUpfrontFee, true);
         } else if (op == uint8(Op.WithdrawColl)) {
             (, address troveManager, uint256 troveId, address collateralToken) =
                 abi.decode(data, (uint8, address, uint256, address));

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Order, Validator, LegOut} from "@core/settlement/Settlement.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {
@@ -91,7 +93,7 @@ contract TriggerValidatorsTest is MockSettlementBase {
     function _withValidator(Order memory o, address target, bytes memory data) internal pure returns (Order memory) {
         Validator[] memory v = new Validator[](1);
         v[0] = Validator(target, data);
-        o.validators = v;
+        o.validators = PackedEncode.validators(v);
         return o;
     }
 
@@ -108,14 +110,14 @@ contract TriggerValidatorsTest is MockSettlementBase {
         feed.set(1500e8, block.timestamp - 2 hours);
         Order memory o = _withValidator(_order(1), address(gte), abi.encode(address(feed), int256(1000e8), 1 hours));
         vm.expectRevert(ChainlinkRead.StalePrice.selector);
-        gte.validate(o, solver, o.validators[0].data, "");
+        gte.validate(o, solver, PackedEncode.getValidatorData(o.validators, 0), "");
     }
 
     function test_read_zeroUpdatedAt_reverts() public {
         feed.set(1500e8, 0);
         Order memory o = _withValidator(_order(2), address(gte), abi.encode(address(feed), int256(1000e8), 1 hours));
         vm.expectRevert(ChainlinkRead.StalePrice.selector);
-        gte.validate(o, solver, o.validators[0].data, "");
+        gte.validate(o, solver, PackedEncode.getValidatorData(o.validators, 0), "");
     }
 
     function test_read_incompleteRound_reverts() public {
@@ -123,14 +125,14 @@ contract TriggerValidatorsTest is MockSettlementBase {
         feed.setRounds(11, 10); // answeredInRound < roundId
         Order memory o = _withValidator(_order(3), address(gte), abi.encode(address(feed), int256(1000e8), 1 hours));
         vm.expectRevert(ChainlinkRead.IncompleteRound.selector);
-        gte.validate(o, solver, o.validators[0].data, "");
+        gte.validate(o, solver, PackedEncode.getValidatorData(o.validators, 0), "");
     }
 
     function test_read_nonPositivePrice_reverts() public {
         feed.set(0, block.timestamp);
         Order memory o = _withValidator(_order(4), address(gte), abi.encode(address(feed), int256(0), 1 hours));
         vm.expectRevert(ChainlinkRead.NonPositivePrice.selector);
-        gte.validate(o, solver, o.validators[0].data, "");
+        gte.validate(o, solver, PackedEncode.getValidatorData(o.validators, 0), "");
     }
 
     /// @dev A REVERTING validator (stale feed) surfaces as ValidationFailed on
@@ -166,9 +168,11 @@ contract TriggerValidatorsTest is MockSettlementBase {
     function test_lte_stopLoss_unit() public {
         feed.set(1500e8, block.timestamp);
         Order memory o = _withValidator(_order(7), address(lte), abi.encode(address(feed), int256(1500e8), 1 hours));
-        assertTrue(lte.validate(o, solver, o.validators[0].data, ""), "at threshold passes");
+        assertTrue(lte.validate(o, solver, PackedEncode.getValidatorData(o.validators, 0), ""), "at threshold passes");
         feed.set(1501e8, block.timestamp);
-        assertFalse(lte.validate(o, solver, o.validators[0].data, ""), "above threshold fails");
+        assertFalse(
+            lte.validate(o, solver, PackedEncode.getValidatorData(o.validators, 0), ""), "above threshold fails"
+        );
     }
 
     // ──────────────────── PredicateStaticCall ────────────────────
@@ -226,7 +230,7 @@ contract TriggerValidatorsTest is MockSettlementBase {
     ///      tolerance into `scale` = 1e18·(1−tol)·10^(18−18−8) = (1e10·(10000−tol))/10000.
     function _decayingSell(uint256 nonce) internal view returns (Order memory o) {
         o = _plainOrder(nonce, address(tA), address(tB), 1_000e18, 2e18);
-        o.legsOut[0].end = 1e18;
+        o.legsOut = PackedEncode.setLegOutEnd(o.legsOut, 0, 1e18);
         _setDecayStart(o, block.timestamp);
         _setDecayDuration(o, 1000);
     }

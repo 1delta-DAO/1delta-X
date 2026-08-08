@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Base} from "@core/settlement/Base.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {
-    Settlement, Order, Item, ItemOp, MatchPlan, MatchStep, OrderSide, Validator
+    Settlement,
+    Order,
+    Item,
+    ItemOp,
+    MatchPlan,
+    MatchStep,
+    OrderSide,
+    Validator
 } from "@core/settlement/Settlement.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -68,9 +77,7 @@ contract PresendSolver {
 
     /// @dev The pre-sent `surplusToken` sits in THIS contract; swap it for the
     ///      `deficitToken` and deposit the deficit into Settlement.
-    function swapAndCover(address surplusToken, uint256 surplusAmt, address deficitToken, uint256 deficitAmt)
-        external
-    {
+    function swapAndCover(address surplusToken, uint256 surplusAmt, address deficitToken, uint256 deficitAmt) external {
         IERC20(surplusToken).approve(address(dex), surplusAmt);
         dex.swap(surplusToken, surplusAmt, deficitToken, deficitAmt);
         IERC20(deficitToken).transfer(address(settlement), deficitAmt);
@@ -83,11 +90,7 @@ contract PresendSolver {
 contract TakerDataValidator is IOrderValidator {
     uint256 constant SENTINEL = 42;
 
-    function validate(Order calldata, address, bytes calldata, bytes calldata takerData)
-        external
-        pure
-        returns (bool)
-    {
+    function validate(Order calldata, address, bytes calldata, bytes calldata takerData) external pure returns (bool) {
         return takerData.length == 32 && abi.decode(takerData, (uint256)) == SENTINEL;
     }
 }
@@ -192,8 +195,8 @@ contract MatchSettleCoWTest is CoreSettlementBase {
         sigs[0] = _signAs(a, makerPk);
         sigs[1] = _signAs(b, bobPk);
         uint256[] memory fills = new uint256[](2);
-        fills[0] = a.legsIn[0].start; // Alice anchor = WETH in
-        fills[1] = b.legsIn[0].start; // Bob anchor   = USDC in
+        fills[0] = PackedEncode.getLegInStart(a.legsIn, 0); // Alice anchor = WETH in
+        fills[1] = PackedEncode.getLegInStart(b.legsIn, 0); // Bob anchor   = USDC in
         address[] memory targets = new address[](callTarget == address(0) ? 0 : 1);
         bytes[] memory datas = new bytes[](callTarget == address(0) ? 0 : 1);
         if (callTarget != address(0)) {
@@ -223,12 +226,11 @@ contract MatchSettleCoWTest is CoreSettlementBase {
     /// @dev N-order plan with no takerDatas and no CALL steps. `pks[i]` signs
     ///      `orders[i]`; `fills[i]` is that order's requested fill in its own anchor
     ///      units (so a value below the anchor is a PARTIAL fill).
-    function _planN(
-        Order[] memory orders,
-        uint256[] memory pks,
-        uint256[] memory fills,
-        uint256[] memory schedule
-    ) internal view returns (MatchPlan memory) {
+    function _planN(Order[] memory orders, uint256[] memory pks, uint256[] memory fills, uint256[] memory schedule)
+        internal
+        view
+        returns (MatchPlan memory)
+    {
         bytes[] memory sigs = new bytes[](orders.length);
         for (uint256 i; i < orders.length; i++) {
             sigs[i] = _signAs(orders[i], pks[i]);

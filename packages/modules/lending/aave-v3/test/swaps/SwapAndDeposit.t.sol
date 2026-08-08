@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -41,7 +43,6 @@ contract SwapAndDepositTest is AaveModulesBase {
 
         Order memory order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn), //        fixed-price (start == end)
@@ -53,9 +54,9 @@ contract SwapAndDepositTest is AaveModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -113,7 +114,6 @@ contract SwapAndDepositTest is AaveModulesBase {
 
         Order memory order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
@@ -125,9 +125,9 @@ contract SwapAndDepositTest is AaveModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

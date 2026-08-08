@@ -17,6 +17,8 @@ import {
     OrderSide,
     CurvePoint
 } from "@core/settlement/Settlement.sol";
+import {PackedEncode} from "./PackedEncode.sol";
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.sol";
@@ -158,7 +160,6 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ) internal view returns (Order memory o) {
         o = Order({
             maker: maker_,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(tokenIn, amountIn),
@@ -167,12 +168,12 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -192,8 +193,14 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     }
 
     function _orderWithExclusivity(
-        uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
-        Item[] memory items, address exclusiveFiller, uint32 exclusivityEndTime
+        uint256 nonce,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        Item[] memory items,
+        address exclusiveFiller,
+        uint32 exclusivityEndTime
     ) internal view returns (Order memory o) {
         o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
         o.exclusiveFiller = exclusiveFiller;
@@ -201,39 +208,52 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     }
 
     function _orderWithMinFill(
-        uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
-        Item[] memory items, uint256 minFillAmountIn
+        uint256 nonce,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        Item[] memory items,
+        uint256 minFillAmountIn
     ) internal view returns (Order memory o) {
         o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
         o.minFillAnchor = minFillAmountIn;
     }
 
     function _orderWithInvariants(
-        uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
-        Item[] memory items, Validator[] memory invariants
+        uint256 nonce,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        Item[] memory items,
+        Validator[] memory invariants
     ) internal view returns (Order memory o) {
         o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
-        o.invariants = invariants;
+        o.invariants = PackedEncode.validators(invariants);
     }
 
     function _orderWithValidators(
-        uint256 nonce, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut,
-        Item[] memory items, Validator[] memory validators
+        uint256 nonce,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        Item[] memory items,
+        Validator[] memory validators
     ) internal view returns (Order memory o) {
         o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
-        o.validators = validators;
+        o.validators = PackedEncode.validators(validators);
     }
 
     /// @dev A single fixed input leg (`end == 0`).
-    function _legsIn1(address token, uint256 amount) internal pure returns (LegIn[] memory a) {
-        a = new LegIn[](1);
-        a[0] = LegIn(token, amount, 0);
+    function _legsIn1(address token, uint256 amount) internal pure returns (bytes memory) {
+        return PackedEncode.oneLegIn(token, amount, 0);
     }
 
     /// @dev A single fixed output leg to the maker (`end == 0`, recipient == 0).
-    function _legsOut1(address token, uint256 amount) internal pure returns (LegOut[] memory a) {
-        a = new LegOut[](1);
-        a[0] = LegOut(token, amount, 0, address(0));
+    function _legsOut1(address token, uint256 amount) internal pure returns (bytes memory) {
+        return PackedEncode.oneLegOut(token, amount, 0, address(0));
     }
 
     /// @dev Pack the three uint32 clocks into `Order.timing` (mirror of {DutchAuction}).
@@ -259,12 +279,26 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ///      — the originator/sourcing fee as an ordinary fee OUTPUT leg. Both legs
     ///      stay fixed (`end == 0`); for a bps-of-tick fee on a decaying order set
     ///      the legs' start/end proportionally instead.
+    /// @dev `(token, start)` of packed output leg 0 held in MEMORY. {PackedArrays} is
+    ///      deliberately calldata-only (that is where the settler reads orders from),
+    ///      so test helpers that mutate an in-memory order need this small mirror.
+    function _memLegOut0(bytes memory legs) internal pure returns (address token, uint256 start) {
+        require(legs.length >= 1 + 104, "no out leg 0");
+        assembly {
+            let p := add(legs, 0x21) // 0x20 header + 1 count byte
+            token := shr(96, mload(p))
+            start := mload(add(p, 20))
+        }
+    }
+
     function _splitFeeLeg(Order memory order, address recipient, uint256 fee) internal pure {
-        address token = order.legsOut[0].token;
-        uint256 gross = order.legsOut[0].start;
-        order.legsOut = new LegOut[](2);
-        order.legsOut[0] = LegOut(token, gross - fee, 0, address(0)); // maker
-        order.legsOut[1] = LegOut(token, fee, 0, recipient); // fee
+        // Decode leg 0 back out of the packed blob, then re-encode both legs.
+        // `PackedArrays` is calldata-only, so read the memory blob directly here.
+        (address token, uint256 gross) = _memLegOut0(order.legsOut);
+        LegOut[] memory two = new LegOut[](2);
+        two[0] = LegOut(token, gross - fee, 0, address(0)); // maker
+        two[1] = LegOut(token, fee, 0, recipient); // fee
+        order.legsOut = PackedEncode.legsOut(two);
     }
 
     // ──────────────────── Array helpers (single-asset wrap) ────────────────────
@@ -279,8 +313,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         arr[0] = x;
     }
 
-    function _noCurve() internal pure returns (CurvePoint[] memory) {
-        return new CurvePoint[](0);
+    /// @dev An EMPTY packed curve blob — the byte `0x00`, not a zero-length array.
+    function _noCurve() internal pure returns (bytes memory) {
+        return PackedEncode.noCurve();
     }
 
     // ──────────────────── Permit-batch builders ────────────────────
@@ -299,8 +334,12 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     }
 
     function _tokenPermits(
-        address spender1, address token1, uint256 amt1,
-        address spender2, address token2, uint256 amt2
+        address spender1,
+        address token1,
+        uint256 amt1,
+        address spender2,
+        address token2,
+        uint256 amt2
     ) internal view returns (IPermit3.TokenPermit[] memory tp) {
         tp = new IPermit3.TokenPermit[](2);
         uint48 exp = uint48(block.timestamp + 1 hours);
@@ -309,8 +348,12 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     }
 
     function _tokenPermitsWithTaker(
-        address spender1, address token1, uint256 amt1,
-        address spender2, address token2, uint256 amt2
+        address spender1,
+        address token1,
+        uint256 amt1,
+        address spender2,
+        address token2,
+        uint256 amt2
     ) internal view returns (IPermit3.TokenPermit[] memory) {
         return _tokenPermits(spender1, token1, amt1, spender2, token2, amt2);
     }
@@ -329,18 +372,12 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     // Type hashes must match Settlement / Permit3 exactly.
 
     bytes32 constant CURVE_POINT_TH = keccak256("CurvePoint(uint32 timeDelta,uint32 bumpBps)");
-    bytes32 constant ITEM_TH =
-        keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
+    bytes32 constant ITEM_TH = keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 constant LEG_IN_TH = keccak256("LegIn(address token,uint256 start,uint256 end)");
     bytes32 constant LEG_OUT_TH = keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
-        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
-        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LegIn(address token,uint256 start,uint256 end)"
-        "LegOut(address token,uint256 start,uint256 end,address recipient)"
-        "Validator(address target,bytes data)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
     );
     bytes32 constant TOKEN_PERMIT_TH =
         keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
@@ -349,17 +386,11 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
 
     /// @dev Must mirror Permit3's `_PERMIT_BATCH_WITNESS_STUB` + Settlement's
     ///      `_ORDER_WITNESS_TYPESTRING` exactly.
-    string constant PERMIT_BATCH_WITNESS_FULL =
-        "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
+    string constant PERMIT_BATCH_WITNESS_FULL = "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
-        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
-        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LegIn(address token,uint256 start,uint256 end)"
-        "LegOut(address token,uint256 start,uint256 end,address recipient)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
-        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
-        "Validator(address target,bytes data)";
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
     function _hashItems(Item[] memory items) internal pure returns (bytes32) {
         bytes32[] memory h = new bytes32[](items.length);
@@ -414,23 +445,22 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         bytes memory head = abi.encode(
             ORDER_TH,
             o.maker,
-            uint8(o.side),
             o.nonce,
             o.deadline,
-            _hashLegsIn(o.legsIn),
-            _hashLegsOut(o.legsOut),
+            keccak256(o.legsIn),
+            keccak256(o.legsOut),
             o.timing,
             o.exclusiveFiller,
             o.minFillAnchor
         );
         bytes memory tail = abi.encode(
             o.exclusivityOverrideBps,
-            _hashCurve(o.curve),
+            keccak256(o.curve),
             o.gasBumpBps,
             o.gasPriceRef,
-            _hashItems(o.items),
-            _hashValidators(o.validators),
-            _hashValidators(o.invariants),
+            keccak256(o.items),
+            keccak256(o.validators),
+            keccak256(o.invariants),
             o.fillModule,
             o.fillTotal
         );

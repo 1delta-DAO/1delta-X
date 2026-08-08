@@ -73,13 +73,9 @@ library DelegationHelper {
     // `withdrawFrom` on `owner`'s Comet position — without a prior on-chain
     // `allow(manager, true)` call.
     //
-    function replayCometAllow(
-        bytes calldata data,
-        uint256 baseLen,
-        address comet,
-        address owner,
-        address manager
-    ) internal {
+    function replayCometAllow(bytes calldata data, uint256 baseLen, address comet, address owner, address manager)
+        internal
+    {
         if (data.length < baseLen + 160) return;
         (uint256 nonce, uint256 expiry, uint8 v, bytes32 r, bytes32 s) =
             abi.decode(data[baseLen:baseLen + 160], (uint256, uint256, uint8, bytes32, bytes32));
@@ -109,15 +105,13 @@ library DelegationHelper {
         (uint256 nonce, uint256 deadline, uint8 v, bytes32 r, bytes32 s) =
             abi.decode(data[baseLen:baseLen + 160], (uint256, uint256, uint8, bytes32, bytes32));
         // Best-effort — see the front-run note in the header.
-        try IMorphoAuth(morpho).setAuthorizationWithSig(
-            IMorphoAuth.Authorization({
-                authorizer: authorizer,
-                authorized: authorized,
-                isAuthorized: true,
-                nonce: nonce,
-                deadline: deadline
-            }),
-            IMorphoAuth.Signature({v: v, r: r, s: s})
-        ) {} catch {}
+        try IMorphoAuth(morpho)
+            .setAuthorizationWithSig(
+                IMorphoAuth.Authorization({
+                    authorizer: authorizer, authorized: authorized, isAuthorized: true, nonce: nonce, deadline: deadline
+                }),
+                IMorphoAuth.Signature({v: v, r: r, s: s})
+            ) {}
+            catch {}
     }
 }

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Base} from "@core/settlement/Base.sol";
 import {Settlement, Order, Validator} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
@@ -56,7 +58,7 @@ contract FillerWhitelistTest is MockSettlementBase {
         o = _plainOrder(nonce, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         Validator[] memory v = new Validator[](1);
         v[0] = Validator({target: address(wl), data: abi.encode(curator_, openAfter)});
-        o.validators = v;
+        o.validators = PackedEncode.validators(v);
     }
 
     function _expectValidationFailed() internal {
@@ -200,7 +202,7 @@ contract FillerWhitelistTest is MockSettlementBase {
         Order memory o = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         Validator[] memory inv = new Validator[](1);
         inv[0] = Validator({target: address(wl), data: abi.encode(curator, uint256(0))});
-        o.invariants = inv;
+        o.invariants = PackedEncode.validators(inv);
         bytes memory sig = _sign(o);
 
         // Unlisted filler: everything (delivery + payout) unwinds on the invariant.

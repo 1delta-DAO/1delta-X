@@ -47,11 +47,7 @@ contract ChainBindingTest is BridgeTestBase {
         );
     }
 
-    function _lzSpec(address dstRecipient, uint256 dstChainId, uint32 dstEid)
-        internal
-        view
-        returns (bytes memory)
-    {
+    function _lzSpec(address dstRecipient, uint256 dstChainId, uint32 dstEid) internal view returns (bytes memory) {
         return abi.encode(
             LzOftBridgeOutModule.LzSpec({
                 oft: address(oft),

@@ -209,11 +209,7 @@ abstract contract AaveV4ModulesBase is CoreSettlementBase {
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({
-            op: ItemOp.TAKE,
-            module: address(withdrawModule),
-            amount: wethIn,
-            recipient: address(0),
-            data: takerData
+            op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData
         });
         order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
     }

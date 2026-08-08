@@ -213,11 +213,7 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
         return abi.encode(uint8(DolomiteTakerModule.Op.Withdraw), address(DOLOMITE), COLL_MARKET, COLL, ACCOUNT);
     }
 
-    function _buildDepositBorrowOrder(uint256 collateralIn, uint256 borrowOut)
-        internal
-        view
-        returns (Order memory)
-    {
+    function _buildDepositBorrowOrder(uint256 collateralIn, uint256 borrowOut) internal view returns (Order memory) {
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), _depositData());
         items[1] = Item(ItemOp.TAKE, address(takerModule), borrowOut, address(0), _borrowData());

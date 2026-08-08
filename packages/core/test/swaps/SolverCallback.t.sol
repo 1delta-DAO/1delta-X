@@ -80,9 +80,7 @@ contract SolverCallbackTest is CoreSettlementBase {
         bytes memory cb = abi.encodeCall(LiquiditySource.supply, (solver, WETH, WETH_OUT));
 
         vm.prank(solver);
-        settlement.fillWithCallback(
-            order, sig, USDC_IN, address(source), cb, CallbackMode.PreDelivery
-        );
+        settlement.fillWithCallback(order, sig, USDC_IN, address(source), cb, CallbackMode.PreDelivery);
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "maker received WETH");
         assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "solver received USDC");
@@ -138,9 +136,7 @@ contract SolverCallbackTest is CoreSettlementBase {
 
         vm.prank(attacker);
         vm.expectRevert(); // executor is not an approved spender → Permit3 reverts → CallbackFailed
-        settlement.fillWithCallback(
-            order, sig, USDC_IN, address(permit3), drain, CallbackMode.PreDelivery
-        );
+        settlement.fillWithCallback(order, sig, USDC_IN, address(permit3), drain, CallbackMode.PreDelivery);
 
         assertEq(IERC20(USDC).balanceOf(victim), victimBal, "victim funds untouched");
     }
@@ -238,9 +234,7 @@ contract SolverCallbackTest is CoreSettlementBase {
         bytes memory cb = abi.encodeCall(SwapHelper.swap, (solver, USDC, USDC_IN, WETH, WETH_OUT));
 
         vm.prank(solver);
-        settlement.fillWithCallback(
-            order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs
-        );
+        settlement.fillWithCallback(order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs);
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "maker received WETH");
         assertEq(IERC20(USDC).balanceOf(maker), 0, "maker spent USDC");
@@ -263,9 +257,7 @@ contract SolverCallbackTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(Base.ReverseModeRequiresNoItems.selector);
-        settlement.fillWithCallback(
-            order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs
-        );
+        settlement.fillWithCallback(order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs);
     }
 
     /// @dev If the callback under-delivers (solver ends with less WETH than owed),
@@ -282,9 +274,7 @@ contract SolverCallbackTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(); // delivery pulls WETH_OUT from solver who only has WETH_OUT-1
-        settlement.fillWithCallback(
-            order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs
-        );
+        settlement.fillWithCallback(order, sig, USDC_IN, address(swapHelper), cb, CallbackMode.PostInputs);
 
         assertEq(IERC20(USDC).balanceOf(maker), USDC_IN, "maker still holds its USDC");
         assertEq(IERC20(WETH).balanceOf(maker), 0, "maker received nothing");
@@ -313,9 +303,7 @@ contract SolverCallbackTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert();
-        settlement.fillWithCallback(
-            order, sig, USDC_IN, address(permit3), drain, CallbackMode.PostInputs
-        );
+        settlement.fillWithCallback(order, sig, USDC_IN, address(permit3), drain, CallbackMode.PostInputs);
 
         assertEq(IERC20(USDC).balanceOf(victim), victimBal, "victim untouched in reverse mode");
     }

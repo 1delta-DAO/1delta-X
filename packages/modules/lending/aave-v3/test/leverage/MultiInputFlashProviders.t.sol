@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
@@ -43,8 +45,7 @@ contract MultiInputFlashProvidersTest is AaveModulesBase {
     }
 
     function test_dualConversion_via_euler_flash() public {
-        EulerMultiInputFlashSolver s =
-            new EulerMultiInputFlashSolver(address(permit3), address(settlement), UNI_ROUTER);
+        EulerMultiInputFlashSolver s = new EulerMultiInputFlashSolver(address(permit3), address(settlement), UNI_ROUTER);
         _runDualVia(address(s), EULER_WETH_VAULT);
     }
 
@@ -91,10 +92,9 @@ contract MultiInputFlashProvidersTest is AaveModulesBase {
 
         Order memory order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 50,
             deadline: block.timestamp + 1 hours,
-            legsIn: _legsIn2(USDC, borrowOut, DAI, equityIn),
+            legsIn: PackedEncode.legsIn(_legsIn2(USDC, borrowOut, DAI, equityIn)),
             legsOut: _legsOut1(WETH, collateralIn),
             timing: 0,
             exclusiveFiller: address(0),
@@ -103,9 +103,9 @@ contract MultiInputFlashProvidersTest is AaveModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -115,9 +115,8 @@ contract MultiInputFlashProvidersTest is AaveModulesBase {
         uint256 makerDebtBefore = IERC20(usdcDebtToken).balanceOf(maker);
 
         // USDC via 0.05% pool, DAI via 0.3% pool.
-        IMultiInputFlashSolver(solver).executeFill(
-            flashSource, collateralIn, order, sig, borrowOut, _fees(500, 3000), _u2(0, 0)
-        );
+        IMultiInputFlashSolver(solver)
+            .executeFill(flashSource, collateralIn, order, sig, borrowOut, _fees(500, 3000), _u2(0, 0));
 
         // Maker: +1 aWETH collateral, +3000 USDC debt, -3000 DAI equity. Tolerance
         // absorbs Aave liquidity-index accrual when the flash source IS the pool.

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, Validator, OrderSide, LegIn, LegOut} from "@core/settlement/Settlement.sol";
@@ -38,8 +40,7 @@ contract MultiOutputFlashTest is CoreSettlementBase {
     function setUp() public override {
         super.setUp();
         vm.label(DAI, "DAI");
-        flashSolver =
-            new MultiOutputFlashSolver(address(permit3), address(settlement), BALANCER_VAULT, UNI_ROUTER);
+        flashSolver = new MultiOutputFlashSolver(address(permit3), address(settlement), BALANCER_VAULT, UNI_ROUTER);
         vm.label(address(flashSolver), "multiOutputFlashSolver");
     }
 
@@ -58,11 +59,10 @@ contract MultiOutputFlashTest is CoreSettlementBase {
         legsOut[1] = LegOut(DAI, DAI_OUT, 0, address(0));
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(WETH, WETH_IN),
-            legsOut: legsOut,
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
@@ -70,9 +70,9 @@ contract MultiOutputFlashTest is CoreSettlementBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, CurvePoint, LegIn, LegOut} from "./Structs.sol";
+import {Order, OrderSide} from "./Structs.sol";
+import {PackedArrays} from "./PackedArrays.sol";
 
 /// @title DutchAuction
 /// @notice Dutch decay pricing. Every leg shares ONE clock and ONE normalized
@@ -10,7 +11,7 @@ import {Order, CurvePoint, LegIn, LegOut} from "./Structs.sol";
 ///         through its own `start`/`end` bounds. The shape of the bump over time
 ///         is either a single linear segment (`decayStartTime`/`decayDuration`)
 ///         or, if `curve` is non-empty, a piecewise-linear interpolation over the
-///         signed `CurvePoint[]`. An optional gas bump adds decay proportional to
+///         signed packed `curve` blob. An optional gas bump adds decay proportional to
 ///         `block.basefee`, so the maker clears for less when gas is high.
 ///
 ///         Fixed legs (`end == 0`) ignore the bump; any leg with `end != 0` is
@@ -57,6 +58,52 @@ library DutchAuction {
         return (order.timing >> 96) & 0xf;
     }
 
+    /// @notice The maker's FILL-ONCE opt-in — bit 100 of `timing`.
+    /// @dev    When set, the order is settled against the maker's NONCE BITMAP instead
+    ///         of a dedicated `filled[orderHash]` slot: the fill consumes
+    ///         `nonceBitmap[maker][nonce >> 8]`'s bit, which every fill already SLOADs
+    ///         for the cancellation gate, so the write lands on a WARM, usually
+    ///         already-non-zero slot (~2,900 gas) instead of a fresh order-specific
+    ///         slot's zero-to-one write (22,100). 256 orders share one word, so only
+    ///         the first order in a word pays full price. 1inch LOP v4 calls this the
+    ///         bit invalidator and picks it automatically for any order that forbids
+    ///         partial or multiple fills; we make it an explicit maker opt-in.
+    ///
+    ///         Bit 100 was free space in a word the maker ALREADY SIGNS, so this costs
+    ///         no new `Order` field, no typehash change and no golden-hash break —
+    ///         and every previously signed order reads back 0, i.e. the classic
+    ///         per-hash counter it was signed under.
+    ///
+    ///         ⚠ CONSEQUENCES the maker is opting into:
+    ///           • The fill MUST be a full fill ({_openFill} reverts {FillOnceMustBeFull}
+    ///             otherwise) — a partial fill would burn the nonce and strand the rest.
+    ///           • The nonce is shared state. Filling this order invalidates EVERY
+    ///             other order the maker signed with the same nonce, exactly as
+    ///             {NonceManager.cancelOrders} would.
+    ///           • `filled[orderHash]` stays 0 forever, so {SettlementLens.remaining}
+    ///             keeps reporting the full size. Order status must be read from
+    ///             {SettlementLens.getOrderRelevantState}, which consults the nonce
+    ///             bitmap and reports the order as no longer fillable.
+    function useNonceInvalidator(Order calldata order) internal pure returns (bool) {
+        return (order.timing >> 100) & 1 == 1;
+    }
+
+    /// @notice Which side of the order is FIXED and which is auctioned — bit 101 of
+    ///         `timing`. See {OrderSide}.
+    /// @dev    It lived in its own `Order` field, which cost a full 32-byte calldata
+    ///         word and one of the hash preimage's words for a single bit. It is NOT
+    ///         derivable from the legs — a fixed-price order has `end == 0` on every
+    ///         leg of both sides, and a SELL may carry a RISING relayer-fee input, so
+    ///         "which side decays" identifies neither the auctioned side nor the
+    ///         anchor. What it selects is which side gets the exactness guarantee
+    ///         (SELL: exact-input, BUY: exact-output) and which leg 0 denominates the
+    ///         fill. So it stays signed — just not in a word of its own.
+    ///
+    ///         `0` reads back {OrderSide.SELL}, matching the enum's zero value.
+    function side(Order calldata order) internal pure returns (OrderSide) {
+        return OrderSide((order.timing >> 101) & 1);
+    }
+
     // ──────────────────── Decay clock ────────────────────
 
     /// @notice The shared normalized decay for this order at the current time,
@@ -64,8 +111,8 @@ library DutchAuction {
     ///         segment; then the optional gas bump is added and the sum clamped.
     function bumpBps(Order calldata order) internal view returns (uint256 bps) {
         uint256 startT = decayStartTime(order);
-        CurvePoint[] calldata curve = order.curve;
-        uint256 n = curve.length;
+        bytes calldata curve = order.curve;
+        uint256 n = PackedArrays.validateFixed(curve, PackedArrays.CURVE_STRIDE);
 
         if (n == 0) {
             // Classic single linear segment.
@@ -80,10 +127,12 @@ library DutchAuction {
             // Piecewise-linear curve, timeDeltas relative to decayStartTime.
             if (block.timestamp < startT) revert AuctionNotStarted();
             uint256 elapsed = block.timestamp - startT;
-            if (elapsed <= curve[0].timeDelta) {
-                bps = curve[0].bumpBps;
-            } else if (elapsed >= curve[n - 1].timeDelta) {
-                bps = curve[n - 1].bumpBps;
+            (uint256 tFirst, uint256 bFirst) = PackedArrays.curvePoint(curve, 0);
+            (uint256 tLast, uint256 bLast) = PackedArrays.curvePoint(curve, n - 1);
+            if (elapsed <= tFirst) {
+                bps = bFirst;
+            } else if (elapsed >= tLast) {
+                bps = bLast;
             } else {
                 // `n - 1` is deliberately left IN the condition. Hoisting it to a
                 // local measured WORSE: this loop almost always matches on its first
@@ -91,11 +140,9 @@ library DutchAuction {
                 // costs more than the re-subtraction it saves. The unchecked
                 // increment is a clean win — `k < n - 1` cannot overflow.
                 for (uint256 k; k < n - 1;) {
-                    uint256 t1 = curve[k + 1].timeDelta;
+                    (uint256 t1, uint256 b1) = PackedArrays.curvePoint(curve, k + 1);
                     if (elapsed < t1) {
-                        uint256 t0 = curve[k].timeDelta;
-                        uint256 b0 = curve[k].bumpBps;
-                        uint256 b1 = curve[k + 1].bumpBps;
+                        (uint256 t0, uint256 b0) = PackedArrays.curvePoint(curve, k);
                         uint256 span = t1 - t0; // > 0 for a well-formed (increasing) curve
                         // Interpolate; the curve may rise or fall between points.
                         bps = b1 >= b0
@@ -127,16 +174,14 @@ library DutchAuction {
     ///         reuses it across every leg. A FIXED leg (`end == 0`) returns `start`
     ///         and ignores `bump`.
     function amountOutAt(Order calldata order, uint256 j, uint256 bump) internal pure returns (uint256) {
-        return amountOutAt(order.legsOut[j], bump);
+        (, uint256 s0, uint256 e0,) = PackedArrays.legOut(order.legsOut, j);
+        return outTick(s0, e0, bump);
     }
 
-    /// @notice Leg-pointer form of {amountOutAt}. Identical math; it just lets a
-    ///         caller that has ALREADY resolved `legsOut[j]` reuse that pointer
-    ///         instead of re-resolving the array offset, the length bounds check, and
-    ///         the element offset on every field read. {Pricing} uses this one.
-    function amountOutAt(LegOut calldata leg, uint256 bump) internal pure returns (uint256) {
-        uint256 startOut = leg.start;
-        uint256 endOut = leg.end;
+    /// @notice The output tick from a leg's ALREADY-DECODED bounds. Split out so a
+    ///         caller that decoded the whole leg for other reasons ({Pricing}) does not
+    ///         pay to decode it twice.
+    function outTick(uint256 startOut, uint256 endOut, uint256 bump) internal pure returns (uint256) {
         if (endOut == 0) return startOut; // fixed leg — no bump
         if (startOut < endOut) revert InvalidAuctionParams(); // outputs must FALL
         return startOut - ((startOut - endOut) * bump) / BPS;
@@ -146,16 +191,17 @@ library DutchAuction {
     ///         `bump` at most ONCE (lazily, only if some leg actually decays — so
     ///         an all-fixed order never calls `bumpBps`, preserving its behavior).
     function currentAmountOut(Order calldata order) internal view returns (uint256[] memory outs) {
-        uint256 n = order.legsOut.length;
+        uint256 n = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
         outs = new uint256[](n);
         uint256 bump;
         bool bumpSet;
         for (uint256 j; j < n;) {
-            if (order.legsOut[j].end != 0 && !bumpSet) {
+            (, uint256 s0, uint256 e0,) = PackedArrays.legOut(order.legsOut, j);
+            if (e0 != 0 && !bumpSet) {
                 bump = bumpBps(order);
                 bumpSet = true;
             }
-            outs[j] = amountOutAt(order, j, bump);
+            outs[j] = outTick(s0, e0, bump);
             unchecked {
                 ++j;
             }
@@ -166,13 +212,12 @@ library DutchAuction {
     ///         `pure` counterpart of `amountOutAt`. FIXED leg (`end == 0`) returns
     ///         `start`.
     function amountInAt(Order calldata order, uint256 i, uint256 bump) internal pure returns (uint256) {
-        return amountInAt(order.legsIn[i], bump);
+        (, uint256 s0, uint256 e0) = PackedArrays.legIn(order.legsIn, i);
+        return inTick(s0, e0, bump);
     }
 
-    /// @notice Leg-pointer form of {amountInAt} — see {amountOutAt}'s counterpart.
-    function amountInAt(LegIn calldata leg, uint256 bump) internal pure returns (uint256) {
-        uint256 startIn = leg.start;
-        uint256 endIn = leg.end;
+    /// @notice The input tick from already-decoded bounds — see {outTick}.
+    function inTick(uint256 startIn, uint256 endIn, uint256 bump) internal pure returns (uint256) {
         if (endIn == 0) return startIn; // fixed leg — no bump
         if (startIn > endIn) revert InvalidAuctionParams(); // inputs must RISE
         return startIn + ((endIn - startIn) * bump) / BPS;
@@ -181,16 +226,17 @@ library DutchAuction {
     /// @notice Current auction tick for every input leg. Shared `bump` computed at
     ///         most once (lazily), as in `currentAmountOut`.
     function currentAmountIn(Order calldata order) internal view returns (uint256[] memory ins) {
-        uint256 n = order.legsIn.length;
+        uint256 n = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         ins = new uint256[](n);
         uint256 bump;
         bool bumpSet;
         for (uint256 i; i < n;) {
-            if (order.legsIn[i].end != 0 && !bumpSet) {
+            (, uint256 s0, uint256 e0) = PackedArrays.legIn(order.legsIn, i);
+            if (e0 != 0 && !bumpSet) {
                 bump = bumpBps(order);
                 bumpSet = true;
             }
-            ins[i] = amountInAt(order, i, bump);
+            ins[i] = inTick(s0, e0, bump);
             unchecked {
                 ++i;
             }

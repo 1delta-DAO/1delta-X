@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
@@ -24,7 +26,7 @@ contract AaveV3MultiInputFlashSolver is BaseFlashSolver {
         pool = IAaveV3Pool(_pool);
     }
 
-    /// @param flashToken  the collateral asset to flash (equals `order.legsOut[0].token`)
+    /// @param flashToken  the collateral asset to flash (equals `PackedArraysMem.legOutToken(order.legsOut, 0)`)
     function executeFill(
         address flashToken,
         uint256 flashAmount,
@@ -39,16 +41,13 @@ contract AaveV3MultiInputFlashSolver is BaseFlashSolver {
 
         // Surplus collateral is the fill's profit — sweep it to the caller so no
         // balance accumulates in this permissionless solver.
-        _sweep(order.legsOut[0].token, msg.sender);
+        _sweep(PackedArraysMem.legOutToken(order.legsOut, 0), msg.sender);
     }
 
-    function executeOperation(
-        address asset,
-        uint256 amount,
-        uint256 premium,
-        address initiator,
-        bytes calldata params
-    ) external returns (bool) {
+    function executeOperation(address asset, uint256 amount, uint256 premium, address initiator, bytes calldata params)
+        external
+        returns (bool)
+    {
         if (msg.sender != address(pool)) revert OnlyPool();
         if (initiator != address(this)) revert BadInitiator();
         _requireInFlash();

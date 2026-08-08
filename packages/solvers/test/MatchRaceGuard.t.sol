@@ -187,9 +187,7 @@ contract MatchRaceGuardTest is CoreSettlementBase {
 
         MatchPlan memory plan = _plan(a, b, rival);
         vm.prank(rival);
-        vm.expectRevert(
-            abi.encodeWithSelector(MatchRaceGuard.OrderTaken.selector, uint256(1), uint256(0), BOB_IN / 4)
-        );
+        vm.expectRevert(abi.encodeWithSelector(MatchRaceGuard.OrderTaken.selector, uint256(1), uint256(0), BOB_IN / 4));
         guarded.settleMatch(hashes, _zeros(), plan);
     }
 

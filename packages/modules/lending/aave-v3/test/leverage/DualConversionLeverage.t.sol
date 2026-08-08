@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
@@ -78,10 +80,9 @@ contract DualConversionLeverageTest is AaveModulesBase {
 
         Order memory order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 42,
             deadline: block.timestamp + 1 hours,
-            legsIn: _legsIn2(USDC, borrowOut, DAI, equityIn),
+            legsIn: PackedEncode.legsIn(_legsIn2(USDC, borrowOut, DAI, equityIn)),
             legsOut: _legsOut1(WETH, collateralIn),
             timing: 0,
             exclusiveFiller: address(0),
@@ -90,9 +91,9 @@ contract DualConversionLeverageTest is AaveModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

@@ -91,7 +91,9 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
     ///      be stable across a test so the derived `id` is stable.
     function _market() internal view returns (Market memory m) {
         CollateralParams[] memory cp = new CollateralParams[](1);
-        cp[0] = CollateralParams({token: address(COLL), lltv: 0.8e18, liquidationCursor: 0.05e18, oracle: address(0x0AC1E)});
+        cp[0] = CollateralParams({
+            token: address(COLL), lltv: 0.8e18, liquidationCursor: 0.05e18, oracle: address(0x0AC1E)
+        });
         m = Market({
             chainId: 1,
             midnight: address(midnight),
@@ -186,7 +188,10 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
         Market memory m = _market();
         return keccak256(
             abi.encodePacked(
-                uint8(0xff), m.midnight, uint256(0), keccak256(abi.encodePacked(hex"600b380380600b5f395ff3", abi.encode(m)))
+                uint8(0xff),
+                m.midnight,
+                uint256(0),
+                keccak256(abi.encodePacked(hex"600b380380600b5f395ff3", abi.encode(m)))
             )
         );
     }

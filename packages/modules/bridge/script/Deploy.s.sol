@@ -72,8 +72,7 @@ contract DeployScript is Script {
         console.logBytes32(factory.initCodeHashFor(address(0xdead))); // sample; owner-dependent by design
 
         if (spokePool != address(0)) {
-            AcrossBridgeOutModule acrossOut =
-                new AcrossBridgeOutModule{salt: SALT}(permit3, settlement, spokePool);
+            AcrossBridgeOutModule acrossOut = new AcrossBridgeOutModule{salt: SALT}(permit3, settlement, spokePool);
             console.log("AcrossBridgeOutModule", address(acrossOut));
         }
 

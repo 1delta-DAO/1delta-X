@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Base} from "@core/settlement/Base.sol";
 
 import {Settlement, CallbackMode, Order, Item, Validator, OrderSide, CurvePoint} from "@core/settlement/Settlement.sol";
@@ -127,9 +129,9 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint256 end = 1e18;
 
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.legsOut[0].end = end;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, end);
         _setDecayStart(order, uint32(block.timestamp));
-        order.curve = _curve3();
+        order.curve = PackedEncode.curve(_curve3());
         bytes memory sig = _sign(order);
 
         // t=50 → halfway into [0,100] → bump 2500 → out = start - (start-end)*2500/10000.
@@ -149,9 +151,9 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_curve_clampsAfterLastPoint() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         _setDecayStart(order, uint32(block.timestamp));
-        order.curve = _curve3();
+        order.curve = PackedEncode.curve(_curve3());
 
         vm.warp(block.timestamp + 10_000); // well past the last point
         assertEq(lens.previewAmountOut(order)[0], 1e18, "clamped to end (bump 10000)");
@@ -159,9 +161,9 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_curve_revertsBeforeStart() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         _setDecayStart(order, uint32(block.timestamp + 100)); // future
-        order.curve = _curve3();
+        order.curve = PackedEncode.curve(_curve3());
 
         vm.expectRevert(DutchAuction.AuctionNotStarted.selector);
         lens.previewAmountOut(order);
@@ -174,7 +176,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         Order memory order = _buyOrder(1, address(tA), address(tB), startIn, endIn, BUY_OUT);
         _setDecayStart(order, uint32(block.timestamp));
-        order.curve = _curve3();
+        order.curve = PackedEncode.curve(_curve3());
         bytes memory sig = _sign(order);
 
         vm.warp(block.timestamp + 50); // bump 2500
@@ -196,7 +198,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         // No time decay (duration 0, no curve) → the ONLY bump is the gas bump.
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.legsOut[0].end = end;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, end);
         order.gasBumpBps = 1_000;
         order.gasPriceRef = ref;
         bytes memory sig = _sign(order);
@@ -212,7 +214,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_gasBump_cappedAtGasBumpBps() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         order.gasBumpBps = 1_000;
         order.gasPriceRef = 30 gwei;
 
@@ -223,7 +225,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_gasBump_belowRef_partial() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         order.gasBumpBps = 1_000;
         order.gasPriceRef = 30 gwei;
 
@@ -257,12 +259,12 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
     function test_validateOrder_newFields() public view {
         // Well-formed with all three features.
         Order memory ok = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        ok.legsOut[0].end = 1e18;
+        ok.legsOut = PackedEncode.setLegOutEnd(ok.legsOut, 0, 1e18);
         ok.exclusiveFiller = EX;
         _setExclusivityEnd(ok, uint32(block.timestamp + 100));
         ok.exclusivityOverrideBps = 50;
         _setDecayStart(ok, uint32(block.timestamp));
-        ok.curve = _curve3();
+        ok.curve = PackedEncode.curve(_curve3());
         ok.gasBumpBps = 500;
         ok.gasPriceRef = 30 gwei;
         (bool good,) = lens.validateOrder(ok);
@@ -281,7 +283,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         CurvePoint[] memory bad = new CurvePoint[](2);
         bad[0] = CurvePoint({timeDelta: 100, bumpBps: 0});
         bad[1] = CurvePoint({timeDelta: 100, bumpBps: 5_000}); // not strictly increasing
-        o2.curve = bad;
+        o2.curve = PackedEncode.curve(bad);
         (bool b2, string memory r2) = lens.validateOrder(o2);
         assertFalse(b2, "curve time must increase");
         assertEq(r2, "curve timeDelta not increasing");
@@ -308,7 +310,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         _setDecayStart(o2, uint32(block.timestamp));
         CurvePoint[] memory c2 = new CurvePoint[](1);
         c2[0] = CurvePoint({timeDelta: 0, bumpBps: 10_001});
-        o2.curve = c2;
+        o2.curve = PackedEncode.curve(c2);
         (bool b2, string memory r2) = lens.validateOrder(o2);
         assertFalse(b2);
         assertEq(r2, "curve bumpBps > 10000");
@@ -317,7 +319,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory o3 = _plainOrder(3, address(tA), address(tB), SELL_IN, SELL_OUT);
         CurvePoint[] memory c3 = new CurvePoint[](1);
         c3[0] = CurvePoint({timeDelta: 0, bumpBps: 5_000});
-        o3.curve = c3; // decayStartTime left 0
+        o3.curve = PackedEncode.curve(c3); // decayStartTime left 0
         (bool b3, string memory r3) = lens.validateOrder(o3);
         assertFalse(b3);
         assertEq(r3, "curve set without decayStartTime");
@@ -339,7 +341,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint64 ref = 30 gwei;
 
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.legsOut[0].end = end;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, end);
         _setDecayStart(order, uint32(block.timestamp));
         _setDecayDuration(order, 100);
         order.gasBumpBps = 1_000;
@@ -360,7 +362,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
     function test_gasBump_plusTimeDecay_saturatesToEnd() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         _setDecayStart(order, uint32(block.timestamp));
         _setDecayDuration(order, 100);
         order.gasBumpBps = 3_000;
@@ -385,9 +387,9 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint256 start = SELL_OUT;
         uint256 end = 1e18;
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.legsOut[0].end = end;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, end);
         _setDecayStart(order, uint32(block.timestamp));
-        order.curve = c;
+        order.curve = PackedEncode.curve(c);
 
         uint256 t0 = block.timestamp;
         vm.warp(t0 + 50); // decreasing: 8000 - 6000*50/100 = 5000
@@ -403,9 +405,9 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         c[0] = CurvePoint({timeDelta: 50, bumpBps: 2_000});
         c[1] = CurvePoint({timeDelta: 150, bumpBps: 8_000});
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         _setDecayStart(order, uint32(block.timestamp));
-        order.curve = c;
+        order.curve = PackedEncode.curve(c);
 
         vm.warp(block.timestamp + 20); // before first point → clamp to 2000
         assertEq(
@@ -417,22 +419,20 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         CurvePoint[] memory c = new CurvePoint[](1);
         c[0] = CurvePoint({timeDelta: 0, bumpBps: 4_000});
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         _setDecayStart(order, uint32(block.timestamp));
-        order.curve = c;
+        order.curve = PackedEncode.curve(c);
 
         vm.warp(block.timestamp + 50);
-        assertEq(
-            lens.previewAmountOut(order)[0], SELL_OUT - ((SELL_OUT - 1e18) * 4_000) / 10_000, "single-point curve"
-        );
+        assertEq(lens.previewAmountOut(order)[0], SELL_OUT - ((SELL_OUT - 1e18) * 4_000) / 10_000, "single-point curve");
     }
 
     function test_curve_fillRevertsBeforeStart() public {
         _fundSell(SELL_OUT);
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         _setDecayStart(order, uint32(block.timestamp + 100));
-        order.curve = _curve3();
+        order.curve = PackedEncode.curve(_curve3());
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -446,9 +446,9 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint256 start = SELL_OUT;
         uint256 end = 1e18;
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
-        order.legsOut[0].end = end;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, end);
         _setDecayStart(order, uint32(block.timestamp));
-        order.curve = _curve3(); // [(0,0),(100,5000),(200,10000)]
+        order.curve = PackedEncode.curve(_curve3()); // [(0,0),(100,5000),(200,10000)]
         bytes memory sig = _sign(order);
 
         uint256 t0 = block.timestamp;
@@ -481,10 +481,10 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         Order memory order = _plainOrderMultiOut(1, address(tA), SELL_IN, tokenOut, startO);
         for (uint256 j; j < endO.length; j++) {
-            order.legsOut[j].end = endO[j];
+            order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, j, endO[j]);
         }
         _setDecayStart(order, uint32(block.timestamp));
-        order.curve = _curve3();
+        order.curve = PackedEncode.curve(_curve3());
         bytes memory sig = _sign(order);
 
         uint256 outB = 2e18 - (1e18 * 2_500) / 10_000; // shared bump 2500
@@ -511,7 +511,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         _fundSell(bumped);
 
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         _setDecayStart(order, uint32(block.timestamp));
         _setDecayDuration(order, 100);
         order.exclusiveFiller = EX;
@@ -540,9 +540,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         bytes memory cb = abi.encodeCall(Supplier.supply, (solver, address(tB), bumped));
 
         vm.prank(solver);
-        settlement.fillWithCallback(
-            order, sig, SELL_IN, address(supplier), cb, CallbackMode.PreDelivery
-        );
+        settlement.fillWithCallback(order, sig, SELL_IN, address(supplier), cb, CallbackMode.PreDelivery);
         assertEq(tB.balanceOf(maker), bumped, "override honored in PreDelivery callback");
     }
 
@@ -564,9 +562,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         bytes memory cb = abi.encodeCall(SwapHelper.swap, (solver, address(tA), discounted, address(tB), BUY_OUT));
 
         vm.prank(solver);
-        settlement.fillWithCallback(
-            order, sig, BUY_OUT, address(helper), cb, CallbackMode.PostInputs
-        );
+        settlement.fillWithCallback(order, sig, BUY_OUT, address(helper), cb, CallbackMode.PostInputs);
         assertEq(tB.balanceOf(maker), BUY_OUT, "maker got exact output");
         assertEq(tA.balanceOf(maker), BUY_IN - discounted, "maker paid only the discounted input");
     }
@@ -627,7 +623,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
     function testFuzz_gasBump_withinBounds(uint256 basefee) public {
         basefee = bound(basefee, 0, 1_000 gwei);
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
-        order.legsOut[0].end = 1e18;
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         order.gasBumpBps = 2_000;
         order.gasPriceRef = 30 gwei;
 

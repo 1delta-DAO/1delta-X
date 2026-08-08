@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {Order, Item, Validator, OrderSide, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
 import {LimitOrderLeverageSolver} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
@@ -102,10 +104,9 @@ contract SolverGuardsTest is CoreSettlementBase {
 
         o = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
+            legsIn: PackedEncode.legsIn(legsIn),
             legsOut: _legsOut1(WETH, 1 ether),
             timing: 0,
             exclusiveFiller: address(0),
@@ -114,9 +115,9 @@ contract SolverGuardsTest is CoreSettlementBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -142,7 +143,6 @@ contract SolverGuardsTest is CoreSettlementBase {
     function _singleOutputOrder() internal view returns (Order memory o) {
         o = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(WETH, 3 ether),
@@ -154,9 +154,9 @@ contract SolverGuardsTest is CoreSettlementBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

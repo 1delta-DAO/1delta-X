@@ -64,10 +64,7 @@ interface IOFT {
     ///         allowance needed); true for an adapter that pulls the underlying.
     function approvalRequired() external view returns (bool);
 
-    function quoteSend(SendParam calldata _sendParam, bool _payInLzToken)
-        external
-        view
-        returns (MessagingFee memory);
+    function quoteSend(SendParam calldata _sendParam, bool _payInLzToken) external view returns (MessagingFee memory);
 
     function send(SendParam calldata _sendParam, MessagingFee calldata _fee, address _refundAddress)
         external

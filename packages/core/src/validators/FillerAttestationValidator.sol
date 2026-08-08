@@ -172,11 +172,7 @@ contract FillerAttestationValidator is IOrderValidator {
     ///      now carries bytecode — avoiding the Permit2 failure mode where a code-
     ///      length-first branch misroutes it into the 1271 path. Accepts 65-byte and
     ///      64-byte (EIP-2098 compact) ECDSA signatures; 1271 sigs may be any length.
-    function _isValidAttestation(bytes32 digest, bytes memory sig, address attester)
-        private
-        view
-        returns (bool)
-    {
+    function _isValidAttestation(bytes32 digest, bytes memory sig, address attester) private view returns (bool) {
         // An attester of address(0) can never be matched — a failed ecrecover also
         // yields address(0), so it must be rejected explicitly.
         if (attester == address(0)) return false;
@@ -214,8 +210,7 @@ contract FillerAttestationValidator is IOrderValidator {
         //    staticcall so a reverting / missing implementation returns false rather
         //    than bubbling up and breaking AND-composition.
         if (attester.code.length == 0) return false;
-        (bool ok, bytes memory ret) =
-            attester.staticcall(abi.encodeCall(IERC1271.isValidSignature, (digest, sig)));
+        (bool ok, bytes memory ret) = attester.staticcall(abi.encodeCall(IERC1271.isValidSignature, (digest, sig)));
         return ok && ret.length >= 32 && abi.decode(ret, (bytes4)) == IERC1271.isValidSignature.selector;
     }
 }

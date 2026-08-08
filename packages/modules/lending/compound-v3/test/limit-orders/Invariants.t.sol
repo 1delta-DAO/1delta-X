@@ -26,7 +26,13 @@ contract InvariantsTest is CompoundV3ModulesBase {
         FalseInvariant failing = new FalseInvariant();
 
         Item[] memory items = new Item[](1);
-        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(COMET, WETH)});
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(depositModule),
+            amount: wethOut,
+            recipient: address(0),
+            data: abi.encode(COMET, WETH)
+        });
 
         Validator[] memory invariants = new Validator[](1);
         invariants[0] = Validator({target: address(failing), data: ""});
@@ -59,7 +65,13 @@ contract InvariantsTest is CompoundV3ModulesBase {
         TrueInvariant passing = new TrueInvariant();
 
         Item[] memory items = new Item[](1);
-        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(COMET, WETH)});
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(depositModule),
+            amount: wethOut,
+            recipient: address(0),
+            data: abi.encode(COMET, WETH)
+        });
 
         Validator[] memory invariants = new Validator[](1);
         invariants[0] = Validator({target: address(passing), data: ""});

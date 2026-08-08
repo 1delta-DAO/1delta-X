@@ -12,7 +12,9 @@ contract MockAToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
 
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
@@ -43,7 +45,9 @@ contract MockERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
 
     function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
@@ -73,7 +77,9 @@ contract MockDebtToken {
         address delegatee,
         uint256 value,
         uint256, // deadline — not verified in mock
-        uint8, bytes32, bytes32
+        uint8,
+        bytes32,
+        bytes32
     ) external {
         delegationCalled = true;
         lastDelegator = delegator;
@@ -103,7 +109,10 @@ contract MockAaveV3Pool {
     }
 
     function supply(address, uint256, address, uint16) external {}
-    function repay(address, uint256, uint256, address) external returns (uint256) { return 0; }
+
+    function repay(address, uint256, uint256, address) external returns (uint256) {
+        return 0;
+    }
 }
 
 contract MockPermit3 {
@@ -136,8 +145,14 @@ contract AaveV3BorrowModuleTest is Test {
     function test_borrow_withDelegationSig() public {
         // data = abi.encode(pool, asset, rateMode, debtToken, deadline, v, r, s)
         bytes memory data = abi.encode(
-            address(pool), address(asset), uint256(2),
-            address(debtToken), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
+            address(pool),
+            address(asset),
+            uint256(2),
+            address(debtToken),
+            block.timestamp + 1 hours,
+            uint8(27),
+            bytes32(0),
+            bytes32(0)
         );
 
         vm.prank(address(permit3));
@@ -197,9 +212,14 @@ contract AaveV3WithdrawModuleTest is Test {
     function test_withdraw_withATokenPermit() public {
         // data = abi.encode(pool, asset, aToken, BalanceMode=0, deadline, v, r, s)
         bytes memory data = abi.encode(
-            address(pool), address(asset), address(aToken),
+            address(pool),
+            address(asset),
+            address(aToken),
             uint8(0), // BalanceMode = Exact, explicit slot required when permit present
-            block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
+            block.timestamp + 1 hours,
+            uint8(27),
+            bytes32(0),
+            bytes32(0)
         );
 
         vm.prank(address(permit3));

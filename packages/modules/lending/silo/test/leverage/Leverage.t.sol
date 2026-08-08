@@ -109,11 +109,7 @@ contract SiloLeverageTest is CoreSettlementBase {
             data: _depositData()
         });
         items[1] = Item({
-            op: ItemOp.TAKE,
-            module: address(takerModule),
-            amount: borrowOut,
-            recipient: address(0),
-            data: _borrowData()
+            op: ItemOp.TAKE, module: address(takerModule), amount: borrowOut, recipient: address(0), data: _borrowData()
         });
         return _order(maker, 1, WETH, WSTETH, borrowOut, collateralIn, items);
     }

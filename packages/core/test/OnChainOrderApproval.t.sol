@@ -116,6 +116,27 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
         settlement.fill(o, "", AMOUNT_IN);
     }
 
+    /// @dev REGRESSION: revocation must bind on the REMAINDER of an already
+    ///      partially-filled order too. `_verifySignature` short-circuits on a
+    ///      non-zero `filled[orderHash]` to skip re-running `ecrecover` on later
+    ///      fills — but that skip must not swallow the on-chain-approval check, which
+    ///      unlike a signature is revocable. The earlier test only revokes before any
+    ///      fill, so it passes either way; this one is the case that distinguishes them.
+    function test_revokeOrderApproval_blocksRemainderAfterPartialFill() public {
+        Order memory o = _order(1);
+        bytes32 hash = _approve(o);
+
+        vm.prank(solver);
+        settlement.fill(o, "", AMOUNT_IN / 10); // partial → filled[hash] != 0
+        assertGt(settlement.filled(hash), 0, "counter advanced");
+
+        cm.exec(address(settlement), abi.encodeCall(OrderState.revokeOrderApproval, (hash)));
+
+        vm.prank(solver);
+        vm.expectRevert(Signatures.OrderNotApproved.selector);
+        settlement.fill(o, "", AMOUNT_IN - AMOUNT_IN / 10);
+    }
+
     /// @dev Cancelling the order's nonce blocks an on-chain-approved order exactly
     ///      as it blocks a signed one — the nonce gate runs regardless of how the
     ///      order was authorized.

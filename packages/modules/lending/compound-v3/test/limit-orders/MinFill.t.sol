@@ -21,7 +21,13 @@ contract MinFillTest is CompoundV3ModulesBase {
         _approveSolverSide(wethOut, WETH);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item({op: ItemOp.MAKE, module: address(depositModule), amount: wethOut, recipient: address(0), data: abi.encode(COMET, WETH)});
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(depositModule),
+            amount: wethOut,
+            recipient: address(0),
+            data: abi.encode(COMET, WETH)
+        });
 
         // Sign with minFillAmountIn = 100 USDC. Attempt a 50 USDC fill → reverts.
         Order memory order = _orderWithMinFill(203, USDC, WETH, usdcIn, wethOut, items, 100e6);

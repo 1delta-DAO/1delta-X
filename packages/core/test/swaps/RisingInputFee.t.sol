@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
@@ -25,7 +27,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
     ///      against a fixed WETH output.
     function _risingOrder(uint256 nonce) internal view returns (Order memory o) {
         o = _order(maker, nonce, USDC, WETH, F0, WETH_OUT, new Item[](0));
-        o.legsIn[0].end = FMAX; // rising input (start F0 → end FMAX)
+        o.legsIn = PackedEncode.setLegInEnd(o.legsIn, 0, FMAX); // rising input (start F0 → end FMAX)
         o.timing = _packTiming(uint32(block.timestamp), DURATION, 0);
     }
 
@@ -40,7 +42,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
     function test_fixedLeg_unaffectedByDecay() public {
         _fund();
         Order memory o = _risingOrder(0);
-        o.legsIn[0].end = 0; // fixed again (end == 0 sentinel)
+        o.legsIn = PackedEncode.setLegInEnd(o.legsIn, 0, 0); // fixed again (end == 0 sentinel)
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2); // mid-decay — must not matter
@@ -120,7 +122,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
         _approveMakerToSettlement(USDC, FMAX);
 
         Order memory o = _risingOrder(4);
-        o.legsOut = new LegOut[](0);
+        o.legsOut = PackedEncode.legsOut(new LegOut[](0));
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2);
@@ -152,9 +154,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
         vm.prank(solver);
         settlement.fill(o, sig, F0 - F0 / 2);
         uint256 secondOwed = ((F0 - F0 / 2) * (F0 + (FMAX - F0) / 2)) / F0; // 1050e6
-        assertEq(
-            IERC20(USDC).balanceOf(solver), firstOwed + secondOwed, "second slice at the risen tick"
-        );
+        assertEq(IERC20(USDC).balanceOf(solver), firstOwed + secondOwed, "second slice at the risen tick");
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "full output delivered across fills");
     }
 
@@ -165,9 +165,10 @@ contract RisingInputFeeTest is CoreSettlementBase {
         uint256 skim = WETH_OUT / 100; // 1% of the delivery, as its own leg
 
         Order memory o = _risingOrder(6);
-        o.legsOut = new LegOut[](2);
-        o.legsOut[0] = LegOut(WETH, WETH_OUT - skim, 0, address(0)); // maker
-        o.legsOut[1] = LegOut(WETH, skim, 0, feeRecipient); //          originator fee
+        LegOut[] memory _tmplegsOut = new LegOut[](2);
+        _tmplegsOut[0] = LegOut(WETH, WETH_OUT - skim, 0, address(0)); // maker
+        _tmplegsOut[1] = LegOut(WETH, skim, 0, feeRecipient); //          originator fee
+        o.legsOut = PackedEncode.legsOut(_tmplegsOut);
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2);
@@ -209,8 +210,8 @@ contract RisingInputFeeTest is CoreSettlementBase {
     function test_fallingInputLeg_reverts() public {
         _fund();
         Order memory o = _risingOrder(8);
-        o.legsIn[0].start = FMAX;
-        o.legsIn[0].end = F0; // falling — inputs may only rise
+        o.legsIn = PackedEncode.setLegInStart(o.legsIn, 0, FMAX);
+        o.legsIn = PackedEncode.setLegInEnd(o.legsIn, 0, F0); // falling — inputs may only rise
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
@@ -227,8 +228,8 @@ contract RisingInputFeeTest is CoreSettlementBase {
         assertTrue(ok, string.concat("rising leg valid: ", reason));
 
         // Falling leg → malformed.
-        o.legsIn[0].start = FMAX;
-        o.legsIn[0].end = F0;
+        o.legsIn = PackedEncode.setLegInStart(o.legsIn, 0, FMAX);
+        o.legsIn = PackedEncode.setLegInEnd(o.legsIn, 0, F0);
         (ok, reason) = lens.validateOrder(o);
         assertFalse(ok, "falling input leg rejected");
         assertEq(reason, "input end < start (must rise)");
@@ -237,23 +238,23 @@ contract RisingInputFeeTest is CoreSettlementBase {
     function test_lens_validateOrder_emptyTokenOutShapes() public view {
         // Pure-fee shape with items → well-formed.
         Order memory o = _risingOrder(10);
-        o.legsOut = new LegOut[](0);
+        o.legsOut = PackedEncode.legsOut(new LegOut[](0));
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.MAKE, module: address(0xD0D0), amount: 1 ether, recipient: address(0), data: ""});
-        o.items = items;
+        o.items = PackedEncode.items(items);
         (bool ok, string memory reason) = lens.validateOrder(o);
         assertTrue(ok, string.concat("deposit shape valid: ", reason));
 
         // Empty tokenOut with NO items → giveaway.
-        o.items = new Item[](0);
+        o.items = PackedEncode.noItems();
         (ok, reason) = lens.validateOrder(o);
         assertFalse(ok, "no outputs and no items rejected");
         assertEq(reason, "no tokenOut and no items (giveaway)");
 
         // BUY can never omit tokenOut (it anchors there).
         o = _risingOrder(10);
-        o.side = OrderSide.BUY;
-        o.legsOut = new LegOut[](0);
+        o.timing |= uint256(1) << 101; // BUY (timing bit 101)
+        o.legsOut = PackedEncode.legsOut(new LegOut[](0));
         (ok, reason) = lens.validateOrder(o);
         assertFalse(ok, "buy without tokenOut rejected");
         assertEq(reason, "buy requires tokenOut");
@@ -268,8 +269,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
         Order memory o = _risingOrder(11);
         bytes memory sig = _sign(o);
 
-        (SettlementLens.OrderStatus status, uint256 fillable,,) =
-            lens.getOrderRelevantState(o, sig, solver, "");
+        (SettlementLens.OrderStatus status, uint256 fillable,,) = lens.getOrderRelevantState(o, sig, solver, "");
         assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Fillable));
         assertEq(fillable, (F0 * F0) / FMAX, "capped by allowance at the ceiling tick");
     }
@@ -299,9 +299,10 @@ contract RisingInputFeeTest is CoreSettlementBase {
         vm.stopPrank();
 
         Order memory o = _order(maker, 20, USDC, DAI, usdcFixed, daiOut, new Item[](0));
-        o.legsIn = new LegIn[](2);
-        o.legsIn[0] = LegIn(USDC, usdcFixed, 0); //          end == 0 ⇒ fixed anchor
-        o.legsIn[1] = LegIn(WETH, wethFloor, wethCeil); //   start != end ⇒ rising fee leg
+        LegIn[] memory _tmplegsIn = new LegIn[](2);
+        _tmplegsIn[0] = LegIn(USDC, usdcFixed, 0); //          end == 0 ⇒ fixed anchor
+        _tmplegsIn[1] = LegIn(WETH, wethFloor, wethCeil); //   start != end ⇒ rising fee leg
+        o.legsIn = PackedEncode.legsIn(_tmplegsIn);
         o.timing = _packTiming(uint32(block.timestamp), DURATION, 0);
         bytes memory sig = _sign(o);
 
@@ -321,13 +322,12 @@ contract RisingInputFeeTest is CoreSettlementBase {
 
     function test_lens_relevantState_emptyTokenOut_isFillable() public view {
         Order memory o = _risingOrder(12);
-        o.legsOut = new LegOut[](0);
+        o.legsOut = PackedEncode.legsOut(new LegOut[](0));
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.MAKE, module: address(0xD0D0), amount: 1 ether, recipient: address(0), data: ""});
-        o.items = items;
+        o.items = PackedEncode.items(items);
 
-        (SettlementLens.OrderStatus status, uint256 fillable,,) =
-            lens.getOrderRelevantState(o, "", solver, "");
+        (SettlementLens.OrderStatus status, uint256 fillable,,) = lens.getOrderRelevantState(o, "", solver, "");
         assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Fillable), "deposit shape not Invalid");
         assertEq(fillable, F0, "full anchor fillable (item orders skip the cap)");
     }

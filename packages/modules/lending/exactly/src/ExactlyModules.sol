@@ -221,7 +221,9 @@ contract ExactlyTakerModule is ITakerModule {
     /// @dev Full mode (floating): withdraw the user's entire position to this
     ///      module, forward the signed `amount` to `receiver`, sweep the excess
     ///      back to the user — always to `onBehalfOf`, never a caller.
-    function _withdrawFull(address market, address asset, address onBehalfOf, uint256 amount, address receiver) private {
+    function _withdrawFull(address market, address asset, address onBehalfOf, uint256 amount, address receiver)
+        private
+    {
         uint256 max = IExactlyMarket(market).maxWithdraw(onBehalfOf);
         uint256 before = IERC20(asset).balanceOf(address(this));
         IExactlyMarket(market).withdraw(max, address(this), onBehalfOf);

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, OrderSide, Item, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
@@ -101,8 +103,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
     {
         return abi.encodeCall(
             ISwapRouter02.exactInputSingle,
-            (
-                ISwapRouter02.ExactInputSingleParams({
+            (ISwapRouter02.ExactInputSingleParams({
                     tokenIn: tokenIn,
                     tokenOut: tokenOut,
                     fee: fee,
@@ -110,8 +111,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
                     amountIn: amountIn,
                     amountOutMinimum: 0,
                     sqrtPriceLimitX96: 0
-                })
-            )
+                }))
         );
     }
 
@@ -120,7 +120,6 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
     function _usdrifOrder(uint256 nonce) internal view returns (Order memory) {
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDRIF, USDRIF_IN),
@@ -132,9 +131,9 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -353,5 +352,4 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         vm.expectRevert(UsdrifInventorySolver.NotOwner.selector);
         inv.setMaxOutflowPerFill(USDT0, type(uint256).max);
     }
-
 }

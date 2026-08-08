@@ -126,7 +126,14 @@ contract MidnightLoopCallbackTest is Test {
     function test_onSell_onlyMidnight() public {
         vm.expectRevert(MidnightLoopCallback.OnlyMidnight.selector);
         loopCb.onSell(
-            bytes32(0), _market(), 1e18, 1e18, 0, alice, address(loopCb), abi.encode(uint256(0), uint24(500), uint256(0))
+            bytes32(0),
+            _market(),
+            1e18,
+            1e18,
+            0,
+            alice,
+            address(loopCb),
+            abi.encode(uint256(0), uint24(500), uint256(0))
         );
     }
 
@@ -155,7 +162,8 @@ contract MidnightLoopCallbackTest is Test {
 
     function _market() internal view returns (Market memory m) {
         CollateralParams[] memory cp = new CollateralParams[](1);
-        cp[0] = CollateralParams({token: address(COLL), lltv: LLTV, liquidationCursor: 0.05e18, oracle: address(0x0AC1E)});
+        cp[0] =
+            CollateralParams({token: address(COLL), lltv: LLTV, liquidationCursor: 0.05e18, oracle: address(0x0AC1E)});
         m = Market({
             chainId: 1,
             midnight: address(midnight),
@@ -172,7 +180,10 @@ contract MidnightLoopCallbackTest is Test {
         Market memory m = _market();
         return keccak256(
             abi.encodePacked(
-                uint8(0xff), m.midnight, uint256(0), keccak256(abi.encodePacked(hex"600b380380600b5f395ff3", abi.encode(m)))
+                uint8(0xff),
+                m.midnight,
+                uint256(0),
+                keccak256(abi.encodePacked(hex"600b380380600b5f395ff3", abi.encode(m)))
             )
         );
     }

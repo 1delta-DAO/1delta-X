@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, OrderSide, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
@@ -39,11 +41,10 @@ contract DepositWithFeeTest is AaveModulesBase {
         });
         order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: _legsIn1Rising(WETH, F0, FMAX),
-            legsOut: new LegOut[](0),
+            legsIn: PackedEncode.legsIn(_legsIn1Rising(WETH, F0, FMAX)),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)),
             timing: _packTiming(uint32(block.timestamp), uint32(DURATION), 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
@@ -51,9 +52,9 @@ contract DepositWithFeeTest is AaveModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -133,9 +134,7 @@ contract DepositWithFeeTest is AaveModulesBase {
         settlement.fill(order, sig, F0 / 2);
         uint256 fee1 = F0 / 2; // (F0/2 · F0) / F0
         assertEq(IERC20(WETH).balanceOf(solver), fee1, "first slice at floor tick");
-        assertApproxEqAbs(
-            IERC20(aWETH).balanceOf(maker) - makerAWethBefore, DEPOSIT / 2, 2, "half the deposit landed"
-        );
+        assertApproxEqAbs(IERC20(aWETH).balanceOf(maker) - makerAWethBefore, DEPOSIT / 2, 2, "half the deposit landed");
 
         // Second half mid-decay. Re-snapshot after the warp — aWETH rebases, so
         // the first half accrues interest over the 500s and would skew a
@@ -146,9 +145,7 @@ contract DepositWithFeeTest is AaveModulesBase {
         settlement.fill(order, sig, F0 - F0 / 2);
         uint256 fee2 = ((F0 - F0 / 2) * (F0 + (FMAX - F0) / 2)) / F0; // risen tick
         assertEq(IERC20(WETH).balanceOf(solver), fee1 + fee2, "second slice at the risen tick");
-        assertApproxEqAbs(
-            IERC20(aWETH).balanceOf(maker) - makerAWethMid, DEPOSIT / 2, 2, "second half landed"
-        );
+        assertApproxEqAbs(IERC20(aWETH).balanceOf(maker) - makerAWethMid, DEPOSIT / 2, 2, "second half landed");
 
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
     }
@@ -178,7 +175,7 @@ contract DepositWithFeeTest is AaveModulesBase {
             recipient: address(0),
             data: abi.encode(WETH, originator)
         });
-        order.items = items;
+        order.items = PackedEncode.items(items);
         bytes memory sig = _sign(order);
 
         uint256 makerAWethBefore = IERC20(aWETH).balanceOf(maker);

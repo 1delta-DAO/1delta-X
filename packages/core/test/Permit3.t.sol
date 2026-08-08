@@ -123,8 +123,7 @@ contract Permit3Test is Test {
     string constant WITNESS_STUB =
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,";
     // Witness is a bare bytes32; type defs in alphabetical order after the field.
-    string constant WITNESS_TYPE_STRING =
-        "bytes32 witness)"
+    string constant WITNESS_TYPE_STRING = "bytes32 witness)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
@@ -514,10 +513,7 @@ contract Permit3Test is Test {
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](1);
         tp[0] = IPermit3.TokenPermit(sp, tk, amount, expiration);
         batch = IPermit3.PermitBatch({
-            tokens: tp,
-            takers: new IPermit3.TakerPermit[](0),
-            nonce: nonce,
-            deadline: block.timestamp + 1 hours
+            tokens: tp, takers: new IPermit3.TakerPermit[](0), nonce: nonce, deadline: block.timestamp + 1 hours
         });
     }
 

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
@@ -127,7 +129,6 @@ contract MatchSettleTest is CoreSettlementBase {
         });
         o = Order({
             maker: who,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(debtToken, debt),
@@ -136,12 +137,12 @@ contract MatchSettleTest is CoreSettlementBase {
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -195,8 +196,8 @@ contract MatchSettleTest is CoreSettlementBase {
         sigs[0] = _signAs(a, pkA);
         sigs[1] = _signAs(b, pkB);
         uint256[] memory fills = new uint256[](2);
-        fills[0] = a.legsIn[0].start;
-        fills[1] = b.legsIn[0].start;
+        fills[0] = PackedEncode.getLegInStart(a.legsIn, 0);
+        fills[1] = PackedEncode.getLegInStart(b.legsIn, 0);
         return _plan(orders, sigs, fills, schedule);
     }
 
@@ -206,11 +207,16 @@ contract MatchSettleTest is CoreSettlementBase {
     ///      delivered collateral, and Settlement may consume the borrow gate.
     function _authLeverage(address who, Order memory o) internal {
         vm.startPrank(who);
-        permit3.approveToken(address(depositor), o.legsOut[0].token, uint160(o.legsOut[0].start), 0);
+        permit3.approveToken(
+            address(depositor),
+            PackedEncode.getLegOutToken(o.legsOut, 0),
+            uint160(PackedEncode.getLegOutStart(o.legsOut, 0)),
+            0
+        );
         permit3.approveTaker(
             address(settlement),
-            keccak256(o.items[1].data),
-            uint160(o.legsIn[0].start),
+            keccak256(PackedEncode.getItemData(o.items, 1)),
+            uint160(PackedEncode.getLegInStart(o.legsIn, 0)),
             uint48(block.timestamp + 1 hours)
         );
         vm.stopPrank();
@@ -272,9 +278,13 @@ contract MatchSettleTest is CoreSettlementBase {
         (Order memory a, Order memory b) = _cyclePair();
         uint256[] memory s = new uint256[](7);
         uint256[] memory base = _cycleSchedule();
-        for (uint256 i; i < 3; i++) s[i] = base[i];
+        for (uint256 i; i < 3; i++) {
+            s[i] = base[i];
+        }
         s[3] = _step(MatchStep.DELIVER, 0, 0); // ← the repeat
-        for (uint256 i = 3; i < 6; i++) s[i + 1] = base[i];
+        for (uint256 i = 3; i < 6; i++) {
+            s[i + 1] = base[i];
+        }
 
         MatchPlan memory p = _two(a, b, makerPk, bobPk, s);
         vm.prank(solver);
@@ -461,11 +471,11 @@ contract MatchSettleTest is CoreSettlementBase {
         (Order memory a, Order memory b) = _mirrorPair(WETH_AMT);
         // Alice is both sides: she sells 1 WETH (order a) and buys 1 WETH back
         // (order b is Bob's mirror, so re-point its output at her instead).
-        b.legsOut[0].recipient = maker;
+        b.legsOut = PackedEncode.setLegOutRecipient(b.legsOut, 0, maker);
 
         Validator[] memory invs = new Validator[](1);
         invs[0] = Validator({target: address(inv), data: abi.encode(WETH, maker, WETH_AMT)});
-        a.invariants = invs;
+        a.invariants = PackedEncode.validators(invs);
 
         // Order a's own steps (pull + deliver) all complete before order b's
         // delivery restores Alice's WETH — so this only passes because the check
@@ -718,7 +728,7 @@ contract MatchSettleTest is CoreSettlementBase {
         (Order memory a, Order memory b) = _cyclePair();
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.SETTLE, module: address(0x5E7), amount: 1, recipient: address(0), data: ""});
-        b.items = items;
+        b.items = PackedEncode.items(items);
 
         MatchPlan memory p = _two(a, b, makerPk, bobPk, _cycleSchedule());
         vm.prank(solver);
@@ -730,9 +740,10 @@ contract MatchSettleTest is CoreSettlementBase {
     //    ledger (proceeds are attributed per token) — rejected at open. ──
     function test_duplicateInput_reverts() public {
         (Order memory a, Order memory b) = _cyclePair();
-        b.legsIn = new LegIn[](2);
-        b.legsIn[0] = LegIn(WETH, WETH_AMT, 0);
-        b.legsIn[1] = LegIn(WETH, 1, 0);
+        LegIn[] memory _tmplegsIn = new LegIn[](2);
+        _tmplegsIn[0] = LegIn(WETH, WETH_AMT, 0);
+        _tmplegsIn[1] = LegIn(WETH, 1, 0);
+        b.legsIn = PackedEncode.legsIn(_tmplegsIn);
 
         MatchPlan memory p = _two(a, b, makerPk, bobPk, _cycleSchedule());
         vm.prank(solver);

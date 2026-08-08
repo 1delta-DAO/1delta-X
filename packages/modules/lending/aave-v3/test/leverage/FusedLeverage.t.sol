@@ -138,9 +138,7 @@ contract FusedLeverageTest is AaveModulesBase {
         vm.prank(solver);
         settlement.fill(o, sig, BORROW / 2); // half the debt…
 
-        assertApproxEqAbs(
-            IERC20(aWETH).balanceOf(maker) - aBefore, COLLATERAL / 2, 2, "supplies half the collateral"
-        );
+        assertApproxEqAbs(IERC20(aWETH).balanceOf(maker) - aBefore, COLLATERAL / 2, 2, "supplies half the collateral");
         assertApproxEqAbs(IERC20(usdcDebtToken).balanceOf(maker) - dBefore, BORROW / 2, 2, "half the debt");
 
         // The remaining half completes the position exactly — the ceil rounding is
@@ -181,9 +179,7 @@ contract FusedLeverageTest is AaveModulesBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(fused), WETH, uint160(COLLATERAL), 0);
-        permit3.approveTaker(
-            address(settlement), keccak256(data), uint160(BORROW), uint48(block.timestamp + 1 hours)
-        );
+        permit3.approveTaker(address(settlement), keccak256(data), uint160(BORROW), uint48(block.timestamp + 1 hours));
         IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(fused), type(uint256).max);
         vm.stopPrank();
 

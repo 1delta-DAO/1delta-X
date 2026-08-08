@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -37,11 +39,11 @@ interface IUniV3Router {
 ///  where `flashSource` is the provider-specific handle (the asset to borrow for
 ///  the singleton providers, or the EVK vault for Euler). The body always:
 ///
-///    1. flash-loan `flashAmount` of the collateral asset (`order.legsOut[0].token`),
+///    1. flash-loan `flashAmount` of the collateral asset (`PackedArraysMem.legOutToken(order.legsOut, 0)`),
 ///    2. inside the provider callback, run `_fillAndSwap`:
 ///         a. `settlement.fill` — Settlement pulls the collateral from this solver
 ///            via Permit3, supplies it on the maker's behalf, borrows
-///            `order.legsIn[0].token` and routes the proceeds back here,
+///            `PackedArraysMem.legInToken(order.legsIn, 0)` and routes the proceeds back here,
 ///         b. swap the borrow proceeds → collateral on Uniswap v3,
 ///    3. repay the flash per the provider's convention (transfer-back or approve-pull).
 ///
@@ -149,7 +151,7 @@ abstract contract BaseFlashSolver {
     }
 
     /// @dev The leverage core: run the maker fill, then swap the borrow proceeds
-    ///      (`order.legsIn[0].token`) back to `tokenOut` (the flash-loaned collateral) so the
+    ///      (`PackedArraysMem.legInToken(order.legsIn, 0)`) back to `tokenOut` (the flash-loaned collateral) so the
     ///      caller can repay. Leaves all proceeds in `tokenOut` denomination here.
     function _fillAndSwap(
         Order memory order,
@@ -163,11 +165,11 @@ abstract contract BaseFlashSolver {
         // leg. A multi-input order would collect only legsIn[0] here and turn
         // legs [1..] into maker shortfalls, so reject it (see _fillAndSwapAll for
         // the multi-input variant).
-        if (order.legsIn.length != 1) revert MultiInputUnsupported();
+        if (PackedArraysMem.count(order.legsIn) != 1) revert MultiInputUnsupported();
 
         settlement.fill(order, sig, fillAmountIn);
 
-        address tokenIn = order.legsIn[0].token;
+        address tokenIn = PackedArraysMem.legInToken(order.legsIn, 0);
         _swapExactIn(tokenIn, tokenOut, IERC20(tokenIn).balanceOf(address(this)), dexFee, minSwapOut);
     }
 
@@ -175,7 +177,7 @@ abstract contract BaseFlashSolver {
     ///      received input leg back to `tokenOut` (the flash-loaned collateral)
     ///      so the caller can repay. Input legs already denominated in `tokenOut`
     ///      are left as-is. `dexFees`/`minSwapOuts` are aligned with
-    ///      `order.legsIn[0].token`; entries for a skipped leg are ignored.
+    ///      `PackedArraysMem.legInToken(order.legsIn, 0)`; entries for a skipped leg are ignored.
     function _fillAndSwapAll(
         Order memory order,
         bytes memory sig,
@@ -186,9 +188,9 @@ abstract contract BaseFlashSolver {
     ) internal {
         settlement.fill(order, sig, fillAmountIn);
 
-        uint256 n = order.legsIn.length;
+        uint256 n = PackedArraysMem.count(order.legsIn);
         for (uint256 i; i < n; i++) {
-            address tokenIn = order.legsIn[i].token;
+            address tokenIn = PackedArraysMem.legInToken(order.legsIn, i);
             if (tokenIn == tokenOut) continue; // already the collateral asset
             uint256 bal = IERC20(tokenIn).balanceOf(address(this));
             if (bal == 0) continue;
@@ -197,9 +199,7 @@ abstract contract BaseFlashSolver {
     }
 
     /// @dev Swap `amountIn` of `tokenIn` → `tokenOut` on Uniswap v3 (single hop).
-    function _swapExactIn(address tokenIn, address tokenOut, uint256 amountIn, uint24 dexFee, uint256 minOut)
-        internal
-    {
+    function _swapExactIn(address tokenIn, address tokenOut, uint256 amountIn, uint24 dexFee, uint256 minOut) internal {
         SafeTransferLib.forceApprove(tokenIn, address(router), amountIn);
         router.exactInputSingle(
             IUniV3Router.ExactInputSingleParams({

@@ -173,7 +173,9 @@ contract CompoundV2NativeSettlementTest is CompoundV2ModulesBase {
         // Redeem leg: pull the maker's cETH + cap the forwarded slice.
         IERC20(address(CETH)).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(nWithdraw), address(CETH), type(uint160).max, 0);
-        permit3.approveTaker(address(settlement), keccak256(_withdrawEthFullData(wethToSolver)), uint160(wethToSolver), 0);
+        permit3.approveTaker(
+            address(settlement), keccak256(_withdrawEthFullData(wethToSolver)), uint160(wethToSolver), 0
+        );
         vm.stopPrank();
 
         // Order-of-items matters: repay (MAKE) BEFORE redeem-Full (TAKE), else the

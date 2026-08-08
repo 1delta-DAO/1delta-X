@@ -237,8 +237,7 @@ contract ExactlyLeverageTest is Test {
         vm.prank(maker);
         IERC20(MARKET_WETH).approve(address(takerModule), type(uint256).max);
 
-        bytes memory data =
-            abi.encode(uint8(ExactlyTakerModule.Op.Borrow), MARKET_WETH, WETH, uint256(0), uint256(0));
+        bytes memory data = abi.encode(uint8(ExactlyTakerModule.Op.Borrow), MARKET_WETH, WETH, uint256(0), uint256(0));
         vm.prank(maker);
         permit3.approveTaker(settlement, keccak256(data), type(uint160).max, 0);
 

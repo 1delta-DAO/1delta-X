@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -126,7 +128,6 @@ contract MigrateTest is CompoundV3ModulesBase {
 
         order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDS, 3_000e18),
@@ -138,9 +139,9 @@ contract MigrateTest is CompoundV3ModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

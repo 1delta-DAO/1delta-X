@@ -134,18 +134,11 @@ contract EulerV2RepayModule is IMakerModule {
 
     /// @dev Re-supply (opt-in) the residual as a lend balance in the same vault,
     ///      else sweep to the user. Best-effort recycle with a guaranteed sweep.
-    function _disposeResidual(address vault, address asset, address onBehalfOf, DustHandler.DustAction action)
-        private
-    {
+    function _disposeResidual(address vault, address asset, address onBehalfOf, DustHandler.DustAction action) private {
         uint256 residual = IERC20(asset).balanceOf(address(this));
         if (residual == 0) return;
         DustHandler.disposeResidual(
-            asset,
-            residual,
-            onBehalfOf,
-            action,
-            vault,
-            abi.encodeCall(IEulerVault.deposit, (residual, onBehalfOf))
+            asset, residual, onBehalfOf, action, vault, abi.encodeCall(IEulerVault.deposit, (residual, onBehalfOf))
         );
     }
 }
@@ -182,7 +175,6 @@ contract EulerV2TakerModule is ITakerModule {
     enum Op {
         Borrow, // 0
         Withdraw // 1
-
     }
 
     error OnlyPermit3();
@@ -200,9 +192,8 @@ contract EulerV2TakerModule is ITakerModule {
         (uint8 op, address vault) = abi.decode(data, (uint8, address));
 
         if (op == uint8(Op.Borrow)) {
-            IEVC(IEulerVault(vault).EVC()).call(
-                vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.borrow, (amount, receiver))
-            );
+            IEVC(IEulerVault(vault).EVC())
+                .call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.borrow, (amount, receiver)));
         } else if (op == uint8(Op.Withdraw)) {
             // BalanceMode slot at offset 64 (op@0 + vault@32).
             if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
@@ -212,9 +203,8 @@ contract EulerV2TakerModule is ITakerModule {
                 FullFillGuard.requireFullFillFromData(data, 96, amount);
                 _withdrawFull(vault, onBehalfOf, amount, receiver);
             } else {
-                IEVC(IEulerVault(vault).EVC()).call(
-                    vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf))
-                );
+                IEVC(IEulerVault(vault).EVC())
+                    .call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf)));
             }
         } else {
             revert BadOp(op);
@@ -230,9 +220,8 @@ contract EulerV2TakerModule is ITakerModule {
         address asset = IEulerVault(vault).asset();
         uint256 bal = IEulerVault(vault).maxWithdraw(onBehalfOf);
         uint256 balBefore = IERC20(asset).balanceOf(address(this));
-        IEVC(IEulerVault(vault).EVC()).call(
-            vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), onBehalfOf))
-        );
+        IEVC(IEulerVault(vault).EVC())
+            .call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), onBehalfOf)));
         uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
         require(received >= amount, "insufficient withdrawn");
         SafeTransferLib.safeTransfer(asset, receiver, amount);
@@ -270,7 +259,6 @@ contract EulerV2BatchModule is ITakerModule {
     enum BatchMode {
         Open, // 0 — deposit collateral + borrow
         Close // 1 — repay debt + withdraw collateral
-
     }
 
     struct BatchData {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {Order, Item, ItemOp, LegOut} from "@core/settlement/Settlement.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 
@@ -41,8 +43,7 @@ contract GrantItemTest is BridgeTestBase {
     function setUp() public virtual override {
         super.setUp();
         grantModule = new FunnelGrantModule(address(settlement));
-        factory =
-            new PositionFunnelFactory(address(permit3), address(settlement), address(lens), address(grantModule));
+        factory = new PositionFunnelFactory(address(permit3), address(settlement), address(lens), address(grantModule));
 
         funnel = PositionFunnel(payable(factory.deploy(maker, USER_SALT)));
         attackerFunnel = PositionFunnel(payable(factory.deploy(solver, USER_SALT)));
@@ -74,11 +75,7 @@ contract GrantItemTest is BridgeTestBase {
 
     // ──────────────────── Builders ────────────────────
 
-    function _grantSpec(address spender, address token, bool taker, bytes32 ref)
-        internal
-        pure
-        returns (bytes memory)
-    {
+    function _grantSpec(address spender, address token, bool taker, bytes32 ref) internal pure returns (bytes memory) {
         return abi.encode(FunnelGrantModule.GrantSpec({spender: spender, token: token, taker: taker, ref: ref}));
     }
 
@@ -90,15 +87,16 @@ contract GrantItemTest is BridgeTestBase {
         o = _blank(nonce);
         o.maker = funnelAddr;
         o.legsIn = _legsIn1(address(tB), BORROW);
-        o.legsOut = new LegOut[](1);
+        LegOut[] memory _tmplegsOut = new LegOut[](1);
         // recipient 0 == the maker: the solver's collateral lands at the funnel,
         // where item[2] picks it up together with the bridged share.
-        o.legsOut[0] = LegOut(address(tA), SOLVER_COLL, 0, address(0));
+        _tmplegsOut[0] = LegOut(address(tA), SOLVER_COLL, 0, address(0));
+        o.legsOut = PackedEncode.legsOut(_tmplegsOut);
 
         bytes memory takeData = "";
-        o.items = new Item[](4);
+        Item[] memory _tmpitems = new Item[](4);
         // [0] let the supply module pull the collateral
-        o.items[0] = Item({
+        _tmpitems[0] = Item({
             op: ItemOp.MAKE,
             module: address(grantModule),
             amount: COLL,
@@ -106,17 +104,19 @@ contract GrantItemTest is BridgeTestBase {
             data: _grantSpec(address(supplyModule), address(tA), false, bytes32(0))
         });
         // [1] let Settlement spend the taker allowance the borrow needs
-        o.items[1] = Item({
+        _tmpitems[1] = Item({
             op: ItemOp.MAKE,
             module: address(grantModule),
             amount: BORROW,
             recipient: address(0),
             data: _grantSpec(address(settlement), address(0), true, keccak256(takeData))
         });
-        o.items[2] =
+        _tmpitems[2] =
             Item({op: ItemOp.MAKE, module: address(supplyModule), amount: COLL, recipient: address(0), data: ""});
-        o.items[3] =
-            Item({op: ItemOp.TAKE, module: address(borrowModule), amount: BORROW, recipient: address(0), data: takeData});
+        _tmpitems[3] = Item({
+            op: ItemOp.TAKE, module: address(borrowModule), amount: BORROW, recipient: address(0), data: takeData
+        });
+        o.items = PackedEncode.items(_tmpitems);
     }
 
     function _fill(Order memory o, uint256 amount) internal {
@@ -250,9 +250,7 @@ contract GrantItemTest is BridgeTestBase {
     function test_attack_moduleCannotBeCalledDirectly() public {
         vm.prank(solver);
         vm.expectRevert(FunnelGrantModule.OnlySettlement.selector);
-        grantModule.makeOnBehalf(
-            address(funnel), type(uint160).max, _grantSpec(solver, address(tA), false, bytes32(0))
-        );
+        grantModule.makeOnBehalf(address(funnel), type(uint160).max, _grantSpec(solver, address(tA), false, bytes32(0)));
     }
 
     /// @dev THE attack this design has to survive. The attacker signs their OWN
@@ -265,15 +263,16 @@ contract GrantItemTest is BridgeTestBase {
         Order memory evil = _blank(99);
         evil.maker = address(attackerFunnel); // the attacker's own funnel
         evil.legsIn = _legsIn1(address(tA), 1);
-        evil.legsOut = new LegOut[](0);
-        evil.items = new Item[](1);
-        evil.items[0] = Item({
+        evil.legsOut = PackedEncode.legsOut(new LegOut[](0));
+        Item[] memory _tmpitems = new Item[](1);
+        _tmpitems[0] = Item({
             op: ItemOp.MAKE,
             module: address(grantModule),
             amount: COLL,
             recipient: address(0),
             data: _grantSpec(solver, address(tA), false, bytes32(0)) // spender = attacker
         });
+        evil.items = PackedEncode.items(_tmpitems);
 
         // Fund and wire the attacker's own funnel so the fill can complete.
         tA.mint(address(attackerFunnel), 1);

@@ -15,7 +15,9 @@ contract MockERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
 
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
@@ -46,8 +48,18 @@ contract MockMorpho {
         uint256 nonce;
         uint256 deadline;
     }
-    struct Signature { uint8 v; bytes32 r; bytes32 s; }
-    struct Position { uint256 supplyShares; uint128 borrowShares; uint128 collateral; }
+
+    struct Signature {
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
+    }
+
+    struct Position {
+        uint256 supplyShares;
+        uint128 borrowShares;
+        uint128 collateral;
+    }
 
     mapping(address => mapping(address => bool)) public authorization;
     bool public authWithSigCalled;

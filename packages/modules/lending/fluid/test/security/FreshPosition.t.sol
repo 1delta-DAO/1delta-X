@@ -24,10 +24,7 @@ contract FreshMintingVault {
 
     mapping(uint256 => address) public ownerOf;
 
-    function operate(uint256 nftId, int256, int256, address)
-        external
-        returns (uint256 id, int256, int256)
-    {
+    function operate(uint256 nftId, int256, int256, address) external returns (uint256 id, int256, int256) {
         if (nftId == 0) {
             id = nextId++;
             // Fluid mints the new position to the caller — here, the module.

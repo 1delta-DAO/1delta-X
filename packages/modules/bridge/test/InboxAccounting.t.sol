@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {Signatures} from "@core/settlement/Signatures.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
@@ -101,7 +103,7 @@ contract InboxAccountingTest is BridgeTestBase {
 
         // Attacker's order: same size, but every output goes to the attacker.
         Order memory attack = _dstOrder(2, BRIDGED, 1);
-        attack.legsOut[0] = LegOut(address(tB), 1, 0, solver);
+        attack.legsOut = PackedEncode.oneLegOut(address(tB), 1, 0, solver);
         bytes32 ah = _hashOrder(attack);
 
         _acrossDeliver(1, _commitmentFor(ah)); // one wei of "funding"
@@ -395,8 +397,29 @@ contract InboxAccountingTest is BridgeTestBase {
 
     function test_shape_rejectsItems() public {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
-        o.items = new Item[](1);
-        o.items[0] = Item({op: ItemOp.MAKE, module: address(0xBAD), amount: 1, recipient: address(0), data: ""});
+        Item[] memory _tmpitems = new Item[](1);
+        _tmpitems[0] = Item({op: ItemOp.MAKE, module: address(0xBAD), amount: 1, recipient: address(0), data: ""});
+        o.items = PackedEncode.items(_tmpitems);
+        _credited(o);
+        vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
+        inbox.activate(o);
+    }
+
+    /// @dev SECURITY REGRESSION — a FILL-ONCE order ({DutchAuction.useNonceInvalidator},
+    ///      `timing` bit 100) records its progress by consuming the maker's NONCE
+    ///      rather than writing `filled[orderHash]`, which then stays 0 forever. This
+    ///      inbox derives refunds from exactly that counter (`sync`: "`filled` ... IS
+    ///      the amount of `token` pulled from here"), so such an order would be FILLED
+    ///      and then REFUNDED IN FULL — a double payout whose excess is drawn from
+    ///      other commitments' pooled balance, defeating the isolation that
+    ///      {test_cannotDrainAnotherCommitsFunds} exists to guarantee.
+    ///
+    ///      Rejected at the shape gate. `sync` cannot be taught to read the nonce
+    ///      bitmap instead: it is not amount-denominated (it can only say
+    ///      filled/not-filled) and `credited` may legitimately exceed the anchor.
+    function test_shape_rejectsFillOnceOrder() public {
+        Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
+        o.timing |= uint256(1) << 100; // the fill-once opt-in
         _credited(o);
         vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
         inbox.activate(o);
@@ -406,7 +429,7 @@ contract InboxAccountingTest is BridgeTestBase {
     ///      the user's proceeds would land back inside it, reachable only by rescue.
     function test_shape_rejectsOutputToMaker() public {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
-        o.legsOut[0].recipient = address(0);
+        o.legsOut = PackedEncode.setLegOutRecipient(o.legsOut, 0, address(0));
         _credited(o);
         vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
         inbox.activate(o);
@@ -414,7 +437,7 @@ contract InboxAccountingTest is BridgeTestBase {
 
     function test_shape_rejectsOutputToInbox() public {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
-        o.legsOut[0].recipient = address(inbox);
+        o.legsOut = PackedEncode.setLegOutRecipient(o.legsOut, 0, address(inbox));
         _credited(o);
         vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
         inbox.activate(o);
@@ -422,7 +445,7 @@ contract InboxAccountingTest is BridgeTestBase {
 
     function test_shape_rejectsBuySide() public {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
-        o.side = OrderSide.BUY;
+        o.timing |= uint256(1) << 101; // BUY (timing bit 101)
         _credited(o);
         vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
         inbox.activate(o);
@@ -441,9 +464,10 @@ contract InboxAccountingTest is BridgeTestBase {
 
     function test_shape_rejectsMultipleInputLegs() public {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
-        o.legsIn = new LegIn[](2);
-        o.legsIn[0] = LegIn(address(tA), BRIDGED, 0);
-        o.legsIn[1] = LegIn(address(tC), 1, 0);
+        LegIn[] memory _tmplegsIn = new LegIn[](2);
+        _tmplegsIn[0] = LegIn(address(tA), BRIDGED, 0);
+        _tmplegsIn[1] = LegIn(address(tC), 1, 0);
+        o.legsIn = PackedEncode.legsIn(_tmplegsIn);
         _credited(o);
         vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
         inbox.activate(o);
@@ -451,7 +475,7 @@ contract InboxAccountingTest is BridgeTestBase {
 
     function test_shape_rejectsNoOutputs() public {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
-        o.legsOut = new LegOut[](0);
+        o.legsOut = PackedEncode.legsOut(new LegOut[](0));
         _credited(o);
         vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
         inbox.activate(o);

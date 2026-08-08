@@ -3,7 +3,12 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 
-import {AaveV2DepositModule, AaveV2RepayModule, AaveV2WithdrawModule, AaveV2BorrowModule} from "../src/AaveV2Modules.sol";
+import {
+    AaveV2DepositModule,
+    AaveV2RepayModule,
+    AaveV2WithdrawModule,
+    AaveV2BorrowModule
+} from "../src/AaveV2Modules.sol";
 
 // ── Mock contracts ────────────────────────────────────────────────────────────
 
@@ -28,7 +33,9 @@ contract MockERC2612 {
         );
     }
 
-    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
 
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
@@ -155,7 +162,11 @@ contract AaveV2ModulesTest is Test {
                 keccak256(
                     abi.encode(
                         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),
-                        user, spender, value, tok.nonces(user), block.timestamp + 1 hours
+                        user,
+                        spender,
+                        value,
+                        tok.nonces(user),
+                        block.timestamp + 1 hours
                     )
                 )
             )
@@ -180,9 +191,7 @@ contract AaveV2ModulesTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
 
         vm.prank(settlement);
-        depositModule.makeOnBehalf(
-            user, AMOUNT, abi.encode(address(pool), address(asset), deadline, v, r, s)
-        );
+        depositModule.makeOnBehalf(user, AMOUNT, abi.encode(address(pool), address(asset), deadline, v, r, s));
 
         assertEq(aToken.balanceOf(user), AMOUNT);
         // ERC-20 allowance was consumed via permit
@@ -217,9 +226,8 @@ contract AaveV2ModulesTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
 
         // data = (pool, asset, rateMode, debtToken, DustAction=0, deadline, v, r, s)
-        bytes memory data = abi.encode(
-            address(pool), address(asset), uint256(2), address(debtToken), uint8(0), deadline, v, r, s
-        );
+        bytes memory data =
+            abi.encode(address(pool), address(asset), uint256(2), address(debtToken), uint8(0), deadline, v, r, s);
         vm.prank(settlement);
         repayModule.makeOnBehalf(user, AMOUNT, data);
 

@@ -34,7 +34,9 @@ abstract contract NonceManager {
         uint256 len = noncesToCancel.length;
         for (uint256 i; i < len;) {
             _cancelNonce(msg.sender, noncesToCancel[i]);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         emit OrdersCancelled(msg.sender, noncesToCancel);
     }

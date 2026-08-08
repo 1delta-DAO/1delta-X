@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -90,21 +92,20 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         }
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
-            legsOut: legsOut,
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -280,11 +281,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         permit3.approveToken(address(depositor), WETH, uint160(deposit), uint48(block.timestamp + 1 hours));
 
         Item memory it = Item({
-            op: ItemOp.MAKE,
-            module: address(depositor),
-            amount: deposit,
-            recipient: address(0),
-            data: abi.encode(WETH)
+            op: ItemOp.MAKE, module: address(depositor), amount: deposit, recipient: address(0), data: abi.encode(WETH)
         });
         Order memory order = _orderItems(5, _a1(USDC), _u1(usdcIn), _a1(WETH), _u1(wethOut), _one(it));
         bytes memory sig = _sign(order);
@@ -315,8 +312,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
 
         Item memory it = _takeItem(usdcIn, address(0), USDC, usdcIn);
         _approveTake(it.data, usdcIn);
-        Order memory order =
-            _orderItems(6, _a2(USDC, DAI), _u2(usdcIn, daiIn), _a1(WETH), _u1(wethOut), _one(it));
+        Order memory order = _orderItems(6, _a2(USDC, DAI), _u2(usdcIn, daiIn), _a1(WETH), _u1(wethOut), _one(it));
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -350,8 +346,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         Item memory it = _takeItem(100e18, address(0), DAI, daiProduced);
         _approveTake(it.data, 100e18);
 
-        Order memory order =
-            _orderItems(9, _a2(USDC, DAI), _u2(usdcAnchor, daiDust), _a1(WETH), _u1(wethOut), _one(it));
+        Order memory order = _orderItems(9, _a2(USDC, DAI), _u2(usdcAnchor, daiDust), _a1(WETH), _u1(wethOut), _one(it));
         bytes memory sig = _sign(order);
 
         uint256 makerDaiBefore = IERC20(DAI).balanceOf(maker);
@@ -360,9 +355,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         vm.prank(solver);
         settlement.fill(order, sig, usdcAnchor / 2);
 
-        assertEq(
-            IERC20(DAI).balanceOf(maker) - makerDaiBefore, daiProduced, "zero-owed leg proceeds refunded to maker"
-        );
+        assertEq(IERC20(DAI).balanceOf(maker) - makerDaiBefore, daiProduced, "zero-owed leg proceeds refunded to maker");
         assertEq(IERC20(DAI).balanceOf(address(settlement)), 0, "no DAI stranded in settlement");
         assertEq(IERC20(USDC).balanceOf(solver), usdcAnchor / 2, "solver paid the anchor half-slice");
     }

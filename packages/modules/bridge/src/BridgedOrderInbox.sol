@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
+import {DutchAuction} from "@core/settlement/DutchAuction.sol";
+
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {Order, OrderSide} from "@core/settlement/Structs.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -55,7 +58,7 @@ interface ISettlementApprove {
 ///  bookkeeping here. Per-order accounting inside this contract therefore cannot
 ///  constrain a pull. The isolation comes from a single rule in {activate}:
 ///
-///      an order is approved only once `credited >= order.legsIn[0].start`
+///      an order is approved only once `credited >= _legInStart(order.legsIn, 0)`
 ///
 ///  The settlement caps cumulative fills at the anchor, which for the constrained
 ///  shape below IS `legsIn[0].start`. So for every approved order
@@ -95,6 +98,7 @@ interface ISettlementApprove {
 ///    3. Settlement and Permit3 are trusted (the standing allowance is to
 ///       Settlement alone, and only for tokens {enableToken} has wired).
 contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
+    using DutchAuction for Order; // `side` now lives in `timing` bit 101
     IPermit3 public immutable PERMIT3;
     ISettlementApprove public immutable SETTLEMENT;
 
@@ -366,13 +370,13 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         Commit storage k = commits[orderHash];
         if (k.settled) revert AlreadySettled();
         if (k.credited == 0) revert BadCommitment(); // nothing was ever bridged for this hash
-        if (order.legsIn[0].token != k.token) revert TokenMismatch();
+        if (PackedArrays.legInToken(order.legsIn, 0) != k.token) revert TokenMismatch();
         if (!tokenEnabled[k.token]) revert TokenNotEnabled();
 
         // THE funding invariant. See the contract-level note: this, plus the
         // settlement's own `filled <= anchor` cap, is what makes cross-order
         // isolation hold without any pull-time bookkeeping.
-        uint256 anchor = order.legsIn[0].start;
+        uint256 anchor = _legInStart(order.legsIn, 0);
         if (k.credited < anchor) revert Underfunded();
 
         k.approved = true;
@@ -514,16 +518,38 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///          reach them.
     ///        a live deadline — {settle}'s refund gate keys on it.
     function _checkShape(Order calldata order) internal view {
-        if (order.side != OrderSide.SELL) revert UnsupportedOrderShape();
-        if (order.legsIn.length != 1) revert UnsupportedOrderShape();
-        if (order.legsOut.length == 0) revert UnsupportedOrderShape();
-        if (order.items.length != 0) revert UnsupportedOrderShape();
+        if (order.side() != OrderSide.SELL) revert UnsupportedOrderShape();
+        // A FILL-ONCE order ({DutchAuction.useNonceInvalidator}, `timing` bit 100)
+        // records its progress by consuming the maker's NONCE instead of writing
+        // `filled[orderHash]`, which stays 0 forever. This inbox's refund accounting
+        // reads exactly that counter — `sync` treats `filled` as "the amount of
+        // `token` pulled from here" — so such an order would be filled AND refunded
+        // in full: the escrow pays out twice for one commitment, and the excess comes
+        // out of OTHER commitments' pooled balance. Reject the shape outright; the
+        // nonce bitmap is not amount-denominated, so `sync` could not be taught to
+        // read it (it can only say filled/not-filled, and `credited` may legitimately
+        // exceed the anchor).
+        if (order.useNonceInvalidator()) revert UnsupportedOrderShape();
+        if (PackedArrays.countUnchecked(order.legsIn) != 1) revert UnsupportedOrderShape();
+        if (PackedArrays.countUnchecked(order.legsOut) == 0) revert UnsupportedOrderShape();
+        if (PackedArrays.countUnchecked(order.items) != 0) revert UnsupportedOrderShape();
         if (order.fillModule != address(0) || order.fillTotal != 0) revert UnsupportedOrderShape();
-        if (order.legsIn[0].start == 0) revert UnsupportedOrderShape();
+        if (_legInStart(order.legsIn, 0) == 0) revert UnsupportedOrderShape();
         if (order.deadline <= block.timestamp) revert UnsupportedOrderShape();
-        for (uint256 j; j < order.legsOut.length; j++) {
-            address to = order.legsOut[j].recipient;
+        for (uint256 j; j < PackedArrays.countUnchecked(order.legsOut); j++) {
+            address to = _legOutRecipient(order.legsOut, j);
             if (to == address(0) || to == address(this)) revert UnsupportedOrderShape();
         }
+    }
+
+    /// @dev `startAmount` of packed input leg `i` — the leg's other fields are unused
+    ///      here, so this keeps the call sites from destructuring a 3-tuple each time.
+    function _legInStart(bytes calldata legs, uint256 i) private pure returns (uint256 v) {
+        (, v,) = PackedArrays.legIn(legs, i);
+    }
+
+    /// @dev `recipient` of packed output leg `j`.
+    function _legOutRecipient(bytes calldata legs, uint256 j) private pure returns (address r) {
+        (,,, r) = PackedArrays.legOut(legs, j);
     }
 }

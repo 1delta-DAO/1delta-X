@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
@@ -39,7 +41,12 @@ contract MockMakerWallet is IERC1271 {
 /// @dev Trivial validator: passes iff `data` decodes to `true`. Lets a test
 ///      flip a gate on/off while keeping the target/data in the signed order.
 contract BoolValidator is IOrderValidator {
-    function validate(Order calldata, address, bytes calldata data, bytes calldata) external pure override returns (bool) {
+    function validate(Order calldata, address, bytes calldata data, bytes calldata)
+        external
+        pure
+        override
+        returns (bool)
+    {
         return abi.decode(data, (bool));
     }
 }
@@ -76,21 +83,20 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         legsOut[1] = LegOut(DAI, 1_000e18, 0, address(0));
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, 2_000e6),
-            legsOut: legsOut,
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: validators,
-            invariants: invariants,
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.validators(validators),
+            invariants: PackedEncode.validators(invariants),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -140,21 +146,20 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         legsIn[1] = LegIn(USDC, usdcIn, 0);
         Order memory order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
+            legsIn: PackedEncode.legsIn(legsIn),
             legsOut: _legsOut1(DAI, daiOut),
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: _noV(),
-            invariants: _noV(),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

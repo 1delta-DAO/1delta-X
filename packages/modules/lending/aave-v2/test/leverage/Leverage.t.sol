@@ -88,8 +88,7 @@ contract AaveV2LeverageTest is CoreSettlementBase {
         returns (Order memory order)
     {
         Item[] memory items = new Item[](2);
-        items[0] =
-            Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(AAVE_V2_POOL, WETH));
+        items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(AAVE_V2_POOL, WETH));
         items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), _borrowData());
         order = _order(maker, nonce, USDC, WETH, borrowOut, collateralIn, items);
     }

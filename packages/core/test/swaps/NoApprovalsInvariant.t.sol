@@ -107,12 +107,8 @@ contract NoApprovalsInvariantTest is MockSettlementBase {
     function _assertSettlementNeverApproved() internal view {
         assertEq(rA.approveCalls(address(settlement)), 0, "settlement approved rA");
         assertEq(rB.approveCalls(address(settlement)), 0, "settlement approved rB");
-        assertEq(
-            rA.allowance(address(settlement), address(permit3)), 0, "settlement holds a standing rA allowance"
-        );
-        assertEq(
-            rB.allowance(address(settlement), address(permit3)), 0, "settlement holds a standing rB allowance"
-        );
+        assertEq(rA.allowance(address(settlement), address(permit3)), 0, "settlement holds a standing rA allowance");
+        assertEq(rB.allowance(address(settlement), address(permit3)), 0, "settlement holds a standing rB allowance");
     }
 
     /// A full single fill grants no approval.

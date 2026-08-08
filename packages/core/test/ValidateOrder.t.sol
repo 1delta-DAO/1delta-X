@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "./shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, OrderSide} from "@core/settlement/Settlement.sol";
@@ -32,26 +34,26 @@ contract ValidateOrderTest is CoreSettlementBase {
         Order memory o;
 
         o = _base();
-        o.legsIn[0].start = 0;
-        o.legsIn[0].end = 0;
+        o.legsIn = PackedEncode.setLegInStart(o.legsIn, 0, 0);
+        o.legsIn = PackedEncode.setLegInEnd(o.legsIn, 0, 0);
         _assertInvalid(o, "anchor amount is zero");
 
         o = _base();
-        o.legsOut[0].start = 0;
-        o.legsOut[0].end = 0;
+        o.legsOut = PackedEncode.setLegOutStart(o.legsOut, 0, 0);
+        o.legsOut = PackedEncode.setLegOutEnd(o.legsOut, 0, 0);
         _assertInvalid(o, "output start is zero (giveaway)");
 
         o = _base();
-        o.legsOut[0].start = 1 ether;
-        o.legsOut[0].end = 2 ether; // start < end (output must fall)
+        o.legsOut = PackedEncode.setLegOutStart(o.legsOut, 0, 1 ether);
+        o.legsOut = PackedEncode.setLegOutEnd(o.legsOut, 0, 2 ether); // start < end (output must fall)
         _assertInvalid(o, "output start < end (must fall)");
 
         o = _base();
-        o.legsOut[0].token = o.legsIn[0].token; // self-trade
+        o.legsOut = PackedEncode.setLegOutToken(o.legsOut, 0, PackedEncode.getLegInToken(o.legsIn, 0)); // self-trade
         _assertInvalid(o, "input token == output token");
 
         o = _base();
-        o.minFillAnchor = o.legsIn[0].start + 1;
+        o.minFillAnchor = PackedEncode.getLegInStart(o.legsIn, 0) + 1;
         _assertInvalid(o, "minFillAnchor > anchor (unfillable)");
 
         o = _base();

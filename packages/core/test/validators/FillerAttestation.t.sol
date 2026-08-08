@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Base} from "@core/settlement/Base.sol";
 import {Settlement, Order, Validator} from "@core/settlement/Settlement.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
@@ -110,19 +112,18 @@ contract FillerAttestationTest is MockSettlementBase {
         o.deadline = block.timestamp + 3 hours; // survive warps in the fallback/expiry tests
         Validator[] memory v = new Validator[](1);
         v[0] = Validator({target: address(av), data: abi.encode(att, LIST_ID, openAfter)});
-        o.validators = v;
+        o.validators = PackedEncode.validators(v);
     }
 
     /// @dev Build `takerData = abi.encode(expiry, sig)` where `sig` is `signerPk`'s
     ///      signature over `validator`'s attestation digest for `(filler, LIST_ID,
     ///      expiry)`. Uses the validator's own view so the digest is exactly what it
     ///      will recompute on-chain.
-    function _credential(
-        FillerAttestationValidator validator,
-        address filler,
-        uint256 expiry,
-        uint256 signerPk
-    ) internal view returns (bytes memory) {
+    function _credential(FillerAttestationValidator validator, address filler, uint256 expiry, uint256 signerPk)
+        internal
+        view
+        returns (bytes memory)
+    {
         bytes32 digest = validator.attestationDigest(filler, LIST_ID, expiry);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
         return abi.encode(expiry, abi.encodePacked(r, s, v));
@@ -295,7 +296,7 @@ contract FillerAttestationTest is MockSettlementBase {
         Order memory o = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         Validator[] memory v = new Validator[](1);
         v[0] = Validator({target: address(asserter), data: ""});
-        o.validators = v;
+        o.validators = PackedEncode.validators(v);
         bytes memory sig = _sign(o);
 
         // 3-arg wrapper → empty takerData → keccak("") != expected → fails.
@@ -357,7 +358,7 @@ contract FillerAttestationTest is MockSettlementBase {
         Order memory o = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         Validator[] memory inv = new Validator[](1);
         inv[0] = Validator({target: address(av), data: abi.encode(attester, LIST_ID, uint256(0))});
-        o.invariants = inv;
+        o.invariants = PackedEncode.validators(inv);
         bytes memory sig = _sign(o);
         bytes memory cred = _credential(av, solver, block.timestamp + 1 hours, attesterPk);
 

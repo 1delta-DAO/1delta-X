@@ -262,17 +262,15 @@ contract MidnightMock {
         IERC20Min(offer.market.loanToken).transferFrom(msg.sender, address(this), units);
         IERC20Min(offer.market.loanToken).transfer(proceedsReceiver, units);
         require(
-            ISellCallback(offer.callback).onSell(
-                id, offer.market, units, units, 0, borrower, proceedsReceiver, offer.callbackData
-            ) == CALLBACK_SUCCESS,
+            ISellCallback(offer.callback)
+                .onSell(id, offer.market, units, units, 0, borrower, proceedsReceiver, offer.callbackData)
+            == CALLBACK_SUCCESS,
             "bad onSell callback"
         );
         require(_isHealthy(offer.market, id, borrower), "SellerIsLiquidatable");
     }
 
-    function flashLoan(address[] memory tokens, uint256[] memory assets, address callback, bytes memory data)
-        external
-    {
+    function flashLoan(address[] memory tokens, uint256[] memory assets, address callback, bytes memory data) external {
         for (uint256 i; i < tokens.length; i++) {
             IERC20Min(tokens[i]).transfer(callback, assets[i]);
         }

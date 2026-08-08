@@ -74,19 +74,83 @@ abstract contract Signatures is OrderState {
     /// @dev Authorize `orderHash` for `expected` (the order's maker). Either the
     ///      empty-sig on-chain-approval path or a real signature over the domain-
     ///      bound digest; reverts if neither authorizes.
+    ///
+    ///      FIRST-FILL ONLY, FOR REAL SIGNATURES. A non-zero `filled[orderHash]` can only have been written
+    ///      by {OrderState._openFill}, which every entry path reaches AFTER this gate
+    ///      — so the counter being non-zero is itself proof that some earlier fill
+    ///      presented valid authorization for this exact hash (and the hash commits to
+    ///      `maker`). Re-deriving the digest and re-running `ecrecover` on every
+    ///      partial fill therefore proves nothing new. Ported from 1inch LOP v4, which
+    ///      gates on `remaining == makingAmount` for the same reason.
+    ///
+    ///      COST, measured: the added read is NOT free, but it is nearly so —
+    ///      {_openFill} SLOADs the same slot moments later, so this only moves the
+    ///      cold access earlier and leaves that one warm. Net **+150 gas on a first /
+    ///      single fill**, **−2,860 on every fill after it** (−14,531 across a TWAP
+    ///      schedule). A path that reverts BEFORE `_openFill` (a failing validator, a
+    ///      cancelled nonce) pays the ~2,100 cold read for nothing — the +2,374…+4,374
+    ///      seen on revert-path tests. Worth it: fillers simulate before submitting, so
+    ///      reverts are off the real hot path, and any order filled more than once
+    ///      repays the 150 nineteen times over.
+    ///      The cancelled sentinel (`type(uint256).max`) also skips — {_openFill}
+    ///      rejects it a moment later with the precise {OrderCancelled}.
+    ///
+    ///      The skip applies ONLY to the signature branch. The on-chain-approval
+    ///      ({approveOrder}) path is re-checked on every fill, because that record is
+    ///      revocable and a maker is entitled to expect {revokeOrderApproval} to bind
+    ///      mid-order — see the branch itself.
+    ///
+    ///      ⚠ SEMANTIC CHANGE for CONTRACT signers. An EIP-1271 wallet (Safe, 7702
+    ///      delegate) that would start returning `false` — approval revoked, owners
+    ///      rotated — no longer blocks the REMAINDER of an order it already part-filled.
+    ///      EOA signatures are unaffected (a signature over a fixed digest cannot be
+    ///      withdrawn anyway), and the maker's real kill switches are unchanged and
+    ///      still checked on every fill: {cancelOrder}, nonce cancellation /
+    ///      {rollbackNonces}, the deadline, and revoking the Permit3 allowances that
+    ///      fund the fill. A contract maker that needs signature revocation to bind
+    ///      mid-order must use {cancelOrder}.
     function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {
         // Signature-less path: an EMPTY `sig` authorizes against the maker's on-chain
         // {approveOrder} record instead of a signature. No valid signature has zero
         // length (the shared verifier rejects it), so the sentinel can never collide
         // with a real one. This lets a maker that cannot sign — e.g. a multisig
         // without EIP-1271 — still place orders. Every other fill gate is unchanged.
+        //
+        // Checked BEFORE the first-fill skip below, and deliberately so: unlike a
+        // signature — an immutable commitment over a fixed digest — this record is
+        // MUTABLE and the maker is told they may withdraw it ({revokeOrderApproval}).
+        // Skipping it after the first fill would silently turn revocation into a
+        // no-op for a partially filled order. Costs nothing on the hot path: this
+        // branch never ran an `ecrecover`, and sigless orders are the rare case.
         if (sig.length == 0) {
             if (!orderApproved[expected][orderHash]) revert OrderNotApproved();
             return;
         }
+        if (filled[orderHash] != 0) return; // already authorized once — see above
         bytes32 digest = _hashTypedData(orderHash);
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
         SignatureVerification.verify(sig, digest, expected);
+    }
+
+    /// @dev EOA-only authorization from an EIP-2098 COMPACT signature passed as two
+    ///      bare words. The `bytes sig` form costs an offset word, a length word and
+    ///      65 bytes padded to 96 — 160 bytes of calldata against 64 here, and the
+    ///      saving is pure calldata, which is what dominates cost on rollups.
+    ///
+    ///      Deliberately NO EIP-1271 fallback: a contract wallet's signature is not
+    ///      65 bytes, so it could never take this path anyway. Contract signers,
+    ///      7702-delegated-1271 accounts and the empty-sig {approveOrder} path all
+    ///      keep using the `bytes` entrypoints. Same split 1inch draws between
+    ///      `fillOrder` and `fillContractOrder`.
+    ///
+    ///      Same first-fill-only skip as {_verifySignature}, for the same reason.
+    function _verifySignatureCompact(bytes32 orderHash, bytes32 r, bytes32 vs, address expected) internal view {
+        if (filled[orderHash] != 0) return; // already authorized once
+        // EIP-2098: `vs` carries `s` in its low 255 bits and `v - 27` in the top bit.
+        address signer = ecrecover(
+            _hashTypedData(orderHash), uint8(uint256(vs >> 255)) + 27, r, vs & SignatureVerification.UPPER_BIT_MASK
+        );
+        if (signer == address(0) || signer != expected) revert SignatureVerification.InvalidSigner();
     }
 }

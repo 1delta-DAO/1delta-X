@@ -1,19 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
-import {
-    Settlement,
-    Order,
-    Item,
-    Validator,
-    LegIn,
-    LegOut,
-    CurvePoint
-} from "@core/settlement/Settlement.sol";
+import {Settlement, Order, Item, Validator, LegIn, LegOut, CurvePoint} from "@core/settlement/Settlement.sol";
 
 import {IMocRif, IMocQueue} from "../../src/interfaces/IMoc.sol";
 
@@ -71,11 +65,7 @@ abstract contract UsdrifForkBase is Test {
             if (bytes(v).length > 0 && _tryFork(v)) return;
         } catch {}
 
-        string[3] memory rpcs = [
-            "https://public-node.rsk.co",
-            "https://mycrypto.rsk.co",
-            "https://rootstock.drpc.org"
-        ];
+        string[3] memory rpcs = ["https://public-node.rsk.co", "https://mycrypto.rsk.co", "https://rootstock.drpc.org"];
         for (uint256 i = 0; i < rpcs.length; i++) {
             if (_tryFork(rpcs[i])) return;
         }
@@ -101,18 +91,14 @@ abstract contract UsdrifForkBase is Test {
         keccak256("Item(uint8 op,address module,uint256 amount,address recipient,bytes data)");
     bytes32 internal constant VALIDATOR_TH = keccak256("Validator(address target,bytes data)");
     bytes32 internal constant LEG_IN_TH = keccak256("LegIn(address token,uint256 start,uint256 end)");
-    bytes32 internal constant LEG_OUT_TH = keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
+    bytes32 internal constant LEG_OUT_TH =
+        keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 internal constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
-        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
-        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LegIn(address token,uint256 start,uint256 end)"
-        "LegOut(address token,uint256 start,uint256 end,address recipient)"
-        "Validator(address target,bytes data)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
     );
 
-    function _noCurve() internal pure returns (CurvePoint[] memory) {
-        return new CurvePoint[](0);
+    function _noCurve() internal pure returns (bytes memory) {
+        return PackedEncode.noCurve();
     }
 
     function _hashCurve(CurvePoint[] memory curve) internal pure returns (bytes32) {
@@ -165,15 +151,13 @@ abstract contract UsdrifForkBase is Test {
     }
 
     /// @dev A single fixed input leg (`end == 0`).
-    function _legsIn1(address token, uint256 amount) internal pure returns (LegIn[] memory a) {
-        a = new LegIn[](1);
-        a[0] = LegIn(token, amount, 0);
+    function _legsIn1(address token, uint256 amount) internal pure returns (bytes memory) {
+        return PackedEncode.oneLegIn(token, amount, 0);
     }
 
     /// @dev A single fixed output leg to the maker (`end == 0`, recipient == 0).
-    function _legsOut1(address token, uint256 amount) internal pure returns (LegOut[] memory a) {
-        a = new LegOut[](1);
-        a[0] = LegOut(token, amount, 0, address(0));
+    function _legsOut1(address token, uint256 amount) internal pure returns (bytes memory) {
+        return PackedEncode.oneLegOut(token, amount, 0, address(0));
     }
 
     /// @dev Pack the three uint32 clocks into `Order.timing`.
@@ -197,23 +181,22 @@ abstract contract UsdrifForkBase is Test {
         bytes memory head = abi.encode(
             ORDER_TH,
             o.maker,
-            uint8(o.side),
             o.nonce,
             o.deadline,
-            _hashLegsIn(o.legsIn),
-            _hashLegsOut(o.legsOut),
+            keccak256(o.legsIn),
+            keccak256(o.legsOut),
             o.timing,
             o.exclusiveFiller,
             o.minFillAnchor
         );
         bytes memory tail = abi.encode(
             o.exclusivityOverrideBps,
-            _hashCurve(o.curve),
+            keccak256(o.curve),
             o.gasBumpBps,
             o.gasPriceRef,
-            _hashItems(o.items),
-            _hashValidators(o.validators),
-            _hashValidators(o.invariants),
+            keccak256(o.items),
+            keccak256(o.validators),
+            keccak256(o.invariants),
             o.fillModule,
             o.fillTotal
         );

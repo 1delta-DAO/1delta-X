@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
@@ -21,7 +23,6 @@ interface IEulerFlashVault {
 ///         `flashVault`. Repays by transferring the borrowed `amount` straight
 ///         back to that vault — Euler flash loans carry no fee.
 contract EulerFlashSolver is BaseFlashSolver {
-
     constructor(address _permit3, address _settlement, address _router)
         BaseFlashSolver(_permit3, _settlement, _router)
     {}
@@ -48,7 +49,7 @@ contract EulerFlashSolver is BaseFlashSolver {
 
         // Surplus collateral is the fill's profit — sweep it to the caller so no
         // balance accumulates in this permissionless solver.
-        _sweep(order.legsOut[0].token, msg.sender);
+        _sweep(PackedArraysMem.legOutToken(order.legsOut, 0), msg.sender);
     }
 
     /// @dev EVK callback. `asset()` of the vault has been transferred here; we owe

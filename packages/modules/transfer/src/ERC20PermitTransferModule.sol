@@ -56,14 +56,10 @@ contract ERC20PermitTransferModule is ITakerModule {
     /// @param amount        Gross tokens pulled from the user (transferAmount + fee).
     /// @param receiver      Settlement address — the fee portion lands here.
     /// @param data          abi.encode(token, recipient, transferAmount[, deadline, v, r, s])
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        (address token, address recipient, uint256 transferAmount) =
-            abi.decode(data, (address, address, uint256));
+        (address token, address recipient, uint256 transferAmount) = abi.decode(data, (address, address, uint256));
 
         if (transferAmount > amount) revert TransferAmountExceedsGross(transferAmount, amount);
 

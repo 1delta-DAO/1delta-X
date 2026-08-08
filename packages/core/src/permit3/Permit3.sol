@@ -126,8 +126,7 @@ contract Permit3 is IPermit3, EIP712 {
 
     function approveTaker(address spender, bytes32 ref, uint160 amount, uint48 expiration) external override {
         // Single packed store — see `approveToken`.
-        _takerAllowance[msg.sender][spender][ref] =
-            PackedAllowance({amount: amount, expiration: expiration, nonce: 0});
+        _takerAllowance[msg.sender][spender][ref] = PackedAllowance({amount: amount, expiration: expiration, nonce: 0});
         emit TakerApproval(msg.sender, spender, ref, amount, expiration);
     }
 
@@ -376,7 +375,9 @@ contract Permit3 is IPermit3, EIP712 {
             _tokenAllowance[owner][p.spender][p.token] =
                 PackedAllowance({amount: p.amount, expiration: p.expiration, nonce: 0});
             emit TokenApproval(owner, p.spender, p.token, p.amount, p.expiration);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
         uint256 takersLen = batch.takers.length;
         for (uint256 i; i < takersLen;) {
@@ -384,7 +385,9 @@ contract Permit3 is IPermit3, EIP712 {
             _takerAllowance[owner][p.spender][p.ref] =
                 PackedAllowance({amount: p.amount, expiration: p.expiration, nonce: 0});
             emit TakerApproval(owner, p.spender, p.ref, p.amount, p.expiration);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 

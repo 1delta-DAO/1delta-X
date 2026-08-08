@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -114,7 +116,13 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         vm.stopPrank();
     }
 
-    function _approveMakerWithdrawSide(uint256 wethIn, bytes32 ref, bytes memory /* takerData */) internal {
+    function _approveMakerWithdrawSide(
+        uint256 wethIn,
+        bytes32 ref,
+        bytes memory /* takerData */
+    )
+        internal
+    {
         vm.startPrank(maker);
         // Fallback for _payTokenInToSolver — never triggers in this flow.
         IERC20(WETH).approve(address(permit3), type(uint256).max);
@@ -205,11 +213,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
     {
         Item[] memory items = new Item[](1);
         items[0] = Item({
-            op: ItemOp.TAKE,
-            module: address(withdrawModule),
-            amount: wethIn,
-            recipient: address(0),
-            data: takerData
+            op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData
         });
         order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
     }
@@ -263,27 +267,24 @@ abstract contract AaveModulesBase is CoreSettlementBase {
     }
 
     /// @dev A single rising input leg (`start <= end`, `end != 0`).
-    function _legsIn1Rising(address token, uint256 start, uint256 end) internal pure returns (LegIn[] memory a) {
-        a = new LegIn[](1);
-        a[0] = LegIn(token, start, end);
+    function _legsIn1Rising(address token, uint256 start, uint256 end) internal pure returns (bytes memory) {
+        return PackedEncode.oneLegIn(token, start, end);
     }
 
     /// @dev A single falling/explicit output leg (`start >= end`, arbitrary recipient).
     function _legsOut1Falling(address token, uint256 start, uint256 end, address recipient)
         internal
         pure
-        returns (LegOut[] memory a)
+        returns (bytes memory)
     {
-        a = new LegOut[](1);
-        a[0] = LegOut(token, start, end, recipient);
+        return PackedEncode.oneLegOut(token, start, end, recipient);
     }
 
-    function _buildMigrationOrder(
-        uint256 bufferedRepay,
-        uint256 exactWeth,
-        uint256 debt,
-        address SPARK_POOL
-    ) internal view returns (Order memory order) {
+    function _buildMigrationOrder(uint256 bufferedRepay, uint256 exactWeth, uint256 debt, address SPARK_POOL)
+        internal
+        view
+        returns (Order memory order)
+    {
         Item[] memory items = new Item[](4);
 
         items[0] = Item({
@@ -317,7 +318,6 @@ abstract contract AaveModulesBase is CoreSettlementBase {
 
         order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, debt), //             Settlement pays solver entirely from the borrow proceeds
@@ -329,9 +329,9 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

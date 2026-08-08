@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {
-    Order, Item, ItemOp, OrderSide, LegIn, LegOut, Validator, CurvePoint
-} from "@core/settlement/Settlement.sol";
+import {Order, Item, ItemOp, OrderSide, LegIn, LegOut, Validator, CurvePoint} from "@core/settlement/Settlement.sol";
 
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
 import {AaveV3FusedLeverageModule} from "../../src/AaveV3FusedModules.sol";
@@ -69,8 +69,8 @@ contract FusedDutchAuctionTest is AaveModulesBase {
             side: OrderSide.BUY,
             nonce: 1,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
-            legsOut: legsOut,
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: _packTiming(uint32(block.timestamp), DECAY, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
@@ -78,9 +78,9 @@ contract FusedDutchAuctionTest is AaveModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

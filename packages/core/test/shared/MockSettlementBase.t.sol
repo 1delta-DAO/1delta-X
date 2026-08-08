@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
@@ -116,20 +118,19 @@ abstract contract MockSettlementBase is Test {
         arr[0] = x;
     }
 
-    function _noCurve() internal pure returns (CurvePoint[] memory) {
-        return new CurvePoint[](0);
+    /// @dev An EMPTY packed curve blob — the byte `0x00`, not a zero-length array.
+    function _noCurve() internal pure returns (bytes memory) {
+        return PackedEncode.noCurve();
     }
 
     // ──────────────────── Order builder ────────────────────
 
-    function _legsIn1(address token, uint256 amount) internal pure returns (LegIn[] memory a) {
-        a = new LegIn[](1);
-        a[0] = LegIn(token, amount, 0);
+    function _legsIn1(address token, uint256 amount) internal pure returns (bytes memory) {
+        return PackedEncode.oneLegIn(token, amount, 0);
     }
 
-    function _legsOut1(address token, uint256 amount) internal pure returns (LegOut[] memory a) {
-        a = new LegOut[](1);
-        a[0] = LegOut(token, amount, 0, address(0));
+    function _legsOut1(address token, uint256 amount) internal pure returns (bytes memory) {
+        return PackedEncode.oneLegOut(token, amount, 0, address(0));
     }
 
     // Bit-preserving setters for the packed `timing` word.
@@ -149,21 +150,20 @@ abstract contract MockSettlementBase is Test {
     function _blank(uint256 nonce) internal view returns (Order memory o) {
         o = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: new LegIn[](0),
-            legsOut: new LegOut[](0),
+            legsIn: PackedEncode.legsIn(new LegIn[](0)),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)),
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -191,9 +191,8 @@ abstract contract MockSettlementBase is Test {
         uint256 amountOut
     ) internal view returns (Order memory o) {
         o = _blank(nonce);
-        o.side = OrderSide.BUY;
-        o.legsIn = new LegIn[](1);
-        o.legsIn[0] = LegIn(tokenIn, startAmountIn, endAmountIn); // rising input (end = ceiling)
+        o.timing |= uint256(1) << 101; // BUY (timing bit 101)
+        o.legsIn = PackedEncode.oneLegIn(tokenIn, startAmountIn, endAmountIn); // rising input (end = ceiling)
         o.legsOut = _legsOut1(tokenOut, amountOut);
     }
 
@@ -213,7 +212,7 @@ abstract contract MockSettlementBase is Test {
         for (uint256 j; j < tokenOut.length; j++) {
             lo[j] = LegOut(tokenOut[j], amountOut[j], 0, address(0));
         }
-        o.legsOut = lo;
+        o.legsOut = PackedEncode.legsOut(lo);
     }
 
     // ──────────────────── Permit-batch (witness) builders ────────────────────
@@ -228,24 +227,19 @@ abstract contract MockSettlementBase is Test {
 
     /// @dev Must mirror Permit3's `_PERMIT_BATCH_WITNESS_STUB` + Settlement's
     ///      `OrderHash.WITNESS_TYPESTRING` exactly.
-    string constant PERMIT_BATCH_WITNESS_FULL =
-        "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
+    string constant PERMIT_BATCH_WITNESS_FULL = "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
-        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
-        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LegIn(address token,uint256 start,uint256 end)"
-        "LegOut(address token,uint256 start,uint256 end,address recipient)"
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
-        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
-        "Validator(address target,bytes data)";
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
-    function _buildBatch(
-        IPermit3.TokenPermit[] memory tp,
-        uint256 nonce,
-        uint256 deadline
-    ) internal pure returns (IPermit3.PermitBatch memory) {
-        return IPermit3.PermitBatch({tokens: tp, takers: new IPermit3.TakerPermit[](0), nonce: nonce, deadline: deadline});
+    function _buildBatch(IPermit3.TokenPermit[] memory tp, uint256 nonce, uint256 deadline)
+        internal
+        pure
+        returns (IPermit3.PermitBatch memory)
+    {
+        return
+            IPermit3.PermitBatch({tokens: tp, takers: new IPermit3.TakerPermit[](0), nonce: nonce, deadline: deadline});
     }
 
     function _tokenPermit1(address spender, address token, uint256 amt, uint48 exp)
@@ -311,12 +305,7 @@ abstract contract MockSettlementBase is Test {
     bytes32 constant LEG_IN_TH = keccak256("LegIn(address token,uint256 start,uint256 end)");
     bytes32 constant LEG_OUT_TH = keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint8 side,uint256 nonce,uint256 deadline,LegIn[] legsIn,LegOut[] legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,CurvePoint[] curve,uint256 gasBumpBps,uint256 gasPriceRef,Item[] items,Validator[] validators,Validator[] invariants,address fillModule,uint256 fillTotal)"
-        "CurvePoint(uint32 timeDelta,uint32 bumpBps)"
-        "Item(uint8 op,address module,uint256 amount,address recipient,bytes data)"
-        "LegIn(address token,uint256 start,uint256 end)"
-        "LegOut(address token,uint256 start,uint256 end,address recipient)"
-        "Validator(address target,bytes data)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
     );
 
     function _hashItems(Item[] memory items) internal pure returns (bytes32) {
@@ -372,23 +361,22 @@ abstract contract MockSettlementBase is Test {
         bytes memory head = abi.encode(
             ORDER_TH,
             o.maker,
-            uint8(o.side),
             o.nonce,
             o.deadline,
-            _hashLegsIn(o.legsIn),
-            _hashLegsOut(o.legsOut),
+            keccak256(o.legsIn),
+            keccak256(o.legsOut),
             o.timing,
             o.exclusiveFiller,
             o.minFillAnchor
         );
         bytes memory tail = abi.encode(
             o.exclusivityOverrideBps,
-            _hashCurve(o.curve),
+            keccak256(o.curve),
             o.gasBumpBps,
             o.gasPriceRef,
-            _hashItems(o.items),
-            _hashValidators(o.validators),
-            _hashValidators(o.invariants),
+            keccak256(o.items),
+            keccak256(o.validators),
+            keccak256(o.invariants),
             o.fillModule,
             o.fillTotal
         );

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
@@ -35,33 +37,39 @@ contract FeeTransferModuleTest is CoreSettlementBase {
     }
 
     function _feeOrder(uint256 nonce) internal view returns (Order memory order) {
+        return _feeOrderTo(nonce, originator);
+    }
+
+    /// @dev `_feeOrder` with the fee recipient overridable — the packed item blob is
+    ///      not mutable in place, so a test that wants a different recipient builds
+    ///      the order with it rather than poking the encoded bytes afterwards.
+    function _feeOrderTo(uint256 nonce, address feeRecipient) internal view returns (Order memory order) {
         Item[] memory items = new Item[](1);
         items[0] = Item({
             op: ItemOp.MAKE,
             module: address(feeModule),
             amount: ORIG_FEE,
             recipient: address(0),
-            data: abi.encode(USDC, originator)
+            data: abi.encode(USDC, feeRecipient)
         });
         LegIn[] memory legsIn = new LegIn[](1);
         legsIn[0] = LegIn(USDC, F0, FMAX); // rising relayer-fee input (F0 → FMAX)
         order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
-            legsOut: new LegOut[](0), // gasless deposit — no conversion output
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)), // gasless deposit — no conversion output
             timing: _packTiming(uint32(block.timestamp), DURATION, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -119,8 +127,7 @@ contract FeeTransferModuleTest is CoreSettlementBase {
 
     function test_feeItem_zeroRecipient_reverts() public {
         _fund();
-        Order memory order = _feeOrder(2);
-        order.items[0].data = abi.encode(USDC, address(0));
+        Order memory order = _feeOrderTo(2, address(0));
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -132,13 +139,14 @@ contract FeeTransferModuleTest is CoreSettlementBase {
     function test_lens_sameAssetOverlap_flaggedOnlyWithoutItems() public view {
         // Item-bearing same-asset order (the same-asset exit / fee shape) → valid.
         Order memory o = _feeOrder(3);
-        o.legsOut = new LegOut[](1);
-        o.legsOut[0] = LegOut(USDC, 1e6, 0, address(0));
+        LegOut[] memory _tmplegsOut = new LegOut[](1);
+        _tmplegsOut[0] = LegOut(USDC, 1e6, 0, address(0));
+        o.legsOut = PackedEncode.legsOut(_tmplegsOut);
         (bool ok, string memory reason) = lens.validateOrder(o);
         assertTrue(ok, string.concat("item order overlap valid: ", reason));
 
         // Item-free self-trade → still flagged.
-        o.items = new Item[](0);
+        o.items = PackedEncode.noItems();
         (ok, reason) = lens.validateOrder(o);
         assertFalse(ok, "item-free self-trade rejected");
         assertEq(reason, "input token == output token");

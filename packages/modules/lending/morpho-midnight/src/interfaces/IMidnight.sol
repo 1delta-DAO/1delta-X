@@ -57,8 +57,7 @@ interface IMidnight {
 
     /// @dev Inflow: pulls `assets` of `market.collateralParams[collateralIndex].token`
     ///      from `msg.sender` and credits it as collateral to `onBehalf`.
-    function supplyCollateral(Market memory market, uint256 collateralIndex, uint256 assets, address onBehalf)
-        external;
+    function supplyCollateral(Market memory market, uint256 collateralIndex, uint256 assets, address onBehalf) external;
 
     /// @dev Outflow: sends `assets` of the indexed collateral from `onBehalf`'s
     ///      position to `receiver`. Requires `msg.sender == onBehalf` or
@@ -132,12 +131,9 @@ interface IMidnightFlashConstants {
 
 /// @notice Callback invoked by `Midnight.flashLoan` on the borrower.
 interface IMidnightFlashLoanReceiver {
-    function onFlashLoan(
-        address caller,
-        address[] calldata tokens,
-        uint256[] calldata assets,
-        bytes calldata data
-    ) external returns (bytes32);
+    function onFlashLoan(address caller, address[] calldata tokens, uint256[] calldata assets, bytes calldata data)
+        external
+        returns (bytes32);
 }
 
 /// @title MidnightIdLib

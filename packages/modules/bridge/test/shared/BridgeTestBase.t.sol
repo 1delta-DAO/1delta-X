@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {MockSettlementBase, MockERC20} from "@coretest/shared/MockSettlementBase.t.sol";
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 
@@ -89,8 +91,9 @@ abstract contract BridgeTestBase is MockSettlementBase {
         o = _blank(nonce);
         o.maker = address(inbox);
         o.legsIn = _legsIn1(address(tA), amountIn);
-        o.legsOut = new LegOut[](1);
-        o.legsOut[0] = LegOut(address(tB), amountOut, 0, endUser);
+        LegOut[] memory _tmplegsOut = new LegOut[](1);
+        _tmplegsOut[0] = LegOut(address(tB), amountOut, 0, endUser);
+        o.legsOut = PackedEncode.legsOut(_tmplegsOut);
     }
 
     function _commitmentFor(bytes32 orderHash) internal view returns (bytes memory) {
@@ -139,8 +142,9 @@ abstract contract BridgeTestBase is MockSettlementBase {
         o = _blank(nonce);
         o.legsIn = _legsIn1(address(tC), payAmount);
         o.legsOut = _legsOut1(address(tA), bridgeAmount); // recipient 0 == the maker
-        o.items = new Item[](1);
-        o.items[0] = Item({op: ItemOp.MAKE, module: module, amount: bridgeAmount, recipient: address(0), data: spec});
+        Item[] memory _tmpitems = new Item[](1);
+        _tmpitems[0] = Item({op: ItemOp.MAKE, module: module, amount: bridgeAmount, recipient: address(0), data: spec});
+        o.items = PackedEncode.items(_tmpitems);
     }
 
     /// @dev Sign a source order under the SOURCE chain id. The signature is

@@ -72,9 +72,7 @@ contract FullFillGuardTest is Test {
     function testFuzz_anySliceBelowTotalIsRejected(uint256 slice) public {
         slice = bound(slice, 1, BORROW_TOTAL - 1);
         CompositeModuleStub m = new CompositeModuleStub(true);
-        vm.expectRevert(
-            abi.encodeWithSelector(FullFillGuard.PartialFillUnsupported.selector, slice, BORROW_TOTAL)
-        );
+        vm.expectRevert(abi.encodeWithSelector(FullFillGuard.PartialFillUnsupported.selector, slice, BORROW_TOTAL));
         m.execute(slice, SIDE, BORROW_TOTAL);
     }
 }

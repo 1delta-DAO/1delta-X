@@ -101,9 +101,8 @@ contract FluidLeverageTest is FluidModulesBase {
         returns (Order memory order)
     {
         Item[] memory items = new Item[](2);
-        items[0] = Item(
-            ItemOp.MAKE, address(depositModule), colAdd, address(0), abi.encode(WSTETH_USDC_VAULT, WSTETH, nftId)
-        );
+        items[0] =
+            Item(ItemOp.MAKE, address(depositModule), colAdd, address(0), abi.encode(WSTETH_USDC_VAULT, WSTETH, nftId));
         items[1] = Item(ItemOp.TAKE, address(takerModule), debtAdd, address(0), _borrowData(nftId));
         order = _order(maker, nonce, USDC, WSTETH, debtAdd, colAdd, items);
     }

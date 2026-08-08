@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
@@ -52,11 +54,7 @@ contract PlainSwapTest is CoreSettlementBase {
         permit3.approveToken(address(settlement), USDC, uint160(usdcCap), 0);
     }
 
-    function _plainSwapOrder(uint256 nonce, uint256 usdcIn, uint256 wethOut)
-        internal
-        view
-        returns (Order memory)
-    {
+    function _plainSwapOrder(uint256 nonce, uint256 usdcIn, uint256 wethOut) internal view returns (Order memory) {
         return _order(maker, nonce, USDC, WETH, usdcIn, wethOut, new Item[](0));
     }
 
@@ -148,21 +146,20 @@ contract PlainSwapTest is CoreSettlementBase {
         legsOut[0] = LegOut(WETH, startOut, endOut, address(0));
         Order memory order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 2,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
-            legsOut: legsOut,
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -195,10 +192,7 @@ contract PlainSwapTest is CoreSettlementBase {
         // Single token permit: Settlement may pull the maker's USDC.
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](1);
         tp[0] = IPermit3.TokenPermit({
-            spender: address(settlement),
-            token: USDC,
-            amount: uint160(usdcIn),
-            expiration: uint48(order.deadline)
+            spender: address(settlement), token: USDC, amount: uint160(usdcIn), expiration: uint48(order.deadline)
         });
 
         IPermit3.PermitBatch memory batch = _buildBatch(tp, _noTakerPermits(), 0, order.deadline);
@@ -326,21 +320,20 @@ contract PlainSwapTest is CoreSettlementBase {
         legsOut[0] = LegOut(WETH, startOut, endOut, address(0));
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
-            legsOut: legsOut,
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

@@ -6,12 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
 import {IFluidVault} from "../../src/interfaces/IFluid.sol";
-import {
-    FluidDepositModule,
-    FluidRepayModule,
-    FluidTakerModule,
-    FluidOperateModule
-} from "../../src/FluidModules.sol";
+import {FluidDepositModule, FluidRepayModule, FluidTakerModule, FluidOperateModule} from "../../src/FluidModules.sol";
 
 /// @dev ERC721 surface (incl. `setApprovalForAll`) used to seed positions and the
 ///      one-time operator grant for the value-out modules.

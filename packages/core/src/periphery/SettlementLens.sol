@@ -7,8 +7,9 @@ import {IFillModule} from "../interfaces/IFillModule.sol";
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 
-import {Order, Item, ItemOp, Validator, OrderSide, CurvePoint, FillCtx} from "../settlement/Structs.sol";
+import {Order, ItemOp, OrderSide, FillCtx} from "../settlement/Structs.sol";
 import {OrderHash} from "../settlement/OrderHash.sol";
+import {PackedArrays} from "../settlement/PackedArrays.sol";
 import {DutchAuction} from "../settlement/DutchAuction.sol";
 import {Pricing} from "../settlement/Pricing.sol";
 
@@ -38,6 +39,12 @@ interface ISettlementState {
 ///         allowances), read through {ISettlementState}. The lens holds no funds
 ///         and no approvals; it can only ever read.
 contract SettlementLens {
+    /// @dev `recipient` of packed output leg `k` — small helper so the duplicate-leg
+    ///      scan can compare recipients without decoding the whole leg twice.
+    function _legOutRecipient(bytes calldata legs, uint256 k) private pure returns (address r) {
+        (,,, r) = PackedArrays.legOut(legs, k);
+    }
+
     using OrderHash for Order;
     using DutchAuction for Order;
     using Pricing for Order;
@@ -179,11 +186,11 @@ contract SettlementLens {
         view
         returns (uint256[] memory received, uint256[] memory paid)
     {
-        received = new uint256[](order.legsIn.length);
+        received = new uint256[](PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE));
         for (uint256 i; i < received.length; i++) {
             received[i] = order.inputOwed(ctx, i);
         }
-        paid = new uint256[](order.legsOut.length);
+        paid = new uint256[](PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE));
         for (uint256 j; j < paid.length; j++) {
             paid[j] = order.outputAt(ctx, j);
         }
@@ -314,13 +321,16 @@ contract SettlementLens {
         // (a gasless deposit). A `fillTotal != 0` order is denominated by
         // `fillTotal`, not a leg, so it may have both empty (a pure NFT swap).
         bool moduleFill = order.fillTotal != 0;
-        uint256 nIn = order.legsIn.length;
-        uint256 nOut = order.legsOut.length;
+        uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
+        uint256 nOut = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
         // The leg structs make token↔amount length mismatch impossible; only the
         // anchor-leg-presence check remains. SELL anchors on `legsIn[0]`, BUY on
         // `legsOut[0]` (unless `fillTotal` supplies the denominator directly), so a
         // BUY may have empty legsIn (an NFT-sale SETTLE) and a SELL empty legsOut.
-        if (!moduleFill && ((nIn == 0 && order.side == OrderSide.SELL) || (nOut == 0 && order.side == OrderSide.BUY))) {
+        if (
+            !moduleFill
+                && ((nIn == 0 && order.side() == OrderSide.SELL) || (nOut == 0 && order.side() == OrderSide.BUY))
+        ) {
             return (OrderStatus.Invalid, 0);
         }
         if (block.timestamp > order.deadline) return (OrderStatus.Expired, 0);
@@ -334,7 +344,7 @@ contract SettlementLens {
         // Plain orders: the maker funds tokenIn from their wallet, so cap the
         // fillable amount by their live capacity across every input leg. Skipped
         // for module orders — the fillable is in `fillTotal` units, not leg units.
-        if (order.items.length == 0 && order.fillModule == address(0)) {
+        if (PackedArrays.countUnchecked(order.items) == 0 && order.fillModule == address(0)) {
             uint256 cap = _makerFillableCap(order, anchor);
             if (cap < fillableAmount) fillableAmount = cap;
         }
@@ -359,9 +369,9 @@ contract SettlementLens {
     function _makerFillableCap(Order calldata order, uint256 anchor) internal view returns (uint256 cap) {
         cap = type(uint256).max;
         address spender = address(SETTLEMENT);
-        uint256 nLegsIn = order.legsIn.length;
+        uint256 nLegsIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         for (uint256 i; i < nLegsIn; i++) {
-            address token = order.legsIn[i].token;
+            (address token, uint256 lgStart, uint256 lgEnd) = PackedArrays.legIn(order.legsIn, i);
             (uint160 allowed, uint48 expiration,) = PERMIT3.tokenAllowance(order.maker, spender, token);
             uint256 capacity = allowed;
             if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
@@ -372,7 +382,7 @@ contract SettlementLens {
 
             // Worst-case input cost of one anchor unit: the leg ceiling (`end`), or
             // `start` when the leg is fixed (`end == 0`).
-            uint256 perUnitIn = order.legsIn[i].end == 0 ? order.legsIn[i].start : order.legsIn[i].end;
+            uint256 perUnitIn = lgEnd == 0 ? lgStart : lgEnd;
             // Scale leg-i capacity back into anchor units. Guard the multiply: an
             // unbounded (e.g. max) allowance times a large `anchor` can exceed
             // uint256 — treat an overflowing product as "this leg imposes no
@@ -391,6 +401,47 @@ contract SettlementLens {
     }
 
     // ──────────────────── Well-formedness ────────────────────
+    /// @dev The duplicate / self-trade leg checks, split into their own frame purely
+    ///      to keep {validateOrder} under the EVM stack limit without via-IR — the
+    ///      packed decode yields several values per leg where the old typed access
+    ///      read one field at a time. Pure relocation; the rules are unchanged.
+    function _checkLegOverlaps(Order calldata order, uint256 nIn, uint256 nOut)
+        private
+        view
+        returns (bool, string memory)
+    {
+        for (uint256 i; i < nIn; i++) {
+            for (uint256 k = i + 1; k < nIn; k++) {
+                if (PackedArrays.legInToken(order.legsIn, i) == PackedArrays.legInToken(order.legsIn, k)) {
+                    return (false, "duplicate input token");
+                }
+            }
+            if (PackedArrays.countUnchecked(order.items) == 0) {
+                for (uint256 j; j < nOut; j++) {
+                    if (PackedArrays.legInToken(order.legsIn, i) == PackedArrays.legOutToken(order.legsOut, j)) {
+                        return (false, "input token == output token");
+                    }
+                }
+            }
+        }
+        for (uint256 j; j < nOut; j++) {
+            // A leg addressed to the settlement contract permanently burns that
+            // delivery (it lands in the anti-donation snapshot baseline and is
+            // never swept). On-chain it's a maker self-burn, not an exploit, but
+            // the preflight should catch the footgun.
+            (address ojToken,,, address ojRecip) = PackedArrays.legOut(order.legsOut, j);
+            if (ojRecip == address(SETTLEMENT)) return (false, "recipient is settlement (burn)");
+            for (uint256 k = j + 1; k < nOut; k++) {
+                if (
+                    ojToken == PackedArrays.legOutToken(order.legsOut, k)
+                        && ojRecip == _legOutRecipient(order.legsOut, k)
+                ) {
+                    return (false, "duplicate output token+recipient");
+                }
+            }
+        }
+        return (true, "");
+    }
 
     /// @notice Off-chain / preview check for order well-formedness. Intentionally
     ///         NOT called during `fill` — fills stay cheap and unopinionated — so
@@ -415,9 +466,12 @@ contract SettlementLens {
         // leg-shape economics below still apply to whatever legs it does have.
         bool moduleFill = order.fillTotal != 0;
 
-        // ── leg shape ── (token↔amount length mismatch is impossible: {LegIn}/{LegOut})
-        uint256 nIn = order.legsIn.length;
-        uint256 nOut = order.legsOut.length;
+        // ── leg shape ──
+        // NOTE: `.length` on a packed member is the BYTE length, not the element
+        // count — the count lives in the blob's prefix. Always go through
+        // {PackedArrays}, which also proves the blob is well formed.
+        uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
+        uint256 nOut = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
         // Anchor-leg presence. The fill denominator is the anchor side's leg 0 —
         // SELL reads `tokenIn[0]`, BUY reads `tokenOut[0]` — unless a maker-signed
         // `fillTotal` supplies it directly. So a BUY may have EMPTY tokenIn (its
@@ -426,11 +480,19 @@ contract SettlementLens {
         // `fillTotal == 0` still derives its total from the anchor leg, so it
         // needs that leg too.
         if (!moduleFill) {
-            if (order.side == OrderSide.SELL && nIn == 0) {
-                return (false, order.fillModule != address(0) ? "fill module without denominator" : "sell requires tokenIn");
+            if (order.side() == OrderSide.SELL && nIn == 0) {
+                return
+                    (
+                        false,
+                        order.fillModule != address(0) ? "fill module without denominator" : "sell requires tokenIn"
+                    );
             }
-            if (order.side == OrderSide.BUY && nOut == 0) {
-                return (false, order.fillModule != address(0) ? "fill module without denominator" : "buy requires tokenOut");
+            if (order.side() == OrderSide.BUY && nOut == 0) {
+                return
+                    (
+                        false,
+                        order.fillModule != address(0) ? "fill module without denominator" : "buy requires tokenOut"
+                    );
             }
             // Empty tokenOut on a SELL is the deposit shape (items) or the
             // invariant-protected PURCHASE shape (the maker pays the input leg
@@ -438,7 +500,10 @@ contract SettlementLens {
             // {Erc721OwnerInvariant}, delivered by the filler's callback). With
             // neither items nor invariants the maker gives tokenIn away for
             // nothing.
-            if (order.side == OrderSide.SELL && nOut == 0 && order.items.length == 0 && order.invariants.length == 0) {
+            if (
+                order.side() == OrderSide.SELL && nOut == 0 && PackedArrays.countUnchecked(order.items) == 0
+                    && PackedArrays.countUnchecked(order.invariants) == 0
+            ) {
                 return (false, "no tokenOut and no items (giveaway)");
             }
         }
@@ -449,23 +514,26 @@ contract SettlementLens {
         // Input legs are FIXED (`end == 0`) or RISE to a ceiling (`end ≥ start`) —
         // a rising leg is the relayer-fee/conversion auction. Same rule both sides.
         for (uint256 i; i < nIn; i++) {
-            if (order.legsIn[i].end != 0 && order.legsIn[i].end < order.legsIn[i].start) {
+            (, uint256 inS, uint256 inE) = PackedArrays.legIn(order.legsIn, i);
+            if (inE != 0 && inE < inS) {
                 return (false, "input end < start (must rise)");
             }
         }
-        if (order.side == OrderSide.SELL) {
+        if (order.side() == OrderSide.SELL) {
             // Outputs decay DOWN from a positive start (`end ≤ start`), or fixed.
             for (uint256 j; j < nOut; j++) {
-                if (order.legsOut[j].start == 0) return (false, "output start is zero (giveaway)");
-                if (order.legsOut[j].end != 0 && order.legsOut[j].start < order.legsOut[j].end) {
+                (, uint256 oS, uint256 oE,) = PackedArrays.legOut(order.legsOut, j);
+                if (oS == 0) return (false, "output start is zero (giveaway)");
+                if (oE != 0 && oS < oE) {
                     return (false, "output start < end (must fall)");
                 }
             }
         } else {
             // BUY outputs are FIXED (exact-output); the canonical form is `end == 0`.
             for (uint256 j; j < nOut; j++) {
-                if (order.legsOut[j].start == 0) return (false, "output start is zero (giveaway)");
-                if (order.legsOut[j].end != 0) return (false, "buy output must be fixed (end == 0)");
+                (, uint256 oS2, uint256 oE2,) = PackedArrays.legOut(order.legsOut, j);
+                if (oS2 == 0) return (false, "output start is zero (giveaway)");
+                if (oE2 != 0) return (false, "buy output must be fixed (end == 0)");
             }
         }
         // Distinct within each array — a duplicate tokenIn shares one proceeds
@@ -480,30 +548,9 @@ contract SettlementLens {
         // balance (proven by the same-asset withdraw fork tests). For item-FREE
         // orders the overlap is a pure self-trade (the maker pays the spread
         // for nothing) and stays flagged.
-        for (uint256 i; i < nIn; i++) {
-            for (uint256 k = i + 1; k < nIn; k++) {
-                if (order.legsIn[i].token == order.legsIn[k].token) return (false, "duplicate input token");
-            }
-            if (order.items.length == 0) {
-                for (uint256 j; j < nOut; j++) {
-                    if (order.legsIn[i].token == order.legsOut[j].token) return (false, "input token == output token");
-                }
-            }
-        }
-        for (uint256 j; j < nOut; j++) {
-            // A leg addressed to the settlement contract permanently burns that
-            // delivery (it lands in the anti-donation snapshot baseline and is
-            // never swept). On-chain it's a maker self-burn, not an exploit, but
-            // the preflight should catch the footgun.
-            if (order.legsOut[j].recipient == address(SETTLEMENT)) return (false, "recipient is settlement (burn)");
-            for (uint256 k = j + 1; k < nOut; k++) {
-                if (
-                    order.legsOut[j].token == order.legsOut[k].token
-                        && order.legsOut[j].recipient == order.legsOut[k].recipient
-                ) {
-                    return (false, "duplicate output token+recipient");
-                }
-            }
+        {
+            (bool okLegs, string memory whyLegs) = _checkLegOverlaps(order, nIn, nOut);
+            if (!okLegs) return (false, whyLegs);
         }
         if (order.minFillAnchor > anchor) return (false, "minFillAnchor > anchor (unfillable)");
         // An INDIVISIBLE SETTLE item (`amount <= 1` — the ERC-721 sentinel, or a
@@ -515,14 +562,20 @@ contract SettlementLens {
         // partial fills — each fill transfers its exact pro-rata slice — and are
         // deliberately allowed through.
         if (order.fillModule == address(0) && order.minFillAnchor != anchor) {
-            uint256 nItems = order.items.length;
+            bytes calldata its = order.items;
+            uint256 nItems = PackedArrays.validateRecords(its, PackedArrays.ITEM_HEAD);
+            uint256 cur = PackedArrays.recordsStart();
             for (uint256 s; s < nItems; s++) {
-                if (order.items[s].op == ItemOp.SETTLE && order.items[s].amount <= 1) {
+                (uint256 iop,, uint256 iamt,,, uint256 nxt) = PackedArrays.itemAt(its, cur);
+                if (iop == uint256(ItemOp.SETTLE) && iamt <= 1) {
                     return (false, "settle item requires full-fill");
                 }
+                cur = nxt;
             }
         }
-        if (order.decayDuration() != 0 && order.decayStartTime() == 0) return (false, "decay set without decayStartTime");
+        if (order.decayDuration() != 0 && order.decayStartTime() == 0) {
+            return (false, "decay set without decayStartTime");
+        }
 
         // ── soft exclusivity override ──
         if (order.exclusivityOverrideBps != 0) {
@@ -530,14 +583,16 @@ contract SettlementLens {
             if (order.exclusivityOverrideBps > 10_000) return (false, "exclusivityOverrideBps > 10000");
         }
         // ── piecewise auction curve (monotonic time, bounded bump) ──
-        uint256 nCurve = order.curve.length;
+        uint256 nCurve = PackedArrays.validateFixed(order.curve, PackedArrays.CURVE_STRIDE);
         for (uint256 c; c < nCurve; c++) {
-            if (order.curve[c].bumpBps > 10_000) return (false, "curve bumpBps > 10000");
-            if (c != 0 && order.curve[c].timeDelta <= order.curve[c - 1].timeDelta) {
+            (uint256 cT, uint256 cB) = PackedArrays.curvePoint(order.curve, c);
+            if (cB > 10_000) return (false, "curve bumpBps > 10000");
+            (uint256 cTPrev,) = c == 0 ? (uint256(0), uint256(0)) : PackedArrays.curvePoint(order.curve, c - 1);
+            if (c != 0 && cT <= cTPrev) {
                 return (false, "curve timeDelta not increasing");
             }
         }
-        if (order.curve.length != 0 && order.decayStartTime() == 0) return (false, "curve set without decayStartTime");
+        if (nCurve != 0 && order.decayStartTime() == 0) return (false, "curve set without decayStartTime");
         // ── gas bump ──
         if (order.gasBumpBps != 0) {
             if (order.gasPriceRef == 0) return (false, "gasBump without gasPriceRef");
@@ -564,12 +619,27 @@ contract SettlementLens {
         view
         returns (bool)
     {
-        uint256 len = order.validators.length;
+        bytes calldata vs = order.validators;
+        uint256 len = PackedArrays.validateRecords(vs, PackedArrays.VALIDATOR_HEAD);
+        uint256 vcur = PackedArrays.recordsStart();
         for (uint256 i; i < len; i++) {
-            Validator calldata v = order.validators[i];
-            if (!_gatePasses(v.target, order, filler, v.data, takerData)) return false;
+            bool pass;
+            (pass, vcur) = _oneGate(order, vs, vcur, filler, takerData);
+            if (!pass) return false;
         }
         return true;
+    }
+
+    /// @dev One validator record: decode, gate, and hand back the next cursor. Its own
+    ///      frame because holding the decoded record alongside the loop state pushed
+    ///      {_validatorsPass} over the stack limit.
+    function _oneGate(Order calldata order, bytes calldata vs, uint256 cursor, address filler, bytes calldata takerData)
+        private
+        view
+        returns (bool, uint256)
+    {
+        (address target, bytes calldata data, uint256 next) = PackedArrays.validatorAt(vs, cursor);
+        return (_gatePasses(target, order, filler, data, takerData), next);
     }
 
     /// @dev Byte-for-byte mirror of the settlement's validator gate (see
@@ -603,7 +673,12 @@ contract SettlementLens {
     ///      `startAmountOut[0]` (BUY). Reverts on empty legs; only call when a
     ///      fungible anchor is known to exist.
     function _anchorTotal(Order calldata order) internal pure returns (uint256) {
-        return order.side == OrderSide.BUY ? order.legsOut[0].start : order.legsIn[0].start;
+        if (order.side() == OrderSide.BUY) {
+            (, uint256 bStart,,) = PackedArrays.legOut(order.legsOut, 0);
+            return bStart;
+        }
+        (, uint256 sStart,) = PackedArrays.legIn(order.legsIn, 0);
+        return sStart;
     }
 
     /// @dev The fill denominator: the maker-signed `fillTotal` when set (module

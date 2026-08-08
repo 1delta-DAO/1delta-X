@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {Settlement, Order, Item, Validator, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
@@ -101,7 +103,7 @@ contract OrderRelevantStateTest is MockSettlementBase {
 
     function test_state_invalid_malformed() public view {
         Order memory o = _order(1);
-        o.legsIn = new LegIn[](0); // malformed shape
+        o.legsIn = PackedEncode.legsIn(new LegIn[](0)); // malformed shape
         (SettlementLens.OrderStatus status,,) = _state(o, _sign(_order(1)));
         assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Invalid), "invalid");
     }
@@ -154,7 +156,7 @@ contract OrderRelevantStateTest is MockSettlementBase {
         settlement.fill(filled, filledSig, AMOUNT_IN); // → Filled
 
         Order memory malformed = _order(3);
-        malformed.legsIn = new LegIn[](0); // no anchor input leg (SELL) → Invalid
+        malformed.legsIn = PackedEncode.legsIn(new LegIn[](0)); // no anchor input leg (SELL) → Invalid
 
         Order[] memory orders = new Order[](3);
         bytes[] memory sigs = new bytes[](3);

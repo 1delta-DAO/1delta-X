@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
@@ -55,21 +57,20 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
         }
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
-            legsOut: legsOut,
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: _packTiming(decayStart, decayDur, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -149,8 +150,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
         _approveSolverSide(daiOut, DAI);
         _approveSolverSide(wbtcOut, WBTC);
 
-        Order memory order =
-            _fixed(1, _a2(WETH, USDC), _u2(wethIn, usdcIn), _a2(DAI, WBTC), _u2(daiOut, wbtcOut));
+        Order memory order = _fixed(1, _a2(WETH, USDC), _u2(wethIn, usdcIn), _a2(DAI, WBTC), _u2(daiOut, wbtcOut));
         bytes memory sig = _sign(order);
 
         // 30% then 70%.
@@ -224,8 +224,9 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
         _approveMakerToSettlement(USDC, usdcIn);
         _approveSolverSide(daiStart, DAI);
 
-        Order memory order =
-            _order(3, _a2(WETH, USDC), _u2(wethIn, usdcIn), _a1(DAI), _u1(daiStart), _u1(daiEnd), uint32(block.timestamp), 100);
+        Order memory order = _order(
+            3, _a2(WETH, USDC), _u2(wethIn, usdcIn), _a1(DAI), _u1(daiStart), _u1(daiEnd), uint32(block.timestamp), 100
+        );
         bytes memory sig = _sign(order);
 
         vm.warp(block.timestamp + 50);

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
@@ -215,9 +217,10 @@ contract FillModuleTest is CoreSettlementBase {
         aOut[1] = daiOut;
 
         Order memory o = _order(maker, 5, USDC, WETH, usdcIn, wethOut, new Item[](0));
-        o.legsOut = new LegOut[](2); // two fixed outputs, both → maker
-        o.legsOut[0] = LegOut(tOut[0], aOut[0], 0, address(0));
-        o.legsOut[1] = LegOut(tOut[1], aOut[1], 0, address(0));
+        LegOut[] memory twoOut = new LegOut[](2); // two fixed outputs, both → maker
+        twoOut[0] = LegOut(tOut[0], aOut[0], 0, address(0));
+        twoOut[1] = LegOut(tOut[1], aOut[1], 0, address(0));
+        o.legsOut = PackedEncode.legsOut(twoOut);
         o.fillModule = address(mock);
         o.fillTotal = total;
         bytes memory sig = _sign(o);
@@ -248,21 +251,20 @@ contract FillModuleTest is CoreSettlementBase {
         items[0] = Item({op: ItemOp.MAKE, module: address(0xD0D0), amount: 1, recipient: address(0), data: ""});
         Order memory o = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 6,
             deadline: block.timestamp + 1 hours,
-            legsIn: new LegIn[](0),
-            legsOut: new LegOut[](0),
+            legsIn: PackedEncode.legsIn(new LegIn[](0)),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)),
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(fullFill),
             fillTotal: 1
         });

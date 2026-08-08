@@ -36,8 +36,7 @@ abstract contract LiquityV2ForkBase is Test {
 
     /// @dev An active WETH-branch trove at the pinned block: ~541 WETH collateral
     ///      backing ~687k BOLD, so it has ample headroom for the small test borrow.
-    uint256 internal constant TROVE_ID =
-        102036905498439360210701303197562255497830229508729325448634378946648943354674;
+    uint256 internal constant TROVE_ID = 102036905498439360210701303197562255497830229508729325448634378946648943354674;
     address internal constant TROVE_OWNER = 0xDf6E7fd41ef192dF5d37f766435162b4e579fdb0;
 
     uint256 internal constant FORK_BLOCK = 25_600_000;
@@ -139,9 +138,8 @@ contract LiquityV2ForkAuthTest is LiquityV2ForkBase {
 
         // The owner onboards exactly as documented.
         vm.startPrank(TROVE_OWNER);
-        IBorrowerOpsFork(BORROWER_OPS).setRemoveManagerWithReceiver(
-            TROVE_ID, address(takerModule), address(takerModule)
-        );
+        IBorrowerOpsFork(BORROWER_OPS)
+            .setRemoveManagerWithReceiver(TROVE_ID, address(takerModule), address(takerModule));
         permit3.approveTaker(settlement, keccak256(data), uint160(BORROW), 0);
         vm.stopPrank();
 
@@ -166,9 +164,8 @@ contract LiquityV2ForkAuthTest is LiquityV2ForkBase {
         // The victim has completed the documented setup — this is the precondition
         // for the attack, not a misconfiguration.
         vm.prank(TROVE_OWNER);
-        IBorrowerOpsFork(BORROWER_OPS).setRemoveManagerWithReceiver(
-            TROVE_ID, address(takerModule), address(takerModule)
-        );
+        IBorrowerOpsFork(BORROWER_OPS)
+            .setRemoveManagerWithReceiver(TROVE_ID, address(takerModule), address(takerModule));
 
         // Succeeds: the taker book is keyed by the approver, so nothing here
         // belongs to the victim.
@@ -192,9 +189,8 @@ contract LiquityV2ForkAuthTest is LiquityV2ForkBase {
     /// victim and any filler who knows their trove id is the module's own check.
     function test_protocolItselfWouldHaveAllowedTheDrain() public {
         vm.prank(TROVE_OWNER);
-        IBorrowerOpsFork(BORROWER_OPS).setRemoveManagerWithReceiver(
-            TROVE_ID, address(takerModule), address(takerModule)
-        );
+        IBorrowerOpsFork(BORROWER_OPS)
+            .setRemoveManagerWithReceiver(TROVE_ID, address(takerModule), address(takerModule));
 
         uint256 debtBefore = _debtOf(TROVE_ID);
         uint256 modBefore = IERC20(BOLD).balanceOf(address(takerModule));

@@ -155,12 +155,7 @@ contract VenusRepayModule is IMakerModule {
         uint256 residual = IERC20(underlying).balanceOf(address(this));
         if (residual == 0) return;
         DustHandler.disposeResidual(
-            underlying,
-            residual,
-            onBehalfOf,
-            action,
-            vToken,
-            abi.encodeCall(IVToken.mintBehalf, (onBehalfOf, residual))
+            underlying, residual, onBehalfOf, action, vToken, abi.encodeCall(IVToken.mintBehalf, (onBehalfOf, residual))
         );
     }
 }
@@ -220,10 +215,7 @@ contract VenusTakerModule is ITakerModule {
         permit3 = IPermit3(_permit3);
     }
 
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         // op@0, vToken@32, underlying@64 — all static, so a prefix decode is sound

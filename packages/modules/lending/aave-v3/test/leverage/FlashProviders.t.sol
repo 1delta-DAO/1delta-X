@@ -82,7 +82,9 @@ contract AaveFlashProvidersTest is AaveModulesBase {
         // Collateral up ~1 WETH. Tolerance absorbs aToken interest accrual: an Aave
         // flash bumps the WETH reserve's liquidity index, crediting a few gwei to
         // the existing collateral (the off-Aave providers leave it exact).
-        assertApproxEqAbs(IERC20(aWETH).balanceOf(maker) - makerAWethBefore, collateralIn, 1e13, "maker aWETH up ~1 WETH");
+        assertApproxEqAbs(
+            IERC20(aWETH).balanceOf(maker) - makerAWethBefore, collateralIn, 1e13, "maker aWETH up ~1 WETH"
+        );
         assertApproxEqAbs(IERC20(usdcDebtToken).balanceOf(maker) - makerDebtBefore, borrowOut, 2, "maker debt up");
 
         // Solver ends with no USDC (all swapped) and the flash repaid; WETH is profit.

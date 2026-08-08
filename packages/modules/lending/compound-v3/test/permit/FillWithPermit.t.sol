@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -40,7 +42,6 @@ contract FillWithPermitTest is CompoundV3ModulesBase {
         });
         Order memory order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 42,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
@@ -52,9 +53,9 @@ contract FillWithPermitTest is CompoundV3ModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -64,25 +65,15 @@ contract FillWithPermitTest is CompoundV3ModulesBase {
         //   - depositModule pulls WETH for the supply
         IPermit3.TokenPermit[] memory tokenPermits = new IPermit3.TokenPermit[](2);
         tokenPermits[0] = IPermit3.TokenPermit({
-            spender: address(settlement),
-            token: USDC,
-            amount: uint160(usdcIn),
-            expiration: uint48(order.deadline)
+            spender: address(settlement), token: USDC, amount: uint160(usdcIn), expiration: uint48(order.deadline)
         });
         tokenPermits[1] = IPermit3.TokenPermit({
-            spender: address(depositModule),
-            token: WETH,
-            amount: uint160(wethOut),
-            expiration: uint48(order.deadline)
+            spender: address(depositModule), token: WETH, amount: uint160(wethOut), expiration: uint48(order.deadline)
         });
         IPermit3.TakerPermit[] memory takerPermits = new IPermit3.TakerPermit[](0);
 
-        IPermit3.PermitBatch memory batch = IPermit3.PermitBatch({
-            tokens: tokenPermits,
-            takers: takerPermits,
-            nonce: 1,
-            deadline: order.deadline
-        });
+        IPermit3.PermitBatch memory batch =
+            IPermit3.PermitBatch({tokens: tokenPermits, takers: takerPermits, nonce: 1, deadline: order.deadline});
 
         // Sign the witness-bound permit.
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));

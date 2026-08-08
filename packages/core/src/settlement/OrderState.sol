@@ -4,6 +4,8 @@ pragma solidity ^0.8.28;
 import {IFillModule} from "../interfaces/IFillModule.sol";
 import {Order, OrderSide, FillCtx} from "./Structs.sol";
 import {OrderHash} from "./OrderHash.sol";
+import {DutchAuction} from "./DutchAuction.sol";
+import {PackedArrays} from "./PackedArrays.sol";
 import {NonceManager} from "./NonceManager.sol";
 
 /// @title OrderState
@@ -22,6 +24,7 @@ import {NonceManager} from "./NonceManager.sol";
 ///         NonceManager, then `filled`(2), `orderApproved`(3).
 abstract contract OrderState is NonceManager {
     using OrderHash for Order;
+    using DutchAuction for Order;
 
     /// @notice orderHash → cumulative filled amount, in the order's ANCHOR units
     ///         (`tokenIn[0]` for SELL, `tokenOut[0]` for BUY). The
@@ -59,6 +62,14 @@ abstract contract OrderState is NonceManager {
     error NotOrderMaker();
     /// @dev The order was cancelled by hash via {cancelOrder} (`filled` sentinel).
     error OrderCancelled();
+    /// @dev A fill-once order (see {DutchAuction.useNonceInvalidator}) was offered a
+    ///      partial fill. Such an order keeps no per-order counter — its progress IS
+    ///      the consumed nonce — so anything short of a full fill would burn the nonce
+    ///      and make the remainder permanently unfillable. Rejected outright.
+    error FillOnceMustBeFull();
+    /// @dev The order derives its fill denominator from leg 0 of the fixed side, but
+    ///      that side is empty. Such an order must carry an explicit `fillTotal`.
+    error NoAnchorLeg();
 
     // ──────────────────── On-chain order authorization ────────────────────
 
@@ -90,10 +101,13 @@ abstract contract OrderState is NonceManager {
     }
 
     /// @notice Withdraw a prior {approveOrder}. Keyed by `msg.sender`, so a maker can
-    ///         only clear its own approval. Cancelling the order's nonce
-    ///         ({cancelOrders}/{rollbackNonces}) also blocks the fill — the nonce gate
-    ///         runs on every fill regardless — but leaves this flag set; use this to
-    ///         un-approve without burning the nonce, or to reclaim the storage.
+    ///         only clear its own approval. Binds on EVERY fill, including the
+    ///         remainder of an already partially-filled order: {Signatures} re-reads
+    ///         this record each time precisely because, unlike a signature, it is
+    ///         revocable. Cancelling the order's nonce ({cancelOrders}/{rollbackNonces})
+    ///         also blocks the fill — the nonce gate runs on every fill regardless —
+    ///         but leaves this flag set; use this to un-approve without burning the
+    ///         nonce, or to reclaim the storage.
     function revokeOrderApproval(bytes32 orderHash) external {
         orderApproved[msg.sender][orderHash] = false;
         emit OrderApprovalRevoked(msg.sender, orderHash);
@@ -170,7 +184,19 @@ abstract contract OrderState is NonceManager {
         if (delta < order.minFillAnchor) revert FillTooSmall();
         uint256 newFilled = prevFilled + delta;
         if (newFilled > total) revert OverFill();
-        filled[orderHash] = newFilled;
+        // Progress is recorded EITHER in this order's own counter (the default) OR, for
+        // a maker who opted into fill-once, by consuming the nonce — a warm, shared,
+        // usually-already-non-zero slot instead of a fresh 22,100-gas one. See
+        // {DutchAuction.useNonceInvalidator} for the full trade and its consequences.
+        if (order.useNonceInvalidator()) {
+            // A partial fill would burn the nonce and strand the remainder, so the
+            // opt-in only accepts a fill that closes the order outright.
+            if (newFilled != total) revert FillOnceMustBeFull();
+            _cancelNonce(order.maker, order.nonce); // blocks every later fill via the
+            // nonce gate `_fillCore` already runs
+        } else {
+            filled[orderHash] = newFilled;
+        }
         // `payTo` defaults to the filler; the aggregator entry may redirect it
         // after this returns (payment destination only — never authority).
         // Assigned field-by-field rather than as a struct literal: a literal would
@@ -192,7 +218,18 @@ abstract contract OrderState is NonceManager {
 
     /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —
     ///      `startAmountIn[0]` (SELL) or `startAmountOut[0]` (BUY).
+    ///      The empty-blob check is NOT optional. `LegIn[]` used to give us an
+    ///      out-of-bounds revert for free when leg 0 did not exist; a packed blob just
+    ///      reads zeroes (`calldataload` pads past calldata), which would silently
+    ///      yield a zero denominator. An order with no legs must set `fillTotal`.
     function _anchorTotal(Order calldata order) internal pure returns (uint256) {
-        return order.side == OrderSide.BUY ? order.legsOut[0].start : order.legsIn[0].start;
+        if (order.side() == OrderSide.BUY) {
+            if (PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE) == 0) revert NoAnchorLeg();
+            (, uint256 start,,) = PackedArrays.legOut(order.legsOut, 0);
+            return start;
+        }
+        if (PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE) == 0) revert NoAnchorLeg();
+        (, uint256 startIn,) = PackedArrays.legIn(order.legsIn, 0);
+        return startIn;
     }
 }

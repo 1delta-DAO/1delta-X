@@ -6,7 +6,8 @@ import {IMakerModule} from "../interfaces/IMakerModule.sol";
 import {ISettlementModule} from "../interfaces/ISettlementModule.sol";
 import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
-import {Order, Item, ItemOp, Validator, LegIn, FillCtx} from "./Structs.sol";
+import {Order, ItemOp, FillCtx} from "./Structs.sol";
+import {PackedArrays} from "./PackedArrays.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 import {SolverCallbackExecutor} from "./SolverCallbackExecutor.sol";
 import {Signatures} from "./Signatures.sol";
@@ -155,11 +156,11 @@ abstract contract Base is Signatures {
     }
 
     /// @dev Snapshot Settlement's balance of every input leg's token before items run.
-    function _snapshotInputs(LegIn[] calldata legs) internal view returns (uint256[] memory bals) {
-        uint256 n = legs.length;
+    function _snapshotInputs(bytes calldata legs) internal view returns (uint256[] memory bals) {
+        uint256 n = PackedArrays.validateFixed(legs, PackedArrays.LEG_IN_STRIDE);
         bals = new uint256[](n);
         for (uint256 i; i < n;) {
-            bals[i] = SafeTransferLib.balanceOf(legs[i].token, address(this));
+            bals[i] = SafeTransferLib.balanceOf(PackedArrays.legInToken(legs, i), address(this));
             unchecked {
                 ++i;
             }
@@ -188,10 +189,42 @@ abstract contract Base is Signatures {
     ///      decode (that is what keeps the core module-agnostic). Order construction
     ///      owns it — `validateOrder` in the SDK checks it, and a maker can pin the
     ///      outcome on-chain with a {MinBalanceInvariant} on the expected token.
+    ///      Items are a length-prefixed RECORD blob, so this walks it with a cursor
+    ///      rather than indexing — the settler only ever runs items in signed order.
+    ///      `validateRecords` is the single bounds proof for the whole walk.
     function _executeItems(Order calldata order, FillCtx memory ctx) internal {
-        uint256 n = order.items.length;
+        bytes calldata items = order.items;
+        uint256 n = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
+        uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < n;) {
-            _executeItem(order, ctx, i);
+            cursor = _executeItemAt(order, ctx, items, cursor);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @dev Cursor form used by both the plain loop above and {Batch.matchSettle},
+    ///      which needs to run ONE item at an arbitrary schedule position. Returns the
+    ///      next cursor so a sequential walk needs no re-scan.
+    function _executeItemAt(Order calldata order, FillCtx memory ctx, bytes calldata items, uint256 cursor)
+        internal
+        returns (uint256 next)
+    {
+        (uint256 op, address module, uint256 amount, address recipient, bytes calldata data, uint256 n2) =
+            PackedArrays.itemAt(items, cursor);
+        _runItem(order, ctx, op, module, amount, recipient, data);
+        return n2;
+    }
+
+    /// @dev Byte-offset of item `index` — {Batch} schedules items by index, so it must
+    ///      be able to seek. O(index), which is fine: an order's item list is tiny and
+    ///      only the netted path pays this.
+    function _itemCursor(bytes calldata items, uint256 index) internal pure returns (uint256 cursor) {
+        cursor = PackedArrays.recordsStart();
+        for (uint256 i; i < index;) {
+            (,,,,, uint256 n2) = PackedArrays.itemAt(items, cursor);
+            cursor = n2;
             unchecked {
                 ++i;
             }
@@ -203,11 +236,21 @@ abstract contract Base is Signatures {
     ///      order's borrow before its own delivery, interleaved with another
     ///      order's steps) while the single-order path keeps the plain loop above.
     ///      Byte-identical semantics: same slice math, same dispatch, same guards.
-    function _executeItem(Order calldata order, FillCtx memory ctx, uint256 i) internal {
-        Item calldata item = order.items[i];
+    /// @dev Execute one item from its ALREADY-DECODED fields. Same slice math, same
+    ///      dispatch and same guards as before the packed encoding; only the decode
+    ///      moved out to the caller so a sequential walk decodes each record once.
+    function _runItem(
+        Order calldata order,
+        FillCtx memory ctx,
+        uint256 op,
+        address module,
+        uint256 amount,
+        address recipient,
+        bytes calldata itemData
+    ) internal {
         uint256 slice = ctx.fullFill
-            ? item.amount
-            : (item.amount * ctx.newFilled) / ctx.anchor - (item.amount * ctx.prevFilled) / ctx.anchor;
+            ? amount
+            : (amount * ctx.newFilled) / ctx.anchor - (amount * ctx.prevFilled) / ctx.anchor;
         if (slice == 0) {
             // A SETTLE slice that floors to 0 would charge the maker's
             // pro-rata payment while delivering NOTHING to this filler (an
@@ -216,20 +259,20 @@ abstract contract Base is Signatures {
             // on-chain too: revert instead of silently skipping. MAKE/TAKE
             // dust slices keep the historical skip (they accumulate exactly
             // across fills). Cost: one calldata read, only on the dust branch.
-            if (item.op == ItemOp.SETTLE) revert SettleSliceZero();
+            if (op == uint256(ItemOp.SETTLE)) revert SettleSliceZero();
             return;
         }
 
-        if (item.op == ItemOp.MAKE) {
+        if (op == uint256(ItemOp.MAKE)) {
             // Maker module pulls the funding token from order.maker via Permit3 internally.
-            IMakerModule(item.module).makeOnBehalf(order.maker, slice, item.data);
-        } else if (item.op == ItemOp.TAKE) {
+            IMakerModule(module).makeOnBehalf(order.maker, slice, itemData);
+        } else if (op == uint256(ItemOp.TAKE)) {
             // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
             // classic flow (proceeds to Settlement for tokenIn payout); signing a
             // non-zero recipient (e.g. the maker) chains output into a subsequent item.
-            address to = item.recipient == address(0) ? address(this) : item.recipient;
+            address to = recipient == address(0) ? address(this) : recipient;
             if (slice > type(uint160).max) revert AmountOverflow();
-            PERMIT3.take(item.module, order.maker, uint160(slice), to, item.data);
+            PERMIT3.take(module, order.maker, uint160(slice), to, itemData);
         } else {
             // SETTLE: generic solver↔maker exchange — the FILLER-AWARE fallback
             // for exchanges the typed legs can't express (see {ISettlementModule}).
@@ -237,7 +280,7 @@ abstract contract Base is Signatures {
             // passing `ctx.filler` lets the maker's asset route to whoever fills. The
             // maker's receipt is guaranteed by the mandatory tokenOut delivery (run
             // before items) and/or an invariant, not by the module.
-            ISettlementModule(item.module).settle(order.maker, ctx.filler, slice, item.data);
+            ISettlementModule(module).settle(order.maker, ctx.filler, slice, itemData);
         }
     }
 
@@ -249,10 +292,13 @@ abstract contract Base is Signatures {
     ///      `takerData` (filler-supplied, unsigned, adversarial — see
     ///      {IOrderValidator}) is passed to every validator.
     function _runValidators(Order calldata order, address filler, bytes memory takerData) internal view {
-        uint256 len = order.validators.length;
+        bytes calldata vs = order.validators;
+        uint256 len = PackedArrays.validateRecords(vs, PackedArrays.VALIDATOR_HEAD);
+        uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < len;) {
-            Validator calldata v = order.validators[i];
-            if (!_gatePasses(v.target, order, filler, v.data, takerData)) revert ValidationFailed(i);
+            (address target, bytes calldata data, uint256 next) = PackedArrays.validatorAt(vs, cursor);
+            if (!_gatePasses(target, order, filler, data, takerData)) revert ValidationFailed(i);
+            cursor = next;
             unchecked {
                 ++i;
             }
@@ -285,10 +331,13 @@ abstract contract Base is Signatures {
     ///      AFTER items execute, so they can assert on the order's side effects
     ///      (e.g. "maker's Aave health factor ≥ 2.0").
     function _runInvariants(Order calldata order, address filler, bytes memory takerData) internal view {
-        uint256 len = order.invariants.length;
+        bytes calldata vs = order.invariants;
+        uint256 len = PackedArrays.validateRecords(vs, PackedArrays.VALIDATOR_HEAD);
+        uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < len;) {
-            Validator calldata v = order.invariants[i];
-            if (!_gatePasses(v.target, order, filler, v.data, takerData)) revert InvariantFailed(i);
+            (address target, bytes calldata data, uint256 next) = PackedArrays.validatorAt(vs, cursor);
+            if (!_gatePasses(target, order, filler, data, takerData)) revert InvariantFailed(i);
+            cursor = next;
             unchecked {
                 ++i;
             }

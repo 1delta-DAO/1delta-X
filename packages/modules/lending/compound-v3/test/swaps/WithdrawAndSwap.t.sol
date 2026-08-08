@@ -70,11 +70,7 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
 
         Item[] memory items = new Item[](1);
         items[0] = Item({
-            op: ItemOp.TAKE,
-            module: address(takerModule),
-            amount: wethIn,
-            recipient: address(0),
-            data: takerData
+            op: ItemOp.TAKE, module: address(takerModule), amount: wethIn, recipient: address(0), data: takerData
         });
 
         Order memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);

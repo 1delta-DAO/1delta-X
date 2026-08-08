@@ -36,13 +36,11 @@ struct AccountInfo {
 enum AssetDenomination {
     Wei, // underlying token amount
     Par // principal/index amount
-
 }
 
 enum AssetReference {
     Delta, // relative change from the current value
     Target // absolute end value
-
 }
 
 struct AssetAmount {

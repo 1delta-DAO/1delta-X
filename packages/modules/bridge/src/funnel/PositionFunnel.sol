@@ -104,8 +104,9 @@ contract PositionFunnel is IERC1271 {
     bytes32 private constant _HASHED_NAME = keccak256("PositionFunnel");
     bytes32 private constant _HASHED_VERSION = keccak256("1");
     bytes32 private constant _CALL_TYPEHASH = keccak256("Call(address target,uint256 value,bytes data)");
-    bytes32 private constant _EXECUTE_TYPEHASH =
-        keccak256("ExecuteBatch(Call[] calls,uint256 nonce,uint256 deadline)Call(address target,uint256 value,bytes data)");
+    bytes32 private constant _EXECUTE_TYPEHASH = keccak256(
+        "ExecuteBatch(Call[] calls,uint256 nonce,uint256 deadline)Call(address target,uint256 value,bytes data)"
+    );
 
     event TokenEnabled(address indexed token);
     event Withdrawn(address indexed token, address indexed to, uint256 amount);

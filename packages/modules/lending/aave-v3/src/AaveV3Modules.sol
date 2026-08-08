@@ -150,9 +150,7 @@ contract AaveV3RepayModule is IMakerModule {
     /// @dev Dispose of any residual: re-supply into the user's Aave position
     ///      (Recycle, best-effort with a guaranteed sweep fallback) or sweep to
     ///      the user (default). In its own frame to keep the stack shallow.
-    function _disposeResidual(address pool, address asset, address onBehalfOf, DustHandler.DustAction action)
-        private
-    {
+    function _disposeResidual(address pool, address asset, address onBehalfOf, DustHandler.DustAction action) private {
         uint256 residual = IERC20(asset).balanceOf(address(this));
         if (residual == 0) return;
         DustHandler.disposeResidual(

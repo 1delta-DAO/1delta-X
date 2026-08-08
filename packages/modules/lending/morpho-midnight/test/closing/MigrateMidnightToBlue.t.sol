@@ -7,10 +7,7 @@ import {MidnightModulesBase} from "../shared/MidnightModulesBase.t.sol";
 import {MorphoBlueMock} from "../shared/MorphoBlueMock.sol";
 
 import {MarketParams} from "../../../morpho-blue/src/interfaces/IMorphoBlue.sol";
-import {
-    MorphoBlueSupplyCollateralModule,
-    MorphoBlueTakerModule
-} from "../../../morpho-blue/src/MorphoBlueModules.sol";
+import {MorphoBlueSupplyCollateralModule, MorphoBlueTakerModule} from "../../../morpho-blue/src/MorphoBlueModules.sol";
 
 /// @dev Migrate a Morpho MIDNIGHT position → Morpho BLUE in ONE settlement order —
 /// the "avoid a fixed-maturity liquidation by rolling into a perpetual Blue

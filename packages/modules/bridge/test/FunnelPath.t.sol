@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {Order, Item, ItemOp, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 
@@ -112,13 +114,15 @@ contract FunnelPathTest is BridgeTestBase {
         o = _blank(nonce);
         o.maker = address(funnel);
         o.legsIn = _legsIn1(address(tB), BORROW);
-        o.legsOut = new LegOut[](1);
-        o.legsOut[0] = LegOut(address(tA), SOLVER_COLL, 0, address(0)); // 0 == the maker (funnel)
-        o.items = new Item[](2);
-        o.items[0] =
+        LegOut[] memory _tmplegsOut = new LegOut[](1);
+        _tmplegsOut[0] = LegOut(address(tA), SOLVER_COLL, 0, address(0)); // 0 == the maker (funnel)
+        o.legsOut = PackedEncode.legsOut(_tmplegsOut);
+        Item[] memory _tmpitems = new Item[](2);
+        _tmpitems[0] =
             Item({op: ItemOp.MAKE, module: address(supplyModule), amount: TOTAL_COLL, recipient: address(0), data: ""});
-        o.items[1] =
+        _tmpitems[1] =
             Item({op: ItemOp.TAKE, module: address(borrowModule), amount: BORROW, recipient: address(0), data: ""});
+        o.items = PackedEncode.items(_tmpitems);
     }
 
     /// @dev Destination SWAP order — the same funnel hosting the simple case.
@@ -126,8 +130,9 @@ contract FunnelPathTest is BridgeTestBase {
         o = _blank(nonce);
         o.maker = address(funnel);
         o.legsIn = _legsIn1(address(tA), DELIVERED);
-        o.legsOut = new LegOut[](1);
-        o.legsOut[0] = LegOut(address(tB), 300e18, 0, endUser);
+        LegOut[] memory _tmplegsOut = new LegOut[](1);
+        _tmplegsOut[0] = LegOut(address(tB), 300e18, 0, endUser);
+        o.legsOut = PackedEncode.legsOut(_tmplegsOut);
     }
 
     // ──────────────────── executeSigned ────────────────────
@@ -177,7 +182,8 @@ contract FunnelPathTest is BridgeTestBase {
             target: address(permit3),
             value: 0,
             data: abi.encodeCall(
-                IPermit3.approveTaker, (address(settlement), keccak256(o.items[1].data), uint160(BORROW), uint48(0))
+                IPermit3.approveTaker,
+                (address(settlement), keccak256(PackedEncode.getItemData(o.items, 1)), uint160(BORROW), uint48(0))
             )
         });
         calls[2] = PositionFunnel.Call({
@@ -334,9 +340,7 @@ contract FunnelPathTest is BridgeTestBase {
         address expected = address(
             uint160(
                 uint256(
-                    keccak256(
-                        abi.encodePacked(bytes1(0xff), address(factory), salt, factory.initCodeHashFor(maker))
-                    )
+                    keccak256(abi.encodePacked(bytes1(0xff), address(factory), salt, factory.initCodeHashFor(maker)))
                 )
             )
         );

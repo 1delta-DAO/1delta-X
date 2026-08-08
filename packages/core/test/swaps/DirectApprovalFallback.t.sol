@@ -22,11 +22,7 @@ import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 ///   tokenIn  = USDC   (maker gives, solver receives)
 ///   tokenOut = WETH   (solver gives, maker receives — straight to wallet)
 contract DirectApprovalFallbackTest is CoreSettlementBase {
-    function _plainSwapOrder(uint256 nonce, uint256 usdcIn, uint256 wethOut)
-        internal
-        view
-        returns (Order memory)
-    {
+    function _plainSwapOrder(uint256 nonce, uint256 usdcIn, uint256 wethOut) internal view returns (Order memory) {
         return _order(maker, nonce, USDC, WETH, usdcIn, wethOut, new Item[](0));
     }
 

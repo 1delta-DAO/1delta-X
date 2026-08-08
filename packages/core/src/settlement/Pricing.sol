@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, FillCtx, OrderSide, LegIn, LegOut} from "./Structs.sol";
+import {Order, FillCtx, OrderSide} from "./Structs.sol";
+import {PackedArrays} from "./PackedArrays.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 
 /// @title Pricing
@@ -39,25 +40,24 @@ library Pricing {
     /// @notice The amount to deliver on output leg `j` (post-override), pool/solver
     ///         → recipient.
     function outputAt(Order calldata o, FillCtx memory ctx, uint256 j) internal view returns (uint256 amt) {
-        // Resolve the leg pointer ONCE. `o.legsOut[j]` is not a free repeat: each use
-        // re-reads the array offset out of the order, re-checks the length bound, and
-        // recomputes the element offset. The SELL branch below touched it four times.
-        LegOut calldata leg = o.legsOut[j];
-        if (o.side == OrderSide.BUY) {
+        // Decode the leg ONCE — all four fields in a single pass over the packed blob,
+        // rather than re-deriving the element offset for every field.
+        (, uint256 legStart, uint256 legEnd, address legRecipient) = PackedArrays.legOut(o.legsOut, j);
+        if (o.side() == OrderSide.BUY) {
             // Fixed output — the exact-output guarantee; never overridden.
-            uint256 fixedOut = leg.start;
             amt = ctx.fullFill
-                ? fixedOut
-                : ceilDiv(fixedOut * ctx.newFilled, ctx.anchor) - ceilDiv(fixedOut * ctx.prevFilled, ctx.anchor);
+                ? legStart
+                : ceilDiv(legStart * ctx.newFilled, ctx.anchor) - ceilDiv(legStart * ctx.prevFilled, ctx.anchor);
         } else {
-            uint256 bump = leg.end != 0 ? o.bumpBps() : 0;
-            amt = ceilDiv((ctx.newFilled - ctx.prevFilled) * DutchAuction.amountOutAt(leg, bump), ctx.anchor);
+            uint256 bump = legEnd != 0 ? o.bumpBps() : 0;
+            amt = ceilDiv((ctx.newFilled - ctx.prevFilled) * DutchAuction.outTick(legStart, legEnd, bump), ctx.anchor);
             // Soft-exclusivity override lifts ONLY the maker's own SELL legs — never
             // a fee leg to a third party (would leak the comp) — mirroring the input
             // side, where the override lowers only the maker's charge.
             if (amt != 0 && ctx.overrideBps != 0) {
-                address to = leg.recipient;
-                if (to == address(0) || to == o.maker) amt = ceilDiv(amt * (10_000 + ctx.overrideBps), 10_000);
+                if (legRecipient == address(0) || legRecipient == o.maker) {
+                    amt = ceilDiv(amt * (10_000 + ctx.overrideBps), 10_000);
+                }
             }
         }
     }
@@ -66,18 +66,18 @@ library Pricing {
     ///         An auctioned leg (`end != 0`, and every BUY leg) rises with the tick;
     ///         a fixed leg (`end == 0`) is the exact cumulative slice of `start`.
     function inputOwed(Order calldata o, FillCtx memory ctx, uint256 i) internal view returns (uint256 owed) {
-        LegIn calldata leg = o.legsIn[i]; // resolved once — see {outputAt}
-        uint256 endIn = leg.end;
-        if (o.side == OrderSide.BUY || endIn != 0) {
+        (, uint256 startIn, uint256 endIn) = PackedArrays.legIn(o.legsIn, i); // decoded once
+        if (o.side() == OrderSide.BUY || endIn != 0) {
             uint256 bump = endIn != 0 ? o.bumpBps() : 0;
-            owed = (ctx.newFilled - ctx.prevFilled) * DutchAuction.amountInAt(leg, bump) / ctx.anchor;
+            owed = (ctx.newFilled - ctx.prevFilled) * DutchAuction.inTick(startIn, endIn, bump) / ctx.anchor;
             // Soft-exclusivity override: a non-exclusive in-window filler charges
             // LESS input (the auction leg moves toward the maker).
             if (ctx.overrideBps != 0) owed = owed * (10_000 - ctx.overrideBps) / 10_000;
         } else {
             // Fixed input — the exact-input guarantee; never overridden.
-            uint256 amt = leg.start;
-            owed = ctx.fullFill ? amt : (amt * ctx.newFilled) / ctx.anchor - (amt * ctx.prevFilled) / ctx.anchor;
+            owed = ctx.fullFill
+                ? startIn
+                : (startIn * ctx.newFilled) / ctx.anchor - (startIn * ctx.prevFilled) / ctx.anchor;
         }
     }
 }

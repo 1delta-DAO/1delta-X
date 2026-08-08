@@ -344,8 +344,7 @@ contract GearboxCreditAccountTest is Test {
     function test_depositModule_lacks_borrow_permission() public {
         MultiCall[] memory calls = new MultiCall[](1);
         calls[0] = MultiCall({
-            target: address(facade),
-            callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.increaseDebt, (BORROW))
+            target: address(facade), callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.increaseDebt, (BORROW))
         });
 
         vm.prank(address(depositModule));

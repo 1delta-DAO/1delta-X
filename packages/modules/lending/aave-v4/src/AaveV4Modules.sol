@@ -108,7 +108,9 @@ contract AaveV4RepayModule is IMakerModule {
         DustHandler.DustAction action = DustHandler.readAction(data, 128);
         PermitHelper.replayIfPresent(data, 160, asset, onBehalfOf, address(permit3), amount);
 
-        _pullAndRepay(spoke, positionManager, reserveId, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
+        _pullAndRepay(
+            spoke, positionManager, reserveId, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle
+        );
 
         // Dispose of any residual: re-supplied into the user's position (Recycle,
         // best-effort with sweep fallback) or swept to the user (default), never

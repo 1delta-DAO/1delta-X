@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
@@ -13,7 +15,6 @@ import {IEulerFlashVault} from "@solvers/single-input/EulerFlashSolver.sol";
 ///         swaps EVERY received input leg back to the collateral, and repays by
 ///         transfer (Euler flash loans are fee-free).
 contract EulerMultiInputFlashSolver is BaseFlashSolver {
-
     constructor(address _permit3, address _settlement, address _router)
         BaseFlashSolver(_permit3, _settlement, _router)
     {}
@@ -28,8 +29,7 @@ contract EulerMultiInputFlashSolver is BaseFlashSolver {
         uint24[] calldata dexFees,
         uint256[] calldata minSwapOuts
     ) external initiatesFlash {
-        bytes memory data =
-            abi.encode(flashVault, flashAmount, order, sig, fillAmountIn, dexFees, minSwapOuts);
+        bytes memory data = abi.encode(flashVault, flashAmount, order, sig, fillAmountIn, dexFees, minSwapOuts);
         // Pin the provider BEFORE the external call so the callback can be
         // authenticated against it rather than against its own payload.
         _armProvider(flashVault);
@@ -41,7 +41,7 @@ contract EulerMultiInputFlashSolver is BaseFlashSolver {
 
         // Surplus collateral is the fill's profit — sweep it to the caller so no
         // balance accumulates in this permissionless solver.
-        _sweep(order.legsOut[0].token, msg.sender);
+        _sweep(PackedArraysMem.legOutToken(order.legsOut, 0), msg.sender);
     }
 
     function onFlashLoan(bytes calldata data) external {

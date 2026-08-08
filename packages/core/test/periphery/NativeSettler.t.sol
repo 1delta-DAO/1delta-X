@@ -50,8 +50,7 @@ contract NativeSettlerTest is CoreSettlementBase {
         bytes memory sig = _sign(order);
 
         // Frontend builds the route calldata: pull the settler's WETH, return USDC to it.
-        bytes memory routeData =
-            abi.encodeCall(RouteHelper.swap, (address(settler), WETH, ethIn, USDC, usdcOut));
+        bytes memory routeData = abi.encodeCall(RouteHelper.swap, (address(settler), WETH, ethIn, USDC, usdcOut));
 
         // The user holds NATIVE ETH and self-settles in one call.
         vm.deal(maker, ethIn);

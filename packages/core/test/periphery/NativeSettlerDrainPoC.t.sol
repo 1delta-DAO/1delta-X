@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, LegIn, LegOut, OrderSide, Validator, CallbackMode} from "@core/settlement/Settlement.sol";
@@ -112,12 +114,14 @@ contract NativeSettlerDrainPoC is MockSettlementBase {
         //    SELL, maker = attacker, in = 1 wei WETH (anchor), out = the FULL
         //    residue of the attacker-chosen `victimToken`, delivered to the attacker.
         Order memory order = _blank(0);
-        order.side = OrderSide.SELL;
+        order.timing &= ~(uint256(1) << 101); // SELL (timing bit 101)
         order.maker = attacker;
-        order.legsIn = new LegIn[](1);
-        order.legsIn[0] = LegIn(address(weth), 1, 0); // fixed 1-wei input, anchor
-        order.legsOut = new LegOut[](1);
-        order.legsOut[0] = LegOut(address(victimToken), RESIDUE, 0, attacker); // full residue → attacker
+        LegIn[] memory _tmplegsIn = new LegIn[](1);
+        _tmplegsIn[0] = LegIn(address(weth), 1, 0); // fixed 1-wei input, anchor
+        order.legsIn = PackedEncode.legsIn(_tmplegsIn);
+        LegOut[] memory _tmplegsOut = new LegOut[](1);
+        _tmplegsOut[0] = LegOut(address(victimToken), RESIDUE, 0, attacker); // full residue → attacker
+        order.legsOut = PackedEncode.legsOut(_tmplegsOut);
 
         bytes memory sig = _sign(order);
 
@@ -130,9 +134,7 @@ contract NativeSettlerDrainPoC is MockSettlementBase {
         //    entry balance — which the floor check refuses.
         vm.deal(attacker, 1);
         vm.prank(attacker);
-        vm.expectRevert(
-            abi.encodeWithSelector(NativeSettler.PreexistingBalanceConsumed.selector, address(victimToken))
-        );
+        vm.expectRevert(abi.encodeWithSelector(NativeSettler.PreexistingBalanceConsumed.selector, address(victimToken)));
         settler.settleFromNative{value: 1}(order, sig, 1, address(route), dexCallData);
 
         // ── ASSERT nothing moved ──

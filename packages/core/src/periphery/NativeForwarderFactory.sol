@@ -76,7 +76,13 @@ contract NativeForwarderFactory {
         bytes32 initCodeHash =
             keccak256(abi.encodePacked(type(WethUnwrapForwarder).creationCode, abi.encode(WETH, maker)));
         return address(
-            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), bytes32(uint256(uint160(maker))), initCodeHash))))
+            uint160(
+                uint256(
+                    keccak256(
+                        abi.encodePacked(bytes1(0xff), address(this), bytes32(uint256(uint160(maker))), initCodeHash)
+                    )
+                )
+            )
         );
     }
 

@@ -16,9 +16,7 @@ contract NonceToken {
     /// @dev `v` doubles as the "signature" here — a given (owner, v) may be
     ///      submitted once. Signature cryptography is not what this test is about;
     ///      the nonce burn is.
-    function permit(address owner, address spender, uint256 value, uint256 deadline, uint8, bytes32, bytes32)
-        external
-    {
+    function permit(address owner, address spender, uint256 value, uint256 deadline, uint8, bytes32, bytes32) external {
         require(block.timestamp <= deadline, "expired");
         if (nonces[owner] != 0) revert PermitNonceUsed(); // already consumed
         nonces[owner] = 1;
@@ -51,9 +49,14 @@ contract NonceDebtToken {
 
 /// @dev Thin wrappers so the internal library functions are reachable externally.
 contract HelperHarness {
-    function replayPermit(bytes calldata data, uint256 baseLen, address token, address owner, address spender, uint256 amount)
-        external
-    {
+    function replayPermit(
+        bytes calldata data,
+        uint256 baseLen,
+        address token,
+        address owner,
+        address spender,
+        uint256 amount
+    ) external {
         PermitHelper.replayIfPresent(data, baseLen, token, owner, spender, amount);
     }
 
@@ -96,7 +99,8 @@ contract PermitReplayGriefingTest is Test {
 
     function _permitBlock() internal view returns (bytes memory) {
         // base = 64 (two addresses), then the 128-byte permit block.
-        return abi.encode(address(0xBA5E), address(0xBA5E2), block.timestamp + 1 days, uint8(27), bytes32(0), bytes32(0));
+        return
+            abi.encode(address(0xBA5E), address(0xBA5E2), block.timestamp + 1 days, uint8(27), bytes32(0), bytes32(0));
     }
 
     function _delegationBlock() internal view returns (bytes memory) {
@@ -147,9 +151,8 @@ contract PermitReplayGriefingTest is Test {
     /// An expired permit is also swallowed — same reasoning, and the pull still
     /// gates the actual movement of funds.
     function test_expiredPermit_isSwallowed() public {
-        bytes memory data = abi.encode(
-            address(0xBA5E), address(0xBA5E2), block.timestamp - 1, uint8(27), bytes32(0), bytes32(0)
-        );
+        bytes memory data =
+            abi.encode(address(0xBA5E), address(0xBA5E2), block.timestamp - 1, uint8(27), bytes32(0), bytes32(0));
         harness.replayPermit(data, 64, address(token), maker, spender, AMOUNT);
         assertEq(token.allowance(maker, spender), 0, "no allowance, but no revert either");
     }

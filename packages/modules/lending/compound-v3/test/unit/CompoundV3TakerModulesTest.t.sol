@@ -10,7 +10,9 @@ contract MockERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
 
     function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
@@ -42,7 +44,9 @@ contract MockComet {
     MockERC20 public baseToken;
     mapping(address => mapping(address => uint128)) public collateralBalances;
 
-    constructor(MockERC20 _baseToken) { baseToken = _baseToken; }
+    constructor(MockERC20 _baseToken) {
+        baseToken = _baseToken;
+    }
 
     function setCollateral(address user, address asset, uint128 amount) external {
         collateralBalances[user][asset] = amount;
@@ -55,8 +59,12 @@ contract MockComet {
         bool _isAllowed,
         uint256, // nonce
         uint256, // expiry
-        uint8, bytes32, bytes32
-    ) external {
+        uint8,
+        bytes32,
+        bytes32
+    )
+        external
+    {
         allowBySigCalled = true;
         lastOwner = owner;
         lastManager = manager;
@@ -76,7 +84,9 @@ contract MockComet {
         return collateralBalances[account][asset];
     }
 
-    function borrowBalanceOf(address) external pure returns (uint256) { return 0; }
+    function borrowBalanceOf(address) external pure returns (uint256) {
+        return 0;
+    }
 }
 
 contract MockPermit3 {
@@ -121,8 +131,14 @@ contract CometTakerModuleTest is Test {
     function test_borrow_withAllowBySig() public {
         // data = abi.encode(op, comet, asset, nonce, expiry, v, r, s)
         bytes memory data = abi.encode(
-            OP_BORROW, address(comet), address(asset),
-            uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
+            OP_BORROW,
+            address(comet),
+            address(asset),
+            uint256(0),
+            block.timestamp + 1 hours,
+            uint8(27),
+            bytes32(0),
+            bytes32(0)
         );
 
         vm.prank(address(permit3));
@@ -162,9 +178,15 @@ contract CometTakerModuleTest is Test {
     function test_withdraw_withAllowBySig() public {
         // data = abi.encode(op, comet, asset, BalanceMode=0, nonce, expiry, v, r, s)
         bytes memory data = abi.encode(
-            OP_WITHDRAW, address(comet), address(asset),
+            OP_WITHDRAW,
+            address(comet),
+            address(asset),
             uint8(0), // explicit BalanceMode = Exact, slot required ahead of the allow block
-            uint256(0), block.timestamp + 1 hours, uint8(27), bytes32(0), bytes32(0)
+            uint256(0),
+            block.timestamp + 1 hours,
+            uint8(27),
+            bytes32(0),
+            bytes32(0)
         );
 
         vm.prank(address(permit3));

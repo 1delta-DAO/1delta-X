@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator, CallbackMode} from "@core/settlement/Settlement.sol";
@@ -119,9 +121,9 @@ contract ExoticSettlementTest is CoreSettlementBase {
     ///      a zero-inventory NFT fill.
     function _purchaseOrder(uint256 nonce, uint256 wantId) internal view returns (Order memory o) {
         o = _sellOrder(nonce, maker, USDC, address(0), PRICE, 0, new Item[](0));
-        o.legsOut = new LegOut[](0);
+        o.legsOut = PackedEncode.legsOut(new LegOut[](0));
         o.minFillAnchor = PRICE; // indivisible purchase — full-fill only
-        o.invariants = _invariant1(address(ownerInv), abi.encode(address(nftA), wantId, maker));
+        o.invariants = PackedEncode.validators(_invariant1(address(ownerInv), abi.encode(address(nftA), wantId, maker)));
     }
 
     function test_nftPurchase_fillerDelivers_viaInvariant() public {
@@ -190,11 +192,11 @@ contract ExoticSettlementTest is CoreSettlementBase {
         items[0] = Item(ItemOp.SETTLE, address(nft721Module), 1, address(0), abi.encode(address(nftA), 1));
 
         Order memory order = _sellOrder(10, maker, address(0), address(0), 0, 0, items);
-        order.legsIn = new LegIn[](0);
-        order.legsOut = new LegOut[](0);
+        order.legsIn = PackedEncode.legsIn(new LegIn[](0));
+        order.legsOut = PackedEncode.legsOut(new LegOut[](0));
         order.fillTotal = 1; //     pure-NFT denominator (1 lot)
         order.minFillAnchor = 1; // full-fill only
-        order.invariants = _invariant1(address(ownerInv), abi.encode(address(nftB), 2, maker));
+        order.invariants = PackedEncode.validators(_invariant1(address(ownerInv), abi.encode(address(nftB), 2, maker)));
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -221,9 +223,9 @@ contract ExoticSettlementTest is CoreSettlementBase {
         LegOut[] memory legsOut = new LegOut[](1);
         legsOut[0] = LegOut(USDC, PRICE, 0, address(0));
         o = _sellOrder(nonce, maker, address(0), address(0), 0, 0, items);
-        o.side = OrderSide.BUY; // fixed USDC output = the anchor/price
-        o.legsIn = new LegIn[](0);
-        o.legsOut = legsOut;
+        o.timing |= uint256(1) << 101; // BUY (timing bit 101) // fixed USDC output = the anchor/price
+        o.legsIn = PackedEncode.legsIn(new LegIn[](0));
+        o.legsOut = PackedEncode.legsOut(legsOut);
     }
 
     function test_erc1155Sale_partialFills_exactQuantities() public {
@@ -257,9 +259,11 @@ contract ExoticSettlementTest is CoreSettlementBase {
         _approveMakerToSettlement(USDC, PRICE);
 
         Order memory order = _sellOrder(21, maker, USDC, address(0), PRICE, 0, new Item[](0));
-        order.legsOut = new LegOut[](0);
+        order.legsOut = PackedEncode.legsOut(new LegOut[](0));
         order.minFillAnchor = PRICE;
-        order.invariants = _invariant1(address(balance1155Inv), abi.encode(address(multi), maker, uint256(9), uint256(40)));
+        order.invariants = PackedEncode.validators(
+            _invariant1(address(balance1155Inv), abi.encode(address(multi), maker, uint256(9), uint256(40)))
+        );
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

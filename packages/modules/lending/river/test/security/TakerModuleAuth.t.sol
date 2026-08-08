@@ -25,9 +25,7 @@ contract RiverTakerModuleAuthTest is Test {
     }
 
     function _borrowData() internal view returns (bytes memory) {
-        return abi.encode(
-            uint8(RiverTakerModule.Op.Borrow), xapp, tm, token, uint256(1e16), address(0), address(0)
-        );
+        return abi.encode(uint8(RiverTakerModule.Op.Borrow), xapp, tm, token, uint256(1e16), address(0), address(0));
     }
 
     function _withdrawData() internal view returns (bytes memory) {
@@ -35,9 +33,7 @@ contract RiverTakerModuleAuthTest is Test {
     }
 
     function _openData() internal view returns (bytes memory) {
-        return abi.encode(
-            RiverOpenModule.OpenData(xapp, tm, token, token, 1e16, 1 ether, address(0), address(0), 1e18)
-        );
+        return abi.encode(RiverOpenModule.OpenData(xapp, tm, token, token, 1e16, 1 ether, address(0), address(0), 1e18));
     }
 
     function test_borrow_rejects_non_permit3() public {

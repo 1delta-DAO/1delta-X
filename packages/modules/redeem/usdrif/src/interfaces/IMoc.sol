@@ -10,13 +10,10 @@ interface IMocRif {
     ///         MocQueue; the RIF is delivered to `recipient_` when the op executes
     ///         (~30–90s later). Payable: `msg.value` funds the queue exec fee.
     /// @return operId The queue operation id (track via MocQueue).
-    function redeemTP(
-        address tp_,
-        uint256 qTP_,
-        uint256 qACmin_,
-        address recipient_,
-        address vendor_
-    ) external payable returns (uint256 operId);
+    function redeemTP(address tp_, uint256 qTP_, uint256 qACmin_, address recipient_, address vendor_)
+        external
+        payable
+        returns (uint256 operId);
 
     /// @notice Live price of pegged token `tp_` in AC (RIF) terms, 1e18-scaled.
     function getPACtp(address tp_) external view returns (uint256);
@@ -60,11 +57,9 @@ interface IMocQueue {
     /// @notice Execute up to `maxOperPerBatch_` pending operations. Restricted to
     ///         `mocMultiCollateralGuard()`. Does not revert on a single op's
     ///         failure — it emits `OperationError` and moves on.
-    function execute(
-        address executor_,
-        uint256 maxOperPerBatch_,
-        uint256 blocksSinceLastPublication_
-    ) external returns (uint256 totalExecutionFee, uint256 totalOperExecuted);
+    function execute(address executor_, uint256 maxOperPerBatch_, uint256 blocksSinceLastPublication_)
+        external
+        returns (uint256 totalExecutionFee, uint256 totalOperExecuted);
 }
 
 /// @notice Classic MoC price-provider surface: `peek()` returns a 1e18-scaled

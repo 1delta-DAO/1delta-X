@@ -70,11 +70,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
 
         Item[] memory items = new Item[](1);
         items[0] = Item({
-            op: ItemOp.TAKE,
-            module: address(withdrawModule),
-            amount: wethIn,
-            recipient: address(0),
-            data: takerData
+            op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData
         });
 
         Order memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
@@ -112,8 +108,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
 
         // Full-balance flag appended → distinct taker-allowance ref.
         // `Full` is full-fill only: the trailing word is the maker-signed item total.
-        bytes memory takerData =
-            abi.encode(AAVE_POOL, WETH, aWETH, uint8(DustHandler.BalanceMode.Full), wethIn);
+        bytes memory takerData = abi.encode(AAVE_POOL, WETH, aWETH, uint8(DustHandler.BalanceMode.Full), wethIn);
         bytes32 ref = keccak256(takerData);
 
         vm.startPrank(maker);
@@ -128,7 +123,9 @@ contract WithdrawAndSwapTest is AaveModulesBase {
         _approveSolverSide(usdcOut, USDC);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData});
+        items[0] = Item({
+            op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: takerData
+        });
         Order memory order = _order(maker, 1, WETH, USDC, wethIn, usdcOut, items);
         bytes memory sig = _sign(order);
 

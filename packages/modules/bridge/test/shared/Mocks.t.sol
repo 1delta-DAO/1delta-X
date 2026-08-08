@@ -78,9 +78,8 @@ contract MockSpokePool {
         // attached. A funnel-addressed deposit carries none, so the delivery is a
         // plain transfer and the recipient needs no hook at all.
         if (d.message.length != 0) {
-            IAcrossMessageHandler(d.recipient).handleV3AcrossMessage(
-                d.outputToken, d.outputAmount, address(this), d.message
-            );
+            IAcrossMessageHandler(d.recipient)
+                .handleV3AcrossMessage(d.outputToken, d.outputAmount, address(this), d.message);
         }
     }
 
@@ -88,9 +87,7 @@ contract MockSpokePool {
     function relayWith(uint256 i, bytes calldata message) external {
         Deposit memory d = _deposits[i];
         MockERC20(d.outputToken).mint(d.recipient, d.outputAmount);
-        IAcrossMessageHandler(d.recipient).handleV3AcrossMessage(
-            d.outputToken, d.outputAmount, address(this), message
-        );
+        IAcrossMessageHandler(d.recipient).handleV3AcrossMessage(d.outputToken, d.outputAmount, address(this), message);
     }
 }
 

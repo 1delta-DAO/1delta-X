@@ -129,9 +129,7 @@ contract AaveV2RepayModule is IMakerModule {
         }
     }
 
-    function _disposeResidual(address pool, address asset, address onBehalfOf, DustHandler.DustAction action)
-        private
-    {
+    function _disposeResidual(address pool, address asset, address onBehalfOf, DustHandler.DustAction action) private {
         uint256 residual = IERC20(asset).balanceOf(address(this));
         if (residual == 0) return;
         DustHandler.disposeResidual(

@@ -31,9 +31,13 @@ struct Position {
 type Id is bytes32;
 
 interface IMorphoBlue {
-    function supply(MarketParams memory marketParams, uint256 assets, uint256 shares, address onBehalf, bytes memory data)
-        external
-        returns (uint256 assetsSupplied, uint256 sharesSupplied);
+    function supply(
+        MarketParams memory marketParams,
+        uint256 assets,
+        uint256 shares,
+        address onBehalf,
+        bytes memory data
+    ) external returns (uint256 assetsSupplied, uint256 sharesSupplied);
 
     function withdraw(
         MarketParams memory marketParams,
@@ -51,9 +55,13 @@ interface IMorphoBlue {
         address receiver
     ) external returns (uint256 assetsBorrowed, uint256 sharesBorrowed);
 
-    function repay(MarketParams memory marketParams, uint256 assets, uint256 shares, address onBehalf, bytes memory data)
-        external
-        returns (uint256 assetsRepaid, uint256 sharesRepaid);
+    function repay(
+        MarketParams memory marketParams,
+        uint256 assets,
+        uint256 shares,
+        address onBehalf,
+        bytes memory data
+    ) external returns (uint256 assetsRepaid, uint256 sharesRepaid);
 
     function supplyCollateral(MarketParams memory marketParams, uint256 assets, address onBehalf, bytes memory data)
         external;

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
@@ -31,7 +33,7 @@ contract PreviewFillTest is MockSettlementBase {
     function test_previewFill_equalsExecution_midDecay() public {
         _fund(IN_, 2 * OUT_);
         Order memory order = _plainOrder(1, address(tA), address(tB), IN_, OUT_);
-        order.legsOut[0].end = OUT_ / 2; // SELL output decays 2 → 1
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, OUT_ / 2); // SELL output decays 2 → 1
         _setDecayStart(order, block.timestamp);
         _setDecayDuration(order, 1000);
         bytes memory sig = _sign(order);
@@ -41,8 +43,7 @@ contract PreviewFillTest is MockSettlementBase {
 
         vm.warp(block.timestamp + 300); // mid-auction
 
-        (uint256 pDelta, uint256[] memory pReceived, uint256[] memory pPaid) =
-            lens.previewFill(order, IN_, solver, "");
+        (uint256 pDelta, uint256[] memory pReceived, uint256[] memory pPaid) = lens.previewFill(order, IN_, solver, "");
 
         vm.prank(solver);
         (uint256 delta, uint256[] memory received, uint256[] memory paid) =

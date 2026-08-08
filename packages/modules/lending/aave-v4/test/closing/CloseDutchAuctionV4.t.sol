@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, OrderSide, Item, ItemOp, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
@@ -75,8 +77,12 @@ contract CloseDutchAuctionV4Test is AaveV4ModulesBase {
         bytes memory withdrawData
     ) internal view returns (Order memory order) {
         Item[] memory items = new Item[](2);
-        items[0] = Item({op: ItemOp.MAKE, module: address(repayModule), amount: repayCeiling, recipient: address(0), data: repayData});
-        items[1] = Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: withdrawData});
+        items[0] = Item({
+            op: ItemOp.MAKE, module: address(repayModule), amount: repayCeiling, recipient: address(0), data: repayData
+        });
+        items[1] = Item({
+            op: ItemOp.TAKE, module: address(withdrawModule), amount: wethIn, recipient: address(0), data: withdrawData
+        });
 
         LegIn[] memory legsIn = new LegIn[](1);
         legsIn[0] = LegIn(WETH, wethIn, 0); // fixed input
@@ -85,11 +91,10 @@ contract CloseDutchAuctionV4Test is AaveV4ModulesBase {
 
         order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
-            legsOut: legsOut,
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
@@ -97,9 +102,9 @@ contract CloseDutchAuctionV4Test is AaveV4ModulesBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });

@@ -90,27 +90,27 @@ contract LiquityV2LeverageTest is CoreSettlementBase {
         deal(WETH, maker, OPEN_COLL + ETH_GAS_COMPENSATION);
         vm.startPrank(maker);
         IERC20(WETH).approve(BORROWER_OPS, type(uint256).max);
-        troveId = IBorrowerOpsLeverage(BORROWER_OPS).openTrove(
-            maker, //                     _owner
-            0, //                         _ownerIndex
-            OPEN_COLL,
-            OPEN_DEBT,
-            0, //                         _upperHint
-            0, //                         _lowerHint
-            INTEREST_RATE,
-            type(uint256).max, //         _maxUpfrontFee
-            address(0), //                _addManager    (granted below, as documented)
-            address(0), //                _removeManager
-            address(0) //                 _receiver
-        );
+        troveId = IBorrowerOpsLeverage(BORROWER_OPS)
+            .openTrove(
+                maker, //                     _owner
+                0, //                         _ownerIndex
+                OPEN_COLL,
+                OPEN_DEBT,
+                0, //                         _upperHint
+                0, //                         _lowerHint
+                INTEREST_RATE,
+                type(uint256).max, //         _maxUpfrontFee
+                address(0), //                _addManager    (granted below, as documented)
+                address(0), //                _removeManager
+                address(0) //                 _receiver
+            );
 
         // Onboard the modules exactly as the README documents:
         //   add-manager  → MAKE legs (addColl / repayBold)
         //   remove-manager + receiver = module → TAKE legs (withdrawBold / withdrawColl)
         IBorrowerOpsLeverage(BORROWER_OPS).setAddManager(troveId, address(addCollModule));
-        IBorrowerOpsLeverage(BORROWER_OPS).setRemoveManagerWithReceiver(
-            troveId, address(takerModule), address(takerModule)
-        );
+        IBorrowerOpsLeverage(BORROWER_OPS)
+            .setRemoveManagerWithReceiver(troveId, address(takerModule), address(takerModule));
 
         // Dump the BOLD minted at open so the maker wallet starts clean.
         IERC20(BOLD).transfer(address(0xdead), IERC20(BOLD).balanceOf(maker));

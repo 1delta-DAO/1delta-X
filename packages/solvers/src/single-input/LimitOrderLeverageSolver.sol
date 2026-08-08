@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
@@ -42,7 +44,7 @@ contract LimitOrderLeverageSolver is BaseFlashSolver {
     }
 
     /// @notice Fill a leverage-style order with no starting inventory.
-    /// @param flashToken   the collateral asset (equals `order.legsOut[0].token`)
+    /// @param flashToken   the collateral asset (equals `PackedArraysMem.legOutToken(order.legsOut, 0)`)
     /// @param flashAmount  amount to flash-loan — should cover Settlement's pull
     /// @param order        the maker's signed order
     /// @param sig          EIP-712 signature
@@ -68,7 +70,7 @@ contract LimitOrderLeverageSolver is BaseFlashSolver {
 
         // Surplus collateral is the fill's profit — sweep it to the caller so no
         // balance accumulates in this permissionless solver.
-        _sweep(order.legsOut[0].token, msg.sender);
+        _sweep(PackedArraysMem.legOutToken(order.legsOut, 0), msg.sender);
     }
 
     /// @dev Balancer v2 callback.

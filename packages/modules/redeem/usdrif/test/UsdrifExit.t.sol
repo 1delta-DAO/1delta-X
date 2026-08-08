@@ -1,18 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
+
 import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {
-    Settlement,
-    Order,
-    OrderSide,
-    Item,
-    Validator,
-    LegIn,
-    LegOut
-} from "@core/settlement/Settlement.sol";
+import {Settlement, Order, OrderSide, Item, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
 
 import {UsdrifForkBase} from "./shared/UsdrifForkBase.t.sol";
 import {RedemptionSettledValidator} from "../src/RedemptionSettledValidator.sol";
@@ -72,7 +66,6 @@ contract UsdrifExitTest is UsdrifForkBase {
     {
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(RIF, amountIn),
@@ -84,9 +77,9 @@ contract UsdrifExitTest is UsdrifForkBase {
             curve: _noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: validators,
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.validators(validators),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -202,8 +195,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
         // Absurd band far above the live RIF price (~6.85e16) → out of band.
         validators[1] = Validator({
-            target: address(depegValidator),
-            data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e18), uint256(2e18))
+            target: address(depegValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e18), uint256(2e18))
         });
 
         Order memory order = _exitOrder(4, rifIn, usdtOut, validators);
@@ -227,8 +219,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
         // Wide band that brackets the live RIF price.
         validators[1] = Validator({
-            target: address(depegValidator),
-            data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e16), uint256(1e18))
+            target: address(depegValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e16), uint256(1e18))
         });
 
         Order memory order = _exitOrder(5, rifIn, usdtOut, validators);

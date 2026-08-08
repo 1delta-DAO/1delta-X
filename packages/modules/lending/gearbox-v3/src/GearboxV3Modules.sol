@@ -221,8 +221,7 @@ contract GearboxCreditAddCollateralModule is IMakerModule, IGearboxBot {
 
         MultiCall[] memory calls = new MultiCall[](1);
         calls[0] = MultiCall({
-            target: facade,
-            callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.addCollateral, (token, amount))
+            target: facade, callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.addCollateral, (token, amount))
         });
         IGearboxCreditFacadeV3(facade).botMulticall(creditAccount, calls);
 
@@ -287,12 +286,10 @@ contract GearboxCreditRepayModule is IMakerModule, IGearboxBot {
 
         MultiCall[] memory calls = new MultiCall[](2);
         calls[0] = MultiCall({
-            target: facade,
-            callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.addCollateral, (asset, amount))
+            target: facade, callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.addCollateral, (asset, amount))
         });
         calls[1] = MultiCall({
-            target: facade,
-            callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.decreaseDebt, (amount))
+            target: facade, callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.decreaseDebt, (amount))
         });
         IGearboxCreditFacadeV3(facade).botMulticall(creditAccount, calls);
 
@@ -345,8 +342,7 @@ contract GearboxCreditBorrowModule is ITakerModule, IGearboxBot {
 
         MultiCall[] memory calls = new MultiCall[](2);
         calls[0] = MultiCall({
-            target: facade,
-            callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.increaseDebt, (amount))
+            target: facade, callData: abi.encodeCall(IGearboxCreditFacadeV3Multicall.increaseDebt, (amount))
         });
         calls[1] = MultiCall({
             target: facade,

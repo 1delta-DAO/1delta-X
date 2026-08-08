@@ -253,9 +253,7 @@ contract ERC4626WithdrawModuleTest is Test {
         // Permit3 cap, not the floor.
         bytes memory claimData = abi.encode(address(vault), requestId, SHARES + 1);
         vm.prank(address(permit3));
-        vm.expectRevert(
-            abi.encodeWithSelector(ERC4626WithdrawModule.InsufficientAssets.selector, SHARES, SHARES + 1)
-        );
+        vm.expectRevert(abi.encodeWithSelector(ERC4626WithdrawModule.InsufficientAssets.selector, SHARES, SHARES + 1));
         module.takeOnBehalf(user, SHARES, receiver, claimData);
     }
 

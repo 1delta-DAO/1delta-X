@@ -205,10 +205,7 @@ contract CompoundV2WithdrawModule is ITakerModule {
         permit3 = IPermit3(_permit3);
     }
 
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         (address cToken, address underlying) = abi.decode(data, (address, address));

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, ItemOp, ItemPolicy, MatchPlan, MatchStep, LegIn, LegOut, FillCtx} from "./Structs.sol";
+import {Order, ItemOp, ItemPolicy, MatchPlan, MatchStep, FillCtx} from "./Structs.sol";
+import {PackedArrays} from "./PackedArrays.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 import {OrderHash} from "./OrderHash.sol";
@@ -52,7 +53,6 @@ abstract contract Batch is Core {
         }
     }
 
-
     /// @dev The wholeness backstop, run last: require the context left Settlement
     ///      no worse off on any touched token ({BatchNotWhole} else) and sweep any
     ///      residual — the filler's compensation, ~0 after a clean pre-send — to
@@ -87,7 +87,6 @@ abstract contract Batch is Core {
         }
     }
 
-
     /// @dev The `_fillCore` gate set WITHOUT moving any funds: zero fill, deadline,
     ///      signature/approval, exclusivity, nonce, validators — then `_openFill`,
     ///      which writes `filled` before any external call in the context. Split out
@@ -111,15 +110,18 @@ abstract contract Batch is Core {
         ctx = _openFill(order, orderHash, fillAmount, overrideBps, solver, takerData);
     }
 
-
     /// @dev This fill's per-leg output amounts, WITHOUT transferring — computed at
     ///      open so `outstanding` (and hence the PRESEND bound) is known before any
     ///      delivery. The per-leg math — BUY fixed-output slices, SELL
     ///      auction-priced, soft exclusivity on maker legs only — is IDENTICAL to
     ///      the single-order `_deliverOutputs`; the amount is final (post-override),
     ///      so a DELIVER step just moves it.
-    function _batchComputeOutputs(Order calldata order, FillCtx memory ctx) internal view returns (uint256[] memory outs) {
-        uint256 n = order.legsOut.length;
+    function _batchComputeOutputs(Order calldata order, FillCtx memory ctx)
+        internal
+        view
+        returns (uint256[] memory outs)
+    {
+        uint256 n = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
         outs = new uint256[](n);
         for (uint256 j; j < n;) {
             outs[j] = order.outputAt(ctx, j); // same slice math as `_deliverOutputs`
@@ -128,13 +130,14 @@ abstract contract Batch is Core {
             }
         }
     }
+
     /// @dev This fill's per-INPUT-leg owed amounts — the mirror of
     ///      {_batchComputeOutputs}, resolved at open for the same reason and from
     ///      the same frozen {FillCtx}. The per-leg math (fixed cumulative slice,
     ///      auctioned tick, soft-exclusivity discount) is {Pricing.inputOwed}
     ///      unchanged; this only decides WHEN it runs.
     function _computeOwed(Order calldata order, FillCtx memory ctx) internal view returns (uint256[] memory owed) {
-        uint256 n = order.legsIn.length;
+        uint256 n = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         owed = new uint256[](n);
         for (uint256 j; j < n;) {
             owed[j] = order.inputOwed(ctx, j);
@@ -151,7 +154,7 @@ abstract contract Batch is Core {
     function _collectTokens(Order[] calldata orders) internal pure returns (address[] memory tokens) {
         uint256 maxLen;
         for (uint256 i; i < orders.length;) {
-            maxLen += orders[i].legsIn.length + orders[i].legsOut.length;
+            maxLen += PackedArrays.countUnchecked(orders[i].legsIn) + PackedArrays.countUnchecked(orders[i].legsOut);
             unchecked {
                 ++i;
             }
@@ -159,16 +162,18 @@ abstract contract Batch is Core {
         address[] memory buf = new address[](maxLen);
         uint256 count;
         for (uint256 i; i < orders.length;) {
-            LegIn[] calldata li = orders[i].legsIn;
-            for (uint256 k; k < li.length;) {
-                count = _appendToken(buf, count, li[k].token);
+            bytes calldata li = orders[i].legsIn;
+            uint256 nIn = PackedArrays.validateFixed(li, PackedArrays.LEG_IN_STRIDE);
+            for (uint256 k; k < nIn;) {
+                count = _appendToken(buf, count, PackedArrays.legInToken(li, k));
                 unchecked {
                     ++k;
                 }
             }
-            LegOut[] calldata lo = orders[i].legsOut;
-            for (uint256 k; k < lo.length;) {
-                count = _appendToken(buf, count, lo[k].token);
+            bytes calldata lo = orders[i].legsOut;
+            uint256 nOut = PackedArrays.validateFixed(lo, PackedArrays.LEG_OUT_STRIDE);
+            for (uint256 k; k < nOut;) {
+                count = _appendToken(buf, count, PackedArrays.legOutToken(lo, k));
                 unchecked {
                     ++k;
                 }
@@ -203,7 +208,6 @@ abstract contract Batch is Core {
             return count + 1;
         }
     }
-
 
     // ──────────── Deferred match settle (schedule-driven, checks deferred) ────────────
 
@@ -325,9 +329,7 @@ abstract contract Batch is Core {
 
         // Destination only (see {_sweepSurplus}); `PRESEND` deliberately still pays
         // `msg.sender`, because that is working capital a `CALL` step must spend.
-        swept = _sweepSurplus(
-            st.tokens, st.beforeBal, p.profitRecipient == address(0) ? msg.sender : p.profitRecipient
-        );
+        swept = _sweepSurplus(st.tokens, st.beforeBal, p.profitRecipient == address(0) ? msg.sender : p.profitRecipient);
         return (st.outs, st.tokens, swept);
     }
 
@@ -357,14 +359,14 @@ abstract contract Batch is Core {
             st.fills[i] = _openGated(order, p.sigs[i], p.fillAmounts[i], solver, _tdc(p.takerDatas, i));
             st.outs[i] = _batchComputeOutputs(order, st.fills[i]);
             st.owed[i] = _computeOwed(order, st.fills[i]);
-            st.credit[i] = new uint256[](order.legsIn.length);
-            uint256 m = order.legsOut.length;
+            st.credit[i] = new uint256[](PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE));
+            uint256 m = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
             // An order with no outputs (a pure gasless deposit) has nothing to
             // deliver, so its bit is pre-set and the schedule need not carry a
             // no-op DELIVER step for it.
             if (m == 0) st.done[i] = DELIVERED_BIT;
             for (uint256 j; j < m;) {
-                st.outstanding[_tokenIndex(st.tokens, order.legsOut[j].token)] += st.outs[i][j];
+                st.outstanding[_tokenIndex(st.tokens, PackedArrays.legOutToken(order.legsOut, j))] += st.outs[i][j];
                 unchecked {
                     ++j;
                 }
@@ -387,18 +389,26 @@ abstract contract Batch is Core {
     ///      deliberate CoW path, never the single-order hot path (where the same
     ///      shapes are handled correctly and the guard would only cost gas).
     function _assertMatchShape(Order calldata order) internal pure {
-        Item[] calldata items = order.items;
-        if (items.length > 255) revert LengthMismatch();
-        for (uint256 i; i < items.length;) {
-            if (items[i].op == ItemOp.SETTLE) revert MatchSettleItemUnsupported();
+        bytes calldata items = order.items;
+        // The packed count is a `uint8`, so the 255 ceiling is structural now rather
+        // than checked — but the walk still proves the blob is well formed.
+        uint256 nItems = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
+        uint256 cursor = PackedArrays.recordsStart();
+        for (uint256 i; i < nItems;) {
+            (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
+            if (op == uint256(ItemOp.SETTLE)) revert MatchSettleItemUnsupported();
+            cursor = next;
             unchecked {
                 ++i;
             }
         }
-        LegIn[] calldata legsIn = order.legsIn;
-        for (uint256 i; i < legsIn.length;) {
-            for (uint256 j = i + 1; j < legsIn.length;) {
-                if (legsIn[i].token == legsIn[j].token) revert MatchDuplicateInput();
+        bytes calldata legsIn = order.legsIn;
+        uint256 nIn = PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE);
+        for (uint256 i; i < nIn;) {
+            for (uint256 j = i + 1; j < nIn;) {
+                if (PackedArrays.legInToken(legsIn, i) == PackedArrays.legInToken(legsIn, j)) {
+                    revert MatchDuplicateInput();
+                }
                 unchecked {
                     ++j;
                 }
@@ -475,11 +485,11 @@ abstract contract Batch is Core {
     function _stepPull(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 j, uint256 s) internal {
         if (i >= orders.length) revert PlanBadStep(s);
         Order calldata order = orders[i];
-        if (j >= order.legsIn.length) revert PlanBadStep(s);
+        if (j >= PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE)) revert PlanBadStep(s);
         uint256 owed = st.owed[i][j]; // resolved at open — single source
         if (owed != 0) {
             Permit3TransferLib.transferFromWithFallback(
-                PERMIT3, order.legsIn[j].token, order.maker, address(this), owed
+                PERMIT3, PackedArrays.legInToken(order.legsIn, j), order.maker, address(this), owed
             );
             unchecked {
                 st.credit[i][j] += owed;
@@ -501,9 +511,7 @@ abstract contract Batch is Core {
         for (uint256 j; j < n;) {
             uint256 amt = amts[j];
             if (amt != 0) {
-                LegOut calldata leg = order.legsOut[j]; // one resolve for both reads
-                address token = leg.token;
-                address to = leg.recipient;
+                (address token,,, address to) = PackedArrays.legOut(order.legsOut, j); // one decode
                 bool makerLeg = to == address(0) || to == order.maker;
                 SafeTransferLib.safeTransfer(token, makerLeg ? order.maker : to, amt);
                 unchecked {
@@ -527,7 +535,7 @@ abstract contract Batch is Core {
     function _stepItem(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 k, uint256 s) internal {
         if (i >= orders.length) revert PlanBadStep(s);
         Order calldata order = orders[i];
-        if (k >= order.items.length) revert PlanBadStep(s);
+        if (k >= PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD)) revert PlanBadStep(s);
         uint256 bit = uint256(1) << k; // k < 255 by `_assertMatchShape`
         if (st.done[i] & bit != 0) revert PlanBadStep(s);
 
@@ -548,18 +556,21 @@ abstract contract Batch is Core {
         }
         st.done[i] |= bit;
 
-        if (order.items[k].op != ItemOp.TAKE) {
-            _executeItem(order, st.fills[i], k);
+        uint256 itemCursor = _itemCursor(order.items, k);
+        (uint256 kOp,,,,,) = PackedArrays.itemAt(order.items, itemCursor);
+        if (kOp != uint256(ItemOp.TAKE)) {
+            _executeItemAt(order, st.fills[i], order.items, itemCursor);
             return;
         }
         uint256[] memory pre = _snapshotInputs(order.legsIn);
-        _executeItem(order, st.fills[i], k);
-        uint256 m = order.legsIn.length;
+        _executeItemAt(order, st.fills[i], order.items, itemCursor);
+        uint256 m = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         for (uint256 j; j < m;) {
             // A module can only ADD to Settlement's balance (the pool grants no
             // approvals), so this cannot underflow on any honest path — and a
             // checked revert is the right outcome if one ever did.
-            st.credit[i][j] += SafeTransferLib.balanceOf(order.legsIn[j].token, address(this)) - pre[j];
+            st.credit[i][j] += SafeTransferLib.balanceOf(PackedArrays.legInToken(order.legsIn, j), address(this))
+            - pre[j];
             unchecked {
                 ++j;
             }
@@ -596,7 +607,7 @@ abstract contract Batch is Core {
             Order calldata order = p.orders[i];
             // Completeness: outputs delivered, and every item ran. Deliveries and
             // items are scheduled, so this cannot be structural — it is asserted.
-            uint256 full = ((uint256(1) << order.items.length) - 1) | DELIVERED_BIT;
+            uint256 full = ((uint256(1) << PackedArrays.countUnchecked(order.items)) - 1) | DELIVERED_BIT;
             if (st.done[i] != full) revert PlanIncomplete(i);
             _matchReconcileInputs(order, st.owed[i], st.credit[i], i);
             // The deferred check itself: the order's post-conditions, judged on the
@@ -618,21 +629,19 @@ abstract contract Batch is Core {
     ///      Takes the `owed` resolved at open rather than recomputing {Pricing}: the
     ///      amount charged and the amount checked are then the SAME WORD, not two
     ///      computations an auditor has to prove equal.
-    function _matchReconcileInputs(
-        Order calldata order,
-        uint256[] memory owedOf,
-        uint256[] memory credit,
-        uint256 idx
-    ) internal {
-        uint256 n = order.legsIn.length; // hoisted: a calldata STRUCT member's
-        // `.length` costs an offset load plus a length load on every re-read
+    function _matchReconcileInputs(Order calldata order, uint256[] memory owedOf, uint256[] memory credit, uint256 idx)
+        internal
+    {
+        uint256 n = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         for (uint256 j; j < n;) {
             uint256 owed = owedOf[j];
             uint256 have = credit[j];
             if (have < owed) revert LegUnfunded(idx, j);
             unchecked {
                 uint256 surplus = have - owed; // have >= owed
-                if (surplus != 0) SafeTransferLib.safeTransfer(order.legsIn[j].token, order.maker, surplus);
+                if (surplus != 0) {
+                    SafeTransferLib.safeTransfer(PackedArrays.legInToken(order.legsIn, j), order.maker, surplus);
+                }
             }
             unchecked {
                 ++j;

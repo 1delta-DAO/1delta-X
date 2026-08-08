@@ -90,7 +90,11 @@ contract RepayTest is AaveModulesBase {
 
         Item[] memory items = new Item[](1);
         items[0] = Item(
-            ItemOp.MAKE, address(repayModule), buffered, address(0), abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
+            ItemOp.MAKE,
+            address(repayModule),
+            buffered,
+            address(0),
+            abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
         );
 
         Order memory order = _order(maker, 3, WETH, USDC, 1 ether, buffered, items);

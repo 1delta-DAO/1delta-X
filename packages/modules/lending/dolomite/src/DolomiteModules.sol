@@ -205,12 +205,7 @@ contract DolomiteRepayModule is DolomiteBase, IMakerModule {
         actions[0] = _depositAction(marketId, residual, address(this));
 
         DustHandler.disposeResidual(
-            token,
-            residual,
-            onBehalfOf,
-            action,
-            dolomite,
-            abi.encodeCall(IDolomiteMargin.operate, (accounts, actions))
+            token, residual, onBehalfOf, action, dolomite, abi.encodeCall(IDolomiteMargin.operate, (accounts, actions))
         );
     }
 }
@@ -262,10 +257,7 @@ contract DolomiteTakerModule is DolomiteBase, ITakerModule {
 
     constructor(address _permit3) DolomiteBase(_permit3) {}
 
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         (uint8 op, address dolomite, uint256 marketId, address token, uint256 accountNumber) =
@@ -276,7 +268,8 @@ contract DolomiteTakerModule is DolomiteBase, ITakerModule {
             // pro-rated — a sliced fill would unwind the whole position and brick
             // the rest of the order. Require the slice to be the whole item.
             FullFillGuard.requireFullFillFromData(data, 192, amount);
-            WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(onBehalfOf, accountNumber), marketId);
+            WeiBalance memory w =
+                IDolomiteMargin(dolomite).getAccountWei(AccountInfo(onBehalfOf, accountNumber), marketId);
             uint256 bal = w.sign ? w.value : 0;
 
             // Measure the token actually received from the withdraw (fee-on-transfer
@@ -322,7 +315,6 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
     enum BatchMode {
         Open, // 0 — deposit collateral + borrow
         Close // 1 — repay debt + withdraw collateral
-
     }
 
     struct BatchData {

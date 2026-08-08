@@ -71,14 +71,9 @@ library RiverProceeds {
     ///         module-held first (plain transfer), maker-held next (Permit3
     ///         sweep), module-held surplus back to the maker. Reverts
     ///         {InsufficientProceeds} if the op under-delivered across BOTH.
-    function settle(
-        IPermit3 permit3,
-        address token,
-        address maker,
-        address receiver,
-        uint256 amount,
-        Snap memory s
-    ) internal {
+    function settle(IPermit3 permit3, address token, address maker, address receiver, uint256 amount, Snap memory s)
+        internal
+    {
         uint256 gotSelf = SafeTransferLib.balanceOf(token, address(this)) - s.selfBefore;
         uint256 gotMaker = SafeTransferLib.balanceOf(token, maker) - s.makerBefore;
         if (gotSelf + gotMaker < amount) revert InsufficientProceeds(gotSelf + gotMaker, amount);
@@ -302,9 +297,8 @@ contract RiverOpenModule is ITakerModule {
         SafeTransferLib.forceApprove(p.collateralToken, p.xapp, p.sideAmount);
 
         RiverProceeds.Snap memory s = RiverProceeds.snapshot(p.debtToken, onBehalfOf);
-        IRiverXApp(p.xapp).openTrove(
-            p.tm, onBehalfOf, p.maxFeePercentage, p.sideAmount, amount, p.upperHint, p.lowerHint
-        );
+        IRiverXApp(p.xapp)
+            .openTrove(p.tm, onBehalfOf, p.maxFeePercentage, p.sideAmount, amount, p.upperHint, p.lowerHint);
         // Settle the minted `amount` to `receiver` from wherever it landed
         // (Hemi mints to this module) — only what the open actually produced.
         RiverProceeds.settle(permit3, p.debtToken, onBehalfOf, receiver, amount, s);

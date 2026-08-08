@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Settlement, CallbackMode, Order, Item, OrderSide, Validator} from "@core/settlement/Settlement.sol";
@@ -45,8 +47,8 @@ contract TwapFillModuleTest is CoreSettlementBase {
         returns (Order memory o)
     {
         o = _order(maker, nonce, USDC, WETH, total, WETH_TOTAL, new Item[](0));
-        o.legsOut[0].start = total * WETH_TOTAL / TOTAL; // scale WETH to `total`
-        o.legsOut[0].end = 0; //        fixed output (end == 0)
+        o.legsOut = PackedEncode.setLegOutStart(o.legsOut, 0, total * WETH_TOTAL / TOTAL); // scale WETH to `total`
+        o.legsOut = PackedEncode.setLegOutEnd(o.legsOut, 0, 0); //        fixed output (end == 0)
         o.fillModule = address(twap);
         o.fillTotal = total; //         the TWAP total (denominator)
         o.minFillAnchor = part; //      part size ⇒ parts = total/part

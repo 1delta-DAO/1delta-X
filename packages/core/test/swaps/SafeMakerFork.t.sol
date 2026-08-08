@@ -109,8 +109,7 @@ contract SafeMakerForkTest is CoreSettlementBase {
         address[] memory owners = new address[](1);
         owners[0] = owner;
         bytes memory initializer = abi.encodeCall(
-            ISafe.setup,
-            (owners, 1, address(0), "", SAFE_FALLBACK_HANDLER, address(0), 0, payable(address(0)))
+            ISafe.setup, (owners, 1, address(0), "", SAFE_FALLBACK_HANDLER, address(0), 0, payable(address(0)))
         );
         proxy = ISafeProxyFactory(SAFE_FACTORY).createProxyWithNonce(SAFE_SINGLETON, initializer, 0);
     }
@@ -119,8 +118,7 @@ contract SafeMakerForkTest is CoreSettlementBase {
     ///      Safe-wrapped hash of the settlement order digest — exactly what the
     ///      CompatibilityFallbackHandler recomputes inside `isValidSignature`.
     function _safeSign(Order memory order, uint256 ownerPk) internal view returns (bytes memory) {
-        bytes32 orderDigest =
-            keccak256(abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), _hashOrder(order)));
+        bytes32 orderDigest = keccak256(abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), _hashOrder(order)));
         bytes32 safeMsgHash =
             ISafeMessageHasher(SAFE_FALLBACK_HANDLER).getMessageHashForSafe(safe, abi.encode(orderDigest));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerPk, safeMsgHash);

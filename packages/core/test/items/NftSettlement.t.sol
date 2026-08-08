@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
@@ -30,7 +32,8 @@ contract MockERC721 {
         ownerOf[id] = to;
         if (to.code.length != 0) {
             require(
-                IERC721Receiver(to).onERC721Received(msg.sender, from, id, "") == IERC721Receiver.onERC721Received.selector,
+                IERC721Receiver(to).onERC721Received(msg.sender, from, id, "")
+                    == IERC721Receiver.onERC721Received.selector,
                 "bad receiver"
             );
         }
@@ -82,24 +85,24 @@ contract NftSettlementTest is CoreSettlementBase {
         legsOut[0] = LegOut(USDC, PRICE, 0, address(0)); // fixed output to maker
         order = Order({
             maker: maker,
-            side: OrderSide.BUY, //      fixed output = the price
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: new LegIn[](0), //   consideration is the NFT item, not a fungible input
-            legsOut: legsOut,
+            legsIn: PackedEncode.legsIn(new LegIn[](0)), //   consideration is the NFT item, not a fungible input
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: 0,
             exclusiveFiller: address(0), //  OPEN — any solver may fill
             minFillAnchor: PRICE, //         full-fill only (indivisible)
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: items,
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
+        order.timing |= uint256(1) << 101; // BUY — fixed output = the price
     }
 
     function _fundSolver(address who, uint256 usdc) internal {
@@ -172,8 +175,7 @@ contract NftSettlementTest is CoreSettlementBase {
         (bool ok, string memory reason) = lens.validateOrder(order);
         assertTrue(ok, string.concat("NFT sale order should validate: ", reason));
 
-        (SettlementLens.OrderStatus status, uint256 fillable,,) =
-            lens.getOrderRelevantState(order, sig, solver, "");
+        (SettlementLens.OrderStatus status, uint256 fillable,,) = lens.getOrderRelevantState(order, sig, solver, "");
         assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Fillable), "preflight: Fillable, not Invalid");
         assertEq(fillable, PRICE, "full anchor fillable");
     }
@@ -212,7 +214,7 @@ contract NftSettlementTest is CoreSettlementBase {
     function test_settleGuard_zeroAmountSentinel_reverts() public {
         _fundSolver(solver, PRICE);
         Order memory order = _nftSaleOrder(7);
-        order.items[0].amount = 0; // the broken sentinel
+        order.items = PackedEncode.setItemAmount(order.items, 0, 0); // the broken sentinel
         bytes memory sig = _sign(order);
 
         vm.prank(solver);

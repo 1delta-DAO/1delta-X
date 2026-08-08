@@ -104,11 +104,7 @@ contract ERC20PermitTransferModuleTest is Test {
 
     // ── Helper: build a permit sig ────────────────────────────────────────────
 
-    function _permitSig(uint256 value, uint256 deadline)
-        internal
-        view
-        returns (uint8 v, bytes32 r, bytes32 s)
-    {
+    function _permitSig(uint256 value, uint256 deadline) internal view returns (uint8 v, bytes32 r, bytes32 s) {
         bytes32 digest = keccak256(
             abi.encodePacked(
                 "\x19\x01",
@@ -192,9 +188,7 @@ contract ERC20PermitTransferModuleTest is Test {
 
         vm.prank(address(permit3));
         vm.expectRevert(
-            abi.encodeWithSelector(
-                ERC20PermitTransferModule.TransferAmountExceedsGross.selector, GROSS + 1, GROSS
-            )
+            abi.encodeWithSelector(ERC20PermitTransferModule.TransferAmountExceedsGross.selector, GROSS + 1, GROSS)
         );
         module.takeOnBehalf(user, GROSS, solver, data);
     }

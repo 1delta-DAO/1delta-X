@@ -157,11 +157,10 @@ struct Validator {
 ///         (`end == 0`) for an absolute fee.
 struct Order {
     address maker;
-    OrderSide side; //      SELL (outputs decay) or BUY (inputs rise)
     uint256 nonce;
     uint256 deadline;
-    LegIn[] legsIn; //      maker gives (solver receives); see {LegIn}. anchor = legsIn[0]
-    LegOut[] legsOut; //    solver delivers (to recipient, default = maker); see {LegOut}
+    bytes legsIn; //        PACKED {LegIn} blob — see {PackedArrays}. anchor = leg 0
+    bytes legsOut; //       PACKED {LegOut} blob — see {PackedArrays}
     uint256 timing; //      PACKED three uint32 clocks (see {DutchAuction} helpers):
     //                        bits [0:32)   decayStartTime      (unix; auction start)
     //                        bits [32:64)  decayDuration       (seconds; 0 = no decay window)
@@ -170,12 +169,15 @@ struct Order {
     uint256 minFillAnchor; //        anti-dust floor per fill (anchor units); 0 = no minimum
     uint256 exclusivityOverrideBps; //  0 = hard exclusivity; else the bps a non-exclusive
     //                                  in-window filler must improve the maker's auction leg by
-    CurvePoint[] curve; //           optional piecewise decay shape (shared clock); empty = linear
+    bytes curve; //                  PACKED {CurvePoint} blob; optional piecewise decay
+    //                               shape (shared clock); empty = linear
     uint256 gasBumpBps; //           max extra decay (bps) the gas bump adds at/above gasPriceRef; 0 = off
     uint256 gasPriceRef; //          reference basefee (wei) at which the gas bump reaches gasBumpBps
-    Item[] items;
-    Validator[] validators; //       pre-execution trigger conditions; AND-composed
-    Validator[] invariants; //       post-execution invariants; AND-composed
+    bytes items; //                  PACKED {Item} record blob
+    bytes validators; //             PACKED {Validator} records; pre-execution triggers,
+    //                               AND-composed
+    bytes invariants; //             PACKED {Validator} records; post-execution
+    //                               invariants, AND-composed
     address fillModule; //           optional fill denominator/matcher; address(0) = identity
     //                               (the fill delta is the requested `fillAmount`, denominated in
     //                               the leg anchor — the classic fungible fill). When set, the module

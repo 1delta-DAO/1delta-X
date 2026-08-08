@@ -56,6 +56,5 @@ interface IAcrossSpokePool {
 ///      external ABI and selector are identical; calldata is what lets
 ///      {CommitmentCodec} read the payload by slicing.
 interface IAcrossMessageHandler {
-    function handleV3AcrossMessage(address tokenSent, uint256 amount, address relayer, bytes calldata message)
-        external;
+    function handleV3AcrossMessage(address tokenSent, uint256 amount, address relayer, bytes calldata message) external;
 }

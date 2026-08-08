@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {Settlement, CallbackMode, Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
@@ -232,7 +234,7 @@ contract BuyOrdersTest is MockSettlementBase {
 
         // Non-fixed output → rejected.
         Order memory badOut = _buyOrder(2, address(tA), address(tB), START_IN, END_IN, OUT);
-        badOut.legsOut[0].end = OUT - 1;
+        badOut.legsOut = PackedEncode.setLegOutEnd(badOut.legsOut, 0, OUT - 1);
         (bool ok2, string memory r2) = lens.validateOrder(badOut);
         assertFalse(ok2, "non-fixed output rejected");
         assertEq(r2, "buy output must be fixed (end == 0)");

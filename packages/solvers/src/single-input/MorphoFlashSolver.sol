@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
@@ -29,7 +31,7 @@ contract MorphoFlashSolver is BaseFlashSolver {
         morpho = IMorphoFlash(_morpho);
     }
 
-    /// @param flashToken  the collateral asset to flash (equals `order.legsOut[0].token`)
+    /// @param flashToken  the collateral asset to flash (equals `PackedArraysMem.legOutToken(order.legsOut, 0)`)
     function executeFill(
         address flashToken,
         uint256 flashAmount,
@@ -44,7 +46,7 @@ contract MorphoFlashSolver is BaseFlashSolver {
 
         // Surplus collateral is the fill's profit — sweep it to the caller so no
         // balance accumulates in this permissionless solver.
-        _sweep(order.legsOut[0].token, msg.sender);
+        _sweep(PackedArraysMem.legOutToken(order.legsOut, 0), msg.sender);
     }
 
     /// @dev Morpho Blue callback. `assets` of `flashToken` are here; Morpho pulls
@@ -53,8 +55,14 @@ contract MorphoFlashSolver is BaseFlashSolver {
         if (msg.sender != address(morpho)) revert OnlyMorpho();
         _requireInFlash();
 
-        (address flashToken, Order memory order, bytes memory sig, uint256 fillAmountIn, uint24 dexFee, uint256 minSwapOut)
-        = abi.decode(data, (address, Order, bytes, uint256, uint24, uint256));
+        (
+            address flashToken,
+            Order memory order,
+            bytes memory sig,
+            uint256 fillAmountIn,
+            uint24 dexFee,
+            uint256 minSwapOut
+        ) = abi.decode(data, (address, Order, bytes, uint256, uint24, uint256));
 
         _fillAndSwap(order, sig, fillAmountIn, flashToken, dexFee, minSwapOut);
 

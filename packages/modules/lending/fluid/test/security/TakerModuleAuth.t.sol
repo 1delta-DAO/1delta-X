@@ -3,10 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 
-import {
-    FluidTakerModule,
-    FluidOperateModule
-} from "../../src/FluidModules.sol";
+import {FluidTakerModule, FluidOperateModule} from "../../src/FluidModules.sol";
 
 /// @dev The taker modules MUST reject any caller other than Permit3 — otherwise a
 /// direct `takeOnBehalf(victim, amount, attacker, data)` would bypass the Permit3

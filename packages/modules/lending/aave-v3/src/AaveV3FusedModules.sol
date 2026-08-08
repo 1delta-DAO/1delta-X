@@ -71,10 +71,7 @@ contract AaveV3FusedLeverageModule is ITakerModule {
     ///                 allowance gates).
     /// @param receiver where the borrow proceeds land — Settlement on the netted
     ///                 path, so they fund the rest of the match.
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
-        external
-        override
-    {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         // The two legs are scoped separately, and `data` is decoded twice, so the
@@ -83,14 +80,8 @@ contract AaveV3FusedLeverageModule is ITakerModule {
         // of this many fields overflows the stack.
         address pool;
         {
-            (
-                address p,
-                ,
-                ,
-                address collateralAsset,
-                uint256 collateralTotal,
-                uint256 borrowTotal
-            ) = abi.decode(data, (address, address, uint256, address, uint256, uint256));
+            (address p,,, address collateralAsset, uint256 collateralTotal, uint256 borrowTotal) =
+                abi.decode(data, (address, address, uint256, address, uint256, uint256));
             if (borrowTotal == 0) revert InvalidRatio();
             pool = p;
 

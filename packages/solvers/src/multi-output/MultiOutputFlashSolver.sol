@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
@@ -37,7 +39,7 @@ struct OutputLeg {
 ///            v3, then repay the flashed amount.
 ///    3. `executeFill` sweeps the leftover input / surplus outputs to the caller.
 ///
-///  The input side is single-source: `order.legsIn[0].token` funds every buyback.
+///  The input side is single-source: `PackedArraysMem.legInToken(order.legsIn, 0)` funds every buyback.
 ///  Holds no funds between fills; callable by anyone.
 contract MultiOutputFlashSolver is BaseFlashSolver {
     IBalancerVault public immutable vault;
@@ -68,8 +70,10 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
 
         // Sweep the fill's surplus — leftover buyback currency + any output overage
         // — to the caller so no balance accumulates in this permissionless solver.
-        _sweep(order.legsIn[0].token, msg.sender);
-        for (uint256 i; i < n; i++) _sweep(tokens[i], msg.sender);
+        _sweep(PackedArraysMem.legInToken(order.legsIn, 0), msg.sender);
+        for (uint256 i; i < n; i++) {
+            _sweep(tokens[i], msg.sender);
+        }
     }
 
     /// @dev Balancer v2 callback.
@@ -85,7 +89,7 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
         (Order memory order, bytes memory sig, uint256 fillAmountIn, OutputLeg[] memory legs) =
             abi.decode(userData, (Order, bytes, uint256, OutputLeg[]));
 
-        address tokenIn = order.legsIn[0].token; // single-source buyback currency
+        address tokenIn = PackedArraysMem.legInToken(order.legsIn, 0); // single-source buyback currency
 
         // Delivers every output leg to the maker (from the flashed basket) and
         // pays us `tokenIn`.

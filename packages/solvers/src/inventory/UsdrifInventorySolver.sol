@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -113,7 +115,11 @@ contract UsdrifInventorySolver {
     event MaxOutflowSet(address indexed token, uint256 cap);
     event RedemptionInitiated(uint256 indexed opId, uint256 qTP, uint256 qACmin, uint256 execFee);
     event Sold(
-        address indexed aggregator, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut
+        address indexed aggregator,
+        address indexed tokenIn,
+        address indexed tokenOut,
+        uint256 amountIn,
+        uint256 amountOut
     );
 
     modifier onlyOwner() {
@@ -190,16 +196,16 @@ contract UsdrifInventorySolver {
         private
         returns (uint256[] memory paid)
     {
-        uint256 n = order.legsOut.length;
+        uint256 n = PackedArraysMem.count(order.legsOut);
         uint256[] memory before = new uint256[](n);
         for (uint256 j; j < n; ++j) {
-            before[j] = IERC20(order.legsOut[j].token).balanceOf(address(this));
+            before[j] = IERC20(PackedArraysMem.legOutToken(order.legsOut, j)).balanceOf(address(this));
         }
 
         paid = settlement.fill(order, sig, fillAmountIn);
 
         for (uint256 j; j < n; ++j) {
-            address token = order.legsOut[j].token;
+            address token = PackedArraysMem.legOutToken(order.legsOut, j);
             uint256 nowBal = IERC20(token).balanceOf(address(this));
             if (nowBal < before[j]) {
                 uint256 movedOut = before[j] - nowBal;
@@ -215,12 +221,7 @@ contract UsdrifInventorySolver {
     ///         (`execCost × block.basefee`) is computed in-tx and funded from this
     ///         contract's RBTC balance (top up via `msg.value` or `receive`).
     /// @param qTP USDRIF amount to redeem; `type(uint256).max` = full balance.
-    function initiateRedemption(uint256 qTP, uint256 qACmin)
-        external
-        payable
-        onlyOperator
-        returns (uint256 opId)
-    {
+    function initiateRedemption(uint256 qTP, uint256 qACmin) external payable onlyOperator returns (uint256 opId) {
         if (qTP == type(uint256).max) qTP = IERC20(usdrif).balanceOf(address(this));
         opId = _initiateRedemption(qTP, qACmin);
     }

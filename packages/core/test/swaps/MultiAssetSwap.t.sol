@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {PackedEncode} from "../shared/PackedEncode.sol";
+
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, Validator, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
@@ -44,21 +46,20 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         }
         return Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: legsIn,
-            legsOut: legsOut,
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -91,8 +92,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         _approveSolverSide(wethOut, WETH);
         _approveSolverSide(daiOut, DAI);
 
-        Order memory order =
-            _multiOrder(0, _a1(USDC), _u1(usdcIn), _addr2(WETH, DAI), _uint2(wethOut, daiOut));
+        Order memory order = _multiOrder(0, _a1(USDC), _u1(usdcIn), _addr2(WETH, DAI), _uint2(wethOut, daiOut));
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -130,8 +130,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         _approveMakerToSettlement(USDC, usdcIn);
         _approveSolverSide(daiOut, DAI);
 
-        Order memory order =
-            _multiOrder(1, _addr2(WETH, USDC), _uint2(wethIn, usdcIn), _a1(DAI), _u1(daiOut));
+        Order memory order = _multiOrder(1, _addr2(WETH, USDC), _uint2(wethIn, usdcIn), _a1(DAI), _u1(daiOut));
         bytes memory sig = _sign(order);
 
         // fillAmountIn is in tokenIn[0] (WETH) units; full fill == amountIn[0].
@@ -167,8 +166,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         _approveSolverSide(wethOut, WETH);
         _approveSolverSide(daiOut, DAI);
 
-        Order memory order =
-            _multiOrder(2, _a1(USDC), _u1(usdcIn), _addr2(WETH, DAI), _uint2(wethOut, daiOut));
+        Order memory order = _multiOrder(2, _a1(USDC), _u1(usdcIn), _addr2(WETH, DAI), _uint2(wethOut, daiOut));
         bytes memory sig = _sign(order);
 
         // First fill: half → every output leg halves.
@@ -196,33 +194,30 @@ contract MultiAssetSwapTest is CoreSettlementBase {
     ///      decaying between its own start/end bounds — and a partial fill still
     ///      slices the whole basket by fillAmountIn / amountIn[0].
     /// @dev Two output legs on one shared decay clock (100s from now).
-    function _twoCurveOrder(
-        uint256 usdcIn,
-        uint256 wethStart,
-        uint256 wethEnd,
-        uint256 daiStart,
-        uint256 daiEnd
-    ) internal view returns (Order memory order) {
+    function _twoCurveOrder(uint256 usdcIn, uint256 wethStart, uint256 wethEnd, uint256 daiStart, uint256 daiEnd)
+        internal
+        view
+        returns (Order memory order)
+    {
         LegOut[] memory legsOut = new LegOut[](2);
         legsOut[0] = LegOut(WETH, wethStart, wethEnd, address(0));
         legsOut[1] = LegOut(DAI, daiStart, daiEnd, address(0));
         order = Order({
             maker: maker,
-            side: OrderSide.SELL,
             nonce: 6,
             deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
-            legsOut: legsOut,
+            legsOut: PackedEncode.legsOut(legsOut),
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             exclusivityOverrideBps: 0,
-            curve: _noCurve(),
+            curve: PackedEncode.noCurve(),
             gasBumpBps: 0,
             gasPriceRef: 0,
-            items: new Item[](0),
-            validators: new Validator[](0),
-            invariants: new Validator[](0),
+            items: PackedEncode.noItems(),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
@@ -275,16 +270,14 @@ contract MultiAssetSwapTest is CoreSettlementBase {
 
     function test_validate_rejectsInOutOverlap() public view {
         // WETH appears in both the input and output baskets.
-        Order memory order =
-            _multiOrder(4, _addr2(WETH, USDC), _uint2(1 ether, 1e6), _a1(WETH), _u1(1 ether));
+        Order memory order = _multiOrder(4, _addr2(WETH, USDC), _uint2(1 ether, 1e6), _a1(WETH), _u1(1 ether));
         (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, "in/out overlap rejected");
         assertEq(reason, "input token == output token");
     }
 
     function test_validate_rejectsDuplicateTokenIn() public view {
-        Order memory order =
-            _multiOrder(5, _addr2(USDC, USDC), _uint2(1e6, 2e6), _a1(WETH), _u1(1 ether));
+        Order memory order = _multiOrder(5, _addr2(USDC, USDC), _uint2(1e6, 2e6), _a1(WETH), _u1(1 ether));
         (bool ok, string memory reason) = lens.validateOrder(order);
         assertFalse(ok, "duplicate tokenIn rejected");
         assertEq(reason, "duplicate input token");
@@ -313,8 +306,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         _approveSolverSide(wethOut, WETH);
 
         // Duplicate USDC leg — rejected off-chain, but nothing stops an on-chain fill.
-        Order memory order =
-            _multiOrder(10, _addr2(USDC, USDC), _uint2(a, b), _a1(WETH), _u1(wethOut));
+        Order memory order = _multiOrder(10, _addr2(USDC, USDC), _uint2(a, b), _a1(WETH), _u1(wethOut));
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
