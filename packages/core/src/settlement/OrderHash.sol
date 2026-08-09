@@ -14,7 +14,7 @@ import {Order} from "./Structs.sol";
 ///  keccaks and no per-element work whatsoever.
 ///
 ///  That is the entire point of the packed encoding. The previous shape declared
-///  `LegIn[] legsIn, LegOut[] legsOut, bytes curve, Item[] items,
+///  `LegIn[] legsIn, LegOut[] legsOut, CurvePoint[] curve, Item[] items,
 ///  Validator[] validators, Validator[] invariants`, and EIP-712 requires an
 ///  array-of-struct member to be hashed element by element — one `keccak256` per
 ///  element plus one over the concatenated element hashes, with each element first

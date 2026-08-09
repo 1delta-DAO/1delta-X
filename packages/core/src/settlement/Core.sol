@@ -41,30 +41,6 @@ abstract contract Core is Base {
         );
     }
 
-    /// @notice {fill} taking the maker's signature as an EIP-2098 COMPACT pair of
-    ///         bare words instead of a `bytes` blob — the cheapest EOA entry.
-    /// @dev    Saves ~96 bytes of calldata per fill against the `bytes sig` form (no
-    ///         offset word, no length word, no padding to 96), which is the dominant
-    ///         cost on rollups, plus the decode. EOA signers only — contract wallets,
-    ///         7702-delegated-1271 accounts and the empty-sig {approveOrder} path keep
-    ///         using {fill}; see {Signatures._verifySignatureCompact}.
-    ///
-    ///         Deliberately a DISTINCT NAME rather than a `fill` overload: an
-    ///         `(Order, bytes32, bytes32, uint256)` overload sits alongside
-    ///         `(Order, bytes, uint256, bytes)` at the same arity, which is exactly
-    ///         the shape that makes off-chain libraries pick the wrong selector.
-    function fillCompact(Order calldata order, bytes32 r, bytes32 vs, uint256 fillAmount)
-        external
-        nonReentrant
-        returns (uint256[] memory fillAmountsOut)
-    {
-        bytes32 orderHash = order.hash();
-        _verifySignatureCompact(orderHash, r, vs, order.maker);
-        (fillAmountsOut,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, "", false
-        );
-    }
-
     /// @notice Fill overload that carries a filler-supplied `takerData` blob into
     ///         the order's validators and invariants.
     /// @param  takerData  Adversarial, UNSIGNED, shared-per-fill data (see

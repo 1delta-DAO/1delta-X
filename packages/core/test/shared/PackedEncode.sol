@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {LegIn, LegOut, CurvePoint, Item, Validator} from "@core/settlement/Structs.sol";
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 
 /// @title PackedEncode
 /// @notice The ENCODER side of {PackedArrays} — typed structs in, packed blob out.
@@ -185,14 +186,15 @@ library PackedEncode {
             assembly {
                 dl := shr(240, mload(add(add(b, 0x20), add(cur, 73))))
             }
-            cur += 75 + dl;
+            cur += PackedArrays.ITEM_HEAD + dl;
         }
         _setWord(b, cur + 21, v); // op(1) + module(20)
         return b;
     }
 
-    /// @dev `data` of record `i` in an item / validator blob. `headSize` is 75 for
-    ///      items, 22 for validators (both include the 2-byte length field).
+    /// @dev `data` of record `i` in an item / validator blob. `headSize` comes from
+    ///      {PackedArrays.ITEM_HEAD} / {VALIDATOR_HEAD} rather than a literal, so the
+    ///      encoder cannot silently drift from the decoder if a record gains a field.
     function getRecordData(bytes memory b, uint256 i, uint256 headSize) internal pure returns (bytes memory out) {
         uint256 cur = 1;
         uint256 dl;
@@ -211,11 +213,11 @@ library PackedEncode {
     }
 
     function getItemData(bytes memory b, uint256 i) internal pure returns (bytes memory) {
-        return getRecordData(b, i, 75);
+        return getRecordData(b, i, PackedArrays.ITEM_HEAD);
     }
 
     function getValidatorData(bytes memory b, uint256 i) internal pure returns (bytes memory) {
-        return getRecordData(b, i, 22);
+        return getRecordData(b, i, PackedArrays.VALIDATOR_HEAD);
     }
 
     // ──────────────────── Convenience for the common shapes ────────────────────

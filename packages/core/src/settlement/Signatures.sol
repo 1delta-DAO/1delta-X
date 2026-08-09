@@ -132,25 +132,4 @@ abstract contract Signatures is OrderState {
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
         SignatureVerification.verify(sig, digest, expected);
     }
-
-    /// @dev EOA-only authorization from an EIP-2098 COMPACT signature passed as two
-    ///      bare words. The `bytes sig` form costs an offset word, a length word and
-    ///      65 bytes padded to 96 — 160 bytes of calldata against 64 here, and the
-    ///      saving is pure calldata, which is what dominates cost on rollups.
-    ///
-    ///      Deliberately NO EIP-1271 fallback: a contract wallet's signature is not
-    ///      65 bytes, so it could never take this path anyway. Contract signers,
-    ///      7702-delegated-1271 accounts and the empty-sig {approveOrder} path all
-    ///      keep using the `bytes` entrypoints. Same split 1inch draws between
-    ///      `fillOrder` and `fillContractOrder`.
-    ///
-    ///      Same first-fill-only skip as {_verifySignature}, for the same reason.
-    function _verifySignatureCompact(bytes32 orderHash, bytes32 r, bytes32 vs, address expected) internal view {
-        if (filled[orderHash] != 0) return; // already authorized once
-        // EIP-2098: `vs` carries `s` in its low 255 bits and `v - 27` in the top bit.
-        address signer = ecrecover(
-            _hashTypedData(orderHash), uint8(uint256(vs >> 255)) + 27, r, vs & SignatureVerification.UPPER_BIT_MASK
-        );
-        if (signer == address(0) || signer != expected) revert SignatureVerification.InvalidSigner();
-    }
 }
