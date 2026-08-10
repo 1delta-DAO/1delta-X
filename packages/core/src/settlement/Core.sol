@@ -8,6 +8,7 @@ import {Order, CallbackMode, FillCtx} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {Pricing} from "./Pricing.sol";
+import {OrderGates} from "./OrderGates.sol";
 import {Base} from "./Base.sol";
 
 /// @title Core
@@ -276,6 +277,13 @@ abstract contract Core is Base {
     ///         competing fill landed first — and return full both-sides accounting.
     ///         The 0x-v4 `fillLimitOrder` shape.
     ///
+    ///  ⚠ The race tolerance covers IDENTITY orders only. A fill-module order
+    ///  (`order.fillModule != 0`) passes through UNCLAMPED and can still revert
+    ///  {OverFill} on a race — only the module knows what a partial acceptance of
+    ///  its unit means, so the core cannot size it. See the clamping note below and
+    ///  {IFillModule}. An aggregator that treats this entry as never-reverting must
+    ///  either skip module orders or catch the revert itself.
+    ///
     ///  Clamping (identity orders only): the executed delta is
     ///  `min(fillAmount, total - filled)`. A fill-module order's `fillAmount` is a
     ///  PROPOSAL in module units, so it passes through unclamped — the module
@@ -340,7 +348,7 @@ abstract contract Core is Base {
         returns (uint256)
     {
         if (order.fillModule != address(0)) return fillAmount;
-        uint256 total = order.fillTotal != 0 ? order.fillTotal : _anchorTotal(order);
+        uint256 total = order.fillTotal != 0 ? order.fillTotal : OrderGates.anchorTotal(order);
         uint256 prev = filled[orderHash];
         if (prev < total) {
             unchecked {
@@ -376,7 +384,7 @@ abstract contract Core is Base {
         // unchanged.
         if (block.timestamp > order.deadline) revert OrderExpired();
 
-        uint256 overrideBps = _exclusivity(order, filler);
+        uint256 overrideBps = OrderGates.exclusivityOverride(order, filler);
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
         _runValidators(order, filler, takerData);
 
@@ -519,6 +527,13 @@ abstract contract Core is Base {
         // `recipient` when redirected (see {FillCtx.payTo}). Destination only:
         // authority (exclusivity, validators, output pulls) stays on `ctx.filler`.
         address payTo = ctx.payTo;
+        // MEASURED, do not "optimize" by borrowing the count from `tokenInBefore`.
+        // When `hasItems` that array IS `_snapshotInputs(order.legsIn)`, so its length
+        // is already the validated leg count and `hasItems ? tokenInBefore.length :
+        // validateFixed(...)` looks like a free saving. It is not: the branch costs
+        // +23 gas on EVERY item-free fill — the dominant shape — to save ~230 on an
+        // item-bearing one. Same trade the `receipts` array above resolves the same
+        // way. 2026-08-09: hot path +23 with it, +0 without.
         uint256 n = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         for (uint256 i; i < n;) {
             uint256 owed = order.inputOwed(ctx, i); // see {Pricing.inputOwed}

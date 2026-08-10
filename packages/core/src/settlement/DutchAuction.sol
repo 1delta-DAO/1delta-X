@@ -143,7 +143,16 @@ library DutchAuction {
                     (uint256 t1, uint256 b1) = PackedArrays.curvePoint(curve, k + 1);
                     if (elapsed < t1) {
                         (uint256 t0, uint256 b0) = PackedArrays.curvePoint(curve, k);
-                        uint256 span = t1 - t0; // > 0 for a well-formed (increasing) curve
+                        // A well-formed curve is strictly increasing in time, and
+                        // {SettlementLens.validateOrder} rejects one that is not. But
+                        // the lens is off-chain advice, not a gate: a maker can sign a
+                        // flat or decreasing pair anyway, and the settler would then
+                        // surface a raw Panic(0x11)/Panic(0x12) from the subtraction
+                        // and the divide below. Name it instead. One comparison, and
+                        // only on the iteration that matched — this loop almost always
+                        // matches on its first.
+                        if (t1 <= t0) revert InvalidAuctionParams();
+                        uint256 span = t1 - t0; // > 0 by the check above
                         // Interpolate; the curve may rise or fall between points.
                         bps = b1 >= b0
                             ? b0 + ((b1 - b0) * (elapsed - t0)) / span

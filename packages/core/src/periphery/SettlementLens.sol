@@ -12,6 +12,7 @@ import {OrderHash} from "../settlement/OrderHash.sol";
 import {PackedArrays} from "../settlement/PackedArrays.sol";
 import {DutchAuction} from "../settlement/DutchAuction.sol";
 import {Pricing} from "../settlement/Pricing.sol";
+import {OrderGates} from "../settlement/OrderGates.sol";
 
 /// @dev The subset of {Settlement}'s public/external surface this lens
 ///      reads. All are views on the live settlement, so the lens never needs the
@@ -98,7 +99,7 @@ contract SettlementLens {
     /// @notice Remaining fillable amount, in denominator units (`fillTotal` when
     ///         set, else `tokenIn[0]` for SELL / `tokenOut[0]` for BUY).
     function remaining(Order calldata order) external view returns (uint256) {
-        return _fillDenominator(order) - SETTLEMENT.filled(order.hash());
+        return OrderGates.fillDenominator(order) - SETTLEMENT.filled(order.hash());
     }
 
     /// @notice Preview EXACTLY what `Settlement.fillUpTo` would settle right now —
@@ -147,7 +148,7 @@ contract SettlementLens {
     {
         if (fillAmount == 0) revert ZeroFill();
         bytes32 orderHash = order.hash();
-        uint256 total = _fillDenominator(order);
+        uint256 total = OrderGates.fillDenominator(order);
         uint256 prevFilled = SETTLEMENT.filled(orderHash);
         if (prevFilled == type(uint256).max) revert OrderCancelled();
 
@@ -171,7 +172,7 @@ contract SettlementLens {
             total,
             prevFilled,
             newFilled,
-            _exclusivityOverride(order, filler),
+            OrderGates.exclusivityOverride(order, filler),
             filler,
             filler,
             prevFilled == 0 && newFilled == total,
@@ -196,27 +197,17 @@ contract SettlementLens {
         }
     }
 
-    /// @dev Mirror of the settlement's `Base._exclusivity` gate, error for error,
-    ///      so a preview fails exactly where the fill would.
-    function _exclusivityOverride(Order calldata order, address filler) internal view returns (uint256 overrideBps) {
-        if (
-            order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime()
-                && filler != order.exclusiveFiller
-        ) {
-            if (order.exclusivityOverrideBps == 0) revert NotExclusiveFiller();
-            if (order.exclusivityOverrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
-            overrideBps = order.exclusivityOverrideBps;
-        }
-    }
 
     // Mirrored settlement errors (same signatures ⇒ same selectors), so preview
     // reverts decode identically to execution reverts in any tooling.
+    // Re-declared rather than imported: an error's selector is derived from its
+    // NAME and ARG TYPES, not from the contract that declares it, so each of these
+    // decodes identically to the settler's own. A preview therefore fails with the
+    // exact error the fill would.
     error ZeroFill();
     error OverFill();
     error FillTooSmall();
     error OrderCancelled();
-    error NotExclusiveFiller();
-    error InvalidOverrideBps();
 
     // ──────────────────── Solver preflight ────────────────────
 
@@ -336,7 +327,7 @@ contract SettlementLens {
         if (block.timestamp > order.deadline) return (OrderStatus.Expired, 0);
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (OrderStatus.Cancelled, 0);
 
-        uint256 anchor = _fillDenominator(order);
+        uint256 anchor = OrderGates.fillDenominator(order);
         uint256 done = SETTLEMENT.filled(orderHash);
         if (done >= anchor) return (OrderStatus.Filled, 0);
 
@@ -509,7 +500,7 @@ contract SettlementLens {
         }
 
         // ── structural / economic sanity (time-independent) ──
-        uint256 anchor = _fillDenominator(order);
+        uint256 anchor = OrderGates.fillDenominator(order);
         if (anchor == 0) return (false, "anchor amount is zero");
         // Input legs are FIXED (`end == 0`) or RISE to a ceiling (`end ≥ start`) —
         // a rising leg is the relayer-fee/conversion auction. Same rule both sides.
@@ -639,25 +630,7 @@ contract SettlementLens {
         returns (bool, uint256)
     {
         (address target, bytes calldata data, uint256 next) = PackedArrays.validatorAt(vs, cursor);
-        return (_gatePasses(target, order, filler, data, takerData), next);
-    }
-
-    /// @dev Byte-for-byte mirror of the settlement's validator gate (see
-    ///      {Settlement._gatePasses}): single-word return read into
-    ///      scratch space, no `bytes memory` return allocation.
-    function _gatePasses(
-        address target,
-        Order calldata order,
-        address filler,
-        bytes calldata data,
-        bytes calldata takerData
-    ) private view returns (bool pass) {
-        bytes memory cd = abi.encodeCall(IOrderValidator.validate, (order, filler, data, takerData));
-        /// @solidity memory-safe-assembly
-        assembly {
-            let ok := staticcall(gas(), target, add(cd, 0x20), mload(cd), 0x00, 0x20)
-            pass := and(and(ok, gt(returndatasize(), 31)), eq(mload(0x00), 1))
-        }
+        return (OrderGates.gatePasses(target, order, filler, data, takerData), next);
     }
 
     /// @dev Live `token.allowance(owner, spender)` — best-effort staticcall; a
@@ -669,24 +642,10 @@ contract SettlementLens {
         if (ok && ret.length >= 32) a = abi.decode(ret, (uint256));
     }
 
-    /// @dev The leg anchor: the FIXED side's leg 0 — `startAmountIn[0]` (SELL) or
-    ///      `startAmountOut[0]` (BUY). Reverts on empty legs; only call when a
-    ///      fungible anchor is known to exist.
-    function _anchorTotal(Order calldata order) internal pure returns (uint256) {
-        if (order.side() == OrderSide.BUY) {
-            (, uint256 bStart,,) = PackedArrays.legOut(order.legsOut, 0);
-            return bStart;
-        }
-        (, uint256 sStart,) = PackedArrays.legIn(order.legsIn, 0);
-        return sStart;
-    }
-
-    /// @dev The fill denominator: the maker-signed `fillTotal` when set (module
-    ///      orders — no leg access, so it's safe for empty-leg NFT swaps), else
-    ///      the leg anchor. Mirrors the settlement's `_openFill`.
-    function _fillDenominator(Order calldata order) internal pure returns (uint256) {
-        return order.fillTotal != 0 ? order.fillTotal : _anchorTotal(order);
-    }
+    /// @dev The leg anchor and the fill denominator, shared with the settler — see
+    ///      {OrderGates}. These were local copies until the 2026-08 audit found the
+    ///      anchor one had drifted (it was missing the empty-blob {NoAnchorLeg}
+    ///      guard, so an order with no legs previewed against a denominator of 0).
 
     /// @dev Recompute the settlement's EIP-712 order digest and verify `sig`
     ///      against it. Uses the SETTLEMENT's domain separator (name +
@@ -699,11 +658,23 @@ contract SettlementLens {
     ///      to special-case it. The lens reads the settler's own `orderApproved`
     ///      record, so a sigless order is attested here on exactly the terms the
     ///      settler will apply — not taken on trust from whoever submitted it.
+    ///
+    ///      ...and INCLUDING its FIRST-FILL SKIP, which this mirror was missing. The
+    ///      settler returns early once `filled[orderHash] != 0`, on the reasoning
+    ///      that a non-zero counter is itself proof some earlier fill presented valid
+    ///      authorization for this exact (maker-committing) hash. Without the same
+    ///      skip the lens was STRICTER than the settler: a partially-filled order
+    ///      whose EIP-1271 maker has since rotated owners or revoked would be
+    ///      reported unfillable here while `fill` would still settle it — so an
+    ///      orderbook would drop live, fillable size. Divergence in this direction is
+    ///      merely lost liquidity rather than a false attestation, but the point of a
+    ///      preflight is to answer the question the settler will answer.
     function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {
         if (sig.length == 0) {
             if (!SETTLEMENT.orderApproved(expected, orderHash)) revert OrderNotApproved();
             return;
         }
+        if (SETTLEMENT.filled(orderHash) != 0) return; // already authorized once — see above
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", SETTLEMENT.DOMAIN_SEPARATOR(), orderHash));
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.

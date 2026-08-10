@@ -208,9 +208,19 @@ contract PositionFunnel is IERC1271 {
     ///  item names a hostile spender has authorised it. That is exactly the trust
     ///  every item already carries — a module's authority lives in maker-signed
     ///  `data` throughout this protocol (`FluidModules.OperateData` names the vault,
-    ///  `RiverModules.BorrowParams` the trove manager, and {GenericCallModule}
-    ///  carries an arbitrary call TARGET). Against that precedent this module is
-    ///  strictly narrower: it can only ever create a Permit3 allowance.
+    ///  `RiverModules.BorrowParams` the trove manager). Against that this module is
+    ///  strictly narrower: it can only ever create a Permit3 allowance, and only on
+    ///  the funnel that the order's own maker IS.
+    ///
+    ///  ⚠ That last clause is the load-bearing half, and it is worth stating why.
+    ///  "Maker-signed `data`" alone is NOT a safety argument, because EVERY address
+    ///  can be a maker of its own order. The 2026-08 audit found exactly that in the
+    ///  old `GenericCallModule` — a SHARED module that held per-user Permit3
+    ///  allowances and made an arbitrary maker-signed call from its OWN identity, so
+    ///  an attacker's self-signed order could spend a stranger's allowance to it.
+    ///  What saves this module is not the signature but step 4 above: it targets
+    ///  `order.maker`, never an address taken from item data, so an attacker's order
+    ///  can only ever reach the attacker's own funnel.
     function grant(address spender, address token, uint160 amount, bool taker, bytes32 ref) external onlyProxy {
         if (msg.sender != GRANT_MODULE) revert NotGrantModule();
         if (grantsDisabled) revert GrantsDisabled();

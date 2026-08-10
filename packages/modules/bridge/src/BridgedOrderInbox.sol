@@ -66,6 +66,14 @@ interface ISettlementApprove {
 ///  never exceeds total received. One user's order can never reach another's
 ///  funds — not by bookkeeping, but by construction.
 ///
+///  ⚠ The middle step — `filled <= anchor` ⟹ *pulled* `<= anchor` — holds ONLY for
+///  a FIXED input leg. `filled` is anchor-denominated, but the amount actually
+///  pulled is {Pricing.inputOwed}, and a RISING leg (`legsIn[0].end != 0`) is
+///  charged at the decayed tick, reaching `end` while `filled` still reads `start`.
+///  `_checkShape` therefore rejects a rising input leg, and that rejection is
+///  load-bearing for everything in this paragraph — see the check for the full
+///  argument.
+///
 ///  The practical consequence is that a destination order must be authored
 ///  against the bridge's GUARANTEED delivery floor, never its expected amount.
 ///  All three supported bridges provide one: Across enforces `outputAmount`
@@ -507,6 +515,8 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///        SELL + exactly one input leg — makes the settlement's `filled`
     ///          counter denominated in the credited token, which is what both the
     ///          funding invariant and {settle}'s accounting rely on.
+    ///        a FIXED input leg (`legsIn[0].end == 0`) — see below; without it the
+    ///          amount pulled and the amount counted come apart.
     ///        no fill module, no fillTotal — either would decouple the fill delta
     ///          from the leg anchor and break that denomination.
     ///        no items — an item executes under the maker's authority, and this
@@ -531,6 +541,23 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         // exceed the anchor).
         if (order.useNonceInvalidator()) revert UnsupportedOrderShape();
         if (PackedArrays.countUnchecked(order.legsIn) != 1) revert UnsupportedOrderShape();
+        // The input leg must be FIXED (`end == 0`). A RISING leg (`end != 0`, the
+        // relayer-fee auction) is priced by {Pricing.inputOwed} as
+        // `delta * inTick(start, end, bump) / anchor`, which reaches `end` at full
+        // decay — while `filled` only ever reaches the ANCHOR, `start`. The two come
+        // apart, and both things that depend on them break:
+        //   • the funding invariant ({activate} approves at `credited >= start`)
+        //     stops bounding the pull, so ONE commitment funded at `start` can draw
+        //     `end` out of the pool — i.e. out of OTHER commitments' balances;
+        //   • `sync` reads `filled` as "the amount of `token` pulled from here", so
+        //     it under-reports the spend and leaves `liability` overstated forever.
+        // Commitments are attacker-authorable (anyone can originate a bridge message
+        // naming their own order hash) and {activate} is permissionless, so this is
+        // reachable, not merely a mis-authoring hazard. With a fixed leg the gas bump
+        // never applies either (`inTick` returns `start` when `end == 0`), and soft
+        // exclusivity only ever REDUCES the input charge — so this one check restores
+        // `pulled <= anchor <= credited` completely.
+        if (_legInEnd(order.legsIn, 0) != 0) revert UnsupportedOrderShape();
         if (PackedArrays.countUnchecked(order.legsOut) == 0) revert UnsupportedOrderShape();
         if (PackedArrays.countUnchecked(order.items) != 0) revert UnsupportedOrderShape();
         if (order.fillModule != address(0) || order.fillTotal != 0) revert UnsupportedOrderShape();
@@ -546,6 +573,12 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///      here, so this keeps the call sites from destructuring a 3-tuple each time.
     function _legInStart(bytes calldata legs, uint256 i) private pure returns (uint256 v) {
         (, v,) = PackedArrays.legIn(legs, i);
+    }
+
+    /// @dev `endAmount` of packed input leg `i` — 0 means the leg is FIXED. Read on
+    ///      its own by {_checkShape}, which cares about nothing else on the leg.
+    function _legInEnd(bytes calldata legs, uint256 i) private pure returns (uint256 v) {
+        (,, v) = PackedArrays.legIn(legs, i);
     }
 
     /// @dev `recipient` of packed output leg `j`.

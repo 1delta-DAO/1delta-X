@@ -14,7 +14,8 @@ import {DutchAuction} from "./DutchAuction.sol";
 ///         `bumpBps()`) but ONLY for a decaying leg (`start != end`) — a fixed leg
 ///         never touches the decay tick, preserving the "no bump on a fixed order"
 ///         gas shape. `bumpBps()` is deterministic within a tx, so resolving it
-///         per decaying leg is result-identical to the old once-per-side sentinel.
+///         per decaying leg is result-identical to the old once-per-side sentinel —
+///         and, measured, also the CHEAPER shape; see the note above {outputAt}.
 ///
 /// @dev    Behaviour is byte-for-byte the pre-refactor inline math:
 ///           • outputs — BUY legs are the fixed cumulative ceil slice (exact
@@ -36,6 +37,23 @@ library Pricing {
     function ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
         return a == 0 ? 0 : (a - 1) / b + 1;
     }
+
+    /// @dev MEASURED, do not "optimize" by memoizing the bump on the {FillCtx}. It
+    ///      was tried (2026-08-09): one extra `uint256` field holding `bump + 1`, with
+    ///      zero meaning unresolved, resolved lazily by a private helper and reused
+    ///      across every leg and both sides of a fill. It is correct — the bump is a
+    ///      pure function of `block.timestamp`/`block.basefee`, both fixed within a
+    ///      tx — and it is SLOWER almost everywhere:
+    ///        • +27 gas on EVERY fill, including all-fixed orders that never decay
+    ///          at all, just for the extra word in the struct;
+    ///        • +178 on a single-decaying-leg swap, +291..+392 on the curve tests —
+    ///          the helper does not inline, so a one-leg order pays a JUMP, the
+    ///          load/compare/store, and the ±1 to save a call it never repeats;
+    ///        • it only pays off with TWO OR MORE decaying legs in one fill
+    ///          (−1,158 on the multi-output shared-bump case), which is the rare
+    ///          shape, not the common one.
+    ///      Net across the suite: 266 tests worse, 6 better. The per-leg resolution
+    ///      below is already the right shape for the dominant case.
 
     /// @notice The amount to deliver on output leg `j` (post-override), pool/solver
     ///         → recipient.

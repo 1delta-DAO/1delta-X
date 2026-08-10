@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {PackedEncode} from "../shared/PackedEncode.sol";
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
@@ -60,7 +61,7 @@ contract PreviewFillTest is MockSettlementBase {
         order.exclusiveFiller = address(0xE0);
         _setExclusivityEnd(order, block.timestamp + 1 hours);
 
-        vm.expectRevert(SettlementLens.NotExclusiveFiller.selector);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
         lens.previewFill(order, IN_, solver, "");
     }
 

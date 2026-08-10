@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {PackedEncode} from "../shared/PackedEncode.sol";
 
 import {Base} from "@core/settlement/Base.sol";
@@ -110,7 +111,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(Base.NotExclusiveFiller.selector);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
         settlement.fill(order, sig, SELL_IN);
     }
 
@@ -614,7 +615,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         // the bare `(10000 - 10001)` underflow panic this used to surface from
         // `Pricing.inputOwed`.
         vm.prank(solver);
-        vm.expectRevert(Base.InvalidOverrideBps.selector);
+        vm.expectRevert(OrderGates.InvalidOverrideBps.selector);
         settlement.fill(order, sig, BUY_OUT);
     }
 

@@ -19,8 +19,13 @@ library ChainlinkRead {
             IAggregatorV3(feed).latestRoundData();
         if (price <= 0) revert NonPositivePrice();
         if (answeredInRound < roundId) revert IncompleteRound();
-        // updatedAt == 0 ⇒ round not yet answered; otherwise enforce the heartbeat.
-        if (updatedAt == 0 || block.timestamp - updatedAt > maxStaleness) revert StalePrice();
+        // updatedAt == 0 ⇒ round not yet answered. `updatedAt > block.timestamp` is a
+        // feed reporting the future: it cannot be a fresh round by any reading, and
+        // without this test the subtraction below underflows and surfaces a raw
+        // Panic(0x11) instead of the typed {StalePrice} the other guards raise.
+        if (updatedAt == 0 || updatedAt > block.timestamp || block.timestamp - updatedAt > maxStaleness) {
+            revert StalePrice();
+        }
         return price;
     }
 }

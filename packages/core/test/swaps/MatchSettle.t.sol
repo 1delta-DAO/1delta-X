@@ -795,4 +795,91 @@ contract MatchSettleTest is CoreSettlementBase {
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "no WETH pooled");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "no USDC pooled");
     }
+
+    // ──────────────────── un-attributed item proceeds ────────────────────
+
+    /// @dev SECURITY REGRESSION — a TAKE whose proceeds token is in NO input leg of
+    ///      its own order must not become the SOLVER's profit.
+    ///
+    ///      `Base._executeItems` states the maker constraint (a TAKE's proceeds token
+    ///      MUST appear in `legsIn`) and argues a violating order merely STRANDS the
+    ///      proceeds, because the batch paths "floor every touched token at its
+    ///      pre-batch balance". That floor is the PRE-batch balance — proceeds
+    ///      arriving DURING the context sit above it. So if the token appears in any
+    ///      OTHER order's legs (putting it in the derived universe, hence in the final
+    ///      sweep), `_sweepSurplus` used to hand the maker's money to the filler:
+    ///      the same mis-authored order loses funds to NOBODY via `fill` but to the
+    ///      SOLVER via `matchSettle`, which also gives a solver a reason to hunt for
+    ///      such orders and bundle them with anything touching the same token.
+    ///
+    ///      {Batch._creditItemProceeds} now returns anything landing outside the
+    ///      order's own `legsIn` to that order's MAKER, as the item runs.
+    ///
+    ///      The shape is deliberately synthetic — Alice's order gives up USDC for no
+    ///      output at all — so the accounting is the only thing under test. Bob's
+    ///      ordinary spot order exists solely to put WETH in the token universe.
+    function test_strayItemProceeds_goToMakerNotSolver() public {
+        uint256 STRAY = 3 ether; // what Alice's "borrow" actually produces
+        uint256 GATE = 1; // the amount-gated slice; the mock ignores it
+
+        // Alice: pays 2000 USDC in, NO output legs, one TAKE that produces WETH —
+        // a token that appears nowhere in her own `legsIn`.
+        bytes memory strayData = abi.encode(WETH, STRAY);
+        Item[] memory items = new Item[](1);
+        items[0] =
+            Item({op: ItemOp.TAKE, module: address(taker), amount: GATE, recipient: address(0), data: strayData});
+        Order memory a = Order({
+            maker: maker,
+            nonce: 11,
+            deadline: block.timestamp + 1 hours,
+            legsIn: _legsIn1(USDC, USDC_AMT),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)),
+            timing: 0,
+            exclusiveFiller: address(0),
+            minFillAnchor: 0,
+            exclusivityOverrideBps: 0,
+            curve: PackedEncode.noCurve(),
+            gasBumpBps: 0,
+            gasPriceRef: 0,
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
+            fillModule: address(0),
+            fillTotal: 0
+        });
+
+        // Bob: a plain spot order. Its only job is to put WETH in the universe.
+        Order memory b = _spot(bob, 12, WETH, WETH_AMT, USDC, USDC_AMT);
+
+        deal(USDC, maker, USDC_AMT);
+        deal(WETH, bob, WETH_AMT);
+        deal(WETH, address(taker), STRAY); // the "lender" holds what it lends
+        _approveMakerToSettlement(USDC, USDC_AMT);
+        vm.startPrank(maker);
+        permit3.approveTaker(address(settlement), keccak256(strayData), uint160(GATE), uint48(block.timestamp + 1 hours));
+        vm.stopPrank();
+        vm.startPrank(bob);
+        permit3.approveToken(address(settlement), WETH, uint160(WETH_AMT), 0);
+        vm.stopPrank();
+
+        uint256[] memory s = new uint256[](4);
+        s[0] = _step(MatchStep.PULL, 0, 0); //    Alice's USDC → pool (credits her leg)
+        s[1] = _step(MatchStep.ITEM, 0, 0); //    the borrow → 3 WETH lands in the pool
+        s[2] = _step(MatchStep.PULL, 1, 0); //    Bob's WETH → pool
+        s[3] = _step(MatchStep.DELIVER, 1, 0); // pool → Bob, 2000 USDC
+
+        MatchPlan memory p = _two(a, b, makerPk, bobPk, s);
+        p.fillAmounts[0] = USDC_AMT;
+        p.fillAmounts[1] = WETH_AMT;
+
+        vm.prank(solver);
+        settlement.matchSettle(p);
+
+        // THE assertion. Before the fix the solver swept STRAY + WETH_AMT.
+        assertEq(IERC20(WETH).balanceOf(maker), STRAY, "stray proceeds returned to their own maker");
+        assertEq(IERC20(WETH).balanceOf(solver), WETH_AMT, "solver keeps only the real CoW surplus");
+        assertEq(IERC20(USDC).balanceOf(bob), USDC_AMT, "Bob still settled normally");
+        assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "pool flat in WETH");
+        assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "pool flat in USDC");
+    }
 }

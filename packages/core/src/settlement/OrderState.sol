@@ -7,6 +7,7 @@ import {OrderHash} from "./OrderHash.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {NonceManager} from "./NonceManager.sol";
+import {OrderGates} from "./OrderGates.sol";
 
 /// @title OrderState
 /// @notice ALL order-lifecycle STATE and its mutation, in one auditable place — no
@@ -67,9 +68,6 @@ abstract contract OrderState is NonceManager {
     ///      the consumed nonce — so anything short of a full fill would burn the nonce
     ///      and make the remainder permanently unfillable. Rejected outright.
     error FillOnceMustBeFull();
-    /// @dev The order derives its fill denominator from leg 0 of the fixed side, but
-    ///      that side is empty. Such an order must carry an explicit `fillTotal`.
-    error NoAnchorLeg();
 
     // ──────────────────── On-chain order authorization ────────────────────
 
@@ -164,7 +162,7 @@ abstract contract OrderState is NonceManager {
         // Denominator: maker-signed `fillTotal` when set, else the leg anchor.
         // The `!= 0` branch reads a single calldata word — no leg access, so a
         // pure non-fungible order (empty legs) still has a valid denominator.
-        uint256 total = order.fillTotal != 0 ? order.fillTotal : _anchorTotal(order);
+        uint256 total = order.fillTotal != 0 ? order.fillTotal : OrderGates.anchorTotal(order);
         uint256 prevFilled = filled[orderHash];
         // Per-order-hash cancellation ({cancelOrder}) parks `filled` at max — reuse
         // the SLOAD we just did, so the check is free. (An uncancelled order's
@@ -216,20 +214,4 @@ abstract contract OrderState is NonceManager {
         ctx.fullFill = prevFilled == 0 && newFilled == total;
     }
 
-    /// @dev The fill denominator in anchor units: the FIXED side's leg 0 —
-    ///      `startAmountIn[0]` (SELL) or `startAmountOut[0]` (BUY).
-    ///      The empty-blob check is NOT optional. `LegIn[]` used to give us an
-    ///      out-of-bounds revert for free when leg 0 did not exist; a packed blob just
-    ///      reads zeroes (`calldataload` pads past calldata), which would silently
-    ///      yield a zero denominator. An order with no legs must set `fillTotal`.
-    function _anchorTotal(Order calldata order) internal pure returns (uint256) {
-        if (order.side() == OrderSide.BUY) {
-            if (PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE) == 0) revert NoAnchorLeg();
-            (, uint256 start,,) = PackedArrays.legOut(order.legsOut, 0);
-            return start;
-        }
-        if (PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE) == 0) revert NoAnchorLeg();
-        (, uint256 startIn,) = PackedArrays.legIn(order.legsIn, 0);
-        return startIn;
-    }
 }

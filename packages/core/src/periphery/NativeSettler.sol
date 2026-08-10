@@ -118,7 +118,11 @@ contract NativeSettler {
 
         // 1) Wrap native → WETH and give it to the maker so the core can charge it.
         weth.deposit{value: msg.value}();
-        weth.transfer(order.maker, msg.value);
+        // Via the shared helper, not `weth.transfer` — the bool return was previously
+        // dropped. Canonical WETH9 always returns true, but this address is a
+        // constructor argument, and a wrapper that returned false would have made the
+        // hand-off a silent no-op with the fill continuing on regardless.
+        SafeTransferLib.safeTransfer(address(weth), order.maker, msg.value);
 
         // 2) Scope both approvals to the exact maximum this fill can consume — never
         //    unbounded (see the contract-level security note). The route can spend at

@@ -14,7 +14,7 @@
 ## 1. Motivation
 
 The settlement is already a generalized any↔any intent settler: the maker's side
-is arbitrary (value legs + module items + a `GenericCallModule` escape hatch),
+is arbitrary (value legs + module items + a `PermissionlessCallModule` escape hatch),
 the required outcome is arbitrary (post-execution invariants), and the solver
 supplies the counterparty side (delivery legs + callback) for the surplus. One
 hardcoded coupling remains — **the fill is denominated in a fungible leg

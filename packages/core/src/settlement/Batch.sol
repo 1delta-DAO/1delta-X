@@ -8,6 +8,7 @@ import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {Pricing} from "./Pricing.sol";
 import {DutchAuction} from "./DutchAuction.sol";
+import {OrderGates} from "./OrderGates.sol";
 import {Core} from "./Core.sol";
 
 /// @title Batch
@@ -104,7 +105,7 @@ abstract contract Batch is Core {
         if (block.timestamp > order.deadline) revert OrderExpired();
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        uint256 overrideBps = _exclusivity(order, solver);
+        uint256 overrideBps = OrderGates.exclusivityOverride(order, solver);
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
         _runValidators(order, solver, takerData);
         ctx = _openFill(order, orderHash, fillAmount, overrideBps, solver, takerData);
@@ -355,11 +356,13 @@ abstract contract Batch is Core {
         address solver = msg.sender;
         for (uint256 i; i < n;) {
             Order calldata order = p.orders[i];
-            _assertMatchShape(order); // items allowed here — that is the point
+            // The shape assertion already proves `legsIn`, so its count is reused for
+            // the credit ledger rather than re-validating the same blob.
+            uint256 nIn = _assertMatchShape(order); // items allowed here — that is the point
             st.fills[i] = _openGated(order, p.sigs[i], p.fillAmounts[i], solver, _tdc(p.takerDatas, i));
             st.outs[i] = _batchComputeOutputs(order, st.fills[i]);
             st.owed[i] = _computeOwed(order, st.fills[i]);
-            st.credit[i] = new uint256[](PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE));
+            st.credit[i] = new uint256[](nIn);
             uint256 m = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
             // An order with no outputs (a pure gasless deposit) has nothing to
             // deliver, so its bit is pre-set and the schedule need not carry a
@@ -388,7 +391,9 @@ abstract contract Batch is Core {
     ///      Runs once per order at open. O(items + legsIn²), tiny — and this is the
     ///      deliberate CoW path, never the single-order hot path (where the same
     ///      shapes are handled correctly and the guard would only cost gas).
-    function _assertMatchShape(Order calldata order) internal pure {
+    /// @return nIn the validated `legsIn` count, handed back so the caller can size
+    ///         the credit ledger from it instead of validating the same blob twice.
+    function _assertMatchShape(Order calldata order) internal pure returns (uint256 nIn) {
         bytes calldata items = order.items;
         // The packed count is a `uint8`, so the 255 ceiling is structural now rather
         // than checked — but the walk still proves the blob is well formed.
@@ -403,7 +408,7 @@ abstract contract Batch is Core {
             }
         }
         bytes calldata legsIn = order.legsIn;
-        uint256 nIn = PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE);
+        nIn = PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE);
         for (uint256 i; i < nIn;) {
             for (uint256 j = i + 1; j < nIn;) {
                 if (PackedArrays.legInToken(legsIn, i) == PackedArrays.legInToken(legsIn, j)) {
@@ -485,7 +490,9 @@ abstract contract Batch is Core {
     function _stepPull(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 j, uint256 s) internal {
         if (i >= orders.length) revert PlanBadStep(s);
         Order calldata order = orders[i];
-        if (j >= PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE)) revert PlanBadStep(s);
+        // `st.credit[i]` was sized from the validated leg count at open, so its
+        // length IS that count — no need to re-validate the same blob per step.
+        if (j >= st.credit[i].length) revert PlanBadStep(s);
         uint256 owed = st.owed[i][j]; // resolved at open — single source
         if (owed != 0) {
             Permit3TransferLib.transferFromWithFallback(
@@ -526,8 +533,9 @@ abstract contract Batch is Core {
 
     /// @dev ITEM — execute ONE of an order's items. A TAKE produces value into the
     ///      pool, so its proceeds are measured around that single call and credited
-    ///      to the order's input legs; a MAKE only consumes the maker's own funds,
-    ///      so it needs no snapshot. Measuring per CALL rather than per ORDER is
+    ///      to the order's input legs (anything landing OUTSIDE them goes back to the
+    ///      maker — see {_creditItemProceeds}); a MAKE only consumes the maker's own
+    ///      funds, so it needs no snapshot. Measuring per CALL rather than per ORDER is
     ///      what makes interleaving sound: the window is atomic with respect to the
     ///      schedule, so another order running in between cannot be misattributed.
     ///      The repeat guard is load-bearing — a second item is a second borrow
@@ -562,15 +570,83 @@ abstract contract Batch is Core {
             _executeItemAt(order, st.fills[i], order.items, itemCursor);
             return;
         }
-        uint256[] memory pre = _snapshotInputs(order.legsIn);
+        // Measured over the WHOLE token universe, not just this order's `legsIn` —
+        // see {_creditItemProceeds} for why that difference is load-bearing.
+        uint256[] memory pre = _snapshotBalances(st.tokens);
         _executeItemAt(order, st.fills[i], order.items, itemCursor);
-        uint256 m = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
-        for (uint256 j; j < m;) {
+        _creditItemProceeds(order, st, i, pre);
+    }
+
+    /// @dev Attribute everything a TAKE just produced, measured against `pre` (the
+    ///      universe snapshot taken immediately before the item call).
+    ///
+    ///      A proceeds token that matches one of the order's `legsIn` credits that
+    ///      leg, exactly as before. Anything ELSE goes straight back to the MAKER.
+    ///
+    ///      ⚠ The refund is the security-relevant half. `Base._executeItems` states
+    ///      the maker constraint — a TAKE's proceeds token MUST appear in `legsIn` —
+    ///      and argues that a violating order merely STRANDS the proceeds, because
+    ///      "the batch paths additionally floor every touched token at its pre-batch
+    ///      balance". That floor is the PRE-BATCH balance: proceeds arriving DURING
+    ///      the context sit above it, so if the token appears in any OTHER order's
+    ///      legs (hence in `st.tokens`, hence in the final sweep) {_sweepSurplus}
+    ///      hands the maker's money to the filler. Same mis-authored order, but the
+    ///      single-order path loses it to nobody while the netted path loses it to
+    ///      the solver — which also gives a solver a reason to go looking for such
+    ///      orders and bundle them with anything touching the same token.
+    ///
+    ///      Refunding is strictly better than stranding and costs nothing on a
+    ///      well-formed order (the branch is only reached when a non-leg token
+    ///      actually gained). It is the same rule {_matchReconcileInputs} already
+    ///      applies to an over-credited leg: any excess goes to the maker, never to
+    ///      the solver. The netted path can do this where `fill` cannot only because
+    ///      it has the token universe in hand.
+    ///
+    ///      COST: this widens the measurement from `2·|legsIn|` to `2·|tokens|`
+    ///      balance reads per TAKE step. Deliberate — `matchSettle` is the CoW path,
+    ///      never the single-order hot path, and it already accepts O(legs²) scans
+    ///      here; a correctness hole that pays out to the counterparty is not worth
+    ///      a few staticcalls.
+    function _creditItemProceeds(Order calldata order, MatchCtx memory st, uint256 i, uint256[] memory pre) private {
+        uint256 n = st.tokens.length;
+        bytes calldata legsIn = order.legsIn;
+        // The leg count comes from `st.credit[i]`, which `_matchOpenAll` sized from
+        // the ONE validation of this blob — per the {PackedArrays} safety contract,
+        // validate once and keep the count. Re-deriving it here would re-validate the
+        // same blob once per token in the universe.
+        uint256 nIn = st.credit[i].length; // the validated leg count, kept from open
+        for (uint256 t; t < n;) {
+            address token = st.tokens[t];
             // A module can only ADD to Settlement's balance (the pool grants no
             // approvals), so this cannot underflow on any honest path — and a
             // checked revert is the right outcome if one ever did.
-            st.credit[i][j] += SafeTransferLib.balanceOf(PackedArrays.legInToken(order.legsIn, j), address(this))
-            - pre[j];
+            uint256 gain = SafeTransferLib.balanceOf(token, address(this)) - pre[t];
+            if (gain != 0) {
+                (bool isLeg, uint256 j) = _legInIndexOf(legsIn, nIn, token);
+                if (isLeg) {
+                    st.credit[i][j] += gain;
+                } else {
+                    SafeTransferLib.safeTransfer(token, order.maker, gain);
+                }
+            }
+            unchecked {
+                ++t;
+            }
+        }
+    }
+
+    /// @dev Index of `token` among the order's input legs, if present. `n` is the
+    ///      count the CALLER already proved with {PackedArrays.validateFixed} — see
+    ///      that library's safety contract: validate once per blob, then index.
+    ///      `_assertMatchShape` has already proved `legsIn` holds no duplicate token,
+    ///      so the first match is the only match.
+    function _legInIndexOf(bytes calldata legsIn, uint256 n, address token)
+        private
+        pure
+        returns (bool found, uint256 index)
+    {
+        for (uint256 j; j < n;) {
+            if (PackedArrays.legInToken(legsIn, j) == token) return (true, j);
             unchecked {
                 ++j;
             }
@@ -632,7 +708,7 @@ abstract contract Batch is Core {
     function _matchReconcileInputs(Order calldata order, uint256[] memory owedOf, uint256[] memory credit, uint256 idx)
         internal
     {
-        uint256 n = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
+        uint256 n = credit.length; // sized from the validated leg count at open
         for (uint256 j; j < n;) {
             uint256 owed = owedOf[j];
             uint256 have = credit[j];
@@ -655,6 +731,12 @@ abstract contract Batch is Core {
     ///      sentinel, so a future caller that widens the universe fails loudly
     ///      instead of silently attributing to slot 0. A linear scan over a handful
     ///      of entries beats any on-chain map.
+    /// @dev The fall-through carries its OWN error. It used to reuse
+    ///      {LengthMismatch}, which made a broken internal invariant look like a
+    ///      malformed call — the one thing the rest of this file is careful to keep
+    ///      apart ({LegUnfunded}, {ItemPolicyViolated} both name the exact
+    ///      obligation). Nothing can raise this today; if it ever does, it is a bug
+    ///      here and should say so.
     function _tokenIndex(address[] memory tokens, address token) private pure returns (uint256) {
         uint256 n = tokens.length;
         for (uint256 k; k < n;) {
@@ -663,7 +745,7 @@ abstract contract Batch is Core {
                 ++k;
             }
         }
-        revert LengthMismatch();
+        revert TokenNotInUniverse(token);
     }
 
     /// @dev `takerDatas[i]`, or an empty blob when the plan carries none.

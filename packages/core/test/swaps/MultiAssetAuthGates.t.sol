@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {PackedEncode} from "../shared/PackedEncode.sol";
 
 import {OrderState} from "@core/settlement/OrderState.sol";
@@ -280,7 +281,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
 
         // Non-exclusive solver blocked during the window.
         vm.prank(solver);
-        vm.expectRevert(Base.NotExclusiveFiller.selector);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
         settlement.fill(order, sig, 2_000e6);
 
         // After the window, anyone can fill.

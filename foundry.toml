@@ -14,7 +14,34 @@ solc = "0.8.28"
 # it only alongside a `make gas` baseline regeneration.
 evm_version = "prague"
 optimizer = true
-optimizer_runs = 200
+# MEASURED 2026-08-09. `optimizer_runs` is a hint about how often the deployed code
+# is expected to be CALLED, i.e. how much bytecode SIZE to spend on runtime speed —
+# not a quality dial. The binding constraint is `Settlement` under via-IR
+# (`[profile.core-deploy]`), which must stay under EIP-170's 24,576 bytes:
+#
+#     runs      Settlement runtime      free
+#     200            20,586            3,990
+#     20,000         23,103            1,473     ← here
+#     25,000         24,325              251
+#     30,000+        24,604              −28     FAIL
+#
+# Above 30,000 the output is byte-identical however high you go (2^32−1 included) —
+# it is a step function, so there is no finer dial up there, only a cliff.
+#
+# 20,000 captures effectively the whole gain and keeps ~1.4KB of headroom: measured
+# −1.1% on a plain fill (`test_plain_swap_full` 509,689 → 504,032), −1.2..1.4% on
+# multi-leg / batch / netted paths, 364 of 409 tests cheaper, median −1,938. The 45
+# tests that got DEARER all deploy a mock contract mid-test (1271 wallets,
+# reentrancy attackers, token harnesses) — bigger mocks cost more to CREATE; none is
+# a settlement-path regression.
+#
+# 25,000 buys a sliver more for another 1.2KB and leaves 251 bytes, which is less
+# than one small function — one PR from an unshippable contract. Don't.
+#
+# This lives in [profile.default], so it moves EVERY package's bytecode and gas, not
+# just core. Changing it requires a `make gas` baseline regeneration and costs ~2.5KB
+# more initcode (~500k gas) at deploy, once.
+optimizer_runs = 20000
 
 [profile.default.fuzz]
 runs = 256
@@ -44,7 +71,9 @@ out    = "out/core"
 
 # DEPLOYMENT profile for the core package: identical settings + via-IR, which
 # compiles Settlement ~20% smaller (legacy codegen puts it over EIP-170; via-IR
-# fits with ~1.3KB of margin — see `make size-check`). Kept OUT of the dev/test
+# fits at 23,103 / 24,576 at the current `optimizer_runs` — ~1.4KB of margin as of
+# 2026-08-09, measured by `make size-check`, which is the only figure to trust here;
+# see the `optimizer_runs` note above for the size/gas curve). Kept OUT of the dev/test
 # profile because via-IR compiles are minutes, not seconds; tests/gas run on
 # [profile.core] (same semantics, gas slightly conservative vs. production).
 # Deploy scripts and the size gate MUST use this profile.

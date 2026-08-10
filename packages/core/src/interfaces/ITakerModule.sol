@@ -65,5 +65,22 @@ interface ITakerModule {
     ///         from the taker book being keyed by SPENDER (only an approved
     ///         spender — Settlement — can consume an allowance and choose
     ///         `receiver`). See `Permit3.take` / `IPermit3`.
+    ///
+    ///         ⚠ `Permit3.take` is `nonReentrant`, so a module CANNOT call back
+    ///         into it from inside `takeOnBehalf` — a composite op spanning two
+    ///         protocols must be expressed as two items, not one nested take.
+    ///         (`Permit3.transferFrom` is NOT locked and stays available, which is
+    ///         how a module pulls the ERC20s it needs mid-op.) Stated here because
+    ///         it is a constraint on writing a module, discoverable otherwise only
+    ///         by reading Permit3.
+    ///
+    ///         ⚠ The allowance `ref` is `keccak256(data)` and does NOT include the
+    ///         module address, so two modules that decode the same `data` layout
+    ///         share a ref — `AaveV2BorrowModule` and `AaveV3BorrowModule` both
+    ///         read `(address pool, address asset, uint256 rateMode)`. Consuming it
+    ///         still requires an order the maker signed naming the module, so this
+    ///         is not a bypass; but it does mean "single-op modules keep the blast
+    ///         radius small" holds per-SIGNATURE, not per-allowance. Do not rely on
+    ///         a ref being reachable by only one module.
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external;
 }

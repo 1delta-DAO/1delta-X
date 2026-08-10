@@ -11,6 +11,7 @@ import {PackedArrays} from "./PackedArrays.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 import {SolverCallbackExecutor} from "./SolverCallbackExecutor.sol";
 import {Signatures} from "./Signatures.sol";
+import {OrderGates} from "./OrderGates.sol";
 
 /// @title Base
 /// @notice The settler's EXECUTION foundation, on top of the state
@@ -57,7 +58,6 @@ abstract contract Base is Signatures {
     error Reentrancy();
     error ValidationFailed(uint256 index);
     error InvariantFailed(uint256 index);
-    error NotExclusiveFiller();
     error OnlySelf();
     error BatchFillIncomplete(uint256 index);
     /// @dev `batchFill`'s `takerDatas` array is not aligned 1:1 with `orders`.
@@ -72,16 +72,12 @@ abstract contract Base is Signatures {
     ///      no-op — orders would "settle" with no funds moving at all. Checked once
     ///      here rather than on every transfer.
     error InvalidPermit3();
-    /// @dev A TAKE item's per-fill slice exceeds `uint160`, the width of Permit3's
-    ///      allowance book. Amounts are maker-signed so this is not reachable
-    ///      adversarially, but the cast is on a value path: revert instead of
-    ///      silently wrapping to a smaller take.
+    /// @dev A MAKE or TAKE item's per-fill slice exceeds `uint160`, the width of
+    ///      Permit3's allowance book. Amounts are maker-signed so this is not
+    ///      reachable adversarially, but the cast is on a value path: revert instead
+    ///      of silently wrapping to a smaller move. (SETTLE is exempt — its module
+    ///      interface is `uint256` and never narrows.)
     error AmountOverflow();
-    /// @dev `order.exclusivityOverrideBps` exceeds 100%. Above `BPS` the input-side
-    ///      discount in {Pricing.inputOwed} underflows, so the order would be
-    ///      unfillable by any non-exclusive filler; reject it explicitly rather than
-    ///      surfacing an arithmetic panic.
-    error InvalidOverrideBps();
     /// @dev A netted `matchSettle` left Settlement holding LESS of `token` than it
     ///      did before the context — the solver under-covered the residual, so the
     ///      settlement would have drawn down a pre-existing/donated balance. Reverts.
@@ -120,6 +116,12 @@ abstract contract Base is Signatures {
     ///      same-token legs would mis-account. Use distinct tokens
     ///      (leverage/repay/migrate orders already do).
     error MatchDuplicateInput();
+    /// @dev A `matchSettle` internal invariant broke: a token was looked up in the
+    ///      on-chain-derived token universe and was not there. Unreachable today —
+    ///      `_collectTokens` is the union of exactly the legs every lookup comes
+    ///      from — so this exists to make a future widening of the universe fail
+    ///      LOUDLY rather than silently attribute to slot 0.
+    error TokenNotInUniverse(address token);
     /// @dev A SETTLE item's pro-rata slice floored to 0 for this fill — the filler
     ///      would pay the maker's pro-rata price and receive nothing (an
     ///      indivisible exchange has no fractional delivery). Sign the order
@@ -138,21 +140,6 @@ abstract contract Base is Signatures {
         if (permit3.code.length == 0) revert InvalidPermit3();
         PERMIT3 = IPermit3(permit3);
         EXECUTOR = new SolverCallbackExecutor();
-    }
-
-    /// @dev Exclusivity gate. Inside the window only the nominated filler fills
-    ///      for free; a non-exclusive filler is blocked (hard exclusivity) or
-    ///      allowed against an `exclusivityOverrideBps` price improvement it must
-    ///      pay the maker (soft exclusivity). Returns the override, 0 otherwise.
-    function _exclusivity(Order calldata order, address filler) internal view returns (uint256 overrideBps) {
-        if (
-            order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime()
-                && filler != order.exclusiveFiller
-        ) {
-            if (order.exclusivityOverrideBps == 0) revert NotExclusiveFiller();
-            if (order.exclusivityOverrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
-            overrideBps = order.exclusivityOverrideBps;
-        }
     }
 
     /// @dev Snapshot Settlement's balance of every input leg's token before items run.
@@ -183,6 +170,13 @@ abstract contract Base is Signatures {
     ///      measured from a snapshot taken in the same fill, and the batch paths
     ///      additionally floor every touched token at its pre-batch balance — so a
     ///      stranded balance is invisible to later fills. It is simply lost.
+    ///
+    ///      ⚠ That floor is the PRE-BATCH balance, so it does NOT by itself cover
+    ///      proceeds arriving DURING a `matchSettle` context. {Batch} closes the gap
+    ///      on its own side by refunding any un-attributed item proceeds to the maker
+    ///      as the item runs (see {Batch._creditItemProceeds}) — so on the netted
+    ///      path such proceeds are returned rather than lost. Only THIS path, where
+    ///      the token universe is not known, still strands them.
     ///
     ///      This is not enforceable here: an item's proceeds token is encoded inside
     ///      the module-specific `item.data`, which the core deliberately does not
@@ -264,7 +258,15 @@ abstract contract Base is Signatures {
         }
 
         if (op == uint256(ItemOp.MAKE)) {
-            // Maker module pulls the funding token from order.maker via Permit3 internally.
+            // Maker module pulls the funding token from order.maker via Permit3
+            // internally — i.e. it narrows `slice` to Permit3's `uint160` book width
+            // exactly as the TAKE branch does, just one frame further down. Every
+            // shipped maker module does that narrowing UNCHECKED, so without this the
+            // MAKE path would silently wrap a >2^160 slice to a smaller pull while
+            // the TAKE path reverts on the identical value. Maker-signed, so not
+            // adversarially reachable — but the asymmetry was gratuitous, and a value
+            // path should not have two different overflow postures.
+            if (slice > type(uint160).max) revert AmountOverflow();
             IMakerModule(module).makeOnBehalf(order.maker, slice, itemData);
         } else if (op == uint256(ItemOp.TAKE)) {
             // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
@@ -274,6 +276,9 @@ abstract contract Base is Signatures {
             if (slice > type(uint160).max) revert AmountOverflow();
             PERMIT3.take(module, order.maker, uint160(slice), to, itemData);
         } else {
+            // SETTLE deliberately keeps NO width check: {ISettlementModule.settle}
+            // takes a `uint256` and never narrows, so a wide slice (an ERC-1155 id
+            // count, a lot size) is meaningful there and must stay expressible.
             // SETTLE: generic solver↔maker exchange — the FILLER-AWARE fallback
             // for exchanges the typed legs can't express (see {ISettlementModule}).
             // The module acts under the maker's signature + its own maker approval;
@@ -297,32 +302,11 @@ abstract contract Base is Signatures {
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < len;) {
             (address target, bytes calldata data, uint256 next) = PackedArrays.validatorAt(vs, cursor);
-            if (!_gatePasses(target, order, filler, data, takerData)) revert ValidationFailed(i);
+            if (!OrderGates.gatePasses(target, order, filler, data, takerData)) revert ValidationFailed(i);
             cursor = next;
             unchecked {
                 ++i;
             }
-        }
-    }
-
-    /// @dev Staticcall `target.validate(order, filler, data, takerData)` and return
-    ///      whether it passed (call ok AND ≥32 bytes returned AND the bool word ==
-    ///      1). The single-word return is read into scratch space, avoiding the
-    ///      `bytes memory` return allocation the abstract call would make. `data` is
-    ///      the maker-signed per-validator config; `takerData` is the shared
-    ///      filler-supplied blob (a validator must independently verify it).
-    function _gatePasses(
-        address target,
-        Order calldata order,
-        address filler,
-        bytes calldata data,
-        bytes memory takerData
-    ) private view returns (bool pass) {
-        bytes memory cd = abi.encodeCall(IOrderValidator.validate, (order, filler, data, takerData));
-        /// @solidity memory-safe-assembly
-        assembly {
-            let ok := staticcall(gas(), target, add(cd, 0x20), mload(cd), 0x00, 0x20)
-            pass := and(and(ok, gt(returndatasize(), 31)), eq(mload(0x00), 1))
         }
     }
 
@@ -336,7 +320,7 @@ abstract contract Base is Signatures {
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < len;) {
             (address target, bytes calldata data, uint256 next) = PackedArrays.validatorAt(vs, cursor);
-            if (!_gatePasses(target, order, filler, data, takerData)) revert InvariantFailed(i);
+            if (!OrderGates.gatePasses(target, order, filler, data, takerData)) revert InvariantFailed(i);
             cursor = next;
             unchecked {
                 ++i;

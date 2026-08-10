@@ -26,7 +26,7 @@ import {IPermit3} from "../interfaces/IPermit3.sol";
 ///         WHOEVER fills an auction-discovered amount. An outputless
 ///         integrator order typically carries both.
 ///
-///  Trust model (mirrors {GenericCallModule}): `msg.sender == SETTLEMENT` makes
+///  Trust model: `msg.sender == SETTLEMENT` makes
 ///  the maker's order signature the sole authority over `(token, recipient,
 ///  amount)`, and the maker's Permit3 allowance to THIS module caps what it can
 ///  ever pull. The transfer is maker → recipient directly; the module never

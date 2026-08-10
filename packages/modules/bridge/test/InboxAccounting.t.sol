@@ -120,6 +120,58 @@ contract InboxAccountingTest is BridgeTestBase {
         assertEq(tA.balanceOf(address(inbox)), BRIDGED + 1, "victim's funds untouched");
     }
 
+    /// @dev SECURITY REGRESSION — the SECOND way to drain another commit's funds,
+    ///      and the one the full-funding rule above does NOT catch.
+    ///
+    ///      {test_cannotDrainAnotherCommitsFunds} relies on `credited >= anchor`
+    ///      bounding the pull. That step assumes the amount PULLED equals the
+    ///      amount COUNTED — true only for a FIXED input leg. A RISING leg
+    ///      (`legsIn[0].end != 0`, the relayer-fee auction) is priced by
+    ///      {Pricing.inputOwed} at the decayed tick and reaches `end`, while
+    ///      `filled` only ever reaches the anchor, `start`.
+    ///
+    ///      So the attacker funds their commitment HONESTLY — `credited == anchor`,
+    ///      no `Underfunded` — and still walks off with `end`. Here that is 100×
+    ///      the funding, taken straight out of the victim's balance, with `sync`
+    ///      recording a spend of `start` and leaving `liability` overstated forever.
+    ///      Rejected at the shape gate; nothing downstream could catch it.
+    function test_shape_rejectsRisingInputLeg() public {
+        Order memory victim = _dstOrder(1, BRIDGED, DELIVERED);
+        _acrossDeliver(BRIDGED, _commitmentFor(_hashOrder(victim)));
+        inbox.activate(victim);
+
+        // start == 1e18 (fully funded), end == 100e18 (what a decayed fill pulls).
+        Order memory attack = _dstOrder(2, 1e18, 1);
+        attack.legsIn = PackedEncode.oneLegIn(address(tA), 1e18, BRIDGED);
+        attack.legsOut = PackedEncode.oneLegOut(address(tB), 1, 0, solver);
+        // {DutchAuction} timing layout: decayStartTime [0:32), decayDuration [32:64).
+        attack.timing = uint256(uint32(block.timestamp)) | (uint256(1 hours) << 32);
+
+        _acrossDeliver(1e18, _commitmentFor(_hashOrder(attack))); // the FULL anchor
+
+        vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
+        inbox.activate(attack);
+
+        // No approval ⇒ no authorization, so the pull never happens.
+        _fundSolverOut(DELIVERED);
+        vm.warp(block.timestamp + 1 hours); // auction fully decayed
+        vm.prank(solver);
+        vm.expectRevert(Signatures.OrderNotApproved.selector);
+        settlement.fill(attack, "", 1e18);
+
+        assertEq(tA.balanceOf(address(inbox)), BRIDGED + 1e18, "victim's funds untouched");
+    }
+
+    /// @dev The counterpart: a FIXED input leg (`end == 0`) is the supported shape
+    ///      and still activates. Guards against the check above being widened into
+    ///      "reject any leg whose end field is set", which would break every order.
+    function test_shape_acceptsFixedInputLeg() public {
+        Order memory o = _dstOrder(3, BRIDGED, DELIVERED);
+        _acrossDeliver(BRIDGED, _commitmentFor(_hashOrder(o)));
+        inbox.activate(o);
+        assertTrue(settlement.orderApproved(address(inbox), _hashOrder(o)), "fixed leg activates");
+    }
+
     // ──────────────────── Settlement / refunds ────────────────────
 
     function test_settle_refundsUnfilledToBeneficiary() public {

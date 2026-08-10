@@ -59,9 +59,9 @@ contract WethUnwrapForwarder {
 /// @notice CREATE2 factory + address book for {WethUnwrapForwarder}. The
 ///         forwarder address depends only on (factory, WETH, maker), so wallets
 ///         and the SDK can compute it off-chain and sign orders against it
-///         before it exists; `deploy` is permissionless and idempotent-safe
-///         (second deploy for the same maker reverts on the CREATE2 collision —
-///         call `forwarderFor` first).
+///         before it exists; `deploy` is permissionless and IDEMPOTENT — calling
+///         it for an already-deployed maker returns the existing address rather
+///         than reverting on the CREATE2 collision.
 contract NativeForwarderFactory {
     address public immutable WETH;
 
@@ -87,7 +87,14 @@ contract NativeForwarderFactory {
     }
 
     /// @notice Deploy `maker`'s forwarder (anyone may; it can only pay the maker).
+    ///         Idempotent: a second call for the same maker returns the existing
+    ///         address. A solver batching `deploy` in front of a fill cannot know
+    ///         whether someone else already deployed it, and a raw CREATE2 collision
+    ///         revert would kill the whole fill for no reason.
+    ///         ({PositionFunnelFactory.deploy} takes the same posture.)
     function deploy(address payable maker) external returns (address forwarder) {
+        forwarder = forwarderFor(maker);
+        if (forwarder.code.length != 0) return forwarder;
         forwarder = address(new WethUnwrapForwarder{salt: bytes32(uint256(uint160(address(maker))))}(WETH, maker));
         emit ForwarderDeployed(maker, forwarder);
     }
