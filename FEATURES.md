@@ -20,7 +20,7 @@ everything.
 
 | Field group | Feature |
 |---|---|
-| `legsIn[]` / `legsOut[]` | Multi-asset baskets on both sides. Each leg is `(token, start, end)`; output legs additionally carry their own `recipient`. |
+| `legsIn[]` / `legsOut[]` | Multi-asset baskets on both sides. Each leg is `(token, start, end)`; output legs additionally carry their own `recipient`. `legsIn[0].start` may instead carry a **balance-relative marker** — see below. |
 | `side` (SELL/BUY) | SELL = fixed inputs, decaying outputs, anchored on `legsIn[0].start`. BUY = fixed outputs, rising inputs, anchored on `legsOut[0].start`. |
 | `items[]` | Ordered list of maker-signed module calls: `MAKE`, `TAKE`, `SETTLE`. |
 | `timing` | Three `uint32` clocks packed into one word (decay start, decay duration, exclusivity end) plus the item-ordering policy in bits `[96:100)`. |
@@ -41,6 +41,17 @@ clock: inputs may only rise, outputs may only fall; a falling input reverts
 scales by one scalar `f = fillAmount / anchor`, so a solver cannot size legs
 independently, and repeated partial fills accumulate exactly to the signed
 totals.
+
+**Balance-relative amounts.** `legsIn[0].start` on a SELL order may carry a
+[`Proportional`](packages/core/src/settlement/Proportional.sol) marker instead of an absolute amount, encoding "sell N bps of
+whatever I hold when this fills". The bps live in the top of the existing word
+(above `type(uint256).max - 10000`, unreachable by any real token amount), so the
+**typehash and golden hash are unchanged** and no order needs re-signing. Such an
+order is whole-fill only — a live-balance denominator cannot measure partial
+progress — and `end` becomes a **mandatory cap**, without which a balance that
+grew after signing would be sold at the price of a much smaller one. Multi-token
+sweeps are a module. See
+[docs/proportional-legs.md](docs/proportional-legs.md).
 
 **Packed array encoding.** `legsIn`, `legsOut`, `items`, `validators`,
 `invariants`, and `curve` are packed `bytes` blobs
@@ -64,6 +75,13 @@ All in [`Core.sol`](packages/core/src/settlement/Core.sol) /
 | `fillSelf(...)` | The maker fills its own order (fixed price by construction). |
 | `fillUpTo(...)` | Aggregator/router integration entry. Clamps to remaining size (race-tolerant) and returns full both-sides accounting `(delta, received, paid)`; `recipient` redirects payment only, never authority. |
 | `matchSettle(MatchPlan)` | Netted N-order settlement — see [§6](#6-netted-settlement-matchsettle). |
+
+**Delegated signing**
+([`OrderState.sol`](packages/core/src/settlement/OrderState.sol) /
+[`Signatures.sol`](packages/core/src/settlement/Signatures.sol)):
+`setOrderSigner(signer, expiry)` nominates a key that may sign the caller's
+orders until `expiry`; `setOrderSignerWithSig(...)` does the same from a relayed
+EIP-712 permit, for makers with no gas. See [§8](#8-authority-and-security-model).
 
 **Cancellation** ([`NonceManager.sol`](packages/core/src/settlement/NonceManager.sol)):
 `cancelOrders(nonces[])` for individual orders, `invalidateNonceWord(word)` to
@@ -125,6 +143,11 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
   inflated.
 - **Fixed price.** `end == 0` on every leg: exact OTC rate, no time dependency.
   This is the correct setting for self-solving, migrations, and exact rebalances.
+- **Balance-relative sizing.** A SELL anchor may be signed as bps-of-balance
+  rather than an absolute amount, resolved once at fill time against the maker's
+  live balance and capped by the leg's `end`. Whole-fill only, and best filled
+  through `fillUpTo`, whose clamp both resolves the size and bounds the solver
+  against a stale quote. See [docs/proportional-legs.md](docs/proportional-legs.md).
 - **Off-chain preview.** [`SettlementLens.previewFill`](packages/core/src/periphery/SettlementLens.sol)
   quotes a fill exactly (same math as the contract), plus `previewAmountIn` /
   `previewAmountOut` / `remaining` / `hashOrder` / `validateOrder`.
@@ -203,7 +226,9 @@ invariant and pre-send bound it inherits are in
 
 Read-only staticcalls, AND-composed, with `target` and `data` inside the
 typehash. Validators run before any item executes; invariants run after
-everything.
+everything. `OR` and `NOT` are available *within* one order through
+`ConditionTreeValidator`, which is itself one entry in the AND-list — see
+[docs/condition-trees.md](docs/condition-trees.md).
 
 | Contract | Passes when |
 |---|---|
@@ -213,6 +238,7 @@ everything.
 | `PredicateStaticCall` | an arbitrary staticcall returns non-zero |
 | `FillerWhitelistValidator` | the filler is on a curator's list (registry + validator in one) |
 | `FillerAttestationValidator` | the filler presents a valid off-chain attestation bound to the order |
+| `ConditionTreeValidator` | a maker-signed boolean expression over other validators holds — `OR` and `NOT` inside one order, in disjunctive normal form ([docs](docs/condition-trees.md)) |
 | `MinBalanceInvariant` | the account ends the fill holding ≥ a floor (aggregator-style min-return / FoT protection) |
 | `Erc721OwnerInvariant` / `Erc1155BalanceInvariant` | the maker ends the fill owning the NFT / ≥ N units |
 
@@ -246,6 +272,16 @@ on-chain condition.
 - **Signature support**: EOA, EIP-2098 compact, **EIP-1271** (Safe / multisig /
   contract makers), **EIP-7702**, plus an on-chain `approveOrder` fallback for
   makers who cannot produce a signature at all.
+- **Maker-nominated delegated signers.** A maker may authorize another key —
+  a session key, a desk's hot wallet, a Safe or passkey account — to sign *its*
+  orders, with an expiry, via `setOrderSigner` (or a relayed permit). The registry
+  is keyed by `msg.sender` on write and by the **order's own maker** on read, so
+  nobody can nominate a signer for someone else and a delegate can author nothing
+  its nominator could not have authored itself. There is **no protocol-level
+  operator**: unlike designs where an admin-set address may sign for users, every
+  delegate in the book was named by the maker whose orders it can sign, and
+  delegates cannot appoint further delegates. See
+  [docs/delegated-signers.md](docs/delegated-signers.md).
 - **Bitmap nonces** — 256 per storage slot, replay-proof, with individual, word,
   and watermark cancellation.
 - **Funding fallback.** Ordinary transfer legs try Permit3 first and fall back to
@@ -305,7 +341,7 @@ references the new module address in the order it signs.
 | Package | What it does |
 |---|---|
 | [`modules/erc4626`](packages/modules/erc4626) | Generic ERC-4626 vault withdraw/redeem as a TAKE module. |
-| [`modules/transfer`](packages/modules/transfer) | `ERC20PermitTransferModule` — EIP-2612 permit replayed inside the fill. |
+| [`modules/transfer`](packages/modules/transfer) | `ERC20PermitTransferModule` — EIP-2612 permit replayed inside the fill. `ProportionalSweepModule` — SETTLE item sweeping a capped bps of the maker's balance of an extra token to the filler, the multi-token half of balance-relative orders. |
 | [`modules/redeem/usdrif`](packages/modules/redeem/usdrif) | USDRIF exit path: depeg guard + redemption-settled validators. |
 | [`modules/bridge`](packages/modules/bridge/README.md) | Cross-chain orders — see [§11](#11-cross-chain). |
 
@@ -417,6 +453,30 @@ Stated plainly, so nothing here reads as more finished than it is.
   liquity-v2, gearbox-v3, teller) compile and pass their security gates, but the
   full fork suites await an RPC endpoint in `foundry.toml`. Each package README
   flags its own unvalidated assumption.
+- **Oracle validators check freshness, not plausibility.** `ChainlinkRead`
+  rejects stale rounds, incomplete rounds and non-positive prices, but has no
+  absolute sanity band — a feed that is fresh and *wrong* (depeg, misconfigured
+  decimals, a thin feed that got pushed) passes, and
+  `ChainlinkTickFloorValidator` will then use it as the floor. A maker-signed
+  `[min, max]` band per feed would close this; it is a validator change, so it
+  costs no core bytes.
+- **Multi-token sweeps are a module, not a leg.** Balance-relative markers on
+  `legsIn[1..n]` are sound and were implemented, but cost +2,106 bytes of
+  Settlement (over EIP-170) because the `balanceOf` read inlines at every pricing
+  site. Buying that back via `optimizer_runs` would charge ~+4,300 gas to *every*
+  fill of *every* order, so it is expressed as a `ProportionalSweepModule` SETTLE
+  item instead — zero settler bytes, gas only when used.
+- **Revoking a delegated signer does not bind mid-order.** Signatures are
+  re-checked only on an order's first fill, so revocation does not stop the
+  remainder of an order the delegate already part-filled. Same caveat as EIP-1271
+  makers. `cancelOrder`, nonce cancellation, the deadline and Permit3 revocation
+  all still bind. See [docs/delegated-signers.md](docs/delegated-signers.md).
+- **EIP-170 headroom is now ~400 bytes.** Settlement only fits under the
+  `core-deploy` via-IR profile, and recent core features have consumed most of the
+  margin. Lowering `optimizer_runs` from 20,000 to 15,000 buys ~300 bytes for ~48
+  gas per fill and is the documented next step; the measured size/gas curve is in
+  [`foundry.toml`](foundry.toml). Weigh any further *core* feature against this —
+  modules cost nothing here.
 - **Docs drift** — the top-level [README.md](README.md) architecture sketch
   predates the Permit3 rewrite. This file, [SECURITY.md](SECURITY.md), the
   [settlement README](packages/core/src/settlement/README.md), and

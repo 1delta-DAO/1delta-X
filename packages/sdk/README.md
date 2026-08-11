@@ -112,6 +112,36 @@ const prices = currentAmountOut(order, now);            // per-output dutch tick
 const out = fillAmountsOut(order, 1_000_000_000n, now); // delivered amounts (ceil, per leg)
 ```
 
+## Balance-relative orders
+
+A SELL anchor may be signed as *bps of the maker's balance* rather than an
+absolute amount. The marker lives in the top of the existing `start` word, so the
+order typehash is unchanged.
+
+```ts
+import {
+  encodeProportional, resolveProportionalOrder, validateProportional,
+} from "@1delta-x/sdk";
+
+// "sell 100% of my USDC, but never more than the amount I quoted against"
+order.legsIn[0] = { token: USDC, start: encodeProportional(10_000n), end: quotedAmount };
+
+// The cap is MANDATORY on-chain: `end === 0n` reverts. A balance that grew after
+// signing would otherwise be sold at the price of a much smaller one — and anyone
+// can raise a maker's balance by transferring to them.
+validateProportional(order); // null when fine, else the reason the settler rejects it
+
+// Pricing helpers are pure functions of the order and know nothing about
+// balances, so resolve the marker before quoting. `anchorTotal` THROWS on an
+// unresolved marker rather than pricing ~1.15e77 and returning a silent nonsense.
+const priceable = resolveProportionalOrder(order, makerUsdcBalance);
+```
+
+Fill these through `fillUpTo`, not `fill`: the clamp both resolves the size and
+bounds the solver against a stale quote. Details, including multi-token sweeps
+via `ProportionalSweepModule`, in
+[docs/proportional-legs.md](../../docs/proportional-legs.md).
+
 ## Scripts
 
 ```bash

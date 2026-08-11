@@ -67,6 +67,39 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   **token-accounting invariant with items** (whole-ness is invariant to items — a
   pure balance-delta) and the liveness-vs-safety split that `matchSettle` inherits.
 
+## Authorization
+
+- **[delegated-signers.md](delegated-signers.md)** — letting a key other than the
+  maker's own authorize that maker's orders: session keys, a desk's hot wallet, a
+  Safe or passkey account. The registry is keyed by `msg.sender` on write and by
+  the **order's maker** on read, which is the whole security model — nobody
+  nominates a signer for someone else, and a delegate can author nothing its
+  nominator could not have authored itself. Covers the six-step verification
+  order (and why the hot path is unchanged), the contract-delegate envelope and
+  the two conditions that make it collision-proof, gasless nomination with no
+  re-delegation, and the revocation caveat.
+
+## Conditions
+
+- **[condition-trees.md](condition-trees.md)** — `OR` and `NOT` inside a single
+  order. `order.validators` is a flat AND-list, so
+  `ConditionTreeValidator` is one entry in it whose `data` is a whole expression
+  in **disjunctive normal form**, evaluated by staticcalling other validators.
+  Covers why DNF beats a node graph with child indices (no cycles, no recursion,
+  exact well-formedness), the two-way short-circuit, and the rule that a
+  **reverting leaf is an error rather than `false`** — without which
+  `NOT(brokenOracle)` would pass precisely when the feed is broken.
+
+## Order sizing
+
+- **[proportional-legs.md](proportional-legs.md)** — signing "sell 100% of
+  whatever I hold" without knowing the amount, by overloading the top of the
+  existing `start` word — **no typehash change, no re-signing**. Covers why such
+  orders are whole-fill only, why `end` becomes a **mandatory cap** (a maker's
+  balance is not under their sole control, so an uncapped sweep is a standing
+  offer to buy their whole holding at a small order's price), why `fillUpTo` is
+  the entry point, and why multi-token sweeps are a module rather than a leg.
+
 ## Gasless UX
 
 - **[gasless-permit-relay.md](gasless-permit-relay.md)** — EIP-712 signatures

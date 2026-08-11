@@ -202,6 +202,43 @@ abstract contract Signatures is OrderState {
             uint256 expiry = orderSignerExpiry[expected][signer];
             if (expiry != 0 && block.timestamp <= expiry) return;
         }
+        // A CONTRACT delegate — a Safe, a passkey/P256 wallet, any EIP-1271 signer.
+        // The registry probe above cannot reach one: it keys on the address
+        // `ecrecover` produced, and a contract signature has no such address. The
+        // filler therefore NAMES the delegate, in an envelope prepended to the
+        // signature:
+        //
+        //     sig = abi.encodePacked(address delegate, bytes innerSig)
+        //
+        //  ⚠ WHY THIS CANNOT COLLIDE WITH A REAL SIGNATURE. The branch is reached
+        //  only when ALL of the following hold, which is a state that TODAY always
+        //  reverts {SignatureVerification.InvalidSignatureLength}:
+        //    • the signature is not 64/65 bytes (`!standardLength`), so it is not
+        //      an ECDSA signature the branch above could have handled; and
+        //    • the maker has NO CODE, so it has no `isValidSignature` of its own and
+        //      the payload cannot be a 1271 signature meant for the maker.
+        //  A CONTRACT maker never reaches here — it falls straight through to its
+        //  own 1271 check below, exactly as before. That is deliberate and costs
+        //  nothing: a contract maker manages its own signer set internally and has
+        //  no need of this registry.
+        //
+        //  The filler choosing `delegate` grants it nothing. The registry lookup is
+        //  keyed by the ORDER'S maker, so the only addresses that pass are the ones
+        //  that maker nominated — naming any other is just a failed lookup.
+        //
+        //  An envelope whose TOTAL length lands on 64 or 65 bytes is unreachable
+        //  (it would be read as a plain ECDSA signature above); builders must not
+        //  emit an `innerSig` of 44 or 45 bytes. No real signature scheme produces
+        //  one.
+        if (!standardLength && sig.length > 20 && expected.code.length == 0) {
+            address contractSigner = address(bytes20(sig[:20]));
+            uint256 expiry = orderSignerExpiry[expected][contractSigner];
+            if (expiry != 0 && block.timestamp <= expiry) {
+                SignatureVerification.verify(sig[20:], digest, contractSigner);
+                return;
+            }
+        }
+
         // Everything else: EIP-1271 contract wallets, EIP-7702 accounts delegated to
         // a 1271 wallet, and every failure — routed to the shared verifier so the
         // revert reason stays exactly as precise as it was.

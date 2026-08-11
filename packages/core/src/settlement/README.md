@@ -10,6 +10,14 @@ decay, and pro-rata lending-item execution. No module whitelist; no
 admin role. All authority flows through Permit3 allowances + the
 maker's EIP-712 signature.
 
+> **Who may sign.** An order is authorized by a signature from the maker (EOA,
+> EIP-2098 compact, EIP-1271, EIP-7702), by a signature from a key the maker
+> itself nominated via `setOrderSigner` — session keys, a desk's hot wallet, a
+> Safe or passkey account, with an expiry — or by an on-chain `approveOrder`
+> record the maker itself wrote. There is no protocol-level operator: no
+> admin-set address can sign for a user. See
+> [docs/delegated-signers.md](../../../../docs/delegated-signers.md).
+
 > **Multi-asset conversion.** The conversion leg is a basket on both sides:
 > the maker gives `tokenIn[]`/`amountIn[]` and receives
 > `tokenOut[]`/`startAmountOut[]`/`endAmountOut[]`. Partial fills are driven by

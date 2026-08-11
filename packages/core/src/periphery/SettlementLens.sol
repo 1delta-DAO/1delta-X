@@ -726,6 +726,17 @@ contract SettlementLens {
             uint256 expiry = SETTLEMENT.orderSignerExpiry(expected, signer);
             if (expiry != 0 && block.timestamp <= expiry) return;
         }
+        // Contract-delegate envelope — mirrors {Signatures._verifySignature}
+        // exactly, including the reachability conditions that make it
+        // collision-free (non-ECDSA length AND a codeless maker).
+        if (!standardLength && sig.length > 20 && expected.code.length == 0) {
+            address contractSigner = address(bytes20(sig[:20]));
+            uint256 expiry = SETTLEMENT.orderSignerExpiry(expected, contractSigner);
+            if (expiry != 0 && block.timestamp <= expiry) {
+                SignatureVerification.verify(sig[20:], digest, contractSigner);
+                return;
+            }
+        }
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
         SignatureVerification.verify(sig, digest, expected);

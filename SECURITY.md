@@ -87,6 +87,31 @@ spender. It verifies the EIP-712 order, runs pre-execution validators, executes
 items pro-rata, runs post-execution invariants, and pays the solver from the
 proceeds **produced by that fill only**.
 
+### Who may authorize an order
+
+Authorization is the maker's signature, **or** a signature from a key that maker
+itself nominated, **or** an on-chain record that maker itself wrote. There is no
+fourth source, and in particular **no protocol-level operator**: no admin-set
+address can sign for a user, and no role exists that could be granted one.
+
+The delegated-signer registry
+([`OrderState.orderSignerExpiry`](packages/core/src/settlement/OrderState.sol))
+is keyed **by `msg.sender` on write** and **by the order's own maker on read**.
+Those two facts bound it completely:
+
+- nobody can nominate a signer for another address;
+- a delegate's reach is exactly *orders naming its nominator* — the order hash
+  commits to `maker` — so it can author nothing that maker could not have
+  authored itself, and nothing at all for anyone else;
+- delegates cannot appoint further delegates: the relayed nomination permit
+  (`setOrderSignerWithSig`) is verified against `maker` through the shared
+  verifier, never through the delegated branch, so the nomination graph is
+  exactly one level deep.
+
+A delegated order is gated by every other check unchanged — deadline, nonce,
+validators, invariants, and the maker's Permit3 allowances with their own caps
+and expiries. Full design: [docs/delegated-signers.md](docs/delegated-signers.md).
+
 ---
 
 ## Security invariants
@@ -164,6 +189,61 @@ proceeds **produced by that fill only**.
 
 These are properties of the design, not bugs — but each one breaks a reasonable
 default assumption, so they are stated explicitly.
+
+### Revoking a delegated signer does NOT bind mid-order
+
+`Signatures._verifySignature` re-checks a **signature** only on an order's first
+fill: a non-zero `filled[orderHash]` is itself proof that some earlier fill
+presented valid authorization for that exact hash, and the hash commits to
+`maker`. So `setOrderSigner(delegate, 0)` does **not** stop the remainder of an
+order the delegate already part-filled.
+
+This is the same caveat EIP-1271 makers already have (a wallet that starts
+returning `false` does not block a part-filled order either), and it is the price
+of not re-running `ecrecover` on every partial fill. The kill switches that *do*
+bind mid-order are unchanged:
+
+- `cancelOrder(order)` — that specific order, by hash;
+- nonce cancellation — `cancelOrders` / `invalidateNonceWord` / `rollbackNonces`;
+- the order `deadline`;
+- revoking the Permit3 allowances that fund the fill.
+
+The on-chain `approveOrder` path is deliberately **not** subject to the skip: it
+is a mutable record the maker is told they may withdraw, so it is re-read on
+every fill.
+
+### A contract delegate is named by the FILLER, in the signature
+
+A Safe or passkey delegate cannot be reached by address recovery, so the filler
+prepends it: `sig = abi.encodePacked(delegate, innerSig)`. This grants the filler
+nothing — the registry lookup is keyed by the order's maker, so only addresses
+that maker nominated pass.
+
+The branch is reachable **only** when the signature is not 64/65 bytes **and** the
+maker has no code — a combination that previously always reverted
+`InvalidSignatureLength`. A contract maker therefore never reaches it and falls
+through to its own `isValidSignature` unchanged. **Neither condition may be
+relaxed**, or an envelope could shadow a legitimate 1271 payload. Encoders must
+not emit an `innerSig` of 44 or 45 bytes, since a 64/65-byte total would be read
+as a plain ECDSA signature instead.
+
+*(Regression test:
+`DelegatedOrderSigner.t.sol::test_contractMakerWithLongSig_notReadAsAnEnvelope`.)*
+
+### An uncapped balance-relative leg is an offer on the maker's whole holding
+
+A [`Proportional`](packages/core/src/settlement/Proportional.sol) leg fills whole,
+so every output leg pays its full signed amount regardless of what the anchor
+resolved to. A maker's balance is **not under their sole control** — anyone can
+raise it by transferring tokens to them — so without a cap, a sweep signed
+against a small balance becomes an offer to buy the maker's entire holding at
+that small order's price.
+
+The cap is therefore mandatory: `end == 0` on a marker leg reverts
+`ProportionalNeedsCap`, because `0` is what an unset field holds and the dangerous
+mode must not be the default. A deliberately unbounded sweep is
+`end = SENTINEL_FLOOR`. See
+[docs/proportional-legs.md](docs/proportional-legs.md).
 
 ### Revoking a Permit3 allowance is NOT a kill switch
 

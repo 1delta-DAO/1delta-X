@@ -3,6 +3,7 @@ import { decodeFunctionResult, encodeFunctionData, type Address, type Hex } from
 import { SETTLEMENT_ABI } from "./abi";
 import { anchorTotal, currentAmountOutAt, fillAmountsOut, inputOwed } from "./pricing";
 import { OrderSide, type Order } from "./types";
+import { packOrder } from "./packed";
 
 /**
  * Aggregator-side fill helpers: convert a router's spend budget into a
@@ -114,7 +115,7 @@ export function encodeFillUpTo(args: {
     abi: SETTLEMENT_ABI,
     functionName: "fillUpTo",
     args: [
-      args.order as never,
+      packOrder(args.order) as never,
       args.sig,
       args.fillAmount,
       args.recipient ?? "0x0000000000000000000000000000000000000000",

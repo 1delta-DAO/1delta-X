@@ -155,6 +155,86 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
         settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
     }
 
+    // ──────────────────── Contract delegates (Safe / passkey wallets) ────────────────────
+
+    /// A CONTRACT delegate cannot be reached by the registry probe — that keys on
+    /// the address `ecrecover` produced, and a contract signature has none. The
+    /// filler names it instead, in an envelope: `delegate ‖ innerSig`.
+    function _envelope(address d, bytes memory inner) internal pure returns (bytes memory) {
+        return abi.encodePacked(d, inner);
+    }
+
+    function test_contractDelegate_signsViaEnvelope() public {
+        _stage();
+        MockMakerWallet wallet = new MockMakerWallet(delegate); // a smart account the delegate key controls
+        vm.prank(maker);
+        settlement.setOrderSigner(address(wallet), type(uint256).max);
+
+        Order memory order = _order0();
+        bytes memory sig = _envelope(address(wallet), _signAs(DELEGATE_PK, order));
+        assertTrue(sig.length != 64 && sig.length != 65, "envelope must not look like plain ECDSA");
+
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "contract delegate authorized the order");
+    }
+
+    /// The filler picks the address in the envelope, so the registry lookup is the
+    /// only thing standing between it and a forged authorization. It is keyed by
+    /// the ORDER'S maker, so naming an un-nominated contract is just a failed
+    /// lookup — it falls through and dies on the maker's own (absent) 1271.
+    function test_contractDelegate_unnominatedRejected() public {
+        _stage();
+        MockMakerWallet wallet = new MockMakerWallet(delegate); // nominated by NOBODY
+
+        Order memory order = _order0();
+        bytes memory sig = _envelope(address(wallet), _signAs(DELEGATE_PK, order));
+
+        vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidSignatureLength.selector);
+        settlement.fill(order, sig, USDC_IN);
+    }
+
+    function test_contractDelegate_revoked() public {
+        _stage();
+        MockMakerWallet wallet = new MockMakerWallet(delegate);
+        vm.prank(maker);
+        settlement.setOrderSigner(address(wallet), type(uint256).max);
+        vm.prank(maker);
+        settlement.setOrderSigner(address(wallet), 0);
+
+        Order memory order = _order0();
+        bytes memory sig = _envelope(address(wallet), _signAs(DELEGATE_PK, order));
+
+        vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidSignatureLength.selector);
+        settlement.fill(order, sig, USDC_IN);
+    }
+
+    /// THE collision test. A CONTRACT maker with a long (non-ECDSA) signature is
+    /// the one payload shape that could in principle be mistaken for an envelope.
+    /// It must not be: the branch additionally requires the maker to have NO code,
+    /// so a contract maker falls straight through to its own `isValidSignature`.
+    function test_contractMakerWithLongSig_notReadAsAnEnvelope() public {
+        MockMakerWallet makerWallet = new MockMakerWallet(maker);
+        Order memory order = _order(address(makerWallet), 0, USDC, WETH, USDC_IN, WETH_OUT, new Item[](0));
+        bytes32 h = _hashOrder(order);
+
+        // 65-byte 1271 payload the wallet accepts. Verified through the LENS so the
+        // assertion is about the signature gate alone, with no funding in the way.
+        bytes memory sig = _sign(order);
+        lens.checkSignature(h, sig, address(makerWallet)); // must not revert
+
+        // And an 85-byte payload — exactly an envelope's shape — must still be
+        // handed to the MAKER'S `isValidSignature`, never re-read as
+        // `delegate ‖ inner`. The proof is the revert: it is the wallet's OWN
+        // length check ("len"), i.e. the payload reached the 1271 branch.
+        bytes memory envelopeShaped = abi.encodePacked(address(makerWallet), _signAs(OUTSIDER_PK, order));
+        assertEq(envelopeShaped.length, 85, "same shape an envelope would have");
+        vm.expectRevert(bytes("len"));
+        lens.checkSignature(h, envelopeShaped, address(makerWallet));
+    }
+
     // ──────────────────── EIP-7702 makers ────────────────────
 
     /// A 7702 account signing with its OWN key returns early on

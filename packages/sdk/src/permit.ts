@@ -3,6 +3,7 @@ import type { Address, Hex } from "viem";
 import { PERMIT_WITNESS_TYPES, permit3Domain } from "./eip712";
 import type { TypedDataSigner } from "./orders";
 import type { Deployment, Order, PermitBatch, TakerPermit, TokenPermit } from "./types";
+import { packOrder } from "./packed";
 
 /**
  * Single-signature `fillWithPermit`: the maker signs a Permit3 `PermitBatch`
@@ -19,7 +20,7 @@ export function permitWitnessTypedData(batch: PermitBatch, order: Order, d: Depl
       takers: batch.takers,
       nonce: batch.nonce,
       deadline: batch.deadline,
-      witness: order,
+      witness: packOrder(order),
     } as unknown as Record<string, unknown>,
   };
 }

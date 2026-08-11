@@ -2,6 +2,7 @@ import { encodeFunctionData, type Address, type Hex } from "viem";
 
 import { FLASH_SOLVER_ABI, MULTI_INPUT_SOLVER_ABI, MULTI_OUTPUT_SOLVER_ABI } from "./abi";
 import type { Order, OutputLeg } from "./types";
+import { packOrder } from "./packed";
 
 /**
  * Single-input flash solver `executeFill` (LimitOrderLeverageSolver,
@@ -23,7 +24,7 @@ export function encodeExecuteFillSingle(args: {
     args: [
       args.flashSource,
       args.flashAmount,
-      args.order as any,
+      packOrder(args.order) as any,
       args.sig,
       args.fillAmountIn,
       args.dexFee,
@@ -52,7 +53,7 @@ export function encodeExecuteFillMultiInput(args: {
     args: [
       args.flashSource,
       args.flashAmount,
-      args.order as any,
+      packOrder(args.order) as any,
       args.sig,
       args.fillAmountIn,
       args.dexFees,
@@ -75,7 +76,7 @@ export function encodeExecuteFillMultiOutput(args: {
   return encodeFunctionData({
     abi: MULTI_OUTPUT_SOLVER_ABI,
     functionName: "executeFill",
-    args: [args.order as any, args.sig, args.fillAmountIn, args.legs as any],
+    args: [packOrder(args.order) as any, args.sig, args.fillAmountIn, args.legs as any],
   });
 }
 

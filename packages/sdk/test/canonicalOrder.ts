@@ -10,6 +10,7 @@ export const CANONICAL_ORDER: Order = {
   nonce: 1n,
   deadline: 1_000_000n,
   // Two fixed input legs (USDC, DAI) — end == 0 ⇒ fixed at start.
+  // NOTE these stay STRUCTURED here; `packOrder` produces the packed wire form.
   legsIn: [
     { token: A("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), start: 2_000_000_000n, end: 0n },
     { token: A("0x6b175474e89094c44da98b954eedeac495271d0f"), start: 500_000_000_000_000_000_000n, end: 0n },
@@ -58,5 +59,13 @@ export const CANONICAL_ORDER: Order = {
   fillTotal: 42n,
 };
 
-/// Emitted by `HashGolden.t.sol` (Solidity `settlement.hashOrder`).
-export const GOLDEN_ORDER_HASH = "0x9a4bfce139ee6ec84dcf14487f56b70d0011e63988be7c7acc58a62ccb2320f0";
+/// Emitted by `HashGolden.t.sol` (Solidity `lens.hashOrder`) for the SAME order.
+///
+/// ⚠ This constant and `HashGolden.t.sol::GOLDEN_ORDER_HASH` must be identical.
+/// They are the cross-language check that the SDK's encoding still matches the
+/// contract's — and duplicating it is exactly how that check was once defeated:
+/// each side was updated on its own schedule, both suites stayed green, and the
+/// SDK silently signed hashes the contract rejected for two migrations. If you
+/// change one, change the other in the same commit; `eip712.test.ts` also pins
+/// the typestring so a field-type change cannot slip through unnoticed.
+export const GOLDEN_ORDER_HASH = "0x51e64365d966affedcd2cc04a116dc98dfc6dd54bdf5a9ed298fef732101a7c3";

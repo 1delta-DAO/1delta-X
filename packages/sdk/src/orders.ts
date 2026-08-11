@@ -1,3 +1,4 @@
+import { packOrder } from "./packed";
 import { encodeFunctionData, hashStruct, hashTypedData, keccak256, type Hex } from "viem";
 
 import { SETTLEMENT_ABI } from "./abi";
@@ -15,7 +16,7 @@ export function orderTypedData(order: Order, d: Deployment) {
     domain: settlementDomain(d.chainId, d.settlement),
     types: ORDER_TYPES,
     primaryType: "Order" as const,
-    message: order,
+    message: packOrder(order),
   };
 }
 
@@ -24,7 +25,7 @@ export function orderTypedData(order: Order, d: Deployment) {
  * `hashOrder(order)` / `filledAmountIn` key.
  */
 export function hashOrderStruct(order: Order): Hex {
-  return hashStruct({ data: order, primaryType: "Order", types: ORDER_TYPES } as any);
+  return hashStruct({ data: packOrder(order), primaryType: "Order", types: ORDER_TYPES } as any);
 }
 
 /** Full EIP-712 digest the maker signs for a direct `fill`. */
@@ -46,7 +47,7 @@ export function refOf(itemData: Hex): Hex {
 
 /** `settlement.fill(order, sig, fillAmountIn)` */
 export function encodeFill(order: Order, sig: Hex, fillAmountIn: bigint): Hex {
-  return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "fill", args: [order as any, sig, fillAmountIn] });
+  return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "fill", args: [packOrder(order) as any, sig, fillAmountIn] });
 }
 
 /** `settlement.fillWithPermit(order, batch, sig, fillAmountIn)` */
@@ -54,7 +55,7 @@ export function encodeFillWithPermit(order: Order, batch: PermitBatch, sig: Hex,
   return encodeFunctionData({
     abi: SETTLEMENT_ABI,
     functionName: "fillWithPermit",
-    args: [order as any, batch as any, sig, fillAmountIn],
+    args: [packOrder(order) as any, batch as any, sig, fillAmountIn],
   });
 }
 

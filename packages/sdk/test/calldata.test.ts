@@ -15,6 +15,7 @@ import {
   type OutputLeg,
 } from "../src";
 import { CANONICAL_ORDER } from "./canonicalOrder";
+import { packOrder } from "../src";
 
 const SIG = ("0x" + "11".repeat(65)) as `0x${string}`;
 
@@ -24,8 +25,15 @@ describe("calldata builders round-trip", () => {
     const { functionName, args } = decodeFunctionData({ abi: SETTLEMENT_ABI, data });
     expect(functionName).toBe("fill");
     expect((args as any)[2]).toBe(123n);
-    expect((args as any)[0].legsIn.length).toBe(2);
-    expect((args as any)[0].items.length).toBe(2);
+    // The order crosses the wire PACKED, so the decoded members are blobs, not
+    // arrays. Assert the exact bytes the packer produced — a length check on a
+    // hex string would pass for almost any encoding.
+    const wire = packOrder(CANONICAL_ORDER);
+    expect((args as any)[0].legsIn).toBe(wire.legsIn);
+    expect((args as any)[0].items).toBe(wire.items);
+    // ...and that the blobs really are count-prefixed as the contract expects.
+    expect((args as any)[0].legsIn.slice(0, 4)).toBe("0x02"); // two input legs
+    expect((args as any)[0].items.slice(0, 4)).toBe("0x02"); // two items
   });
 
   it("fillWithPermit encodes and decodes", () => {
