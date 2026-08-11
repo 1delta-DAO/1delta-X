@@ -41,6 +41,20 @@ interface ISettlementState {
 ///         allowances), read through {ISettlementState}. The lens holds no funds
 ///         and no approvals; it can only ever read.
 contract SettlementLens {
+    /// @dev Worst-case input cost of ONE anchor unit on an input leg — the leg
+    ///      ceiling (`end`), or `start` when the leg is fixed (`end == 0`), or a
+    ///      {Proportional} leg's resolved amount.
+    /// @dev Its own frame purely to keep {_makerFillableCap} under the stack limit
+    ///      without via-IR — the lens builds under the legacy profile.
+    function _perUnitIn(address maker, address token, uint256 lgStart, uint256 lgEnd)
+        private
+        view
+        returns (uint256)
+    {
+        if (Proportional.isProportional(lgStart)) return Proportional.resolve(token, maker, lgStart, lgEnd);
+        return lgEnd == 0 ? lgStart : lgEnd;
+    }
+
     /// @dev `recipient` of packed output leg `k` — small helper so the duplicate-leg
     ///      scan can compare recipients without decoding the whole leg twice.
     function _legOutRecipient(bytes calldata legs, uint256 k) private pure returns (address r) {
@@ -375,14 +389,13 @@ contract SettlementLens {
             // Worst-case input cost of one anchor unit: the leg ceiling (`end`), or
             // `start` when the leg is fixed (`end == 0`).
             //
-            // A {Proportional} leg is neither: `anchor` IS its resolved amount (the
-            // settler pins it in `FillCtx.anchor` and {Pricing.inputOwed} returns it
-            // verbatim), so one anchor unit costs exactly one token unit and
-            // `perUnitIn == anchor`. Reading the raw marker instead would make every
-            // proportional order preview as unfillable — a ~1.15e77 per-unit cost no
-            // maker can fund.
-            uint256 perUnitIn =
-                Proportional.isProportional(lgStart) ? anchor : (lgEnd == 0 ? lgStart : lgEnd);
+            // A {Proportional} leg is neither. Its cost for the whole (always full)
+            // fill is its own resolved amount, and the fill is `anchor` units, so
+            // that resolved amount IS the per-unit figure this formula wants — for
+            // leg 0 it equals `anchor` exactly. Reading the raw marker instead would
+            // make every proportional order preview as unfillable: a ~1.15e77
+            // per-unit cost no maker can fund.
+            uint256 perUnitIn = _perUnitIn(order.maker, token, lgStart, lgEnd);
             // Scale leg-i capacity back into anchor units. Guard the multiply: an
             // unbounded (e.g. max) allowance times a large `anchor` can exceed
             // uint256 — treat an overflowing product as "this leg imposes no
@@ -518,14 +531,16 @@ contract SettlementLens {
             if (Proportional.isProportional(inS)) {
                 // Mirror the settler's rule EXACTLY — see {Pricing.inputOwed}. A
                 // preflight that is stricter drops fillable orders; one that is
-                // looser passes orders that revert on-chain. Note an UNCAPPED
-                // proportional leg (`inE == 0`) is deliberately accepted here,
-                // because the settler accepts it: it is a footgun, not an invalid
-                // order, and the lens is not the place to overrule a maker. See the
-                // cap discussion in {Proportional}.
-                if (i != 0 || order.side() == OrderSide.BUY || order.fillTotal != 0 || order.fillModule != address(0)) {
+                // looser passes orders that revert on-chain.
+                if (
+                    i != 0 || order.side() == OrderSide.BUY || order.fillTotal != 0
+                        || order.fillModule != address(0)
+                ) {
                     return (false, "proportional leg only allowed on legsIn[0] of a plain SELL order");
                 }
+                // The cap is mandatory on-chain, and `0` is what an unset field
+                // holds — so this is the check most likely to catch a real mistake.
+                if (inE == 0) return (false, "proportional leg has no cap (end == 0)");
                 continue;
             }
             if (inE != 0 && inE < inS) {

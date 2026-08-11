@@ -38,12 +38,25 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 ///  which overloads the Permit2 permitted-amount word the same way and for the
 ///  same reason.
 ///
-///  ⚠ WHERE THIS MAY APPEAR, AND WHY IT IS SO NARROW
-///  ────────────────────────────────────────────────
-///  ONLY on `legsIn[0]` of a SELL order — the ANCHOR leg. Not on output legs
-///  (the solver delivers those; a balance-relative obligation on the payer's
-///  counterparty is meaningless), not on a rising fee leg, and not on legs 1..n.
-///  The restriction is not conservatism, it is what makes the feature sound:
+///  ⚠ WHERE THIS MAY APPEAR
+///  ───────────────────────
+///  On ANY `legsIn[i]` of a SELL order, so a single signature can sweep several
+///  tokens at once ("take all my USDC and all my USDT for this much ETH"). NOT on
+///  output legs — the solver delivers those, and an obligation measured against
+///  the PAYER's balance is meaningless on the counterparty's side.
+///
+///  Leg 0 is special only in WHERE it is resolved. It is the anchor, so it is read
+///  in {OrderGates.anchorTotal} before any funds move and pinned in
+///  `FillCtx.anchor`; legs 1..n are read in {Pricing.inputOwed} at the moment they
+///  are charged. Nothing else consumes a non-anchor leg's amount — output pricing
+///  and the fill counter both key off the anchor alone — so a later read is
+///  self-consistent. The one visible consequence is that a maker who also signs an
+///  item crediting themselves that token pays against the post-item balance on the
+///  single-order path and the pre-item balance on the netted {Batch} path. Both
+///  sit under the same mandatory cap, which is what bounds the difference.
+///
+///  A proportional order is still FULL-FILL ONLY, and that is what makes the whole
+///  thing sound:
 ///
 ///  The anchor is the fill DENOMINATOR, and `filled[orderHash]` counts in anchor
 ///  units. A denominator derived from a live balance MOVES between fills, so a
@@ -52,13 +65,11 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 ///  balance of 600 and believes the order is 400/600 done. Partial fills and a
 ///  balance-relative anchor cannot both be correct.
 ///
-///  So a proportional order is FULL-FILL ONLY, and because it is, the resolved
-///  amount is read exactly once per fill — in {OrderGates.anchorTotal} — and
-///  pinned in `FillCtx.anchor`. {Pricing.inputOwed} then returns that pinned
-///  value rather than re-reading the balance, which is what makes the output
-///  pricing and the input pull provably consistent: there is only ever ONE
-///  balance read, so no window exists in which an item crediting the maker
-///  mid-fill could make the two disagree.
+///  Because the order is full-fill only, the ANCHOR is read exactly once per fill
+///  and `FillCtx.anchor` pins it; {Pricing.inputOwed} returns that pin for leg 0
+///  rather than re-reading. That is what makes the output pricing and the maker's
+///  leg-0 payment provably consistent: one balance read, so no window exists in
+///  which an item crediting the maker mid-fill could make the two disagree.
 ///
 ///  The full-fill rule also gives the maker the semantics they actually asked
 ///  for. "Sell everything I have" is an all-or-nothing instruction; a solver
@@ -104,14 +115,22 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 ///
 ///      balance ≤ cap → sell the balance, receive the full output  (maker gains)
 ///      balance > cap → sell exactly the cap, receive the full output (identical
-///                      to the absolute order)
+///                      to the absolute order they would otherwise have signed)
 ///
-///  `end == 0` leaves the leg uncapped. That is the correct encoding only when
-///  something else already bounds the balance — an escrow the maker alone funds,
-///  a fresh single-purpose address — and is a footgun anywhere else. The SDK
-///  defaults the cap to the quoted amount; `minFillAnchor` provides the matching
-///  FLOOR ("do not bother unless I hold at least X") for free, since the anti-dust
-///  check already runs against the resolved delta.
+///  The cap is MANDATORY (`end == 0` reverts {ProportionalNeedsCap}). Uncapped is
+///  not merely a footgun: the maker's balance is not under their sole control —
+///  ANYONE can raise it by transferring tokens to them — so an uncapped sweep is a
+///  standing offer to buy the maker's entire holding at a price fixed for a much
+///  smaller one. Nor is it a hypothetical accident: `0` is what an unset field
+///  holds, so the dangerous mode would be the default.
+///
+///  A genuinely unbounded sweep remains expressible as `end = SENTINEL_FLOOR` —
+///  the largest value that is not itself a marker — so requiring a cap costs no
+///  expressiveness, only deliberateness. The SDK defaults it to the quoted amount,
+///  which makes the order exactly as good as the absolute one it replaces and
+///  never worse. `minFillAnchor` is the matching FLOOR ("do not bother unless I
+///  hold at least X") and needs no new machinery, since the anti-dust check already
+///  runs against the resolved delta.
 ///
 ///  This is also the direction the drift actually runs in practice: the marker
 ///  exists to absorb the gap between quote and inclusion — accrued interest, a
@@ -129,6 +148,18 @@ library Proportional {
     ///      live balance, so progress cannot be measured across fills — see the
     ///      contract note.
     error ProportionalNeedsFullFill();
+    /// @dev A proportional leg carries no cap (`end == 0`). MANDATORY — see the cap
+    ///      section of the contract note. An uncapped sweep hands the maker's ENTIRE
+    ///      balance over for the order's fixed output, and since anyone may raise
+    ///      that balance by simply transferring tokens to the maker, an uncapped
+    ///      order is an open invitation rather than a mere footgun. `end == 0` is
+    ///      also the value an unset field has, so the dangerous mode would otherwise
+    ///      be the one you get by not thinking about it.
+    ///
+    ///      A genuinely unbounded sweep is still expressible — set `end` to
+    ///      {SENTINEL_FLOOR}, the largest value that is not itself a marker — so
+    ///      this costs no expressiveness, only deliberateness.
+    error ProportionalNeedsCap();
 
     /// @dev A `start` STRICTLY ABOVE this is a proportional marker. Equal to
     ///      `type(uint256).max - BPS`, i.e. ~1.15e77 — unreachable by any real
@@ -165,8 +196,11 @@ library Proportional {
     ///      and a silent wrap here would under-price the maker's own leg. Revert
     ///      instead.
     function resolve(address token, address owner, uint256 start, uint256 cap) internal view returns (uint256 amount) {
+        // Every resolution goes through here, so this is the one place the cap has
+        // to be enforced for it to be enforced everywhere.
+        if (cap == 0) revert ProportionalNeedsCap();
         amount = SafeTransferLib.balanceOf(token, owner) * bps(start) / BPS;
-        if (cap != 0 && amount > cap) amount = cap;
+        if (amount > cap) amount = cap;
     }
 
     /// @notice Build the marker for `bpsValue` (1..{BPS}).

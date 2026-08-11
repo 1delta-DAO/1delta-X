@@ -108,13 +108,39 @@ contract ProportionalLegTest is CoreSettlementBase {
     function test_prop_partialBps_sellsThatFraction() public {
         _stage(2_000e6);
 
-        Order memory order = _propOrder(0, 5_000, 0); // 50%, uncapped
+        Order memory order = _propOrder(0, 5_000, 2_000e6); // 50%, cap above the half
         bytes memory sig = _sign(order);
         vm.prank(solver);
         settlement.fill(order, sig, 1_000e6);
 
         assertEq(IERC20(USDC).balanceOf(solver), 1_000e6, "solver received half");
         assertEq(IERC20(USDC).balanceOf(maker), 1_000e6, "maker kept half");
+    }
+
+    // ──────────────────── Anchor leg only ────────────────────
+
+    /// A marker on `legsIn[1..n]` — the multi-token sweep, "take all my USDC AND
+    /// all my WETH". It is SOUND (nothing but the charge itself consumes a
+    /// non-anchor leg, so a late balance read is self-consistent) and was fully
+    /// implemented and tested; it is rejected purely because
+    /// `Proportional.resolve` inlines a `balanceOf` staticcall at every
+    /// `inputOwed` site and cost **+2,161 bytes** against ~1,473 of EIP-170
+    /// headroom. Express it as a MAKE item on a sweep module instead — the
+    /// settler's byte budget is permanent, a module's is not.
+    function test_prop_onNonAnchorInputLeg_reverts() public {
+        _stage(2_000e6);
+        deal(WETH, maker, 1 ether);
+
+        Order memory order = _order(maker, 0, USDC, WETH, 2_000e6, WETH_OUT, new Item[](0));
+        LegIn[] memory legs = new LegIn[](2);
+        legs[0] = LegIn({token: USDC, start: 2_000e6, end: 0});
+        legs[1] = LegIn({token: WETH, start: Proportional.encode(10_000), end: 1 ether});
+        order.legsIn = PackedEncode.legsIn(legs);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(Proportional.InvalidProportionalLeg.selector);
+        settlement.fill(order, sig, 2_000e6);
     }
 
     // ──────────────────── The solver's staleness bound ────────────────────
@@ -125,7 +151,7 @@ contract ProportionalLegTest is CoreSettlementBase {
     function test_prop_balanceGrewPastSolverCeiling_reverts() public {
         _stage(2_500e6);
 
-        Order memory order = _propOrder(0, 10_000, 0); // uncapped: only the solver's bound applies
+        Order memory order = _propOrder(0, 10_000, 3_000e6); // cap above the grown balance
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -178,22 +204,30 @@ contract ProportionalLegTest is CoreSettlementBase {
 
     // ──────────────────── Only ever the SELL anchor ────────────────────
 
-    function test_prop_onNonAnchorInputLeg_reverts() public {
+    function test_prop_uncappedLeg_reverts() public {
         _stage(2_000e6);
-        deal(WETH, maker, 1 ether);
 
-        // Two input legs; the marker sits on leg 1, which is exactly the position
-        // the anchor resolution never sees — only {Pricing.inputOwed} can catch it.
-        Order memory order = _order(maker, 0, USDC, WETH, 2_000e6, WETH_OUT, new Item[](0));
-        LegIn[] memory legs = new LegIn[](2);
-        legs[0] = LegIn({token: USDC, start: 2_000e6, end: 0});
-        legs[1] = LegIn({token: WETH, start: Proportional.encode(10_000), end: 0});
-        order.legsIn = PackedEncode.legsIn(legs);
+        // `end == 0` is what an unset field holds, so the dangerous mode must not be
+        // the default one. An unbounded sweep is still expressible as SENTINEL_FLOOR.
+        Order memory order = _propOrder(0, 10_000, 0);
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(Proportional.InvalidProportionalLeg.selector);
+        vm.expectRevert(Proportional.ProportionalNeedsCap.selector);
         settlement.fill(order, sig, 2_000e6);
+    }
+
+    /// A deliberately unbounded sweep: the largest value that is not itself a
+    /// marker. Costs no expressiveness — it just cannot be reached by accident.
+    function test_prop_sentinelFloorCap_isEffectivelyUnbounded() public {
+        _stage(2_000e6);
+
+        Order memory order = _propOrder(0, 10_000, Proportional.SENTINEL_FLOOR);
+        bytes memory sig = _sign(order);
+        vm.prank(solver);
+        settlement.fill(order, sig, 2_000e6);
+
+        assertEq(IERC20(USDC).balanceOf(solver), 2_000e6, "swept in full");
     }
 
     function test_prop_onBuyOrderOutputAnchor_reverts() public {
@@ -235,7 +269,7 @@ contract ProportionalLegTest is CoreSettlementBase {
         uint256 bal = 2_000e6;
         _stage(bal);
 
-        Order memory order = _propOrder(0, 10_000, 0);
+        Order memory order = _propOrder(0, 10_000, bal);
         bytes memory sig = _sign(order);
         vm.prank(solver);
         (uint256 delta, uint256[] memory received,) =

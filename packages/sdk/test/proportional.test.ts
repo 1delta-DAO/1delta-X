@@ -10,7 +10,6 @@ import {
   encodeProportional,
   resolveProportional,
   validateProportional,
-  orderCapWarning,
   resolveProportionalOrder,
   anchorTotal,
   type Order,
@@ -78,11 +77,17 @@ describe("Proportional encoding", () => {
 
   it("resolves against a balance and honours the cap", () => {
     const full = encodeProportional(10_000n);
-    expect(resolveProportional(2_000_000_000n, full, 0n)).toBe(2_000_000_000n); // uncapped
     expect(resolveProportional(3_000_000_000n, full, 2_000_000_000n)).toBe(2_000_000_000n); // clamped
     expect(resolveProportional(1_500_000_000n, full, 2_000_000_000n)).toBe(1_500_000_000n); // under cap
-    expect(resolveProportional(2_000_000_000n, encodeProportional(5_000n), 0n)).toBe(1_000_000_000n); // 50%
-    expect(resolveProportional(0n, full, 0n)).toBe(0n);
+    expect(resolveProportional(2_000_000_000n, encodeProportional(5_000n), 9n ** 30n)).toBe(1_000_000_000n); // 50%
+    expect(resolveProportional(0n, full, 1n)).toBe(0n);
+  });
+
+  it("refuses an absent cap, the way the contract does", () => {
+    // `0n` is what an unset field holds, so the dangerous mode must not be the
+    // default. A deliberately unbounded sweep is SENTINEL_FLOOR.
+    expect(() => resolveProportional(1n, encodeProportional(10_000n), 0n)).toThrow(/no cap/);
+    expect(resolveProportional(5n, encodeProportional(10_000n), SENTINEL_FLOOR)).toBe(5n);
   });
 });
 
@@ -100,8 +105,10 @@ describe("resolveProportionalOrder", () => {
   });
 
   it("refuses to resolve an order the settler would reject", () => {
-    expect(() => resolveProportionalOrder(propOrder(10_000n, 0n, { fillTotal: 5n }), 1n)).toThrow(/fillTotal/);
+    expect(() => resolveProportionalOrder(propOrder(10_000n, 1n, { fillTotal: 5n }), 1n)).toThrow(/fillTotal/);
+    expect(() => resolveProportionalOrder(propOrder(10_000n, 0n), 1n)).toThrow(/no cap/);
   });
+
 });
 
 describe("pricing refuses unresolved markers", () => {
@@ -117,25 +124,23 @@ describe("validateProportional mirrors the settler", () => {
     expect(validateProportional(propOrder(10_000n, 2_000_000_000n))).toBeNull();
   });
 
-  it("accepts an uncapped marker, because the settler does", () => {
-    // Looser than ideal, but a preflight that is STRICTER than the settler drops
-    // orders that would have filled. The cap is surfaced as a warning instead.
-    expect(validateProportional(propOrder(10_000n, 0n))).toBeNull();
-    expect(orderCapWarning(propOrder(10_000n, 0n))).toMatch(/no cap/);
-    expect(orderCapWarning(propOrder(10_000n, 2_000_000_000n))).toBeNull();
+  it("rejects an uncapped marker, because the settler does", () => {
+    expect(validateProportional(propOrder(10_000n, 0n))).toMatch(/no cap/);
+    expect(validateProportional(propOrder(10_000n, SENTINEL_FLOOR))).toBeNull();
   });
+
 
   it("rejects every position the settler rejects", () => {
     const onLeg1 = order({
       legsIn: [
         { token: USDC, start: 2_000_000_000n, end: 0n },
-        { token: WETH, start: encodeProportional(10_000n), end: 0n },
+        { token: WETH, start: encodeProportional(10_000n), end: 10n ** 18n },
       ],
     });
     expect(validateProportional(onLeg1)).toMatch(/legsIn\[0\]/);
-    expect(validateProportional(propOrder(10_000n, 0n, { side: OrderSide.BUY }))).toMatch(/SELL/);
-    expect(validateProportional(propOrder(10_000n, 0n, { fillTotal: 1n }))).toMatch(/fillTotal/);
-    expect(validateProportional(propOrder(10_000n, 0n, { fillModule: USDC }))).toMatch(/fillModule/);
+    expect(validateProportional(propOrder(10_000n, 1n, { side: OrderSide.BUY }))).toMatch(/SELL/);
+    expect(validateProportional(propOrder(10_000n, 1n, { fillTotal: 1n }))).toMatch(/fillTotal/);
+    expect(validateProportional(propOrder(10_000n, 1n, { fillModule: USDC }))).toMatch(/fillModule/);
 
     const onOutput = order({
       legsOut: [{ token: WETH, start: encodeProportional(10_000n), end: 0n, recipient: ZERO }],

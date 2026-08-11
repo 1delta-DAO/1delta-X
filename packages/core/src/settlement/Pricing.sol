@@ -110,10 +110,32 @@ library Pricing {
         // larger number; production pays the smaller one. Do not "optimize" this
         // against the legacy figure.
         if (Proportional.isProportional(startIn)) {
-            if (i != 0 || o.fillTotal != 0 || o.fillModule != address(0) || o.side() == OrderSide.BUY) {
+            if (o.fillTotal != 0 || o.fillModule != address(0) || o.side() == OrderSide.BUY) {
                 revert Proportional.InvalidProportionalLeg();
             }
             if (!ctx.fullFill) revert Proportional.ProportionalNeedsFullFill();
+            // Leg 0 is the ANCHOR: already resolved in {OrderGates.anchorTotal}
+            // BEFORE any funds moved, and pinned in `ctx.anchor`. Return the pin —
+            // re-reading the balance here would let an item that credits the maker
+            // mid-fill price the outputs against one balance and charge against a
+            // larger one.
+            //
+            // ⚠ ANCHOR LEG ONLY, AND THE REASON IS COST, NOT SOUNDNESS.
+            // Resolving legs 1..n here — the multi-token sweep, "take all my USDC
+            // AND all my USDT" — is sound (nothing but the charge itself consumes a
+            // non-anchor leg, so a late balance read is self-consistent) and was
+            // fully implemented and tested. MEASURED 2026-08-11: it costs **+2,106
+            // bytes**, because `Proportional.resolve` carries a `balanceOf`
+            // staticcall and inlines at every `inputOwed` site — 25,264 against
+            // EIP-170's 24,576. It can be bought back with `optimizer_runs`, but
+            // only at 2,000 (1,001 bytes free), which costs **+4,307 gas on EVERY
+            // fill of EVERY order** — the setting lives in `[profile.default]` and
+            // moves every package. Paying that on single-token orders forever to
+            // make multi-token expressible here is the wrong trade.
+            //
+            // {ProportionalSweepModule} does the same job as a SETTLE item: zero
+            // settler bytes, and gas only on the orders that use it.
+            if (i != 0) revert Proportional.InvalidProportionalLeg();
             owed = ctx.anchor;
         } else if (o.side() == OrderSide.BUY || endIn != 0) {
             uint256 bump = endIn != 0 ? o.bumpBps() : 0;
