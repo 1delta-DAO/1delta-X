@@ -162,6 +162,18 @@ abstract contract OrderState is NonceManager {
         // Denominator: maker-signed `fillTotal` when set, else the leg anchor.
         // The `!= 0` branch reads a single calldata word — no leg access, so a
         // pure non-fungible order (empty legs) still has a valid denominator.
+        //
+        // A {Proportional} anchor is resolved inside `anchorTotal` and needs
+        // NOTHING from this function — deliberately. Threading a "was it
+        // proportional" flag back here to force `delta = total` was measured at
+        // +253 gas on EVERY plain fill (2026-08-10), which is an order of magnitude
+        // more than this codebase accepts for a feature most orders never use. The
+        // whole-fill rule is instead enforced where the marker is CONSUMED, by
+        // {Pricing.inputOwed}'s `ctx.fullFill` assert, and the solver's size bound
+        // falls out of machinery that already exists: `fillUpTo` clamps to the
+        // remaining size, so asking for less than the resolved anchor — including
+        // because the maker's balance grew past the amount the solver quoted —
+        // arrives here as a partial fill and is rejected.
         uint256 total = order.fillTotal != 0 ? order.fillTotal : OrderGates.anchorTotal(order);
         uint256 prevFilled = filled[orderHash];
         // Per-order-hash cancellation ({cancelOrder}) parks `filled` at max — reuse

@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Order, OrderSide} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
+import {Proportional} from "./Proportional.sol";
 
 /// @title DutchAuction
 /// @notice Dutch decay pricing. Every leg shares ONE clock and ONE normalized
@@ -222,6 +223,12 @@ library DutchAuction {
     ///         `start`.
     function amountInAt(Order calldata order, uint256 i, uint256 bump) internal pure returns (uint256) {
         (, uint256 s0, uint256 e0) = PackedArrays.legIn(order.legsIn, i);
+        // A {Proportional} leg has no tick: its amount is a live balance, which a
+        // `pure` reader cannot see. Callers that need it (the lens) use
+        // {currentAmountIn}, which is `view`. Fail loudly rather than hand back the
+        // raw marker — it would read as a ~1.15e77 amount and silently poison any
+        // price a validator derives from it.
+        if (Proportional.isProportional(s0)) revert Proportional.InvalidProportionalLeg();
         return inTick(s0, e0, bump);
     }
 
@@ -240,7 +247,19 @@ library DutchAuction {
         uint256 bump;
         bool bumpSet;
         for (uint256 i; i < n;) {
-            (, uint256 s0, uint256 e0) = PackedArrays.legIn(order.legsIn, i);
+            (address tk, uint256 s0, uint256 e0) = PackedArrays.legIn(order.legsIn, i);
+            // A {Proportional} leg's "current amount" is its resolved balance slice,
+            // not an auction tick — and on such a leg `e0` is the maker's cap, not a
+            // ramp endpoint, so feeding the pair to `inTick` would either revert
+            // ({InvalidAuctionParams}, since the marker exceeds any cap) or return
+            // the raw marker. Resolve it the same way the settler does.
+            if (Proportional.isProportional(s0)) {
+                ins[i] = Proportional.resolve(tk, order.maker, s0, e0);
+                unchecked {
+                    ++i;
+                }
+                continue;
+            }
             if (e0 != 0 && !bumpSet) {
                 bump = bumpBps(order);
                 bumpSet = true;

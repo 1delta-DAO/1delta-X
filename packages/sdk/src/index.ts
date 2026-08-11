@@ -4,5 +4,6 @@ export * from "./abi";
 export * from "./orders";
 export * from "./permit";
 export * from "./solving";
+export * from "./proportional";
 export * from "./pricing";
 export * from "./filling";

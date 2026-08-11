@@ -1,4 +1,5 @@
 import { type Order, OrderSide, unpackTiming } from "./types";
+import { isProportional } from "./proportional";
 
 /**
  * Client-side mirror of the contract's dutch pricing + fill math, for off-chain
@@ -14,7 +15,17 @@ import { type Order, OrderSide, unpackTiming } from "./types";
  *  `fillTotal` when set (module orders), else the leg anchor. */
 export function anchorTotal(order: Order): bigint {
   if (order.fillTotal !== 0n) return order.fillTotal;
-  return order.side === OrderSide.BUY ? order.legsOut[0]!.start : order.legsIn[0]!.start;
+  const anchor = order.side === OrderSide.BUY ? order.legsOut[0]!.start : order.legsIn[0]!.start;
+  // A balance-relative marker has no meaning to these pure helpers — resolving it
+  // needs the maker's live balance. Fail loudly rather than price a ~1.15e77
+  // "amount" and hand back a preview that silently means nothing. Callers pass the
+  // order through `resolveProportionalOrder(order, balance)` first.
+  if (isProportional(anchor)) {
+    throw new Error(
+      "order carries a Proportional marker; call resolveProportionalOrder(order, makerBalance) before pricing it",
+    );
+  }
+  return anchor;
 }
 
 function ceilDiv(a: bigint, b: bigint): bigint {

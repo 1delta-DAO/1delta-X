@@ -4,10 +4,14 @@ pragma solidity ^0.8.28;
 import {IERC1271} from "../interfaces/IERC1271.sol";
 
 /// @title SignatureVerification
-/// @notice Adapted from Uniswap's Permit2
-///         (https://github.com/Uniswap/permit2 — src/libraries/SignatureVerification.sol),
-///         reordered to the OpenZeppelin `SignatureChecker` pattern so that
-///         EIP-7702 accounts are fully supported.
+/// @notice PROVENANCE — adapted from Uniswap's Permit2
+///         (https://github.com/Uniswap/permit2 — src/libraries/SignatureVerification.sol).
+///         The error set, the EIP-2098 handling and the 1271 magic-value check
+///         are Permit2's. Deviations: the ECDSA and 1271 branches are reordered
+///         to the OpenZeppelin `SignatureChecker` pattern so EIP-7702 accounts
+///         are fully supported (Permit2 predates 7702 and dispatches purely on
+///         signature length), and the signature words are read straight from
+///         calldata instead of being copied to memory first.
 ///
 ///         Verification is attempted ECDSA-first, then falls back to EIP-1271:
 ///           - plain EOAs                         → recover via ecrecover

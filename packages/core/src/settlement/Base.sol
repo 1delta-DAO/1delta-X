@@ -291,6 +291,30 @@ abstract contract Base is Signatures {
 
     // ──────────────────── Validators / invariants ────────────────────
 
+    /// @dev MEASURED AND REJECTED (2026-08-10) — two attempts to buy back EIP-170
+    ///      headroom by hand-rolling what solc already does. Both made Settlement
+    ///      BIGGER under the `core-deploy` (via-IR) profile that is the one that has
+    ///      to fit. Baseline 23,594 bytes:
+    ///
+    ///        • Hand-encoding the three item-dispatch calls (`makeOnBehalf`, `take`,
+    ///          `settle`) through one shared assembly encoder, 0x-Settler style:
+    ///          **+1,862 bytes (25,456 — over the cap).** Their win comes from
+    ///          payloads solc encodes badly — nested structs plus a `string` — but
+    ///          these are 2–4 words and one `bytes`, a shape whose encoder via-IR
+    ///          already emits ONCE and shares across all three call sites. An
+    ///          `internal` assembly helper is instead inlined three times.
+    ///        • Merging `_runValidators`/`_runInvariants` into one `private` walk
+    ///          parameterised by a `post` flag, to stop the {IOrderValidator}
+    ///          encoder (which serialises the whole {Order}) being emitted twice:
+    ///          **+389 bytes (23,983).** via-IR was already sharing it; the flag
+    ///          only added a branch and blocked per-site specialisation.
+    ///
+    ///      The generalisation, and the reason not to retry this family: under
+    ///      via-IR, solc's own deduplication is already better than hand-rolling for
+    ///      any payload it can encode with a shared routine. Reach for assembly here
+    ///      only where the encoder is genuinely bespoke per call site. See
+    ///      [[settlement-size-via-ir]] for the alternatives rejected before these.
+
     /// @dev Pre-execution staticcall validators. `filler` is the address executing
     ///      this fill (threaded from msg.sender, or from batchFill's caller), so a
     ///      maker-signed validator can express filler-conditional policy. The shared

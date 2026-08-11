@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Order, FillCtx, OrderSide} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {DutchAuction} from "./DutchAuction.sol";
+import {Proportional} from "./Proportional.sol";
 
 /// @title Pricing
 /// @notice The per-leg slice math for a single fill, factored into ONE place so
@@ -85,7 +86,36 @@ library Pricing {
     ///         a fixed leg (`end == 0`) is the exact cumulative slice of `start`.
     function inputOwed(Order calldata o, FillCtx memory ctx, uint256 i) internal view returns (uint256 owed) {
         (, uint256 startIn, uint256 endIn) = PackedArrays.legIn(o.legsIn, i); // decoded once
-        if (o.side() == OrderSide.BUY || endIn != 0) {
+        // Balance-relative anchor ({Proportional}). The marker was already resolved
+        // against the maker's live balance in {OrderGates.anchorTotal} and pinned in
+        // `ctx.anchor`; returning that pin — rather than re-reading the balance — is
+        // what guarantees the output pricing and this pull agree. Re-reading would
+        // open a window in which an item crediting the maker mid-fill (a TAKE with
+        // `recipient == maker`) makes the solver deliver against one balance and the
+        // maker pay against a larger one.
+        //
+        // ⚠ MEASURED — KEEP THIS BRANCH INLINE HERE (2026-08-10). Moving the four
+        // checks into a `private` helper and tail-calling it looks obviously better
+        // and is obviously worse: `inputOwed` is reached from {Core}, {Batch} AND
+        // {SettlementLens}, and a private library function is emitted per call site,
+        // so the split cost **+2,430 bytes** of Settlement bytecode (23,134 →
+        // 25,564, straight over EIP-170) and did not buy back one gas. Inline, the
+        // whole feature is +31 bytes.
+        //
+        // ⚠ AND BEWARE THE PROFILE WHEN MEASURING THIS. Under the legacy `core`
+        // profile that `make gas` uses, this one compare reads as +232 gas per fill
+        // — a stack spill, not opcodes. Under `core-deploy` (via-IR), which is what
+        // actually gets DEPLOYED, the same code costs **+40 gas**
+        // (495,147 vs 495,107 on `test_plain_swap_full`). The snapshot will show the
+        // larger number; production pays the smaller one. Do not "optimize" this
+        // against the legacy figure.
+        if (Proportional.isProportional(startIn)) {
+            if (i != 0 || o.fillTotal != 0 || o.fillModule != address(0) || o.side() == OrderSide.BUY) {
+                revert Proportional.InvalidProportionalLeg();
+            }
+            if (!ctx.fullFill) revert Proportional.ProportionalNeedsFullFill();
+            owed = ctx.anchor;
+        } else if (o.side() == OrderSide.BUY || endIn != 0) {
             uint256 bump = endIn != 0 ? o.bumpBps() : 0;
             owed = (ctx.newFilled - ctx.prevFilled) * DutchAuction.inTick(startIn, endIn, bump) / ctx.anchor;
             // Soft-exclusivity override: a non-exclusive in-window filler charges
@@ -98,4 +128,5 @@ library Pricing {
                 : (startIn * ctx.newFilled) / ctx.anchor - (startIn * ctx.prevFilled) / ctx.anchor;
         }
     }
+
 }

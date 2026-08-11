@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {GearboxCreditBorrowModule, GearboxCreditAuth} from "../../src/GearboxV3Modules.sol";
 import {ICreditAccountV3, ICreditManagerV3} from "../../src/interfaces/IGearboxV3.sol";
 
@@ -118,7 +119,7 @@ contract GearboxV3ForkAuthTest is Test {
 
         vm.prank(settlement);
         (bool ok, bytes memory ret) = address(permit3)
-            .call(abi.encodeCall(Permit3.take, (address(borrowModule), BORROWER, uint160(1e18), BORROWER, data)));
+            .call(abi.encodeCall(IPermit3.take, (address(borrowModule), BORROWER, uint160(1e18), BORROWER, data)));
         assertFalse(ok, "not registered as a bot, so the dispatch still fails");
 
         bytes4 sel;

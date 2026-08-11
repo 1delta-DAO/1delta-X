@@ -20,11 +20,109 @@ thereafter — the same ergonomic as Permit2, extended to debt/withdrawal/etc.
 
 ## Files
 
-| File                                   | Purpose                                                          |
-|----------------------------------------|------------------------------------------------------------------|
-| [`Permit3.sol`](Permit3.sol)           | Allowance-hub contract. Token + taker books, `take()` dispatch.  |
-| [`../interfaces/IPermit3.sol`](../interfaces/IPermit3.sol)       | External surface.                       |
-| [`../interfaces/ITakerModule.sol`](../interfaces/ITakerModule.sol) | Uniform adapter interface modules implement.         |
+Permit3 is decomposed the way Permit2 is: each layer owns its own state and its
+own rules, and `Permit3.sol` is nothing but the point where they meet.
+
+| File                                             | Purpose                                                                   |
+|--------------------------------------------------|---------------------------------------------------------------------------|
+| [`Permit3.sol`](Permit3.sol)                     | Assembly point — `contract Permit3 is SignedPermits, SignatureTransfer {}`. |
+| [`Permit3Base.sol`](Permit3Base.sol)             | `IPermit3` + `EIP712`; resolves the `DOMAIN_SEPARATOR` diamond once.       |
+| [`AllowanceTransfer.sol`](AllowanceTransfer.sol) | Token book — `approveToken`, `transferFrom`, `revokeToken`, `lockdown`.    |
+| [`TakerAllowance.sol`](TakerAllowance.sol)       | Taker book — `approveTaker`, `take`, `revokeTaker`, `lockdownTakers`.     |
+| [`SignedPermits.sol`](SignedPermits.sol)         | Signed **allowance grants** over both books — `permitBatch(WithWitness)`.  |
+| [`SignatureTransfer.sol`](SignatureTransfer.sol) | Signed **one-shot transfers** — `permitTransferFrom(WitnessTransferFrom)`. |
+| [`UnorderedNonces.sol`](UnorderedNonces.sol)     | Nonce bitmap shared by both signed flows + `invalidateUnorderedNonces`.    |
+| [`EIP712.sol`](EIP712.sol)                       | Fork-safe domain separator (verbatim Permit2 port).                       |
+| [`SignatureVerification.sol`](SignatureVerification.sol) | EOA / EIP-2098 / EIP-1271 / EIP-7702 signature checking.           |
+| [`AllowanceHolder.sol`](AllowanceHolder.sol)     | **Standalone.** Signature-free ephemeral allowances (0x port).            |
+| [`libraries/Allowance.sol`](libraries/Allowance.sol)   | Packed grant/spend primitives shared by both books.                 |
+| [`libraries/Permit3Hash.sol`](libraries/Permit3Hash.sol) | Every EIP-712 type string and struct hasher.                      |
+| [`../interfaces/IPermit3.sol`](../interfaces/IPermit3.sol)             | External surface (books + allowance permits).      |
+| [`../interfaces/ISignatureTransfer.sol`](../interfaces/ISignatureTransfer.sol) | External surface (one-shot transfers).   |
+| [`../interfaces/IAllowanceHolder.sol`](../interfaces/IAllowanceHolder.sol)     | External surface (ephemeral allowances). |
+| [`../interfaces/ITakerModule.sol`](../interfaces/ITakerModule.sol)     | Uniform adapter interface modules implement.       |
+
+All libraries are `internal`-only: they inline into their caller, so there is no
+delegatecall and no link step.
+
+## Provenance: what is Permit2 and what is not
+
+Permit3 is [Permit2](https://github.com/Uniswap/permit2) (Uniswap, MIT) plus a
+second allowance book. Every source file carries a `PROVENANCE` block with the
+same detail as below — `grep -rn PROVENANCE` to read them in place.
+
+| File                    | Permit2 origin                        | Status |
+|-------------------------|---------------------------------------|--------|
+| `Permit3.sol`           | `Permit2.sol`                         | same shape — an empty contract joining the layers |
+| `AllowanceTransfer.sol` | `AllowanceTransfer.sol`               | ported, with deviations |
+| `SignatureTransfer.sol` | `SignatureTransfer.sol`               | ported — the closest to a straight port here |
+| `UnorderedNonces.sol`   | `SignatureTransfer.sol` (nonce half)  | ported, extracted into its own layer |
+| `SignedPermits.sol`     | `AllowanceTransfer.permit()`          | reworked |
+| `libraries/Allowance.sol`   | `libraries/Allowance.sol`         | rewritten around the same slot layout |
+| `libraries/Permit3Hash.sol` | `libraries/PermitHash.sol`        | half ported verbatim, half new |
+| `EIP712.sol`            | `EIP712.sol`                          | verbatim but for the domain values + a scratch-space digest |
+| `SignatureVerification.sol` | `libraries/SignatureVerification.sol` | adapted (EIP-7702 ordering, calldata reads) |
+| `TakerAllowance.sol`    | —                                     | **new in Permit3** |
+| `Permit3Base.sol`       | —                                     | **new in Permit3** (glue for the extra layers) |
+| `AllowanceHolder.sol`   | —                                     | **not Permit2** — ported from 0x |
+
+### Symbol map
+
+| Permit2                                  | Permit3                          |
+|------------------------------------------|----------------------------------|
+| `approve(token, spender, …)`             | `approveToken(spender, token, …)` |
+| `allowance[owner][token][spender]`        | `tokenAllowance(user, spender, token)` — **key order differs** |
+| `transferFrom` (single + batch)          | same                             |
+| `lockdown`                               | same (+ `lockdownTakers`)        |
+| `permit(owner, PermitSingle\|PermitBatch, sig)` | `permitBatch(owner, PermitBatch, sig)` |
+| —                                        | `permitBatchWithWitness`         |
+| `permitTransferFrom` / `permitWitnessTransferFrom` | same, all four overloads |
+| `nonceBitmap`                            | `permitNonceBitmap` (+ `isPermitNonceUsed`) |
+| `invalidateUnorderedNonces`              | same                             |
+| `invalidateNonces(token, spender, nonce)` | — (no allowance-level nonce)    |
+| —                                        | `approveTaker` / `take` / `takerAllowance` / `revokeTaker` |
+| —                                        | `revokeToken`                    |
+
+### Behavioural deviations to know about
+
+These change what identical-looking code does. Read them before porting
+reasoning — or an audit finding — across from Permit2.
+
+1. **`expiration == 0` is inverted.** Permit3: never expires. Permit2: the
+   opposite — its gate has no zero-exemption, and `approve` rewrites a 0 to
+   `block.timestamp`, so the grant dies at the end of that block.
+2. **Token-book key order.** `[user][spender][token]` here vs
+   `[owner][token][spender]` in Permit2, so it lines up with the taker book.
+   Off-chain slot derivations do not carry over.
+3. **No allowance-level nonce.** Permit2 gates `permit` on a sequential
+   per-(owner, token, spender) nonce and offers `invalidateNonces`. Permit3
+   relies on the unordered bitmap alone; `PackedAllowance.nonce` is written as 0
+   and reserved.
+4. **One nonce space.** Permit3's bitmap is shared by allowance permits and
+   signature transfers; Permit2 keeps sequential nonces for the former and a
+   private bitmap for the latter. Allocate nonces per-owner, not per-flow.
+5. **Verify-then-spend-nonce.** Permit2's signature transfers spend the nonce
+   first. Both spend it before any token moves; ours is ordered for consistency
+   across the two signed flows, not for a security reason.
+6. **Signed grants are one batch spanning both books**, each leg naming its own
+   spender — where Permit2 has `PermitSingle`/`PermitBatch`, both scoped to a
+   single spender. Permit3 also binds a witness to an allowance grant, which
+   Permit2 does only for signature transfers.
+
+Permit2 pieces with no Permit3 counterpart: `PermitSingle`, `invalidateNonces` /
+`ExcessiveInvalidation`, `SafeCast160`, `Permit2Lib` (the caller-side helper —
+[`Permit3TransferLib`](../utils/Permit3TransferLib.sol) is a different thing: a
+direct-approval fallback, not a DAI-permit shim) and `IDAIPermit`.
+
+EIP-712 type strings for signature transfers are **byte-identical** to Permit2's,
+so signing tooling needs no changes; digests still differ because the domain
+names this contract, so no signature crosses between the two in either direction.
+
+**Base order is load-bearing.** Storage slots follow C3 linearisation, so
+reordering the base list in `Permit3.sol` or `SignedPermits.sol` moves every
+mapping. Permit3 is deployed fresh per chain and is not upgradeable, so this is
+a review hazard rather than a migration one — but a redeploy that silently
+relocates `_tokenAllowance` would strand allowances mid-migration.
 
 ## Architecture
 
@@ -100,6 +198,79 @@ This has three consequences:
 
 Adding a new lender or op = adding a new module. Permit3 and the
 interface do not change.
+
+## Granting authority
+
+Four paths, distinguished by how long the authority lives and what it costs to
+create. The books and the module dispatch are the same underneath.
+
+| Path                     | Where                | Signature? | Survives the call?      |
+|--------------------------|----------------------|------------|-------------------------|
+| `approveToken` / `approveTaker` | `AllowanceTransfer` / `TakerAllowance` | no  | yes — until revoked  |
+| `permitBatch(WithWitness)`      | `SignedPermits`      | one per grant | yes — until spent or expired |
+| `permitTransferFrom`            | `SignatureTransfer`  | one per transfer | **no** — nothing is written |
+| `AllowanceHolder.exec`          | `AllowanceHolder`    | no         | **no** — zeroed before return |
+
+### Signature transfers (`SignatureTransfer`)
+
+Permit2's `SignatureTransfer`, ported. The owner signs *"`spender` may move at
+most `amount` of `token`, once, before `deadline`"*; the spender consumes it by
+naming a recipient and an amount at or below the cap. No allowance book is
+touched, so there is nothing to revoke afterwards and nothing to expire.
+
+The signed `spender` is always `msg.sender` — never a caller-supplied argument.
+A signature that leaks from a mempool, a failed relay or a log is therefore
+useless to anyone but the intended spender. **Never add an overload that takes
+`spender` in.**
+
+Type strings are byte-identical to Permit2's, so existing tooling produces them
+unchanged; digests still differ because the domain names this contract
+("Permit3"), so a Permit2 signature can never be replayed here or vice versa.
+
+Nonces come from the same per-owner bitmap the allowance permits use. One nonce
+is spendable exactly once, whichever flow spends it, and
+`invalidateUnorderedNonces` cancels both kinds — at the cost that off-chain
+nonce allocation must be per-owner, not per-message-type.
+
+### Ephemeral allowances (`AllowanceHolder`)
+
+The signature-free option, ported from 0x. The owner approves `AllowanceHolder`
+once on the ERC20, then calls
+`exec(operator, token, amount, target, data)`: the holder grants `operator` an
+allowance, calls `target`, and zeroes the allowance before returning. No
+signature, and no standing approval to the consuming contract.
+
+It is deliberately **standalone and unprivileged**, and must stay that way.
+`exec` makes an arbitrary call to an arbitrary target from the holder's address,
+so anything the holder is trusted with, everyone is trusted with. Folded into
+Permit3 the same capability would be a total bypass: taker modules gate on
+`msg.sender == permit3`, so a Permit3 that could be told to call anything would
+let anyone reach `takeOnBehalf` directly. Never grant the holder authority —
+not as a Permit3 spender, not as a module's authorised caller — and never leave
+tokens or ETH sitting in it.
+
+Two guards carry the design:
+
+- **`_rejectIfERC20`** — targets that answer `balanceOf(address)` are refused.
+  Every user's approval sits on the holder, so a direct call to a token would
+  let any caller spend them all (`exec(_, _, 0, USDC, transferFrom(victim, …))`),
+  the `amount` grant being irrelevant. Only *direct* calls are dangerous —
+  through any intermediate contract `msg.sender` is no longer the holder. The
+  probe is a heuristic and deliberately over-broad; loosen it only with a
+  positive allowlist.
+- **`AllowanceInFlight`** — a nested `exec` on the same (operator, owner, token)
+  is rejected rather than allowed to clobber the outer grant and zero it early.
+  Nesting on a *different* triple stays legal, which multi-token flows need.
+
+The grant is a real `SSTORE`, not `TSTORE` — some target chains have no
+transient storage. Set-then-clear inside one transaction refunds the full write
+(EIP-3529), so on any transaction big enough to clear the `gasUsed/5` refund cap
+— a settlement fill is an order of magnitude past it — the net cost is about the
+cold-slot premium (~2.3k gas), not the ~22k headline.
+
+`msg.sender` is appended to `data` as 20 trailing bytes (ERC-2771 style) so a
+target that cares can recover the real caller; Solidity's decoder ignores
+trailing calldata, so targets that don't are unaffected.
 
 ## Usage
 
@@ -298,6 +469,12 @@ Implemented:
 - [x] `uint160.max` infinite semantics; `expiration == 0` sentinel.
 - [x] EIP-712 signed permits (`permitBatch`, `permitBatchWithWitness`) with
       unordered (bitmap) nonces.
+- [x] One-shot signature transfers (`permitTransferFrom`,
+      `permitWitnessTransferFrom`, both single and batched) sharing that nonce
+      space — Permit2's `SignatureTransfer`, ported.
+- [x] `AllowanceHolder` — signature-free ephemeral allowances, standalone and
+      unprivileged, with the confused-deputy probe and the in-flight guard.
+      **Not wired into Settlement**; see below.
 - [x] Permit2-derived signature stack: `SignatureVerification` (EOA 65-byte +
       EIP-2098 compact + EIP-1271 contract signatures + EIP-7702 accounts,
       verified ecrecover-first then EIP-1271 fallback) and fork-safe `EIP712`
@@ -314,6 +491,16 @@ Implemented:
       module whitelist, no admin role.
 
 Not yet implemented:
+- [ ] Settlement wiring for `AllowanceHolder` — some path by which Settlement
+      pulls taker funds through the holder. The candidates are a third attempt in
+      [`Permit3TransferLib`](../utils/Permit3TransferLib.sol) (no caller changes,
+      but it widens the silent-fallthrough surface that library already warns
+      about) or an explicit opt-in through the `takerData` channel (no silent
+      fallthrough, but it touches the fill path and the SDK). Until one lands the
+      holder is usable only by contracts that call it directly.
+- [ ] `permitTake` — the taker-book analogue of `permitTransferFrom`: a signature
+      authorising ONE module dispatch without leaving an allowance behind. Would
+      save the grant-then-spend `SSTORE` pair on the single-signature fill path.
 - [ ] Concrete taker modules (AaveV3Borrow/Withdraw, Comet, Morpho
       Blue, Compound V2, Lido unstake/claim).
 - [ ] `revokeAll(module)` helper that also calls the module's

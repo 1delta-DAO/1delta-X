@@ -5,6 +5,7 @@ import {IOrderValidator} from "../interfaces/IOrderValidator.sol";
 import {Order, OrderSide} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {DutchAuction} from "./DutchAuction.sol";
+import {Proportional} from "./Proportional.sol";
 
 /// @title OrderGates
 /// @notice The order-level rules that BOTH the settler and {SettlementLens} have to
@@ -72,21 +73,51 @@ library OrderGates {
     /// @notice The fill denominator in anchor units: the FIXED side's leg 0 —
     ///         `legsIn[0].start` (SELL) or `legsOut[0].start` (BUY).
     /// @dev    The empty-blob check is NOT optional — see the contract note above.
-    function anchorTotal(Order calldata order) internal pure returns (uint256) {
+    ///
+    ///         A SELL anchor may carry a {Proportional} marker instead of an
+    ///         absolute amount, in which case it is RESOLVED here against the
+    ///         maker's live balance — this is the one and only balance read a
+    ///         proportional fill performs, and `FillCtx.anchor` pins the result for
+    ///         the rest of the fill (see {Proportional}). That is why this is
+    ///         `view` rather than `pure`.
+    /// @return the denominator, proportional markers already resolved.
+    function anchorTotal(Order calldata order) internal view returns (uint256) {
         if (order.side() == OrderSide.BUY) {
             if (PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE) == 0) revert NoAnchorLeg();
             (, uint256 start,,) = PackedArrays.legOut(order.legsOut, 0);
+            // An OUTPUT is what the solver delivers, so a marker relative to the
+            // MAKER's balance has no meaning here. Rejected explicitly: such a leg
+            // would otherwise read as a ~1.15e77 absolute demand and fail deep in a
+            // token transfer with no hint as to why.
+            //
+            // Only the anchor is checked. `legsOut[1..n]` are deliberately NOT,
+            // because there the natural failure is already safe and total (the
+            // solver simply cannot deliver 1e77), and a per-leg compare would tax
+            // every output of every fill forever to improve one error message.
+            if (Proportional.isProportional(start)) revert Proportional.InvalidProportionalLeg();
             return start;
         }
         if (PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE) == 0) revert NoAnchorLeg();
-        (, uint256 startIn,) = PackedArrays.legIn(order.legsIn, 0);
+        (address token, uint256 startIn, uint256 endIn) = PackedArrays.legIn(order.legsIn, 0);
+        if (Proportional.isProportional(startIn)) {
+            // On a proportional leg `end` is not a ramp endpoint — there is nothing
+            // to ramp — it is the maker's absolute CAP. See {Proportional} for why
+            // an uncapped proportional order is a footgun and this is not optional
+            // in practice. `0` keeps the historical "no second endpoint" meaning and
+            // leaves the leg uncapped.
+            return Proportional.resolve(token, order.maker, startIn, endIn);
+        }
         return startIn;
     }
 
     /// @notice The fill denominator: the maker-signed `fillTotal` when set (module
     ///         orders — no leg access, so it is safe for empty-leg NFT swaps), else
     ///         the leg anchor.
-    function fillDenominator(Order calldata order) internal pure returns (uint256) {
+    /// @dev    A `fillTotal` order never reaches {anchorTotal}, which is exactly why
+    ///         {Pricing.inputOwed} rejects a proportional leg on one: the marker
+    ///         would never be resolved and `FillCtx.anchor` would hold the signed
+    ///         total instead of a balance.
+    function fillDenominator(Order calldata order) internal view returns (uint256) {
         return order.fillTotal != 0 ? order.fillTotal : anchorTotal(order);
     }
 

@@ -7,10 +7,14 @@ pragma solidity ^0.8.28;
 ///         Caches the domain separator as an immutable value but recomputes it
 ///         if `block.chainid` changes (chain fork), so signatures cannot be
 ///         replayed against the wrong domain after a fork.
-/// @dev    The only deviation from the Permit2 original is the domain type/values:
-///         Permit3 keeps its established domain — name "Permit3", version "1" —
-///         so the domain separator value is identical to the pre-EIP712-base
-///         implementation. The caching/fork-recompute logic is verbatim.
+/// @dev    PROVENANCE — Permit2 `src/EIP712.sol` (Uniswap, MIT). The
+///         caching/fork-recompute logic is verbatim. Two deviations:
+///           • the domain values — name "Permit3", version "1" — so the
+///             separator matches the pre-EIP712-base implementation, and no
+///             signature is valid against both contracts;
+///           • `_hashTypedData` builds its 66-byte preimage in scratch space
+///             instead of `abi.encodePacked`, which allocated on every permit.
+///             Identical digest; see the note on that function.
 contract EIP712 {
     // Cache the domain separator as an immutable value, but also store the chain id that it
     // corresponds to, in order to invalidate the cached domain separator if the chain id changes.

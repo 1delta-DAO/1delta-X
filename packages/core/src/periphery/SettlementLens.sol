@@ -13,6 +13,7 @@ import {PackedArrays} from "../settlement/PackedArrays.sol";
 import {DutchAuction} from "../settlement/DutchAuction.sol";
 import {Pricing} from "../settlement/Pricing.sol";
 import {OrderGates} from "../settlement/OrderGates.sol";
+import {Proportional} from "../settlement/Proportional.sol";
 
 /// @dev The subset of {Settlement}'s public/external surface this lens
 ///      reads. All are views on the live settlement, so the lens never needs the
@@ -373,7 +374,15 @@ contract SettlementLens {
 
             // Worst-case input cost of one anchor unit: the leg ceiling (`end`), or
             // `start` when the leg is fixed (`end == 0`).
-            uint256 perUnitIn = lgEnd == 0 ? lgStart : lgEnd;
+            //
+            // A {Proportional} leg is neither: `anchor` IS its resolved amount (the
+            // settler pins it in `FillCtx.anchor` and {Pricing.inputOwed} returns it
+            // verbatim), so one anchor unit costs exactly one token unit and
+            // `perUnitIn == anchor`. Reading the raw marker instead would make every
+            // proportional order preview as unfillable — a ~1.15e77 per-unit cost no
+            // maker can fund.
+            uint256 perUnitIn =
+                Proportional.isProportional(lgStart) ? anchor : (lgEnd == 0 ? lgStart : lgEnd);
             // Scale leg-i capacity back into anchor units. Guard the multiply: an
             // unbounded (e.g. max) allowance times a large `anchor` can exceed
             // uint256 — treat an overflowing product as "this leg imposes no
@@ -506,6 +515,19 @@ contract SettlementLens {
         // a rising leg is the relayer-fee/conversion auction. Same rule both sides.
         for (uint256 i; i < nIn; i++) {
             (, uint256 inS, uint256 inE) = PackedArrays.legIn(order.legsIn, i);
+            if (Proportional.isProportional(inS)) {
+                // Mirror the settler's rule EXACTLY — see {Pricing.inputOwed}. A
+                // preflight that is stricter drops fillable orders; one that is
+                // looser passes orders that revert on-chain. Note an UNCAPPED
+                // proportional leg (`inE == 0`) is deliberately accepted here,
+                // because the settler accepts it: it is a footgun, not an invalid
+                // order, and the lens is not the place to overrule a maker. See the
+                // cap discussion in {Proportional}.
+                if (i != 0 || order.side() == OrderSide.BUY || order.fillTotal != 0 || order.fillModule != address(0)) {
+                    return (false, "proportional leg only allowed on legsIn[0] of a plain SELL order");
+                }
+                continue;
+            }
             if (inE != 0 && inE < inS) {
                 return (false, "input end < start (must rise)");
             }

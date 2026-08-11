@@ -348,6 +348,12 @@ abstract contract Core is Base {
         returns (uint256)
     {
         if (order.fillModule != address(0)) return fillAmount;
+        // Clamping is ALREADY exactly right for a {Proportional} anchor and needs
+        // no special case: such an order is unfilled (`prev == 0`), so `rem` is the
+        // freshly resolved anchor, and an aggregator asking for more than the whole
+        // thing is trimmed to precisely the one size a proportional fill accepts.
+        // Asking for LESS stays below it and is rejected downstream as the partial
+        // fill it is.
         uint256 total = order.fillTotal != 0 ? order.fillTotal : OrderGates.anchorTotal(order);
         uint256 prev = filled[orderHash];
         if (prev < total) {
