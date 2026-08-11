@@ -16,13 +16,15 @@ import {OrderGates} from "./OrderGates.sol";
 ///           • the per-order `filled` counter (with the cancellation sentinel),
 ///           • the on-chain `orderApproved` records (the signature-less path),
 ///           • per-order-HASH cancellation ({cancelOrder}),
+///           • the maker-keyed delegated-signer registry ({setOrderSigner}),
 ///           • nonce cancellation (inherited from {NonceManager}),
 ///           • the `_openFill` state transition — resolve this fill's delta, apply
 ///             the over-fill cap, and advance the counter.
 ///
 ///         All mutable storage lives in this layer + {NonceManager}, so the slot
 ///         layout is fixed here: `nonceBitmap`(0), `minValidNonce`(1) from
-///         NonceManager, then `filled`(2), `orderApproved`(3).
+///         NonceManager, then `filled`(2), `orderApproved`(3),
+///         `orderSignerExpiry`(4).
 abstract contract OrderState is NonceManager {
     using OrderHash for Order;
     using DutchAuction for Order;
@@ -44,10 +46,59 @@ abstract contract OrderState is NonceManager {
     ///         this only replaces the signature check, nothing else.
     mapping(address => mapping(bytes32 => bool)) public orderApproved;
 
+    /// @notice maker → delegate → the unix time until which that delegate may sign
+    ///         orders on the maker's behalf. `0` means NOT a signer.
+    ///
+    ///         The session-key / trading-desk primitive: an EOA maker nominates
+    ///         another key to produce order signatures for them, without handing
+    ///         over custody and without deploying a smart account. Modelled on 0x
+    ///         v4's `registerAllowedOrderSigner`, with an expiry added so a
+    ///         delegation can lapse on its own.
+    ///
+    ///  ⚠ WHY THIS IS NOT AN "OPERATOR"
+    ///  ───────────────────────────────
+    ///  Delegated order signing is only safe when the DELEGATOR chooses the
+    ///  delegate. This mapping is keyed by `msg.sender` on write and by the ORDER'S
+    ///  OWN MAKER on read, which pins both halves:
+    ///
+    ///    • nobody can nominate a signer for someone else — the key is the caller;
+    ///    • a delegate's reach is exactly "orders naming this maker", because the
+    ///      order hash commits to `maker` and the lookup is
+    ///      `orderSignerExpiry[order.maker][recovered]`. A delegate can therefore
+    ///      author nothing the maker could not have authored themselves, and
+    ///      nothing at all for any other maker.
+    ///
+    ///  Contrast the protocol-set operator in OpenOcean's LOP fork, where an
+    ///  admin-nominated address signs the ORDER hash while the user signs only a
+    ///  constant, order-independent message — one signature there is unbounded,
+    ///  non-expiring, replayable delegation over everything the user has approved.
+    ///  Nothing here can express that: there is no protocol-level signer, and every
+    ///  other gate (deadline, nonce, validators, and above all the maker's Permit3
+    ///  allowances with their own caps and expiries) binds a delegated order exactly
+    ///  as it binds a self-signed one.
+    ///
+    ///  ⚠ REVOCATION AND THE FIRST-FILL SKIP. {Signatures._verifySignature} only
+    ///  re-checks a SIGNATURE on an order's first fill, so revoking a delegate does
+    ///  NOT stop the remainder of an order it already part-filled — the same
+    ///  documented caveat EIP-1271 makers live with. The kill switches that DO bind
+    ///  mid-order are unchanged: {cancelOrder}, nonce cancellation, the deadline,
+    ///  and revoking the Permit3 allowances that fund the fill.
+    ///
+    /// @dev `0` means "not a signer" because that is the value of an unset mapping,
+    ///      so it CANNOT also mean "never expires" the way Permit3's `expiration`
+    ///      field does. A perpetual delegation is `type(uint256).max`. The
+    ///      divergence is deliberate and is called out here because the two
+    ///      conventions sit one contract apart.
+    mapping(address => mapping(address => uint256)) public orderSignerExpiry;
+
     /// @notice A maker authorized an order on-chain via {approveOrder} — the
     ///         signature-less order path — or withdrew it via {revokeOrderApproval}.
     event OrderApproved(address indexed maker, bytes32 indexed orderHash);
     event OrderApprovalRevoked(address indexed maker, bytes32 indexed orderHash);
+
+    /// @notice A maker nominated (`expiry != 0`) or revoked (`expiry == 0`) a
+    ///         delegate permitted to sign orders on their behalf.
+    event OrderSignerSet(address indexed maker, address indexed signer, uint256 expiry);
 
     /// @notice A maker cancelled a SPECIFIC order by hash via {cancelOrder} — the
     ///         per-order-hash cancellation, complementing {NonceManager}'s bulk
@@ -61,6 +112,10 @@ abstract contract OrderState is NonceManager {
     /// @dev {approveOrder}/{cancelOrder} called with an order whose `maker` is not
     ///      the caller.
     error NotOrderMaker();
+    /// @dev {setOrderSigner} was given `address(0)`. `ecrecover` yields the zero
+    ///      address for any malformed signature, so authorizing it would promote
+    ///      every unrecoverable signature to a valid delegated one.
+    error InvalidOrderSigner();
     /// @dev The order was cancelled by hash via {cancelOrder} (`filled` sentinel).
     error OrderCancelled();
     /// @dev A fill-once order (see {DutchAuction.useNonceInvalidator}) was offered a
@@ -96,6 +151,31 @@ abstract contract OrderState is NonceManager {
         orderHash = order.hash();
         orderApproved[msg.sender][orderHash] = true;
         emit OrderApproved(msg.sender, orderHash);
+    }
+
+    /// @notice Nominate `signer` to produce order signatures on the caller's behalf
+    ///         until `expiry`, or revoke it with `expiry == 0`. See
+    ///         {orderSignerExpiry} for the trust model and its limits.
+    /// @param  signer the delegate. Nominating `address(0)` is rejected: `ecrecover`
+    ///         returns `address(0)` on a malformed signature, so an authorized zero
+    ///         address would turn every unrecoverable signature into a valid one.
+    /// @param  expiry unix time the delegation lapses at. `0` revokes;
+    ///         `type(uint256).max` never lapses. A past value is accepted and is
+    ///         simply already-expired — it reads identically to a revocation and
+    ///         needs no special case.
+    function setOrderSigner(address signer, uint256 expiry) external {
+        _setOrderSigner(msg.sender, signer, expiry);
+    }
+
+    /// @dev The write itself, shared with the relayed variant
+    ///      ({Signatures.setOrderSignerWithSig}) so the storage mutation and its
+    ///      event exist ONCE. `maker` is the delegator: `msg.sender` above, or the
+    ///      recovered signer of an EIP-712 permit there. Callers own the
+    ///      authorization; this owns the write.
+    function _setOrderSigner(address maker, address signer, uint256 expiry) internal {
+        if (signer == address(0)) revert InvalidOrderSigner();
+        orderSignerExpiry[maker][signer] = expiry;
+        emit OrderSignerSet(maker, signer, expiry);
     }
 
     /// @notice Withdraw a prior {approveOrder}. Keyed by `msg.sender`, so a maker can

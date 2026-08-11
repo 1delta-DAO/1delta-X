@@ -27,6 +27,10 @@ interface ISettlementState {
     ///      Read so the lens can attest an empty-`sig` order instead of reporting
     ///      it unauthorized — see {SettlementLens._verifySignature}.
     function orderApproved(address maker, bytes32 orderHash) external view returns (bool);
+    /// @dev The maker-keyed delegated-signer registry. Mirrored so the preflight
+    ///      accepts exactly the signatures the settler accepts — a lens that is
+    ///      STRICTER here silently drops fillable orders from an orderbook.
+    function orderSignerExpiry(address maker, address signer) external view returns (uint256);
 }
 
 /// @title SettlementLens
@@ -713,6 +717,15 @@ contract SettlementLens {
         }
         if (SETTLEMENT.filled(orderHash) != 0) return; // already authorized once — see above
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", SETTLEMENT.DOMAIN_SEPARATOR(), orderHash));
+        // Mirrors {Signatures._verifySignature} EXACTLY, including the delegated
+        // branch — the drift this whole lens/settler split has already been bitten
+        // by once (see {OrderGates}). Maker first, then the maker-nominated signer.
+        (bool standardLength, address signer) = SignatureVerification.recoverCalldata(sig, digest);
+        if (standardLength && signer != address(0)) {
+            if (signer == expected) return;
+            uint256 expiry = SETTLEMENT.orderSignerExpiry(expected, signer);
+            if (expiry != 0 && block.timestamp <= expiry) return;
+        }
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
         SignatureVerification.verify(sig, digest, expected);

@@ -32,6 +32,17 @@ abstract contract Signatures is OrderState {
     /// @dev An empty `sig` was supplied for a fill, but the maker has no matching
     ///      on-chain {OrderState.approveOrder} record for this order.
     error OrderNotApproved();
+    /// @dev {setOrderSignerWithSig} was presented past its `deadline`. Declared here
+    ///      rather than reusing {Base.OrderExpired} because {Base} sits ABOVE this
+    ///      layer — and because the two mean different things: an expired order
+    ///      versus an expired nomination permit.
+    error SignerPermitExpired();
+
+    /// @dev EIP-712 type for a RELAYED delegate nomination. Independent of the
+    ///      `Order` type, so adding it leaves the order typehash — and the golden
+    ///      hash — untouched.
+    bytes32 private constant _ORDER_SIGNER_TYPEHASH =
+        keccak256("OrderSignerPermit(address maker,address signer,uint256 expiry,uint256 nonce,uint256 deadline)");
 
     constructor() {
         _CACHED_CHAIN_ID = block.chainid;
@@ -69,6 +80,53 @@ abstract contract Signatures is OrderState {
             digest := keccak256(0x1e, 0x42)
             mstore(0x40, fmp) // restore the free-memory pointer
         }
+    }
+
+    /// @notice Nominate (or revoke) a delegated order signer with a SIGNATURE
+    ///         instead of a transaction, so a maker with no gas can do it — the
+    ///         same audience the gasless-order flow exists for. Anyone may relay it;
+    ///         the permit carries its own authorization.
+    ///
+    ///  ⚠ NO RE-DELEGATION. The permit is verified against `maker` through the
+    ///  SHARED verifier ({SignatureVerification.verify}), NOT through
+    ///  {_verifySignature}'s delegated branch. A delegate therefore cannot appoint
+    ///  further delegates, and the nomination graph stays exactly one level deep:
+    ///  every delegate in the book was named by the maker whose orders it can sign.
+    ///  Do not "simplify" this into `_verifySignature`.
+    ///
+    ///  Replay protection reuses the maker's ORDER nonce bitmap rather than a
+    ///  private counter. Two things fall out for free: the permit can be consumed
+    ///  only once, and a maker can pre-emptively kill an outstanding nomination they
+    ///  never wanted relayed with the cancellation primitives they already have
+    ///  ({NonceManager.cancelOrders} / {invalidateNonceWord} / {rollbackNonces}).
+    ///  The cost is one nonce out of a 2^256 space.
+    ///
+    ///  A gasless REVOCATION (`expiry == 0`) is accepted too, but note it depends on
+    ///  someone relaying it. The unconditional kill switch is still the direct
+    ///  {OrderState.setOrderSigner}, plus the order-level gates that bind regardless
+    ///  ({cancelOrder}, nonce cancellation, deadlines, Permit3 revocation).
+    ///
+    /// @param maker    the delegator, and the address the permit must be signed by.
+    /// @param signer   the delegate being nominated (or revoked with `expiry == 0`).
+    /// @param expiry   unix time the delegation lapses at; see {orderSignerExpiry}.
+    /// @param nonce    a nonce from the maker's shared order-nonce space.
+    /// @param deadline unix time after which this permit may no longer be relayed.
+    function setOrderSignerWithSig(
+        address maker,
+        address signer,
+        uint256 expiry,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata sig
+    ) external {
+        if (block.timestamp > deadline) revert SignerPermitExpired();
+        if (_isNonceCancelled(maker, nonce)) revert NonceCancelled();
+        bytes32 digest =
+            _hashTypedData(keccak256(abi.encode(_ORDER_SIGNER_TYPEHASH, maker, signer, expiry, nonce, deadline)));
+        // Against `maker` ONLY — see the no-re-delegation note above.
+        SignatureVerification.verify(sig, digest, maker);
+        _cancelNonce(maker, nonce); // consume before the write; nothing external runs here
+        _setOrderSigner(maker, signer, expiry);
     }
 
     /// @dev Authorize `orderHash` for `expected` (the order's maker). Either the
@@ -128,8 +186,30 @@ abstract contract Signatures is OrderState {
         }
         if (filled[orderHash] != 0) return; // already authorized once — see above
         bytes32 digest = _hashTypedData(orderHash);
-        // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
-        // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
+        // Recover ONCE, then decide. The maker's own signature — the overwhelming
+        // majority — takes the first branch and pays exactly what it paid before
+        // delegation existed: one `ecrecover` and one compare, which is precisely
+        // the work {SignatureVerification.verify} would have done. The registry
+        // SLOAD sits behind a mismatch, so an ordinary fill never touches it.
+        (bool standardLength, address signer) = SignatureVerification.recoverCalldata(sig, digest);
+        if (standardLength && signer != address(0)) {
+            if (signer == expected) return;
+            // Not the maker — but the maker may have nominated this key. The lookup
+            // is keyed by the ORDER'S maker, so a delegate can only ever authorize
+            // orders that name the maker who nominated it. See
+            // {OrderState.orderSignerExpiry} for why that bound is the whole trust
+            // model.
+            uint256 expiry = orderSignerExpiry[expected][signer];
+            if (expiry != 0 && block.timestamp <= expiry) return;
+        }
+        // Everything else: EIP-1271 contract wallets, EIP-7702 accounts delegated to
+        // a 1271 wallet, and every failure — routed to the shared verifier so the
+        // revert reason stays exactly as precise as it was.
+        //
+        // COST NOTE: a CONTRACT maker whose 1271 signature happens to be 64 or 65
+        // bytes pays one extra (cold) SLOAD for the registry probe above before
+        // landing here. Safe wallets and the rest produce longer payloads, which
+        // `recoverCalldata` rejects on length alone, so they skip it entirely.
         SignatureVerification.verify(sig, digest, expected);
     }
 }

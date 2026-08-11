@@ -41,6 +41,53 @@ library SignatureVerification {
     // 0x7f followed by 31 bytes of 0xff — clears only the top bit (EIP-2098 `s`).
     bytes32 constant UPPER_BIT_MASK = (0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff);
 
+    /// @notice Recover the ECDSA signer of a standard-length signature.
+    /// @dev Split out of {verify} so a caller that needs to know WHO signed —
+    ///      rather than merely whether a named party did — can ask without
+    ///      duplicating the recovery, and without the two copies drifting. Used by
+    ///      {Signatures._verifySignature} for maker-delegated order signing.
+    /// @return standardLength whether the signature was 64/65 bytes, i.e. whether
+    ///         ECDSA recovery was attempted at all. Callers MUST check it:
+    ///         `signer == address(0)` alone cannot distinguish "not an ECDSA
+    ///         signature" from "an ECDSA signature that recovered to nothing", and
+    ///         {verify} takes a different branch for each.
+    /// @return signer the recovered address, or `address(0)`.
+    function recoverCalldata(bytes calldata signature, bytes32 hash)
+        internal
+        pure
+        returns (bool standardLength, address signer)
+    {
+        if (signature.length != 65 && signature.length != 64) return (false, address(0));
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        // Read the words STRAIGHT OUT OF CALLDATA. `abi.decode` on a `bytes
+        // calldata` copies the payload into a fresh memory buffer and decodes it
+        // back out; the words are already 32-byte aligned at `signature.offset`,
+        // so the copy was pure overhead — on a path every fill and every permit
+        // runs. `signature[64]` likewise carried a bounds check the enclosing
+        // length test has already made redundant.
+        if (signature.length == 65) {
+            /// @solidity memory-safe-assembly
+            assembly {
+                r := calldataload(signature.offset)
+                s := calldataload(add(signature.offset, 0x20))
+                v := byte(0, calldataload(add(signature.offset, 0x40)))
+            }
+        } else {
+            // EIP-2098 compact
+            bytes32 vs;
+            /// @solidity memory-safe-assembly
+            assembly {
+                r := calldataload(signature.offset)
+                vs := calldataload(add(signature.offset, 0x20))
+            }
+            s = vs & UPPER_BIT_MASK;
+            v = uint8(uint256(vs >> 255)) + 27;
+        }
+        return (true, ecrecover(hash, v, r, s));
+    }
+
     function verify(bytes calldata signature, bytes32 hash, address claimedSigner) internal view {
         // 1. Attempt ECDSA recovery for standard-length signatures. This covers
         //    plain EOAs and EIP-7702 accounts signing with their own key, since
@@ -48,35 +95,8 @@ library SignatureVerification {
         //    address. We only short-circuit on a positive match; a mismatch
         //    falls through to the EIP-1271 path so contract wallets that happen
         //    to use 64/65-byte signatures are still honoured.
-        if (signature.length == 65 || signature.length == 64) {
-            bytes32 r;
-            bytes32 s;
-            uint8 v;
-            // Read the words STRAIGHT OUT OF CALLDATA. `abi.decode` on a `bytes
-            // calldata` copies the payload into a fresh memory buffer and decodes it
-            // back out; the words are already 32-byte aligned at `signature.offset`,
-            // so the copy was pure overhead — on a path every fill and every permit
-            // runs. `signature[64]` likewise carried a bounds check the enclosing
-            // length test has already made redundant.
-            if (signature.length == 65) {
-                /// @solidity memory-safe-assembly
-                assembly {
-                    r := calldataload(signature.offset)
-                    s := calldataload(add(signature.offset, 0x20))
-                    v := byte(0, calldataload(add(signature.offset, 0x40)))
-                }
-            } else {
-                // EIP-2098 compact
-                bytes32 vs;
-                /// @solidity memory-safe-assembly
-                assembly {
-                    r := calldataload(signature.offset)
-                    vs := calldataload(add(signature.offset, 0x20))
-                }
-                s = vs & UPPER_BIT_MASK;
-                v = uint8(uint256(vs >> 255)) + 27;
-            }
-            address signer = ecrecover(hash, v, r, s);
+        (bool standardLength, address signer) = recoverCalldata(signature, hash);
+        if (standardLength) {
             if (signer != address(0) && signer == claimedSigner) return;
             // A standard-length signature that does not recover to the signer
             // is only salvageable via EIP-1271; for a plain EOA it is final.
