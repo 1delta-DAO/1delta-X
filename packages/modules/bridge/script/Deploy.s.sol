@@ -42,8 +42,10 @@ import {BridgedOrderInbox} from "../src/BridgedOrderInbox.sol";
 ///  Optional env: ACROSS_SPOKE_POOL, LZ_ENDPOINT (zero disables that path),
 ///                INBOX_OWNER (omit to skip the shared inbox entirely).
 contract DeployScript is Script {
-    /// @dev Never change this. It is an input to every funnel address ever
-    ///      predicted for this deployment.
+    /// @dev PLACEHOLDER — the real preimage is chosen at rollout and is not
+    ///      committed here (see `docs/deterministic-deployment.md` §1). Once a
+    ///      rollout begins, the chosen value must never change: it is an input to
+    ///      every funnel address ever predicted for that deployment.
     bytes32 constant SALT = keccak256("1delta.bridge.v1");
 
     function run() public {

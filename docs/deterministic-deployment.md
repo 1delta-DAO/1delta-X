@@ -33,10 +33,25 @@ function computeAddress(bytes32 salt, bytes32 bytecodeHash) external view return
 
 Three properties to keep in mind:
 
-- **The salt is not sender-scoped**, and `deploy` has no access control. On a
-  chain you have not deployed to yet, anyone can occupy your salt with different
-  code and permanently burn that address there. Derive salts from a preimage you
-  do not publish until the rollout is complete.
+- **The salt is not sender-scoped**, and `deploy` has no access control — anyone
+  may call it with any salt. This does *not* let a stranger plant hostile code at
+  an address you predicted: the CREATE2 address binds `keccak256(init_code)`, and
+  constructor arguments are part of init code, so different code (or different
+  args) lands at a *different* address. What it does allow, once your constructor
+  inputs are public, is someone deploying your **byte-identical** contract at your
+  address on a chain you have not reached yet. The contract is then the one you
+  wanted — but your own run reverts on collision, and you must verify the deployed
+  code rather than assume it. Two consequences:
+  - **Keep every deployed contract's configuration inside its constructor.** The
+    guarantee above holds only because nothing here is configured by a
+    post-deployment initializer. An initializer-configured contract (any proxy
+    pattern) has an address that does *not* bind its config, and that address is
+    genuinely squattable by whoever calls first.
+  - **Still derive salts from a preimage you do not publish until the rollout is
+    complete** — defence in depth, and it keeps predicted addresses out of reach
+    of griefers before you are ready to use them. The salt in
+    [`bridge/script/Deploy.s.sol`](../packages/modules/bridge/script/Deploy.s.sol)
+    is a placeholder for exactly this reason.
 - **No value forwarding** — `deploy` is not payable. None of our constructors
   need ETH, so this is fine, but it rules out funding at construction.
 - **No event** — the deployment registry has to be maintained off-chain.

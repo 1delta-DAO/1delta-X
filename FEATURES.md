@@ -516,8 +516,10 @@ Stated plainly, so nothing here reads as more finished than it is.
   gas per fill and is the documented next step; the measured size/gas curve is in
   [`foundry.toml`](foundry.toml). Weigh any further *core* feature against this —
   modules cost nothing here.
-- **Docs drift** — the top-level [README.md](README.md) architecture sketch
-  predates the Permit3 rewrite. This file, [SECURITY.md](SECURITY.md), the
+- **Docs drift** — the top-level [README.md](README.md) is now a front door
+  (status, repo map, build commands) rather than an architecture sketch, so it
+  has nothing to drift *from*; the architecture lives here. This file,
+  [SECURITY.md](SECURITY.md), the
   [settlement README](packages/core/src/settlement/README.md), and
   [docs/](docs/README.md) are current.
 - **Breaking signing-format changes** — the 2026-07 audit changed the encoding

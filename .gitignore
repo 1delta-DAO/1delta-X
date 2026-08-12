@@ -9,7 +9,10 @@ node_modules/
 cache/
 broadcast/
 
-# Fundraising / positioning material — kept locally, never published with the
-# protocol source. Also excluded from the pnpm workspace so a fresh clone (where
-# this directory does not exist) still resolves the lockfile cleanly.
+# TypeScript build output. `sdk` and `orderbook` carry their own `dist/` ignore;
+# this covers `orderbook-server`, whose compiled output was tracked by accident.
+packages/orderbook-server/dist/
+
+# Local-only working directory. Also excluded from the pnpm workspace so a fresh
+# clone (where this directory does not exist) still resolves the lockfile cleanly.
 packages/pitch-deck/
