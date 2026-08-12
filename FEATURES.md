@@ -418,9 +418,15 @@ no funds between fills:
   hash against the contract's `hashOrder` byte-for-byte.
 - [`@1delta-x/orderbook`](packages/orderbook/README.md) — transport-agnostic
   order distribution: protobuf wire format, a two-layer verification pipeline
-  (local recover/deadline/shape, then one on-chain lens call, TTL-cached), an
-  in-memory `Book` with expiry and signed soft-cancel eviction. The `Transport`
-  seam lets the same book run in-memory, over HTTP, or over Waku unchanged.
+  (local recover/deadline/shape, then a **chunked** on-chain lens call,
+  TTL-cached), an in-memory `Book` with expiry, signed soft-cancel eviction, and
+  atomic cancel-and-replace. Eviction is **event-driven**: `ChainWatcher` turns
+  Settlement logs into evictions with **zero RPC** — a cancellation event carries
+  maker plus which hash/nonces died, and one `GroupClaimed` retires every sibling
+  of an OCO bracket — so the periodic sweep is a safety net for what no log can
+  announce (a maker's balance falling away) rather than the primary signal. The
+  `Transport` seam lets the same book run in-memory, over HTTP, or over Waku
+  unchanged.
 - [`@1delta-x/orderbook-server`](packages/orderbook-server/README.md) — a Fastify
   REST/WS reference backend.
 - [docs/waku-orderbook.md](docs/waku-orderbook.md) — the decentralized transport

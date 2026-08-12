@@ -28,8 +28,9 @@ maker/filler ── HttpTransport ──▶ demo backend ── InMemoryTranspor
 | `config` | `OrderbookConfig` (+ `lens`), `rootstockTestnetConfig`, `toDeployment`. |
 | `transport` | `Transport` interface + `InMemoryTransport`. |
 | `cancels` | `CancelVerifier` — EIP-712 soft-cancel signatures under the same signer set the settlement accepts for an order (EOA locally, delegate + EIP-1271 via one call); `evictableHashes` for the separate ownership check. See [docs/soft-cancel.md](../../docs/soft-cancel.md). |
-| `verify` | `Verifier` — Layer 1 (local recover/deadline/shape) + Layer 2 (one `SettlementLens.getOrderRelevantStates` call) with a TTL cache. |
-| `book` | `Book` — backfill → subscribe → verify → keyed map, with expiry, signed soft-cancel eviction, atomic `ingestReplace` (admit-then-retract), and periodic on-chain re-check. |
+| `watcher` | `ChainWatcher` — turns Settlement (and `OcoGroupModule`) logs into normalized `ChainEvent`s. Four of the five evict with **zero RPC**; `GroupClaimed` retires N−1 bracket siblings from one log. |
+| `verify` | `Verifier` — chunked (`batchSize`, default 100) so a growing book cannot walk into the provider's `eth_call` gas cap and revert wholesale — Layer 1 (local recover/deadline/shape) + Layer 2 (one `SettlementLens.getOrderRelevantStates` call) with a TTL cache. |
+| `book` | `Book` — backfill → subscribe → verify → keyed map, with expiry, signed soft-cancel eviction, atomic `ingestReplace` (admit-then-retract), `applyChainEvent` (event-driven eviction, O(changed)), an `evictWhen` policy hook, `onError`, and a periodic sweep as the safety net. |
 | `client` | `HttpTransport` (Transport over the demo backend), `OrderbookClient`, `signSoftCancel`. |
 
 ## Verification pipeline

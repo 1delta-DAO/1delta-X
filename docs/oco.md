@@ -146,8 +146,14 @@ const stopLoss = ocoGroupLeg(
 Groups are isolated (a random 256-bit `groupId` keeps a maker's unrelated
 brackets apart) and maker-scoped (one maker's bracket cannot retire another's).
 `isRetiredFor(maker, groupId, nonce)` is the exact predicate an off-chain book
-needs to evict a sibling, and the `GroupClaimed` event lets an indexer do it the
-moment the winner lands rather than after a failed fill proves it.
+needs to evict a sibling, and the `GroupClaimed` event lets it do so the moment
+the winner lands rather than after a failed fill proves it. `ChainWatcher` wires
+that up: one log retires N−1 legs with no view call. This matters more than it
+looks, because a book does **not** evict on `validatorsPass: false` by default —
+a filler-conditional order (whitelist, attestation) fails validation for everyone
+but its target filler and is still book-worthy — so without the event a retired
+leg lingers and every solver that tries it burns ~21.8k gas discovering it is
+dead.
 
 ---
 

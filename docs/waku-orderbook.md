@@ -224,6 +224,19 @@ amortized.
   re-simulates immediately before broadcast and the on-chain fill reverts
   harmlessly. Layer 2 is a **prioritization/spam filter, not a guarantee**; the
   guarantee is the contract.
+- **Stale-book drift.** A book that only polls learns about a cancellation up to
+  a full sweep period late, and pays O(book) view gas per sweep to do it. The
+  chain already broadcasts the fact: `OrderCancelledByHash`, `OrdersCancelled`,
+  `NoncesRolledBack` and `NonceWordInvalidated` each carry the maker plus exactly
+  which orders died, so a watcher evicts them with **no view call at all**, and
+  `OcoGroupModule.GroupClaimed` retires every other leg of a bracket from a single
+  log. `OrderFilled` is the one that still needs a follow-up read — it says an
+  order moved, not how far — so it only marks that order for a targeted re-check.
+  The sweep stays, scoped to what no log can announce: a maker's balance or
+  allowance falling away underneath a still-valid order. It must also be
+  **chunked** — an unchunked `getOrderRelevantStates` over a growing book
+  eventually exceeds the provider's `eth_call` gas cap and reverts wholesale,
+  which would read as "every order is un-fillable" and evict the entire book.
 - **Soft-cancel spoofing.** Two independent checks, both required. The EIP-712
   signature says WHO signed (EOA locally, delegate or EIP-1271 maker via one
   `eth_call`); the book then evicts a hash only if the order it holds names THAT
