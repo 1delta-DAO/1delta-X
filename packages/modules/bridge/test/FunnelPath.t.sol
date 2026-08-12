@@ -76,6 +76,7 @@ contract FunnelPathTest is BridgeTestBase {
                 dstRecipient: address(funnel), // straight to the user's own account
                 exclusiveRelayer: address(0),
                 maxRelayFeeBps: RELAY_FEE_BPS,
+                dstScalingFactor: 0,
                 fillDeadlineOffset: 2 hours,
                 exclusivityOffset: 0,
                 dstOrderHash: bytes32(0), // no commitment — the order is owner-signed

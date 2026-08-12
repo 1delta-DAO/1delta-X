@@ -126,14 +126,93 @@ the floor is fail-safe: the order simply never activates and the funds come back
 
 ## Bridge paths
 
-| | Across | Stargate V2 | OFT (USDT0) |
-|---|---|---|---|
-| source module | `AcrossBridgeOutModule` | `LzOftBridgeOutModule` | `LzOftBridgeOutModule` |
-| arrival | atomic (relayer's fill tx) | two txs (`lzReceive`, then `lzCompose`) | two txs |
-| destination hook | `handleV3AcrossMessage` | `lzCompose` | `lzCompose` |
-| native messaging fee | none | yes → `nativeCredit` ledger | yes |
-| delivery floor | `outputAmount`, exact | `minAmountLD` | `minAmountLD` (dust only) |
-| **revert posture** | **must revert on bad input** | **must never revert** | **must never revert** |
+| | Across | Stargate V2 | OFT (USDT0) | CCTP |
+|---|---|---|---|---|
+| source module | `AcrossBridgeOutModule` | `LzOftBridgeOutModule` | `LzOftBridgeOutModule` | `CctpBridgeOutModule` |
+| arrival | atomic (relayer's fill tx) | two txs (`lzReceive`, then `lzCompose`) | two txs | mint after Circle attestation |
+| destination hook | `handleV3AcrossMessage` | `lzCompose` | `lzCompose` | **none — plain mint** |
+| native messaging fee | none | yes → `nativeCredit` ledger | yes | none |
+| delivery floor | `outputAmount`, exact | `minAmountLD` | `minAmountLD` (dust only) | **the amount itself — burn == mint** |
+| destination host | inbox or funnel | inbox or funnel | inbox or funnel | **funnel only** |
+| **revert posture** | **must revert on bad input** | **must never revert** | **must never revert** | n/a — nothing to handle |
+
+### CCTP: no fee, no counterparty, funnel only
+
+CCTP is burn-and-mint rather than a liquidity network, which makes it the odd one
+out in both directions. There is no relayer and no LP on v1, so the mint equals
+the burn exactly — the tightest delivery floor available here, and the only one a
+destination order can be authored against with no slack at all. Nothing can
+under-fill it, because nothing is fronting capital.
+
+But `depositForBurn` carries **tokens only**. There is no message field, so this
+path cannot carry the `CommitmentCodec` payload that authorises a destination
+order on the shared `BridgedOrderInbox` — USDC sent to the inbox over CCTP would
+arrive unattributed and no commitment would ever claim it. `CctpSpec` therefore
+has no `dstOrderHash` **field at all**, rather than one that must be zero: a
+parameter with exactly one legal value is a trap. The destination host must be a
+`PositionFunnel`, whose order is owner-signed and validated through its EIP-1271.
+
+Routing the inbox path over CCTP needs v2's `depositForBurnWithHook`, which is a
+different messenger ABI and a separate module.
+
+#### Who pays for the mint
+
+CCTP v1 has **no destination-side incentive**. The mint only happens when someone
+calls `MessageTransmitter.receiveMessage(message, attestation)` on the destination
+chain, and that costs gas. Across pays its relayer out of the token amount;
+LayerZero charges a native messaging fee at the source. CCTP charges nothing and
+therefore pays nobody — which is exactly why it has no fee.
+
+**The solver does both calls in one transaction of its own:**
+
+```
+solver tx:
+  1. MessageTransmitter.receiveMessage(message, attestation)   → USDC minted to the funnel
+  2. settlement.fill(destinationOrder, sig, amount)            → funnel funds the order
+```
+
+and the destination order's **rising input leg** pays the solver for the combined
+gas — the same flagless relayer-fee mechanism a gasless deposit uses, gas-indexed
+through `gasBumpBps` / `gasPriceRef` so it escalates on its own until someone finds
+it profitable. Nothing new is required: `fill` is permissionless, and a solver's
+transaction may do anything it likes before it.
+
+⚠ It cannot be an ITEM on the destination order. Items receive only maker-signed
+`data` — no filler-supplied channel reaches them — and the Circle attestation does
+not exist when the user signs. So this is necessarily solver-side batching, not
+order-side composition.
+
+**If nobody submits**, the funds are un-minted rather than lost: the burn already
+happened and the attestation stays redeemable, so the user or anyone else can
+submit later and the rising fee leg keeps climbing until the economics work. Stuck,
+not gone. (Verify attestation longevity against Circle's docs before mainnet, on
+the same footing as the ABI-risk note in `ICctp.sol`.)
+
+**Correlation is off-chain, and `CctpBurn` is what makes it possible.** Because no
+payload crosses, nothing on either chain says which order a burn funds. The source
+module emits `CctpBurn(nonce, dstDomain, recipient, token, amount)` — Circle's
+message nonce is the key an indexer pairs with the published attestation, and the
+recipient funnel is what an orderbook matches outstanding destination orders
+against. The other two paths need no such event; their commitment does this
+on-chain and the inbox emits `Credited`.
+
+⚠ CCTP routes on Circle's own **domain id**, which is unrelated to the EVM chain
+id (Ethereum is domain 0). `CctpSpec` carries both: the domain is what routes, the
+chain id is what `_checkDestination` sanity-checks. Dropping the chain id would
+lose that check entirely, since domain 0 is indistinguishable from unset.
+
+### Cross-chain decimals
+
+`AcrossSpec.dstScalingFactor` (`int8`, `destinationDecimals - sourceDecimals`)
+converts the delivery floor into the destination token's denomination. `0` — every
+route shipped so far — is the identity and costs one comparison.
+
+It matters because the failure is silent. Across enforces `outputAmount` in
+destination decimals while the item receives `amount` in source decimals, so a
+pair whose decimals differ across chains (USDT 6/18, WBTC 8/18) sets a floor wrong
+by a power of ten without reverting. `BridgeOutBase._scaleToDest` rounds DOWN,
+which keeps the floor reachable rather than demanding more value than the source
+amount is worth. CCTP has no equivalent field — see above.
 
 That last row is the one to internalize. For Across, a reverting handler unwinds the
 relayer's fill, so they skip the deposit and it refunds on the origin chain — nothing

@@ -30,6 +30,7 @@ contract AcrossPathTest is BridgeTestBase {
                 dstRecipient: address(inbox),
                 exclusiveRelayer: address(0),
                 maxRelayFeeBps: RELAY_FEE_BPS,
+                dstScalingFactor: 0,
                 fillDeadlineOffset: 2 hours,
                 exclusivityOffset: 0,
                 dstOrderHash: dstOrderHash,
@@ -139,7 +140,8 @@ contract AcrossPathTest is BridgeTestBase {
                 dstChainId: DST_CHAIN,
                 dstRecipient: address(inbox),
                 exclusiveRelayer: address(0),
-                maxRelayFeeBps: 5_000, // 50%
+                maxRelayFeeBps: 5_000,
+                dstScalingFactor: 0, // 50%
                 fillDeadlineOffset: 2 hours,
                 exclusivityOffset: 0,
                 dstOrderHash: _hashOrder(dst),

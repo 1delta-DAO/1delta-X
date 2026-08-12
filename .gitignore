@@ -1,5 +1,11 @@
 node_modules/
-out/
+# ANCHORED. Unanchored, `out/` matches a directory named `out` at ANY depth — which
+# silently swallowed `packages/modules/bridge/src/out/`, the bridge-out SOURCE
+# modules, so none of them were ever tracked. Every foundry profile in
+# `foundry.toml` writes under the repo-root `out/`, so anchoring loses nothing.
+# `cache/` and `broadcast/` stay unanchored on purpose: they DO have legitimate
+# nested instances (e.g. `packages/core/cache/`).
+/out/
 cache/
 broadcast/
 

@@ -38,6 +38,7 @@ contract ChainBindingTest is BridgeTestBase {
                 dstRecipient: dstRecipient,
                 exclusiveRelayer: address(0),
                 maxRelayFeeBps: 100,
+                dstScalingFactor: 0,
                 fillDeadlineOffset: 2 hours,
                 exclusivityOffset: 0,
                 dstOrderHash: bytes32(0),

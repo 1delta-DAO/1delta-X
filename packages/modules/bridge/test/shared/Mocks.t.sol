@@ -191,3 +191,42 @@ contract MockOFT {
         endpoint.deliverCompose(address(uint160(uint256(s.to))), address(this), bytes32(uint256(i + 1)), payload);
     }
 }
+
+/// @dev Circle CCTP v1 TokenMessenger. Records the burn and actually takes the
+///      tokens, so a test can assert both what was requested and that the module
+///      ends up holding nothing.
+contract MockTokenMessenger {
+    struct Burn {
+        uint256 amount;
+        uint32 destinationDomain;
+        bytes32 mintRecipient;
+        address burnToken;
+    }
+
+    Burn[] internal _burns;
+    uint64 internal _nonce;
+
+    function burnCount() external view returns (uint256) {
+        return _burns.length;
+    }
+
+    function burnAt(uint256 i) external view returns (Burn memory) {
+        return _burns[i];
+    }
+
+    function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken)
+        external
+        returns (uint64)
+    {
+        _burns.push(Burn(amount, destinationDomain, mintRecipient, burnToken));
+        // CCTP pulls the burn amount from the caller's balance.
+        IERC20Like(burnToken).transferFrom(msg.sender, address(this), amount);
+        unchecked {
+            return ++_nonce;
+        }
+    }
+}
+
+interface IERC20Like {
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+}
