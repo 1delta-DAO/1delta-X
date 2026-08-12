@@ -1,5 +1,5 @@
 import { packOrder } from "./packed";
-import { encodeFunctionData, hashStruct, hashTypedData, keccak256, type Hex } from "viem";
+import { encodeFunctionData, hashStruct, hashTypedData, keccak256, type Address, type Hex } from "viem";
 
 import { SETTLEMENT_ABI } from "./abi";
 import { ORDER_TYPES, settlementDomain } from "./eip712";
@@ -59,7 +59,25 @@ export function encodeFillWithPermit(order: Order, batch: PermitBatch, sig: Hex,
   });
 }
 
-/** `settlement.cancelOrders(nonces)` — maker self-service. */
+// ──────────────────── Cancellation ────────────────────
+//
+// Four on-chain granularities. Pick the narrowest one that expresses the intent:
+// nonce cancellation is BULK (every order carrying that nonce dies), which is
+// the right tool for a bracket and the wrong one for a single re-price.
+// The free off-chain complement is `softcancel.ts`.
+
+/**
+ * `settlement.cancelOrder(order)` — cancel exactly ONE order, by hash. Orders
+ * that happen to share its nonce stay fillable. Parks the order's `filled`
+ * counter at the max sentinel, which the fill path already reads, so this costs
+ * the hot path nothing. Works on a partially-filled order (the remainder becomes
+ * unfillable).
+ */
+export function encodeCancelOrder(order: Order): Hex {
+  return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "cancelOrder", args: [packOrder(order) as never] });
+}
+
+/** `settlement.cancelOrders(nonces)` — cancel every order carrying any of these nonces. */
 export function encodeCancelOrders(nonces: readonly bigint[]): Hex {
   return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "cancelOrders", args: [nonces] });
 }
@@ -67,4 +85,23 @@ export function encodeCancelOrders(nonces: readonly bigint[]): Hex {
 /** `settlement.invalidateNonceWord(wordIndex)` — cancels 256 nonces at once. */
 export function encodeInvalidateNonceWord(wordIndex: bigint): Hex {
   return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "invalidateNonceWord", args: [wordIndex] });
+}
+
+/**
+ * `settlement.rollbackNonces(minValid)` — invalidate every nonce below a
+ * watermark in one write. The panic button: one transaction retires an entire
+ * outstanding book. Monotonic, so it can never be walked back.
+ */
+export function encodeRollbackNonces(newMinValidNonce: bigint): Hex {
+  return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "rollbackNonces", args: [newMinValidNonce] });
+}
+
+/** `settlement.approveOrder(order)` — the signature-less authorization path. */
+export function encodeApproveOrder(order: Order): Hex {
+  return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "approveOrder", args: [packOrder(order) as never] });
+}
+
+/** `settlement.setOrderSigner(signer, expiry)` — nominate a delegated signer (`0` revokes). */
+export function encodeSetOrderSigner(signer: Address, expiry: bigint): Hex {
+  return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "setOrderSigner", args: [signer, expiry] });
 }

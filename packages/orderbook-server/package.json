@@ -1,5 +1,6 @@
 {
   "name": "@1delta-x/orderbook-server",
+  "license": "MIT",
   "version": "0.0.1",
   "description": "Demo centralized orderbook backend for UniversalSettlement — a Fastify REST + WebSocket access layer over @1delta-x/orderbook's verified Book. Protobuf wire; config-driven testnet deployment.",
   "type": "module",

@@ -1,5 +1,6 @@
 {
   "name": "@1delta-x/sdk",
+  "license": "MIT",
   "version": "0.0.1",
   "description": "TypeScript SDK for building UniversalSettlement order + solver calldata",
   "type": "module",

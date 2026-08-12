@@ -58,14 +58,16 @@ export class Verifier {
   private readonly cache = new Map<Hex, CacheEntry>();
   private readonly cacheTtlMs: number;
   private readonly now: () => number;
+  private readonly batchSize: number;
 
   constructor(
     private readonly client: PublicClient,
     private readonly config: OrderbookConfig,
-    opts?: { cacheTtlMs?: number; now?: () => number },
+    opts?: { cacheTtlMs?: number; now?: () => number; batchSize?: number },
   ) {
     this.cacheTtlMs = opts?.cacheTtlMs ?? 15_000;
     this.now = opts?.now ?? (() => Math.floor(Date.now() / 1000));
+    this.batchSize = Math.max(1, opts?.batchSize ?? 100);
   }
 
   /** Layer 1 — local, no RPC. `deferSig` means the sig can only be judged by Layer 2. */
@@ -105,9 +107,28 @@ export class Verifier {
     return { ok: true, orderHash, deferSig: true };
   }
 
-  /** Layer 2 — one `getOrderRelevantStates` view call over the whole batch. No cache. */
+  /**
+   * Layer 2 — `getOrderRelevantStates` over the batch, CHUNKED. No cache.
+   *
+   * The chunking is not a micro-optimization, it is a correctness bound. Each
+   * order in the call costs an external call, an order hash, cold
+   * balance/allowance reads and one staticcall per validator — roughly 25–60k of
+   * view gas. An unchunked call over a growing book therefore walks into the
+   * provider's `eth_call` gas cap (30–50M, so somewhere past a few hundred to a
+   * couple of thousand orders) and starts reverting WHOLESALE. Every order in
+   * the book would then read as un-fillable at once, which is the worst possible
+   * failure: a periodic re-check that evicts the entire book. Chunks keep one
+   * bad or oversized order's blast radius to its own chunk.
+   */
   async verifyLayer2(entries: readonly { order: Order; sig: Hex; sigless?: boolean }[]): Promise<Layer2Result[]> {
     if (entries.length === 0) return [];
+    if (entries.length > this.batchSize) {
+      const out: Layer2Result[] = [];
+      for (let i = 0; i < entries.length; i += this.batchSize) {
+        out.push(...(await this.verifyLayer2(entries.slice(i, i + this.batchSize))));
+      }
+      return out;
+    }
     const orders = entries.map((e) => e.order);
     const sigs = entries.map((e) => e.sig);
     const takerDatas = entries.map(() => "0x" as Hex);

@@ -19,8 +19,9 @@ to it. Protobuf on the wire throughout; the chain stays the source of truth.
 | POST | `/orders` | protobuf `OrderAnnounce` | `202 {orderHash}` or `422 {error}` |
 | GET | `/orders` | `?maker=&tokenIn=&tokenOut=&side=` | protobuf `OrderList` |
 | GET | `/orders/:hash` | — | protobuf `OrderAnnounce` / `404` |
-| POST | `/cancels` | protobuf `OrderSoftCancel` | `202` / `403` (not maker) / `404` |
-| GET | `/stream` | WebSocket | `SNAPSHOT` then live `ADD` / `CANCEL` frames |
+| POST | `/cancels` | protobuf `SoftCancel` | `202 {evicted}` / `403` (bad signature) |
+| POST | `/replaces` | protobuf `OrderReplace` | `202 {orderHash, replaces}` / `422` |
+| GET | `/stream` | WebSocket | `SNAPSHOT` then live `ADD` / `CANCEL` / `REPLACE` frames |
 | GET | `/health` | — | `{chainId, settlement, permit3, lens, orders}` |
 
 Ingest runs the two-layer self-authenticating pipeline (local recover + deadline,

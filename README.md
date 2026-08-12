@@ -131,3 +131,12 @@ Planned features inspired by 1inch Limit Orders and CoW Protocol:
 - **ERC-1271 signatures** — smart wallet / Safe multisig support
 - **Swap guards** — optional policy enforcement contracts for DAOs and institutional users
 - **Extension system** — hash-committed optional blob for predicates, permits, and interactions (keeps base order struct minimal)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Every first-party Solidity source carries an `// SPDX-License-Identifier: MIT`
+header. Third-party code that ships in this repository — most notably the
+Permit3 sources under `packages/core/src/permit3/`, which are derived from
+Uniswap's (MIT-licensed) Permit2 — is attributed in [NOTICE](NOTICE).

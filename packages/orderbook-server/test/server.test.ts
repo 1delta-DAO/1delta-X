@@ -5,7 +5,7 @@ import {
   decodeOrderList,
   decodeStreamMessage,
   encodeOrderAnnounce,
-  encodeOrderSoftCancel,
+  encodeSoftCancel,
   InMemoryTransport,
   signSoftCancel,
   StreamKind,
@@ -134,9 +134,22 @@ describe("orderbook backend", () => {
       method: "POST",
       url: "/cancels",
       headers: { "content-type": "application/x-protobuf" },
-      payload: Buffer.from(encodeOrderSoftCancel(await signSoftCancel(stranger, orderHash))),
+      payload: Buffer.from(encodeSoftCancel(await signSoftCancel(stranger, stranger.address, [orderHash], config))),
     });
-    expect(bad.statusCode).toBe(403);
+    // Signature is valid, but the stranger owns none of the named orders — the
+    // cancel is accepted and evicts nothing.
+    expect(bad.statusCode).toBe(202);
+    expect(bad.json().evicted).toEqual([]);
+    expect(server.book.size).toBe(1);
+
+    // Claiming to BE the maker without the maker's key → rejected outright.
+    const forged = await server.app.inject({
+      method: "POST",
+      url: "/cancels",
+      headers: { "content-type": "application/x-protobuf" },
+      payload: Buffer.from(encodeSoftCancel(await signSoftCancel(stranger, account.address, [orderHash], config))),
+    });
+    expect(forged.statusCode).toBe(403);
     expect(server.book.size).toBe(1);
 
     // Maker's own signature → 202, evicted.
@@ -144,7 +157,7 @@ describe("orderbook backend", () => {
       method: "POST",
       url: "/cancels",
       headers: { "content-type": "application/x-protobuf" },
-      payload: Buffer.from(encodeOrderSoftCancel(await signSoftCancel(account, orderHash))),
+      payload: Buffer.from(encodeSoftCancel(await signSoftCancel(account, account.address, [orderHash], config))),
     });
     expect(ok.statusCode).toBe(202);
     await vi.waitFor(() => expect(server!.book.size).toBe(0));

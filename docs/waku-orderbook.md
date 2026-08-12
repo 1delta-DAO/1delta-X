@@ -82,14 +82,18 @@ does not justify sharding yet. Payloads are protobuf (`proto`).
 Message types:
 
 1. **`OrderAnnounce`** — `{ order, sig, permitBatch?, sigless? }`. The whole payload.
-2. **`OrderSoftCancel`** — `{ orderHash, makerSig }`. The *hard* cancel is
-   on-chain ([`cancelOrders` / `rollbackNonces` / `invalidateNonceWord`](../packages/core/src/settlement/NonceManager.sol),
+2. **`SoftCancel`** — `{ maker, orderHashes[], issuedAt, expiry, sig }`, signed
+   as EIP-712 in the **Settlement domain**. The *hard* cancel is on-chain
+   ([`cancelOrders` / `rollbackNonces` / `invalidateNonceWord`](../packages/core/src/settlement/NonceManager.sol),
    plus per-hash [`cancelOrder`](../packages/core/src/settlement/OrderState.sol)),
    but that costs a Rootstock tx and a block. A signed soft-cancel lets fillers
-   drop the order from their books instantly; they still treat the on-chain
-   nonce as ground truth. **Must carry the maker's signature over the
-   `orderHash`** — otherwise anyone could evict anyone's orders (see spoofing
-   note below).
+   drop orders from their books instantly — one signature for a whole quote set —
+   while still treating the on-chain nonce as ground truth. Full spec:
+   [soft-cancel.md](soft-cancel.md).
+3. **`OrderReplace`** — `{ cancel, announce, replaces }`. Cancel-and-replace as
+   one message, so a re-price is one event rather than a remove racing an add.
+   Both halves are independently signed; a node that cannot verify either applies
+   neither.
 3. **`FillNotice`** *(optional)* — a filler hints "I'm taking this" to reduce
    wasted races. Purely advisory; `filled[orderHash]` on-chain is authoritative.
 4. **`RFQ`** — a taker/maker requests a quote, for the `exclusiveFiller` path.
@@ -220,10 +224,13 @@ amortized.
   re-simulates immediately before broadcast and the on-chain fill reverts
   harmlessly. Layer 2 is a **prioritization/spam filter, not a guarantee**; the
   guarantee is the contract.
-- **Soft-cancel spoofing.** An `OrderSoftCancel` must carry the maker's
-  signature over the `orderHash`; unsigned/mis-signed cancels drop at Layer 1,
-  so you can only soft-cancel your own orders. The hard cancel (nonce) is ground
-  truth regardless.
+- **Soft-cancel spoofing.** Two independent checks, both required. The EIP-712
+  signature says WHO signed (EOA locally, delegate or EIP-1271 maker via one
+  `eth_call`); the book then evicts a hash only if the order it holds names THAT
+  maker. Without the second check a valid signature over somebody else's order
+  hash would evict it. The Settlement domain also binds the message to one chain
+  and one deployment, so a cancel cannot be replayed across them. The hard cancel
+  (nonce, or per-hash) is ground truth regardless.
 
 ### Policy: strict vs optimistic ingest
 

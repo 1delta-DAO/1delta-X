@@ -1,7 +1,10 @@
 import {
   Book,
+  CancelVerifier,
+  ChainWatcher,
   decodeOrderAnnounce,
-  decodeOrderSoftCancel,
+  decodeOrderReplace,
+  decodeSoftCancel,
   encodeOrderAnnounce,
   encodeOrderList,
   encodeStreamMessage,
@@ -14,7 +17,7 @@ import {
 import { encodeFillUpTo, SETTLEMENT_LENS_ABI } from "@1delta-x/sdk";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
-import { createPublicClient, http, recoverMessageAddress, type Address, type Hex, type PublicClient } from "viem";
+import { createPublicClient, http, type Address, type Hex, type PublicClient } from "viem";
 import type { WebSocket as WsWebSocket } from "ws";
 
 const PROTOBUF_CONTENT_TYPES = ["application/x-protobuf", "application/protobuf", "application/octet-stream"];
@@ -25,6 +28,18 @@ export interface BuildServerOptions {
   client?: PublicClient;
   /** Inject a verifier (tests use a stub to skip the chain). */
   verifier?: Verifier;
+  /** Inject the soft-cancel verifier (tests). */
+  cancelVerifier?: CancelVerifier;
+  /**
+   * Watch Settlement logs so cancellations evict immediately and for free,
+   * instead of waiting for the O(book) sweep. Off by default because it opens a
+   * live log subscription — every test would otherwise start polling a chain.
+   * Pass `true` (needs a real `rpcUrl`) or inject a preconfigured watcher.
+   */
+  watchChain?: boolean;
+  watcher?: ChainWatcher;
+  /** {OcoGroupModule} addresses to watch `GroupClaimed` on — retires bracket siblings. */
+  ocoModules?: Address[];
   /** Inject the internal bus (tests). */
   transport?: InMemoryTransport;
   /** Inject a preconfigured book (tests: e.g. `revalidateMs: 0`). */
@@ -51,8 +66,9 @@ export interface OrderbookServer {
  *   POST /orders        protobuf OrderAnnounce  → verify (L1+L2) → publish  → 202
  *   GET  /orders        → protobuf OrderList (filters: maker,tokenIn,tokenOut,side)
  *   GET  /orders/:hash  → protobuf OrderAnnounce
- *   POST /cancels       protobuf OrderSoftCancel → verify maker sig → evict → 202
- *   GET  /stream (ws)   → SNAPSHOT then live ADD / CANCEL StreamMessages
+ *   POST /cancels       protobuf SoftCancel → verify EIP-712 sig → evict → 202
+ *   POST /replaces      protobuf OrderReplace → admit new, retract old → 202
+ *   GET  /stream (ws)   → SNAPSHOT then live ADD / CANCEL / REPLACE StreamMessages
  *   GET  /quote         → JSON fill quote + ready-to-send `fillUpTo` calldata
  *   GET  /health        → chain config + book size
  */
@@ -70,7 +86,21 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
   let clientInst: PublicClient | undefined = opts.client;
   const getClient = (): PublicClient => (clientInst ??= createPublicClient({ transport: http(config.rpcUrl) }));
   const verifier = opts.verifier ?? new Verifier(getClient(), config);
-  const book = opts.book ?? new Book({ transport, config, verifier });
+  const cancelVerifier = opts.cancelVerifier ?? new CancelVerifier(getClient, config);
+  const watcher =
+    opts.watcher ??
+    (opts.watchChain
+      ? new ChainWatcher({
+          client: getClient(),
+          config,
+          ...(opts.ocoModules ? { ocoModules: opts.ocoModules } : {}),
+          onError: (e: unknown) => app.log.warn({ err: e }, "chain watcher"),
+        })
+      : undefined);
+  const book = opts.book ?? new Book({ transport, config, verifier, cancelVerifier, ...(watcher ? { watcher } : {}) });
+  // A book that has silently stopped self-cleaning looks exactly like a healthy
+  // one, which is why this is wired rather than left to the caller.
+  book.onError((err: unknown) => app.log.error({ err }, "book revalidate failed"));
 
   const { orders: ordersTopic, cancels: cancelsTopic } = topicsFor(config);
 
@@ -92,6 +122,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
   };
   book.onAdd((e) => broadcast(encodeStreamMessage({ kind: StreamKind.ADD, order: e.announce })));
 
+  if (watcher) await watcher.start();
   await book.start();
 
   // ──────────────────── routes ────────────────────
@@ -128,29 +159,51 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     return reply.type("application/x-protobuf").send(Buffer.from(encodeOrderAnnounce(entry.announce)));
   });
 
+  // The cancel is verified HERE only to give the caller a real status code; the
+  // Book re-verifies it independently on ingest, because a book must never trust
+  // the route that fed it.
   app.post("/cancels", async (request, reply) => {
     const body = request.body as Uint8Array | undefined;
     if (!body || body.length === 0) return reply.code(400).send({ error: "empty body" });
     let cancel;
     try {
-      cancel = decodeOrderSoftCancel(body);
+      cancel = decodeSoftCancel(body);
     } catch {
-      return reply.code(400).send({ error: "undecodable OrderSoftCancel" });
+      return reply.code(400).send({ error: "undecodable SoftCancel" });
     }
-    const entry = book.get(cancel.orderHash);
-    if (!entry) return reply.code(404).send({ error: "unknown order" });
-    let signer: string;
-    try {
-      signer = await recoverMessageAddress({ message: { raw: cancel.orderHash }, signature: cancel.makerSig });
-    } catch {
-      return reply.code(400).send({ error: "bad signature" });
-    }
-    if (signer.toLowerCase() !== entry.announce.order.maker.toLowerCase()) {
-      return reply.code(403).send({ error: "not order maker" });
-    }
+    const verdict = await cancelVerifier.verify(cancel);
+    if (!verdict.ok) return reply.code(403).send({ error: verdict.reason ?? "rejected" });
+
+    // Which of the named hashes this maker actually owns here. Reported back so
+    // a caller can tell "retracted" from "we never had it" — the cancel is
+    // accepted either way, since a book that has not seen an order has nothing
+    // to evict and nothing to complain about.
+    const known = cancel.cancel.orderHashes.filter(
+      (h: Hex) => book.get(h)?.announce.order.maker.toLowerCase() === verdict.maker!.toLowerCase(),
+    );
+
     await transport.publish(cancelsTopic, body); // Book verifies + evicts → onRemove
     broadcast(encodeStreamMessage({ kind: StreamKind.CANCEL, cancel }));
-    return reply.code(202).send({ orderHash: cancel.orderHash });
+    return reply.code(202).send({ evicted: known });
+  });
+
+  // Cancel-and-replace: one call, one atomic outcome. The replacement is
+  // admitted first and the retraction applied only if it verified, so the
+  // maker's quote is never briefly absent from the book.
+  app.post("/replaces", async (request, reply) => {
+    const body = request.body as Uint8Array | undefined;
+    if (!body || body.length === 0) return reply.code(400).send({ error: "empty body" });
+    let replace;
+    try {
+      replace = decodeOrderReplace(body);
+    } catch {
+      return reply.code(400).send({ error: "undecodable OrderReplace" });
+    }
+    const res = await book.ingestReplace(replace);
+    if (!res.ok) return reply.code(422).send({ error: res.reason ?? "rejected" });
+
+    broadcast(encodeStreamMessage({ kind: StreamKind.REPLACE, replace }));
+    return reply.code(202).send({ orderHash: res.orderHash, replaces: replace.replaces });
   });
 
   app.get("/stream", { websocket: true }, (socket: WsWebSocket) => {
@@ -236,6 +289,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     transport,
     config,
     close: async () => {
+      watcher?.stop();
       await book.stop();
       await app.close();
     },

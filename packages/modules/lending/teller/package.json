@@ -1,5 +1,6 @@
 {
   "name": "@1delta-x/modules-teller",
+  "license": "MIT",
   "version": "0.0.1",
   "private": true,
   "scripts": {

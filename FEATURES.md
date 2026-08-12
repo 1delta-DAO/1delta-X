@@ -83,10 +83,22 @@ All in [`Core.sol`](packages/core/src/settlement/Core.sol) /
 orders until `expiry`; `setOrderSignerWithSig(...)` does the same from a relayed
 EIP-712 permit, for makers with no gas. See [§8](#8-authority-and-security-model).
 
-**Cancellation** ([`NonceManager.sol`](packages/core/src/settlement/NonceManager.sol)):
-`cancelOrders(nonces[])` for individual orders, `invalidateNonceWord(word)` to
-kill 256 at once, `rollbackNonces(minValid)` to invalidate everything below a
-watermark.
+**Cancellation** — five granularities, four authoritative and one free:
+
+| Primitive | Scope | Binds a filler? |
+|---|---|---|
+| `cancelOrder(order)` ([`OrderState.sol`](packages/core/src/settlement/OrderState.sol)) | exactly ONE order, by hash — nonce siblings stay fillable | ✅ |
+| `cancelOrders(nonces[])` ([`NonceManager.sol`](packages/core/src/settlement/NonceManager.sol)) | every order carrying any of those nonces (bulk) | ✅ |
+| `invalidateNonceWord(word)` | 256 nonces in one SSTORE | ✅ |
+| `rollbackNonces(minValid)` | everything below a watermark, one SSTORE | ✅ |
+| signed `SoftCancel` ([`softcancel.ts`](packages/sdk/src/softcancel.ts)) | any set of hashes, **zero gas** | ❌ advisory |
+
+`cancelOrder` is gas-free on the hot path: it parks `filled` at the
+`type(uint256).max` sentinel, a slot every fill already reads, so the check is one
+compare. The soft cancel is EIP-712 in the Settlement domain — deployment-bound,
+batched, and verified under the same signer set an order is (EOA / EIP-1271 /
+delegate). It evicts from books; it does not stop a filler that already holds the
+order. See [docs/soft-cancel.md](docs/soft-cancel.md).
 
 ---
 
@@ -120,7 +132,9 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
   (one signed order releasing on a TWAP schedule).
 - **Settlement modules shipped**: [`NftSettlementModule`](packages/core/src/modules/NftSettlementModule.sol)
   (ERC-721 to whoever fills — an open solver set, no exclusivity),
-  [`Erc1155SettlementModule`](packages/core/src/modules/Erc1155SettlementModule.sol).
+  [`Erc1155SettlementModule`](packages/core/src/modules/Erc1155SettlementModule.sol),
+  [`OcoGroupModule`](packages/core/src/modules/OcoGroupModule.sol) (one-cancels-other,
+  below).
 - **Escape hatch**: [`PermissionlessCallModule`](packages/core/src/modules/PermissionlessCallModule.sol)
   executes one arbitrary maker-signed contract call as a MAKE item.
 
@@ -252,6 +266,25 @@ This covers stop-loss, take-profit, scheduled execution, gas-price gating,
 health-factor predicates, rate-differential debt swaps, and any other read-only
 on-chain condition.
 
+**Brackets / one-cancels-other.** The one order type whose defining property is a
+relationship *between* orders rather than a condition on one. Two expressions,
+neither touching the core:
+
+- **Shared nonce** — sign every leg with the same nonce and the fill-once bit;
+  the first full fill consumes it and the siblings then fail the nonce gate the
+  settlement already runs. Zero contracts, zero extra gas, **whole-fill only**.
+- **[`OcoGroupModule`](packages/core/src/modules/OcoGroupModule.sol)** — a
+  validator that reads a group claim plus a SETTLE item that writes it (a
+  `staticcall` validator can read the fact but never record it, and validators run
+  before items, which is exactly the ordering OCO needs). Survives partial fills
+  of the winner — the claim records *which* order took the group — scales to
+  N-way brackets, and AND-composes with each leg's own trigger. The claim is a
+  SETTLE item because SETTLE is the one op that **reverts** on a zero pro-rata
+  slice instead of skipping it, so a misconfigured bracket fails loudly rather
+  than silently opening up.
+
+See [docs/oco.md](docs/oco.md).
+
 ---
 
 ## 8. Authority and security model
@@ -343,7 +376,7 @@ references the new module address in the order it signs.
 | [`modules/erc4626`](packages/modules/erc4626) | Generic ERC-4626 vault withdraw/redeem as a TAKE module. |
 | [`modules/transfer`](packages/modules/transfer) | `ERC20PermitTransferModule` — EIP-2612 permit replayed inside the fill. `ProportionalSweepModule` — SETTLE item sweeping a capped bps of the maker's balance of an extra token to the filler, the multi-token half of balance-relative orders. |
 | [`modules/redeem/usdrif`](packages/modules/redeem/usdrif) | USDRIF exit path: depeg guard + redemption-settled validators. |
-| [`modules/bridge`](packages/modules/bridge/README.md) | Cross-chain orders — see [§11](#11-cross-chain). |
+| [`modules/bridge`](packages/modules/bridge/README.md) | Cross-chain orders over Across, LayerZero OFT and **Circle CCTP** — see [§11](#11-cross-chain). |
 
 ---
 

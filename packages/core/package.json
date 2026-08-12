@@ -1,5 +1,6 @@
 {
   "name": "@1delta-x/core",
+  "license": "MIT",
   "version": "0.0.1",
   "private": true,
   "scripts": {

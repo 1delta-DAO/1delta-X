@@ -89,6 +89,17 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   exact well-formedness), the two-way short-circuit, and the rule that a
   **reverting leaf is an error rather than `false`** — without which
   `NOT(brokenOracle)` would pass precisely when the feed is broken.
+- **[oco.md](oco.md)** — **brackets and one-cancels-other**: the one order type
+  whose defining property is a relationship *between* orders, where every gate the
+  settlement runs is scoped to the order being filled. Two expressions, neither
+  touching the core: a **shared nonce** with the fill-once bit (free, zero
+  contracts, whole-fill only), and `OcoGroupModule` (a `staticcall` validator that
+  READS the group claim plus a SETTLE item that WRITES it — validators run before
+  items, which is exactly the ordering OCO needs). Covers why the claim records
+  the winner's nonce rather than a bare flag, and why the claim is a SETTLE item:
+  SETTLE is the only op that **reverts** on a zero pro-rata slice instead of
+  skipping it, so a misconfigured bracket fails loudly rather than silently
+  becoming fillable on both legs.
 
 ## Order sizing
 
@@ -105,6 +116,20 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
 - **[gasless-permit-relay.md](gasless-permit-relay.md)** — EIP-712 signatures
   attached to module `data` so on-chain approvals aren't required beforehand;
   replayed atomically inside the module call.
+
+## Cancellation
+
+- **[soft-cancel.md](soft-cancel.md)** — the five cancellation granularities and
+  when each is the right one: `cancelOrder` (one order, **by hash** — nonce
+  siblings survive), `cancelOrders` / `invalidateNonceWord` / `rollbackNonces`
+  (bulk, by nonce), and the **free, off-chain signed `SoftCancel`**. Covers why
+  the soft cancel moved from `personal_sign`-over-a-hash to **EIP-712 in the
+  Settlement domain** (deployment binding, a readable prompt, the full
+  EOA/1271/delegate signer set, batching + freshness), the two independent checks
+  a node must run — *who signed* vs. *what may they retract* — and
+  **cancel-and-replace**: why the replacement takes a fresh nonce, why the
+  retraction is applied only after the replacement verifies, and what an amend
+  honestly does not guarantee.
 
 ## Order distribution
 

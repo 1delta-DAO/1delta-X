@@ -85,11 +85,32 @@ message OrderAnnounce {
   bool        sigless     = 4;
 }
 
-// Maker-signed soft cancel. makerSig is over the 32-byte orderHash (EIP-191);
-// an unsigned/mis-signed cancel is dropped, so you can only cancel your own.
-message OrderSoftCancel {
-  bytes orderHash = 1;
-  bytes makerSig  = 2;
+// Maker-signed soft cancel — the free, off-chain retraction.
+//
+// sig is EIP-712 over SoftCancel(address maker,bytes32[] orderHashes,
+// uint256 issuedAt,uint256 expiry) in the SETTLEMENT domain, so it is bound to
+// one chain + settlement and verifies under the same signer set an order does
+// (EOA, EIP-1271 contract maker, maker-nominated delegate). A node evicts only
+// hashes whose order names THIS maker, so a valid signature over someone else's
+// order hash retracts nothing.
+//
+// ADVISORY: evicts from books, does not bind a filler already holding the order.
+// The on-chain cancels stay ground truth. Spec: docs/soft-cancel.md.
+message SoftCancel {
+  bytes    maker       = 1;
+  repeated bytes orderHashes = 2;
+  bytes    issuedAt    = 3;
+  bytes    expiry      = 4;
+  bytes    sig         = 5;
+}
+
+// Cancel-and-replace in one message: retract the named order and admit the
+// replacement atomically. Both halves are independently signed; a node that
+// cannot verify either half applies NEITHER.
+message OrderReplace {
+  SoftCancel    cancel   = 1;
+  OrderAnnounce announce = 2;
+  bytes         replaces = 3;
 }
 
 // Advisory "I'm taking this" hint to cut wasted races. filled[orderHash]
@@ -104,10 +125,11 @@ message OrderList {
 }
 
 // WebSocket stream envelope from a centralized backend to a thin client.
-// SNAPSHOT (orders) on connect, then live ADD (order) / CANCEL (cancel).
+// SNAPSHOT (orders) on connect, then live ADD / CANCEL / REPLACE.
 message StreamMessage {
-  uint32          kind   = 1; // 0 SNAPSHOT, 1 ADD, 2 CANCEL
-  repeated        OrderAnnounce orders = 2;
-  OrderAnnounce   order  = 3;
-  OrderSoftCancel cancel = 4;
+  uint32        kind    = 1; // 0 SNAPSHOT, 1 ADD, 2 CANCEL, 3 REPLACE
+  repeated      OrderAnnounce orders = 2;
+  OrderAnnounce order   = 3;
+  SoftCancel    cancel  = 4;
+  OrderReplace  replace = 5;
 }

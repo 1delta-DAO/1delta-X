@@ -1,28 +1,40 @@
-import type { Order } from "@1delta-x/sdk";
+import { buildSoftCancel, signSoftCancel as signSoftCancelTyped, type Deployment, type Order, type SoftCancel, type TypedDataSigner } from "@1delta-x/sdk";
 import type { Hex } from "viem";
 
 import type { OrderbookConfig } from "./config";
-import type { OrderAnnounce, OrderSoftCancel } from "./messages";
+import type { OrderAnnounce, OrderReplace, SignedSoftCancel } from "./messages";
 import {
   decodeOrderAnnounce,
   decodeOrderList,
-  decodeOrderSoftCancel,
+  decodeOrderReplace,
+  decodeSoftCancel,
   decodeStreamMessage,
   encodeOrderAnnounce,
-  encodeOrderSoftCancel,
+  encodeOrderReplace,
+  encodeSoftCancel,
 } from "./proto/codec";
 import { StreamKind } from "./proto/schema";
 import { cancelTopic, orderTopic } from "./topics";
 import type { MessageHandler, Transport, Unsubscribe } from "./transport";
 
-/** Minimal EIP-191 signer surface — a viem `LocalAccount`/`WalletClient` satisfies it. */
-export interface MessageSigner {
-  signMessage(args: { message: { raw: Hex } }): Promise<Hex>;
-}
-
-/** Sign a soft cancel: EIP-191 over the raw 32-byte `orderHash`. */
-export async function signSoftCancel(signer: MessageSigner, orderHash: Hex): Promise<OrderSoftCancel> {
-  return { orderHash, makerSig: await signer.signMessage({ message: { raw: orderHash } }) };
+/**
+ * Build + sign a soft cancel over one or more order hashes.
+ *
+ * EIP-712 in the SETTLEMENT domain, not `personal_sign` over a bare hash: the
+ * domain pins the message to one chain + settlement (so a cancel cannot be
+ * replayed across deployments), the wallet renders named fields instead of an
+ * opaque blob, and the SAME signer set the settlement accepts for an order
+ * verifies it — EOA, EIP-1271 contract maker, or a nominated delegate.
+ */
+export async function signSoftCancel(
+  signer: TypedDataSigner,
+  maker: Hex,
+  orderHashes: readonly Hex[],
+  d: Deployment,
+  opts?: { now?: bigint; ttlSeconds?: bigint },
+): Promise<SignedSoftCancel> {
+  const cancel: SoftCancel = buildSoftCancel(maker as `0x${string}`, orderHashes, opts);
+  return { cancel, sig: await signSoftCancelTyped(signer, cancel, d) };
 }
 
 // ──────────────────── HTTP transport (client ↔ demo backend) ────────────────────
@@ -148,8 +160,13 @@ export class HttpTransport implements Transport {
       for (const a of msg.orders) this.fanout(this.orders, encodeOrderAnnounce(a));
     } else if (msg.kind === StreamKind.ADD) {
       this.fanout(this.orders, encodeOrderAnnounce(msg.order));
+    } else if (msg.kind === StreamKind.CANCEL) {
+      this.fanout(this.cancels, encodeSoftCancel(msg.cancel));
     } else {
-      this.fanout(this.cancels, encodeOrderSoftCancel(msg.cancel));
+      // A replace is an add + a retraction; fan it out on BOTH topics so a
+      // subscriber that only cares about one still sees its half.
+      this.fanout(this.orders, encodeOrderAnnounce(msg.replace.announce));
+      this.fanout(this.cancels, encodeSoftCancel(msg.replace.cancel));
     }
   }
 
@@ -200,8 +217,27 @@ export class OrderbookClient {
     await this.transport.publish(this.orders, encodeOrderAnnounce(announce));
   }
 
-  async cancelOrder(cancel: OrderSoftCancel): Promise<void> {
-    await this.transport.publish(this.cancels, encodeOrderSoftCancel(cancel));
+  async cancelOrder(cancel: SignedSoftCancel): Promise<void> {
+    await this.transport.publish(this.cancels, encodeSoftCancel(cancel));
+  }
+
+  /**
+   * Publish a cancel-and-replace. Goes out on the ORDER topic, because the
+   * message a book must act on is the one carrying the replacement — a node that
+   * saw only the cancel would drop the maker's quote instead of re-pricing it.
+   */
+  async replaceOrder(replace: OrderReplace): Promise<void> {
+    await this.transport.publish(this.orders, encodeOrderReplace(replace));
+  }
+
+  async subscribeReplaces(onReplace: (r: OrderReplace) => void): Promise<Unsubscribe> {
+    return this.transport.subscribe(this.orders, (b) => {
+      try {
+        onReplace(decodeOrderReplace(b));
+      } catch {
+        /* not a replace frame */
+      }
+    });
   }
 
   async subscribeOrders(onOrder: (a: OrderAnnounce) => void): Promise<Unsubscribe> {
@@ -214,10 +250,10 @@ export class OrderbookClient {
     });
   }
 
-  async subscribeCancels(onCancel: (c: OrderSoftCancel) => void): Promise<Unsubscribe> {
+  async subscribeCancels(onCancel: (c: SignedSoftCancel) => void): Promise<Unsubscribe> {
     return this.transport.subscribe(this.cancels, (b) => {
       try {
-        onCancel(decodeOrderSoftCancel(b));
+        onCancel(decodeSoftCancel(b));
       } catch {
         /* skip undecodable frame */
       }

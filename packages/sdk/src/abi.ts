@@ -152,6 +152,25 @@ export const SETTLEMENT_ABI = [
       { name: "paid", type: "uint256[]" },
     ],
   },
+  // ──────────────────── Cancellation ────────────────────
+  //
+  // Three on-chain granularities, plus the free off-chain one:
+  //   cancelOrder(order)         ONE order, by hash. Siblings sharing its nonce
+  //                              stay fillable. Parks `filled` at the max
+  //                              sentinel, so it costs the hot path nothing.
+  //   cancelOrders(nonces[])     every order carrying any of those nonces.
+  //   invalidateNonceWord(word)  256 nonces in one SSTORE.
+  //   rollbackNonces(minValid)   every nonce below a watermark, in one SSTORE.
+  //   (off-chain)                a signed `SoftCancel` — see `softcancel.ts`.
+  //                              Free, but advisory: it evicts from books, it
+  //                              does not bind a filler.
+  {
+    type: "function",
+    name: "cancelOrder",
+    stateMutability: "nonpayable",
+    inputs: [orderArg],
+    outputs: [{ name: "orderHash", type: "bytes32" }],
+  },
   {
     type: "function",
     name: "cancelOrders",
@@ -168,10 +187,149 @@ export const SETTLEMENT_ABI = [
   },
   {
     type: "function",
+    name: "rollbackNonces",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "newMinValidNonce", type: "uint256" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "isNonceCancelled",
+    stateMutability: "view",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "nonce", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  // ──────────────────── Authorization ────────────────────
+  {
+    type: "function",
+    name: "approveOrder",
+    stateMutability: "nonpayable",
+    inputs: [orderArg],
+    outputs: [{ name: "orderHash", type: "bytes32" }],
+  },
+  {
+    type: "function",
+    name: "revokeOrderApproval",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "orderHash", type: "bytes32" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "setOrderSigner",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "signer", type: "address" },
+      { name: "expiry", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  // `0` = not a signer. Read by the off-chain cancel verifier to accept a
+  // delegate's signature over a `SoftCancel` on exactly the terms the settlement
+  // accepts one over an `Order`.
+  {
+    type: "function",
+    name: "orderSignerExpiry",
+    stateMutability: "view",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "signer", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
     name: "filled",
     stateMutability: "view",
     inputs: [{ name: "orderHash", type: "bytes32" }],
     outputs: [{ name: "", type: "uint256" }],
+  },
+  // ──────────────────── Events ────────────────────
+  //
+  // The chain announcing what an off-chain book would otherwise have to poll
+  // for. Four of the five below are ENOUGH ON THEIR OWN to evict — a watcher
+  // learns maker + which nonces/hash died and needs no follow-up call. Only
+  // `OrderFilled` needs one, because it says an order moved but not how far.
+  {
+    type: "event",
+    name: "OrderFilled",
+    inputs: [
+      { name: "orderHash", type: "bytes32", indexed: true },
+      { name: "maker", type: "address", indexed: true },
+      { name: "solver", type: "address", indexed: true },
+    ],
+  },
+  {
+    type: "event",
+    name: "OrderCancelledByHash",
+    inputs: [
+      { name: "maker", type: "address", indexed: true },
+      { name: "orderHash", type: "bytes32", indexed: true },
+    ],
+  },
+  {
+    type: "event",
+    name: "OrdersCancelled",
+    inputs: [
+      { name: "maker", type: "address", indexed: true },
+      { name: "nonces", type: "uint256[]", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "NoncesRolledBack",
+    inputs: [
+      { name: "maker", type: "address", indexed: true },
+      { name: "minValidNonce", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "NonceWordInvalidated",
+    inputs: [
+      { name: "maker", type: "address", indexed: true },
+      { name: "wordIndex", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+/// {OcoGroupModule} — the bracket registry. `GroupClaimed` is the one event that
+/// retires N−1 orders at once, so a book watching it drops every sibling of a
+/// bracket the moment the winner lands, instead of serving them until a solver
+/// wastes gas discovering they are dead. See `docs/oco.md`.
+export const OCO_GROUP_MODULE_ABI = [
+  {
+    type: "event",
+    name: "GroupClaimed",
+    inputs: [
+      { name: "maker", type: "address", indexed: true },
+      { name: "groupId", type: "uint256", indexed: true },
+      { name: "nonce", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "function",
+    name: "claim",
+    stateMutability: "view",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "groupId", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "isRetiredFor",
+    stateMutability: "view",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "groupId", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
   },
 ] as const;
 

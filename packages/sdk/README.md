@@ -6,7 +6,8 @@ TypeScript SDK for building **order** and **solver** calldata for
 It covers both sides of a fill:
 
 - **Maker** — construct an order, hash it, sign it (`fill`), or sign a
-  witness-bound Permit3 batch (`fillWithPermit`); cancel orders.
+  witness-bound Permit3 batch (`fillWithPermit`); cancel, amend, and bracket
+  orders (see [Cancelling and amending](#cancelling-and-amending) below).
 - **Solver** — build `fill` / `fillWithPermit` calldata, and `executeFill`
   calldata for the flash-solver family (single-input, multi-input, multi-output);
   preview dutch prices off-chain.
@@ -149,3 +150,50 @@ pnpm build      # tsc → dist
 pnpm typecheck
 pnpm test       # vitest (golden hash + sign/recover + calldata round-trips)
 ```
+
+## Cancelling and amending
+
+Five granularities, four on-chain and one free. Pick the narrowest that expresses
+the intent — cancelling *by nonce* is bulk, and a nonce may be shared by several
+orders.
+
+```ts
+import {
+  encodeCancelOrder,       // ONE order, by hash — nonce siblings stay fillable
+  encodeCancelOrders,      // every order carrying these nonces (bulk)
+  encodeInvalidateNonceWord, // 256 nonces, one SSTORE
+  encodeRollbackNonces,    // everything below a watermark, one SSTORE
+  softCancelOrders,        // free, off-chain, signed — advisory
+  amendOrder,              // cancel-and-replace, as one gesture
+} from "@1delta-x/sdk";
+
+// Free retraction: one EIP-712 signature retires a whole quote set.
+const { cancel, sig } = await softCancelOrders(maker, maker.address, [h1, h2, h3], dep);
+
+// Re-price: a replacement on a fresh nonce + a signed retraction of the old one.
+const { order, sig: orderSig, replaces, cancel: c, cancelSig } =
+  await amendOrder(maker, prev, nextNonce, { legsOut: repriced }, dep);
+```
+
+A soft cancel evicts an order from books that honour it; it does **not** bind a
+filler that already holds the signed order. Anything that must not fill needs one
+of the on-chain cancels. Full rationale, including why an amend takes a fresh
+nonce: [docs/soft-cancel.md](../../docs/soft-cancel.md).
+
+## Brackets (one-cancels-other)
+
+A group of the maker's own orders of which at most one may fill.
+
+```ts
+import { ocoNonceGroup, ocoGroup } from "@1delta-x/sdk";
+
+// Free, zero contracts, WHOLE-FILL ONLY: one shared nonce + the fill-once bit.
+const [tp, sl] = ocoNonceGroup([takeProfit, stopLoss], sharedNonce);
+
+// Partial-fill capable, N-way: OcoGroupModule's validator + claim item on each
+// leg. Appends, so each leg keeps its own trigger validator.
+const legs = ocoGroup([takeProfit, stopLoss, timeOut], OCO_MODULE, groupId);
+```
+
+[docs/oco.md](../../docs/oco.md) explains the trade-off and why the claim is a
+SETTLE item.

@@ -8,12 +8,14 @@ import {
   decodeFillNotice,
   decodeOrderAnnounce,
   decodeOrderList,
-  decodeOrderSoftCancel,
+  decodeOrderReplace,
+  decodeSoftCancel,
   decodeStreamMessage,
   encodeFillNotice,
   encodeOrderAnnounce,
   encodeOrderList,
-  encodeOrderSoftCancel,
+  encodeOrderReplace,
+  encodeSoftCancel,
   encodeStreamMessage,
   orderToProto,
   protoToOrder,
@@ -23,6 +25,9 @@ import type { OrderAnnounce } from "../src/messages";
 // The SDK's canonical order + its contract-verified golden hash — the same
 // fixture the SDK's own EIP-712 golden test pins.
 import { CANONICAL_ORDER, GOLDEN_ORDER_HASH } from "../../sdk/test/canonicalOrder";
+
+/** A second, arbitrary 32-byte hash — batch cancels need more than one. */
+const OTHER_HASH = "0x1111111111111111111111111111111111111111111111111111111111111111" as const;
 
 describe("Order ⇄ protobuf", () => {
   it("round-trips the canonical order field-for-field", () => {
@@ -62,9 +67,47 @@ describe("message encode/decode", () => {
     expect(back.sigless).toBe(false);
   });
 
-  it("OrderSoftCancel", () => {
-    const c = { orderHash: GOLDEN_ORDER_HASH, makerSig: sig } as const;
-    expect(decodeOrderSoftCancel(encodeOrderSoftCancel(c))).toEqual(c);
+  it("SoftCancel round-trips, including a multi-hash batch", () => {
+    const c = {
+      cancel: {
+        maker: CANONICAL_ORDER.maker,
+        orderHashes: [GOLDEN_ORDER_HASH, OTHER_HASH],
+        issuedAt: 1_700_000_000n,
+        expiry: 1_700_000_300n,
+      },
+      sig,
+    } as const;
+    expect(decodeSoftCancel(encodeSoftCancel(c))).toEqual(c);
+  });
+
+  it("SoftCancel refuses a mis-sized order hash", () => {
+    const bad = {
+      cancel: { maker: CANONICAL_ORDER.maker, orderHashes: ["0xdead" as const], issuedAt: 1n, expiry: 2n },
+      sig,
+    };
+    // Hashes are fixed-width on the wire — minimizing one would silently change
+    // which order a cancel names.
+    expect(() => encodeSoftCancel(bad)).toThrow();
+  });
+
+  it("OrderReplace round-trips both signed halves", () => {
+    const r = {
+      cancel: {
+        cancel: {
+          maker: CANONICAL_ORDER.maker,
+          orderHashes: [GOLDEN_ORDER_HASH],
+          issuedAt: 1_700_000_000n,
+          expiry: 1_700_000_300n,
+        },
+        sig,
+      },
+      announce: { order: { ...CANONICAL_ORDER, nonce: 2n } as Order, sig, sigless: false },
+      replaces: GOLDEN_ORDER_HASH,
+    } as const;
+    const back = decodeOrderReplace(encodeOrderReplace(r));
+    expect(back.replaces).toBe(GOLDEN_ORDER_HASH);
+    expect(back.announce.order.nonce).toBe(2n);
+    expect(back.cancel).toEqual(r.cancel);
   });
 
   it("FillNotice", () => {
@@ -83,7 +126,7 @@ describe("message encode/decode", () => {
     expect(back[1]!.order.nonce).toBe(2n);
   });
 
-  it("StreamMessage — SNAPSHOT / ADD / CANCEL", () => {
+  it("StreamMessage — SNAPSHOT / ADD / CANCEL / REPLACE", () => {
     const add = decodeStreamMessage(encodeStreamMessage({ kind: StreamKind.ADD, order: { order: CANONICAL_ORDER, sig } }));
     expect(add.kind).toBe(StreamKind.ADD);
 
@@ -91,8 +134,26 @@ describe("message encode/decode", () => {
     expect(snap.kind).toBe(StreamKind.SNAPSHOT);
     if (snap.kind === StreamKind.SNAPSHOT) expect(snap.orders).toHaveLength(1);
 
-    const cancel = decodeStreamMessage(encodeStreamMessage({ kind: StreamKind.CANCEL, cancel: { orderHash: GOLDEN_ORDER_HASH, makerSig: sig } }));
+    const softCancel = {
+      cancel: { maker: CANONICAL_ORDER.maker, orderHashes: [GOLDEN_ORDER_HASH], issuedAt: 1n, expiry: 2n },
+      sig,
+    } as const;
+    const cancel = decodeStreamMessage(encodeStreamMessage({ kind: StreamKind.CANCEL, cancel: softCancel }));
     expect(cancel.kind).toBe(StreamKind.CANCEL);
+    if (cancel.kind === StreamKind.CANCEL) expect(cancel.cancel).toEqual(softCancel);
+
+    const replace = decodeStreamMessage(
+      encodeStreamMessage({
+        kind: StreamKind.REPLACE,
+        replace: {
+          cancel: softCancel,
+          announce: { order: CANONICAL_ORDER, sig, sigless: false },
+          replaces: GOLDEN_ORDER_HASH,
+        },
+      }),
+    );
+    expect(replace.kind).toBe(StreamKind.REPLACE);
+    if (replace.kind === StreamKind.REPLACE) expect(replace.replace.replaces).toBe(GOLDEN_ORDER_HASH);
   });
 
   it("handles a zero-legged fill-module order (empty anchor legs)", () => {

@@ -3,6 +3,8 @@ export * from "./config";
 export * from "./topics";
 export * from "./transport";
 export * from "./verify";
+export * from "./cancels";
+export * from "./watcher";
 export * from "./book";
 export * from "./client";
 export * from "./proto/codec";

@@ -1,0 +1,66 @@
+# Third-party notices
+
+1delta-x is licensed under the MIT License — see [LICENSE](LICENSE).
+
+This repository contains and derives from third-party software. The notices
+below are reproduced to satisfy the attribution requirements of those licenses.
+All of them are MIT-licensed (or MIT-compatible), so the combined work remains
+distributable under the MIT License above.
+
+---
+
+## Uniswap Permit2
+
+`packages/core/src/permit3/` is derived from Uniswap's Permit2. The token
+allowance book (`AllowanceTransfer.sol`), the one-shot signature transfers
+(`SignatureTransfer.sol`), `SignatureVerification.sol`, the EIP-712 type
+strings in `libraries/Permit3Hash.sol`, and the `ISignatureTransfer` /
+`IAllowanceTransfer` interfaces are ports or adaptations of the corresponding
+Permit2 sources. Each file documents what was kept from Permit2 and what was
+changed. `packages/core/src/permit3/README.md` has the same accounting in
+prose.
+
+    Copyright (c) 2022 Uniswap Labs
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+Source: https://github.com/Uniswap/permit2
+
+---
+
+## Forge Standard Library (forge-std)
+
+`lib/forge-std/` is a checked-in copy of the Foundry standard library, used for
+tests and scripts only. It is not part of any deployed artifact. forge-std is
+offered under either the MIT License or the Apache License 2.0 — see
+`lib/forge-std/LICENSE-MIT` and `lib/forge-std/LICENSE-APACHE` for the full
+texts, which are retained alongside the sources.
+
+Source: https://github.com/foundry-rs/forge-std
+
+---
+
+## Vendored third-party interfaces
+
+`packages/modules/bridge/src/vendor/` contains minimal interface declarations
+for Across V3, Circle CCTP, and LayerZero V2 — the handful of function and
+event signatures those protocols expose on-chain, transcribed rather than
+pulled in as dependencies. Interface declarations of a public on-chain API
+carry no implementation from the upstream projects; they are listed here for
+completeness.

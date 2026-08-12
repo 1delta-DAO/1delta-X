@@ -1,5 +1,6 @@
 {
   "name": "1delta-x",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "build": "forge build",

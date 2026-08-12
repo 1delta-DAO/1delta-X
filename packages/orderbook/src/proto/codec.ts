@@ -3,7 +3,7 @@ import type { CurvePoint, Item, LegIn, LegOut, Order, PermitBatch, TakerPermit, 
 import { ItemOp, OrderSide } from "@1delta-x/sdk";
 import { bytesToBigInt, bytesToHex, getAddress, hexToBytes, zeroAddress, type Address, type Hex } from "viem";
 
-import type { FillNotice, OrderAnnounce, OrderSoftCancel } from "../messages";
+import type { FillNotice, OrderAnnounce, OrderReplace, SignedSoftCancel } from "../messages";
 import { SCHEMA, StreamKind } from "./schema";
 
 // ──────────────────── schema (parsed once, at load) ────────────────────
@@ -12,7 +12,8 @@ const root = protobuf.parse(SCHEMA, { keepCase: true }).root;
 root.resolveAll();
 const P = "onedelta.orderbook.v1.";
 const OrderAnnounceT = root.lookupType(`${P}OrderAnnounce`);
-const OrderSoftCancelT = root.lookupType(`${P}OrderSoftCancel`);
+const SoftCancelT = root.lookupType(`${P}SoftCancel`);
+const OrderReplaceT = root.lookupType(`${P}OrderReplace`);
 const FillNoticeT = root.lookupType(`${P}FillNotice`);
 const OrderListT = root.lookupType(`${P}OrderList`);
 const StreamMessageT = root.lookupType(`${P}StreamMessage`);
@@ -66,7 +67,8 @@ interface PbTokenPermit { spender: Uint8Array; token: Uint8Array; amount: Uint8A
 interface PbTakerPermit { spender: Uint8Array; ref: Uint8Array; amount: Uint8Array; expiration: number }
 interface PbPermitBatch { tokens: PbTokenPermit[]; takers: PbTakerPermit[]; nonce: Uint8Array; deadline: Uint8Array }
 interface PbOrderAnnounce { order: PbOrder; sig: Uint8Array; permitBatch?: PbPermitBatch | null; sigless: boolean }
-interface PbOrderSoftCancel { orderHash: Uint8Array; makerSig: Uint8Array }
+interface PbSoftCancel { maker: Uint8Array; orderHashes: Uint8Array[]; issuedAt: Uint8Array; expiry: Uint8Array; sig: Uint8Array }
+interface PbOrderReplace { cancel: PbSoftCancel; announce: PbOrderAnnounce; replaces: Uint8Array }
 interface PbFillNotice { orderHash: Uint8Array; filler: Uint8Array }
 
 // ──────────────────── Order ⇄ wire ────────────────────
@@ -163,13 +165,62 @@ export function decodeOrderAnnounce(b: Uint8Array): OrderAnnounce {
   return protoToAnnounce(OrderAnnounceT.decode(b) as unknown as PbOrderAnnounce);
 }
 
-export function encodeOrderSoftCancel(c: OrderSoftCancel): Uint8Array {
-  const p: PbOrderSoftCancel = { orderHash: hexToU8(c.orderHash), makerSig: hexToU8(c.makerSig) };
-  return OrderSoftCancelT.encode(p as object).finish();
+/** `bytes32` on the wire is fixed 32 bytes, never minimized — a hash has no leading-zero freedom. */
+function b32ToU8(h: Hex): Uint8Array {
+  const b = hexToBytes(h);
+  if (b.length !== 32) throw new Error(`expected a 32-byte hash, got ${b.length}`);
+  return b;
 }
-export function decodeOrderSoftCancel(b: Uint8Array): OrderSoftCancel {
-  const p = OrderSoftCancelT.decode(b) as unknown as PbOrderSoftCancel;
-  return { orderHash: u8ToHex(p.orderHash), makerSig: u8ToHex(p.makerSig) };
+function u8ToB32(b: Uint8Array | undefined): Hex {
+  if (!b || b.length !== 32) throw new Error("expected a 32-byte hash on the wire");
+  return bytesToHex(b);
+}
+
+function softCancelToProto(c: SignedSoftCancel): PbSoftCancel {
+  return {
+    maker: addrToBytes(c.cancel.maker),
+    orderHashes: c.cancel.orderHashes.map(b32ToU8),
+    issuedAt: u256ToBytes(c.cancel.issuedAt),
+    expiry: u256ToBytes(c.cancel.expiry),
+    sig: hexToU8(c.sig),
+  };
+}
+function protoToSoftCancel(p: PbSoftCancel): SignedSoftCancel {
+  return {
+    cancel: {
+      maker: bytesToAddr(p.maker),
+      orderHashes: (p.orderHashes ?? []).map(u8ToB32),
+      issuedAt: bytesToU256(p.issuedAt),
+      expiry: bytesToU256(p.expiry),
+    },
+    sig: u8ToHex(p.sig),
+  };
+}
+
+export function encodeSoftCancel(c: SignedSoftCancel): Uint8Array {
+  return SoftCancelT.encode(softCancelToProto(c) as object).finish();
+}
+export function decodeSoftCancel(b: Uint8Array): SignedSoftCancel {
+  return protoToSoftCancel(SoftCancelT.decode(b) as unknown as PbSoftCancel);
+}
+
+export function encodeOrderReplace(r: OrderReplace): Uint8Array {
+  const p: PbOrderReplace = {
+    cancel: softCancelToProto(r.cancel),
+    announce: announceToProto(r.announce),
+    replaces: b32ToU8(r.replaces),
+  };
+  return OrderReplaceT.encode(p as object).finish();
+}
+export function decodeOrderReplace(b: Uint8Array): OrderReplace {
+  const p = OrderReplaceT.decode(b) as unknown as PbOrderReplace;
+  if (!p.cancel) throw new Error("OrderReplace missing cancel");
+  if (!p.announce) throw new Error("OrderReplace missing announce");
+  return {
+    cancel: protoToSoftCancel(p.cancel),
+    announce: protoToAnnounce(p.announce),
+    replaces: u8ToB32(p.replaces),
+  };
 }
 
 export function encodeFillNotice(n: FillNotice): Uint8Array {
@@ -193,19 +244,28 @@ export function decodeOrderList(b: Uint8Array): OrderAnnounce[] {
 export type StreamMessage =
   | { kind: StreamKind.SNAPSHOT; orders: OrderAnnounce[] }
   | { kind: StreamKind.ADD; order: OrderAnnounce }
-  | { kind: StreamKind.CANCEL; cancel: OrderSoftCancel };
+  | { kind: StreamKind.CANCEL; cancel: SignedSoftCancel }
+  | { kind: StreamKind.REPLACE; replace: OrderReplace };
 
 export function encodeStreamMessage(m: StreamMessage): Uint8Array {
   const obj =
     m.kind === StreamKind.SNAPSHOT ? { kind: m.kind, orders: m.orders.map(announceToProto) }
     : m.kind === StreamKind.ADD ? { kind: m.kind, order: announceToProto(m.order) }
-    : { kind: m.kind, cancel: { orderHash: hexToU8(m.cancel.orderHash), makerSig: hexToU8(m.cancel.makerSig) } };
+    : m.kind === StreamKind.CANCEL ? { kind: m.kind, cancel: softCancelToProto(m.cancel) }
+    : {
+        kind: m.kind,
+        replace: {
+          cancel: softCancelToProto(m.replace.cancel),
+          announce: announceToProto(m.replace.announce),
+          replaces: b32ToU8(m.replace.replaces),
+        },
+      };
   return StreamMessageT.encode(obj as object).finish();
 }
 export function decodeStreamMessage(b: Uint8Array): StreamMessage {
   const p = StreamMessageT.decode(b) as unknown as {
     kind: number; orders?: PbOrderAnnounce[]; order?: PbOrderAnnounce | null;
-    cancel?: PbOrderSoftCancel | null;
+    cancel?: PbSoftCancel | null; replace?: PbOrderReplace | null;
   };
   const kind = toNum(p.kind) as StreamKind;
   if (kind === StreamKind.ADD) {
@@ -214,7 +274,18 @@ export function decodeStreamMessage(b: Uint8Array): StreamMessage {
   }
   if (kind === StreamKind.CANCEL) {
     if (!p.cancel) throw new Error("StreamMessage CANCEL missing cancel");
-    return { kind, cancel: { orderHash: u8ToHex(p.cancel.orderHash), makerSig: u8ToHex(p.cancel.makerSig) } };
+    return { kind, cancel: protoToSoftCancel(p.cancel) };
+  }
+  if (kind === StreamKind.REPLACE) {
+    if (!p.replace?.cancel || !p.replace?.announce) throw new Error("StreamMessage REPLACE missing halves");
+    return {
+      kind,
+      replace: {
+        cancel: protoToSoftCancel(p.replace.cancel),
+        announce: protoToAnnounce(p.replace.announce),
+        replaces: u8ToB32(p.replace.replaces),
+      },
+    };
   }
   return { kind: StreamKind.SNAPSHOT, orders: (p.orders ?? []).map(protoToAnnounce) };
 }
