@@ -100,6 +100,11 @@ The rest, in full, are in **[docs/pricing-modes.md](../../../../docs/pricing-mod
   cosigner-quoted price. The core CLAMPS it to `[0, 10000]` and maps it through
   the legs' own signed bounds, so a module can only choose where INSIDE the
   maker's band a fill lands.
+- **Delta-verify delivery** (`timing` bit 104) — not a pricing mode but a DELIVERY
+  mode, listed here because it is the fourth `timing` opt-in: outputs are verified
+  by the recipient's measured balance delta instead of pushed nominally, which is
+  what makes a fee-on-transfer output safe. The required amount is still whatever
+  the pricing modes above produced. See the FoT section.
 
 In every case the floor/ceiling stays the maker's signed leg bound — the mode
 only decides where between them a fill prices.
@@ -296,21 +301,39 @@ For a fee-on-transfer or rebasing token this means the recipient receives
 
 - **Solver bears the fee** (FoT on the leg the solver receives): the solver
   chooses to fill and can price the fee in — self-protected.
-- **Maker bears the fee** (FoT on `tokenOut`): the maker is the passive party
-  and is **silently underpaid**. `startAmountOut`/`endAmountOut` set the
-  *computed* transfer amount, not a floor on the maker's actual received
-  balance, so there is no automatic `minReturn`-style revert.
+- **Maker bears the fee** (FoT on `tokenOut`): by default the maker is the passive
+  party and is **silently underpaid** — `startAmountOut`/`endAmountOut` set the
+  *computed* transfer amount, not a floor on the maker's actual received balance,
+  so there is no automatic `minReturn`-style revert. Two opt-ins below fix this;
+  delta-verify delivery makes the signed amount a **net-of-fee floor**.
 - **Accounting**: `filled` and the `OrderFilled` event report nominal amounts,
   so they **overstate** what moved for FoT tokens. No funds are lost or
   stranded — the numbers are simply pre-fee.
 
-There is **no built-in FoT validation** — trading such tokens is the
-maker's/solver's responsibility. A maker who wants aggregator-style protection
-attaches the ready-made **`MinBalanceInvariant`** (`src/validators/`) — a
-post-execution invariant asserting *"my `token` balance is ≥ floor"* — which
-reverts the whole fill if the fee eats past the floor (`data = abi.encode(token,
-account, minBalance)`, floor = pre-fill balance + the minimum net accepted). This
-is the Seaport/0x "minimum balance after" pattern.
+Two opt-ins fix the maker-bears-the-fee case, in increasing order of strength:
+
+- **`MinBalanceInvariant`** (`src/validators/`) — a post-execution invariant
+  asserting *"my `token` balance is ≥ floor"*, reverting the fill if the fee eats
+  past it (`data = abi.encode(token, account, minBalance)`, floor = pre-fill
+  balance + the minimum net accepted). The Seaport/0x "minimum balance after"
+  pattern. Because an invariant is a stateless `view`, it is an **absolute** floor
+  fixed at signing time — re-sign if the account's balance drifts.
+- **Delta-verify delivery** (`timing` bit 104, {DutchAuction.deltaVerifyOutputs})
+  — the settler stops pushing nominal amounts on this order and instead **verifies
+  the recipient's measured balance delta** against the leg's priced amount. A true
+  start/end delta taken inside the fill, so nothing drifts, and the required amount
+  is still `outputAt` — so it composes with the dutch clock, a priority bid, a
+  price module and partial fills unchanged. The filler delivers out-of-band in its
+  callback (pool → recipient), which also means a FoT output pays its fee **once**.
+  Fillable only via `fillWithCallback`; rejected on the netted path
+  (`DeltaVerifyNotBatchable`). Shape restrictions enforced on-chain: no two output
+  legs may share a `(token, recipient)`, and a maker-bound output token may not
+  also be an input token (a per-leg delta only measures one leg when that leg alone
+  moves the balance). Prefer plain FoT tokens over reflection/rebasing ones — the
+  check counts *any* balance increase, which a self-crediting token can supply.
+
+Beyond those opt-ins there is **no built-in FoT validation** — trading such tokens
+is the maker's/solver's responsibility.
 
 **Scope: simple single-order swaps only.** A plain buy/sell of a FoT/rebasing
 token is **functional** — the receiving party simply nets the post-fee amount

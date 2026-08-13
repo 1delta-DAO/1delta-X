@@ -37,7 +37,10 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   modules** (`pricingModule` → oracle-pegged, range/ladder, cosigner-quoted). Covers
   the reason a module returns a BUMP rather than an amount — the core clamps it, so
   no mode can price outside the maker's signed band — the once-per-fill resolution,
-  the three shipped modules, and the measured per-mode gas.
+  the three shipped modules, and the measured per-mode gas. Also **delta-verify
+  delivery** (bit 104), which is orthogonal to all of them: it changes how the priced
+  amount is *delivered* (verified against the recipient's balance delta rather than
+  pushed nominally), which is what makes a fee-on-transfer output safe.
 
 ## Generalizing beyond fungible swaps
 
@@ -194,16 +197,19 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
 
 ## The 2026-08 parity work
 
-- **[lop-parity-plan.md](lop-parity-plan.md)** — the 2026-08 feature diff against
+- **[lop-parity.md](lop-parity.md)** — the 2026-08 feature diff against
   1inch LOP v4 / Fusion+, UniswapX (V2 / V3 / Priority), ComposableCoW and
-  ERC-7683, and the plan that closes it: external **pricing modules** (bounded by
+  ERC-7683, and what closed it: external **pricing modules** (bounded by
   the maker's signed band, unlike 1inch's amount getters), a **block-number
-  clock** and a **priority-fee auction** in free `timing` bits, **Merkle bulk
-  signing** in the signature envelope, and a permissionless **7683 adapter**.
-  Includes the one-time order-shape change all of it rides on (new typehash — see
-  [SECURITY.md](../SECURITY.md)) and, in §7, the byte budget: what the features
-  actually cost against EIP-170, the three restructurings that returned ~3.3KB, and
-  why `optimizer_runs` moved to 400 in the deploy profile. **Shipped.**
+  clock**, a **priority-fee auction** and **delta-verify delivery** in free
+  `timing` bits, **Merkle bulk signing** in the signature envelope, and a
+  permissionless **7683 adapter**. The **rationale and cost record**: why each
+  feature has the shape it has, the byte budget that forced it, and the measured
+  gas — read it before adding anything to the settler.
+  Covers the one-time order-shape change all of it rides on (new typehash — see
+  [SECURITY.md](../SECURITY.md)) and, in §4, the byte budget: why Settlement needs
+  via-IR to be deployable at all, the restructurings that returned ~3.3KB, and why
+  the `optimizer_runs` curve is not an escape hatch from a size regression.
 
 ## Reading order
 

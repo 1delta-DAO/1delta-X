@@ -142,6 +142,59 @@ function bump(
 
 ---
 
+## Delta-verify delivery (`timing` bit 104)
+
+Orthogonal to every mode above. Those decide **what** the price is; this decides
+**how the priced amount is delivered** — and it is the fee-on-transfer answer.
+
+Normally the settler *pushes* the computed amount from the filler to the leg's
+recipient. Those are nominal amounts: for a fee-on-transfer or rebasing `tokenOut`
+the recipient nets less than the number the maker signed, silently. With bit 104
+set the settler instead **snapshots each output recipient at fill start and, after
+the filler has delivered, requires**
+
+```
+balanceOf(recipient) after  −  balanceOf(recipient) before   ≥   outputAt(leg)
+```
+
+The required amount is still `outputAt`, i.e. whatever the clock / priority bid /
+price module produced for this fill, pro-rated for a partial. So the primitive
+composes with every mode by construction — a dutch order's floor decays with the
+tick, a module order's tracks the oracle — and the maker's signed output becomes a
+**net-of-fee floor** instead of a pre-fee nominal.
+
+The filler delivers out-of-band, inside its own fill callback: pool → recipient
+directly, or from an aggregator, or from inventory. For a FoT token that direct hop
+also means the fee is paid **once** rather than once per intermediate hop.
+
+**How to use it, and the rules:**
+
+- **Callback-only.** Nothing in the settler delivers these legs, so the order is
+  fillable only through `fillWithCallback`. Plain `fill`/`fillUpTo`/`batchFill`
+  reach the check with nothing delivered and revert `DeltaTooLow`; the netted
+  `matchSettle` path rejects the order up front (`DeltaVerifyNotBatchable`) because
+  it has no per-order callback to deliver from. Delivery must happen *during* the
+  fill — a pre-transfer lands under the snapshot and does not count.
+- **Shape restrictions, enforced on-chain.** No two output legs may share a
+  `(token, recipient)` (`DeltaVerifyDuplicateLeg`), and a maker-bound output token
+  may not also be an input token (`DeltaVerifySameToken`). A per-leg balance delta
+  only measures that leg when the leg alone moves the balance; both shapes would
+  otherwise let one delivery satisfy two checks, or measure net instead of gross.
+  Multiple legs in different tokens, and one token to different recipients (the
+  maker leg + a fee leg), are sound and supported.
+- **Prefer plain fee-on-transfer tokens.** The check counts *any* balance increase
+  across the fill, not specifically "sent by the filler". That is exactly right for
+  an ordinary FoT token, but a reflection token that credits holders on every
+  transfer — or an upward rebase mid-fill — can move the balance on its own, and a
+  filler can lean on that to deliver less. Same trust posture as
+  `MinBalanceInvariant`: the maker chose the token.
+
+The SDK sets the bit with `withDeltaVerifyOutputs(timing)`
+(`DELTA_VERIFY_OUTPUTS_BIT`). Unmarked orders are unaffected — delivery stays
+nominal and the hot path pays only a bit test.
+
+---
+
 ## Quoting and protecting a fill
 
 A filler that quotes an order and submits a moment later is exposed to the tick
@@ -193,5 +246,5 @@ that use none of this pay a single calldata compare.
 
 Related: [fill-modules.md](fill-modules.md) (the fill *denominator*, a different
 axis), [relayer-fees.md](relayer-fees.md) (rising input legs),
-[lop-parity-plan.md](lop-parity-plan.md) §7–8 (why the shape is what it is, and
+[lop-parity.md](lop-parity.md) §4–5 (why the shape is what it is, and
 what it cost).

@@ -174,6 +174,17 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
   `params.priorityScale`) moves the tick toward `start`. The sequencer's own
   ordering picks the winner; losers revert on the `filled` guard. Nothing new is
   trusted — the floor is the same absolute bound every other order has.
+- **Delta-verify delivery** (`timing` bit 104) — a DELIVERY mode rather than a
+  pricing one: instead of pushing the computed amount from the filler, the settler
+  **verifies the recipient's measured balance delta** against the leg's priced
+  amount. That makes a **fee-on-transfer output safe** — the maker's signed amount
+  becomes a net-of-fee floor rather than a pre-fee nominal — and it is the generic
+  outcome-based settlement primitive: the filler sources liquidity any way it likes
+  (pool → recipient, aggregator, inventory) inside its callback, and the core only
+  checks the result. Because the required amount is still the leg's price, it
+  composes with the dutch clock, priority auctions, price modules and partial fills
+  unchanged. Callback-only, and refused on the netted path. See the fee-on-transfer
+  stance in [the settlement README](packages/core/src/settlement/README.md).
 - **External price modules** ([`IPriceModule`](packages/core/src/interfaces/IPriceModule.sol)) —
   the generalization of the clock, and the 1inch `IAmountGetter` class of orders:
 
@@ -199,7 +210,7 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
   signature **+1,368** over a single one. Across the whole existing suite the
   features cost a median **+283 gas (+0.09%)**, and the canonical
   `test_plain_swap_full` **+369 (+0.07%)** — see
-  [docs/lop-parity-plan.md](docs/lop-parity-plan.md) §8.
+  [docs/lop-parity.md](docs/lop-parity.md) §5.
 - **Off-chain preview.** [`SettlementLens.previewFill`](packages/core/src/periphery/SettlementLens.sol)
   quotes a fill exactly (same math as the contract), `previewBump` returns the
   resolved bump for the `minBumpBps` floor, plus `remaining` / `hashOrder` /
@@ -386,7 +397,9 @@ See [docs/oco.md](docs/oco.md).
 - **Fee-on-transfer stance is explicit**: simple single-order swaps of FoT tokens
   work (the receiving party nets the post-fee amount); `matchSettle` relies on
   balance-delta pool accounting and **reverts safely** rather than mis-settling.
-  A maker wanting a hard floor attaches `MinBalanceInvariant`.
+  A maker wanting a hard floor attaches `MinBalanceInvariant` (absolute, fixed at
+  signing) or opts into **delta-verify delivery** (`timing` bit 104), which turns
+  the signed output into a true net-of-fee floor measured inside the fill.
 
 Authoritative document, including the trust model, per-layer invariants, the
 caveats integrators get wrong, and the audit history with findings and fixes:
@@ -595,7 +608,7 @@ Stated plainly, so nothing here reads as more finished than it is.
   gas on the deployed contract, and the size below 400 is flat, so there is nothing
   left in that dial. The measured curve and the three restructurings that returned
   ~3.3KB are in [`foundry.toml`](foundry.toml) and
-  [docs/lop-parity-plan.md](docs/lop-parity-plan.md) §7. **Weigh any further *core*
+  [docs/lop-parity.md](docs/lop-parity.md) §4. **Weigh any further *core*
   feature against this** — and note that anything reachable from `Pricing`/`bumpBps`
   is inlined ~8× and pays 8× for every byte. Modules and periphery cost nothing here.
 - **The committed gas baseline does not measure the deployed contract.** `make gas`

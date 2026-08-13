@@ -201,6 +201,21 @@ and expiries. Full design: [docs/delegated-signers.md](docs/delegated-signers.md
    maker signed — never outside it, and never to another token or recipient.
    See [docs/pricing-modes.md](docs/pricing-modes.md).
 
+11. **Delta-verified delivery fails closed.** An order may opt into having its
+   output legs VERIFIED by the recipient's measured balance delta (`timing` bit
+   104) instead of pushed as a nominal amount — the settlement-level form of the
+   "measure the delta, `require` at or above the signed amount" rule that H-3 and
+   M-10 imposed on modules. The required amount is the leg's own priced amount, so
+   the guarantee is the maker's signed output NET of any transfer fee; a short
+   delivery reverts (`DeltaTooLow`) rather than silently underpaying. Two shapes
+   would make a per-leg delta ambiguous and are rejected on-chain: two output legs
+   sharing a `(token, recipient)` (one delivery would satisfy both checks —
+   `DeltaVerifyDuplicateLeg`) and a maker-bound output token that is also an input
+   token (the measurement would be net, not gross — `DeltaVerifySameToken`). The
+   mode is callback-only and refused on the netted path. Its one trust assumption:
+   the check counts any balance increase across the fill, so a reflection/rebasing
+   token can supply part of it — prefer plain fee-on-transfer tokens.
+
 ---
 
 ## Caveats integrators must know
