@@ -96,6 +96,12 @@ contract DestinationSettler7683 is IDestinationSettler {
         // The floor is taken over the UNION of every touched token, BEFORE any caller
         // funds arrive — the true on-entry balance. A token that appears on both sides
         // is floored once and swept once.
+        //
+        // Note the packed leg blobs are decoded per-access rather than cached into a
+        // memory array: for the realistic 1–2 leg orders this settles, allocating and
+        // filling an `address[]` MEASURED MORE (+~1.1k gas on a single-leg fill) than
+        // the handful of cheap re-decodes it would save — the array only wins for many-
+        // leg baskets that do not occur here. Keep the direct reads.
         (address[] memory tokens, uint256[] memory floors) =
             _touchedFloors(p.order.legsIn, p.order.legsOut, nIn, nOut);
 
