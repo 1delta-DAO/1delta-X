@@ -136,6 +136,18 @@ export interface Order {
 export const BLOCK_CLOCK_BIT = 102n;
 /// `timing` bit 103: the bump is bid in PRIORITY FEE rather than elapsed time.
 export const PRIORITY_AUCTION_BIT = 103n;
+/// `timing` bit 104: deliver output legs by VERIFYING the recipient's balance
+/// delta (>= the priced amount) instead of pushing a nominal amount — the
+/// fee-on-transfer / rebasing-safe delivery mode. The filler delivers each output
+/// leg out-of-band (its fill callback); the required amount is still the leg's
+/// price, so it composes with every pricing mode.
+export const DELTA_VERIFY_OUTPUTS_BIT = 104n;
+
+/// Set the delta-verify-outputs mode on a packed `timing` word (see
+/// {@link DELTA_VERIFY_OUTPUTS_BIT}). Mirrors `DutchAuction.deltaVerifyOutputs`.
+export function withDeltaVerifyOutputs(timing: bigint): bigint {
+  return timing | (1n << DELTA_VERIFY_OUTPUTS_BIT);
+}
 
 /**
  * Pack the four auction scalars into the wire `params` word, mirroring

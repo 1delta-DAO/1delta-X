@@ -86,6 +86,38 @@ abstract contract Base is Signatures {
     ///      an oracle-pegged {IPriceModule} and a falling basefee shrinking the gas
     ///      bump.
     error BumpTooLow();
+    /// @dev A DELTA-VERIFY output leg ({DutchAuction.deltaVerifyOutputs}) did not
+    ///      land: the recipient's measured balance increase over the fill was below
+    ///      the leg's priced amount ({Pricing.outputAt}). The filler was supposed to
+    ///      deliver this leg out-of-band (its callback — pool/aggregator/inventory);
+    ///      the core verified the outcome instead of pushing a nominal amount, so a
+    ///      short or missing delivery (including a fee-on-transfer/rebase eating past
+    ///      the priced amount) unwinds the whole fill rather than silently underpaying
+    ///      the maker.
+    error DeltaTooLow();
+    /// @dev A {DutchAuction.deltaVerifyOutputs} order was offered to the netted
+    ///      `matchSettle` path. That path delivers output legs NOMINALLY (no per-order
+    ///      callback for the filler to source into, no recipient snapshot), so it
+    ///      cannot honour the delta-verify contract — it would deliver the very way the
+    ///      maker opted OUT of, silently. Fill such orders through the single-order
+    ///      {Core.fillWithCallback} path.
+    error DeltaVerifyNotBatchable();
+    /// @dev A {DutchAuction.deltaVerifyOutputs} order carries two output legs with the
+    ///      SAME (token, recipient). Both would verify their own priced amount against
+    ///      the SAME starting balance, so a single delivery of `max(amt)` — rather than
+    ///      the sum — satisfies both checks and the maker is underpaid. That defeats
+    ///      the one property this mode exists to provide, so it is rejected ON-CHAIN
+    ///      (the lens already reports a duplicate `(token, recipient)` pair as
+    ///      malformed for every order; here it is load-bearing, not advice).
+    ///      The nominal path is unaffected — it pushes each leg separately.
+    error DeltaVerifyDuplicateLeg();
+    /// @dev A {DutchAuction.deltaVerifyOutputs} order names the same token on an INPUT
+    ///      leg and an output leg paid to the maker. The maker's input is pulled
+    ///      between the snapshot and the check (the `PostInputs` ordering), so the
+    ///      measured balance delta would be output MINUS input — a net figure — while
+    ///      the check compares it against the GROSS output the maker signed for.
+    ///      Rejected rather than mis-measured.
+    error DeltaVerifySameToken();
     /// @dev A netted `matchSettle` left Settlement holding LESS of `token` than it
     ///      did before the context — the solver under-covered the residual, so the
     ///      settlement would have drawn down a pre-existing/donated balance. Reverts.

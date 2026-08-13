@@ -102,6 +102,10 @@ abstract contract Batch is Core {
         bytes memory takerData
     ) internal returns (FillCtx memory ctx) {
         if (fillAmount == 0) revert ZeroFill();
+        // Delta-verify delivery has no home on the netted path (see the error note):
+        // it needs a per-order callback + a recipient snapshot, neither of which the
+        // {matchSettle} PRESEND/DELIVER flow has. Reject rather than deliver nominally.
+        if (order.deltaVerifyOutputs()) revert DeltaVerifyNotBatchable();
         if (block.timestamp > order.deadline) revert OrderExpired();
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);

@@ -447,6 +447,60 @@ abstract contract Core is Base {
             : _settleForward(order, ctx, callbackTarget, callbackData, takerData);
     }
 
+    /// @dev Snapshot every output leg's recipient balance of that leg's token, for a
+    ///      {DutchAuction.deltaVerifyOutputs} order. Indexed 1:1 with `legsOut`, taken
+    ///      at fill start (before the callback) so the later check is a true delta.
+    ///      Recipient resolution mirrors `_deliverOutputs`: `address(0)` ⇒ the maker.
+    ///
+    ///      ALSO THE SHAPE GATE for this mode, and both checks are load-bearing rather
+    ///      than hygiene — see {DeltaVerifyDuplicateLeg} / {DeltaVerifySameToken}. A
+    ///      per-leg balance delta is only a sound measure of "what this leg delivered"
+    ///      when each leg's (token, recipient) balance moves for that leg ALONE. Both
+    ///      shapes are already reported malformed by {SettlementLens.validateOrder} for
+    ///      every order, but the lens is off-chain advice; on a delta-verify order they
+    ///      are exploitable, so they are enforced here. Runs only for this mode, so the
+    ///      nominal hot path pays nothing.
+    function _snapshotOutRecipients(Order calldata order) internal view returns (uint256[] memory before) {
+        uint256 n = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
+        uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
+        before = new uint256[](n);
+        // The decoded (token, recipient) pairs are CACHED rather than re-decoded for
+        // the duplicate scan: `PackedArrays.legOut` is an internal library call that
+        // the optimizer inlines at every call site, so a second decode site costs far
+        // more bytecode than the two memory arrays do (the +2,430-byte lesson recorded
+        // on {Pricing.inputOwed}). One decode site, one pass.
+        address[] memory toks = new address[](n);
+        address[] memory recips = new address[](n);
+        for (uint256 j; j < n;) {
+            (address token,,, address to) = PackedArrays.legOut(order.legsOut, j);
+            address recipient = to == address(0) ? order.maker : to;
+            // No earlier leg may share this (token, recipient) — one delivery would
+            // otherwise satisfy both legs' checks.
+            for (uint256 k; k < j;) {
+                if (toks[k] == token && recips[k] == recipient) revert DeltaVerifyDuplicateLeg();
+                unchecked {
+                    ++k;
+                }
+            }
+            // A maker-bound leg whose token is also pulled FROM the maker as an input
+            // would measure net, not gross.
+            if (recipient == order.maker) {
+                for (uint256 i; i < nIn;) {
+                    if (PackedArrays.legInToken(order.legsIn, i) == token) revert DeltaVerifySameToken();
+                    unchecked {
+                        ++i;
+                    }
+                }
+            }
+            toks[j] = token;
+            recips[j] = recipient;
+            before[j] = SafeTransferLib.balanceOf(token, recipient);
+            unchecked {
+                ++j;
+            }
+        }
+    }
+
     /// @dev Forward flow: optional callback → deliver outputs → items → pay
     ///      inputs → invariants. The callback runs BEFORE any funds move, routed
     ///      through the allowance-less EXECUTOR (cannot leverage Settlement's
@@ -458,9 +512,15 @@ abstract contract Core is Base {
         bytes memory callbackData,
         bytes memory takerData
     ) internal returns (uint256[] memory outs) {
+        // DELTA-VERIFY delivery: snapshot the output recipients BEFORE the callback
+        // delivers, so `_deliverOutputs` can verify the measured delta. `outBefore`
+        // stays a NULL array (no allocation) on the dominant nominal path — the hot
+        // path pays only the one `timing` bit test.
+        uint256[] memory outBefore;
+        if (DutchAuction.deltaVerifyOutputs(order)) outBefore = _snapshotOutRecipients(order);
         if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
 
-        outs = _deliverOutputs(order, ctx);
+        outs = _deliverOutputs(order, ctx, outBefore);
 
         // Snapshot each tokenIn before items so the payout uses ONLY this fill's
         // TAKE proceeds — never a pre-existing/donated Settlement balance. Skipped
@@ -489,12 +549,17 @@ abstract contract Core is Base {
         bytes memory takerData
     ) internal returns (uint256[] memory outs) {
         if (PackedArrays.countUnchecked(order.items) != 0) revert ReverseModeRequiresNoItems();
+        // DELTA-VERIFY delivery: snapshot output recipients before anything moves
+        // (null array — no allocation — on the nominal path). Taken before the input
+        // pull too, so a same-token in/out edge still measures a true delta.
+        uint256[] memory outBefore;
+        if (DutchAuction.deltaVerifyOutputs(order)) outBefore = _snapshotOutRecipients(order);
         // No items ⇒ no TAKE proceeds ⇒ proceeds are 0 by construction, so
         // `_payInputsToSolver` (hasItems=false) pulls exactly `owed` from the
         // maker → solver with no balance snapshot needed.
         _payInputsToSolver(order, ctx, new uint256[](0), false);
         if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
-        outs = _deliverOutputs(order, ctx);
+        outs = _deliverOutputs(order, ctx, outBefore);
         _runInvariants(order, ctx.filler, takerData);
         emit OrderFilled(ctx.orderHash, order.maker, ctx.filler);
     }
@@ -511,9 +576,17 @@ abstract contract Core is Base {
     ///        `tokenOut` via Permit3, falling back to a direct ERC20 transferFrom
     ///        when the solver approved Settlement directly (see
     ///        `_transferFromWithFallback`).
-    function _deliverOutputs(Order calldata order, FillCtx memory ctx) internal returns (uint256[] memory outs) {
+    function _deliverOutputs(Order calldata order, FillCtx memory ctx, uint256[] memory outBefore)
+        internal
+        returns (uint256[] memory outs)
+    {
         uint256 n = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
         outs = new uint256[](n);
+        // DELTA-VERIFY delivery ({DutchAuction.deltaVerifyOutputs}): the filler already
+        // delivered each leg out-of-band (its callback), so verify the recipient's
+        // measured balance increase instead of pushing from the filler. `outBefore`
+        // was snapshotted at fill start.
+        bool verify = DutchAuction.deltaVerifyOutputs(order);
         for (uint256 j; j < n;) {
             // Amount (incl. the maker-leg soft-exclusivity override) — see
             // {Pricing.outputAt}. The maker-leg test is recomputed here
@@ -522,11 +595,17 @@ abstract contract Core is Base {
             if (amt != 0) {
                 // One decode for both field reads — see {Pricing.outputAt}.
                 (address legToken,,, address to) = PackedArrays.legOut(order.legsOut, j);
-                bool makerLeg = to == address(0) || to == order.maker;
+                address recipient = to == address(0) || to == order.maker ? order.maker : to;
                 outs[j] = amt;
-                Permit3TransferLib.transferFromWithFallback(
-                    PERMIT3, legToken, ctx.filler, makerLeg ? order.maker : to, amt
-                );
+                if (verify) {
+                    // The required amount is the SAME priced `amt` — every pricing mode
+                    // (dutch/priority/module/partial) flows through unchanged. Measured
+                    // delta ≥ priced amount, fee-on-transfer / rebasing safe.
+                    uint256 bal = SafeTransferLib.balanceOf(legToken, recipient);
+                    if (bal < outBefore[j] || bal - outBefore[j] < amt) revert DeltaTooLow();
+                } else {
+                    Permit3TransferLib.transferFromWithFallback(PERMIT3, legToken, ctx.filler, recipient, amt);
+                }
             }
             unchecked {
                 ++j;

@@ -131,6 +131,50 @@ library DutchAuction {
         return (order.timing >> 103) & 1 == 1;
     }
 
+    /// @notice Deliver output legs by VERIFYING the recipient's balance delta instead
+    ///         of pushing a nominal amount — bit 104 of `timing`.
+    /// @dev    Fee-on-transfer / rebasing-safe delivery, and the generic outcome-based
+    ///         settlement primitive. On a delta-verify order the FILLER delivers each
+    ///         output leg out-of-band (typically inside the fill callback — pool →
+    ///         recipient, aggregator, inventory), and {Core._deliverOutputs} requires
+    ///         the recipient's MEASURED balance increase to be at least the leg's
+    ///         priced amount ({Pricing.outputAt}) rather than transferring that amount
+    ///         from the filler. Because the required amount is still `outputAt`, this
+    ///         composes with EVERY pricing mode unchanged — the dutch clock, a priority
+    ///         bid, a price module, and partial-fill scaling all flow through as-is;
+    ///         a fixed leg is simply a flat floor. The recipient is snapshotted at fill
+    ///         start (before the callback), so the check is a true start/end delta, not
+    ///         an absolute floor — no signing-time balance to track. Bit 104 was free
+    ///         space in a word the maker ALREADY signs, so this costs no new `Order`
+    ///         field, no typehash change and no golden-hash break; an order that does
+    ///         not set it delivers nominally exactly as before.
+    ///
+    ///         ⚠ CALLBACK-ONLY. Nothing in the settler delivers these legs, so such an
+    ///         order is fillable ONLY through {Core.fillWithCallback}, where the filler
+    ///         delivers inside its own callback. Plain `fill` / `fillUpTo` /
+    ///         `batchFill` reach the check with nothing delivered and revert
+    ///         {DeltaTooLow}; the netted `matchSettle` path rejects the order up front
+    ///         ({DeltaVerifyNotBatchable}) because it has no per-order callback. And
+    ///         the delivery must happen DURING the fill: the snapshot is taken at fill
+    ///         start, so a pre-transfer lands under it and does not count.
+    ///
+    ///         ⚠ SHAPE RESTRICTIONS, enforced on-chain by {Core._snapshotOutRecipients}:
+    ///         no two output legs may share a (token, recipient), and a maker-bound
+    ///         output token may not also be an input token. A per-leg balance delta
+    ///         only measures one leg when that leg alone moves the balance.
+    ///
+    ///         ⚠ REBASING / REFLECTION TOKENS. The check measures ANY balance increase
+    ///         on the recipient across the fill, not specifically "sent by the filler".
+    ///         For an ordinary fee-on-transfer token that is exactly right — it is what
+    ///         makes the maker's floor net-of-fee. But a token that credits holders on
+    ///         every transfer (reflection), or rebases upward mid-fill, can move the
+    ///         recipient's balance on its own, and a filler may lean on that to deliver
+    ///         less. Same trust posture as {MinBalanceInvariant}: the maker chose the
+    ///         token. Prefer plain fee-on-transfer tokens here.
+    function deltaVerifyOutputs(Order calldata order) internal pure returns (bool) {
+        return (order.timing >> 104) & 1 == 1;
+    }
+
     // ──────────────────── Packed `params` accessors ────────────────────
 
     /// @notice Soft-exclusivity improvement — `params` bits [0:16).
