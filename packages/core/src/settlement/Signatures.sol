@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
+import {OrderHash} from "./OrderHash.sol";
 import {OrderState} from "./OrderState.sol";
 
 /// @title Signatures
@@ -185,13 +186,61 @@ abstract contract Signatures is OrderState {
             return;
         }
         if (filled[orderHash] != 0) return; // already authorized once — see above
-        bytes32 digest = _hashTypedData(orderHash);
+        bytes32 digest;
+        bytes calldata sigBody = sig;
+        // BULK (Merkle) signature — ONE signature authorizing every order whose hash is
+        // a leaf of a signed root. What a 50-slice ladder, an N-way bracket or a market
+        // maker's quote refresh needs, and what Seaport's bulk orders and
+        // ComposableCoW's O(1) root both do: the maker signs `OrderRoot(root)` once and
+        // each order carries its own inclusion proof.
+        //
+        //     sig = innerSig(65) ‖ bytes32[] proof ‖ 0xB0
+        //
+        //  This branch only swaps in a DIFFERENT DIGEST and a 65-byte body; every
+        //  acceptance rule below — maker, delegate, contract wallet — then applies
+        //  unchanged. That is deliberate: verifying the root inline with its own copy
+        //  of the signer set measured **+1,343 bytes** of Settlement (2026-08-12,
+        //  against a 404-byte budget), because `recoverCalldata` and `verify` are
+        //  library internals the optimizer inlines per site. A bulk signature grants
+        //  exactly the authority a single signature would, no more.
+        //
+        //  ⚠ SHAPE, AND WHY IT CANNOT AUTHORIZE ANYTHING IT SHOULDN'T. `length >= 98`,
+        //  `(length - 66) % 32 == 0`, trailing `0xB0`. No ECDSA signature (64/65 bytes)
+        //  can match. This IS a liveness edge, never a bypass: any signature that
+        //  matches the three predicates is re-read against a root the maker never
+        //  signed and REVERTS. Two shapes can collide, and both are liveness-only:
+        //    • a delegate envelope (`address ‖ innerSig`) — builders control their own
+        //      envelope, so it is avoidable off-chain; and
+        //    • a plain CONTRACT-MAKER 1271 blob whose own length lands on `2 mod 32`
+        //      (98, 130, 162 …) and whose last byte is `0xB0`. This one the maker does
+        //      NOT choose — it is whatever the wallet emits — so it is not "avoidable
+        //      off-chain" for every wallet. Vanilla Safes are immune (the trailing byte
+        //      of a static ECDSA part is `v ∈ {0,1,27,28}`); the exposure is wallets
+        //      with attacker-influenceable trailing bytes (dynamic-part Safe signatures,
+        //      some passkey/WebAuthn encodings), at ~1/256 per matching length. Such a
+        //      maker still has the empty-`sig` {approveOrder} path and {cancelOrder}, so
+        //      no order is stuck; a future envelope revision (a length field, a reserved
+        //      trailer namespace) would remove even the liveness edge.
+        //
+        //  The proof folds with SORTED pairs (the OpenZeppelin convention), so a leaf
+        //  is just an order hash and the tree carries no position bits. Passing an
+        //  internal node off as an order would require finding an order whose EIP-712
+        //  struct hash equals a chosen 256-bit node — a second-preimage search.
+        uint256 n = sig.length;
+        if (n >= 98 && (n - 66) % 32 == 0 && uint8(sig[n - 1]) == 0xB0) {
+            digest = _hashTypedData(
+                keccak256(abi.encode(OrderHash.ORDER_ROOT_TYPEHASH, _foldProof(orderHash, sig[65:n - 1])))
+            );
+            sigBody = sig[:65];
+        } else {
+            digest = _hashTypedData(orderHash);
+        }
         // Recover ONCE, then decide. The maker's own signature — the overwhelming
         // majority — takes the first branch and pays exactly what it paid before
         // delegation existed: one `ecrecover` and one compare, which is precisely
         // the work {SignatureVerification.verify} would have done. The registry
         // SLOAD sits behind a mismatch, so an ordinary fill never touches it.
-        (bool standardLength, address signer) = SignatureVerification.recoverCalldata(sig, digest);
+        (bool standardLength, address signer) = SignatureVerification.recoverCalldata(sigBody, digest);
         if (standardLength && signer != address(0)) {
             if (signer == expected) return;
             // Not the maker — but the maker may have nominated this key. The lookup
@@ -230,11 +279,11 @@ abstract contract Signatures is OrderState {
         //  (it would be read as a plain ECDSA signature above); builders must not
         //  emit an `innerSig` of 44 or 45 bytes. No real signature scheme produces
         //  one.
-        if (!standardLength && sig.length > 20 && expected.code.length == 0) {
-            address contractSigner = address(bytes20(sig[:20]));
+        if (!standardLength && sigBody.length > 20 && expected.code.length == 0) {
+            address contractSigner = address(bytes20(sigBody[:20]));
             uint256 expiry = orderSignerExpiry[expected][contractSigner];
             if (expiry != 0 && block.timestamp <= expiry) {
-                SignatureVerification.verify(sig[20:], digest, contractSigner);
+                SignatureVerification.verify(sigBody[20:], digest, contractSigner);
                 return;
             }
         }
@@ -247,6 +296,35 @@ abstract contract Signatures is OrderState {
         // bytes pays one extra (cold) SLOAD for the registry probe above before
         // landing here. Safe wallets and the rest produce longer payloads, which
         // `recoverCalldata` rejects on length alone, so they skip it entirely.
-        SignatureVerification.verify(sig, digest, expected);
+        SignatureVerification.verify(sigBody, digest, expected);
+    }
+
+    /// @dev Fold an inclusion proof into its Merkle root, hashing SORTED pairs (the
+    ///      OpenZeppelin convention, so any standard tree builder produces compatible
+    ///      proofs). Hashed in scratch space — a `bytes32[] calldata` decode plus
+    ///      `abi.encodePacked` per level would allocate on every level for a fixed
+    ///      64-byte preimage.
+    function _foldProof(bytes32 leaf, bytes calldata proof) private pure returns (bytes32 h) {
+        h = leaf;
+        uint256 levels = proof.length / 32;
+        for (uint256 i; i < levels;) {
+            /// @solidity memory-safe-assembly
+            assembly {
+                let p := calldataload(add(proof.offset, mul(i, 32)))
+                switch lt(h, p)
+                case 1 {
+                    mstore(0x00, h)
+                    mstore(0x20, p)
+                }
+                default {
+                    mstore(0x00, p)
+                    mstore(0x20, h)
+                }
+                h := keccak256(0x00, 0x40)
+            }
+            unchecked {
+                ++i;
+            }
+        }
     }
 }

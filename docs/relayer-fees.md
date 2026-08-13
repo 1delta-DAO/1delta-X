@@ -42,7 +42,7 @@ side      = SELL
 items     = [ MAKE deposit D ]                        (the real action)
 legsIn    = [ LegIn{ USDC, start: F0, end: FMAX } ]   (rising relayer fee — maker pays, filler earns)
 legsOut   = [ ]                                       (EMPTY — nothing is delivered back)
-timing    = packTiming(decayStartTime, decayDuration, exclusivityEndTime)  (shared clock; curve + gasBumpBps/gasPriceRef too)
+timing    = packTiming(decayStartTime, decayDuration, exclusivityEndTime)  (shared clock; curve + the gas bump in `params` too)
 ```
 
 Fill-time semantics (`_payInputsToSolver`):
@@ -54,14 +54,15 @@ Fill-time semantics (`_payInputsToSolver`):
 | input, `end != 0`, `end < start` | reverts `InvalidAuctionParams` (inputs only rise) |
 
 Soft exclusivity applies to every auctioned input leg: a non-exclusive
-in-window filler charges `exclusivityOverrideBps` less.
+in-window filler charges the `params` override bps less.
 
 ## 4. Why this is the economically-correct shape
 
 - **Auction-discovered.** The fee rises until the *first* relayer for whom
   `tick ≥ gas + margin` fills. Competition prices the fill at the marginal
   relayer's cost; the maker's worst case is the signed `legsIn[0].end` ceiling.
-- **Gas-indexed.** `gasBumpBps`/`gasPriceRef` widen the fee with `basefee`, so
+- **Gas-indexed.** The gas bump in `params` (`gasBumpBps`/`gasPriceRef`, see
+  `DutchAuction.packParams`) widens the fee with `basefee`, so
   a deposit stays fillable through a gas spike without a fat static fee.
 - **Zero filler capital.** With an empty `legsOut` the relayer fronts
   nothing — no inventory, no flash. It pays gas and collects the fee leg.

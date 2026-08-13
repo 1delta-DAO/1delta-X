@@ -138,18 +138,17 @@ contract WithdrawWithFeeTest is AaveModulesBase {
             data: takerData
         });
         Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 31,
             deadline: block.timestamp + 1 hours,
-            legsIn: PackedEncode.legsIn(_legsIn1Rising(WETH, feeFloor, feeCeil)),
+            legsIn: _legsIn1Rising(WETH, feeFloor, feeCeil),
             legsOut: PackedEncode.legsOut(new LegOut[](0)),
             timing: _packTiming(uint32(block.timestamp), uint32(duration), 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

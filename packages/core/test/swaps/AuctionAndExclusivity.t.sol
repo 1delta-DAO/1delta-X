@@ -61,7 +61,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.exclusiveFiller = EX;
         _setExclusivityEnd(order, uint32(block.timestamp + 100));
-        order.exclusivityOverrideBps = 100;
+        order.params = (order.params & ~uint256(0xffff)) | uint256(100);
         bytes memory sig = _sign(order);
 
         // Non-exclusive `solver` fills in-window → must deliver 1% more output.
@@ -77,7 +77,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory order = _buyOrder(1, address(tA), address(tB), BUY_IN, BUY_IN, BUY_OUT);
         order.exclusiveFiller = EX;
         _setExclusivityEnd(order, uint32(block.timestamp + 100));
-        order.exclusivityOverrideBps = 100; // maker pays 1% less
+        order.params = (order.params & ~uint256(0xffff)) | uint256(100); // maker pays 1% less
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -93,7 +93,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.exclusiveFiller = solver; // the exclusive filler IS our solver
         _setExclusivityEnd(order, uint32(block.timestamp + 100));
-        order.exclusivityOverrideBps = 100;
+        order.params = (order.params & ~uint256(0xffff)) | uint256(100);
         bytes memory sig = _sign(order);
 
         // Exclusive filler pays the base price — no override.
@@ -107,7 +107,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.exclusiveFiller = EX;
         _setExclusivityEnd(order, uint32(block.timestamp + 100));
-        order.exclusivityOverrideBps = 0; // hard
+        order.params = (order.params & ~uint256(0xffff)) | uint256(0); // hard
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
@@ -200,8 +200,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         // No time decay (duration 0, no curve) → the ONLY bump is the gas bump.
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, start);
         order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, end);
-        order.gasBumpBps = 1_000;
-        order.gasPriceRef = ref;
+        order.params = (order.params & ~(uint256(0xffff) << 16)) | (uint256(1_000) << 16);
+        order.params = (order.params & ~(uint256(type(uint64).max) << 32)) | (uint256(ref) << 32);
         bytes memory sig = _sign(order);
 
         vm.fee(ref); // basefee == ref → full 1000 bps of gas bump
@@ -216,8 +216,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
     function test_gasBump_cappedAtGasBumpBps() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
-        order.gasBumpBps = 1_000;
-        order.gasPriceRef = 30 gwei;
+        order.params = (order.params & ~(uint256(0xffff) << 16)) | (uint256(1_000) << 16);
+        order.params = (order.params & ~(uint256(type(uint64).max) << 32)) | (uint256(30 gwei) << 32);
 
         vm.fee(90 gwei); // 3× ref → gas add would be 3000, capped to 1000
         uint256 exp = SELL_OUT - ((SELL_OUT - 1e18) * 1_000) / 10_000;
@@ -227,8 +227,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
     function test_gasBump_belowRef_partial() public {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
-        order.gasBumpBps = 1_000;
-        order.gasPriceRef = 30 gwei;
+        order.params = (order.params & ~(uint256(0xffff) << 16)) | (uint256(1_000) << 16);
+        order.params = (order.params & ~(uint256(type(uint64).max) << 32)) | (uint256(30 gwei) << 32);
 
         vm.fee(15 gwei); // half of ref → 500 bps
         uint256 exp = SELL_OUT - ((SELL_OUT - 1e18) * 500) / 10_000;
@@ -242,8 +242,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         uint64 ref = 30 gwei;
 
         Order memory order = _buyOrder(1, address(tA), address(tB), startIn, endIn, BUY_OUT);
-        order.gasBumpBps = 1_000;
-        order.gasPriceRef = ref;
+        order.params = (order.params & ~(uint256(0xffff) << 16)) | (uint256(1_000) << 16);
+        order.params = (order.params & ~(uint256(type(uint64).max) << 32)) | (uint256(ref) << 32);
         bytes memory sig = _sign(order);
 
         vm.fee(ref); // full 1000 bps
@@ -263,17 +263,17 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         ok.legsOut = PackedEncode.setLegOutEnd(ok.legsOut, 0, 1e18);
         ok.exclusiveFiller = EX;
         _setExclusivityEnd(ok, uint32(block.timestamp + 100));
-        ok.exclusivityOverrideBps = 50;
+        ok.params = (ok.params & ~uint256(0xffff)) | uint256(50);
         _setDecayStart(ok, uint32(block.timestamp));
         ok.curve = PackedEncode.curve(_curve3());
-        ok.gasBumpBps = 500;
-        ok.gasPriceRef = 30 gwei;
+        ok.params = (ok.params & ~(uint256(0xffff) << 16)) | (uint256(500) << 16);
+        ok.params = (ok.params & ~(uint256(type(uint64).max) << 32)) | (uint256(30 gwei) << 32);
         (bool good,) = lens.validateOrder(ok);
         assertTrue(good, "well-formed advanced order validates");
 
         // override without exclusiveFiller
         Order memory o1 = _plainOrder(2, address(tA), address(tB), SELL_IN, SELL_OUT);
-        o1.exclusivityOverrideBps = 50;
+        o1.params = (o1.params & ~uint256(0xffff)) | uint256(50);
         (bool b1, string memory r1) = lens.validateOrder(o1);
         assertFalse(b1, "override needs exclusiveFiller");
         assertEq(r1, "override without exclusiveFiller");
@@ -291,20 +291,20 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         // gas bump without reference price
         Order memory o3 = _plainOrder(4, address(tA), address(tB), SELL_IN, SELL_OUT);
-        o3.gasBumpBps = 500;
+        o3.params = (o3.params & ~(uint256(0xffff) << 16)) | (uint256(500) << 16);
         (bool b3, string memory r3) = lens.validateOrder(o3);
         assertFalse(b3, "gas bump needs gasPriceRef");
         assertEq(r3, "gasBump without gasPriceRef");
     }
 
     function test_validateOrder_moreRejects() public view {
-        // exclusivityOverrideBps > 10000
+        // overrideBps > 10000
         Order memory o1 = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         o1.exclusiveFiller = EX;
-        o1.exclusivityOverrideBps = 10_001;
+        o1.params = (o1.params & ~uint256(0xffff)) | uint256(10_001);
         (bool b1, string memory r1) = lens.validateOrder(o1);
         assertFalse(b1);
-        assertEq(r1, "exclusivityOverrideBps > 10000");
+        assertEq(r1, "overrideBps > 10000");
 
         // curve bumpBps > 10000
         Order memory o2 = _plainOrder(2, address(tA), address(tB), SELL_IN, SELL_OUT);
@@ -327,8 +327,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
 
         // gasBumpBps > 10000
         Order memory o4 = _plainOrder(4, address(tA), address(tB), SELL_IN, SELL_OUT);
-        o4.gasBumpBps = 10_001;
-        o4.gasPriceRef = 30 gwei;
+        o4.params = (o4.params & ~(uint256(0xffff) << 16)) | (uint256(10_001) << 16);
+        o4.params = (o4.params & ~(uint256(type(uint64).max) << 32)) | (uint256(30 gwei) << 32);
         (bool b4, string memory r4) = lens.validateOrder(o4);
         assertFalse(b4);
         assertEq(r4, "gasBumpBps > 10000");
@@ -345,8 +345,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, end);
         _setDecayStart(order, uint32(block.timestamp));
         _setDecayDuration(order, 100);
-        order.gasBumpBps = 1_000;
-        order.gasPriceRef = ref;
+        order.params = (order.params & ~(uint256(0xffff) << 16)) | (uint256(1_000) << 16);
+        order.params = (order.params & ~(uint256(type(uint64).max) << 32)) | (uint256(ref) << 32);
         bytes memory sig = _sign(order);
 
         // t+50 → auction bump 5000; basefee = half ref → gas add 500; total 5500.
@@ -366,8 +366,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
         _setDecayStart(order, uint32(block.timestamp));
         _setDecayDuration(order, 100);
-        order.gasBumpBps = 3_000;
-        order.gasPriceRef = 30 gwei;
+        order.params = (order.params & ~(uint256(0xffff) << 16)) | (uint256(3_000) << 16);
+        order.params = (order.params & ~(uint256(type(uint64).max) << 32)) | (uint256(30 gwei) << 32);
 
         // t+80 (auction 8000) + full gas 3000 = 11000 → clamped to 10000 → end price.
         vm.warp(block.timestamp + 80);
@@ -517,7 +517,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         _setDecayDuration(order, 100);
         order.exclusiveFiller = EX;
         _setExclusivityEnd(order, uint32(block.timestamp + 1_000));
-        order.exclusivityOverrideBps = 100;
+        order.params = (order.params & ~uint256(0xffff)) | uint256(100);
         bytes memory sig = _sign(order);
 
         vm.warp(block.timestamp + 50);
@@ -536,7 +536,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.exclusiveFiller = EX;
         _setExclusivityEnd(order, uint32(block.timestamp + 100));
-        order.exclusivityOverrideBps = 100;
+        order.params = (order.params & ~uint256(0xffff)) | uint256(100);
         bytes memory sig = _sign(order);
         bytes memory cb = abi.encodeCall(Supplier.supply, (solver, address(tB), bumped));
 
@@ -558,7 +558,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory order = _buyOrder(1, address(tA), address(tB), BUY_IN, BUY_IN, BUY_OUT);
         order.exclusiveFiller = EX;
         _setExclusivityEnd(order, uint32(block.timestamp + 100));
-        order.exclusivityOverrideBps = 100;
+        order.params = (order.params & ~uint256(0xffff)) | uint256(100);
         bytes memory sig = _sign(order);
         bytes memory cb = abi.encodeCall(SwapHelper.swap, (solver, address(tA), discounted, address(tB), BUY_OUT));
 
@@ -578,12 +578,12 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory soft = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         soft.exclusiveFiller = EX;
         _setExclusivityEnd(soft, uint32(block.timestamp + 100));
-        soft.exclusivityOverrideBps = 100;
+        soft.params = (soft.params & ~uint256(0xffff)) | uint256(100);
 
         Order memory hard = _plainOrder(2, address(tA), address(tB), SELL_IN, SELL_OUT);
         hard.exclusiveFiller = EX;
         _setExclusivityEnd(hard, uint32(block.timestamp + 100));
-        hard.exclusivityOverrideBps = 0; // hard → skipped
+        hard.params = (hard.params & ~uint256(0xffff)) | uint256(0); // hard → skipped
 
         Order[] memory orders = new Order[](2);
         orders[0] = soft;
@@ -607,7 +607,7 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         Order memory order = _buyOrder(1, address(tA), address(tB), BUY_IN, BUY_IN, BUY_OUT);
         order.exclusiveFiller = EX;
         _setExclusivityEnd(order, uint32(block.timestamp + 100));
-        order.exclusivityOverrideBps = 10_001; // malformed; validateOrder would reject it
+        order.params = (order.params & ~uint256(0xffff)) | uint256(10_001); // malformed; validateOrder would reject it
         bytes memory sig = _sign(order);
 
         // A non-exclusive filler triggers the override. `_exclusivity` rejects the
@@ -625,8 +625,8 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         basefee = bound(basefee, 0, 1_000 gwei);
         Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
         order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
-        order.gasBumpBps = 2_000;
-        order.gasPriceRef = 30 gwei;
+        order.params = (order.params & ~(uint256(0xffff) << 16)) | (uint256(2_000) << 16);
+        order.params = (order.params & ~(uint256(type(uint64).max) << 32)) | (uint256(30 gwei) << 32);
 
         vm.fee(basefee);
         uint256 out = lens.previewAmountOut(order)[0];

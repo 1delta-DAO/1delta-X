@@ -3,9 +3,11 @@ pragma solidity ^0.8.28;
 
 import {PackedEncode} from "../shared/PackedEncode.sol";
 
+import {Base} from "@core/settlement/Base.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Order, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
+import {RangePriceModule} from "@core/modules/RangePriceModule.sol";
 
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
@@ -60,7 +62,7 @@ contract FillUpToTest is MockSettlementBase {
 
         vm.prank(solver);
         (uint256 delta, uint256[] memory received, uint256[] memory paid) =
-            settlement.fillUpTo(order, sig, IN_, address(0), "");
+            settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
 
         assertEq(delta, IN_, "full delta");
         assertEq(received.length, 1, "one input leg");
@@ -79,7 +81,7 @@ contract FillUpToTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(OrderState.ZeroFill.selector);
-        settlement.fillUpTo(order, sig, 0, address(0), "");
+        settlement.fillUpTo(order, sig, 0, address(0), 0, "");
     }
 
     // ──────────────────── The clamp ────────────────────
@@ -99,7 +101,7 @@ contract FillUpToTest is MockSettlementBase {
         uint256 aBefore = tA.balanceOf(solver);
         vm.prank(solver);
         (uint256 delta, uint256[] memory received, uint256[] memory paid) =
-            settlement.fillUpTo(order, sig, IN_, address(0), "");
+            settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
 
         uint256 rem = (IN_ * 40) / 100;
         assertEq(delta, rem, "clamped to the remaining 40%");
@@ -115,7 +117,7 @@ contract FillUpToTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        (uint256 delta,,) = settlement.fillUpTo(order, sig, IN_ * 3, address(0), "");
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, IN_ * 3, address(0), 0, "");
         assertEq(delta, IN_, "over-request clamps to the whole order");
     }
 
@@ -129,7 +131,7 @@ contract FillUpToTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        (uint256 delta,,) = settlement.fillUpTo(order, sig, type(uint256).max, address(0), "");
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, type(uint256).max, address(0), 0, "");
         assertEq(delta, IN_, "clamped exactly onto the full-fill floor");
     }
 
@@ -147,7 +149,7 @@ contract FillUpToTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(OrderState.FillTooSmall.selector);
-        settlement.fillUpTo(order, sig, IN_, address(0), "");
+        settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
     }
 
     // ── dead orders fall through to the classic precise errors ──
@@ -162,7 +164,7 @@ contract FillUpToTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(OrderState.OverFill.selector);
-        settlement.fillUpTo(order, sig, 1, address(0), "");
+        settlement.fillUpTo(order, sig, 1, address(0), 0, "");
     }
 
     function test_fillUpTo_cancelledByHash_reverts_OrderCancelled() public {
@@ -175,7 +177,7 @@ contract FillUpToTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(OrderState.OrderCancelled.selector);
-        settlement.fillUpTo(order, sig, IN_, address(0), "");
+        settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
     }
 
     // ──────────────────── recipient: destination, never authority ────────────────────
@@ -190,7 +192,7 @@ contract FillUpToTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        (, uint256[] memory received,) = settlement.fillUpTo(order, sig, IN_, recipient, "");
+        (, uint256[] memory received,) = settlement.fillUpTo(order, sig, IN_, recipient, 0, "");
 
         assertEq(tA.balanceOf(recipient), IN_, "proceeds redirected to recipient");
         assertEq(tA.balanceOf(solver), 0, "nothing at the filler");
@@ -208,7 +210,7 @@ contract FillUpToTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(abi.encodeWithSignature("NotExclusiveFiller()"));
-        settlement.fillUpTo(order, sig, IN_, address(0xD00D), "");
+        settlement.fillUpTo(order, sig, IN_, address(0xD00D), 0, "");
     }
 
     // ──────────────────── received exactness under decay ────────────────────
@@ -232,7 +234,7 @@ contract FillUpToTest is MockSettlementBase {
         uint256 aBefore = tA.balanceOf(solver);
         vm.prank(solver);
         (uint256 delta, uint256[] memory received, uint256[] memory paid) =
-            settlement.fillUpTo(order, sig, out, address(0), "");
+            settlement.fillUpTo(order, sig, out, address(0), 0, "");
 
         assertEq(delta, out, "BUY delta in output units");
         assertEq(paid[0], out, "delivered the exact output");
@@ -265,7 +267,7 @@ contract FillUpToTest is MockSettlementBase {
         vm.warp(block.timestamp + 500);
 
         vm.prank(solver);
-        (, uint256[] memory received,) = settlement.fillUpTo(order, sig, IN_, address(0), "");
+        (, uint256[] memory received,) = settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
 
         assertEq(received.length, 2, "both input legs reported");
         assertEq(received[0], tA.balanceOf(solver), "anchor leg receipt");
@@ -290,7 +292,7 @@ contract FillUpToTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(OrderState.OverFill.selector);
-        settlement.fillUpTo(order, sig, IN_, address(0), "");
+        settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
     }
 
     /// @dev A module that clamps itself via `prevFilled` — the documented
@@ -306,7 +308,7 @@ contract FillUpToTest is MockSettlementBase {
         settlement.fill(order, sig, (IN_ * 60) / 100);
 
         vm.prank(solver);
-        (uint256 delta,,) = settlement.fillUpTo(order, sig, IN_, address(0), "");
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
         assertEq(delta, (IN_ * 40) / 100, "module clamped to remaining");
     }
 
@@ -339,12 +341,91 @@ contract FillUpToTest is MockSettlementBase {
         uint256 bBefore = tB.balanceOf(solver);
         vm.prank(solver);
         (uint256 delta, uint256[] memory received, uint256[] memory paid) =
-            settlement.fillUpTo(order, sig, request, address(0), "");
+            settlement.fillUpTo(order, sig, request, address(0), 0, "");
 
         uint256 rem = IN_ - preFill;
         assertEq(delta, request > rem ? rem : request, "delta = min(request, remaining)");
         assertEq(received[0], tA.balanceOf(solver) - aBefore, "received == balance gain");
         assertEq(paid[0], bBefore - tB.balanceOf(solver), "paid == balance spend");
         assertEq(settlement.filled(lens.hashOrder(order)), preFill + delta, "progress accounted");
+    }
+
+    // ──────────────────── minBumpBps: the filler's price floor ────────────────────
+
+    /// @dev A decaying SELL (output 2e18 → 1e18 over 1000s) at mid-window: the
+    ///      resolved bump is exactly 5000, so a floor AT the quote passes.
+    function _minBumpOrder(uint256 nonce) internal view returns (Order memory order) {
+        order = _plainOrder(nonce, address(tA), address(tB), IN_, OUT_);
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, OUT_ / 2);
+        _setDecayStart(order, block.timestamp);
+        _setDecayDuration(order, 1000);
+    }
+
+    function test_fillUpTo_minBump_atQuote_succeeds() public {
+        _fund(IN_, OUT_);
+        Order memory order = _minBumpOrder(20);
+        bytes memory sig = _sign(order);
+        vm.warp(block.timestamp + 500); // bump = 5000
+
+        vm.prank(solver);
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, IN_, address(0), 5_000, "");
+        assertEq(delta, IN_, "filled - resolved bump meets the floor exactly");
+    }
+
+    function test_fillUpTo_minBump_belowQuote_reverts() public {
+        _fund(IN_, OUT_);
+        Order memory order = _minBumpOrder(21);
+        bytes memory sig = _sign(order);
+        vm.warp(block.timestamp + 500); // bump = 5000
+
+        vm.prank(solver);
+        vm.expectRevert(Base.BumpTooLow.selector);
+        settlement.fillUpTo(order, sig, IN_, address(0), 5_001, "");
+    }
+
+    /// @dev An all-fixed order never leaves bump 0, so any floor > 0 fails — the
+    ///      filler asked for a price movement the order cannot express.
+    function test_fillUpTo_minBump_fixedOrder_reverts() public {
+        _fund(IN_, OUT_);
+        Order memory order = _plainOrder(22, address(tA), address(tB), IN_, OUT_);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.BumpTooLow.selector);
+        settlement.fillUpTo(order, sig, IN_, address(0), 1, "");
+    }
+
+    /// @dev Zero floor is the pre-existing behaviour: no check, an all-fixed order
+    ///      fills untouched.
+    function test_fillUpTo_minBump_zero_noCheck() public {
+        _fund(IN_, OUT_);
+        Order memory order = _plainOrder(23, address(tA), address(tB), IN_, OUT_);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
+        assertEq(delta, IN_, "zero floor = no gate");
+    }
+
+    /// @dev A pricing-module order PINS its bump ({FillCtx.bump}); the floor must
+    ///      be checked against the pinned value, not the clock. The order has NO
+    ///      decay window (clock bump would be 0), the module answers 4000: a floor
+    ///      of 4000 passes — proof the check reads the pin — and 4001 reverts.
+    function test_fillUpTo_minBump_checksPinnedModuleBump() public {
+        _fund(IN_, OUT_ * 2);
+        RangePriceModule mod = new RangePriceModule(4_000, 10_000);
+
+        Order memory order = _plainOrder(24, address(tA), address(tB), IN_, OUT_);
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, OUT_ / 2);
+        order.pricingModule = address(mod);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.BumpTooLow.selector);
+        settlement.fillUpTo(order, sig, IN_ / 2, address(0), 4_001, "");
+
+        vm.prank(solver);
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, IN_ / 2, address(0), 4_000, "");
+        assertEq(delta, IN_ / 2, "pinned module bump meets the floor");
     }
 }

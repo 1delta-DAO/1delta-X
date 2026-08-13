@@ -317,6 +317,8 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         });
 
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
@@ -325,10 +327,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

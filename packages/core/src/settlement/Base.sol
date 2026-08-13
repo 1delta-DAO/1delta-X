@@ -78,6 +78,14 @@ abstract contract Base is Signatures {
     ///      of silently wrapping to a smaller move. (SETTLE is exempt — its module
     ///      interface is `uint256` and never narrows.)
     error AmountOverflow();
+    /// @dev `fillUpTo`'s `minBumpBps` price floor was not met: the fill's resolved
+    ///      shared decay bump came in below what the filler demanded. Every leg
+    ///      price is monotone in the bump (outputs fall with it, inputs rise), so
+    ///      the scalar floor is an exact filler-side price guard against the two
+    ///      movers that can shift the tick maker-ward between quote and inclusion —
+    ///      an oracle-pegged {IPriceModule} and a falling basefee shrinking the gas
+    ///      bump.
+    error BumpTooLow();
     /// @dev A netted `matchSettle` left Settlement holding LESS of `token` than it
     ///      did before the context — the solver under-covered the residual, so the
     ///      settlement would have drawn down a pre-existing/donated balance. Reverts.

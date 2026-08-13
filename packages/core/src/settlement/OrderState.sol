@@ -153,6 +153,31 @@ abstract contract OrderState is NonceManager {
         emit OrderApproved(msg.sender, orderHash);
     }
 
+    /// @notice Batch {approveOrder}: authorize several orders in one transaction.
+    ///         This is the shape the signature-less makers this path exists for
+    ///         actually need — a multisig queues ONE action approving its whole
+    ///         ladder of orders, not one proposal per order. Semantics are exactly
+    ///         N sequential {approveOrder} calls: every order must name the caller
+    ///         as maker (the whole call reverts {NotOrderMaker} otherwise — a
+    ///         multisig must not half-approve a ladder), and each order emits its
+    ///         own {OrderApproved}, so indexers see no new event shape.
+    /// @return orderHashes The EIP-712 hashes now authorized, aligned with `orders`.
+    function approveOrders(Order[] calldata orders) external returns (bytes32[] memory orderHashes) {
+        uint256 n = orders.length;
+        orderHashes = new bytes32[](n);
+        for (uint256 i; i < n;) {
+            Order calldata order = orders[i];
+            if (order.maker != msg.sender) revert NotOrderMaker();
+            bytes32 orderHash = order.hash();
+            orderApproved[msg.sender][orderHash] = true;
+            emit OrderApproved(msg.sender, orderHash);
+            orderHashes[i] = orderHash;
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     /// @notice Nominate `signer` to produce order signatures on the caller's behalf
     ///         until `expiry`, or revoke it with `expiry == 0`. See
     ///         {orderSignerExpiry} for the trust model and its limits.
@@ -304,6 +329,14 @@ abstract contract OrderState is NonceManager {
         ctx.filler = filler;
         ctx.payTo = filler;
         ctx.fullFill = prevFilled == 0 && newFilled == total;
+        // A PRICE MODULE or a PRIORITY auction is resolved HERE, once, and pinned —
+        // this is the only point in a fill where the filler, the fill progress and the
+        // taker blob are all in scope. Pinning keeps a multi-leg module order to ONE
+        // staticcall, and keeping both cold modes behind this single call site is what
+        // holds Settlement under EIP-170 (see the size note on {DutchAuction.bumpBps}).
+        // A clock-priced order gets 0 back and resolves lazily per decaying leg, which
+        // is the measured-cheapest shape for the dominant case.
+        ctx.bump = DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData);
     }
 
 }

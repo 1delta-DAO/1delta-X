@@ -26,43 +26,60 @@ pnpm add @1delta-x/sdk viem
 ## Order model
 
 The conversion leg is a **basket on both sides**: the maker gives
-`tokenIn[]`/`amountIn[]` and receives `tokenOut[]`/`startAmountOut[]`/`endAmountOut[]`.
+`legsIn[]` (`{token, start, end}`) and receives `legsOut[]`
+(`{token, start, end, recipient}`).
 Partial fills scale every leg (and lending item) by the single fraction
-`fillAmountIn / amountIn[0]`. `amountIn[0]` is the fill denominator and
-`fillAmountIn` is denominated in `tokenIn[0]`.
+`fillAmount / anchor`. The anchor is `legsIn[0].start` for a SELL order,
+`legsOut[0].start` for a BUY, or the signed `fillTotal` when set.
 
 ## Maker: sign + fill
 
 ```ts
 import { privateKeyToAccount } from "viem/accounts";
-import { signOrder, encodeFill, hashOrderStruct, ItemOp, type Order, type Deployment } from "@1delta-x/sdk";
+import {
+  signOrder, encodeFill, hashOrderStruct, packTiming, ItemOp, OrderSide,
+  type Order, type Deployment,
+} from "@1delta-x/sdk";
 
 const dep: Deployment = { chainId: 1, settlement: "0x…", permit3: "0x…" };
 const maker = privateKeyToAccount("0x…");
 
+const ZERO = "0x0000000000000000000000000000000000000000" as const;
+
 const order: Order = {
   maker: maker.address,
+  side: OrderSide.SELL,              // fixed inputs, decaying outputs
   nonce: 1n,
   deadline: 1893456000n,
-  tokenIn: ["0xUSDC"],
-  amountIn: [2_000_000_000n],       // 2,000 USDC — amountIn[0] = fill denominator
-  decayStartTime: 0,
-  decayDuration: 0,                  // fixed price
-  tokenOut: ["0xWETH", "0xDAI"],     // multi-output basket
-  startAmountOut: [1_000000000000000000n, 1_000_000000000000000000n],
-  endAmountOut:   [1_000000000000000000n, 1_000_000000000000000000n],
-  exclusiveFiller: "0x0000000000000000000000000000000000000000",
-  exclusivityEndTime: 0,
-  minFillAmountIn: 0n,
+  // 2,000 USDC in — `end: 0n` = FIXED, and legsIn[0].start is the fill denominator.
+  legsIn: [{ token: "0xUSDC", start: 2_000_000_000n, end: 0n }],
+  // A multi-output basket; `recipient: ZERO` means the maker (a non-zero one is a
+  // fee/originator leg). `end: 0n` = fixed, else the leg decays start → end.
+  legsOut: [
+    { token: "0xWETH", start: 1_000000000000000000n, end: 0n, recipient: ZERO },
+    { token: "0xDAI",  start: 1_000_000000000000000000n, end: 0n, recipient: ZERO },
+  ],
+  timing: packTiming(0, 0, 0),       // decay start / duration / exclusivity end — fixed price
+  exclusiveFiller: ZERO,
+  minFillAnchor: 0n,
+  // The four auction scalars; `packOrder` folds them into one signed `params` word.
+  exclusivityOverrideBps: 0n,
+  gasBumpBps: 0n,
+  gasPriceRef: 0n,
+  priorityScale: 0n,                 // non-zero only for a PRIORITY auction
+  curve: [],
   items: [],
   validators: [],
   invariants: [],
+  fillModule: ZERO,
+  fillTotal: 0n,
+  pricingModule: ZERO,               // an IPriceModule address prices this instead
 };
 
 const sig = await signOrder(maker, order, dep);
 const orderHash = hashOrderStruct(order);          // == settlement.hashOrder(order)
 
-// Solver-side: build the fill calldata (send from the solver, holding tokenOut).
+// Solver-side: build the fill calldata (send from the solver, holding the outputs).
 const data = encodeFill(order, sig, 2_000_000_000n);
 ```
 

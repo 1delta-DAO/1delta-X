@@ -51,6 +51,8 @@ message Order {
   repeated  Validator invariants   = 16;
   bytes     fillModule             = 17;
   bytes     fillTotal              = 18;
+  bytes     priorityScale          = 19;
+  bytes     pricingModule          = 20;
 }
 
 message TokenPermit {

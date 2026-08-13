@@ -119,6 +119,8 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
     ///      inventory-solver variant needs no order-side machinery at all.
     function _usdrifOrder(uint256 nonce) internal view returns (Order memory) {
         return Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -127,10 +129,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

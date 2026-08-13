@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {IPriceModule} from "../interfaces/IPriceModule.sol";
 import {Order, OrderSide} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {Proportional} from "./Proportional.sol";
@@ -27,6 +28,14 @@ import {Proportional} from "./Proportional.sol";
 library DutchAuction {
     error AuctionNotStarted();
     error InvalidAuctionParams();
+    /// @dev The maker's {IPriceModule} reverted, returned nothing, or returned less
+    ///      than a full word. A price the core cannot read is not a price — fail the
+    ///      fill rather than fall back to a clock the maker did not sign.
+    error PriceModuleFailed();
+    /// @dev The order delegates pricing to an {IPriceModule}, and the caller reached a
+    ///      path that has no filler / fill-progress / taker blob to resolve it with.
+    ///      Use the fill path (which pins the bump) or {SettlementLens.previewFill}.
+    error PricingNeedsContext();
 
     uint256 internal constant BPS = 10_000;
 
@@ -89,6 +98,80 @@ library DutchAuction {
         return (order.timing >> 100) & 1 == 1;
     }
 
+    /// @notice The order's clock counts BLOCKS, not seconds — bit 102 of `timing`.
+    /// @dev    `decayStartTime` and `decayDuration` (and every {CurvePoint.timeDelta})
+    ///         are then block numbers and block counts. UniswapX moved its V3 reactor
+    ///         to a block clock for the same reason: on a chain with 250ms blocks a
+    ///         one-second timestamp tick is eight blocks of resolution, so a
+    ///         timestamp-decayed auction cannot price the interval solvers actually
+    ///         compete over. `uint32` holds any L2 block number for centuries.
+    function blockClock(Order calldata order) internal pure returns (bool) {
+        return (order.timing >> 102) & 1 == 1;
+    }
+
+    /// @notice The bump is bid in PRIORITY FEE rather than elapsed time — bit 103.
+    /// @dev    The parity feature with UniswapX's `PriorityOrderReactor`, for chains
+    ///         whose sequencer orders transactions by priority fee (OP-stack, and
+    ///         Arbitrum's timeboost). The maker signs the band the other way round:
+    ///         `start` is the ambitious price and `end` is the GUARANTEED FLOOR, so a
+    ///         zero-priority-fee fill clears at `end` and every gwei bid moves the tick
+    ///         toward `start`. The sequencer's own ordering then picks the highest
+    ///         bidder; the losers revert on the `filled` guard they already run.
+    ///
+    ///         Note what this does NOT change: the floor is the same signed `end` the
+    ///         core enforces for every other order, so a priority auction adds no way
+    ///         to price outside the band. `decayStartTime` keeps its meaning as the
+    ///         "not before" gate (a start BLOCK, with bit 102), which is how the maker
+    ///         says "let the book see this first, then let solvers bid".
+    ///
+    ///         The basefee gas bump is IGNORED in this mode — it moves the tick toward
+    ///         the floor as gas rises, which is precisely backwards when the filler is
+    ///         bidding gas to move it the other way.
+    function priorityAuction(Order calldata order) internal pure returns (bool) {
+        return (order.timing >> 103) & 1 == 1;
+    }
+
+    // ──────────────────── Packed `params` accessors ────────────────────
+
+    /// @notice Soft-exclusivity improvement — `params` bits [0:16).
+    function overrideBps(Order calldata order) internal pure returns (uint256) {
+        return uint16(order.params);
+    }
+
+    /// @notice Max extra decay the basefee bump adds — `params` bits [16:32).
+    function gasBumpBps(Order calldata order) internal pure returns (uint256) {
+        return uint16(order.params >> 16);
+    }
+
+    /// @notice Reference basefee (wei) at which the gas bump saturates — bits [32:96).
+    /// @dev    64 bits is 18.4 ETH of wei; no reference basefee approaches it.
+    function gasPriceRef(Order calldata order) internal pure returns (uint256) {
+        return uint64(order.params >> 32);
+    }
+
+    /// @notice Priority fee (wei) that buys a FULL bump — `params` bits [96:160).
+    ///         Only read under {priorityAuction}; 0 there is a signing error.
+    function priorityScale(Order calldata order) internal pure returns (uint256) {
+        return uint64(order.params >> 96);
+    }
+
+    /// @notice Pack the four auction scalars into a `params` word. Off-chain builders
+    ///         mirror this exactly (the SDK's `packParams`).
+    /// @dev    Reverts on an out-of-range field rather than silently truncating: this
+    ///         word is HASHED INTO THE ORDER, so a truncated `priorityScale` would have
+    ///         a contract maker sign an auction with a different bid scale than it
+    ///         intended, with no revert. The SDK's `packParams` throws on exactly these
+    ///         inputs — keep the two mirrors in agreement.
+    function packParams(uint256 overrideBps_, uint256 gasBumpBps_, uint256 gasPriceRef_, uint256 priorityScale_)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (overrideBps_ > type(uint16).max || gasBumpBps_ > type(uint16).max) revert InvalidAuctionParams();
+        if (gasPriceRef_ > type(uint64).max || priorityScale_ > type(uint64).max) revert InvalidAuctionParams();
+        return overrideBps_ | (gasBumpBps_ << 16) | (gasPriceRef_ << 32) | (priorityScale_ << 96);
+    }
+
     /// @notice Which side of the order is FIXED and which is auctioned — bit 101 of
     ///         `timing`. See {OrderSide}.
     /// @dev    It lived in its own `Order` field, which cost a full 32-byte calldata
@@ -107,11 +190,40 @@ library DutchAuction {
 
     // ──────────────────── Decay clock ────────────────────
 
+    /// @notice The tick this order's clock reads — seconds by default, BLOCKS under
+    ///         {blockClock}. One accessor so the two decay branches and the priority
+    ///         gate cannot disagree about which clock the order signed.
+    function nowTick(Order calldata order) internal view returns (uint256) {
+        return blockClock(order) ? block.number : block.timestamp;
+    }
+
     /// @notice The shared normalized decay for this order at the current time,
     ///         in [0, 10000]. Piecewise if `curve` is set, else a single linear
     ///         segment; then the optional gas bump is added and the sum clamped.
+    ///
+    /// @dev    Three shapes exist for an order, but only the classic clock is handled
+    ///         HERE (linear or piecewise, plus the basefee bump). The other two — an
+    ///         EXTERNAL price module (`order.pricingModule`) and a PRIORITY auction —
+    ///         are resolved once per fill by {resolveBump} and never reach this
+    ///         function; see the ⚠ note below.
+    ///
+    ///         ⚠ THIS FUNCTION HANDLES THE CLOCK ONLY — not the PRIORITY auction, and
+    ///         not an external price module. Both of those are resolved ONCE per fill
+    ///         by {resolveBump}, called from {OrderState._openFill} (and
+    ///         {SettlementLens._previewCtx}) and pinned in {FillCtx.bump}, which
+    ///         {Pricing} reads in preference to this function. So no fill ever reaches
+    ///         this function for such an order.
+    ///
+    ///         ⚠ AND THAT SPLIT IS A SIZE DECISION, NOT A STYLE ONE. MEASURED
+    ///         2026-08-12: with the two extra modes branched INSIDE this function,
+    ///         Settlement came to 27,254 bytes against EIP-170's 24,576. `bumpBps` is
+    ///         reached through {Pricing}, which the optimizer inlines at every
+    ///         delivery/payout/pull site in {Core}, {Batch} and the lens, so at
+    ///         `optimizer_runs = 20000` every byte added here is paid ~8 times over.
+    ///         Moving the two cold modes to a once-per-fill resolution returned
+    ///         **1,343 bytes** for zero change in behaviour. Add nothing to this
+    ///         function that only a minority of orders need.
     function bumpBps(Order calldata order) internal view returns (uint256 bps) {
-        uint256 startT = decayStartTime(order);
         bytes calldata curve = order.curve;
         uint256 n = PackedArrays.validateFixed(curve, PackedArrays.CURVE_STRIDE);
 
@@ -119,15 +231,13 @@ library DutchAuction {
             // Classic single linear segment.
             uint256 dur = decayDuration(order);
             if (dur != 0) {
-                if (block.timestamp < startT) revert AuctionNotStarted();
-                uint256 elapsed = block.timestamp - startT;
+                uint256 elapsed = _elapsed(order);
                 bps = elapsed >= dur ? BPS : (BPS * elapsed) / dur;
             }
             // decayDuration == 0 ⇒ bps stays 0 (start price, no time decay).
         } else {
             // Piecewise-linear curve, timeDeltas relative to decayStartTime.
-            if (block.timestamp < startT) revert AuctionNotStarted();
-            uint256 elapsed = block.timestamp - startT;
+            uint256 elapsed = _elapsed(order);
             (uint256 tFirst, uint256 bFirst) = PackedArrays.curvePoint(curve, 0);
             (uint256 tLast, uint256 bLast) = PackedArrays.curvePoint(curve, n - 1);
             if (elapsed <= tFirst) {
@@ -168,13 +278,126 @@ library DutchAuction {
         }
 
         // Gas bump: extra decay proportional to basefee, capped at gasBumpBps.
-        uint256 gb = order.gasBumpBps;
-        if (gb != 0 && order.gasPriceRef != 0) {
-            uint256 gasAdd = (gb * block.basefee) / order.gasPriceRef;
+        uint256 gb = gasBumpBps(order);
+        uint256 ref = gasPriceRef(order);
+        if (gb != 0 && ref != 0) {
+            uint256 gasAdd = (gb * block.basefee) / ref;
             if (gasAdd > gb) gasAdd = gb;
             bps += gasAdd;
         }
         if (bps > BPS) bps = BPS;
+    }
+
+    /// @dev How far into the auction we are, on whichever clock the order signed, with
+    ///      the "has it started" gate. Its own function rather than two locals in
+    ///      {bumpBps}: the piecewise branch already carries eight live values through
+    ///      the interpolation loop, and adding the clock pair to that frame overflows
+    ///      the stack under the LEGACY (non-via-IR) profile the test suite compiles.
+    function _elapsed(Order calldata order) private view returns (uint256) {
+        uint256 startT = decayStartTime(order);
+        uint256 t = nowTick(order);
+        if (t < startT) revert AuctionNotStarted();
+        unchecked {
+            return t - startT;
+        }
+    }
+
+    /// @notice Resolve the bump for a fill whose order does NOT price off the plain
+    ///         clock — an external price module or a priority auction — and return
+    ///         `bump + 1` for {FillCtx.bump}, or 0 when the order prices off the clock
+    ///         and should be resolved lazily per decaying leg.
+    /// @dev    ONE call site per fill ({OrderState._openFill}) and one in the lens.
+    ///         Everything cold lives behind it; see the size note on {bumpBps}.
+    function resolveBump(
+        Order calldata order,
+        bytes32 orderHash,
+        uint256 total,
+        address filler,
+        uint256 prevFilled,
+        bytes memory takerData
+    ) internal view returns (uint256) {
+        if (order.pricingModule != address(0)) {
+            // "Not before" gate — the same `decayStartTime` field, the same meaning,
+            // whichever pricing mode. A module order may signal "let the book see this
+            // first" with a future start; without this it would price (and fill) before
+            // the maker's signed start. Mirrors {priorityBump}'s gate.
+            uint256 startT = decayStartTime(order);
+            if (startT != 0 && nowTick(order) < startT) revert AuctionNotStarted();
+            return priceBump(order, orderHash, total, filler, prevFilled, takerData) + 1;
+        }
+        if (priorityAuction(order)) return priorityBump(order) + 1;
+        return 0;
+    }
+
+    /// @notice The PRIORITY-auction bump: the filler bids priority fee, and every wei
+    ///         moves the tick from the maker's signed floor (`end`) toward its signed
+    ///         ambition (`start`). See {priorityAuction} for the shape and why the
+    ///         basefee bump is skipped.
+    /// @dev    `tx.gasprice - block.basefee` is the effective priority fee the
+    ///         sequencer is being paid. It cannot go negative on a well-formed chain,
+    ///         but the subtraction is guarded anyway: an L2 that reports a gas price
+    ///         below basefee should price at the floor, not panic every fill.
+    function priorityBump(Order calldata order) internal view returns (uint256) {
+        uint256 startT = decayStartTime(order);
+        // "Not before" gate — the same field, the same meaning, whichever clock.
+        if (startT != 0 && nowTick(order) < startT) revert AuctionNotStarted();
+        uint256 scale = priorityScale(order);
+        // A zero scale would divide by zero on the first bid; an order that opts into
+        // the priority auction without one is malformed, not "unbid".
+        if (scale == 0) revert InvalidAuctionParams();
+        uint256 base = block.basefee;
+        uint256 gp = tx.gasprice;
+        uint256 prio = gp > base ? gp - base : 0;
+        uint256 improve = (prio * BPS) / scale;
+        // No bid ⇒ BPS ⇒ the maker receives `end`, its guaranteed floor.
+        return improve >= BPS ? 0 : BPS - improve;
+    }
+
+    /// @notice Resolve the maker's EXTERNAL price module ({IPriceModule}) and CLAMP its
+    ///         answer into [0, BPS]. The clamp is the security property: whatever the
+    ///         module says, the resulting tick stays inside the `start`/`end` band the
+    ///         maker signed (see {IPriceModule} for the full argument).
+    /// @dev    The return is read into scratch space and capped at ONE WORD, so a
+    ///         hostile module cannot bomb the caller's memory — the same shape as
+    ///         {OrderGates.gatePasses}.
+    function priceBump(
+        Order calldata order,
+        bytes32 orderHash,
+        uint256 total,
+        address filler,
+        uint256 prevFilled,
+        bytes memory takerData
+    ) internal view returns (uint256 bps) {
+        address target = order.pricingModule;
+        // Built in its OWN frame: with `orderTiming` added, encoding the nine-value
+        // call tuple alongside `target`/`ok`/`bps` overflows the stack under the LEGACY
+        // (non-via-IR) profile the test suite compiles.
+        bytes memory cd = _encodeBumpCall(order, orderHash, total, filler, prevFilled, takerData);
+        bool ok;
+        /// @solidity memory-safe-assembly
+        assembly {
+            ok := staticcall(gas(), target, add(cd, 0x20), mload(cd), 0x00, 0x20)
+            ok := and(ok, gt(returndatasize(), 31))
+            bps := mload(0x00)
+        }
+        if (!ok) revert PriceModuleFailed();
+        if (bps > BPS) bps = BPS;
+    }
+
+    /// @dev ABI-encode the {IPriceModule.bump} call in its own frame — see the stack
+    ///      note in {priceBump}.
+    function _encodeBumpCall(
+        Order calldata order,
+        bytes32 orderHash,
+        uint256 total,
+        address filler,
+        uint256 prevFilled,
+        bytes memory takerData
+    ) private pure returns (bytes memory) {
+        return abi.encodeCall(
+            IPriceModule.bump,
+            (orderHash, order.maker, filler, prevFilled, total, order.timing, order.legsIn, order.legsOut, takerData)
+        );
     }
 
     // ──────────────────── Per-leg ticks ────────────────────
@@ -201,6 +424,13 @@ library DutchAuction {
     ///         `bump` at most ONCE (lazily, only if some leg actually decays — so
     ///         an all-fixed order never calls `bumpBps`, preserving its behavior).
     function currentAmountOut(Order calldata order) internal view returns (uint256[] memory outs) {
+        // These context-free per-leg views cannot resolve a price module (needs the
+        // filler / taker blob / fill progress) or a priority auction (needs the bid),
+        // so they would silently return the CLOCK tick — `start` for the typical
+        // no-duration module order — while the fill clears at the pinned bump. Fail
+        // loudly and send the caller to {SettlementLens.previewFill}/`previewBump`,
+        // which resolve the bump the way the fill does.
+        if (order.pricingModule != address(0) || priorityAuction(order)) revert PricingNeedsContext();
         uint256 n = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
         outs = new uint256[](n);
         uint256 bump;
@@ -242,6 +472,8 @@ library DutchAuction {
     /// @notice Current auction tick for every input leg. Shared `bump` computed at
     ///         most once (lazily), as in `currentAmountOut`.
     function currentAmountIn(Order calldata order) internal view returns (uint256[] memory ins) {
+        // See {currentAmountOut}: a module/priority order has no context-free tick.
+        if (order.pricingModule != address(0) || priorityAuction(order)) revert PricingNeedsContext();
         uint256 n = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         ins = new uint256[](n);
         uint256 bump;

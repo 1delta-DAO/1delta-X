@@ -156,6 +156,51 @@ contract SettlementLens {
         (received, paid) = _previewAmounts(order, ctx);
     }
 
+    /// @notice The resolved shared decay bump a fill by `filler` would price at
+    ///         RIGHT NOW — the quote side of `fillUpTo`'s `minBumpBps` price
+    ///         floor. Resolves exactly as the fill does: the pinned path for a
+    ///         price-module / priority-auction order (with the real `filler`,
+    ///         fill progress and taker blob), the clock otherwise. Pass the
+    ///         returned value as `minBumpBps` and the fill executes at this
+    ///         quote's price or better on every leg, or reverts `BumpTooLow`.
+    /// @dev    Time-sensitive the same way {previewFill} is: an `eth_call` here
+    ///         at block N equals a fill at block N. All-fixed orders (nothing
+    ///         decays) return 0 — there is no price motion to protect against.
+    ///
+    ///         ⚠ PRIORITY-auction orders derive the bump from `tx.gasprice`, so a
+    ///         default `eth_call` (gas price 0) quotes the NO-BID bump — higher
+    ///         than any bid fill's. Either quote with the gas price you will
+    ///         actually send, or skip the floor there: the bump is your own bid,
+    ///         not a race.
+    function previewBump(Order calldata order, address filler, bytes calldata takerData)
+        external
+        view
+        returns (uint256 bump)
+    {
+        (bytes32 orderHash, uint256 total, uint256 prevFilled) = _resolveState(order);
+        uint256 pinned = DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData);
+        return pinned != 0 ? pinned - 1 : DutchAuction.bumpBps(order);
+    }
+
+    /// @dev The state preamble both quote paths ({previewBump} and {_previewCtx})
+    ///      resolve: the order hash, the fill denominator, and the pre-fill progress,
+    ///      with the cancelled-sentinel check. Shared so the two can never disagree
+    ///      about the progress axis or the cancel semantics — the exact drift a floor
+    ///      quote (`previewBump`) diverging from the price (`previewFill`) would cause.
+    ///      Stops BEFORE {DutchAuction.resolveBump} deliberately: `_previewCtx` must
+    ///      run its Zero/OverFill/FillTooSmall checks first, so folding the bump in here
+    ///      would reorder which revert surfaces.
+    function _resolveState(Order calldata order)
+        private
+        view
+        returns (bytes32 orderHash, uint256 total, uint256 prevFilled)
+    {
+        orderHash = order.hash();
+        total = OrderGates.fillDenominator(order);
+        prevFilled = SETTLEMENT.filled(orderHash);
+        if (prevFilled == type(uint256).max) revert OrderCancelled();
+    }
+
     /// @dev Mirror of `Core._clampToRemaining` + `OrderState._openFill`'s delta
     ///      resolution: identity orders clamp to remaining; module orders resolve
     ///      the proposal through the maker's (view) fill module. Packages the
@@ -166,10 +211,7 @@ contract SettlementLens {
         returns (FillCtx memory)
     {
         if (fillAmount == 0) revert ZeroFill();
-        bytes32 orderHash = order.hash();
-        uint256 total = OrderGates.fillDenominator(order);
-        uint256 prevFilled = SETTLEMENT.filled(orderHash);
-        if (prevFilled == type(uint256).max) revert OrderCancelled();
+        (bytes32 orderHash, uint256 total, uint256 prevFilled) = _resolveState(order);
 
         uint256 delta;
         if (order.fillModule == address(0)) {
@@ -195,6 +237,11 @@ contract SettlementLens {
             filler,
             filler,
             prevFilled == 0 && newFilled == total,
+            // A price-module order is resolved with the REAL preview inputs here — the
+            // filler and taker blob the caller supplied — rather than through
+            // {DutchAuction.bumpBps}'s anonymous preview, so a quote from this lens is
+            // exactly what that filler would get. Pinned the same way a fill pins it.
+            DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData),
             new uint256[](0) // preview prices legs directly; no payout ledger to record
         );
     }
@@ -610,9 +657,9 @@ contract SettlementLens {
         }
 
         // ── soft exclusivity override ──
-        if (order.exclusivityOverrideBps != 0) {
+        if (order.overrideBps() != 0) {
             if (order.exclusiveFiller == address(0)) return (false, "override without exclusiveFiller");
-            if (order.exclusivityOverrideBps > 10_000) return (false, "exclusivityOverrideBps > 10000");
+            if (order.overrideBps() > 10_000) return (false, "overrideBps > 10000");
         }
         // ── piecewise auction curve (monotonic time, bounded bump) ──
         uint256 nCurve = PackedArrays.validateFixed(order.curve, PackedArrays.CURVE_STRIDE);
@@ -626,9 +673,31 @@ contract SettlementLens {
         }
         if (nCurve != 0 && order.decayStartTime() == 0) return (false, "curve set without decayStartTime");
         // ── gas bump ──
-        if (order.gasBumpBps != 0) {
-            if (order.gasPriceRef == 0) return (false, "gasBump without gasPriceRef");
-            if (order.gasBumpBps > 10_000) return (false, "gasBumpBps > 10000");
+        if (order.gasBumpBps() != 0) {
+            if (order.gasPriceRef() == 0) return (false, "gasBump without gasPriceRef");
+            if (order.gasBumpBps() > 10_000) return (false, "gasBumpBps > 10000");
+        }
+        // ── priority auction (bit 103) ──
+        if (order.priorityAuction()) {
+            if (order.priorityScale() == 0) return (false, "priority auction without priorityScale");
+            // A priority auction prices from the FLOOR up on the pinned bid — the
+            // clock/curve/gas-bump shapes never run, so signing any of them is a
+            // mistake: they silently never apply. `decayStartTime` alone is fine (it
+            // keeps its "not before" meaning).
+            if (order.gasBumpBps() != 0) return (false, "gas bump with priority auction");
+            if (order.decayDuration() != 0) return (false, "decay duration with priority auction");
+            if (nCurve != 0) return (false, "curve with priority auction");
+        }
+        // ── external price module ──
+        if (order.pricingModule != address(0)) {
+            // A module pins the bump; the clock/curve/gas-bump never run, so — as with
+            // the priority branch above — signing any of them is a footgun that never
+            // applies. `decayStartTime` alone stays meaningful as the "not before" gate
+            // ({DutchAuction.resolveBump} enforces it).
+            if (order.priorityAuction()) return (false, "price module with priority auction");
+            if (nCurve != 0) return (false, "price module with curve");
+            if (order.decayDuration() != 0) return (false, "decay duration with price module");
+            if (order.gasBumpBps() != 0) return (false, "gas bump with price module");
         }
 
         // ── current fillability (time/state-dependent) ──
@@ -716,11 +785,25 @@ contract SettlementLens {
             return;
         }
         if (SETTLEMENT.filled(orderHash) != 0) return; // already authorized once — see above
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", SETTLEMENT.DOMAIN_SEPARATOR(), orderHash));
+        bytes calldata sigBody = sig;
+        bytes32 structHash = orderHash;
+        // BULK (Merkle) signature — mirrors {Signatures._verifySignature} EXACTLY:
+        // `sig = innerSig(65) ‖ bytes32[] proof ‖ 0xB0` swaps in the `OrderRoot(root)`
+        // digest and a 65-byte body, then every acceptance rule below applies
+        // unchanged. WITHOUT this branch the lens is STRICTER than the settler — it
+        // reports every bulk-signed leaf as unauthorized while `fill` settles it — so
+        // an orderbook drops the whole ladder. This is exactly the lens/settler drift
+        // this mirror exists to prevent.
+        uint256 n = sig.length;
+        if (n >= 98 && (n - 66) % 32 == 0 && uint8(sig[n - 1]) == 0xB0) {
+            structHash = keccak256(abi.encode(OrderHash.ORDER_ROOT_TYPEHASH, _foldProof(orderHash, sig[65:n - 1])));
+            sigBody = sig[:65];
+        }
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", SETTLEMENT.DOMAIN_SEPARATOR(), structHash));
         // Mirrors {Signatures._verifySignature} EXACTLY, including the delegated
         // branch — the drift this whole lens/settler split has already been bitten
         // by once (see {OrderGates}). Maker first, then the maker-nominated signer.
-        (bool standardLength, address signer) = SignatureVerification.recoverCalldata(sig, digest);
+        (bool standardLength, address signer) = SignatureVerification.recoverCalldata(sigBody, digest);
         if (standardLength && signer != address(0)) {
             if (signer == expected) return;
             uint256 expiry = SETTLEMENT.orderSignerExpiry(expected, signer);
@@ -729,16 +812,43 @@ contract SettlementLens {
         // Contract-delegate envelope — mirrors {Signatures._verifySignature}
         // exactly, including the reachability conditions that make it
         // collision-free (non-ECDSA length AND a codeless maker).
-        if (!standardLength && sig.length > 20 && expected.code.length == 0) {
-            address contractSigner = address(bytes20(sig[:20]));
+        if (!standardLength && sigBody.length > 20 && expected.code.length == 0) {
+            address contractSigner = address(bytes20(sigBody[:20]));
             uint256 expiry = SETTLEMENT.orderSignerExpiry(expected, contractSigner);
             if (expiry != 0 && block.timestamp <= expiry) {
-                SignatureVerification.verify(sig[20:], digest, contractSigner);
+                SignatureVerification.verify(sigBody[20:], digest, contractSigner);
                 return;
             }
         }
         // Shared verifier: EOA (ecrecover), EIP-1271 contract wallets, and
         // EIP-7702 accounts (raw-key or delegated-1271) are all accepted.
-        SignatureVerification.verify(sig, digest, expected);
+        SignatureVerification.verify(sigBody, digest, expected);
+    }
+
+    /// @dev Fold an inclusion proof into its Merkle root, hashing SORTED pairs —
+    ///      a byte-for-byte copy of {Signatures._foldProof} so the lens accepts
+    ///      exactly the bulk signatures the settler does.
+    function _foldProof(bytes32 leaf, bytes calldata proof) private pure returns (bytes32 h) {
+        h = leaf;
+        uint256 levels = proof.length / 32;
+        for (uint256 i; i < levels;) {
+            /// @solidity memory-safe-assembly
+            assembly {
+                let p := calldataload(add(proof.offset, mul(i, 32)))
+                switch lt(h, p)
+                case 1 {
+                    mstore(0x00, h)
+                    mstore(0x20, p)
+                }
+                default {
+                    mstore(0x00, p)
+                    mstore(0x20, h)
+                }
+                h := keccak256(0x00, 0x40)
+            }
+            unchecked {
+                ++i;
+            }
+        }
     }
 }

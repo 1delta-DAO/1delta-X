@@ -40,6 +40,8 @@ function order(partial: Partial<Order>): Order {
     invariants: [],
     fillModule: ZERO,
     fillTotal: 0n,
+    priorityScale: 0n,
+    pricingModule: ZERO,
     ...partial,
   };
 }

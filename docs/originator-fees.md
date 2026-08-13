@@ -63,7 +63,7 @@ fee validation path — the fee is delivery. Key properties:
 
 ### Soft exclusivity leaves the fee leg alone
 
-Soft exclusivity (`exclusivityOverrideBps`) makes a non-exclusive in-window
+Soft exclusivity (the override bps in `params`) makes a non-exclusive in-window
 filler improve the maker's terms — deliver more on SELL, charge less on the
 input. That improvement is the **maker's** compensation for a bypassed exclusive
 filler, so settlement applies it **only to legs delivered to the maker**, never

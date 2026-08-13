@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {Base} from "@core/settlement/Base.sol";
 import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {PackedEncode} from "../shared/PackedEncode.sol";
 
@@ -48,7 +49,7 @@ contract PreviewFillTest is MockSettlementBase {
 
         vm.prank(solver);
         (uint256 delta, uint256[] memory received, uint256[] memory paid) =
-            settlement.fillUpTo(order, sig, IN_, address(0), "");
+            settlement.fillUpTo(order, sig, IN_, address(0), 0, "");
 
         assertEq(pDelta, delta, "delta");
         assertEq(pReceived[0], received[0], "received");
@@ -102,5 +103,38 @@ contract PreviewFillTest is MockSettlementBase {
         Order memory order = _plainOrder(5, address(tA), address(tB), IN_, OUT_);
         (, uint256 fillable,,) = lens.getOrderRelevantState(order, _sign(order), solver, "");
         assertEq(fillable, IN_ / 2, "balance-bound");
+    }
+
+    // ──────────────────── previewBump: the minBumpBps quote ────────────────────
+
+    /// @dev The quote-then-guard loop: the bump the lens reports in a block is
+    ///      accepted as a `minBumpBps` floor by a fill in that same block, and
+    ///      one bps above it reverts — the two sides resolve identically.
+    function test_previewBump_quotedFloor_fillAcceptsExactly() public {
+        _fund(IN_, OUT_);
+        Order memory order = _plainOrder(6, address(tA), address(tB), IN_, OUT_);
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, OUT_ / 2);
+        _setDecayStart(order, block.timestamp);
+        _setDecayDuration(order, 1000);
+        bytes memory sig = _sign(order);
+
+        vm.warp(block.timestamp + 300); // mid-auction
+        uint256 quoted = lens.previewBump(order, solver, "");
+        assertEq(quoted, 3_000, "clock bump at 30% of the window");
+
+        vm.prank(solver);
+        vm.expectRevert(Base.BumpTooLow.selector);
+        settlement.fillUpTo(order, sig, IN_, address(0), quoted + 1, "");
+
+        vm.prank(solver);
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, IN_, address(0), quoted, "");
+        assertEq(delta, IN_, "quoted bump accepted as the floor");
+    }
+
+    /// @dev An all-fixed order has no price motion: the quote is 0, meaning
+    ///      "no floor to set".
+    function test_previewBump_allFixed_returnsZero() public {
+        Order memory order = _plainOrder(7, address(tA), address(tB), IN_, OUT_);
+        assertEq(lens.previewBump(order, solver, ""), 0, "nothing decays");
     }
 }

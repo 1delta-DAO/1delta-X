@@ -6,6 +6,7 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 import {Order, CallbackMode, FillCtx} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
+import {DutchAuction} from "./DutchAuction.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {Pricing} from "./Pricing.sol";
 import {OrderGates} from "./OrderGates.sol";
@@ -300,6 +301,22 @@ abstract contract Core is Base {
     ///         validators, and output-leg pulls all stay on `msg.sender` — so this
     ///         grants no new authority (it routes money the filler could forward
     ///         anyway, saving the extra transfer on a route's last hop).
+    /// @param  minBumpBps The filler's PRICE FLOOR on the resolved shared decay
+    ///         bump, in bps of the band; `0` = no floor (the pre-existing
+    ///         behaviour). The scalar is exact because every leg price is monotone
+    ///         in the one shared bump — outputs (what the filler delivers) FALL
+    ///         with it and inputs (what the filler receives) RISE — so "bump ≥ my
+    ///         quote's bump" IS "price ≥ my quoted price", across every leg of both
+    ///         baskets at once (the Pendle `maxTaking` / 0x taker-amount guard,
+    ///         without a per-leg array). Only two movers can shift the tick
+    ///         maker-ward between quote and inclusion — an oracle-pegged
+    ///         {IPriceModule} and a falling basefee shrinking the gas bump — and
+    ///         both are covered, since the check reads the very bump the fill
+    ///         priced at (the pinned {FillCtx.bump} when one was pinned). Quote the
+    ///         floor from {SettlementLens.previewFill}. Time decay, the priority
+    ///         auction, and soft-exclusivity need no protection: time moves the
+    ///         bump filler-ward, the priority bid is the filler's own, and the
+    ///         override is signed in the order. Reverts {BumpTooLow}.
     /// @param  takerData Filler-supplied blob for validators/invariants (and the
     ///         fill proposal for a fill-module order); `""` for plain orders.
     /// @return delta     The anchor-unit progress actually executed (post-clamp).
@@ -312,15 +329,20 @@ abstract contract Core is Base {
         bytes calldata sig,
         uint256 fillAmount,
         address recipient,
+        uint256 minBumpBps,
         bytes calldata takerData
     ) external nonReentrant returns (uint256 delta, uint256[] memory received, uint256[] memory paid) {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
+        // Hoisted out of the `_fillCore` argument list: nested there, the extra
+        // `minBumpBps` local pushes the LEGACY (non-via-IR) profile over the
+        // stack limit; as its own statement, `fillAmount` dies before the call.
+        fillAmount = _clampToRemaining(order, orderHash, fillAmount);
         FillCtx memory ctx;
         (paid, ctx) = _fillCore(
             order,
             orderHash,
-            _clampToRemaining(order, orderHash, fillAmount),
+            fillAmount,
             msg.sender,
             recipient,
             address(0),
@@ -329,6 +351,16 @@ abstract contract Core is Base {
             takerData,
             true // the aggregator entry is the one caller that returns receipts
         );
+        if (minBumpBps != 0) {
+            // The bump the fill actually priced at: the pinned one when the order
+            // pins ({FillCtx.bump} — price module / priority auction), else the
+            // clock, deterministic within the tx so re-reading it here is exact.
+            // Checked AFTER the fill so a pinning order's price module is called
+            // ONCE — the revert unwinds everything either way, and the happy path
+            // (the only one anyone pays for) is one compare.
+            uint256 bump = ctx.bump != 0 ? ctx.bump - 1 : DutchAuction.bumpBps(order);
+            if (bump < minBumpBps) revert BumpTooLow();
+        }
         unchecked {
             delta = ctx.newFilled - ctx.prevFilled; // _openFill guarantees newFilled >= prevFilled
         }

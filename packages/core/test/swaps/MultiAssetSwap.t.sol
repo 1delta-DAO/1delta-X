@@ -45,6 +45,8 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             legsOut[j] = LegOut(tokenOut[j], amountOut[j], 0, address(0)); // fixed output (end == 0)
         }
         return Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -53,10 +55,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
@@ -203,6 +202,8 @@ contract MultiAssetSwapTest is CoreSettlementBase {
         legsOut[0] = LegOut(WETH, wethStart, wethEnd, address(0));
         legsOut[1] = LegOut(DAI, daiStart, daiEnd, address(0));
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 6,
             deadline: block.timestamp + 1 hours,
@@ -211,10 +212,7 @@ contract MultiAssetSwapTest is CoreSettlementBase {
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

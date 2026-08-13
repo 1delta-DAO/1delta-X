@@ -79,6 +79,8 @@ contract DualConversionLeverageTest is AaveModulesBase {
         });
 
         Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 42,
             deadline: block.timestamp + 1 hours,
@@ -87,10 +89,7 @@ contract DualConversionLeverageTest is AaveModulesBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

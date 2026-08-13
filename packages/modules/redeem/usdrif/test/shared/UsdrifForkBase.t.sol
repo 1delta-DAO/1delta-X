@@ -94,7 +94,7 @@ abstract contract UsdrifForkBase is Test {
     bytes32 internal constant LEG_OUT_TH =
         keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 internal constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
     );
 
     function _noCurve() internal pure returns (bytes memory) {
@@ -190,15 +190,14 @@ abstract contract UsdrifForkBase is Test {
             o.minFillAnchor
         );
         bytes memory tail = abi.encode(
-            o.exclusivityOverrideBps,
+            o.params,
             keccak256(o.curve),
-            o.gasBumpBps,
-            o.gasPriceRef,
             keccak256(o.items),
             keccak256(o.validators),
             keccak256(o.invariants),
             o.fillModule,
-            o.fillTotal
+            o.fillTotal,
+            o.pricingModule
         );
         return keccak256(bytes.concat(head, tail));
     }

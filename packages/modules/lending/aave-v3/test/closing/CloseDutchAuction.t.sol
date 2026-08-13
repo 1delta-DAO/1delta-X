@@ -48,6 +48,8 @@ contract CloseDutchAuctionTest is AaveModulesBase {
         });
 
         Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
@@ -56,10 +58,7 @@ contract CloseDutchAuctionTest is AaveModulesBase {
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

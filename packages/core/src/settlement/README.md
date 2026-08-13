@@ -34,10 +34,13 @@ maker's EIP-712 signature.
 > produced by the current fill. See [`/SECURITY.md`](../../../../SECURITY.md).
 
 > **Integrating fills from a router/aggregator?** Use `fillUpTo` — it clamps to
-> the order's remaining size (race-tolerant) and returns full both-sides
-> accounting `(delta, received, paid)`; quote it exactly via
-> `SettlementLens.previewFill`. The walkthrough — approvals, side/denomination
-> mapping, quoting, sharp edges — is [`INTEGRATION.md`](./INTEGRATION.md).
+> the order's remaining size (race-tolerant), returns full both-sides
+> accounting `(delta, received, paid)`, and takes an optional `minBumpBps`
+> price floor (quote it via `SettlementLens.previewBump`; the fill executes at
+> that quote or better on every leg, or reverts `BumpTooLow`). Quote amounts
+> exactly via `SettlementLens.previewFill`. The walkthrough — approvals,
+> side/denomination mapping, quoting, sharp edges — is
+> [`INTEGRATION.md`](./INTEGRATION.md).
 
 ### Dutch auctions — how they work
 
@@ -64,22 +67,42 @@ regardless of the current auction tick.
 
 #### Fixed price (no auction)
 
-Set `startAmountOut == endAmountOut` (or `decayDuration == 0`).
-The solver must pay exactly this amount. No time dependency.
+Set the leg's `end == 0` — the FIXED sentinel — on every leg of both sides (or
+leave `decayDuration == 0`). The solver must pay exactly `start`. No time
+dependency.
 
 **Use when:** self-solving, migrations, any order where the user
 already knows the exact exchange rate they want.
 
 #### Dutch decay (solver competition)
 
-Set `startAmountOut > endAmountOut` with `decayStartTime` and
-`decayDuration`. Price decays linearly from best-for-maker to
-worst-for-maker. The `endAmountOut` is the maker's absolute floor
+Set an output leg's `start > end != 0` with `decayStartTime` and
+`decayDuration` (both in `timing`). Price decays linearly from best-for-maker to
+worst-for-maker. The leg's `end` is the maker's absolute floor
 — no fill can ever pay less.
 
 **Use when:** the user wants price discovery. Solvers compete by
 filling earlier (paying more) or later (paying less). The first
 solver whose expected profit exceeds gas + capital cost fills.
+
+#### Other clocks, and pricing that isn't a clock at all
+
+Four modes produce the shared bump; the two subsections above are the first.
+The rest, in full, are in **[docs/pricing-modes.md](../../../../docs/pricing-modes.md)**:
+
+- **Block clock** (`timing` bit 102) — the same decay, counted in BLOCKS. For
+  chains where a one-second tick is eight blocks of resolution.
+- **Priority auction** (`timing` bit 103) — the bump is BID in priority fee
+  instead of elapsed: the maker signs `end` as its guaranteed floor and every wei
+  of priority fee moves the tick toward `start`. Needs `params.priorityScale`.
+- **External price module** (`pricingModule`) — an [`IPriceModule`](../interfaces/IPriceModule.sol)
+  returns the bump: oracle-pegged, fill-progress (range/ladder), or a
+  cosigner-quoted price. The core CLAMPS it to `[0, 10000]` and maps it through
+  the legs' own signed bounds, so a module can only choose where INSIDE the
+  maker's band a fill lands.
+
+In every case the floor/ceiling stays the maker's signed leg bound — the mode
+only decides where between them a fill prices.
 
 ### How to size items relative to auction bounds
 
@@ -327,7 +350,7 @@ recipientOut   = [ 0 (maker),   originator  ]      fixed = absolute fee)
 - **Items untouched** — MAKE funding, TAKE proceeds, chaining, and the solver
   `tokenIn` payout ignore fee legs entirely. A `tokenOut`-funded MAKE item is
   simply sized to the MAKER leg's amount.
-- **Soft exclusivity skips fee legs** — the `exclusivityOverrideBps` bump
+- **Soft exclusivity skips fee legs** — the soft-exclusivity override bump (in `params`)
   (deliver-more) is the maker's queue-jump compensation, so it applies only to
   legs delivered to the maker; a fee leg to a third party is never inflated (an
   absolute fee stays absolute). `recipientOut[j] == address(this)` burns the leg
@@ -353,7 +376,7 @@ tokenOut  = [ ]                             (may be EMPTY — nothing delivered 
 ```
 
 The fee leg rises until the first filler for whom `tick ≥ gas + margin` fills —
-auction-discovered, `gasBumpBps`-indexed, and requiring **zero filler capital**
+auction-discovered, gas-indexed (the `params` gas bump), and requiring **zero filler capital**
 (nothing is fronted; the filler only collects the fee leg). The anchor is the
 fee leg (`startAmountIn[0]`), so pure deposits should be full-fill-only
 (`minFillAnchor = anchor`).

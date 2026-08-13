@@ -41,15 +41,14 @@ export const orderComponents = [
   { name: "timing", type: "uint256" },
   { name: "exclusiveFiller", type: "address" },
   { name: "minFillAnchor", type: "uint256" },
-  { name: "exclusivityOverrideBps", type: "uint256" },
+  { name: "params", type: "uint256" },
   { name: "curve", type: "bytes" },
-  { name: "gasBumpBps", type: "uint256" },
-  { name: "gasPriceRef", type: "uint256" },
   { name: "items", type: "bytes" },
   { name: "validators", type: "bytes" },
   { name: "invariants", type: "bytes" },
   { name: "fillModule", type: "address" },
   { name: "fillTotal", type: "uint256" },
+  { name: "pricingModule", type: "address" },
 ] as const;
 
 const tokenPermitComponents = [
@@ -144,6 +143,7 @@ export const SETTLEMENT_ABI = [
       { name: "sig", type: "bytes" },
       { name: "fillAmount", type: "uint256" },
       { name: "recipient", type: "address" },
+      { name: "minBumpBps", type: "uint256" },
       { name: "takerData", type: "bytes" },
     ],
     outputs: [
@@ -209,6 +209,15 @@ export const SETTLEMENT_ABI = [
     stateMutability: "nonpayable",
     inputs: [orderArg],
     outputs: [{ name: "orderHash", type: "bytes32" }],
+  },
+  // Batch approveOrder — one transaction (one multisig action) authorizing a
+  // whole ladder. All-or-nothing on the maker check; same per-order events.
+  {
+    type: "function",
+    name: "approveOrders",
+    stateMutability: "nonpayable",
+    inputs: [{ ...orderArg, name: "orders", type: "tuple[]" }],
+    outputs: [{ name: "orderHashes", type: "bytes32[]" }],
   },
   {
     type: "function",
@@ -411,6 +420,16 @@ export const SETTLEMENT_LENS_ABI = [
       { name: "received", type: "uint256[]" },
       { name: "paid", type: "uint256[]" },
     ],
+  },
+  // The quote side of `fillUpTo`'s `minBumpBps` floor: the resolved decay bump
+  // a fill by `filler` would price at right now. Pass the result as the floor
+  // and the fill executes at this quote or better, or reverts BumpTooLow.
+  {
+    type: "function",
+    name: "previewBump",
+    stateMutability: "view",
+    inputs: [orderArg, { name: "filler", type: "address" }, { name: "takerData", type: "bytes" }],
+    outputs: [{ name: "bump", type: "uint256" }],
   },
   {
     type: "function",

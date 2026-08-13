@@ -13,7 +13,7 @@ IERC20(tokenToPay).approve(SETTLEMENT, type(uint256).max); // plain approve work
 
 // per fill:
 (uint256 delta, uint256[] memory received, uint256[] memory paid) =
-    Settlement(SETTLEMENT).fillUpTo(order, sig, fillAmount, recipient, "");
+    Settlement(SETTLEMENT).fillUpTo(order, sig, fillAmount, recipient, minBumpBps, "");
 ```
 
 * `fillUpTo` **clamps to the order's remaining size** instead of reverting
@@ -26,6 +26,11 @@ IERC20(tokenToPay).approve(SETTLEMENT, type(uint256).max); // plain approve work
 * `recipient` redirects `received` (e.g. straight to the user on a last hop);
   `address(0)` = `msg.sender`. Destination only — exclusivity, validators, and
   the output pulls all key on `msg.sender`.
+* `minBumpBps` — the filler's **price floor** on the resolved decay bump; `0` =
+  off. Pass the bump your quote priced at and the fill reverts `BumpTooLow`
+  instead of executing below it. One scalar guards every leg at once, because
+  every leg price is monotone in the shared bump. See "Price motion" below for
+  when it matters (price-module orders, the gas bump).
 * The strict entries (`fill`, `batchFill`, …) are unchanged — fill-or-kill
   semantics with the classic returns.
 
@@ -50,10 +55,20 @@ The order is written from the **maker's** frame; the filler is the mirror:
 * Converting a spend budget into `fillAmount`: `fillAmountFromBudget` in
   `@1delta-x/sdk` (side-aware), or quote on-chain (below).
 
-**Price motion is always in the filler's favor between quote and execution**:
-SELL outputs decay down, BUY inputs rise, and the gas bump moves the same way.
-A quote at block N never executes worse at N+k — the only race risk is *size*,
-which the clamp absorbs and your own min-return check prices.
+**Price motion is almost always in the filler's favor between quote and
+execution**: SELL outputs decay down, BUY inputs rise. A quote at block N
+usually executes no worse at N+k — the main race risk is *size*, which the
+clamp absorbs and your own min-return check prices. Two exceptions can move
+the tick *against* you after the quote, and `minBumpBps` covers both:
+
+* an order with an **external price module** (`order.pricingModule != 0`) —
+  e.g. oracle-pegged — reprices per block, inside the signed band but in
+  either direction;
+* a **falling basefee** shrinks the gas bump on orders that use one.
+
+Quote the bump alongside the amounts (the lens/preview exposes it) and pass it
+as the floor; the fill then executes at your quoted price or better, or
+reverts `BumpTooLow`.
 
 ## Quoting
 
@@ -61,9 +76,17 @@ which the clamp absorbs and your own min-return check prices.
   filler, takerData)` returns the same `(delta, received, paid)` the fill
   would settle **in that block** — same clamp, same exclusivity gate, same
   per-leg math. Pair with `getOrderRelevantState` for lifecycle (expiry,
-  nonce, signature, validator pass, maker funding capacity).
+  nonce, signature, validator pass, maker funding capacity), and with
+  `previewBump(order, filler, takerData)` for the `minBumpBps` floor — the
+  resolved decay bump this quote priced at, accepted verbatim by a fill in the
+  same block. (Priority-auction orders derive the bump from your own gas
+  price — quote with the gas price you'll send, or skip the floor there.)
 * **Off-chain:** `previewFillLocal` in `@1delta-x/sdk` mirrors the identical
-  math from a timestamp + basefee.
+  math from a timestamp + basefee. For a **priority-auction** order pass the
+  `priorityFee` you will bid (the last argument); a zero-bid quote prices at the
+  floor and would misstate both the delivery and a budget-derived `fillAmount`. A
+  `pricingModule` order can't be mirrored locally — quote it via
+  `SettlementLens.previewFill`.
 * **HTTP:** the orderbook server's `GET /quote?hash=…&fillAmount=…&filler=…`
   returns the previewed amounts plus ready-to-send `fillUpTo` calldata.
 
@@ -89,7 +112,7 @@ which the clamp absorbs and your own min-return check prices.
   delta: if a race leaves `remaining < minFillAnchor` the fill reverts
   (`FillTooSmall`). Skip such orders — the lens reports remaining size.
 * Exclusivity: inside the window, only `exclusiveFiller` fills for free.
-  A non-zero `exclusivityOverrideBps` lets outsiders fill at that many bps of
+  A non-zero override bps (in `params`) lets outsiders fill at that many bps of
   price improvement to the maker — priced into `previewFill` automatically.
   Hard exclusivity (`overrideBps == 0`) reverts (and previews as) `NotExclusiveFiller`.
 * Repeated small fills round per fill (maker-favoring ceil on SELL outputs):

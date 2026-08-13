@@ -128,6 +128,8 @@ contract MatchSettleTest is CoreSettlementBase {
             data: abi.encode(debtToken, produce)
         });
         o = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: who,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -136,10 +138,7 @@ contract MatchSettleTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
@@ -594,7 +593,7 @@ contract MatchSettleTest is CoreSettlementBase {
 
         bytes memory sig = _signAs(lev, bobPk);
         vm.prank(solver);
-        settlement.fillUpTo(lev, sig, USDC_AMT, solver, "");
+        settlement.fillUpTo(lev, sig, USDC_AMT, solver, 0, "");
 
         assertEq(IERC20(USDC).balanceOf(solver), USDC_AMT, "recipient got the OWED amount, not a wei more");
         assertEq(IERC20(USDC).balanceOf(bob), excess, "the surplus still reached the maker");
@@ -829,6 +828,8 @@ contract MatchSettleTest is CoreSettlementBase {
         items[0] =
             Item({op: ItemOp.TAKE, module: address(taker), amount: GATE, recipient: address(0), data: strayData});
         Order memory a = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 11,
             deadline: block.timestamp + 1 hours,
@@ -837,10 +838,7 @@ contract MatchSettleTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

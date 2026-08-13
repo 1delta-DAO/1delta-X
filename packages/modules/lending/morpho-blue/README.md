@@ -54,7 +54,7 @@ the maker beforehand — Settlement and the solver can never widen them:
 | Gate | Who enforces | What it caps |
 |---|---|---|
 | Permit3 **token** allowance (`approveToken(module, token, cap)`) | Permit3 | MAKE legs — how much of *this token* the module may pull (supply-collateral, repay buffer) |
-| Permit3 **taker** allowance (`approveTaker(settlement, ref, cap)`) | Permit3, TAKE only | how much may be drawn on *this exact market* (`ref = keccak256(data)`); keyed by **spender = Settlement** (only Settlement can consume it). See [`/SECURITY.md`](../../SECURITY.md). |
+| Permit3 **taker** allowance (`approveTaker(settlement, ref, cap)`) | Permit3, TAKE only | how much may be drawn on *this exact market* (`ref = keccak256(data)`); keyed by **spender = Settlement** (only Settlement can consume it). See [`/SECURITY.md`](../../../../SECURITY.md). |
 | Morpho **authorization** (`setAuthorization(module, true)`) | Morpho | borrow & withdraw-collateral — Morpho's own permission for the module to manage the position |
 
 > **Note on Morpho's coarse auth.** `setAuthorization(module, true)` grants the

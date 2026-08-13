@@ -57,6 +57,8 @@ export const CANONICAL_ORDER: Order = {
   // Non-zero fill fields — cross-check the two tail words hash.
   fillModule: A("0x000000000000000000000000000000000000f111"),
   fillTotal: 42n,
+  priorityScale: 0n,
+  pricingModule: "0x000000000000000000000000000000000000f222" as Address,
 };
 
 /// Emitted by `HashGolden.t.sol` (Solidity `lens.hashOrder`) for the SAME order.
@@ -68,4 +70,4 @@ export const CANONICAL_ORDER: Order = {
 /// SDK silently signed hashes the contract rejected for two migrations. If you
 /// change one, change the other in the same commit; `eip712.test.ts` also pins
 /// the typestring so a field-type change cannot slip through unnoticed.
-export const GOLDEN_ORDER_HASH = "0x51e64365d966affedcd2cc04a116dc98dfc6dd54bdf5a9ed298fef732101a7c3";
+export const GOLDEN_ORDER_HASH = "0x627e590874df6c58eba2354e7f1cf0c103f72bc95d48a01e758493e7a5bbcfef";

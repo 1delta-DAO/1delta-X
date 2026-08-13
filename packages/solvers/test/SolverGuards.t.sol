@@ -103,6 +103,8 @@ contract SolverGuardsTest is CoreSettlementBase {
         legsIn[1] = LegIn(DAI, 500e18, 0);
 
         o = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
@@ -111,10 +113,7 @@ contract SolverGuardsTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
@@ -142,6 +141,8 @@ contract SolverGuardsTest is CoreSettlementBase {
 
     function _singleOutputOrder() internal view returns (Order memory o) {
         o = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
@@ -150,10 +151,7 @@ contract SolverGuardsTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

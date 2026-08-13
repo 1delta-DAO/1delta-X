@@ -102,8 +102,8 @@ contract RisingInputFeeTest is CoreSettlementBase {
         _fund();
         Order memory o = _risingOrder(3);
         _setDecayDuration(o, 0); //      no time decay — gas bump only
-        o.gasBumpBps = 2_000; //         max +20% of the leg span
-        o.gasPriceRef = 10 gwei; //      reference basefee for the full bump
+        o.params = (o.params & ~(uint256(0xffff) << 16)) | (uint256(2_000) << 16); //         max +20% of the leg span
+        o.params = (o.params & ~(uint256(type(uint64).max) << 32)) | (uint256(10 gwei) << 32); //      reference basefee for the full bump
 
         bytes memory sig = _sign(o);
 
@@ -193,7 +193,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
         Order memory o = _risingOrder(7);
         o.exclusiveFiller = address(0xE0E0);
         _setExclusivityEnd(o, uint32(block.timestamp + DURATION));
-        o.exclusivityOverrideBps = overrideBps;
+        o.params = (o.params & ~uint256(0xffff)) | uint256(overrideBps);
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2);

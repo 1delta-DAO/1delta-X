@@ -149,6 +149,8 @@ abstract contract MockSettlementBase is Test {
     /// @dev Empty-body Order with common defaults; callers set legsIn/legsOut/side.
     function _blank(uint256 nonce) internal view returns (Order memory o) {
         o = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -157,10 +159,7 @@ abstract contract MockSettlementBase is Test {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
@@ -229,7 +228,7 @@ abstract contract MockSettlementBase is Test {
     ///      `OrderHash.WITNESS_TYPESTRING` exactly.
     string constant PERMIT_BATCH_WITNESS_FULL = "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
-        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
         "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
@@ -305,7 +304,7 @@ abstract contract MockSettlementBase is Test {
     bytes32 constant LEG_IN_TH = keccak256("LegIn(address token,uint256 start,uint256 end)");
     bytes32 constant LEG_OUT_TH = keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
     );
 
     function _hashItems(Item[] memory items) internal pure returns (bytes32) {
@@ -370,15 +369,14 @@ abstract contract MockSettlementBase is Test {
             o.minFillAnchor
         );
         bytes memory tail = abi.encode(
-            o.exclusivityOverrideBps,
+            o.params,
             keccak256(o.curve),
-            o.gasBumpBps,
-            o.gasPriceRef,
             keccak256(o.items),
             keccak256(o.validators),
             keccak256(o.invariants),
             o.fillModule,
-            o.fillTotal
+            o.fillTotal,
+            o.pricingModule
         );
         return keccak256(bytes.concat(head, tail));
     }

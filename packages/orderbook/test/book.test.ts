@@ -61,6 +61,8 @@ function orderFor(maker: Hex, nonce = 1n): Order {
     invariants: [],
     fillModule: zeroAddress,
     fillTotal: 0n,
+    priorityScale: 0n,
+    pricingModule: "0x0000000000000000000000000000000000000000" as Address,
   };
 }
 

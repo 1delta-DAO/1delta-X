@@ -170,6 +170,49 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
         assertEq(tA.balanceOf(solver), AMOUNT_IN, "solver paid the full input");
     }
 
+    // ──────────────────── approveOrders (batch) ────────────────────
+
+    /// @dev The batch is exactly N sequential {approveOrder}s: one multisig action
+    ///      authorizes a whole ladder, each order individually fillable after.
+    function test_approveOrders_batchAuthorizesAll() public {
+        Order[] memory orders = new Order[](3);
+        orders[0] = _order(1);
+        orders[1] = _order(2);
+        orders[2] = _order(3);
+
+        bytes memory ret =
+            cm.exec(address(settlement), abi.encodeCall(OrderState.approveOrders, (orders)));
+        bytes32[] memory hashes = abi.decode(ret, (bytes32[]));
+
+        assertEq(hashes.length, 3, "one hash per order");
+        for (uint256 i; i < 3; ++i) {
+            assertTrue(settlement.orderApproved(address(cm), hashes[i]), "each order recorded");
+        }
+
+        // Any of them fills with an empty sig, independently of the others.
+        vm.prank(solver);
+        settlement.fill(orders[1], "", AMOUNT_IN);
+        assertEq(tB.balanceOf(address(cm)), AMOUNT_OUT, "batch-approved order settled");
+    }
+
+    /// @dev All-or-nothing on the maker guard: one foreign order poisons the whole
+    ///      batch, so a multisig can never half-approve its ladder.
+    function test_approveOrders_wrongMakerAnywhere_revertsWhole() public {
+        Order[] memory orders = new Order[](2);
+        orders[0] = _order(1);
+        orders[1] = _order(2);
+        orders[1].maker = address(0xBEEF); // not the caller
+
+        vm.prank(address(cm));
+        vm.expectRevert(OrderState.NotOrderMaker.selector);
+        settlement.approveOrders(orders);
+
+        // Nothing from the failed batch is approved — including the valid one.
+        vm.prank(solver);
+        vm.expectRevert(Signatures.OrderNotApproved.selector);
+        settlement.fill(_order(1), "", AMOUNT_IN);
+    }
+
     // ──────────────────── batchFill ────────────────────
 
     function test_batchFill_approvedOrder_emptySig() public {

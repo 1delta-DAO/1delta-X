@@ -49,6 +49,8 @@ const order: Order = {
   invariants: [],
   fillModule: zeroAddress,
   fillTotal: 0n,
+  priorityScale: 0n,
+  pricingModule: zeroAddress,
 };
 
 const sig = await signOrder(maker, order, toDeployment(config));

@@ -23,10 +23,11 @@ everything.
 | `legsIn[]` / `legsOut[]` | Multi-asset baskets on both sides. Each leg is `(token, start, end)`; output legs additionally carry their own `recipient`. `legsIn[0].start` may instead carry a **balance-relative marker** — see below. |
 | `side` (SELL/BUY) | SELL = fixed inputs, decaying outputs, anchored on `legsIn[0].start`. BUY = fixed outputs, rising inputs, anchored on `legsOut[0].start`. |
 | `items[]` | Ordered list of maker-signed module calls: `MAKE`, `TAKE`, `SETTLE`. |
-| `timing` | Three `uint32` clocks packed into one word (decay start, decay duration, exclusivity end) plus the item-ordering policy in bits `[96:100)`. |
+| `timing` | Three `uint32` clocks packed into one word (decay start, decay duration, exclusivity end), the item-ordering policy in bits `[96:100)`, fill-once (100), side (101), **BLOCK clock (102)** and **PRIORITY auction (103)**. |
 | `curve` | Optional piecewise-linear decay shape (`CurvePoint[]`); empty = single linear segment. |
-| `gasBumpBps` / `gasPriceRef` | Gas-indexed extra decay: the auction tick moves further toward the maker's floor as basefee rises. |
-| `exclusiveFiller` / `exclusivityOverrideBps` | Hard exclusivity (only that filler until the deadline) or soft (anyone may jump the queue by improving the maker's leg by N bps). |
+| `params` | One word holding the four auction scalars: soft-exclusivity bps, gas-bump bps, gas price reference, and the **priority-fee scale**. |
+| `pricingModule` | Optional **external price provider** (`IPriceModule`) — oracle-pegged, range, or cosigner-quoted pricing. `0x0` = the built-in clock. |
+| `exclusiveFiller` / `params` override bps | Hard exclusivity (only that filler until the deadline) or soft (anyone may jump the queue by improving the maker's leg by N bps). |
 | `minFillAnchor` | Anti-dust floor per fill. |
 | `validators` / `invariants` | AND-composed pre-execution triggers and post-execution invariants (staticcall only). |
 | `fillModule` / `fillTotal` | Fill denominator decoupled from a fungible leg, for indivisible or exotic units. |
@@ -73,7 +74,7 @@ All in [`Core.sol`](packages/core/src/settlement/Core.sol) /
 | `fillWithPermit(...)` | Fill with a Permit3 batch bound to the order hash as a witness — no prior on-chain approval needed. |
 | `batchFill(...)` | Several independent single-order fills in one transaction. |
 | `fillSelf(...)` | The maker fills its own order (fixed price by construction). |
-| `fillUpTo(...)` | Aggregator/router integration entry. Clamps to remaining size (race-tolerant) and returns full both-sides accounting `(delta, received, paid)`; `recipient` redirects payment only, never authority. |
+| `fillUpTo(...)` | Aggregator/router integration entry. Clamps to remaining size (race-tolerant) and returns full both-sides accounting `(delta, received, paid)`; `recipient` redirects payment only, never authority. `minBumpBps` is the filler's price floor on the resolved decay bump (`0` = off; quote it via `SettlementLens.previewBump`) — one scalar guards every leg because leg prices are monotone in the shared bump; reverts `BumpTooLow` below it. |
 | `matchSettle(MatchPlan)` | Netted N-order settlement — see [§6](#6-netted-settlement-matchsettle). |
 
 **Delegated signing**
@@ -162,9 +163,50 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
   live balance and capped by the leg's `end`. Whole-fill only, and best filled
   through `fillUpTo`, whose clamp both resolves the size and bounds the solver
   against a stale quote. See [docs/proportional-legs.md](docs/proportional-legs.md).
+- **Block clock** (`timing` bit 102). The decay clocks count BLOCKS instead of
+  seconds. UniswapX moved its V3 reactor to a block clock for the same reason: on a
+  chain with 250ms blocks, a one-second timestamp tick is eight blocks of
+  resolution, which is coarser than the interval solvers actually compete over.
+- **Priority auction** (`timing` bit 103) — the parity feature with UniswapX's
+  `PriorityOrderReactor`, for chains whose sequencer orders by priority fee. The
+  maker signs `start` as its ambition and `end` as its **guaranteed floor**; an
+  unbid fill clears at the floor and every wei of priority fee (scaled by
+  `params.priorityScale`) moves the tick toward `start`. The sequencer's own
+  ordering picks the winner; losers revert on the `filled` guard. Nothing new is
+  trusted — the floor is the same absolute bound every other order has.
+- **External price modules** ([`IPriceModule`](packages/core/src/interfaces/IPriceModule.sol)) —
+  the generalization of the clock, and the 1inch `IAmountGetter` class of orders:
+
+  | Module | Prices from | Parity with |
+  |---|---|---|
+  | [`ChainlinkPeggedPriceModule`](packages/core/src/modules/ChainlinkPeggedPriceModule.sol) | a Chainlink feed, with staleness **and an absolute plausibility band** | oracle-pegged limit orders |
+  | [`RangePriceModule`](packages/core/src/modules/RangePriceModule.sol) | the fill-progress axis (`prevFilled/total`) | 1inch `RangeAmountCalculator`, ladders |
+  | [`CosignedQuotePriceModule`](packages/core/src/modules/CosignedQuotePriceModule.sol) | an EIP-712 quote signed by a named cosigner, carried in `takerData` | UniswapX's cosigner — without the trusted party |
+
+  **A module returns a BUMP, never an amount**, and the core clamps it to
+  `[0, 10000]` before mapping it through each leg's own signed `start`/`end`. So a
+  hostile, buggy or stale module can move the price anywhere *inside* the band the
+  maker signed and **nowhere outside it** — the difference from an amount getter,
+  which *is* the price. A module is resolved once per fill and pinned, so a
+  multi-leg order pays one `STATICCALL`, and orders that don't use one pay a single
+  calldata compare. Configuration lives in the module's immutables (one instance per
+  configuration, shared via CREATE2), so there is no per-order config blob.
+
+  **Measured, fill-only** ([`PricingGasBench.t.sol`](packages/core/test/swaps/PricingGasBench.t.sol),
+  same order shape, warm state): a clock-priced fill is 56,140; the block clock is
+  **+17**; the priority auction is **−217**; a range module **+2,315**; the
+  oracle-pegged module **+5,273**; a cosigned quote **+7,289**; a 2-level bulk
+  signature **+1,368** over a single one. Across the whole existing suite the
+  features cost a median **+283 gas (+0.09%)**, and the canonical
+  `test_plain_swap_full` **+369 (+0.07%)** — see
+  [docs/lop-parity-plan.md](docs/lop-parity-plan.md) §8.
 - **Off-chain preview.** [`SettlementLens.previewFill`](packages/core/src/periphery/SettlementLens.sol)
-  quotes a fill exactly (same math as the contract), plus `previewAmountIn` /
-  `previewAmountOut` / `remaining` / `hashOrder` / `validateOrder`.
+  quotes a fill exactly (same math as the contract), `previewBump` returns the
+  resolved bump for the `minBumpBps` floor, plus `remaining` / `hashOrder` /
+  `validateOrder`. The context-free per-leg views `previewAmountIn` /
+  `previewAmountOut` cover clock-priced orders only; a price-module or priority
+  order needs the filler/progress/taker context, so those views revert
+  `PricingNeedsContext` — use `previewFill`/`previewBump` there.
 
 ---
 
@@ -184,8 +226,14 @@ output leg names its own recipient, so a fee is one more signed `LegOut`:
   [`FeeTransferModule`](packages/core/src/modules/FeeTransferModule.sol) MAKE item.
 
 No fee switch, no protocol owner, no cap registry — the fee is a maker-signed
-delivery a solver can neither inject nor redirect, and the wallet shows it as a
-plain amount + recipient in the EIP-712 prompt.
+delivery a solver can neither inject nor redirect.
+
+⚠ It is **not** legible in the wallet prompt, though. Since the legs moved to a
+packed `bytes` encoding, EIP-712 hashes each blob as one `keccak256`, so a signer
+UI shows six opaque hex blobs rather than amounts, recipients and module addresses.
+That is the accepted cost of the packed encoding (six keccaks instead of
+per-element hashing); the mitigation — an ERC-7730 descriptor plus a lens-side
+decoder a frontend can render — is not built.
 
 **Relayer fee (payee anonymous) — a rising input leg.** The filler is normally
 paid the conversion spread. Orders with no conversion (a gasless deposit) carry
@@ -304,7 +352,16 @@ See [docs/oco.md](docs/oco.md).
   can only ever touch *that maker's* approved assets.
 - **Signature support**: EOA, EIP-2098 compact, **EIP-1271** (Safe / multisig /
   contract makers), **EIP-7702**, plus an on-chain `approveOrder` fallback for
-  makers who cannot produce a signature at all.
+  makers who cannot produce a signature at all — with a batch `approveOrders`
+  so a multisig authorizes its whole order ladder in one queued action
+  (all-or-nothing on the maker check; per-order events).
+- **Bulk (Merkle) signatures** — one signature authorizing N orders: the maker signs
+  `OrderRoot(bytes32 root)` and each order carries its own inclusion proof in the
+  signature envelope (`innerSig(65) ‖ proof ‖ 0xB0`). A 50-slice ladder, an N-way
+  bracket or a market maker's quote refresh becomes **one wallet prompt**. The root
+  is authorized by exactly the signer set a single order is (maker, delegate, or the
+  maker's own EIP-1271 wallet), and every cancellation primitive still binds — a
+  root does not outrank `cancelOrder`, the nonce bitmap or the deadline.
 - **Maker-nominated delegated signers.** A maker may authorize another key —
   a session key, a desk's hot wallet, a Safe or passkey account — to sign *its*
   orders, with an expiry, via `setOrderSigner` (or a relayed permit). The registry
@@ -393,6 +450,25 @@ references the new module address in the order it signs.
   — native ETH handled entirely at the edge: the core and Permit3 stay
   ERC20-only, while a maker can still pay native into a WETH-denominated order in
   one transaction.
+- **ERC-7683 adapters** —
+  [`OriginSettler7683`](packages/core/src/periphery/OriginSettler7683.sol) and
+  [`DestinationSettler7683`](packages/core/src/periphery/DestinationSettler7683.sol).
+  The intent networks (Across, UniswapX, Eco, CoW) all expose 7683 endpoints and
+  most of Across's flow arrives that way, so this exists for **distribution**: an
+  existing solver fleet resolves and fills our orders through the interface it
+  already speaks. `orderId` is the EIP-712 order hash (no second id space);
+  `minReceived`/`maxSpent` come from the same `previewFill` the fill prices with.
+  **Escrow-free**, which is the one deviation: `open`/`openFor` verify liveness
+  (signature, order deadline, nonce) and broadcast rather than take custody, because
+  maker funds move only at fill time under the maker's own Permit3 allowances — the
+  property that keeps the protocol admin- and custody-free. `openFor` broadcasts the
+  exact signature it verified (an override sponsor-signature replaces the embedded
+  one), and a hard-exclusive order can still be opened by its exclusive filler (or
+  the maker) during the window. Nothing to refund, and a filler that walks away costs
+  the maker nothing. The destination adapter fills through `fillUpTo` (so a published
+  payload stays fillable after a partial fill instead of reverting `OverFill`), and
+  is a conduit that must end every call holding nothing, approving nothing, and above
+  a balance floor taken over the union of every input and output token it touched.
 - [`DustHandler`](packages/core/src/dust/DustHandler.sol) — residual disposal for
   MAKE modules: sweep to the user, or best-effort **recycle** back into the
   position, with an automatic fall back to sweep when a re-supply would revert
@@ -492,7 +568,9 @@ Stated plainly, so nothing here reads as more finished than it is.
   liquity-v2, gearbox-v3, teller) compile and pass their security gates, but the
   full fork suites await an RPC endpoint in `foundry.toml`. Each package README
   flags its own unvalidated assumption.
-- **Oracle validators check freshness, not plausibility.** `ChainlinkRead`
+- **Oracle *validators* check freshness, not plausibility** (the *price module*
+  does — `ChainlinkPeggedPriceModule` carries a maker-signed `[MIN, MAX]` band, so
+  this gap now applies only to the trigger validators). `ChainlinkRead`
   rejects stale rounds, incomplete rounds and non-positive prices, but has no
   absolute sanity band — a feed that is fresh and *wrong* (depeg, misconfigured
   decimals, a thin feed that got pushed) passes, and
@@ -510,12 +588,22 @@ Stated plainly, so nothing here reads as more finished than it is.
   remainder of an order the delegate already part-filled. Same caveat as EIP-1271
   makers. `cancelOrder`, nonce cancellation, the deadline and Permit3 revocation
   all still bind. See [docs/delegated-signers.md](docs/delegated-signers.md).
-- **EIP-170 headroom is now ~400 bytes.** Settlement only fits under the
-  `core-deploy` via-IR profile, and recent core features have consumed most of the
-  margin. Lowering `optimizer_runs` from 20,000 to 15,000 buys ~300 bytes for ~48
-  gas per fill and is the documented next step; the measured size/gas curve is in
-  [`foundry.toml`](foundry.toml). Weigh any further *core* feature against this —
-  modules cost nothing here.
+- **EIP-170 headroom is ~390 bytes, and it was bought with `optimizer_runs`.** The
+  2026-08 pricing/signing features put Settlement over the cap at
+  `optimizer_runs = 20000`; the deploy profile now compiles at **400**, which
+  restores roughly the margin the contract had before them. That step costs runtime
+  gas on the deployed contract, and the size below 400 is flat, so there is nothing
+  left in that dial. The measured curve and the three restructurings that returned
+  ~3.3KB are in [`foundry.toml`](foundry.toml) and
+  [docs/lop-parity-plan.md](docs/lop-parity-plan.md) §7. **Weigh any further *core*
+  feature against this** — and note that anything reachable from `Pricing`/`bumpBps`
+  is inlined ~8× and pays 8× for every byte. Modules and periphery cost nothing here.
+- **The committed gas baseline does not measure the deployed contract.** `make gas`
+  runs `[profile.core]` (legacy codegen, `optimizer_runs = 20000`); production
+  deploys `[profile.core-deploy]` (via-IR, 400). The two were always slightly
+  different; since 2026-08 they differ by the optimizer step as well. A via-IR gas
+  baseline needs a test profile that skips the ~900KB `LenderRegistry` data
+  contract — worth building, not built.
 - **Docs drift** — the top-level [README.md](README.md) is now a front door
   (status, repo map, build commands) rather than an architecture sketch, so it
   has nothing to drift *from*; the architecture lives here. This file,

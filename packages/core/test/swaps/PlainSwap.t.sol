@@ -145,6 +145,8 @@ contract PlainSwapTest is CoreSettlementBase {
         LegOut[] memory legsOut = new LegOut[](1);
         legsOut[0] = LegOut(WETH, startOut, endOut, address(0));
         Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 2,
             deadline: block.timestamp + 1 hours,
@@ -153,10 +155,7 @@ contract PlainSwapTest is CoreSettlementBase {
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
@@ -319,6 +318,8 @@ contract PlainSwapTest is CoreSettlementBase {
         LegOut[] memory legsOut = new LegOut[](1);
         legsOut[0] = LegOut(WETH, startOut, endOut, address(0));
         return Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -327,10 +328,7 @@ contract PlainSwapTest is CoreSettlementBase {
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

@@ -150,7 +150,7 @@ contract NoApprovalsInvariantTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        settlement.fillUpTo(order, sig, type(uint256).max, address(0), "");
+        settlement.fillUpTo(order, sig, type(uint256).max, address(0), 0, "");
 
         _assertSettlementNeverApproved();
     }

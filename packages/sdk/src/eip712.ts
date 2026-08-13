@@ -57,15 +57,14 @@ export const ORDER_TYPE = [
   { name: "timing", type: "uint256" },
   { name: "exclusiveFiller", type: "address" },
   { name: "minFillAnchor", type: "uint256" },
-  { name: "exclusivityOverrideBps", type: "uint256" },
+  { name: "params", type: "uint256" },
   { name: "curve", type: "bytes" },
-  { name: "gasBumpBps", type: "uint256" },
-  { name: "gasPriceRef", type: "uint256" },
   { name: "items", type: "bytes" },
   { name: "validators", type: "bytes" },
   { name: "invariants", type: "bytes" },
   { name: "fillModule", type: "address" },
   { name: "fillTotal", type: "uint256" },
+  { name: "pricingModule", type: "address" },
 ] as const;
 
 /**
@@ -76,9 +75,9 @@ export const ORDER_TYPE = [
  */
 export const ORDER_TYPESTRING =
   "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing," +
-  "address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve," +
-  "uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants," +
-  "address fillModule,uint256 fillTotal)";
+  "address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve," +
+  "bytes items,bytes validators,bytes invariants," +
+  "address fillModule,uint256 fillTotal,address pricingModule)";
 
 export const TOKEN_PERMIT_TYPE = [
   { name: "spender", type: "address" },

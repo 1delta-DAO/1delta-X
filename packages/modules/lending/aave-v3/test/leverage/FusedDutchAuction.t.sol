@@ -65,8 +65,9 @@ contract FusedDutchAuctionTest is AaveModulesBase {
         legsOut[0] = LegOut(WETH, COLLATERAL, 0, address(0)); // end == 0 ⇒ fixed
 
         o = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
-            side: OrderSide.BUY,
             nonce: 1,
             deadline: block.timestamp + 1 hours,
             legsIn: PackedEncode.legsIn(legsIn),
@@ -74,16 +75,14 @@ contract FusedDutchAuctionTest is AaveModulesBase {
             timing: _packTiming(uint32(block.timestamp), DECAY, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
             fillModule: address(0),
             fillTotal: 0
         });
+        o.timing |= uint256(1) << 101; // BUY (side lives in timing bit 101, not its own field)
     }
 
     function _auth() internal {
@@ -179,7 +178,11 @@ contract FusedDutchAuctionTest is AaveModulesBase {
     function test_takeItemSizedAtFloor_pullsShortfallFromMaker() public {
         bytes memory floorData = abi.encode(AAVE_POOL, USDC, uint256(2), WETH, COLLATERAL, DEBT_FLOOR);
         Order memory o = _auctionedLeverage();
-        o.items[0] = Item(ItemOp.TAKE, address(fused), DEBT_FLOOR, address(0), floorData); // ← floor, not ceiling
+        // Resize the single TAKE item to the auction FLOOR (`o.items` is a packed blob
+        // now, so rebuild it rather than index into it). ← floor, not ceiling
+        Item[] memory floorItems = new Item[](1);
+        floorItems[0] = Item(ItemOp.TAKE, address(fused), DEBT_FLOOR, address(0), floorData);
+        o.items = PackedEncode.items(floorItems);
         o.nonce = 2;
 
         vm.startPrank(maker);

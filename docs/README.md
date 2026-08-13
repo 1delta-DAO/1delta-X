@@ -10,8 +10,10 @@ package READMEs are the API reference — [`settlement`](../packages/core/src/se
 A maker signs an intent: fungible legs it gives/receives (`legsIn`/`legsOut`,
 the inline fast path), arbitrary actions on its own positions (`items` →
 MAKE/TAKE modules), a generic solver↔maker exchange for anything the legs can't
-express (`SETTLE` module), a fill denominator (`fillModule`/`fillTotal`), and
-pre/post predicates (`validators`/`invariants`). A permissionless solver fills it
+express (`SETTLE` module), a fill denominator (`fillModule`/`fillTotal`), how the
+price moves between its signed endpoints (the clock, a priority bid, or a
+`pricingModule`), and pre/post predicates (`validators`/`invariants`). A
+permissionless solver fills it
 as `msg.sender` and keeps the surplus. Everything beyond the fungible fast path
 is a maker-signed, pay-per-use module call — the fast path stays inline and free.
 
@@ -25,6 +27,17 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   conversion spread; for orders with no spread (a gasless deposit), a **rising
   input leg** (flagless: a rising `LegIn`, `start < end`) is an auction-discovered,
   gas-indexed relayer fee requiring zero filler capital.
+
+## Pricing
+
+- **[pricing-modes.md](pricing-modes.md)** — how an order decides where between its
+  signed endpoints a fill prices: the time clock, the **block clock** (`timing` bit
+  102, for 250ms-block L2s), the **priority auction** (bit 103 — the bump is bid in
+  priority fee, UniswapX `PriorityOrderReactor` parity), and **external price
+  modules** (`pricingModule` → oracle-pegged, range/ladder, cosigner-quoted). Covers
+  the reason a module returns a BUMP rather than an amount — the core clamps it, so
+  no mode can price outside the maker's signed band — the once-per-fill resolution,
+  the three shipped modules, and the measured per-mode gas.
 
 ## Generalizing beyond fungible swaps
 
@@ -78,6 +91,12 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   order (and why the hot path is unchanged), the contract-delegate envelope and
   the two conditions that make it collision-proof, gasless nomination with no
   re-delegation, and the revocation caveat.
+- **[bulk-signatures.md](bulk-signatures.md)** — one signature authorizing N orders
+  via a Merkle root (`innerSig ‖ proof ‖ 0xB0` → `OrderRoot(root)`), for ladders,
+  brackets and quote refreshes. Covers the collision argument, why the branch only
+  swaps the digest rather than re-implementing the signer set (it cost 1,343 bytes
+  the other way), and what it does NOT do — a root is not a bracket, see
+  [oco.md](oco.md).
 
 ## Conditions
 
@@ -172,6 +191,19 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   encoder** — the 2026-07 audit changed the signing format for Gearbox, Liquity,
   ERC4626 claims, composite items, and every `BalanceMode.Full` taker leg. Two of
   those fail *silently* if missed.
+
+## The 2026-08 parity work
+
+- **[lop-parity-plan.md](lop-parity-plan.md)** — the 2026-08 feature diff against
+  1inch LOP v4 / Fusion+, UniswapX (V2 / V3 / Priority), ComposableCoW and
+  ERC-7683, and the plan that closes it: external **pricing modules** (bounded by
+  the maker's signed band, unlike 1inch's amount getters), a **block-number
+  clock** and a **priority-fee auction** in free `timing` bits, **Merkle bulk
+  signing** in the signature envelope, and a permissionless **7683 adapter**.
+  Includes the one-time order-shape change all of it rides on (new typehash — see
+  [SECURITY.md](../SECURITY.md)) and, in §7, the byte budget: what the features
+  actually cost against EIP-170, the three restructurings that returned ~3.3KB, and
+  why `optimizer_runs` moved to 400 in the deploy profile. **Shipped.**
 
 ## Reading order
 

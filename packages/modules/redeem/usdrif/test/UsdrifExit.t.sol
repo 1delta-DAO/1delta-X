@@ -65,6 +65,8 @@ contract UsdrifExitTest is UsdrifForkBase {
         returns (Order memory)
     {
         return Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -73,10 +75,7 @@ contract UsdrifExitTest is UsdrifForkBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.validators(validators),
             invariants: PackedEncode.noValidators(),

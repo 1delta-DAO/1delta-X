@@ -81,7 +81,7 @@ contract ProportionalLegTest is CoreSettlementBase {
         // ceiling and the clamp resolves the actual size. Plain `fill` would need
         // the exact balance, which is precisely what the solver cannot know.
         vm.prank(solver);
-        (, , uint256[] memory paidLegs) = settlement.fillUpTo(order, sig, 2_000e6, address(0), "");
+        (, , uint256[] memory paidLegs) = settlement.fillUpTo(order, sig, 2_000e6, address(0), 0, "");
         uint256 paid = paidLegs[0];
 
         assertEq(paid, WETH_OUT, "output does not shrink with the input");
@@ -156,7 +156,7 @@ contract ProportionalLegTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(Proportional.ProportionalNeedsFullFill.selector);
-        settlement.fillUpTo(order, sig, 2_000e6, address(0), "");
+        settlement.fillUpTo(order, sig, 2_000e6, address(0), 0, "");
     }
 
     /// "Give me only part of it" is not expressible: a live-balance denominator
@@ -199,7 +199,7 @@ contract ProportionalLegTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(OrderState.FillTooSmall.selector);
-        settlement.fillUpTo(order, sig, 2_000e6, address(0), "");
+        settlement.fillUpTo(order, sig, 2_000e6, address(0), 0, "");
     }
 
     // ──────────────────── Only ever the SELL anchor ────────────────────
@@ -273,7 +273,7 @@ contract ProportionalLegTest is CoreSettlementBase {
         bytes memory sig = _sign(order);
         vm.prank(solver);
         (uint256 delta, uint256[] memory received,) =
-            settlement.fillUpTo(order, sig, type(uint128).max, address(0), "");
+            settlement.fillUpTo(order, sig, type(uint128).max, address(0), 0, "");
 
         assertEq(delta, bal, "clamped to the live balance");
         assertEq(received[0], bal, "receipts report the swept amount");

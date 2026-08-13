@@ -1,4 +1,4 @@
-import { type Order, OrderSide, unpackTiming } from "./types";
+import { type Order, OrderSide, PRIORITY_AUCTION_BIT, unpackTiming } from "./types";
 import { isProportional } from "./proportional";
 
 /**
@@ -36,11 +36,37 @@ const BPS = 10_000n;
 
 /**
  * Shared normalized decay in [0, 10000] at time `now`, given a basefee. Mirrors
- * `DutchAuction.bumpBps`: a piecewise-linear curve if `curve` is set, else a
- * single linear segment; then the optional gas bump is added and clamped. The
- * `decayStartTime`/`decayDuration` clocks are unpacked from `order.timing`.
+ * `DutchAuction.bumpBps` plus the two modes the settler resolves once per fill
+ * (`DutchAuction.resolveBump`): a piecewise-linear curve if `curve` is set, else
+ * a single linear segment, then the optional gas bump, all clamped.
+ *
+ * `now` is read on the order's OWN clock: seconds by default, or a BLOCK NUMBER
+ * when `timing` bit 102 is set (fast L2s, where a one-second tick is eight blocks
+ * of resolution). Pass the matching quantity.
+ *
+ * A PRIORITY auction (bit 103) prices off `priorityFee` instead of `now`, and an
+ * order with a `pricingModule` cannot be priced here at all — both are noted
+ * below.
  */
-export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n): bigint {
+export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n, priorityFee: bigint = 0n): bigint {
+  // An EXTERNAL price module cannot be mirrored here: its answer comes from an
+  // oracle, the fill progress, or a cosigned quote. Quote such an order through
+  // `SettlementLens.previewFill`, which resolves the module the way the fill does.
+  if (BigInt(order.pricingModule) !== 0n) {
+    throw new Error("order is priced by an IPriceModule; quote it with SettlementLens.previewFill");
+  }
+  // PRIORITY auction: the bump is BID, not elapsed. No bid ⇒ BPS ⇒ the maker's
+  // signed floor; every wei of priority fee moves the tick toward `start`.
+  if ((order.timing >> PRIORITY_AUCTION_BIT) & 1n) {
+    if (order.priorityScale === 0n) throw new Error("InvalidAuctionParams: priority auction without priorityScale");
+    // "Not before" gate — the same as the contract's `priorityBump` (and the clock
+    // branches below): a future `decayStartTime` means the order is not yet biddable,
+    // so a quote here must fail exactly as the fill would.
+    const { decayStartTime } = unpackTiming(order.timing);
+    if (decayStartTime !== 0 && now < BigInt(decayStartTime)) throw new Error("AuctionNotStarted");
+    const improve = (priorityFee * BPS) / order.priorityScale;
+    return improve >= BPS ? 0n : BPS - improve;
+  }
   let bps = 0n;
   const n = order.curve.length;
   const { decayStartTime, decayDuration } = unpackTiming(order.timing);
@@ -85,26 +111,38 @@ export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n): bigint
 }
 
 /** Current output tick for leg `j` — the SELL auction price, or the fixed BUY output. */
-export function currentAmountOutAt(order: Order, j: number, now: bigint, baseFee: bigint = 0n): bigint {
+export function currentAmountOutAt(
+  order: Order,
+  j: number,
+  now: bigint,
+  baseFee: bigint = 0n,
+  priorityFee: bigint = 0n,
+): bigint {
   const startOut = order.legsOut[j]!.start;
   const endOut = order.legsOut[j]!.end;
   if (endOut === 0n) return startOut; // fixed leg — no bump
   if (startOut < endOut) throw new Error("InvalidAuctionParams: output start < end");
-  return startOut - ((startOut - endOut) * bumpBps(order, now, baseFee)) / BPS;
+  return startOut - ((startOut - endOut) * bumpBps(order, now, baseFee, priorityFee)) / BPS;
 }
 
 /** Current output tick for every leg. Mirrors `previewAmountOut`. */
-export function currentAmountOut(order: Order, now: bigint, baseFee: bigint = 0n): bigint[] {
-  return order.legsOut.map((_, j) => currentAmountOutAt(order, j, now, baseFee));
+export function currentAmountOut(order: Order, now: bigint, baseFee: bigint = 0n, priorityFee: bigint = 0n): bigint[] {
+  return order.legsOut.map((_, j) => currentAmountOutAt(order, j, now, baseFee, priorityFee));
 }
 
 /** Current input tick for leg `i` — the rising BUY/fee auction price, or the fixed SELL input. */
-export function currentAmountInAt(order: Order, i: number, now: bigint, baseFee: bigint = 0n): bigint {
+export function currentAmountInAt(
+  order: Order,
+  i: number,
+  now: bigint,
+  baseFee: bigint = 0n,
+  priorityFee: bigint = 0n,
+): bigint {
   const startIn = order.legsIn[i]!.start;
   const endIn = order.legsIn[i]!.end;
   if (endIn === 0n) return startIn; // fixed leg — no bump
   if (startIn > endIn) throw new Error("InvalidAuctionParams: input start > end");
-  return startIn + ((endIn - startIn) * bumpBps(order, now, baseFee)) / BPS;
+  return startIn + ((endIn - startIn) * bumpBps(order, now, baseFee, priorityFee)) / BPS;
 }
 
 /** Current input tick for every leg. Mirrors `previewAmountIn`. */
@@ -119,7 +157,14 @@ export function currentAmountIn(order: Order, now: bigint): bigint[] {
  *   • SELL — auction-priced per fill.
  *   • BUY  — fixed output, cumulative so partials sum exactly to `legsOut[j].start`.
  */
-export function fillAmountsOut(order: Order, fillAmount: bigint, now: bigint, prevFilled: bigint = 0n): bigint[] {
+export function fillAmountsOut(
+  order: Order,
+  fillAmount: bigint,
+  now: bigint,
+  prevFilled: bigint = 0n,
+  baseFee: bigint = 0n,
+  priorityFee: bigint = 0n,
+): bigint[] {
   const anchor = anchorTotal(order);
   const newFilled = prevFilled + fillAmount;
   return order.legsOut.map((_, j) => {
@@ -127,7 +172,7 @@ export function fillAmountsOut(order: Order, fillAmount: bigint, now: bigint, pr
       const fixedOut = order.legsOut[j]!.start;
       return ceilDiv(fixedOut * newFilled, anchor) - ceilDiv(fixedOut * prevFilled, anchor);
     }
-    return ceilDiv(fillAmount * currentAmountOutAt(order, j, now), anchor);
+    return ceilDiv(fillAmount * currentAmountOutAt(order, j, now, baseFee, priorityFee), anchor);
   });
 }
 
@@ -145,12 +190,13 @@ export function inputOwed(
   newFilled: bigint,
   now: bigint,
   baseFee: bigint = 0n,
+  priorityFee: bigint = 0n,
 ): bigint {
   const anchor = anchorTotal(order);
   const auctioned = order.side === OrderSide.BUY || order.legsIn[i]!.end !== 0n;
   if (auctioned) {
     const fillAmount = newFilled - prevFilled;
-    return (fillAmount * currentAmountInAt(order, i, now, baseFee)) / anchor;
+    return (fillAmount * currentAmountInAt(order, i, now, baseFee, priorityFee)) / anchor;
   }
   const amt = order.legsIn[i]!.start;
   return (amt * newFilled) / anchor - (amt * prevFilled) / anchor;

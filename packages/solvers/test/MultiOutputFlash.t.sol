@@ -58,6 +58,8 @@ contract MultiOutputFlashTest is CoreSettlementBase {
         legsOut[0] = LegOut(USDC, USDC_OUT, 0, address(0));
         legsOut[1] = LegOut(DAI, DAI_OUT, 0, address(0));
         return Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
@@ -66,10 +68,7 @@ contract MultiOutputFlashTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

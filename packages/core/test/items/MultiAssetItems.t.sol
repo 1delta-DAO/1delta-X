@@ -91,6 +91,8 @@ contract MultiAssetItemsTest is CoreSettlementBase {
             legsOut[j] = LegOut(tokenOut[j], amountOut[j], 0, address(0));
         }
         return Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -99,10 +101,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

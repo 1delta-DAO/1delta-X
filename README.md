@@ -23,7 +23,7 @@ comes entirely from the maker's signature plus its Permit3 allowances.
 |---|---|
 | [FEATURES.md](FEATURES.md) | Complete inventory of what the protocol does today — order model, entry points, items, pricing, fees, netting, conditions, coverage, limits. **Start here.** |
 | [SECURITY.md](SECURITY.md) | Trust model, security invariants, integrator caveats, all three audits with findings and fixes, disclosure policy. |
-| [docs/](docs/README.md) | Topic-level design notes: netted settlement, fill modules, condition trees, fees, proportional legs, deterministic deployment, orderbook transport. |
+| [docs/](docs/README.md) | Topic-level design notes: netted settlement, pricing modes, fill modules, bulk signatures, condition trees, fees, proportional legs, deterministic deployment, orderbook transport. |
 | [settlement README](packages/core/src/settlement/README.md) | API reference for the fill flow, item ops, denominator, fees. |
 | [permit3 README](packages/core/src/permit3/README.md) | The token / taker allowance hub, and what it keeps from and changes versus Uniswap's Permit2. |
 
@@ -35,9 +35,9 @@ packages/
 │   └── src/
 │       ├── settlement/         Settlement entry points, order struct, packed arrays, pricing
 │       ├── permit3/            Allowance hub — token book, taker book, signature transfers
-│       ├── modules/            Core modules (OCO groups, permissionless calls, NFT settle, …)
+│       ├── modules/            Core modules (price modules, OCO groups, NFT settle, …)
 │       ├── validators/         Pre-execution triggers (staticcall only)
-│       ├── periphery/          SettlementLens, NativeSettler, forwarders
+│       ├── periphery/          SettlementLens, NativeSettler, forwarders, ERC-7683 adapters
 │       ├── dust/               Dust handling for module legs
 │       ├── interfaces/         Module and settlement interfaces
 │       └── utils/              Shared helpers and guards

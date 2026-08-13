@@ -56,6 +56,8 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
             legsOut[j] = LegOut(tokenOut[j], startOut[j], endOut[j], address(0));
         }
         return Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -64,10 +66,7 @@ contract MultiAssetPartialsTest is CoreSettlementBase {
             timing: _packTiming(decayStart, decayDur, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

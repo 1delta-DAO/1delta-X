@@ -22,7 +22,7 @@ maker/filler ── HttpTransport ──▶ demo backend ── InMemoryTranspor
 
 | Module | Exports |
 |---|---|
-| `proto/codec` | `encode/decodeOrderAnnounce`, `…SoftCancel`, `…OrderReplace`, `…FillNotice`, `…OrderList`, `…StreamMessage`, `orderToProto`/`protoToOrder` — all `uint256`→`bytes`, `address`→20 bytes (order hashes stay fixed-width). |
+| `proto/codec` | `encode/decodeOrderAnnounce`, `…SoftCancel`, `…OrderReplace`, `…FillNotice`, `…OrderList`, `…StreamMessage`, `orderToProto`/`protoToOrder` — all `uint256`→`bytes`, `address`→20 bytes (order hashes stay fixed-width). **Wire note (2026-08):** `Order` gained fields `19 priorityScale` and `20 pricingModule` alongside the settlement's order-shape change; both are proto3 additions, so an old decoder reads a new message with them defaulted — but it would then compute the WRONG order hash, since they are signed. Bump both ends together. |
 | `messages` | `OrderAnnounce`, `SignedSoftCancel`, `OrderReplace`, `FillNotice` (viem-typed). |
 | `topics` | `orderTopic`/`cancelTopic` — Waku content topics bound to `chainId`+`settlement`. |
 | `config` | `OrderbookConfig` (+ `lens`), `rootstockTestnetConfig`, `toDeployment`. |

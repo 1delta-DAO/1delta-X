@@ -46,7 +46,7 @@ library OrderGates {
     /// @dev A non-exclusive filler tried to fill inside the exclusivity window of an
     ///      order that grants no soft-exclusivity override.
     error NotExclusiveFiller();
-    /// @dev `order.exclusivityOverrideBps` exceeds 100%. Above `BPS` the input-side
+    /// @dev The order's `params` override (bps) exceeds 100%. Above `BPS` the input-side
     ///      discount in {Pricing.inputOwed} underflows, so the order would be
     ///      unfillable by any non-exclusive filler; reject it explicitly rather than
     ///      surfacing an arithmetic panic.
@@ -64,9 +64,9 @@ library OrderGates {
             order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime()
                 && filler != order.exclusiveFiller
         ) {
-            if (order.exclusivityOverrideBps == 0) revert NotExclusiveFiller();
-            if (order.exclusivityOverrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
-            overrideBps = order.exclusivityOverrideBps;
+            overrideBps = order.overrideBps();
+            if (overrideBps == 0) revert NotExclusiveFiller();
+            if (overrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
         }
     }
 

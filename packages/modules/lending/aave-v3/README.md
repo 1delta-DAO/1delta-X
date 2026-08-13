@@ -57,7 +57,7 @@ module, while the Permit3 taker allowance is what actually caps the fill size.
 
 > **Security:** the taker book is keyed by spender (Settlement), so a standing
 > taker allowance cannot be drained by an arbitrary caller; MAKE modules
-> additionally enforce `msg.sender == settlement`. See [`/SECURITY.md`](../../SECURITY.md).
+> additionally enforce `msg.sender == settlement`. See [`/SECURITY.md`](../../../../SECURITY.md).
 
 ## Modules (`src/`)
 

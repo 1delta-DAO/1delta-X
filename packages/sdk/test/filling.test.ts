@@ -35,6 +35,8 @@ function plainSell(): Order {
     items: [],
     fillModule: ZERO,
     fillTotal: 0n,
+    priorityScale: 0n,
+    pricingModule: ZERO,
   };
 }
 
@@ -45,7 +47,8 @@ describe("fillUpTo calldata", () => {
     expect(functionName).toBe("fillUpTo");
     expect((args as any)[2]).toBe(42n);
     expect((args as any)[3]).toBe(ZERO);
-    expect((args as any)[4]).toBe("0x");
+    expect((args as any)[4]).toBe(0n); // minBumpBps defaults to 0 = no price floor
+    expect((args as any)[5]).toBe("0x");
   });
 
   it("round-trips the (delta, received, paid) result", () => {

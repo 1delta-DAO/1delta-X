@@ -37,18 +37,17 @@ contract RepayWithFeeTest is AaveModulesBase {
             data: abi.encode(AAVE_POOL, USDC, uint256(2), usdcDebtToken)
         });
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: PackedEncode.legsIn(_legsIn1Rising(USDC, F0, FMAX)),
+            legsIn: _legsIn1Rising(USDC, F0, FMAX),
             legsOut: PackedEncode.legsOut(new LegOut[](0)),
             timing: _packTiming(uint32(block.timestamp), uint32(DURATION), 0),
             exclusiveFiller: address(0),
             minFillAnchor: F0, //      full-fill only (repay is not partial-friendly here)
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

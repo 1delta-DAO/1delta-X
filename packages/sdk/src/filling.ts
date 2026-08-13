@@ -40,12 +40,16 @@ export function fillAmountFromBudget(
   now: bigint,
   baseFee: bigint = 0n,
   remaining?: bigint,
+  priorityFee: bigint = 0n,
 ): bigint {
   let fillAmount: bigint;
   if (order.side === OrderSide.BUY) {
     fillAmount = budget;
   } else {
-    const out0 = currentAmountOutAt(order, 0, now, baseFee);
+    // Pass the priority-fee bid you will actually send: on a priority-auction SELL
+    // the leg-0 tick moves toward `start` as you bid, so a zero-bid quote here would
+    // divide the budget by the floor price and OVERSTATE the fill amount.
+    const out0 = currentAmountOutAt(order, 0, now, baseFee, priorityFee);
     fillAmount = out0 === 0n ? 0n : (budget * anchorTotal(order)) / out0;
   }
   if (remaining !== undefined && fillAmount > remaining) fillAmount = remaining;
@@ -70,6 +74,7 @@ export function previewFillLocal(
   now: bigint,
   baseFee: bigint = 0n,
   overrideBps: bigint = 0n,
+  priorityFee: bigint = 0n,
 ): { delta: bigint; received: bigint[]; paid: bigint[] } {
   if (order.fillModule !== "0x0000000000000000000000000000000000000000") {
     throw new Error("previewFillLocal: fill-module orders must be quoted via SettlementLens.previewFill");
@@ -85,13 +90,13 @@ export function previewFillLocal(
   if (newFilled > total) throw new Error("OverFill");
 
   const received = order.legsIn.map((leg, i) => {
-    let owed = inputOwed(order, i, prevFilled, newFilled, now, baseFee);
+    let owed = inputOwed(order, i, prevFilled, newFilled, now, baseFee, priorityFee);
     // Override discounts only AUCTIONED legs (any BUY input; a rising SELL leg).
     const auctioned = order.side === OrderSide.BUY || leg.end !== 0n;
     if (owed !== 0n && overrideBps !== 0n && auctioned) owed = (owed * (BPS - overrideBps)) / BPS;
     return owed;
   });
-  const paid = fillAmountsOut(order, delta, now, prevFilled).map((amt, j) => {
+  const paid = fillAmountsOut(order, delta, now, prevFilled, baseFee, priorityFee).map((amt, j) => {
     // Override lifts only the MAKER's SELL legs — never a third-party fee leg.
     const to = order.legsOut[j]!.recipient;
     const makerLeg = to === "0x0000000000000000000000000000000000000000" || to.toLowerCase() === order.maker.toLowerCase();
@@ -103,12 +108,19 @@ export function previewFillLocal(
   return { delta, received, paid };
 }
 
-/** Encode `Settlement.fillUpTo` calldata. `recipient` zero ⇒ pay the caller. */
+/**
+ * Encode `Settlement.fillUpTo` calldata. `recipient` zero ⇒ pay the caller.
+ * `minBumpBps` is the filler's price floor on the resolved decay bump (0 = off):
+ * quote it from `previewFill`/the lens and the fill reverts `BumpTooLow` if the
+ * included price lands below the quote — only an oracle price module or a
+ * falling basefee (gas bump) can move it there.
+ */
 export function encodeFillUpTo(args: {
   order: Order;
   sig: Hex;
   fillAmount: bigint;
   recipient?: Address;
+  minBumpBps?: bigint;
   takerData?: Hex;
 }): Hex {
   return encodeFunctionData({
@@ -119,6 +131,7 @@ export function encodeFillUpTo(args: {
       args.sig,
       args.fillAmount,
       args.recipient ?? "0x0000000000000000000000000000000000000000",
+      args.minBumpBps ?? 0n,
       args.takerData ?? "0x",
     ],
   });

@@ -47,4 +47,14 @@ library PackedArraysMem {
             a := shr(96, mload(add(add(b, 0x21), mul(j, stride))))
         }
     }
+
+    /// @notice `recipient` of output leg `j` — needed by the ERC-7683 adapter, which
+    ///         must name each output's destination in a {ResolvedCrossChainOrder}.
+    function legOutRecipient(bytes memory b, uint256 j) internal pure returns (address a) {
+        uint256 stride = PackedArrays.LEG_OUT_STRIDE;
+        assembly {
+            // token(20) | start(32) | end(32) = 84 bytes into the element
+            a := shr(96, mload(add(add(add(b, 0x21), mul(j, stride)), 84)))
+        }
+    }
 }

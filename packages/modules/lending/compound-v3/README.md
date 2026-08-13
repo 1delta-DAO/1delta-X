@@ -55,7 +55,7 @@ beforehand — Settlement and the solver can never widen them:
 | Gate | Who enforces | What it caps |
 |---|---|---|
 | Permit3 **token** allowance (`approveToken(module, token, cap)`) | Permit3 | how much of *this token* a MAKE module may pull from the maker |
-| Permit3 **taker** allowance (`approveTaker(settlement, ref, cap)`) | Permit3, TAKE only | how much may be drawn on *this exact position* (`ref = keccak256(data)`); keyed by **spender = Settlement** (only Settlement can consume it). See [`/SECURITY.md`](../../SECURITY.md). |
+| Permit3 **taker** allowance (`approveTaker(settlement, ref, cap)`) | Permit3, TAKE only | how much may be drawn on *this exact position* (`ref = keccak256(data)`); keyed by **spender = Settlement** (only Settlement can consume it). See [`/SECURITY.md`](../../../../SECURITY.md). |
 | Comet **account manager** (`comet.allow(module, true)`) | Comet | TAKE only — Comet's own permission for the module to call `withdrawFrom` on the maker's position |
 
 > **Note on `comet.allow`.** Unlike Aave's per-asset credit delegation +

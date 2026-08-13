@@ -51,6 +51,36 @@ The core keeps the over-fill cap and the single-fraction per-leg scaling; the
 module only picks the accepted `delta` (and may gate the counterparty match via
 `takerData`).
 
+## IPriceModule.sol
+
+Optional EXTERNAL price provider (`Order.pricingModule`). The generalization of
+the built-in decay clock: oracle-pegged, fill-progress (range), and
+cosigner-quoted pricing.
+```solidity
+function bump(
+    bytes32 orderHash, address maker, address filler,
+    uint256 prevFilled, uint256 total, uint256 orderTiming,
+    bytes legsIn, bytes legsOut, bytes takerData
+) external view returns (uint256 bps);
+```
+It returns a **bump**, not an amount — the core clamps the answer to `[0, 10000]`
+and then maps it through each leg's own signed `start`/`end`. A hostile, buggy or
+stale module can therefore move the price anywhere INSIDE the band the maker
+signed and nowhere outside it, which is the difference from 1inch's amount
+getters (where the getter *is* the price). Resolved once per fill and pinned in
+`FillCtx.bump`, so a multi-leg order pays one `STATICCALL`. `orderTiming` is the
+maker-signed `timing` word: its bit 101 is the order **side**, which a
+side-oriented module (e.g. `ChainlinkPeggedPriceModule`) reads to reject a
+config/side mismatch. Modules must read fill progress from the `prevFilled` /
+`total` arguments, never from `SETTLEMENT.filled()` live (which the settler has
+already advanced for the current fill by the time the module runs).
+
+Configuration lives in the module's own immutables — one instance per
+configuration, shared via CREATE2 — because a per-order `bytes` config member
+would have cost ~1,000 bytes of Settlement. Shipped instances:
+`ChainlinkPeggedPriceModule`, `RangePriceModule`, `CosignedQuotePriceModule`.
+See [docs/pricing-modes.md](../../../../docs/pricing-modes.md).
+
 ## IOrderValidator.sol
 
 Read-only pre-execution trigger (`Order.validators`) or post-execution invariant
@@ -66,6 +96,6 @@ protection), and similar policy checks — all maker-signed.
 
 `IPermit3` (allowance book + witness permits), `IERC1271` / `IERC2612`
 (contract-signer + EIP-2612 permit), `IAggregatorV3` (Chainlink-style price feed
-for depeg guards), and the protocol-auth shims `ICometAllow` /
+for depeg guards and the oracle price module), and the protocol-auth shims `ICometAllow` /
 `ICreditDelegationToken` / `IMorphoAuth` used by the lending modules to arrange
 on-behalf authority.

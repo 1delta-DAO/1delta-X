@@ -62,6 +62,7 @@ interface PbOrder {
   minFillAnchor: Uint8Array; exclusivityOverrideBps: Uint8Array; curve: PbCurvePoint[];
   gasBumpBps: Uint8Array; gasPriceRef: Uint8Array; items: PbItem[]; validators: PbValidator[];
   invariants: PbValidator[]; fillModule: Uint8Array; fillTotal: Uint8Array;
+  priorityScale: Uint8Array; pricingModule: Uint8Array;
 }
 interface PbTokenPermit { spender: Uint8Array; token: Uint8Array; amount: Uint8Array; expiration: number }
 interface PbTakerPermit { spender: Uint8Array; ref: Uint8Array; amount: Uint8Array; expiration: number }
@@ -94,6 +95,8 @@ export function orderToProto(o: Order): PbOrder {
     invariants: o.invariants.map((v): PbValidator => ({ target: addrToBytes(v.target), data: hexToU8(v.data) })),
     fillModule: addrToBytes(o.fillModule),
     fillTotal: u256ToBytes(o.fillTotal),
+    priorityScale: u256ToBytes(o.priorityScale),
+    pricingModule: addrToBytes(o.pricingModule),
   };
 }
 
@@ -118,6 +121,8 @@ export function protoToOrder(p: PbOrder): Order {
     invariants: (p.invariants ?? []).map((v): Validator => ({ target: bytesToAddr(v.target), data: u8ToHex(v.data) })),
     fillModule: bytesToAddr(p.fillModule),
     fillTotal: bytesToU256(p.fillTotal),
+    priorityScale: bytesToU256(p.priorityScale),
+    pricingModule: bytesToAddr(p.pricingModule),
   };
 }
 

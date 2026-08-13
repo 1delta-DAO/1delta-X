@@ -83,6 +83,7 @@ export interface Order {
   /// Anti-dust floor per fill, in anchor units (legsIn[0] for SELL, legsOut[0] for BUY).
   minFillAnchor: bigint;
   /// Soft exclusivity: bps a non-exclusive in-window filler must improve the maker by (0 = hard).
+  /// Folded into the wire `params` word by {@link packOrder} — see {@link packParams}.
   exclusivityOverrideBps: bigint;
   /// Optional piecewise decay shape (shared clock); empty = single linear segment.
   curve: readonly CurvePoint[];
@@ -90,6 +91,13 @@ export interface Order {
   gasBumpBps: bigint;
   /// Reference basefee (wei) at which the gas bump reaches `gasBumpBps`.
   gasPriceRef: bigint;
+  /**
+   * PRIORITY auction (timing bit 103): the priority fee, in wei, that buys a FULL
+   * bump. The maker signs `start` as its ambition and `end` as its guaranteed
+   * floor; an unbid fill clears at `end` and every wei of priority fee moves the
+   * tick toward `start`. `0n` = the order is not a priority auction.
+   */
+  priorityScale: bigint;
   items: readonly Item[];
   validators: readonly Validator[];
   invariants: readonly Validator[];
@@ -108,9 +116,61 @@ export interface Order {
    * Maker-signed so the cap `filled + delta <= fillTotal` stays in the core.
    */
   fillTotal: bigint;
+  /**
+   * Optional EXTERNAL price provider (`IPriceModule`); the zero address = the
+   * built-in clock. The module returns the shared decay bump, which the CORE
+   * clamps to [0, 10000] and maps through each leg's own signed `start`/`end` —
+   * so an oracle-pegged, range or cosigner-quoted price can move the tick
+   * anywhere inside the band the maker signed and nowhere outside it.
+   *
+   * The module carries its configuration in its own immutables; there is no
+   * per-order config blob. An order priced this way CANNOT be quoted by the
+   * off-chain `pricing.ts` mirror — call `SettlementLens.previewFill`.
+   */
+  pricingModule: Address;
 }
 
 // ──────────────────── Packed timing helpers ────────────────────
+
+/// `timing` bit 102: the decay clocks count BLOCKS, not seconds (fast L2s).
+export const BLOCK_CLOCK_BIT = 102n;
+/// `timing` bit 103: the bump is bid in PRIORITY FEE rather than elapsed time.
+export const PRIORITY_AUCTION_BIT = 103n;
+
+/**
+ * Pack the four auction scalars into the wire `params` word, mirroring
+ * `DutchAuction.packParams`: [0:16) overrideBps, [16:32) gasBumpBps,
+ * [32:96) gasPriceRef, [96:160) priorityScale.
+ */
+export function packParams(
+  overrideBps: bigint,
+  gasBumpBps: bigint,
+  gasPriceRef: bigint,
+  priorityScale: bigint,
+): bigint {
+  const U16 = 0xffffn;
+  const U64 = 0xffff_ffff_ffff_ffffn;
+  if (overrideBps > U16 || gasBumpBps > U16) throw new Error("params bps field exceeds uint16");
+  if (gasPriceRef > U64 || priorityScale > U64) throw new Error("params wei field exceeds uint64");
+  return overrideBps | (gasBumpBps << 16n) | (gasPriceRef << 32n) | (priorityScale << 96n);
+}
+
+/// Inverse of {@link packParams}.
+export function unpackParams(params: bigint): {
+  overrideBps: bigint;
+  gasBumpBps: bigint;
+  gasPriceRef: bigint;
+  priorityScale: bigint;
+} {
+  const U16 = 0xffffn;
+  const U64 = 0xffff_ffff_ffff_ffffn;
+  return {
+    overrideBps: params & U16,
+    gasBumpBps: (params >> 16n) & U16,
+    gasPriceRef: (params >> 32n) & U64,
+    priorityScale: (params >> 96n) & U64,
+  };
+}
 
 const U32 = 0xffff_ffffn;
 

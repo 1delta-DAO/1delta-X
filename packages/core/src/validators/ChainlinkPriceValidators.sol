@@ -92,12 +92,22 @@ contract ChainlinkPriceLte is IOrderValidator {
 contract ChainlinkTickFloorValidator is IOrderValidator {
     using DutchAuction for Order;
 
+    /// @dev The order pins its bump ({IPriceModule} or a priority auction), so the
+    ///      clock tick this validator reads via {DutchAuction.bumpBps} is NOT the price
+    ///      the fill clears at — `bumpBps` returns the clock (0/`start`) while the fill
+    ///      uses the pinned bump the validator, running before `_openFill` with no bump
+    ///      argument, cannot see. Rather than silently pass at the wrong price, refuse:
+    ///      this validator is only sound for clock-priced orders. (Preflight then
+    ///      reports the order as failing this validator, surfacing the misconfig.)
+    error UnsupportedPricingMode();
+
     function validate(Order calldata order, address, bytes calldata data, bytes calldata)
         external
         view
         override
         returns (bool)
     {
+        if (order.pricingModule != address(0) || order.priorityAuction()) revert UnsupportedPricingMode();
         (address feed, uint256 maxStaleness, uint256 scale) = abi.decode(data, (address, uint256, uint256));
         uint256 bump = order.bumpBps();
         uint256 out0 = order.amountOutAt(0, bump);

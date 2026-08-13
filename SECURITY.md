@@ -170,18 +170,36 @@ and expiries. Full design: [docs/delegated-signers.md](docs/delegated-signers.md
    MUST independently verify anything it reads from it before trusting it (e.g.
    recover a maker-chosen trusted signer over an EIP-712 digest bound to the
    on-chain `filler` and the validator's own domain, as `FillerAttestationValidator`
-   does). Crucially, `takerData` cannot alter the maker's signed outcome (amounts,
-   tokens, recipients): only a validator — a read-only gate that can merely pass or
-   fail the fill — ever consumes it. Its power is bounded to letting a maker gate a
-   fill on a filler-produced proof (off-chain attestation, oracle update, ZK proof).
+   does). `takerData` cannot alter the maker's signed TOKENS or RECIPIENTS: the three
+   consumers are a validator/invariant (a read-only gate that can only pass or fail
+   the fill), a fill module (which picks the fill FRACTION, under the core's
+   over-fill cap and uniform per-leg scaling), and — since 2026-08 — a price module
+   (which picks the BUMP, which the core clamps to `[0, 10000]` and maps through the
+   maker's own signed `start`/`end`). So the most `takerData` can do to the maker's
+   economics is move a fill to a different point INSIDE the band that maker signed,
+   or size the fraction it advances; it can never price outside the band, redirect a
+   leg, or introduce a token.
 
 8. **Oracle freshness is enforced.** Chainlink validators reject
    non-positive prices, incomplete rounds, and prices older than a maker-signed
    `maxStaleness`. The MoC depeg guard rejects zero prices and reversed bands.
+   `ChainlinkPeggedPriceModule` — which PRICES rather than gates — additionally
+   enforces an absolute `[MIN_ANSWER, MAX_ANSWER]` plausibility band, so a feed
+   that is fresh and *wrong* reverts the fill instead of pricing against it. The
+   trigger validators still have no such band; see FEATURES.md's gap list.
 
 9. **Settlement holds no cross-fill funds.** The solver is paid from the TAKE
    proceeds of the current fill (measured as a balance delta), never from any
    pre-existing or donated Settlement balance; surplus is returned to the maker.
+
+10. **Pricing is bounded by the maker's signed band, whatever chooses it.** The
+   clock, a priority-fee bid, and an external `pricingModule` all produce one
+   normalized bump that the core clamps to `[0, 10000]` before mapping it through
+   each leg's own `start`/`end`. A price module is consensus-critical and
+   maker-signed (exactly like a validator), MUST be `view`, and is resolved once
+   per fill; a hostile or broken one can only move the price INSIDE the band the
+   maker signed — never outside it, and never to another token or recipient.
+   See [docs/pricing-modes.md](docs/pricing-modes.md).
 
 ---
 
@@ -444,6 +462,44 @@ and nothing in this repository is deployed.
 ---
 
 ## Breaking change for integrators
+
+### 2026-08-12 — the order struct changed shape (NEW ORDER TYPEHASH)
+
+Every order encoder, signer and indexer must be updated together. There is no
+compatibility shim: an order built the old way produces a different hash and
+simply fails signature verification.
+
+**Removed** three fields — `exclusivityOverrideBps`, `gasBumpBps`, `gasPriceRef`.
+**Added** `uint256 params` (which carries all three, plus the new priority-fee
+scale) and `address pricingModule`. Field order is now:
+
+```
+maker, nonce, deadline, legsIn, legsOut, timing, exclusiveFiller, minFillAnchor,
+params, curve, items, validators, invariants, fillModule, fillTotal, pricingModule
+```
+
+`params` layout — mirror it exactly (`DutchAuction.packParams`, SDK `packParams`):
+
+```
+[0:16)    exclusivityOverrideBps        [32:96)    gasPriceRef   (wei)
+[16:32)   gasBumpBps                    [96:160)   priorityScale (wei)
+```
+
+Two new `timing` bits are now meaningful and were previously required to be zero:
+**102 = BLOCK clock** (the decay clocks count blocks, not seconds) and
+**103 = PRIORITY auction** (the bump is bid in priority fee). An encoder that
+leaves them clear keeps the old behaviour exactly.
+
+The golden order hash moved to
+`0x627e590874df6c58eba2354e7f1cf0c103f72bc95d48a01e758493e7a5bbcfef`; it is pinned
+on both sides (`HashGolden.t.sol` and the SDK's `canonicalOrder.ts`).
+
+**Also new, and opt-in rather than breaking:** a signature may now be a BULK
+(Merkle) envelope — `innerSig(65) ‖ proof ‖ 0xB0` — authorizing every order whose
+hash is a leaf of a root the maker signed as `OrderRoot(bytes32 root)`. Anything
+that constructs signature envelopes must avoid accidentally producing that shape:
+a payload of length ≥ 98 with `(length - 66) % 32 == 0` and a trailing `0xB0` byte
+is read as a proof. Ordinary 64/65-byte ECDSA signatures can never collide.
 
 ### 2026-07-29 — signing-format changes
 

@@ -8,7 +8,8 @@
 > Filling a *single* order from a router or aggregator is a different job with a
 > different entry point — see
 > [INTEGRATION.md](../packages/core/src/settlement/INTEGRATION.md) and use
-> `fillUpTo`, which clamps to the remaining size instead of reverting.
+> `fillUpTo`, which clamps to the remaining size instead of reverting and takes
+> a `minBumpBps` price floor (quoted via `SettlementLens.previewBump`).
 
 ## The shape
 

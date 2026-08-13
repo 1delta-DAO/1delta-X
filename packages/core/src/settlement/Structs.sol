@@ -161,18 +161,29 @@ struct Order {
     uint256 deadline;
     bytes legsIn; //        PACKED {LegIn} blob — see {PackedArrays}. anchor = leg 0
     bytes legsOut; //       PACKED {LegOut} blob — see {PackedArrays}
-    uint256 timing; //      PACKED three uint32 clocks (see {DutchAuction} helpers):
-    //                        bits [0:32)   decayStartTime      (unix; auction start)
-    //                        bits [32:64)  decayDuration       (seconds; 0 = no decay window)
+    uint256 timing; //      PACKED clocks and flags (see {DutchAuction} helpers):
+    //                        bits [0:32)   decayStartTime      (unix, or BLOCK when bit 102 is set)
+    //                        bits [32:64)  decayDuration       (seconds/blocks; 0 = no decay window)
     //                        bits [64:96)  exclusivityEndTime  (unix; ignored if exclusiveFiller == 0)
+    //                        bits [96:100) item execution policy ({ItemPolicy})
+    //                        bit  100      fill-once (nonce invalidator)
+    //                        bit  101      side (0 = SELL, 1 = BUY)
+    //                        bit  102      BLOCK clock — the two clocks above count BLOCKS
+    //                        bit  103      PRIORITY auction — the bump is bid in priority fee
     address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
     uint256 minFillAnchor; //        anti-dust floor per fill (anchor units); 0 = no minimum
-    uint256 exclusivityOverrideBps; //  0 = hard exclusivity; else the bps a non-exclusive
-    //                                  in-window filler must improve the maker's auction leg by
+    uint256 params; //               PACKED auction scalars (see {DutchAuction} helpers):
+    //                        bits [0:16)    exclusivityOverrideBps — 0 = hard exclusivity; else the
+    //                                       bps a non-exclusive in-window filler must improve the
+    //                                       maker's auction leg by
+    //                        bits [16:32)   gasBumpBps — max extra decay the basefee bump adds; 0 = off
+    //                        bits [32:96)   gasPriceRef — reference basefee (wei) at which the gas
+    //                                       bump reaches gasBumpBps
+    //                        bits [96:160)  priorityScale — wei of priority fee that buys a FULL
+    //                                       bump under the PRIORITY auction (bit 103); 0 = off
+    //                        bits [160:256) free
     bytes curve; //                  PACKED {CurvePoint} blob; optional piecewise decay
     //                               shape (shared clock); empty = linear
-    uint256 gasBumpBps; //           max extra decay (bps) the gas bump adds at/above gasPriceRef; 0 = off
-    uint256 gasPriceRef; //          reference basefee (wei) at which the gas bump reaches gasBumpBps
     bytes items; //                  PACKED {Item} record blob
     bytes validators; //             PACKED {Validator} records; pre-execution triggers,
     //                               AND-composed
@@ -187,6 +198,22 @@ struct Order {
     uint256 fillTotal; //            fill denominator when the unit isn't a fungible leg; 0 = derive
     //                               from the leg anchor (legsIn[0].start / legsOut[0].start). Maker-
     //                               signed so the cap `filled + delta <= fillTotal` stays in the core.
+    address pricingModule; //        optional EXTERNAL price provider; address(0) = the built-in
+    //                               clock. The module returns the shared decay bump, which the core
+    //                               CLAMPS to [0, 10000] and then maps through each leg's own signed
+    //                               `start`/`end`. So an oracle-pegged, range (fill-progress) or
+    //                               cosigner-quoted price can move the tick anywhere INSIDE the band
+    //                               the maker signed and nowhere outside it — unlike an amount getter,
+    //                               which would BE the price.
+    //
+    //                               ⚠ NO PER-ORDER CONFIG BLOB, AND THAT IS A SIZE DECISION. A
+    //                               `bytes pricing` carrying `{target, data}` measured **~1,000 bytes**
+    //                               of Settlement (2026-08-12) — a SEVENTH dynamic member grows the
+    //                               `Order` ABI decoder at EVERY external entry point, and the budget
+    //                               against EIP-170 was 404. A module instead carries its config in
+    //                               its own immutables (deploy one per configuration; identical
+    //                               configs share a CREATE2 address), and reads everything
+    //                               order-specific from the `Order` it is handed. See {IPriceModule}.
 }
 
 /// @notice Per-fill execution context — the resolved, in-memory state of ONE fill.
@@ -211,6 +238,16 @@ struct FillCtx {
     bool fullFill; //        prevFilled == 0 && newFilled == anchor: the whole order in
     //                       one shot ⇒ every pro-rata slice is the leg's full amount,
     //                       skipping the mul/div.
+    uint256 bump; //         the PINNED shared decay bump, plus one (0 = not pinned, resolve
+    //                       lazily per decaying leg from the clock — the classic shape, and
+    //                       what every order without a `pricingModule` or priority auction
+    //                       uses). Both cold modes pin: a PRICE-MODULE order and a PRIORITY
+    //                       auction are resolved ONCE per fill by {OrderState._openFill} (via
+    //                       {DutchAuction.resolveBump}, where the filler and `takerData` are in
+    //                       scope) and the clamped result pinned here. Pinning is what stops a
+    //                       two-leg module order from paying the module's STATICCALL twice — and
+    //                       per-leg lazy resolution stays the cheaper shape for everything else
+    //                       (measured; see {Pricing}).
     uint256[] receipts; //    per-`legsIn` amounts actually paid to `payTo`, recorded by
     //                       `_payInputsToSolver` as it pays them. `fillUpTo` returns
     //                       this instead of re-deriving it: a second {Pricing} pass

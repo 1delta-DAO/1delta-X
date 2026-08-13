@@ -50,24 +50,22 @@ contract HashDifferentialTest is Test {
     // no padding at all, so that class of divergence is now structurally impossible.
 
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 exclusivityOverrideBps,bytes curve,uint256 gasBumpBps,uint256 gasPriceRef,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal)"
+        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
     );
 
-    /// @dev Chunked only to stay under the stack limit; all 18 members are static
-    ///      words so the concatenation is byte-identical to one 18-arg `abi.encode`.
+    /// @dev Chunked only to stay under the stack limit; all 16 members are static
+    ///      words so the concatenation is byte-identical to one 16-arg `abi.encode`.
     function _refHash(Order memory o) private pure returns (bytes32) {
         bytes memory p1 = abi.encode(ORDER_TH, o.maker, o.nonce, o.deadline, keccak256(o.legsIn), keccak256(o.legsOut));
-        bytes memory p2 = abi.encode(
-            o.timing,
-            o.exclusiveFiller,
-            o.minFillAnchor,
-            o.exclusivityOverrideBps,
-            keccak256(o.curve),
-            o.gasBumpBps,
-            o.gasPriceRef
+        bytes memory p2 = abi.encode(o.timing, o.exclusiveFiller, o.minFillAnchor, o.params, keccak256(o.curve));
+        bytes memory p3 = abi.encode(
+            keccak256(o.items),
+            keccak256(o.validators),
+            keccak256(o.invariants),
+            o.fillModule,
+            o.fillTotal,
+            o.pricingModule
         );
-        bytes memory p3 =
-            abi.encode(keccak256(o.items), keccak256(o.validators), keccak256(o.invariants), o.fillModule, o.fillTotal);
         return keccak256(bytes.concat(p1, p2, p3));
     }
 
@@ -83,9 +81,8 @@ contract HashDifferentialTest is Test {
         o.timing = uint256(keccak256(abi.encode(seed, "timing")));
         o.exclusiveFiller = address(uint160(uint256(keccak256(abi.encode(seed, "excl")))));
         o.minFillAnchor = uint256(keccak256(abi.encode(seed, "minfill")));
-        o.exclusivityOverrideBps = uint256(keccak256(abi.encode(seed, "bps")));
-        o.gasBumpBps = uint256(keccak256(abi.encode(seed, "gbump")));
-        o.gasPriceRef = uint256(keccak256(abi.encode(seed, "gref")));
+        o.params = uint256(keccak256(abi.encode(seed, "params")));
+        o.pricingModule = address(uint160(uint256(keccak256(abi.encode(seed, "pmod")))));
         o.fillModule = address(uint160(uint256(keccak256(abi.encode(seed, "fmod")))));
         o.fillTotal = uint256(keccak256(abi.encode(seed, "ftotal")));
 

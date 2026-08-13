@@ -40,18 +40,17 @@ contract DepositWithFeeTest is AaveModulesBase {
             data: abi.encode(AAVE_POOL, WETH)
         });
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
-            legsIn: PackedEncode.legsIn(_legsIn1Rising(WETH, F0, FMAX)),
+            legsIn: _legsIn1Rising(WETH, F0, FMAX),
             legsOut: PackedEncode.legsOut(new LegOut[](0)),
             timing: _packTiming(uint32(block.timestamp), uint32(DURATION), 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
@@ -104,8 +103,8 @@ contract DepositWithFeeTest is AaveModulesBase {
         Order memory order = _buildDepositOrder(22);
         _setDecayStart(order, 0);
         _setDecayDuration(order, 0); //   no time decay — gas bump only
-        order.gasBumpBps = 5_000; //  up to half the leg span from gas alone
-        order.gasPriceRef = 10 gwei;
+        order.params = (order.params & ~(uint256(0xffff) << 16)) | (uint256(5_000) << 16); //  up to half the leg span from gas alone
+        order.params = (order.params & ~(uint256(type(uint64).max) << 32)) | (uint256(10 gwei) << 32);
         bytes memory sig = _sign(order);
 
         vm.fee(2 gwei); // gasAdd = 5000 * 2/10 = 1000 bps
@@ -167,7 +166,14 @@ contract DepositWithFeeTest is AaveModulesBase {
 
         Order memory order = _buildDepositOrder(24);
         Item[] memory items = new Item[](2);
-        items[0] = order.items[0]; // the deposit
+        // The deposit item (rebuilt: `order.items` is now a packed blob, not Item[]).
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(depositModule),
+            amount: DEPOSIT,
+            recipient: address(0),
+            data: abi.encode(AAVE_POOL, WETH)
+        });
         items[1] = Item({
             op: ItemOp.MAKE,
             module: address(feeModule),

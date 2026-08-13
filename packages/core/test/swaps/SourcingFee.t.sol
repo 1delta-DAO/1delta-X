@@ -218,7 +218,7 @@ contract SourcingFeeTest is CoreSettlementBase {
         // Soft exclusivity: a nominated filler, but the solver is NOT it → override.
         order.exclusiveFiller = address(0xE0E0);
         _setExclusivityEnd(order, uint32(block.timestamp + 1 hours));
-        order.exclusivityOverrideBps = overrideBps;
+        order.params = (order.params & ~uint256(0xffff)) | uint256(overrideBps);
         bytes memory sig = _sign(order);
 
         vm.prank(solver); // non-exclusive in-window filler
@@ -250,6 +250,8 @@ contract SourcingFeeTest is CoreSettlementBase {
         legsOut[1] = LegOut(WETH, fee, 0, originator); //      fee → originator
 
         Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 12,
             deadline: block.timestamp + 1 hours,
@@ -258,10 +260,7 @@ contract SourcingFeeTest is CoreSettlementBase {
             timing: uint256(1) << 101, // BUY (timing bit 101)
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
@@ -297,6 +296,8 @@ contract SourcingFeeTest is CoreSettlementBase {
         legsOut[1] = LegOut(WETH, fee, 0, feeRecipient);
 
         Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 13,
             deadline: block.timestamp + 1 hours,
@@ -305,10 +306,7 @@ contract SourcingFeeTest is CoreSettlementBase {
             timing: uint256(1) << 101, // BUY (timing bit 101)
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

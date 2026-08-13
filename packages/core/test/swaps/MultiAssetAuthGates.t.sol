@@ -83,6 +83,8 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         legsOut[0] = LegOut(WETH, 1 ether, 0, address(0));
         legsOut[1] = LegOut(DAI, 1_000e18, 0, address(0));
         return Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -91,10 +93,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.validators(validators),
             invariants: PackedEncode.validators(invariants),
@@ -146,6 +145,8 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         legsIn[0] = LegIn(WETH, wethIn, 0);
         legsIn[1] = LegIn(USDC, usdcIn, 0);
         Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 0,
             deadline: block.timestamp + 1 hours,
@@ -154,10 +155,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.noItems(),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

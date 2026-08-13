@@ -127,6 +127,8 @@ contract MigrateTest is CompoundV3ModulesBase {
         items[3] = Item(ItemOp.TAKE, address(takerModule), 3_000e18, address(0), borrowData);
 
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
@@ -135,10 +137,7 @@ contract MigrateTest is CompoundV3ModulesBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

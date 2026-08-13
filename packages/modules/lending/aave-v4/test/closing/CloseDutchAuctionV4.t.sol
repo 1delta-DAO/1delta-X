@@ -90,6 +90,8 @@ contract CloseDutchAuctionV4Test is AaveV4ModulesBase {
         legsOut[0] = LegOut(USDC, startOut, endOut, address(0)); // Dutch-decaying output → maker
 
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 7,
             deadline: block.timestamp + 1 hours,
@@ -98,10 +100,7 @@ contract CloseDutchAuctionV4Test is AaveV4ModulesBase {
             timing: _packTiming(uint32(block.timestamp), 100, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

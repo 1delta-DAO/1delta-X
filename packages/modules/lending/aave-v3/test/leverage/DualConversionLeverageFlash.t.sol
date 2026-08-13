@@ -76,6 +76,8 @@ contract DualConversionLeverageFlashTest is AaveModulesBase {
         items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), borrowData);
 
         Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 43,
             deadline: block.timestamp + 1 hours,
@@ -84,10 +86,7 @@ contract DualConversionLeverageFlashTest is AaveModulesBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

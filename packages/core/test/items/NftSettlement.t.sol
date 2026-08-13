@@ -84,6 +84,8 @@ contract NftSettlementTest is CoreSettlementBase {
         LegOut[] memory legsOut = new LegOut[](1);
         legsOut[0] = LegOut(USDC, PRICE, 0, address(0)); // fixed output to maker
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -92,10 +94,7 @@ contract NftSettlementTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0), //  OPEN — any solver may fill
             minFillAnchor: PRICE, //         full-fill only (indivisible)
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

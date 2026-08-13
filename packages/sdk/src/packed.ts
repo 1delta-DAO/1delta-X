@@ -1,4 +1,5 @@
 import { numberToHex, type Hex } from "viem";
+import { packParams } from "./types";
 import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types";
 
 /**
@@ -108,15 +109,15 @@ export interface WireOrder {
   timing: bigint;
   exclusiveFiller: Hex;
   minFillAnchor: bigint;
-  exclusivityOverrideBps: bigint;
+  /// Packed auction scalars — see `packParams`.
+  params: bigint;
   curve: Hex;
-  gasBumpBps: bigint;
-  gasPriceRef: bigint;
   items: Hex;
   validators: Hex;
   invariants: Hex;
   fillModule: Hex;
   fillTotal: bigint;
+  pricingModule: Hex;
 }
 
 /** `Order.side` lives in bit 101 of the packed `timing` word — see `DutchAuction.side`. */
@@ -128,7 +129,9 @@ export const SIDE_BIT = 101n;
  * Two shape changes, both mirroring the Solidity struct:
  *  - the five struct arrays become packed `bytes` blobs;
  *  - `side` is folded into `timing` bit 101, because it did not justify a whole
- *    32-byte word in the calldata and the hash preimage for one bit.
+ *    32-byte word in the calldata and the hash preimage for one bit;
+ *  - the four auction scalars (override bps, gas bump, gas price ref, priority
+ *    scale) fold into one `params` word, for the same reason.
  *
  * `timing`'s lower bits stay the caller's: [0:32) decay start, [32:64) decay
  * duration, [64:96) exclusivity end, [96:100) item policy, bit 100 fill-once.
@@ -149,14 +152,13 @@ export function packOrder(order: Order): WireOrder {
     timing: order.timing | (BigInt(order.side) << SIDE_BIT),
     exclusiveFiller: order.exclusiveFiller,
     minFillAnchor: order.minFillAnchor,
-    exclusivityOverrideBps: order.exclusivityOverrideBps,
+    params: packParams(order.exclusivityOverrideBps, order.gasBumpBps, order.gasPriceRef, order.priorityScale),
     curve: packCurve(order.curve),
-    gasBumpBps: order.gasBumpBps,
-    gasPriceRef: order.gasPriceRef,
     items: packItems(order.items),
     validators: packValidators(order.validators),
     invariants: packValidators(order.invariants),
     fillModule: order.fillModule,
     fillTotal: order.fillTotal,
+    pricingModule: order.pricingModule,
   };
 }

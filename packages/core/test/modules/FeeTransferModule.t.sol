@@ -55,6 +55,8 @@ contract FeeTransferModuleTest is CoreSettlementBase {
         LegIn[] memory legsIn = new LegIn[](1);
         legsIn[0] = LegIn(USDC, F0, FMAX); // rising relayer-fee input (F0 → FMAX)
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -63,10 +65,7 @@ contract FeeTransferModuleTest is CoreSettlementBase {
             timing: _packTiming(uint32(block.timestamp), DURATION, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

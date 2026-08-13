@@ -250,6 +250,8 @@ contract FillModuleTest is CoreSettlementBase {
         Item[] memory items = new Item[](1);
         items[0] = Item({op: ItemOp.MAKE, module: address(0xD0D0), amount: 1, recipient: address(0), data: ""});
         Order memory o = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: 6,
             deadline: block.timestamp + 1 hours,
@@ -258,10 +260,7 @@ contract FillModuleTest is CoreSettlementBase {
             timing: 0,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: PackedEncode.noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),

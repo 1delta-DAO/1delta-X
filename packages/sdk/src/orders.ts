@@ -101,6 +101,19 @@ export function encodeApproveOrder(order: Order): Hex {
   return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "approveOrder", args: [packOrder(order) as never] });
 }
 
+/**
+ * `settlement.approveOrders(orders)` — batch signature-less authorization: one
+ * transaction (one multisig action) approving a whole ladder. Reverts entirely
+ * if any order names a different maker.
+ */
+export function encodeApproveOrders(orders: Order[]): Hex {
+  return encodeFunctionData({
+    abi: SETTLEMENT_ABI,
+    functionName: "approveOrders",
+    args: [orders.map((o) => packOrder(o)) as never],
+  });
+}
+
 /** `settlement.setOrderSigner(signer, expiry)` — nominate a delegated signer (`0` revokes). */
 export function encodeSetOrderSigner(signer: Address, expiry: bigint): Hex {
   return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "setOrderSigner", args: [signer, expiry] });

@@ -88,6 +88,34 @@ test   = "packages/core/script"
 script = "packages/core/script"
 out    = "out/core-deploy"
 via_ir = true
+# MEASURED 2026-08-12, and the ONLY place `optimizer_runs` deviates from the
+# 20,000 in [profile.default] — deliberately, because this profile produces the
+# DEPLOYED artifact and nothing else. [profile.default] still governs every other
+# package and the whole committed gas baseline.
+#
+# The 2026-08 pricing/signing features (block clock, priority auction, external
+# price modules, Merkle bulk signatures) put Settlement over EIP-170 at 20,000.
+# Figures below are `make size-check`, which is the only measurement to trust:
+#
+#     runs      Settlement runtime      free
+#     20,000        (over cap)         FAIL
+#     1,500          24,522                54   fits, but one PR from failing
+#     800            24,331               245
+#     400            24,186               390   ← here
+#     200            24,179               397   floor; nothing below 400 buys more
+#
+# ⚠ THE CURVE IS NOT MONOTONIC, in either direction. The pristine pre-feature
+# source measured 24,172 at 20,000 but 26,149 at 6,000: `runs` moves inlining
+# decisions in steps, so a size change must be MEASURED, never predicted. Do not
+# reason about this dial from the [profile.default] table above — that one was
+# measured on a smaller contract and its shape does not carry over.
+#
+# 400 restores the same ~400-byte margin the contract had before these features,
+# and the curve is flat below it, so there is nothing to gain by going lower. The
+# price of the step is runtime gas on the DEPLOYED contract only; the committed
+# gas baseline is unaffected because it runs on [profile.core] at 20,000. See
+# docs/lop-parity-plan.md §7.
+optimizer_runs = 400
 
 [profile.solvers]
 src    = "packages/solvers/src"

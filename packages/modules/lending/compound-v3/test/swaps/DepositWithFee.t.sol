@@ -41,6 +41,8 @@ contract DepositWithFeeTest is CompoundV3ModulesBase {
         LegIn[] memory legsIn = new LegIn[](1);
         legsIn[0] = LegIn(USDC, F0, FMAX);
         order = Order({
+            params: 0,
+            pricingModule: address(0),
             maker: maker,
             nonce: nonce,
             deadline: block.timestamp + 1 hours,
@@ -49,10 +51,7 @@ contract DepositWithFeeTest is CompoundV3ModulesBase {
             timing: _packTiming(uint32(block.timestamp), DURATION, 0),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
-            exclusivityOverrideBps: 0,
             curve: _noCurve(),
-            gasBumpBps: 0,
-            gasPriceRef: 0,
             items: PackedEncode.items(items),
             validators: PackedEncode.noValidators(),
             invariants: PackedEncode.noValidators(),
