@@ -445,7 +445,7 @@ references the new module address in the order it signs.
 |---|---|
 | [`modules/erc4626`](packages/modules/erc4626) | Generic ERC-4626 vault withdraw/redeem as a TAKE module. |
 | [`modules/transfer`](packages/modules/transfer) | `ERC20PermitTransferModule` — EIP-2612 permit replayed inside the fill. `ProportionalSweepModule` — SETTLE item sweeping a capped bps of the maker's balance of an extra token to the filler, the multi-token half of balance-relative orders. |
-| [`modules/redeem/usdrif`](packages/modules/redeem/usdrif) | USDRIF exit path: depeg guard + redemption-settled validators. |
+| [`modules/redeem/usdrif`](packages/modules/redeem/usdrif) | USDRIF exit path: `RedemptionSettledValidator` (MoC op executed *and* cleared) + optional `MocPriceBandValidator` (bands the MoC RIF↔USDRIF quote; **not** a peg guard — see that package's README). |
 | [`modules/bridge`](packages/modules/bridge/README.md) | Cross-chain orders over Across, LayerZero OFT and **Circle CCTP** — see [§11](#11-cross-chain). |
 
 ---

@@ -51,7 +51,9 @@ entrypoint is owner/operator-gated.
     calldata, with the output floor enforced by balance delta). This is the
     one-signature variant of the two-phase flow in
     `packages/modules/redeem/usdrif` (there the user redeems first and the
-    order needs settlement/depeg validators; here the order needs none).
+    order carries the redemption-settled validator, optionally a price band;
+    here the order needs none — it fills in seconds, so the signed output floor
+    is the whole protection).
 
 The single-input Aave/Morpho/Euler solvers each define the provider interface
 (`IAaveV3Pool`, `IMorphoFlash`, `IEulerFlashVault`); their multi-input

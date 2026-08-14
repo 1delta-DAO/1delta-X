@@ -10,7 +10,7 @@ import {Settlement, Order, OrderSide, Item, Validator, LegIn, LegOut} from "@cor
 
 import {UsdrifForkBase} from "./shared/UsdrifForkBase.t.sol";
 import {RedemptionSettledValidator} from "../src/RedemptionSettledValidator.sol";
-import {DepegGuardValidator} from "../src/DepegGuardValidator.sol";
+import {MocPriceBandValidator} from "../src/MocPriceBandValidator.sol";
 import {IMocRif, IMocQueue} from "../src/interfaces/IMoc.sol";
 
 /// @dev End-to-end USDRIF→USDT0 exit on a Rootstock fork — the plan's variant 1
@@ -26,18 +26,18 @@ import {IMocRif, IMocQueue} from "../src/interfaces/IMoc.sol";
 ///
 /// Covers the plan's must-pass matrix (§9): fill reverts before settlement (via
 /// the validator AND via the implicit Permit3 RIF pull), fill succeeds after
-/// settlement, and the depeg guard gates fills by the live RIF price band.
+/// settlement, and the price band gates fills by the live MoC RIF↔USDRIF quote.
 contract UsdrifExitTest is UsdrifForkBase {
     uint256 constant USDRIF_IN = 1_000e18; //  $1000 of USDRIF
     uint256 constant QAC_MIN = 1e18; //         conservative RIF floor for the redeem
 
     RedemptionSettledValidator settledValidator;
-    DepegGuardValidator depegValidator;
+    MocPriceBandValidator bandValidator;
 
     function setUp() public override {
         super.setUp();
         settledValidator = new RedemptionSettledValidator(RIF);
-        depegValidator = new DepegGuardValidator();
+        bandValidator = new MocPriceBandValidator();
     }
 
     // ──────────────────── Step 1: user redeems USDRIF → RIF directly ────────────────────
@@ -181,8 +181,8 @@ contract UsdrifExitTest is UsdrifForkBase {
         settlement.fill(order, sig, rifIn);
     }
 
-    /// DepegGuardValidator blocks fills when the RIF price is outside the band.
-    function test_depegGuard_blocksOutOfBand() public {
+    /// MocPriceBandValidator blocks fills when the MoC quote is outside the band.
+    function test_priceBand_blocksOutOfBand() public {
         uint256 opId = _initiateRedemption();
         _executeQueue();
 
@@ -192,9 +192,10 @@ contract UsdrifExitTest is UsdrifForkBase {
 
         Validator[] memory validators = new Validator[](2);
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
-        // Absurd band far above the live RIF price (~6.85e16) → out of band.
+        // Absurd band far above the live MoC quote (~6.85e16 USDRIF per RIF at the
+        // pinned block) → out of band.
         validators[1] = Validator({
-            target: address(depegValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e18), uint256(2e18))
+            target: address(bandValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e18), uint256(2e18))
         });
 
         Order memory order = _exitOrder(4, rifIn, usdtOut, validators);
@@ -205,8 +206,8 @@ contract UsdrifExitTest is UsdrifForkBase {
         settlement.fill(order, sig, rifIn);
     }
 
-    /// DepegGuardValidator allows fills when the RIF price is inside the band.
-    function test_depegGuard_passesInBand() public {
+    /// MocPriceBandValidator allows fills when the MoC quote is inside the band.
+    function test_priceBand_passesInBand() public {
         uint256 opId = _initiateRedemption();
         _executeQueue();
 
@@ -216,9 +217,9 @@ contract UsdrifExitTest is UsdrifForkBase {
 
         Validator[] memory validators = new Validator[](2);
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
-        // Wide band that brackets the live RIF price.
+        // Wide band that brackets the live MoC quote.
         validators[1] = Validator({
-            target: address(depegValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e16), uint256(1e18))
+            target: address(bandValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e16), uint256(1e18))
         });
 
         Order memory order = _exitOrder(5, rifIn, usdtOut, validators);
@@ -228,5 +229,32 @@ contract UsdrifExitTest is UsdrifForkBase {
         uint256 paid = settlement.fill(order, sig, rifIn)[0];
         assertEq(paid, usdtOut, "in-band fill succeeds");
         assertEq(IERC20(USDT0).balanceOf(maker), usdtOut, "seller exited to USDT0");
+    }
+
+    /// A reversed band (min > max) is unsatisfiable, so the gate simply fails —
+    /// which is why the validator needs no explicit check for it. Pins the reason
+    /// the old `InvalidBand` revert was dropped: {OrderGates.gatePasses} folds ANY
+    /// validator revert into `false`, so a maker could never have observed it —
+    /// the outcome is `ValidationFailed(1)` either way.
+    function test_priceBand_reversedBandBlocks() public {
+        uint256 opId = _initiateRedemption();
+        _executeQueue();
+
+        uint256 rifIn = IERC20(RIF).balanceOf(maker);
+        uint256 usdtOut = 950e6;
+        _approveExitSides(rifIn, usdtOut);
+
+        Validator[] memory validators = new Validator[](2);
+        validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
+        validators[1] = Validator({
+            target: address(bandValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e18), uint256(1e16))
+        });
+
+        Order memory order = _exitOrder(6, rifIn, usdtOut, validators);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(Base.ValidationFailed.selector, uint256(1)));
+        settlement.fill(order, sig, rifIn);
     }
 }

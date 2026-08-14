@@ -180,9 +180,13 @@ and expiries. Full design: [docs/delegated-signers.md](docs/delegated-signers.md
    or size the fraction it advances; it can never price outside the band, redirect a
    leg, or introduce a token.
 
-8. **Oracle freshness is enforced.** Chainlink validators reject
-   non-positive prices, incomplete rounds, and prices older than a maker-signed
-   `maxStaleness`. The MoC depeg guard rejects zero prices and reversed bands.
+8. **Oracle freshness is enforced *where the feed exposes it*.** Chainlink
+   validators reject non-positive prices, incomplete rounds, and prices older than
+   a maker-signed `maxStaleness`. `MocPriceBandValidator` **cannot** match that:
+   classic MoC `peek()` has no `updatedAt`, so a frozen feed reads in-band
+   indefinitely. It rejects zero prices and honours the provider's validity flag,
+   and that is the whole of its liveness story — orders relying on it must bound
+   their own exposure with a short expiry.
    `ChainlinkPeggedPriceModule` — which PRICES rather than gates — additionally
    enforces an absolute `[MIN_ANSWER, MAX_ANSWER]` plausibility band, so a feed
    that is fresh and *wrong* reverts the fill instead of pricing against it. The
@@ -384,13 +388,13 @@ including fork tests).
 | ID  | Severity | Component | Finding | Fix |
 |-----|----------|-----------|---------|-----|
 | **C-1** | **Critical** | `Permit3.take` | The taker book was keyed by *module* and `take` was callable by anyone with an arbitrary `receiver`. Any standing taker allowance (required by the `fill()` path; left as a residual by partial `fillWithPermit`) could be drained by anyone — borrow/withdraw proceeds redirected to an attacker while the victim kept the debt. | Re-keyed the taker book by **spender** (`_takerAllowance[user][msg.sender][ref]`), mirroring the token book. Only the approved spender (Settlement) can consume an allowance; Settlement enforces the maker-signed `recipient`. |
-| H-1 | High | Chainlink / DepegGuard validators | Oracle reads ignored staleness, round completeness, and price sign — a stale/zero price could pass a take-profit/stop-loss gate. | Added `price > 0`, `answeredInRound >= roundId`, and a maker-signed `maxStaleness` heartbeat to the Chainlink validators; DepegGuard now rejects zero price and reversed bands. |
+| H-1 | High | Chainlink / MoC price validators | Oracle reads ignored staleness, round completeness, and price sign — a stale/zero price could pass a take-profit/stop-loss gate. | Added `price > 0`, `answeredInRound >= roundId`, and a maker-signed `maxStaleness` heartbeat to the Chainlink validators; the MoC band validator rejects zero price. Its staleness half is **not fixable at this layer** — `peek()` exposes no timestamp; documented in-contract instead. |
 | M-1 | Medium | Maker modules | `makeOnBehalf` was ungated — anyone could force a victim's pre-approved funds into deposits/repays (griefing / order-layer bypass). | Gated every `makeOnBehalf` to `msg.sender == settlement`. |
 | M-2 | Medium | All modules + core | Raw ERC20 calls ignored return values (USDT-class break / silent failure). | Introduced `SafeTransferLib` and applied it repo-wide. |
 | M-3 | Medium | `RedemptionSettledValidator` | "Settled" was inferred from the FIFO queue head (`firstOperId`), which only proves the op was *dequeued*, not that it cleared. | Now reads the op's final state via `opersInfo(opId)` / `operIdCount()`. |
 | M-4 | Medium | Full-mode withdraws | Trusted a stale pre-read balance / static amount; could over-forward or leak a stray balance. | Forward a **measured** balance delta with `require(received >= amount)`; sweep only the real excess to the user. |
 | L-1 | Low | `UniversalSettlement` (now `Settlement`) | Solver payout used the whole contract balance (could scoop donated funds). | Pay from the current fill's measured proceeds only; return surplus to the maker. |
-| L-2 | Low | DepegGuard | No `minPrice <= maxPrice` validation (self-DoS). | Reverts `InvalidBand` on a reversed band. |
+| L-2 | Low | `MocPriceBandValidator` (was `DepegGuardValidator`) | No `minPrice <= maxPrice` validation (self-DoS). | ~~Reverts `InvalidBand`~~ — **superseded 2026-08-14**: that revert was unobservable, because `OrderGates.gatePasses` staticcalls validators and folds any revert into `false`. A maker saw `ValidationFailed(i)` either way. The check was removed (a reversed band is unsatisfiable and already returns false) and pinned by `test_priceBand_reversedBandBlocks`. |
 
 **Confirmed-safe (no change needed):** flash-solver callback authentication;
 Morpho `onMorphoRepay` is morpho-gated with a cap check (and supply uses empty
