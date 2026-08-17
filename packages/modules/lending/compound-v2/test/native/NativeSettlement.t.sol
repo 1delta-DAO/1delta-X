@@ -115,7 +115,7 @@ contract CompoundV2NativeSettlementTest is CompoundV2ModulesBase {
         vm.startPrank(maker);
         IERC20(address(CETH)).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(nWithdraw), address(CETH), type(uint160).max, 0);
-        permit3.approveTaker(address(settlement), keccak256(_withdrawEthData()), uint160(wethIn), 0);
+        permit3.approveTaker(address(settlement), address(nWithdraw), keccak256(_withdrawEthData()), uint160(wethIn), 0);
         vm.stopPrank();
 
         Item[] memory items = new Item[](1);
@@ -173,8 +173,7 @@ contract CompoundV2NativeSettlementTest is CompoundV2ModulesBase {
         // Redeem leg: pull the maker's cETH + cap the forwarded slice.
         IERC20(address(CETH)).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(nWithdraw), address(CETH), type(uint160).max, 0);
-        permit3.approveTaker(
-            address(settlement), keccak256(_withdrawEthFullData(wethToSolver)), uint160(wethToSolver), 0
+        permit3.approveTaker(address(settlement), address(nWithdraw), keccak256(_withdrawEthFullData(wethToSolver)), uint160(wethToSolver), 0
         );
         vm.stopPrank();
 

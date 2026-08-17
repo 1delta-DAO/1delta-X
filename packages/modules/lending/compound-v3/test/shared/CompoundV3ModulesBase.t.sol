@@ -173,7 +173,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         // No receipt-token pull on Comet: `comet.allow(withdrawModule)` (set in
         // setUp) is the protocol-native gate; the Permit3 taker allowance caps
         // the fill on the exact position.
-        permit3.approveTaker(address(settlement), ref, uint160(wethIn), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), ref, uint160(wethIn), 0);
         vm.stopPrank();
     }
 
@@ -188,7 +188,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
 
         // Comet account-manager flag for the borrow module is granted in setUp;
         // the Permit3 taker allowance is what caps this borrow.
-        permit3.approveTaker(address(settlement), borrowRef, uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), borrowRef, uint160(borrowOut), 0);
 
         // USDC fallback allowance for _payTokenInToSolver — never triggers here
         // since the borrow fully funds tokenIn, but keeps the shortfall path safe.
@@ -221,7 +221,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         permit3.approveToken(address(settlement), WETH, uint160(exactWeth), 0);
         permit3.approveToken(address(settlement), USDC, uint160(bufferedRepay), 0);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
-        permit3.approveTaker(address(settlement), keccak256(withdrawData), uint160(exactWeth), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(withdrawData), uint160(exactWeth), 0);
 
         // [2] USDS-Comet deposit leg: depositModule pulls WETH from maker.
         permit3.approveToken(address(depositModule), WETH, uint160(exactWeth), 0);
@@ -229,7 +229,7 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
         // [3] USDS-Comet borrow leg: Comet account-manager flag + Permit3 cap.
         IComet(COMET_USDS).allow(address(takerModule), true);
         bytes memory borrowData = _borrowData(COMET_USDS, USDS);
-        permit3.approveTaker(address(settlement), keccak256(borrowData), uint160(borrowUsds), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(borrowData), uint160(borrowUsds), 0);
 
         vm.stopPrank();
     }

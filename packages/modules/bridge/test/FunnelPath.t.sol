@@ -184,7 +184,7 @@ contract FunnelPathTest is BridgeTestBase {
             value: 0,
             data: abi.encodeCall(
                 IPermit3.approveTaker,
-                (address(settlement), keccak256(PackedEncode.getItemData(o.items, 1)), uint160(BORROW), uint48(0))
+                (address(settlement), address(borrowModule), keccak256(PackedEncode.getItemData(o.items, 1)), uint160(BORROW), uint48(0))
             )
         });
         calls[2] = PositionFunnel.Call({

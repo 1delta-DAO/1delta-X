@@ -429,7 +429,7 @@ contract SettlementLens {
         uint256 nLegsIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         for (uint256 i; i < nLegsIn; i++) {
             (address token, uint256 lgStart, uint256 lgEnd) = PackedArrays.legIn(order.legsIn, i);
-            (uint160 allowed, uint48 expiration,) = PERMIT3.tokenAllowance(order.maker, spender, token);
+            (uint160 allowed, uint48 expiration) = PERMIT3.tokenAllowance(order.maker, spender, token);
             uint256 capacity = allowed;
             if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
             uint256 direct = _erc20Allowance(token, order.maker, spender);
@@ -849,6 +849,84 @@ contract SettlementLens {
             unchecked {
                 ++i;
             }
+        }
+    }
+
+    // ──────────────────── Taker-allowance preflight (U-3) ────────────────────
+
+    /// @notice For every TAKE item in `order`, the maker's live Permit3 taker
+    ///         allowance that the fill will consume — the taker-book analogue of
+    ///         {getOrderRelevantState}'s token-side capacity, which skips item
+    ///         orders entirely. A solver quoting a leverage/withdraw order can read
+    ///         this instead of hand-deriving `keccak256(item.data)` and querying
+    ///         Permit3 itself. The allowance is keyed `(maker, settlement, module,
+    ///         ref)`, exactly as {Base._runItem}'s `PERMIT3.take` consumes it.
+    /// @return out `TakerAllowances{modules, refs, amounts, expirations}`, one entry
+    ///         per TAKE item in signed order. `refs[j] = keccak256(item.data)` (the
+    ///         position key), `amounts[j]` the live allowance (`uint160.max` =
+    ///         infinite), `expirations[j]` its expiry (`0` = never).
+    function previewTakerAllowances(Order calldata order) external view returns (TakerAllowances memory out) {
+        bytes calldata items = order.items;
+        uint256 n = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
+        // First pass: count TAKE items so the arrays are sized exactly.
+        uint256 takes;
+        uint256 cursor = PackedArrays.recordsStart();
+        for (uint256 i; i < n;) {
+            (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
+            if (op == uint256(ItemOp.TAKE)) ++takes;
+            cursor = next;
+            unchecked {
+                ++i;
+            }
+        }
+
+        out.modules = new address[](takes);
+        out.refs = new bytes32[](takes);
+        out.amounts = new uint160[](takes);
+        out.expirations = new uint48[](takes);
+
+        uint256 k;
+        cursor = PackedArrays.recordsStart();
+        for (uint256 i; i < n;) {
+            // The whole per-item decode+read+write is one helper (fewest params:
+            // `order`, `cursor`, `out`, `k`) so the wide `itemAt` tuple never shares
+            // this frame — otherwise legacy (non-via-IR) codegen goes stack-too-deep.
+            (cursor, k) = _takerItemAt(order, cursor, out, k);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @dev Memory bundle for {previewTakerAllowances}, so the helper carries one
+    ///      pointer instead of four arrays (a stack-limit concession).
+    struct TakerAllowances {
+        address[] modules;
+        bytes32[] refs;
+        uint160[] amounts;
+        uint48[] expirations;
+    }
+
+    /// @dev Decode the item at `cursor`; if it is a TAKE, read its
+    ///      `(maker, settlement, module, ref)` taker allowance and write slot `k` of
+    ///      `out`. Returns the next cursor and the advanced `k` (unchanged for a
+    ///      non-TAKE). Takes `order` (not `maker`+`items` separately) to keep the
+    ///      param count — and thus this frame — small.
+    function _takerItemAt(Order calldata order, uint256 cursor, TakerAllowances memory out, uint256 k)
+        private
+        view
+        returns (uint256 next, uint256)
+    {
+        (uint256 op, address module,,, bytes calldata data, uint256 n2) = PackedArrays.itemAt(order.items, cursor);
+        if (op != uint256(ItemOp.TAKE)) return (n2, k);
+        bytes32 ref = keccak256(data);
+        (uint160 amt, uint48 exp) = PERMIT3.takerAllowance(order.maker, address(SETTLEMENT), module, ref);
+        out.modules[k] = module;
+        out.refs[k] = ref;
+        out.amounts[k] = amt;
+        out.expirations[k] = exp;
+        unchecked {
+            return (n2, k + 1);
         }
     }
 }

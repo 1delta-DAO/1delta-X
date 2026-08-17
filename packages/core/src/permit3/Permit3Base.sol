@@ -23,4 +23,23 @@ abstract contract Permit3Base is IPermit3, EIP712 {
     function DOMAIN_SEPARATOR() public view override(IPermit3, EIP712) returns (bytes32) {
         return EIP712.DOMAIN_SEPARATOR();
     }
+
+    /// @dev Same diamond as `DOMAIN_SEPARATOR`: `IPermit3` declares `eip712Domain`
+    ///      and `EIP712` implements it, so it is resolved once here.
+    function eip712Domain()
+        public
+        view
+        override(IPermit3, EIP712)
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        return EIP712.eip712Domain();
+    }
 }

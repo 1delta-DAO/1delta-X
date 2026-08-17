@@ -140,7 +140,7 @@ contract LiquityV2ForkAuthTest is LiquityV2ForkBase {
         vm.startPrank(TROVE_OWNER);
         IBorrowerOpsFork(BORROWER_OPS)
             .setRemoveManagerWithReceiver(TROVE_ID, address(takerModule), address(takerModule));
-        permit3.approveTaker(settlement, keccak256(data), uint160(BORROW), 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), uint160(BORROW), 0);
         vm.stopPrank();
 
         uint256 debtBefore = _debtOf(TROVE_ID);
@@ -170,7 +170,7 @@ contract LiquityV2ForkAuthTest is LiquityV2ForkBase {
         // Succeeds: the taker book is keyed by the approver, so nothing here
         // belongs to the victim.
         vm.prank(attacker);
-        permit3.approveTaker(settlement, keccak256(victimData), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(victimData), type(uint160).max, 0);
 
         uint256 debtBefore = _debtOf(TROVE_ID);
 

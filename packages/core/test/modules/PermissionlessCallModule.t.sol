@@ -105,7 +105,7 @@ contract PermissionlessCallModuleTest is CoreSettlementBase {
         _approveMakerToSettlement(USDC, USDC_IN);
         _approveSolverSide(WETH_OUT, WETH);
 
-        (uint160 allowed,,) = permit3.tokenAllowance(maker, address(module), USDC);
+        (uint160 allowed,) = permit3.tokenAllowance(maker, address(module), USDC);
         assertEq(allowed, 0, "no Permit3 allowance to the module");
 
         Order memory order = _orderWithItem(0, _callItem(1, abi.encodeCall(Accruer.accrue, ())));

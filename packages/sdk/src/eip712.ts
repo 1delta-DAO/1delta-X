@@ -88,6 +88,7 @@ export const TOKEN_PERMIT_TYPE = [
 
 export const TAKER_PERMIT_TYPE = [
   { name: "spender", type: "address" },
+  { name: "module", type: "address" },
   { name: "ref", type: "bytes32" },
   { name: "amount", type: "uint160" },
   { name: "expiration", type: "uint48" },

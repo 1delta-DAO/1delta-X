@@ -59,7 +59,7 @@ contract ModuleAuthTest is MidnightModulesBase {
         _seedCollateral(maker, 1e18);
 
         bytes memory wcData = _withdrawCollateralData(0);
-        _makerApproveTaker(keccak256(wcData), 1e18);
+        _makerApproveTaker(address(takerModule), keccak256(wcData), 1e18);
         // NB: no `_makerAuthorize(takerModule)`.
 
         vm.prank(address(permit3));

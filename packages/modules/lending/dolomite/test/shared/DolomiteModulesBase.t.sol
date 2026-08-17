@@ -224,7 +224,7 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(COLL).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(depositModule), COLL, uint160(collateralIn), 0);
-        permit3.approveTaker(address(settlement), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData()), uint160(borrowOut), 0);
         IERC20(DEBT).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), DEBT, uint160(borrowOut), 0);
         vm.stopPrank();

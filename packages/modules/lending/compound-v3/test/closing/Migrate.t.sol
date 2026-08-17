@@ -152,8 +152,8 @@ contract MigrateTest is CompoundV3ModulesBase {
         tp[2] = IPermit3.TokenPermit(address(settlement), USDC, uint160(3_050e6), exp);
 
         IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](2);
-        tkp[0] = IPermit3.TakerPermit(address(settlement), keccak256(withdrawData), uint160(9 ether), exp);
-        tkp[1] = IPermit3.TakerPermit(address(settlement), keccak256(borrowData), uint160(3_000e18), exp);
+        tkp[0] = IPermit3.TakerPermit(address(settlement), address(takerModule), keccak256(withdrawData), uint160(9 ether), exp);
+        tkp[1] = IPermit3.TakerPermit(address(settlement), address(takerModule), keccak256(borrowData), uint160(3_000e18), exp);
 
         batch = _buildBatch(tp, tkp, 3, order.deadline);
     }

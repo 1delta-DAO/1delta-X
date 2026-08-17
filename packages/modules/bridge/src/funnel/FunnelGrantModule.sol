@@ -6,7 +6,7 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 /// @dev The one call this module is allowed to make. Implemented by
 ///      {PositionFunnel}, which gates it on `msg.sender == GRANT_MODULE`.
 interface IFunnelGrantee {
-    function grant(address spender, address token, uint160 amount, bool taker, bytes32 ref) external;
+    function grant(address spender, address module, address token, uint160 amount, bool taker, bytes32 ref) external;
 }
 
 /// @title FunnelGrantModule
@@ -49,12 +49,16 @@ contract FunnelGrantModule is IMakerModule {
 
     /// @param spender Who receives the allowance — a lender module for a MAKE leg,
     ///                or Settlement for a TAKE leg or a `legsIn` pull.
+    /// @param module  The taker module the grant authorises — part of the taker
+    ///                book key `(user, spender, module, ref)`. Ignored when `taker`
+    ///                is false.
     /// @param token   ERC20 for the token book. Ignored when `taker` is true.
     /// @param taker   True to grant on the TAKER book instead of the token book.
     /// @param ref     `keccak256(item.data)` of the TAKE item being authorised.
     ///                Ignored when `taker` is false.
     struct GrantSpec {
         address spender;
+        address module;
         address token;
         bool taker;
         bytes32 ref;
@@ -76,6 +80,6 @@ contract FunnelGrantModule is IMakerModule {
         if (msg.sender != SETTLEMENT) revert OnlySettlement();
         if (amount > type(uint160).max) revert AmountOverflow();
         GrantSpec memory g = abi.decode(data, (GrantSpec));
-        IFunnelGrantee(onBehalfOf).grant(g.spender, g.token, uint160(amount), g.taker, g.ref);
+        IFunnelGrantee(onBehalfOf).grant(g.spender, g.module, g.token, uint160(amount), g.taker, g.ref);
     }
 }

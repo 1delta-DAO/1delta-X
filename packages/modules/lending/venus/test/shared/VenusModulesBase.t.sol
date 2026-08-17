@@ -137,7 +137,7 @@ abstract contract VenusModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(depositModule), WETH, uint160(collateralIn), 0);
-        permit3.approveTaker(address(settlement), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData()), uint160(borrowOut), 0);
         // USDC fallback for the tokenIn shortfall path (never triggers here).
         IERC20(USDC).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), USDC, uint160(borrowOut), 0);

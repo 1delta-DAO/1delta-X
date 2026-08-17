@@ -139,7 +139,7 @@ contract SignatureTransferTest is Test {
         permit3.permitTransferFrom(permit, _details(recipient, 100e18), owner, sig);
 
         assertEq(token.balanceOf(recipient), 100e18, "tokens delivered");
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, 0, "no standing allowance created");
         assertTrue(permit3.isPermitNonceUsed(owner, 1), "nonce spent");
     }
@@ -248,7 +248,7 @@ contract SignatureTransferTest is Test {
                 abi.encode(
                     keccak256(
                         "PermitBatch(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline)"
-                        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
+                        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
                         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
                     ),
                     keccak256(""),

@@ -64,9 +64,10 @@ message TokenPermit {
 
 message TakerPermit {
   bytes  spender    = 1;
-  bytes  ref        = 2;
-  bytes  amount     = 3;
-  uint64 expiration = 4;
+  bytes  module     = 2;
+  bytes  ref        = 3;
+  bytes  amount     = 4;
+  uint64 expiration = 5;
 }
 
 message PermitBatch {

@@ -262,7 +262,7 @@ contract LiquityV2TroveAuthTest is Test {
         bytes memory data = _borrowData(MAKER_TROVE);
 
         vm.prank(maker);
-        permit3.approveTaker(settlement, keccak256(data), uint160(BORROW), 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), uint160(BORROW), 0);
 
         vm.prank(settlement);
         permit3.take(address(takerModule), maker, uint160(BORROW), receiver, data);
@@ -283,7 +283,7 @@ contract LiquityV2TroveAuthTest is Test {
         // Succeeds: the taker book is keyed by the approver, so nothing here
         // belongs to the maker.
         vm.prank(attacker);
-        permit3.approveTaker(settlement, keccak256(victimData), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(victimData), type(uint160).max, 0);
 
         vm.prank(settlement);
         vm.expectRevert(LiquityV2TroveAuth.InvalidCaller.selector);
@@ -298,7 +298,7 @@ contract LiquityV2TroveAuthTest is Test {
         bytes memory victimData = _withdrawCollData(MAKER_TROVE);
 
         vm.prank(attacker);
-        permit3.approveTaker(settlement, keccak256(victimData), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(victimData), type(uint160).max, 0);
 
         vm.prank(settlement);
         vm.expectRevert(LiquityV2TroveAuth.InvalidCaller.selector);
@@ -315,7 +315,7 @@ contract LiquityV2TroveAuthTest is Test {
         bytes memory ownData = _borrowData(ATTACKER_TROVE);
 
         vm.prank(attacker);
-        permit3.approveTaker(settlement, keccak256(ownData), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(ownData), type(uint160).max, 0);
 
         vm.prank(settlement);
         permit3.take(address(takerModule), attacker, uint160(BORROW), attacker, ownData);
@@ -346,7 +346,7 @@ contract LiquityV2TroveAuthTest is Test {
         bytes memory data = _borrowData(9999);
 
         vm.prank(attacker);
-        permit3.approveTaker(settlement, keccak256(data), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), type(uint160).max, 0);
 
         vm.prank(settlement);
         vm.expectRevert(LqtyTroveNFT.NonexistentTrove.selector);

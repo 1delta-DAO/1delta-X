@@ -139,7 +139,7 @@ contract ExactlyLeverageTest is Test {
     /// TAKE through the Permit3 taker book, as Settlement would dispatch it.
     function _take(bytes memory data, uint256 amount, address receiver) internal {
         vm.prank(maker);
-        permit3.approveTaker(settlement, keccak256(data), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), type(uint160).max, 0);
         vm.prank(settlement);
         permit3.take(address(takerModule), maker, uint160(amount), receiver, data);
     }
@@ -239,7 +239,7 @@ contract ExactlyLeverageTest is Test {
 
         bytes memory data = abi.encode(uint8(ExactlyTakerModule.Op.Borrow), MARKET_WETH, WETH, uint256(0), uint256(0));
         vm.prank(maker);
-        permit3.approveTaker(settlement, keccak256(data), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), type(uint160).max, 0);
 
         uint256 wethOut = 0.05e18; // ~$200 against $10k collateral
 

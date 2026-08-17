@@ -65,7 +65,7 @@ interface PbOrder {
   priorityScale: Uint8Array; pricingModule: Uint8Array;
 }
 interface PbTokenPermit { spender: Uint8Array; token: Uint8Array; amount: Uint8Array; expiration: number }
-interface PbTakerPermit { spender: Uint8Array; ref: Uint8Array; amount: Uint8Array; expiration: number }
+interface PbTakerPermit { spender: Uint8Array; module: Uint8Array; ref: Uint8Array; amount: Uint8Array; expiration: number }
 interface PbPermitBatch { tokens: PbTokenPermit[]; takers: PbTakerPermit[]; nonce: Uint8Array; deadline: Uint8Array }
 interface PbOrderAnnounce { order: PbOrder; sig: Uint8Array; permitBatch?: PbPermitBatch | null; sigless: boolean }
 interface PbSoftCancel { maker: Uint8Array; orderHashes: Uint8Array[]; issuedAt: Uint8Array; expiry: Uint8Array; sig: Uint8Array }
@@ -129,7 +129,7 @@ export function protoToOrder(p: PbOrder): Order {
 function permitBatchToProto(b: PermitBatch): PbPermitBatch {
   return {
     tokens: b.tokens.map((t): PbTokenPermit => ({ spender: addrToBytes(t.spender), token: addrToBytes(t.token), amount: u256ToBytes(t.amount), expiration: t.expiration })),
-    takers: b.takers.map((t): PbTakerPermit => ({ spender: addrToBytes(t.spender), ref: hexToU8(t.ref), amount: u256ToBytes(t.amount), expiration: t.expiration })),
+    takers: b.takers.map((t): PbTakerPermit => ({ spender: addrToBytes(t.spender), module: addrToBytes(t.module), ref: hexToU8(t.ref), amount: u256ToBytes(t.amount), expiration: t.expiration })),
     nonce: u256ToBytes(b.nonce),
     deadline: u256ToBytes(b.deadline),
   };
@@ -137,7 +137,7 @@ function permitBatchToProto(b: PermitBatch): PbPermitBatch {
 function protoToPermitBatch(p: PbPermitBatch): PermitBatch {
   return {
     tokens: (p.tokens ?? []).map((t): TokenPermit => ({ spender: bytesToAddr(t.spender), token: bytesToAddr(t.token), amount: bytesToU256(t.amount), expiration: toNum(t.expiration) })),
-    takers: (p.takers ?? []).map((t): TakerPermit => ({ spender: bytesToAddr(t.spender), ref: u8ToHex(t.ref) as Hex, amount: bytesToU256(t.amount), expiration: toNum(t.expiration) })),
+    takers: (p.takers ?? []).map((t): TakerPermit => ({ spender: bytesToAddr(t.spender), module: bytesToAddr(t.module), ref: u8ToHex(t.ref) as Hex, amount: bytesToU256(t.amount), expiration: toNum(t.expiration) })),
     nonce: bytesToU256(p.nonce),
     deadline: bytesToU256(p.deadline),
   };

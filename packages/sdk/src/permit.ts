@@ -41,8 +41,14 @@ export function tokenPermit(spender: Address, token: Address, amount: bigint, ex
   return { spender, token, amount, expiration };
 }
 
-export function takerPermit(spender: Address, ref: Hex, amount: bigint, expiration: number): TakerPermit {
-  return { spender, ref, amount, expiration };
+export function takerPermit(
+  spender: Address,
+  module: Address,
+  ref: Hex,
+  amount: bigint,
+  expiration: number,
+): TakerPermit {
+  return { spender, module, ref, amount, expiration };
 }
 
 export function permitBatch(

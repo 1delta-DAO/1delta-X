@@ -55,7 +55,7 @@ contract WithdrawV4Test is AaveV4ModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(withdrawModule)), 0, "module WETH drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(withdrawModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(withdrawModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 }

@@ -53,7 +53,7 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(takerModule)), 0, "module WETH drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(takerModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(takerModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 
@@ -82,7 +82,7 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
         tp[0] = IPermit3.TokenPermit(address(settlement), WETH, uint160(wethIn), uint48(order.deadline));
 
         IPermit3.PermitBatch memory batch =
-            _buildBatch(tp, _takerPermits1(address(settlement), keccak256(takerData), wethIn), 0, order.deadline);
+            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(takerData), wethIn), 0, order.deadline);
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 

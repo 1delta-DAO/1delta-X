@@ -181,10 +181,10 @@ contract Permit3HashDifferentialTest is Test {
     bytes32 constant TOKEN_PERMIT_TYPEHASH =
         keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
     bytes32 constant TAKER_PERMIT_TYPEHASH =
-        keccak256("TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)");
+        keccak256("TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)");
     bytes32 constant PERMIT_BATCH_TYPEHASH = keccak256(
         "PermitBatch(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline)"
-        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
     );
 
@@ -208,8 +208,9 @@ contract Permit3HashDifferentialTest is Test {
     function _refTakers(IPermit3.TakerPermit[] memory ps) private pure returns (bytes32) {
         bytes32[] memory h = new bytes32[](ps.length);
         for (uint256 i; i < ps.length; i++) {
-            h[i] =
-                keccak256(abi.encode(TAKER_PERMIT_TYPEHASH, ps[i].spender, ps[i].ref, ps[i].amount, ps[i].expiration));
+            h[i] = keccak256(
+                abi.encode(TAKER_PERMIT_TYPEHASH, ps[i].spender, ps[i].module, ps[i].ref, ps[i].amount, ps[i].expiration)
+            );
         }
         return keccak256(abi.encodePacked(h));
     }
@@ -244,6 +245,7 @@ contract Permit3HashDifferentialTest is Test {
         for (uint256 i; i < b.takers.length; i++) {
             b.takers[i] = IPermit3.TakerPermit({
                 spender: address(uint160(uint256(keccak256(abi.encode(seed, "ks", i))))),
+                module: address(uint160(uint256(keccak256(abi.encode(seed, "km", i))))),
                 ref: keccak256(abi.encode(seed, "kr", i)),
                 amount: uint160(uint256(keccak256(abi.encode(seed, "ka", i)))),
                 expiration: uint48(uint256(keccak256(abi.encode(seed, "ke", i))))
@@ -256,11 +258,11 @@ contract Permit3HashDifferentialTest is Test {
 
         // And the allowances the reference-signed batch authorized really landed.
         for (uint256 i; i < b.tokens.length; i++) {
-            (uint160 amt,,) = permit3.tokenAllowance(owner, b.tokens[i].spender, b.tokens[i].token);
+            (uint160 amt,) = permit3.tokenAllowance(owner, b.tokens[i].spender, b.tokens[i].token);
             assertEq(amt, b.tokens[i].amount, "token allowance not applied");
         }
         for (uint256 i; i < b.takers.length; i++) {
-            (uint160 amt,,) = permit3.takerAllowance(owner, b.takers[i].spender, b.takers[i].ref);
+            (uint160 amt,) = permit3.takerAllowance(owner, b.takers[i].spender, b.takers[i].module, b.takers[i].ref);
             assertEq(amt, b.takers[i].amount, "taker allowance not applied");
         }
     }

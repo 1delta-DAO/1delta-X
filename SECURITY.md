@@ -45,15 +45,24 @@ allowances.
 Permit3 holds **two allowance books**, both keyed by **spender** (the address
 allowed to consume the allowance), exactly like Permit2:
 
-| Book  | Key                       | Consumed by                                   |
-|-------|---------------------------|-----------------------------------------------|
-| Token | `(user, spender, token)`  | `transferFrom(user, to, token, amount)` — `msg.sender == spender` |
-| Taker | `(user, spender, ref)`    | `take(module, user, amount, receiver, data)` — `msg.sender == spender`, `ref = keccak256(data)` |
+| Book  | Key                              | Consumed by                                   |
+|-------|----------------------------------|-----------------------------------------------|
+| Token | `(user, spender, token)`         | `transferFrom(user, to, token, amount)` — `msg.sender == spender` |
+| Taker | `(user, spender, module, ref)`   | `take(module, user, amount, receiver, data)` — `msg.sender == spender`, `ref = keccak256(data)` |
 
 The taker book lets a module pull *value out of a position* (borrow, withdraw,
 unstake, claim) — operations that don't fit the ERC20 `transferFrom` shape.
-`take` decrements the `(user, msg.sender, ref)` allowance and then calls
+`take` decrements the `(user, msg.sender, module, ref)` allowance and then calls
 `module.takeOnBehalf(...)`, which performs the protocol-native call.
+
+**The `module` is part of the key** (2026-08-17 audit fix S-2). `ref =
+keccak256(data)` alone did not bind the module, and the shipped module `data`
+layouts are deliberately minimal (`abi.encode(comet)`, `abi.encode(cToken)`, a
+`MarketParams`), so two distinct modules routinely shared a `ref`. Naming the
+module in the key makes an `approveTaker(spender, borrowModule, ref, …)` grant
+unusable to dispatch any *other* module, whatever its data — the property is now
+per-allowance, not merely per-signature. `TakerPermit`, `approveTaker`,
+`takerAllowance`, `revokeTaker` and `SpenderRefPair` all carry the module.
 
 ### Modules — single-operation adapters
 
@@ -70,10 +79,11 @@ be used to withdraw collateral. Modules come in two shapes:
   fusing makes that ordering internal instead of a scheduling obligation the solver
   must honour. **This relaxes the one-operation rule, and the granularity is
   recovered by the allowance key rather than by the module boundary:** the taker
-  allowance is keyed on `ref = keccak256(data)` and amount-capped, and a fused
-  module's `data` names BOTH legs (pool, both assets, both totals). So approving a
-  fused ref authorises exactly that composite at those parameters — strictly
-  narrower than approving a generic borrow module for any amount — and the value-in
+  allowance is keyed on `(module, ref = keccak256(data))` and amount-capped, and a
+  fused module's `data` names BOTH legs (pool, both assets, both totals). So
+  approving a fused `(module, ref)` authorises exactly that composite at those
+  parameters — strictly narrower than approving a generic borrow module for any
+  amount, and (since S-2) unusable to dispatch any other module — and the value-in
   leg is separately capped by the maker's ordinary token allowance to that module.
   Reference implementation + the equivalence and pro-rata tests:
   `packages/modules/lending/aave-v3/src/AaveV3FusedModules.sol`.
@@ -296,6 +306,39 @@ This is intended (a direct ERC20 approval *is* the broader grant, made
 deliberately), but it means a maker who wants to actually stop settlement from
 moving a token must zero BOTH the Permit3 allowance and the direct ERC20
 allowance. **Wallets and UIs offering a "revoke" action MUST clear both.**
+
+**Strict mode (2026-08-17, U-6) makes revocation binding for makers who want it.**
+`IPermit3.setStrictMode(true)` marks the caller so that
+`transferFromWithFallback` **refuses** the direct-ERC20 fallback for that payer —
+a failed Permit3 leg reverts `Permit3Denied` instead of silently pulling via the
+plain approval. A maker who opts in gets `revokeToken` / `lockdown` / an expiry
+back as real kill switches. It is off by default and read only on the
+already-failed Permit3 leg, so it costs nothing on the hot path for anyone who
+never opts in. `lockdownAll(tokens, takers, nonceWords, nonceMasks)` revokes both
+books and invalidates signed-permit nonces in one transaction (the
+protocol-native delegation still needs its own per-protocol revoke).
+
+### A signed permit batch OVERWRITES standing allowances (S-4)
+
+`Allowance.grant` is an unconditional single-slot write, and `fillWithPermit`
+applies the maker's signed batch as a side effect of the *filler's* transaction.
+So a maker who holds `approveToken(settlement, USDC, max, …)` and then has one
+`fillWithPermit` order landed with a smaller/short-dated batch ends up with the
+smaller, short-dated allowance — their *other* resting orders lose their funding,
+with no revert and no warning (and the reverse: one order's batch can *raise* the
+cap another draws against). This matches Permit2's overwrite rule, but Permit2 has
+no flow in which a third party applies your batch. Tooling that builds a batch
+should refuse to *shrink* a live allowance, and the lens reports current caps
+(`tokenAllowance` / `previewTakerAllowances`) so a UI can warn.
+
+### Signature malleability is inert on-chain, but the orderbook must key on the hash (S-7)
+
+`SignatureVerification` does not reject high-`s` (matching Permit2). On-chain this
+is harmless — replay is keyed by the nonce bitmap in Permit3 and by
+`filled[orderHash]` in Settlement, never by the signature bytes. **Off-chain,
+`@1delta-x/orderbook` must key deduplication, cancellation and rate-limiting on the
+order hash, never on a hash of the signature envelope**, or the same order
+re-enters the book under a second identity.
 
 ### Any contract that fills on its own behalf must hold no balance
 

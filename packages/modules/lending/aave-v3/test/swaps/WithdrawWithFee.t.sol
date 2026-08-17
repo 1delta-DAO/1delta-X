@@ -59,7 +59,7 @@ contract WithdrawWithFeeTest is AaveModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(aWETH).balanceOf(address(withdrawModule)), 0, "module aWETH drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(withdrawModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(withdrawModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 
@@ -100,7 +100,7 @@ contract WithdrawWithFeeTest is AaveModulesBase {
         assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, usdcOut - fee, "maker net full");
         assertEq(IERC20(WETH).balanceOf(solver), wethIn, "solver received all WETH");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(withdrawModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(withdrawModule), ref);
         assertEq(remaining, 0, "taker allowance fully spent");
 
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
@@ -168,7 +168,7 @@ contract WithdrawWithFeeTest is AaveModulesBase {
         assertEq(IERC20(WETH).balanceOf(solver), fee, "relayer earned the auction-tick fee");
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement never held the withdrawal");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(withdrawModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(withdrawModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 }

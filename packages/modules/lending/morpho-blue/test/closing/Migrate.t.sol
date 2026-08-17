@@ -143,7 +143,7 @@ contract MigrateTest is MorphoModulesBase {
 
         // [1] Morpho withdraw: Morpho-native auth + Permit3 taker cap. No token pull.
         MORPHO.setAuthorization(address(takerModule), true);
-        permit3.approveTaker(address(settlement), keccak256(_withdrawData()), uint160(exactWeth), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_withdrawData()), uint160(exactWeth), 0);
 
         // [2] Aave deposit: depositModule pulls wstETH from maker via Permit3.
         IERC20(WSTETH).approve(address(permit3), type(uint256).max);
@@ -151,7 +151,7 @@ contract MigrateTest is MorphoModulesBase {
 
         // [3] Aave borrow: credit delegation + Permit3 taker cap.
         IAaveCreditDelegation(aaveUsdcDebt).approveDelegation(address(aaveBorrowModule), type(uint256).max);
-        permit3.approveTaker(address(settlement), keccak256(_aaveBorrowData()), uint160(debt), 0);
+        permit3.approveTaker(address(settlement), address(aaveBorrowModule), keccak256(_aaveBorrowData()), uint160(debt), 0);
 
         vm.stopPrank();
     }
@@ -184,8 +184,8 @@ contract MigrateTest is MorphoModulesBase {
         tp[2] = IPermit3.TokenPermit(address(settlement), USDC, uint160(bufferedRepay), exp);
 
         IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](2);
-        tkp[0] = IPermit3.TakerPermit(address(settlement), keccak256(_withdrawData()), uint160(exactWeth), exp);
-        tkp[1] = IPermit3.TakerPermit(address(settlement), keccak256(_aaveBorrowData()), uint160(debt), exp);
+        tkp[0] = IPermit3.TakerPermit(address(settlement), address(takerModule), keccak256(_withdrawData()), uint160(exactWeth), exp);
+        tkp[1] = IPermit3.TakerPermit(address(settlement), address(aaveBorrowModule), keccak256(_aaveBorrowData()), uint160(debt), exp);
 
         batch = _buildBatch(tp, tkp, 3, order.deadline);
     }

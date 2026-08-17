@@ -49,7 +49,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
     function test_borrow_rejectsBuySideOffer() public {
         bytes memory wrongSide = abi.encode(_offer(false), bytes(""), uint256(1e6));
 
-        _makerApproveTaker(keccak256(wrongSide), 1e6);
+        _makerApproveTaker(address(borrowModule), keccak256(wrongSide), 1e6);
         _makerAuthorize(address(borrowModule));
 
         vm.prank(address(permit3));

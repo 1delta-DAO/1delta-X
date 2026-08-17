@@ -153,7 +153,14 @@ abstract contract Core is Base {
         // Permit3 verifies the sig against (PermitBatchWitness + orderHash) and
         // applies all allowances. The order itself doesn't need a separate sig
         // — the witness binding makes the permit endorse this exact order.
-        PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
+        // IDEMPOTENT on purpose: the signature is still verified every time (a bad
+        // `sig` reverts), but a nonce already spent — by an earlier partial fill, or
+        // by a griefer who front-ran the permit straight out of this calldata — is
+        // skipped instead of reverting {PermitNonceUsed}. Without this, one cheap
+        // front-run permanently bricks the order (the maker signed a
+        // PermitBatchWitness, not an Order, so no other entry can rescue it), and
+        // partial fills are impossible. See {SignedPermits.permitBatchWithWitnessIfNeeded}.
+        PERMIT3.permitBatchWithWitnessIfNeeded(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
         (fillAmountsOut,) = _fillCore(
             order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, "", false
         );
@@ -170,7 +177,14 @@ abstract contract Core is Base {
         bytes calldata takerData
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
         bytes32 orderHash = order.hash();
-        PERMIT3.permitBatchWithWitness(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
+        // IDEMPOTENT on purpose: the signature is still verified every time (a bad
+        // `sig` reverts), but a nonce already spent — by an earlier partial fill, or
+        // by a griefer who front-ran the permit straight out of this calldata — is
+        // skipped instead of reverting {PermitNonceUsed}. Without this, one cheap
+        // front-run permanently bricks the order (the maker signed a
+        // PermitBatchWitness, not an Order, so no other entry can rescue it), and
+        // partial fills are impossible. See {SignedPermits.permitBatchWithWitnessIfNeeded}.
+        PERMIT3.permitBatchWithWitnessIfNeeded(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
         (fillAmountsOut,) = _fillCore(
             order,
             orderHash,
@@ -270,6 +284,22 @@ abstract contract Core is Base {
             order, orderHash, fillAmount, filler, address(0), address(0), "", CallbackMode.PreDelivery, takerData, false
         );
     }
+
+    // NOTE ON permitTake (U-2) SETTLEMENT WIRING — DELIBERATELY NOT AN ENTRYPOINT HERE.
+    // Permit3 ships the one-shot `permitTake`/`permitTakeWithWitness` primitive (the
+    // taker-book analogue of `permitTransferFrom`), and it is correct and tested. But
+    // it cannot be bolted onto the fill path as a pre-step: `_executeItems` dispatches
+    // every TAKE item through `PERMIT3.take`, which consumes a STANDING allowance. A
+    // permit-take that ran up front would either double-dispatch (the item loop then
+    // reverts with no allowance) or strand its proceeds (item-free order). Making it
+    // work needs the item loop itself to be permit-aware — to fund ONE named TAKE item
+    // from the signed permit and skip the allowance pull for it — which is a change to
+    // the hot fill path with its own gas-snapshot and test surface, not a thin new
+    // entrypoint. Until that lands, single-signature taker fills use {fillWithPermit}'s
+    // witness-bound allowance batch (grant-then-spend), and `permitTake` is available
+    // to contracts that dispatch a take directly. Same reasoning defers a
+    // `fillWithSignedTransfer` that would fund maker inputs via `permitTransferFrom`:
+    // `_payInputsToSolver` already owns the input pull, so a pre-pull double-moves.
 
     // ──────────────────── Aggregator fill ────────────────────
 

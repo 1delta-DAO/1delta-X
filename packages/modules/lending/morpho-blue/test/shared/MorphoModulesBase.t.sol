@@ -191,7 +191,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         MORPHO.setAuthorization(address(takerModule), true);
 
         // Permit3 taker gate on the exact market + amount.
-        permit3.approveTaker(address(settlement), borrowRef, uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), borrowRef, uint160(borrowOut), 0);
 
         // USDC fallback allowance for the tokenIn shortfall path — never triggers
         // here since the borrow fully funds tokenIn, but keeps it safe.
@@ -209,7 +209,7 @@ abstract contract MorphoModulesBase is CoreSettlementBase {
         // Morpho-native authorisation for the combined taker module. No token pull:
         // the collateral is not tokenised, so the taker allowance is the only cap.
         MORPHO.setAuthorization(address(takerModule), true);
-        permit3.approveTaker(address(settlement), ref, uint160(wstethIn), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), ref, uint160(wstethIn), 0);
         vm.stopPrank();
     }
 

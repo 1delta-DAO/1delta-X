@@ -214,6 +214,7 @@ contract MatchSettleTest is CoreSettlementBase {
         );
         permit3.approveTaker(
             address(settlement),
+            address(taker),
             keccak256(PackedEncode.getItemData(o.items, 1)),
             uint160(PackedEncode.getLegInStart(o.legsIn, 0)),
             uint48(block.timestamp + 1 hours)
@@ -854,7 +855,9 @@ contract MatchSettleTest is CoreSettlementBase {
         deal(WETH, address(taker), STRAY); // the "lender" holds what it lends
         _approveMakerToSettlement(USDC, USDC_AMT);
         vm.startPrank(maker);
-        permit3.approveTaker(address(settlement), keccak256(strayData), uint160(GATE), uint48(block.timestamp + 1 hours));
+        permit3.approveTaker(
+            address(settlement), address(taker), keccak256(strayData), uint160(GATE), uint48(block.timestamp + 1 hours)
+        );
         vm.stopPrank();
         vm.startPrank(bob);
         permit3.approveToken(address(settlement), WETH, uint160(WETH_AMT), 0);

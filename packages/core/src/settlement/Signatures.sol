@@ -61,6 +61,13 @@ abstract contract Signatures is OrderState {
         return keccak256(abi.encode(_DOMAIN_TYPEHASH, _HASHED_NAME, _HASHED_VERSION, block.chainid, address(this)));
     }
 
+    // NOTE: ERC-5267 `eip712Domain()` is deliberately NOT on Settlement. It measured
+    // ~750 bytes (the string returns + the empty extensions array) and Settlement is
+    // hard against EIP-170 (see the `optimizer_runs` note in foundry.toml). The
+    // order-signing domain is fully recoverable from the exposed `DOMAIN_SEPARATOR()`
+    // plus the constant name "Settlement"/version "1", and {SettlementLens} mirrors
+    // it for tooling. Permit3 — which has bytecode headroom — DOES implement 5267.
+
     /// @dev `keccak256(abi.encodePacked("\x19\x01", domain, structHash))` built in
     ///      SCRATCH SPACE instead of an allocated 66-byte buffer. `encodePacked`
     ///      allocated + copied on every fill for a fixed 66-byte preimage; this

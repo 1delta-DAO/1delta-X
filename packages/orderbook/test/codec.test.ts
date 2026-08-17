@@ -50,7 +50,7 @@ describe("message encode/decode", () => {
   it("OrderAnnounce with a permit batch", () => {
     const batch = permitBatch(
       [tokenPermit(CANONICAL_ORDER.maker, CANONICAL_ORDER.legsIn[0]!.token, 2_000_000_000n, 1_893_456_000)],
-      [takerPermit(CANONICAL_ORDER.maker, `0x${"11".repeat(32)}`, 1_500_000_000n, 1_893_456_000)],
+      [takerPermit(CANONICAL_ORDER.maker, CANONICAL_ORDER.maker, `0x${"11".repeat(32)}`, 1_500_000_000n, 1_893_456_000)],
       7n,
       1_893_456_000n,
     );

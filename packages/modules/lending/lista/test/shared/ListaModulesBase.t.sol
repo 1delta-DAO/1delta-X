@@ -184,7 +184,7 @@ abstract contract ListaModulesBase is CoreSettlementBase {
         if (authorizeMoolah) IMoolah(MOOLAH).setAuthorization(address(takerModule), true);
 
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(settlement), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData()), uint160(borrowOut), 0);
 
         // USD1 fallback allowance for the tokenIn shortfall path — never triggers
         // here (the borrow fully funds tokenIn) but keeps the flow shaped like
@@ -198,7 +198,7 @@ abstract contract ListaModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         // Withdraw-collateral runs through the same Moolah authorization.
         IMoolah(MOOLAH).setAuthorization(address(takerModule), true);
-        permit3.approveTaker(address(settlement), keccak256(_withdrawData()), uint160(withdrawAmount), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_withdrawData()), uint160(withdrawAmount), 0);
         // Fallback for the tokenIn shortfall path — never triggers here.
         IERC20(BTCB).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), BTCB, uint160(withdrawAmount), 0);

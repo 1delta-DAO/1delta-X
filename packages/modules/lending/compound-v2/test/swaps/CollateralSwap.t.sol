@@ -27,7 +27,7 @@ contract CompoundV2CollateralSwapTest is CompoundV2ModulesBase {
         permit3.approveToken(address(depositModule), DAI, uint160(daiIn), 0);
         IERC20(address(CUSDC)).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(withdrawModule), address(CUSDC), type(uint160).max, 0);
-        permit3.approveTaker(address(settlement), keccak256(_withdrawUsdcData()), uint160(usdcOut), 0);
+        permit3.approveTaker(address(settlement), address(withdrawModule), keccak256(_withdrawUsdcData()), uint160(usdcOut), 0);
         vm.stopPrank();
         _approveSolverSide(daiIn, DAI);
 

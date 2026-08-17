@@ -21,8 +21,10 @@ contract EIP712 {
     bytes32 private immutable _CACHED_DOMAIN_SEPARATOR;
     uint256 private immutable _CACHED_CHAIN_ID;
 
-    bytes32 private constant _HASHED_NAME = keccak256("Permit3");
-    bytes32 private constant _HASHED_VERSION = keccak256("1");
+    string private constant _NAME = "Permit3";
+    string private constant _VERSION = "1";
+    bytes32 private constant _HASHED_NAME = keccak256(bytes(_NAME));
+    bytes32 private constant _HASHED_VERSION = keccak256(bytes(_VERSION));
     bytes32 private constant _TYPE_HASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
@@ -35,6 +37,26 @@ contract EIP712 {
     /// @dev Uses cached version if chainid and address are unchanged from construction.
     function DOMAIN_SEPARATOR() public view virtual returns (bytes32) {
         return block.chainid == _CACHED_CHAIN_ID ? _CACHED_DOMAIN_SEPARATOR : _buildDomainSeparator();
+    }
+
+    /// @notice ERC-5267 domain descriptor. `fields = 0x0f` = {name, version,
+    ///          chainId, verifyingContract}; no salt, no extensions. Lets tooling
+    ///          derive the domain rather than being handed it out of band.
+    function eip712Domain()
+        public
+        view
+        virtual
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        return (hex"0f", _NAME, _VERSION, block.chainid, address(this), bytes32(0), new uint256[](0));
     }
 
     /// @notice Builds a domain separator using the current chainId and contract address.

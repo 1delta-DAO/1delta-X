@@ -100,7 +100,7 @@ contract GearboxV3ForkAuthTest is Test {
         bytes memory victimData = _data(CREDIT_ACCOUNT);
 
         vm.prank(attacker);
-        permit3.approveTaker(settlement, keccak256(victimData), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(borrowModule), keccak256(victimData), type(uint160).max, 0);
 
         vm.prank(settlement);
         vm.expectRevert(GearboxCreditAuth.InvalidCaller.selector);
@@ -115,7 +115,7 @@ contract GearboxV3ForkAuthTest is Test {
         bytes memory data = _data(CREDIT_ACCOUNT);
 
         vm.prank(BORROWER);
-        permit3.approveTaker(settlement, keccak256(data), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(borrowModule), keccak256(data), type(uint160).max, 0);
 
         vm.prank(settlement);
         (bool ok, bytes memory ret) = address(permit3)

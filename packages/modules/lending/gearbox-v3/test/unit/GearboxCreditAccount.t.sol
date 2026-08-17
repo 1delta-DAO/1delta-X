@@ -252,7 +252,7 @@ contract GearboxCreditAccountTest is Test {
         bytes memory data = _borrowData(makerCA);
 
         vm.prank(maker);
-        permit3.approveTaker(settlement, keccak256(data), uint160(BORROW), 0);
+        permit3.approveTaker(settlement, address(borrowModule), keccak256(data), uint160(BORROW), 0);
 
         vm.prank(settlement);
         permit3.take(address(borrowModule), maker, uint160(BORROW), receiver, data);
@@ -273,7 +273,7 @@ contract GearboxCreditAccountTest is Test {
         // The attacker self-approves. This SUCCEEDS: the taker book is keyed by the
         // approver, so nothing here belongs to the maker.
         vm.prank(attacker);
-        permit3.approveTaker(settlement, keccak256(victimData), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(borrowModule), keccak256(victimData), type(uint160).max, 0);
 
         // Permit3's gate now passes on the attacker's own allowance. Everything
         // downstream rests on the module's ownership binding.
@@ -292,7 +292,7 @@ contract GearboxCreditAccountTest is Test {
         bytes memory ownData = _borrowData(attackerCA);
 
         vm.prank(attacker);
-        permit3.approveTaker(settlement, keccak256(ownData), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(borrowModule), keccak256(ownData), type(uint160).max, 0);
 
         vm.prank(settlement);
         permit3.take(address(borrowModule), attacker, uint160(BORROW), attacker, ownData);

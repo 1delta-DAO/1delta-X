@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {IPermit3} from "../interfaces/IPermit3.sol";
+import {ITakerModule} from "../interfaces/ITakerModule.sol";
 import {SignatureVerification} from "./SignatureVerification.sol";
 import {AllowanceTransfer} from "./AllowanceTransfer.sol";
 import {TakerAllowance} from "./TakerAllowance.sol";
@@ -65,7 +67,102 @@ abstract contract SignedPermits is UnorderedNonces, AllowanceTransfer, TakerAllo
         emit PermitBatchApplied(owner, batch.nonce);
     }
 
+    /// @inheritdoc IPermit3
+    ///
+    /// @dev The griefing fix for single-signature fills. The signature is verified
+    ///      UNCONDITIONALLY — this is not an optional-permit path, and a garbage
+    ///      `sig` still reverts — but a spent nonce short-circuits AFTER the check
+    ///      instead of reverting, and the grants are NOT re-applied. So a griefer
+    ///      landing the permit first no longer bricks the order: the next fill
+    ///      re-presents the same signature, sees the nonce spent, and proceeds
+    ///      against the allowances the first application wrote. Only the nonce spend
+    ///      and `_applyBatch` are skipped.
+    function permitBatchWithWitnessIfNeeded(
+        address owner,
+        PermitBatch calldata batch,
+        bytes32 witness,
+        string calldata witnessTypeString,
+        bytes calldata sig
+    ) external override {
+        if (block.timestamp > batch.deadline) revert PermitExpired();
+        _verifyPermitSig(owner, Permit3Hash.hashWithWitness(batch, witness, witnessTypeString), sig);
+        if (_isPermitNonceUsed(owner, batch.nonce)) return; // authorization still proven; grants already applied
+        _usePermitNonce(owner, batch.nonce);
+        _applyBatch(owner, batch);
+        emit PermitBatchApplied(owner, batch.nonce);
+    }
+
+    /// @inheritdoc IPermit3
+    function lockdownAll(
+        TokenSpenderPair[] calldata tokens,
+        SpenderRefPair[] calldata takers,
+        uint256[] calldata nonceWords,
+        uint256[] calldata nonceMasks
+    ) external override {
+        address owner = msg.sender;
+        _lockdownTokens(owner, tokens);
+        _lockdownTakers(owner, takers);
+        _invalidateNonces(owner, nonceWords, nonceMasks);
+    }
+
+    // ──────────────────── One-shot signed take ────────────────────
+
+    /// @inheritdoc IPermit3
+    function permitTake(
+        IPermit3.PermitTake calldata permit,
+        address owner,
+        address receiver,
+        bytes calldata data,
+        bytes calldata sig
+    ) external override nonReentrant {
+        _permitTake(permit, owner, receiver, data, Permit3Hash.hashPermitTake(permit, msg.sender), sig);
+    }
+
+    /// @inheritdoc IPermit3
+    function permitTakeWithWitness(
+        IPermit3.PermitTake calldata permit,
+        address owner,
+        address receiver,
+        bytes calldata data,
+        bytes32 witness,
+        string calldata witnessTypeString,
+        bytes calldata sig
+    ) external override nonReentrant {
+        // Compute the digest in a nested scope so `witness`/`witnessTypeString`
+        // (four calldata stack slots) are dead before the `_permitTake` call —
+        // otherwise the legacy (non-via-IR) codegen goes stack-too-deep.
+        bytes32 hashStruct;
+        {
+            hashStruct = Permit3Hash.hashPermitTakeWithWitness(permit, msg.sender, witness, witnessTypeString);
+        }
+        _permitTake(permit, owner, receiver, data, hashStruct, sig);
+    }
+
     // ──────────────────── Internal ────────────────────
+
+    /// @dev Expiry, amount, ref-binding, signature, nonce, then dispatch. The
+    ///      signed `spender` is `msg.sender` (folded into `hashStruct`), so a leaked
+    ///      signature is useless to anyone else — exactly the {SignatureTransfer}
+    ///      model, applied to the taker book. No allowance is written or read.
+    function _permitTake(
+        IPermit3.PermitTake calldata permit,
+        address owner,
+        address receiver,
+        bytes calldata data,
+        bytes32 hashStruct,
+        bytes calldata sig
+    ) private {
+        if (block.timestamp > permit.deadline) revert PermitExpired();
+        if (permit.amount == 0) revert ZeroAmount();
+        // The signed `ref` must be the position the caller is actually dispatching,
+        // so the maker authorises exact bytes — same guarantee the allowance book's
+        // `ref = keccak256(data)` gives, enforced here for the one-shot path.
+        if (keccak256(data) != permit.ref) revert RefMismatch();
+        _verifyPermitSig(owner, hashStruct, sig);
+        _usePermitNonce(owner, permit.nonce);
+        emit Taken(owner, msg.sender, permit.ref, permit.module, permit.amount, receiver);
+        ITakerModule(permit.module).takeOnBehalf(owner, permit.amount, receiver, data);
+    }
 
     function _verifyPermitSig(address owner, bytes32 hashStruct, bytes calldata sig) internal view {
         // SignatureVerification handles EOA (65-byte & EIP-2098 compact),

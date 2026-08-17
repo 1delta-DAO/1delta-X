@@ -74,7 +74,7 @@ contract AaveV2LeverageTest is CoreSettlementBase {
         IAaveV2CreditDelegation(usdcVariableDebt).approveDelegation(address(borrowModule), type(uint256).max);
 
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(settlement), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(borrowModule), keccak256(_borrowData()), uint160(borrowOut), 0);
 
         // USDC fallback allowance for the tokenIn shortfall path — never triggers
         // here since the borrow fully funds tokenIn, but keeps it safe.

@@ -52,7 +52,9 @@ packages/
 ├── solvers/                    Reference permissionless fillers (flash-funded leverage, …)
 ├── sdk/                        TypeScript SDK — order packing, EIP-712 signing, calldata
 ├── orderbook/                  Transport-agnostic order distribution (protobuf, verifier, book)
-└── orderbook-server/           Demo backend for the orderbook (Fastify REST + WS)
+├── orderbook-server/           Demo backend for the orderbook (Fastify REST + WS)
+└── app/                        Reference trading interface (React + Vite) — live Uniswap v3
+                                depth from the Oku API merged with resting limit orders
 ```
 
 ## Building and testing

@@ -74,13 +74,25 @@ interface ITakerModule {
     ///         it is a constraint on writing a module, discoverable otherwise only
     ///         by reading Permit3.
     ///
-    ///         ⚠ The allowance `ref` is `keccak256(data)` and does NOT include the
-    ///         module address, so two modules that decode the same `data` layout
-    ///         share a ref — `AaveV2BorrowModule` and `AaveV3BorrowModule` both
-    ///         read `(address pool, address asset, uint256 rateMode)`. Consuming it
-    ///         still requires an order the maker signed naming the module, so this
-    ///         is not a bypass; but it does mean "single-op modules keep the blast
-    ///         radius small" holds per-SIGNATURE, not per-allowance. Do not rely on
-    ///         a ref being reachable by only one module.
+    ///         The allowance `ref` is `keccak256(data)` — the position key — but the
+    ///         taker book is keyed `(user, spender, MODULE, ref)`, so the module is
+    ///         part of the allowance identity. Two modules that decode the same
+    ///         `data` layout (`AaveV2BorrowModule` / `AaveV3BorrowModule`, both
+    ///         reading `(address pool, address asset, uint256 rateMode)`) therefore
+    ///         have SEPARATE allowance buckets: approving one can never be consumed
+    ///         dispatching the other, whatever the data. "Single-op modules keep the
+    ///         blast radius small" holds per-allowance, not merely per-signature.
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external;
+}
+
+/// @notice OPTIONAL companion a module MAY implement so a wallet or the settlement
+///         lens can render a taker authorisation in words — turning an opaque
+///         `ref = keccak256(data)` into "Borrow 1,000 USDC from Aave v3". Purely
+///         informational and off-chain; Permit3 never calls it. A module that does
+///         not implement it is unaffected (the call simply reverts, and callers
+///         treat a revert as "no description available").
+interface ITakerModuleDescribe {
+    /// @param data The exact `data` bytes the allowance is keyed to.
+    /// @return A human-readable description of the operation `data` encodes.
+    function describe(bytes calldata data) external view returns (string memory);
 }

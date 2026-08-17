@@ -42,6 +42,7 @@ contract MockERC20 {
 contract MockPermit3 {
     bool public succeed;
     uint256 public calls;
+    mapping(address => bool) public strictMode;
 
     constructor(bool _succeed) {
         succeed = _succeed;
@@ -49,6 +50,10 @@ contract MockPermit3 {
 
     function setSucceed(bool s) external {
         succeed = s;
+    }
+
+    function setStrict(address user, bool on) external {
+        strictMode[user] = on;
     }
 
     function transferFrom(address from, address to, address token, uint160 amount) external {
@@ -134,11 +139,28 @@ contract Permit3TransferLibTest is Test {
         assertEq(token.balanceOf(recipient), big, "recipient funded via fallback");
     }
 
-    // ── Zero amount is a no-op via Permit3 (mock succeeds, moves nothing) ──
+    // ── Zero amount is a pure no-op: NEITHER leg runs ──
     function test_zeroAmount_noop() public {
         MockPermit3 p3 = new MockPermit3(true);
         harness.pull(IPermit3(address(p3)), address(token), payer, recipient, 0);
         assertEq(token.balanceOf(recipient), 0, "nothing moved");
-        assertEq(p3.calls(), 1, "permit3 leg still attempted with 0");
+        // The library short-circuits amount==0 before touching either leg, so the
+        // Permit3 hub (which now reverts ZeroAmount) is never called, and no direct
+        // `transferFrom(_, _, 0)` — which strict tokens reject — is attempted.
+        assertEq(p3.calls(), 0, "no permit3 leg on a zero amount");
+    }
+
+    // ── Strict mode: a failed Permit3 leg does NOT fall through to a direct pull ──
+    function test_strictMode_refusesFallback() public {
+        MockPermit3 p3 = new MockPermit3(false); // Permit3 leg always reverts
+        p3.setStrict(payer, true);
+        // Payer HAS a direct approval that would ordinarily fund the fallback.
+        vm.prank(payer);
+        token.approve(address(harness), 100 ether);
+
+        vm.expectRevert(IPermit3.Permit3Denied.selector);
+        harness.pull(IPermit3(address(p3)), address(token), payer, recipient, 100 ether);
+
+        assertEq(token.balanceOf(recipient), 0, "strict mode blocked the fallback");
     }
 }

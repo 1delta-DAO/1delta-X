@@ -32,7 +32,7 @@ contract DirectApprovalFallbackTest is CoreSettlementBase {
     function _revokeSolverPermit3(address token) internal {
         vm.prank(solver);
         permit3.revokeToken(address(settlement), token);
-        (uint160 amt,,) = permit3.tokenAllowance(solver, address(settlement), token);
+        (uint160 amt,) = permit3.tokenAllowance(solver, address(settlement), token);
         assertEq(amt, 0, "solver Permit3 allowance revoked");
     }
 
@@ -89,7 +89,7 @@ contract DirectApprovalFallbackTest is CoreSettlementBase {
         // is a different spender and does not help here.)
         vm.prank(maker);
         IERC20(USDC).approve(address(settlement), usdcIn);
-        (uint160 makerP3,,) = permit3.tokenAllowance(maker, address(settlement), USDC);
+        (uint160 makerP3,) = permit3.tokenAllowance(maker, address(settlement), USDC);
         assertEq(makerP3, 0, "maker granted no Permit3 allowance to Settlement");
 
         // Solver funds tokenOut the normal way (standing Permit3 allowance).

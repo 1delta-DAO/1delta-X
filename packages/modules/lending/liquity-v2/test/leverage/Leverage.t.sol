@@ -151,7 +151,7 @@ contract LiquityV2LeverageTest is CoreSettlementBase {
         // WETH: the add-coll module pulls the collateral via Permit3 during MAKE.
         permit3.approveToken(address(addCollModule), WETH, uint160(collateralIn), 0);
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(settlement), keccak256(_borrowData(type(uint256).max)), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData(type(uint256).max)), uint160(borrowOut), 0);
         // BOLD fallback allowance for the tokenIn shortfall path — never triggers
         // here (the borrow fully funds tokenIn) but keeps the flow safe.
         IERC20(BOLD).approve(address(permit3), type(uint256).max);

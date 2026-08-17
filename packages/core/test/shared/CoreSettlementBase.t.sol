@@ -357,13 +357,13 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         return _tokenPermits(spender1, token1, amt1, spender2, token2, amt2);
     }
 
-    function _takerPermits1(address spender, bytes32 ref, uint256 amt)
+    function _takerPermits1(address spender, address module, bytes32 ref, uint256 amt)
         internal
         view
         returns (IPermit3.TakerPermit[] memory tkp)
     {
         tkp = new IPermit3.TakerPermit[](1);
-        tkp[0] = IPermit3.TakerPermit(spender, ref, uint160(amt), uint48(block.timestamp + 1 hours));
+        tkp[0] = IPermit3.TakerPermit(spender, module, ref, uint160(amt), uint48(block.timestamp + 1 hours));
     }
 
     // ──────────────────── EIP-712 hashing + signing ────────────────────
@@ -381,14 +381,14 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     bytes32 constant TOKEN_PERMIT_TH =
         keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
     bytes32 constant TAKER_PERMIT_TH =
-        keccak256("TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)");
+        keccak256("TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)");
 
     /// @dev Must mirror Permit3's `_PERMIT_BATCH_WITNESS_STUB` + Settlement's
     ///      `_ORDER_WITNESS_TYPESTRING` exactly.
     string constant PERMIT_BATCH_WITNESS_FULL = "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
         "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
-        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
     function _hashItems(Item[] memory items) internal pure returns (bytes32) {
@@ -483,7 +483,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     function _hashTakerPermits(IPermit3.TakerPermit[] memory p) internal pure returns (bytes32) {
         bytes32[] memory h = new bytes32[](p.length);
         for (uint256 i; i < p.length; i++) {
-            h[i] = keccak256(abi.encode(TAKER_PERMIT_TH, p[i].spender, p[i].ref, p[i].amount, p[i].expiration));
+            h[i] = keccak256(
+                abi.encode(TAKER_PERMIT_TH, p[i].spender, p[i].module, p[i].ref, p[i].amount, p[i].expiration)
+            );
         }
         return keccak256(abi.encodePacked(h));
     }

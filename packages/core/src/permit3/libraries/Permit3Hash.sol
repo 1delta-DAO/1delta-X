@@ -47,11 +47,11 @@ library Permit3Hash {
         keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
 
     bytes32 internal constant TAKER_PERMIT_TYPEHASH =
-        keccak256("TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)");
+        keccak256("TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)");
 
     bytes32 internal constant PERMIT_BATCH_TYPEHASH = keccak256(
         "PermitBatch(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline)"
-        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
     );
 
@@ -59,6 +59,17 @@ library Permit3Hash {
     ///      its own `"<fieldName> <WitnessType>)<TYPES IN ALPHABETICAL ORDER>"`.
     string internal constant PERMIT_BATCH_WITNESS_STUB =
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,";
+
+    // ──────────────────── PermitTake (one-shot taker dispatch) ────────────────────
+
+    bytes32 internal constant PERMIT_TAKE_TYPEHASH = keccak256(
+        "PermitTake(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline)"
+    );
+
+    /// @dev Stub for the witness-bound one-shot take. Same `spender`-is-`msg.sender`
+    ///      convention as the signature-transfer stubs.
+    string internal constant PERMIT_TAKE_WITNESS_STUB =
+        "PermitTakeWitness(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline,";
 
     // ──────────────────── Signature transfers ────────────────────
 
@@ -179,6 +190,7 @@ library Permit3Hash {
     ///                  abi.encode(
     ///                      TAKER_PERMIT_TYPEHASH,
     ///                      permits[i].spender,
+    ///                      permits[i].module,
     ///                      permits[i].ref,
     ///                      permits[i].amount,
     ///                      permits[i].expiration
@@ -197,14 +209,41 @@ library Permit3Hash {
             let src := permits.offset
             for { let dst := hashes } lt(dst, end) { dst := add(dst, 0x20) } {
                 mstore(add(buf, 0x20), and(calldataload(src), 0xffffffffffffffffffffffffffffffffffffffff)) // spender
-                mstore(add(buf, 0x40), calldataload(add(src, 0x20))) // ref — full bytes32, no mask
-                mstore(add(buf, 0x60), and(calldataload(add(src, 0x40)), 0xffffffffffffffffffffffffffffffffffffffff)) // uint160
-                mstore(add(buf, 0x80), and(calldataload(add(src, 0x60)), 0xffffffffffff)) // uint48
-                mstore(dst, keccak256(buf, 0xa0))
-                src := add(src, 0x80) // 4 static words per TakerPermit
+                mstore(add(buf, 0x40), and(calldataload(add(src, 0x20)), 0xffffffffffffffffffffffffffffffffffffffff)) // module
+                mstore(add(buf, 0x60), calldataload(add(src, 0x40))) // ref — full bytes32, no mask
+                mstore(add(buf, 0x80), and(calldataload(add(src, 0x60)), 0xffffffffffffffffffffffffffffffffffffffff)) // uint160
+                mstore(add(buf, 0xa0), and(calldataload(add(src, 0x80)), 0xffffffffffff)) // uint48
+                mstore(dst, keccak256(buf, 0xc0)) // 6 words: typehash + 5 fields
+                src := add(src, 0xa0) // 5 static words per TakerPermit
             }
             out := keccak256(hashes, sub(end, hashes))
         }
+    }
+
+    // ──────────────────── PermitTake hashers ────────────────────
+
+    /// @dev `spender` is `msg.sender` at consumption, never a signed argument —
+    ///      same model as the signature transfers. `ref` is a full `bytes32`.
+    function hashPermitTake(IPermit3.PermitTake calldata permit, address spender) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                PERMIT_TAKE_TYPEHASH, permit.module, permit.ref, permit.amount, spender, permit.nonce, permit.deadline
+            )
+        );
+    }
+
+    function hashPermitTakeWithWitness(
+        IPermit3.PermitTake calldata permit,
+        address spender,
+        bytes32 witness,
+        string calldata witnessTypeString
+    ) internal pure returns (bytes32) {
+        bytes32 typeHash = keccak256(abi.encodePacked(PERMIT_TAKE_WITNESS_STUB, witnessTypeString));
+        return keccak256(
+            abi.encode(
+                typeHash, permit.module, permit.ref, permit.amount, spender, permit.nonce, permit.deadline, witness
+            )
+        );
     }
 
     // ──────────────────── PermitTransferFrom (one-shot) ────────────────────

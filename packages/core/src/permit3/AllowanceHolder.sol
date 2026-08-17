@@ -152,9 +152,24 @@ contract AllowanceHolder is IAllowanceHolder {
         // could pick on purpose to steer the probe.
         if (uint160(probe) <= 0xffff) probe = address(this);
 
-        // `balanceOf(address)` == 0x70a08231.
-        (bool success, bytes memory ret) = target.staticcall(abi.encodeWithSelector(0x70a08231, probe));
-        if (success && ret.length >= 32) revert ConfusedDeputy();
+        // Probe TWICE — once with the callee's own argument, once with a constant
+        // (`this`). The argument-derived probe is chosen BY THE CALLER: for the
+        // drain this guard exists to stop
+        // (`exec(_, _, 0, USDC, transferFrom(victim, …))`) the attacker sets
+        // `arg0 = victim`, so a token that reverts / returns short for that one
+        // address would read as "not a token" and open the guard. Rejecting if
+        // EITHER probe answers removes the attacker's control over the outcome, at
+        // the cost of one extra staticcall on a path that already makes one. Only a
+        // target that answers `balanceOf` for NEITHER address slips through, and
+        // such a thing cannot be the ERC20 whose approvals the drain would spend.
+        if (_answersBalanceOf(target, probe) || _answersBalanceOf(target, address(this))) revert ConfusedDeputy();
+    }
+
+    /// @dev True if `target.balanceOf(who)` succeeds and returns at least a word.
+    ///      `balanceOf(address)` == 0x70a08231.
+    function _answersBalanceOf(address target, address who) private view returns (bool) {
+        (bool success, bytes memory ret) = target.staticcall(abi.encodeWithSelector(0x70a08231, who));
+        return success && ret.length >= 32;
     }
 
     /// @dev Calls `target` with `data ++ sender` (20 trailing bytes, ERC-2771

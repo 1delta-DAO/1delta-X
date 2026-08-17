@@ -89,8 +89,7 @@ contract FusedDutchAuctionTest is AaveModulesBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(fused), WETH, uint160(COLLATERAL), 0);
-        permit3.approveTaker(
-            address(settlement), keccak256(_data()), uint160(DEBT_CEIL), uint48(block.timestamp + 1 hours)
+        permit3.approveTaker(address(settlement), address(fused), keccak256(_data()), uint160(DEBT_CEIL), uint48(block.timestamp + 1 hours)
         );
         IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(fused), type(uint256).max);
         vm.stopPrank();
@@ -189,8 +188,7 @@ contract FusedDutchAuctionTest is AaveModulesBase {
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         IERC20(USDC).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(fused), WETH, uint160(COLLATERAL), 0);
-        permit3.approveTaker(
-            address(settlement), keccak256(floorData), uint160(DEBT_FLOOR), uint48(block.timestamp + 1 hours)
+        permit3.approveTaker(address(settlement), address(fused), keccak256(floorData), uint160(DEBT_FLOOR), uint48(block.timestamp + 1 hours)
         );
         IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(fused), type(uint256).max);
         vm.stopPrank();

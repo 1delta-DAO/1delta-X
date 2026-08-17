@@ -51,7 +51,7 @@ contract InboxAccountingTest is BridgeTestBase {
         inbox.activate(o);
         _fundSolverOut(DELIVERED);
 
-        (uint160 allowed,,) = permit3.tokenAllowance(endUser, address(settlement), address(tB));
+        (uint160 allowed,) = permit3.tokenAllowance(endUser, address(settlement), address(tB));
         assertEq(allowed, 0, "no allowance");
         assertEq(endUser.balance, 0, "no gas");
 

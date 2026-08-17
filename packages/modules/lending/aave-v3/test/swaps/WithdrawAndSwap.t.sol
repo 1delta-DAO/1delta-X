@@ -53,7 +53,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(aWETH).balanceOf(address(withdrawModule)), 0, "module aWETH drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(withdrawModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(withdrawModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 
@@ -77,7 +77,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
 
         IPermit3.PermitBatch memory batch = _buildBatch(
             _tokenPermitsWithTaker(address(settlement), WETH, wethIn, address(withdrawModule), aWETH, wethIn),
-            _takerPermits1(address(settlement), keccak256(takerData), wethIn),
+            _takerPermits1(address(settlement), address(withdrawModule), keccak256(takerData), wethIn),
             0,
             order.deadline
         );
@@ -118,7 +118,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
         IERC20(aWETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(withdrawModule), aWETH, type(uint160).max, 0);
         // Taker gate still bounds the order slice that reaches the solver.
-        permit3.approveTaker(address(settlement), ref, uint160(wethIn), 0);
+        permit3.approveTaker(address(settlement), address(withdrawModule), ref, uint160(wethIn), 0);
         vm.stopPrank();
         _approveSolverSide(usdcOut, USDC);
 

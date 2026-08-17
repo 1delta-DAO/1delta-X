@@ -75,8 +75,8 @@ contract GrantItemTest is BridgeTestBase {
 
     // ──────────────────── Builders ────────────────────
 
-    function _grantSpec(address spender, address token, bool taker, bytes32 ref) internal pure returns (bytes memory) {
-        return abi.encode(FunnelGrantModule.GrantSpec({spender: spender, token: token, taker: taker, ref: ref}));
+    function _grantSpec(address spender, address module, address token, bool taker, bytes32 ref) internal pure returns (bytes memory) {
+        return abi.encode(FunnelGrantModule.GrantSpec({spender: spender, module: module, token: token, taker: taker, ref: ref}));
     }
 
     /// @dev Leverage with the allowances carried by the order. The grant items are
@@ -101,7 +101,7 @@ contract GrantItemTest is BridgeTestBase {
             module: address(grantModule),
             amount: COLL,
             recipient: address(0),
-            data: _grantSpec(address(supplyModule), address(tA), false, bytes32(0))
+            data: _grantSpec(address(supplyModule), address(0), address(tA), false, bytes32(0))
         });
         // [1] let Settlement spend the taker allowance the borrow needs
         _tmpitems[1] = Item({
@@ -109,7 +109,7 @@ contract GrantItemTest is BridgeTestBase {
             module: address(grantModule),
             amount: BORROW,
             recipient: address(0),
-            data: _grantSpec(address(settlement), address(0), true, keccak256(takeData))
+            data: _grantSpec(address(settlement), address(borrowModule), address(0), true, keccak256(takeData))
         });
         _tmpitems[2] =
             Item({op: ItemOp.MAKE, module: address(supplyModule), amount: COLL, recipient: address(0), data: ""});
@@ -130,7 +130,7 @@ contract GrantItemTest is BridgeTestBase {
     /// @dev No `enableToken`, no `executeSigned` for allowances, no standing
     ///      approvals of any kind — the order is the whole authorisation.
     function test_leverage_withNoStandingApprovals() public {
-        (uint160 before1,,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
+        (uint160 before1,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
         assertEq(before1, 0, "no allowance before the fill");
 
         Order memory o = _leverageOrder(1, address(funnel));
@@ -149,9 +149,9 @@ contract GrantItemTest is BridgeTestBase {
         Order memory o = _leverageOrder(1, address(funnel));
         _fill(o, BORROW);
 
-        (uint160 tokenLeft,,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
+        (uint160 tokenLeft,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
         assertEq(tokenLeft, 0, "token allowance fully spent");
-        (uint160 takerLeft,,) = permit3.takerAllowance(address(funnel), address(settlement), keccak256(""));
+        (uint160 takerLeft,) = permit3.takerAllowance(address(funnel), address(settlement), address(borrowModule), keccak256(""));
         assertEq(takerLeft, 0, "taker allowance fully spent");
     }
 
@@ -160,7 +160,7 @@ contract GrantItemTest is BridgeTestBase {
         Order memory o = _leverageOrder(1, address(funnel));
         _fill(o, BORROW);
 
-        (, uint48 exp,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
+        (, uint48 exp) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
         assertEq(exp, uint48(block.timestamp), "same-block expiry");
         assertTrue(exp < uint48(block.timestamp + 1), "dead next block");
     }
@@ -172,7 +172,7 @@ contract GrantItemTest is BridgeTestBase {
 
         assertEq(pool.collateralOf(address(funnel)), COLL / 2, "half supplied");
         assertEq(tB.balanceOf(solver), BORROW / 2, "solver paid pro-rata");
-        (uint160 left,,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
+        (uint160 left,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
         assertEq(left, 0, "half granted, half spent, nothing left");
     }
 
@@ -225,7 +225,7 @@ contract GrantItemTest is BridgeTestBase {
         vm.expectRevert(MockLendingPool.NotDelegated.selector);
         settlement.fill(o, sig, BORROW);
 
-        (uint160 left,,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
+        (uint160 left,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
         assertEq(left, 0, "grant reverted with the fill");
     }
 
@@ -235,14 +235,14 @@ contract GrantItemTest is BridgeTestBase {
     function test_attack_grantCannotBeCalledDirectly() public {
         vm.prank(solver);
         vm.expectRevert(PositionFunnel.NotGrantModule.selector);
-        funnel.grant(solver, address(tA), type(uint160).max, false, bytes32(0));
+        funnel.grant(solver, address(0), address(tA), type(uint160).max, false, bytes32(0));
     }
 
     /// @dev Not even by the owner — the only caller is the module.
     function test_attack_ownerCannotCallGrantDirectly() public {
         vm.prank(maker);
         vm.expectRevert(PositionFunnel.NotGrantModule.selector);
-        funnel.grant(maker, address(tA), type(uint160).max, false, bytes32(0));
+        funnel.grant(maker, address(0), address(tA), type(uint160).max, false, bytes32(0));
     }
 
     /// @dev Going through the module directly skips Settlement, and therefore skips
@@ -250,7 +250,7 @@ contract GrantItemTest is BridgeTestBase {
     function test_attack_moduleCannotBeCalledDirectly() public {
         vm.prank(solver);
         vm.expectRevert(FunnelGrantModule.OnlySettlement.selector);
-        grantModule.makeOnBehalf(address(funnel), type(uint160).max, _grantSpec(solver, address(tA), false, bytes32(0)));
+        grantModule.makeOnBehalf(address(funnel), type(uint160).max, _grantSpec(solver, address(0), address(tA), false, bytes32(0)));
     }
 
     /// @dev THE attack this design has to survive. The attacker signs their OWN
@@ -270,7 +270,7 @@ contract GrantItemTest is BridgeTestBase {
             module: address(grantModule),
             amount: COLL,
             recipient: address(0),
-            data: _grantSpec(solver, address(tA), false, bytes32(0)) // spender = attacker
+            data: _grantSpec(solver, address(0), address(tA), false, bytes32(0)) // spender = attacker
         });
         evil.items = PackedEncode.items(_tmpitems);
 
@@ -285,11 +285,11 @@ contract GrantItemTest is BridgeTestBase {
         settlement.fill(evil, sig, 1);
 
         // The grant landed on the attacker's funnel, over the attacker's own funds.
-        (uint160 onAttacker,,) = permit3.tokenAllowance(address(attackerFunnel), solver, address(tA));
+        (uint160 onAttacker,) = permit3.tokenAllowance(address(attackerFunnel), solver, address(tA));
         assertEq(onAttacker, COLL, "attacker granted over their own funnel");
 
         // The victim's funnel has no allowance to anyone, and still holds everything.
-        (uint160 onVictim,,) = permit3.tokenAllowance(address(funnel), solver, address(tA));
+        (uint160 onVictim,) = permit3.tokenAllowance(address(funnel), solver, address(tA));
         assertEq(onVictim, 0, "victim funnel untouched");
         assertEq(tA.balanceOf(address(funnel)), FUNNEL_COLL, "victim funds intact");
     }
@@ -304,7 +304,7 @@ contract GrantItemTest is BridgeTestBase {
         vm.expectRevert();
         settlement.fill(evil, sig, BORROW);
 
-        (uint160 left,,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
+        (uint160 left,) = permit3.tokenAllowance(address(funnel), address(supplyModule), address(tA));
         assertEq(left, 0, "no allowance was created");
     }
 
@@ -332,6 +332,6 @@ contract GrantItemTest is BridgeTestBase {
         PositionFunnel impl = PositionFunnel(payable(factory.IMPLEMENTATION()));
         vm.prank(address(grantModule));
         vm.expectRevert(PositionFunnel.NotProxy.selector);
-        impl.grant(solver, address(tA), 1, false, bytes32(0));
+        impl.grant(solver, address(0), address(tA), 1, false, bytes32(0));
     }
 }

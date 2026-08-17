@@ -45,7 +45,7 @@ contract BorrowWithFeeTest is AaveModulesBase {
         // debt on the maker's behalf.
         IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(borrowModule), type(uint256).max);
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(settlement), borrowRef, uint160(borrowAmount), 0);
+        permit3.approveTaker(address(settlement), address(borrowModule), borrowRef, uint160(borrowAmount), 0);
         // USDC fallback for the tokenIn shortfall — never triggers (the borrow
         // fully funds tokenIn), but keeps the shortfall path safe.
         IERC20(USDC).approve(address(permit3), type(uint256).max);
@@ -88,8 +88,8 @@ contract BorrowWithFeeTest is AaveModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
 
-        (uint160 remaining,,) =
-            permit3.takerAllowance(maker, address(borrowModule), keccak256(abi.encode(AAVE_POOL, USDC, uint256(2))));
+        (uint160 remaining,) =
+            permit3.takerAllowance(maker, address(settlement), address(borrowModule), keccak256(abi.encode(AAVE_POOL, USDC, uint256(2))));
         assertEq(remaining, 0, "taker allowance spent");
     }
 }

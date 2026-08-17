@@ -56,8 +56,7 @@ contract FusedLeverageTest is AaveModulesBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(fused), WETH, uint160(collateralTotal), 0);
-        permit3.approveTaker(
-            address(settlement),
+        permit3.approveTaker(address(settlement), address(fused),
             keccak256(_fusedData(collateralTotal, borrowTotal)),
             uint160(borrowTotal),
             uint48(block.timestamp + 1 hours)
@@ -179,7 +178,7 @@ contract FusedLeverageTest is AaveModulesBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(fused), WETH, uint160(COLLATERAL), 0);
-        permit3.approveTaker(address(settlement), keccak256(data), uint160(BORROW), uint48(block.timestamp + 1 hours));
+        permit3.approveTaker(address(settlement), address(fused), keccak256(data), uint160(BORROW), uint48(block.timestamp + 1 hours));
         IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(fused), type(uint256).max);
         vm.stopPrank();
 

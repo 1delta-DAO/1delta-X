@@ -114,17 +114,17 @@ contract Permit3Test is Test {
     bytes32 constant TOKEN_PERMIT_TH =
         keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
     bytes32 constant TAKER_PERMIT_TH =
-        keccak256("TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)");
+        keccak256("TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)");
     bytes32 constant PERMIT_BATCH_TH = keccak256(
         "PermitBatch(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline)"
-        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
     );
     string constant WITNESS_STUB =
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,";
     // Witness is a bare bytes32; type defs in alphabetical order after the field.
     string constant WITNESS_TYPE_STRING = "bytes32 witness)"
-        "TakerPermit(address spender,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
     function setUp() public {
@@ -147,7 +147,7 @@ contract Permit3Test is Test {
         permit3.transferFrom(owner, recipient, address(token), 40e18);
 
         assertEq(token.balanceOf(recipient), 40e18);
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, 60e18, "allowance decremented");
     }
 
@@ -158,7 +158,7 @@ contract Permit3Test is Test {
         vm.prank(spender);
         permit3.transferFrom(owner, recipient, address(token), 123e18);
 
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, type(uint160).max, "infinite allowance untouched");
     }
 
@@ -195,7 +195,7 @@ contract Permit3Test is Test {
 
         assertEq(token.balanceOf(recipient), 30e18);
         assertEq(token.balanceOf(address(0xD00D)), 20e18);
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, 50e18, "both legs decremented");
     }
 
@@ -205,7 +205,7 @@ contract Permit3Test is Test {
         permit3.revokeToken(spender, address(token));
         vm.stopPrank();
 
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, 0);
     }
 
@@ -226,8 +226,8 @@ contract Permit3Test is Test {
         permit3.lockdown(pairs);
         vm.stopPrank();
 
-        (uint160 a1,,) = permit3.tokenAllowance(owner, spender, address(token));
-        (uint160 a2,,) = permit3.tokenAllowance(owner, spender2, address(token));
+        (uint160 a1,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 a2,) = permit3.tokenAllowance(owner, spender2, address(token));
         assertEq(a1, 0);
         assertEq(a2, 0);
     }
@@ -237,15 +237,16 @@ contract Permit3Test is Test {
         // Taker book is keyed by SPENDER (the caller of `take`); this test's
         // `take` would be called by address(this), so approve that spender.
         address sp = address(this);
+        address module = address(taker);
         vm.prank(owner);
-        permit3.approveTaker(sp, ref, 100e18, 0);
+        permit3.approveTaker(sp, module, ref, 100e18, 0);
 
         IPermit3.SpenderRefPair[] memory pairs = new IPermit3.SpenderRefPair[](1);
-        pairs[0] = IPermit3.SpenderRefPair(sp, ref);
+        pairs[0] = IPermit3.SpenderRefPair(sp, module, ref);
         vm.prank(owner);
         permit3.lockdownTakers(pairs);
 
-        (uint160 amount,,) = permit3.takerAllowance(owner, sp, ref);
+        (uint160 amount,) = permit3.takerAllowance(owner, sp, module, ref);
         assertEq(amount, 0);
     }
 
@@ -257,14 +258,14 @@ contract Permit3Test is Test {
 
         // Spender = address(this) since this test calls `take` directly.
         vm.prank(owner);
-        permit3.approveTaker(address(this), ref, 100e18, 0);
+        permit3.approveTaker(address(this), address(taker), ref, 100e18, 0);
 
         permit3.take(address(taker), owner, 40e18, recipient, data);
 
         assertEq(taker.lastUser(), owner);
         assertEq(taker.lastAmount(), 40e18);
         assertEq(taker.lastReceiver(), recipient);
-        (uint160 amount,,) = permit3.takerAllowance(owner, address(this), ref);
+        (uint160 amount,) = permit3.takerAllowance(owner, address(this), address(taker), ref);
         assertEq(amount, 60e18, "taker allowance decremented");
     }
 
@@ -280,7 +281,7 @@ contract Permit3Test is Test {
 
         address goodSpender = address(0x5E771E); // stand-in for Settlement
         vm.prank(owner);
-        permit3.approveTaker(goodSpender, ref, 100e18, 0);
+        permit3.approveTaker(goodSpender, address(taker), ref, 100e18, 0);
 
         // Attacker is not the approved spender → no allowance under their key.
         address attacker = address(0xBAD);
@@ -298,7 +299,7 @@ contract Permit3Test is Test {
         bytes memory data = abi.encode(uint256(1));
         bytes32 ref = keccak256(data);
         vm.prank(owner);
-        permit3.approveTaker(address(this), ref, 5e18, 0);
+        permit3.approveTaker(address(this), address(taker), ref, 5e18, 0);
 
         vm.expectRevert(abi.encodeWithSelector(IPermit3.InsufficientAllowance.selector, uint160(5e18)));
         permit3.take(address(taker), owner, 6e18, recipient, data);
@@ -329,7 +330,7 @@ contract Permit3Test is Test {
         // Outer `take` is called by address(this); its allowance must pass so the
         // re-entrant inner call is what trips the guard.
         vm.prank(owner);
-        permit3.approveTaker(address(this), ref, type(uint160).max, 0);
+        permit3.approveTaker(address(this), address(evil), ref, type(uint160).max, 0);
 
         vm.expectRevert(IPermit3.Reentrancy.selector);
         permit3.take(address(evil), owner, 1e18, recipient, data);
@@ -343,7 +344,7 @@ contract Permit3Test is Test {
 
         permit3.permitBatch(owner, batch, sig);
 
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, 500e18);
         assertTrue(permit3.isPermitNonceUsed(owner, 0));
     }
@@ -392,7 +393,7 @@ contract Permit3Test is Test {
         assertEq(sig.length, 64, "compact sig is 64 bytes");
 
         permit3.permitBatch(owner, batch, sig);
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, 7e18);
     }
 
@@ -405,7 +406,7 @@ contract Permit3Test is Test {
 
         permit3.permitBatch(address(wallet), batch, sig);
 
-        (uint160 amount,,) = permit3.tokenAllowance(address(wallet), spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(address(wallet), spender, address(token));
         assertEq(amount, 9e18, "contract-signed permit applied");
     }
 
@@ -435,7 +436,7 @@ contract Permit3Test is Test {
 
         permit3.permitBatch(owner, batch, sig);
 
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, 11e18, "7702 raw-key permit applied");
     }
 
@@ -452,7 +453,7 @@ contract Permit3Test is Test {
 
         permit3.permitBatch(spender, batch, sig);
 
-        (uint160 amount,,) = permit3.tokenAllowance(spender, recipient, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(spender, recipient, address(token));
         assertEq(amount, 5e18, "7702 delegated-1271 permit applied");
     }
 
@@ -465,7 +466,7 @@ contract Permit3Test is Test {
 
         permit3.permitBatchWithWitness(owner, batch, witness, WITNESS_TYPE_STRING, sig);
 
-        (uint160 amount,,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 amount,) = permit3.tokenAllowance(owner, spender, address(token));
         assertEq(amount, 3e18);
     }
 
@@ -528,7 +529,9 @@ contract Permit3Test is Test {
     function _hashTakerPermits(IPermit3.TakerPermit[] memory p) internal pure returns (bytes32) {
         bytes32[] memory h = new bytes32[](p.length);
         for (uint256 i; i < p.length; i++) {
-            h[i] = keccak256(abi.encode(TAKER_PERMIT_TH, p[i].spender, p[i].ref, p[i].amount, p[i].expiration));
+            h[i] = keccak256(
+                abi.encode(TAKER_PERMIT_TH, p[i].spender, p[i].module, p[i].ref, p[i].amount, p[i].expiration)
+            );
         }
         return keccak256(abi.encodePacked(h));
     }
@@ -570,5 +573,184 @@ contract Permit3Test is Test {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), hashStruct));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    // ════════════════ One-shot signed take (permitTake) ════════════════
+
+    bytes32 constant PERMIT_TAKE_TH =
+        keccak256("PermitTake(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline)");
+
+    function _signPermitTake(IPermit3.PermitTake memory permit, address spender, uint256 pk)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 hashStruct = keccak256(
+            abi.encode(PERMIT_TAKE_TH, permit.module, permit.ref, permit.amount, spender, permit.nonce, permit.deadline)
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), hashStruct));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _permitTakeFor(bytes memory data, uint160 amount, uint256 nonce)
+        internal
+        view
+        returns (IPermit3.PermitTake memory p)
+    {
+        p = IPermit3.PermitTake({
+            module: address(taker),
+            ref: keccak256(data),
+            amount: amount,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours
+        });
+    }
+
+    function test_permitTake_dispatchesWithoutStandingAllowance() public {
+        bytes memory data = abi.encode(uint256(9));
+        IPermit3.PermitTake memory permit = _permitTakeFor(data, 40e18, 3);
+        bytes memory sig = _signPermitTake(permit, address(this), ownerPk);
+
+        // No approveTaker anywhere — the signature alone authorises the dispatch.
+        permit3.permitTake(permit, owner, recipient, data, sig);
+
+        assertEq(taker.lastUser(), owner, "module dispatched");
+        assertEq(taker.lastAmount(), 40e18);
+        assertEq(taker.lastReceiver(), recipient);
+        // Nothing left behind: no allowance bucket was written.
+        (uint160 left,) = permit3.takerAllowance(owner, address(this), address(taker), keccak256(data));
+        assertEq(left, 0, "no standing allowance created");
+        assertTrue(permit3.isPermitNonceUsed(owner, 3), "nonce consumed");
+    }
+
+    function test_permitTake_revert_refMismatch() public {
+        bytes memory data = abi.encode(uint256(9));
+        IPermit3.PermitTake memory permit = _permitTakeFor(data, 40e18, 3);
+        bytes memory sig = _signPermitTake(permit, address(this), ownerPk);
+
+        // Present DIFFERENT data than the signed ref.
+        vm.expectRevert(IPermit3.RefMismatch.selector);
+        permit3.permitTake(permit, owner, recipient, abi.encode(uint256(10)), sig);
+    }
+
+    function test_permitTake_revert_zeroAmount() public {
+        bytes memory data = abi.encode(uint256(9));
+        IPermit3.PermitTake memory permit = _permitTakeFor(data, 0, 3);
+        bytes memory sig = _signPermitTake(permit, address(this), ownerPk);
+
+        vm.expectRevert(IPermit3.ZeroAmount.selector);
+        permit3.permitTake(permit, owner, recipient, data, sig);
+    }
+
+    function test_permitTake_revert_replay() public {
+        bytes memory data = abi.encode(uint256(9));
+        IPermit3.PermitTake memory permit = _permitTakeFor(data, 40e18, 3);
+        bytes memory sig = _signPermitTake(permit, address(this), ownerPk);
+
+        permit3.permitTake(permit, owner, recipient, data, sig);
+        vm.expectRevert(IPermit3.PermitNonceUsed.selector);
+        permit3.permitTake(permit, owner, recipient, data, sig);
+    }
+
+    function test_permitTake_revert_leakedSigUselessToOtherSpender() public {
+        bytes memory data = abi.encode(uint256(9));
+        IPermit3.PermitTake memory permit = _permitTakeFor(data, 40e18, 3);
+        // Signed for spender == address(this); a different caller cannot use it.
+        bytes memory sig = _signPermitTake(permit, address(this), ownerPk);
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(); // digest binds spender = original caller, so verify fails
+        permit3.permitTake(permit, owner, recipient, data, sig);
+    }
+
+    // ════════════════ Combined revocation (lockdownAll) ════════════════
+
+    function test_lockdownAll_revokesBothBooksAndNonces() public {
+        bytes32 ref = keccak256("pos");
+        vm.startPrank(owner);
+        permit3.approveToken(spender, address(token), 100e18, 0);
+        permit3.approveTaker(spender, address(taker), ref, 100e18, 0);
+
+        IPermit3.TokenSpenderPair[] memory tokens = new IPermit3.TokenSpenderPair[](1);
+        tokens[0] = IPermit3.TokenSpenderPair(address(token), spender);
+        IPermit3.SpenderRefPair[] memory takers = new IPermit3.SpenderRefPair[](1);
+        takers[0] = IPermit3.SpenderRefPair(spender, address(taker), ref);
+        uint256[] memory words = new uint256[](1);
+        uint256[] memory masks = new uint256[](1);
+        words[0] = 0;
+        masks[0] = (1 << 5) | (1 << 9);
+        permit3.lockdownAll(tokens, takers, words, masks);
+        vm.stopPrank();
+
+        (uint160 tAmt,) = permit3.tokenAllowance(owner, spender, address(token));
+        (uint160 kAmt,) = permit3.takerAllowance(owner, spender, address(taker), ref);
+        assertEq(tAmt, 0, "token allowance zeroed");
+        assertEq(kAmt, 0, "taker allowance zeroed");
+        assertTrue(permit3.isPermitNonceUsed(owner, 5), "nonce 5 invalidated");
+        assertTrue(permit3.isPermitNonceUsed(owner, 9), "nonce 9 invalidated");
+    }
+
+    function test_lockdownAll_revert_nonceArrayLengthMismatch() public {
+        IPermit3.TokenSpenderPair[] memory tokens = new IPermit3.TokenSpenderPair[](0);
+        IPermit3.SpenderRefPair[] memory takers = new IPermit3.SpenderRefPair[](0);
+        uint256[] memory words = new uint256[](1);
+        uint256[] memory masks = new uint256[](2);
+        vm.prank(owner);
+        vm.expectRevert(IPermit3.NonceArrayLengthMismatch.selector);
+        permit3.lockdownAll(tokens, takers, words, masks);
+    }
+
+    // ════════════════ ERC-5267 ════════════════
+
+    function test_eip712Domain_matchesSeparator() public view {
+        (bytes1 fields, string memory name, string memory version, uint256 chainId, address vc, bytes32 salt,) =
+            permit3.eip712Domain();
+        assertEq(fields, hex"0f");
+        assertEq(name, "Permit3");
+        assertEq(version, "1");
+        assertEq(chainId, block.chainid);
+        assertEq(vc, address(permit3));
+        assertEq(salt, bytes32(0));
+        bytes32 expected = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes(name)),
+                keccak256(bytes(version)),
+                chainId,
+                vc
+            )
+        );
+        assertEq(expected, permit3.DOMAIN_SEPARATOR(), "5267 fields rebuild the separator");
+    }
+
+    // ════════════════ Idempotent signed batch (S-1) ════════════════
+
+    function test_permitBatchWithWitnessIfNeeded_skipsSpentNonce() public {
+        IPermit3.PermitBatch memory batch = _batchSingleToken(spender, address(token), 500e18, 0, 4);
+        bytes32 witness = keccak256("order");
+        bytes memory sig = _signBatchWitness(batch, witness, ownerPk);
+
+        // First application grants the allowance and spends the nonce.
+        permit3.permitBatchWithWitnessIfNeeded(owner, batch, witness, WITNESS_TYPE_STRING, sig);
+        (uint160 a1,) = permit3.tokenAllowance(owner, spender, address(token));
+        assertEq(a1, 500e18);
+
+        // Draw the allowance down, then re-present the SAME batch: the spent nonce is
+        // skipped (no revert), and crucially the grant is NOT re-applied.
+        vm.prank(spender);
+        permit3.transferFrom(owner, recipient, address(token), 200e18);
+        permit3.permitBatchWithWitnessIfNeeded(owner, batch, witness, WITNESS_TYPE_STRING, sig);
+        (uint160 a2,) = permit3.tokenAllowance(owner, spender, address(token));
+        assertEq(a2, 300e18, "grant not re-applied on the idempotent re-call");
+    }
+
+    function test_permitBatchWithWitnessIfNeeded_revert_badSig() public {
+        IPermit3.PermitBatch memory batch = _batchSingleToken(spender, address(token), 500e18, 0, 4);
+        bytes32 witness = keccak256("order");
+        // Sign with the wrong key — the signature is verified UNCONDITIONALLY.
+        bytes memory sig = _signBatchWitness(batch, witness, 0xB0B);
+        vm.expectRevert();
+        permit3.permitBatchWithWitnessIfNeeded(owner, batch, witness, WITNESS_TYPE_STRING, sig);
     }
 }

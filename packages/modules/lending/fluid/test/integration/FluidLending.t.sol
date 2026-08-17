@@ -47,7 +47,7 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         bytes memory data = abi.encode(uint8(FluidTakerModule.Op.Borrow), VAULT, VAULT_FACTORY, nftId);
 
         vm.prank(maker);
-        permit3.approveTaker(address(settlement), keccak256(data), uint160(borrowAmount), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(data), uint160(borrowAmount), 0);
 
         uint256 recvBefore = IERC20(USDC).balanceOf(recv);
 
@@ -68,7 +68,7 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         bytes memory data = abi.encode(uint8(FluidTakerModule.Op.Withdraw), VAULT, VAULT_FACTORY, nftId);
 
         vm.prank(maker);
-        permit3.approveTaker(address(settlement), keccak256(data), uint160(withdrawAmount), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(data), uint160(withdrawAmount), 0);
 
         uint256 recvEthBefore = recv.balance;
 
@@ -101,7 +101,7 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
 
         vm.startPrank(maker);
         permit3.approveToken(address(operateModule), USDC, uint160(ceiling), 0);
-        permit3.approveTaker(address(settlement), keccak256(data), uint160(withdrawCol), 0);
+        permit3.approveTaker(address(settlement), address(operateModule), keccak256(data), uint160(withdrawCol), 0);
         vm.stopPrank();
 
         uint256 recvEthBefore = recv.balance;

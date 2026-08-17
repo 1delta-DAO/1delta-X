@@ -1,0 +1,27 @@
+{
+  "name": "@1delta-x/app",
+  "license": "MIT",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Reference intent-trading frontend for UniversalSettlement \u2014 a ladder built from live Uniswap v3 tick liquidity merged with resting signed limit orders, over a mocked order backend.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview --port 5060",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "vite"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7"
+  }
+}

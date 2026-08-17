@@ -66,12 +66,12 @@ contract MigrateMidnightToBlueTest is MidnightModulesBase {
         // [0] Midnight repay: repay module pulls LOAN via Permit3.
         _makerApproveToken(address(repayModule), address(LOAN), bufferedRepay);
         // [1] Midnight withdraw-collateral: Permit3 taker cap + Midnight native auth.
-        _makerApproveTaker(keccak256(wcData), collat);
+        _makerApproveTaker(address(takerModule), keccak256(wcData), collat);
         _makerAuthorize(address(takerModule));
         // [2] Blue supply: supply module pulls COLL via Permit3.
         _makerApproveToken(address(blueSupply), address(COLL), collat);
         // [3] Blue borrow: Permit3 taker cap + Morpho native auth.
-        _makerApproveTaker(keccak256(blueBorrowData), debtUnits);
+        _makerApproveTaker(address(blueTaker), keccak256(blueBorrowData), debtUnits);
         vm.prank(maker);
         blue.setAuthorization(address(blueTaker), true);
         // Solver funds the tokenOut delivery.

@@ -215,7 +215,7 @@ contract GearboxCreditFlowTest is Test {
     function _takeBorrow(uint256 amount, address receiver) internal {
         bytes memory data = _data();
         vm.prank(user);
-        permit3.approveTaker(settlement, keccak256(data), type(uint160).max, 0);
+        permit3.approveTaker(settlement, address(borrowModule), keccak256(data), type(uint160).max, 0);
         vm.prank(settlement);
         permit3.take(address(borrowModule), user, uint160(amount), receiver, data);
     }

@@ -123,7 +123,7 @@ contract SiloLeverageTest is CoreSettlementBase {
         // credit-delegation analogue). The Permit3 taker gate caps the fill.
         ISiloShareToken(WETH_DEBT_SHARE).setReceiveApproval(address(takerModule), borrowOut);
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(settlement), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData()), uint160(borrowOut), 0);
         // WETH fallback allowance for the tokenIn shortfall path — never triggers
         // here (the borrow fully funds tokenIn) but keeps the flow safe.
         permit3.approveToken(address(settlement), WETH, uint160(borrowOut), 0);

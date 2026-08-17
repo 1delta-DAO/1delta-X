@@ -221,7 +221,10 @@ contract PositionFunnel is IERC1271 {
     ///  What saves this module is not the signature but step 4 above: it targets
     ///  `order.maker`, never an address taken from item data, so an attacker's order
     ///  can only ever reach the attacker's own funnel.
-    function grant(address spender, address token, uint160 amount, bool taker, bytes32 ref) external onlyProxy {
+    function grant(address spender, address module, address token, uint160 amount, bool taker, bytes32 ref)
+        external
+        onlyProxy
+    {
         if (msg.sender != GRANT_MODULE) revert NotGrantModule();
         if (grantsDisabled) revert GrantsDisabled();
 
@@ -229,7 +232,7 @@ contract PositionFunnel is IERC1271 {
         // expires", so a real timestamp is what bounds it.
         uint48 exp = uint48(block.timestamp);
         if (taker) {
-            PERMIT3.approveTaker(spender, ref, amount, exp);
+            PERMIT3.approveTaker(spender, module, ref, amount, exp);
         } else {
             // The ERC20 approval goes to PERMIT3 — a pinned immutable, which is the
             // only case `ensureApproval` is safe for. The caller-supplied `spender`

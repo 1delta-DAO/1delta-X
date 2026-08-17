@@ -101,7 +101,7 @@ contract RiverLeverageTest is CoreSettlementBase {
         // by the taker module via Permit3 — module = spender on satUSD.
         permit3.approveToken(address(takerModule), SAT_USD, uint160(borrowOut), 0);
         // Taker gate: the settlement is the spender-keyed taker; ref = borrow data.
-        permit3.approveTaker(address(settlement), keccak256(_borrowData(MAX_FEE)), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData(MAX_FEE)), uint160(borrowOut), 0);
         // satUSD shortfall fallback for the tokenIn payout (never triggers).
         permit3.approveToken(address(settlement), SAT_USD, uint160(borrowOut), 0);
         // Diamond-wide delegation. FORK FINDING: the deployed diamond enforces
@@ -213,7 +213,7 @@ contract RiverLeverageTest is CoreSettlementBase {
         vm.startPrank(maker);
         permit3.approveToken(address(openModule), HEMI_WETH, uint160(side), 0);
         permit3.approveToken(address(openModule), SAT_USD, uint160(debt), 0);
-        permit3.approveTaker(address(settlement), keccak256(openData), uint160(debt), 0);
+        permit3.approveTaker(address(settlement), address(openModule), keccak256(openData), uint160(debt), 0);
         permit3.approveToken(address(settlement), SAT_USD, uint160(debt), 0);
         IRiverXApp(XAPP).setDelegateApproval(address(openModule), true);
         vm.stopPrank();

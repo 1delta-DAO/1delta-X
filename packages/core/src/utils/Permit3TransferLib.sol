@@ -44,6 +44,12 @@ library Permit3TransferLib {
     function transferFromWithFallback(IPermit3 permit3, address token, address from, address to, uint256 amount)
         internal
     {
+        // A zero move is a no-op that the Permit3 leg now REJECTS ({ZeroAmount});
+        // returning early keeps behaviour identical for the honest zero-slice case
+        // and avoids falling through to a direct `transferFrom(_, _, 0)`, which some
+        // strict tokens reject. Settlement already zero-guards its call sites, so
+        // this only hardens the library against a future caller that does not.
+        if (amount == 0) return;
         bool ok;
         if (amount <= type(uint160).max) {
             // Low-level call so a Permit3 failure is caught rather than reverting,
@@ -82,6 +88,15 @@ library Permit3TransferLib {
                 ok := call(gas(), permit3, 0, add(p, 0x1c), 0x84, 0x00, 0x00)
             }
         }
-        if (!ok) SafeTransferLib.safeTransferFrom(token, from, to, amount);
+        if (!ok) {
+            // STRICT MODE (opt-in, off by default): a payer can make the Permit3
+            // allowance book the ONLY funding path for their tokens, so that
+            // `revokeToken`/`lockdown`/an expiry actually stop settlement rather than
+            // being silently overridden by a standing direct approval. The flag is
+            // read only HERE, on the already-failed Permit3 leg, so a payer who never
+            // opts in pays nothing. See {IPermit3.setStrictMode}.
+            if (permit3.strictMode(from)) revert IPermit3.Permit3Denied();
+            SafeTransferLib.safeTransferFrom(token, from, to, amount);
+        }
     }
 }

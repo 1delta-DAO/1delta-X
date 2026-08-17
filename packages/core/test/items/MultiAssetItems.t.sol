@@ -9,6 +9,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {Order, Item, ItemOp, LegIn, LegOut, Validator, OrderSide} from "@core/settlement/Settlement.sol";
+import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -114,7 +115,9 @@ contract MultiAssetItemsTest is CoreSettlementBase {
     ///      on the (spender=Settlement, ref=keccak256(data)) taker allowance.
     function _approveTake(bytes memory data, uint256 amount) internal {
         vm.prank(maker);
-        permit3.approveTaker(address(settlement), keccak256(data), uint160(amount), uint48(block.timestamp + 1 hours));
+        permit3.approveTaker(
+            address(settlement), address(taker), keccak256(data), uint160(amount), uint48(block.timestamp + 1 hours)
+        );
     }
 
     function _takeItem(uint256 amount, address recipient, address token, uint256 produce)
@@ -141,6 +144,24 @@ contract MultiAssetItemsTest is CoreSettlementBase {
     /// @dev Borrow flow: the input USDC is produced by a TAKE (recipient =
     ///      Settlement) exactly equal to what's owed. Solver is paid from the
     ///      proceeds; the maker's own USDC is never touched.
+    /// @dev U-3: the lens surfaces the maker's per-TAKE-item taker allowance, which
+    ///      the token-side preflight skips for item orders. Verifies module, ref and
+    ///      the live cap for a borrow order.
+    function test_previewTakerAllowances_surfacesItemGate() public {
+        uint256 usdcIn = 1_500e6;
+        Item memory it = _takeItem(usdcIn, address(0), USDC, usdcIn);
+        _approveTake(it.data, usdcIn);
+        Order memory order = _orderItems(0, _a1(USDC), _u1(usdcIn), _a1(WETH), _u1(1 ether), _one(it));
+
+        SettlementLens lens = new SettlementLens(address(settlement));
+        SettlementLens.TakerAllowances memory ta = lens.previewTakerAllowances(order);
+
+        assertEq(ta.modules.length, 1, "one TAKE item");
+        assertEq(ta.modules[0], address(taker), "module surfaced");
+        assertEq(ta.refs[0], keccak256(it.data), "ref = keccak256(data)");
+        assertEq(ta.amounts[0], uint160(usdcIn), "live allowance surfaced");
+    }
+
     function test_take_fundsInput_exact() public {
         uint256 usdcIn = 1_500e6;
         uint256 wethOut = 1 ether;

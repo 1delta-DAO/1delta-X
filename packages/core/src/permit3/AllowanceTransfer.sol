@@ -50,6 +50,12 @@ abstract contract AllowanceTransfer is Permit3Base {
     /// @dev user → spender → token → (amount, expiration, nonce)
     mapping(address => mapping(address => mapping(address => PackedAllowance))) private _tokenAllowance;
 
+    /// @dev user → strict mode. When set, {Permit3TransferLib}'s direct-approval
+    ///      fallback is refused for this payer (see {setStrictMode}). Off by
+    ///      default; the flag is read only when the Permit3 leg has already failed,
+    ///      so it never touches the hot path for anyone who has not opted in.
+    mapping(address => bool) private _strict;
+
     // ──────────────────── Grants ────────────────────
 
     function approveToken(address spender, address token, uint160 amount, uint48 expiration) external override {
@@ -77,10 +83,23 @@ abstract contract AllowanceTransfer is Permit3Base {
         external
         view
         override
-        returns (uint160 amount, uint48 expiration, uint48 nonce)
+        returns (uint160 amount, uint48 expiration)
     {
         PackedAllowance storage a = _tokenAllowance[user][spender][token];
-        return (a.amount, a.expiration, a.nonce);
+        return (a.amount, a.expiration);
+    }
+
+    // ──────────────────── Strict mode ────────────────────
+
+    /// @inheritdoc IPermit3
+    function setStrictMode(bool enabled) external override {
+        _strict[msg.sender] = enabled;
+        emit StrictModeSet(msg.sender, enabled);
+    }
+
+    /// @inheritdoc IPermit3
+    function strictMode(address user) external view override returns (bool) {
+        return _strict[user];
     }
 
     // ──────────────────── Revocation ────────────────────
@@ -92,7 +111,11 @@ abstract contract AllowanceTransfer is Permit3Base {
 
     /// @dev Token-book lockdown. Ported from Permit2's `lockdown`.
     function lockdown(TokenSpenderPair[] calldata approvals) external override {
-        address owner = msg.sender;
+        _lockdownTokens(msg.sender, approvals);
+    }
+
+    /// @dev Shared by `lockdown` and the combined {SignedPermits.lockdownAll}.
+    function _lockdownTokens(address owner, TokenSpenderPair[] calldata approvals) internal {
         unchecked {
             uint256 length = approvals.length;
             for (uint256 i; i < length; ++i) {
@@ -122,6 +145,14 @@ abstract contract AllowanceTransfer is Permit3Base {
     }
 
     function _transferFrom(address from, address to, address token, uint160 amount) private {
+        // Reject zero-amount pulls. `spend(bucket, 0)` does not revert even against
+        // an empty allowance, so without this ANY caller could make Permit3 issue
+        // `token.transferFrom(from, to, 0)` from Permit3's own address for any
+        // `from`/`token` — harmless for a plain ERC20 but a free way to trigger a
+        // hook-bearing token, or a token whose `transferFrom` a contract gates on
+        // `msg.sender == permit3`. Mirrors the identical guard on `take`. Honest
+        // fills never move zero (Settlement zero-guards every leg upstream).
+        if (amount == 0) revert ZeroAmount();
         _tokenAllowance[from][msg.sender][token].spend(amount);
         // Assembly safe-transfer: reverts on a `false` return or a no-code token,
         // and allocates no memory (previously a raw `IERC20.transferFrom` with no

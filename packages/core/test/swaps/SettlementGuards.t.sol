@@ -227,21 +227,27 @@ contract SettlementGuardsTest is MockSettlementBase {
         settlement.fillWithPermit(order, batch, sig, AMOUNT_IN);
     }
 
-    function test_fillWithPermit_replayNonce_reverts() public {
+    /// @dev S-1: the idempotent permit path makes `fillWithPermit` partial-fillable
+    ///      with ONE signature. The first fill applies the batch (granting the full
+    ///      Permit3 allowance) and consumes half; the second re-presents the same
+    ///      signed batch, finds nonce 7 already spent, SKIPS the re-grant, and draws
+    ///      the remainder against the standing allowance — no revert. Before the fix
+    ///      the second fill reverted {PermitNonceUsed} and the order was stuck.
+    function test_fillWithPermit_partialFillsReuseOneSignature() public {
         _fundPermitSide(AMOUNT_IN, AMOUNT_OUT);
         Order memory order = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
         (IPermit3.PermitBatch memory batch, bytes memory sig) =
             _permitFor(order, AMOUNT_IN, 7, block.timestamp + 1 hours);
 
-        // First partial fill consumes permit nonce 7.
         vm.prank(solver);
         settlement.fillWithPermit(order, batch, sig, AMOUNT_IN / 2);
 
-        // Re-using the same signed batch (nonce 7) is rejected at the permit step,
-        // even though the order still has room.
+        // Same signed batch again — the spent nonce is skipped, not reverted.
         vm.prank(solver);
-        vm.expectRevert(IPermit3.PermitNonceUsed.selector);
         settlement.fillWithPermit(order, batch, sig, AMOUNT_IN / 2);
+
+        assertEq(tA.balanceOf(solver), AMOUNT_IN, "solver received the whole input across two fills");
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker received the whole output");
     }
 
     function test_fillWithPermit_wrongWitnessOrder_reverts() public {

@@ -159,9 +159,9 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
         permit3.approveToken(module, token, uint160(cap), 0);
     }
 
-    function _makerApproveTaker(bytes32 ref, uint256 cap) internal {
+    function _makerApproveTaker(address module, bytes32 ref, uint256 cap) internal {
         vm.prank(maker);
-        permit3.approveTaker(address(settlement), ref, uint160(cap), 0);
+        permit3.approveTaker(address(settlement), module, ref, uint160(cap), 0);
     }
 
     function _makerAuthorize(address module) internal {

@@ -42,7 +42,7 @@ contract WithdrawWithFeeTest is CompoundV3ModulesBase {
         permit3.approveToken(address(settlement), USDC, uint160(usdcIn), 0);
         // `comet.allow(takerModule)` (set in setUp) is the protocol-native gate;
         // the Permit3 taker allowance caps the fill on the exact position.
-        permit3.approveTaker(address(settlement), ref, uint160(usdcIn), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), ref, uint160(usdcIn), 0);
         vm.stopPrank();
     }
 
@@ -95,7 +95,7 @@ contract WithdrawWithFeeTest is CompoundV3ModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "module USDC drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(takerModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(takerModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 
@@ -137,7 +137,7 @@ contract WithdrawWithFeeTest is CompoundV3ModulesBase {
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received all withdrawn USDC");
         assertEq(IComet(COMET).borrowBalanceOf(maker), 0, "no debt opened");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(takerModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(takerModule), ref);
         assertEq(remaining, 0, "taker allowance fully spent");
 
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");

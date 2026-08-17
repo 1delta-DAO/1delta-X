@@ -136,8 +136,8 @@ contract MigrateTest is AaveModulesBase {
         tp[3] = IPermit3.TokenPermit(address(settlement), USDC, uint160(3_050e6), exp);
 
         IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](2);
-        tkp[0] = IPermit3.TakerPermit(address(settlement), keccak256(aaveWithdrawData), uint160(9 ether), exp);
-        tkp[1] = IPermit3.TakerPermit(address(settlement), keccak256(sparkBorrowData), uint160(3_000e6), exp);
+        tkp[0] = IPermit3.TakerPermit(address(settlement), address(withdrawModule), keccak256(aaveWithdrawData), uint160(9 ether), exp);
+        tkp[1] = IPermit3.TakerPermit(address(settlement), address(borrowModule), keccak256(sparkBorrowData), uint160(3_000e6), exp);
 
         batch = _buildBatch(tp, tkp, 3, order.deadline);
     }

@@ -87,7 +87,7 @@ contract FluidLeverageTest is FluidModulesBase {
         // wstETH: deposit module pulls the collateral via Permit3 during MAKE.
         permit3.approveToken(address(depositModule), WSTETH, uint160(colAdd), 0);
         // Permit3 taker gate on the exact (op, vault, factory, nftId) borrow ref.
-        permit3.approveTaker(address(settlement), keccak256(_borrowData(nftId)), uint160(debtAdd), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData(nftId)), uint160(debtAdd), 0);
         // USDC fallback allowance for the tokenIn shortfall path — never triggers
         // here since the borrow fully funds tokenIn, but keeps it safe.
         permit3.approveToken(address(settlement), USDC, uint160(debtAdd), 0);

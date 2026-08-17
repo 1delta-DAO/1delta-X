@@ -248,9 +248,13 @@ export interface TokenPermit {
   expiration: number;
 }
 
-/// Permit3 taker-book permit (spender may consume a position allowance keyed by `ref`).
+/// Permit3 taker-book permit: `spender` may dispatch `module` against the position
+/// keyed by `ref = keccak256(data)`. The allowance is keyed
+/// `(user, spender, module, ref)`, so `module` is a signed field — approving a
+/// borrow module can never be consumed dispatching a different one.
 export interface TakerPermit {
   spender: Address;
+  module: Address;
   ref: Hex;
   amount: bigint;
   expiration: number;

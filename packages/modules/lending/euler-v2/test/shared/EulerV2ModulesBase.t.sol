@@ -127,9 +127,7 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(depositModule), WETH, uint160(collateralIn), 0);
-        permit3.approveTaker(
-            address(settlement),
-            keccak256(abi.encode(uint8(EulerV2TakerModule.Op.Borrow), address(EUSDC))),
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(abi.encode(uint8(EulerV2TakerModule.Op.Borrow), address(EUSDC))),
             uint160(borrowOut),
             0
         );

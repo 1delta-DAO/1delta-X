@@ -44,6 +44,19 @@ abstract contract UnorderedNonces is Permit3Base {
         emit UnorderedNonceInvalidation(msg.sender, wordPos, mask);
     }
 
+    /// @dev Batched form for the combined {SignedPermits.lockdownAll}.
+    function _invalidateNonces(address owner, uint256[] calldata wordPos, uint256[] calldata mask) internal {
+        uint256 length = wordPos.length;
+        if (length != mask.length) revert NonceArrayLengthMismatch();
+        for (uint256 i; i < length;) {
+            permitNonceBitmap[owner][wordPos[i]] |= mask[i];
+            emit UnorderedNonceInvalidation(owner, wordPos[i], mask[i]);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     /// @dev Marks `nonce` spent for `owner`, reverting if it already was.
     function _usePermitNonce(address owner, uint256 nonce) internal {
         uint256 wordIndex = nonce >> 8;
@@ -52,5 +65,11 @@ abstract contract UnorderedNonces is Permit3Base {
         uint256 word = permitNonceBitmap[owner][wordIndex];
         if (word & mask != 0) revert PermitNonceUsed();
         permitNonceBitmap[owner][wordIndex] = word | mask;
+    }
+
+    /// @dev Non-reverting predicate form of {_usePermitNonce}, for the idempotent
+    ///      signed-permit path ({SignedPermits.permitBatchWithWitnessIfNeeded}).
+    function _isPermitNonceUsed(address owner, uint256 nonce) internal view returns (bool) {
+        return permitNonceBitmap[owner][nonce >> 8] & (1 << (nonce & 0xff)) != 0;
     }
 }

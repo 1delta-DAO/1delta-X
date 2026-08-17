@@ -33,13 +33,22 @@ import {Allowance} from "./libraries/Allowance.sol";
 abstract contract TakerAllowance is Permit3Base {
     using Allowance for IPermit3.PackedAllowance;
 
-    /// @dev user → spender → ref → (amount, expiration, nonce).
+    /// @dev user → spender → module → ref → (amount, expiration, nonce).
     ///      Keyed by `spender` (the caller of `take`, e.g. Settlement) — exactly
     ///      like the token book is keyed by `spender` — so only an approved
     ///      spender can consume a taker allowance. `ref = keccak256(data)` is the
-    ///      opaque position key; the dispatched module is bound by the maker's
-    ///      signed order, not by `ref`.
-    mapping(address => mapping(address => mapping(bytes32 => PackedAllowance))) private _takerAllowance;
+    ///      opaque position key.
+    ///
+    ///      `module` IS PART OF THE KEY. Earlier revisions keyed on `ref` alone, on
+    ///      the reasoning that Settlement pins the module from the maker's signed
+    ///      order. But the shipped module `data` layouts are deliberately minimal
+    ///      (`abi.encode(comet)`, `abi.encode(cToken)`, a `MarketParams`), so two
+    ///      distinct modules routinely share a `ref` — the containment was the
+    ///      order signature, never the key. Naming the module in the key makes an
+    ///      `approveTaker(borrowModule, …)` grant unusable to dispatch ANY other
+    ///      module, whatever its data, and lets a wallet render the authorisation.
+    mapping(address => mapping(address => mapping(address => mapping(bytes32 => PackedAllowance)))) private
+        _takerAllowance;
 
     /// @dev 1/2 flag rather than transient storage: some target chains have no
     ///      TSTORE. Guards `take` only — that is the sole outbound call.
@@ -54,9 +63,12 @@ abstract contract TakerAllowance is Permit3Base {
 
     // ──────────────────── Grants ────────────────────
 
-    function approveTaker(address spender, bytes32 ref, uint160 amount, uint48 expiration) external override {
-        _takerAllowance[msg.sender][spender][ref].grant(amount, expiration);
-        emit TakerApproval(msg.sender, spender, ref, amount, expiration);
+    function approveTaker(address spender, address module, bytes32 ref, uint160 amount, uint48 expiration)
+        external
+        override
+    {
+        _takerAllowance[msg.sender][spender][module][ref].grant(amount, expiration);
+        emit TakerApproval(msg.sender, spender, ref, module, amount, expiration);
     }
 
     // ──────────────────── Spending ────────────────────
@@ -82,37 +94,48 @@ abstract contract TakerAllowance is Permit3Base {
         // (`_executeItems`), so this is behaviour-preserving on the honest path.
         if (amount == 0) revert ZeroAmount();
         bytes32 ref = keccak256(data);
-        _takerAllowance[user][msg.sender][ref].spend(amount);
+        _takerAllowance[user][msg.sender][module][ref].spend(amount);
+        emit Taken(user, msg.sender, ref, module, amount, receiver);
         ITakerModule(module).takeOnBehalf(user, amount, receiver, data);
     }
 
-    function takerAllowance(address user, address spender, bytes32 ref)
+    function takerAllowance(address user, address spender, address module, bytes32 ref)
         external
         view
         override
-        returns (uint160 amount, uint48 expiration, uint48 nonce)
+        returns (uint160 amount, uint48 expiration)
     {
-        PackedAllowance storage a = _takerAllowance[user][spender][ref];
-        return (a.amount, a.expiration, a.nonce);
+        PackedAllowance storage a = _takerAllowance[user][spender][module][ref];
+        return (a.amount, a.expiration);
+    }
+
+    /// @inheritdoc IPermit3
+    function refFor(bytes calldata data) external pure override returns (bytes32) {
+        return keccak256(data);
     }
 
     // ──────────────────── Revocation ────────────────────
 
-    function revokeTaker(address spender, bytes32 ref) external override {
-        delete _takerAllowance[msg.sender][spender][ref];
-        emit TakerApproval(msg.sender, spender, ref, 0, 0);
+    function revokeTaker(address spender, address module, bytes32 ref) external override {
+        delete _takerAllowance[msg.sender][spender][module][ref];
+        emit TakerApproval(msg.sender, spender, ref, module, 0, 0);
     }
 
     /// @dev Taker-book analogue of `lockdown` (Permit3 extension).
     function lockdownTakers(SpenderRefPair[] calldata approvals) external override {
-        address owner = msg.sender;
+        _lockdownTakers(msg.sender, approvals);
+    }
+
+    /// @dev Shared by `lockdownTakers` and the combined {SignedPermits.lockdownAll}.
+    function _lockdownTakers(address owner, SpenderRefPair[] calldata approvals) internal {
         unchecked {
             uint256 length = approvals.length;
             for (uint256 i; i < length; ++i) {
                 address spender = approvals[i].spender;
+                address module = approvals[i].module;
                 bytes32 ref = approvals[i].ref;
-                _takerAllowance[owner][spender][ref].amount = 0;
-                emit TakerLockdown(owner, spender, ref);
+                _takerAllowance[owner][spender][module][ref].amount = 0;
+                emit TakerLockdown(owner, spender, module, ref);
             }
         }
     }
@@ -126,8 +149,8 @@ abstract contract TakerAllowance is Permit3Base {
         uint256 length = permits.length;
         for (uint256 i; i < length;) {
             TakerPermit calldata p = permits[i];
-            _takerAllowance[owner][p.spender][p.ref].grant(p.amount, p.expiration);
-            emit TakerApproval(owner, p.spender, p.ref, p.amount, p.expiration);
+            _takerAllowance[owner][p.spender][p.module][p.ref].grant(p.amount, p.expiration);
+            emit TakerApproval(owner, p.spender, p.ref, p.module, p.amount, p.expiration);
             unchecked {
                 ++i;
             }

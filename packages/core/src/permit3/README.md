@@ -160,14 +160,20 @@ relocates `_tokenAllowance` would strand allowances mid-migration.
   Spender calls `permit3.transferFrom(user, to, token, amount)`; the
   allowance gates on `msg.sender == spender`.
 
-- **Taker book** — keyed `(user, spender, bytes32 ref)` where
+- **Taker book** — keyed `(user, spender, module, bytes32 ref)` where
   `ref = keccak256(data)`. The **spender** is the address allowed to call
-  `take` (the Settlement contract), exactly mirroring the token book. An
-  approved spender invokes
+  `take` (the Settlement contract), exactly mirroring the token book, and the
+  **module** is the adapter the grant authorises. An approved spender invokes
   `permit3.take(module, user, amount, receiver, data)`; Permit3
-  decrements the `(user, msg.sender, ref)` allowance and calls
+  decrements the `(user, msg.sender, module, ref)` allowance and calls
   `module.takeOnBehalf(...)`. Asset identity lives inside `data` (or
   is implicit to the position for protocols like Morpho/Comet).
+
+  `module` is in the key (audit fix S-2): `ref = keccak256(data)` alone did not
+  bind the module, and minimal `data` layouts (`abi.encode(comet)`,
+  `abi.encode(cToken)`) are shared across modules, so a standing grant to one
+  module could be consumed dispatching another. Now approving a borrow module can
+  never dispatch a withdraw module, whatever the data.
 
   Because the book is spender-keyed, a standing taker allowance can only
   ever be consumed by the spender the maker approved — a third party
@@ -189,8 +195,9 @@ Every `ITakerModule` performs exactly one operation. The op is identified
 by the module's address; the position is identified by `keccak256(data)`.
 This has three consequences:
 
-- Approvals are legible: `approveTaker(AaveV3BorrowModule, ref, 1000 USDC)`
-  is unambiguously a borrow authorisation.
+- Approvals are legible: `approveTaker(settlement, AaveV3BorrowModule, ref, 1000
+  USDC)` is unambiguously a borrow authorisation — the spender is Settlement, and
+  the module (`AaveV3BorrowModule`) is a signed part of the key.
 - Module code stays tiny — one protocol call, one optional
   `permit3.transferFrom` for ERC20 legs, nothing else.
 - A compromised borrow module cannot be used to withdraw collateral, and
@@ -294,8 +301,8 @@ The taker allowance is granted to the **spender** that will call `take` — the
 Settlement contract — not to the module:
 
 ```solidity
-bytes32 ref = keccak256(data);     // same bytes the solver will pass to `take`
-permit3.approveTaker(settlement, ref, 1_000e6, uint48(block.timestamp + 1 hours));
+bytes32 ref = permit3.refFor(data);   // == keccak256(data); the bytes the solver passes to `take`
+permit3.approveTaker(settlement, borrowModule, ref, 1_000e6, uint48(block.timestamp + 1 hours));
 ```
 
 Sign the order and hand it to a solver (or self-solve). (In the single-signature
@@ -490,21 +497,38 @@ Implemented:
       `module.makeOnBehalf`, token legs via `permit3.transferFrom`, no
       module whitelist, no admin role.
 
+Added in the 2026-08-17 audit remediation:
+- [x] **Module-bound taker key** (S-2) — `(user, spender, module, ref)`;
+      `TakerPermit`/`approveTaker`/`takerAllowance`/`revokeTaker`/`SpenderRefPair`
+      all carry `module`.
+- [x] **Idempotent `permitBatchWithWitnessIfNeeded`** (S-1) — verifies the
+      signature every time but skips a spent nonce (and its grant) instead of
+      reverting, so front-running the permit can no longer brick a `fillWithPermit`
+      order and partial fills reuse one signature. `Core.fillWithPermit` uses it.
+- [x] **Zero-amount guards** (S-3) on `transferFrom` and the transfer library.
+- [x] **`Taken` event** on `take` (S-8); **double-probe** confused-deputy check in
+      `AllowanceHolder` (S-6).
+- [x] **`permitTake` / `permitTakeWithWitness`** — the taker-book analogue of
+      `permitTransferFrom`: a signature authorising ONE module dispatch with no
+      allowance left behind. Shipped as a Permit3 primitive; Settlement wiring is
+      deferred (the generic item loop dispatches every TAKE via a standing
+      allowance, so a pre-step would double-dispatch — see the note in
+      [`Core.sol`](../settlement/Core.sol)).
+- [x] **`refFor(data)`** helper; **`ITakerModuleDescribe.describe`** optional
+      module surface for rendering a ref in words (U-5).
+- [x] **`setStrictMode` / `strictMode`** (U-6) — opt-in that makes revocation a
+      real kill switch by refusing the direct-approval fallback.
+- [x] **`lockdownAll`** (U-4) — one call revoking both books + signed-permit
+      nonces (supersedes the proposed `revokeAll`).
+- [x] **ERC-5267 `eip712Domain()`** on Permit3 (U-8).
+- [x] **`SettlementLens.previewTakerAllowances`** (U-3) — per-TAKE-item taker
+      allowance preflight, which the token-side preview skipped for item orders.
+
 Not yet implemented:
-- [ ] Settlement wiring for `AllowanceHolder` — some path by which Settlement
-      pulls taker funds through the holder. The candidates are a third attempt in
-      [`Permit3TransferLib`](../utils/Permit3TransferLib.sol) (no caller changes,
-      but it widens the silent-fallthrough surface that library already warns
-      about) or an explicit opt-in through the `takerData` channel (no silent
-      fallthrough, but it touches the fill path and the SDK). Until one lands the
-      holder is usable only by contracts that call it directly.
-- [ ] `permitTake` — the taker-book analogue of `permitTransferFrom`: a signature
-      authorising ONE module dispatch without leaving an allowance behind. Would
-      save the grant-then-spend `SSTORE` pair on the single-signature fill path.
-- [ ] Concrete taker modules (AaveV3Borrow/Withdraw, Comet, Morpho
-      Blue, Compound V2, Lido unstake/claim).
-- [ ] `revokeAll(module)` helper that also calls the module's
-      per-protocol revoke path.
-- [ ] Foundry invariant suite asserting `data` round-trips cleanly
-      through each module (the ref a frontend hashes matches the bytes
-      the module decodes).
+- [ ] Settlement wiring for `AllowanceHolder` (filler-side, via the `takerData`
+      channel) and for `permitTake` (needs the fill item-loop to be permit-aware).
+      Both are additive fill-path changes with their own gas-snapshot/test surface.
+- [ ] Concrete taker modules for chains not yet covered by the `packages/modules`
+      tree.
+- [ ] Foundry invariant suite asserting `data` round-trips cleanly through each
+      module (the ref a frontend hashes matches the bytes the module decodes).

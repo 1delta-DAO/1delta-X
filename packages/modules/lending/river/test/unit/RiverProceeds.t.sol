@@ -124,7 +124,7 @@ contract RiverProceedsTest is Test {
 
     function _take(bytes memory data, uint256 amount) internal {
         vm.prank(maker);
-        permit3.approveTaker(settlement, keccak256(data), uint160(amount), 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), uint160(amount), 0);
         vm.prank(settlement);
         permit3.take(address(takerModule), maker, uint160(amount), solver, data);
     }
@@ -148,7 +148,7 @@ contract RiverProceedsTest is Test {
 
         bytes memory data = _borrowData();
         vm.prank(maker);
-        permit3.approveTaker(settlement, keccak256(data), uint160(BORROW), 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), uint160(BORROW), 0);
 
         vm.prank(settlement);
         vm.expectRevert(
@@ -168,7 +168,7 @@ contract RiverProceedsTest is Test {
 
         bytes memory data = _borrowData();
         vm.prank(maker);
-        permit3.approveTaker(settlement, keccak256(data), uint160(BORROW), 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), uint160(BORROW), 0);
 
         vm.prank(settlement);
         vm.expectRevert(abi.encodeWithSelector(RiverProceeds.InsufficientProceeds.selector, 0, BORROW));
@@ -184,7 +184,7 @@ contract RiverProceedsTest is Test {
 
         bytes memory data = _collData();
         vm.prank(maker);
-        permit3.approveTaker(settlement, keccak256(data), uint160(1 ether), 0);
+        permit3.approveTaker(settlement, address(takerModule), keccak256(data), uint160(1 ether), 0);
 
         vm.prank(settlement);
         vm.expectRevert(abi.encodeWithSelector(RiverProceeds.InsufficientProceeds.selector, 0, 1 ether));

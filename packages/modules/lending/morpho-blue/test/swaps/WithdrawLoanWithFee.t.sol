@@ -42,7 +42,7 @@ contract WithdrawLoanWithFeeTest is MorphoModulesBase {
         // Morpho-native authorisation for the combined taker module; the taker
         // allowance is the only per-fill cap (no receipt token to pull).
         MORPHO.setAuthorization(address(takerModule), true);
-        permit3.approveTaker(address(settlement), ref, uint160(usdcIn), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), ref, uint160(usdcIn), 0);
         vm.stopPrank();
     }
 
@@ -83,7 +83,7 @@ contract WithdrawLoanWithFeeTest is MorphoModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(USDC).balanceOf(address(takerModule)), 0, "module USDC drained");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(takerModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(takerModule), ref);
         assertEq(remaining, 0, "taker allowance spent");
     }
 
@@ -122,7 +122,7 @@ contract WithdrawLoanWithFeeTest is MorphoModulesBase {
         assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, usdcOut - fee, "maker net full");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received all withdrawn USDC");
 
-        (uint160 remaining,,) = permit3.takerAllowance(maker, address(takerModule), ref);
+        (uint160 remaining,) = permit3.takerAllowance(maker, address(settlement), address(takerModule), ref);
         assertEq(remaining, 0, "taker allowance fully spent");
 
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
