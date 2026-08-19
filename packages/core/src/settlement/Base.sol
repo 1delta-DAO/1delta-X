@@ -67,6 +67,9 @@ abstract contract Base is Signatures {
     /// @dev {Core.fillWithPermitTake} completed without dispatching its one-shot
     ///      permit — so nothing verified the maker's signature. Reverts.
     error PermitTakeNotConsumed();
+    /// @dev The one-shot permit does not match the TAKE item it would fund — a
+    ///      different module, or an amount that is not this fill's pro-rata slice.
+    error PermitTakeMismatch();
     /// @dev The constructor was given a `permit3` with no code. Load-bearing: every
     ///      maker/solver token move runs through
     ///      {Permit3TransferLib.transferFromWithFallback}, which probes Permit3 with
@@ -324,7 +327,7 @@ abstract contract Base is Signatures {
             // witness binds it to THIS order, so it doubles as the order's
             // authorization (see {Core.fillWithPermitTake}).
             if (ctx.permitTake.length != 0) {
-                _takeByPermit(order, ctx, to, itemData);
+                _takeByPermit(order, ctx, module, slice, to, itemData);
             } else {
                 PERMIT3.take(module, order.maker, uint160(slice), to, itemData);
             }
@@ -344,9 +347,24 @@ abstract contract Base is Signatures {
 
     /// @dev Consume the fill's one-shot taker permit for this TAKE item. Its own
     ///      frame so the 7-argument call does not share {_runItem}'s stack.
-    function _takeByPermit(Order calldata order, FillCtx memory ctx, address to, bytes calldata itemData) private {
+    function _takeByPermit(
+        Order calldata order,
+        FillCtx memory ctx,
+        address module,
+        uint256 slice,
+        address to,
+        bytes calldata itemData
+    ) private {
         (IPermit3.PermitTake memory permit, bytes memory sig) =
             abi.decode(ctx.permitTake, (IPermit3.PermitTake, bytes));
+        // THE ITEM IS THE SOURCE OF TRUTH. Permit3 dispatches `permit.module` for
+        // `permit.amount`, so without this the order's own `module`/`amount` would be
+        // decorative: a PARTIAL fill would still draw the permit's FULL amount
+        // (over-borrowing the maker, who gets the surplus back as tokens but keeps
+        // the debt), and the permit could name a different module than the order
+        // advertises. Requiring equality also makes this path implicitly full-fill:
+        // a pro-rata `slice` below `permit.amount` cannot match.
+        if (permit.module != module || permit.amount != slice) revert PermitTakeMismatch();
         // MARK CONSUMED. `ctx` is a memory struct threaded by reference through
         // `_settleForward` → `_executeItems` → `_runItem`, so clearing here is visible
         // to {Core.fillWithPermitTake}, which REQUIRES it to be empty. That check is

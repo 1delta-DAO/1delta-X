@@ -490,4 +490,43 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         settlement.fillWithPermitTake(order, junk, hex"deadbeef", usdcIn);
         assertEq(IERC20(USDC).balanceOf(maker), before, "maker untouched");
     }
+
+    /// @dev SECURITY REGRESSION. Permit3 dispatches `permit.module` for
+    ///      `permit.amount`, so without the item-binding guard a PARTIAL fill drew
+    ///      the permit's FULL amount — over-borrowing the maker, who gets the surplus
+    ///      back as tokens but keeps the debt (proven: a half fill emitted `Taken`
+    ///      for the whole amount). The item is the source of truth; a slice below
+    ///      `permit.amount` must revert.
+    function test_permitTake_partialFill_reverts_overDraw() public {
+        uint256 usdcIn = 1_500e6;
+        uint256 wethOut = 1 ether;
+        deal(WETH, solver, wethOut);
+        deal(USDC, address(taker), usdcIn * 2);
+        _approveSolverSide(wethOut, WETH);
+
+        Item memory it = _takeItem(usdcIn, address(0), USDC, usdcIn);
+        Order memory order = _orderItems(3, _a1(USDC), _u1(usdcIn), _a1(WETH), _u1(wethOut), _one(it));
+        IPermit3.PermitTake memory p = IPermit3.PermitTake({
+            module: address(taker), ref: keccak256(it.data), amount: uint160(usdcIn),
+            nonce: 91, deadline: block.timestamp + 1 hours
+        });
+        bytes memory psig = _signPermitTakeWitness(p, _hashOrder(order));
+
+        // HALF fill: the item's slice is usdcIn/2 but the permit authorises usdcIn.
+        vm.prank(solver);
+        vm.expectRevert(Base.PermitTakeMismatch.selector);
+        settlement.fillWithPermitTake(order, p, psig, usdcIn / 2);
+
+        // A permit naming a DIFFERENT module than the order's item is rejected too.
+        IPermit3.PermitTake memory wrongModule = IPermit3.PermitTake({
+            module: address(depositor), ref: keccak256(it.data), amount: uint160(usdcIn),
+            nonce: 92, deadline: block.timestamp + 1 hours
+        });
+        // Hoisted: `_signPermitTakeWitness` itself calls `permit3.DOMAIN_SEPARATOR()`,
+        // and `expectRevert` would otherwise bind to THAT call.
+        bytes memory wrongSig = _signPermitTakeWitness(wrongModule, _hashOrder(order));
+        vm.prank(solver);
+        vm.expectRevert(Base.PermitTakeMismatch.selector);
+        settlement.fillWithPermitTake(order, wrongModule, wrongSig, usdcIn);
+    }
 }
