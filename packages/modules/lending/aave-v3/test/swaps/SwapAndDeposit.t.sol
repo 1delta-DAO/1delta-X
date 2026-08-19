@@ -48,7 +48,7 @@ contract SwapAndDepositTest is AaveModulesBase {
             nonce: 0,
             legsIn: _legsIn1(USDC, usdcIn), //        fixed-price (start == end)
             legsOut: _legsOut1(WETH, wethOut),
-            timing: _deadlineBits(block.timestamp + 1 hours),
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),
@@ -117,7 +117,7 @@ contract SwapAndDepositTest is AaveModulesBase {
             nonce: 0,
             legsIn: _legsIn1(USDC, usdcIn),
             legsOut: _legsOut1(WETH, wethOut),
-            timing: _deadlineBits(block.timestamp + 1 hours),
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),
@@ -132,7 +132,7 @@ contract SwapAndDepositTest is AaveModulesBase {
             _tokenPermits(address(settlement), USDC, usdcIn, address(depositModule), WETH, wethOut),
             _noTakerPermits(),
             0,
-            _deadline(order)
+            _expiry(order)
         );
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));

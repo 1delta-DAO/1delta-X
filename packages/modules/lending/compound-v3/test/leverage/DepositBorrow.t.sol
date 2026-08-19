@@ -88,11 +88,11 @@ contract DepositBorrowTest is CompoundV3ModulesBase {
         Order memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
 
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](2);
-        tp[0] = IPermit3.TokenPermit(address(settlement), USDC, uint160(borrowOut), uint48(_deadline(order)));
-        tp[1] = IPermit3.TokenPermit(address(depositModule), WETH, uint160(collateralIn), uint48(_deadline(order)));
+        tp[0] = IPermit3.TokenPermit(address(settlement), USDC, uint160(borrowOut), uint48(_expiry(order)));
+        tp[1] = IPermit3.TokenPermit(address(depositModule), WETH, uint160(collateralIn), uint48(_expiry(order)));
 
         IPermit3.PermitBatch memory batch =
-            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(borrowData), borrowOut), 1, _deadline(order));
+            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(borrowData), borrowOut), 1, _expiry(order));
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 

@@ -77,24 +77,40 @@ export async function fetchMarketMeta(
 }
 
 /**
- * A deadline for one venue's fetch.
+ * Bound how long one venue may take, and cancel it when the deadline passes.
  *
- * Without it "gradual loading" is a lie: a hung endpoint holds its venue in
- * `loading` forever, and the legend never resolves to either depth or a reason.
- * The parent signal still wins, so switching markets aborts immediately.
+ * The signal is not enough on its own. Aborting only helps if whatever is slow
+ * is watching for it — an in-flight `fetch` is, but a stall anywhere else in the
+ * chain is not — so the work is RACED against the timer as well. Signal to be
+ * polite and stop the request; race to guarantee the venue resolves either way.
+ * Without the race a hung endpoint pins its venue in `loading` forever, and
+ * "gradual loading" quietly becomes "one venue never arrives".
+ *
+ * The parent signal still wins, so switching markets cancels immediately.
  */
-export function withTimeout(parent: AbortSignal | undefined, ms: number): { signal: AbortSignal; done: () => void } {
+export async function withDeadline<T>(
+  parent: AbortSignal | undefined,
+  ms: number,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(`timed out after ${ms / 1000}s`)), ms);
   const relay = () => controller.abort(parent?.reason);
   parent?.addEventListener("abort", relay);
-  return {
-    signal: controller.signal,
-    done: () => {
-      clearTimeout(timer);
-      parent?.removeEventListener("abort", relay);
-    },
-  };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`timed out after ${Math.round(ms / 1000)}s`));
+    }, ms);
+  });
+
+  try {
+    return await Promise.race([work(controller.signal), expired]);
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener("abort", relay);
+  }
 }
 
 /** How long any single venue gets before it is called slow rather than waited on. */
@@ -165,31 +181,29 @@ export async function fetchVenue(
 ): Promise<VenueResult> {
   const source = DEX_SOURCE[ref.dex];
   const blank: Venue = { source, dex: ref.dex, pool: ref.address, feeBps: ref.feeBps, block: 0, rungs: 0 };
-  const { signal, done } = withTimeout(parentSignal, VENUE_TIMEOUT_MS);
   try {
-    const { meta, liquidity } = await fetchPool(ref, chain, signal);
-    const baseAddress = base.address.toLowerCase();
-    const isToken0 = meta.token0.address.toLowerCase() === baseAddress;
-    if (!isToken0 && meta.token1.address.toLowerCase() !== baseAddress) {
-      throw new Error(`pool does not hold ${base.symbol}`);
-    }
+    return await withDeadline(parentSignal, VENUE_TIMEOUT_MS, async (signal) => {
+      const { meta, liquidity } = await fetchPool(ref, chain, signal);
+      const baseAddress = base.address.toLowerCase();
+      const isToken0 = meta.token0.address.toLowerCase() === baseAddress;
+      if (!isToken0 && meta.token1.address.toLowerCase() !== baseAddress) {
+        throw new Error(`pool does not hold ${base.symbol}`);
+      }
 
-    const ladder = buildLadder(liquidity, { baseIsToken0: isToken0, maxRungs: MAX_RUNGS, maxSpread: MAX_SPREAD });
-    const tag = (r: { price: number; size: number }): Level => ({
-      price: r.price,
-      size: r.size,
-      source,
-      pool: ref.address,
-      feeBps: ref.feeBps,
+      const ladder = buildLadder(liquidity, { baseIsToken0: isToken0, maxRungs: MAX_RUNGS, maxSpread: MAX_SPREAD });
+      const tag = (r: { price: number; size: number }): Level => ({
+        price: r.price,
+        size: r.size,
+        source,
+        pool: ref.address,
+        feeBps: ref.feeBps,
+      });
+      const bids = ladder.bids.map(tag);
+      const asks = ladder.asks.map(tag);
+      return { venue: { ...blank, block: liquidity.block, rungs: bids.length + asks.length }, bids, asks };
     });
-    const bids = ladder.bids.map(tag);
-    const asks = ladder.asks.map(tag);
-    return { venue: { ...blank, block: liquidity.block, rungs: bids.length + asks.length }, bids, asks };
   } catch (e) {
-    const reason = signal.aborted && signal.reason instanceof Error ? signal.reason.message : undefined;
-    return { venue: { ...blank, error: reason ?? (e instanceof Error ? e.message : String(e)) }, bids: [], asks: [] };
-  } finally {
-    done();
+    return { venue: { ...blank, error: e instanceof Error ? e.message : String(e) }, bids: [], asks: [] };
   }
 }
 

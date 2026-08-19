@@ -179,7 +179,7 @@ contract InboxAccountingTest is BridgeTestBase {
         _acrossDeliver(BRIDGED, _commitmentFor(_hashOrder(o)));
         inbox.activate(o);
 
-        vm.warp(_deadline(o) + 1);
+        vm.warp(_expiry(o) + 1);
         inbox.settle(_hashOrder(o));
 
         assertEq(tA.balanceOf(beneficiary), BRIDGED, "full refund");
@@ -195,7 +195,7 @@ contract InboxAccountingTest is BridgeTestBase {
         vm.prank(solver);
         settlement.fill(o, "", BRIDGED / 4);
 
-        vm.warp(_deadline(o) + 1);
+        vm.warp(_expiry(o) + 1);
         inbox.settle(_hashOrder(o));
 
         assertEq(tB.balanceOf(endUser), DELIVERED / 4, "user got the filled quarter");
@@ -233,7 +233,7 @@ contract InboxAccountingTest is BridgeTestBase {
         _acrossDeliver(BRIDGED, _commitmentFor(h));
         inbox.activate(o);
 
-        vm.warp(_deadline(o) + 1);
+        vm.warp(_expiry(o) + 1);
         inbox.settle(h);
         vm.expectRevert(BridgedOrderInbox.AlreadySettled.selector);
         inbox.settle(h);
@@ -247,7 +247,7 @@ contract InboxAccountingTest is BridgeTestBase {
         _acrossDeliver(BRIDGED, _commitmentFor(h));
         inbox.activate(o);
 
-        vm.warp(_deadline(o) + 1);
+        vm.warp(_expiry(o) + 1);
         inbox.settle(h);
         assertFalse(settlement.orderApproved(address(inbox), h), "approval withdrawn");
     }
@@ -337,7 +337,7 @@ contract InboxAccountingTest is BridgeTestBase {
         inbox.sync(h); // idempotent
         assertEq(inbox.liability(address(tA)), (BRIDGED * 3) / 4, "only the unspent part is owed");
 
-        vm.warp(_deadline(o) + 1);
+        vm.warp(_expiry(o) + 1);
         inbox.settle(h);
         assertEq(inbox.liability(address(tA)), 0, "cleared exactly once");
         assertEq(tA.balanceOf(beneficiary), (BRIDGED * 3) / 4, "remainder refunded");
@@ -536,7 +536,7 @@ contract InboxAccountingTest is BridgeTestBase {
     function test_shape_rejectsExpiredDeadline() public {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
         _credited(o);
-        vm.warp(_deadline(o) + 1);
+        vm.warp(_expiry(o) + 1);
         vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
         inbox.activate(o);
     }

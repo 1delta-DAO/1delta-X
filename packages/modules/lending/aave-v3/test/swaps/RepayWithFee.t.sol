@@ -43,7 +43,7 @@ contract RepayWithFeeTest is AaveModulesBase {
             nonce: nonce,
             legsIn: _legsIn1Rising(USDC, F0, FMAX),
             legsOut: PackedEncode.legsOut(new LegOut[](0)),
-            timing: _packTiming(uint32(block.timestamp), uint32(DURATION), 0) | _deadlineBits(block.timestamp + 1 hours),
+            timing: _packTiming(uint32(block.timestamp), uint32(DURATION), 0) | _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: F0, //      full-fill only (repay is not partial-friendly here)
             curve: _noCurve(),

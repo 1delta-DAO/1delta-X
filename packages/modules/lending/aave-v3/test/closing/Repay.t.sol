@@ -103,7 +103,7 @@ contract RepayTest is AaveModulesBase {
             _tokenPermits(address(settlement), WETH, 1 ether, address(repayModule), USDC, buffered),
             _noTakerPermits(),
             2,
-            _deadline(order)
+            _expiry(order)
         );
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));

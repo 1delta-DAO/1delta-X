@@ -64,7 +64,7 @@ contract MultiOutputFlashTest is CoreSettlementBase {
             nonce: 0,
             legsIn: _legsIn1(WETH, WETH_IN),
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: _deadlineBits(block.timestamp + 1 hours),
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),

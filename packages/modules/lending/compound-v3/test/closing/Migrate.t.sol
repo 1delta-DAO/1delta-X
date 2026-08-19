@@ -133,7 +133,7 @@ contract MigrateTest is CompoundV3ModulesBase {
             nonce: 7,
             legsIn: _legsIn1(USDS, 3_000e18),
             legsOut: _legsOut1(USDC, 3_050e6),
-            timing: _deadlineBits(block.timestamp + 1 hours),
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),
@@ -154,7 +154,7 @@ contract MigrateTest is CompoundV3ModulesBase {
         tkp[0] = IPermit3.TakerPermit(address(settlement), address(takerModule), keccak256(withdrawData), uint160(9 ether), exp);
         tkp[1] = IPermit3.TakerPermit(address(settlement), address(takerModule), keccak256(borrowData), uint160(3_000e18), exp);
 
-        batch = _buildBatch(tp, tkp, 3, _deadline(order));
+        batch = _buildBatch(tp, tkp, 3, _expiry(order));
     }
 
     function _assertMigration() internal view {

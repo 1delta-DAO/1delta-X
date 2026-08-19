@@ -242,6 +242,7 @@ contract SettlementLens {
             // {DutchAuction.bumpBps}'s anonymous preview, so a quote from this lens is
             // exactly what that filler would get. Pinned the same way a fill pins it.
             DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData),
+            "", // no one-shot taker permit in a preview — see {FillCtx.permitTake}
             new uint256[](0) // preview prices legs directly; no payout ledger to record
         );
     }

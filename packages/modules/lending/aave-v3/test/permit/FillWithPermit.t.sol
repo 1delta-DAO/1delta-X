@@ -47,7 +47,7 @@ contract FillWithPermitTest is AaveModulesBase {
             nonce: 42,
             legsIn: _legsIn1(USDC, usdcIn),
             legsOut: _legsOut1(WETH, wethOut),
-            timing: _deadlineBits(block.timestamp + 1 hours),
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),
@@ -63,15 +63,15 @@ contract FillWithPermitTest is AaveModulesBase {
         //   - depositModule pulls WETH for the supply
         IPermit3.TokenPermit[] memory tokenPermits = new IPermit3.TokenPermit[](2);
         tokenPermits[0] = IPermit3.TokenPermit({
-            spender: address(settlement), token: USDC, amount: uint160(usdcIn), expiration: uint48(_deadline(order))
+            spender: address(settlement), token: USDC, amount: uint160(usdcIn), expiration: uint48(_expiry(order))
         });
         tokenPermits[1] = IPermit3.TokenPermit({
-            spender: address(depositModule), token: WETH, amount: uint160(wethOut), expiration: uint48(_deadline(order))
+            spender: address(depositModule), token: WETH, amount: uint160(wethOut), expiration: uint48(_expiry(order))
         });
         IPermit3.TakerPermit[] memory takerPermits = new IPermit3.TakerPermit[](0);
 
         IPermit3.PermitBatch memory batch =
-            IPermit3.PermitBatch({tokens: tokenPermits, takers: takerPermits, nonce: 1, deadline: _deadline(order)});
+            IPermit3.PermitBatch({tokens: tokenPermits, takers: takerPermits, nonce: 1, deadline: _expiry(order)});
 
         // Sign the witness-bound permit.
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));

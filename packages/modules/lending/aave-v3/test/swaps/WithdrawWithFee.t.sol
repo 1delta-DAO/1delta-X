@@ -144,7 +144,7 @@ contract WithdrawWithFeeTest is AaveModulesBase {
             nonce: 31,
             legsIn: _legsIn1Rising(WETH, feeFloor, feeCeil),
             legsOut: PackedEncode.legsOut(new LegOut[](0)),
-            timing: _packTiming(uint32(block.timestamp), uint32(duration), 0) | _deadlineBits(block.timestamp + 1 hours),
+            timing: _packTiming(uint32(block.timestamp), uint32(duration), 0) | _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),

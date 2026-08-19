@@ -54,7 +54,7 @@ contract CloseDutchAuctionTest is AaveModulesBase {
             nonce: 7,
             legsIn: _legsIn1(WETH, wethIn),
             legsOut: _legsOut1Falling(USDC, startOut, endOut, address(0)),
-            timing: _packTiming(uint32(block.timestamp), 100, 0) | _deadlineBits(block.timestamp + 1 hours),
+            timing: _packTiming(uint32(block.timestamp), 100, 0) | _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),

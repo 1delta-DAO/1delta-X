@@ -254,6 +254,12 @@ struct FillCtx {
     //                       two-leg module order from paying the module's STATICCALL twice — and
     //                       per-leg lazy resolution stays the cheaper shape for everything else
     //                       (measured; see {Pricing}).
+    /// @dev ABI-encoded `(IPermit3.PermitTake, bytes sig)` for a fill whose TAKE item
+    ///      is funded by a ONE-SHOT maker permit instead of a standing taker
+    ///      allowance. EMPTY on every ordinary fill — {Base._runItem} tests the length
+    ///      and takes the classic `PERMIT3.take` path, so the hot path pays one
+    ///      memory word and one length check. See {Core.fillWithPermitTake}.
+    bytes permitTake;
     uint256[] receipts; //    per-`legsIn` amounts actually paid to `payTo`, recorded by
     //                       `_payInputsToSolver` as it pays them. `fillUpTo` returns
     //                       this instead of re-deriving it: a second {Pricing} pass

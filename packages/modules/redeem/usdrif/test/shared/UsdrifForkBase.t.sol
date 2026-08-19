@@ -180,15 +180,15 @@ abstract contract UsdrifForkBase is Test {
     /// @dev `Order.deadline` (unix seconds) now lives in `timing` bits [160:208) —
     ///      mirror of {DutchAuction.deadline}. It stopped being a struct field, so
     ///      builders OR these bits into `timing` and readers shift them back out.
-    function _deadlineBits(uint256 unixTime) internal pure returns (uint256) {
+    function _expiryBits(uint256 unixTime) internal pure returns (uint256) {
         return uint256(uint48(unixTime)) << 160;
     }
 
-    function _deadline(Order memory o) internal pure returns (uint256) {
+    function _expiry(Order memory o) internal pure returns (uint256) {
         return uint48(o.timing >> 160);
     }
 
-    function _setDeadline(Order memory o, uint256 v) internal pure {
+    function _setExpiry(Order memory o, uint256 v) internal pure {
         o.timing = (o.timing & ~(uint256(type(uint48).max) << 160)) | (uint256(uint48(v)) << 160);
     }
 

@@ -46,7 +46,7 @@ contract DepositWithFeeTest is AaveModulesBase {
             nonce: nonce,
             legsIn: _legsIn1Rising(WETH, F0, FMAX),
             legsOut: PackedEncode.legsOut(new LegOut[](0)),
-            timing: _packTiming(uint32(block.timestamp), uint32(DURATION), 0) | _deadlineBits(block.timestamp + 1 hours),
+            timing: _packTiming(uint32(block.timestamp), uint32(DURATION), 0) | _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),

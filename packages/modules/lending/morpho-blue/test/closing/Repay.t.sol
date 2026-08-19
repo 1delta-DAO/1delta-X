@@ -93,7 +93,7 @@ contract RepayTest is MorphoModulesBase {
             _tokenPermits(address(settlement), WSTETH, 1 ether, address(repayModule), USDC, buffered),
             _noTakerPermits(),
             2,
-            _deadline(order)
+            _expiry(order)
         );
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));

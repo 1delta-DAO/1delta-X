@@ -200,7 +200,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         returns (Order memory order, IPermit3.PermitBatch memory batch)
     {
         order = _buildMigrationOrder(bufferedRepay, exactWeth, debt);
-        uint48 exp = uint48(_deadline(order));
+        uint48 exp = uint48(_expiry(order));
 
         // Four token permits — the Aave withdraw needs an aWstETH pull; the Morpho
         // borrow needs none (collateral isn't tokenised, debt isn't pulled).
@@ -214,6 +214,6 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         tkp[0] = IPermit3.TakerPermit(address(settlement), address(aaveWithdrawModule), keccak256(_aaveWithdrawData()), uint160(exactWeth), exp);
         tkp[1] = IPermit3.TakerPermit(address(settlement), address(takerModule), keccak256(_borrowData()), uint160(debt), exp);
 
-        batch = _buildBatch(tp, tkp, 4, _deadline(order));
+        batch = _buildBatch(tp, tkp, 4, _expiry(order));
     }
 }

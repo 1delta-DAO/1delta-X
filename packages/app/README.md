@@ -65,9 +65,32 @@ Every other pool is matched to it **by token address, not symbol** — Oku calls
 Rootstock's USDT0 `USD0` and the Sushi subgraph calls it `USD₮0`, and they agree
 on the address.
 
+## Nothing waits on the slowest thing
+
+Every feed lands on its own. The book renders from whatever has arrived and
+fills in as the rest catches up:
+
+- **Per venue.** Each pool is fetched and committed independently, on its own
+  poll cycle. One `Promise.all` over the venues is the version that makes a fast
+  Uniswap ladder wait on a slow Sushi subgraph — the exact coupling worth
+  avoiding, since the whole point of aggregating venues is that they are
+  independent. Measured with the subgraph artificially slowed 8s: Uniswap rungs
+  are on screen at **2s**, Sushi joins at **10s**, and the network dot reads
+  *partial* in between.
+- **Per market.** The picker shows each pair the moment its own pool metadata
+  resolves, rather than after the slowest market on the chain.
+- **Per token.** Balances and token-list logos each settle on their own.
+
+Every venue is also **raced against a 20s deadline**, not merely sent an abort
+signal. Aborting only helps if whatever is slow is watching for it; the race is
+what guarantees the venue resolves either way. A hung endpoint therefore turns
+into `SushiSwap v3 0.30% 0x6d77…fd71 — timed out after 20s` in the legend
+instead of a spinner that never stops.
+
 A venue that fails does not fail the market: it is recorded with its reason, the
 legend shows it in red with that reason spelled out, and the book renders from
-the rest. A subgraph outage should not take the Uniswap depth off the screen.
+the rest. A failed *refresh* keeps the venue's last good rungs on screen — depth
+that was true a moment ago beats a blank book on one bad poll.
 
 **Only Rootstock works out of the box.** Of SushiSwap's v3 subgraphs, the
 Goldsky-hosted ones are public and the rest sit behind The Graph's gateway, which

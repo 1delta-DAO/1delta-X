@@ -12,6 +12,8 @@ import {Order, Item, ItemOp, LegIn, LegOut, Validator, OrderSide} from "@core/se
 import {SettlementLens} from "@core/periphery/SettlementLens.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
+import {OrderHash} from "@core/settlement/OrderHash.sol";
+import {Base} from "@core/settlement/Base.sol";
 
 /// @dev TAKE mock: simulates a borrow/withdraw. On dispatch it transfers a
 ///      pre-configured `produce` amount of `token` (both encoded in `data`)
@@ -389,5 +391,103 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         r = new uint256[](2);
         r[0] = a;
         r[1] = b;
+    }
+
+    // ──────────────────── One-shot permit-funded TAKE (U-2) ────────────────────
+
+    bytes32 constant PERMIT_TAKE_WITNESS_TH = keccak256(bytes(
+        "PermitTakeWitness(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline,Order witness)Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+    ));
+
+    function _signPermitTakeWitness(IPermit3.PermitTake memory p, bytes32 witness) internal view returns (bytes memory) {
+        bytes32 hs = keccak256(
+            abi.encode(PERMIT_TAKE_WITNESS_TH, p.module, p.ref, p.amount, address(settlement), p.nonce, p.deadline, witness)
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), hs));
+        (uint8 v, bytes32 r, bytes32 sg) = vm.sign(makerPk, digest);
+        return abi.encodePacked(r, sg, v);
+    }
+
+    /// @dev The whole point: the borrow is funded by a ONE-SHOT maker signature, the
+    ///      fill settles exactly as the standing-allowance path does, and NO taker
+    ///      allowance exists afterwards.
+    function test_fillWithPermitTake_fundsBorrow_andLeavesNoAllowance() public {
+        uint256 usdcIn = 1_500e6;
+        uint256 wethOut = 1 ether;
+
+        deal(WETH, solver, wethOut);
+        deal(USDC, address(taker), usdcIn);
+        _approveSolverSide(wethOut, WETH);
+
+        Item memory it = _takeItem(usdcIn, address(0), USDC, usdcIn);
+        Order memory order = _orderItems(0, _a1(USDC), _u1(usdcIn), _a1(WETH), _u1(wethOut), _one(it));
+
+        IPermit3.PermitTake memory p = IPermit3.PermitTake({
+            module: address(taker),
+            ref: keccak256(it.data),
+            amount: uint160(usdcIn),
+            nonce: 77,
+            deadline: block.timestamp + 1 hours
+        });
+        bytes memory psig = _signPermitTakeWitness(p, _hashOrder(order));
+
+        // NO approveTaker anywhere — the signature is the only taker authority.
+        vm.prank(solver);
+        settlement.fillWithPermitTake(order, p, psig, usdcIn);
+
+        assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver paid from borrow proceeds");
+        assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH");
+        (uint160 left,) = permit3.takerAllowance(maker, address(settlement), address(taker), keccak256(it.data));
+        assertEq(left, 0, "NO standing taker allowance was ever written");
+        assertTrue(permit3.isPermitNonceUsed(maker, 77), "one-shot permit consumed");
+    }
+
+    function test_fillWithPermitTake_replay_reverts() public {
+        uint256 usdcIn = 1_500e6;
+        deal(WETH, solver, 2 ether);
+        deal(USDC, address(taker), usdcIn * 2);
+        _approveSolverSide(2 ether, WETH);
+        Item memory it = _takeItem(usdcIn, address(0), USDC, usdcIn);
+        Order memory order = _orderItems(0, _a1(USDC), _u1(usdcIn), _a1(WETH), _u1(1 ether), _one(it));
+        IPermit3.PermitTake memory p = IPermit3.PermitTake({
+            module: address(taker), ref: keccak256(it.data), amount: uint160(usdcIn),
+            nonce: 78, deadline: block.timestamp + 1 hours
+        });
+        bytes memory psig = _signPermitTakeWitness(p, _hashOrder(order));
+        vm.prank(solver);
+        settlement.fillWithPermitTake(order, p, psig, usdcIn);
+
+        Order memory order2 = _orderItems(1, _a1(USDC), _u1(usdcIn), _a1(WETH), _u1(1 ether), _one(it));
+        bytes memory psig2 = _signPermitTakeWitness(p, _hashOrder(order2));
+        vm.prank(solver);
+        vm.expectRevert(IPermit3.PermitNonceUsed.selector);
+        settlement.fillWithPermitTake(order2, p, psig2, usdcIn);
+    }
+
+    /// @dev SECURITY REGRESSION. On {fillWithPermitTake} the permit's witness IS the
+    ///      order's authorization, and it is only verified when the TAKE item
+    ///      dispatches. An order with NO take item never reaches that dispatch — so
+    ///      without the consumption guard the fill settled with NO signature checked
+    ///      at all, pulling the maker's inputs against their standing allowance
+    ///      (measured: 1,500 USDC moved on a `0xdeadbeef` signature). Must revert.
+    function test_permitTake_itemFreeOrder_reverts_unauthenticated() public {
+        uint256 usdcIn = 1_500e6;
+        uint256 wethOut = 1 ether;
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+        _approveMakerToSettlement(USDC, usdcIn); // maker has a standing Permit3 allowance
+        _approveSolverSide(wethOut, WETH);
+
+        Item[] memory none = new Item[](0);
+        Order memory order = _orderItems(9, _a1(USDC), _u1(usdcIn), _a1(WETH), _u1(wethOut), none);
+
+        IPermit3.PermitTake memory junk = IPermit3.PermitTake({
+            module: address(taker), ref: bytes32(0), amount: 1, nonce: 999, deadline: block.timestamp + 1 hours
+        });
+        uint256 before = IERC20(USDC).balanceOf(maker);
+        vm.prank(solver);
+        vm.expectRevert(Base.PermitTakeNotConsumed.selector);
+        settlement.fillWithPermitTake(order, junk, hex"deadbeef", usdcIn);
+        assertEq(IERC20(USDC).balanceOf(maker), before, "maker untouched");
     }
 }

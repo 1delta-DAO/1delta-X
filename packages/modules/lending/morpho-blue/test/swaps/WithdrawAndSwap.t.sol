@@ -82,10 +82,10 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
         // Only one token permit needed (the tokenIn shortfall fallback); the
         // withdraw needs no token allowance at all — just the taker permit.
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](1);
-        tp[0] = IPermit3.TokenPermit(address(settlement), WSTETH, uint160(wstethIn), uint48(_deadline(order)));
+        tp[0] = IPermit3.TokenPermit(address(settlement), WSTETH, uint160(wstethIn), uint48(_expiry(order)));
 
         IPermit3.PermitBatch memory batch =
-            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(takerData), wstethIn), 0, _deadline(order));
+            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(takerData), wstethIn), 0, _expiry(order));
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 

@@ -96,7 +96,7 @@ contract CloseDutchAuctionV4Test is AaveV4ModulesBase {
             nonce: 7,
             legsIn: PackedEncode.legsIn(legsIn),
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: _packTiming(uint32(block.timestamp), 100, 0) | _deadlineBits(block.timestamp + 1 hours),
+            timing: _packTiming(uint32(block.timestamp), 100, 0) | _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),

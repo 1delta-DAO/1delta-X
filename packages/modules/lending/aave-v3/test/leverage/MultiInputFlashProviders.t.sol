@@ -97,7 +97,7 @@ contract MultiInputFlashProvidersTest is AaveModulesBase {
             nonce: 50,
             legsIn: PackedEncode.legsIn(_legsIn2(USDC, borrowOut, DAI, equityIn)),
             legsOut: _legsOut1(WETH, collateralIn),
-            timing: _deadlineBits(block.timestamp + 1 hours),
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),

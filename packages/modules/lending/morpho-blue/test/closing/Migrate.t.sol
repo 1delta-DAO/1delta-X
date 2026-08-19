@@ -175,7 +175,7 @@ contract MigrateTest is MorphoModulesBase {
         returns (Order memory order, IPermit3.PermitBatch memory batch)
     {
         order = _buildMigrationOrder(bufferedRepay, exactWeth, debt);
-        uint48 exp = uint48(_deadline(order));
+        uint48 exp = uint48(_expiry(order));
 
         // Three token permits — Morpho withdraw needs none (collateral isn't tokenised).
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](3);
@@ -187,6 +187,6 @@ contract MigrateTest is MorphoModulesBase {
         tkp[0] = IPermit3.TakerPermit(address(settlement), address(takerModule), keccak256(_withdrawData()), uint160(exactWeth), exp);
         tkp[1] = IPermit3.TakerPermit(address(settlement), address(aaveBorrowModule), keccak256(_aaveBorrowData()), uint160(debt), exp);
 
-        batch = _buildBatch(tp, tkp, 3, _deadline(order));
+        batch = _buildBatch(tp, tkp, 3, _expiry(order));
     }
 }

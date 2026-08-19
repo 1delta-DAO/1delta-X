@@ -290,31 +290,40 @@ abstract contract Core is Base {
         );
     }
 
-    // NOTE ON permitTake (U-2) SETTLEMENT WIRING — RE-MEASURED 2026-08-19, STILL DOES NOT FIT.
-    // A `fillWithPermitTake` entrypoint works and is not hard: item-free take-to-swap,
-    // one witness-bound `PermitTake` authorising both the order and the single
-    // borrow/withdraw, the take dispatched INSIDE the proceeds-accounting window
-    // (snapshot `legsIn` before the dispatch, then reuse `_payInputsToSolver` with
-    // hasItems=true). It saves the grant SSTORE that `fillWithPermit`'s taker leg
-    // writes. The blocker is purely EIP-170:
-    //
-    //     feature cost                          1,441 bytes
-    //     Settlement with it, runs=400         25,114 / 24,576   (−538)
-    //     best over the whole optimizer curve  25,046 / 24,576   (−470, at runs=1,
-    //                                          which also makes every fill dearer)
-    //   (Re-measured after the deadline→timing fold, which freed only ~19 bytes of
-    //    baseline — the gap is structural, not a rounding accident.)
-    //
-    // The 2026-08-19 overload funnelling closed ~1,120 bytes of the original 1,620-byte
-    // gap (a smaller baseline, plus better sharing making the feature itself cheaper),
-    // but ~500 bytes remain and there is no measured slack left: funnelling `batchFill`
-    // too yields EXACTLY 0 (via-IR already shares that loop). Closing it now means
-    // evicting a feature — `batchFill` + `fillSelf` is 603 bytes and would just cover it.
-    // That is a poor trade: `fillWithPermit` with a `TakerPermit` in its batch already
-    // funds the identical single-signature borrow-and-swap (fork-tested in the module
-    // leverage suites), so this buys ~1 SSTORE at the cost of batch filling. The
-    // one-shot `permitTake` primitive stays on Permit3 for contracts that dispatch a
-    // take directly. Revisit only alongside a real Settlement size reduction.
+    /// @notice Single-signature fill whose TAKE item is funded by a ONE-SHOT
+    ///         `PermitTake` instead of a standing taker allowance — so the maker's
+    ///         borrow/withdraw authority is consumed by this fill and NOTHING
+    ///         survives it. The permit's witness is this order's hash, so the one
+    ///         signature authorises both the order and the position draw.
+    ///
+    ///  Shape: the order carries its TAKE item exactly as it would for {fill}; only
+    ///  the funding of that item changes ({Base._runItem} dispatches through
+    ///  `permitTakeWithWitness` when {FillCtx.permitTake} is set). Everything else —
+    ///  output delivery, the item loop's proceeds accounting, the solver payout,
+    ///  invariants — is the ordinary path, unchanged and unduplicated.
+    ///
+    ///  The maker's authorization is verified INSIDE that dispatch rather than up
+    ///  front. That is safe because the whole fill is atomic: a bad signature reverts
+    ///  the `_openFill` counter write and every transfer with it.
+    function fillWithPermitTake(
+        Order calldata order,
+        IPermit3.PermitTake calldata permit,
+        bytes calldata sig,
+        uint256 fillAmount
+    ) external nonReentrant returns (uint256[] memory outs) {
+        bytes32 orderHash = order.hash();
+        if (fillAmount == 0) revert ZeroFill();
+        if (block.timestamp > DutchAuction.expiry(order)) revert OrderExpired();
+        uint256 overrideBps = OrderGates.exclusivityOverride(order, msg.sender);
+        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
+        _runValidators(order, msg.sender, "");
+        FillCtx memory ctx = _openFill(order, orderHash, fillAmount, overrideBps, msg.sender, "");
+        ctx.permitTake = abi.encode(permit, sig);
+        outs = _settleForward(order, ctx, address(0), "", "");
+        // The permit MUST have been consumed — it is this fill's only authorization.
+        // See the note in {Base._takeByPermit}.
+        if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
+    }
 
     // ──────────────────── Aggregator fill ────────────────────
 

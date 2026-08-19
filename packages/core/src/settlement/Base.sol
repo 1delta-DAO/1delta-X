@@ -12,6 +12,7 @@ import {DutchAuction} from "./DutchAuction.sol";
 import {SolverCallbackExecutor} from "./SolverCallbackExecutor.sol";
 import {Signatures} from "./Signatures.sol";
 import {OrderGates} from "./OrderGates.sol";
+import {OrderHash} from "./OrderHash.sol";
 
 /// @title Base
 /// @notice The settler's EXECUTION foundation, on top of the state
@@ -63,6 +64,9 @@ abstract contract Base is Signatures {
     /// @dev `batchFill`'s `takerDatas` array is not aligned 1:1 with `orders`.
     error LengthMismatch();
     error ReverseModeRequiresNoItems();
+    /// @dev {Core.fillWithPermitTake} completed without dispatching its one-shot
+    ///      permit — so nothing verified the maker's signature. Reverts.
+    error PermitTakeNotConsumed();
     /// @dev The constructor was given a `permit3` with no code. Load-bearing: every
     ///      maker/solver token move runs through
     ///      {Permit3TransferLib.transferFromWithFallback}, which probes Permit3 with
@@ -314,7 +318,16 @@ abstract contract Base is Signatures {
             // non-zero recipient (e.g. the maker) chains output into a subsequent item.
             address to = recipient == address(0) ? address(this) : recipient;
             if (slice > type(uint160).max) revert AmountOverflow();
-            PERMIT3.take(module, order.maker, uint160(slice), to, itemData);
+            // ONE-SHOT permit path: same dispatch, same proceeds accounting, but the
+            // authority is a maker signature consumed here rather than a standing
+            // allowance — so nothing is written and nothing survives the fill. The
+            // witness binds it to THIS order, so it doubles as the order's
+            // authorization (see {Core.fillWithPermitTake}).
+            if (ctx.permitTake.length != 0) {
+                _takeByPermit(order, ctx, to, itemData);
+            } else {
+                PERMIT3.take(module, order.maker, uint160(slice), to, itemData);
+            }
         } else {
             // SETTLE deliberately keeps NO width check: {ISettlementModule.settle}
             // takes a `uint256` and never narrows, so a wide slice (an ERC-1155 id
@@ -327,6 +340,26 @@ abstract contract Base is Signatures {
             // before items) and/or an invariant, not by the module.
             ISettlementModule(module).settle(order.maker, ctx.filler, slice, itemData);
         }
+    }
+
+    /// @dev Consume the fill's one-shot taker permit for this TAKE item. Its own
+    ///      frame so the 7-argument call does not share {_runItem}'s stack.
+    function _takeByPermit(Order calldata order, FillCtx memory ctx, address to, bytes calldata itemData) private {
+        (IPermit3.PermitTake memory permit, bytes memory sig) =
+            abi.decode(ctx.permitTake, (IPermit3.PermitTake, bytes));
+        // MARK CONSUMED. `ctx` is a memory struct threaded by reference through
+        // `_settleForward` → `_executeItems` → `_runItem`, so clearing here is visible
+        // to {Core.fillWithPermitTake}, which REQUIRES it to be empty. That check is
+        // load-bearing: on that entrypoint the permit's witness IS the order's
+        // authorization, and it is only verified inside the call below — so an order
+        // that never reaches a TAKE item (item-free, or a slice that floors to 0)
+        // would otherwise settle with NO signature verified at all, pulling the
+        // maker's inputs against their standing allowance. A second TAKE item finds
+        // this empty and falls back to the ordinary `PERMIT3.take` allowance gate.
+        ctx.permitTake = "";
+        PERMIT3.permitTakeWithWitness(
+            permit, order.maker, to, itemData, ctx.orderHash, OrderHash.WITNESS_TYPESTRING, sig
+        );
     }
 
     // ──────────────────── Validators / invariants ────────────────────

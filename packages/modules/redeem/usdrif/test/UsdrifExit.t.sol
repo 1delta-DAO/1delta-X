@@ -71,7 +71,7 @@ contract UsdrifExitTest is UsdrifForkBase {
             nonce: nonce,
             legsIn: _legsIn1(RIF, amountIn),
             legsOut: _legsOut1(USDT0, amountOut),
-            timing: _deadlineBits(block.timestamp + 1 hours),
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),
