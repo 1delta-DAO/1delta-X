@@ -47,6 +47,21 @@ import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
 ///  need gas on this chain, and {enableToken} is permissionless so a solver can
 ///  wire the Permit3 side while filling.
 ///
+///  ...or ONE signature, across both chains
+///  ───────────────────────────────────────
+///  Both of the above, plus the SOURCE-chain order that funded the bridge, can be
+///  leaves of a single Merkle tree whose root the owner signs once. The root is
+///  signed as `OrderRoot(bytes32 root)` under the SOURCE chain's Settlement
+///  domain, which that Settlement already accepts through its existing `0xB0`
+///  bulk-order envelope — so the source chain needs no new code, and the whole
+///  cross-chain half lives here. See {_verifyCrossRoot}; {isValidSignature} and
+///  {executeSigned} each accept it in place of a plain signature.
+///
+///  This works over a bridge that carries NO calldata, because the bridge never
+///  transports the order: authorisation is the owner's signature and availability
+///  is this funnel's balance. That is what makes the CCTP path — tokens only, no
+///  message field — a one-signature path too.
+///
 ///  Cancellation
 ///  ────────────
 ///  {withdraw} is the cancel primitive: pull the funds and every pending order
@@ -107,6 +122,28 @@ contract PositionFunnel is IERC1271 {
     bytes32 private constant _EXECUTE_TYPEHASH = keccak256(
         "ExecuteBatch(Call[] calls,uint256 nonce,uint256 deadline)Call(address target,uint256 value,bytes data)"
     );
+
+    /// @dev Settlement's EIP-712 domain fields. Needed because a CROSS-CHAIN ROOT
+    ///      envelope is signed under the SOURCE chain's Settlement domain, which
+    ///      this contract rebuilds from the `(srcChainId, srcSettlement)` the
+    ///      envelope carries. The version string is Settlement's too — it is the
+    ///      same "1" this funnel uses, so {_HASHED_VERSION} is reused.
+    bytes32 private constant _SETTLEMENT_HASHED_NAME = keccak256("Settlement");
+    /// @dev MUST match `OrderHash.ORDER_ROOT_TYPEHASH` verbatim: the very same
+    ///      signature is verified by Settlement on the source chain.
+    bytes32 private constant _ORDER_ROOT_TYPEHASH = keccak256("OrderRoot(bytes32 root)");
+
+    /// @dev Trailing marker of a cross-chain root envelope. Settlement's same-chain
+    ///      bulk envelope uses `0xB0`; this is its cross-chain sibling.
+    uint8 private constant _CROSS_MARKER = 0xB1;
+    /// @dev Envelope bytes that are NOT proof: 65 sig + 32 chainId + 20 address + 1
+    ///      marker. Length is therefore `_CROSS_FIXED + 32 * levels`.
+    uint256 private constant _CROSS_FIXED = 118;
+    /// @dev Shortest accepted envelope — `_CROSS_FIXED` plus one proof level. A
+    ///      zero-level "tree" is refused: its root is the leaf itself, so it would
+    ///      let a root signature authorise a single order under a domain the caller
+    ///      names, which is what the multi-leaf structure exists to prevent.
+    uint256 private constant _CROSS_MIN_LEN = 150;
 
     event TokenEnabled(address indexed token);
     event Withdrawn(address indexed token, address indexed to, uint256 amount);
@@ -310,8 +347,14 @@ contract PositionFunnel is IERC1271 {
         address o = owner();
         if (signature.length == 65 || signature.length == 64) {
             if (_recover(hash, signature) == o) return IERC1271.isValidSignature.selector;
+        } else if (_isCrossRootEnvelope(signature)) {
+            // ONE owner signature covering this order together with a source-chain
+            // order (and optionally an {executeSigned} batch) — see {_verifyCrossRoot}.
+            if (_verifyCrossRoot(hash, signature, o)) return IERC1271.isValidSignature.selector;
         }
-        // An owner that is itself a contract wallet — nested 1271.
+        // An owner that is itself a contract wallet — nested 1271. Reached ALSO when
+        // the branches above declined, so a contract-wallet payload that happens to
+        // match the envelope shape is still verified normally rather than rejected.
         if (o.code.length != 0) {
             try IERC1271(o).isValidSignature(hash, signature) returns (bytes4 magic) {
                 if (magic == IERC1271.isValidSignature.selector) return IERC1271.isValidSignature.selector;
@@ -378,11 +421,18 @@ contract PositionFunnel is IERC1271 {
 
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), _hashBatch(calls, nonce, deadline)));
         address o = owner();
-        // Reuse the shared verifier so an owner that is a contract wallet or a
-        // 7702 account works exactly as it does everywhere else in the protocol.
-        try this.checkOwnerSignature(digest, sig, o) {}
-        catch {
-            revert BadSignature();
+        // A cross-chain root envelope makes this batch the THIRD leaf of the tree the
+        // destination order already uses, so the grants a leverage order needs cost no
+        // extra signature. Declining falls through to the ordinary path below rather
+        // than reverting, exactly as in {isValidSignature}.
+        bool ok = _isCrossRootEnvelope(sig) && _verifyCrossRoot(digest, sig, o);
+        if (!ok) {
+            // Reuse the shared verifier so an owner that is a contract wallet or a
+            // 7702 account works exactly as it does everywhere else in the protocol.
+            try this.checkOwnerSignature(digest, sig, o) {}
+            catch {
+                revert BadSignature();
+            }
         }
 
         rets = _run(calls);
@@ -417,6 +467,118 @@ contract PositionFunnel is IERC1271 {
             if (!ok) revert CallFailed(i, ret);
             rets[i] = ret;
         }
+    }
+
+    /// @dev Does `sig` have the shape of a cross-chain root envelope?
+    ///
+    ///          ownerSig(65) ‖ proof(32 * levels) ‖ srcChainId(32) ‖ srcSettlement(20) ‖ 0xB1
+    ///
+    ///      A false positive is HARMLESS here, which is the whole reason this lives
+    ///      on the funnel rather than on Settlement. {isValidSignature} returns a
+    ///      sentinel instead of reverting, so a blob that matches this shape but is
+    ///      really an owner-wallet 1271 payload simply fails the root check and
+    ///      falls through to the nested-1271 branch. Settlement's `0xB0` envelope
+    ///      cannot do that — it must revert — which is why it documents a ~1/256
+    ///      liveness edge for contract makers. There is no such edge here.
+    function _isCrossRootEnvelope(bytes memory sig) private pure returns (bool) {
+        uint256 n = sig.length;
+        return n >= _CROSS_MIN_LEN && (n - _CROSS_FIXED) % 32 == 0 && uint8(sig[n - 1]) == _CROSS_MARKER;
+    }
+
+    /// @dev Verify a CROSS-CHAIN ROOT: one owner signature authorising this funnel's
+    ///      `leaf` together with every other leaf of the same Merkle tree — an order
+    ///      on the source chain, this destination order, and an {executeSigned}
+    ///      grant batch, all under ONE signature.
+    ///
+    ///      The root is signed as `OrderRoot(bytes32 root)` under the SOURCE chain's
+    ///      Settlement domain, so the source chain needs no new code at all: its
+    ///      Settlement already accepts exactly that digest through its own `0xB0`
+    ///      bulk-order path. This function is the destination half of the same
+    ///      envelope.
+    ///
+    ///  ⚠ WHY A CALLER-NAMED DOMAIN IS SAFE. `(srcChainId, srcSettlement)` come out
+    ///  of the envelope and nothing here constrains them. That grants nothing:
+    ///  naming different values builds a different domain, hence a different digest,
+    ///  hence a different recovered signer — an attacker would need the owner's
+    ///  signature under the domain they chose. They cannot be pinned as immutables
+    ///  either; the proxy carries exactly one immutable argument and its byte layout
+    ///  is fixed by test.
+    ///
+    ///  ⚠ WHY THIS IS NOT CHAIN-REPLAYABLE, the hazard {isValidSignature} warns
+    ///  about. A funnel sits at the same address on every chain, so a signature
+    ///  verified under a chain-agnostic domain would be replayable somewhere real.
+    ///  The domain here IS effectively caller-chosen — so the chain binding is moved
+    ///  into the LEAF instead. `leaf` is the digest its consumer already computed:
+    ///  for an order that is `0x1901 ‖ Settlement's domain ‖ orderStructHash`, which
+    ///  commits both this chain's id and this chain's Settlement instance; for
+    ///  {executeSigned} it is this funnel's own domain, likewise chain-bound. To
+    ///  replay the root against a funnel on another chain an attacker would need a
+    ///  proof folding THAT chain's leaf into the same root — a second-preimage
+    ///  search. The mirror direction is bounded by the same argument: the source
+    ///  Settlement will accept any leaf of the tree as an order, and one of those
+    ///  leaves is a `0x1901` digest, so passing it off as an order means finding an
+    ///  `Order` whose EIP-712 struct hash equals a chosen 256-bit value.
+    ///
+    ///  ⚠ LEAVES ARE INDEPENDENT, NOT SEQUENCED. One root does not make this order
+    ///  conditional on the source order having filled — it only bundles the act of
+    ///  signing. In practice the funds gate it (Settlement's pull reverts against an
+    ///  empty funnel), but a funnel already holding an idle balance above the
+    ///  order's `legsIn[0].start` is fillable regardless. That is not a regression —
+    ///  a separately signed destination order has exactly the same property — but an
+    ///  order meant to be conditional should carry a start time in its packed
+    ///  timing.
+    ///
+    ///      Inner signature is a plain 65-byte ECDSA one, which covers EOAs and
+    ///      EIP-7702 accounts (recovery returns the account's own address). An owner
+    ///      that is a CONTRACT WALLET uses the ordinary per-chain path: its 1271
+    ///      payload is not 65 bytes, and a length field here would buy one caller a
+    ///      shape predicate that no longer closes cleanly.
+    ///
+    ///      The proof folds SORTED pairs — the OpenZeppelin convention, identical to
+    ///      `Signatures._foldProof`, so one tree builder serves both ends.
+    function _verifyCrossRoot(bytes32 leaf, bytes memory env, address o) private pure returns (bool) {
+        if (o == address(0)) return false;
+        uint256 levels = (env.length - _CROSS_FIXED) / 32;
+        uint256 tail = 65 + levels * 32;
+
+        bytes32 root = leaf;
+        uint256 srcChainId;
+        address srcSettlement;
+        bytes32 r;
+        bytes32 sig_s;
+        uint8 v;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let d := add(env, 0x20)
+            let p := add(d, 65)
+            for { let i := 0 } lt(i, levels) { i := add(i, 1) } {
+                let node := mload(add(p, mul(i, 0x20)))
+                switch lt(root, node)
+                case 1 {
+                    mstore(0x00, root)
+                    mstore(0x20, node)
+                }
+                default {
+                    mstore(0x00, node)
+                    mstore(0x20, root)
+                }
+                root := keccak256(0x00, 0x40)
+            }
+            srcChainId := mload(add(d, tail))
+            // The address occupies bytes [tail+32, tail+52). Read the word ENDING at
+            // that boundary and mask, so the load never reaches past the envelope.
+            srcSettlement := and(mload(add(d, add(tail, 20))), 0xffffffffffffffffffffffffffffffffffffffff)
+            r := mload(d)
+            sig_s := mload(add(d, 0x20))
+            v := byte(0, mload(add(d, 0x40)))
+        }
+
+        bytes32 srcDomain =
+            keccak256(abi.encode(_DOMAIN_TYPEHASH, _SETTLEMENT_HASHED_NAME, _HASHED_VERSION, srcChainId, srcSettlement));
+        bytes32 digest = keccak256(
+            abi.encodePacked(hex"1901", srcDomain, keccak256(abi.encode(_ORDER_ROOT_TYPEHASH, root)))
+        );
+        return ecrecover(digest, v, r, sig_s) == o;
     }
 
     function _recover(bytes32 hash, bytes memory sig) private pure returns (address) {
