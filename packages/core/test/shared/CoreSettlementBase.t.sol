@@ -163,10 +163,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             pricingModule: address(0),
             maker: maker_,
             nonce: nonce,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(tokenIn, amountIn),
             legsOut: _legsOut1(tokenOut, amountOut),
-            timing: 0,
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),
@@ -203,7 +202,12 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ) internal view returns (Order memory o) {
         o = _sellOrder(nonce, maker, tokenIn, tokenOut, amountIn, amountOut, items);
         o.exclusiveFiller = exclusiveFiller;
-        o.timing = _packTiming(0, 0, exclusivityEndTime);
+        // BIT-PRESERVING. A wholesale `o.timing = _packTiming(...)` here would wipe the
+        // deadline bits [160:208) that `_sellOrder` folded in, leaving the order
+        // permanently expired (`OrderExpired` instead of the exclusivity revert the
+        // callers assert). Every other timing helper in this base is masked for the
+        // same reason.
+        _setExclusivityEnd(o, exclusivityEndTime);
     }
 
     function _orderWithMinFill(
@@ -256,8 +260,27 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     }
 
     /// @dev Pack the three uint32 clocks into `Order.timing` (mirror of {DutchAuction}).
+    ///      Leaves the deadline bits [160:208) untouched — callers OR in
+    ///      {_expiryBits} (or start it via {_setExpiry}).
     function _packTiming(uint32 decayStart, uint32 decayDur, uint32 exclEnd) internal pure returns (uint256) {
         return uint256(decayStart) | (uint256(decayDur) << 32) | (uint256(exclEnd) << 64);
+    }
+
+    /// @dev The `Order.deadline` (unix seconds) packed into its `timing` slot,
+    ///      bits [160:208) — mirror of {DutchAuction.deadline}. Deadline stopped being
+    ///      a struct field of its own, so order builders OR this into `timing`.
+    function _expiryBits(uint256 unixTime) internal pure returns (uint256) {
+        return uint256(uint48(unixTime)) << 160;
+    }
+
+    /// @dev Read the deadline back out of a memory order's `timing` word.
+    function _expiry(Order memory o) internal pure returns (uint256) {
+        return uint48(o.timing >> 160);
+    }
+
+    /// @dev Bit-preserving deadline setter (leaves the clocks/flags in place).
+    function _setExpiry(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~(uint256(type(uint48).max) << 160)) | (uint256(uint48(v)) << 160);
     }
 
     // Bit-preserving setters for the packed `timing` word (used by tests that mutate
@@ -376,7 +399,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     bytes32 constant LEG_IN_TH = keccak256("LegIn(address token,uint256 start,uint256 end)");
     bytes32 constant LEG_OUT_TH = keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
     );
     bytes32 constant TOKEN_PERMIT_TH =
         keccak256("TokenPermit(address spender,address token,uint160 amount,uint48 expiration)");
@@ -387,7 +410,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     ///      `_ORDER_WITNESS_TYPESTRING` exactly.
     string constant PERMIT_BATCH_WITNESS_FULL = "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
         "Order witness)"
-        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
         "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
@@ -445,7 +468,6 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
             ORDER_TH,
             o.maker,
             o.nonce,
-            o.deadline,
             keccak256(o.legsIn),
             keccak256(o.legsOut),
             o.timing,

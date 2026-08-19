@@ -58,7 +58,8 @@ contract PricingModesTest is MockSettlementBase {
         _fund(OUT_START);
         Order memory o = _decayingSell(1);
         // 10-BLOCK decay window starting at the current block, on the block clock.
-        o.timing = uint256(uint32(block.number)) | (uint256(10) << 32) | (uint256(1) << 102);
+        o.timing =
+            uint256(uint32(block.number)) | (uint256(10) << 32) | (uint256(1) << 102) | _expiryBits(block.timestamp + 1 hours);
         bytes memory sig = _sign(o);
 
         // Half the window — in BLOCKS, with the timestamp deliberately untouched, so
@@ -73,7 +74,8 @@ contract PricingModesTest is MockSettlementBase {
     function test_blockClock_beforeStartBlock_reverts() public {
         _fund(OUT_START);
         Order memory o = _decayingSell(2);
-        o.timing = uint256(uint32(block.number + 50)) | (uint256(10) << 32) | (uint256(1) << 102);
+        o.timing = uint256(uint32(block.number + 50)) | (uint256(10) << 32) | (uint256(1) << 102)
+            | _expiryBits(block.timestamp + 1 hours);
         bytes memory sig = _sign(o);
         vm.prank(solver);
         vm.expectRevert(DutchAuction.AuctionNotStarted.selector);
@@ -87,7 +89,7 @@ contract PricingModesTest is MockSettlementBase {
     function test_priorityAuction_noBid_clearsAtFloor() public {
         _fund(OUT_START);
         Order memory o = _decayingSell(3);
-        o.timing = uint256(1) << 103;
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
         o.params = DutchAuction.packParams(0, 0, 0, 1 gwei);
         bytes memory sig = _sign(o);
 
@@ -102,7 +104,7 @@ contract PricingModesTest is MockSettlementBase {
     function test_priorityAuction_bidMovesTickTowardStart() public {
         _fund(OUT_START);
         Order memory o = _decayingSell(4);
-        o.timing = uint256(1) << 103;
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
         o.params = DutchAuction.packParams(0, 0, 0, 2 gwei); // 2 gwei buys a FULL bump
         bytes memory sig = _sign(o);
 
@@ -118,7 +120,7 @@ contract PricingModesTest is MockSettlementBase {
     function test_priorityAuction_overbid_capsAtStart() public {
         _fund(OUT_START);
         Order memory o = _decayingSell(5);
-        o.timing = uint256(1) << 103;
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
         o.params = DutchAuction.packParams(0, 0, 0, 1 gwei);
         bytes memory sig = _sign(o);
 
@@ -133,7 +135,7 @@ contract PricingModesTest is MockSettlementBase {
     function test_priorityAuction_withoutScale_reverts() public {
         _fund(OUT_START);
         Order memory o = _decayingSell(6);
-        o.timing = uint256(1) << 103; // no priorityScale in `params`
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours); // no priorityScale in `params`
         bytes memory sig = _sign(o);
         vm.prank(solver);
         vm.expectRevert(DutchAuction.InvalidAuctionParams.selector);
@@ -212,7 +214,7 @@ contract PricingModesTest is MockSettlementBase {
             new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
 
         Order memory o = _decayingSell(10);
-        o.deadline = block.timestamp + 1 hours;
+        _setExpiry(o, block.timestamp + 1 hours);
         o.pricingModule = address(mod);
         bytes memory sig = _sign(o);
         vm.prank(solver);

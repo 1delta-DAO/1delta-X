@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "build": "forge build",
-    "test": "forge test"
+    "test": "forge test",
+    "app": "pnpm --filter @1delta-x/app dev"
   }
 }

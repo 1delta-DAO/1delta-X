@@ -87,10 +87,9 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: nonce,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, 2_000e6),
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: 0,
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),
@@ -149,10 +148,9 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 0,
-            deadline: block.timestamp + 1 hours,
             legsIn: PackedEncode.legsIn(legsIn),
             legsOut: _legsOut1(DAI, daiOut),
-            timing: 0,
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),
@@ -165,9 +163,9 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
 
         // Two token permits — one per input leg — all endorsed by the order witness.
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](2);
-        tp[0] = IPermit3.TokenPermit(address(settlement), WETH, uint160(wethIn), uint48(order.deadline));
-        tp[1] = IPermit3.TokenPermit(address(settlement), USDC, uint160(usdcIn), uint48(order.deadline));
-        IPermit3.PermitBatch memory batch = _buildBatch(tp, _noTakerPermits(), 0, order.deadline);
+        tp[0] = IPermit3.TokenPermit(address(settlement), WETH, uint160(wethIn), uint48(_expiry(order)));
+        tp[1] = IPermit3.TokenPermit(address(settlement), USDC, uint160(usdcIn), uint48(_expiry(order)));
+        IPermit3.PermitBatch memory batch = _buildBatch(tp, _noTakerPermits(), 0, _expiry(order));
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
@@ -184,8 +182,8 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         Order memory order = _multiOut(1, _noV(), _noV());
 
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](1);
-        tp[0] = IPermit3.TokenPermit(address(settlement), USDC, uint160(2_000e6), uint48(order.deadline));
-        IPermit3.PermitBatch memory batch = _buildBatch(tp, _noTakerPermits(), 1, order.deadline);
+        tp[0] = IPermit3.TokenPermit(address(settlement), USDC, uint160(2_000e6), uint48(_expiry(order)));
+        IPermit3.PermitBatch memory batch = _buildBatch(tp, _noTakerPermits(), 1, _expiry(order));
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
@@ -307,7 +305,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         _fundMultiOut();
         Order memory order = _multiOut(10, _noV(), _noV());
         bytes memory sig = _sign(order);
-        vm.warp(order.deadline + 1);
+        vm.warp(_expiry(order) + 1);
         vm.prank(solver);
         vm.expectRevert(Base.OrderExpired.selector);
         settlement.fill(order, sig, 2_000e6);

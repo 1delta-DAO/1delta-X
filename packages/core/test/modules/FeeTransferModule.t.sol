@@ -59,10 +59,9 @@ contract FeeTransferModuleTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: nonce,
-            deadline: block.timestamp + 1 hours,
             legsIn: PackedEncode.legsIn(legsIn),
             legsOut: PackedEncode.legsOut(new LegOut[](0)), // gasless deposit — no conversion output
-            timing: _packTiming(uint32(block.timestamp), DURATION, 0),
+            timing: _packTiming(uint32(block.timestamp), DURATION, 0) | _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),

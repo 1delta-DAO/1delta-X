@@ -73,7 +73,7 @@ contract OrderRelevantStateTest is MockSettlementBase {
     function test_state_expired() public {
         Order memory o = _order(1);
         bytes memory sig = _sign(o);
-        vm.warp(o.deadline + 1);
+        vm.warp(_expiry(o) + 1);
         (SettlementLens.OrderStatus status, uint256 fillable,) = _state(o, sig);
         assertEq(uint8(status), uint8(SettlementLens.OrderStatus.Expired), "expired");
         assertEq(fillable, 0, "nothing fillable");

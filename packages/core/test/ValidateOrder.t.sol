@@ -57,13 +57,13 @@ contract ValidateOrderTest is CoreSettlementBase {
         _assertInvalid(o, "minFillAnchor > anchor (unfillable)");
 
         o = _base();
-        o.timing = uint256(100) << 32; // decayDuration = 100, decayStartTime = 0
+        o.timing = (uint256(100) << 32) | _expiryBits(block.timestamp + 1 hours); // decayDuration = 100, decayStartTime = 0
         _assertInvalid(o, "decay set without decayStartTime");
     }
 
     function test_validateOrder_expiredAndCancelled() public {
         Order memory o = _base();
-        o.deadline = block.timestamp - 1;
+        _setExpiry(o, block.timestamp - 1);
         _assertInvalid(o, "order expired");
 
         o = _base();

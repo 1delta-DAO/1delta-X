@@ -51,7 +51,8 @@ export const LEG_OUT_TYPE = [
 export const ORDER_TYPE = [
   { name: "maker", type: "address" },
   { name: "nonce", type: "uint256" },
-  { name: "deadline", type: "uint256" },
+  // `expiry` (order timeout) is folded into `timing` bits [160:208) (1inch makerTraits
+  // expiration trick) — it is not a struct field of its own. See `packed.ts`.
   { name: "legsIn", type: "bytes" },
   { name: "legsOut", type: "bytes" },
   { name: "timing", type: "uint256" },
@@ -74,7 +75,7 @@ export const ORDER_TYPE = [
  * drift two migrations behind the contract once already.
  */
 export const ORDER_TYPESTRING =
-  "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing," +
+  "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing," +
   "address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve," +
   "bytes items,bytes validators,bytes invariants," +
   "address fillModule,uint256 fillTotal,address pricingModule)";
@@ -93,6 +94,20 @@ export const TAKER_PERMIT_TYPE = [
   { name: "amount", type: "uint160" },
   { name: "expiration", type: "uint48" },
 ] as const;
+
+/// Permit3 `PermitTake` — the one-shot signed take. `spender` is a signed field
+/// here (it is `msg.sender` at consumption, bound into the digest), exactly as the
+/// signature-transfer types bind their spender.
+export const PERMIT_TAKE_TYPE = [
+  { name: "module", type: "address" },
+  { name: "ref", type: "bytes32" },
+  { name: "amount", type: "uint160" },
+  { name: "spender", type: "address" },
+  { name: "nonce", type: "uint256" },
+  { name: "deadline", type: "uint256" },
+] as const;
+
+export const PERMIT_TAKE_TYPES = { PermitTake: PERMIT_TAKE_TYPE } as const;
 
 /// Types for signing/hashing a bare `Order` (Settlement domain).
 export const ORDER_TYPES = { Order: ORDER_TYPE } as const;

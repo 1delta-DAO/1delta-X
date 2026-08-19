@@ -2,7 +2,8 @@ import { useMemo } from "react";
 
 import { fmt, fmtAmt, fmtPrice } from "../lib/format";
 import { restingLabel, type RestingPreview } from "../lib/ladder";
-import { SOURCE_NAME, type Level, type Side } from "../lib/types";
+import type { VenueStatus } from "../hooks/usePoolBook";
+import { SOURCE_NAME, SOURCE_VAR, type Level, type Side, type Venue } from "../lib/types";
 
 /** Rungs shown per side before the ladder is cut off. */
 const ROWS = 14;
@@ -28,6 +29,10 @@ interface OrderBookProps {
   loading: boolean;
   error: string | null;
   block: number | null;
+  /** Which pools contributed, so a rung's origin is never a mystery. */
+  venues: Venue[];
+  /** Per-pool load phase, so a venue still in flight says so instead of reading as empty. */
+  status: VenueStatus[];
   onRetry: () => void;
 }
 
@@ -98,12 +103,18 @@ function LadderRow({
   }
 
   const own = row.level.mine ?? 0;
+  const level = row.level;
+  // The tooltip names the exact pool this size is in — an aggregated ladder is
+  // only honest if you can still trace a rung back to where it came from.
+  const origin = level.pool
+    ? `${SOURCE_NAME[level.source]} ${(level.feeBps ?? 0) / 10_000}% · ${level.pool}`
+    : SOURCE_NAME[level.source];
   return (
     <button
       type="button"
       className={`lvl${own > 0 ? " owned" : ""}`}
       data-side={rung}
-      title={`${SOURCE_NAME[row.level.source]} · click to set limit price`}
+      title={`${origin} · click to set limit price`}
       onClick={() => onPick(row.level.price, rung)}
     >
       <span className="dep" style={{ width }} />
@@ -118,7 +129,13 @@ function LadderRow({
 }
 
 export function OrderBook(props: OrderBookProps) {
-  const { bids, asks, base, quote, tick, side, preview, onPickPrice, loading, error, block, onRetry } = props;
+  const { bids, asks, base, quote, tick, side, preview, onPickPrice, loading, error, block, venues, status, onRetry } =
+    props;
+  const phaseOf = (pool: string) => status.find((s) => s.pool.toLowerCase() === pool.toLowerCase())?.phase;
+  // A pool that has not answered yet has no `Venue` row of its own, so the
+  // legend is driven by the configured set — otherwise a slow venue is simply
+  // invisible, which reads as "this market has one pool".
+  const pending = status.filter((s) => s.phase === "loading" && !venues.some((v) => v.pool.toLowerCase() === s.pool.toLowerCase()));
 
   const view = useMemo(() => {
     const askSide = assemble(asks, preview?.side === "ask" ? preview : null, false);
@@ -132,8 +149,8 @@ export function OrderBook(props: OrderBookProps) {
   const spreadBps = mid ? ((bestAsk! - bestBid!) / mid) * 10_000 : null;
 
   const lmtDepth = bids.reduce((n, l) => n + (l.source === "LMT" ? l.size : 0), 0);
-  const dexDepth = bids.reduce((n, l) => n + (l.source === "DEX" ? l.size : 0), 0);
-  const ratio = dexDepth > 0 ? `${((lmtDepth + dexDepth) / dexDepth).toFixed(2)}× pool depth` : "—";
+  const poolDepth = bids.reduce((n, l) => n + (l.source === "LMT" ? 0 : l.size), 0);
+  const ratio = poolDepth > 0 ? `${((lmtDepth + poolDepth) / poolDepth).toFixed(2)}× pool depth` : "—";
 
   const empty = !bids.length || !asks.length;
 
@@ -151,7 +168,11 @@ export function OrderBook(props: OrderBookProps) {
 
       {empty ? (
         <div className={`bkstate${error ? " err" : ""}`}>
-          {loading ? "loading pool depth…" : error ? error : "no depth for this pool"}
+          {loading
+            ? `loading depth from ${status.length} ${status.length === 1 ? "pool" : "pools"}…`
+            : error
+              ? error
+              : "no depth for this pool"}
           {!loading && (
             <button type="button" onClick={onRetry}>
               Retry
@@ -225,9 +246,24 @@ export function OrderBook(props: OrderBookProps) {
           </div>
 
           <div className="bkfoot">
-            <span>
-              <em style={{ background: "var(--dex)" }} /> Uniswap v3 tick liquidity — live
-            </span>
+            {venues.map((v) => (
+              <span key={v.pool} className={v.error ? "venue-down" : undefined} title={v.pool}>
+                <em style={{ background: `var(${SOURCE_VAR[v.source]})` }} />
+                {SOURCE_NAME[v.source]} {(v.feeBps / 10_000).toFixed(2)}%{" "}
+                <b className="m">{v.pool.slice(0, 6)}…{v.pool.slice(-4)}</b>
+                {v.error
+                  ? ` — ${v.error}`
+                  : phaseOf(v.pool) === "loading"
+                    ? ` · ${v.rungs} rungs · refreshing`
+                    : ` · ${v.rungs} rungs`}
+              </span>
+            ))}
+            {pending.map((s) => (
+              <span key={s.pool} className="venue-wait" title={s.pool}>
+                <em />
+                loading <b className="m">{s.pool.slice(0, 6)}…{s.pool.slice(-4)}</b>
+              </span>
+            ))}
             <span>
               <em style={{ background: "var(--lmt)" }} /> Signed limit orders
             </span>
@@ -241,8 +277,9 @@ export function OrderBook(props: OrderBookProps) {
             A limit order does not have to cross. Name a price the book has not reached and the part that does
             not fill <b>rests where you put it</b> — often inside the spread, marked in the ladder above. Each
             pool rung is one range between initialized ticks, priced at what it actually costs to consume, so
-            a concentrated position shows up as the cliff it is; <b>LMT</b> rungs are signed orders a filler
-            can take at any time.
+            a concentrated position shows up as the cliff it is. Rungs from every venue sit in one sorted
+            ladder and each keeps its own tag, so the best bid and the best ask can be in different pools —
+            hover a row to see exactly which. <b>LMT</b> rungs are signed orders a filler can take at any time.
           </p>
         </>
       )}

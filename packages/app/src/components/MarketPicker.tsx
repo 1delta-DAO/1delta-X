@@ -1,4 +1,4 @@
-import { marketsOn } from "../config/markets";
+import { marketsOn, venueLabel } from "../config/markets";
 import type { TokenIndex } from "../hooks/useTokenIndex";
 import { PairIcon } from "./TokenIcon";
 
@@ -27,7 +27,7 @@ export function MarketPicker({ chainId, selected, tokens, onSelect }: MarketPick
               {m.base} / {m.quote}
             </span>
             <br />
-            <span className="sub">{m.venue}</span>
+            <span className="sub">{venueLabel(m)}</span>
           </span>
         </button>
       ))}

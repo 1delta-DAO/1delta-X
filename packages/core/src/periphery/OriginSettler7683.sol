@@ -66,7 +66,7 @@ contract OriginSettler7683 is IOriginSettler {
     /// @dev The envelope names a different origin settler or a different chain.
     error WrongSettler();
     /// @dev The order cannot be broadcast: its open-envelope deadline or its own
-    ///      deadline has passed, or its nonce was cancelled. `reason` names which.
+    ///      expiry has passed, or its nonce was cancelled. `reason` names which.
     ///      (Per-hash cancellation and full-fill surface from {SettlementLens.previewFill}
     ///      as their own reverts; maker funding and validators are the filler's to
     ///      check via {SettlementLens.getOrderRelevantState} before filling.)
@@ -166,13 +166,20 @@ contract OriginSettler7683 is IOriginSettler {
     ///      `Open` event that a solver fleet consumes, so an expired or nonce-cancelled
     ///      order here is wasted solver gas and feed spam. Per-hash cancellation and
     ///      full-fill are already caught inside {SettlementLens.previewFill}; this
-    ///      covers the two lifecycle gates it does not: the order deadline and the
+    ///      covers the two lifecycle gates it does not: the order expiry and the
     ///      maker's nonce bitmap.
     function _requireLive(Order memory order) private view {
-        if (block.timestamp > order.deadline) revert OrderNotFillable("order expired");
+        if (block.timestamp > _expiry(order)) revert OrderNotFillable("order expired");
         if (ISettlementNonce(SETTLEMENT).isNonceCancelled(order.maker, order.nonce)) {
             revert OrderNotFillable("nonce cancelled");
         }
+    }
+
+    /// @dev Memory mirror of {DutchAuction.expiry} (which is calldata-only, and
+    ///      Solidity cannot overload it on data location). The expiry rides in
+    ///      `timing` bits [160:208) since it stopped being an `Order` field of its own.
+    function _expiry(Order memory order) private pure returns (uint256) {
+        return uint48(order.timing >> 160);
     }
 
     /// @dev The standard's view of one of our orders, priced at the CURRENT tick:
@@ -205,8 +212,9 @@ contract OriginSettler7683 is IOriginSettler {
         r.user = user;
         r.originChainId = block.chainid;
         r.openDeadline = openDeadline;
-        // The order's own deadline is authoritative; the envelope may only tighten it.
-        uint32 orderDeadline = p.order.deadline > type(uint32).max ? type(uint32).max : uint32(p.order.deadline);
+        // The order's own expiry is authoritative; the envelope may only tighten it.
+        uint32 orderDeadline =
+            _expiry(p.order) > type(uint32).max ? type(uint32).max : uint32(_expiry(p.order));
         r.fillDeadline = fillDeadline != 0 && fillDeadline < orderDeadline ? fillDeadline : orderDeadline;
         r.orderId = orderHash;
 

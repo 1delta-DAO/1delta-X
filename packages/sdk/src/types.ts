@@ -73,10 +73,19 @@ export interface Order {
   /// SELL (fixed input, outputs decay) or BUY (fixed output, inputs rise).
   side: OrderSide;
   nonce: bigint;
-  deadline: bigint;
+  /// Order EXPIRY — when the order stops being fillable. ALWAYS UNIX SECONDS, even for a
+  /// block-clock order (bit 102) whose decay and exclusivity count blocks: the expiry
+  /// stays wall-clock (a robust safety bound a chain halt cannot freeze; 0x/UniswapX keep
+  /// it a timestamp for the same reason). `packOrder` folds it into `timing` bits
+  /// [160:208); do not pass a block number here for a block-clock order. Distinct from the
+  /// Permit3 `deadline`s, which bound signatures rather than the order.
+  expiry: bigint;
   legsIn: readonly LegIn[];
   legsOut: readonly LegOut[];
   /// Packed auction clocks: decayStartTime | decayDuration<<32 | exclusivityEndTime<<64.
+  /// All three are on the ORDER'S clock — block numbers under bit 102 ({@link BLOCK_CLOCK_BIT}),
+  /// else unix seconds — so exclusivity aligns with the decay window rather than drifting
+  /// on a separate clock. (The `expiry` above is the sole exception: always seconds.)
   /// Build/read with {@link packTiming} / {@link unpackTiming}.
   timing: bigint;
   exclusiveFiller: Address;
@@ -189,7 +198,10 @@ const U32 = 0xffff_ffffn;
 /**
  * Pack the three auction clocks into the single `Order.timing` word, mirroring
  * the Solidity layout: bits [0:32) decayStartTime, [32:64) decayDuration,
- * [64:96) exclusivityEndTime. Each must fit in a uint32.
+ * [64:96) exclusivityEndTime. Each must fit in a uint32. All three are read on the
+ * order's clock — block numbers when {@link BLOCK_CLOCK_BIT} is set, else unix seconds —
+ * so pass values in one consistent unit (the `expiry` field is separate and always
+ * seconds).
  */
 export function packTiming(decayStartTime: number, decayDuration: number, exclusivityEndTime: number): bigint {
   const s = BigInt(decayStartTime);
@@ -264,6 +276,32 @@ export interface TakerPermit {
 export interface PermitBatch {
   tokens: readonly TokenPermit[];
   takers: readonly TakerPermit[];
+  nonce: bigint;
+  deadline: bigint;
+}
+
+/// A `(token, spender)` pair to zero in a token-book `lockdown` / `lockdownAll`.
+export interface TokenSpenderPair {
+  token: Address;
+  spender: Address;
+}
+
+/// A `(spender, module, ref)` triple to zero in a taker-book `lockdownTakers` /
+/// `lockdownAll`.
+export interface SpenderRefPair {
+  spender: Address;
+  module: Address;
+  ref: Hex;
+}
+
+/// Permit3 one-shot signed take (`PermitTake`): authorises exactly ONE dispatch of
+/// `module` against the position `ref = keccak256(data)`, leaving no standing
+/// allowance. The signed `spender` is always the consumer (`msg.sender`), never a
+/// field — a leaked signature is useless to anyone else.
+export interface PermitTake {
+  module: Address;
+  ref: Hex;
+  amount: bigint;
   nonce: bigint;
   deadline: bigint;
 }

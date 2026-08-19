@@ -88,7 +88,7 @@ abstract contract Batch is Core {
         }
     }
 
-    /// @dev The `_fillCore` gate set WITHOUT moving any funds: zero fill, deadline,
+    /// @dev The `_fillCore` gate set WITHOUT moving any funds: zero fill, expiry,
     ///      signature/approval, exclusivity, nonce, validators — then `_openFill`,
     ///      which writes `filled` before any external call in the context. Split out
     ///      so the authorization sequence exists once and is audited once,
@@ -106,7 +106,7 @@ abstract contract Batch is Core {
         // it needs a per-order callback + a recipient snapshot, neither of which the
         // {matchSettle} PRESEND/DELIVER flow has. Reject rather than deliver nominally.
         if (order.deltaVerifyOutputs()) revert DeltaVerifyNotBatchable();
-        if (block.timestamp > order.deadline) revert OrderExpired();
+        if (block.timestamp > order.expiry()) revert OrderExpired();
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         uint256 overrideBps = OrderGates.exclusivityOverride(order, solver);
@@ -338,7 +338,7 @@ abstract contract Batch is Core {
         return (st.outs, st.tokens, swept);
     }
 
-    /// @dev PHASE 1. Open every order — the full gate set (shape, deadline,
+    /// @dev PHASE 1. Open every order — the full gate set (shape, expiry,
     ///      signature, exclusivity, nonce, validators) then `_openFill`, which
     ///      writes `filled` BEFORE any external call in the context.
     ///

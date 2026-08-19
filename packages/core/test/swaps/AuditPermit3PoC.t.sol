@@ -67,7 +67,7 @@ contract AuditPermit3PoCTest is MockSettlementBase {
             batch,
             _hashOrder(order),
             "Order witness)"
-            "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+            "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
             "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
             "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)",
             sig

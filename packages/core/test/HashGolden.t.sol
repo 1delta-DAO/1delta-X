@@ -68,15 +68,16 @@ contract HashGoldenTest is Test {
         curve[0] = CurvePoint({timeDelta: 0, bumpBps: 1_000});
         curve[1] = CurvePoint({timeDelta: 200, bumpBps: 9_000});
 
-        // Packed timing: decayStartTime 111 | decayDuration 222 | exclusivityEndTime 333.
-        uint256 timing = uint256(111) | (uint256(222) << 32) | (uint256(333) << 64);
+        // Packed timing: decayStartTime 111 | decayDuration 222 | exclusivityEndTime 333
+        // | deadline 1_000_000 (bits [160:208), the folded-in `Order.deadline`).
+        uint256 timing =
+            uint256(111) | (uint256(222) << 32) | (uint256(333) << 64) | (uint256(uint48(1_000_000)) << 160);
 
         o = Order({
             params: 25 | (50 << 16) | (30_000_000_000 << 32),
             pricingModule: address(0xF222),
             maker: MAKER,
             nonce: 1,
-            deadline: 1_000_000,
             legsIn: PackedEncode.legsIn(legsIn),
             legsOut: PackedEncode.legsOut(legsOut),
             timing: timing,
@@ -93,7 +94,7 @@ contract HashGoldenTest is Test {
 
     /// @dev The TypeScript SDK (`packages/sdk`) asserts this SAME constant for the
     ///      same canonical order — cross-verifying its EIP-712 typed-data defs.
-    bytes32 constant GOLDEN_ORDER_HASH = 0x627e590874df6c58eba2354e7f1cf0c103f72bc95d48a01e758493e7a5bbcfef;
+    bytes32 constant GOLDEN_ORDER_HASH = 0x9a3d3d3d43d1b09bbdecf71f61c62e61e533e09efcaa926384683860a4df22dd;
 
     function test_goldenOrderHash() public view {
         assertEq(lens.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");

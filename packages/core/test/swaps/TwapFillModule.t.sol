@@ -52,7 +52,7 @@ contract TwapFillModuleTest is CoreSettlementBase {
         o.fillModule = address(twap);
         o.fillTotal = total; //         the TWAP total (denominator)
         o.minFillAnchor = part; //      part size ⇒ parts = total/part
-        o.timing = _packTiming(startTime, DURATION, 0); // TWAP start + total window
+        o.timing = _packTiming(startTime, DURATION, 0) | _expiryBits(block.timestamp + 1 hours); // TWAP window
     }
 
     function _fund() internal {

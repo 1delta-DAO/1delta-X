@@ -119,7 +119,7 @@ contract FillerWhitelistTest is MockSettlementBase {
     function test_whitelist_unlistedFillerOpensAfterT() public {
         uint256 openAfter = block.timestamp + 30 minutes;
         Order memory o = _gated(1, curator, openAfter);
-        o.deadline = block.timestamp + 2 hours; // stays live past the open-up
+        _setExpiry(o, block.timestamp + 2 hours); // stays live past the open-up
         bytes memory sig = _sign(o);
 
         // Before T: whitelisted-only.
@@ -137,7 +137,7 @@ contract FillerWhitelistTest is MockSettlementBase {
 
     function test_whitelist_openAfterZeroStaysHardForever() public {
         Order memory o = _gated(1, curator, 0);
-        o.deadline = block.timestamp + 3650 days;
+        _setExpiry(o, block.timestamp + 3650 days);
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + 365 days);

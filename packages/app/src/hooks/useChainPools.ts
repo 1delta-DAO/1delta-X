@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
 import { chainById } from "../config/chains";
-import { marketsOn, type Market } from "../config/markets";
-import { fetchPoolMeta, type PoolMeta } from "../lib/oku";
+import { marketsOn, primaryPool, type Market } from "../config/markets";
+import type { PoolMeta } from "../lib/oku";
+import { fetchMarketMeta } from "../lib/poolbook";
 import { ensureTokens } from "../lib/tokens";
 
 /**
@@ -33,7 +34,7 @@ export function useChainPools(chainId: number): ChainPools {
     const markets = marketsOn(chainId);
     setLoaded({ key: chainId, metas: seed(chainId) });
 
-    const missing = markets.filter((m) => !cache.has(m.pool));
+    const missing = markets.filter((m) => !cache.has(primaryPool(m).address));
     if (!missing.length) {
       ensureTokens(chainId, addressesOf(markets));
       return;
@@ -41,17 +42,28 @@ export function useChainPools(chainId: number): ChainPools {
 
     let alive = true;
     setLoading(true);
-    void Promise.allSettled(
-      missing.map(async (m) => {
-        const meta = await fetchPoolMeta(config.oku, m.pool);
-        cache.set(m.pool, meta);
-      }),
-    ).then(() => {
-      if (!alive) return;
-      setLoaded({ key: chainId, metas: seed(chainId) });
-      setLoading(false);
-      ensureTokens(chainId, addressesOf(markets));
-    });
+    let outstanding = missing.length;
+
+    // Each market commits the moment its own metadata lands. Joining them means
+    // the picker shows no icons and no pair labels until the SLOWEST pool on the
+    // chain answers — one unlucky market holding every other one hostage.
+    for (const m of missing) {
+      void fetchMarketMeta(m, config)
+        .then((meta) => {
+          cache.set(primaryPool(m).address, meta);
+          if (!alive) return;
+          setLoaded({ key: chainId, metas: seed(chainId) });
+          ensureTokens(chainId, addressesOf(markets));
+        })
+        .catch(() => {
+          // A market whose pool will not resolve simply has no icons; it is not
+          // a reason to withhold the ones that did.
+        })
+        .finally(() => {
+          if (!alive) return;
+          if (--outstanding === 0) setLoading(false);
+        });
+    }
 
     return () => {
       alive = false;
@@ -68,7 +80,7 @@ export function useChainPools(chainId: number): ChainPools {
 function seed(chainId: number): Record<string, PoolMeta> {
   const out: Record<string, PoolMeta> = {};
   for (const m of marketsOn(chainId)) {
-    const meta = cache.get(m.pool);
+    const meta = cache.get(primaryPool(m).address);
     if (meta) out[m.id] = meta;
   }
   return out;
@@ -77,7 +89,7 @@ function seed(chainId: number): Record<string, PoolMeta> {
 function addressesOf(markets: Market[]): string[] {
   const out: string[] = [];
   for (const m of markets) {
-    const meta = cache.get(m.pool);
+    const meta = cache.get(primaryPool(m).address);
     if (!meta) continue;
     for (const a of [meta.token0.address, meta.token1.address]) {
       if (!out.includes(a)) out.push(a);

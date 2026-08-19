@@ -28,7 +28,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
     function _risingOrder(uint256 nonce) internal view returns (Order memory o) {
         o = _order(maker, nonce, USDC, WETH, F0, WETH_OUT, new Item[](0));
         o.legsIn = PackedEncode.setLegInEnd(o.legsIn, 0, FMAX); // rising input (start F0 → end FMAX)
-        o.timing = _packTiming(uint32(block.timestamp), DURATION, 0);
+        o.timing = _packTiming(uint32(block.timestamp), DURATION, 0) | _expiryBits(block.timestamp + 1 hours);
     }
 
     function _fund() internal {
@@ -303,7 +303,7 @@ contract RisingInputFeeTest is CoreSettlementBase {
         _tmplegsIn[0] = LegIn(USDC, usdcFixed, 0); //          end == 0 ⇒ fixed anchor
         _tmplegsIn[1] = LegIn(WETH, wethFloor, wethCeil); //   start != end ⇒ rising fee leg
         o.legsIn = PackedEncode.legsIn(_tmplegsIn);
-        o.timing = _packTiming(uint32(block.timestamp), DURATION, 0);
+        o.timing = _packTiming(uint32(block.timestamp), DURATION, 0) | _expiryBits(block.timestamp + 1 hours);
         bytes memory sig = _sign(o);
 
         vm.warp(block.timestamp + DURATION / 2); // bump = 5000

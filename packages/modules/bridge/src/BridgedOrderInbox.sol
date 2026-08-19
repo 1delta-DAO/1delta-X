@@ -393,7 +393,7 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         // settlement itself refuses to fill, so nothing is gained by holding the
         // beneficiary's funds any longer — and the fallback is typically the more
         // distant of the two.
-        k.deadline = uint64(order.deadline);
+        k.deadline = uint64(DutchAuction.deadline(order));
         emit Activated(orderHash, k.token, anchor, k.deadline);
     }
 
@@ -562,7 +562,7 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         if (PackedArrays.countUnchecked(order.items) != 0) revert UnsupportedOrderShape();
         if (order.fillModule != address(0) || order.fillTotal != 0) revert UnsupportedOrderShape();
         if (_legInStart(order.legsIn, 0) == 0) revert UnsupportedOrderShape();
-        if (order.deadline <= block.timestamp) revert UnsupportedOrderShape();
+        if (DutchAuction.deadline(order) <= block.timestamp) revert UnsupportedOrderShape();
         for (uint256 j; j < PackedArrays.countUnchecked(order.legsOut); j++) {
             address to = _legOutRecipient(order.legsOut, j);
             if (to == address(0) || to == address(this)) revert UnsupportedOrderShape();

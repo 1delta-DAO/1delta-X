@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { buildSoftCancel, signOrder, signSoftCancel } from "@1delta-x/sdk";
+import { zeroAddress } from "viem";
+
 import { orderbook } from "./backend/mock";
+import type { SignedOrder } from "./backend/api";
 import { Header } from "./components/Header";
 import { MarketPicker } from "./components/MarketPicker";
 import { OrderBook } from "./components/OrderBook";
@@ -8,6 +12,7 @@ import { OrderForm, type Gate, type Receipt } from "./components/OrderForm";
 import { Orders } from "./components/Orders";
 import { Stats } from "./components/Stats";
 import { chainLabel } from "./config/chains";
+import { deploymentFor } from "./config/deployments";
 import { symbolsOn } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
 import { useFills, useRestingOrders } from "./hooks/useOrderbook";
@@ -16,15 +21,19 @@ import { useTheme } from "./hooks/useTheme";
 import { useTicket, type TicketDeps } from "./hooks/useTicket";
 import { useTokenIndex } from "./hooks/useTokenIndex";
 import { fmtAmt, fmtPrice } from "./lib/format";
-import { randomHash } from "./lib/hash";
 import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/ladder";
+import { buildOrder } from "./lib/order";
 import { useBalances } from "./wallet/useBalances";
+import { useSigner } from "./wallet/useSigner";
 import { useWallet } from "./wallet/useWallet";
 
 /** Slippage floor quoted on market orders. */
 const SLIPPAGE_BPS = 50;
 
 const DAY_MS = 24 * 3600_000;
+
+/** How long a market order stays live, and how long its auction runs. */
+const MARKET_TTL_SECONDS = 60;
 
 /** Past this the pool ladder is old enough to say so rather than imply it is live. */
 const STALE_MS = 30_000;
@@ -55,6 +64,9 @@ export default function App() {
     onChain,
     tokens: tokens.tokens,
   });
+
+  const signer = useSigner(wallet.provider, wallet.address, chainId, onChain);
+  const deployment = deploymentFor(chainId);
 
   const balances = useMemo(() => {
     const out: Record<string, number | undefined> = {};
@@ -115,10 +127,54 @@ export default function App() {
 
   const [signing, setSigning] = useState(false);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
+  const [signError, setSignError] = useState<string | null>(null);
   const [connectRequest, setConnectRequest] = useState(0);
 
   // A receipt describes one ticket; switching market, side or type makes it stale.
-  useEffect(() => setReceipt(null), [ticket.marketId, ticket.side, ticket.mode]);
+  useEffect(() => {
+    setReceipt(null);
+    setSignError(null);
+  }, [ticket.marketId, ticket.side, ticket.mode]);
+
+  /**
+   * Build the EIP-712 order this ticket describes and have the wallet sign it.
+   *
+   * The domain is the deployment's — chain id plus the Settlement address — so
+   * the signature is bound to one deployment and cannot be replayed onto
+   * another. With nothing deployed the zero address stands in: the wallet still
+   * signs, the order still hashes to the value the contract would compute
+   * (`hashOrderStruct` is domain-independent), and the receipt says plainly
+   * that no filler can use it.
+   */
+  const signDraft = useCallback(
+    async (spec: {
+      amountIn: number;
+      targetOut: number;
+      minOut: number;
+      ttlSeconds: number;
+      decaySeconds: number;
+    }): Promise<SignedOrder> => {
+      if (!signer || !wallet.address) throw new Error("wallet not connected");
+      const pay = tokens.view(ticket.payToken);
+      const recv = tokens.view(ticket.recvToken);
+      if (!pay.address || !recv.address || pay.decimals === undefined || recv.decimals === undefined) {
+        throw new Error("token metadata still loading");
+      }
+
+      const draft = buildOrder({
+        maker: wallet.address,
+        side: ticket.side,
+        pay: { address: pay.address, decimals: pay.decimals },
+        recv: { address: recv.address, decimals: recv.decimals },
+        ...spec,
+      });
+
+      const domain = deployment ?? { chainId, settlement: zeroAddress, permit3: zeroAddress };
+      const sig = await signOrder(signer, draft.order, domain);
+      return { order: draft.order, sig, hash: draft.hash, deployment: domain, deployed: deployment !== null };
+    },
+    [chainId, deployment, signer, ticket.payToken, ticket.recvToken, ticket.side, tokens, wallet.address],
+  );
 
   const sign = useCallback(async () => {
     if (!q || !pool.book) return;
@@ -126,23 +182,36 @@ export default function App() {
     try {
       const { marketId, side, mode, payToken, recvToken, amount } = ticket;
       const price = ticket.limit ?? pool.book.mid;
+      const undeployed = deployment === null ? " · domain not deployed" : "";
 
       if (mode === "twap") {
-        const size = side === "sell" ? amount : amount / price;
+        // A TWAP is N independent orders on a schedule, so only the slice that
+        // is due can be signed now. Signing the whole notional up front would
+        // hand a filler the entire size at the first tick.
+        const sliceIn = amount / ticket.slices;
+        const sliceOut = side === "sell" ? sliceIn * price : sliceIn / price;
+        const signed = await signDraft({
+          amountIn: sliceIn,
+          targetOut: sliceOut,
+          minOut: sliceOut,
+          ttlSeconds: ticket.everyMin * 60 + 60,
+          decaySeconds: 0,
+        });
         const order = await orderbook.place({
           marketId,
           side,
           type: "twap",
-          size,
+          size: side === "sell" ? amount : amount / price,
           price,
           ttlMs: ticket.slices * ticket.everyMin * 60_000 + 60_000,
           slices: { total: ticket.slices, everyMin: ticket.everyMin },
+          signed,
         });
         setReceipt({
           hash: order.id,
           headline: `${fmtAmt(amount)} ${payToken} in ${ticket.slices} slices, ${ticket.everyMin} min apart`,
-          detail: `first slice at ${fmtPrice(price, tick)} ${ticket.market.quote}/${ticket.market.base}`,
-          note: "scheduled · 0 gas",
+          detail: `slice 1 signed at ${fmtPrice(price, tick)} ${ticket.market.quote}/${ticket.market.base} — the rest are signed as they come due`,
+          note: `scheduled · 0 gas${undeployed}`,
         });
         ticket.clearAmount();
         return;
@@ -155,8 +224,18 @@ export default function App() {
         orderbook.recordTake({ marketId, side, size: q.crossedBase, price: q.avg, bySource: q.bySource });
       }
 
-      let hash = randomHash();
+      let signed: SignedOrder;
+      let hash: string;
       if (mode === "limit" && q.resting && ticket.limit) {
+        const restingIn = side === "sell" ? q.resting.size : q.resting.size * ticket.limit;
+        const restingOut = side === "sell" ? q.resting.size * ticket.limit : q.resting.size;
+        signed = await signDraft({
+          amountIn: restingIn,
+          targetOut: restingOut,
+          minOut: restingOut,
+          ttlSeconds: DAY_MS / 1000,
+          decaySeconds: 0,
+        });
         const order = await orderbook.place({
           marketId,
           side,
@@ -164,10 +243,20 @@ export default function App() {
           size: q.resting.size,
           price: ticket.limit,
           ttlMs: DAY_MS,
+          signed,
         });
         hash = order.id;
       } else {
-        await new Promise((r) => setTimeout(r, 650));
+        // A market order is a short dutch auction: the maker names the price the
+        // book shows now and a floor, and lets fillers compete in between.
+        signed = await signDraft({
+          amountIn: q.totalIn,
+          targetOut: q.crossedOut,
+          minOut: q.minReceived,
+          ttlSeconds: MARKET_TTL_SECONDS,
+          decaySeconds: MARKET_TTL_SECONDS,
+        });
+        hash = signed.hash;
       }
 
       setReceipt({
@@ -176,17 +265,43 @@ export default function App() {
         detail: q.resting
           ? `${restingLabel(q.resting).toLowerCase()} at ${fmtPrice(q.resting.price, tick)}`
           : undefined,
-        note: q.resting ? "resting · free to cancel" : "settled · 0 gas",
+        note: `${q.resting ? "resting · free to cancel" : "settled · 0 gas"}${undeployed}`,
       });
       ticket.clearAmount();
+    } catch (e) {
+      // A rejected signature is a normal outcome, not a crash — say what
+      // happened and leave the ticket exactly as it was.
+      setReceipt(null);
+      setSignError(e instanceof Error ? e.message : String(e));
     } finally {
       setSigning(false);
     }
-  }, [pool.book, q, tick, ticket]);
+  }, [deployment, pool.book, q, signDraft, tick, ticket]);
 
-  const cancel = useCallback((orderHash: string) => {
-    void orderbook.cancel(orderHash);
-  }, []);
+  /**
+   * Retraction is a signed EIP-712 message, not a transaction: free, instant,
+   * and advisory — it evicts from books that honour it but does not bind a
+   * filler already holding the order. The on-chain cancels are the hard ones.
+   */
+  const cancel = useCallback(
+    async (orderHash: string) => {
+      const order = allOrders.find((o) => o.id === orderHash);
+      const domain = order?.signed?.deployment ?? deployment;
+      if (signer && wallet.address && domain) {
+        try {
+          const message = buildSoftCancel(wallet.address, [orderHash as `0x${string}`]);
+          const sig = await signSoftCancel(signer, message, domain);
+          await orderbook.cancel(orderHash, { cancel: message, sig });
+          return;
+        } catch {
+          // Declining the cancel signature leaves the order where it was.
+          return;
+        }
+      }
+      await orderbook.cancel(orderHash);
+    },
+    [allOrders, deployment, signer, wallet.address],
+  );
 
   const tickOf = useCallback((marketId: string) => ticks[marketId] ?? 4, [ticks]);
 
@@ -198,9 +313,11 @@ export default function App() {
       ? { label: `Switch to ${chainLabel(chainId)}`, action: () => void wallet.switchChain(chainId) }
       : null;
 
+  // `partial` is its own state: the book on screen is real, but one venue has
+  // not reported yet — which is not the same as stale data or a dead feed.
   const live: "live" | "stale" | "down" = pool.error
     ? "down"
-    : pool.age !== null && pool.age > STALE_MS
+    : pool.partial || (pool.age !== null && pool.age > STALE_MS)
       ? "stale"
       : "live";
 
@@ -227,7 +344,7 @@ export default function App() {
           />
         </div>
 
-        <Stats bids={merged.bids} asks={merged.asks} base={ticket.market.base} venue={ticket.market.venue} />
+        <Stats bids={merged.bids} asks={merged.asks} base={ticket.market.base} venues={pool.book?.venues ?? []} />
 
         <div className="deck">
           <OrderForm
@@ -241,6 +358,12 @@ export default function App() {
             signing={signing}
             receipt={receipt}
             gate={gate}
+            signError={signError}
+            domain={{
+              settlement: deployment?.settlement ?? zeroAddress,
+              chainLabel: chainLabel(chainId),
+              deployed: deployment !== null,
+            }}
             onSign={sign}
           />
           <OrderBook
@@ -255,6 +378,8 @@ export default function App() {
             loading={pool.loading || pools.loading}
             error={pool.error}
             block={pool.book?.block ?? null}
+            venues={pool.book?.venues ?? []}
+            status={pool.venues}
             onRetry={pool.refresh}
           />
         </div>

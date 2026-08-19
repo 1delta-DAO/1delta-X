@@ -87,11 +87,11 @@ contract SupplyBorrowTest is MorphoModulesBase {
         Order memory order = _order(maker, 2, USDC, WSTETH, borrowOut, collateralIn, items);
 
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](2);
-        tp[0] = IPermit3.TokenPermit(address(settlement), USDC, uint160(borrowOut), uint48(order.deadline));
-        tp[1] = IPermit3.TokenPermit(address(supplyModule), WSTETH, uint160(collateralIn), uint48(order.deadline));
+        tp[0] = IPermit3.TokenPermit(address(settlement), USDC, uint160(borrowOut), uint48(_deadline(order)));
+        tp[1] = IPermit3.TokenPermit(address(supplyModule), WSTETH, uint160(collateralIn), uint48(_deadline(order)));
 
         IPermit3.PermitBatch memory batch =
-            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(borrowData), borrowOut), 1, order.deadline);
+            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(borrowData), borrowOut), 1, _deadline(order));
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 

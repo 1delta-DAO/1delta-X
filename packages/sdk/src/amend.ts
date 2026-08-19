@@ -7,7 +7,7 @@ import type { Deployment, Order } from "./types";
 /**
  * Cancel-and-replace — "amend" as one operation.
  *
- * A signed order is immutable: changing a limit price, a size, a deadline or a
+ * A signed order is immutable: changing a limit price, a size, an expiry or a
  * decay curve changes the EIP-712 hash, so there is no such thing as editing one
  * in place. What a trading UI actually wants is nonetheless a single gesture —
  * *this order, but at a different price* — and the honest primitive underneath
@@ -36,7 +36,7 @@ import type { Deployment, Order } from "./types";
  *
  * The consequence is stated plainly: after an amend, the OLD order is retracted
  * only from books that honour the soft cancel. A filler that already holds it
- * can still submit it until its deadline. When that is unacceptable — a real
+ * can still submit it until its expiry. When that is unacceptable — a real
  * re-price in a fast market, not a cosmetic edit — pair the amend with an
  * on-chain `cancelOrder(prev)` (one order, by hash, leaving nonce siblings
  * alone) via {@link encodeCancelOrder}. {@link amendOrder} deliberately does not

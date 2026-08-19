@@ -115,6 +115,35 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         settlement.fill(order, sig, SELL_IN);
     }
 
+    /// @dev The exclusivity window is measured on the ORDER'S clock. For a block-clocked
+    ///      order it ends after a number of BLOCKS, not seconds — so advancing blocks
+    ///      (without advancing the timestamp) opens the order to any filler. Under the
+    ///      old wall-clock behaviour this fill would still revert, so the test pins the
+    ///      fix: `vm.roll` moves only `block.number`.
+    function test_exclusivity_followsBlockClock() public {
+        vm.roll(1_000);
+        vm.warp(1_000);
+        _fundSell(SELL_OUT);
+        Order memory order = _plainOrder(7, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.exclusiveFiller = EX;
+        order.timing |= (uint256(1) << 102); // BLOCK clock (bit 102)
+        _setExclusivityEnd(order, uint32(block.number + 10)); // window is 10 BLOCKS
+        order.params = (order.params & ~uint256(0xffff)) | uint256(0); // hard exclusivity
+        bytes memory sig = _sign(order);
+
+        // Inside the block window: the non-exclusive solver is blocked.
+        vm.prank(solver);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        settlement.fill(order, sig, SELL_IN);
+
+        // Advance BLOCKS past the window, timestamp untouched → the window has ended on
+        // the block clock, so the open filler now succeeds.
+        vm.roll(block.number + 11);
+        vm.prank(solver);
+        settlement.fill(order, sig, SELL_IN);
+        assertEq(tB.balanceOf(maker), SELL_OUT, "open fill after block-window ended");
+    }
+
     // ════════════════════ piecewise auction curve ════════════════════
 
     function _curve3() internal pure returns (CurvePoint[] memory c) {

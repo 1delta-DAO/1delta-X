@@ -100,7 +100,7 @@ contract FillOnceNonceTest is CoreSettlementBase {
 
         Order memory a = _swap(11, usdcIn, wethOut, true);
         Order memory b = _swap(11, usdcIn, wethOut, false); // sibling, same nonce
-        b.deadline = a.deadline - 1; // make it a distinct hash
+        _setExpiry(b, _expiry(a) - 1); // make it a distinct hash
         bytes memory sigA = _sign(a);
         bytes memory sigB = _sign(b);
 

@@ -101,7 +101,7 @@ contract RepayTest is CompoundV3ModulesBase {
             _tokenPermits(address(settlement), WETH, 1 ether, address(repayModule), USDC, buffered),
             _noTakerPermits(),
             2,
-            order.deadline
+            _deadline(order)
         );
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));

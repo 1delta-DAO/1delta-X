@@ -1,4 +1,28 @@
+import type { Deployment, Order, SoftCancel } from "@1delta-x/sdk";
+import type { Hex } from "viem";
+
 import type { Fill, RestingOrder, Side, Source } from "../lib/types";
+
+/**
+ * The maker-signed artefact the book actually distributes. `hash` is the SDK's
+ * domain-independent struct hash — the contract's `filledAmountIn` key — so it
+ * identifies the order whether or not a Settlement exists to fill it.
+ */
+export interface SignedOrder {
+  order: Order;
+  sig: Hex;
+  hash: Hex;
+  /** The EIP-712 domain the signature is bound to. */
+  deployment: Deployment;
+  /** False when no Settlement is deployed on this chain: the signature is real, but no filler can use it. */
+  deployed: boolean;
+}
+
+/** Maker-signed retraction. Advisory — it evicts from books that honour it. */
+export interface SignedCancel {
+  cancel: SoftCancel;
+  sig: Hex;
+}
 
 export interface PlaceOrderRequest {
   marketId: string;
@@ -9,6 +33,8 @@ export interface PlaceOrderRequest {
   price: number;
   ttlMs: number;
   slices?: { total: number; everyMin: number };
+  /** The signed order this ticket produced. Absent only if signing was skipped. */
+  signed?: SignedOrder;
 }
 
 export interface RecordTakeRequest {
@@ -50,8 +76,12 @@ export interface OrderbookApi {
   subscribe(listener: () => void): () => void;
   /** Sign and broadcast. Resolves once the book has admitted the order. */
   place(req: PlaceOrderRequest): Promise<RestingOrder>;
-  /** Free retraction — the soft cancel, no transaction. */
-  cancel(orderHash: string): Promise<void>;
+  /**
+   * Free retraction — the soft cancel, no transaction. The signed message is
+   * what a real book verifies before evicting; passing it keeps this call site
+   * the shape a transport-backed client already needs.
+   */
+  cancel(orderHash: string, signed?: SignedCancel): Promise<void>;
   /** Record an order that crossed immediately and never rested. */
   recordTake(req: RecordTakeRequest): void;
   /** Feed the current market state in; drives expiry and fill progress. */

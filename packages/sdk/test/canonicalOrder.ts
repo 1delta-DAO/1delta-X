@@ -8,7 +8,7 @@ export const CANONICAL_ORDER: Order = {
   maker: A("0x00000000000000000000000000000000000000a1"),
   side: OrderSide.SELL,
   nonce: 1n,
-  deadline: 1_000_000n,
+  expiry: 1_000_000n,
   // Two fixed input legs (USDC, DAI) — end == 0 ⇒ fixed at start.
   // NOTE these stay STRUCTURED here; `packOrder` produces the packed wire form.
   legsIn: [
@@ -70,4 +70,4 @@ export const CANONICAL_ORDER: Order = {
 /// SDK silently signed hashes the contract rejected for two migrations. If you
 /// change one, change the other in the same commit; `eip712.test.ts` also pins
 /// the typestring so a field-type change cannot slip through unnoticed.
-export const GOLDEN_ORDER_HASH = "0x627e590874df6c58eba2354e7f1cf0c103f72bc95d48a01e758493e7a5bbcfef";
+export const GOLDEN_ORDER_HASH = "0x9a3d3d3d43d1b09bbdecf71f61c62e61e533e09efcaa926384683860a4df22dd";

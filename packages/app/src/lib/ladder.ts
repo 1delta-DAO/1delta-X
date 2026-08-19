@@ -1,4 +1,9 @@
-import type { Level, PoolBook, RestingOrder, Side, Source } from "./types";
+import { SOURCES, type Level, type PoolBook, type RestingOrder, type Side, type Source } from "./types";
+
+/** A zeroed tally per source — one place that knows the full source set. */
+export function emptyBySource(): Record<Source, number> {
+  return Object.fromEntries(SOURCES.map((s) => [s, 0])) as Record<Source, number>;
+}
 
 /** Rounding floor for "is there anything left" checks, in BASE units. */
 const EPS = 1e-9;
@@ -59,7 +64,7 @@ export interface Simulation {
  * shortcut is what makes a "buy 5,000 USDC of ETH" quote silently wrong.
  */
 export function walk(levels: Level[], amountIn: number, side: Side, limit: number | null): Simulation {
-  const bySource: Record<Source, number> = { DEX: 0, LMT: 0 };
+  const bySource = emptyBySource();
   let rem = amountIn;
   let crossedBase = 0;
   let crossedOut = 0;
@@ -214,7 +219,7 @@ export function restingLabel(r: RestingPreview): string {
 
 /** Cumulative BASE depth per side, and the split by source, for the stat row. */
 export function depth(levels: Level[]): { total: number; bySource: Record<Source, number> } {
-  const bySource: Record<Source, number> = { DEX: 0, LMT: 0 };
+  const bySource = emptyBySource();
   let total = 0;
   for (const l of levels) {
     bySource[l.source] += l.size;

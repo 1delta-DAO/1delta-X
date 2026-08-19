@@ -149,10 +149,9 @@ contract PlainSwapTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 2,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: _packTiming(uint32(block.timestamp), 100, 0),
+            timing: _packTiming(uint32(block.timestamp), 100, 0) | _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),
@@ -191,10 +190,10 @@ contract PlainSwapTest is CoreSettlementBase {
         // Single token permit: Settlement may pull the maker's USDC.
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](1);
         tp[0] = IPermit3.TokenPermit({
-            spender: address(settlement), token: USDC, amount: uint160(usdcIn), expiration: uint48(order.deadline)
+            spender: address(settlement), token: USDC, amount: uint160(usdcIn), expiration: uint48(_expiry(order))
         });
 
-        IPermit3.PermitBatch memory batch = _buildBatch(tp, _noTakerPermits(), 0, order.deadline);
+        IPermit3.PermitBatch memory batch = _buildBatch(tp, _noTakerPermits(), 0, _expiry(order));
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
@@ -322,10 +321,9 @@ contract PlainSwapTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: nonce,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: _packTiming(uint32(block.timestamp), 100, 0),
+            timing: _packTiming(uint32(block.timestamp), 100, 0) | _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),

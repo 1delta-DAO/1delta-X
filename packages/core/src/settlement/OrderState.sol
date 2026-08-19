@@ -42,7 +42,7 @@ abstract contract OrderState is NonceManager {
     ///         {approveOrder}. Fillers then pass an EMPTY `sig` and the fill
     ///         authorizes against this mapping (see {Signatures}). Funding
     ///         still flows through the maker's standing Permit3 allowances, and the
-    ///         fill is still gated by the shared nonce/deadline/validator machinery —
+    ///         fill is still gated by the shared nonce/expiry/validator machinery —
     ///         this only replaces the signature check, nothing else.
     mapping(address => mapping(bytes32 => bool)) public orderApproved;
 
@@ -73,7 +73,7 @@ abstract contract OrderState is NonceManager {
     ///  constant, order-independent message — one signature there is unbounded,
     ///  non-expiring, replayable delegation over everything the user has approved.
     ///  Nothing here can express that: there is no protocol-level signer, and every
-    ///  other gate (deadline, nonce, validators, and above all the maker's Permit3
+    ///  other gate (expiry, nonce, validators, and above all the maker's Permit3
     ///  allowances with their own caps and expiries) binds a delegated order exactly
     ///  as it binds a self-signed one.
     ///
@@ -81,7 +81,7 @@ abstract contract OrderState is NonceManager {
     ///  re-checks a SIGNATURE on an order's first fill, so revoking a delegate does
     ///  NOT stop the remainder of an order it already part-filled — the same
     ///  documented caveat EIP-1271 makers live with. The kill switches that DO bind
-    ///  mid-order are unchanged: {cancelOrder}, nonce cancellation, the deadline,
+    ///  mid-order are unchanged: {cancelOrder}, nonce cancellation, the expiry,
     ///  and revoking the Permit3 allowances that fund the fill.
     ///
     /// @dev `0` means "not a signer" because that is the value of an unset mapping,
@@ -142,7 +142,7 @@ abstract contract OrderState is NonceManager {
     ///
     ///         Nothing else about the fill changes: the maker must still hold the
     ///         standing Permit3 allowances the fill consumes, and every fill remains
-    ///         gated by the order's deadline, nonce, validators, and invariants.
+    ///         gated by the order's expiry, nonce, validators, and invariants.
     ///         Approval authorizes the order for partial fills up to its size, not a
     ///         single use.
     /// @return orderHash The EIP-712 order hash now authorized (handy for indexing).

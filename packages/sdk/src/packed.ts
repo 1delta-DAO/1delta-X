@@ -103,7 +103,7 @@ export function packValidators(vs: readonly Validator[]): Hex {
 export interface WireOrder {
   maker: Hex;
   nonce: bigint;
-  deadline: bigint;
+  // `expiry` (the order timeout) is folded into `timing` bits [160:208) — not a wire field.
   legsIn: Hex;
   legsOut: Hex;
   timing: bigint;
@@ -122,6 +122,11 @@ export interface WireOrder {
 
 /** `Order.side` lives in bit 101 of the packed `timing` word — see `DutchAuction.side`. */
 export const SIDE_BIT = 101n;
+
+/** `Order.expiry` (unix seconds, uint48) rides in `timing` bits [160:208) — see
+ *  `DutchAuction.expiry`. Folded in by `packOrder`, so authors keep a friendly
+ *  `expiry` field on {@link Order} and never touch these bits by hand. */
+export const EXPIRY_OFFSET = 160n;
 
 /**
  * Convert an authoring {@link Order} into the form the contract actually takes.
@@ -146,10 +151,12 @@ export function packOrder(order: Order): WireOrder {
   return {
     maker: order.maker,
     nonce: order.nonce,
-    deadline: order.deadline,
     legsIn: packLegsIn(order.legsIn),
     legsOut: packLegsOut(order.legsOut),
-    timing: order.timing | (BigInt(order.side) << SIDE_BIT),
+    timing:
+      order.timing |
+      (BigInt(order.side) << SIDE_BIT) |
+      (BigInt.asUintN(48, order.expiry) << EXPIRY_OFFSET),
     exclusiveFiller: order.exclusiveFiller,
     minFillAnchor: order.minFillAnchor,
     params: packParams(order.exclusivityOverrideBps, order.gasBumpBps, order.gasPriceRef, order.priorityScale),

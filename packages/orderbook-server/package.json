@@ -7,9 +7,9 @@
   "private": true,
   "files": ["dist", "src"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run",
+    "build": "pnpm --filter @1delta-x/sdk build && tsc -p tsconfig.json",
+    "typecheck": "pnpm --filter @1delta-x/sdk build && tsc --noEmit -p tsconfig.json",
+    "test": "pnpm --filter @1delta-x/sdk build && vitest run",
     "start": "tsx src/bin.ts",
     "dev": "tsx watch src/bin.ts",
     "example:maker": "tsx examples/maker.ts",

@@ -50,13 +50,14 @@ contract HashDifferentialTest is Test {
     // no padding at all, so that class of divergence is now structurally impossible.
 
     bytes32 constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
     );
 
-    /// @dev Chunked only to stay under the stack limit; all 16 members are static
-    ///      words so the concatenation is byte-identical to one 16-arg `abi.encode`.
+    /// @dev Chunked only to stay under the stack limit; all 15 members are static
+    ///      words so the concatenation is byte-identical to one 15-arg `abi.encode`.
+    ///      `deadline` is no longer a member of its own — it rides in `timing`.
     function _refHash(Order memory o) private pure returns (bytes32) {
-        bytes memory p1 = abi.encode(ORDER_TH, o.maker, o.nonce, o.deadline, keccak256(o.legsIn), keccak256(o.legsOut));
+        bytes memory p1 = abi.encode(ORDER_TH, o.maker, o.nonce, keccak256(o.legsIn), keccak256(o.legsOut));
         bytes memory p2 = abi.encode(o.timing, o.exclusiveFiller, o.minFillAnchor, o.params, keccak256(o.curve));
         bytes memory p3 = abi.encode(
             keccak256(o.items),
@@ -77,7 +78,8 @@ contract HashDifferentialTest is Test {
         o.maker = address(uint160(uint256(keccak256(abi.encode(seed, "maker")))));
 
         o.nonce = uint256(keccak256(abi.encode(seed, "nonce")));
-        o.deadline = uint256(keccak256(abi.encode(seed, "deadline")));
+        // `timing` is a full random word, so its deadline bits [160:208) are already
+        // fuzzed — no separate `deadline` member to seed.
         o.timing = uint256(keccak256(abi.encode(seed, "timing")));
         o.exclusiveFiller = address(uint160(uint256(keccak256(abi.encode(seed, "excl")))));
         o.minFillAnchor = uint256(keccak256(abi.encode(seed, "minfill")));

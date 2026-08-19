@@ -332,10 +332,9 @@ abstract contract CompoundV3ModulesBase is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 7,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDS, borrowUsds), //   Settlement pays solver from the USDS borrow proceeds
             legsOut: _legsOut1(USDC, bufferedRepay), // solver funds the USDC repay
-            timing: 0,
+            timing: _deadlineBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),

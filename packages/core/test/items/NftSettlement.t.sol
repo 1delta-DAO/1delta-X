@@ -88,10 +88,9 @@ contract NftSettlementTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: nonce,
-            deadline: block.timestamp + 1 hours,
             legsIn: PackedEncode.legsIn(new LegIn[](0)), //   consideration is the NFT item, not a fungible input
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: 0,
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0), //  OPEN — any solver may fill
             minFillAnchor: PRICE, //         full-fill only (indivisible)
             curve: PackedEncode.noCurve(),

@@ -79,10 +79,10 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
         // needed — Comet's `allow` (set in setUp) covers the protocol side, so
         // there is no receipt-token permit like Aave's aToken pull.
         IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](1);
-        tp[0] = IPermit3.TokenPermit(address(settlement), WETH, uint160(wethIn), uint48(order.deadline));
+        tp[0] = IPermit3.TokenPermit(address(settlement), WETH, uint160(wethIn), uint48(_deadline(order)));
 
         IPermit3.PermitBatch memory batch =
-            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(takerData), wethIn), 0, order.deadline);
+            _buildBatch(tp, _takerPermits1(address(settlement), address(takerModule), keccak256(takerData), wethIn), 0, _deadline(order));
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 

@@ -39,12 +39,17 @@ const stubVerifier = {
   refreshStates: async () => new Map(),
 } as unknown as Verifier;
 
+// A deadline relative to now, because the admission policy bounds how far ahead
+// an order may expire. The old fixed year-2096 timestamp was never a realistic
+// order — it was "never expires" spelled as a constant.
+const anHourFromNow = (): bigint => BigInt(Math.floor(Date.now() / 1000) + 3600);
+
 function orderFor(maker: Hex, nonce = 1n): Order {
   return {
     maker,
     side: OrderSide.SELL,
     nonce,
-    deadline: 4_000_000_000n,
+    deadline: anHourFromNow(),
     legsIn: [{ token: "0x1111111111111111111111111111111111111111", start: 1000n, end: 0n }],
     legsOut: [{ token: "0x2222222222222222222222222222222222222222", start: 900n, end: 800n, recipient: zeroAddress }],
     timing: 0n,

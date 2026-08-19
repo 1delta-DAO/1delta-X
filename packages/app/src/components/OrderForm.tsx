@@ -5,7 +5,7 @@ import type { Ticket } from "../hooks/useTicket";
 import type { TokenIndex } from "../hooks/useTokenIndex";
 import { fmtAmt, fmtPrice, shortHex } from "../lib/format";
 import { restingLabel, type Quote } from "../lib/ladder";
-import { SOURCE_NAME, SOURCE_VAR, type Source } from "../lib/types";
+import { SOURCE_NAME, SOURCE_VAR, SOURCES, type Source } from "../lib/types";
 import { TokenSelect } from "./TokenSelect";
 
 export interface Receipt {
@@ -33,6 +33,10 @@ interface OrderFormProps {
   signing: boolean;
   receipt: Receipt | null;
   gate: Gate | null;
+  /** Why the last signature attempt failed — a declined wallet prompt, usually. */
+  signError: string | null;
+  /** The EIP-712 domain orders are signed into, so it is never a mystery. */
+  domain: { settlement: string; chainLabel: string; deployed: boolean };
   onSign: () => void;
 }
 
@@ -47,7 +51,8 @@ function cssVar(name: string): string {
 }
 
 export function OrderForm(props: OrderFormProps) {
-  const { ticket, quote, tokens, balances, tick, mid, ready, signing, receipt, gate, onSign } = props;
+  const { ticket, quote, tokens, balances, tick, mid, ready, signing, receipt, gate, signError, domain, onSign } =
+    props;
   const [approved, setApproved] = useState(false);
   const [approving, setApproving] = useState(false);
 
@@ -75,7 +80,7 @@ export function OrderForm(props: OrderFormProps) {
 
   const bar: Array<{ key: string; pct: number; color: string; label: string }> = [];
   if (quote && amount > 0 && quote.filledIn > 0) {
-    for (const src of ["DEX", "LMT"] as Source[]) {
+    for (const src of SOURCES as Source[]) {
       const share = quote.bySource[src];
       if (share <= 0) continue;
       const pct = (share / amount) * 100;
@@ -353,6 +358,19 @@ export function OrderForm(props: OrderFormProps) {
           <div className="gas">
             Network fee <b>0</b> — the filler pays
           </div>
+          <div className="domain" title="EIP-712 verifyingContract — a signature is bound to this address and chain">
+            {domain.deployed ? (
+              <>
+                signing into Settlement <b>{shortHex(domain.settlement, 8, 6)}</b> on {domain.chainLabel}
+              </>
+            ) : (
+              <>
+                no Settlement deployed on {domain.chainLabel} — signatures are real but{" "}
+                <b className="warn">not fillable</b>
+              </>
+            )}
+          </div>
+          {signError && <div className="signerr">{signError}</div>}
         </div>
 
         {receipt && (

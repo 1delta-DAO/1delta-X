@@ -51,7 +51,10 @@ library DutchAuction {
         return uint32(order.timing >> 32);
     }
 
-    /// @notice Exclusivity end (unix; ignored if `exclusiveFiller == 0`) — bits [64:96).
+    /// @notice Exclusivity end — bits [64:96); ignored if `exclusiveFiller == 0`. Read
+    ///         against the order's OWN clock ({nowTick}): a block number under
+    ///         {blockClock}, else unix seconds — so it aligns with the decay clock rather
+    ///         than sitting on a separate one. See {OrderGates.exclusivityOverride}.
     function exclusivityEndTime(Order calldata order) internal pure returns (uint256) {
         return uint32(order.timing >> 64);
     }
@@ -173,6 +176,18 @@ library DutchAuction {
     ///         token. Prefer plain fee-on-transfer tokens here.
     function deltaVerifyOutputs(Order calldata order) internal pure returns (bool) {
         return (order.timing >> 104) & 1 == 1;
+    }
+
+    /// @notice Order expiry (unix SECONDS) — bits [160:208) of `order.timing`.
+    /// @dev    Folded into `timing` rather than carried as its own `Order` word — the
+    ///         1inch `makerTraits` expiration trick — which drops one calldata word and
+    ///         one hash-preimage word from every order (and shrinks the `Order` ABI
+    ///         decoder at every external entry point). `uint48` reaches unix year
+    ///         ~8,921,556, so `type(uint48).max` reads as "never expires". Always a
+    ///         WALL-CLOCK time: unlike the auction clocks above it ignores {blockClock},
+    ///         because the expiry gate is `block.timestamp` on every chain.
+    function expiry(Order calldata order) internal pure returns (uint256) {
+        return uint48(order.timing >> 160);
     }
 
     // ──────────────────── Packed `params` accessors ────────────────────

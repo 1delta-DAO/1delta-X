@@ -103,8 +103,8 @@ describe("amendOrder — cancel and replace", () => {
   });
 
   it("carries every unpatched field through verbatim", () => {
-    const patched = patchOrder(order, 99n, { deadline: 123n });
-    expect(patched.deadline).toBe(123n);
+    const patched = patchOrder(order, 99n, { expiry: 123n });
+    expect(patched.expiry).toBe(123n);
     expect(patched.legsIn).toEqual(order.legsIn);
     expect(patched.legsOut).toEqual(order.legsOut);
     expect(patched.items).toEqual(order.items);

@@ -2,9 +2,11 @@
 
 Reference intent-trading interface for UniversalSettlement.
 
-One ladder, two sources of liquidity: **Uniswap v3 tick liquidity**, walked from
-the pool's own initialized ticks, merged with **signed resting limit orders**
-from the order book. The order form quotes against the merged ladder, previews
+One ladder, several sources of liquidity: **Uniswap v3** and **SushiSwap v3**
+tick liquidity, each walked from the pool's own initialized ticks, merged with
+**signed resting limit orders** from the order book. Every rung keeps its venue,
+so the best bid and the best ask can be in different pools and you can still see
+which. The order form quotes against the merged ladder, previews
 the part of a limit order that would rest — in position, in the ladder — and
 signs.
 
@@ -19,7 +21,8 @@ No API key and no backend. A wallet is needed to sign; the book renders without 
 
 | Part | Status |
 | --- | --- |
-| Pool ladder, mid, spread, block height | **Live.** Oku `cush_simulatePoolLiquidity`, polled every 12s |
+| Uniswap v3 ladder | **Live.** Oku `cush_simulatePoolLiquidity`, polled every 12s |
+| SushiSwap v3 ladder | **Live.** The v3 subgraph, same tick maths, same polling |
 | Token symbols, decimals, icons | **Live.** [1delta-DAO/token-lists](https://github.com/1delta-DAO/token-lists) |
 | Wallet connection, chain switching, balances | **Live.** EIP-6963 + viem, read through the wallet |
 | Ladder merge, fill simulation, resting/crossing split | **Real.** `src/lib/univ3.ts`, `src/lib/ladder.ts` |
@@ -28,8 +31,11 @@ No API key and no backend. A wallet is needed to sign; the book renders without 
 
 ## The ladder
 
-`cush_simulatePoolLiquidity` returns every initialized tick in the pool, with
-`liquidity_net` and its Q96 sqrt price. [`src/lib/univ3.ts`](src/lib/univ3.ts)
+Both venues return every initialized tick in the pool. Oku gives each tick's Q96
+sqrt price directly; the subgraph gives a tick *index*, so
+[`getSqrtRatioAtTick`](src/lib/univ3.ts) ports Uniswap's integer `TickMath` —
+reconstructing it in floating point would corrupt every rung, because the ladder
+*differences* adjacent sqrt prices. [`src/lib/univ3.ts`](src/lib/univ3.ts)
 accumulates those into per-range liquidity, walks outward from the current
 price, and converts each range into one rung:
 
@@ -47,6 +53,32 @@ ladder reads as synthetic even though the numbers are real. Walking the ticks
 gives one rung per range where liquidity is genuinely constant, so sizes vary by
 60–250% across the visible ladder and a concentrated position shows up as a
 cliff.
+
+## Two venues, one ladder
+
+A market names its pools in priority order. Each is walked independently, then
+the rungs are merged into one sorted ladder with the venue tag intact — hover a
+row for the exact pool address, or read the legend under the book.
+
+The first pool listed is the **primary**: its token metadata resolves the pair.
+Every other pool is matched to it **by token address, not symbol** — Oku calls
+Rootstock's USDT0 `USD0` and the Sushi subgraph calls it `USD₮0`, and they agree
+on the address.
+
+A venue that fails does not fail the market: it is recorded with its reason, the
+legend shows it in red with that reason spelled out, and the book renders from
+the rest. A subgraph outage should not take the Uniswap depth off the screen.
+
+**Only Rootstock works out of the box.** Of SushiSwap's v3 subgraphs, the
+Goldsky-hosted ones are public and the rest sit behind The Graph's gateway, which
+needs an API key. Rootstock is the one chain where both this app trades *and*
+Sushi publishes keylessly. Ethereum and BNB Chain carry their gateway URLs and
+light up when `VITE_GRAPH_KEY` is set; without it they are reported as absent
+rather than tried and 401'd.
+
+```bash
+VITE_GRAPH_KEY=… pnpm run app     # enables SushiSwap on the gateway chains
+```
 
 ## Replacing the mock
 
@@ -80,11 +112,12 @@ timer of its own.
 
 ```
 src/
-  config/chains.ts      chainId ↔ Oku slug ↔ viem chain
-  config/markets.ts     pinned pools per chain
-  lib/univ3.ts          tick maths — the ladder itself
-  lib/oku.ts            Oku JSON-RPC client
-  lib/poolbook.ts       pool identity + ladder → PoolBook
+  config/chains.ts      chainId ↔ Oku slug ↔ Sushi subgraph ↔ viem chain
+  config/markets.ts     pinned pools per chain, one or more venues each
+  lib/univ3.ts          tick maths + TickMath — the ladder itself
+  lib/oku.ts            Oku JSON-RPC client (Uniswap v3 ticks)
+  lib/sushi.ts          SushiSwap v3 subgraph client
+  lib/poolbook.ts       every venue → one merged, venue-tagged PoolBook
   lib/ladder.ts         merge, walk, quote, clearing price, depth
   lib/tokens.ts         1delta token lists, lazily loaded and cached
   backend/api.ts        the order-distribution seam
@@ -98,11 +131,26 @@ src/
 ## Adding a market
 
 Append to `MARKETS` in [`src/config/markets.ts`](src/config/markets.ts) with the
-chain id and the Uniswap v3 pool address. `base`/`quote` are how you want the
-pair quoted; which of them is the pool's token0 is resolved from the pool's own
-metadata, so the orientation cannot be configured wrong. Symbols, decimals and
-icons follow from the token list. A new chain needs one row in
-[`src/config/chains.ts`](src/config/chains.ts) — chain id, Oku slug, viem chain.
+chain id and one or more pools:
+
+```ts
+{
+  id: "rsk-30-wrbtc-usd0",
+  chainId: 30,
+  pools: [
+    { dex: "uniswap-v3",  address: "0xaef6…", feeBps: 3000 },
+    { dex: "sushiswap-v3", address: "0x6d77…", feeBps: 3000 },
+  ],
+  base: "WRBTC",
+  quote: "USD0",
+}
+```
+
+`base`/`quote` are how you want the pair quoted; which of them is the primary
+pool's token0 is resolved from the pool's own metadata, so the orientation
+cannot be configured wrong. Symbols, decimals and icons follow from the token
+list. A new chain needs one row in [`src/config/chains.ts`](src/config/chains.ts)
+— chain id, Oku slug, viem chain, and optionally a SushiSwap subgraph URL.
 
 ## Notes on the feeds
 

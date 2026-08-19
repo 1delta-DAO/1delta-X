@@ -79,7 +79,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
             _tokenPermitsWithTaker(address(settlement), WETH, wethIn, address(withdrawModule), aWETH, wethIn),
             _takerPermits1(address(settlement), address(withdrawModule), keccak256(takerData), wethIn),
             0,
-            order.deadline
+            _deadline(order)
         );
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));

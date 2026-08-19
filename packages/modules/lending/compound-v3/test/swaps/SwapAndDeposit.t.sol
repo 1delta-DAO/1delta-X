@@ -46,10 +46,9 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 0,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
             legsOut: _legsOut1(WETH, wethOut), // fixed-price (start == end)
-            timing: 0,
+            timing: _deadlineBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),
@@ -111,10 +110,9 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 0,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
             legsOut: _legsOut1(WETH, wethOut),
-            timing: 0,
+            timing: _deadlineBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),
@@ -129,7 +127,7 @@ contract SwapAndDepositTest is CompoundV3ModulesBase {
             _tokenPermits(address(settlement), USDC, usdcIn, address(depositModule), WETH, wethOut),
             _noTakerPermits(),
             0,
-            order.deadline
+            _deadline(order)
         );
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));

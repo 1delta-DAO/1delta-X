@@ -139,7 +139,7 @@ contract MigrateTest is AaveModulesBase {
         tkp[0] = IPermit3.TakerPermit(address(settlement), address(withdrawModule), keccak256(aaveWithdrawData), uint160(9 ether), exp);
         tkp[1] = IPermit3.TakerPermit(address(settlement), address(borrowModule), keccak256(sparkBorrowData), uint160(3_000e6), exp);
 
-        batch = _buildBatch(tp, tkp, 3, order.deadline);
+        batch = _buildBatch(tp, tkp, 3, _deadline(order));
     }
 
     function _assertMigration() internal view {

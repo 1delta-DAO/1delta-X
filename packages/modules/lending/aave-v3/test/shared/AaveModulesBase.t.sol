@@ -321,10 +321,9 @@ abstract contract AaveModulesBase is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 7,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, debt), //             Settlement pays solver entirely from the borrow proceeds
             legsOut: _legsOut1(USDC, bufferedRepay),
-            timing: 0,
+            timing: _deadlineBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: _noCurve(),

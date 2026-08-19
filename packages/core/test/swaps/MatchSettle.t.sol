@@ -132,10 +132,9 @@ contract MatchSettleTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: who,
             nonce: nonce,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(debtToken, debt),
             legsOut: _legsOut1(collateralToken, collateral),
-            timing: 0,
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),
@@ -619,7 +618,9 @@ contract MatchSettleTest is CoreSettlementBase {
     //    permits the cycle. This is the regression guard on "no behaviour change". ──
     function test_itemPolicy_anyIsTheDefault_andPermitsTheCycle() public {
         (Order memory a, Order memory b) = _cyclePair();
-        assertEq(a.timing, 0, "default order carries no policy bits");
+        // ANY == 0: no policy bits [96:100). (The deadline now rides in timing bits
+        // [160:208), so the whole word is no longer zero — mask to the policy nibble.)
+        assertEq((a.timing >> 96) & 0xf, 0, "default order carries no policy bits");
 
         vm.prank(solver);
         settlement.matchSettle(_two(a, b, makerPk, bobPk, _cycleSchedule()));
@@ -833,10 +834,9 @@ contract MatchSettleTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 11,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, USDC_AMT),
             legsOut: PackedEncode.legsOut(new LegOut[](0)),
-            timing: 0,
+            timing: _expiryBits(block.timestamp + 1 hours),
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),

@@ -110,7 +110,7 @@ contract SourcingFeeTest is CoreSettlementBase {
         _fund(usdcIn, startOut); // solver funded for the worst (start) case
 
         Order memory order = _order(maker, 3, USDC, WETH, usdcIn, startOut, new Item[](0));
-        order.timing = _packTiming(uint32(block.timestamp), 1000, 0);
+        order.timing = _packTiming(uint32(block.timestamp), 1000, 0) | _expiryBits(block.timestamp + 1 hours);
         LegOut[] memory outs2 = new LegOut[](2);
         outs2[0] = LegOut(WETH, startOut * (10_000 - feeBps) / 10_000, endOut * (10_000 - feeBps) / 10_000, address(0));
         outs2[1] = LegOut(WETH, startOut * feeBps / 10_000, endOut * feeBps / 10_000, feeRecipient);
@@ -254,10 +254,9 @@ contract SourcingFeeTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 12,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn), // fixed-price input (end == 0)
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: uint256(1) << 101, // BUY (timing bit 101)
+            timing: (uint256(1) << 101) | _expiryBits(block.timestamp + 1 hours), // BUY (timing bit 101)
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),
@@ -300,10 +299,9 @@ contract SourcingFeeTest is CoreSettlementBase {
             pricingModule: address(0),
             maker: maker,
             nonce: 13,
-            deadline: block.timestamp + 1 hours,
             legsIn: _legsIn1(USDC, usdcIn),
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: uint256(1) << 101, // BUY (timing bit 101)
+            timing: (uint256(1) << 101) | _expiryBits(block.timestamp + 1 hours), // BUY (timing bit 101)
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),

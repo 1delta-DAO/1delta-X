@@ -35,7 +35,7 @@ const legOutComponents = [
 export const orderComponents = [
   { name: "maker", type: "address" },
   { name: "nonce", type: "uint256" },
-  { name: "deadline", type: "uint256" },
+  // `expiry` folded into `timing` bits [160:208) — not a tuple member. See packed.ts.
   { name: "legsIn", type: "bytes" },
   { name: "legsOut", type: "bytes" },
   { name: "timing", type: "uint256" },
@@ -71,6 +71,25 @@ const permitBatchComponents = [
   { name: "takers", type: "tuple[]", components: takerPermitComponents },
   { name: "nonce", type: "uint256" },
   { name: "deadline", type: "uint256" },
+] as const;
+
+const permitTakeComponents = [
+  { name: "module", type: "address" },
+  { name: "ref", type: "bytes32" },
+  { name: "amount", type: "uint160" },
+  { name: "nonce", type: "uint256" },
+  { name: "deadline", type: "uint256" },
+] as const;
+
+const tokenSpenderPairComponents = [
+  { name: "token", type: "address" },
+  { name: "spender", type: "address" },
+] as const;
+
+const spenderRefPairComponents = [
+  { name: "spender", type: "address" },
+  { name: "module", type: "address" },
+  { name: "ref", type: "bytes32" },
 ] as const;
 
 const outputLegComponents = [
@@ -303,6 +322,213 @@ export const SETTLEMENT_ABI = [
       { name: "maker", type: "address", indexed: true },
       { name: "wordIndex", type: "uint256", indexed: false },
     ],
+  },
+] as const;
+
+/// The Permit3 allowance hub — the external surface an integrator calls directly
+/// (the SDK's order helpers only ever touch `permitBatchWithWitness` via the
+/// settlement's `fillWithPermit`, so this is the rest: on-chain grants, the taker
+/// book, the one-shot `permitTake`, strict mode and combined revocation). Tuple
+/// component order matches `IPermit3.sol` exactly.
+export const PERMIT3_ABI = [
+  // ── Token book ──
+  {
+    type: "function",
+    name: "approveToken",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "token", type: "address" },
+      { name: "amount", type: "uint160" },
+      { name: "expiration", type: "uint48" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "transferFrom",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "to", type: "address" },
+      { name: "token", type: "address" },
+      { name: "amount", type: "uint160" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "tokenAllowance",
+    stateMutability: "view",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "token", type: "address" },
+    ],
+    outputs: [
+      { name: "amount", type: "uint160" },
+      { name: "expiration", type: "uint48" },
+    ],
+  },
+  { type: "function", name: "revokeToken", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "token", type: "address" }], outputs: [] },
+  { type: "function", name: "lockdown", stateMutability: "nonpayable", inputs: [{ name: "approvals", type: "tuple[]", components: tokenSpenderPairComponents }], outputs: [] },
+  // ── Taker book (module is part of the key — audit fix S-2) ──
+  {
+    type: "function",
+    name: "approveTaker",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "module", type: "address" },
+      { name: "ref", type: "bytes32" },
+      { name: "amount", type: "uint160" },
+      { name: "expiration", type: "uint48" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "take",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "module", type: "address" },
+      { name: "user", type: "address" },
+      { name: "amount", type: "uint160" },
+      { name: "receiver", type: "address" },
+      { name: "data", type: "bytes" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "takerAllowance",
+    stateMutability: "view",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "module", type: "address" },
+      { name: "ref", type: "bytes32" },
+    ],
+    outputs: [
+      { name: "amount", type: "uint160" },
+      { name: "expiration", type: "uint48" },
+    ],
+  },
+  { type: "function", name: "refFor", stateMutability: "pure", inputs: [{ name: "data", type: "bytes" }], outputs: [{ name: "ref", type: "bytes32" }] },
+  { type: "function", name: "revokeTaker", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "module", type: "address" }, { name: "ref", type: "bytes32" }], outputs: [] },
+  { type: "function", name: "lockdownTakers", stateMutability: "nonpayable", inputs: [{ name: "approvals", type: "tuple[]", components: spenderRefPairComponents }], outputs: [] },
+  // ── Combined revocation (audit fix U-4) ──
+  {
+    type: "function",
+    name: "lockdownAll",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "tokens", type: "tuple[]", components: tokenSpenderPairComponents },
+      { name: "takers", type: "tuple[]", components: spenderRefPairComponents },
+      { name: "nonceWords", type: "uint256[]" },
+      { name: "nonceMasks", type: "uint256[]" },
+    ],
+    outputs: [],
+  },
+  // ── Strict mode (audit fix U-6) ──
+  { type: "function", name: "setStrictMode", stateMutability: "nonpayable", inputs: [{ name: "enabled", type: "bool" }], outputs: [] },
+  { type: "function", name: "strictMode", stateMutability: "view", inputs: [{ name: "user", type: "address" }], outputs: [{ name: "", type: "bool" }] },
+  // ── Signed grants ──
+  {
+    type: "function",
+    name: "permitBatch",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "owner", type: "address" }, { name: "batch", type: "tuple", components: permitBatchComponents }, { name: "sig", type: "bytes" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "permitBatchWithWitness",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "batch", type: "tuple", components: permitBatchComponents },
+      { name: "witness", type: "bytes32" },
+      { name: "witnessTypeString", type: "string" },
+      { name: "sig", type: "bytes" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "permitBatchWithWitnessIfNeeded",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "batch", type: "tuple", components: permitBatchComponents },
+      { name: "witness", type: "bytes32" },
+      { name: "witnessTypeString", type: "string" },
+      { name: "sig", type: "bytes" },
+    ],
+    outputs: [],
+  },
+  // ── One-shot signed take (audit fix U-2) ──
+  {
+    type: "function",
+    name: "permitTake",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "permit", type: "tuple", components: permitTakeComponents },
+      { name: "owner", type: "address" },
+      { name: "receiver", type: "address" },
+      { name: "data", type: "bytes" },
+      { name: "sig", type: "bytes" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "permitTakeWithWitness",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "permit", type: "tuple", components: permitTakeComponents },
+      { name: "owner", type: "address" },
+      { name: "receiver", type: "address" },
+      { name: "data", type: "bytes" },
+      { name: "witness", type: "bytes32" },
+      { name: "witnessTypeString", type: "string" },
+      { name: "sig", type: "bytes" },
+    ],
+    outputs: [],
+  },
+  // ── Nonces & domain ──
+  { type: "function", name: "invalidateUnorderedNonces", stateMutability: "nonpayable", inputs: [{ name: "wordPos", type: "uint256" }, { name: "mask", type: "uint256" }], outputs: [] },
+  { type: "function", name: "isPermitNonceUsed", stateMutability: "view", inputs: [{ name: "owner", type: "address" }, { name: "nonce", type: "uint256" }], outputs: [{ name: "", type: "bool" }] },
+  { type: "function", name: "DOMAIN_SEPARATOR", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "bytes32" }] },
+  {
+    type: "function",
+    name: "eip712Domain",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "fields", type: "bytes1" },
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+      { name: "chainId", type: "uint256" },
+      { name: "verifyingContract", type: "address" },
+      { name: "salt", type: "bytes32" },
+      { name: "extensions", type: "uint256[]" },
+    ],
+  },
+] as const;
+
+/// Optional per-module view a taker module MAY implement so a wallet can render a
+/// taker approval in words — "Borrow 1,000 USDC from Aave v3" instead of an opaque
+/// `ref`. Off-chain only; Permit3 never calls it. A frontend that holds a TAKE
+/// item's `data` reads it directly (with its own graceful fallback for modules that
+/// do not implement it). See `readTakerDescription` in `permit3.ts`.
+export const TAKER_MODULE_DESCRIBE_ABI = [
+  {
+    type: "function",
+    name: "describe",
+    stateMutability: "view",
+    inputs: [{ name: "data", type: "bytes" }],
+    outputs: [{ name: "", type: "string" }],
   },
 ] as const;
 

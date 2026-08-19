@@ -170,7 +170,7 @@ contract DeltaVerifyDeliveryTest is CoreSettlementBase {
 
         Order memory o = _order(maker, 3, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
         o.legsOut = PackedEncode.oneLegOut(address(fot), start, end, address(0)); // decaying output
-        o.timing = _packTiming(uint32(block.timestamp), duration, 0);
+        o.timing = _packTiming(uint32(block.timestamp), duration, 0) | _expiryBits(block.timestamp + 1 hours);
         _markDeltaVerify(o);
         bytes memory sig = _sign(o);
 

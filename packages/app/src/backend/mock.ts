@@ -1,5 +1,11 @@
-import type { Fill, RestingOrder, Side } from "../lib/types";
-import type { MarketObservation, OrderbookApi, PlaceOrderRequest, RecordTakeRequest } from "./api";
+import { SOURCES, type Fill, type RestingOrder, type Side } from "../lib/types";
+import type {
+  MarketObservation,
+  OrderbookApi,
+  PlaceOrderRequest,
+  RecordTakeRequest,
+  SignedCancel,
+} from "./api";
 
 /**
  * In-memory stand-in for order distribution.
@@ -71,12 +77,15 @@ export class MockOrderbook implements OrderbookApi {
   }
 
   async place(req: PlaceOrderRequest): Promise<RestingOrder> {
-    // The pause stands in for the wallet round-trip, so the button's
-    // "waiting for signature" state is a real state and not a fake one.
-    await new Promise((r) => setTimeout(r, 650));
+    // The wallet round-trip already happened in the caller: an order arrives
+    // here signed, or not at all. The pause only stands in for the unsigned
+    // path, so the button's "waiting" state is never instantaneous.
+    if (!req.signed) await new Promise((r) => setTimeout(r, 300));
     const now = Date.now();
     const order: RestingOrder = {
-      id: hex(this.rand, 32),
+      // Keyed by the contract's own order hash when there is one, so this id is
+      // the same string a filler and the chain would use.
+      id: req.signed?.hash ?? hex(this.rand, 32),
       marketId: req.marketId,
       side: req.side,
       type: req.type,
@@ -86,6 +95,7 @@ export class MockOrderbook implements OrderbookApi {
       createdAt: now,
       expiresAt: now + req.ttlMs,
       mine: true,
+      signed: req.signed,
       slices: req.slices ? { done: 0, total: req.slices.total, everyMin: req.slices.everyMin } : undefined,
     };
     this.restingOrders.push(order);
@@ -93,7 +103,11 @@ export class MockOrderbook implements OrderbookApi {
     return order;
   }
 
-  async cancel(orderHash: string): Promise<void> {
+  async cancel(orderHash: string, signed?: SignedCancel): Promise<void> {
+    // A real book verifies the signature and checks the hash is in `orderHashes`
+    // before evicting. The mock trusts its own tab, but the message is carried
+    // so the call site is already the shape a real client needs.
+    if (signed && !signed.cancel.orderHashes.includes(orderHash as `0x${string}`)) return;
     this.restingOrders = this.restingOrders.filter((o) => o.id !== orderHash);
     this.emit();
   }
@@ -102,10 +116,8 @@ export class MockOrderbook implements OrderbookApi {
     const now = Date.now();
     // One row per source the sweep touched, because "filled from the pool" and
     // "filled against a resting order" are different settlements, not one blend.
-    const parts = (["LMT", "DEX"] as const)
-      .map((source) => ({ source, size: req.bySource[source] }))
-      .filter((p) => p.size > 0);
-    const rows = parts.length ? parts : [{ source: "DEX" as const, size: req.size }];
+    const parts = SOURCES.map((source) => ({ source, size: req.bySource[source] ?? 0 })).filter((p) => p.size > 0);
+    const rows = parts.length ? parts : [{ source: "UNI" as const, size: req.size }];
     for (const p of rows) {
       this.settled.push({
         id: `${now}-${this.counter++}`,

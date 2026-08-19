@@ -94,7 +94,7 @@ abstract contract UsdrifForkBase is Test {
     bytes32 internal constant LEG_OUT_TH =
         keccak256("LegOut(address token,uint256 start,uint256 end,address recipient)");
     bytes32 internal constant ORDER_TH = keccak256(
-        "Order(address maker,uint256 nonce,uint256 deadline,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
     );
 
     function _noCurve() internal pure returns (bytes memory) {
@@ -177,12 +177,26 @@ abstract contract UsdrifForkBase is Test {
         o.timing = (o.timing & ~(uint256(type(uint32).max) << 64)) | (uint256(uint32(v)) << 64);
     }
 
+    /// @dev `Order.deadline` (unix seconds) now lives in `timing` bits [160:208) —
+    ///      mirror of {DutchAuction.deadline}. It stopped being a struct field, so
+    ///      builders OR these bits into `timing` and readers shift them back out.
+    function _deadlineBits(uint256 unixTime) internal pure returns (uint256) {
+        return uint256(uint48(unixTime)) << 160;
+    }
+
+    function _deadline(Order memory o) internal pure returns (uint256) {
+        return uint48(o.timing >> 160);
+    }
+
+    function _setDeadline(Order memory o, uint256 v) internal pure {
+        o.timing = (o.timing & ~(uint256(type(uint48).max) << 160)) | (uint256(uint48(v)) << 160);
+    }
+
     function _hashOrder(Order memory o) internal pure returns (bytes32) {
         bytes memory head = abi.encode(
             ORDER_TH,
             o.maker,
             o.nonce,
-            o.deadline,
             keccak256(o.legsIn),
             keccak256(o.legsOut),
             o.timing,

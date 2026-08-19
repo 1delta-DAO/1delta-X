@@ -60,8 +60,14 @@ library OrderGates {
     ///         allowed against an `exclusivityOverrideBps` price improvement it must
     ///         pay the maker (soft exclusivity). Returns the override, 0 otherwise.
     function exclusivityOverride(Order calldata order, address filler) internal view returns (uint256 overrideBps) {
+        // `exclusivityEndTime` is measured on the ORDER'S OWN clock — block numbers under
+        // {DutchAuction.blockClock}, else unix seconds — so a block-clocked order's
+        // exclusivity window aligns with its block-clocked decay instead of drifting on a
+        // separate seconds clock. `nowTick` is `block.timestamp` for the timestamp orders
+        // that are the norm, so their behaviour is unchanged. (UniswapX ties exclusivity
+        // to `decayStartTime`, i.e. the same clock as the decay, for the same reason.)
         if (
-            order.exclusiveFiller != address(0) && block.timestamp < order.exclusivityEndTime()
+            order.exclusiveFiller != address(0) && order.nowTick() < order.exclusivityEndTime()
                 && filler != order.exclusiveFiller
         ) {
             overrideBps = order.overrideBps();
@@ -129,6 +135,31 @@ library OrderGates {
     ///         bomb the caller's memory. `data` is the maker-signed per-validator
     ///         config; `takerData` is the shared filler-supplied blob (a validator
     ///         must independently verify it).
+    /// @dev MEASURED 2026-08-19 — the per-gate `abi.encodeCall` below re-encodes the
+    ///      WHOLE order (6 blob copies) for every validator AND every invariant, and
+    ///      is the largest single gas item left in the fill path. Priced with a
+    ///      throwaway harness, per gate:
+    ///
+    ///        order shape        current    hoisted   saving/extra gate
+    ///        1 leg,  0 items     3,152      1,603      −1,549
+    ///        2 legs, 2 items     4,750      1,603      −3,147
+    ///        4 legs, 4 items     4,903      1,603      −3,300
+    ///
+    ///      "Hoisted" = encode the order-bearing calldata ONCE per fill, then per gate
+    ///      rewrite only the `data`/`takerData` tails and patch their head offsets.
+    ///      It works, but it is NOT shipped, for three reasons:
+    ///        • it costs **+136 gas on a single-gate order** — and one gate is the
+    ///          common shape, so the majority case pays for the minority's win;
+    ///        • the buffer must survive item execution (validators run pre-items,
+    ///          invariants post-), so it has to be threaded through `_runValidators` →
+    ///          `_runInvariants` and re-sized for the largest `data` in the walk;
+    ///        • it puts hand-rolled ABI tail-patching on the SECURITY-GATE path, where
+    ///          a mis-sized buffer would silently hand a validator the wrong bytes.
+    ///      A verbatim `calldatacopy` of the order's calldata region is cheaper still
+    ///      and was also rejected: the region's end is not knowable without walking
+    ///      every blob, and a non-canonical-but-valid encoding could make the validator
+    ///      decode a different order than execution uses.
+    ///      Revisit only with a design + differential test of its own.
     function gatePasses(
         address target,
         Order calldata order,

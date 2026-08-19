@@ -77,21 +77,22 @@ contract PricingGasBenchTest is MockSettlementBase {
         // ── 1. clock (linear decay) — the baseline
         _fund();
         Order memory o = _decayingSell(1);
-        o.timing = uint256(uint32(block.timestamp)) | (uint256(600) << 32);
+        o.timing = uint256(uint32(block.timestamp)) | (uint256(600) << 32) | _expiryBits(block.timestamp + 1 hours);
         vm.warp(block.timestamp + 300);
         uint256 base = _measure("clock  (linear decay)      ", o, _sign(o), "");
 
         // ── 2. block clock
         _fund();
         o = _decayingSell(2);
-        o.timing = uint256(uint32(block.number)) | (uint256(100) << 32) | (uint256(1) << 102);
+        o.timing =
+            uint256(uint32(block.number)) | (uint256(100) << 32) | (uint256(1) << 102) | _expiryBits(block.timestamp + 1 hours);
         vm.roll(block.number + 50);
         uint256 blockClock = _measure("block clock                ", o, _sign(o), "");
 
         // ── 3. priority auction
         _fund();
         o = _decayingSell(3);
-        o.timing = uint256(1) << 103;
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
         o.params = DutchAuction.packParams(0, 0, 0, 2 gwei);
         vm.fee(1 gwei);
         vm.txGasPrice(2 gwei);

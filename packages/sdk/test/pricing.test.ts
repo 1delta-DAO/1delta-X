@@ -25,7 +25,7 @@ function order(partial: Partial<Order>): Order {
     maker: A("0x00000000000000000000000000000000000000a1"),
     side: OrderSide.SELL,
     nonce: 0n,
-    deadline: 10_000_000n,
+    expiry: 10_000_000n,
     legsIn: [{ token: USDC, start: 2_000_000_000n, end: 0n }],
     legsOut: [{ token: WETH, start: 1_000_000_000_000_000_000n, end: 0n, recipient: ZERO }],
     timing: 0n,

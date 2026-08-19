@@ -36,11 +36,7 @@ abstract contract Core is Base {
         nonReentrant
         returns (uint256[] memory fillAmountsOut)
     {
-        bytes32 orderHash = order.hash();
-        _verifySignature(orderHash, sig, order.maker);
-        (fillAmountsOut,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, "", false
-        );
+        return _fillSigned(order, sig, fillAmount, "");
     }
 
     /// @notice Fill overload that carries a filler-supplied `takerData` blob into
@@ -58,19 +54,20 @@ abstract contract Core is Base {
         nonReentrant
         returns (uint256[] memory fillAmountsOut)
     {
+        return _fillSigned(order, sig, fillAmount, takerData);
+    }
+
+    /// @dev Shared body of both {fill} overloads — see {_fillWithPermitCore} for why
+    ///      the overload pairs are funnelled through one body rather than duplicated.
+    function _fillSigned(Order calldata order, bytes calldata sig, uint256 fillAmount, bytes memory takerData)
+        private
+        returns (uint256[] memory outs)
+    {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        (fillAmountsOut,) = _fillCore(
-            order,
-            orderHash,
-            fillAmount,
-            msg.sender,
-            address(0),
-            address(0),
-            "",
-            CallbackMode.PreDelivery,
-            takerData,
-            false
+        (outs,) = _fillCore(
+            order, orderHash, fillAmount, msg.sender, address(0), address(0), "",
+            CallbackMode.PreDelivery, takerData, false
         );
     }
 
@@ -112,11 +109,7 @@ abstract contract Core is Base {
         bytes calldata callbackData,
         CallbackMode mode
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
-        bytes32 orderHash = order.hash();
-        _verifySignature(orderHash, sig, order.maker);
-        (fillAmountsOut,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, "", false
-        );
+        return _fillCallback(order, sig, fillAmount, callbackTarget, callbackData, mode, "");
     }
 
     /// @notice {fillWithCallback} overload carrying a filler-supplied `takerData`
@@ -131,12 +124,27 @@ abstract contract Core is Base {
         CallbackMode mode,
         bytes calldata takerData
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+        return _fillCallback(order, sig, fillAmount, callbackTarget, callbackData, mode, takerData);
+    }
+
+    /// @dev Shared body of both {fillWithCallback} overloads — see
+    ///      {_fillWithPermitCore} for why the pairs are funnelled, not duplicated.
+    function _fillCallback(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        address callbackTarget,
+        bytes calldata callbackData,
+        CallbackMode mode,
+        bytes memory takerData
+    ) private returns (uint256[] memory outs) {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        (fillAmountsOut,) = _fillCore(
+        (outs,) = _fillCore(
             order, orderHash, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, takerData, false
         );
     }
+
 
     /// @notice Single-signature fill: the maker's `sig` is over a Permit3
     ///         `PermitBatch` bound to this order's hash as a witness, so
@@ -149,21 +157,7 @@ abstract contract Core is Base {
         bytes calldata sig,
         uint256 fillAmount
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
-        bytes32 orderHash = order.hash();
-        // Permit3 verifies the sig against (PermitBatchWitness + orderHash) and
-        // applies all allowances. The order itself doesn't need a separate sig
-        // — the witness binding makes the permit endorse this exact order.
-        // IDEMPOTENT on purpose: the signature is still verified every time (a bad
-        // `sig` reverts), but a nonce already spent — by an earlier partial fill, or
-        // by a griefer who front-ran the permit straight out of this calldata — is
-        // skipped instead of reverting {PermitNonceUsed}. Without this, one cheap
-        // front-run permanently bricks the order (the maker signed a
-        // PermitBatchWitness, not an Order, so no other entry can rescue it), and
-        // partial fills are impossible. See {SignedPermits.permitBatchWithWitnessIfNeeded}.
-        PERMIT3.permitBatchWithWitnessIfNeeded(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
-        (fillAmountsOut,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), address(0), "", CallbackMode.PreDelivery, "", false
-        );
+        return _fillWithPermitCore(order, batch, sig, fillAmount, "");
     }
 
     /// @notice {fillWithPermit} overload carrying a filler-supplied `takerData`
@@ -176,28 +170,39 @@ abstract contract Core is Base {
         uint256 fillAmount,
         bytes calldata takerData
     ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+        return _fillWithPermitCore(order, batch, sig, fillAmount, takerData);
+    }
+
+    /// @dev Shared body of both {fillWithPermit} overloads. Extracted because each
+    ///      overload otherwise emits its OWN copy of the permit call's encoder — a
+    ///      `PermitBatch` struct (two dynamic arrays of structs) plus the long
+    ///      `WITNESS_TYPESTRING` constant — which is one of the largest single
+    ///      encoders in the contract. MEASURED: **−200 bytes** of Settlement runtime,
+    ///      with the external ABI unchanged.
+    ///
+    ///      IDEMPOTENT permit on purpose: the signature is still verified every time
+    ///      (a bad `sig` reverts), but a nonce already spent — by an earlier partial
+    ///      fill, or by a griefer who front-ran the permit straight out of this
+    ///      calldata — is skipped instead of reverting {PermitNonceUsed}. Without
+    ///      that, one cheap front-run permanently bricks the order (the maker signed
+    ///      a PermitBatchWitness, not an Order, so no other entry can rescue it) and
+    ///      partial fills are impossible. See
+    ///      {SignedPermits.permitBatchWithWitnessIfNeeded}.
+    function _fillWithPermitCore(
+        Order calldata order,
+        IPermit3.PermitBatch calldata batch,
+        bytes calldata sig,
+        uint256 fillAmount,
+        bytes memory takerData
+    ) private returns (uint256[] memory outs) {
         bytes32 orderHash = order.hash();
-        // IDEMPOTENT on purpose: the signature is still verified every time (a bad
-        // `sig` reverts), but a nonce already spent — by an earlier partial fill, or
-        // by a griefer who front-ran the permit straight out of this calldata — is
-        // skipped instead of reverting {PermitNonceUsed}. Without this, one cheap
-        // front-run permanently bricks the order (the maker signed a
-        // PermitBatchWitness, not an Order, so no other entry can rescue it), and
-        // partial fills are impossible. See {SignedPermits.permitBatchWithWitnessIfNeeded}.
         PERMIT3.permitBatchWithWitnessIfNeeded(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
-        (fillAmountsOut,) = _fillCore(
-            order,
-            orderHash,
-            fillAmount,
-            msg.sender,
-            address(0),
-            address(0),
-            "",
-            CallbackMode.PreDelivery,
-            takerData,
-            false
+        (outs,) = _fillCore(
+            order, orderHash, fillAmount, msg.sender, address(0), address(0), "",
+            CallbackMode.PreDelivery, takerData, false
         );
     }
+
 
     /// @notice Fill a batch of orders in one transaction. Each order is attempted
     ///         independently; an order that reverts (expired, cancelled,
@@ -285,21 +290,31 @@ abstract contract Core is Base {
         );
     }
 
-    // NOTE ON permitTake (U-2) SETTLEMENT WIRING — DELIBERATELY NOT AN ENTRYPOINT HERE.
-    // Permit3 ships the one-shot `permitTake`/`permitTakeWithWitness` primitive (the
-    // taker-book analogue of `permitTransferFrom`), and it is correct and tested. But
-    // it cannot be bolted onto the fill path as a pre-step: `_executeItems` dispatches
-    // every TAKE item through `PERMIT3.take`, which consumes a STANDING allowance. A
-    // permit-take that ran up front would either double-dispatch (the item loop then
-    // reverts with no allowance) or strand its proceeds (item-free order). Making it
-    // work needs the item loop itself to be permit-aware — to fund ONE named TAKE item
-    // from the signed permit and skip the allowance pull for it — which is a change to
-    // the hot fill path with its own gas-snapshot and test surface, not a thin new
-    // entrypoint. Until that lands, single-signature taker fills use {fillWithPermit}'s
-    // witness-bound allowance batch (grant-then-spend), and `permitTake` is available
-    // to contracts that dispatch a take directly. Same reasoning defers a
-    // `fillWithSignedTransfer` that would fund maker inputs via `permitTransferFrom`:
-    // `_payInputsToSolver` already owns the input pull, so a pre-pull double-moves.
+    // NOTE ON permitTake (U-2) SETTLEMENT WIRING — RE-MEASURED 2026-08-19, STILL DOES NOT FIT.
+    // A `fillWithPermitTake` entrypoint works and is not hard: item-free take-to-swap,
+    // one witness-bound `PermitTake` authorising both the order and the single
+    // borrow/withdraw, the take dispatched INSIDE the proceeds-accounting window
+    // (snapshot `legsIn` before the dispatch, then reuse `_payInputsToSolver` with
+    // hasItems=true). It saves the grant SSTORE that `fillWithPermit`'s taker leg
+    // writes. The blocker is purely EIP-170:
+    //
+    //     feature cost                          1,441 bytes
+    //     Settlement with it, runs=400         25,114 / 24,576   (−538)
+    //     best over the whole optimizer curve  25,046 / 24,576   (−470, at runs=1,
+    //                                          which also makes every fill dearer)
+    //   (Re-measured after the deadline→timing fold, which freed only ~19 bytes of
+    //    baseline — the gap is structural, not a rounding accident.)
+    //
+    // The 2026-08-19 overload funnelling closed ~1,120 bytes of the original 1,620-byte
+    // gap (a smaller baseline, plus better sharing making the feature itself cheaper),
+    // but ~500 bytes remain and there is no measured slack left: funnelling `batchFill`
+    // too yields EXACTLY 0 (via-IR already shares that loop). Closing it now means
+    // evicting a feature — `batchFill` + `fillSelf` is 603 bytes and would just cover it.
+    // That is a poor trade: `fillWithPermit` with a `TakerPermit` in its batch already
+    // funds the identical single-signature borrow-and-swap (fork-tested in the module
+    // leverage suites), so this buys ~1 SSTORE at the cost of batch filling. The
+    // one-shot `permitTake` primitive stays on Permit3 for contracts that dispatch a
+    // take directly. Revisit only alongside a real Settlement size reduction.
 
     // ──────────────────── Aggregator fill ────────────────────
 
@@ -450,7 +465,7 @@ abstract contract Core is Base {
         // fill-module order the two can differ, and minFillAnchor must gate the
         // real advance. For an identity order delta == fillAmount, so behavior is
         // unchanged.
-        if (block.timestamp > order.deadline) revert OrderExpired();
+        if (block.timestamp > DutchAuction.expiry(order)) revert OrderExpired();
 
         uint256 overrideBps = OrderGates.exclusivityOverride(order, filler);
         if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();

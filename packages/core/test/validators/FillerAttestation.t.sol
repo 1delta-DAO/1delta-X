@@ -109,7 +109,7 @@ contract FillerAttestationTest is MockSettlementBase {
     ///      lets a test point the gate at a contract-wallet / 7702 attester.
     function _gatedBy(uint256 nonce, uint256 openAfter, address att) internal view returns (Order memory o) {
         o = _plainOrder(nonce, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
-        o.deadline = block.timestamp + 3 hours; // survive warps in the fallback/expiry tests
+        _setExpiry(o, block.timestamp + 3 hours); // survive warps in the fallback/expiry tests
         Validator[] memory v = new Validator[](1);
         v[0] = Validator({target: address(av), data: abi.encode(att, LIST_ID, openAfter)});
         o.validators = PackedEncode.validators(v);

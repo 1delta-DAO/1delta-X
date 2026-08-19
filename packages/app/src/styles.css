@@ -19,8 +19,10 @@
   --bid:    var(--lime);
   --ask:    var(--orange);
 
-  /* Liquidity sources. DEX = the AMM pool, LMT = signed resting orders. */
-  --dex:    #8E8E93;
+  /* Liquidity sources — one colour per venue, so a rung's origin is legible
+     in the ladder without reading the Source column. */
+  --uni:    #8E8E93;
+  --sushi:  var(--pink);
   --lmt:    var(--violet);
 
   --hair:   rgba(255, 255, 255, .04);
@@ -34,7 +36,7 @@
   --bg: #FFFFFF; --card: #FFFFFF; --raise: #F4F4F2; --line: #E2E2DF; --line2: #C9C9C5;
   --ink: #000000; --dim: #6A6A70; --faint: #96969C;
   --lime: #8FBE0C; --violet: #7C5CF0; --orange: #E8811A; --pink: #E0459F;
-  --dex: #7A7A80;
+  --uni: #7A7A80;
   --hair: rgba(0, 0, 0, .05);
 }
 
@@ -318,7 +320,8 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .lvl[data-side="ask"] .px { color: var(--ask); }
 .lvl[data-side="bid"] .dep { background: var(--bid); }
 .lvl[data-side="ask"] .dep { background: var(--ask); }
-.sr[data-k="DEX"] { color: var(--dex); }
+.sr[data-k="UNI"] { color: var(--uni); }
+.sr[data-k="SUSHI"] { color: var(--sushi); }
 .sr[data-k="LMT"] { color: var(--lmt); }
 
 .lvl.hit { background: var(--raise); }
@@ -364,6 +367,10 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .bkfoot { padding: 16px 24px; border-top: 1px solid var(--line); display: flex; gap: 20px; flex-wrap: wrap; }
 .bkfoot span { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
 .bkfoot em { width: 9px; height: 9px; border-radius: 2px; font-style: normal; }
+.bkfoot b { color: var(--faint); font-weight: 400; }
+/* A venue that failed still gets a line: silence would read as "not configured". */
+.bkfoot .venue-down { color: var(--ask); }
+.bkfoot .venue-down em { opacity: .35; }
 
 .bknote { padding: 0 24px 20px; font-size: 13px; color: var(--dim); max-width: 68ch; }
 .bknote b { color: var(--lmt); font-weight: 700; }
@@ -445,3 +452,25 @@ footer a { color: var(--dim); }
   .nav { gap: 10px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition-duration: .001ms !important; } }
+
+/* EIP-712 domain the order form signs into, and signature failures. */
+.domain {
+  text-align: center; font-family: var(--mono); font-size: 10px; line-height: 1.6;
+  color: var(--faint); letter-spacing: .02em;
+}
+.domain b { color: var(--dim); font-weight: 700; }
+.domain b.warn { color: var(--orange); }
+.signerr {
+  font-family: var(--mono); font-size: 11px; color: var(--ask); text-align: center;
+  border: 1px solid var(--ask); border-radius: 10px; padding: 9px 12px; word-break: break-word;
+}
+
+/* A venue still in flight. Listed rather than omitted: a missing legend row
+   reads as "this market has fewer pools", which is a different claim. */
+.bkfoot .venue-wait { color: var(--faint); }
+.bkfoot .venue-wait em {
+  background: var(--line2);
+  animation: venue-pulse 1.1s ease-in-out infinite;
+}
+@keyframes venue-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .bkfoot .venue-wait em { animation: none; } }

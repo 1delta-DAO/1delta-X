@@ -38,32 +38,31 @@ export function useBalances(args: BalanceArgs): Record<string, number> {
     let alive = true;
     const client = createPublicClient({ chain: config.chain, transport: custom(provider) });
 
-    const load = async () => {
-      try {
-        const values = await Promise.all(
-          tokens.map((t) =>
-            client.readContract({
-              address: t.address,
-              abi: erc20Abi,
-              functionName: "balanceOf",
-              args: [address],
-            }),
-          ),
-        );
-        if (!alive) return;
-        const next: Record<string, number> = {};
-        tokens.forEach((t, i) => {
-          next[t.address.toLowerCase()] = Number(formatUnits(values[i], t.decimals));
-        });
-        setBalances(next);
-      } catch {
-        // A balance we cannot read is shown as unknown, not as zero — zero would
-        // read as "you hold none of this" and is a different statement.
-        if (alive) setBalances({});
+    // Per token, not one joined read: a single unresponsive ERC-20 would
+    // otherwise leave every balance on the chain showing "—".
+    const load = () => {
+      for (const t of tokens) {
+        void client
+          .readContract({ address: t.address, abi: erc20Abi, functionName: "balanceOf", args: [address] })
+          .then((value) => {
+            if (!alive) return;
+            setBalances((prev) => ({ ...prev, [t.address.toLowerCase()]: Number(formatUnits(value, t.decimals)) }));
+          })
+          .catch(() => {
+            // A balance we cannot read stays unknown, never zero — zero reads as
+            // "you hold none of this", which is a different statement.
+            if (!alive) return;
+            setBalances((prev) => {
+              if (!(t.address.toLowerCase() in prev)) return prev;
+              const next = { ...prev };
+              delete next[t.address.toLowerCase()];
+              return next;
+            });
+          });
       }
     };
 
-    void load();
+    load();
     const t = setInterval(load, 20_000);
     return () => {
       alive = false;

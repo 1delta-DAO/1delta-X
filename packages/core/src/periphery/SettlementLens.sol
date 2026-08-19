@@ -83,7 +83,7 @@ contract SettlementLens {
         Fillable, // open, at least one unit still fillable
         Filled, // fully filled
         Cancelled, // nonce bit set, or below the maker's rollback floor
-        Expired // past deadline
+        Expired // past expiry
     }
 
     /// @dev An empty `sig` with no matching on-chain approval. Mirrors
@@ -125,7 +125,7 @@ contract SettlementLens {
     ///         the aggregator quote call. Runs the same clamp, the same exclusivity
     ///         override, and the same per-leg {Pricing} math the settlement runs, so
     ///         an `eth_call` here at block N equals a fill executed at block N.
-    /// @dev    Scope: the AMOUNT pipeline only. Lifecycle gates (deadline, nonce,
+    /// @dev    Scope: the AMOUNT pipeline only. Lifecycle gates (expiry, nonce,
     ///         cancellation, signature, validators, maker funding) are the job of
     ///         {getOrderRelevantState} — call both. Mirrored execution reverts are
     ///         kept where they change the answer: a hard-exclusive order previews as
@@ -390,7 +390,7 @@ contract SettlementLens {
         ) {
             return (OrderStatus.Invalid, 0);
         }
-        if (block.timestamp > order.deadline) return (OrderStatus.Expired, 0);
+        if (block.timestamp > order.expiry()) return (OrderStatus.Expired, 0);
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (OrderStatus.Cancelled, 0);
 
         uint256 anchor = OrderGates.fillDenominator(order);
@@ -701,7 +701,7 @@ contract SettlementLens {
         }
 
         // ── current fillability (time/state-dependent) ──
-        if (order.deadline < block.timestamp) return (false, "order expired");
+        if (order.expiry() < block.timestamp) return (false, "order expired");
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (false, "nonce cancelled");
         if (SETTLEMENT.filled(order.hash()) >= anchor) return (false, "order fully filled");
 
@@ -929,4 +929,12 @@ contract SettlementLens {
             return (n2, k + 1);
         }
     }
+
+    // NOTE ON describe() (U-5): the human-readable per-position string comes from a
+    // module's OPTIONAL {ITakerModuleDescribe.describe}, NOT from a lens method — a
+    // batched `describeTakerAllowances` here measured +237 bytes and put this lens
+    // over EIP-170. It does not need to be on-chain-batched: a frontend already holds
+    // each TAKE item's `data` (it has the order), and {previewTakerAllowances} gives
+    // it the modules, so it reads `module.describe(data)` directly (with its own
+    // graceful fallback). The SDK exposes the ABI for exactly that call.
 }

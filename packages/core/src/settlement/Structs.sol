@@ -158,18 +158,24 @@ struct Validator {
 struct Order {
     address maker;
     uint256 nonce;
-    uint256 deadline;
     bytes legsIn; //        PACKED {LegIn} blob — see {PackedArrays}. anchor = leg 0
     bytes legsOut; //       PACKED {LegOut} blob — see {PackedArrays}
     uint256 timing; //      PACKED clocks and flags (see {DutchAuction} helpers):
     //                        bits [0:32)   decayStartTime      (unix, or BLOCK when bit 102 is set)
     //                        bits [32:64)  decayDuration       (seconds/blocks; 0 = no decay window)
-    //                        bits [64:96)  exclusivityEndTime  (unix; ignored if exclusiveFiller == 0)
+    //                        bits [64:96)  exclusivityEndTime  (on the order's OWN clock —
+    //                                       blocks under bit 102, else unix; ignored if exclusiveFiller == 0)
     //                        bits [96:100) item execution policy ({ItemPolicy})
     //                        bit  100      fill-once (nonce invalidator)
     //                        bit  101      side (0 = SELL, 1 = BUY)
     //                        bit  102      BLOCK clock — the two clocks above count BLOCKS
     //                        bit  103      PRIORITY auction — the bump is bid in priority fee
+    //                        bit  104      DELTA-VERIFY outputs (see {DutchAuction.deltaVerifyOutputs})
+    //                        bits [160:208) expiry (unix seconds; uint48, 0 = already expired).
+    //                                       Folded in here so the order carries no separate
+    //                                       `expiry` word — the 1inch `makerTraits` expiration
+    //                                       trick. Always a WALL-CLOCK time, independent of the
+    //                                       BLOCK clock above.
     address exclusiveFiller; //      only this address may fill until exclusivityEndTime; 0 = open
     uint256 minFillAnchor; //        anti-dust floor per fill (anchor units); 0 = no minimum
     uint256 params; //               PACKED auction scalars (see {DutchAuction} helpers):
