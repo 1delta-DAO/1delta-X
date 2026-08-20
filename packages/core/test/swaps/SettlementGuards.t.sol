@@ -55,6 +55,63 @@ contract Reverter {
     }
 }
 
+/// @dev Single-overload views of the hand-armed entry points, so the reentrancy tests
+///      can `abi.encodeCall` them (the real ones are overloaded, which `encodeCall`
+///      cannot resolve).
+interface IReenter {
+    function fill(Order calldata o, bytes calldata sig, uint256 amt) external returns (uint256[] memory);
+    function fillWithCallback(
+        Order calldata o,
+        bytes calldata sig,
+        uint256 amt,
+        address target,
+        bytes calldata data,
+        CallbackMode mode
+    ) external returns (uint256[] memory);
+    function fillWithPermit(Order calldata o, IPermit3.PermitBatch calldata b, bytes calldata sig, uint256 amt)
+        external
+        returns (uint256[] memory);
+    function fillUpTo(
+        Order calldata o,
+        bytes calldata sig,
+        uint256 amt,
+        address recipient,
+        uint256 minBumpBps,
+        bytes calldata takerData
+    ) external returns (uint256, uint256[] memory, uint256[] memory);
+}
+
+/// @dev Re-enters Settlement with an ARBITRARY payload while a fill is mid-flight.
+///      One module covers every entry point: the test sets the payload to the encoded
+///      call it wants to prove is blocked, and the inner revert is bubbled verbatim.
+///
+///      This exists because four entry families no longer wear the `nonReentrant`
+///      modifier — they arm the guard by hand, AFTER a read-only gate, so a losing
+///      priority-auction bid does not pay for it (see {Base._enter}). The guard is
+///      therefore armed a few opcodes later than it used to be, and these tests pin
+///      that it is still armed before anything can call out.
+contract ReentrantPayloadModule is IMakerModule {
+    Settlement immutable settlement;
+    bytes public payload;
+
+    constructor(Settlement s) {
+        settlement = s;
+    }
+
+    function setPayload(bytes calldata p) external {
+        payload = p;
+    }
+
+    function makeOnBehalf(address, uint256, bytes calldata) external override {
+        (bool ok, bytes memory ret) = address(settlement).call(payload);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 0x20), mload(ret))
+            }
+        }
+    }
+}
+
 /// @dev A benign callback that funds the solver with output inventory just in
 ///      time (mirrors SolverCallback.t.sol's LiquiditySource, non-fork).
 contract Supplier {
@@ -109,6 +166,87 @@ contract SettlementGuardsTest is MockSettlementBase {
         vm.prank(solver);
         vm.expectRevert(Base.Reentrancy.selector);
         settlement.fill(order, sig, AMOUNT_IN);
+    }
+
+    /// @dev The four HAND-ARMED entry families ({Core.fill}, {Core.fillWithCallback},
+    ///      {Core.fillWithPermit}, {Core.fillUpTo}) arm the guard themselves, after a
+    ///      read-only gate, instead of wearing `nonReentrant`. Each must still reject a
+    ///      re-entrant call — and the inner order is a REAL, otherwise-fillable one, so
+    ///      the call reaches `_enter()` rather than dying earlier on a malformed order.
+    function _reentersWith(bytes memory payload) internal {
+        _fund(AMOUNT_IN, AMOUNT_OUT);
+        ReentrantPayloadModule mod = new ReentrantPayloadModule(settlement);
+        mod.setPayload(payload);
+
+        Order memory order = _plainOrder(1, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
+        Item[] memory items = new Item[](1);
+        items[0] = Item({op: ItemOp.MAKE, module: address(mod), amount: 1, recipient: address(0), data: ""});
+        order.items = PackedEncode.items(items);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.Reentrancy.selector);
+        settlement.fill(order, sig, AMOUNT_IN);
+    }
+
+    /// @dev The inner order every case below re-enters with: valid, signed, and fillable
+    ///      on its own, so nothing but the guard can be what rejects it.
+    function _innerOrder() internal returns (Order memory o, bytes memory sig) {
+        tA.mint(maker, AMOUNT_IN);
+        _makerApprove(address(settlement), address(tA), 2 * AMOUNT_IN);
+        tB.mint(solver, AMOUNT_OUT);
+        _solverApprove(address(settlement), address(tB), 2 * AMOUNT_OUT);
+        o = _plainOrder(2, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
+        sig = _sign(o);
+    }
+
+    function test_reentrancy_into_fill_reverts() public {
+        (Order memory o, bytes memory sig) = _innerOrder();
+        _reentersWith(abi.encodeCall(IReenter.fill, (o, sig, AMOUNT_IN)));
+    }
+
+    function test_reentrancy_into_fillWithCallback_reverts() public {
+        (Order memory o, bytes memory sig) = _innerOrder();
+        _reentersWith(
+            abi.encodeCall(IReenter.fillWithCallback, (o, sig, AMOUNT_IN, address(0), "", CallbackMode.PreDelivery))
+        );
+    }
+
+    function test_reentrancy_into_fillUpTo_reverts() public {
+        (Order memory o, bytes memory sig) = _innerOrder();
+        _reentersWith(abi.encodeCall(IReenter.fillUpTo, (o, sig, AMOUNT_IN, address(0), 0, "")));
+    }
+
+    /// @dev `fillWithPermit` arms the guard BEFORE its Permit3 call — the one external
+    ///      call that precedes `_fillCore` on any hand-armed body — so an empty batch is
+    ///      enough: the guard fires first and the permit is never reached.
+    function test_reentrancy_into_fillWithPermit_reverts() public {
+        (Order memory o, bytes memory sig) = _innerOrder();
+        IPermit3.PermitBatch memory empty;
+        _reentersWith(abi.encodeCall(IReenter.fillWithPermit, (o, empty, sig, AMOUNT_IN)));
+    }
+
+    /// @dev The other half of arming by hand: the guard must also be RELEASED. A missed
+    ///      `_exit()` leaves `_locked` at 2 and bricks every later fill, so drive each
+    ///      hand-armed family once and then fill again in the same transaction.
+    function test_guardIsReleased_acrossEntries() public {
+        _fund(3 * AMOUNT_IN, 3 * AMOUNT_OUT);
+        _makerApprove(address(settlement), address(tA), 3 * AMOUNT_IN);
+        _solverApprove(address(settlement), address(tB), 3 * AMOUNT_OUT);
+
+        Order memory a = _plainOrder(11, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
+        bytes memory sa = _sign(a);
+        Order memory b = _plainOrder(12, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
+        bytes memory sb = _sign(b);
+        Order memory c = _plainOrder(13, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
+        bytes memory sc = _sign(c);
+
+        vm.startPrank(solver);
+        settlement.fill(a, sa, AMOUNT_IN);
+        settlement.fillUpTo(b, sb, AMOUNT_IN, solver, 0, "");
+        settlement.fillWithCallback(c, sc, AMOUNT_IN, address(0), "", CallbackMode.PreDelivery);
+        vm.stopPrank();
+        assertEq(tB.balanceOf(maker), 3 * AMOUNT_OUT, "all three fills settled, so the guard released each time");
     }
 
     /// @dev A `fillWithCallback` callback that re-enters Settlement is blocked too;

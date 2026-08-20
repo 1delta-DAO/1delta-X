@@ -235,8 +235,12 @@ impossible at any ordering.
 Two consequences worth knowing:
 
 * **No re-entrancy is involved.** The composition a solver would otherwise express
-  by re-entering `fill` from a callback is a schedule instead, so `nonReentrant`
-  stays intact and every balance-delta window is measured inside one frame. The
+  by re-entering `fill` from a callback is a schedule instead, so the guard stays
+  intact and every balance-delta window is measured inside one frame. (Four entry
+  families — `fill`, `fillWithCallback`, `fillWithPermit`, `fillUpTo` — arm that
+  guard by hand via `Base._enter` instead of wearing the `nonReentrant` modifier, so
+  a read-only gate can run first and a lost priority-fee race is cheap. `_enter`
+  documents the rule that keeps this safe: nothing before it may call out.) The
   whole deferred context is a single **memory** struct — no storage, no transient
   storage.
 * **Invariants assert the end of the CONTEXT, not the end of an order.** One

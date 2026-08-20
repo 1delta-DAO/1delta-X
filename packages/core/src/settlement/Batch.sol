@@ -109,10 +109,8 @@ abstract contract Batch is Core {
         if (block.timestamp > order.expiry()) revert OrderExpired();
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
-        uint256 overrideBps = OrderGates.exclusivityOverride(order, solver);
-        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
-        _runValidators(order, solver, takerData);
-        ctx = _openFill(order, orderHash, fillAmount, overrideBps, solver, takerData);
+        _gateOrder(order, orderHash, solver, takerData, ctx);
+        _openFill(order, fillAmount, solver, takerData, ctx);
     }
 
     /// @dev This fill's per-leg output amounts, WITHOUT transferring — computed at

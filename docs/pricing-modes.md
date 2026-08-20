@@ -43,14 +43,22 @@ Cost: **+17 gas** on a fill (measured; see below).
 (OP-stack, Arbitrum timeboost) — the parity feature with UniswapX's
 `PriorityOrderReactor`.
 
+One deliberate difference from that reactor: theirs scales the output up with **no
+ceiling**, so the gas auction runs to the filler's break-even and the surplus above
+the maker's ask is burned as tip to the sequencer. Ours walks a **signed band** —
+`end` (the guaranteed floor) up to `start` (the ambition) — so bidding past `start`
+buys nothing, the filler keeps the residual edge, and less value leaks out of the
+trade. It also bounds the filler's exposure to basefee drift (see the ⚠ under
+"Quoting" below), which an uncapped scale does not.
+
 The maker signs the band **the other way round**:
 
 ```
 legsOut[j].start = the ambitious price     ← what a large bid buys
 legsOut[j].end   = the GUARANTEED FLOOR    ← what a zero-bid fill clears at
 
-bump = BPS − min(BPS, priorityFee · BPS / params.priorityScale)
-priorityFee = tx.gasprice − block.basefee          (0 if it underflows)
+bump = BPS − min(BPS, bid · BPS / params.priorityScale)
+bid   = tx.gasprice − block.basefee − params.baselinePriorityFeeWei  (clamped at 0)
 ```
 
 So an unbid fill clears at `end`, every wei of priority fee moves the tick toward
@@ -61,14 +69,79 @@ Three consequences worth signing deliberately:
 
 - **`params.priorityScale` is mandatory** here (`InvalidAuctionParams` otherwise):
   it is the wei of priority fee that buys a *full* bump.
-- **The basefee gas bump is ignored** in this mode. It moves the tick toward the
-  floor as gas rises, which is precisely backwards when the filler is bidding gas
-  to move it the other way.
+- **The basefee gas bump cannot run** in this mode — it moves the tick toward the
+  floor as gas rises, which is precisely backwards when the filler is bidding gas to
+  move it the other way. Signing one anyway is an outright `InvalidAuctionParams`
+  rather than a silently dropped parameter.
+- **`params.baselinePriorityFeeWei`** (bits [160:208)) is the tip that does *not*
+  count as a bid — UniswapX's field of the same name. Without it the chain's
+  inclusion tip reads as a bid: the maker collects an improvement nobody chose to
+  offer, and `priorityScale` stops being a pure economic parameter because it has to
+  be re-tuned per chain and per congestion regime. `0` = every wei of tip bids.
+
+  It has **bits of its own** rather than borrowing `gasPriceRef`, which is dead space
+  here and was tempting. One signed field with two meanings, selected by a bit in a
+  *different* word, would have meant any order already signed with an inert
+  `gasPriceRef` quietly starting to bid against a baseline its maker never chose —
+  same bytes, same valid signature, different price. Bits [160:256) were free and
+  every order ever signed has zeros there, so a pre-existing priority order reads a
+  baseline of `0` and prices exactly as before. `uint48` reaches 281,474 gwei; bits
+  [208:256) stay free.
 - **`decayStartTime` keeps its meaning** as a "not before" gate (a start BLOCK when
   combined with bit 102) — "let the book see this first, then let solvers bid".
 
-Cost: **−217 gas** versus the clock (it skips the curve check and the elapsed
-arithmetic).
+### What a lost race costs
+
+A priority auction is a gas auction, so every solver but one lands and reverts —
+and a reverted transaction still pays for the gas it burned, at *that bidder's own
+priority fee*. The loser's bill is `gasUsed × (basefee + its bid)`, which is the tax
+the mechanism charges for competing, and it is the number to minimise.
+
+`filled[orderHash] >= total` **is** the "you lost" signal, so `Settlement` asks it
+first, and it asks it before it *arms the reentrancy guard* — the gate is the order
+hash, one `SLOAD` and the denominator resolve, none of which can hand control to
+another contract, so nothing can be re-entered while they run (`Base._enter` states
+the rule, `OrderState._gateFillState` is the gate). A loser therefore pays for the
+answer and nothing else — not the guard's `SLOAD`+`SSTORE`, not the maker's nonce
+word, not the validator `STATICCALL`s:
+
+| lost-race revert | before | gate first | + guard after the gate |
+|---|---|---|---|
+| plain order | 11,244 | 9,237 | **5,616** |
+| order carrying two validators | 21,176 | 9,292 | **5,671** |
+
+The +55 between the two final rows is the larger calldata, not the validators — they
+never run, so a loser's cost no longer depends on how much policy the order carries.
+A real (cold-slot) losing transaction saves more still: it skips the maker's nonce
+word and the guard slot's cold access, ~2,100 each. `PriorityRaceGasBench.t.sol`
+prints the table and pins the ordering with a validator that reverts if it is ever
+reached; `SettlementGuards.t.sol` pins that every hand-armed entry still rejects
+re-entry and still releases.
+
+The winner pays **+110** for both steps (56,140 → 56,250 on the clock baseline) —
+one gas auction with two bidders repays that several times over — and Settlement got
+**123 bytes smaller**, because folding three inlined copies of the gate into one
+shared sequence gave back more than the reordering cost.
+
+### Why there is no "compact calldata" entry
+
+The other half of a loser's bill is the transaction's intrinsic calldata cost, which
+is charged in full before the revert. It is smaller than the byte count suggests: a
+plain fill is 1,252 bytes but **1,062 of them are zero** (ABI padding, priced at 4
+gas against a non-zero byte's 16), so it costs 7,288 gas, and a hand-packed encoding
+of the same order — no padding, empty fields omitted, addresses at 20 bytes — floors
+at 361 bytes, saving roughly 3,600.
+
+That saving is not reachable. Every function in the fill path takes `Order calldata`,
+and a struct's calldata representation *is* its ABI encoding, so a compressed blob
+would have to be decoded into memory and re-encoded through the `onlySelf`
+`Core.fillSelf` trampoline. `batchFill` already performs exactly that bounce, and a
+one-order batch prices it at **9,069 gas** — more than twice what the compact form
+could ever save, before writing a single line of decoder. `CalldataSizeBench.t.sol`
+measures both halves; run it before anyone proposes this again.
+
+Cost: **−91 gas** versus the clock — it skips the curve check and the elapsed
+arithmetic, and pays back part of that for the baseline subtraction.
 
 ---
 
@@ -209,8 +282,14 @@ can change independently of the clock. Two paired views close that:
 
 ⚠ For a **priority auction** the bump is derived from `tx.gasprice`, so a default
 `eth_call` (gas price 0) quotes the *no-bid* bump — higher than any bid fill's.
-Quote with the gas price you will actually send, or skip the floor there: that
-bump is your own bid, not a race.
+Quote with the gas price you will actually send.
+
+And **do pass the floor on a priority order** — the bid is
+`tx.gasprice − block.basefee − baseline`, and only the first term is yours. Name a
+gas price expecting to bid the difference over the current basefee, and you bid
+*more* than that if the basefee drops before your transaction lands. The maker's
+signed `start` caps how far that can go (an uncapped design has no such bound), but
+`minBumpBps` is what holds your actual quote.
 
 ---
 
@@ -221,12 +300,12 @@ Fill-only, same order shape, warm state
 
 | Mode | fill gas | Δ vs the clock |
 |---|---|---|
-| clock (linear decay) | 56,140 | — |
-| block clock | 56,157 | +17 |
-| priority auction | 55,923 | −217 |
-| price module: range | 58,455 | +2,315 |
-| price module: oracle-pegged | 61,413 | +5,273 |
-| price module: cosigned quote | 63,429 | +7,289 |
+| clock (linear decay) | 56,250 | — |
+| block clock | 56,266 | +16 |
+| priority auction | 56,159 | −91 |
+| price module: range | 58,737 | +2,487 |
+| price module: oracle-pegged | 61,819 | +5,569 |
+| price module: cosigned quote | 63,683 | +7,433 |
 
 A module costs one cold `STATICCALL` (~2.3k) plus whatever it does inside. Orders
 that use none of this pay a single calldata compare.

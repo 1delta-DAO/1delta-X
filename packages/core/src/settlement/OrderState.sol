@@ -256,14 +256,24 @@ abstract contract OrderState is NonceManager {
     ///      (`newFilled <= total`) and the uniform per-leg scaling stay here, so
     ///      a buggy/hostile module can only mis-size the fraction (which scales
     ///      both sides of the order proportionally), never over-extract.
-    function _openFill(
-        Order calldata order,
-        bytes32 orderHash,
-        uint256 fillAmount,
-        uint256 overrideBps,
-        address filler,
-        bytes memory takerData
-    ) internal returns (FillCtx memory ctx) {
+    /// @dev THE FILL-STATE GATE — the cheapest question a fill can ask, asked FIRST.
+    ///      Seeds `ctx` with the order hash, the denominator and the progress so far,
+    ///      and rejects an order that is cancelled or already complete.
+    ///
+    ///      Ordering is the point, not the arithmetic. A PRIORITY-fee auction
+    ///      ({DutchAuction.priorityAuction}) is a gas auction: every solver sends the
+    ///      SAME fill, the sequencer's fee ordering picks one, and every other bidder
+    ///      lands and reverts — paying its own bid on whatever gas it burned before
+    ///      the revert. That loss is the tax the whole mechanism charges solvers, and
+    ///      it is proportional to how deep into the fill the loser gets before it
+    ///      learns it lost. `filled[orderHash] >= total` IS the "you lost" signal, so
+    ///      it runs before the maker's nonce word, the exclusivity read, and the
+    ///      validator STATICCALLs — none of which can change the answer.
+    ///
+    ///      Costs the winner nothing: the same SLOAD and the same denominator resolve
+    ///      that {_openFill} used to do, moved up and handed over in `ctx` rather than
+    ///      recomputed.
+    function _gateFillState(Order calldata order, bytes32 orderHash, FillCtx memory ctx) internal view {
         // Denominator: maker-signed `fillTotal` when set, else the leg anchor.
         // The `!= 0` branch reads a single calldata word — no leg access, so a
         // pure non-fungible order (empty legs) still has a valid denominator.
@@ -279,12 +289,39 @@ abstract contract OrderState is NonceManager {
         // remaining size, so asking for less than the resolved anchor — including
         // because the maker's balance grew past the amount the solver quoted —
         // arrives here as a partial fill and is rejected.
+        // ORDER IS LOAD-BEARING. `anchorTotal` STATICCALLs `balanceOf` on a
+        // maker-chosen token for a {Proportional} anchor, and this gate runs BEFORE the
+        // reentrancy guard on the hand-armed entries (see {Base._enter}). Resolving the
+        // denominator first and reading `filled` second means the counter this gate
+        // hands to {_openFill} is read after that call, never before it — so it cannot
+        // be stale. Do not flip these two lines.
         uint256 total = order.fillTotal != 0 ? order.fillTotal : OrderGates.anchorTotal(order);
         uint256 prevFilled = filled[orderHash];
         // Per-order-hash cancellation ({cancelOrder}) parks `filled` at max — reuse
         // the SLOAD we just did, so the check is free. (An uncancelled order's
         // `filled` never reaches max, so no false positive.)
         if (prevFilled == type(uint256).max) revert OrderCancelled();
+        // Nothing is left to fill. {_openFill}'s `newFilled > total` cap still stands
+        // as the universal backstop — this is the same rule, asked early enough that
+        // a losing bidder pays for it and not for the rest of the fill.
+        if (prevFilled >= total) revert OverFill();
+        ctx.orderHash = orderHash;
+        ctx.anchor = total;
+        ctx.prevFilled = prevFilled;
+    }
+
+    function _openFill(
+        Order calldata order,
+        uint256 fillAmount,
+        address filler,
+        bytes memory takerData,
+        FillCtx memory ctx
+    ) internal {
+        // Seeded by {_gateFillState}, which every caller runs first: `ctx.anchor` is
+        // the resolved denominator and `ctx.prevFilled` the progress so far, both
+        // already checked against cancellation and completion.
+        uint256 total = ctx.anchor;
+        uint256 prevFilled = ctx.prevFilled;
         // Delta: identity (zero overhead — a calldata compare, no call) or a
         // fill-module resolve. The module validates the filler's proposal
         // (`takerData`) against this order and returns the accepted delta.
@@ -310,7 +347,7 @@ abstract contract OrderState is NonceManager {
             _cancelNonce(order.maker, order.nonce); // blocks every later fill via the
             // nonce gate `_fillCore` already runs
         } else {
-            filled[orderHash] = newFilled;
+            filled[ctx.orderHash] = newFilled;
         }
         // `payTo` defaults to the filler; the aggregator entry may redirect it
         // after this returns (payment destination only — never authority).
@@ -319,11 +356,7 @@ abstract contract OrderState is NonceManager {
         // — a real allocation on EVERY fill, for an array only `fillUpTo` ever sizes
         // and only it ever reads. Zero-initialisation points it at the canonical
         // empty-array slot for free, so the ordinary paths pay nothing.
-        ctx.orderHash = orderHash;
-        ctx.anchor = total;
-        ctx.prevFilled = prevFilled;
         ctx.newFilled = newFilled;
-        ctx.overrideBps = overrideBps;
         // `payTo` defaults to the filler; the aggregator entry may redirect it
         // after this returns (payment destination only — never authority).
         ctx.filler = filler;
@@ -336,7 +369,7 @@ abstract contract OrderState is NonceManager {
         // holds Settlement under EIP-170 (see the size note on {DutchAuction.bumpBps}).
         // A clock-priced order gets 0 back and resolves lazily per decaying leg, which
         // is the measured-cheapest shape for the dominant case.
-        ctx.bump = DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData);
+        ctx.bump = DutchAuction.resolveBump(order, ctx.orderHash, total, filler, prevFilled, takerData);
     }
 
 }

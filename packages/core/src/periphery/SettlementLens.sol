@@ -677,6 +677,12 @@ contract SettlementLens {
         if (order.gasBumpBps() != 0) {
             if (order.gasPriceRef() == 0) return (false, "gasBump without gasPriceRef");
             if (order.gasBumpBps() > 10_000) return (false, "gasBumpBps > 10000");
+        } else if (order.gasPriceRef() != 0) {
+            // `gasPriceRef` is read by NOTHING but the gas bump. Set without one it is
+            // inert, and the likeliest reason a builder set it is that it meant
+            // {DutchAuction.baselinePriorityFeeWei} — a different field, in bits of its
+            // own precisely so the two can never be confused for each other on-chain.
+            return (false, "gasPriceRef without gasBump");
         }
         // ── priority auction (bit 103) ──
         if (order.priorityAuction()) {

@@ -90,7 +90,7 @@ contract PricingModesTest is MockSettlementBase {
         _fund(OUT_START);
         Order memory o = _decayingSell(3);
         o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
-        o.params = DutchAuction.packParams(0, 0, 0, 1 gwei);
+        o.params = DutchAuction.packParams(0, 0, 0, 1 gwei, 0);
         bytes memory sig = _sign(o);
 
         vm.fee(1 gwei);
@@ -105,7 +105,7 @@ contract PricingModesTest is MockSettlementBase {
         _fund(OUT_START);
         Order memory o = _decayingSell(4);
         o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
-        o.params = DutchAuction.packParams(0, 0, 0, 2 gwei); // 2 gwei buys a FULL bump
+        o.params = DutchAuction.packParams(0, 0, 0, 2 gwei, 0); // 2 gwei buys a FULL bump
         bytes memory sig = _sign(o);
 
         vm.fee(1 gwei);
@@ -121,7 +121,7 @@ contract PricingModesTest is MockSettlementBase {
         _fund(OUT_START);
         Order memory o = _decayingSell(5);
         o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
-        o.params = DutchAuction.packParams(0, 0, 0, 1 gwei);
+        o.params = DutchAuction.packParams(0, 0, 0, 1 gwei, 0);
         bytes memory sig = _sign(o);
 
         vm.fee(1 gwei);
@@ -130,6 +130,77 @@ contract PricingModesTest is MockSettlementBase {
         vm.prank(solver);
         settlement.fill(o, sig, SELL_IN);
         assertEq(tB.balanceOf(maker) - before_, OUT_START, "capped at the signed ambition");
+    }
+
+    /// @dev The chain's INCLUSION tip is not an auction bid. With a 1 gwei baseline a
+    ///      fill that tips exactly 1 gwei has bid nothing and clears at the floor —
+    ///      without it the maker would collect an improvement nobody chose to offer.
+    function test_priorityAuction_baselineTipIsNotABid() public {
+        _fund(OUT_START);
+        Order memory o = _decayingSell(7);
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
+        o.params = DutchAuction.packParams(0, 0, 0, 2 gwei, 1 gwei); // 1 gwei baseline
+        bytes memory sig = _sign(o);
+
+        vm.fee(1 gwei);
+        vm.txGasPrice(2 gwei); // 1 gwei of tip — exactly the baseline
+        uint256 before_ = tB.balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(o, sig, SELL_IN);
+        assertEq(tB.balanceOf(maker) - before_, OUT_END, "the baseline tip buys nothing");
+    }
+
+    /// @dev Only the tip ABOVE the baseline bids. 3 gwei tip − 1 gwei baseline = 2 gwei
+    ///      of bid against a 4 gwei scale ⇒ half a bump.
+    function test_priorityAuction_baselineSubtractedFromBid() public {
+        _fund(OUT_START);
+        Order memory o = _decayingSell(8);
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
+        o.params = DutchAuction.packParams(0, 0, 0, 4 gwei, 1 gwei);
+        bytes memory sig = _sign(o);
+
+        vm.fee(1 gwei);
+        vm.txGasPrice(4 gwei); // 3 gwei of tip, 2 of which are a bid
+        uint256 before_ = tB.balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(o, sig, SELL_IN);
+        assertEq(tB.balanceOf(maker) - before_, (OUT_START + OUT_END) / 2, "half-bid lands mid-band");
+    }
+
+    /// @dev The gas bump cannot run under a priority auction — it moves the tick the
+    ///      wrong way. An order carrying both is rejected outright rather than having
+    ///      one of its signed parameters silently dropped.
+    function test_priorityAuction_withGasBump_reverts() public {
+        _fund(OUT_START);
+        Order memory o = _decayingSell(9);
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
+        o.params = DutchAuction.packParams(0, 5_000, 1 gwei, 2 gwei, 0);
+        bytes memory sig = _sign(o);
+
+        vm.fee(1 gwei);
+        vm.txGasPrice(2 gwei);
+        vm.prank(solver);
+        vm.expectRevert(DutchAuction.InvalidAuctionParams.selector);
+        settlement.fill(o, sig, SELL_IN);
+    }
+
+    /// @dev `gasPriceRef` is the gas bump's reference basefee and NOTHING else. On a
+    ///      priority order it stays inert, so an order signed before the baseline field
+    ///      existed prices exactly as it did — the reason the baseline claimed its own
+    ///      bits instead of overlaying this one.
+    function test_priorityAuction_gasPriceRefIsInert() public {
+        _fund(OUT_START);
+        Order memory o = _decayingSell(10);
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
+        o.params = DutchAuction.packParams(0, 0, 5 gwei, 2 gwei, 0); // ref set, no bump, no baseline
+        bytes memory sig = _sign(o);
+
+        vm.fee(1 gwei);
+        vm.txGasPrice(2 gwei); // 1 gwei of bid against a 2 gwei scale
+        uint256 before_ = tB.balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(o, sig, SELL_IN);
+        assertEq(tB.balanceOf(maker) - before_, (OUT_START + OUT_END) / 2, "gasPriceRef did not eat the bid");
     }
 
     function test_priorityAuction_withoutScale_reverts() public {

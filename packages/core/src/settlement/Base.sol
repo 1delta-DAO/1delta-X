@@ -177,9 +177,47 @@ abstract contract Base is Signatures {
     error SettleSliceZero();
 
     modifier nonReentrant() {
+        _enter();
+        _;
+        _exit();
+    }
+
+    /// @dev Arm the reentrancy guard. Split out of {nonReentrant} so a fill can run its
+    ///      READ-ONLY gate — the order hash, one `SLOAD` of `filled`, and the
+    ///      denominator resolve, none of which touch another contract — BEFORE paying
+    ///      for it. A losing priority-auction bid then reverts without the guard's
+    ///      cold `SLOAD` + `SSTORE` (~5,000 gas at its own bid), and the winner is
+    ///      unaffected: the same two operations, in the same order, a few opcodes later.
+    ///
+    ///      ⚠ THE RULE FOR CALLERS. An entry point that arms the guard by hand instead
+    ///      of wearing {nonReentrant} may make NO STATE-CHANGING CALL before
+    ///      `_enter()` — no permits, no modules, no callbacks, no transfers, and in
+    ///      particular no signature verification (a contract maker's EIP-1271 check is
+    ///      a call to maker-chosen code). Calldata decoding, hashing, storage reads and
+    ///      pure arithmetic are fine; they never hand over control.
+    ///
+    ///      ONE `STATICCALL` does occur inside the pre-guard gate and is deliberate: a
+    ///      {Proportional} anchor leg resolves through `balanceOf` ({OrderGates.anchorTotal}
+    ///      → {Proportional.resolve}), and that token is maker-chosen. It is safe
+    ///      because it is a STATICCALL — re-entering any fill from it hits `_enter()`'s
+    ///      own `SSTORE` and reverts in the static context — and because
+    ///      {OrderState._gateFillState} reads `filled` AFTER resolving the denominator,
+    ///      so the fill counter the gate hands on cannot be stale. Both properties are
+    ///      load-bearing: if `anchorTotal` ever gains a non-static call, or if that read
+    ///      order is flipped, these four entries need the modifier back.
+    ///
+    ///      Every such entry must also reach {_exit}: a missed release leaves `_locked`
+    ///      at 2 and bricks every later fill, which is why the hand-armed entries are
+    ///      four straight-line private bodies (`_fillSigned`, `_fillCallback`,
+    ///      `_fillWithPermitCore`, `_openCustomFill`) and everything with a loop, a
+    ///      self-call or a branchy body keeps the modifier.
+    function _enter() internal {
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
-        _;
+    }
+
+    /// @dev Release the guard. See {_enter} for the pairing rule.
+    function _exit() internal {
         _locked = 1;
     }
 
@@ -405,6 +443,43 @@ abstract contract Base is Signatures {
     ///      any payload it can encode with a shared routine. Reach for assembly here
     ///      only where the encoder is genuinely bespoke per call site. See
     ///      [[settlement-size-via-ir]] for the alternatives rejected before these.
+
+    /// @dev THE ORDER GATE — every authorization check a fill runs before it moves a
+    ///      token, in one place and in the one order that is cheapest to be wrong in.
+    ///
+    ///      All three fill entries ({Core._fillCore}, {Core.fillWithPermitTake},
+    ///      {Batch._openGated}) ran this exact sequence inline; sharing it keeps them
+    ///      from drifting and pays for the reordering below in bytecode.
+    ///
+    ///      The order matters. {OrderState._gateFillState} runs FIRST because
+    ///      `filled[orderHash] >= total` is the "you lost the race" signal in a
+    ///      priority-fee auction ({DutchAuction.priorityAuction}), where every solver
+    ///      but one lands and reverts and pays its own bid on whatever gas it burned
+    ///      getting there. Nothing below can change that answer, so nothing below
+    ///      should be paid for first.
+    function _gateOrder(
+        Order calldata order,
+        bytes32 orderHash,
+        address filler,
+        bytes memory takerData,
+        FillCtx memory ctx
+    ) internal view {
+        _gateFillState(order, orderHash, ctx);
+        _gateOrderPost(order, filler, takerData, ctx);
+    }
+
+    /// @dev The gate MINUS its fill-state half, for the entries that already ran
+    ///      {OrderState._gateFillState} themselves — which is every entry that arms the
+    ///      reentrancy guard by hand, since running that gate early is the whole reason
+    ///      they do (see {_enter}). `ctx` arrives seeded; this adds the rest.
+    function _gateOrderPost(Order calldata order, address filler, bytes memory takerData, FillCtx memory ctx)
+        internal
+        view
+    {
+        ctx.overrideBps = OrderGates.exclusivityOverride(order, filler);
+        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
+        _runValidators(order, filler, takerData);
+    }
 
     /// @dev Pre-execution staticcall validators. `filler` is the address executing
     ///      this fill (threaded from msg.sender, or from batchFill's caller), so a

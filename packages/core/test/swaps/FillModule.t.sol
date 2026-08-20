@@ -99,9 +99,11 @@ contract FillModuleTest is CoreSettlementBase {
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "full output on the single fill");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "full input on the single fill");
 
-        // A second fill: delta = fillTotal - prevFilled = 0 ⇒ ZeroFill.
+        // A second fill: the order is COMPLETE, so {OrderState._gateFillState} rejects it
+        // before the module is consulted at all — the module could not have resolved a
+        // legal delta anyway (any delta > 0 over-fills, and 0 is `ZeroFill`).
         vm.prank(solver);
-        vm.expectRevert(OrderState.ZeroFill.selector);
+        vm.expectRevert(OrderState.OverFill.selector);
         settlement.fill(o, sig, 1, "");
     }
 

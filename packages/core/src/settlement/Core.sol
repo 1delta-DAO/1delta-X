@@ -33,7 +33,6 @@ abstract contract Core is Base {
     ///         existing 3-arg call sites (solvers, SDK) keep working unchanged.
     function fill(Order calldata order, bytes calldata sig, uint256 fillAmount)
         external
-        nonReentrant
         returns (uint256[] memory fillAmountsOut)
     {
         return _fillSigned(order, sig, fillAmount, "");
@@ -51,7 +50,6 @@ abstract contract Core is Base {
     ///         can produce (off-chain attestation, oracle update, ZK proof).
     function fill(Order calldata order, bytes calldata sig, uint256 fillAmount, bytes calldata takerData)
         external
-        nonReentrant
         returns (uint256[] memory fillAmountsOut)
     {
         return _fillSigned(order, sig, fillAmount, takerData);
@@ -64,11 +62,17 @@ abstract contract Core is Base {
         returns (uint256[] memory outs)
     {
         bytes32 orderHash = order.hash();
+        // Read-only, and ahead of the guard on purpose — {Base._enter} explains the
+        // rule this body has to keep.
+        FillCtx memory ctx;
+        _gateFillState(order, orderHash, ctx);
+        _enter();
         _verifySignature(orderHash, sig, order.maker);
-        (outs,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), address(0), "",
-            CallbackMode.PreDelivery, takerData, false
+        outs = _fillCore(
+            order, fillAmount, msg.sender, address(0), address(0), "",
+            CallbackMode.PreDelivery, takerData, false, ctx
         );
+        _exit();
     }
 
     /// @notice Fill with a solver-supplied callback that runs just before output
@@ -108,7 +112,7 @@ abstract contract Core is Base {
         address callbackTarget,
         bytes calldata callbackData,
         CallbackMode mode
-    ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+    ) external returns (uint256[] memory fillAmountsOut) {
         return _fillCallback(order, sig, fillAmount, callbackTarget, callbackData, mode, "");
     }
 
@@ -123,7 +127,7 @@ abstract contract Core is Base {
         bytes calldata callbackData,
         CallbackMode mode,
         bytes calldata takerData
-    ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+    ) external returns (uint256[] memory fillAmountsOut) {
         return _fillCallback(order, sig, fillAmount, callbackTarget, callbackData, mode, takerData);
     }
 
@@ -139,10 +143,14 @@ abstract contract Core is Base {
         bytes memory takerData
     ) private returns (uint256[] memory outs) {
         bytes32 orderHash = order.hash();
+        FillCtx memory ctx;
+        _gateFillState(order, orderHash, ctx);
+        _enter();
         _verifySignature(orderHash, sig, order.maker);
-        (outs,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, takerData, false
+        outs = _fillCore(
+            order, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, takerData, false, ctx
         );
+        _exit();
     }
 
 
@@ -156,7 +164,7 @@ abstract contract Core is Base {
         IPermit3.PermitBatch calldata batch,
         bytes calldata sig,
         uint256 fillAmount
-    ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+    ) external returns (uint256[] memory fillAmountsOut) {
         return _fillWithPermitCore(order, batch, sig, fillAmount, "");
     }
 
@@ -169,7 +177,7 @@ abstract contract Core is Base {
         bytes calldata sig,
         uint256 fillAmount,
         bytes calldata takerData
-    ) external nonReentrant returns (uint256[] memory fillAmountsOut) {
+    ) external returns (uint256[] memory fillAmountsOut) {
         return _fillWithPermitCore(order, batch, sig, fillAmount, takerData);
     }
 
@@ -196,11 +204,17 @@ abstract contract Core is Base {
         bytes memory takerData
     ) private returns (uint256[] memory outs) {
         bytes32 orderHash = order.hash();
+        FillCtx memory ctx;
+        _gateFillState(order, orderHash, ctx);
+        // The permit is an external call, so it goes INSIDE the guard — only the
+        // read-only gate above may precede it. See {Base._enter}.
+        _enter();
         PERMIT3.permitBatchWithWitnessIfNeeded(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
-        (outs,) = _fillCore(
-            order, orderHash, fillAmount, msg.sender, address(0), address(0), "",
-            CallbackMode.PreDelivery, takerData, false
+        outs = _fillCore(
+            order, fillAmount, msg.sender, address(0), address(0), "",
+            CallbackMode.PreDelivery, takerData, false, ctx
         );
+        _exit();
     }
 
 
@@ -284,9 +298,11 @@ abstract contract Core is Base {
     ) external returns (uint256[] memory outs) {
         if (msg.sender != address(this)) revert OnlySelf();
         bytes32 orderHash = order.hash();
+        FillCtx memory ctx;
+        _gateFillState(order, orderHash, ctx);
         _verifySignature(orderHash, sig, order.maker);
-        (outs,) = _fillCore(
-            order, orderHash, fillAmount, filler, address(0), address(0), "", CallbackMode.PreDelivery, takerData, false
+        outs = _fillCore(
+            order, fillAmount, filler, address(0), address(0), "", CallbackMode.PreDelivery, takerData, false, ctx
         );
     }
 
@@ -314,10 +330,9 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         if (fillAmount == 0) revert ZeroFill();
         if (block.timestamp > DutchAuction.expiry(order)) revert OrderExpired();
-        uint256 overrideBps = OrderGates.exclusivityOverride(order, msg.sender);
-        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
-        _runValidators(order, msg.sender, "");
-        FillCtx memory ctx = _openFill(order, orderHash, fillAmount, overrideBps, msg.sender, "");
+        FillCtx memory ctx;
+        _gateOrder(order, orderHash, msg.sender, "", ctx);
+        _openFill(order, fillAmount, msg.sender, "", ctx);
         ctx.permitTake = abi.encode(permit, sig);
         outs = _settleForward(order, ctx, address(0), "", "");
         // The permit MUST have been consumed — it is this fill's only authorization.
@@ -362,15 +377,25 @@ abstract contract Core is Base {
     ///         with it and inputs (what the filler receives) RISE — so "bump ≥ my
     ///         quote's bump" IS "price ≥ my quoted price", across every leg of both
     ///         baskets at once (the Pendle `maxTaking` / 0x taker-amount guard,
-    ///         without a per-leg array). Only two movers can shift the tick
-    ///         maker-ward between quote and inclusion — an oracle-pegged
-    ///         {IPriceModule} and a falling basefee shrinking the gas bump — and
-    ///         both are covered, since the check reads the very bump the fill
-    ///         priced at (the pinned {FillCtx.bump} when one was pinned). Quote the
-    ///         floor from {SettlementLens.previewFill}. Time decay, the priority
-    ///         auction, and soft-exclusivity need no protection: time moves the
-    ///         bump filler-ward, the priority bid is the filler's own, and the
-    ///         override is signed in the order. Reverts {BumpTooLow}.
+    ///         without a per-leg array). Three movers can shift the tick maker-ward
+    ///         between quote and inclusion, and all three are covered, since the
+    ///         check reads the very bump the fill priced at (the pinned
+    ///         {FillCtx.bump} when one was pinned):
+    ///           • an oracle-pegged {IPriceModule} re-reading its feed;
+    ///           • a FALLING basefee shrinking the gas bump; and
+    ///           • a FALLING basefee widening a PRIORITY bid. The bid is
+    ///             `tx.gasprice - block.basefee - baseline`, and only the first term
+    ///             is the filler's. A solver that names a gas price expecting to bid
+    ///             the difference over the CURRENT basefee bids MORE than that if the
+    ///             basefee drops before its transaction lands — so a priority order is
+    ///             not "the filler's own bid" end to end, and a filler that wants its
+    ///             quote to hold should pass this floor rather than skip it. (The
+    ///             maker's signed `start` bounds the exposure either way, which the
+    ///             unbounded-scaling designs do not.)
+    ///         Quote the floor from {SettlementLens.previewFill} — at the gas price
+    ///         you will actually send. Time decay and soft-exclusivity need no
+    ///         protection: time moves the bump filler-ward and the override is signed
+    ///         in the order. Reverts {BumpTooLow}.
     /// @param  takerData Filler-supplied blob for validators/invariants (and the
     ///         fill proposal for a fill-module order); `""` for plain orders.
     /// @return delta     The anchor-unit progress actually executed (post-clamp).
@@ -385,17 +410,15 @@ abstract contract Core is Base {
         address recipient,
         uint256 minBumpBps,
         bytes calldata takerData
-    ) external nonReentrant returns (uint256 delta, uint256[] memory received, uint256[] memory paid) {
-        bytes32 orderHash = order.hash();
-        _verifySignature(orderHash, sig, order.maker);
-        // Hoisted out of the `_fillCore` argument list: nested there, the extra
-        // `minBumpBps` local pushes the LEGACY (non-via-IR) profile over the
-        // stack limit; as its own statement, `fillAmount` dies before the call.
-        fillAmount = _clampToRemaining(order, orderHash, fillAmount);
+    ) external returns (uint256 delta, uint256[] memory received, uint256[] memory paid) {
         FillCtx memory ctx;
-        (paid, ctx) = _fillCore(
+        // The whole prologue lives in a helper so `orderHash` never enters THIS frame:
+        // with `minBumpBps`, `recipient` and `ctx` all live across the fill, the LEGACY
+        // (non-via-IR) profile has no stack slot left for it. The helper also hoists the
+        // clamp out of the `_fillCore` argument list for the same reason.
+        fillAmount = _openCustomFill(order, sig, fillAmount, ctx);
+        paid = _fillCore(
             order,
-            orderHash,
             fillAmount,
             msg.sender,
             recipient,
@@ -403,7 +426,8 @@ abstract contract Core is Base {
             "",
             CallbackMode.PreDelivery,
             takerData,
-            true // the aggregator entry is the one caller that returns receipts
+            true, // the aggregator entry is the one caller that returns receipts
+            ctx
         );
         if (minBumpBps != 0) {
             // The bump the fill actually priced at: the pinned one when the order
@@ -419,6 +443,31 @@ abstract contract Core is Base {
             delta = ctx.newFilled - ctx.prevFilled; // _openFill guarantees newFilled >= prevFilled
         }
         received = ctx.receipts; // recorded by the payout itself — see {FillCtx.receipts}
+        _exit();
+    }
+
+    /// @dev {fillUpTo}'s prologue: hash, the READ-ONLY fill-state gate, arm the guard,
+    ///      verify, clamp. Kept together (and out of `fillUpTo`'s frame) so the order
+    ///      hash dies here — see the note at the call site. The gate before {Base._enter}
+    ///      is the point of the ordering, not an accident; {Base._enter} states the rule.
+    ///
+    ///      "Custom" rather than "aggregator": what {fillUpTo} actually offers is a
+    ///      caller-supplied fill — its own size (clamped rather than reverted), its own
+    ///      payout `recipient`, its own price floor, and receipts back. A DEX aggregator
+    ///      is the obvious consumer, but an RFQ desk, a router, or anything else
+    ///      assembling its own calldata wants exactly the same four things, and the
+    ///      helper should not name only one of them.
+    function _openCustomFill(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        FillCtx memory ctx
+    ) private returns (uint256) {
+        bytes32 orderHash = order.hash();
+        _gateFillState(order, orderHash, ctx);
+        _enter();
+        _verifySignature(orderHash, sig, order.maker);
+        return _clampToRemaining(order, orderHash, fillAmount);
     }
 
     /// @dev The order-progress clamp: cap an identity fill at the order's
@@ -458,7 +507,6 @@ abstract contract Core is Base {
     ///      (`address(0)` = the filler); see {FillCtx.payTo}.
     function _fillCore(
         Order calldata order,
-        bytes32 orderHash,
         uint256 fillAmount,
         address filler,
         address payTo,
@@ -466,8 +514,9 @@ abstract contract Core is Base {
         bytes memory callbackData,
         CallbackMode mode,
         bytes memory takerData,
-        bool wantReceipts
-    ) internal returns (uint256[] memory outs, FillCtx memory ctx) {
+        bool wantReceipts,
+        FillCtx memory ctx
+    ) internal returns (uint256[] memory outs) {
         if (fillAmount == 0) revert ZeroFill();
         // Note: the anti-dust floor is checked in _openFill against the resolved
         // `delta` (the actual progress), not the requested `fillAmount` — for a
@@ -476,13 +525,14 @@ abstract contract Core is Base {
         // unchanged.
         if (block.timestamp > DutchAuction.expiry(order)) revert OrderExpired();
 
-        uint256 overrideBps = OrderGates.exclusivityOverride(order, filler);
-        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
-        _runValidators(order, filler, takerData);
+        // `ctx` arrives seeded by {OrderState._gateFillState}, which every caller runs
+        // before it arms the reentrancy guard — that ordering is what makes a lost
+        // priority-fee race cheap. The rest of the gate runs here. See {Base._enter}.
+        _gateOrderPost(order, filler, takerData, ctx);
 
         // `takerData` doubles as the filler's fill proposal for a fill-module
         // order (see {IFillModule}); a plain fungible order ignores it here.
-        ctx = _openFill(order, orderHash, fillAmount, overrideBps, filler, takerData);
+        _openFill(order, fillAmount, filler, takerData, ctx);
         if (payTo != address(0)) ctx.payTo = payTo;
         // OPT-IN. Only `fillUpTo` returns per-leg receipts, and allocating the array
         // unconditionally measured +453 gas on every ordinary fill — more than the

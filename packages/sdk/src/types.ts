@@ -98,15 +98,32 @@ export interface Order {
   curve: readonly CurvePoint[];
   /// Max extra decay (bps) the gas bump adds at/above `gasPriceRef` basefee; 0 = off.
   gasBumpBps: bigint;
-  /// Reference basefee (wei) at which the gas bump reaches `gasBumpBps`.
+  /**
+   * Reference basefee (wei) at which the gas bump reaches `gasBumpBps`. Read by the
+   * gas bump and nothing else — set it without `gasBumpBps` and it is inert (the lens
+   * reports that shape as malformed). For a priority auction you almost certainly
+   * want {@link Order.baselinePriorityFeeWei} instead.
+   */
   gasPriceRef: bigint;
   /**
    * PRIORITY auction (timing bit 103): the priority fee, in wei, that buys a FULL
    * bump. The maker signs `start` as its ambition and `end` as its guaranteed
    * floor; an unbid fill clears at `end` and every wei of priority fee moves the
    * tick toward `start`. `0n` = the order is not a priority auction.
+   *
+   * The bid is `tx.gasprice - block.basefee - baselinePriorityFeeWei` (clamped at 0).
    */
   priorityScale: bigint;
+  /**
+   * PRIORITY auction only: the tip, in wei, that does NOT count as a bid — UniswapX's
+   * `baselinePriorityFeeWei`. Subtract whatever the chain currently wants just to
+   * INCLUDE a transaction, so the inclusion tip is not mistaken for an auction bid and
+   * `priorityScale` stays a pure economic parameter. `uint48`, so at most
+   * ~281,474 gwei. Omitted or `0n` = every wei of tip bids, which is how every order
+   * signed before this field existed reads — the field has bits of its own
+   * (`params[160:208)`) precisely so that stays true.
+   */
+  baselinePriorityFeeWei?: bigint;
   items: readonly Item[];
   validators: readonly Validator[];
   invariants: readonly Validator[];
@@ -161,19 +178,28 @@ export function withDeltaVerifyOutputs(timing: bigint): bigint {
 /**
  * Pack the four auction scalars into the wire `params` word, mirroring
  * `DutchAuction.packParams`: [0:16) overrideBps, [16:32) gasBumpBps,
- * [32:96) gasPriceRef, [96:160) priorityScale.
+ * [32:96) gasPriceRef, [96:160) priorityScale, [160:208) baselinePriorityFeeWei.
  */
 export function packParams(
   overrideBps: bigint,
   gasBumpBps: bigint,
   gasPriceRef: bigint,
   priorityScale: bigint,
+  baselinePriorityFeeWei: bigint = 0n,
 ): bigint {
   const U16 = 0xffffn;
+  const U48 = 0xffff_ffff_ffffn;
   const U64 = 0xffff_ffff_ffff_ffffn;
   if (overrideBps > U16 || gasBumpBps > U16) throw new Error("params bps field exceeds uint16");
   if (gasPriceRef > U64 || priorityScale > U64) throw new Error("params wei field exceeds uint64");
-  return overrideBps | (gasBumpBps << 16n) | (gasPriceRef << 32n) | (priorityScale << 96n);
+  if (baselinePriorityFeeWei > U48) throw new Error("params baselinePriorityFeeWei exceeds uint48");
+  return (
+    overrideBps |
+    (gasBumpBps << 16n) |
+    (gasPriceRef << 32n) |
+    (priorityScale << 96n) |
+    (baselinePriorityFeeWei << 160n)
+  );
 }
 
 /// Inverse of {@link packParams}.
@@ -182,14 +208,17 @@ export function unpackParams(params: bigint): {
   gasBumpBps: bigint;
   gasPriceRef: bigint;
   priorityScale: bigint;
+  baselinePriorityFeeWei: bigint;
 } {
   const U16 = 0xffffn;
+  const U48 = 0xffff_ffff_ffffn;
   const U64 = 0xffff_ffff_ffff_ffffn;
   return {
     overrideBps: params & U16,
     gasBumpBps: (params >> 16n) & U16,
     gasPriceRef: (params >> 32n) & U64,
     priorityScale: (params >> 96n) & U64,
+    baselinePriorityFeeWei: (params >> 160n) & U48,
   };
 }
 

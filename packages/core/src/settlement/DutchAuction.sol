@@ -129,7 +129,9 @@ library DutchAuction {
     ///
     ///         The basefee gas bump is IGNORED in this mode — it moves the tick toward
     ///         the floor as gas rises, which is precisely backwards when the filler is
-    ///         bidding gas to move it the other way.
+    ///         bidding gas to move it the other way — signing one is now an outright
+    ///         {InvalidAuctionParams}. The tip that does not count as a bid is
+    ///         {baselinePriorityFeeWei}, which has bits of its own.
     function priorityAuction(Order calldata order) internal pure returns (bool) {
         return (order.timing >> 103) & 1 == 1;
     }
@@ -203,9 +205,41 @@ library DutchAuction {
     }
 
     /// @notice Reference basefee (wei) at which the gas bump saturates — bits [32:96).
-    /// @dev    64 bits is 18.4 ETH of wei; no reference basefee approaches it.
+    /// @dev    64 bits is 18.4 ETH of wei; no reference basefee approaches it. Read
+    ///         only by {bumpBps}, which never runs under {priorityAuction} or an
+    ///         {IPriceModule}, so on those orders this field is inert — see
+    ///         {baselinePriorityFeeWei} for why it is not quietly repurposed there.
     function gasPriceRef(Order calldata order) internal pure returns (uint256) {
         return uint64(order.params >> 32);
+    }
+
+    /// @notice PRIORITY-auction only: the tip (wei) that does NOT count as a bid —
+    ///         `params` bits [160:208).
+    /// @dev    UniswapX's `baselinePriorityFeeWei`, and it exists for the reason theirs
+    ///         does. `tx.gasprice - block.basefee` is not purely an auction bid: part of
+    ///         it is whatever tip the chain currently wants just to INCLUDE the
+    ///         transaction. Without a baseline that inclusion tip reads as a bid, so the
+    ///         maker collects an improvement nobody chose to offer and `priorityScale`
+    ///         stops being a pure economic parameter — it has to be re-tuned per chain
+    ///         and per congestion regime, which is exactly the re-quoting risk a solver
+    ///         cannot hedge. Subtracting it makes the bid the part of the tip the filler
+    ///         actually chose.
+    ///
+    ///         ⚠ IT CLAIMS ITS OWN BITS, and that is the whole point. Overlaying it on
+    ///         {gasPriceRef} — dead space under a priority auction, and tempting for it
+    ///         — would have given one signed field two meanings selected by a bit
+    ///         elsewhere in a DIFFERENT word. Any order already signed with an inert
+    ///         `gasPriceRef` would then have started bidding against a baseline its
+    ///         maker never chose, silently, with a valid signature over the same bytes.
+    ///         Bits [160:256) were free and every order ever signed has zeros there, so
+    ///         a pre-existing priority order reads a baseline of 0 — precisely the
+    ///         behaviour it was signed under. Still no new `Order` field, no EIP-712
+    ///         typehash change and no golden-hash break; `params` is already signed.
+    ///
+    ///         `uint48` reaches 281,474 gwei of tip. No inclusion tip is within four
+    ///         orders of magnitude of that, and it leaves bits [208:256) free.
+    function baselinePriorityFeeWei(Order calldata order) internal pure returns (uint256) {
+        return uint48(order.params >> 160);
     }
 
     /// @notice Priority fee (wei) that buys a FULL bump — `params` bits [96:160).
@@ -221,14 +255,18 @@ library DutchAuction {
     ///         a contract maker sign an auction with a different bid scale than it
     ///         intended, with no revert. The SDK's `packParams` throws on exactly these
     ///         inputs — keep the two mirrors in agreement.
-    function packParams(uint256 overrideBps_, uint256 gasBumpBps_, uint256 gasPriceRef_, uint256 priorityScale_)
-        internal
-        pure
-        returns (uint256)
-    {
+    function packParams(
+        uint256 overrideBps_,
+        uint256 gasBumpBps_,
+        uint256 gasPriceRef_,
+        uint256 priorityScale_,
+        uint256 baselinePriorityFeeWei_
+    ) internal pure returns (uint256) {
         if (overrideBps_ > type(uint16).max || gasBumpBps_ > type(uint16).max) revert InvalidAuctionParams();
         if (gasPriceRef_ > type(uint64).max || priorityScale_ > type(uint64).max) revert InvalidAuctionParams();
-        return overrideBps_ | (gasBumpBps_ << 16) | (gasPriceRef_ << 32) | (priorityScale_ << 96);
+        if (baselinePriorityFeeWei_ > type(uint48).max) revert InvalidAuctionParams();
+        return overrideBps_ | (gasBumpBps_ << 16) | (gasPriceRef_ << 32) | (priorityScale_ << 96)
+            | (baselinePriorityFeeWei_ << 160);
     }
 
     /// @notice Which side of the order is FIXED and which is auctioned — bit 101 of
@@ -404,9 +442,20 @@ library DutchAuction {
         // A zero scale would divide by zero on the first bid; an order that opts into
         // the priority auction without one is malformed, not "unbid".
         if (scale == 0) revert InvalidAuctionParams();
+        // A gas bump cannot run here (it moves the tick the wrong way — see
+        // {priorityAuction}), so an order carrying both is asking for something it will
+        // not get. SAY SO rather than ignore it: a silently-dropped signed parameter is
+        // how one field ends up meaning two things. {SettlementLens.validateOrder}
+        // already reports this shape; this makes the settler agree.
+        if (gasBumpBps(order) != 0) revert InvalidAuctionParams();
         uint256 base = block.basefee;
         uint256 gp = tx.gasprice;
         uint256 prio = gp > base ? gp - base : 0;
+        // The inclusion tip is not a bid — see {baselinePriorityFeeWei}. Saturating
+        // subtraction: a fill that tips below the maker's baseline has bid nothing and
+        // clears at the floor, which is exactly the guarantee `end` already is.
+        uint256 baseline = baselinePriorityFeeWei(order);
+        prio = prio > baseline ? prio - baseline : 0;
         uint256 improve = (prio * BPS) / scale;
         // No bid ⇒ BPS ⇒ the maker receives `end`, its guaranteed floor.
         return improve >= BPS ? 0 : BPS - improve;

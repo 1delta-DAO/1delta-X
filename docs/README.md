@@ -138,6 +138,10 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
 - **[gasless-permit-relay.md](gasless-permit-relay.md)** — EIP-712 signatures
   attached to module `data` so on-chain approvals aren't required beforehand;
   replayed atomically inside the module call.
+- **[account-onboarding.md](account-onboarding.md)** — the two grants a fresh
+  account needs before it can be filled, which of them a signature can create,
+  and which route applies to which kind of account. Includes the EIP-7702 /
+  ERC-7579 approver that was built and deleted, and why.
 
 ## Cancellation
 

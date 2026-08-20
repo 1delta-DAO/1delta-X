@@ -58,6 +58,7 @@ export const CANONICAL_ORDER: Order = {
   fillModule: A("0x000000000000000000000000000000000000f111"),
   fillTotal: 42n,
   priorityScale: 0n,
+  baselinePriorityFeeWei: 0n,
   pricingModule: "0x000000000000000000000000000000000000f222" as Address,
 };
 

@@ -93,7 +93,7 @@ contract PricingGasBenchTest is MockSettlementBase {
         _fund();
         o = _decayingSell(3);
         o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
-        o.params = DutchAuction.packParams(0, 0, 0, 2 gwei);
+        o.params = DutchAuction.packParams(0, 0, 0, 2 gwei, 0);
         vm.fee(1 gwei);
         vm.txGasPrice(2 gwei);
         uint256 priority = _measure("priority auction           ", o, _sign(o), "");

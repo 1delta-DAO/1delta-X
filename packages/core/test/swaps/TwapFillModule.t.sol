@@ -7,6 +7,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Settlement, CallbackMode, Order, Item, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {TwapFillModule} from "@core/modules/TwapFillModule.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev A mock DEX for the PostInputs callback: pulls the solver's just-received
@@ -101,10 +102,13 @@ contract TwapFillModuleTest is CoreSettlementBase {
         assertEq(IERC20(WETH).balanceOf(maker), WETH_TOTAL, "TWAP complete: 0.5 WETH");
         assertEq(IERC20(USDC).balanceOf(solver), TOTAL, "solver has all 1000 USDC");
 
-        // Order fully filled → any further fill reverts (nothing left to unlock).
+        // Order fully filled → any further fill reverts. Not the module's error: the
+        // order is COMPLETE, so {OrderState._gateFillState} answers before the schedule
+        // is ever read. (Inside the schedule — parts remaining but none unlocked yet,
+        // as at line 81 above — the module still owns the error.)
         vm.warp(t0 + 2000);
         vm.prank(solver);
-        vm.expectRevert(TwapFillModule.TwapPartUnavailable.selector);
+        vm.expectRevert(OrderState.OverFill.selector);
         settlement.fill(o, sig, PART);
     }
 
