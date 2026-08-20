@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 
+import { adviseBand, bumpDistribution, OrderSide, type Order } from "@1delta-x/sdk";
+
 import { FillIndex } from "../src/fills";
 import type { OrderbookConfig } from "../src/config";
 
@@ -17,6 +19,8 @@ const BOB = "0x00000000000000000000000000000000000000b0" as Address;
 const SOLVER = "0x00000000000000000000000000000000000005a1" as Address;
 const H1 = `0x${"11".repeat(32)}` as Hex;
 const H2 = `0x${"22".repeat(32)}` as Hex;
+/** `stubClient` reports block N at BASE_TS + N. */
+const BASE_TS = 1_700_000_000;
 
 function log(orderHash: Hex, maker: Address, blockNumber: bigint, logIndex: number) {
   return {
@@ -126,5 +130,128 @@ describe("FillIndex", () => {
 
     await expect(index.backfill()).resolves.toBeGreaterThanOrEqual(0);
     expect(errors).toHaveLength(1);
+  });
+});
+
+// ──────────────────── realized clearing depth (bump replay) ────────────────────
+
+/** A decaying SELL: 1000 in, output 2000 → 1000 over a 100-second window opening
+ *  at the timestamp `stubClient` reports for block 0. */
+function decayingOrder(over: Partial<Order> = {}): Order {
+  return {
+    maker: ALICE,
+    side: OrderSide.SELL,
+    nonce: 1n,
+    expiry: 4_000_000_000n,
+    legsIn: [{ token: "0x1111111111111111111111111111111111111111", start: 1_000n, end: 0n }],
+    legsOut: [{ token: "0x2222222222222222222222222222222222222222", start: 2_000n, end: 1_000n, recipient: zeroAddress }],
+    // decayStartTime = the block-0 timestamp, decayDuration = 100.
+    timing: BigInt(BASE_TS) | (100n << 32n),
+    exclusiveFiller: zeroAddress,
+    minFillAnchor: 0n,
+    exclusivityOverrideBps: 0n,
+    curve: [],
+    gasBumpBps: 0n,
+    gasPriceRef: 0n,
+    items: [],
+    validators: [],
+    invariants: [],
+    fillModule: zeroAddress,
+    fillTotal: 0n,
+    priorityScale: 0n,
+    pricingModule: zeroAddress,
+    ...over,
+  };
+}
+
+describe("FillIndex realized bump", () => {
+  it("replays the clock bump from the fill block, with no new chain data", async () => {
+    // Block 50 ⇒ 50s into a 100s window ⇒ the midpoint of the band.
+    const client = stubClient([log(H1, ALICE, 50n, 0)], { [H1]: 1_000n });
+    const order = decayingOrder();
+    const index = new FillIndex({ client, config, defaultLookbackBlocks: 100n, orderFor: () => order });
+
+    await index.backfill();
+    await index.resolveBumps();
+
+    const row = index.query({ orderHash: H1 }).items[0]!;
+    expect(row.bumpSource).toBe("clock");
+    expect(row.realizedBump).toBe(5_000);
+  });
+
+  it("clamps at the end of the window", async () => {
+    const client = stubClient([log(H1, ALICE, 90n, 0)], { [H1]: 1_000n });
+    const order = decayingOrder({ timing: BigInt(BASE_TS) | (10n << 32n) });
+    const index = new FillIndex({ client, config, defaultLookbackBlocks: 100n, orderFor: () => order });
+    await index.backfill();
+    await index.resolveBumps();
+    expect(index.query({ orderHash: H1 }).items[0]!.realizedBump).toBe(10_000);
+  });
+
+  it("reads a block-clock order's window in BLOCKS, not seconds", async () => {
+    // decayStart = block 40, duration = 20 blocks; the fill lands at block 50 ⇒ half.
+    const client = stubClient([log(H1, ALICE, 50n, 0)], { [H1]: 1_000n });
+    const order = decayingOrder({ timing: 40n | (20n << 32n) | (1n << 102n) });
+    const index = new FillIndex({ client, config, defaultLookbackBlocks: 100n, orderFor: () => order });
+    await index.backfill();
+    await index.resolveBumps();
+    const row = index.query({ orderHash: H1 }).items[0]!;
+    expect(row.bumpSource).toBe("clock");
+    expect(row.realizedBump).toBe(5_000);
+  });
+
+  it("marks an IPriceModule order as a blind spot rather than guessing", async () => {
+    // The bump depends on the filler's `takerData`, which is in the fill tx's
+    // calldata and opaque behind a solver's own contract. `null`, never 0.
+    const client = stubClient([log(H1, ALICE, 50n, 0)], { [H1]: 1_000n });
+    const order = decayingOrder({ pricingModule: "0x00000000000000000000000000000000000000ff" as Address });
+    const index = new FillIndex({ client, config, defaultLookbackBlocks: 100n, orderFor: () => order });
+    await index.backfill();
+    await index.resolveBumps();
+    const row = index.query({ orderHash: H1 }).items[0]!;
+    expect(row.bumpSource).toBe("module");
+    expect(row.realizedBump).toBeNull();
+  });
+
+  it("reports unknown — not zero — when the order is not available", async () => {
+    const client = stubClient([log(H1, ALICE, 50n, 0)], { [H1]: 1_000n });
+    const index = new FillIndex({ client, config, defaultLookbackBlocks: 100n, orderFor: () => undefined });
+    await index.backfill();
+    await index.resolveBumps();
+    const row = index.query({ orderHash: H1 }).items[0]!;
+    expect(row.bumpSource).toBe("unknown");
+    expect(row.realizedBump).toBeNull();
+  });
+
+  it("leaves backfilled rows unresolved until asked — backfill does no per-event RPC", async () => {
+    const client = stubClient([log(H1, ALICE, 50n, 0)], { [H1]: 1_000n });
+    const order = decayingOrder();
+    const index = new FillIndex({ client, config, defaultLookbackBlocks: 100n, orderFor: () => order });
+    await index.backfill();
+    expect(index.query({ orderHash: H1 }).items[0]!.bumpSource).toBe("unresolved");
+    expect(await index.resolveBumps()).toBe(1);
+    expect(index.query({ orderHash: H1 }).items[0]!.bumpSource).toBe("clock");
+    // Idempotent: a second pass has nothing left to do.
+    expect(await index.resolveBumps()).toBe(0);
+  });
+
+  it("feeds bumpSamples straight into the SDK band advisor", async () => {
+    const logs = [log(H1, ALICE, 25n, 0), log(H1, ALICE, 50n, 1), log(H1, ALICE, 75n, 2)];
+    const client = stubClient(logs, { [H1]: 1_000n });
+    const order = decayingOrder();
+    const index = new FillIndex({ client, config, defaultLookbackBlocks: 100n, orderFor: () => order });
+    await index.backfill();
+    await index.resolveBumps();
+
+    const d = bumpDistribution(index.bumpSamples({ orderHash: H1 }));
+    expect(d.sorted).toEqual([2_500, 5_000, 7_500]);
+
+    const advice = adviseBand({ start: 2_000n, end: 1_000n }, d, { coverage: 1 })!;
+    // Nothing ever reached the floor: 2500 bps of the band is dead weight.
+    expect(advice.maxBumpBps).toBe(7_500);
+    expect(advice.unusedBandBps).toBe(2_500);
+    expect(advice.suggestedEnd).toBe(1_250n);
+    expect(advice.floorGain).toBe(250n);
+    expect(advice.missedFraction).toBe(0);
   });
 });

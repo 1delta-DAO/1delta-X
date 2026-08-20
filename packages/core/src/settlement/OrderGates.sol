@@ -55,10 +55,35 @@ library OrderGates {
     ///      that side is empty. Such an order must carry an explicit `fillTotal`.
     error NoAnchorLeg();
 
-    /// @notice Exclusivity gate. Inside the window only the nominated filler fills
-    ///         for free; a non-exclusive filler is blocked (hard exclusivity) or
-    ///         allowed against an `exclusivityOverrideBps` price improvement it must
-    ///         pay the maker (soft exclusivity). Returns the override, 0 otherwise.
+    /// @notice `Order.exclusiveFiller == FILLER_SET` — the exclusivity window names a
+    ///         SET of fillers instead of one. The set rides the signed `curve` blob:
+    ///
+    ///             curve = [0x00] ‖ [20-byte filler]×N          (N ≥ 1)
+    ///
+    ///         The leading zero is the blob's COUNT BYTE: {PackedArrays.validateFixed}
+    ///         reads it as "no curve points" and tolerates the trailing bytes, so
+    ///         {DutchAuction.bumpBps} prices the order on the plain LINEAR clock and
+    ///         never parses the set. That is also the trade a set order signs: a
+    ///         piecewise curve and a filler set cannot share the blob — sets decay
+    ///         linearly. The window and the soft override keep their existing homes
+    ///         (`timing` bits [64:96), `params` bits [0:16)) and their existing
+    ///         meanings, so a SET may be soft: an unlisted in-window filler fills
+    ///         against the same `overrideBps` price improvement a single-filler
+    ///         order charges. `address(1)` is the ecrecover precompile — it can
+    ///         never be a fill's `msg.sender`, which is what makes it safe to
+    ///         retask as a sentinel.
+    address internal constant FILLER_SET = address(1);
+
+    /// @dev A FILLER_SET order whose `curve` is not `[0x00] ‖ fillers×N, N ≥ 1`. A
+    ///      malformed set is refused outright rather than read as "empty ⇒ open" —
+    ///      the maker signed exclusivity, and a decode bug must not un-sign it.
+    error MalformedFillerSet();
+
+    /// @notice Exclusivity gate. Inside the window only the nominated filler — or any
+    ///         member of the nominated SET ({FILLER_SET}) — fills for free; every
+    ///         other filler is blocked (hard exclusivity) or allowed against an
+    ///         `exclusivityOverrideBps` price improvement it must pay the maker
+    ///         (soft exclusivity). Returns the override, 0 otherwise.
     function exclusivityOverride(Order calldata order, address filler) internal view returns (uint256 overrideBps) {
         // `exclusivityEndTime` is measured on the ORDER'S OWN clock — block numbers under
         // {DutchAuction.blockClock}, else unix seconds — so a block-clocked order's
@@ -66,13 +91,35 @@ library OrderGates {
         // separate seconds clock. `nowTick` is `block.timestamp` for the timestamp orders
         // that are the norm, so their behaviour is unchanged. (UniswapX ties exclusivity
         // to `decayStartTime`, i.e. the same clock as the decay, for the same reason.)
-        if (
-            order.exclusiveFiller != address(0) && order.nowTick() < order.exclusivityEndTime()
-                && filler != order.exclusiveFiller
-        ) {
-            overrideBps = order.overrideBps();
-            if (overrideBps == 0) revert NotExclusiveFiller();
-            if (overrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
+        address ex = order.exclusiveFiller;
+        if (ex != address(0) && order.nowTick() < order.exclusivityEndTime()) {
+            bool excluded;
+            if (ex == FILLER_SET) {
+                bytes calldata set = order.curve;
+                uint256 len = set.length;
+                if (len < 21 || (len - 1) % 20 != 0 || set[0] != 0) revert MalformedFillerSet();
+                excluded = true;
+                // The length check above proves the blob is exactly [count byte][20-byte
+                // entries], so the walk needs no per-entry bounds checks — raw calldata
+                // loads, {PackedArrays} style.
+                /// @solidity memory-safe-assembly
+                assembly {
+                    let end := add(set.offset, len)
+                    for { let ptr := add(set.offset, 1) } lt(ptr, end) { ptr := add(ptr, 20) } {
+                        if eq(shr(96, calldataload(ptr)), filler) {
+                            excluded := false
+                            break
+                        }
+                    }
+                }
+            } else {
+                excluded = filler != ex;
+            }
+            if (excluded) {
+                overrideBps = order.overrideBps();
+                if (overrideBps == 0) revert NotExclusiveFiller();
+                if (overrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
+            }
         }
     }
 

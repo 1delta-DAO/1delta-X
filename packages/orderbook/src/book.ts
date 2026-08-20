@@ -396,7 +396,7 @@ export class Book {
   async revalidate(): Promise<void> {
     const now = BigInt(this.now());
     for (const entry of [...this.entries.values()]) {
-      if (entry.announce.order.deadline <= now) this.evict(entry.orderHash);
+      if (entry.announce.order.expiry <= now) this.evict(entry.orderHash);
     }
     const live = this.list();
     if (live.length === 0) return;

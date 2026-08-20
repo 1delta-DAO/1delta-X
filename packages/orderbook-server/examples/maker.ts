@@ -34,7 +34,7 @@ const order: Order = {
   maker: maker.address,
   side: OrderSide.SELL,
   nonce: BigInt(process.env.NONCE ?? now),
-  deadline: BigInt(now + 3600),
+  expiry: BigInt(now + 3600),
   legsIn: [{ token: tokenIn, start: amountIn, end: 0n }], // fixed input
   legsOut: [{ token: tokenOut, start: startOut, end: endOut, recipient: zeroAddress }], // decays start→floor
   timing: packTiming(now, 600, 0), // 10-min decay from now

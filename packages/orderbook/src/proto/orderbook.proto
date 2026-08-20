@@ -53,6 +53,7 @@ message Order {
   bytes     fillTotal              = 18;
   bytes     priorityScale          = 19;
   bytes     pricingModule          = 20;
+  bytes     baselinePriorityFeeWei = 21;
 }
 
 message TokenPermit {

@@ -127,7 +127,7 @@ function matches(entry: BookEntry, q: OrderQuery): boolean {
     const reverse = ins.some((t) => eq(t, b)) && outs.some((t) => eq(t, a));
     if (!forward && !reverse) return false;
   }
-  if (q.expiresAfter !== undefined && order.deadline < q.expiresAfter) return false;
+  if (q.expiresAfter !== undefined && order.expiry < q.expiresAfter) return false;
   if (q.addedAfter !== undefined && entry.addedAt < q.addedAfter) return false;
 
   const state = entry.state;
@@ -142,7 +142,7 @@ function matches(entry: BookEntry, q: OrderQuery): boolean {
 function sortValue(entry: BookEntry, key: SortKey): number {
   switch (key) {
     case "deadline":
-      return Number(entry.announce.order.deadline);
+      return Number(entry.announce.order.expiry);
     case "fillable":
       return Number(entry.state?.fillableAmount ?? 0n);
     case "price":
@@ -260,7 +260,7 @@ export function summarize(entry: BookEntry): OrderSummary {
     maker: order.maker,
     side: order.side === OrderSide.SELL ? "SELL" : "BUY",
     nonce: order.nonce.toString(),
-    deadline: order.deadline.toString(),
+    deadline: order.expiry.toString(),
     addedAt: entry.addedAt,
     tokensIn: tokensIn(order),
     tokensOut: tokensOut(order),

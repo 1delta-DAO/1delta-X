@@ -1,4 +1,4 @@
-import { numberToHex, type Hex } from "viem";
+import { numberToHex, type Address, type Hex } from "viem";
 import { packParams } from "./types";
 import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types";
 
@@ -70,6 +70,24 @@ export function packLegsOut(legs: readonly LegOut[]): Hex {
   let out = count(legs.length);
   for (const l of legs) out += addr(l.token) + u(l.start, 32) + u(l.end, 32) + addr(l.recipient);
   return `0x${out}`;
+}
+
+/**
+ * Encode a filler SET into the `curve` bytes for a {@link FILLER_SET_SENTINEL}
+ * order: `[0x00] ‖ [20-byte filler]×N`. The leading zero is the blob's count
+ * byte — the decay clock reads "no curve points" and prices the order on the
+ * plain linear ramp, never parsing the set. Sign the window into `timing` bits
+ * [64:96) (`packTiming`'s exclusivityEndTime) and, for a SOFT set, a non-zero
+ * `exclusivityOverrideBps`.
+ */
+export function packFillerSet(fillers: readonly Address[]): Hex {
+  if (fillers.length === 0) throw new Error("a filler set needs at least one filler");
+  let out = "0x00";
+  for (const f of fillers) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(f)) throw new Error(`not an address: ${f}`);
+    out += f.slice(2);
+  }
+  return out.toLowerCase() as Hex;
 }
 
 export function packCurve(points: readonly CurvePoint[]): Hex {

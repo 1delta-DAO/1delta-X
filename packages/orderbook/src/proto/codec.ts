@@ -62,7 +62,7 @@ interface PbOrder {
   minFillAnchor: Uint8Array; exclusivityOverrideBps: Uint8Array; curve: PbCurvePoint[];
   gasBumpBps: Uint8Array; gasPriceRef: Uint8Array; items: PbItem[]; validators: PbValidator[];
   invariants: PbValidator[]; fillModule: Uint8Array; fillTotal: Uint8Array;
-  priorityScale: Uint8Array; pricingModule: Uint8Array;
+  priorityScale: Uint8Array; pricingModule: Uint8Array; baselinePriorityFeeWei: Uint8Array;
 }
 interface PbTokenPermit { spender: Uint8Array; token: Uint8Array; amount: Uint8Array; expiration: number }
 interface PbTakerPermit { spender: Uint8Array; module: Uint8Array; ref: Uint8Array; amount: Uint8Array; expiration: number }
@@ -80,7 +80,7 @@ export function orderToProto(o: Order): PbOrder {
     maker: addrToBytes(o.maker),
     side: o.side,
     nonce: u256ToBytes(o.nonce),
-    deadline: u256ToBytes(o.deadline),
+    deadline: u256ToBytes(o.expiry),
     legsIn: o.legsIn.map((l): PbLegIn => ({ token: addrToBytes(l.token), start: u256ToBytes(l.start), end: u256ToBytes(l.end) })),
     legsOut: o.legsOut.map((l): PbLegOut => ({ token: addrToBytes(l.token), start: u256ToBytes(l.start), end: u256ToBytes(l.end), recipient: addrToBytes(l.recipient) })),
     timing: u256ToBytes(o.timing),
@@ -97,6 +97,10 @@ export function orderToProto(o: Order): PbOrder {
     fillTotal: u256ToBytes(o.fillTotal),
     priorityScale: u256ToBytes(o.priorityScale),
     pricingModule: addrToBytes(o.pricingModule),
+    // Optional on the SDK `Order`; proto3 `bytes` defaults to empty, which decodes
+    // back to 0n — so a message written before this field existed still round-trips
+    // to the value it was signed under.
+    baselinePriorityFeeWei: u256ToBytes(o.baselinePriorityFeeWei ?? 0n),
   };
 }
 
@@ -106,7 +110,7 @@ export function protoToOrder(p: PbOrder): Order {
     maker: bytesToAddr(p.maker),
     side: p.side as OrderSide,
     nonce: bytesToU256(p.nonce),
-    deadline: bytesToU256(p.deadline),
+    expiry: bytesToU256(p.deadline),
     legsIn: (p.legsIn ?? []).map((l): LegIn => ({ token: bytesToAddr(l.token), start: bytesToU256(l.start), end: bytesToU256(l.end) })),
     legsOut: (p.legsOut ?? []).map((l): LegOut => ({ token: bytesToAddr(l.token), start: bytesToU256(l.start), end: bytesToU256(l.end), recipient: bytesToAddr(l.recipient) })),
     timing: bytesToU256(p.timing),
@@ -123,6 +127,7 @@ export function protoToOrder(p: PbOrder): Order {
     fillTotal: bytesToU256(p.fillTotal),
     priorityScale: bytesToU256(p.priorityScale),
     pricingModule: bytesToAddr(p.pricingModule),
+    baselinePriorityFeeWei: bytesToU256(p.baselinePriorityFeeWei),
   };
 }
 

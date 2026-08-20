@@ -142,8 +142,7 @@ gas-diff:
 size-check:
 	@FOUNDRY_PROFILE=core-deploy $(FORGE) build --quiet \
 		--skip 'packages/core/test/*' --skip '*.s.sol' \
-		--skip 'src/validators/*' --skip 'src/periphery/*' --skip 'src/dust/*' --skip 'src/modules/*'
-	@FOUNDRY_PROFILE=core $(FORGE) build --quiet --skip '*.t.sol' --skip '*.s.sol'
+		--skip 'src/validators/*' --skip 'src/dust/*' --skip 'src/modules/*'
 	@fail=0; \
 	check() { \
 		rt=$$(( ($$(FOUNDRY_PROFILE=$$1 $(FORGE) inspect $$2 deployedBytecode | tr -d '[:space:]' | wc -c) - 2) / 2 )); \
@@ -153,7 +152,9 @@ size-check:
 		if [ $$ic -gt 49152 ]; then echo "FAIL: $$2 initcode exceeds EIP-3860"; fail=1; fi; \
 	}; \
 	check core-deploy Settlement; \
-	check core SettlementLens; \
+	check core-deploy SettlementLens; \
+	check core-deploy OriginSettler7683; \
+	check core-deploy DestinationSettler7683; \
 	exit $$fail
 
 # ── Help ──────────────────────────────────────────────────────────────────────

@@ -81,7 +81,7 @@ export class Verifier {
       (order.side === OrderSide.BUY && order.legsOut.length > 0);
     if (!hasDenominator) return { ok: false, reason: "no fill denominator (empty anchor leg)", orderHash, deferSig: false };
 
-    if (order.deadline <= BigInt(this.now())) return { ok: false, reason: "order expired", orderHash, deferSig: false };
+    if (order.expiry <= BigInt(this.now())) return { ok: false, reason: "order expired", orderHash, deferSig: false };
 
     // sigless = on-chain approveOrder path; confirmed on-chain, never by recover.
     if (a.sigless) return { ok: true, orderHash, deferSig: true };

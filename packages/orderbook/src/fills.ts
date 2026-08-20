@@ -1,8 +1,31 @@
-import { SETTLEMENT_ABI } from "@1delta-x/sdk";
+import {
+  BLOCK_CLOCK_BIT,
+  PRIORITY_AUCTION_BIT,
+  bumpBps,
+  priorityBid,
+  SETTLEMENT_ABI,
+  type Order,
+} from "@1delta-x/sdk";
 import type { Address, Hex, PublicClient } from "viem";
 
 import type { OrderbookConfig } from "./config";
 import type { Unsubscribe } from "./transport";
+
+/**
+ * Where a fill priced within the maker's band, and how confidently we know it.
+ *
+ *   • `clock`      — replayed from the order's decay clock at the fill block. Exact.
+ *   • `priority`   — replayed from the fill's effective gas price. Exact.
+ *   • `module`     — the order is priced by an {IPriceModule}; the answer depends on
+ *                    the filler's `takerData`, which lives in the fill transaction's
+ *                    calldata and is opaque when the filler routes through its own
+ *                    contract. Genuinely not recoverable here.
+ *   • `unresolved` — not attempted yet (backfilled rows, until {FillIndex.resolveBumps}).
+ *   • `unknown`    — attempted and failed: no order available, or an RPC error.
+ *
+ * Only `clock` and `priority` carry a non-null `realizedBump`.
+ */
+export type BumpSource = "clock" | "priority" | "module" | "unresolved" | "unknown";
 
 /**
  * One `OrderFilled` log, enriched.
@@ -12,6 +35,14 @@ import type { Unsubscribe } from "./transport";
  * therefore RECONSTRUCTED by reading the settlement's cumulative `filled(hash)`
  * and differencing it, which is exact for events this index saw live and
  * unavailable for most backfilled ones. `null` means "not known", never zero.
+ *
+ * ⚠ The PRICE is not on chain either, and is not in `filled` — that counter tracks
+ * the ANCHORED side, which is precisely the side that does not decay. The bump is
+ * resolved once per fill into memory (`DutchAuction.resolveBump` → `FillCtx.bump`),
+ * used, and discarded. But for the two on-chain pricing modes it is a deterministic
+ * function of block context, so `realizedBump` REPLAYS it rather than observing it —
+ * no new event, no gas on the hot path, no archive node. See {BumpSource} for the
+ * modes where that replay does not work.
  */
 export interface FillRecord {
   orderHash: Hex;
@@ -26,6 +57,13 @@ export interface FillRecord {
   cumulative: bigint | null;
   /** This fill's own delta. Known only when the previous cumulative was known. */
   amount: bigint | null;
+  /**
+   * Where in the maker's signed band this fill cleared, in bps: `0` = `start`
+   * (the maker's ambition), `10000` = `end` (its floor). `null` when it could not
+   * be replayed — check {@link bumpSource} to tell a blind spot from a real 0.
+   */
+  realizedBump: number | null;
+  bumpSource: BumpSource;
 }
 
 export interface FillIndexOptions {
@@ -40,6 +78,12 @@ export interface FillIndexOptions {
   defaultLookbackBlocks?: bigint;
   /** Log-range chunk for backfill; providers cap `eth_getLogs` spans. Default 10k. */
   chunkBlocks?: bigint;
+  /**
+   * Resolve an order by hash, for {@link FillRecord.realizedBump}. Wire this to the
+   * {@link Book}. Without it every row reports `bumpSource: "unknown"` — the index
+   * holds only the event, and the band lives in the order.
+   */
+  orderFor?: (orderHash: Hex) => Order | undefined | Promise<Order | undefined>;
   onError?: (err: unknown) => void;
 }
 
@@ -91,7 +135,8 @@ export class FillIndex {
   private readonly byHash = new Map<Hex, FillRecord[]>();
   /** Last known cumulative per order, so a live event can be differenced. */
   private readonly cumulative = new Map<Hex, bigint>();
-  private readonly timestamps = new Map<string, number>();
+  /** Per-block context both the timestamp and the bump replay need. */
+  private readonly blocks = new Map<string, BlockCtx>();
   private readonly maxRecords: number;
   private readonly lookback: bigint;
   private readonly chunk: bigint;
@@ -163,6 +208,8 @@ export class FillIndex {
           at: null,
           cumulative: null,
           amount: null,
+          realizedBump: null,
+          bumpSource: "unresolved",
         });
         found++;
       }
@@ -198,8 +245,11 @@ export class FillIndex {
               at: await this.timestampOf(log.blockNumber),
               cumulative: null,
               amount: null,
+              realizedBump: null,
+              bumpSource: "unresolved",
             };
             await this.resolveAmount(record);
+            await this.resolveBump(record);
             this.push(record);
             if (this.scannedTo === null || record.blockNumber > this.scannedTo) this.scannedTo = record.blockNumber;
           }
@@ -310,25 +360,129 @@ export class FillIndex {
     }
   }
 
+  /**
+   * Resolve {@link FillRecord.realizedBump} for every row not yet attempted.
+   *
+   * Separate from `backfill()` on purpose: that path deliberately does NO per-event
+   * RPC (it resolves cumulatives once per distinct order at head), and a bump replay
+   * costs a `getBlock` per distinct block — cheap and cached, but not free. Call this
+   * when you want the price data; skip it when you only want "was it filled".
+   *
+   * @returns how many rows gained a non-null bump.
+   */
+  async resolveBumps(): Promise<number> {
+    let resolved = 0;
+    for (const record of this.records) {
+      if (record.bumpSource !== "unresolved") continue;
+      await this.resolveBump(record);
+      if (record.realizedBump !== null) resolved++;
+    }
+    return resolved;
+  }
+
+  /**
+   * Realized clearing depths for a query, in the shape the SDK's `bumpDistribution`
+   * consumes. Nulls are preserved rather than dropped — the distribution builder
+   * discards them, and a null is an unobservable fill, never a fill at `start`.
+   *
+   * ⚠ Filter by pair before treating this as a band statistic. A fixed-price order
+   * (no decay window) contributes an honest but meaningless `0`: it had no band to
+   * clear inside.
+   */
+  bumpSamples(q: FillQuery = {}): (number | null)[] {
+    return this.query(q).items.map((r) => r.realizedBump);
+  }
+
+  /**
+   * Replay one fill's bump from block context.
+   *
+   * This is a REPLAY, not an observation: for the two on-chain pricing modes the
+   * bump is a pure function of the order plus the fill's block (and, for a priority
+   * auction, its effective gas price), so the same arithmetic the settler ran can be
+   * re-run off-chain. That is why `OrderFilled` does not need to carry it — paying
+   * ~256 gas on every fill forever to publish a derivable number would hand back a
+   * tenth of the 2026-08 core gas pass.
+   */
+  private async resolveBump(record: FillRecord): Promise<void> {
+    const lookup = this.opts.orderFor;
+    if (!lookup) {
+      record.bumpSource = "unknown";
+      return;
+    }
+    try {
+      const order = await lookup(record.orderHash);
+      if (!order) {
+        record.bumpSource = "unknown";
+        return;
+      }
+      // An {IPriceModule} order prices off the filler's `takerData`, which is in the
+      // fill transaction's calldata and opaque whenever the filler routes through its
+      // own contract. Not recoverable here; say so rather than guessing.
+      if (BigInt(order.pricingModule) !== 0n) {
+        record.bumpSource = "module";
+        return;
+      }
+      const ctx = await this.blockOf(record.blockNumber);
+      if (!ctx) {
+        record.bumpSource = "unknown";
+        return;
+      }
+
+      const priority = ((order.timing >> PRIORITY_AUCTION_BIT) & 1n) === 1n;
+      let bid = 0n;
+      if (priority) {
+        // The receipt's `effectiveGasPrice` IS the EVM's `tx.gasprice`; `maxFeePerGas`
+        // is only a ceiling and would read as a much larger bid than was paid.
+        const receipt = await this.opts.client.getTransactionReceipt({ hash: record.txHash });
+        bid = priorityBid(receipt.effectiveGasPrice ?? 0n, ctx.baseFee, order.baselinePriorityFeeWei ?? 0n);
+      }
+      // The order's OWN clock: block numbers under `timing` bit 102, else seconds.
+      const now = ((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 1n ? record.blockNumber : BigInt(ctx.timestamp);
+
+      record.realizedBump = Number(bumpBps(order, now, ctx.baseFee, bid));
+      record.bumpSource = priority ? "priority" : "clock";
+    } catch (err) {
+      // A malformed order, an auction that had not started, an RPC failure — all
+      // reach here. `unknown` keeps them distinguishable from a real zero.
+      record.bumpSource = "unknown";
+      this.opts.onError?.(err);
+    }
+  }
+
   private async timestampOf(blockNumber: bigint | null | undefined): Promise<number | null> {
+    const ctx = await this.blockOf(blockNumber);
+    return ctx ? ctx.timestamp : null;
+  }
+
+  /** Block timestamp + basefee, cached. Both are inputs to the bump replay: the
+   *  timestamp drives the decay clock, the basefee the gas bump and the priority bid. */
+  private async blockOf(blockNumber: bigint | null | undefined): Promise<BlockCtx | null> {
     if (blockNumber == null) return null;
     const key = blockNumber.toString();
-    const hit = this.timestamps.get(key);
+    const hit = this.blocks.get(key);
     if (hit !== undefined) return hit;
     try {
       const block = await this.opts.client.getBlock({ blockNumber });
-      const seconds = Number(block.timestamp);
-      this.timestamps.set(key, seconds);
+      const ctx: BlockCtx = {
+        timestamp: Number(block.timestamp),
+        baseFee: block.baseFeePerGas ?? 0n,
+      };
+      this.blocks.set(key, ctx);
       // Bounded: one entry per block seen, and blocks only ever move forward.
-      if (this.timestamps.size > 4096) {
-        const oldest = this.timestamps.keys().next().value;
-        if (oldest !== undefined) this.timestamps.delete(oldest);
+      if (this.blocks.size > 4096) {
+        const oldest = this.blocks.keys().next().value;
+        if (oldest !== undefined) this.blocks.delete(oldest);
       }
-      return seconds;
+      return ctx;
     } catch {
       return null;
     }
   }
+}
+
+interface BlockCtx {
+  timestamp: number;
+  baseFee: bigint;
 }
 
 /** Plain text — this library also runs where `Buffer` does not exist. */

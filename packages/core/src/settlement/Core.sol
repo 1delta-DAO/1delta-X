@@ -15,7 +15,7 @@ import {Base} from "./Base.sol";
 /// @title Core
 /// @notice The single-order fill path — the HOT PATH. Public entrypoints (`fill`,
 ///         `fillWithCallback`, `fillWithPermit`, `batchFill`, `fillSelf`, and the
-///         aggregator entry `fillUpTo`) and the per-order settle flow (`_fillCore`
+///         custom-fill entry `fillUpTo`) and the per-order settle flow (`_fillCore`
 ///         → `_settleForward`/`_settlePostInputs` → `_deliverOutputs`/
 ///         `_payInputsToSolver`). One order settles against the solver as
 ///         counterparty; per-leg pricing is {Pricing}. The netted-batch
@@ -340,19 +340,26 @@ abstract contract Core is Base {
         if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
     }
 
-    // ──────────────────── Aggregator fill ────────────────────
+    // ──────────────────── Custom fill ────────────────────
 
-    /// @notice The DEX-aggregator entry: fill UP TO `fillAmount` — clamped to the
+    /// @notice The CUSTOM-FILL entry: fill UP TO `fillAmount` — clamped to the
     ///         order's remaining size instead of reverting {OverFill} when a
     ///         competing fill landed first — and return full both-sides accounting.
     ///         The 0x-v4 `fillLimitOrder` shape.
+    ///
+    ///  Four things a caller assembling its own calldata wants and a plain {fill}
+    ///  does not give it: a size that is CLAMPED rather than reverted, its own payout
+    ///  `recipient`, its own `minBumpBps` price floor, and per-leg receipts back. A DEX
+    ///  aggregator routing one hop is the obvious consumer, but an RFQ desk, a
+    ///  smart-order router or any other caller building the fill itself wants exactly
+    ///  the same four, so nothing here is specific to aggregation.
     ///
     ///  ⚠ The race tolerance covers IDENTITY orders only. A fill-module order
     ///  (`order.fillModule != 0`) passes through UNCLAMPED and can still revert
     ///  {OverFill} on a race — only the module knows what a partial acceptance of
     ///  its unit means, so the core cannot size it. See the clamping note below and
-    ///  {IFillModule}. An aggregator that treats this entry as never-reverting must
-    ///  either skip module orders or catch the revert itself.
+    ///  {IFillModule}. A caller that treats this entry as never-reverting must either
+    ///  skip module orders or catch the revert itself.
     ///
     ///  Clamping (identity orders only): the executed delta is
     ///  `min(fillAmount, total - filled)`. A fill-module order's `fillAmount` is a
@@ -362,8 +369,8 @@ abstract contract Core is Base {
     ///  ({OrderCancelled} / {OverFill}): a dead hop must fail loudly, and callers
     ///  splitting across orders get skip semantics from their own adapter loop.
     ///  The maker-signed `minFillAnchor` floor still gates the CLAMPED delta
-    ///  ({FillTooSmall}) — aggregators should skip orders whose remaining size is
-    ///  below the floor (the lens reports it).
+    ///  ({FillTooSmall}) — callers should skip orders whose remaining size is below
+    ///  the floor (the lens reports it).
     ///
     /// @param  recipient Where the filler's input-leg proceeds are sent;
     ///         `address(0)` = `msg.sender`. Destination only — exclusivity,
@@ -426,7 +433,7 @@ abstract contract Core is Base {
             "",
             CallbackMode.PreDelivery,
             takerData,
-            true, // the aggregator entry is the one caller that returns receipts
+            true, // the custom-fill entry is the one caller that returns receipts
             ctx
         );
         if (minBumpBps != 0) {
@@ -451,12 +458,9 @@ abstract contract Core is Base {
     ///      hash dies here — see the note at the call site. The gate before {Base._enter}
     ///      is the point of the ordering, not an accident; {Base._enter} states the rule.
     ///
-    ///      "Custom" rather than "aggregator": what {fillUpTo} actually offers is a
-    ///      caller-supplied fill — its own size (clamped rather than reverted), its own
-    ///      payout `recipient`, its own price floor, and receipts back. A DEX aggregator
-    ///      is the obvious consumer, but an RFQ desk, a router, or anything else
-    ///      assembling its own calldata wants exactly the same four things, and the
-    ///      helper should not name only one of them.
+    ///      Named for {fillUpTo}'s own framing — a CALLER-SUPPLIED fill, not an
+    ///      aggregator-specific one; see that entry's notice for the four things it
+    ///      offers and who wants them.
     function _openCustomFill(
         Order calldata order,
         bytes calldata sig,
@@ -485,8 +489,8 @@ abstract contract Core is Base {
         if (order.fillModule != address(0)) return fillAmount;
         // Clamping is ALREADY exactly right for a {Proportional} anchor and needs
         // no special case: such an order is unfilled (`prev == 0`), so `rem` is the
-        // freshly resolved anchor, and an aggregator asking for more than the whole
-        // thing is trimmed to precisely the one size a proportional fill accepts.
+        // freshly resolved anchor, and a caller asking for more than the whole thing
+        // is trimmed to precisely the one size a proportional fill accepts.
         // Asking for LESS stays below it and is rejected downstream as the partial
         // fill it is.
         uint256 total = order.fillTotal != 0 ? order.fillTotal : OrderGates.anchorTotal(order);
@@ -536,7 +540,7 @@ abstract contract Core is Base {
         if (payTo != address(0)) ctx.payTo = payTo;
         // OPT-IN. Only `fillUpTo` returns per-leg receipts, and allocating the array
         // unconditionally measured +453 gas on every ordinary fill — more than the
-        // 795 the aggregator path saves on a simple order. Behind the flag the hot
+        // 795 the custom-fill path saves on a simple order. Behind the flag the hot
         // path pays one stack word and one length test per leg; `fillUpTo` skips a
         // second {Pricing} pass worth 795 gas on a fixed leg and 3,583 on a two-leg
         // order with a rising leg.

@@ -90,6 +90,23 @@ Three consequences worth signing deliberately:
 - **`decayStartTime` keeps its meaning** as a "not before" gate (a start BLOCK when
   combined with bit 102) — "let the book see this first, then let solvers bid".
 
+### It is only an auction where the sequencer sells ordering
+
+Signing bit 103 is a **per-chain** decision, and the chain has to cooperate:
+
+- **Priority-ordered sequencer** (OP-stack, Arbitrum timeboost) — works as designed.
+- **FCFS / arrival-ordered sequencer** — bit 103 is not an auction at all. Priority
+  fee buys no ordering, so the "bid" decides only the price the winner pays, and
+  which solver wins is decided by network latency. A maker signing bit 103 there is
+  paying an auction's complexity for a latency race, and would do better on the
+  clock (or the block clock, which is what fast blocks actually want).
+- **Private-mempool / builder-auction chains** — the bid is legible to the builder
+  before inclusion, which is a different game again.
+
+Nothing on-chain can detect this: the settler cannot know how its chain sequences.
+It belongs in deployment config, and it is worth checking before enabling the mode
+on a new chain rather than after.
+
 ### What a lost race costs
 
 A priority auction is a gas auction, so every solver but one lands and reverts —
@@ -212,6 +229,7 @@ function bump(
 | [`ChainlinkPeggedPriceModule`](../packages/core/src/modules/ChainlinkPeggedPriceModule.sol) | a Chainlink feed | staleness **and** an absolute `[MIN, MAX]` plausibility band — a fresh-but-wrong feed (depeg, decimals misconfiguration) reverts the fill instead of pricing against it. Configured per (feed, staleness, band, scale, side, spread). |
 | [`RangePriceModule`](../packages/core/src/modules/RangePriceModule.sol) | `prevFilled / total` | the ladder: price varies along the VOLUME axis (1inch `RangeAmountCalculator`). Measured on `prevFilled`, so a solver knows the exact bump before submitting. |
 | [`CosignedQuotePriceModule`](../packages/core/src/modules/CosignedQuotePriceModule.sol) | an EIP-712 quote signed by a named cosigner | UniswapX's cosigner without the trusted party: the cosigner is an immutable of the instance, any maker may deploy one, any filler may present a quote, and the quote can only improve *within* the band. `takerData = filler(20) ‖ bumpBps(32) ‖ deadline(32) ‖ sig`. **`FALLBACK_BPS` is not maker protection** — `takerData` is filler-controlled and a pinned bump replaces the clock, so an unquoted fill clears at `FALLBACK_BPS` immediately with no decay ramp. Use `0` (unquoted → `start`, quote required to improve — the adversarial-safe UniswapX shape) unless you specifically intend `end` to be the price a filler can always take. |
+| [`ClockFlooredQuoteModule`](../packages/core/src/modules/ClockFlooredQuoteModule.sol) | the same quote, **floored by the dutch clock** | `min(quotedBump, clockBump)`, so a quote can only ever *improve* on plain dutch and never undercut it. Removes the `FALLBACK_BPS` footgun structurally — there is no fallback to misconfigure, because `min(anything, clock)` is the clock — and makes the cosigner safe to point at a third party the maker does not fully trust: absent, buggy, compromised and colluding all degrade to an ordinary dutch fill. Reads a **single linear segment** from `timing` (a module never receives `curve`/`params`, both of which are already inert under any `pricingModule`). ⚠ `decayDuration == 0` ⇒ ceiling 0 ⇒ no quote can extract anything; sign a window. |
 
 ---
 

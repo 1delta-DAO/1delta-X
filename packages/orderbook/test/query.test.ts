@@ -21,7 +21,7 @@ function order(overrides: Partial<Order> = {}): Order {
     maker: ALICE,
     side: OrderSide.SELL,
     nonce: 1n,
-    deadline: BigInt(NOW + 3600),
+    expiry: BigInt(NOW + 3600),
     legsIn: [{ token: WETH, start: 1_000n, end: 0n }],
     legsOut: [{ token: USDC, start: 2_000n, end: 0n, recipient: zeroAddress }],
     timing: 0n,
@@ -213,13 +213,13 @@ describe("checkAdmission", () => {
   });
 
   it("rejects an order that expires too soon to be worth verifying", () => {
-    const res = checkAdmission(order({ deadline: BigInt(NOW + 2) }), ctx);
+    const res = checkAdmission(order({ expiry: BigInt(NOW + 2) }), ctx);
     expect(res.ok).toBe(false);
     expect(res.reason).toMatch(/min 15s/);
   });
 
   it("rejects a deadline far enough out to be squatting", () => {
-    const res = checkAdmission(order({ deadline: BigInt(NOW + 400 * 24 * 3600) }), ctx);
+    const res = checkAdmission(order({ expiry: BigInt(NOW + 400 * 24 * 3600) }), ctx);
     expect(res.ok).toBe(false);
     expect(res.reason).toMatch(/max/);
   });

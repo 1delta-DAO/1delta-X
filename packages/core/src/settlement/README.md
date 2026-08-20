@@ -33,7 +33,7 @@ maker's EIP-712 signature.
 > `msg.sender == settlement`. Settlement pays the solver only from the proceeds
 > produced by the current fill. See [`/SECURITY.md`](../../../../SECURITY.md).
 
-> **Integrating fills from a router/aggregator?** Use `fillUpTo` — it clamps to
+> **Building the fill yourself — router, DEX aggregator, RFQ desk?** Use `fillUpTo` — it clamps to
 > the order's remaining size (race-tolerant), returns full both-sides
 > accounting `(delta, received, paid)`, and takes an optional `minBumpBps`
 > price floor (quote it via `SettlementLens.previewBump`; the fill executes at

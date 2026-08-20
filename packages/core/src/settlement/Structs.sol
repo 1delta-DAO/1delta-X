@@ -236,7 +236,7 @@ struct FillCtx {
     uint256 overrideBps; //  soft-exclusivity improvement (0 = none)
     address filler; //       who delivers / whose authority the fill runs under
     address payTo; //        where the filler's input-leg proceeds are sent. Defaults
-    //                       to `filler` in `_openFill`; the aggregator entry
+    //                       to `filler` in `_openFill`; the custom-fill entry
     //                       (`fillUpTo`) may redirect it. Payment destination ONLY —
     //                       exclusivity, validators, and output pulls all key on
     //                       `filler`, so this grants no new authority (it routes the

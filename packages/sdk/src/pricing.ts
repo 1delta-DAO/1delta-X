@@ -110,6 +110,24 @@ export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n, priorit
   return bps > BPS ? BPS : bps;
 }
 
+/**
+ * The priority-auction BID, in wei: `tx.gasprice - block.basefee -
+ * baselinePriorityFeeWei`, clamped at 0. Mirrors `DutchAuction.priorityBump`.
+ *
+ * This is what {@link bumpBps}'s `priorityFee` argument expects — the fee bid
+ * ABOVE the maker's signed baseline, not the raw effective gas price. The
+ * baseline exists so the inclusion tip a chain charges anyway is not read as a
+ * bid ({@link Order.baselinePriorityFeeWei}); forgetting to subtract it reads
+ * every ordinary transaction as an aggressive bid.
+ *
+ * `effectiveGasPrice` is the receipt's field, which is exactly the EVM's
+ * `tx.gasprice` — not `maxFeePerGas`, which is only a ceiling.
+ */
+export function priorityBid(effectiveGasPrice: bigint, baseFee: bigint, baselinePriorityFeeWei: bigint = 0n): bigint {
+  const overBase = effectiveGasPrice > baseFee ? effectiveGasPrice - baseFee : 0n;
+  return overBase > baselinePriorityFeeWei ? overBase - baselinePriorityFeeWei : 0n;
+}
+
 /** Current output tick for leg `j` — the SELL auction price, or the fixed BUY output. */
 export function currentAmountOutAt(
   order: Order,

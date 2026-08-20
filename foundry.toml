@@ -82,6 +82,16 @@ out    = "out/core"
 # non-*.t.sol data contracts (LenderRegistry — ~900KB of initcode) that via-IR
 # spends the better part of an hour optimizing. Nothing in this profile ever
 # runs tests; it exists to produce deployable artifacts.
+# This profile also produces the DEPLOYED artifacts for the periphery —
+# SettlementLens and the 7683 settlers — not just Settlement. MEASURED 2026-08-20:
+# the lens under legacy codegen at runs=20,000 sat at 24,414/24,576 (162 bytes of
+# headroom — TIGHTER than Settlement, making the lens the binding constraint on
+# every OrderGates/preview feature); under this profile it is 17,732 (6.8KB free).
+# The lens is a view contract whose callers are eth_calls, so runs=400's runtime
+# gas costs nobody anything — the ONE paid consumer is DestinationSettler7683's
+# previewFill staticcall, an edge adapter; re-measure that call before tuning
+# `runs` for it (the size curve is non-monotonic, see below). `make size-check`
+# gates all four contracts from this profile.
 [profile.core-deploy]
 src    = "packages/core/src"
 test   = "packages/core/script"

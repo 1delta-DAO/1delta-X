@@ -122,7 +122,7 @@ contract SettlementLens {
     }
 
     /// @notice Preview EXACTLY what `Settlement.fillUpTo` would settle right now —
-    ///         the aggregator quote call. Runs the same clamp, the same exclusivity
+    ///         the custom-fill quote call. Runs the same clamp, the same exclusivity
     ///         override, and the same per-leg {Pricing} math the settlement runs, so
     ///         an `eth_call` here at block N equals a fill executed at block N.
     /// @dev    Scope: the AMOUNT pipeline only. Lifecycle gates (expiry, nonce,
@@ -662,6 +662,29 @@ contract SettlementLens {
             if (order.exclusiveFiller == address(0)) return (false, "override without exclusiveFiller");
             if (order.overrideBps() > 10_000) return (false, "overrideBps > 10000");
         }
+        // ── filler set ({OrderGates.FILLER_SET}) ──
+        // A set order carries `curve = [0x00] ‖ filler×N`. The leading COUNT BYTE is
+        // zero, so the curve validation below reads it as "no curve points" and never
+        // looks at the entries — nothing else in this function would ever inspect the
+        // set. Without this check a malformed set is reported VALID here and then
+        // reverts {OrderGates.MalformedFillerSet} on every fill, which is the worst of
+        // both: the maker signed exclusivity and the order is simply dead. Mirror the
+        // settler's shape test exactly so the two cannot drift.
+        //
+        // Deliberately NOT gated on the window still being open, even though the
+        // settler only reaches its copy of this test in-window. A lapsed window makes
+        // a broken set harmless (the gate is skipped and the order fills), so this is
+        // strictly stricter than the fill — but it matches how the two exclusivity
+        // shape rules directly above already behave: `override without
+        // exclusiveFiller` also only bites in-window and is also unconditional. The
+        // shape section reports what the maker SIGNED, so a defect stays reported
+        // once the window lapses instead of quietly ageing out.
+        if (order.exclusiveFiller == OrderGates.FILLER_SET) {
+            uint256 setLen = order.curve.length;
+            if (setLen < 21 || (setLen - 1) % 20 != 0 || order.curve[0] != 0) {
+                return (false, "malformed filler set");
+            }
+        }
         // ── piecewise auction curve (monotonic time, bounded bump) ──
         uint256 nCurve = PackedArrays.validateFixed(order.curve, PackedArrays.CURVE_STRIDE);
         for (uint256 c; c < nCurve; c++) {
@@ -697,13 +720,44 @@ contract SettlementLens {
         }
         // ── external price module ──
         if (order.pricingModule != address(0)) {
-            // A module pins the bump; the clock/curve/gas-bump never run, so — as with
-            // the priority branch above — signing any of them is a footgun that never
-            // applies. `decayStartTime` alone stays meaningful as the "not before" gate
-            // ({DutchAuction.resolveBump} enforces it).
+            // What a module CAN see decides what is a footgun here. {IPriceModule.bump}
+            // is handed `order.timing` and the two leg blobs — and NOTHING else. So:
+            //
+            //   • `order.curve` and `order.params` are not passed at all. No price
+            //     module can read them, whatever it does, so a signed CURVE or gas
+            //     bump is PROVABLY inert on a module order. Both stay rejected.
+            //
+            //     ⚠ "curve" here means curve POINTS — `nCurve`, not `curve.length`.
+            //     A {OrderGates.FILLER_SET} order stores its filler set in the very
+            //     same `curve` blob behind a zero count byte, and that set is NOT
+            //     inert: {OrderGates.exclusivityOverride} reads it on every fill,
+            //     whatever prices the order. `nCurve` is 0 for such a blob, so the
+            //     test below correctly lets a set + module order through. DO NOT
+            //     "harden" it to `order.curve.length != 0` — that would reject every
+            //     filler-set order that prices off a module. The set's own shape is
+            //     validated in the filler-set branch above.
+            //   • the `timing` word IS passed, so every field packed in it is fair
+            //     game for a module to consume. `decayStartTime` (bits [0:32)) keeps
+            //     its "not before" meaning ({DutchAuction.resolveBump} enforces it),
+            //     and `decayDuration` (bits [32:64)) is NOT inert: a clock-consuming
+            //     module reads it. {ClockFlooredQuoteModule} floors a cosigned quote
+            //     with exactly that window, and REQUIRES a non-zero one — with
+            //     `decayDuration == 0` its ceiling is a constant 0 and its quote
+            //     channel is dead. Rejecting the pair would have declared every
+            //     working quote-auction order invalid while blessing only the
+            //     degenerate one, so it is deliberately NOT rejected.
+            //
+            // The lens cannot tell a clock-consuming module from a clock-ignoring one
+            // without a capability probe, and it has no bytes for one (EIP-170). Given
+            // the choice, a missed advisory on an inert field is much cheaper than a
+            // false REJECT that makes a live feature unusable through any book gating
+            // on this function.
+            //
+            // `priorityAuction` (bit 103) is different from the rest of `timing`: it is
+            // not a field a module reads, it is a COMPETING core pricing mode, and
+            // {DutchAuction.resolveBump} silently prefers the module. Still a conflict.
             if (order.priorityAuction()) return (false, "price module with priority auction");
             if (nCurve != 0) return (false, "price module with curve");
-            if (order.decayDuration() != 0) return (false, "decay duration with price module");
             if (order.gasBumpBps() != 0) return (false, "gas bump with price module");
         }
 

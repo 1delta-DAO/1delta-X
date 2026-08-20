@@ -26,7 +26,7 @@ function orderFor(maker: Hex, nonce: bigint): Order {
     maker,
     side: OrderSide.SELL,
     nonce,
-    deadline: 4_000_000_000n,
+    expiry: 4_000_000_000n,
     legsIn: [{ token: "0x1111111111111111111111111111111111111111", start: 1000n, end: 0n }],
     legsOut: [{ token: "0x2222222222222222222222222222222222222222", start: 900n, end: 800n, recipient: zeroAddress }],
     timing: 0n,

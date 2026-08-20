@@ -12,4 +12,6 @@ export * from "./permit3";
 export * from "./solving";
 export * from "./proportional";
 export * from "./pricing";
+export * from "./auction";
+export * from "./band";
 export * from "./filling";

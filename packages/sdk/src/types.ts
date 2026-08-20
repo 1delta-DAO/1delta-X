@@ -159,6 +159,17 @@ export interface Order {
 // ──────────────────── Packed timing helpers ────────────────────
 
 /// `timing` bit 102: the decay clocks count BLOCKS, not seconds (fast L2s).
+/**
+ * `Order.exclusiveFiller` sentinel: the exclusivity window names a SET of fillers
+ * instead of one. The set rides the signed `curve` bytes — build them with
+ * {@link packFillerSet} — and the window/override keep their usual homes
+ * (`timing` bits [64:96), `exclusivityOverrideBps`). `address(1)` is the
+ * ecrecover precompile, which can never be a fill's `msg.sender`.
+ * A set order decays on the plain LINEAR clock only: the set occupies the curve
+ * blob, so a piecewise curve cannot be signed alongside it.
+ */
+export const FILLER_SET_SENTINEL = "0x0000000000000000000000000000000000000001" as Address;
+
 export const BLOCK_CLOCK_BIT = 102n;
 /// `timing` bit 103: the bump is bid in PRIORITY FEE rather than elapsed time.
 export const PRIORITY_AUCTION_BIT = 103n;

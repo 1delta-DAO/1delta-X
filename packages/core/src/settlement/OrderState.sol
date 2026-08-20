@@ -349,7 +349,7 @@ abstract contract OrderState is NonceManager {
         } else {
             filled[ctx.orderHash] = newFilled;
         }
-        // `payTo` defaults to the filler; the aggregator entry may redirect it
+        // `payTo` defaults to the filler; the custom-fill entry may redirect it
         // after this returns (payment destination only — never authority).
         // Assigned field-by-field rather than as a struct literal: a literal would
         // have to name `receipts`, and the only way to name it is `new uint256[](0)`
@@ -357,7 +357,7 @@ abstract contract OrderState is NonceManager {
         // and only it ever reads. Zero-initialisation points it at the canonical
         // empty-array slot for free, so the ordinary paths pay nothing.
         ctx.newFilled = newFilled;
-        // `payTo` defaults to the filler; the aggregator entry may redirect it
+        // `payTo` defaults to the filler; the custom-fill entry may redirect it
         // after this returns (payment destination only — never authority).
         ctx.filler = filler;
         ctx.payTo = filler;

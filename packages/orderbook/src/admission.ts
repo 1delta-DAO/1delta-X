@@ -86,7 +86,7 @@ export function checkAdmission(
     return { ok: false, reason: `too many validators (max ${policy.maxValidators})` };
   }
 
-  const ttl = Number(order.deadline) - ctx.now;
+  const ttl = Number(order.expiry) - ctx.now;
   if (ttl < policy.minTtlSeconds) {
     return { ok: false, reason: `expires in ${ttl}s (min ${policy.minTtlSeconds}s)` };
   }
