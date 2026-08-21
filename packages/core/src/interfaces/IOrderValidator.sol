@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order} from "../settlement/Settlement.sol";
+// Imported from its DEFINING file, not re-exported through `Settlement.sol`.
+// `Settlement.sol` re-exports the order types for downstream convenience, but this
+// interface sits INSIDE the settlement's own import cycle — `Settlement` → `Batch`
+// → … → `OrderGates`/`Base` → here — and a cycle that resolves a symbol through a
+// re-export only works while nothing compiles `Settlement.sol` as a root. A deploy
+// script importing `{Settlement}` is exactly that, and it fails the whole profile
+// with "Declaration Order not found". Its siblings ({IFillModule}, {IMakerModule})
+// already import from `Structs.sol`; this was the lone outlier.
+import {Order} from "../settlement/Structs.sol";
 
 /// @title IOrderValidator
 /// @notice Read-only trigger for limit orders. Settlement calls `validate`

@@ -38,7 +38,7 @@ PACKAGES := \
 	modules-gearbox-v3 \
 	modules-teller
 
-.PHONY: test build test-all build-all gas gas-check gas-diff size-check $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
+.PHONY: test build test-all build-all gas gas-check gas-diff size-check predict-core deploy-core $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -157,6 +157,42 @@ size-check:
 	check core-deploy DestinationSettler7683; \
 	exit $$fail
 
+# ── Deterministic deployment ─────────────────────────────────────────────────
+#
+# The core singletons (Permit3 -> Settlement -> SettlementLens) go out through the
+# shared CREATE2 DeployFactory so they land on IDENTICAL addresses on every chain.
+# See docs/deterministic-deployment.md.
+#
+# THESE TARGETS EXIST TO PIN THE PROFILE. A CREATE2 address is a hash of init code,
+# so `via_ir`, `optimizer_runs`, `bytecode_hash`, `cbor_metadata` and `evm_version`
+# are all inputs to it -- and every one of them differs between `core-deploy` and
+# the default profile. A hand-run `forge script` under the wrong profile produces a
+# silently WRONG address family that nothing downstream would catch, and a
+# Settlement that exceeds EIP-170 besides. A script cannot detect its own compiler
+# settings, so the guard has to live here.
+#
+#   make predict-core RPC=https://...              # no key, no broadcast
+#   make deploy-core  RPC=https://... CORE_SALT=0x...
+#
+# CORE_SALT is REQUIRED for a real rollout; without it the script falls back to a
+# committed PLACEHOLDER salt and says so loudly. Once a rollout begins the salt
+# must never change -- it is an input to every address ever predicted for it.
+
+DEPLOY_SCRIPT := packages/core/script/Deploy.s.sol:DeployCore
+
+## Print the predicted core addresses for a chain. Read-only.
+predict-core:
+	@test -n "$(RPC)" || { echo "RPC is required: make predict-core RPC=https://..."; exit 1; }
+	FOUNDRY_PROFILE=core-deploy $(FORGE) script $(DEPLOY_SCRIPT) \
+		--sig 'predict()' --rpc-url $(RPC)
+
+## Deploy the core singletons, asserting each lands on its predicted address.
+deploy-core:
+	@test -n "$(RPC)" || { echo "RPC is required: make deploy-core RPC=https://..."; exit 1; }
+	@test -n "$(CORE_SALT)" || echo ">> WARNING: CORE_SALT unset - using the PLACEHOLDER salt."
+	FOUNDRY_PROFILE=core-deploy $(FORGE) script $(DEPLOY_SCRIPT) \
+		--rpc-url $(RPC) --broadcast --verify
+
 # ── Help ──────────────────────────────────────────────────────────────────────
 
 help:
@@ -171,5 +207,7 @@ help:
 	@echo "  gas-check             Fail if any test's gas moved from the baseline"
 	@echo "  gas-diff              Show per-test gas deltas vs the baseline"
 	@echo "  size-check            Fail if Settlement/facet exceed deploy size limits"
+	@echo "  predict-core RPC=..   Print predicted deterministic core addresses"
+	@echo "  deploy-core  RPC=..   Deploy core singletons via the CREATE2 factory"
 	@echo ""
 	@echo "Packages: $(PACKAGES)"

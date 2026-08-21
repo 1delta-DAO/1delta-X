@@ -162,10 +162,11 @@ comment change moves every address — hence `bytecode_hash = "none"`.
 | Setting | Value | Why |
 |---|---|---|
 | `solc` | `0.8.28` | already pinned in `[profile.default]` |
-| `optimizer_runs` | `200` | changes codegen |
+| `optimizer_runs` | **`400`** | changes codegen. ⚠ This row said `200` until 2026-08-21; `[profile.core-deploy]` has used **400** since 2026-08-12, chosen by measurement against EIP-170 (see the size/gas table in [foundry.toml](../foundry.toml)). **foundry.toml is authoritative** — do not "restore" 200 from this doc, it would start a new address family. |
 | `via_ir` | **`true` for the core package only** | Settlement exceeds EIP-170 under legacy codegen; only `[profile.core-deploy]` artifacts fit. Different codegen ⇒ different address, silently. |
-| `bytecode_hash` | `none` | otherwise source/settings churn moves addresses |
-| `evm_version` | **`cancun`**, explicitly — see §4.1 | the chain-coverage decision |
+| `bytecode_hash` | `none` | otherwise source/settings churn moves addresses. Pinned in `[profile.core-deploy]` on 2026-08-21 — until then it was UNSET (defaulting to `ipfs`), and a bare comment edit to `Core.sol` was measured moving Settlement's init-code hash `72868496f2f2736e` → `9f73cceccf6f2052`. |
+| `evm_version` | **`cancun`**, explicitly — see §4.1 | the chain-coverage decision. Pinned on `[profile.core-deploy]` 2026-08-21; `[profile.default]` remains `prague` (byte-identical on 0.8.28, and it governs the gas baseline). |
+| `cbor_metadata` | `false` | the other half of the metadata trailer; pinned alongside `bytecode_hash`. |
 
 Pinning `evm_version` matters more than it looks. Bump solc past 0.8.28 without
 it and the compiler's *default* moves to a newer fork; at `osaka` a newer solc

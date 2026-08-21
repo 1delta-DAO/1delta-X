@@ -1,0 +1,30 @@
+{
+  "name": "@1delta-x/auction",
+  "license": "MIT",
+  "version": "0.0.1",
+  "description": "Solver quote auctions for UniversalSettlement — a permissionless bid round, a deterministic selection rule (first-price or Vickrey), a cosigned quote as the only on-chain artifact, and a published bid set anyone can re-run to check the outcome.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "pnpm --filter @1delta-x/sdk build && tsc -p tsconfig.json",
+    "typecheck": "pnpm --filter @1delta-x/sdk build && tsc --noEmit -p tsconfig.json",
+    "test": "pnpm --filter @1delta-x/sdk build && vitest run"
+  },
+  "dependencies": {
+    "@1delta-x/sdk": "workspace:*",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}

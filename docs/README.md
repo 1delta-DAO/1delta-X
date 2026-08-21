@@ -104,7 +104,10 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
 ## Auctions
 
 - **[quote-auctions.md](quote-auctions.md)** — the off-chain half of the cosigned
-  quote channel: how to **measure clearing depth** (replay the bump from block
+  quote channel. Codified as APIs in
+  [`@1delta-x/auction`](../packages/auction/README.md) (round lifecycle,
+  operator, `checkRound`) over the SDK's `quote.ts` primitives (digest, sign,
+  `takerData`, verify). This note is the reasoning behind them: how to **measure clearing depth** (replay the bump from block
   context — it is deterministic for the clock and priority modes, and a genuine
   blind spot for module-priced fills), why **band width** outweighs auction format
   by an order of magnitude, and the first-price/second-price trade-off given that

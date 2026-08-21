@@ -98,6 +98,27 @@ test   = "packages/core/script"
 script = "packages/core/script"
 out    = "out/core-deploy"
 via_ir = true
+# ── DETERMINISM PINS ─────────────────────────────────────────────────────────
+# This profile produces the DEPLOYED artifact, and a CREATE2 address is a hash of
+# init code, so every setting below is part of the address. See
+# docs/deterministic-deployment.md §3. Changing any of them starts a NEW ADDRESS
+# FAMILY — that is a migration, not a patch.
+#
+# `bytecode_hash`/`cbor_metadata`: solc appends a CBOR trailer that hashes the
+# compiler settings AND the source (comment text included). Left at the defaults
+# (`ipfs`/`true`) every doc edit silently moves every address on every chain.
+# Stripping the trailer is what makes the address depend on CODE rather than on
+# the file it was compiled from.
+bytecode_hash  = "none"
+cbor_metadata  = false
+# Pinned EXPLICITLY rather than inherited. `[profile.default]` says `prague`,
+# which is byte-identical here on solc 0.8.28 (§3: prague adds no opcode solc
+# emits, and 0.8.28 emits no CLZ at osaka), so this costs nothing today. It is
+# pinned because the hazard is a SOLC BUMP: without it the compiler's default
+# fork moves with the version, a newer solc emits CLZ at osaka, and that both
+# moves every address and fails outright on the 18 surveyed chains lacking it.
+# `cancun` is the documented target family — 38 deployable chains (§4.1).
+evm_version    = "cancun"
 # MEASURED 2026-08-12, and the ONLY place `optimizer_runs` deviates from the
 # 20,000 in [profile.default] — deliberately, because this profile produces the
 # DEPLOYED artifact and nothing else. [profile.default] still governs every other

@@ -13,5 +13,6 @@ export * from "./solving";
 export * from "./proportional";
 export * from "./pricing";
 export * from "./auction";
+export * from "./quote";
 export * from "./band";
 export * from "./filling";
