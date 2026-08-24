@@ -6,7 +6,7 @@ import {PackedEncode} from "../shared/PackedEncode.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {Settlement, CallbackMode, Order, Item, Validator, OrderSide} from "@core/settlement/Settlement.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
 import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol";

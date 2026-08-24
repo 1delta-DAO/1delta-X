@@ -2,3 +2,7 @@ forge-std/=lib/forge-std/src/
 @core/=packages/core/src/
 @coretest/=packages/core/test/
 @solvers/=packages/solvers/src/
+@modules/=packages/modules/
+@periphery/=packages/periphery/src/
+@validators/=packages/validators/src/
+@lib/=packages/lib/src/

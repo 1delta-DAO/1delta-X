@@ -1,0 +1,11 @@
+{
+  "name": "@1delta-x/validators",
+  "license": "MIT",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "forge build --root ../.. ",
+    "test": "forge test -vvv --root ../.. --match-path 'packages/validators/**'",
+    "snapshot": "forge snapshot --root ../.. --match-path 'packages/validators/**'"
+  }
+}

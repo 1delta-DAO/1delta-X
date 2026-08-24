@@ -69,7 +69,7 @@ vendor cooperation required. That is the adoption path the alternatives lack.
 
 ### What exists
 
-[`PermitHelper.replayIfPresent`](../packages/core/src/utils/PermitHelper.sol) and
+[`PermitHelper.replayIfPresent`](../packages/lib/src/PermitHelper.sol) and
 [`IERC2612`](../packages/core/src/interfaces/IERC2612.sol). The permit is appended
 as an optional 128-byte tail to a module's `data` and replayed inside the module
 call. Encodings, per-module offsets and the best-effort rule are documented in

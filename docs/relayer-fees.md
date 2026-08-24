@@ -119,4 +119,4 @@ spread exit, which needs solver inventory). Proven in
 | Compound v3 USDC **base supply** entry (earn on-ramp) | `modules/lending/compound-v3/test/swaps/DepositWithFee.t.sol` |
 | Aave v3 gasless **repay** (MAKE) + rising relayer fee | `modules/lending/aave-v3/test/swaps/RepayWithFee.t.sol` |
 | Rising-leg ticks, gas bump, empty-`legsOut`, exclusivity, Lens | `core/test/swaps/RisingInputFee.t.sol` |
-| Fee item mechanics + Lens same-asset overlap | `core/test/modules/FeeTransferModule.t.sol` |
+| Fee item mechanics + Lens same-asset overlap | `modules/maker/test/FeeTransferModule.t.sol` |

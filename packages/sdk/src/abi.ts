@@ -102,6 +102,30 @@ const outputLegComponents = [
 
 const orderArg = { name: "order", type: "tuple", components: orderComponents } as const;
 
+/**
+ * {ISettlementCallback} — what the settler calls on a `*Typed` {CallbackMode}.
+ *
+ * `pricedOut` is what this fill must deliver per output leg, already sliced for a
+ * partial fill and already lifted by any soft-exclusivity override. A taker can
+ * satisfy the fill from these numbers ALONE: no order, no clock, no re-derivation.
+ */
+export const SETTLEMENT_CALLBACK_ABI = [
+  {
+    type: "function",
+    name: "onSettlementFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "orderHash", type: "bytes32" },
+      { name: "prevFilled", type: "uint256" },
+      { name: "newFilled", type: "uint256" },
+      { name: "anchor", type: "uint256" },
+      { name: "pricedOut", type: "uint256[]" },
+      { name: "userData", type: "bytes" },
+    ],
+    outputs: [],
+  },
+] as const;
+
 export const SETTLEMENT_ABI = [
   {
     type: "function",
@@ -121,6 +145,40 @@ export const SETTLEMENT_ABI = [
       orderArg,
       { name: "sig", type: "bytes" },
       { name: "fillAmountIn", type: "uint256" },
+      { name: "takerData", type: "bytes" },
+    ],
+    outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
+  },
+  // The callback fills. `mode` is {CallbackMode}: 0 PreDelivery, 1 PostInputs,
+  // 2 PreDeliveryTyped, 3 PostInputsTyped — bit 0 is the ordering, bit 1 opts into
+  // the typed {ISettlementCallback} payload.
+  {
+    type: "function",
+    name: "fillWithCallback",
+    stateMutability: "nonpayable",
+    inputs: [
+      orderArg,
+      { name: "sig", type: "bytes" },
+      { name: "fillAmount", type: "uint256" },
+      { name: "callbackTarget", type: "address" },
+      { name: "callbackData", type: "bytes" },
+      { name: "mode", type: "uint8" },
+    ],
+    outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
+  },
+  // Overload carrying the shared `takerData` blob into validators/invariants and
+  // any price module. Distinct selector; the 6-arg form stays for callers without.
+  {
+    type: "function",
+    name: "fillWithCallback",
+    stateMutability: "nonpayable",
+    inputs: [
+      orderArg,
+      { name: "sig", type: "bytes" },
+      { name: "fillAmount", type: "uint256" },
+      { name: "callbackTarget", type: "address" },
+      { name: "callbackData", type: "bytes" },
+      { name: "mode", type: "uint8" },
       { name: "takerData", type: "bytes" },
     ],
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],

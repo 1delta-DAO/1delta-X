@@ -6,7 +6,7 @@ import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, OrderSide, Validator, LegIn, LegOut} from "@core/settlement/Settlement.sol";
-import {FeeTransferModule} from "@core/modules/FeeTransferModule.sol";
+import {FeeTransferModule} from "@modules/maker/src/FeeTransferModule.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 

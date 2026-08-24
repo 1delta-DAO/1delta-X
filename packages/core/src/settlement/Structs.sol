@@ -30,9 +30,18 @@ enum ItemOp {
 
 /// @notice Where the solver callback runs relative to settlement, chosen by the
 ///         filler in `fillWithCallback` (single-order path).
+/// @dev Ordered so the ORDERING is bit 0 and TYPED is bit 1 — the dispatch is bit
+///      math rather than four comparisons (measured: 3 bytes vs the naive form).
 enum CallbackMode {
     PreDelivery, // callback → deliver outputs → items → pay inputs (works for any order)
-    PostInputs // pay inputs → callback → deliver outputs (item-free only; JIT-from-proceeds)
+    PostInputs, // pay inputs → callback → deliver outputs (item-free only; JIT-from-proceeds)
+    // The same two orderings, but the callback is invoked as
+    // {ISettlementCallback.onSettlementFill} with the fill's RESOLVED context
+    // prepended to the taker's own blob. Opt-in: the untyped variants above call
+    // `(target, data)` verbatim and can invoke ANY function on ANY contract, which
+    // the typed shape cannot express.
+    PreDeliveryTyped,
+    PostInputsTyped
 }
 
 /// @notice Which leg of the order is the auction (variable) side and which is

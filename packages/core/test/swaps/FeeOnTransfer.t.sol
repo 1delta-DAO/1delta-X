@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, Validator} from "@core/settlement/Settlement.sol";
-import {MinBalanceInvariant} from "@core/validators/MinBalanceInvariant.sol";
+import {MinBalanceInvariant} from "@validators/MinBalanceInvariant.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev A fee-on-transfer ERC20: the recipient is credited `amount − fee`, the fee

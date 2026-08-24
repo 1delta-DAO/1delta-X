@@ -1,6 +1,6 @@
 # Condition trees — `OR` and `NOT` inside one order
 
-[`ConditionTreeValidator`](../packages/core/src/validators/ConditionTreeValidator.sol)
+[`ConditionTreeValidator`](../packages/validators/src/ConditionTreeValidator.sol)
 is one ordinary entry in `order.validators` whose `data` happens to be a whole
 boolean expression. It evaluates each leaf by staticcalling it exactly as
 [`Base._runValidators`](../packages/core/src/settlement/Base.sol) would.
@@ -106,7 +106,7 @@ answer is never paid for.
 
 ## Testing
 
-[`ConditionTreeValidator.t.sol`](../packages/core/test/validators/ConditionTreeValidator.t.sol)
+[`ConditionTreeValidator.t.sol`](../packages/validators/test/ConditionTreeValidator.t.sol)
 — 25 tests. The short-circuit ones are proven rather than asserted: a leaf that
 **reverts if called** is placed in the position that must be skipped, so reaching
 it would fail the test.

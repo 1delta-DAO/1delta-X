@@ -118,7 +118,7 @@ items += [ MAKE FeeTransferModule: amount = absolute fee,
            data = abi.encode(feeToken, originator) ]
 ```
 
-`core/src/modules/FeeTransferModule.sol` pulls the ABSOLUTE amount from the
+`modules/maker/src/FeeTransferModule.sol` pulls the ABSOLUTE amount from the
 maker (via its own Permit3 allowance) straight to the recipient, slicing
 pro-rata across partial fills like any item. The relayer-fee counterpart on the
 same order is the rising `LegIn` fee leg (see `relayer-fees.md`); the canonical
@@ -179,7 +179,7 @@ Practical notes:
 | Aave v3 | **borrow** + origination fee (same-asset, TAKE) | `modules/lending/aave-v3/test/swaps/BorrowWithFee.t.sol` |
 | plain swaps | fee-leg unit coverage (proportional, absolute, tiers, partials) | `core/test/swaps/SourcingFee.t.sol` |
 | deposit+borrow | fee leg alongside MAKE/TAKE items | `modules/lending/aave-v3/test/leverage/DepositBorrowWithFee.t.sol` |
-| outputless | fee item + rising relayer leg | `core/test/modules/FeeTransferModule.t.sol` |
+| outputless | fee item + rising relayer leg | `modules/maker/test/FeeTransferModule.t.sol` |
 
 ---
 

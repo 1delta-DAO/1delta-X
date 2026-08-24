@@ -9,7 +9,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {Order, Item, ItemOp, LegIn, LegOut, Validator, OrderSide} from "@core/settlement/Settlement.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";

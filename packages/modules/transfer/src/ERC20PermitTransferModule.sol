@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
-import {PermitHelper} from "@core/utils/PermitHelper.sol";
+import {PermitHelper} from "@lib/PermitHelper.sol";
 
 // ──────────────────── ERC-20 gasless transfer via permit ────────────────────
 //

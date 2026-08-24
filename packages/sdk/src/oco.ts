@@ -23,7 +23,7 @@ import { ItemOp, type Item, type Order, type Validator } from "./types";
  * partially fillable, or when they need independent nonces for off-chain
  * book-keeping.
  *
- * See `docs/oco.md` and `packages/core/src/modules/OcoGroupModule.sol`.
+ * See `docs/oco.md` and `packages/modules/strategy/oco/src/OcoGroupModule.sol`.
  */
 
 /** `Order.timing` bit 100 — fill-once (`DutchAuction.useNonceInvalidator`). */

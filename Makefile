@@ -15,6 +15,9 @@ FORGE ?= $(shell command -v forge 2>/dev/null || echo $(HOME)/.foundry/bin/forge
 # Add modules-erc4626 once that branch is merged to main.
 PACKAGES := \
 	core \
+	periphery \
+	validators \
+	lib \
 	solvers \
 	modules-aave-v2 \
 	modules-aave-v3 \
@@ -36,7 +39,14 @@ PACKAGES := \
 	modules-river \
 	modules-liquity-v2 \
 	modules-gearbox-v3 \
-	modules-teller
+	modules-teller \
+	modules-pricing-chainlink \
+	modules-pricing-quotes \
+	modules-pricing-range \
+	modules-fill \
+	modules-nft \
+	modules-maker \
+	modules-oco
 
 .PHONY: test build test-all build-all gas gas-check gas-diff size-check predict-core deploy-core $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
 
@@ -137,12 +147,22 @@ gas-diff:
 # legacy profile and is measured there. `forge build --sizes` can't be the
 # gate directly — the test-data LenderRegistry (never deployed) trips it — so
 # this measures just the production contracts via `forge inspect`.
+#
+# The old `--skip 'src/modules/*'` is gone with the directory: as of 2026-08-24 core
+# ships no modules, so there is nothing there to exclude from the via-IR build. The
+# `src/validators/*` and `src/dust/*` skips went the same way when those directories
+# left core.
+#
+# The lens and the two 7683 settlers now build under `periphery-deploy`, whose
+# compiler settings are pinned byte-identical to `core-deploy` — the lens is a CREATE2
+# singleton in `Deploy.s.sol`, so a settings drift between the two profiles would move
+# its address alone. Verified unchanged across the split.
 
 ## CI gate: fail if the deployable Settlement/lens exceed the deploy size limits.
 size-check:
 	@FOUNDRY_PROFILE=core-deploy $(FORGE) build --quiet \
-		--skip 'packages/core/test/*' --skip '*.s.sol' \
-		--skip 'src/validators/*' --skip 'src/dust/*' --skip 'src/modules/*'
+		--skip 'packages/core/test/*' --skip '*.s.sol'
+	@FOUNDRY_PROFILE=periphery-deploy $(FORGE) build --quiet --skip '*.s.sol'
 	@fail=0; \
 	check() { \
 		rt=$$(( ($$(FOUNDRY_PROFILE=$$1 $(FORGE) inspect $$2 deployedBytecode | tr -d '[:space:]' | wc -c) - 2) / 2 )); \
@@ -152,9 +172,9 @@ size-check:
 		if [ $$ic -gt 49152 ]; then echo "FAIL: $$2 initcode exceeds EIP-3860"; fail=1; fi; \
 	}; \
 	check core-deploy Settlement; \
-	check core-deploy SettlementLens; \
-	check core-deploy OriginSettler7683; \
-	check core-deploy DestinationSettler7683; \
+	check periphery-deploy SettlementLens; \
+	check periphery-deploy OriginSettler7683; \
+	check periphery-deploy DestinationSettler7683; \
 	exit $$fail
 
 # ── Deterministic deployment ─────────────────────────────────────────────────

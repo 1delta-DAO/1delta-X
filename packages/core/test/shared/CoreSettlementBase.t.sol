@@ -19,7 +19,7 @@ import {
 } from "@core/settlement/Settlement.sol";
 import {PackedEncode} from "./PackedEncode.sol";
 import {PackedArrays} from "@core/settlement/PackedArrays.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 
 import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.sol";
 

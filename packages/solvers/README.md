@@ -41,6 +41,26 @@ entrypoint is owner/operator-gated.
 - **`match/`** — `matchSettle` front-ends:
   - `GuardedMatchSolver.sol` — guard → `matchSettle` → forward the edge to the
     caller. See [Losing races cheaply](#losing-races-cheaply).
+- **`aggregator/`** — zero-inventory fills against an off-chain DEX-aggregator
+  route (`CallbackMode.PostInputs`: take the maker's `tokenIn`, swap it, deliver
+  `tokenOut` — no flash loan, no held capital):
+  - `AggregatorFillSolver.sol` — the fill itself. **The router set is an
+    immutable constructor argument**, and that is a security invariant rather
+    than configuration: `executeFill` is permissionless *and* is the thing that
+    arms the callback, so the `msg.sender == EXECUTOR` and arming-flag gates
+    authenticate nothing on their own — an attacker satisfies both by starting a
+    fill of an order they signed as their own maker. Only the allowlist keeps the
+    raw route call from being an "invoke anything as this contract" primitive.
+    Same reasoning as the owner-whitelisted venue list in
+    `UsdrifInventorySolver`, minus the owner. Every amount it spends, approves or
+    sweeps is a **delta** measured against a pre-fill snapshot, so a residue an
+    earlier fill left behind is not reachable by the next caller.
+  - `FillRecovery.sol` — rebuild the in-flight `FillCtx` from inside a callback
+    when the order shape allows it. Refuses proportional-under-`PostInputs`,
+    fill-module and fill-once orders, whose delta it cannot recover by
+    subtraction; for those, use a `*Typed` `CallbackMode`
+    (`ISettlementCallback` carries the resolved numbers) or
+    `SettlementLens.previewFillInFlight`.
 - **`inventory/`** — inventory-funded (non-flash) fillers:
   - `UsdrifInventorySolver.sol` — **USDRIF→USDT0 exits on Rootstock**. Fills a
     maker's direct USDRIF→USDT0 order from its own USDT0 inventory and, in the

@@ -1,0 +1,11 @@
+{
+  "name": "@1delta-x/modules-pricing-quotes",
+  "license": "MIT",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "forge build --root ../../../.. ",
+    "test": "forge test -vvv --root ../../../.. --match-path 'packages/modules/pricing/quotes/**'",
+    "snapshot": "forge snapshot --root ../../../.. --match-path 'packages/modules/pricing/quotes/**'"
+  }
+}

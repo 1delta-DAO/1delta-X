@@ -6,12 +6,12 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
-import {DustHandler} from "@core/dust/DustHandler.sol";
-import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
-import {PermitHelper} from "@core/utils/PermitHelper.sol";
-import {DelegationHelper} from "@core/utils/DelegationHelper.sol";
+import {PermitHelper} from "@lib/PermitHelper.sol";
+import {DelegationHelper} from "@lib/DelegationHelper.sol";
 
 import {
     IMorphoBlue,

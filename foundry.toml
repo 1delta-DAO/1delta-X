@@ -128,24 +128,102 @@ evm_version    = "cancun"
 # price modules, Merkle bulk signatures) put Settlement over EIP-170 at 20,000.
 # Figures below are `make size-check`, which is the only measurement to trust:
 #
+# RE-MEASURED 2026-08-23. The 2026-08-12 table below it is kept for the shape
+# lesson, but its CONCLUSIONS no longer hold — the contract has grown ~290 bytes
+# since, and the curve moved with it:
+#
 #     runs      Settlement runtime      free
-#     20,000        (over cap)         FAIL
-#     1,500          24,522                54   fits, but one PR from failing
-#     800            24,331               245
-#     400            24,186               390   ← here
-#     200            24,179               397   floor; nothing below 400 buys more
+#     1              24,293               283   smallest available
+#     50             24,308               268
+#     100            24,308               268
+#     200            24,383               193
+#     400            24,476               100   ← here
+#     800            24,588               −12   FAIL
+#     1,600          26,051            −1,475   FAIL
+#     3,200          26,592            −2,016   FAIL
+#
+# Two things that were true in August and are NOT true now:
+#   • "the curve is flat below 400, nothing to gain by going lower" — WRONG today.
+#     `runs = 1` buys 183 bytes over 400. The old table's 7-byte gap between 200
+#     and 400 has widened to 93.
+#   • "800 → 245 bytes free" — 800 now FAILS by 12 bytes. The usable range has
+#     collapsed to ≤ 400, and 400 itself leaves 100 bytes, not the ~390 the old
+#     table records.
 #
 # ⚠ THE CURVE IS NOT MONOTONIC, in either direction. The pristine pre-feature
 # source measured 24,172 at 20,000 but 26,149 at 6,000: `runs` moves inlining
 # decisions in steps, so a size change must be MEASURED, never predicted. Do not
 # reason about this dial from the [profile.default] table above — that one was
-# measured on a smaller contract and its shape does not carry over.
+# measured on a smaller contract and its shape does not carry over. The 2026-08-23
+# sweep is monotonic across 1..3,200, which is itself a change from August and no
+# guarantee for the next source revision.
 #
-# 400 restores the same ~400-byte margin the contract had before these features,
-# and the curve is flat below it, so there is nothing to gain by going lower. The
-# price of the step is runtime gas on the DEPLOYED contract only; the committed
-# gas baseline is unaffected because it runs on [profile.core] at 20,000. See
-# docs/lop-parity-plan.md §7.
+# ⚠ AND DROPPING `runs` IS NOT FREE HEADROOM. The price is runtime gas on the
+# DEPLOYED contract, on every fill, forever — and the committed gas baseline
+# CANNOT SEE IT, because `make gas` runs on [profile.core] at 20,000. Buying
+# bytecode here is buying it with production gas that CI will report as unchanged.
+# Prefer moving cold code out of the hot contract (the pricing modes moved out of
+# `bumpBps` for 1,343 bytes) over turning this dial down.
+#
+# 400 is kept: it is the largest value that still fits, so it is the least
+# gas-costly setting available. See docs/lop-parity-plan.md §7.
+optimizer_runs = 400
+
+# ── Periphery, validators and shared libs, split out of core 2026-08-24 ──────
+#
+# Same criterion that emptied `core/src/modules`: NOTHING in `packages/core/src`
+# imports any of these. The dependency runs one way — periphery → settlement, never
+# back — so a bug in any of them costs one integration, not the protocol.
+#
+#   periphery/    the lens, the ERC-7683 settlers, the native handlers. Deployed
+#                 adapters and readers. `SettlementLens` is in the canonical
+#                 `Deploy.s.sol` set and is size-gated; see `[profile.periphery-deploy]`.
+#   validators/   staticcalled from a maker-signed order, exactly like a module.
+#                 One instance per configuration, permissionless to deploy.
+#   lib/          shared Solidity libraries for MODULE authors (DustHandler,
+#                 FullFillGuard, PermitHelper, DelegationHelper) — 24 module packages
+#                 import them and `packages/core/src` imports none of them.
+#
+# Core keeps only what `settlement/` actually reaches for: `interfaces/`, `permit3/`,
+# and the two libs in `utils/` (SafeTransferLib, Permit3TransferLib).
+
+[profile.periphery]
+src    = "packages/periphery/src"
+test   = "packages/periphery/test"
+script = "packages/periphery/script"
+out    = "out/periphery"
+
+[profile.validators]
+src    = "packages/validators/src"
+test   = "packages/validators/test"
+script = "packages/validators/script"
+out    = "out/validators"
+
+[profile.lib]
+src    = "packages/lib/src"
+test   = "packages/lib/test"
+script = "packages/lib/script"
+out    = "out/lib"
+
+# DEPLOYMENT profile for the periphery, and the reason it exists: `SettlementLens` is
+# deployed through the same CREATE2 factory as Settlement (`Deploy.s.sol` deploys
+# permit3 → settlement → lens), so its ADDRESS is a hash of its init code and every
+# setting below is part of that address.
+#
+# ⚠ These MUST stay byte-identical to `[profile.core-deploy]`. They were copied from
+# it verbatim when the periphery moved out of core, and the lens's init-code hash was
+# verified UNCHANGED across the move. Changing one of them here without changing it
+# there — or vice versa — starts a new address family for the lens alone, silently.
+# See docs/deterministic-deployment.md §3.
+[profile.periphery-deploy]
+src    = "packages/periphery/src"
+test   = "packages/periphery/src"
+script = "packages/periphery/src"
+out    = "out/periphery-deploy"
+via_ir = true
+bytecode_hash  = "none"
+cbor_metadata  = false
+evm_version    = "cancun"
 optimizer_runs = 400
 
 [profile.solvers]
@@ -309,3 +387,60 @@ src    = "packages/modules/bridge/src"
 test   = "packages/modules/bridge/test"
 script = "packages/modules/bridge/script"
 out    = "out/modules-bridge"
+
+# ── Modules relocated out of core, 2026-08-24 ─────────────────────────────────
+#
+# `packages/core/src/modules` is GONE. Every module now lives here, grouped by the
+# core interface it implements: pricing/* = IPriceModule, fill/ = IFillModule,
+# nft/ = ISettlementModule, maker/ = IMakerModule, oco/ = both (stateful).
+#
+# Nothing in `packages/core/src` ever imported one — a module is reached only through
+# a maker-signed `pricingModule` / `fillModule` / item `module` field — so none of
+# them was ever part of the baseline, and Settlement is untouched by the move.
+#
+# Core still proves its SIDE of each seam, on local mocks in
+# `packages/core/test/shared/MockModules.sol`. That is deliberate: testing the core
+# against a shipped product measures two things at once, and a mock that can be told
+# what to answer makes a failure point at the core.
+
+[profile.modules-pricing-chainlink]
+src    = "packages/modules/pricing/chainlink/src"
+test   = "packages/modules/pricing/chainlink/test"
+script = "packages/modules/pricing/chainlink/script"
+out    = "out/modules-pricing-chainlink"
+
+[profile.modules-pricing-quotes]
+src    = "packages/modules/pricing/quotes/src"
+test   = "packages/modules/pricing/quotes/test"
+script = "packages/modules/pricing/quotes/script"
+out    = "out/modules-pricing-quotes"
+
+[profile.modules-pricing-range]
+src    = "packages/modules/pricing/range/src"
+test   = "packages/modules/pricing/range/test"
+script = "packages/modules/pricing/range/script"
+out    = "out/modules-pricing-range"
+
+[profile.modules-fill]
+src    = "packages/modules/fill/src"
+test   = "packages/modules/fill/test"
+script = "packages/modules/fill/script"
+out    = "out/modules-fill"
+
+[profile.modules-nft]
+src    = "packages/modules/nft/src"
+test   = "packages/modules/nft/test"
+script = "packages/modules/nft/script"
+out    = "out/modules-nft"
+
+[profile.modules-maker]
+src    = "packages/modules/maker/src"
+test   = "packages/modules/maker/test"
+script = "packages/modules/maker/script"
+out    = "out/modules-maker"
+
+[profile.modules-oco]
+src    = "packages/modules/oco/src"
+test   = "packages/modules/oco/test"
+script = "packages/modules/oco/script"
+out    = "out/modules-oco"

@@ -103,7 +103,7 @@ band. A reserve nobody can forge is unusual, and it is what makes second-price
 survivable with a thin solver set.
 
 **The clock is a second, tighter bound.** Under
-[`ClockFlooredQuoteModule`](../packages/core/src/modules/ClockFlooredQuoteModule.sol)
+[`ClockFlooredQuoteModule`](../packages/modules/pricing/quotes/src/ClockFlooredQuoteModule.sol)
 the result is `min(quotedBump, clockBump)`, so a hostile or colluding cosigner cannot
 do worse than plain dutch — not merely "no worse than the floor". A broken selection
 rule in `selectQuote` cannot price outside either bound.
@@ -113,11 +113,42 @@ second-price) returns `bumpBps: 0` rather than a concession when too few distinc
 bidders show up. A ring that arrives alone gets the maker's ambition. Note this is a
 policy, not a guarantee — it counts submitters, and one operator can be several.
 
-`verifyOutcome` re-runs the selection over the opened bid set. Publishing the
-commitments plus the openings makes a cosigner **accountable with no proving system
-at all**: anyone can recompute the winner and compare. A zero-knowledge proof of the
-same statement is only worth its complexity when the losing bids must stay secret
-*permanently* — a real market-maker demand, but not the first rung.
+`checkRound(round, expected)` re-runs the selection over the published bid set,
+authenticates every bid in it, and checks the round was settled under the policy
+the **auditor** was promised. All three halves are load-bearing:
+
+- **The policy check** confirms `rule` and `minBidders` are what the auditor
+  expected. This is why `expected` is a required argument rather than a default
+  read off the record: `rule` and `minBidders` are operator-authored fields
+  sitting *inside the very record being audited*, so re-running the arithmetic
+  with `round.rule` checks the operator against itself. Publish `minBidders: 1`
+  with one colluding 9,000-bps bid, or write `second-price` where the round was
+  scored `first-price`, and every bid verifies and the arithmetic follows.
+- **Signed bids** (`signBid`/`verifyBid`, bound to `orderHash` + `closesAt`) make
+  the set unforgeable. Without them the shill attack above works perfectly: an
+  operator invents a runner-up just under the winner, and a pure arithmetic check
+  confirms the rigged price. Signatures also stop a rival bidding in another
+  solver's name to displace it — free to mount, and it costs the maker the
+  improvement when the impostor never fills.
+- **The arithmetic check** confirms the winner and price follow from that set.
+
+**What signatures do NOT close: sybils.** `verifyBid` proves a bid is not
+*impersonated*; it proves nothing about whether the filler is a real,
+capitalised participant, and `submit` gates nobody. An operator holding N
+throwaway keys can still manufacture a runner-up to move a Vickrey price, or
+satisfy `minBidders` on its own — the same "one operator can be several" caveat
+the thin-round rule carries, applied to the bid set. Closing it needs a filler
+identity set an auditor can evaluate independently (a registry, an allowlist, or
+a bond posted on-chain), which is a deployment decision rather than something
+this library can pick. Until then, read the accountability claim as *the
+published set is genuine and correctly scored*, not *the published set is the
+whole market*.
+
+Together they make a cosigner **accountable with no proving system at all**. A
+zero-knowledge proof of the same statement is only worth its complexity when the
+losing bids must stay secret *permanently* — a real market-maker demand, but not
+the first rung. What neither closes is the operator OMITTING a bid it received;
+that needs a public commitment log.
 
 ## Order of operations
 

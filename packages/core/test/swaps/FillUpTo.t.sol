@@ -7,7 +7,7 @@ import {Base} from "@core/settlement/Base.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Order, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
-import {RangePriceModule} from "@core/modules/RangePriceModule.sol";
+import {FixedBumpModule} from "../shared/MockModules.sol";
 
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
@@ -411,9 +411,11 @@ contract FillUpToTest is MockSettlementBase {
     ///      be checked against the pinned value, not the clock. The order has NO
     ///      decay window (clock bump would be 0), the module answers 4000: a floor
     ///      of 4000 passes — proof the check reads the pin — and 4001 reverts.
+    ///      The mock answers that number outright, so the assertion does not depend
+    ///      on a shipped module's curve happening to open at it.
     function test_fillUpTo_minBump_checksPinnedModuleBump() public {
         _fund(IN_, OUT_ * 2);
-        RangePriceModule mod = new RangePriceModule(4_000, 10_000);
+        FixedBumpModule mod = new FixedBumpModule(4_000);
 
         Order memory order = _plainOrder(24, address(tA), address(tB), IN_, OUT_);
         order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, OUT_ / 2);

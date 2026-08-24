@@ -8,7 +8,7 @@ Two contracts carry this: the registry and its setters live in
 verification in
 [`Signatures.sol`](../packages/core/src/settlement/Signatures.sol). The
 preflight mirror is in
-[`SettlementLens.sol`](../packages/core/src/periphery/SettlementLens.sol).
+[`SettlementLens.sol`](../packages/periphery/src/SettlementLens.sol).
 
 ---
 

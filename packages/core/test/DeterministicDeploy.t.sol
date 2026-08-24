@@ -8,7 +8,7 @@ import {IDeployFactory, DEPLOY_FACTORY} from "../script/IDeployFactory.sol";
 
 import {Permit3} from "../src/permit3/Permit3.sol";
 import {Settlement} from "../src/settlement/Settlement.sol";
-import {SettlementLens} from "../src/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 
 /// @dev Stand-in for the external CREATE2 factory that really lives at
 ///      {DEPLOY_FACTORY} on every chain in the matched set. Reproduces the two

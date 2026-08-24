@@ -11,6 +11,8 @@ import {OrderHash} from "./OrderHash.sol";
 import {Pricing} from "./Pricing.sol";
 import {OrderGates} from "./OrderGates.sol";
 import {Base} from "./Base.sol";
+import {SolverCallbackExecutor} from "./SolverCallbackExecutor.sol";
+import {ISettlementCallback} from "../interfaces/ISettlementCallback.sol";
 
 /// @title Core
 /// @notice The single-order fill path — the HOT PATH. Public entrypoints (`fill`,
@@ -550,9 +552,102 @@ abstract contract Core is Base {
 
         // The SAME takerData feeds the post-execution invariants (via the settle
         // helper), so a validator and an invariant see an identical filler blob.
-        outs = mode == CallbackMode.PostInputs
+        // Bit 1 = typed: swap the callback PAYLOAD, never the ordering, so the two
+        // settle flows below are untouched and still see only bytes.
+        if (uint8(mode) & 2 == 2) callbackData = _typedPayload(order, ctx, callbackData);
+        outs = uint8(mode) & 1 == 1
             ? _settlePostInputs(order, ctx, callbackTarget, callbackData, takerData)
             : _settleForward(order, ctx, callbackTarget, callbackData, takerData);
+    }
+
+    /// @dev `EXECUTOR.execute(target, data)`, hand-encoded.
+    ///      The typed call makes solc emit a general `(address,bytes)` encoder; the
+    ///      layout is fixed and known here, so it is four `mstore`s and a copy.
+    ///      Reverts bubble raw so the executor's `CallbackFailed(bytes)` survives.
+    function _execute(address target, bytes memory data) private {
+        address executor = address(EXECUTOR);
+        bytes4 sel = SolverCallbackExecutor.execute.selector;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let len := mload(data)
+            let p := mload(0x40)
+            mstore(p, sel)
+            mstore(add(p, 0x04), target)
+            mstore(add(p, 0x24), 0x40) // offset to the bytes tail
+            mstore(add(p, 0x44), len)
+            let src := add(data, 0x20)
+            let dst := add(p, 0x64)
+            for { let i := 0 } lt(i, len) { i := add(i, 0x20) } { mstore(add(dst, i), mload(add(src, i))) }
+            // Bubble RAW, so every revert shape survives unchanged — a `require`
+            // string (`Error(string)`), a custom error selector, `Panic(uint256)`,
+            // and a bare `revert()` (returndatasize 0). Same behaviour solc emits
+            // for a typed external call, so the taxonomy callers rely on is intact.
+            //
+            // Copied to `p` — our own buffer past the free pointer — NOT to offset
+            // 0: scratch is only 0x00..0x3f, so a returndata larger than 64 bytes
+            // would clobber the free memory pointer at 0x40 and break the
+            // memory-safe annotation on this block. Harmless in isolation because
+            // the revert is immediate, but it is a lie to the optimizer, and the
+            // deploy profile is via-IR.
+            if iszero(call(gas(), executor, 0, p, add(0x64, len), 0, 0)) {
+                let rds := returndatasize()
+                returndatacopy(p, 0, rds)
+                revert(p, rds)
+            }
+        }
+    }
+
+    /// @dev The TYPED callback payload, in its own frame (the loop's locals push
+    ///      {_fillCore} past the legacy-profile stack limit inline).
+    ///
+    ///      Prices the outputs EAGERLY so the taker receives AMOUNTS, not the raw
+    ///      bump — see the ⚠ on {ISettlementCallback}: a clock-priced order leaves
+    ///      `ctx.bump` at its "not pinned" sentinel of 0, so the bump alone tells a
+    ///      taker nothing for the dominant order shape. `_deliverOutputs` re-prices
+    ///      from the same pinned `ctx`, so the two cannot disagree.
+    ///
+    ///      ⚠ MEASURED 2026-08-23, and the cost is NOT where it looks. This helper
+    ///      costs ~562 bytes, of which only ~180 is the loop and the encoder: the
+    ///      rest is {_fillCore} sitting on a codegen cliff, where adding any
+    ///      memory-returning call to its ten-argument frame cascades through the
+    ///      optimizer's inlining. Things that did NOT help, each measured:
+    ///        • dropping the `outputAt` call            −10 bytes
+    ///        • `uint256[]` → a scalar in the encoder    −4 bytes
+    ///        • building at the two callback sites      +43 bytes (worse)
+    ///        • bundling the callback triple in a struct +543 bytes
+    ///        • packing it into `bytes calldata`          +226 bytes
+    ///        • carrying it on {FillCtx} (no new slots)   +863 bytes
+    ///        • `bytes memory` + `abi.decode`           +1,030 bytes
+    ///        • `encodePacked` + an ASSEMBLY decoder      +909 bytes
+    ///      THE RULE, isolated 2026-08-23: it is not the encoding, it is the FRAME.
+    ///      In the assembly variant the `encodePacked` cost only 64 bytes — the
+    ///      other 909 was the three locals the decode introduced into {_fillCore}'s
+    ///      BODY. Parameters are cheap because they live in the calling convention;
+    ///      anything added to the body's live set pushes this function over a
+    ///      codegen cliff and cascades through the optimizer's inlining. That is
+    ///      also why {_typedPayload} costs ~562 when its own work is ~180. Do not
+    ///      try to consolidate the parameter list — five variants were measured and
+    ///      all of them LOSE. The only lever that can work is removing live values
+    ///      from the body.
+    ///      Do not micro-optimise this function; the win, if there is one, is in
+    ///      {_fillCore}'s frame.
+    function _typedPayload(Order calldata order, FillCtx memory ctx, bytes memory userData)
+        private
+        view
+        returns (bytes memory)
+    {
+        uint256 nOut = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
+        uint256[] memory priced = new uint256[](nOut);
+        for (uint256 j; j < nOut;) {
+            priced[j] = order.outputAt(ctx, j);
+            unchecked {
+                ++j;
+            }
+        }
+        return abi.encodeCall(
+            ISettlementCallback.onSettlementFill,
+            (ctx.orderHash, ctx.prevFilled, ctx.newFilled, ctx.anchor, priced, userData)
+        );
     }
 
     /// @dev Snapshot every output leg's recipient balance of that leg's token, for a
@@ -626,7 +721,7 @@ abstract contract Core is Base {
         // path pays only the one `timing` bit test.
         uint256[] memory outBefore;
         if (DutchAuction.deltaVerifyOutputs(order)) outBefore = _snapshotOutRecipients(order);
-        if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
+        if (callbackTarget != address(0)) _execute(callbackTarget, callbackData);
 
         outs = _deliverOutputs(order, ctx, outBefore);
 
@@ -666,7 +761,7 @@ abstract contract Core is Base {
         // `_payInputsToSolver` (hasItems=false) pulls exactly `owed` from the
         // maker → solver with no balance snapshot needed.
         _payInputsToSolver(order, ctx, new uint256[](0), false);
-        if (callbackTarget != address(0)) EXECUTOR.execute(callbackTarget, callbackData);
+        if (callbackTarget != address(0)) _execute(callbackTarget, callbackData);
         outs = _deliverOutputs(order, ctx, outBefore);
         _runInvariants(order, ctx.filler, takerData);
         emit OrderFilled(ctx.orderHash, order.maker, ctx.filler);

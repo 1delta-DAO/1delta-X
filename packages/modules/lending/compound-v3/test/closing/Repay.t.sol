@@ -6,7 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 
-import {DustHandler} from "@core/dust/DustHandler.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
 
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";

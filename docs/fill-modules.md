@@ -124,8 +124,8 @@ The fungible case is literally the identity module, so this **subsumes** today's
 behavior rather than replacing it; the earlier "anchor on an item" idea is a
 ~10-line `ItemFillModule`.
 
-**Shipped example — `TwapFillModule`** (`core/src/modules/TwapFillModule.sol`,
-tested in `core/test/swaps/TwapFillModule.t.sol`). A CoW-style TWAP with **no
+**Shipped example — `TwapFillModule`** (`modules/fill/src/TwapFillModule.sol`,
+tested in `modules/fill/test/TwapFillModule.t.sol`). A CoW-style TWAP with **no
 watchtower and no generated sub-orders**: one signed order is released in N equal
 time-sliced parts, the schedule riding existing signed fields (`fillTotal` =
 total, `minFillAnchor` = part size, and the `timing` word's packed decay clock

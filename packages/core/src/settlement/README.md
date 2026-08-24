@@ -316,7 +316,7 @@ For a fee-on-transfer or rebasing token this means the recipient receives
 
 Two opt-ins fix the maker-bears-the-fee case, in increasing order of strength:
 
-- **`MinBalanceInvariant`** (`src/validators/`) — a post-execution invariant
+- **`MinBalanceInvariant`** (`packages/validators/src/`) — a post-execution invariant
   asserting *"my `token` balance is ≥ floor"*, reverting the fill if the fee eats
   past it (`data = abi.encode(token, account, minBalance)`, floor = pre-fill
   balance + the minimum net accepted). The Seaport/0x "minimum balance after"
@@ -525,7 +525,7 @@ struct Validator {
   cannot swap in a more lenient validator or rewrite thresholds.
 - All validators run *before* any item executes, so a failure is cheap.
 
-**Reference validators** in [`src/validators/`](../validators/):
+**Reference validators** in [`packages/validators/src/`](../../../validators/src/):
 
 | Contract | Passes when | `data` |
 |---|---|---|
@@ -559,7 +559,7 @@ Solvers monitor the feed off-chain and submit `fill()` when the gate
 opens. Submitting earlier reverts with `ValidationFailed(0)` — free
 protection for the maker against accidental early execution.
 
-**Composing multiple triggers** (all contracts exist in `src/validators/`):
+**Composing multiple triggers** (all contracts exist in `packages/validators/src/`):
 
 ```
 // Only fill if ETH ≤ $1500 AND it's after 2pm UTC AND the signed tick is

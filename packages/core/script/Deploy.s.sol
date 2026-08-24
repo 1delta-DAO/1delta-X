@@ -7,7 +7,7 @@ import {IDeployFactory, DEPLOY_FACTORY} from "./IDeployFactory.sol";
 
 import {Permit3} from "../src/permit3/Permit3.sol";
 import {Settlement} from "../src/settlement/Settlement.sol";
-import {SettlementLens} from "../src/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 
 /// @title DeployCore
 /// @notice Lands the three core singletons — {Permit3}, {Settlement},

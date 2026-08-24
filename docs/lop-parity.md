@@ -21,11 +21,11 @@ by roughly 5×.
 | block clock, priority auction, delta-verify delivery | [`DutchAuction.sol`](../packages/core/src/settlement/DutchAuction.sol) (`timing` bits 102 / 103 / 104) |
 | external pricing | [`IPriceModule.sol`](../packages/core/src/interfaces/IPriceModule.sol) + three modules |
 | Merkle bulk signing | [`Signatures.sol`](../packages/core/src/settlement/Signatures.sol) |
-| ERC-7683 | [`OriginSettler7683.sol`](../packages/core/src/periphery/OriginSettler7683.sol), [`DestinationSettler7683.sol`](../packages/core/src/periphery/DestinationSettler7683.sol) |
+| ERC-7683 | [`OriginSettler7683.sol`](../packages/periphery/src/OriginSettler7683.sol), [`DestinationSettler7683.sol`](../packages/periphery/src/DestinationSettler7683.sol) |
 
 Tests: [`PricingModes.t.sol`](../packages/core/test/swaps/PricingModes.t.sol),
 [`BulkSignature.t.sol`](../packages/core/test/swaps/BulkSignature.t.sol),
-[`Erc7683.t.sol`](../packages/core/test/periphery/Erc7683.t.sol),
+[`Erc7683.t.sol`](../packages/periphery/test/Erc7683.t.sol),
 [`DeltaVerifyDelivery.t.sol`](../packages/core/test/swaps/DeltaVerifyDelivery.t.sol),
 [`PricingGasBench.t.sol`](../packages/core/test/swaps/PricingGasBench.t.sol).
 

@@ -19,7 +19,7 @@ import {
     OrderSide,
     CurvePoint
 } from "@core/settlement/Settlement.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 
 /// @dev Minimal, freely-mintable ERC20. Enough for Permit3's transfer paths —
 ///      no fork / real tokens, so the pure-protocol suites run fast and are

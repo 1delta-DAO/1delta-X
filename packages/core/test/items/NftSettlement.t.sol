@@ -8,8 +8,8 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 import {Base} from "@core/settlement/Base.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
-import {NftSettlementModule} from "@core/modules/NftSettlementModule.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
+import {Erc721SettleMock} from "../shared/MockModules.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev Minimal ERC-721: mint + setApprovalForAll + safeTransferFrom (with the
@@ -52,16 +52,22 @@ interface IERC721Receiver {
 ///
 ///   side     = BUY (fixed USDC output = the price / anchor)
 ///   tokenOut = [USDC] → maker      (inline, mandatory delivery)
-///   items    = [ SETTLE NftSettlementModule → maker's NFT to the filler ]
+///   items    = [ SETTLE {Erc721SettleMock} → maker's NFT to the filler ]
+///
+/// The module here is a LOCAL MOCK on purpose: core ships none, and the subject
+/// is core's SETTLE dispatch — filler-awareness, the paid-before-items ordering,
+/// the {Base.SettleSliceZero} floor and the lens shape rules. The shipped
+/// `NftSettlementModule` is tested against its own product suite in
+/// `packages/modules/nft`.
 contract NftSettlementTest is CoreSettlementBase {
-    NftSettlementModule nftModule;
+    Erc721SettleMock nftModule;
     MockERC721 nft;
     uint256 constant TOKEN_ID = 1234;
     uint256 constant PRICE = 2_000e6; // USDC the maker wants
 
     function setUp() public override {
         super.setUp();
-        nftModule = new NftSettlementModule(address(settlement));
+        nftModule = new Erc721SettleMock(address(settlement));
         nft = new MockERC721();
         vm.label(address(nftModule), "nftSettlementModule");
         vm.label(address(nft), "mockNFT");
@@ -158,7 +164,7 @@ contract NftSettlementTest is CoreSettlementBase {
 
     // ── Direct call to the module (bypassing Settlement) reverts. ──
     function test_settleModule_directCall_reverts() public {
-        vm.expectRevert(NftSettlementModule.OnlySettlement.selector);
+        vm.expectRevert(Erc721SettleMock.OnlySettlement.selector);
         nftModule.settle(maker, solver, 1, abi.encode(address(nft), TOKEN_ID));
     }
 

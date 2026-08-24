@@ -6,8 +6,8 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
-import {DustHandler} from "@core/dust/DustHandler.sol";
-import {PermitHelper} from "@core/utils/PermitHelper.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
+import {PermitHelper} from "@lib/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {

@@ -295,7 +295,7 @@ It exports exactly what this note called for:
   a periodic on-chain re-check.
 
 The one deviation from the sketch: **Layer 2 is a single view call**, not a hand-
-rolled multicall — [`SettlementLens.getOrderRelevantStates`](../packages/core/src/periphery/SettlementLens.sol)
+rolled multicall — [`SettlementLens.getOrderRelevantStates`](../packages/periphery/src/SettlementLens.sol)
 already returns status + live-fillable + signature validity (incl. EIP-1271/7702)
 + validators for a whole batch. The per-maker negative cache + event invalidation
 remain the noted optimization, deferred.

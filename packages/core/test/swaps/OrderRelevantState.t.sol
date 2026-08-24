@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {PackedEncode} from "../shared/PackedEncode.sol";
 
 import {Settlement, Order, Item, Validator, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
 /// @dev Port of 0x's `getLimitOrderRelevantState` / `batchGet...RelevantStates`

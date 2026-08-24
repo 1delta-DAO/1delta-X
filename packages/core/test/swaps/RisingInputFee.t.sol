@@ -6,7 +6,7 @@ import {PackedEncode} from "../shared/PackedEncode.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide} from "@core/settlement/Settlement.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev Rising-input auction: a SELL input leg with `startAmountIn < endAmountIn`

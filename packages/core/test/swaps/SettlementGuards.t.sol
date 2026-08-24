@@ -7,7 +7,7 @@ import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Settlement, CallbackMode, Order, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
 import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";

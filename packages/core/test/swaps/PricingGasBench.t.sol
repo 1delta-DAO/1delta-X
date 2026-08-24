@@ -5,13 +5,13 @@ import {console2} from "forge-std/console2.sol";
 
 import {Order} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
-import {ChainlinkPeggedPriceModule} from "@core/modules/ChainlinkPeggedPriceModule.sol";
-import {CosignedQuotePriceModule} from "@core/modules/CosignedQuotePriceModule.sol";
-import {RangePriceModule} from "@core/modules/RangePriceModule.sol";
+import {ChainlinkPeggedPriceModule} from "@modules/pricing/chainlink/src/ChainlinkPeggedPriceModule.sol";
+import {CosignedQuotePriceModule} from "@modules/pricing/quotes/src/CosignedQuotePriceModule.sol";
+import {RangePriceModule} from "@modules/pricing/range/src/RangePriceModule.sol";
 
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 import {PackedEncode} from "../shared/PackedEncode.sol";
-import {PriceFeed} from "./PricingModes.t.sol";
+import {PriceFeedMock} from "@coretest/shared/MockModules.sol";
 
 /// @title PricingGasBench
 /// @notice FILL-ONLY gas for each pricing mode, measured with `gasleft()` around the
@@ -22,6 +22,13 @@ import {PriceFeed} from "./PricingModes.t.sol";
 ///         Every case fills the SAME order shape (one fixed input leg, one decaying
 ///         output leg, whole fill) so the only variable is how the bump is resolved.
 ///         Run with `-vv` to read the table.
+///
+///         Deliberately kept in CORE even though two of the six modes now live in
+///         `packages/modules/pricing`: the artifact is the cross-mode COMPARISON
+///         (every number is a delta against the clock baseline), which splitting
+///         per package would destroy — and what it actually measures is core's
+///         pricing dispatch, with the module as the variable. It is also what
+///         keeps per-fill pricing gas inside the committed `.gas-snapshot` gate.
 contract PricingGasBenchTest is MockSettlementBase {
     uint256 constant SELL_IN = 1_000e18;
     uint256 constant OUT_START = 2_000e18;
@@ -107,7 +114,7 @@ contract PricingGasBenchTest is MockSettlementBase {
 
         // ── 5. oracle-pegged module (STATICCALL + a feed read)
         _fund();
-        PriceFeed feed = new PriceFeed();
+        PriceFeedMock feed = new PriceFeedMock();
         feed.set(1.5e18, block.timestamp);
         ChainlinkPeggedPriceModule pegged =
             new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);

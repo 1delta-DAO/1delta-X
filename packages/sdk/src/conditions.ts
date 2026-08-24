@@ -11,7 +11,7 @@ import type { Validator } from "./types";
  * cycles and dangling children are unrepresentable rather than merely rejected.
  *
  * ⚠ KEEP IN LOCKSTEP WITH
- * `packages/core/src/validators/ConditionTreeValidator.sol`.
+ * `packages/validators/src/ConditionTreeValidator.sol`.
  *
  *   groupCount(1) ‖ group*
  *   group := leafCount(1) ‖ leaf*

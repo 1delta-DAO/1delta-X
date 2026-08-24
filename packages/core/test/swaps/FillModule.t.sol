@@ -10,7 +10,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Order, Item, ItemOp, LegIn, LegOut, OrderSide, Validator} from "@core/settlement/Settlement.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
-import {FullFillModule} from "@core/modules/FullFillModule.sol";
+import {FullFillMock} from "../shared/MockModules.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev Configurable fill module for the tests: optionally forces a specific
@@ -47,12 +47,12 @@ contract MockFillModule is IFillModule {
 contract FillModuleTest is CoreSettlementBase {
     address constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
 
-    FullFillModule fullFill;
+    FullFillMock fullFill;
     MockFillModule mock;
 
     function setUp() public override {
         super.setUp();
-        fullFill = new FullFillModule();
+        fullFill = new FullFillMock();
         mock = new MockFillModule();
         vm.label(address(fullFill), "fullFillModule");
         vm.label(address(mock), "mockFillModule");
@@ -79,7 +79,7 @@ contract FillModuleTest is CoreSettlementBase {
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "identity fill pays full input");
     }
 
-    // ── FullFillModule: indivisible, one shot completes; second fill reverts ──
+    // ── all-or-nothing module: one shot completes; second fill reverts ──
     function test_fullFillModule_allOrNothing() public {
         uint256 usdcIn = 2_000e6;
         uint256 wethOut = 1 ether;
@@ -95,7 +95,7 @@ contract FillModuleTest is CoreSettlementBase {
 
         // A "partial" request is ignored — the module returns the whole total.
         vm.prank(solver);
-        settlement.fill(o, sig, 999, ""); // fillAmount irrelevant to FullFillModule
+        settlement.fill(o, sig, 999, ""); // fillAmount irrelevant to a full-fill module
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "full output on the single fill");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "full input on the single fill");
 

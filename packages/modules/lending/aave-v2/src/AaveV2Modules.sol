@@ -7,9 +7,9 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
-import {DustHandler} from "@core/dust/DustHandler.sol";
-import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
-import {PermitHelper} from "@core/utils/PermitHelper.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {PermitHelper} from "@lib/PermitHelper.sol";
 
 import {IAaveV2Pool} from "./interfaces/IAaveV2.sol";
 

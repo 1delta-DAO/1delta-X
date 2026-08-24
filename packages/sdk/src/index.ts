@@ -14,5 +14,7 @@ export * from "./proportional";
 export * from "./pricing";
 export * from "./auction";
 export * from "./quote";
+export * from "./bid";
 export * from "./band";
 export * from "./filling";
+export * from "./callback";

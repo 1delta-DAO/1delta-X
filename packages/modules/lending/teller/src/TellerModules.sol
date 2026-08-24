@@ -5,7 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
-import {PermitHelper} from "@core/utils/PermitHelper.sol";
+import {PermitHelper} from "@lib/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {ITellerPool, ITellerV2} from "./interfaces/ITeller.sol";

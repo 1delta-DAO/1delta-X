@@ -14,7 +14,7 @@ import {
     CurvePoint
 } from "@core/settlement/Settlement.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {PackedEncode} from "./shared/PackedEncode.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";

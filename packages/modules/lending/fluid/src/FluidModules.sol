@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
-import {FullFillGuard} from "@core/utils/FullFillGuard.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";

@@ -1,6 +1,6 @@
 # CoW Protocol × Aave v3 — how excess / dust is handled in repay-with-collateral & swap flows
 
-Reference notes for the dust-handling design in this repo (`src/dust/DustHandler.sol`,
+Reference notes for the dust-handling design in this repo (`packages/lib/src/DustHandler.sol`,
 `offchain/chooseDustAction.ts`). Captures how the **CoW × Aave** integration handles
 the over-repay / leftover problem so we have the prior art at hand.
 
@@ -125,7 +125,7 @@ calls became an attack surface.
 **Takeaway for us:** never let residue rest in a shared module across the tx boundary, and
 be very careful approving + calling data-supplied targets while holding funds. (This is
 exactly the concern behind gating our maker modules — see the note in
-`src/dust/DustHandler.sol` and the repay-module discussion.)
+`packages/lib/src/DustHandler.sol` and the repay-module discussion.)
 
 Source: [Verichains — Aave ParaSwap Repay Adapter hack](https://blog.verichains.io/p/aave-paraswap-repay-adapter-hack),
 [aave/aave-debt-swap](https://github.com/aave/aave-debt-swap).

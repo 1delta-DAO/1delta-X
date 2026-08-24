@@ -2,8 +2,8 @@ import {
   ANY_FILLER,
   signQuote,
   type QuoteBinding,
-  type QuoteBid,
   type QuoteSigner,
+  type SignedBid,
   type SignedQuote,
 } from "@1delta-x/sdk";
 import type { Hex } from "viem";
@@ -58,10 +58,13 @@ export class Auctioneer {
 
   /** Open a round for an order. Re-opening a live round returns the existing
    *  one rather than resetting it — a duplicate open must not discard bids. */
-  open(config: RoundConfig): AuctionRound {
+  open(config: Omit<RoundConfig, "binding"> & { binding?: QuoteBinding }): AuctionRound {
     const existing = this.rounds.get(config.orderHash);
     if (existing && existing.status === "open") return existing;
-    const round = new AuctionRound(config, this.now);
+    // The round inherits the auctioneer's binding unless one is given, so a
+    // caller cannot accidentally open a round bound to a different module than
+    // the quote will be signed for.
+    const round = new AuctionRound({ ...config, binding: config.binding ?? this.config.binding }, this.now);
     this.rounds.set(config.orderHash, round);
     return round;
   }
@@ -70,8 +73,9 @@ export class Auctioneer {
     return this.rounds.get(orderHash);
   }
 
-  /** Submit a bid to an open round. Unknown order ⇒ rejected, not thrown. */
-  submit(orderHash: Hex, bid: QuoteBid): BidReceipt {
+  /** Submit a SIGNED bid to an open round. Unknown order ⇒ rejected, not thrown.
+   *  Forged and malformed bids are rejected too — see {@link AuctionRound.submit}. */
+  async submit(orderHash: Hex, bid: SignedBid): Promise<BidReceipt> {
     const round = this.rounds.get(orderHash);
     if (!round) return { accepted: false, reason: "no such round", bids: 0 };
     return round.submit(bid);

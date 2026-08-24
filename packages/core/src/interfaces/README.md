@@ -77,8 +77,12 @@ already advanced for the current fill by the time the module runs).
 
 Configuration lives in the module's own immutables — one instance per
 configuration, shared via CREATE2 — because a per-order `bytes` config member
-would have cost ~1,000 bytes of Settlement. Shipped instances:
-`ChainlinkPeggedPriceModule`, `RangePriceModule`, `CosignedQuotePriceModule`.
+would have cost ~1,000 bytes of Settlement. Shipped instances: `RangePriceModule`
+here in core (the reference implementation of this interface), plus
+`ChainlinkPeggedPriceModule`, `CosignedQuotePriceModule` and
+`ClockFlooredQuoteModule` in
+[packages/modules/pricing](../../../modules/pricing) — they are optional
+peripherals nothing in core imports, so they live outside it.
 See [docs/pricing-modes.md](../../../../docs/pricing-modes.md).
 
 ## IOrderValidator.sol

@@ -64,9 +64,9 @@ for anything outside the group.
 
 ## 2. `OcoGroupModule` — the bracket that survives partial fills
 
-[`OcoGroupModule.sol`](../packages/core/src/modules/OcoGroupModule.sol) is a
+[`OcoGroupModule.sol`](../packages/modules/oco/src/OcoGroupModule.sol) is a
 registry, a validator and a claim-writer in one contract — the same shape as
-[`FillerWhitelistValidator`](../packages/core/src/validators/FillerWhitelistValidator.sol).
+[`FillerWhitelistValidator`](../packages/validators/src/FillerWhitelistValidator.sol).
 No owner, no admin: every record is keyed by the order's own maker.
 
 ### Why a validator alone cannot do it
@@ -178,6 +178,6 @@ market or a pair.
 - **It does not span makers.** Claims are keyed by the order's maker, by
   construction.
 
-Tests: [`OcoGroupModule.t.sol`](../packages/core/test/modules/OcoGroupModule.t.sol)
+Tests: [`OcoGroupModule.t.sol`](../packages/modules/oco/test/OcoGroupModule.t.sol)
 (14 cases, including both degenerate half-signed shapes and the zero-slice
 posture), [`oco.test.ts`](../packages/sdk/test/oco.test.ts).

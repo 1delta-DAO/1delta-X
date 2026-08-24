@@ -5,7 +5,7 @@ import {Base} from "@core/settlement/Base.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Settlement, Order, Item, ItemOp, Validator} from "@core/settlement/Settlement.sol";
-import {ChainlinkPriceLte} from "@core/validators/ChainlinkPriceValidators.sol";
+import {ChainlinkPriceLte} from "@validators/ChainlinkPriceValidators.sol";
 
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
-import {DelegationHelper} from "@core/utils/DelegationHelper.sol";
+import {DelegationHelper} from "@lib/DelegationHelper.sol";
 
 import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 

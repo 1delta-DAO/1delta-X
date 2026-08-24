@@ -22,7 +22,7 @@ import {
     OrderSide,
     Validator
 } from "@core/settlement/Settlement.sol";
-import {MinBalanceInvariant} from "@core/validators/MinBalanceInvariant.sol";
+import {MinBalanceInvariant} from "@validators/MinBalanceInvariant.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 /// @dev TAKE mock = a borrow/withdraw that DEFERS its own health check — it just

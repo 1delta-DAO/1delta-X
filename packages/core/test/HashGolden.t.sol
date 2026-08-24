@@ -13,7 +13,7 @@ import {
     OrderSide,
     CurvePoint
 } from "@core/settlement/Settlement.sol";
-import {SettlementLens} from "@core/periphery/SettlementLens.sol";
+import {SettlementLens} from "@periphery/SettlementLens.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {PackedEncode} from "./shared/PackedEncode.sol";
 

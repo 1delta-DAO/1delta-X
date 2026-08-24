@@ -128,15 +128,15 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
   lenders that check health inside each call). The single-order path always
   satisfies all three by construction and pays nothing; only `matchSettle` can
   violate one.
-- **Fill modules shipped**: [`FullFillModule`](packages/core/src/modules/FullFillModule.sol)
-  (all-or-nothing) and [`TwapFillModule`](packages/core/src/modules/TwapFillModule.sol)
+- **Fill modules shipped**: [`FullFillModule`](packages/modules/fill/src/FullFillModule.sol)
+  (all-or-nothing) and [`TwapFillModule`](packages/modules/fill/src/TwapFillModule.sol)
   (one signed order releasing on a TWAP schedule).
-- **Settlement modules shipped**: [`NftSettlementModule`](packages/core/src/modules/NftSettlementModule.sol)
+- **Settlement modules shipped**: [`NftSettlementModule`](packages/modules/nft/src/NftSettlementModule.sol)
   (ERC-721 to whoever fills — an open solver set, no exclusivity),
-  [`Erc1155SettlementModule`](packages/core/src/modules/Erc1155SettlementModule.sol),
-  [`OcoGroupModule`](packages/core/src/modules/OcoGroupModule.sol) (one-cancels-other,
+  [`Erc1155SettlementModule`](packages/modules/nft/src/Erc1155SettlementModule.sol),
+  [`OcoGroupModule`](packages/modules/oco/src/OcoGroupModule.sol) (one-cancels-other,
   below).
-- **Escape hatch**: [`PermissionlessCallModule`](packages/core/src/modules/PermissionlessCallModule.sol)
+- **Escape hatch**: [`PermissionlessCallModule`](packages/modules/maker/src/PermissionlessCallModule.sol)
   executes one arbitrary maker-signed contract call as a MAKE item.
 
 ---
@@ -190,9 +190,9 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
 
   | Module | Prices from | Parity with |
   |---|---|---|
-  | [`ChainlinkPeggedPriceModule`](packages/core/src/modules/ChainlinkPeggedPriceModule.sol) | a Chainlink feed, with staleness **and an absolute plausibility band** | oracle-pegged limit orders |
-  | [`RangePriceModule`](packages/core/src/modules/RangePriceModule.sol) | the fill-progress axis (`prevFilled/total`) | 1inch `RangeAmountCalculator`, ladders |
-  | [`CosignedQuotePriceModule`](packages/core/src/modules/CosignedQuotePriceModule.sol) | an EIP-712 quote signed by a named cosigner, carried in `takerData` | UniswapX's cosigner — without the trusted party |
+  | [`ChainlinkPeggedPriceModule`](packages/modules/pricing/chainlink/src/ChainlinkPeggedPriceModule.sol) | a Chainlink feed, with staleness **and an absolute plausibility band** | oracle-pegged limit orders |
+  | [`RangePriceModule`](packages/modules/pricing/range/src/RangePriceModule.sol) | the fill-progress axis (`prevFilled/total`) | 1inch `RangeAmountCalculator`, ladders |
+  | [`CosignedQuotePriceModule`](packages/modules/pricing/quotes/src/CosignedQuotePriceModule.sol) | an EIP-712 quote signed by a named cosigner, carried in `takerData` | UniswapX's cosigner — without the trusted party |
 
   **A module returns a BUMP, never an amount**, and the core clamps it to
   `[0, 10000]` before mapping it through each leg's own signed `start`/`end`. So a
@@ -211,7 +211,7 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
   features cost a median **+283 gas (+0.09%)**, and the canonical
   `test_plain_swap_full` **+369 (+0.07%)** — see
   [docs/lop-parity.md](docs/lop-parity.md) §5.
-- **Off-chain preview.** [`SettlementLens.previewFill`](packages/core/src/periphery/SettlementLens.sol)
+- **Off-chain preview.** [`SettlementLens.previewFill`](packages/periphery/src/SettlementLens.sol)
   quotes a fill exactly (same math as the contract), `previewBump` returns the
   resolved bump for the `minBumpBps` floor, plus `remaining` / `hashOrder` /
   `validateOrder`. The context-free per-leg views `previewAmountIn` /
@@ -234,7 +234,7 @@ output leg names its own recipient, so a fee is one more signed `LegOut`:
 - several legs ⇒ multiple recipients / partner tiers;
 - pro-rata across partial fills for free;
 - for outputless orders (pure deposits, exits, repays) the equivalent is a
-  [`FeeTransferModule`](packages/core/src/modules/FeeTransferModule.sol) MAKE item.
+  [`FeeTransferModule`](packages/modules/maker/src/FeeTransferModule.sol) MAKE item.
 
 No fee switch, no protocol owner, no cap registry — the fee is a maker-signed
 delivery a solver can neither inject nor redirect.
@@ -332,7 +332,7 @@ neither touching the core:
 - **Shared nonce** — sign every leg with the same nonce and the fill-once bit;
   the first full fill consumes it and the siblings then fail the nonce gate the
   settlement already runs. Zero contracts, zero extra gas, **whole-fill only**.
-- **[`OcoGroupModule`](packages/core/src/modules/OcoGroupModule.sol)** — a
+- **[`OcoGroupModule`](packages/modules/oco/src/OcoGroupModule.sol)** — a
   validator that reads a group claim plus a SETTLE item that writes it (a
   `staticcall` validator can read the fact but never record it, and validators run
   before items, which is exactly the ordering OCO needs). Survives partial fills
@@ -454,18 +454,18 @@ references the new module address in the order it signs.
 
 **On-chain periphery**
 
-- [`SettlementLens`](packages/core/src/periphery/SettlementLens.sol) — exact fill
+- [`SettlementLens`](packages/periphery/src/SettlementLens.sol) — exact fill
   preview, `getOrderRelevantStates` (one call returning everything an off-chain
   book needs to decide whether an order is still live and funded), signature
   check, `validateOrder` with a human-readable reason.
-- [`NativeSettler`](packages/core/src/periphery/NativeSettler.sol) +
-  [`NativeForwarderFactory`](packages/core/src/periphery/NativeForwarderFactory.sol)
+- [`NativeSettler`](packages/periphery/src/NativeSettler.sol) +
+  [`NativeForwarderFactory`](packages/periphery/src/NativeForwarderFactory.sol)
   — native ETH handled entirely at the edge: the core and Permit3 stay
   ERC20-only, while a maker can still pay native into a WETH-denominated order in
   one transaction.
 - **ERC-7683 adapters** —
-  [`OriginSettler7683`](packages/core/src/periphery/OriginSettler7683.sol) and
-  [`DestinationSettler7683`](packages/core/src/periphery/DestinationSettler7683.sol).
+  [`OriginSettler7683`](packages/periphery/src/OriginSettler7683.sol) and
+  [`DestinationSettler7683`](packages/periphery/src/DestinationSettler7683.sol).
   The intent networks (Across, UniswapX, Eco, CoW) all expose 7683 endpoints and
   most of Across's flow arrives that way, so this exists for **distribution**: an
   existing solver fleet resolves and fills our orders through the interface it
@@ -482,7 +482,7 @@ references the new module address in the order it signs.
   payload stays fillable after a partial fill instead of reverting `OverFill`), and
   is a conduit that must end every call holding nothing, approving nothing, and above
   a balance floor taken over the union of every input and output token it touched.
-- [`DustHandler`](packages/core/src/dust/DustHandler.sol) — residual disposal for
+- [`DustHandler`](packages/lib/src/DustHandler.sol) — residual disposal for
   MAKE modules: sweep to the user, or best-effort **recycle** back into the
   position, with an automatic fall back to sweep when a re-supply would revert
   (supply caps, frozen/paused reserves, isolation mode).

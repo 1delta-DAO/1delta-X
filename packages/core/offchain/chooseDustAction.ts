@@ -3,7 +3,7 @@
 // Reference implementation of the off-chain order-prep pre-filter that decides a
 // repay item's `DustAction` and appends it to the module `data` blob.
 //
-// Pairs with `packages/core/src/dust/DustHandler.sol`:
+// Pairs with `packages/lib/src/DustHandler.sol`:
 //   enum DustAction { SweepToUser = 0, Recycle = 1 }
 //
 // Division of labour (see the on-chain `DustHandler` doc-comment):
