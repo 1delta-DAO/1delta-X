@@ -85,6 +85,9 @@ abstract contract Base is Signatures {
     ///      of silently wrapping to a smaller move. (SETTLE is exempt — its module
     ///      interface is `uint256` and never narrows.)
     error AmountOverflow();
+    /// @dev An item's `module` (or Permit3) has no code. Solc's own existence check on a
+    ///      void external call; kept explicit now that {_callWithTail} hand-encodes.
+    error ItemTargetHasNoCode();
     /// @dev `fillUpTo`'s `minBumpBps` price floor was not met: the fill's resolved
     ///      shared decay bump came in below what the filler demanded. Every leg
     ///      price is monotone in the bump (outputs fall with it, inputs rise), so
@@ -362,7 +365,9 @@ abstract contract Base is Signatures {
             // adversarially reachable — but the asymmetry was gratuitous, and a value
             // path should not have two different overflow postures.
             if (slice > type(uint160).max) revert AmountOverflow();
-            IMakerModule(module).makeOnBehalf(order.maker, slice, itemData);
+            _callWithTail(
+                module, IMakerModule.makeOnBehalf.selector, 2, uint160(order.maker), slice, 0, 0, itemData
+            );
         } else if (op == uint256(ItemOp.TAKE)) {
             // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
             // classic flow (proceeds to Settlement for tokenIn payout); signing a
@@ -377,7 +382,16 @@ abstract contract Base is Signatures {
             if (ctx.permitTake.length != 0) {
                 _takeByPermit(order, ctx, module, slice, to, itemData);
             } else {
-                PERMIT3.take(module, order.maker, uint160(slice), to, itemData);
+                _callWithTail(
+                    address(PERMIT3),
+                    IPermit3.take.selector,
+                    4,
+                    uint160(module),
+                    uint160(order.maker),
+                    slice,
+                    uint160(to),
+                    itemData
+                );
             }
         } else if (op == uint256(ItemOp.SETTLE)) {
             // SETTLE deliberately keeps NO width check: {ISettlementModule.settle}
@@ -389,7 +403,16 @@ abstract contract Base is Signatures {
             // passing `ctx.filler` lets the maker's asset route to whoever fills. The
             // maker's receipt is guaranteed by the mandatory tokenOut delivery (run
             // before items) and/or an invariant, not by the module.
-            ISettlementModule(module).settle(order.maker, ctx.filler, slice, itemData);
+            _callWithTail(
+                module,
+                ISettlementModule.settle.selector,
+                3,
+                uint160(order.maker),
+                uint160(ctx.filler),
+                slice,
+                0,
+                itemData
+            );
         } else {
             // AN UNKNOWN OP IS A MALFORMED RECORD, NOT A SETTLE. `op` is a raw byte
             // from the signed blob, so without this every `op >= 2` fell into the
@@ -542,4 +565,58 @@ abstract contract Base is Signatures {
             }
         }
     }
+
+    /// @dev `target.sel(a0 … a{n-1}, tail)` hand-encoded — `n` static head words
+    ///      followed by one `bytes` argument, the shape EVERY item call shares.
+    ///      Same trick as {Core._execute}: solc emits a general encoder per call
+    ///      site, the layout here is fixed and known, so it is a handful of
+    ///      `mstore`s reused by all three ops instead of three encoders.
+    ///
+    ///      ⚠ THE `extcodesize` CHECK IS DELIBERATE AND MUST STAY. All three
+    ///      callees are void, and solc's own existence check (which it keeps for
+    ///      exactly that case — it only drops the check when a call has return
+    ///      values to size) is what makes a MAKE or SETTLE item pointed at a
+    ///      code-less address REVERT instead of silently succeeding as a no-op.
+    ///      Dropping it would turn a malformed maker-signed item into a skipped
+    ///      funding step that the rest of the fill happily settles around.
+    ///
+    ///      Reverts bubble RAW, so a module's custom error survives to the filler
+    ///      unchanged — same taxonomy guarantee {Core._execute} documents.
+    function _callWithTail(
+        address target,
+        bytes4 sel,
+        uint256 n,
+        uint256 a0,
+        uint256 a1,
+        uint256 a2,
+        uint256 a3,
+        bytes calldata tail
+    ) private {
+        // Kept in Solidity rather than hand-written next to the encoder: the check is
+        // the load-bearing part, and a hand-rolled selector constant is the kind of
+        // thing that goes stale silently.
+        if (target.code.length == 0) revert ItemTargetHasNoCode();
+        /// @solidity memory-safe-assembly
+        assembly {
+            let p := mload(0x40)
+            mstore(p, sel)
+            // The static head. Slots past `n` are overwritten by the offset word and
+            // the tail below, so writing all four unconditionally is free — and it
+            // keeps this block's live set to ONE local, which is what makes it
+            // compile under the legacy (non-via-IR) profile the tests use.
+            mstore(add(p, 0x04), a0)
+            mstore(add(p, 0x24), a1)
+            mstore(add(p, 0x44), a2)
+            mstore(add(p, 0x64), a3)
+            n := shl(5, add(n, 1)) // reused as `off`: 32 * (n statics + 1 offset word)
+            mstore(add(p, sub(n, 0x1c)), n) // the offset word, at head slot `n`
+            mstore(add(p, add(n, 0x04)), tail.length)
+            calldatacopy(add(p, add(n, 0x24)), tail.offset, tail.length)
+            if iszero(call(gas(), target, 0, p, add(0x24, add(n, tail.length)), 0, 0)) {
+                returndatacopy(p, 0, returndatasize())
+                revert(p, returndatasize())
+            }
+        }
+    }
+
 }

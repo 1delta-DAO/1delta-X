@@ -21,6 +21,10 @@ pragma solidity ^0.8.28;
 ///    • {SettlementLens.previewFill} cannot stand in: {OrderState._openFill}
 ///      advances `filled` BEFORE the callback, so it prices the NEXT fill.
 ///
+///  Both sides are handed over — `pricedIn` AND `pricedOut` — because which one
+///  carries the unknown depends on {OrderSide}: outputs auction on a SELL, inputs
+///  rise on a BUY. A filler that sizes a swap needs the pair, not one of them.
+///
 ///  ⚠ WHY THIS IS ADDITIVE AND NOT A REPLACEMENT. The untyped callback can invoke
 ///  ANY function on ANY contract, which is strictly more expressive and is itself
 ///  a tested property — the suite points it at Permit3 and at Settlement to prove
@@ -38,6 +42,30 @@ interface ISettlementCallback {
     ///                   this fill's delta for EVERY mechanism, including a
     ///                   fill-module order whose delta the caller never chose.
     /// @param anchor     the fill denominator, proportional markers resolved.
+    /// @param pricedIn   what this fill PAYS the filler on each input leg, indexed
+    ///                   1:1 with `legsIn` — the very numbers
+    ///                   {Core._payInputsToSolver} is about to hand over.
+    ///
+    ///                   ⚠ THIS IS THE HALF A BUY (EXACT-OUTPUT) ORDER NEEDS. On a
+    ///                   SELL the outputs are the auctioned side, so `pricedOut`
+    ///                   carries the unknown and the inputs are the fixed amount the
+    ///                   maker signed. A BUY inverts that exactly: the OUTPUT is the
+    ///                   fixed basket and every INPUT leg RISES `start → end` on the
+    ///                   clock, so `pricedOut` alone told a BUY filler only what it
+    ///                   already knew and left the variable side — its own
+    ///                   compensation — to be re-derived from the order, i.e. still
+    ///                   needing the order, which is the thing this mode exists to
+    ///                   avoid. The same applies to a SELL's relayer-fee leg
+    ///                   (`legsIn[i].end != 0`), which rises for the same reason.
+    ///
+    ///                   ⚠ WHAT IS PAID, NOT WHAT IS HELD. Under a `PostInputs*`
+    ///                   mode these have ALREADY been transferred when the callback
+    ///                   runs; under a `PreDelivery*` mode they have not, and are a
+    ///                   promise conditional on the rest of the fill succeeding. In
+    ///                   both cases the destination is {FillCtx.payTo} — the filler
+    ///                   on every classic path, but `fillUpTo`'s `recipient` when
+    ///                   redirected — so a callback that reads its own balance must
+    ///                   not assume it is the payee.
     /// @param pricedOut  what this fill must deliver on each output leg, indexed
     ///                   1:1 with `legsOut` — the very numbers {Pricing} is about
     ///                   to demand.
@@ -55,6 +83,7 @@ interface ISettlementCallback {
         uint256 prevFilled,
         uint256 newFilled,
         uint256 anchor,
+        uint256[] calldata pricedIn,
         uint256[] calldata pricedOut,
         bytes calldata userData
     ) external;

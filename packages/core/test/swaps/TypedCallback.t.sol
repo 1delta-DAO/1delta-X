@@ -13,8 +13,20 @@ import {Proportional} from "@core/settlement/Proportional.sol";
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
 
 /// @dev A taker built on the TYPED callback. It carries only its own blob; the
-///      settler supplies hash, progress, anchor and bump, so the taker performs
-///      no capture, no lens call and no re-derivation.
+///      settler supplies hash, progress, anchor and the priced legs, so the taker
+///      performs no capture, no lens call and no re-derivation.
+///
+///      ⚠ READING THE GAS BASELINE ON THIS FILE. When `pricedIn` was added
+///      (2026-08-25) every typed test in here jumped ~49k gas. That is THIS MOCK,
+///      not the settlement: `owedIn` and `inLegCount` are two new slots written
+///      cold, 22,100 each. Measured by deleting just those two stores, the
+///      settlement-side cost of pricing + encoding the input array on a one-leg
+///      order is +4,233 (`test_typed_contextMatchesTheFill` 310,716 → 314,949),
+///      and the UNTYPED path is unchanged (−43). For scale, a taker re-deriving
+///      the same numbers pays a second {Pricing} pass — 795 gas on one fixed leg,
+///      3,583 on a two-leg order with a rising leg (see {Core._fillCore}) — and
+///      still needs the order in its calldata, which is the cost this mode exists
+///      to remove.
 contract TypedTaker is ISettlementCallback {
     Settlement public immutable SETTLEMENT;
     address public immutable EXECUTOR;
@@ -27,6 +39,13 @@ contract TypedTaker is ISettlementCallback {
     uint256 public gotNew;
     uint256 public gotAnchor;
     uint256 public owedOut;
+    uint256 public owedIn;
+    uint256 public inLegCount;
+    /// @dev The taker's OWN balance of `legsIn[0]`'s token, read INSIDE the callback.
+    ///      Under a `PostInputs*` mode the inputs are already paid, so this is what
+    ///      `pricedIn[0]` is checked against without any help from the test.
+    uint256 public heldInAtCallback;
+    address public probeTokenIn;
 
     error OnlyExecutor();
     error NotArmed();
@@ -59,12 +78,31 @@ contract TypedTaker is ISettlementCallback {
         SETTLEMENT.fillWithCallback(order, sig, fillAmount, address(this), abi.encode(one), mode);
     }
 
+    /// @notice Fill while also recording the taker's live balance of `tokenIn` as
+    ///         the callback sees it — the check that `pricedIn` describes a real
+    ///         transfer under a `PostInputs*` mode rather than a plausible number.
+    function fillProbingInput(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        address tokenOut,
+        address tokenIn,
+        CallbackMode mode
+    ) external {
+        probeTokenIn = tokenIn;
+        _active = 2;
+        address[] memory one = new address[](1);
+        one[0] = tokenOut;
+        SETTLEMENT.fillWithCallback(order, sig, fillAmount, address(this), abi.encode(one), mode);
+    }
+
     /// @inheritdoc ISettlementCallback
     function onSettlementFill(
         bytes32 orderHash,
         uint256 prevFilled,
         uint256 newFilled,
         uint256 anchor,
+        uint256[] calldata pricedIn,
         uint256[] calldata pricedOut,
         bytes calldata userData
     ) external {
@@ -76,6 +114,18 @@ contract TypedTaker is ISettlementCallback {
         gotPrev = prevFilled;
         gotNew = newFilled;
         gotAnchor = anchor;
+
+        // The INPUT half — what this fill pays the filler. On a BUY this is the
+        // auctioned side and the only number the filler could not have known.
+        owedIn = 0;
+        for (uint256 i; i < pricedIn.length; ++i) {
+            owedIn += pricedIn[i];
+        }
+        inLegCount = pricedIn.length;
+        if (probeTokenIn != address(0)) {
+            heldInAtCallback = SafeTransferLib.balanceOf(probeTokenIn, address(this));
+            probeTokenIn = address(0);
+        }
 
         // Approve EXACTLY what the settler said it will demand, PER LEG. No order,
         // no clock, no re-derivation — if any handed-over number is wrong or a leg
@@ -107,6 +157,10 @@ contract TypedCallbackTest is MockSettlementBase {
     uint256 constant OUT_START = 2_000e18;
     uint256 constant OUT_END = 1_000e18;
     uint32 constant DURATION = 1_000;
+    // Exact-output (BUY): fixed output basket, input auction rising best-for-maker first.
+    uint256 constant BUY_OUT = 1_000e18;
+    uint256 constant IN_START = 400e18;
+    uint256 constant IN_END = 800e18;
 
     TypedTaker taker;
 
@@ -139,6 +193,8 @@ contract TypedCallbackTest is MockSettlementBase {
         assertEq(taker.gotPrev(), 0, "prevFilled");
         assertEq(taker.gotNew(), SELL_IN, "newFilled");
         assertEq(taker.gotAnchor(), SELL_IN, "anchor");
+        assertEq(taker.inLegCount(), 1, "one input leg, indexed 1:1 with legsIn");
+        assertEq(taker.owedIn(), SELL_IN, "SELL input is the fixed amount the maker signed");
         // The taker approved only what the context priced, and the fill settled.
         assertEq(tB.balanceOf(maker) - before_, taker.owedOut(), "context priced the real delivery");
         assertEq(taker.owedOut(), OUT_START - (OUT_START - OUT_END) / 4, "quarter-decayed");
@@ -179,6 +235,72 @@ contract TypedCallbackTest is MockSettlementBase {
 
         assertEq(taker.gotAnchor(), half, "live-balance anchor, handed over after the maker paid");
         assertEq(tA.balanceOf(address(taker)), half, "taker was paid the resolved input");
+        // The proportional marker resolves into `pricedIn` too — a filler reading the
+        // raw signed leg would see the MARKER, not a balance slice.
+        assertEq(taker.owedIn(), half, "pricedIn carries the resolved balance slice");
+    }
+
+    // ════════════════ BUY / exact-output: the input is the unknown ════════════════
+
+    /// @dev THE CASE `pricedOut` ALONE CANNOT SERVE. On a BUY the output basket is
+    ///      FIXED — the filler learns nothing from being told it — and the INPUT
+    ///      rises `start → end` on the clock, so the filler's own compensation is
+    ///      the number it cannot know without the order. `pricedIn` is that number,
+    ///      and the assertion is end-to-end: it is compared against the tokens the
+    ///      settlement actually paid out, not against a re-derivation.
+    function test_typed_buyOrder_handsOverTheRisingInput() public {
+        Order memory o = _buyOrder(10, address(tA), address(tB), IN_START, IN_END, BUY_OUT);
+        _setDecayStart(o, block.timestamp);
+        _setDecayDuration(o, DURATION);
+        bytes memory sig = _sign(o);
+        vm.warp(block.timestamp + DURATION / 4);
+
+        uint256 beforeIn = tA.balanceOf(address(taker));
+        uint256 beforeOut = tB.balanceOf(maker);
+        // Fill is denominated in legsOut[0] units on a BUY.
+        taker.fill(o, sig, BUY_OUT, address(tB), CallbackMode.PreDeliveryTyped);
+
+        assertEq(taker.owedOut(), BUY_OUT, "output is the fixed basket the maker signed");
+        assertEq(tB.balanceOf(maker) - beforeOut, BUY_OUT, "and it was delivered");
+        // The auctioned side, quarter-decayed — handed over, never re-derived.
+        assertEq(taker.owedIn(), IN_START + (IN_END - IN_START) / 4, "rising input at the current tick");
+        assertEq(tA.balanceOf(address(taker)) - beforeIn, taker.owedIn(), "pricedIn is what was actually paid");
+    }
+
+    /// @dev And under `PostInputsTyped` — the zero-inventory exact-output shape, where
+    ///      the filler is paid first and converts inside the callback — `pricedIn` is
+    ///      money already in hand. The taker reads its OWN balance during the callback,
+    ///      so this pins the number against a real transfer rather than against the
+    ///      settler's arithmetic.
+    function test_typed_buyOrder_postInputsPricedInIsAlreadyInHand() public {
+        Order memory o = _buyOrder(11, address(tA), address(tB), IN_START, IN_END, BUY_OUT);
+        _setDecayStart(o, block.timestamp);
+        _setDecayDuration(o, DURATION);
+        bytes memory sig = _sign(o);
+        vm.warp(block.timestamp + DURATION / 2);
+
+        assertEq(tA.balanceOf(address(taker)), 0, "taker starts with no tokenIn");
+        taker.fillProbingInput(o, sig, BUY_OUT, address(tB), address(tA), CallbackMode.PostInputsTyped);
+
+        assertEq(taker.owedIn(), IN_START + (IN_END - IN_START) / 2, "half-decayed rising input");
+        assertEq(taker.heldInAtCallback(), taker.owedIn(), "already transferred by callback time");
+    }
+
+    /// @dev A PARTIAL BUY fill: `pricedIn` is this fill's slice, not the whole leg.
+    ///      The number a filler would get wrong by reading `legsIn[0]` off the order.
+    function test_typed_buyOrder_partialFillPricesTheSlice() public {
+        Order memory o = _buyOrder(12, address(tA), address(tB), IN_START, IN_END, BUY_OUT);
+        _setDecayStart(o, block.timestamp);
+        _setDecayDuration(o, DURATION);
+        bytes memory sig = _sign(o);
+
+        uint256 beforeIn = tA.balanceOf(address(taker));
+        taker.fill(o, sig, BUY_OUT / 4, address(tB), CallbackMode.PreDeliveryTyped);
+
+        assertEq(taker.gotNew() - taker.gotPrev(), BUY_OUT / 4, "quarter of the output basket");
+        assertEq(taker.owedOut(), BUY_OUT / 4, "output slice");
+        assertEq(taker.owedIn(), IN_START / 4, "input slice at tick 0, not the whole leg");
+        assertEq(tA.balanceOf(address(taker)) - beforeIn, taker.owedIn(), "and that is what was paid");
     }
 
     // ════════════════ the untyped path is untouched ════════════════
@@ -241,7 +363,15 @@ contract RevertingTarget {
 
     /// @dev The TYPED entrypoint — reached only by the `*Typed` modes, which call
     ///      this selector rather than whatever the taker encoded.
-    function onSettlementFill(bytes32, uint256, uint256, uint256, uint256[] calldata, bytes calldata) external pure {
+    function onSettlementFill(
+        bytes32,
+        uint256,
+        uint256,
+        uint256,
+        uint256[] calldata,
+        uint256[] calldata,
+        bytes calldata
+    ) external pure {
         revert Custom(42, address(0xBEEF));
     }
 }
@@ -520,7 +650,15 @@ contract ShavingTaker {
         );
     }
 
-    function onSettlementFill(bytes32, uint256, uint256, uint256, uint256[] calldata p, bytes calldata d) external {
+    function onSettlementFill(
+        bytes32,
+        uint256,
+        uint256,
+        uint256,
+        uint256[] calldata,
+        uint256[] calldata p,
+        bytes calldata d
+    ) external {
         require(msg.sender == EXECUTOR && _active == 2);
         _active = 1;
         SafeTransferLib.forceApprove(abi.decode(d, (address)), address(SETTLEMENT), p[0] - 1);

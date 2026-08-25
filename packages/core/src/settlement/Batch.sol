@@ -466,7 +466,10 @@ abstract contract Batch is Core {
                 // its own authority; it can never move the pool, and `nonReentrant`
                 // blocks it from calling back into any fill.
                 if (a >= p.callTargets.length) revert PlanBadStep(s);
-                EXECUTOR.execute(p.callTargets[a], p.callDatas[a]);
+                // Through {Core._execute} rather than a typed `EXECUTOR.execute(...)`:
+                // identical call, but the typed form made solc emit a second general
+                // `(address,bytes)` encoder — see the note there.
+                _execute(p.callTargets[a], p.callDatas[a]);
             } else {
                 revert PlanBadStep(s);
             }

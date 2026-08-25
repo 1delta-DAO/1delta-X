@@ -104,6 +104,42 @@ contract ItemOpRangeTest is CoreSettlementBase {
         settlement.fill(o, sig, PRICE);
     }
 
+    // ──────────────── the callee must exist ────────────────
+    //
+    // {Base._callWithTail} hand-encodes the three item calls, which means solc's own
+    // existence check on a VOID external call is no longer emitted for them and is
+    // written out explicitly instead. These pin that it is still there: without it a
+    // maker-signed item pointed at a code-less address would SILENTLY SUCCEED — the
+    // funding or exchange step skipped, and the rest of the fill settling around the
+    // hole as if it had run.
+
+    /// @dev Same order shape, but the item's `module` has no code.
+    function _orderWithCodelessModule(uint256 nonce, uint8 op) internal view returns (Order memory o) {
+        o = _sellOrder(nonce, maker, address(0), USDC, 0, PRICE, new Item[](0));
+        o.items = PackedEncode.itemRawOp(op, address(0xDEAD), QTY, address(0), "");
+        o.timing |= uint256(1) << 101; // BUY
+    }
+
+    function test_makeOp_codelessModule_reverts() public {
+        _fundSolver();
+        Order memory o = _orderWithCodelessModule(10, uint8(ItemOp.MAKE));
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.ItemTargetHasNoCode.selector);
+        settlement.fill(o, sig, PRICE);
+    }
+
+    function test_settleOp_codelessModule_reverts() public {
+        _fundSolver();
+        Order memory o = _orderWithCodelessModule(11, uint8(ItemOp.SETTLE));
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.ItemTargetHasNoCode.selector);
+        settlement.fill(o, sig, PRICE);
+    }
+
     // ──────────────── netted path: the shape guard ────────────────
 
     /// `matchSettle` refuses a SETTLE item. The guard must key on the DISPATCHER's

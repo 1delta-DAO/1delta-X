@@ -9,6 +9,7 @@ import {
   fillDelta,
   isPostInputs,
   isTypedMode,
+  totalPricedIn,
   totalPricedOut,
 } from "../src/callback";
 import { CANONICAL_ORDER } from "./canonicalOrder";
@@ -76,6 +77,7 @@ describe("decodeSettlementCallback", () => {
     prevFilled: 250n,
     newFilled: 1_000n,
     anchor: 4_000n,
+    pricedIn: [750n] as const,
     pricedOut: [900n, 50n] as const,
     userData: "0xc0ffee" as Hex,
   };
@@ -83,11 +85,19 @@ describe("decodeSettlementCallback", () => {
   const encoded = encodeFunctionData({
     abi: SETTLEMENT_CALLBACK_ABI,
     functionName: "onSettlementFill",
-    args: [ctx.orderHash, ctx.prevFilled, ctx.newFilled, ctx.anchor, ctx.pricedOut, ctx.userData],
+    args: [
+      ctx.orderHash,
+      ctx.prevFilled,
+      ctx.newFilled,
+      ctx.anchor,
+      ctx.pricedIn,
+      ctx.pricedOut,
+      ctx.userData,
+    ],
   });
 
   it("decodes what the settler hands a typed callback", () => {
-    expect(decodeSettlementCallback(encoded)).toEqual({ ...ctx, pricedOut: [900n, 50n] });
+    expect(decodeSettlementCallback(encoded)).toEqual({ ...ctx, pricedIn: [750n], pricedOut: [900n, 50n] });
   });
 
   it("derives the delta from the counters, NOT from a requested amount", () => {
@@ -98,5 +108,18 @@ describe("decodeSettlementCallback", () => {
 
   it("totals every output leg — a fee leg is a leg", () => {
     expect(totalPricedOut(decodeSettlementCallback(encoded))).toBe(950n);
+  });
+
+  // The BUY / exact-output half: on such an order the outputs are the fixed basket
+  // the maker signed and the INPUT is the auctioned side, so this is the number a
+  // filler cannot read off the order.
+  it("carries the input side the filler is paid", () => {
+    expect(totalPricedIn(decodeSettlementCallback(encoded))).toBe(750n);
+  });
+
+  it("keeps the two sides indexed against their own leg arrays", () => {
+    const ctx_ = decodeSettlementCallback(encoded);
+    expect(ctx_.pricedIn).toHaveLength(1);
+    expect(ctx_.pricedOut).toHaveLength(2);
   });
 });

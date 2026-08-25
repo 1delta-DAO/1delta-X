@@ -80,6 +80,21 @@ export interface SettlementFillContext {
   /** Fill denominator, proportional markers already resolved. */
   anchor: bigint;
   /**
+   * What this fill PAYS the filler per input leg, indexed 1:1 with `legsIn`.
+   *
+   * ⚠ THE HALF AN EXACT-OUTPUT (BUY) FILL NEEDS. A SELL auctions its outputs, so
+   * `pricedOut` carries the unknown there. A BUY inverts it: the output basket is
+   * fixed and every input leg RISES on the clock, so this is the filler's own
+   * compensation and the only number it could not read off the order. Same for a
+   * SELL's rising relayer-fee leg.
+   *
+   * ⚠ PAID, NOT NECESSARILY HELD. Under a `PostInputs*` mode these have already
+   * been transferred when the callback runs; under `PreDelivery*` they have not.
+   * The destination is the fill's `payTo` — the filler on every classic path, but
+   * `fillUpTo`'s recipient when redirected.
+   */
+  pricedIn: readonly bigint[];
+  /**
    * What this fill must deliver per output leg, indexed 1:1 with `legsOut`.
    *
    * Already sliced for a partial fill and already lifted by any soft-exclusivity
@@ -105,19 +120,29 @@ export function totalPricedOut(ctx: SettlementFillContext): bigint {
   return ctx.pricedOut.reduce((a, b) => a + b, 0n);
 }
 
+/** Total across every input leg — what the fill pays the filler.
+ *
+ *  ⚠ Only comparable to {@link totalPricedOut} when the legs are the same token.
+ *  A multi-token order's legs are different assets; summing across them is a unit
+ *  error, not a P&L. */
+export function totalPricedIn(ctx: SettlementFillContext): bigint {
+  return ctx.pricedIn.reduce((a, b) => a + b, 0n);
+}
+
 /**
  * Decode an `onSettlementFill` call — for a taker written in TS (a simulator, a
  * test harness), or to inspect what the settler handed a solver contract.
  */
 export function decodeSettlementCallback(data: Hex): SettlementFillContext {
   const { args } = decodeFunctionData({ abi: SETTLEMENT_CALLBACK_ABI, data });
-  const [orderHash, prevFilled, newFilled, anchor, pricedOut, userData] = args as readonly [
+  const [orderHash, prevFilled, newFilled, anchor, pricedIn, pricedOut, userData] = args as readonly [
     Hex,
     bigint,
     bigint,
     bigint,
     readonly bigint[],
+    readonly bigint[],
     Hex,
   ];
-  return { orderHash, prevFilled, newFilled, anchor, pricedOut, userData };
+  return { orderHash, prevFilled, newFilled, anchor, pricedIn, pricedOut, userData };
 }

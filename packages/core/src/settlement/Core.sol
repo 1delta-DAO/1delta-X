@@ -583,7 +583,12 @@ abstract contract Core is Base {
     ///      The typed call makes solc emit a general `(address,bytes)` encoder; the
     ///      layout is fixed and known here, so it is four `mstore`s and a copy.
     ///      Reverts bubble raw so the executor's `CallbackFailed(bytes)` survives.
-    function _execute(address target, bytes memory data) private {
+    ///
+    ///      `internal`, not `private`, ON PURPOSE: {Batch}'s CALL step makes the SAME
+    ///      call and used to make it typed, which emitted that general encoder a
+    ///      SECOND time. Routing both through here measured −103 bytes of Settlement
+    ///      (2026-08-25). Any new call site for the executor belongs here too.
+    function _execute(address target, bytes memory data) internal {
         address executor = address(EXECUTOR);
         bytes4 sel = SolverCallbackExecutor.execute.selector;
         /// @solidity memory-safe-assembly
@@ -665,8 +670,56 @@ abstract contract Core is Base {
         }
         return abi.encodeCall(
             ISettlementCallback.onSettlementFill,
-            (ctx.orderHash, ctx.prevFilled, ctx.newFilled, ctx.anchor, priced, userData)
+            (ctx.orderHash, ctx.prevFilled, ctx.newFilled, ctx.anchor, _pricedInputs(order, ctx), priced, userData)
         );
+    }
+
+    /// @dev The typed callback's INPUT half — this fill's per-`legsIn` amounts, the
+    ///      very numbers `_payInputsToSolver` is about to pay out.
+    ///
+    ///      ⚠ IN ITS OWN FRAME, AND THAT IS THE WHOLE COST STORY. Same lesson as
+    ///      {_typedPayload}'s own note — it is the FRAME, not the encoding. Split out
+    ///      like this the feature costs +41 bytes of Settlement; every other shape
+    ///      measured is worse, several of them by an order of magnitude. Figures are
+    ///      `make size-check` deltas against a 24,548-byte baseline, all taken at the
+    ///      `core-deploy` `optimizer_runs` of the day (400), 2026-08-25:
+    ///        • THIS SHAPE, own frame                          +41
+    ///        • both loops inline in {_typedPayload}            +91
+    ///        • `nIn` folded into `new uint256[](...)`          +91
+    ///        • one shared `_pricedLegs(.., bool outputs)`     +100  (solc re-inlines it
+    ///                                                               at both call sites,
+    ///                                                               so nothing is shared)
+    ///        • `countUnchecked` instead of `validateFixed`    +101  (yes, the WEAKER
+    ///                                                               check is bigger)
+    ///        • writing into a pre-allocated `ctx.receipts`    +487  (the `wantReceipts ||`
+    ///                                                               it needs in
+    ///                                                               {_fillCore}'s body is
+    ///                                                               a codegen cliff)
+    ///      And the {Pricing.inputOwed} call itself is FREE: swapping it for a constant
+    ///      measured +9 bytes — i.e. this third inline site shares with the two that
+    ///      were already there. Do not try to save bytes by dropping the pricing.
+    ///
+    ///      ⚠ EVEN AT +41 IT DID NOT FIT — the tree was on 28 bytes of headroom. The
+    ///      bytes were found by deleting two DUPLICATE ABI ENCODERS ({Batch} was
+    ///      re-encoding the call {_execute} already hand-encodes; the three item ops now
+    ///      share {Base._callWithTail}), not by touching `optimizer_runs`, which stayed
+    ///      at 400. The story and what did NOT work are at the dial in foundry.toml.
+    ///
+    ///      ⚠ GAS. Pricing + encoding this array costs +4,233 on a one-input-leg typed
+    ///      fill (`test_typed_contextMatchesTheFill` 310,716 → 314,949) and is paid ONLY
+    ///      by the `*Typed` modes — an untyped fill measured −43, i.e. unchanged. The
+    ///      taker's alternative is a second {Pricing} pass of its own (795 gas on one
+    ///      fixed leg, 3,583 on a two-leg order with a rising leg) plus carrying the
+    ///      order in its calldata, which is the cost this mode exists to remove.
+    function _pricedInputs(Order calldata order, FillCtx memory ctx) private view returns (uint256[] memory owed) {
+        uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
+        owed = new uint256[](nIn);
+        for (uint256 i; i < nIn;) {
+            owed[i] = order.inputOwed(ctx, i);
+            unchecked {
+                ++i;
+            }
+        }
     }
 
     /// @dev Snapshot every output leg's recipient balance of that leg's token, for a

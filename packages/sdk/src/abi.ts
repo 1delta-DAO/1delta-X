@@ -105,9 +105,15 @@ const orderArg = { name: "order", type: "tuple", components: orderComponents } a
 /**
  * {ISettlementCallback} — what the settler calls on a `*Typed` {CallbackMode}.
  *
- * `pricedOut` is what this fill must deliver per output leg, already sliced for a
- * partial fill and already lifted by any soft-exclusivity override. A taker can
- * satisfy the fill from these numbers ALONE: no order, no clock, no re-derivation.
+ * `pricedOut` is what this fill must deliver per output leg and `pricedIn` what it
+ * pays the filler per input leg, both already sliced for a partial fill and already
+ * moved by any soft-exclusivity override. A taker can satisfy the fill from these
+ * numbers ALONE: no order, no clock, no re-derivation.
+ *
+ * Both sides are handed over because which one carries the unknown depends on the
+ * order side: a SELL auctions its OUTPUTS, a BUY (exact-output) has a fixed output
+ * basket and RISING inputs, so on a BUY `pricedIn` is the only number the filler
+ * could not already know.
  */
 export const SETTLEMENT_CALLBACK_ABI = [
   {
@@ -119,6 +125,7 @@ export const SETTLEMENT_CALLBACK_ABI = [
       { name: "prevFilled", type: "uint256" },
       { name: "newFilled", type: "uint256" },
       { name: "anchor", type: "uint256" },
+      { name: "pricedIn", type: "uint256[]" },
       { name: "pricedOut", type: "uint256[]" },
       { name: "userData", type: "bytes" },
     ],
