@@ -122,11 +122,30 @@ contract OriginSettler7683 is IOriginSettler {
     ///      moment it can make an order signature-less: `Settlement.approveOrder`
     ///      keys on `msg.sender`, so a maker that cannot sign calls that first and
     ///      then opens here with an empty signature.
+    ///
+    ///      ⚠ THE SIGNATURE IS CHECKED HERE TOO, and the signature-less path is
+    ///      unaffected. {openFor} states the invariant this pair maintains — `Open` is
+    ///      never emitted for an order nobody can fill — and this entry used to be the
+    ///      hole in it: `maker == msg.sender` proves who is opening, not that the
+    ///      embedded credential is one the settler will accept, and the fill DOES
+    ///      require it ({DestinationSettler7683.fill} → `Settlement.fill`). So an
+    ///      `Open` here could advertise an order that reverts at fill time. Bounded to
+    ///      wasted solver simulation — the flow is same-chain, atomic and escrow-free,
+    ///      so a failed verification unwinds the solver's own pull — but a broadcast
+    ///      nobody can act on is exactly what the invariant exists to prevent.
+    ///
+    ///      Adding it costs the signature-less maker nothing, which is why it is not a
+    ///      trade-off: {LENS.checkSignature} routes an EMPTY `sig` to the settler's own
+    ///      `orderApproved` record, so the `approveOrder`-then-`open` sequence in the
+    ///      paragraph above passes this check by construction. What it rejects is a
+    ///      STALE or malformed credential — the case the maker cannot detect and the
+    ///      solver pays for.
     function open(OnchainCrossChainOrder calldata order) external override {
         OrderPayload memory p = _decode(order.orderDataType, order.orderData);
         if (p.order.maker != msg.sender) revert UserMismatch();
         _requireLive(p.order);
         bytes32 orderHash = LENS.hashOrder(p.order);
+        LENS.checkSignature(orderHash, p.signature, p.order.maker);
         ResolvedCrossChainOrder memory r = _resolve(p, orderHash, msg.sender, 0, order.fillDeadline);
         emit Open(r.orderId, r);
     }

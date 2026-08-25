@@ -431,6 +431,12 @@ Revocation:
 - `lockdownTakers(SpenderRefPair[])` — taker-book analogue (Permit3 extension).
 - `invalidateUnorderedNonces(wordPos, mask)` — cancel signed permits before
   they are consumed (ported from Permit2's `invalidateUnorderedNonces`).
+  ⚠ This cancels the **permit**, not the **order** a witness-bound permit is
+  attached to. `permitBatchWithWitnessIfNeeded` skips a spent nonce rather than
+  reverting (the S-1 remediation), so the fill proceeds without the grants — and
+  succeeds anyway if a standing allowance or a direct ERC-20 approval already funds
+  it. The order-level cancels live on the settler; see
+  [`docs/soft-cancel.md`](../../../../docs/soft-cancel.md).
 
 ## Security properties
 

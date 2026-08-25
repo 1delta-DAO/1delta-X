@@ -53,6 +53,23 @@ library PackedEncode {
         }
     }
 
+    /// @dev A one-record item blob carrying a RAW `op` byte — an op the {ItemOp}
+    ///      enum cannot hold, and therefore one {items} above cannot express.
+    ///
+    ///      This is not a synthetic shape. {PackedArrays.itemAt} reads `op` as a
+    ///      plain byte and deliberately does NOT narrow it, so a maker signing an
+    ///      out-of-range op is exactly what the settler sees on the wire; the enum
+    ///      only exists on the Solidity side of the boundary. Used by
+    ///      `ItemOpRange.t.sol` to prove the dispatcher rejects such a record
+    ///      instead of folding it into the SETTLE branch.
+    function itemRawOp(uint8 op, address module, uint256 amount, address recipient, bytes memory data)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encodePacked(uint8(1), op, module, amount, recipient, uint16(data.length), data);
+    }
+
     function validators(Validator[] memory vs) internal pure returns (bytes memory b) {
         b = abi.encodePacked(uint8(vs.length));
         for (uint256 i; i < vs.length; i++) {

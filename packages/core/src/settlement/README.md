@@ -381,7 +381,10 @@ recipientOut   = [ 0 (maker),   originator  ]      fixed = absolute fee)
   (deliver-more) is the maker's queue-jump compensation, so it applies only to
   legs delivered to the maker; a fee leg to a third party is never inflated (an
   absolute fee stays absolute). `recipientOut[j] == address(this)` burns the leg
-  into the anti-donation baseline — a maker self-burn the Lens flags.
+  into the anti-donation baseline on the single-order path — a maker self-burn the
+  Lens flags — and is REJECTED outright by `matchSettle` (`OutputToSettlement`),
+  which cannot burn it and would otherwise sweep it to the solver. See
+  [originator-fees.md](../../../../docs/originator-fees.md).
 - For **outputless orders** (pure deposits/exits/repays — nothing delivered by
   the solver) the originator fee is a `FeeTransferModule` MAKE **item**
   instead: absolute amount, pulled from the maker, same pro-rata slicing.

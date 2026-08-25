@@ -135,22 +135,46 @@ export interface RevokeCall {
  * helper: a contract that made arbitrary protocol calls from one address would be a
  * confused deputy. The returned calls all execute from the USER's own account.
  *
- * @returns the ordered calls to send (Permit3 `lockdownAll` first, then the
- *          protocol-native revokes). Empty if there is nothing to revoke.
+ * ⚠ THERE ARE TWO FUNDING SURFACES, AND CLEARING ONE IS NOT REVOKING.
+ * `Permit3TransferLib.transferFromWithFallback` tries the Permit3 leg and, when it
+ * fails for ANY reason — missing, capped, expired, or deliberately revoked — falls
+ * through to a plain `token.transferFrom`. So for a payer who ALSO granted a direct
+ * ERC-20 approval to the settlement, `lockdownAll` alone stops nothing: the fallback
+ * funds the very same pull. Pass those tokens as `directApprovals` and they are
+ * zeroed in the same bundle. `strictMode: true` additionally makes the Permit3 book
+ * the only funding path going forward, so a future direct approval cannot silently
+ * re-open the hole — this is the durable fix, and `buildStrictOnboarding` sets it at
+ * account setup so a revocation never has to.
+ *
+ * Order matters and is not cosmetic: strict mode is set FIRST, so that even if the
+ * bundle is sent as separate transactions and a fill lands between them, the
+ * fallback is already closed.
+ *
+ * @returns the ordered calls to send. Empty if there is nothing to revoke.
  */
 export function buildRevokeAll(params: {
   permit3: Address;
   tokens?: readonly TokenSpenderPair[];
   takers?: readonly SpenderRefPair[];
   nonces?: readonly { word: bigint; mask: bigint }[];
+  /** Direct ERC-20 approvals to zero — the fallback funding surface. Each entry is
+   *  the `(token, spender)` pair the payer approved, usually spender = settlement. */
+  directApprovals?: readonly TokenSpenderPair[];
+  /** Also enable Permit3 strict mode, closing the fallback permanently. Recommended
+   *  whenever the caller is revoking rather than merely trimming a grant. */
+  strictMode?: boolean;
   protocolRevokes?: readonly RevokeCall[];
 }): RevokeCall[] {
   const tokens = params.tokens ?? [];
   const takers = params.takers ?? [];
   const nonces = params.nonces ?? [];
+  const directApprovals = params.directApprovals ?? [];
   const protocolRevokes = params.protocolRevokes ?? [];
 
   const calls: RevokeCall[] = [];
+  if (params.strictMode) {
+    calls.push({ to: params.permit3, data: encodeSetStrictMode(true) });
+  }
   if (tokens.length || takers.length || nonces.length) {
     calls.push({
       to: params.permit3,
@@ -162,7 +186,147 @@ export function buildRevokeAll(params: {
       ),
     });
   }
+  // One `approve(spender, 0)` per direct grant, sent to the TOKEN, not to the hub —
+  // the hub has no authority over an allowance it was never part of.
+  for (const { token, spender } of directApprovals) {
+    calls.push({
+      to: token,
+      data: encodeFunctionData({ abi: ERC20_APPROVE_ABI, functionName: "approve", args: [spender, 0n] }),
+    });
+  }
   calls.push(...protocolRevokes);
+  return calls;
+}
+
+const ERC20_APPROVE_ABI = [
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    type: "function",
+    name: "allowance",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+// ──────────────────── funding posture (the two-surface view) ────────────────────
+
+/** What can actually move one of a payer's tokens, across BOTH funding surfaces. */
+export interface FundingPosture {
+  /** Live Permit3 grant to `spender` (0 if never granted or already lapsed). */
+  permit3Amount: bigint;
+  /** Permit3 expiry; `0` means never expires (note: the OPPOSITE of Permit2). */
+  permit3Expiration: number;
+  /** Live direct ERC-20 allowance to `spender` — the fallback surface. */
+  directAllowance: bigint;
+  /** Whether the payer has opted into strict mode, which disables the fallback. */
+  strictMode: boolean;
+  /**
+   * `true` when the token is still spendable through the direct allowance even
+   * though the Permit3 grant is gone or lapsed. THIS is the state a "revoked"
+   * badge in a wallet UI would otherwise get wrong.
+   */
+  fallbackIsLoadBearing: boolean;
+}
+
+/**
+ * Read both funding surfaces for one `(payer, token, spender)` and say plainly
+ * whether revoking Permit3 would actually stop a fill.
+ *
+ * Deliberately an SDK read rather than a `SettlementLens` method: the lens is
+ * hard against EIP-170 (a 237-byte addition already put it over once), and this is
+ * three plain `eth_call`s a frontend can batch itself. `SettlementLens`'s own
+ * `getOrderRelevantState` already folds the max of the two books into its fillable
+ * figure — which is correct for previewing a fill, and precisely why it cannot also
+ * answer "did my revoke work?".
+ */
+export async function readFundingPosture(
+  reader: ContractReader,
+  params: { permit3: Address; token: Address; owner: Address; spender: Address },
+): Promise<FundingPosture> {
+  const [grant, direct, strict] = await Promise.all([
+    reader.readContract({
+      address: params.permit3,
+      abi: PERMIT3_ABI,
+      functionName: "tokenAllowance",
+      args: [params.owner, params.spender, params.token],
+    }) as Promise<readonly [bigint, number]>,
+    reader.readContract({
+      address: params.token,
+      abi: ERC20_APPROVE_ABI,
+      functionName: "allowance",
+      args: [params.owner, params.spender],
+    }) as Promise<bigint>,
+    reader.readContract({
+      address: params.permit3,
+      abi: PERMIT3_ABI,
+      functionName: "strictMode",
+      args: [params.owner],
+    }) as Promise<boolean>,
+  ]);
+
+  const [amount, expiration] = grant;
+  // `expiration === 0` means NEVER EXPIRES in Permit3 (Permit2 means the opposite).
+  const lapsed = expiration !== 0 && BigInt(expiration) < BigInt(Math.floor(Date.now() / 1000));
+  const permit3Live = lapsed ? 0n : amount;
+
+  return {
+    permit3Amount: permit3Live,
+    permit3Expiration: expiration,
+    directAllowance: direct,
+    strictMode: strict,
+    fallbackIsLoadBearing: !strict && direct > 0n && permit3Live === 0n,
+  };
+}
+
+// ──────────────────── onboarding ────────────────────
+
+/**
+ * The recommended account setup: enable strict mode, THEN grant through Permit3.
+ *
+ * Ordering is the point. Strict mode makes the Permit3 book the only path that can
+ * move the payer's tokens, so from here on `revokeToken` / `lockdown` / an expiry
+ * are real kill switches rather than advisory ones — which is what a user assumes
+ * they already are. The flag is read only on an ALREADY-FAILED Permit3 leg, so it
+ * costs nothing on the fill hot path and nothing at all for a payer whose grants
+ * are in order.
+ *
+ * The trade, stated so an integrator can decline it deliberately: a payer in strict
+ * mode who holds only a direct ERC-20 approval can no longer be filled at all. That
+ * is the intended behaviour — it is the difference between "revoked" and "revoked
+ * unless you happen to have approved us some other way" — but an integrator
+ * migrating existing users should grant through Permit3 in the same bundle, which
+ * is exactly what this returns.
+ */
+export function buildStrictOnboarding(params: {
+  permit3: Address;
+  spender: Address;
+  tokens: readonly { token: Address; amount: bigint; expiration: number }[];
+  /** Set `false` to grant without strict mode (not recommended — see above). */
+  strictMode?: boolean;
+}): RevokeCall[] {
+  const calls: RevokeCall[] = [];
+  if (params.strictMode !== false) {
+    calls.push({ to: params.permit3, data: encodeSetStrictMode(true) });
+  }
+  for (const t of params.tokens) {
+    calls.push({
+      to: params.permit3,
+      data: encodeApproveToken(params.spender, t.token, t.amount, t.expiration),
+    });
+  }
   return calls;
 }
 

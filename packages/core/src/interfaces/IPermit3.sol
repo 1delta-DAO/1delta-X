@@ -318,5 +318,13 @@ interface IPermit3 {
     ///         the bitmap word at `wordPos`. Ported from Permit2's
     ///         `invalidateUnorderedNonces` — lets a signer cancel signed
     ///         permits before they are consumed.
+    /// @dev    ⚠ CANCELS THE PERMIT, NOT THE ORDER IT WITNESSES.
+    ///         {permitBatchWithWitnessIfNeeded} skips an already-spent nonce instead
+    ///         of reverting (the S-1 remediation), so a `fillWithPermit` whose grants
+    ///         this invalidates still fills IF a standing allowance — or a direct
+    ///         ERC-20 approval, via the {Permit3TransferLib} fallback — covers it.
+    ///         To stop the ORDER, use the settler's own cancels (`cancelOrder`,
+    ///         `cancelOrders`, `rollbackNonces`) — see {UnorderedNonces} and
+    ///         `docs/soft-cancel.md`.
     function invalidateUnorderedNonces(uint256 wordPos, uint256 mask) external;
 }

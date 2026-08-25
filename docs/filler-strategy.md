@@ -189,6 +189,43 @@ schedulable:
 Point the `CALL` step at whatever contract you like; `GuardedMatchSolver`
 deliberately exposes no callback surface, so there is nothing to authenticate.
 
+## 7. Every maker-supplied target is gas-unbounded
+
+An order names up to five addresses the settler will call **on the maker's behalf,
+with your gas**, and none of them carries a gas cap:
+
+| Surface | Call kind | What a hostile maker can do |
+| --- | --- | --- |
+| `validators` | `STATICCALL`, return capped at one word | burn gas, revert |
+| `invariants` | `STATICCALL`, return capped at one word | burn gas, revert — *after* the fill's transfers |
+| `pricingModule` | `STATICCALL`, return capped at one word | burn gas, revert |
+| `fillModule` | `STATICCALL` (the interface is `view`) | burn gas, revert, mis-size the delta *within* the core's cap |
+| `items[].module` | ordinary `CALL` | burn gas, revert, and make arbitrary state changes **under the maker's own Permit3 authority** |
+
+The four static surfaces cannot move funds and cannot bomb your memory — the return
+is read into scratch and capped at 32 bytes — so their damage ceiling is burnt gas.
+Item modules are real calls, but they act with the *maker's* authority: a module can
+only touch what that maker approved it for, never your inventory and never another
+maker's funds. `fillModule` chooses only the fill fraction; the denominator, the
+over-fill cap and the uniform per-leg scaling stay in the core.
+
+So the residual risk is economic, not custodial: **you can be made to pay for
+computation that then reverts.** This is the accepted posture across the whole
+protocol class — 1inch acknowledged it at L11, UniswapX at M-01 — and the mitigation
+is the same everywhere:
+
+* **Simulate against the exact block you intend to land in.** A validator reading a
+  price feed or a timestamp can be true at quote time and false at inclusion.
+* **Budget by shape, not by hope.** An order with several items and several
+  invariants has a wide gas profile; price that into your margin or skip it.
+* **Treat a revert from an unfamiliar module address as an order to blacklist, not
+  a race to re-enter.** Repeated reverts from the same maker are a griefing pattern.
+* **`minBumpBps` protects your price, not your gas.** It reverts the fill when the
+  tick moved against you — which still costs you the gas spent reaching the check.
+
+See [reference-audits.md §C9](reference-audits.md#c9--one-side-spends-the-other-sides-gas)
+for the audit precedent this posture is inherited from.
+
 ## Related
 
 * [deferred-match-settle.md](deferred-match-settle.md) — the engine: step encoding,

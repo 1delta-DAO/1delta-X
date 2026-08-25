@@ -100,7 +100,7 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         address, /*maker*/
         address, /*filler*/
         uint256, /*prevFilled*/
-        uint256, /*total*/
+        uint256 total,
         uint256 orderTiming,
         bytes calldata legsIn,
         bytes calldata legsOut,
@@ -116,7 +116,7 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         int256 answer = ChainlinkRead.read(FEED, MAX_STALENESS);
         if (answer < MIN_ANSWER || answer > MAX_ANSWER) revert ImplausiblePrice();
 
-        (uint256 anchor, uint256 start, uint256 end) = _band(legsIn, legsOut);
+        (uint256 anchor, uint256 start, uint256 end) = _band(total, legsIn, legsOut);
         uint256 fair = (anchor * uint256(answer) * NUM) / DEN;
 
         if (PRICE_OUTPUT) {
@@ -145,18 +145,49 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
     /// @dev The anchor (the fixed side's leg 0) and the priced band (the auctioned
     ///      side's leg 0). Which is which is the instance's `PRICE_OUTPUT` setting,
     ///      cross-checked against the order's signed side in {bump}.
-    function _band(bytes calldata legsIn, bytes calldata legsOut)
+    /// @dev The band, plus the anchor the fair amount is priced against.
+    ///
+    ///  ⚠ THE ANCHOR IS `total`, NOT THE RAW LEG, AND THAT IS LOAD-BEARING. This used
+    ///  to re-read `legsIn[0].start` / `legsOut[0].start` out of the packed blob. For
+    ///  an ordinary order the two are the same number — but for a {Proportional}
+    ///  order they are not, and the raw read was a live bug:
+    ///
+    ///    • `legsIn[0].start` on such an order is a MARKER (`type(uint256).max −
+    ///      (BPS − bps)`, ≈1.15e77), not an amount. `anchor · answer` then overflows
+    ///      for every feed answer ≥ 2, the `staticcall` panics, and
+    ///      {DutchAuction.priceBump} — which has no fallback — reverts
+    ///      `PriceModuleFailed`. So the order was signable, passed
+    ///      `SettlementLens.validateOrder`, and could never be filled by anyone.
+    ///    • The non-overflowing cases were worse than the revert: they priced the
+    ///      SENTINEL rather than the maker's live balance, so the peg this module
+    ///      exists to track was silently ignored.
+    ///
+    ///  The core already hands us the answer. `total` is the fill denominator
+    ///  {OrderGates.fillDenominator} resolved BEFORE any funds moved — a proportional
+    ///  marker already resolved against the maker's live balance and pinned in
+    ///  `FillCtx.anchor`, so this module now prices against exactly the amount the
+    ///  fill will actually charge. It is the same value the settler and the lens both
+    ///  use, which is what makes preview and fill agree by construction rather than by
+    ///  two implementations happening to match.
+    ///
+    ///  For a `fillTotal` order `total` is that signed denominator rather than the leg
+    ///  amount — which is likewise the right anchor, since that IS the unit the fill is
+    ///  denominated in.
+    ///
+    ///  The blob is still validated and still read for the BAND (`start`/`end`), which
+    ///  is genuinely per-leg and has no equivalent in the call's scalars.
+    ///  Cross-reference: `docs/reference-audits.md` §C13, finding F8.
+    function _band(uint256 total, bytes calldata legsIn, bytes calldata legsOut)
         private
         view
         returns (uint256 anchor, uint256 start, uint256 end)
     {
         if (PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE) == 0) revert NoBand();
         if (PackedArrays.validateFixed(legsOut, PackedArrays.LEG_OUT_STRIDE) == 0) revert NoBand();
+        anchor = total;
         if (PRICE_OUTPUT) {
-            (, anchor,) = PackedArrays.legIn(legsIn, 0);
             (, start, end,) = PackedArrays.legOut(legsOut, 0);
         } else {
-            (, anchor,,) = PackedArrays.legOut(legsOut, 0);
             (, start, end) = PackedArrays.legIn(legsIn, 0);
         }
     }

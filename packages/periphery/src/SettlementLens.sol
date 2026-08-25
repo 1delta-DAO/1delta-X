@@ -78,11 +78,28 @@ contract SettlementLens {
     /// @notice Lifecycle status for the solver-preflight view. Mirrors 0x's
     ///         `OrderStatus` so an off-chain filler can classify an order from a
     ///         single `getOrderRelevantState` call.
+    /// @dev ⚠ `Cancelled` MEANS "cancelled, or a completed fill-once order", AND THAT
+    ///      AMBIGUITY IS NOT FIXABLE HERE. The settler tracks lifecycle on two axes:
+    ///      the per-hash `filled` counter (with its cancellation sentinel) and the
+    ///      nonce bitmap. A {DutchAuction.useNonceInvalidator} order deliberately
+    ///      keeps NO per-order counter — its progress IS the consumed nonce — so a
+    ///      fill-once order that FILLED and one whose nonce the maker CANCELLED leave
+    ///      byte-identical chain state. No view can separate them.
+    ///
+    ///      Consumers that need the distinction must read the `OrderFilled` event,
+    ///      which the settler emits on the fill and not on the cancel. An indexer
+    ///      following events already has this; a pure state poll never will.
+    ///
+    ///      Every OTHER case is exact: a per-hash `cancelOrder` reports `Cancelled`
+    ///      (it used to report `Filled` — see the note in {_orderState}), and an
+    ///      ordinary counted order reports `Filled` only when its counter actually
+    ///      reached the denominator.
     enum OrderStatus {
         Invalid, // malformed (bad array shape) — can never fill
         Fillable, // open, at least one unit still fillable
         Filled, // fully filled
-        Cancelled, // nonce bit set, or below the maker's rollback floor
+        Cancelled, // per-hash sentinel, nonce bit set, below the rollback floor — or a
+        // completed fill-once order (see the ambiguity note above)
         Expired // past expiry
     }
 
@@ -117,8 +134,25 @@ contract SettlementLens {
 
     /// @notice Remaining fillable amount, in denominator units (`fillTotal` when
     ///         set, else `tokenIn[0]` for SELL / `tokenOut[0]` for BUY).
+    /// @dev    A per-hash cancellation ({OrderState.cancelOrder}) parks `filled` at
+    ///         `type(uint256).max`, which is ABOVE any real denominator — so without
+    ///         the sentinel check the subtraction below underflows and this view
+    ///         answers a plain `Panic(0x11)` instead of the {OrderCancelled} this
+    ///         contract already declares and its sibling {_resolveState} already
+    ///         raises. That inconsistency was the bug: `_resolveState`'s docstring
+    ///         says it exists so the quote paths "can never disagree about the cancel
+    ///         semantics", and this function had been left out of that consolidation.
+    ///
+    ///         Reverting (rather than answering 0) is deliberate: 0 is already the
+    ///         truthful answer for a FULLY FILLED order, and collapsing the two would
+    ///         hand callers the same number for "done" and "revoked". A caller that
+    ///         needs a batch-safe, non-reverting answer over a whole book should use
+    ///         {getOrderRelevantState}, which returns a status enum and never throws
+    ///         for a cancelled order.
     function remaining(Order calldata order) external view returns (uint256) {
-        return OrderGates.fillDenominator(order) - SETTLEMENT.filled(order.hash());
+        uint256 done = SETTLEMENT.filled(order.hash());
+        if (done == type(uint256).max) revert OrderCancelled();
+        return OrderGates.fillDenominator(order) - done;
     }
 
     /// @notice Preview EXACTLY what `Settlement.fillUpTo` would settle right now —
@@ -495,10 +529,23 @@ contract SettlementLens {
             return (OrderStatus.Invalid, 0);
         }
         if (block.timestamp > order.expiry()) return (OrderStatus.Expired, 0);
+
+        // THE SETTLER TRACKS LIFECYCLE ON TWO AXES, AND THIS FUNCTION MUST NOT
+        // COLLAPSE THEM. {OrderState.cancelOrder} records a PER-HASH cancellation by
+        // parking `filled` at `type(uint256).max`; {NonceManager} records a BULK one
+        // in the nonce bitmap. Reading only the bitmap meant a hash-cancelled order
+        // fell through to the `done >= anchor` compare below — where the sentinel is
+        // trivially ≥ any real denominator — and was reported as **Filled**. Indexers
+        // and maker dashboards then showed a cancelled order as executed.
+        //
+        // Checked BEFORE the denominator is resolved, because for a cancelled order
+        // that resolve is wasted work (and, for a {Proportional} anchor, a wasted
+        // `balanceOf` staticcall).
+        uint256 done = SETTLEMENT.filled(orderHash);
+        if (done == type(uint256).max) return (OrderStatus.Cancelled, 0);
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (OrderStatus.Cancelled, 0);
 
         uint256 anchor = OrderGates.fillDenominator(order);
-        uint256 done = SETTLEMENT.filled(orderHash);
         if (done >= anchor) return (OrderStatus.Filled, 0);
 
         fillableAmount = anchor - done;
@@ -593,10 +640,16 @@ contract SettlementLens {
             }
         }
         for (uint256 j; j < nOut; j++) {
-            // A leg addressed to the settlement contract permanently burns that
-            // delivery (it lands in the anti-donation snapshot baseline and is
-            // never swept). On-chain it's a maker self-burn, not an exploit, but
-            // the preflight should catch the footgun.
+            // A leg addressed to the settlement contract is a footgun on BOTH paths,
+            // in two different ways. On the single-order path it permanently burns
+            // that delivery — it lands in the anti-donation snapshot baseline and is
+            // never swept — which is a maker self-burn, not an exploit. On the netted
+            // path it is REJECTED ({Base.OutputToSettlement}), because there it could
+            // not be burned at all: a pool→pool self-transfer leaves the balance
+            // untouched while the schedule marks the obligation discharged, so the
+            // amount would clear the pre-context floor and reach the SOLVER in the
+            // final sweep. Either way the preflight should catch it before a
+            // signature exists.
             (address ojToken,,, address ojRecip) = PackedArrays.legOut(order.legsOut, j);
             if (ojRecip == address(SETTLEMENT)) return (false, "recipient is settlement (burn)");
             for (uint256 k = j + 1; k < nOut; k++) {
@@ -867,7 +920,14 @@ contract SettlementLens {
         // ── current fillability (time/state-dependent) ──
         if (order.expiry() < block.timestamp) return (false, "order expired");
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (false, "nonce cancelled");
-        if (SETTLEMENT.filled(order.hash()) >= anchor) return (false, "order fully filled");
+        // The per-hash cancellation sentinel, named as itself. `filled == max` is
+        // ≥ any real `anchor`, so before this the next line reported a cancelled
+        // order as "order fully filled" — the same two-axis conflation {_orderState}
+        // carried. Both directions reject, so this only ever changed the REASON
+        // string; it is fixed because a wrong reason is what an integrator reads.
+        uint256 done = SETTLEMENT.filled(order.hash());
+        if (done == type(uint256).max) return (false, "order cancelled");
+        if (done >= anchor) return (false, "order fully filled");
 
         return (true, "");
     }

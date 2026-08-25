@@ -310,9 +310,28 @@ abstract contract Core is Base {
 
     /// @notice Single-signature fill whose TAKE item is funded by a ONE-SHOT
     ///         `PermitTake` instead of a standing taker allowance — so the maker's
-    ///         borrow/withdraw authority is consumed by this fill and NOTHING
+    ///         borrow/withdraw authority is consumed by this fill and no ALLOWANCE
     ///         survives it. The permit's witness is this order's hash, so the one
     ///         signature authorises both the order and the position draw.
+    ///
+    ///  ⚠ WHAT DOES NOT SURVIVE, AND WHAT DOES. The taker AUTHORITY is genuinely
+    ///  one-shot: nothing is written to the taker book, so no later fill — through
+    ///  this entry or any other — can draw the maker's position again without a
+    ///  fresh signature. The ORDER is a different object and outlives the permit.
+    ///  A successful fill writes `filled[orderHash]` through {OrderState._openFill},
+    ///  and {Signatures._verifySignature} skips re-verification once that counter is
+    ///  non-zero — so any REMAINING size is thereafter fillable with an arbitrary
+    ///  `sig`, funded by the maker's standing TOKEN allowances.
+    ///
+    ///  That is correct, not a gap, and it is the same rule every other entry runs
+    ///  under: a non-zero counter proves some earlier fill presented valid
+    ///  authorization for that maker-committing hash, and here the permit's witness
+    ///  IS the order hash. It is also close to unreachable, because
+    ///  {Base._takeByPermit} requires `permit.amount == slice` and a pro-rata slice
+    ///  below the permit's amount cannot match — so this entry is implicitly
+    ///  full-fill and normally leaves no remainder at all. A maker who wants the
+    ///  remainder of a partly-filled order to stop dead should use {cancelOrder},
+    ///  exactly as an EIP-1271 maker must.
     ///
     ///  Shape: the order carries its TAKE item exactly as it would for {fill}; only
     ///  the funding of that item changes ({Base._runItem} dispatches through

@@ -5,6 +5,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   PERMIT3_ABI,
   buildRevokeAll,
+  buildStrictOnboarding,
   encodeApproveTaker,
   encodeLockdownAll,
   encodePermitTake,
@@ -111,3 +112,86 @@ describe("buildRevokeAll bundles the Permit3 side with protocol-native revokes",
     expect(calls).toHaveLength(0);
   });
 });
+
+// The two-surface rule: `Permit3TransferLib.transferFromWithFallback` falls through
+// to a plain `transferFrom` whenever the Permit3 leg fails — INCLUDING because it was
+// revoked — so a bundle that clears only the hub has not revoked anything for a payer
+// who also holds a direct approval. See docs/reference-audits.md, finding F1.
+describe("buildRevokeAll closes the direct-approval fallback too", () => {
+  const TOKEN = getAddress("0x00000000000000000000000000000000000000d4");
+
+  it("zeroes the direct ERC-20 approval, addressed to the token not the hub", () => {
+    const calls = buildRevokeAll({
+      permit3: DEPLOYMENT.permit3,
+      tokens: [tokenSpenderPair(TOKEN, SPENDER)],
+      directApprovals: [tokenSpenderPair(TOKEN, SPENDER)],
+    });
+    expect(calls).toHaveLength(2);
+    expect(decodeFunctionData({ abi: PERMIT3_ABI, data: calls[0]!.data }).functionName).toBe("lockdownAll");
+
+    // The direct leg goes to the TOKEN — the hub has no authority over an allowance
+    // it was never part of.
+    const direct = calls[1]!;
+    expect(direct.to).toBe(TOKEN);
+    const decoded = decodeFunctionData({ abi: ERC20_ABI, data: direct.data });
+    expect(decoded.functionName).toBe("approve");
+    expect(decoded.args).toEqual([SPENDER, 0n]);
+  });
+
+  it("sets strict mode FIRST so an interleaved fill cannot use the fallback", () => {
+    const calls = buildRevokeAll({
+      permit3: DEPLOYMENT.permit3,
+      tokens: [tokenSpenderPair(TOKEN, SPENDER)],
+      directApprovals: [tokenSpenderPair(TOKEN, SPENDER)],
+      strictMode: true,
+    });
+    expect(calls).toHaveLength(3);
+    const first = decodeFunctionData({ abi: PERMIT3_ABI, data: calls[0]!.data });
+    expect(first.functionName).toBe("setStrictMode");
+    expect(first.args).toEqual([true]);
+    expect(calls[0]!.data).toBe(encodeSetStrictMode(true));
+  });
+});
+
+describe("buildStrictOnboarding grants behind strict mode", () => {
+  const TOKEN = getAddress("0x00000000000000000000000000000000000000d4");
+
+  it("enables strict mode before the first grant", () => {
+    const calls = buildStrictOnboarding({
+      permit3: DEPLOYMENT.permit3,
+      spender: SPENDER,
+      tokens: [{ token: TOKEN, amount: 10n ** 24n, expiration: 0 }],
+    });
+    expect(calls).toHaveLength(2);
+    expect(decodeFunctionData({ abi: PERMIT3_ABI, data: calls[0]!.data }).functionName).toBe("setStrictMode");
+
+    const grant = decodeFunctionData({ abi: PERMIT3_ABI, data: calls[1]!.data });
+    expect(grant.functionName).toBe("approveToken");
+    // expiration 0 == NEVER EXPIRES in Permit3 (the opposite of Permit2).
+    expect(grant.args).toEqual([SPENDER, TOKEN, 10n ** 24n, 0]);
+  });
+
+  it("can be opted out of, for an integrator that wants the fallback", () => {
+    const calls = buildStrictOnboarding({
+      permit3: DEPLOYMENT.permit3,
+      spender: SPENDER,
+      tokens: [{ token: TOKEN, amount: 1n, expiration: 0 }],
+      strictMode: false,
+    });
+    expect(calls).toHaveLength(1);
+    expect(decodeFunctionData({ abi: PERMIT3_ABI, data: calls[0]!.data }).functionName).toBe("approveToken");
+  });
+});
+
+const ERC20_ABI = [
+  {
+    type: "function",
+    name: "approve",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;

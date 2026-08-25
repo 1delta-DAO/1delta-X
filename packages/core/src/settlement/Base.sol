@@ -158,6 +158,16 @@ abstract contract Base is Signatures {
     ///      asset to the filler, not a pool counterparty — out of scope for the
     ///      netted flow (a shared-pool SETTLE needs its own design).
     error MatchSettleItemUnsupported();
+    /// @dev A `matchSettle` order carries an output leg addressed at Settlement
+    ///      itself — the maker "self-burn". The single-order path strands such a leg
+    ///      forever (no sweep exists), which is what the maker signed for; the netted
+    ///      path would instead pay it to the SOLVER, because a pool→pool self-transfer
+    ///      leaves the balance above the pre-context floor while `outstanding` records
+    ///      the obligation as met. Fill these through the single-order path, or fix
+    ///      the recipient. NO ARGUMENTS, deliberately: naming `(order, leg)` the way
+    ///      the sibling plan errors do measured **+37 bytes** of Settlement against a
+    ///      53-byte EIP-170 budget. The lens reports the offending leg off-chain.
+    error OutputToSettlement();
     /// @dev A `matchSettle` order repeats an input token across two `legsIn` legs.
     ///      Item proceeds are attributed per token within a step window, so two
     ///      same-token legs would mis-account. Use distinct tokens
@@ -369,7 +379,7 @@ abstract contract Base is Signatures {
             } else {
                 PERMIT3.take(module, order.maker, uint160(slice), to, itemData);
             }
-        } else {
+        } else if (op == uint256(ItemOp.SETTLE)) {
             // SETTLE deliberately keeps NO width check: {ISettlementModule.settle}
             // takes a `uint256` and never narrows, so a wide slice (an ERC-1155 id
             // count, a lot size) is meaningful there and must stay expressible.
@@ -380,6 +390,21 @@ abstract contract Base is Signatures {
             // maker's receipt is guaranteed by the mandatory tokenOut delivery (run
             // before items) and/or an invariant, not by the module.
             ISettlementModule(module).settle(order.maker, ctx.filler, slice, itemData);
+        } else {
+            // AN UNKNOWN OP IS A MALFORMED RECORD, NOT A SETTLE. `op` is a raw byte
+            // from the signed blob, so without this every `op >= 2` fell into the
+            // SETTLE branch above — which quietly gave the batch path's SETTLE
+            // prohibition ({Batch._assertMatchShape}) an equality test it could be
+            // stepped around. That guard now asks `>=` and is sound on its own; this
+            // is the second half, so the dispatcher and the guard agree about what
+            // the byte means.
+            //
+            // Reuses {PackedArrays.MalformedPackedArray} rather than declaring a new
+            // error: the selector is already in this runtime (the blob validators
+            // raise it), and Settlement has 67 bytes of EIP-170 headroom — a fresh
+            // error would spend a third of it on a revert reason for a state only a
+            // maker can sign themselves into.
+            revert PackedArrays.MalformedPackedArray();
         }
     }
 

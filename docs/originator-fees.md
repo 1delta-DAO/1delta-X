@@ -198,11 +198,24 @@ Practical notes:
   protection. `validateOrder` still catches structural nonsense (zero legs,
   duplicate `(token, recipient)` pairs).
 - **Never address a leg at the settlement contract.** A `LegOut` whose
-  `recipient == Settlement` delivers into the anti-donation snapshot baseline,
-  where it is permanently burned (no sweep exists). It's a maker self-burn, not
-  an exploit — but `validateOrder` flags it (`"recipient is settlement (burn)"`)
-  so a preflight catches the footgun. Each `LegOut.recipient` is signature-bound
-  (part of the order hash), so a filler can never alter a recipient or the
-  number of legs.
+  `recipient == Settlement` behaves differently on the two fill paths, and
+  neither is what a maker wants:
+  - on the **single-order** path (`fill` / `fillUpTo` / `batchFill`) the filler
+    pays it into Settlement, which has no sweep and no admin, so it is
+    **permanently burned**. A maker self-burn, not an exploit;
+  - on the **netted** path (`matchSettle`) it is **rejected**
+    (`OutputToSettlement`). It cannot be burned there: the delivery would be a
+    pool→pool self-transfer, leaving the balance untouched while the schedule
+    records the obligation as discharged — so the amount would sit above the
+    pre-context floor and the final sweep would hand it to the **solver**. That
+    is the opposite of a burn, and it gave solvers a positive-EV reason to hunt
+    mis-authored orders and bundle them with anything touching the same token,
+    so the settler refuses rather than pays.
+
+  `validateOrder` flags the shape for either path
+  (`"recipient is settlement (burn)"`), so a preflight catches the footgun before
+  a signature exists. Each `LegOut.recipient` is signature-bound (part of the
+  order hash), so a filler can never alter a recipient or the number of legs —
+  this is maker authoring, never solver manipulation.
 - **No fee event.** Index the ERC-20 `Transfer` to the recipient, or read the
   fee leg's entry in the fill's return value.

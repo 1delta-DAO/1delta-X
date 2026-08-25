@@ -318,6 +318,28 @@ never opts in. `lockdownAll(tokens, takers, nonceWords, nonceMasks)` revokes bot
 books and invalidates signed-permit nonces in one transaction (the
 protocol-native delegation still needs its own per-protocol revoke).
 
+**The SDK now makes the safe configuration the default one (2026-08-25, F1).**
+Strict mode being off by default meant the protected configuration was the one
+nobody was in, which is the shape the iosiro lingering-allowance finding took
+against 1inch Settlement. Three builders close it at the point where the user
+actually is:
+
+- `buildStrictOnboarding({ permit3, spender, tokens })` — the recommended account
+  setup: `setStrictMode(true)` **then** the Permit3 grants, so the window in which
+  a stray direct approval could fund a fill never opens.
+- `buildRevokeAll({ …, directApprovals, strictMode })` — a revoke bundle that also
+  zeroes the direct ERC20 approvals (`approve(spender, 0)`, addressed to the
+  **token**) and enables strict mode. Strict mode is emitted **first**, so a fill
+  landing between separately-sent calls cannot use the fallback.
+- `readFundingPosture(reader, { permit3, token, owner, spender })` — reads both
+  surfaces and returns `fallbackIsLoadBearing`: true exactly when Permit3 says
+  "revoked" but the direct allowance still funds every fill. That is the state a
+  revoke badge otherwise gets wrong. An SDK read rather than a lens method — the
+  lens is hard against EIP-170.
+
+See [docs/account-onboarding.md](docs/account-onboarding.md#strict-mode-and-the-two-funding-surfaces)
+for the integrator-facing version.
+
 ### A signed permit batch OVERWRITES standing allowances (S-4)
 
 `Allowance.grant` is an unconditional single-slot write, and `fillWithPermit`
@@ -520,6 +542,64 @@ missing-delegate revert. All four pass.
 **No open items remain from the 06-18 / 07-29 audits.** Note that all three audits
 to date are **internal**; the protocol has not been reviewed by an external firm,
 and nothing in this repository is deployed.
+
+---
+
+## Audit (2026-08-25): external-corpus crosswalk
+
+A different method from the three passes above: rather than reading this code for
+defects, the published audit corpus for the protocol class — 1inch LOP + Fusion, 0x
+v4, CoW GPv2, UniswapX, Velora Portikus, plus the two live incidents — was distilled
+into **fifteen failure classes**, and each was traced through this tree. The full
+taxonomy, with the finding or exploit that anchors each class, is
+[docs/reference-audits.md](docs/reference-audits.md); the class keys `C1…C15` used
+below are defined there.
+
+Eleven classes are structurally prevented or already correct, several of them by
+decisions taken deliberately in response to the same findings (C5 — a price module
+returns a *clamped bump*, never an amount; C1 — the solver's call runs through
+`SolverCallbackExecutor`; C11 — the idempotent permit). Two are inverted in the safe
+direction relative to the published bug (C8 — a zero-duration decay resolves to the
+maker's `start`, where UniswapX L-03 resolved to the filler's `end`).
+
+| ID | Class | Severity | Finding | Resolution |
+|----|-------|----------|---------|------------|
+| F1 | C12 | Medium | `transferFromWithFallback` does not discriminate *why* the Permit3 leg failed, so the direct-approval fallback silently overrides a deliberate revocation. Strict mode closed it but defaulted to off — the protected configuration was the one nobody was in. | **Off-chain.** Three SDK builders (`buildStrictOnboarding`, `buildRevokeAll` with `directApprovals`/`strictMode`, `readFundingPosture`) plus [account-onboarding.md](docs/account-onboarding.md#strict-mode-and-the-two-funding-surfaces). No contract change: the fallback is load-bearing for direct-approval makers, and the lens has no EIP-170 headroom. |
+| F2 | C3/C6 | Low | `ItemOp` was decoded as a raw byte and `Base._runItem` folded every `op >= 2` into the SETTLE branch, so `Batch._assertMatchShape`'s `op == SETTLE` prohibition could be stepped around by signing `op = 3` — running a SETTLE inside `matchSettle`, the one item kind that path declares it cannot account for. Maker-signed, so never third-party reachable, and both shipped SETTLE modules move only the maker's own assets. | **Fixed.** `_runItem` reverts `MalformedPackedArray` on an unknown op (the existing selector is reused — Settlement had 67 bytes of headroom); `_assertMatchShape` asks `>=`. `test/items/ItemOpRange.t.sol`, 6 tests incl. a fuzz over the invalid range. **+14 bytes** (24,509 → 24,523 of 24,576). |
+| F3 | C9 | Low | Maker-supplied targets (`pricingModule`, `fillModule`, validators, invariants, item modules) are gas-unbounded and the filler pays. Accepted class — 1inch L11, UniswapX M-01 — but the posture was inferred rather than stated. | **Documented.** [filler-strategy.md §7](docs/filler-strategy.md#7-every-maker-supplied-target-is-gas-unbounded), with the per-surface static/stateful table and the damage ceiling for each. |
+| F4 | C7 | Info | Rounding is uniformly maker-favourable, and the auctioned side is per-fill rather than cumulative, so splitting a fill costs the *filler* ≤1 wei per leg per fill. Correct direction; bounded by `minFillAnchor`. | **Documented.** [pricing-modes.md](docs/pricing-modes.md#rounding-who-pays-the-wei) states the invariant: *fixed legs are exact and cumulative; auctioned legs round toward the maker, per fill.* |
+| F5 | C4 | Info | `fillWithPermitTake`'s "NOTHING survives it" was true of the permit but not the order — a successful fill writes `filled[orderHash]`, which permanently disables signature re-verification for that hash. Correct per the documented invariant (the permit's witness IS the order hash) and near-unreachable (`permit.amount == slice` forces a full fill). | **Comment corrected** to state what actually holds, and to point at `cancelOrder` as the switch that binds. |
+| F6 | C3 | Info | Signature malleability accepted, matching Permit2. | **No change** — already covered by [S-7](#signature-malleability-is-inert-on-chain-but-the-orderbook-must-key-on-the-hash-s-7). Verified `@1delta-x/orderbook` keys, sorts and paginates on `orderHash`. |
+
+Three checks worth re-running whenever the relevant code moves are listed under
+[Checked and clean](docs/reference-audits.md#checked-and-clean) — in particular the
+**module-dispatch selector scan** (`makeOnBehalf` / `settle` must never collide with
+anything on Permit3, which is what contains the C1 shape here) and the rule that a
+**SETTLE module must never pull from the filler**.
+
+Repo state after this pass: core **513/513**, SDK **158/158**, Settlement
+24,523 / 24,576.
+
+### Second pass, same day: F7–F12
+
+An independent review against the same corpus produced six more items, two with
+executed PoCs. All were re-derived here before being acted on, and all six hold. Five
+are fixed in code; one is documentation. Notably **three of the six are C13
+(preflight drift)** — the class this codebase had already been bitten by once and
+written up — which is the strongest available argument for keeping shared rules in
+`OrderGates` rather than in two implementations.
+
+| ID | Class | Severity | Finding | Resolution |
+|----|-------|----------|---------|------------|
+| F7 | C15/C13 | Low | `matchSettle` paid a self-addressed output leg to the SOLVER instead of burning it. The pool→pool self-transfer leaves the balance untouched while `outstanding` marks the obligation discharged, so the amount clears the pre-context floor and reaches `_sweepSurplus`. Three doc sites promised a permanent burn. Maker-authored (`legsOut` is in the typehash) but solver-opportunistic. Reproduced: 2,000 USDC burned via `fill`, the same 2,000 paid to the solver via `matchSettle`. | **Fixed.** `_stepDeliver` reverts `OutputToSettlement`; the single-order burn is unchanged and pinned by a control. Docs corrected. `test/swaps/OutputToSettlement.t.sol`. **+25 bytes** (24,523 → 24,548); the error takes no arguments because naming `(order, leg)` cost +37 against a 53-byte budget. |
+| F8 | C13 | Low | `ChainlinkPeggedPriceModule._band` read `legsIn[0].start` raw, so a `Proportional` marker (≈1.15e77) overflowed `anchor · answer` and every fill reverted `PriceModuleFailed` — while `validateOrder` approved the order. A preflight LOOSER than the settler. | **Fixed, and the combination now works.** The core already passes `total` (the resolved denominator); the module now uses it instead of re-reading the leg. The other three pricing modules were checked and do not read legs raw. `test/ProportionalPeggedPrice.t.sol`, 5 tests. |
+| F9 | C13 | Info | The lens read only the NONCE axis, so an order cancelled by HASH — whose `filled` sentinel is ≥ any denominator — reported as **Filled**. `validateOrder` repeated it in its reason string. | **Fixed** in that direction. The inverse (a completed fill-once order reports `Cancelled`) is **not fixable** — such an order keeps no counter, so filled and nonce-cancelled leave identical state. Now documented on `OrderStatus`, pointing consumers at the `OrderFilled` event. |
+| F10 | C13 | Info | `SettlementLens.remaining` had no sentinel check outside `unchecked`, so a cancelled order produced `Panic(0x11)` rather than the `OrderCancelled()` its sibling `_resolveState` raises. | **Fixed** to revert `OrderCancelled()`. Not `0` — that is already the truthful answer for a fully-filled order, and collapsing the two hands callers one number for "done" and "revoked". Docstring points batch callers at `getOrderRelevantState`. |
+| F11 | C13 | Info | `OriginSettler7683.open` emitted `Open` without the signature check `openFor` performs, so it could advertise an order that reverts at fill time — breaking the invariant `openFor` states. | **Fixed** by adding `LENS.checkSignature`. Costs the signature-less maker nothing: an empty `sig` routes to the settler's `orderApproved` record, so the `approveOrder`-then-`open` path passes by construction. |
+| F12 | C13 | Info | `UnorderedNonces` called `invalidateUnorderedNonces` "a complete kill switch … regardless of what was signed against it". True of permits; a maker could read it as covering the ORDER. `permitBatchWithWitnessIfNeeded` skips a spent nonce (the S-1 remediation), so the fill proceeds without the grants and succeeds if other funding exists. | **Docs.** Corrected in `UnorderedNonces`, `IPermit3` and the permit3 README, as the converse of the existing "Revoking a Permit3 allowance is NOT a kill switch" caveat above. No code defect — the order-level cancels all bind on this path. |
+
+Repo state after the second pass: core **518/518**, periphery **41/41**,
+modules-pricing-chainlink **10/10**, SDK **158/158**, Settlement **24,548 / 24,576**.
 
 ---
 

@@ -229,6 +229,22 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   via-IR to be deployable at all, the restructurings that returned ~3.3KB, and why
   the `optimizer_runs` curve is not an escape hatch from a size regression.
 
+## Security
+
+- **[reference-audits.md](reference-audits.md)** — the published audit corpus for
+  this protocol class (1inch LOP + Fusion, 0x v4, CoW GPv2, UniswapX, Velora
+  Portikus, plus both live incidents), distilled into **fifteen failure classes**
+  `C1…C15` with a verdict for each against this codebase. Read it before designing
+  a feature: most of these classes are already load-bearing decisions here — the
+  price module returns a *clamped bump* rather than an amount because of C5, the
+  solver's callback runs through a trampoline because of C1, the permit is
+  idempotent because of C11 — and knowing which finding a piece of code answers is
+  what stops it being "simplified" back into the bug. Also the glossary (the same
+  word means different things in 0x, CoW and UniswapX, and this repo borrows from
+  all three), the F1–F6 findings ledger, and the checks worth re-running when the
+  relevant code moves. Companion to [SECURITY.md](../SECURITY.md), which is the
+  trust model and the audit log.
+
 ## Reading order
 
 New to the codebase: the [settlement README](../packages/core/src/settlement/README.md)

@@ -12,10 +12,30 @@ import {Permit3Base} from "./Permit3Base.sol";
 /// @dev    ONE BITMAP PER OWNER, SHARED BY BOTH SIGNED FLOWS — allowance permits
 ///         ({SignedPermits}) and one-shot transfers ({SignatureTransfer}) draw from
 ///         the same space. That is deliberate: it makes `invalidateUnorderedNonces`
-///         a complete kill switch for a nonce range regardless of what was signed
+///         a complete kill switch for a nonce range regardless of which FLOW signed
 ///         against it, and removes any chance of a message being replayed by
 ///         re-submitting it through the other flow. The cost is that off-chain
 ///         nonce allocation must be per-owner, not per-message-type.
+///
+///  ⚠ IT KILLS THE GRANTS, NOT THE ORDER. Read the sentence above narrowly: the
+///  bitmap is a kill switch over PERMITS, and a maker should not read it as one over
+///  the ORDER a witness-bound permit is attached to.
+///
+///  {SignedPermits.permitBatchWithWitnessIfNeeded} still verifies the signature, then
+///  returns SILENTLY on a spent bit rather than reverting — the S-1 remediation,
+///  without which one front-run permanently bricks any gasless order (see the note
+///  there and {IPermit3}). So {Core.fillWithPermit} proceeds past an invalidated
+///  nonce: the permit's grants are simply not applied. If a standing Permit3
+///  allowance — or a direct ERC-20 approval, via the
+///  {Permit3TransferLib} fallback — already funds the fill, it succeeds.
+///
+///  The cancellations that DO bind the order are all on the settler and all run on
+///  every fill: {OrderState.cancelOrder} (by hash), {NonceManager}'s order-nonce
+///  bitmap and `rollbackNonces`, and the expiry. `docs/soft-cancel.md` tabulates
+///  them, and correctly omits this function. The funding half of the same caveat —
+///  that a direct approval survives Permit3 revocation unless the payer enables
+///  strict mode — is `SECURITY.md`, "Revoking a Permit3 allowance is NOT a kill
+///  switch"; this is its converse.
 ///
 ///  PROVENANCE — Permit2 `SignatureTransfer`'s nonce half (Uniswap, MIT).
 ///  ─────────────────────────────────────────────────────────────────────────

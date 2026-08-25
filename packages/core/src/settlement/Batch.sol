@@ -403,7 +403,14 @@ abstract contract Batch is Core {
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < nItems;) {
             (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
-            if (op == uint256(ItemOp.SETTLE)) revert MatchSettleItemUnsupported();
+            // `>=`, NOT `==`, and the difference is load-bearing. `op` is a RAW BYTE
+            // out of the signed blob ({PackedArrays.itemAt} deliberately does not
+            // narrow it), and {Base._runItem} dispatches MAKE, else TAKE, else
+            // SETTLE — so every `op >= 2` runs the SETTLE branch. An equality test
+            // here would let an item signed `op = 3` walk past this guard and then
+            // execute the very thing it exists to forbid. Same rule, asked the way
+            // the dispatcher actually behaves.
+            if (op >= uint256(ItemOp.SETTLE)) revert MatchSettleItemUnsupported();
             cursor = next;
             unchecked {
                 ++i;
@@ -521,6 +528,28 @@ abstract contract Batch is Core {
             uint256 amt = amts[j];
             if (amt != 0) {
                 (address token,,, address to) = PackedArrays.legOut(order.legsOut, j); // one decode
+                // A LEG ADDRESSED AT SETTLEMENT IS NOT DELIVERABLE HERE, AND SILENTLY
+                // PAYING IT TO THE SOLVER IS WORSE THAN REFUSING IT. On the
+                // single-order path such a leg is a maker SELF-BURN: the filler pays
+                // it into Settlement, which has no sweep, so it is stranded forever —
+                // that is what the docs promise and what {Core._deliverOutputs} does.
+                // The netted path cannot honour the same promise. The transfer would
+                // be a SELF-transfer (pool → pool), leaving the balance untouched
+                // while `outstanding` records the obligation as discharged — so the
+                // amount lands above the pre-context floor and {_sweepSurplus} hands
+                // it to the SOLVER. Same signed order, opposite outcome, and it gives
+                // a solver positive-EV reason to hunt mis-authored orders and bundle
+                // them with anything touching the same token.
+                //
+                // This is the exact hazard {_creditItemProceeds} already closes for
+                // stray TAKE proceeds, and it is BROADER: an item's proceeds token may
+                // be absent from the universe, but a `legsOut` token is always in it.
+                // Refused rather than refunded because, unlike item proceeds, there is
+                // no honest destination to refund to — the maker deliberately signed
+                // the amount away. {SettlementLens.validateOrder} already reports the
+                // shape as malformed for every order; on this path it is exploitable,
+                // so the settler agrees with the lens instead of taking the money.
+                if (to == address(this)) revert OutputToSettlement();
                 bool makerLeg = to == address(0) || to == order.maker;
                 SafeTransferLib.safeTransfer(token, makerLeg ? order.maker : to, amt);
                 unchecked {

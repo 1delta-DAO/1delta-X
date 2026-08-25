@@ -311,6 +311,41 @@ signed `start` caps how far that can go (an uncapped design has no such bound), 
 
 ---
 
+## Rounding: who pays the wei
+
+Once the bump resolves to a tick, the per-leg slice is a division, and every
+division has a loser. The invariant, in one line:
+
+> **Fixed legs are exact and cumulative. Auctioned legs round toward the maker,
+> per fill.**
+
+Concretely, in [`Pricing`](../packages/core/src/settlement/Pricing.sol):
+
+| Leg | Formula | Property |
+| --- | --- | --- |
+| Fixed input (`end == 0`) | cumulative floor slice of `start` | sums to exactly `start` at full fill — the **exact-input guarantee** |
+| Fixed output (BUY) | cumulative ceil slice of `start` | sums to exactly `start` at full fill — the **exact-output guarantee** |
+| Auctioned output (SELL) | `ceil(delta · outTick / anchor)` | per-fill, rounds **up** toward the maker |
+| Auctioned input (BUY, or a rising SELL fee leg) | `floor(delta · inTick / anchor)` | per-fill, rounds **down** toward the maker |
+
+Two consequences worth knowing before you are surprised by them:
+
+- **The maker is never the one paying the rounding.** That is deliberate, and it is
+  the same posture 1inch accepted at L12 of the OpenZeppelin audit. If you are
+  quoting an order, quote the ceiling.
+- **The auctioned side is not cumulative**, so splitting one fill into N costs the
+  *filler* up to one wei per auctioned leg per fill. This is self-inflicted — the
+  filler chooses the split — and bounded by the maker's signed `minFillAnchor`,
+  which is the floor on how small a slice may be. It is not a griefing vector
+  against the maker in either direction.
+
+The fixed legs are cumulative precisely so that the exact-in/exact-out guarantees
+survive an arbitrary partial-fill schedule; do not "simplify" them to the per-fill
+form the auctioned legs use. See
+[reference-audits.md §C7](reference-audits.md#c7--rounding-direction-and-split-fill-dust).
+
+---
+
 ## Cost
 
 Fill-only, same order shape, warm state

@@ -177,3 +177,78 @@ That last row is worth stating plainly rather than engineering around: one
 `approve` per token per chain, once, is the accepted cost of the entire Permit2
 model. Onboarding work is worth doing where the user has **no gas at all** — which
 is Route 1, and which is already finished.
+
+---
+
+## Strict mode, and the two funding surfaces
+
+Everything above assumes the maker funds through Permit3. Some do not: a maker can
+skip the hub entirely and grant a **direct ERC-20 approval to the Settlement**, and
+`Permit3TransferLib.transferFromWithFallback` will happily use it —
+[`Permit3TransferLib.sol`](../packages/core/src/utils/Permit3TransferLib.sol) tries
+the Permit3 leg with a low-level call and falls through to a plain `transferFrom`
+when it fails.
+
+That fallback is deliberate and useful. It is also, unqualified, a footgun, because
+the fall-through does not discriminate *why* the Permit3 leg failed:
+
+> A payer holding **both** grants is funded by the direct one whenever the Permit3
+> one is missing, too small, expired — **or deliberately revoked**. For that payer,
+> per-order Permit3 caps are not binding, and `revokeToken` / `lockdown` / an expiry
+> do not stop fills.
+
+`setStrictMode(true)` makes the Permit3 book the **only** path that can move that
+payer's tokens, which is what turns those controls back into real kill switches. The
+flag is read only on an already-failed Permit3 leg, so it costs nothing on the fill
+hot path and nothing at all for a payer whose grants are in order.
+
+### The recommended setup
+
+Enable strict mode **before** the first grant, so the window in which a stray direct
+approval could fund a fill never opens:
+
+```ts
+import { buildStrictOnboarding } from "@1delta-x/sdk";
+
+const calls = buildStrictOnboarding({
+  permit3,
+  spender: settlement,
+  tokens: [{ token: USDC, amount: MAX_UINT160, expiration: 0 }], // 0 == never expires
+});
+// → [ setStrictMode(true), approveToken(settlement, USDC, …) ]
+```
+
+The trade, stated so an integrator can decline it deliberately: a payer in strict
+mode who holds *only* a direct approval can no longer be filled at all. That is the
+intended behaviour — it is the difference between "revoked" and "revoked unless you
+happen to have approved us some other way" — but an integrator migrating existing
+users should grant through Permit3 in the same bundle, which is what the builder
+above returns.
+
+### Revocation must clear both
+
+```ts
+import { buildRevokeAll, readFundingPosture } from "@1delta-x/sdk";
+
+const posture = await readFundingPosture(client, { permit3, token, owner, spender });
+if (posture.fallbackIsLoadBearing) {
+  // Permit3 says "revoked" but the direct allowance still funds every fill.
+}
+
+const calls = buildRevokeAll({
+  permit3,
+  tokens: [tokenSpenderPair(token, settlement)],
+  directApprovals: [tokenSpenderPair(token, settlement)], // approve(settlement, 0)
+  strictMode: true,                                       // emitted FIRST
+});
+```
+
+`strictMode` is emitted first on purpose: if the bundle is sent as separate
+transactions, a fill landing between them cannot use the fallback.
+
+**The standing rule for any UI that offers a "revoke" action:** clear both surfaces,
+or enable strict mode, or say plainly that it did neither. A revoke badge that
+reflects only the hub is wrong for exactly the users who are most exposed.
+
+Audit precedent and the full reasoning:
+[reference-audits.md §C12 and F1](reference-audits.md#c12--revocation-that-does-not-revoke).
