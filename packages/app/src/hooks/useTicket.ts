@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { marketById, marketFor, marketsOn, pairsWith, tradableChains } from "../config/markets";
+import { defaultChain, marketById, marketFor, marketsOn, pairsWith } from "../config/markets";
 import { clearingPrice } from "../lib/ladder";
 import type { Level, OrderType, Side } from "../lib/types";
 
@@ -13,7 +13,7 @@ export interface TicketDeps {
   balances: Record<string, number | undefined>;
 }
 
-const FIRST_CHAIN = tradableChains()[0];
+const OPENS_ON = defaultChain();
 
 /**
  * Everything the order form and the ladder both need to agree on, plus the
@@ -24,8 +24,8 @@ const FIRST_CHAIN = tradableChains()[0];
  * disagree with the token pair is a bug waiting to happen.
  */
 export function useTicket(deps: TicketDeps) {
-  const [chainId, setChainId] = useState(FIRST_CHAIN);
-  const [marketId, setMarketId] = useState(() => marketsOn(FIRST_CHAIN)[0].id);
+  const [chainId, setChainId] = useState(OPENS_ON);
+  const [marketId, setMarketId] = useState(() => marketsOn(OPENS_ON)[0]!.id);
   const [side, setSide] = useState<Side>("sell");
   const [mode, setMode] = useState<OrderType>("market");
   const [amountStr, setAmountStr] = useState("");

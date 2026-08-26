@@ -15,6 +15,8 @@ packages/orderbook-server/dist/
 # Vite bundle output.
 packages/app/dist/
 
-# Local-only working directory. Also excluded from the pnpm workspace so a fresh
-# clone (where this directory does not exist) still resolves the lockfile cleanly.
+# Local-only working directories. Also excluded from the pnpm workspace so a
+# fresh clone (where these directories do not exist) still resolves the
+# lockfile cleanly.
 packages/pitch-deck/
+packages/pitch-deck-rootstock/

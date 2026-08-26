@@ -1,5 +1,5 @@
 import type { Dex } from "../lib/types";
-import { CHAINS } from "./chains";
+import { CHAINS, DEFAULT_CHAIN_ID } from "./chains";
 
 /**
  * Markets are configuration, not discovery. A pool address pinned here always
@@ -150,6 +150,16 @@ export function marketsOn(chainId: number): Market[] {
 /** Only chains that actually have a market are worth offering in the selector. */
 export function tradableChains(): number[] {
   return CHAINS.map((c) => c.chainId).filter((id) => marketsOn(id).length > 0);
+}
+
+/**
+ * The chain to open on: the configured default, or the first tradable one if
+ * that default has no markets left. Falling back beats booting into a chain
+ * with an empty picker.
+ */
+export function defaultChain(): number {
+  const tradable = tradableChains();
+  return tradable.includes(DEFAULT_CHAIN_ID) ? DEFAULT_CHAIN_ID : tradable[0]!;
 }
 
 export function symbolsOn(chainId: number): string[] {

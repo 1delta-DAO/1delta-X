@@ -57,9 +57,13 @@ importers:
 
   packages/core: {}
 
+  packages/lib: {}
+
   packages/modules/bridge: {}
 
   packages/modules/erc4626: {}
+
+  packages/modules/fill: {}
 
   packages/modules/lending/aave-v2: {}
 
@@ -96,6 +100,12 @@ importers:
   packages/modules/lending/teller: {}
 
   packages/modules/lending/venus: {}
+
+  packages/modules/maker: {}
+
+  packages/modules/nft: {}
+
+  packages/modules/oco: {}
 
   packages/modules/redeem/usdrif: {}
 
@@ -157,6 +167,8 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.1)
 
+  packages/periphery: {}
+
   packages/sdk:
     dependencies:
       viem:
@@ -171,6 +183,8 @@ importers:
         version: 2.1.9(@types/node@26.1.1)
 
   packages/solvers: {}
+
+  packages/validators: {}
 
 packages:
 

@@ -1,9 +1,10 @@
 packages:
   - "packages/*"
-  # Untracked and gitignored (fundraising material). Excluded explicitly so the
-  # workspace resolves identically here — where the directory still exists on
-  # disk — and in a clone, where it does not.
+  # Untracked and gitignored (fundraising / outreach material). Excluded
+  # explicitly so the workspace resolves identically here — where the
+  # directories still exist on disk — and in a clone, where they do not.
   - "!packages/pitch-deck"
+  - "!packages/pitch-deck-rootstock"
   - "packages/modules/*"
   - "packages/modules/lending/*"
   - "packages/modules/redeem/*"
