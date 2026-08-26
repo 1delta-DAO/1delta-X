@@ -41,7 +41,8 @@ const CACHE_KEY = "1delta-x.tokens.v1";
 
 const resolved = new Map<string, TokenMeta>();
 const listeners = new Set<() => void>();
-const inFlight = new Map<number, Promise<void>>();
+/** One in-flight download per chain, shared by every request that arrives while it runs. */
+const inFlight = new Map<number, Promise<Record<string, ListEntry> | null>>();
 /**
  * Addresses already looked up in a chain's list, so a token the list genuinely
  * does not carry is not re-fetched on every render. Tracked per address rather
@@ -97,19 +98,25 @@ export function tokenMeta(chainId: number, address: string): TokenMeta | undefin
   return resolved.get(key(chainId, address));
 }
 
-async function loadList(chainId: number, addresses: string[]): Promise<void> {
+/** Download and parse a chain's list. Resolves nothing on its own. */
+async function loadList(chainId: number): Promise<Record<string, ListEntry>> {
   const res = await fetch(`${CDN}/${chainId}.json`);
   if (!res.ok) throw new Error(`token list ${chainId}: HTTP ${res.status}`);
   const list = (await res.json()) as TokenList;
-  const seen = attemptedOn(chainId);
+  return list.list ?? {};
+}
 
+/** Pull the requested addresses out of an already-fetched list. */
+function apply(chainId: number, list: Record<string, ListEntry>, addresses: string[]): void {
+  const seen = attemptedOn(chainId);
   let added = false;
   for (const address of addresses) {
-    seen.add(address.toLowerCase());
-    const entry = list.list?.[address.toLowerCase()];
+    const lower = address.toLowerCase();
+    seen.add(lower);
+    const entry = list[lower];
     if (!entry) continue;
     resolved.set(key(chainId, address), {
-      address: address.toLowerCase(),
+      address: lower,
       symbol: entry.symbol,
       name: entry.name,
       decimals: entry.decimals,
@@ -125,26 +132,34 @@ async function loadList(chainId: number, addresses: string[]): Promise<void> {
 }
 
 /**
- * Make sure these addresses are resolved. Failure is silent by design: the UI
- * falls back to a generated mark and the symbol Oku reported, which is
- * worse-looking but never broken.
+ * Make sure these addresses are resolved.
+ *
+ * Callers arrive in waves — the chain's markets resolve one at a time, each
+ * naming a few more tokens — so a request that lands while the list is already
+ * downloading JOINS that download instead of being dropped. Dropping it was a
+ * real bug: the first market's two tokens got logos and every later one was
+ * silently abandoned, because the in-flight guard returned early and nothing
+ * ever retried.
+ *
+ * Failure is silent by design: the UI falls back to a generated mark and the
+ * symbol the indexer reported, which is worse-looking but never broken.
  */
 export function ensureTokens(chainId: number, addresses: string[]): void {
-  if (inFlight.has(chainId)) return;
   const seen = attemptedOn(chainId);
-  const wanted = addresses.filter(
-    (a) => a && !resolved.has(key(chainId, a)) && !seen.has(a.toLowerCase()),
-  );
+  const wanted = addresses.filter((a) => a && !resolved.has(key(chainId, a)) && !seen.has(a.toLowerCase()));
   if (!wanted.length) return;
 
-  const task = loadList(chainId, addresses)
-    .catch(() => {
-      // Allow a later attempt — a failed fetch must not poison these addresses
-      // forever, so nothing about them is remembered.
-      for (const a of addresses) seen.delete(a.toLowerCase());
-    })
-    .finally(() => {
-      inFlight.delete(chainId);
-    });
-  inFlight.set(chainId, task);
+  let task = inFlight.get(chainId);
+  if (!task) {
+    task = loadList(chainId)
+      .catch(() => null)
+      .finally(() => inFlight.delete(chainId));
+    inFlight.set(chainId, task);
+  }
+  // Whether this call started the download or joined one, it resolves ITS OWN
+  // addresses when the list lands.
+  void task.then((list) => {
+    if (list) apply(chainId, list, wanted);
+    // A failed fetch remembers nothing, so a later attempt can still succeed.
+  });
 }

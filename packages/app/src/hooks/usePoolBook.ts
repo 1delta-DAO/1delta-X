@@ -80,8 +80,16 @@ export function usePoolBook(market: Market, meta: PoolMeta | undefined): PoolBoo
   const [state, setState] = useState<MarketState>(() => blankState(market));
   const [nonce, setNonce] = useState(0);
   const [now, setNow] = useState(() => Date.now());
-  const stateRef = useRef(state);
-  stateRef.current = state;
+
+  // Keyed on the pool ADDRESS, never the object. `useChainPools` commits each
+  // market's metadata as it lands, so the record it hands back gets a fresh
+  // identity several times during a chain's load — and an effect that depends on
+  // that identity restarts on every one of them, aborting the in-flight fetch
+  // and blanking the book each time. A `PoolMeta` for a given pool never
+  // changes, so its address is the only part worth reacting to.
+  const metaPool = meta?.pool;
+  const metaRef = useRef(meta);
+  metaRef.current = meta;
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -100,7 +108,7 @@ export function usePoolBook(market: Market, meta: PoolMeta | undefined): PoolBoo
     const run = async () => {
       let resolved: ResolvedMarket;
       try {
-        resolved = await resolveMarket(market, config, meta, controller.signal);
+        resolved = await resolveMarket(market, config, metaRef.current, controller.signal);
       } catch (e) {
         if (!alive || controller.signal.aborted) return;
         const text = e instanceof Error ? e.message : String(e);
@@ -144,7 +152,8 @@ export function usePoolBook(market: Market, meta: PoolMeta | undefined): PoolBoo
       controller.abort();
       for (const t of timers) clearInterval(t);
     };
-  }, [market, meta, nonce]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [market, metaPool, nonce]);
 
   // Drives the staleness indicator without re-fetching.
   useEffect(() => {
