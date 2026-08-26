@@ -11,7 +11,7 @@ the part of a limit order that would rest — in position, in the ladder — and
 signs.
 
 ```bash
-pnpm --filter @1delta-x/app dev       # http://localhost:5173
+pnpm run app                          # http://localhost:5175
 pnpm --filter @1delta-x/app build     # typecheck + static bundle in dist/
 ```
 

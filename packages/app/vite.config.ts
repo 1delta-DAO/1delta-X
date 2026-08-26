@@ -14,6 +14,10 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   base: "./",
-  server: { port: 5173 },
+  // A dedicated port, and `strictPort` so a clash FAILS instead of quietly
+  // moving. Vite's default 5173 is already taken here by the Rootstock pitch
+  // deck, and the silent fallback meant `pnpm run app` printed one port while
+  // the browser sat on another app entirely — which reads as "nothing works".
+  server: { port: 5175, strictPort: true },
   build: { outDir: "dist", assetsDir: "assets" },
 });
