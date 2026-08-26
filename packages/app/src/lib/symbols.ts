@@ -12,8 +12,18 @@ const ALIAS: Record<string, string> = {
   USDT0: "USD0",
 };
 
+/**
+ * Tether brands its ticker with U+20AE TUGRIK SIGN — the SushiSwap subgraph
+ * reports `USD₮0` where Oku reports `USD0`. It is a stylised capital T, so it is
+ * folded to one before any alias is applied; otherwise the two indexers describe
+ * the same token with strings that can never match.
+ */
+function fold(symbol: string): string {
+  return symbol.replace(/₮/g, "T").toUpperCase();
+}
+
 export function normSymbol(symbol: string): string {
-  const s = symbol.toUpperCase();
+  const s = fold(symbol);
   return ALIAS[s] ?? s;
 }
 

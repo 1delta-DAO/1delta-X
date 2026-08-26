@@ -18,6 +18,18 @@ export default defineConfig({
   // moving. Vite's default 5173 is already taken here by the Rootstock pitch
   // deck, and the silent fallback meant `pnpm run app` printed one port while
   // the browser sat on another app entirely — which reads as "nothing works".
-  server: { port: 5175, strictPort: true },
+  server: {
+    port: 5175,
+    strictPort: true,
+    // Mirrors the Pages Function at `functions/api/oku/[[path]].ts`, so the
+    // request path the app uses is identical in development and production.
+    proxy: {
+      "/api/oku": {
+        target: "https://omni.icarus.tools",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/oku/, ""),
+      },
+    },
+  },
   build: { outDir: "dist", assetsDir: "assets" },
 });

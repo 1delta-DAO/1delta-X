@@ -1,14 +1,33 @@
 import { asSigned, type PoolLiquidity, type RawTick } from "./univ3";
 
 /**
- * Oku's public JSON-RPC ("cush") API. No key, no signup, and it answers with a
- * permissive CORS header, so the browser talks to it directly and this app
- * needs no backend of its own to show real depth.
+ * Oku's public JSON-RPC ("cush") API — the Uniswap v3 tick source. No key and no
+ * signup, but see {@link OKU_BASE}: its CORS policy decides whether the browser
+ * may call it directly.
  *
  * Base: `https://omni.icarus.tools/{chain}/cush/{method}`, POST `{id, params}`.
  * Spec: https://oku.trade/api (OpenAPI at unpkg.com/@gfxlabs/oku/openapi.yaml).
  */
-export const OKU_BASE = "https://omni.icarus.tools";
+/** Upstream, for the two proxies that forward to it. Never called from the browser. */
+export const OKU_ORIGIN = "https://omni.icarus.tools";
+
+/**
+ * Oku is ALWAYS reached through this app's own origin, never directly.
+ *
+ * Oku allow-lists CORS origins: `http://localhost:*` and `https://oku.trade`
+ * receive an `access-control-allow-origin` header and every other origin
+ * receives none, so a browser on any deployed domain blocks the response before
+ * this code sees it. No client-side change can work around that — it is their
+ * policy, not our bug.
+ *
+ * Both environments therefore forward server-side, where CORS does not apply:
+ * a Vite dev proxy locally, a Pages Function in production. Going direct in dev
+ * and proxied in production would have worked too, and would have meant the one
+ * path that matters is the one never exercised locally.
+ *
+ * `VITE_OKU_BASE` overrides it, for a self-hosted proxy.
+ */
+export const OKU_BASE = (import.meta.env.VITE_OKU_BASE ?? "/api/oku").replace(/\/$/, "");
 
 async function rpc<T>(chain: string, method: string, params: unknown[], signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${OKU_BASE}/${chain}/cush/${method}`, {

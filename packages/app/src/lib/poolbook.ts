@@ -61,19 +61,43 @@ async function fetchPool(
   return { meta, liquidity };
 }
 
-/** Just the identity — used to label a market before its ladder is fetched. */
-export async function fetchMarketMeta(
-  market: Market,
+/** One pool's identity, from whichever indexer serves its venue. */
+export async function fetchPoolIdentity(
+  ref: PoolRef,
   chain: ChainConfig,
   signal?: AbortSignal,
 ): Promise<PoolMeta> {
-  const ref = primaryPool(market);
   if (ref.dex === "sushiswap-v3") {
     const endpoint = sushiEndpoint(chain.chainId);
     if (!endpoint) throw new Error("no SushiSwap subgraph for this chain (set VITE_GRAPH_KEY)");
     return (await fetchSushiPool(endpoint, ref.address, signal)).meta;
   }
   return fetchPoolMeta(chain.oku, ref.address, signal);
+}
+
+/**
+ * The market's identity, from the first pool that answers.
+ *
+ * Not just the primary: venues fail independently and for reasons that have
+ * nothing to do with the pair. If one indexer is unreachable the market is still
+ * perfectly tradeable on the other, and refusing to name the pair would take the
+ * whole book down over a source we do not even need to describe it.
+ */
+export async function fetchMarketMeta(
+  market: Market,
+  chain: ChainConfig,
+  signal?: AbortSignal,
+): Promise<PoolMeta> {
+  const reasons: string[] = [];
+  for (const ref of market.pools) {
+    try {
+      return await fetchPoolIdentity(ref, chain, signal);
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      reasons.push(`${ref.dex} ${ref.address.slice(0, 8)}…: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  throw new Error(reasons.join("; ") || "no pool configured");
 }
 
 /**
@@ -116,7 +140,7 @@ export async function withDeadline<T>(
 /** How long any single venue gets before it is called slow rather than waited on. */
 export const VENUE_TIMEOUT_MS = 20_000;
 
-/** The pair, resolved from the primary pool. Everything else keys off this. */
+/** The pair, resolved from whichever pool answered. Everything else keys off this. */
 export interface ResolvedMarket {
   meta: PoolMeta;
   base: TokenRef;
@@ -124,12 +148,12 @@ export interface ResolvedMarket {
 }
 
 /**
- * Work out which token is the base, from the primary pool's own metadata.
+ * Work out which token is the base, from the resolving pool's own metadata.
  *
- * Orientation of the PRIMARY pool comes from symbols, because that is all the
- * market config names. Every other pool is then matched by token ADDRESS: the
- * two indexers report different symbols for the same token (`USD0` vs `USD₮0`)
- * and identical addresses.
+ * Orientation of that pool comes from symbols, because that is all the market
+ * config names. Every other pool is then matched by token ADDRESS: the two
+ * indexers report different symbols for the same token (`USD0` vs `USD₮0`) and
+ * identical addresses.
  */
 export async function resolveMarket(
   market: Market,
@@ -137,7 +161,6 @@ export async function resolveMarket(
   meta?: PoolMeta,
   signal?: AbortSignal,
 ): Promise<ResolvedMarket> {
-  const ref = primaryPool(market);
   const primary = meta ?? (await fetchMarketMeta(market, chain, signal));
 
   const wantBase = norm(market.base);
@@ -149,7 +172,7 @@ export async function resolveMarket(
   else if (t1 === wantBase && t0 === wantQuote) baseIsToken0 = false;
   else {
     throw new Error(
-      `pool ${ref.address} holds ${primary.token0.symbol}/${primary.token1.symbol}, not ${market.base}/${market.quote}`,
+      `pool ${primary.pool} holds ${primary.token0.symbol}/${primary.token1.symbol}, not ${market.base}/${market.quote}`,
     );
   }
   return {
