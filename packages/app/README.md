@@ -15,7 +15,34 @@ pnpm run app                          # http://localhost:5175
 pnpm --filter @1delta-x/app build     # typecheck + static bundle in dist/
 ```
 
-No API key and no backend. A wallet is needed to sign; the book renders without one.
+No API key. A wallet is needed to sign; the book renders without one.
+
+## Deploying
+
+The build output carries its own tiny worker, [`public/_worker.js`](public/_worker.js)
+→ `dist/_worker.js`, which proxies `/api/oku/*`. **Deploy `dist` as-is** and it
+comes along; there is nothing to configure.
+
+It exists because Oku allow-lists CORS origins — `http://localhost:*` and
+`https://oku.trade` receive an `access-control-allow-origin` header and every
+other origin receives none, so a browser on a deployed domain has its Oku
+responses discarded before this app sees them. That is their policy, and no
+client-side change can work around it. A worker is server-side, where CORS does
+not apply. Vite's dev server proxies the same path, so the request path is
+identical in both environments rather than production being the one case never
+exercised locally.
+
+It deliberately is **not** a `functions/` directory: Pages reads that only from
+the configured project root, so it is silently dropped whenever the root is not
+this package — and a dropped proxy fails quietly, with `GET` falling through to
+the SPA handler and `POST` returning 405.
+
+After deploying, this should return a block number:
+
+```bash
+curl -X POST https://<your-domain>/api/oku/rootstock/cush/liveBlock \
+  -H 'content-type: application/json' -d '{"id":1,"params":[]}'
+```
 
 ## What is real and what is not
 
