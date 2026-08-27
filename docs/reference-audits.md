@@ -369,8 +369,12 @@ one gap the floor could not, by refunding un-attributed item proceeds to the
 
 **F1–F6** came out of the 2026-08-25 crosswalk. **F7–F12** came out of a second,
 independent review pass against the same corpus later that day; two of those arrived
-with executed PoCs, and all six were re-derived here before being acted on. Every
-item below is resolved.
+with executed PoCs, and all six were re-derived here before being acted on. **F13–F15**
+arrived as three reported findings and were each verified against the code before
+being acted on — two confirmed with executed PoCs and fixed, one (F14) reviewed and
+judged NOT a vulnerability, with only its misleading comment corrected. See
+[Re-audit sweep](#re-audit-sweep--the-generalised-questions-from-f13f15) for the
+generalised questions they imply. Every item below is resolved.
 
 ### F1 — Revoking Permit3 is not a kill switch on its own
 
@@ -633,6 +637,150 @@ runs *before* the permit call), and `docs/soft-cancel.md` already tabulates them
 correctly. **Fixed in the three doc sites** (`UnorderedNonces`, `IPermit3`, the
 permit3 README) as the converse of the existing "Revoking a Permit3 allowance is NOT
 a kill switch" caveat in `SECURITY.md`.
+
+### F13 — A revoked on-chain order approval was bypassed by any non-empty signature
+
+**Class [C12](#c12--revocation-that-does-not-revoke).** PoC'd, fixed.
+
+`Signatures._verifySignature` skips re-verification once `filled != 0` — a signature
+over a fixed digest cannot be withdrawn, so re-checking it is pure cost (~2,860 gas
+per later fill). But that skip is reached by **any** non-empty `sig`, and nothing
+records *how* the earlier fill was authorised. An order authorised by the
+`approveOrder` record therefore set `filled`, and a filler passing 65 arbitrary bytes
+then took the signature branch, hit the skip, and settled the remainder of a
+**revoked** order — for a maker with no EIP-1271 at all, for whom no signature can
+ever be valid. The file's own comment claimed the skip "applies ONLY to the signature
+branch"; it does, but the filler picks the branch.
+
+**Fix.** `revokeOrderApproval` now parks the `cancelOrder` sentinel when the order is
+already partially filled, gated on `wasApproved` (the flag proves the caller is the
+maker, since `approveOrder` enforces it — without that gate a bare hash would let
+anyone cancel a stranger's touched order). Zero hot-path cost: `filled` is already
+read by every fill. The alternative — reading `orderApproved` on the signature path
+too — puts a cold SLOAD on every fill of every order to protect the rare sigless one.
+Revocation of a *touched* order is now one-way; an untouched one still round-trips.
+
+### F14 — "Invalidated nonce ⇒ grants already applied" was a false inference
+
+**Class [C11](#c11--the-permit-as-a-liveness-bomb) / [C12](#c12--revocation-that-does-not-revoke).**
+Reviewed, **not a vulnerability**; comment corrected.
+
+`SignedPermits.permitBatchWithWitnessIfNeeded` returns silently on a spent nonce bit,
+commented "authorization still proven; grants already applied". The second clause is
+false: a bit is set by `invalidateUnorderedNonces`/`lockdownAll` just as much as by a
+prior application, and in that case the grants were never applied and never will be.
+
+No authority is granted that should not be — the signature is verified *before* the
+nonce check, and the spent-bit path applies **nothing**, so the failure direction is
+fail-safe. The silent return is the deliberate S-1 remediation (without it one
+front-run permanently bricks a gasless order), and the consequence is already
+documented in `UnorderedNonces`, `SECURITY.md` and `docs/soft-cancel.md`, and ledgered
+as [F12](#f12--complete-kill-switch-overstated-what-permit3-nonce-invalidation-cancels).
+Only the misleading inline comment was wrong. Kept as a ledger entry because the
+*inference* is the reusable trap, not the code.
+
+### F15 — A duplicate `PULL` step burned maker allowance without extra fill progress
+
+**New shape: a refund that restores the asset but not the authority spent to move it.**
+PoC'd, fixed.
+
+`Batch._stepPull` moved the nominal `owed` unconditionally, justified in-file as "a
+duplicate PULL needs no exactly-once guard … it costs the solver gas and the maker
+nothing", because Phase 3 refunds the surplus to the maker. The **tokens** are indeed
+refunded — net spend stayed exactly one fill — but the **Permit3 allowance** spent to
+move them is not restored. Against a finite, amount-gated allowance (the model
+`IPermit3` is built around) a padded schedule consumed 2× the allowance for 1× the
+fill and left the maker unable to fund the next one; `matchSettle` is permissionless,
+so any solver could do it. Makers on an infinite (`uint160.max`) allowance were never
+affected — Permit3 treats that sentinel as "do not decrement".
+
+**Fix.** Pull the **shortfall** (`owed - credit`) rather than the nominal amount. This
+keeps the tolerant, guard-free shape the schedule wants — a second PULL of a leg now
+needs nothing, moves nothing and spends no allowance — and additionally makes
+ITEM-then-PULL exact instead of over-pull-then-refund. A `credit != 0` guard would
+have been wrong: `_creditItemProceeds` also credits input legs.
+
+---
+
+## Re-audit sweep — the generalised questions from F13–F15
+
+F13–F15 are three instances of two reusable mistakes. Sweep these questions rather
+than the specific functions.
+
+**1. "Authorised once" is not "authorised by what".** Any cache, skip or fast path
+that remembers *that* a check passed, without remembering *which* credential passed
+it, is F13. The credential that can be **withdrawn** is the one that matters: a
+signature cannot be, an on-chain record and an EIP-1271 answer can. Where to look:
+
+- every early `return` in `Signatures._verifySignature` and anything reading `filled`
+  as an authorisation proxy;
+- the **batch paths** — `batchFill`, `matchSettle`, `_openGated` — which take a `sigs[]`
+  array per order. Does each element go through the same branch selection, and can a
+  caller mix an empty and non-empty `sig` for the same order across calls?
+- the 7683 entrypoints (`open`/`openFor`), which authorise by a different route than
+  `fill` — cf. [F11](#f11--open-announced-an-erc-7683-order-without-the-signature-check-openfor-performs);
+- delegated signers (`orderSignerExpiry`): an expiring delegate is a *withdrawable*
+  credential, so ask whether expiry binds mid-order or is skipped after a first fill;
+- contract signers generally — the file already flags that a 1271 wallet turning
+  `false` no longer blocks a part-filled order. That is documented and accepted for
+  signatures; confirm no *other* revocable credential inherits the same skip silently.
+
+**2. "Refunded ⇒ harmless" ignores non-refundable side effects.** F15's real lesson:
+when a step over-consumes and a later phase gives it back, ask what was spent that the
+refund does **not** restore. Allowance is the obvious one; also nonces, one-shot
+permits, rate-limit budgets, expiries, and any ledger keyed off cumulative spend.
+Where to look:
+
+- every repeated-step tolerance in `matchSettle`. `DELIVER` and `ITEM` have
+  exactly-once guards; `PULL` did not. Re-derive the argument for any step added later,
+  and state it in terms of *authority consumed*, not tokens moved.
+- anywhere the code says a duplicate/surplus is "returned to the maker" — that phrase
+  is about assets, and is not an argument about allowances;
+- `Permit3TransferLib.transferFromWithFallback`: a failed Permit3 leg that falls back
+  to a direct approval spends the *approval* instead — check which budget each path
+  draws down;
+- the `uint160.max` infinite-allowance sentinel is a **masking** condition. Any test
+  that grants max allowance cannot observe this class of bug; assert against a finite
+  allowance when the property under test is "how much authority did this consume".
+
+---
+
+## Signature validation — the published corpus vs. our position
+
+Compiled 2026-08-27 after [F13](#f13--a-revoked-on-chain-order-approval-was-bypassed-by-any-non-empty-signature),
+because two of the three findings in that round were in signature handling and the
+area clearly deserved a systematic pass rather than another one-off. Every row was
+checked against the code; the ones that need a behavioural guarantee are pinned in
+`packages/core/test/swaps/SignatureEdgeCases.t.sol`.
+
+| # | Class | Our exposure |
+|---|---|---|
+| S1 | **ECDSA malleability** — `s` and `N − s` recover the same signer (EIP-2), and accepting BOTH the 65-byte and 64-byte EIP-2098 forms compounds it (the OpenZeppelin 4.7.3 advisory) | **Present by construction, benign.** `SignatureVerification.recoverCalldata` applies no lower-half-`s` check and accepts both lengths, so one authorisation has **four** valid byte encodings. Not exploitable: on-chain replay is bound by `filled[orderHash]`, and the off-chain book is a map keyed by `orderHash`, never by signature. Pinned by `test_malleability_fourEncodings_stillOneFill`. **The standing hazard is any NEW consumer that treats a signature as an identity** — a dedup cache, a "seen" set, a rate limiter keyed on `keccak256(sig)`. |
+| S2 | **Cross-account EIP-1271 replay** (ERC-7739) — a digest that does not name the account is replayable across accounts sharing a validation rule | **Orders immune; Permit3 delegates it to the wallet.** `Order` binds `address maker` in its typehash, so the digest differs per account — pinned by `test_crossAccountReplay_ordersBindTheMaker`. But `PermitBatch(TokenPermit[],TakerPermit[],uint256 nonce,uint256 deadline)` and `PermitBatchWitnessTransferFrom(...)` carry **no owner field**; the owner is a separate argument. That is Permit2's shape, inherited verbatim, and it is exactly what ERC-7739 criticises Permit2 for. A Safe rehashes with its own domain and is immune; a naive wallet that just recovers to an owner is not. |
+| S3 | **Domain separator vs. chain id** — a cached separator survives a fork and enables cross-chain replay | **Clean.** `EIP712.DOMAIN_SEPARATOR()` serves the cached value only while `block.chainid` matches construction, else recomputes. Pinned by `test_domainSeparator_followsChainId`. |
+| S4 | **Zero-address recovery** — `ecrecover` returns `address(0)` on failure, and a comparison without a zero check promotes every malformed signature to valid | **Clean.** `verify` requires `signer != address(0)` before matching; `setOrderSigner` separately rejects a zero delegate for the same reason. Pinned by `test_reject_invalidV` / `test_reject_zeroComponents`. |
+| S5 | **Length-dispatch confusion** — deciding what a signature IS from its length | **Present and documented.** The bulk (Merkle) envelope is detected by shape (`length ≥ 98`, `(length − 66) % 32 == 0`, trailing `0xB0`). `Signatures` already argues why this is a liveness edge and never a bypass: any signature matching the predicate is re-read against a root the maker never signed and reverts. Wallets with attacker-influenceable trailing bytes are the residual exposure. |
+| S6 | **EIP-1271 callee misbehaviour** — wrong magic value, revert, empty return | **Clean.** Pinned by the three `test_1271_*` cases. |
+| S7 | **"Authorised once" caching** | **Was broken — [F13](#f13--a-revoked-on-chain-order-approval-was-bypassed-by-any-non-empty-signature).** See the sweep above for the generalised question. |
+
+**What S1 and S2 have in common, and the rule to carry forward:** neither is a bug in
+the verifier. Both are cases where *the digest does not commit to something the
+security argument depends on* — the encoding in S1, the account in S2. When adding
+any new signed message, write down what the digest commits to and check that against
+what the code then assumes. `Order` gets this right by naming `maker`; the Permit3
+batch types do not, and inherit Permit2's posture along with its code.
+
+**Sources.** [ERC-7739: Readable Typed Signatures for Smart Accounts](https://eips.ethereum.org/EIPS/eip-7739) ·
+[OpenZeppelin ECDSA / Cryptography docs](https://docs.openzeppelin.com/contracts/5.x/api/utils/cryptography) ·
+[Zellic — "The ecrecover function allows malleable signatures"](https://reports.zellic.io/publications/orderly-network/findings/medium-signature-the-ecrecover-function-allows-malleable-signatures) ·
+[Smart Contract Security Field Guide — signature attacks](https://scsfg.io/hackers/signature-attacks/) ·
+[Zokyo — Signature Malleability](https://zokyo.io/blog/signature-malleability/) ·
+[Dedaub — 0x Settler audit](https://dedaub.com/audits/0x/0x-settler-crosschainreceiverfactory-june-10-2025/) ·
+[Auditor's Digest — the risks of EIP-712](https://medium.com/@chinmayf/auditors-digest-the-risks-of-eip712-5a0fc57e3837) ·
+[*One Signature, Multiple Payments* (arXiv 2511.09134)](https://arxiv.org/pdf/2511.09134) ·
+[*Demystifying and Detecting Cryptographic Defects* (arXiv 2408.04939)](https://arxiv.org/pdf/2408.04939)
+
+---
 
 ---
 

@@ -205,14 +205,55 @@ abstract contract OrderState is NonceManager {
 
     /// @notice Withdraw a prior {approveOrder}. Keyed by `msg.sender`, so a maker can
     ///         only clear its own approval. Binds on EVERY fill, including the
-    ///         remainder of an already partially-filled order: {Signatures} re-reads
-    ///         this record each time precisely because, unlike a signature, it is
-    ///         revocable. Cancelling the order's nonce ({cancelOrders}/{rollbackNonces})
-    ///         also blocks the fill — the nonce gate runs on every fill regardless —
-    ///         but leaves this flag set; use this to un-approve without burning the
-    ///         nonce, or to reclaim the storage.
+    ///         remainder of an already partially-filled order. Cancelling the order's
+    ///         nonce ({cancelOrders}/{rollbackNonces}) also blocks the fill — the
+    ///         nonce gate runs on every fill regardless — but leaves this flag set;
+    ///         use this to un-approve without burning the nonce, or to reclaim the
+    ///         storage.
+    ///
+    /// @dev    ⚠ ON A PARTIALLY FILLED ORDER THIS ESCALATES TO A FULL CANCEL, and it
+    ///         has to. {Signatures._verifySignature} skips re-verification once
+    ///         `filled != 0` — a signature over a fixed digest cannot be withdrawn,
+    ///         so re-checking it is pure cost — and that skip is reached by ANY
+    ///         non-empty `sig`. It does not know the earlier fill was authorised by
+    ///         this record rather than by a signature, because nothing records which.
+    ///         So clearing the flag alone left a hole: after one approval-authorised
+    ///         partial fill, a filler passing 65 arbitrary bytes took the signature
+    ///         branch, hit the skip, and settled the remainder of a revoked order —
+    ///         even for a maker with no EIP-1271 at all, for whom no signature can
+    ///         ever be valid.
+    ///
+    ///         Parking the {cancelOrder} sentinel closes it at ZERO hot-path cost:
+    ///         `filled` is already read by every fill, so no new SLOAD is added to
+    ///         settle for it. The alternative — reading `orderApproved` on the
+    ///         signature path too — would put a cold SLOAD (~2,100 gas) on EVERY
+    ///         fill of EVERY order to protect the rare sigless one, which is the
+    ///         exact cost that skip exists to avoid.
+    ///
+    ///         Two consequences, both deliberate:
+    ///           • revocation of a TOUCHED order is one-way. Re-approving the same
+    ///             hash will not revive it; sign a fresh order. An UNTOUCHED order
+    ///             (`filled == 0`) is unaffected — approve/revoke/re-approve still
+    ///             round-trips, because with no fill recorded the skip is not
+    ///             reached and the signature branch verifies for real.
+    ///           • a maker that both signed AND approved the same order cancels it
+    ///             here. That is maker-initiated and safe; it cannot be triggered by
+    ///             anyone else.
+    ///
+    ///         The `wasApproved` guard is load-bearing, NOT an optimisation: this
+    ///         takes a bare hash, so without it any caller could park the sentinel on
+    ///         any partially filled order and cancel a stranger's order outright.
+    ///         {approveOrder} enforces `order.maker == msg.sender`, so a set flag is
+    ///         proof the caller is that order's maker.
     function revokeOrderApproval(bytes32 orderHash) external {
-        orderApproved[msg.sender][orderHash] = false;
+        // Nested rather than `wasApproved && …`: Settlement runs on a ~100-byte
+        // EIP-170 margin and the flat form measured 98 bytes against it. No second
+        // event either — {OrderApprovalRevoked} plus a non-zero `filled` is the same
+        // information for an indexer, at no bytecode cost.
+        if (orderApproved[msg.sender][orderHash]) {
+            orderApproved[msg.sender][orderHash] = false;
+            if (filled[orderHash] != 0) filled[orderHash] = type(uint256).max;
+        }
         emit OrderApprovalRevoked(msg.sender, orderHash);
     }
 

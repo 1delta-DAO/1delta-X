@@ -132,8 +132,14 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
 
         cm.exec(address(settlement), abi.encodeCall(OrderState.revokeOrderApproval, (hash)));
 
+        // {OrderCancelled}, not {OrderNotApproved}: revoking a TOUCHED order parks
+        // the cancel sentinel, because clearing the flag alone was bypassable by any
+        // non-empty `sig` (see {OrderState.revokeOrderApproval} and
+        // `test_revoke_blocksRemainder_evenWithNonEmptySig`). The remainder is still
+        // blocked — it is blocked harder, and by a gate that does not depend on which
+        // branch of {Signatures._verifySignature} the filler steers into.
         vm.prank(solver);
-        vm.expectRevert(Signatures.OrderNotApproved.selector);
+        vm.expectRevert(OrderState.OrderCancelled.selector);
         settlement.fill(o, "", AMOUNT_IN - AMOUNT_IN / 10);
     }
 
@@ -230,5 +236,78 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
         (, bool[] memory ok) = settlement.batchFill(orders, sigs, amts, true);
         assertTrue(ok[0], "approved order settled in batch with empty sig");
         assertEq(tB.balanceOf(address(cm)), AMOUNT_OUT, "batch delivered output");
+    }
+
+    // ─────────── revocation binds whatever the filler passes ───────────
+
+    /// @dev REGRESSION (audit finding). {Signatures._verifySignature} skips
+    ///      re-verification once `filled != 0`, and that skip is reached by ANY
+    ///      non-empty `sig`. It cannot tell that the earlier fill was authorised by
+    ///      the {approveOrder} record rather than by a signature. So clearing the
+    ///      flag alone was bypassable: after one approval-authorised partial fill, a
+    ///      filler passing 65 arbitrary bytes took the signature branch, hit the
+    ///      skip, and settled the remainder of a REVOKED order.
+    ///
+    ///      `cm` implements no EIP-1271 at all, so the signature below can never be
+    ///      valid for it — which is what makes this a pure authorisation bypass
+    ///      rather than a signature-forgery question.
+    function test_revoke_blocksRemainder_evenWithNonEmptySig() public {
+        Order memory o = _order(20);
+        bytes32 hash = _approve(o);
+
+        vm.prank(solver);
+        settlement.fill(o, "", AMOUNT_IN / 10); // approval-authorised partial
+        assertGt(settlement.filled(hash), 0, "counter advanced");
+
+        cm.exec(address(settlement), abi.encodeCall(OrderState.revokeOrderApproval, (hash)));
+
+        bytes memory garbage = new bytes(65);
+        garbage[64] = bytes1(uint8(27));
+        vm.prank(solver);
+        vm.expectRevert(OrderState.OrderCancelled.selector);
+        settlement.fill(o, garbage, AMOUNT_IN / 10);
+    }
+
+    /// @dev The empty-sig path must keep its original, more precise error.
+    function test_revoke_emptySigStillReportsNotApproved_whenUntouched() public {
+        Order memory o = _order(21);
+        bytes32 hash = _approve(o);
+        cm.exec(address(settlement), abi.encodeCall(OrderState.revokeOrderApproval, (hash)));
+        vm.prank(solver);
+        vm.expectRevert(Signatures.OrderNotApproved.selector);
+        settlement.fill(o, "", AMOUNT_IN / 10);
+    }
+
+    /// @dev An UNTOUCHED order is not escalated to a cancel, so approve → revoke →
+    ///      re-approve still round-trips. Only a partially filled order is one-way.
+    function test_revoke_untouchedOrder_canBeReApproved() public {
+        Order memory o = _order(22);
+        bytes32 hash = _approve(o);
+        cm.exec(address(settlement), abi.encodeCall(OrderState.revokeOrderApproval, (hash)));
+        assertEq(settlement.filled(hash), 0, "never filled, so never cancelled");
+
+        _approve(o); // revive
+        vm.prank(solver);
+        settlement.fill(o, "", AMOUNT_IN / 10);
+        assertGt(settlement.filled(hash), 0, "re-approved order fills again");
+    }
+
+    /// @dev The `wasApproved` guard is load-bearing: {OrderState.revokeOrderApproval}
+    ///      takes a BARE HASH, so without it any caller could park the cancel
+    ///      sentinel on any partially filled order and cancel a stranger's order.
+    function test_revoke_byNonMaker_cannotCancelSomeoneElsesOrder() public {
+        Order memory o = _order(23);
+        bytes32 hash = _approve(o);
+        vm.prank(solver);
+        settlement.fill(o, "", AMOUNT_IN / 10);
+        uint256 filledBefore = settlement.filled(hash);
+
+        vm.prank(solver); // not the maker, never approved this hash
+        settlement.revokeOrderApproval(hash);
+
+        assertEq(settlement.filled(hash), filledBefore, "stranger must not cancel the order");
+        vm.prank(solver);
+        settlement.fill(o, "", AMOUNT_IN / 10); // maker's approval still stands
+        assertGt(settlement.filled(hash), filledBefore, "order still fillable");
     }
 }

@@ -86,7 +86,24 @@ abstract contract SignedPermits is UnorderedNonces, AllowanceTransfer, TakerAllo
     ) external override {
         if (block.timestamp > batch.deadline) revert PermitExpired();
         _verifyPermitSig(owner, Permit3Hash.hashWithWitness(batch, witness, witnessTypeString), sig);
-        if (_isPermitNonceUsed(owner, batch.nonce)) return; // authorization still proven; grants already applied
+        // Spent bit ⇒ apply NOTHING and return. The signature above is still proven,
+        // so this is not an authorisation bypass — it is the S-1 remediation, without
+        // which one front-run permanently bricks a gasless order.
+        //
+        // ⚠ DO NOT READ THIS AS "the grants were already applied". A bit is set by
+        // {UnorderedNonces.invalidateUnorderedNonces} / {lockdownAll} just as much as
+        // by a prior application, and in that case the grants were NEVER applied and
+        // never will be. Either way the effect here is identical and fail-safe (less
+        // authority, never more) — but the caller must not infer that the allowances
+        // now exist. {Core.fillWithPermit} proceeds past this either way and succeeds
+        // only if a standing allowance, or a direct ERC-20 approval via the
+        // {Permit3TransferLib} fallback, independently funds the fill.
+        //
+        // Consequence a maker must not get wrong: invalidating a nonce KILLS THE
+        // GRANTS, NOT THE ORDER. The cancellations that bind the order are
+        // {OrderState.cancelOrder}, the order-nonce bitmap / `rollbackNonces`, and
+        // the expiry. See {UnorderedNonces} and `docs/soft-cancel.md`.
+        if (_isPermitNonceUsed(owner, batch.nonce)) return;
         _usePermitNonce(owner, batch.nonce);
         _applyBatch(owner, batch);
         emit PermitBatchApplied(owner, batch.nonce);

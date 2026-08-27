@@ -496,9 +496,26 @@ abstract contract Batch is Core {
     ///      {BatchNotWhole} rather than {LegUnfunded}. Both revert, and such tokens
     ///      are already out of scope on the netted path (see the settlement README).
     ///
-    ///      A duplicate PULL needs no exactly-once guard: the extra lands in `credit`
-    ///      and Phase 3 returns it to the MAKER, so it costs the solver gas and the
-    ///      maker nothing.
+    ///      A duplicate PULL needs no exactly-once guard, but it does need this
+    ///      function to pull the SHORTFALL rather than the nominal `owed`.
+    ///
+    ///      ⚠ IT USED TO PULL `owed` UNCONDITIONALLY, on the reasoning that a
+    ///      duplicate "costs the solver gas and the maker nothing" because Phase 3
+    ///      refunds the extra. The TOKENS are indeed refunded — but the Permit3
+    ///      ALLOWANCE spent to move them is not. Against a finite, amount-gated
+    ///      allowance (the model {IPermit3} is built around) a padded schedule
+    ///      therefore consumed 2× the allowance for 1× the fill and left the maker
+    ///      unable to fund their next one, and `matchSettle` is permissionless, so
+    ///      any solver could do it. Makers on an infinite (`uint160.max`) allowance
+    ///      were never affected — that value is a sentinel Permit3 never decrements.
+    ///
+    ///      Netting against `credit` fixes it without adding a guard, which keeps the
+    ///      tolerant shape the schedule wants: a second PULL of the same leg now
+    ///      needs nothing, moves nothing, and spends no allowance. It also makes
+    ///      ITEM-then-PULL exact instead of over-pull-then-refund — the item's
+    ///      proceeds already credited the leg, so only the remainder is drawn from
+    ///      the maker. `credit` may EXCEED `owed` (an item can over-produce), so the
+    ///      subtraction is guarded rather than `unchecked`.
     function _stepPull(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 j, uint256 s) internal {
         if (i >= orders.length) revert PlanBadStep(s);
         Order calldata order = orders[i];
@@ -506,12 +523,16 @@ abstract contract Batch is Core {
         // length IS that count — no need to re-validate the same blob per step.
         if (j >= st.credit[i].length) revert PlanBadStep(s);
         uint256 owed = st.owed[i][j]; // resolved at open — single source
-        if (owed != 0) {
+        uint256 have = st.credit[i][j]; // already covered by an earlier PULL or ITEM
+        // Draw only what is still missing. See the allowance note above for why this
+        // is not merely an optimisation.
+        uint256 need = owed > have ? owed - have : 0;
+        if (need != 0) {
             Permit3TransferLib.transferFromWithFallback(
-                PERMIT3, PackedArrays.legInToken(order.legsIn, j), order.maker, address(this), owed
+                PERMIT3, PackedArrays.legInToken(order.legsIn, j), order.maker, address(this), need
             );
             unchecked {
-                st.credit[i][j] += owed;
+                st.credit[i][j] = have + need;
             }
         }
     }

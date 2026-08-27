@@ -615,4 +615,63 @@ contract MatchSettleCoWTest is CoreSettlementBase {
         assertEq(IERC20(USDC).balanceOf(maker), USDC_AMT, "Alice received USDC (validator passed)");
         assertEq(IERC20(WETH).balanceOf(bob), WETH_AMT, "Bob received WETH");
     }
+
+    // ─────────── duplicate PULL must not burn maker allowance ───────────
+
+    function _dupPullSchedule() internal pure returns (uint256[] memory s) {
+        s = new uint256[](5);
+        s[0] = _step(MatchStep.PULL, 0, 0);
+        s[1] = _step(MatchStep.PULL, 0, 0); // the duplicate
+        s[2] = _step(MatchStep.PULL, 1, 0);
+        s[3] = _step(MatchStep.DELIVER, 0, 0);
+        s[4] = _step(MatchStep.DELIVER, 1, 0);
+    }
+
+    function _alloc(address who, address token) internal view returns (uint256) {
+        (uint160 amt,) = permit3.tokenAllowance(who, address(settlement), token);
+        return amt;
+    }
+
+    /// @dev REGRESSION (audit finding). `_stepPull` used to move the nominal `owed`
+    ///      unconditionally, on the reasoning that a duplicate costs "the maker
+    ///      nothing" because Phase 3 refunds the extra. The TOKENS are refunded, but
+    ///      the Permit3 ALLOWANCE spent to move them is not — so against a finite,
+    ///      amount-gated allowance a padded schedule consumed 2x the allowance for
+    ///      1x the fill and left the maker unable to fund the next one. `matchSettle`
+    ///      is permissionless, so any solver could do it.
+    function test_dupPull_doesNotBurnExtraAllowance() public {
+        deal(WETH, maker, WETH_AMT * 10);
+        deal(USDC, bob, USDC_AMT * 10);
+        _approveToSettlement(maker, WETH, WETH_AMT * 2); // room for exactly two fills
+        _approveToSettlement(bob, USDC, USDC_AMT * 2);
+
+        Order memory a = _aliceOrder(90, WETH_AMT, USDC_AMT);
+        Order memory b = _bobOrder(90, USDC_AMT, WETH_AMT);
+
+        uint256 allowBefore = _alloc(maker, WETH);
+        uint256 balBefore = IERC20(WETH).balanceOf(maker);
+
+        vm.prank(solver);
+        settlement.matchSettle(_plain(a, b, _dupPullSchedule()));
+
+        assertEq(balBefore - IERC20(WETH).balanceOf(maker), WETH_AMT, "maker spends exactly one fill");
+        assertEq(allowBefore - _alloc(maker, WETH), WETH_AMT, "allowance spent ONCE, not twice");
+        assertEq(_alloc(maker, WETH), WETH_AMT, "the maker's second fill is still funded");
+    }
+
+    /// @dev The honest single-PULL schedule is unchanged by the fix.
+    function test_singlePull_spendsAllowanceOnce() public {
+        deal(WETH, maker, WETH_AMT * 10);
+        deal(USDC, bob, USDC_AMT * 10);
+        _approveToSettlement(maker, WETH, WETH_AMT * 2);
+        _approveToSettlement(bob, USDC, USDC_AMT * 2);
+
+        Order memory a = _aliceOrder(91, WETH_AMT, USDC_AMT);
+        Order memory b = _bobOrder(91, USDC_AMT, WETH_AMT);
+
+        uint256 allowBefore = _alloc(maker, WETH);
+        vm.prank(solver);
+        settlement.matchSettle(_plain(a, b, _cowSchedule()));
+        assertEq(allowBefore - _alloc(maker, WETH), WETH_AMT, "one fill, one allowance draw");
+    }
 }
