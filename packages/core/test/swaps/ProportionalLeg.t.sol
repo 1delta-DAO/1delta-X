@@ -322,4 +322,128 @@ contract ProportionalLegTest is CoreSettlementBase {
 
         assertEq(IERC20(USDC).balanceOf(solver), amount, "absolute leg unchanged");
     }
+
+    // ════════ The proportional anchor through the BATCH entry — M3/G10 ════════
+    //
+    //  WHY THIS PATH GETS ITS OWN CASES. A proportional anchor is the one order
+    //  shape whose denominator is not in the order at all: {OrderGates.anchorTotal}
+    //  resolves it with a live `balanceOf` STATICCALL on a MAKER-CHOSEN token. That
+    //  makes it the only fill gate that hands control to an arbitrary address, and
+    //  the ordering around it is explicitly load-bearing — {OrderState._gateFillState}
+    //  carries a "do not flip these two lines" note, because the `filled` read must
+    //  come AFTER that external call or it could be stale.
+    //
+    //  `batchFill` reaches that resolution through `this.fillSelf`, i.e. across a
+    //  fresh external call frame and a re-armed guard, and nothing exercised it. The
+    //  interesting part is not that it works but the two-sided failure mode: a batch
+    //  must neither strand a legal sweep nor let one order's balance read be
+    //  answered with another order's state.
+
+    /// @dev A sweep settles inside a batch, denominated at the balance the maker
+    ///      holds when the batch runs — not at any amount written in the order.
+    function test_prop_batchFill_resolvesTheAnchorPerOrder() public {
+        uint256 bal = 2_000e6;
+        _stage(bal);
+
+        Order memory order = _propOrder(40, 10_000, bal);
+        Order[] memory orders = new Order[](1);
+        orders[0] = order;
+        bytes[] memory sigs = new bytes[](1);
+        sigs[0] = _sign(order);
+        uint256[] memory amts = new uint256[](1);
+        amts[0] = bal; // the resolved anchor — a batch has no clamp of its own
+
+        vm.prank(solver);
+        (, bool[] memory ok) = settlement.batchFill(orders, sigs, amts, true);
+        assertTrue(ok[0], "the sweep settled in a batch");
+        assertEq(IERC20(USDC).balanceOf(maker), 0, "the whole balance moved");
+        assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "and was paid for in full");
+    }
+
+    /// @dev THE PATH-SPECIFIC HAZARD, and the reason a batch is not just "fill in a
+    ///      loop" for this shape. `batchFill` has NO clamp — `fillUpTo` is what
+    ///      clamps a request down to the resolved anchor. So a solver that quoted
+    ///      against a balance which then GREW arrives with a request below the new
+    ///      anchor, and that is a partial fill of an order that can only fill whole.
+    ///      It must fail softly, leaving the order intact and fillable at the right
+    ///      size, rather than half-settling or being stranded.
+    function test_prop_batchFill_staleQuoteAfterBalanceGrows_failsSoftly() public {
+        uint256 quoted = 2_000e6;
+        _stage(quoted);
+
+        Order memory order = _propOrder(41, 10_000, type(uint256).max - 10_000); // effectively uncapped
+        Order[] memory orders = new Order[](1);
+        orders[0] = order;
+        bytes[] memory sigs = new bytes[](1);
+        sigs[0] = _sign(order);
+        uint256[] memory amts = new uint256[](1);
+        amts[0] = quoted;
+
+        // Someone tops the maker up between quote and inclusion — anyone can, which
+        // is exactly why an uncapped sweep is a footgun and the cap exists.
+        deal(USDC, maker, quoted * 2);
+
+        vm.prank(solver);
+        (, bool[] memory ok) = settlement.batchFill(orders, sigs, amts, false);
+        assertFalse(ok[0], "a stale request is a partial, and a partial is refused");
+        assertEq(IERC20(USDC).balanceOf(maker), quoted * 2, "nothing moved");
+        assertEq(settlement.filled(_hashOrder(order)), 0, "and the order is untouched");
+
+        // Asked for at the NEW anchor, the same order settles.
+        Order[] memory again = new Order[](1);
+        again[0] = order;
+        uint256[] memory amts2 = new uint256[](1);
+        amts2[0] = quoted * 2;
+        deal(WETH, solver, WETH_OUT);
+        _approveSolverSide(WETH_OUT, WETH);
+
+        vm.prank(solver);
+        (, bool[] memory ok2) = settlement.batchFill(again, sigs, amts2, true);
+        assertTrue(ok2[0], "re-sized to the live balance, it fills");
+        assertEq(IERC20(USDC).balanceOf(maker), 0, "swept at the balance that actually existed");
+    }
+
+    /// @dev Two sweeps for DIFFERENT makers in one batch, so each anchor is read
+    ///      against its own maker's balance. A shared or cached denominator would
+    ///      pay one of them the other's amount; this is the case that would catch it.
+    function test_prop_batchFill_twoMakersResolveIndependently() public {
+        uint256 aliceBal = 2_000e6;
+        uint256 bobBal = 500e6;
+        uint256 bobPk = 0xB0B;
+        address bob = vm.addr(bobPk);
+
+        _stage(aliceBal);
+        deal(USDC, bob, bobBal);
+        deal(WETH, solver, WETH_OUT * 2);
+        _approveSolverSide(WETH_OUT * 2, WETH);
+        vm.startPrank(bob);
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), USDC, type(uint160).max, 0);
+        vm.stopPrank();
+
+        Order memory a = _propOrder(42, 10_000, aliceBal);
+        Order memory b = _propOrder(43, 10_000, bobBal);
+        b.maker = bob;
+
+        Order[] memory orders = new Order[](2);
+        (orders[0], orders[1]) = (a, b);
+        bytes[] memory sigs = new bytes[](2);
+        sigs[0] = _sign(a);
+        sigs[1] = _signAsPk(b, bobPk);
+        uint256[] memory amts = new uint256[](2);
+        (amts[0], amts[1]) = (aliceBal, bobBal);
+
+        vm.prank(solver);
+        (, bool[] memory ok) = settlement.batchFill(orders, sigs, amts, true);
+        assertTrue(ok[0] && ok[1], "both sweeps settled");
+        assertEq(IERC20(USDC).balanceOf(maker), 0, "alice swept her own balance");
+        assertEq(IERC20(USDC).balanceOf(bob), 0, "bob swept his");
+        assertEq(IERC20(USDC).balanceOf(solver), aliceBal + bobBal, "and the amounts differ, as the balances did");
+    }
+
+    function _signAsPk(Order memory o, uint256 pk) internal view returns (bytes memory) {
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), _hashOrder(o)));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
 }

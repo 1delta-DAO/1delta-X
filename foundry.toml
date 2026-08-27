@@ -165,37 +165,48 @@ evm_version    = "cancun"
 # Prefer moving cold code out of the hot contract (the pricing modes moved out of
 # `bumpBps` for 1,343 bytes) over turning this dial down.
 #
-# 400 IS KEPT, and 2026-08-25 is the day that nearly stopped being true. Adding
-# `pricedIn` to the typed callback (+41 bytes) hit a tree that was already sitting on
-# 28 bytes of headroom, and the dial was dropped to 200 to make room. It went back:
-# two SIZE changes in the same pass paid for the feature and then some, so the deploy
-# profile never had to buy bytecode with production gas.
+# 400 IS KEPT — and the day it was nearly lost, 2026-08-25, produced the rule at the
+# top of this block: MEASURE FROM A WIPED `out/`. Every figure below is `rm -rf
+# out/core-deploy` first. Warm-cache figures from that same session ran ~110 bytes
+# LOW and were wrong in absolute terms (they said 24,418 where a clean build says
+# 24,527); the RELATIVE deltas held up (−103 warm vs −106 clean), so incremental
+# measurement is fine for comparing two shapes and useless for "does it fit".
 #
-#     state                                   Settlement   free
-#     before the day's work                     24,548       28
-#     + pricedIn                                24,589      −13   FAIL
-#     + Batch reusing {Core._execute}           24,483       93
-#     + {Base._callWithTail}                    24,418      158   ← here
+#     variant (clean build, runs = 400)                Settlement   free
+#     the tree before this work                          24,657      −81   FAIL
+#     + `pricedIn`, Batch dedup reverted                 24,633      −57   FAIL
+#     + `pricedIn`, {Base._callWithTail} reverted        24,592      −16   FAIL
+#     shipping: `pricedIn` + BOTH dedups                 24,527       49   ← here
 #
-# THE LESSON, and it is the one this comment existed to teach: both wins were DUPLICATE
-# ABI ENCODERS, found by asking which external calls solc was encoding twice — not by
-# turning this dial. `Batch` was making the same `EXECUTOR.execute(address,bytes)` call
-# {Core._execute} already hand-encodes, and the three item ops (`makeOnBehalf`, `take`,
-# `settle`) all share one `statics… + bytes` shape that now goes through a single
-# hand-encoder. Look there first, every time.
+# ⚠ READ THE FIRST ROW AGAIN. On a clean build the PRE-EXISTING tree did not fit —
+# it was 81 bytes over EIP-170 before a line of this work was written, and the
+# `24,548 / 28 free` this comment used to quote was a warm-cache reading. Whatever
+# CI has been reporting, a fresh checkout of that tree does not produce a deployable
+# Settlement. Both dedups are load-bearing: with either one reverted the contract is
+# still over the cap, so neither is a nice-to-have optimisation.
 #
-# ⚠ WHAT WAS MEASURED AND DID NOT WORK, so nobody repeats it: merging `_runValidators`
-# and `_runInvariants` into one shared walk — the obvious next duplicate, since both
-# inline the same full-`Order` encoder — costs **+158 bytes**. solc was already sharing
-# that encoder, and the merged body with its `bool` breaks an inlining decision that
-# was paying for itself. And a probe that DELETED the three item encoders outright
-# measured **+692**, i.e. removing code made the contract bigger. This codegen is
-# cliff-dominated: measure the real change, never a probe, and never a prediction.
+# WHERE THE BYTES CAME FROM — DUPLICATE ABI ENCODERS, not this dial. `Batch` was
+# making the same `EXECUTOR.execute(address,bytes)` call {Core._execute} already
+# hand-encodes, so solc emitted its general encoder a second time (−106). The three
+# item ops (`makeOnBehalf`, `PERMIT3.take`, `settle`) all share one `statics… + bytes`
+# shape and now go through a single hand-encoder (−65). The general rule: the moment
+# a call is hand-encoded, every other TYPED call site of that same function becomes a
+# duplicate. Look there first, every time.
 #
-# ⚠ IF YOU DO REACH FOR THE DIAL: the price is runtime gas on the DEPLOYED contract, on
-# every fill, forever, and the committed gas baseline CANNOT SEE IT — `make gas` runs
-# [profile.core] at 20,000. The 2026-08-23 sweep above says 1..200 buys ~90–190 bytes.
-# Spend code first. See docs/lop-parity-plan.md §7.
+# ⚠ MEASURED AND WORSE, so nobody repeats it: merging `_runValidators` and
+# `_runInvariants` into one shared walk — the obvious next duplicate, since both
+# inline the same full-`Order` encoder — costs +158. solc was ALREADY sharing that
+# encoder (the deployed Yul has one `abi_encode_struct_Order_calldata` definition
+# against four call sites), and the merged body with its `bool` breaks an inlining
+# decision that was paying for itself. A probe that DELETED the three item encoders
+# outright measured +692 — removing code made the contract bigger. This codegen is
+# cliff-dominated: measure the real change, never a probe, never a prediction.
+#
+# ⚠ IF YOU DO REACH FOR THE DIAL: the price is runtime gas on the DEPLOYED contract,
+# on every fill, forever, and the committed gas baseline CANNOT SEE IT — `make gas`
+# runs [profile.core] at 20,000. The 2026-08-23 sweep above says 1..200 buys
+# ~90–190 bytes, but it too was taken warm and wants re-running clean before anyone
+# leans on it. Spend code first. See docs/lop-parity-plan.md §7.
 optimizer_runs = 400
 
 # ── Periphery, validators and shared libs, split out of core 2026-08-24 ──────

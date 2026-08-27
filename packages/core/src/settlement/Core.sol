@@ -699,7 +699,13 @@ abstract contract Core is Base {
     ///      measured +9 bytes — i.e. this third inline site shares with the two that
     ///      were already there. Do not try to save bytes by dropping the pricing.
     ///
-    ///      ⚠ EVEN AT +41 IT DID NOT FIT — the tree was on 28 bytes of headroom. The
+    ///      ⚠ THE ABSOLUTE FIGURES ABOVE ARE WARM-CACHE and ran ~110 bytes low; the
+    ///      shape RANKING is what they establish and it was re-confirmed clean. The
+    ///      authoritative clean-build ladder — including the fact that the tree did
+    ///      not fit BEFORE this work — is at `optimizer_runs` in foundry.toml. Wipe
+    ///      `out/core-deploy` before trusting any size number you take here.
+    ///
+    ///      ⚠ EVEN AT +41 IT DID NOT FIT — the tree had no headroom to give. The
     ///      bytes were found by deleting two DUPLICATE ABI ENCODERS ({Batch} was
     ///      re-encoding the call {_execute} already hand-encodes; the three item ops now
     ///      share {Base._callWithTail}), not by touching `optimizer_runs`, which stayed

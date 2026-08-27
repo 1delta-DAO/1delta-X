@@ -99,7 +99,10 @@ band the other way round:
 ```
 
 No bid ⇒ `bump == BPS` ⇒ the maker receives `end`, its signed floor — exactly the
-guarantee `PriorityOrderReactor` gives. Every gwei moves the tick toward `start`,
+guarantee `PriorityOrderReactor` gives. (The *floor* matches unconditionally; the
+AUCTION matches only for a fill-once order. Theirs is all-or-nothing, ours is
+partially fillable by default and prices each slice at its own tip — see the parity
+caveat in [`pricing-modes.md`](pricing-modes.md#the-priority-auction).) Every gwei moves the tick toward `start`,
 the sequencer's ordering picks the winner, and losers revert on the `filled` guard
 they already run. The floor is the same absolute bound every other order has, so
 the mode adds no way to price outside the signed band. It ignores the basefee gas

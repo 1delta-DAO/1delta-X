@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
 import {Order} from "@core/settlement/Settlement.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
 import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
 
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
@@ -53,6 +54,38 @@ contract RevertingWallet is IERC1271 {
 
 contract EmptyReturnWallet {
     fallback() external {} // returns zero bytes; the bytes4 decode must not succeed
+}
+
+/// @dev A wallet whose answer can be TURNED OFF — a Safe rotating its owners, an
+///      account abstraction module being uninstalled, a session key being revoked.
+///      Every other 1271 mock in this suite is a fixed function of its input, which
+///      is exactly why none of them can express the question below: what happens to
+///      an order this wallet has ALREADY part-filled once it stops saying yes.
+contract FlippableWallet is IERC1271 {
+    address public immutable owner;
+    bool public live = true;
+
+    constructor(address _owner) {
+        owner = _owner;
+    }
+
+    function setLive(bool v) external {
+        live = v;
+    }
+
+    function isValidSignature(bytes32 hash, bytes memory signature) external view override returns (bytes4) {
+        if (!live || signature.length != 65) return 0xffffffff;
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(signature, 0x20))
+            s := mload(add(signature, 0x40))
+            v := byte(0, mload(add(signature, 0x60)))
+        }
+        if (ecrecover(hash, v, r, s) == owner) return IERC1271.isValidSignature.selector;
+        return 0xffffffff;
+    }
 }
 
 /// @title SignatureEdgeCases
@@ -398,5 +431,99 @@ contract SignatureEdgeCasesTest is MockSettlementBase {
         vm.prank(solver);
         settlement.fill(o, delegateSig, AMOUNT_IN);
         assertEq(settlement.filled(_hashOrder(o)), AMOUNT_IN, "the real delegate can sign");
+    }
+
+    // ════════ A contract maker that stops saying yes — the M2/E9 row ════════
+    //
+    //  THE ONE SEMANTIC CHANGE the first-fill skip makes, and the only one, in the
+    //  words of {Signatures._verifySignature}'s own warning: an EIP-1271 wallet that
+    //  would start returning `false` — approval revoked, owners rotated — no longer
+    //  blocks the REMAINDER of an order it already part-filled.
+    //
+    //  This is the credential most likely to actually be withdrawn in production. An
+    //  EOA signature cannot be taken back, so for A1..A3 the question is vacuous; a
+    //  Safe rotating owners is a Tuesday. The suite had three 1271 mocks and not one
+    //  of them could change its mind, so the documented caveat was untestable by
+    //  construction — the gap that {FlippableWallet} exists to close.
+    //
+    //  Both halves are asserted, because the pair IS the property: the skip is bounded
+    //  by `filled != 0` (an untouched order still blocks), and {cancelOrder} still
+    //  binds (so the advice the source gives a contract maker is true, not merely
+    //  offered).
+
+    function _fundWallet(address w) internal {
+        tA.mint(w, AMOUNT_IN * 4);
+        vm.startPrank(w);
+        tA.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tA), uint160(AMOUNT_IN * 4), 0);
+        vm.stopPrank();
+        tB.mint(solver, AMOUNT_OUT * 4);
+        _solverApprove(address(settlement), address(tB), AMOUNT_OUT * 4);
+    }
+
+    function _walletOrder(address w, uint256 nonce) internal view returns (Order memory o) {
+        o = _plainOrder(nonce, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
+        o.maker = w;
+    }
+
+    /// @dev Partial fill → the wallet goes dark → the remainder settles anyway.
+    function test_1271_revokedMidOrder_doesNotBindOnTheRemainder() public {
+        FlippableWallet w = new FlippableWallet(maker);
+        _fundWallet(address(w));
+        Order memory o = _walletOrder(address(w), 30);
+        bytes memory sig = _sign(o); // signed by makerPk, validated by the wallet
+
+        vm.prank(solver);
+        settlement.fill(o, sig, AMOUNT_IN / 2);
+        assertEq(tA.balanceOf(solver), AMOUNT_IN / 2, "the wallet authorised the opening fill");
+
+        w.setLive(false);
+        assertEq(w.isValidSignature(_digest(o), sig), bytes4(0xffffffff), "the wallet now rejects its own signature");
+
+        vm.prank(solver);
+        settlement.fill(o, sig, AMOUNT_IN / 2);
+        assertEq(tA.balanceOf(solver), AMOUNT_IN, "the remainder settled on the counter, not on the wallet");
+    }
+
+    /// @dev The bound: an UNTOUCHED order from the same dark wallet is refused. The
+    ///      skip is `filled != 0` and nothing broader — not per-maker, not per-wallet.
+    function test_1271_revokedBeforeAnyFill_stillBinds() public {
+        FlippableWallet w = new FlippableWallet(maker);
+        _fundWallet(address(w));
+        Order memory touched = _walletOrder(address(w), 31);
+        Order memory untouched = _walletOrder(address(w), 32);
+        bytes memory sigTouched = _sign(touched);
+        bytes memory sigUntouched = _sign(untouched);
+
+        vm.prank(solver);
+        settlement.fill(touched, sigTouched, AMOUNT_IN / 2);
+
+        w.setLive(false);
+
+        vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidContractSignature.selector);
+        settlement.fill(untouched, sigUntouched, AMOUNT_IN);
+    }
+
+    /// @dev And the switch that DOES work. `Signatures` tells a contract maker that
+    ///      needs revocation to bind mid-order to use {cancelOrder}; this is that
+    ///      sentence as a test.
+    function test_1271_cancelOrderBindsWhereRevocationDoesNot() public {
+        FlippableWallet w = new FlippableWallet(maker);
+        _fundWallet(address(w));
+        Order memory o = _walletOrder(address(w), 33);
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
+        settlement.fill(o, sig, AMOUNT_IN / 2);
+
+        w.setLive(false); // does nothing to this order
+        vm.prank(address(w));
+        settlement.cancelOrder(o); // this does
+
+        vm.prank(solver);
+        vm.expectRevert(OrderState.OrderCancelled.selector);
+        settlement.fill(o, sig, AMOUNT_IN / 2);
+        assertEq(tA.balanceOf(solver), AMOUNT_IN / 2, "the remainder never moved");
     }
 }

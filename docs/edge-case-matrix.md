@@ -25,6 +25,15 @@ It has three jobs, in order:
 3. **Bind** each classified cell to the test that pins it, and name the ones that
    have none.
 
+**Status, 2026-08-27.** The first pass found eleven gaps and six settlement errors
+that fired in no test at all. All are closed: the suite went **552 → 603** tests
+with no contract change, and the mechanical sweep in
+[Part 3](#part-3--the-completeness-check-mechanically) returns clean. Two residual
+combinations are recorded as *accepted*, with the reason, in
+[Part 4](#part-4--the-register). One of the closed items (G-8, the priority auction
+under partial fills) turned out to be a genuine open question about behaviour rather
+than a missing test, and is now a decision on the record.
+
 **Related:** [`reference-audits.md`](reference-audits.md) is the *external* view —
 what other protocols in this class got wrong, as classes `C1…C15`, and our verdict
 against each. This note is the *internal* view: our own state space, exhaustively.
@@ -38,7 +47,7 @@ a cell here, and if it is not, this note is missing an axis.
 | Mark | Verdict | Meaning | What a missing test costs |
 | --- | --- | --- | --- |
 | **●** | **common** | On the normal path. Happens on most fills. | Nothing — the suite is full of these. A gap here would be visible immediately. |
-| **◐** | **rare** | Legitimate, infrequent. A feature most orders never use, or a state most orders never reach. | **The most expensive gap.** Rare-but-legal is where F8 and F15 lived: reachable, unexercised, and nobody notices the regression. |
+| **◐** | **rare** | Legitimate, infrequent. A feature most orders never use, or a state most orders never reach. | **The most expensive gap.** Rare-but-legal is where findings F8 and F15 lived: reachable, unexercised, and nobody notices the regression. |
 | **⊘** | **never** | Structurally unreachable. The mechanism that makes it so must be *named* in the cell. | A test is not the control — the *mechanism* is. But if the mechanism is a convention rather than the compiler, it needs a regression net (cf. [C2](reference-audits.md#c2--hand-rolled-calldata-arithmetic-without-a-bounds-proof)). |
 | **✕** | **must-not** | An actor can present it. The settler must refuse. | A security gap. Every ✕ cell is a revert, and every revert needs a test that proves it fires. |
 
@@ -58,6 +67,10 @@ means it can be constructed and is rejected. Downgrading a ✕ to a ⊘ in your 
 
 Ten axes. Each value names where it is set in the code, so a cell can be
 constructed from the table without reading the settler.
+
+One axis is deliberately not in this list: **who controls a destination address**.
+It is not a property of the order, it is a property of each *value sink*, so it
+gets its own table — [M11](#m11--value-sink--who-controls-the-destination).
 
 ### A — Authorisation credential
 
@@ -154,6 +167,13 @@ documented in three places in the source and is the subject of
 
 ### F — Fill granularity
 
+⚠ **Axis letters are not finding numbers.** This axis's `F1…F9` are fill-granularity
+*values*; [`reference-audits.md`](reference-audits.md)'s `F1…F15` are *findings*. They
+overlap in exactly one place — **`F8` is `newFilled > total` here and the
+proportional-anchor × pegged-module finding there** — so every reference to the
+finding is written as "finding F8" or linked. `F13`–`F15` have no axis meaning and are
+always findings.
+
 | # | Value | Freq |
 | --- | --- | --- |
 | F1 | Whole order in one fill (`ctx.fullFill`) | ● |
@@ -218,7 +238,7 @@ documented in three places in the source and is the subject of
 | J2 | Fee-on-transfer **with** delta-verify (`timing` bit 104) | ◐ |
 | J3 | Fee-on-transfer **without** delta-verify (nominal push) | ◐ |
 | J4 | Missing-return / non-standard | ◐ |
-| J5 | Amount > `uint160.max` (Permit3's cap) | ✕ `AmountOverflow` |
+| J5 | An **item slice** wider than `uint160` (Permit3's book width) | ✕ `AmountOverflow` |
 
 ---
 
@@ -239,10 +259,10 @@ it bind?
 | A1 EOA 65 | ● checked · `PlainSwap:test_plain_swap_full` | ● **skipped** · `PlainSwap:test_plain_swap_partialFills` | ⊘ a signature cannot be withdrawn | ⊘ same |
 | A2 compact 64 | ◐ · `CompactSignature:test_fill_acceptsCompact64ByteSignature` | ● skipped | ⊘ | ⊘ |
 | A3 malleable twin | ◐ · `SignatureEdgeCases:test_malleability_fourEncodings_stillOneFill` | ● skipped — **and this is why the twin is benign**: replay is bounded by `filled`, not by signature identity | ⊘ | ⊘ |
-| A4 bulk / Merkle | ◐ · `BulkSignature:test_bulkSignature_fillsEveryLeaf` | ◐ **skipped — any 65 bytes pass** | ✕ leaf outside tree · `test_bulkSignature_orderOutsideTree_reverts` | ⊘ root is signed, not withdrawable — **but see gap [G-1](#g-1)** |
-| A5 delegate EOA | ◐ · `DelegatedOrderSigner:test_delegate_canSignForTheMaker` | ◐ skipped | ✕ binds · `test_revocation_bindsOnAnUnfilledOrder` | ◐ **does NOT bind** — documented; **[G-2](#g-2) no test** |
-| A6 delegate contract | ◐ · `test_contractDelegate_signsViaEnvelope` | ◐ skipped | ✕ binds · `test_contractDelegate_revoked` | ◐ does NOT bind — **[G-2](#g-2)** |
-| A7 EIP-1271 maker | ◐ · `PlainSwap:test_plain_swap_contractSigner_eip1271`, `SafeMakerFork:test_fork_gnosisSafe_maker_eip1271` | ◐ skipped | ✕ binds · `SignatureEdgeCases:test_1271_wrongMagicValue_reverts` | ◐ does NOT bind (E9) — **[G-3](#g-3) no test** |
+| A4 bulk / Merkle | ◐ · `BulkSignature:test_bulkSignature_fillsEveryLeaf` | ◐ **skipped — any 65 bytes pass** | ✕ leaf outside tree · `test_bulkSignature_orderOutsideTree_reverts` | ⊘ root is signed, not withdrawable · `test_bulkSignature_afterFirstFill_anyBytesAreAccepted` pins the skip, `..._untouchedSibling_stillRefusesGarbage` its bound |
+| A5 delegate EOA | ◐ · `DelegatedOrderSigner:test_delegate_canSignForTheMaker` | ◐ skipped | ✕ binds · `test_revocation_bindsOnAnUnfilledOrder` | ◐ **does NOT bind** · `test_revocation_doesNotBindAfterAPartialFill`; `cancelOrder` does · `test_revocation_cancelOrderBindsWhereRevocationDoesNot` |
+| A6 delegate contract | ◐ · `test_contractDelegate_signsViaEnvelope` | ◐ skipped | ✕ binds · `test_contractDelegate_revoked` | ◐ does NOT bind · `test_contractDelegate_revocationDoesNotBindAfterAPartialFill` |
+| A7 EIP-1271 maker | ◐ · `PlainSwap:test_plain_swap_contractSigner_eip1271`, `SafeMakerFork:test_fork_gnosisSafe_maker_eip1271` | ◐ skipped | ✕ binds · `SignatureEdgeCases:test_1271_wrongMagicValue_reverts` | ◐ does NOT bind (E9) · `test_1271_revokedMidOrder_doesNotBindOnTheRemainder`; bounded by `..._revokedBeforeAnyFill_stillBinds` |
 | A8 EIP-7702 raw key | ◐ · `PlainSwap:test_plain_swap_eip7702_rawKeyMaker` | ◐ skipped | ⊘ | ⊘ |
 | A9 `approveOrder` | ◐ · `OnChainOrderApproval:test_approve_thenFill_emptySig` | ◐ **RE-CHECKED every fill** | ✕ binds · `test_revokeOrderApproval_blocksFill` | ✕ **binds** via sentinel escalation · `test_revoke_blocksRemainder_evenWithNonEmptySig` **(F13 regression pin)** |
 
@@ -258,20 +278,22 @@ credential authorised it?* — is the
 | --- | --- | --- |
 | E1 `cancelOrder` | ✕ binds · `CancelOrder:test_cancelOrder_cancelsOneNotTheSharedNonce` | ✕ binds · `CancelOrder:test_cancelOrder_onPartialFill` |
 | E2 `cancelOrders` | ✕ binds · `NonceCancellation:test_cancel_blocksFill` | ✕ binds · `test_cancel_afterPartialFill_blocksRemainder` |
-| E3 `invalidateNonceWord` | ✕ binds · `test_invalidateNonceWord_cancels256` | ✕ binds (same gate) — untested, **low risk: identical code path** |
-| E4 `rollbackNonces` | ✕ binds · `test_rollback_cancelsBelowFloor` | ✕ binds (same gate) — untested, same note |
+| E3 `invalidateNonceWord` | ✕ binds · `test_invalidateNonceWord_cancels256` | ✕ binds — same gate as E2, which is pinned on a touched order |
+| E4 `rollbackNonces` | ✕ binds · `test_rollback_cancelsBelowFloor` | ✕ binds — same gate; also pinned on the netted path · `MatchSettleGates:test_gate_rolledBackNonce_reverts` |
 | E5 `revokeOrderApproval` | ✕ binds · `OnChainOrderApproval:test_revokeOrderApproval_blocksFill` | ✕ binds · `test_revokeOrderApproval_blocksRemainderAfterPartialFill` + F13 pin |
-| E6 `setOrderSigner(d,0)` | ✕ binds · `DelegatedOrderSigner:test_revocation_bindsOnAnUnfilledOrder` | ◐ **does not bind** — **[G-2](#g-2)** |
+| E6 `setOrderSigner(d,0)` | ✕ binds · `DelegatedOrderSigner:test_revocation_bindsOnAnUnfilledOrder` | ◐ **does not bind** · `test_revocation_doesNotBindAfterAPartialFill`, `test_expiry_doesNotLapseMidOrderOnceTouched` |
 | E7 expiry | ✕ binds · `MultiAssetAuthGates:test_multiOut_expired` | ✕ binds (checked per fill in `_fillCore`) |
 | E8 Permit3 revoke | ✕ funding fails · `OrderRelevantState:test_state_underfunded_byAllowance` | ✕ same |
-| E9 1271 → `false` | ✕ binds · `SignatureEdgeCases:test_1271_*` | ◐ **does not bind** — **[G-3](#g-3)** |
+| E9 1271 → `false` | ✕ binds · `SignatureEdgeCases:test_1271_*` | ◐ **does not bind** · `test_1271_revokedMidOrder_doesNotBindOnTheRemainder` |
 
 **Reading:** a maker holding a part-filled order has exactly seven working kill
 switches, not nine. E6 and E9 are advertised as revocation and are not, for the
 remainder of a touched order. That is a *correct, deliberate* trade (the
-alternative is a cold SLOAD on every fill of every order), but it is a
-**documentation-and-test obligation**, not a free one — and right now the
-obligation is met only by prose.
+alternative is a cold SLOAD on every fill of every order), and as of 2026-08-27 it
+is a **tested** one in both directions: each non-binding cell has a test asserting
+the remainder still fills, paired with one asserting that `cancelOrder` — the
+switch the source tells a maker to reach for — does bind. The advice is now true by
+test rather than by claim.
 
 ### M3 — entry point × lifecycle gate
 
@@ -280,15 +302,15 @@ obligation is met only by prose.
 
 | Gate | `fill` (C1) | `fillUpTo` (C7) | `batchFill` (C6) | `matchSettle` (C8) |
 | --- | --- | --- | --- | --- |
-| Expired (B8) | ✕ `MultiAssetAuthGates:test_multiOut_expired` | ✕ shares `_fillCore` | ✕ shares `_fillCore` | ✕ `Batch.sol:109` — **[G-4](#g-4) no test** |
-| Cancelled by hash (B4) | ✕ `CancelOrder:*` | ✕ `FillUpTo:test_fillUpTo_cancelledByHash_reverts_OrderCancelled` | ✕ skipped, not reverted · `BatchFill:test_batchFill_skipsUnfillable` | ✕ — **[G-4](#g-4)** |
-| Nonce cancelled (B6/B7) | ✕ `NonceCancellation:*` | ✕ shares | ✕ shares | ✕ — **[G-4](#g-4)** |
-| Empty sig / `approveOrder` (A9) | ◐ `OnChainOrderApproval:test_approve_thenFill_emptySig` | ◐ shares | ◐ `test_batchFill_approvedOrder_emptySig` | ◐ — **[G-4](#g-4)** |
-| Fill-once (B5) | ◐ `FillOnceNonce:test_fillOnce_settlesAndConsumesTheNonce` | ◐ — **[G-5](#g-5)** | ◐ — **[G-5](#g-5)** | ◐ — **[G-5](#g-5)** |
-| Exclusivity (I2–I5) | ✕ `AuctionAndExclusivity:*` | ✕ `test_fillUpTo_recipient_doesNotBypassExclusivity` | ✕ `SettlementGuards:test_batchFill_exclusivity_threadsFiller` | ✕ — **[G-4](#g-4)** |
-| Proportional anchor (G10) | ◐ `ProportionalLeg:*` | ◐ `test_prop_fillUpTo_clampsToResolvedAnchor` | ◐ — **[G-6](#g-6)** | ◐ — **[G-6](#g-6)** |
-| Delta-verify (J2) | ◐ `DeltaVerifyDelivery:*` | ◐ shares | ◐ shares | ⊘→✕ `DeltaVerifyNotBatchable` — **[G-7](#g-7) no test** |
-| Contract maker (A7) | ◐ `PlainSwap`, `SafeMakerFork` | ◐ — untested | ◐ — untested | ◐ — untested |
+| Expired (B8) | ✕ `MultiAssetAuthGates:test_multiOut_expired` | ✕ shares `_fillCore` | ✕ shares `_fillCore` | ✕ `MatchSettleGates:test_gate_expiredOrder_reverts` |
+| Cancelled by hash (B4) | ✕ `CancelOrder:*` | ✕ `FillUpTo:test_fillUpTo_cancelledByHash_reverts_OrderCancelled` | ✕ skipped, not reverted · `BatchFill:test_batchFill_skipsUnfillable` | ✕ `MatchSettleGates:test_gate_cancelledByHash_reverts` |
+| Nonce cancelled (B6/B7) | ✕ `NonceCancellation:*` | ✕ shares | ✕ shares | ✕ `MatchSettleGates:test_gate_nonceCancelled_reverts`, `..._rolledBackNonce_reverts` |
+| Empty sig / `approveOrder` (A9) | ◐ `OnChainOrderApproval:test_approve_thenFill_emptySig` | ◐ shares | ◐ `test_batchFill_approvedOrder_emptySig` | ◐ `MatchSettleGates:test_gate_emptySig_authorizesViaOnChainApproval` + `..._withoutApproval_reverts`, `..._revokedApproval_reverts` |
+| Fill-once (B5) | ◐ `FillOnceNonce:test_fillOnce_settlesAndConsumesTheNonce` | ◐ `test_fillOnce_fillUpTo_overRequestClampsToTheWholeOrder`, `..._underRequest_reverts` | ◐ `test_fillOnce_batchFill_partialFailsSoftlyAndBurnsNoNonce` (+2) | ◐ `MatchSettleGates:test_gate_fillOnce_partialInAPlan_reverts`, `..._fullFillConsumesTheNonce` |
+| Exclusivity (I2–I5) | ✕ `AuctionAndExclusivity:*` | ✕ `test_fillUpTo_recipient_doesNotBypassExclusivity` | ✕ `SettlementGuards:test_batchFill_exclusivity_threadsFiller` | ✕ `MatchSettleGates:test_gate_hardExclusivity_outsiderReverts` + the two complements |
+| Proportional anchor (G10) | ◐ `ProportionalLeg:*` | ◐ `test_prop_fillUpTo_clampsToResolvedAnchor` | ◐ `test_prop_batchFill_resolvesTheAnchorPerOrder` (+2) | ◐ `MatchSettleGates:test_gate_proportionalAnchor_resolvesInAPlan`, `..._partialInAPlan_reverts` |
+| Delta-verify (J2) | ◐ `DeltaVerifyDelivery:*` | ◐ shares | ◐ shares | ✕ `MatchSettleGates:test_gate_deltaVerifyOrder_isNotBatchable` + `..._sameOrderWithoutTheFlag_matches` |
+| Contract maker (A7) | ◐ `PlainSwap`, `SafeMakerFork`, `SignatureEdgeCases:test_1271_*` | ◐ — untested | ◐ — untested | ◐ — untested (accepted — see R-1) |
 | Reentrancy | ✕ `SettlementGuards:test_reentrancy_into_fill_reverts` | ✕ `..._into_fillUpTo_reverts` | ✕ shares | ✕ `test_reentrancy_viaCallback_reverts` |
 
 ### M4 — fill granularity × pricing mode
@@ -301,9 +323,9 @@ splitting the fill change what the maker receives?*
 | D1 fixed | ● `PlainSwap:test_plain_swap_full` | ● `test_plain_swap_partialFills` | ◐ **must not drift** · `RoundingDirection:test_fixedInput_isExactUnderAnySlicing`, `testFuzz_slicing_neverFavoursTheSolver` |
 | D2 linear decay | ● `test_plain_swap_dutchDecay` | ● `test_plain_swap_partialFills_acrossDutchTicks`, `MultiAssetPartials:test_multiIn_dutchDecay_midpoint` | ◐ `FillAccountingFuzz:testFuzz_twoPartialFills_sumInvariant` |
 | D3 curve | ◐ `AuctionAndExclusivity:test_curve_sell_interpolatesBetweenPoints` | ◐ `test_curve_partialFills_perTickPricing` | ◐ covered by the same |
-| D4 block clock | ◐ `PricingModes:test_blockClock_decaysPerBlock` | ◐ — untested (low risk: clock source only) | ◐ — untested |
+| D4 block clock | ◐ `PricingModes:test_blockClock_decaysPerBlock` | ◐ — untested (accepted — see R-2) | ◐ — untested |
 | D5 gas bump | ◐ `test_gasBump_sell_reducesOutputWithBasefee` | ◐ `test_gasBump_plusTimeDecay_sumsAndFills` | ◐ `testFuzz_gasBump_withinBounds` |
-| D6 priority | ◐ `PricingModes:test_priorityAuction_bidMovesTickTowardStart` | ◐ **[G-8](#g-8)** — two partials at different tips price differently; nothing pins it | ◐ **[G-8](#g-8)** |
+| D6 priority | ◐ `PricingModes:test_priorityAuction_bidMovesTickTowardStart` | ◐ **slices price INDEPENDENTLY** · `test_priorityAuction_partialFills_priceIndependentlyPerSlice` | ◐ bounded by the band · `testFuzz_priorityAuction_everySliceStaysInsideTheBand` |
 | D7 price module | ◐ `PricingModes:test_priceModule_bumpFollowsFillProgress` | ◐ same test (progress-linked) | ◐ `HostilePriceModule:testFuzz_anyAnswer_staysInsideTheSignedBand` |
 | D8 soft override | ◐ `AuctionAndExclusivity:test_override_sell_nonExclusiveMustDeliverMore` | ◐ `test_override_onDecayedPrice` | ◐ `TypedCallback:test_clamped_partialFillSlice` |
 
@@ -336,11 +358,11 @@ the rounding.
 
 | | `fill` | `fillUpTo` | `batchFill` | `matchSettle` |
 | --- | --- | --- | --- | --- |
-| I2 hard, outsider | ✕ `AuctionAndExclusivity:test_hardExclusivity_zeroBps_stillReverts` | ✕ `FillUpTo:test_fillUpTo_recipient_doesNotBypassExclusivity` | ✕ skipped · `SettlementGuards:test_batchFill_exclusivity_threadsFiller` | **[G-4](#g-4)** |
-| I3 soft, outsider pays | ◐ `test_override_sell_nonExclusiveMustDeliverMore` | ◐ — untested | ◐ `test_override_batchFill_threadsFillerAndOverride` | **[G-4](#g-4)** |
-| I4/I5 filler set | ◐ `FillerSetExclusivity:test_fillerSet_firstMemberFills`, `test_fillerSet_softOverride_outsiderPaysImprovement` | ◐ — untested | ◐ — untested | **[G-4](#g-4)** |
+| I2 hard, outsider | ✕ `AuctionAndExclusivity:test_hardExclusivity_zeroBps_stillReverts` | ✕ `FillUpTo:test_fillUpTo_recipient_doesNotBypassExclusivity` | ✕ skipped · `SettlementGuards:test_batchFill_exclusivity_threadsFiller` | ✕ `MatchSettleGates:test_gate_hardExclusivity_outsiderReverts` |
+| I3 soft, outsider pays | ◐ `test_override_sell_nonExclusiveMustDeliverMore` | ◐ — untested | ◐ `test_override_batchFill_threadsFillerAndOverride` | ◐ — untested (accepted — see R-1) |
+| I4/I5 filler set | ◐ `FillerSetExclusivity:test_fillerSet_firstMemberFills`, `test_fillerSet_softOverride_outsiderPaysImprovement` | ◐ — untested | ◐ — untested | ◐ — untested (accepted — see R-1) |
 | I7 malformed set | ✕ `test_fillerSet_emptySet_isMalformed`, `_truncatedEntry_`, `_nonZeroCountByte_` | ✕ shares | ✕ shares | ✕ shares |
-| I6 window lapsed | ● `test_fillerSet_outsiderFillsAfterWindow`, `test_fillerSet_malformedHealsAfterWindow` | ● | ● | ● |
+| I6 window lapsed | ● `test_fillerSet_outsiderFillsAfterWindow`, `test_fillerSet_malformedHealsAfterWindow` | ● | ● | ● `MatchSettleGates:test_gate_exclusivity_lapsedWindowOpensUp` |
 | × D3 curve | ⊘ **mutually exclusive** — the set rides the `curve` blob, so a set order decays linearly · `test_fillerSet_decayIgnoresSetBytes` | | | |
 | × D4 block clock | ◐ `test_fillerSet_blockClock_windowCountsBlocks` | | | |
 
@@ -386,7 +408,7 @@ row **and** its own finite-allowance assertion.
 
 `Proportional` (G10) and `fillModule`/`fillTotal` change what the *denominator
 means*, so they interact with almost every other axis. Each ✕ here is a real
-revert, and F8 is the cell that was missing.
+revert, and finding F8 is the cell that was missing.
 
 | Combination | Verdict | Test |
 | --- | --- | --- |
@@ -400,13 +422,13 @@ revert, and F8 is the cell that was missing.
 | Proportional × `fillUpTo` clamp | ◐ legal, clamps | `test_prop_fillUpTo_clampsToResolvedAnchor` |
 | Proportional × pegged price module | ◐ **F8** — legal now | see [F8](reference-audits.md#f8--a-proportional-anchor-plus-the-pegged-price-module-passed-preflight-and-never-filled) |
 | Proportional × typed callback | ◐ | `TypedCallback:test_typed_proportionalAnchorUnderPostInputs` |
-| Proportional × batch paths | ◐ | **[G-6](#g-6)** |
+| Proportional × batch paths | ◐ | `ProportionalLeg:test_prop_batchFill_*` (3), `MatchSettleGates:test_gate_proportionalAnchor_*` (2) |
 | `fillModule` × overfill | ✕ cap stays in the core | `FillModule:test_overfillCap_moduleCannotExceedTotal` |
 | `fillModule` × zero delta | ✕ `ZeroFill` | `test_zeroDelta_reverts` |
 | `fillModule` × `minFillAnchor` | ✕ applies to the *delta* | `test_minFillAnchor_appliesToDelta` |
 | `fillModule` × uniform scaling | ◐ one fraction, all legs | `test_singleFraction_scalesAllLegsUniformly` |
 | `fillModule` × `fillUpTo` | ◐ proposal not clamped by the core | `test_fillUpTo_moduleOrder_proposalNotClamped` |
-| Empty legs × no `fillTotal` | ✕ `NoAnchorLeg` | **[G-9](#g-9) no test** |
+| Empty legs × no `fillTotal` | ✕ `NoAnchorLeg` | `ErrorSurface:test_noAnchorLeg_sellWithNoInputLegs_reverts`, `..._buyWithNoOutputLegs_reverts`, `..._signedFillTotalNeedsNoLegs` |
 
 ### M10 — token behaviour × delivery mode
 
@@ -420,9 +442,65 @@ revert, and F8 is the cell that was missing.
 | Same token in **and** out | — | ✕ `test_deltaVerify_sameTokenInAndOut_reverts` |
 | Duplicate (token, recipient) | ◐ legal · `SettlementGuards:test_fill_duplicateTokenOut_deliversBothLegs` | ✕ `test_deltaVerify_duplicateTokenRecipient_reverts` |
 | Same token, different recipients | ◐ | ◐ `test_deltaVerify_sameTokenDifferentRecipients_ok` |
-| Under `matchSettle` | ● | ✕ `DeltaVerifyNotBatchable` — **[G-7](#g-7)** |
+| Under `matchSettle` | ● | ✕ `MatchSettleGates:test_gate_deltaVerifyOrder_isNotBatchable` |
 | J4 missing return | ◐ `utils/SafeTransferLib` suite | ◐ same |
-| J5 > `uint160.max` | ✕ `AmountOverflow` | **[G-10](#g-10) no test** |
+| J5 item slice > `uint160` | ✕ delivery-mode independent — the ceiling is Permit3's book width, not the token's behaviour · `ErrorSurface:test_amountOverflow_makeItemAboveUint160_reverts`, `..._takeItemAboveUint160_reverts`, `..._exactlyUint160Max_isAccepted` | ✕ same |
+
+### M11 — value sink × who controls the destination
+
+The C15 matrix — *the settler's balance treated as a shared pot* — asked the way
+an attacker asks it. Every token movement in a fill has a **destination** and an
+**amount**, and the whole safety argument is that a filler never controls both
+halves for money that is not its own.
+
+| Value sink | Destination chosen by | Amount bounded by | Pinned by |
+| --- | --- | --- | --- |
+| Output leg | **MAKER** — `LegOut.recipient`, in the typehash | the signed leg price | `SolverValueExtraction:test_repointingAFeeRecipient_breaksTheSignature` |
+| Item proceeds | **MAKER** — `Item.recipient`, in the typehash | the signed item slice | `MultiAssetItems:test_take_recipientRouting_toMaker` |
+| `payTo` (`fillUpTo`) | **FILLER** | `owed` — the filler's own signed price | `test_recipient_cannotCaptureTheMakersOutput`, `FillUpTo:test_fillUpTo_recipient_redirectsProceedsOnly` |
+| `profitRecipient` (`matchSettle`) | **FILLER** | `balanceOf − beforeBal` | `test_profitRecipient_cannotReachAPreExistingBalance` |
+| `PRESEND` → `msg.sender` | **FILLER** | unencumbered surplus only | `MatchSettle:test_presend_boundedByOutstanding`, `..._cannotTakeOwedFunds` |
+| Callback `(target, data)` | **FILLER** | **nothing** — the executor is nobody's spender | `test_callbackCannotLiftTheSettlersBalanceMidFill`, `SolverCallback:test_fillWithCallback_cannotDrainViaPermit3` |
+| `takerData` | **FILLER** | reaches no destination at all | `test_takerData_reachesNoDestination` |
+
+**The rule the whole column rests on:** every amount a filler can receive is a
+**measured delta** over a snapshot taken *inside this settlement* — `balanceOf −
+before`, never a raw `balanceOf`. That is what makes a pre-existing or donated
+Settlement balance unreachable, and it holds on both paths.
+
+| Attack | Verdict | Pinned by |
+| --- | --- | --- |
+| Redirect the maker's output via `fillUpTo(recipient)` | ✕ routes the filler's own proceeds only | `test_recipient_cannotCaptureTheMakersOutput` |
+| Re-point a fee leg at the filler | ✕ forgery, not accounting — the recipient is in the typehash | `test_repointingAFeeRecipient_breaksTheSignature` |
+| Smuggle a destination through `takerData` | ⊘ it reaches no destination decision | `test_takerData_reachesNoDestination` |
+| Take a donated `tokenIn` balance as "proceeds" | ✕ the snapshot floors it | `test_donatedBalance_isNotPaidOutAsProceeds` |
+| Let a donated `tokenOut` balance stand in for delivery | ✕ delivery is a pull from the filler | `test_donatedOutputBalance_doesNotFundTheDelivery` |
+| Lift the settler's balance mid-callback | ✕ the executor holds no allowance | `test_callbackCannotLiftTheSettlersBalanceMidFill` |
+| Donate mid-callback, get it back as "proceeds" | ✕ the input snapshot is taken **after** the callback | `test_callbackDonationIsNotCountedAsThisFillsProceeds` |
+| Name a third-party `profitRecipient` to widen the sweep | ✕ still `balanceOf − beforeBal` | `test_profitRecipient_cannotReachAPreExistingBalance` |
+| Inject a filler-signed order to drain the pooled inputs | ✕ `PlanIncomplete` / `BatchNotWhole` | `test_injectedSelfOrder_cannotDrainThePooledInputs` |
+| …the same order, paying its own way | ● legal, and nets only what it funded | `test_injectedSelfOrder_thatPaysItsOwnWay_isFine` |
+
+**Two findings from writing these, neither a vulnerability, both worth knowing.**
+
+*Order of operations is doing security work.* The input snapshot in
+`Core._settleForward` is taken **after** the solver callback returns. A callback
+that pushes tokens into Settlement therefore lands *below* the floor and counts as
+nothing — the maker still funds the full shortfall and the donation is stranded.
+Move that snapshot one line earlier and a filler could pay the maker's side with
+its own money and take it straight back while the maker keeps their input. Nothing
+in the code says "this line must come first"; the test does.
+
+*Value parked in Settlement is unrecoverable, and that is the point.* Because every
+payout is `balanceOf − before`, a balance sitting in the settler raises the floor
+for every future settlement and can never be swept out by a later filler. Naming
+`address(settlement)` as `payTo` or `profitRecipient` is a filler's own funeral,
+not an exploit — pinned by
+`test_recipientIsSettlement_strandsTheFillersOwnProceeds`, which also shows a
+subsequent ordinary fill hands out its own amounts and not one wei more.
+
+---
+
 
 ---
 
@@ -432,23 +510,36 @@ The axis tables above are a human enumeration and can be incomplete. There is on
 enumeration that cannot be: **every `revert` in the settler is a ✕ cell.** If an
 error has no test, some must-not combination is unpinned, by definition.
 
-As of 2026-08-27 the settlement layer declares **53 errors**, and **six have no
-reference anywhere in `packages/core/test/`**:
+The settlement layer declares **53 errors**. When this note was first written, six
+had no reference anywhere in `packages/core/test/`. All six were addressed on
+2026-08-27; the sweep now returns clean.
 
-| Error | Raised at | Reachable by | Gap |
+| Error | Raised at | Reachable by | Now pinned by |
 | --- | --- | --- | --- |
-| `NoAnchorLeg` | `OrderGates.sol:139,153` | an order with an empty fixed-side blob and no `fillTotal` | **[G-9](#g-9)** |
-| `DeltaVerifyNotBatchable` | `Batch.sol:108` | a bit-104 order presented to `matchSettle` | **[G-7](#g-7)** |
-| `AmountOverflow` | `Base.sol:367,376` | a leg slice above `uint160.max` | **[G-10](#g-10)** |
-| `PricingNeedsContext` | `DutchAuction.sol:541,584` | the context-free pricing view called on a module / priority order | **[G-11](#g-11)** |
-| `TokenNotInUniverse` | `Batch.sol:803` | a `matchSettle` internal-consistency failure | **[G-11](#g-11)** |
-| `InvalidPermit3` | `Base.sol:238` | constructor guard — deploy-time | **[G-11](#g-11)** |
+| `NoAnchorLeg` | `OrderGates.sol:139,153` | an order with an empty fixed-side blob and no `fillTotal` | `ErrorSurface:test_noAnchorLeg_sellWithNoInputLegs_reverts` · `..._buyWithNoOutputLegs_reverts` · `..._signedFillTotalNeedsNoLegs` |
+| `DeltaVerifyNotBatchable` | `Batch.sol:108` | a bit-104 order presented to `matchSettle` | `MatchSettleGates:test_gate_deltaVerifyOrder_isNotBatchable` · `..._sameOrderWithoutTheFlag_matches` |
+| `AmountOverflow` | `Base.sol:367,376` | a MAKE/TAKE **item slice** above `uint160.max` | `ErrorSurface:test_amountOverflow_makeItemAboveUint160_reverts` · `..._takeItemAboveUint160_reverts` · `..._exactlyUint160Max_isAccepted` |
+| `PricingNeedsContext` | `DutchAuction.sol:541,584` | the context-free pricing view called on a module / priority order | `ErrorSurface:test_pricingNeedsContext_priceModuleOrder_hasNoClockTick` · `..._priorityOrder_hasNoClockTick` · `..._clockOrderStillPreviews` |
+| `InvalidPermit3` | `Base.sol:238` | constructor guard — deploy-time | `ErrorSurface:test_invalidPermit3_codelessHubRejectedAtConstruction` |
+| `TokenNotInUniverse` | `Batch.sol:803` | **nothing** — see below | `MatchSettleGates:test_tokenUniverse_coversEveryLegTokenAcrossOrders` (invariant, not revert) |
 
 `NoAnchorLeg` deserves a note beyond its row. [`OrderGates`](../packages/core/src/settlement/OrderGates.sol)
 opens by explaining that this specific guard is what the lens copy was **missing**
 when the 2026-08 audit found the drift — a packed blob is not an array, so an
 out-of-range read pads with zeros instead of reverting. The guard that answers a
-found bug is currently pinned by nothing.
+found bug was, until now, pinned by nothing.
+
+**The one honest exception, stated plainly so the clean sweep does not overclaim.**
+`TokenNotInUniverse` is the fall-through of `Batch._tokenIndex`, and its own source
+says nothing can raise it today: the universe is the on-chain union of exactly the
+legs being indexed, so every lookup hits. It is a loud backstop for a future caller
+that widens the universe. **An error that cannot be raised cannot be pinned by
+expecting it** — so what is pinned instead is the *property that makes it
+unreachable*: a three-token, three-order plan settles, which is only possible if
+every leg token resolved to a universe slot. The mechanical sweep below passes on
+that test's reference to the error, not on a `vm.expectRevert`. That is a
+deliberate, documented exception and the only one; a *new* unpinned error still
+stands out.
 
 **Re-run this check** whenever an error is added or a test is deleted:
 
@@ -461,98 +552,199 @@ done
 
 ---
 
-## Part 4 — the gap register
+## Part 4 — the register
 
-Ranked by what a regression would cost, not by effort.
+Every gap this note opened was closed on **2026-08-27**. The entries are kept
+rather than deleted: each one names a property that is now *asserted* rather than
+merely *documented*, and the reasoning is what tells a future reader whether a
+failing test is a bug or a deliberate change. Two residual items (`R-*`) are
+recorded as accepted, with the reason.
 
-### G-1
-**Bulk signature × later fills.** After the first fill of a Merkle-bundled order,
-the first-fill skip accepts **any** 65 bytes — the proof is never re-folded. This
-is the A4 row of [M1](#m1--credential--fill-progress) and is the *same shape* as
-F13, differing only in that a signed root cannot be withdrawn, so there is no
-bypass today. Write the test that pins the behaviour, so that if a future
-revision makes roots revocable (a root-invalidation registry has been discussed
-for quote refresh) the bypass surfaces as a failing test rather than a finding.
-→ `BulkSignature.t.sol`.
+The suite went **552 → 603** tests, all passing, with no change to any contract —
+these are pins on existing behaviour, not fixes.
 
-### G-2
-**Delegate revocation does not bind after a partial fill.** Documented in three
-places (`OrderState.orderSignerExpiry`, `Signatures._verifySignature`,
-`reference-audits.md`), pinned nowhere. `test_revocation_bindsOnAnUnfilledOrder`
-covers only the half that binds. Add its negative twin — partial fill, revoke,
-fill again, **succeeds** — so the accepted semantics are a green test rather than
-a comment. Repeat for A6 (contract delegate) and for expiry lapse.
-→ `DelegatedOrderSigner.t.sol`.
+### G-1 — bulk signature × later fills · CLOSED
+After the first fill of a Merkle-bundled order the first-fill skip accepts **any**
+65 bytes; the proof is folded exactly once. Not a bypass, for one narrow reason: a
+signed root, like a signed order hash, cannot be withdrawn.
+`BulkSignature:test_bulkSignature_afterFirstFill_anyBytesAreAccepted` pins the
+behaviour and `..._untouchedSibling_stillRefusesGarbage` pins its bound (the skip is
+`filled != 0`, not per-tree or per-maker).
+**⚠ This test is a tripwire.** Any future *root-level* revocation — a
+root-invalidation registry for quote refresh has been discussed — makes the root a
+withdrawable credential behind this skip, which is exactly F13. Should that land,
+invert this test rather than delete it.
 
-### G-3
-**An EIP-1271 maker that starts returning `false` mid-order.** Same shape as G-2,
-for the credential most likely to actually be revoked in production — a Safe
-rotating owners. No mock in the suite can currently flip its answer. Add one,
-assert the remainder still fills, and assert that `cancelOrder` **does** stop it.
-That second assertion is the one that makes the documented advice ("a contract
-maker that needs signature revocation to bind mid-order must use `cancelOrder`")
-true by test rather than by claim.
-→ `SignatureEdgeCases.t.sol`.
+### G-2 — delegate revocation after a partial fill · CLOSED
+Documented in three places, pinned nowhere; `test_revocation_bindsOnAnUnfilledOrder`
+covered only the half that binds. Four negative twins added:
+`test_revocation_doesNotBindAfterAPartialFill`,
+`test_contractDelegate_revocationDoesNotBindAfterAPartialFill` (a separate branch,
+so a separate case), `test_expiry_doesNotLapseMidOrderOnceTouched`, and
+`test_revocation_cancelOrderBindsWhereRevocationDoesNot` — the last being the one
+that makes the source's advice ("use `cancelOrder`") true by test.
 
-### G-4
-**`matchSettle` runs an unpinned gate sequence.** `_openGated` re-implements
-expiry, signature, exclusivity, nonce and validator checks, and **no test drives a
-cancelled, expired, nonce-cancelled, exclusivity-gated or empty-sig order through
-it.** The gates are correct today by reading. `OrderGates`' own header is the
-argument for why reading is not enough: two lens copies of these same gates had
-already drifted silently. One parameterised test that walks each B/E/I state
-through C8 closes the whole column.
-→ `MatchSettle.t.sol`.
+### G-3 — an EIP-1271 maker that stops saying yes · CLOSED
+The credential most likely to actually be revoked in production, and the suite's
+three 1271 mocks were all fixed functions of their input — the caveat was
+untestable *by construction*. A `FlippableWallet` closes that:
+`test_1271_revokedMidOrder_doesNotBindOnTheRemainder`,
+`test_1271_revokedBeforeAnyFill_stillBinds` (the bound), and
+`test_1271_cancelOrderBindsWhereRevocationDoesNot`.
 
-### G-5
-**Fill-once (B5) outside `fill`.** `FillOnceMustBeFull` is pinned only on the
-single-order path. `fillUpTo` clamps to the remaining size — which for a fill-once
-order is the whole order, so it should succeed — and `batchFill` / `matchSettle`
-consume the maker's nonce as their progress record, which interacts with every
-other order sharing that nonce. Three cheap tests.
-→ `FillOnceNonce.t.sol`.
+### G-4 — `matchSettle`'s unpinned gate sequence · CLOSED
+The largest gap, and the one with the strongest structural argument behind it:
+`Batch._openGated` is a **third** copy of the settler's gate rules, and
+[`OrderGates`](../packages/core/src/settlement/OrderGates.sol) opens with the record
+of two earlier copies drifting silently. New file
+[`MatchSettleGates.t.sol`](../packages/core/test/swaps/MatchSettleGates.t.sol) —
+21 tests — drives expired, cancelled-by-hash, nonce-cancelled, rolled-back,
+already-filled, zero-fill, hard/soft exclusivity, empty-sig approval and its
+revocation, and a wrong signer through `matchSettle` itself, each with the
+complement that makes the assertion about the *gate* rather than about the order
+being broken.
 
-### G-6
-**Proportional anchor (G10) in the batch paths.** The marker resolves through a
-`balanceOf` on a maker-chosen token, and the ordering of that read against the
-reentrancy guard is explicitly load-bearing (`OrderState._gateFillState` carries a
-"do not flip these two lines" comment). `matchSettle` reaches the same resolution
-by a different route and nothing exercises it.
-→ `ProportionalLeg.t.sol` or `MatchSettle.t.sol`.
+### G-5 — fill-once outside `fill` · CLOSED
+Five tests. The path-specific finding worth keeping: under `batchFill` a partial
+fill-once fails **softly** (`success[i] = false`) and the rolled-back sub-call
+**burns no nonce** — without which one badly-sized batch entry would strand a
+maker's order permanently. Pinned by
+`test_fillOnce_batchFill_partialFailsSoftlyAndBurnsNoNonce`, plus the `fillUpTo`
+clamp agreeing with the full-fill rule
+(`test_fillOnce_fillUpTo_overRequestClampsToTheWholeOrder`) and the `matchSettle`
+pair in `MatchSettleGates`.
 
-### G-7
-**`DeltaVerifyNotBatchable` never fires in a test.** A one-line test. It is on
-this list rather than folded into G-4 because it is the only *deliberate feature
-exclusion* in the batch path — the kind of check that reads like dead weight in a
-bytecode-size pass.
-→ `MatchSettle.t.sol`.
+### G-6 — proportional anchor in the batch paths · CLOSED
+Five tests. Beyond "it resolves", two are about the shape's real hazard: `batchFill`
+has **no clamp** (that is `fillUpTo`'s job), so a solver quoting against a balance
+that then grows arrives with a request below the new anchor — a partial fill of an
+order that can only fill whole. It must fail softly and stay fillable, which
+`test_prop_batchFill_staleQuoteAfterBalanceGrows_failsSoftly` asserts;
+`test_prop_batchFill_twoMakersResolveIndependently` pins that each anchor is read
+against its own maker's balance.
 
-### G-8
-**Priority auction (D6) × partial fills.** The priority bump is pinned once per
-fill, so two partials submitted at different tips price at different ticks — the
-maker's realised price depends on how the solver *sliced*, which is true of no
-other pricing mode here. Whether that is intended should be decided and then
-pinned. This is the cell most likely to contain an actual, currently-unknown
-issue, because the interaction is genuinely novel rather than merely untested.
-→ `PricingModes.t.sol`.
+### G-7 — `DeltaVerifyNotBatchable` · CLOSED
+`MatchSettleGates:test_gate_deltaVerifyOrder_isNotBatchable`, paired with
+`..._sameOrderWithoutTheFlag_matches` so the refusal is pinned to the *flag* and a
+future edit cannot satisfy it by breaking the shape generally.
 
-### G-9
-**`NoAnchorLeg`.** The guard that answers a found audit finding, pinned by
-nothing. Both raise sites (SELL and BUY) need a case.
-→ `ValidateOrder.t.sol` or `PlainSwap.t.sol`.
+### G-8 — priority auction × partial fills · CLOSED, and it was a real question
+This was flagged as the cell most likely to contain something unknown, and it did
+contain something worth deciding. **Confirmed: two partial fills of the same order,
+in the same block, at different tips clear at different ticks** — the maker's
+realised average price depends on how the solver chose to slice, which is true of no
+other pricing mode here.
 
-### G-10
-**`AmountOverflow` (J5).** A leg slice above `uint160.max` is refused because
-Permit3's allowance type cannot carry it. Constructible with a large signed
-amount; currently unexercised.
-→ `PlainSwap.t.sol`.
+That is correct and inherent rather than a defect: a priority auction prices a
+*race*, each transaction is its own race, and a partial fill is a whole transaction.
+Averaging across slices would require remembering a per-order bid — exactly the
+storage the mode exists to avoid. So the decision is *keep it*, and
+`test_priorityAuction_partialFills_priceIndependentlyPerSlice` puts it on the record
+so a future "improvement" has to argue with a test.
+**The maker's protection is the band, not slice-invariance**, and that is the part
+worth carrying forward: every slice clears inside `[end, start]`, both signed, so the
+worst case over any slicing is the floor an unbid single fill would have paid.
+`testFuzz_priorityAuction_everySliceStaysInsideTheBand` fuzzes the slice point and
+both bids against that bound. `minFillAnchor` is the lever a maker uses to limit how
+finely the order can be cut up.
 
-### G-11
-**The remaining unpinned errors** — `PricingNeedsContext`, `TokenNotInUniverse`,
-`InvalidPermit3`. Lower value: the first two are internal-consistency guards on
-view/batch paths and the third is a constructor check. Worth closing to make the
-mechanical check in [Part 3](#part-3--the-completeness-check-mechanically) return
-clean, so that a *new* unpinned error stands out.
+#### G-8 measured against the industry — two claims, two different answers
+
+Checked against source, not reputation, because the repo's own notes call the
+priority auction "the parity feature with UniswapX's `PriorityOrderReactor`" and
+that claim turns out to be exact only under a condition worth naming.
+
+**(a) "Slices of one order clear at different prices, and the signed band is the
+only guarantee" — this IS the standard.** [CoW's
+`GPv2Settlement`](https://github.com/cowprotocol/contracts/blob/main/src/contracts/GPv2Settlement.sol)
+keeps a cumulative `filledAmount[orderUid]` for `partiallyFillable` orders and
+enforces the limit price **per trade** against *that batch's* clearing prices
+(`order.sellAmount * sellPrice >= order.buyAmount * buyPrice`). Clearing prices are
+uniform *within* a batch and differ *across* batches, so a partially fillable CoW
+order filled over N batches realises N different prices and the maker's only
+guarantee is the limit price. That is our structure exactly, with `end` in the role
+of the limit price. 1inch Fusion is the same shape on a time clock. Nothing novel
+here, and nothing to fix.
+
+**(b) "A priority-FEE auction with partial fills" — no precedent exists.**
+UniswapX's `PriorityOrderReactor` is the only shipped auction of this shape, and it
+is **all-or-nothing**: it carries no filled-amount accounting at all, marking orders
+consumed through the Permit2 nonce bitmap (`OrderAlreadyFilled()`), and Uniswap's own
+filler documentation states that *"only the fill transaction with the highest
+priority fee will win the order, all other transactions will revert onchain."* CoW
+has no priority auction (its competition is an off-chain batch auction). So on this
+axis we are **extending the design, not matching it**.
+
+**What the extension changes, precisely.** It is a change of auction *mechanism*,
+and the mechanism has a name:
+
+| | UniswapX priority | Ours, partially fillable |
+| --- | --- | --- |
+| Mechanism | single-unit **first-price** auction | multi-unit **pay-as-bid** (discriminatory) auction |
+| Maker realises | the **top** bid, on the whole size | the quantity-weighted **average** of accepted bids |
+| Losing bidder | reverts, pays gas on its own bid | may instead take a later slice at its own, lower bid |
+
+Pay-as-bid multi-unit auctions are a well-understood mechanism (treasury auctions
+run this way), so this is not pathological — but the expected clearing price is
+lower than the first-price equivalent, because the maker's average is bounded above
+by the top bid rather than equal to it. Against that, partial fills **broaden the
+bidder pool**: a solver whose inventory covers half the order can bid at all, where
+UniswapX excludes it. Which effect dominates is an empirical question about solver
+inventory depth on the target chain, not something to settle here.
+
+**No safety consequence, and the reason is worth stating** because it is what
+separates this from the classic partial-fill hazard. In a *time* dutch auction a
+solver can improve its own price by waiting, so slicing is a strategy. Here it is
+not: each slice is priced at *that transaction's own tip*, so a solver's cheapest
+schedule — every slice at zero tip — clears at the floor, which is exactly what one
+unbid fill of the whole order would have paid. Slicing buys the solver nothing it
+could not already have.
+
+**The lever, and it already exists.** A maker who wants winner-takes-all semantics
+sets the **fill-once** bit (`timing` bit 100) alongside the priority bit. The order
+then admits no slicing, the top bid takes the whole size, and the behaviour is
+`PriorityOrderReactor`'s exactly — the same all-or-nothing enforced by the same kind
+of nonce record. The two bits are independent and compose;
+`test_priorityAuction_fillOnce_restoresWinnerTakesAll` pins it, since it is the
+recommended shape for any priority order that cares about its clearing price.
+
+**Consequence for the parity claim.** [`pricing-modes.md`](pricing-modes.md) and
+[`lop-parity.md`](lop-parity.md) have been qualified: parity with
+`PriorityOrderReactor` is exact for a **fill-once** priority order; a partially
+fillable one is a deliberate extension with different auction economics. Order
+builders should default priority orders to fill-once unless they specifically want
+the multi-unit behaviour.
+
+### G-9 / G-10 / G-11 — the unpinned error surface · CLOSED
+New file [`ErrorSurface.t.sol`](../packages/core/test/swaps/ErrorSurface.t.sol) —
+10 tests covering `NoAnchorLeg` (both raise sites plus the `fillTotal` complement),
+`AmountOverflow` (both branches plus the exact boundary), `InvalidPermit3`, and
+`PricingNeedsContext` (both modes plus the clock-order complement). See
+[Part 3](#part-3--the-completeness-check-mechanically) for the `TokenNotInUniverse`
+exception.
+
+One correction the work produced: `AmountOverflow` guards an **item slice**, not a
+leg amount. The axis and matrix entries above were wrong about this and have been
+fixed. It is reached only through a maker-signed `Item`, so it is not adversarially
+reachable — which is exactly why it needed a test: the failure it prevents is
+*silent truncation* (every shipped maker module narrows to `uint160` unchecked one
+frame down), and nothing else in the suite would have noticed the check being
+dropped in a size pass.
+
+### R-1 — contract makers and exclusivity through non-`fill` entry points · ACCEPTED
+`fillUpTo` / `batchFill` / `matchSettle` are untested with an EIP-1271 maker, and
+soft exclusivity and filler sets are untested through `fillUpTo`. These share
+`_fillCore` (or, for `matchSettle`, the now-pinned `_openGated`) and the credential
+and exclusivity gates are per-order, not per-path — so the marginal value is low
+and the combinatorial cost is high. Recorded rather than closed. Revisit if any
+entry point stops routing through the shared opener.
+
+### R-2 — block clock × partial fills · ACCEPTED
+`fillUpTo` and multi-slice fills under the block clock (D4) are untested. The block
+clock changes only the *source* of the tick (`block.number` for `block.timestamp`);
+the slicing arithmetic is the same code the timestamp clock already exercises across
+`MultiAssetPartials`, `RoundingDirection` and `FillAccountingFuzz`. Low value,
+recorded for completeness.
 
 ---
 
@@ -568,7 +760,7 @@ mechanical check in Part 3 stays clean.
 
 **When a finding lands.** Locate it as a cell. If it has no cell, this document is
 missing an axis — add it before writing the fix, because the axis is what tells
-you where the *siblings* of the bug are. F13 → M1. F15 → M7. F8 → M9.
+you where the *siblings* of the bug are. Findings F13 → M1, F15 → M7, F8 → M9.
 
 **When a test is written.** Ask the ◐ question: does the setup mask the property?
 Infinite allowances mask allowance consumption. Round numbers mask rounding.

@@ -180,10 +180,58 @@ export const PRIORITY_AUCTION_BIT = 103n;
 /// price, so it composes with every pricing mode.
 export const DELTA_VERIFY_OUTPUTS_BIT = 104n;
 
+/**
+ * `timing` bit 100 — FILL-ONCE: progress is recorded by consuming the maker's
+ * nonce instead of a per-order counter, so the order is ALL-OR-NOTHING (a partial
+ * reverts `FillOnceMustBeFull`).
+ *
+ * Named `…_BIT_INDEX` rather than `…_BIT` only because {@link FILL_ONCE_BIT} in
+ * `oco.ts` already exports the same bit as a MASK (`1n << 100n`) and is public
+ * API. That constant derives from this one, so there is a single source of truth.
+ */
+export const FILL_ONCE_BIT_INDEX = 100n;
+
 /// Set the delta-verify-outputs mode on a packed `timing` word (see
 /// {@link DELTA_VERIFY_OUTPUTS_BIT}). Mirrors `DutchAuction.deltaVerifyOutputs`.
 export function withDeltaVerifyOutputs(timing: bigint): bigint {
   return timing | (1n << DELTA_VERIFY_OUTPUTS_BIT);
+}
+
+/// Set the BLOCK-CLOCK mode on a packed `timing` word (see {@link BLOCK_CLOCK_BIT}):
+/// the decay and exclusivity clocks count blocks rather than seconds. `expiry` is
+/// unaffected and stays wall-clock.
+export function withBlockClock(timing: bigint): bigint {
+  return timing | (1n << BLOCK_CLOCK_BIT);
+}
+
+/// Set the PRIORITY-AUCTION mode on a packed `timing` word (see
+/// {@link PRIORITY_AUCTION_BIT}). Prefer {@link priorityOrder}, which also sets the
+/// scale, applies the all-or-nothing default and rejects the shapes the settler
+/// rejects — this helper is the raw bit.
+export function withPriorityAuction(timing: bigint): bigint {
+  return timing | (1n << PRIORITY_AUCTION_BIT);
+}
+
+/// Set FILL-ONCE on a packed `timing` word (see {@link FILL_ONCE_BIT_INDEX}).
+export function withFillOnce(timing: bigint): bigint {
+  return timing | (1n << FILL_ONCE_BIT_INDEX);
+}
+
+/// Read the four `timing` mode flags an author may set. The clocks come from
+/// {@link unpackTiming}; these are the booleans that sit above them.
+export function timingFlags(timing: bigint): {
+  fillOnce: boolean;
+  blockClock: boolean;
+  priorityAuction: boolean;
+  deltaVerifyOutputs: boolean;
+} {
+  const on = (bit: bigint) => ((timing >> bit) & 1n) === 1n;
+  return {
+    fillOnce: on(FILL_ONCE_BIT_INDEX),
+    blockClock: on(BLOCK_CLOCK_BIT),
+    priorityAuction: on(PRIORITY_AUCTION_BIT),
+    deltaVerifyOutputs: on(DELTA_VERIFY_OUTPUTS_BIT),
+  };
 }
 
 /**

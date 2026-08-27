@@ -12,6 +12,7 @@ export * from "./permit3";
 export * from "./solving";
 export * from "./proportional";
 export * from "./pricing";
+export * from "./priority";
 export * from "./auction";
 export * from "./quote";
 export * from "./bid";

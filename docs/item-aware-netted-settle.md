@@ -79,7 +79,7 @@ other through the pool.
 ## Token-accounting invariant (with items)
 
 Per touched token `T` (the on-chain-derived union of every order's legs *and* the
-tokens its items move — see [Open questions](#open-questions) on deriving the
+tokens its items move — see [Open questions](#open-questions--resolutions) on deriving the
 item token set), define the batch's flows:
 
 **Credits into the pool**

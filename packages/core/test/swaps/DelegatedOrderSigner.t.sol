@@ -450,4 +450,120 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
         (,, bool afterRevoke,) = lens.getOrderRelevantState(order, sig, solver, "");
         assertFalse(afterRevoke, "lens tracks revocation too");
     }
+
+    // ════════ Revocation vs. the first-fill skip — the M2/E6 row ════════
+    //
+    //  THE PROPERTY, stated plainly because it is a promise the protocol does NOT
+    //  make: revoking a delegate does not stop the REMAINDER of an order that
+    //  delegate has already part-filled. {Signatures._verifySignature} skips
+    //  re-verification once `filled[orderHash] != 0`, and a delegation is checked on
+    //  the signature path, so once the counter is non-zero the registry is never read
+    //  again for that hash.
+    //
+    //  That is deliberate. Reading `orderSignerExpiry` on every fill would put a cold
+    //  SLOAD on every fill of EVERY order — including the overwhelming majority that
+    //  never delegate anything — to protect the rare touched-and-then-revoked one.
+    //  The trade is the same one EIP-1271 makers live with, and it is documented in
+    //  {OrderState.orderSignerExpiry} and in `docs/delegated-signers.md`.
+    //
+    //  Until now it was documented and nothing more. `test_revocation_bindsOnAnUnfilledOrder`
+    //  covers only the half that DOES bind, so a change that silently made revocation
+    //  bind mid-order — or, far worse, one that made an UNTOUCHED order stop binding —
+    //  would have broken no test. These are the negative twins.
+    //
+    //  Each one ends by asserting the kill switch that DOES bind, because the
+    //  documented advice ("use {cancelOrder}") is only worth writing down if it is
+    //  true, and a maker reading it is entitled to a test.
+
+    /// @dev EOA delegate. Nominate → partial fill → revoke → the remainder still
+    ///      settles on the delegate's original signature. Then {cancelOrder} stops it.
+    function test_revocation_doesNotBindAfterAPartialFill() public {
+        _stage();
+        _nominate(type(uint256).max);
+
+        Order memory order = _order0();
+        bytes memory sig = _signAs(DELEGATE_PK, order);
+
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN / 2);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN / 2, "delegate opened the order");
+
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, 0); // revoke
+        assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "the registry entry is gone");
+
+        // ...and the remainder settles anyway. The counter is the authorisation.
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN / 2);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "revocation did not bind mid-order");
+    }
+
+    /// @dev The kill switch that DOES bind on a touched order, asserted on the same
+    ///      shape so the pair reads as one statement: revocation is not the tool,
+    ///      {OrderState.cancelOrder} is.
+    function test_revocation_cancelOrderBindsWhereRevocationDoesNot() public {
+        _stage();
+        _nominate(type(uint256).max);
+
+        Order memory order = _order0();
+        bytes memory sig = _signAs(DELEGATE_PK, order);
+
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN / 2);
+
+        vm.startPrank(maker);
+        settlement.setOrderSigner(delegate, 0); // does nothing to this order
+        settlement.cancelOrder(order); //          this is the one that binds
+        vm.stopPrank();
+
+        vm.prank(solver);
+        vm.expectRevert(OrderState.OrderCancelled.selector);
+        settlement.fill(order, sig, USDC_IN / 2);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN / 2, "the remainder never moved");
+    }
+
+    /// @dev A lapsing nomination is a withdrawable credential too, and lapses the
+    ///      same way: the expiry is compared against `block.timestamp` on the
+    ///      signature path, which a touched order no longer reaches. Warping a year
+    ///      past a finite expiry changes nothing about the remainder.
+    function test_expiry_doesNotLapseMidOrderOnceTouched() public {
+        _stage();
+        _nominate(block.timestamp + 1 days);
+
+        Order memory order = _order0();
+        _setExpiry(order, block.timestamp + 400 days); // outlive the warp below
+        bytes memory sig = _signAs(DELEGATE_PK, order);
+
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN / 2);
+
+        vm.warp(block.timestamp + 365 days); // the delegation is long gone
+        assertLt(settlement.orderSignerExpiry(maker, delegate), block.timestamp, "nomination has lapsed");
+
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN / 2);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "a lapsed delegation did not bind mid-order either");
+    }
+
+    /// @dev The CONTRACT-delegate envelope carries its own registry lookup on its own
+    ///      branch, so it needs its own case — the two branches could drift.
+    function test_contractDelegate_revocationDoesNotBindAfterAPartialFill() public {
+        _stage();
+        MockMakerWallet wallet = new MockMakerWallet(delegate);
+        vm.prank(maker);
+        settlement.setOrderSigner(address(wallet), type(uint256).max);
+
+        Order memory order = _order0();
+        bytes memory sig = _envelope(address(wallet), _signAs(DELEGATE_PK, order));
+
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN / 2);
+
+        vm.prank(maker);
+        settlement.setOrderSigner(address(wallet), 0);
+
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN / 2);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "the contract-delegate branch behaves identically");
+    }
 }

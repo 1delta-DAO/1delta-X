@@ -224,4 +224,70 @@ contract BulkSignatureTest is MockSettlementBase {
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
         settlement.fill(tampered, sig, IN_AMT);
     }
+
+    // ════════ The first-fill skip, applied to the bulk envelope ════════
+
+    /// @dev THE A4 CELL of `docs/edge-case-matrix.md` M1, and the closest living
+    ///      relative of F13.
+    ///
+    ///      {Signatures._verifySignature} returns early once `filled[orderHash] != 0`
+    ///      — some earlier fill already presented valid authorisation for a hash that
+    ///      commits to `maker`, so re-deriving the digest proves nothing new and costs
+    ///      ~2,860 gas per later fill. The skip is reached by ANY non-empty `sig`,
+    ///      which means the proof is folded EXACTLY ONCE, on the first fill, and every
+    ///      subsequent fill of that leaf accepts arbitrary bytes.
+    ///
+    ///      That is not a bypass today, and the reason is narrow enough to be worth
+    ///      writing down: a signed Merkle ROOT, like a signed order hash, cannot be
+    ///      withdrawn. The maker's kill switches are elsewhere entirely
+    ///      ({cancelOrder}, nonce cancellation, the expiry, Permit3), and all of them
+    ///      still run on every fill — see `test_bulkSignature_cancelledLeafStillCancelled`.
+    ///
+    ///  ⚠ WHAT WOULD MAKE IT A BYPASS. Any future ROOT-LEVEL revocation — a
+    ///      root-invalidation registry for quote refresh has been discussed — turns the
+    ///      root into a WITHDRAWABLE credential, and a withdrawable credential behind
+    ///      this skip is precisely F13. Should that land, this test must be inverted
+    ///      rather than deleted: it is the tripwire, and it is meant to fail loudly.
+    function test_bulkSignature_afterFirstFill_anyBytesAreAccepted() public {
+        _fund(4);
+        (Order[4] memory os, bytes32[4] memory leaves) = _ladder();
+        (bytes32 root, bytes32[] memory proof) = _tree(leaves, 0);
+        bytes memory sig = _bulkSig(makerPk, root, proof);
+
+        // First fill: the real envelope, the proof genuinely folded to the root.
+        vm.prank(solver);
+        settlement.fill(os[0], sig, IN_AMT / 2);
+        assertEq(settlement.filled(lens.hashOrder(os[0])), IN_AMT / 2, "leaf 0 is now touched");
+
+        // Second fill: 65 bytes that authorise nothing. Accepted, because the
+        // counter is the proof.
+        bytes memory garbage = new bytes(65);
+        garbage[64] = bytes1(uint8(27));
+        vm.prank(solver);
+        settlement.fill(os[0], garbage, IN_AMT / 2);
+        assertEq(settlement.filled(lens.hashOrder(os[0])), IN_AMT, "the remainder settled on no authorisation");
+        assertEq(tB.balanceOf(maker), OUT_AMT, "and the maker was paid in full for both halves");
+    }
+
+    /// @dev The contrast that makes the property above precise rather than alarming:
+    ///      an UNTOUCHED sibling leaf of the very same tree refuses the same bytes.
+    ///      The skip is bounded by `filled != 0` and by nothing else — it is not a
+    ///      per-tree or per-maker relaxation.
+    function test_bulkSignature_untouchedSibling_stillRefusesGarbage() public {
+        _fund(4);
+        (Order[4] memory os, bytes32[4] memory leaves) = _ladder();
+        (bytes32 root, bytes32[] memory proof) = _tree(leaves, 0);
+        // Hoisted: `_bulkSig` makes an external call (`DOMAIN_SEPARATOR`), and that
+        // would eat the `vm.prank` below.
+        bytes memory sig = _bulkSig(makerPk, root, proof);
+
+        vm.prank(solver);
+        settlement.fill(os[0], sig, IN_AMT / 2);
+
+        bytes memory garbage = new bytes(65);
+        garbage[64] = bytes1(uint8(27));
+        vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        settlement.fill(os[1], garbage, IN_AMT); // leaf 1 — same tree, never filled
+    }
 }

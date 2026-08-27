@@ -2,13 +2,16 @@
 
 This document describes the security model of the 1delta-x intent-settlement
 system, the invariants each component upholds, and the findings + fixes from the
-internal security audits of 2026-06-18 and 2026-07-29.
+internal security audits of 2026-06-18, 2026-07-29, 2026-08-06 and 2026-08-25 (the
+external-corpus crosswalk, F1–F15).
 
 - [Architecture & trust model](#architecture--trust-model)
 - [Security invariants](#security-invariants)
 - [Caveats integrators must know](#caveats-integrators-must-know)
 - [Audit (2026-06-18): findings & fixes](#audit-2026-06-18-findings--fixes)
 - [Audit (2026-07-29): findings & fixes](#audit-2026-07-29-findings--fixes)
+- [Audit (2026-08-06): the remaining open items](#audit-2026-08-06-the-remaining-open-items)
+- [Audit (2026-08-25): external-corpus crosswalk](#audit-2026-08-25-external-corpus-crosswalk)
 - [Breaking change for integrators](#breaking-change-for-integrators)
 - [Reporting a vulnerability](#reporting-a-vulnerability)
 
@@ -600,6 +603,26 @@ written up — which is the strongest available argument for keeping shared rule
 
 Repo state after the second pass: core **518/518**, periphery **41/41**,
 modules-pricing-chainlink **10/10**, SDK **158/158**, Settlement **24,548 / 24,576**.
+
+### Third pass: F13–F15, and the systematic sweep that followed
+
+A re-audit of the *withdrawal* and *netted-step* surfaces. Two of the three are real
+defects, both PoC'd and fixed; the third is a corrected inference rather than a bug,
+kept in the ledger because the faulty reasoning is the reusable trap. Full write-ups
+in [docs/reference-audits.md](docs/reference-audits.md).
+
+| ID | Class | Severity | Finding | Resolution |
+|----|-------|----------|---------|------------|
+| F13 | C12 | **High** | A **revoked on-chain order approval was bypassable.** `_verifySignature` skips re-verification once `filled != 0`, which is sound for a signature (it cannot be withdrawn) — but the skip is reached by *any* non-empty `sig`, and nothing records how the earlier fill was authorised. An order authorised by `approveOrder` set `filled`; a filler then passed 65 arbitrary bytes, took the signature branch, hit the skip, and settled the remainder of a **revoked** order — for a maker with no EIP-1271, for whom no signature can ever be valid. The comment claimed the skip "applies ONLY to the signature branch": it does, but the *filler* picks the branch. | **Fixed.** `revokeOrderApproval` parks the `cancelOrder` sentinel when the order is already partially filled, gated on `wasApproved` (which proves the caller is the maker). Zero hot-path cost — `filled` is already read by every fill. Reading `orderApproved` on the signature path instead would put a cold SLOAD on every fill of every order to protect the rare sigless one. Revoking a *touched* approval is now one-way; an untouched one still round-trips. |
+| F14 | C11/C12 | Info | `permitBatchWithWitnessIfNeeded`'s silent return on a spent nonce was commented "authorization still proven; **grants already applied**". The second clause is false — a bit is set by `invalidateUnorderedNonces`/`lockdownAll` just as much as by a prior application, and in that case the grants were never applied and never will be. | **Not a vulnerability; comment corrected.** The signature is verified *before* the nonce check and the spent-bit path applies nothing, so the direction is fail-safe. The silent return is the deliberate S-1 remediation. Ledgered because the *inference* — "nonce spent ⇒ effect happened" — is the trap worth remembering. |
+| F15 | — (new shape) | **Medium** | **A refund that restores the asset but not the authority spent to move it.** `Batch._stepPull` moved the nominal `owed` unconditionally, on the in-file reasoning that a duplicate `PULL` "costs the solver gas and the maker nothing" because Phase 3 refunds the surplus. The *tokens* are refunded — net spend stayed one fill — but the **Permit3 allowance** spent to move them is not. Against a finite, amount-gated allowance (the model `IPermit3` is built around) a padded schedule consumed 2× the allowance for 1× the fill, leaving the maker unable to fund the next one. `matchSettle` is permissionless, so any solver could do it. Makers on `uint160.max` were unaffected — Permit3 treats that sentinel as "do not decrement". | **Fixed.** Pull the **shortfall** (`owed - credit`) rather than the nominal amount. Keeps the tolerant, guard-free shape the schedule wants — a second `PULL` now moves nothing and spends no allowance — and makes ITEM-then-PULL exact instead of over-pull-then-refund. A `credit != 0` guard would have been wrong: `_creditItemProceeds` also credits input legs. |
+
+**F15 is the one to generalise from.** "The funds come back" is not the same as "nothing
+was consumed": allowances, nonces, and one-shot authorisations are spent by the
+*attempt*, not by the net outcome. The re-audit sweep that F13–F15 prompted —
+generalising each into a question asked across the whole surface — is
+[in reference-audits.md](docs/reference-audits.md), and the combinatorial coverage
+argument it produced is [docs/edge-case-matrix.md](docs/edge-case-matrix.md).
 
 ---
 

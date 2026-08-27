@@ -130,6 +130,58 @@ const prices = currentAmountOut(order, now);            // per-output dutch tick
 const out = fillAmountsOut(order, 1_000_000_000n, now); // delivered amounts (ceil, per leg)
 ```
 
+## Priority auctions
+
+The bump is bid in **priority fee** rather than elapsed time (`timing` bit 103),
+for chains whose sequencer orders transactions by tip. `priorityOrder` sets the
+mode, the scale, and — by default — **fill-once**.
+
+```ts
+import { priorityOrder, lintPriorityOrder } from "@1delta-x/sdk";
+
+// All-or-nothing, i.e. UniswapX `PriorityOrderReactor` economics.
+const o = priorityOrder(order, {
+  priorityScale: 2_000_000_000n,   // 2 gwei of tip buys a FULL bump (end → start)
+  baselinePriorityFeeWei: 1_000_000n, // the inclusion tip that is NOT a bid
+});
+
+lintPriorityOrder(o); // [] — non-fatal advice; nothing here blocks signing
+```
+
+**Why fill-once is the default.** The bump is resolved from the filling
+transaction's own tip and pinned per fill, so two partial fills at different tips
+clear at *different* ticks in the same block — the maker's realised price depends
+on how the solver sliced. That makes a partially fillable priority order a
+multi-unit **pay-as-bid** auction (maker gets the quantity-weighted average of
+accepted bids) where UniswapX's is single-unit **first-price** (maker gets the top
+bid). Partial fills do broaden the bidder pool to inventory-constrained solvers,
+so it is a real trade rather than a mistake — but it should be chosen, not
+inherited:
+
+```ts
+const partial = priorityOrder(order, {
+  priorityScale: 2_000_000_000n,
+  partiallyFillable: true,  // explicit opt-out of the default
+  minFillAnchor: 50_000n,   // bounds how finely that average can be diluted
+});
+lintPriorityOrder(partial); // explains the economics; still signable
+```
+
+**What throws vs what lints.** `priorityOrder` throws only where the *settler*
+reverts — `priorityScale === 0n` and a non-zero `gasBumpBps`, both
+`InvalidAuctionParams`. Everything else is reported by `lintPriorityOrder` and
+still builds: a `minFillAnchor` that cannot bind, a decay window or curve that a
+priority auction never runs, a `pricingModule` the settler would silently prefer
+over the bid. The lint mirrors `SettlementLens.validateOrder`'s priority branch, so
+you get the same answer without an RPC round trip. No maker-signed field is ever
+rewritten to tidy it away — that would change the order hash behind the author's
+back.
+
+There is **no safety difference** — every slice prices inside the maker's signed
+band, and a solver's cheapest schedule (all slices unbid) clears at the floor a
+single unbid fill would have paid. See `docs/pricing-modes.md` and
+`docs/edge-case-matrix.md` §G-8.
+
 ## Balance-relative orders
 
 A SELL anchor may be signed as *bps of the maker's balance* rather than an

@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Settlement, Order, OrderSide} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
 import {ProgressBumpModule} from "../shared/MockModules.sol";
 
 import {MockSettlementBase} from "../shared/MockSettlementBase.t.sol";
@@ -220,5 +221,141 @@ contract PricingModesTest is MockSettlementBase {
         vm.prank(solver);
         settlement.fill(o, sig, SELL_IN / 2);
         assertEq(tB.balanceOf(maker) - before_, ((OUT_START + OUT_END) / 2) / 2, "second slice at the midpoint");
+    }
+
+    // ════════ The priority auction under PARTIAL fills — M4/D6 ════════
+    //
+    //  THE INTERACTION, and why it is the one cell in the granularity × pricing
+    //  matrix that had no test at all.
+    //
+    //  Every other mode here is a function of the CLOCK. Two partial fills in the
+    //  same block therefore price identically under D1..D5, and across blocks they
+    //  price by elapsed time — a property of WHEN, never of WHO or of HOW the fill
+    //  was sliced. The priority auction is different in kind: its bump is bid in the
+    //  transaction's own priority fee and pinned once per fill by
+    //  {OrderState._openFill}. Two partials submitted at different tips therefore
+    //  clear at DIFFERENT ticks, in the same block, with no clock movement at all —
+    //  the maker's realised average price depends on how the solver chose to slice.
+    //
+    //  That is correct and it is inherent, not a defect to be engineered away: a
+    //  priority auction prices a RACE, each transaction is its own race, and a
+    //  partial fill is a whole transaction. Averaging across slices would require
+    //  remembering a per-order bid, which is exactly the storage the mode exists to
+    //  avoid. It is pinned here so that the property is a decision on the record
+    //  rather than an accident, and so a future "improvement" that made slices share
+    //  a bump has to argue with a test.
+    //
+    //  ⚠ WHAT THE MAKER'S PROTECTION ACTUALLY IS, since it is NOT slice-invariance:
+    //  the band. Every slice clears somewhere in [`end`, `start`], both endpoints
+    //  signed, so the worst case over any slicing is the floor — which is what an
+    //  unbid single fill would have paid anyway. `minFillAnchor` is the lever a maker
+    //  uses to bound how finely the order can be cut up.
+
+    function test_priorityAuction_partialFills_priceIndependentlyPerSlice() public {
+        _fund(OUT_START);
+        Order memory o = _decayingSell(20);
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
+        o.params = DutchAuction.packParams(0, 0, 0, 2 gwei, 0); // 2 gwei = a FULL bump
+        bytes memory sig = _sign(o);
+
+        vm.fee(1 gwei);
+
+        // Slice 1 — no bid. Clears at the floor: half the anchor at OUT_END.
+        vm.txGasPrice(1 gwei);
+        uint256 before1 = tB.balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(o, sig, SELL_IN / 2);
+        uint256 got1 = tB.balanceOf(maker) - before1;
+        assertEq(got1, OUT_END / 2, "the unbid slice clears at the floor");
+
+        // Slice 2 — a full bid, SAME BLOCK, same order, same signature. The tick
+        // moves all the way to `start` for this slice alone.
+        vm.txGasPrice(3 gwei); // 2 gwei of priority = the whole scale
+        uint256 before2 = tB.balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(o, sig, SELL_IN / 2);
+        uint256 got2 = tB.balanceOf(maker) - before2;
+        assertEq(got2, OUT_START / 2, "the bid slice clears at the ceiling");
+
+        assertGt(got2, got1, "two slices of one order priced differently, with no clock movement");
+        assertEq(settlement.filled(_hashOrder(o)), SELL_IN, "and the order is fully filled");
+    }
+
+    /// @dev The bound that makes the above safe. Whatever the slicing and whatever
+    ///      the bids, every slice lands inside the signed band — so the maker's
+    ///      worst case over ANY schedule of partials is the floor they signed, and
+    ///      their best is the ceiling. Fuzzing the slice point and both bids is what
+    ///      turns "it clears somewhere in the band" from a reading of {Pricing} into
+    ///      an assertion.
+    function testFuzz_priorityAuction_everySliceStaysInsideTheBand(uint256 cut, uint256 tip1, uint256 tip2) public {
+        cut = bound(cut, 1, SELL_IN - 1);
+        // Bounded so `basefee + tip` stays inside the cheatcode's uint64 gas-price
+        // domain; 10 gwei is already 5x the scale, so the clamp branch is covered.
+        tip1 = bound(tip1, 0, 10 gwei);
+        tip2 = bound(tip2, 0, 10 gwei);
+        _fund(OUT_START);
+        Order memory o = _decayingSell(21);
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
+        o.params = DutchAuction.packParams(0, 0, 0, 2 gwei, 0);
+        bytes memory sig = _sign(o);
+
+        vm.fee(1 gwei);
+
+        vm.txGasPrice(1 gwei + tip1);
+        uint256 b1 = tB.balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(o, sig, cut);
+        uint256 got1 = tB.balanceOf(maker) - b1;
+
+        vm.txGasPrice(1 gwei + tip2);
+        uint256 b2 = tB.balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(o, sig, SELL_IN - cut);
+        uint256 got2 = tB.balanceOf(maker) - b2;
+
+        // Per-slice bounds. Outputs round UP per slice, so the ceiling is the
+        // ceil-divided share of `start` and the floor the exact share of `end`.
+        assertGe(got1, (cut * OUT_END) / SELL_IN, "slice 1 at or above the signed floor");
+        assertLe(got1, (cut * OUT_START + SELL_IN - 1) / SELL_IN, "slice 1 at or below the signed ceiling");
+        assertGe(got2, ((SELL_IN - cut) * OUT_END) / SELL_IN, "slice 2 at or above the signed floor");
+        assertLe(got2, ((SELL_IN - cut) * OUT_START + SELL_IN - 1) / SELL_IN, "slice 2 at or below the ceiling");
+        assertEq(settlement.filled(_hashOrder(o)), SELL_IN, "the order closed exactly");
+    }
+
+    /// @dev THE ESCAPE HATCH, and the reason the property above is a choice rather
+    ///      than a constraint. A maker who wants single-unit, winner-takes-all
+    ///      semantics — i.e. exactly what UniswapX's `PriorityOrderReactor` gives,
+    ///      where a Permit2 nonce bitmap makes every priority order all-or-nothing —
+    ///      sets the FILL-ONCE bit alongside the priority bit. The order then admits
+    ///      no slicing at all, so the top bid takes the whole size and the
+    ///      pay-as-bid averaging cannot arise.
+    ///
+    ///      The two bits are independent (100 and 103) and nothing rejects the pair;
+    ///      this is what proves the composition works, since it is the recommended
+    ///      shape for a priority order that cares about its clearing price.
+    function test_priorityAuction_fillOnce_restoresWinnerTakesAll() public {
+        _fund(OUT_START);
+        Order memory o = _decayingSell(22);
+        o.timing = (uint256(1) << 103) // PRIORITY
+            | (uint256(1) << 100) //       FILL-ONCE
+            | _expiryBits(block.timestamp + 1 hours);
+        o.params = DutchAuction.packParams(0, 0, 0, 2 gwei, 0);
+        bytes memory sig = _sign(o);
+
+        vm.fee(1 gwei);
+
+        // A slice is refused outright — there is no partial to price separately.
+        vm.txGasPrice(1 gwei);
+        vm.prank(solver);
+        vm.expectRevert(OrderState.FillOnceMustBeFull.selector);
+        settlement.fill(o, sig, SELL_IN / 2);
+
+        // The whole order at one bid, priced at that single bid.
+        vm.txGasPrice(3 gwei); // the full scale
+        uint256 before_ = tB.balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(o, sig, SELL_IN);
+        assertEq(tB.balanceOf(maker) - before_, OUT_START, "one bid, one price, the whole size");
+        assertTrue(settlement.isNonceCancelled(maker, 22), "and the nonce is the progress record");
     }
 }

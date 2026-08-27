@@ -43,6 +43,26 @@ Cost: **+17 gas** on a fill (measured; see below).
 (OP-stack, Arbitrum timeboost) — the parity feature with UniswapX's
 `PriorityOrderReactor`.
 
+⚠ **Parity is exact for a FILL-ONCE priority order, and only then.**
+`PriorityOrderReactor` is all-or-nothing — it keeps no filled-amount accounting and
+consumes the order through a Permit2 nonce bit, so "only the fill transaction with
+the highest priority fee will win the order, all other transactions will revert".
+Ours is partially fillable by default, and the bump is pinned **per fill** from that
+transaction's own tip — so two slices at different tips clear at different ticks in
+the same block, and the maker realises the quantity-weighted average of accepted
+bids rather than the top bid. That turns a single-unit first-price auction into a
+multi-unit pay-as-bid one: a legitimate mechanism, and it broadens the bidder pool
+to inventory-constrained solvers, but it is a different one with a lower expected
+clearing price. **Set the fill-once bit (`timing` bit 100) alongside bit 103** to get
+`PriorityOrderReactor`'s exact semantics back; `minFillAnchor` is the softer lever if
+you want partials but bounded slicing. No safety consequence either way — every slice
+is inside the signed band, and a solver's cheapest schedule (all slices unbid) clears
+at the floor a single unbid fill would have paid. Full reasoning and the
+CoW/UniswapX source check: [`edge-case-matrix.md` §G-8](edge-case-matrix.md#part-4--the-register).
+The SDK applies this default for you: `priorityOrder(order, { priorityScale })`
+sets the mode, the scale and fill-once, `partiallyFillable: true` is the explicit
+opt-out, and `lintPriorityOrder` reports the economics without blocking signing.
+
 One deliberate difference from that reactor: theirs scales the output up with **no
 ceiling**, so the gas auction runs to the filler's break-even and the surplus above
 the maker's ask is burned as tip to the sequencer. Ours walks a **signed band** —

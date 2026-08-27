@@ -146,6 +146,12 @@ export const SIDE_BIT = 101n;
  *  `expiry` field on {@link Order} and never touch these bits by hand. */
 export const EXPIRY_OFFSET = 160n;
 
+/** First `timing` bit an author may never set. Everything below it is either the
+ *  caller's (clocks, item policy, fill-once, the three mode flags at 102–104) or
+ *  `side` at bit 101; everything at or above it is reserved — today that is the
+ *  `expiry` window at [160:208), which {@link packOrder} writes. */
+export const RESERVED_FROM_BIT = 105n;
+
 /**
  * Convert an authoring {@link Order} into the form the contract actually takes.
  *
@@ -157,13 +163,32 @@ export const EXPIRY_OFFSET = 160n;
  *    scale) fold into one `params` word, for the same reason.
  *
  * `timing`'s lower bits stay the caller's: [0:32) decay start, [32:64) decay
- * duration, [64:96) exclusivity end, [96:100) item policy, bit 100 fill-once.
- * Bit 101 and above must be clear — that space is this function's to write.
+ * duration, [64:96) exclusivity end, [96:100) item policy, bit 100 fill-once,
+ * and the three MODE FLAGS at bits 102–104 (block clock, priority auction,
+ * delta-verify outputs — set them with {@link withBlockClock} /
+ * {@link withPriorityAuction} / {@link withDeltaVerifyOutputs}).
+ *
+ * This function owns exactly two regions and rejects a caller that has written
+ * either: bit 101 (`side`) and bits [160:208) (`expiry`), both of which it folds
+ * in from the friendly {@link Order} fields.
+ *
+ * ⚠ THE GUARD USED TO BE `timing >> 101 != 0`, i.e. "bit 101 and above must be
+ * clear". That was wrong, and it made the three mode flags UNREACHABLE: bits 102,
+ * 103 and 104 are the caller's to set, `withDeltaVerifyOutputs` has always
+ * returned a word with bit 104 on, and `pricing.ts` reads bit 103 — yet any such
+ * order threw here before it could be signed. A priority auction, a block-clock
+ * order and a delta-verify order were all unbuildable through the SDK. The guard
+ * now names the two regions it actually owns.
  */
 export function packOrder(order: Order): WireOrder {
-  if (order.timing >> SIDE_BIT !== 0n) {
+  if ((order.timing >> SIDE_BIT) & 1n) {
     throw new Error(
-      "Order.timing must leave bit 101 and above clear — `side` is folded in by packOrder, not set by hand",
+      "Order.timing must leave bit 101 clear — `side` is folded in by packOrder, not set by hand",
+    );
+  }
+  if (order.timing >> RESERVED_FROM_BIT !== 0n) {
+    throw new Error(
+      "Order.timing must leave bit 105 and above clear — `expiry` is folded into bits [160:208) by packOrder",
     );
   }
   return {

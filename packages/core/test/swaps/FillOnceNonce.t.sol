@@ -183,4 +183,133 @@ contract FillOnceNonceTest is CoreSettlementBase {
         // otherwise still pass the strict-less-than above.
         assertGt(counterGas - onceGas, 15_000, "expected ~19,200 of storage saving");
     }
+
+    // ════════ Fill-once outside the single-order `fill` — M3/B5 ════════
+    //
+    //  {OrderState._openFill} owns the rule (`newFilled != total` ⇒
+    //  {FillOnceMustBeFull}) and every entry point reaches it, so these cases are
+    //  correct by reading. They are here because the CONSEQUENCES differ per path
+    //  and the reading does not cover them:
+    //
+    //    • `fillUpTo` CLAMPS the request to the remaining size. For a fill-once
+    //      order that remainder is the whole order, so an over-request must succeed
+    //      rather than trip the rule — the clamp and the rule have to agree, and
+    //      they are computed in different places.
+    //    • `batchFill` swallows a per-order revert into `success[i] = false`, so a
+    //      partial fill-once must fail SOFTLY there while its siblings still settle
+    //      — and, crucially, must not consume the nonce on the way out.
+    //
+    //  ({matchSettle} is covered in `MatchSettleGates.t.sol`, alongside the rest of
+    //  that path's gate sequence.)
+
+    /// @dev `fillUpTo` clamps to the remaining size, which for an untouched
+    ///      fill-once order is the whole order — so asking for more than exists is
+    ///      the ORDINARY way to fill one, not a violation of the full-fill rule.
+    function test_fillOnce_fillUpTo_overRequestClampsToTheWholeOrder() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+        _fund(usdcIn, wethOut);
+
+        Order memory order = _swap(30, usdcIn, wethOut, true);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, type(uint256).max, address(0), 0, "");
+        assertEq(delta, usdcIn, "clamped onto the full order");
+        assertTrue(settlement.isNonceCancelled(maker, 30), "the nonce is the progress record");
+        assertEq(settlement.filled(_hashOrder(order)), 0, "no per-order slot written");
+    }
+
+    /// @dev …and an explicit UNDER-request through the same entry point is still a
+    ///      partial, so it is still refused. The clamp only ever lowers a request; it
+    ///      cannot rescue one the maker never authorised.
+    function test_fillOnce_fillUpTo_underRequest_reverts() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+        _fund(usdcIn, wethOut);
+
+        Order memory order = _swap(31, usdcIn, wethOut, true);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(OrderState.FillOnceMustBeFull.selector);
+        settlement.fillUpTo(order, sig, usdcIn / 2, address(0), 0, "");
+        assertFalse(settlement.isNonceCancelled(maker, 31), "a refused fill burns no nonce");
+    }
+
+    /// @dev In a batch a fill-once order settles like any other, and its nonce is
+    ///      consumed — which also kills any sibling sharing that nonce, exactly as on
+    ///      the single-order path.
+    function test_fillOnce_batchFill_settlesAndConsumesTheNonce() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+        _fund(usdcIn, wethOut);
+
+        Order memory order = _swap(32, usdcIn, wethOut, true);
+        Order[] memory orders = new Order[](1);
+        orders[0] = order;
+        bytes[] memory sigs = new bytes[](1);
+        sigs[0] = _sign(order);
+        uint256[] memory amts = new uint256[](1);
+        amts[0] = usdcIn;
+
+        vm.prank(solver);
+        (, bool[] memory ok) = settlement.batchFill(orders, sigs, amts, true);
+        assertTrue(ok[0], "fill-once settles inside a batch");
+        assertTrue(settlement.isNonceCancelled(maker, 32), "nonce consumed");
+    }
+
+    /// @dev THE PATH-SPECIFIC CASE. `batchFill` catches a per-order revert and
+    ///      reports `success[i] = false` rather than reverting the batch, so a
+    ///      partial fill-once fails SOFTLY here — and the whole `fillSelf` sub-call
+    ///      is rolled back, so the nonce it would have burned survives. Without that,
+    ///      one badly-sized batch entry would strand a maker's order permanently.
+    function test_fillOnce_batchFill_partialFailsSoftlyAndBurnsNoNonce() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+        _fund(usdcIn * 2, wethOut * 2);
+
+        Order memory bad = _swap(33, usdcIn, wethOut, true); //  asked for a partial
+        Order memory good = _swap(34, usdcIn, wethOut, false); // an ordinary sibling
+
+        Order[] memory orders = new Order[](2);
+        (orders[0], orders[1]) = (bad, good);
+        bytes[] memory sigs = new bytes[](2);
+        sigs[0] = _sign(bad);
+        sigs[1] = _sign(good);
+        uint256[] memory amts = new uint256[](2);
+        (amts[0], amts[1]) = (usdcIn / 2, usdcIn);
+
+        vm.prank(solver);
+        (, bool[] memory ok) = settlement.batchFill(orders, sigs, amts, false);
+        assertFalse(ok[0], "the partial fill-once was skipped, not reverted");
+        assertTrue(ok[1], "and its sibling still settled");
+        assertFalse(settlement.isNonceCancelled(maker, 33), "the rolled-back attempt burned no nonce");
+        assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "only the good order moved funds");
+
+        // The order is untouched, so it is still fillable at its full size.
+        vm.prank(solver);
+        settlement.fill(bad, sigs[0], usdcIn);
+        assertTrue(settlement.isNonceCancelled(maker, 33), "and it settles once asked for in full");
+    }
+
+    /// @dev `revertIfIncomplete` turns the soft failure hard, naming the index. The
+    ///      pair pins that the choice is the CALLER's and that the rule is what fails.
+    function test_fillOnce_batchFill_revertIfIncomplete_namesTheIndex() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+        _fund(usdcIn, wethOut);
+
+        Order memory order = _swap(35, usdcIn, wethOut, true);
+        Order[] memory orders = new Order[](1);
+        orders[0] = order;
+        bytes[] memory sigs = new bytes[](1);
+        sigs[0] = _sign(order);
+        uint256[] memory amts = new uint256[](1);
+        amts[0] = usdcIn / 2;
+
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(Base.BatchFillIncomplete.selector, uint256(0)));
+        settlement.batchFill(orders, sigs, amts, true);
+    }
 }

@@ -760,12 +760,48 @@ checked against the code; the ones that need a behavioural guarantee are pinned 
 | # | Class | Our exposure |
 |---|---|---|
 | S1 | **ECDSA malleability** — `s` and `N − s` recover the same signer (EIP-2), and accepting BOTH the 65-byte and 64-byte EIP-2098 forms compounds it (the OpenZeppelin 4.7.3 advisory) | **Present by construction, benign.** `SignatureVerification.recoverCalldata` applies no lower-half-`s` check and accepts both lengths, so one authorisation has **four** valid byte encodings. Not exploitable: on-chain replay is bound by `filled[orderHash]`, and the off-chain book is a map keyed by `orderHash`, never by signature. Pinned by `test_malleability_fourEncodings_stillOneFill`. **The standing hazard is any NEW consumer that treats a signature as an identity** — a dedup cache, a "seen" set, a rate limiter keyed on `keccak256(sig)`. |
-| S2 | **Cross-account EIP-1271 replay** (ERC-7739) — a digest that does not name the account is replayable across accounts sharing a validation rule | **Orders immune; Permit3 delegates it to the wallet.** `Order` binds `address maker` in its typehash, so the digest differs per account — pinned by `test_crossAccountReplay_ordersBindTheMaker`. But `PermitBatch(TokenPermit[],TakerPermit[],uint256 nonce,uint256 deadline)` and `PermitBatchWitnessTransferFrom(...)` carry **no owner field**; the owner is a separate argument. That is Permit2's shape, inherited verbatim, and it is exactly what ERC-7739 criticises Permit2 for. A Safe rehashes with its own domain and is immune; a naive wallet that just recovers to an owner is not. |
+| S2 | **Cross-account EIP-1271 replay** (ERC-7739) — a digest that does not name the account is replayable across accounts sharing a validation rule | **Order & settlement paths immune via the WITNESS; standalone permit entrypoints carry raw Permit2's residual.** See the scoped assessment below — the earlier draft of this row overstated it as an open gap on the settlement path. Short version: none of Permit3's permit type strings bind an owner (owner is a verified argument, spender is bound — the exact Permit2 design), so at the RAW permit layer the ERC-7739 exposure is real for naive 1271 wallets. BUT the settlement path signs a `PermitBatchWitness` whose witness is the **order hash**, and {Order} binds `address maker`, so the digest is account-specific and a permit for wallet A cannot be replayed to a sibling wallet B. That is precisely the app-side binding Permit2 recommends (put the account in your witness), and we already do it. Pinned by `CrossAccountReplay.t.sol` (settlement path) and `test_crossAccountReplay_ordersBindTheMaker` (plain orders). |
 | S3 | **Domain separator vs. chain id** — a cached separator survives a fork and enables cross-chain replay | **Clean.** `EIP712.DOMAIN_SEPARATOR()` serves the cached value only while `block.chainid` matches construction, else recomputes. Pinned by `test_domainSeparator_followsChainId`. |
 | S4 | **Zero-address recovery** — `ecrecover` returns `address(0)` on failure, and a comparison without a zero check promotes every malformed signature to valid | **Clean.** `verify` requires `signer != address(0)` before matching; `setOrderSigner` separately rejects a zero delegate for the same reason. Pinned by `test_reject_invalidV` / `test_reject_zeroComponents`. |
 | S5 | **Length-dispatch confusion** — deciding what a signature IS from its length | **Present and documented.** The bulk (Merkle) envelope is detected by shape (`length ≥ 98`, `(length − 66) % 32 == 0`, trailing `0xB0`). `Signatures` already argues why this is a liveness edge and never a bypass: any signature matching the predicate is re-read against a root the maker never signed and reverts. Wallets with attacker-influenceable trailing bytes are the residual exposure. |
 | S6 | **EIP-1271 callee misbehaviour** — wrong magic value, revert, empty return | **Clean.** Pinned by the three `test_1271_*` cases. |
 | S7 | **"Authorised once" caching** | **Was broken — [F13](#f13--a-revoked-on-chain-order-approval-was-bypassed-by-any-non-empty-signature).** See the sweep above for the generalised question. |
+
+### S2 in full — where the account IS bound, and where it is not
+
+Grounded in the code 2026-08-27, correcting an earlier overstatement.
+
+**What Permit2 does (and we inherit verbatim).** None of Permit2's — or Permit3's —
+signed permit structs contain an owner/`from` field. The owner is a function
+argument the signature is *verified against*; what the struct binds is the
+**spender** (`Permit3Hash.hash(permit, msg.sender)`), so a permit can only be
+consumed by its intended spender. Cross-account replay for naive 1271 wallets is a
+known, accepted residual whose defence Permit2 delegates two ways: **nonces**
+(intra-account) and either **the wallet** (ERC-7739 defensive rehashing) or **the
+app, via the witness** — `permitWitnessTransferFrom` exists so an app can commit the
+account into the digest itself.
+
+**The settlement path: closed, the Permit2-recommended way.** `_fillWithPermitCore`
+calls `permitBatchWithWitnessIfNeeded(order.maker, batch, orderHash, …)`. The witness
+is `orderHash`, and {Order} binds `address maker`, so the signed digest is
+account-specific: reaching a sibling wallet B would require an order with
+`maker == B`, a different witness, a different digest — one only B's owner could
+produce. A permit signed for A therefore cannot drain B. The witness is doing the
+exact job ERC-7739 asks an app to do, and `CrossAccountReplay.t.sol` pins it with a
+vacuity guard proving the wallets really are the naive/replayable shape.
+
+**The residual: standalone permit entrypoints.** Calling
+`SignatureTransfer.permitTransferFrom` / `permitWitnessTransferFrom` or
+`SignedPermits.permitBatchWithWitness` DIRECTLY — off the settlement path — passes an
+attacker-choosable `owner`, and the non-witness variant commits no account at all.
+That is identically Permit2's residual, further bounded by spender-binding: a drain
+needs a **naive 1271 wallet** AND **multiple same-owner accounts** AND a
+**malicious/compromised spender** all at once. Our stance matches Permit2's: this is
+delegated to the wallet (ERC-7739); Safes and any wallet that rehashes with its own
+domain are immune. Binding the account into the standalone structs would CLOSE it but
+is a *divergence* from Permit2 — a breaking wire change, new golden hashes, and
+hot-path hashing growth against a ~50-byte EIP-170 budget — worth it only if
+naive-1271 makers are expected on the standalone entrypoints specifically.
 
 **What S1 and S2 have in common, and the rule to carry forward:** neither is a bug in
 the verifier. Both are cases where *the digest does not commit to something the

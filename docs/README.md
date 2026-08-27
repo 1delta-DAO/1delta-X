@@ -256,7 +256,9 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   allowance; F8 = proportional anchor × pegged module), and a per-feature suite
   cannot find those. Includes a mechanical completeness check — every `revert` in
   the settler is a must-not cell, so an error with no test is an unpinned
-  combination by definition — and the ranked gap register that check produces.
+  combination by definition — and the register of what that check produced. The
+  first pass found eleven gaps and six never-tested errors; all are closed (552 →
+  603 tests, no contract change), with two combinations recorded as accepted.
 
 ## Reading order
 

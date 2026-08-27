@@ -158,6 +158,86 @@ contract DeltaVerifyDeliveryTest is CoreSettlementBase {
         assertEq(IERC20(USDC).balanceOf(maker), USDC_IN, "maker kept its input - fill unwound");
     }
 
+    // ── The three ways "did not deliver" can look on a MEASURED path. On the
+    //    ordinary pull path the core takes the tokens itself, so a filler that does
+    //    nothing simply fails the transfer; here the core takes NOTHING and asks a
+    //    balance question instead, so each of these has to be rejected by the
+    //    measurement rather than by a failed transfer. ──
+
+    /// @dev Nothing delivered at all. The measured delta is zero, which is below any
+    ///      priced amount — no special-casing of the empty callback needed.
+    function test_deltaVerify_noDeliveryAtAll_reverts() public {
+        _fund();
+
+        Order memory o = _order(maker, 20, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
+        _markDeltaVerify(o);
+        bytes memory sig = _sign(o);
+
+        // A callback that only takes the solver's input and delivers nothing back.
+        bytes memory cb = abi.encodeCall(DeltaPool.deliverOne, (address(fot), maker, 0));
+
+        vm.prank(solver);
+        vm.expectRevert(Base.DeltaTooLow.selector);
+        settlement.fillWithCallback(o, sig, USDC_IN, address(pool), cb, CallbackMode.PostInputs);
+
+        assertEq(IERC20(USDC).balanceOf(maker), USDC_IN, "maker kept its input");
+        assertEq(settlement.filled(_hashOrder(o)), 0, "no progress survived the unwind");
+    }
+
+    /// @dev THE PROPERTY THAT MAKES THE SNAPSHOT LOAD-BEARING: the delivery must
+    ///      happen DURING the fill. The maker is handed the full output BEFORE the
+    ///      fill is even called — a filler watching the mempool could arrange exactly
+    ///      this — and the callback then delivers nothing. The snapshot is taken at
+    ///      fill start, so the pre-transfer lands UNDER it and counts for nothing.
+    ///
+    ///      Without this, "deliver" would degrade to "the recipient happens to hold
+    ///      enough", and any maker who already owned the output token would be
+    ///      fillable for free.
+    function test_deltaVerify_preTransferBeforeTheFill_doesNotCount() public {
+        _fund();
+
+        Order memory o = _order(maker, 21, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
+        _markDeltaVerify(o);
+        bytes memory sig = _sign(o);
+
+        // Generously pre-fund the maker with far more than the order asks for.
+        vm.prank(address(pool));
+        fot.transfer(maker, FOT_OUT * 5);
+        uint256 before_ = fot.balanceOf(maker);
+        assertGt(before_, FOT_OUT, "maker already holds more than the signed output");
+
+        bytes memory cb = abi.encodeCall(DeltaPool.deliverOne, (address(fot), maker, 0));
+
+        vm.prank(solver);
+        vm.expectRevert(Base.DeltaTooLow.selector);
+        settlement.fillWithCallback(o, sig, USDC_IN, address(pool), cb, CallbackMode.PostInputs);
+
+        assertEq(IERC20(USDC).balanceOf(maker), USDC_IN, "maker kept its input");
+        assertEq(fot.balanceOf(maker), before_, "and its pre-existing stock, untouched");
+    }
+
+    /// @dev Right token, right amount, WRONG recipient. The snapshot is per-leg and
+    ///      keyed on that leg's resolved recipient, so paying someone else — even the
+    ///      filler itself — moves no measured balance and the fill unwinds.
+    function test_deltaVerify_deliveredToTheWrongRecipient_reverts() public {
+        _fund();
+
+        Order memory o = _order(maker, 22, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
+        _markDeltaVerify(o);
+        bytes memory sig = _sign(o);
+
+        uint256 grossOut = FOT_OUT * 10_000 / (10_000 - FEE_BPS) + 1;
+        // Same generous amount as the passing test — addressed to the solver.
+        bytes memory cb = abi.encodeCall(DeltaPool.deliverOne, (address(fot), solver, grossOut));
+
+        vm.prank(solver);
+        vm.expectRevert(Base.DeltaTooLow.selector);
+        settlement.fillWithCallback(o, sig, USDC_IN, address(pool), cb, CallbackMode.PostInputs);
+
+        assertEq(IERC20(USDC).balanceOf(maker), USDC_IN, "maker kept its input");
+        assertEq(fot.balanceOf(maker), 0, "and received nothing");
+    }
+
     // ── Composes with a DUTCH auction: the verified floor is the CURRENT tick, not
     //    the auction floor. Mid-auction, a delivery at the floor reverts; one at the
     //    current tick passes. Proves the primitive reuses the existing pricing. ──

@@ -1,6 +1,6 @@
 import { encodeAbiParameters, type Address } from "viem";
 
-import { ItemOp, type Item, type Order, type Validator } from "./types";
+import { FILL_ONCE_BIT_INDEX, ItemOp, type Item, type Order, type Validator } from "./types";
 
 /**
  * One-cancels-other (OCO) and N-way brackets — a group of a maker's own orders
@@ -26,8 +26,10 @@ import { ItemOp, type Item, type Order, type Validator } from "./types";
  * See `docs/oco.md` and `packages/modules/strategy/oco/src/OcoGroupModule.sol`.
  */
 
-/** `Order.timing` bit 100 — fill-once (`DutchAuction.useNonceInvalidator`). */
-export const FILL_ONCE_BIT = 1n << 100n;
+/** `Order.timing` bit 100 as a MASK — fill-once (`DutchAuction.useNonceInvalidator`).
+ *  The bit INDEX is {@link FILL_ONCE_BIT_INDEX} in `types.ts`; this derives from it
+ *  so the two cannot drift. */
+export const FILL_ONCE_BIT = 1n << FILL_ONCE_BIT_INDEX;
 
 /** Whether an order opted into fill-once. */
 export function isFillOnce(order: Order): boolean {
