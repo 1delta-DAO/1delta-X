@@ -468,29 +468,47 @@ abstract contract Base is Signatures {
 
     // ──────────────────── Validators / invariants ────────────────────
 
-    /// @dev MEASURED AND REJECTED (2026-08-10) — two attempts to buy back EIP-170
-    ///      headroom by hand-rolling what solc already does. Both made Settlement
-    ///      BIGGER under the `core-deploy` (via-IR) profile that is the one that has
-    ///      to fit. Baseline 23,594 bytes:
+    /// @dev THE ENCODER-DEDUPLICATION LEDGER — one of these was later OVERTURNED, and
+    ///      that reversal is the most useful thing on this page.
+    ///
+    ///      MEASURED 2026-08-10, against a 23,594-byte baseline. Two attempts to buy
+    ///      back EIP-170 headroom by hand-rolling what solc already does; both made
+    ///      Settlement BIGGER under the `core-deploy` (via-IR) profile that is the one
+    ///      that has to fit:
     ///
     ///        • Hand-encoding the three item-dispatch calls (`makeOnBehalf`, `take`,
     ///          `settle`) through one shared assembly encoder, 0x-Settler style:
-    ///          **+1,862 bytes (25,456 — over the cap).** Their win comes from
-    ///          payloads solc encodes badly — nested structs plus a `string` — but
-    ///          these are 2–4 words and one `bytes`, a shape whose encoder via-IR
-    ///          already emits ONCE and shares across all three call sites. An
-    ///          `internal` assembly helper is instead inlined three times.
+    ///          **+1,862 bytes (25,456 — over the cap).**
+    ///          ⚠ SUPERSEDED 2026-08-25 — see {_callWithTail}, which does exactly this
+    ///          and measured **−65 bytes**. Nothing about via-IR changed; the
+    ///          SURROUNDING CODE did. The 08-10 attempt was an `internal` helper the
+    ///          optimizer re-inlined at all three sites, so it paid for three copies
+    ///          and shared nothing; the shipped one is `private` with a flat scalar
+    ///          head (`a0…a3` written unconditionally) that keeps its live set to a
+    ///          single local, which is what lets it stay one body. Same idea, opposite
+    ///          result, from a detail the original measurement could not see.
     ///        • Merging `_runValidators`/`_runInvariants` into one `private` walk
     ///          parameterised by a `post` flag, to stop the {IOrderValidator}
     ///          encoder (which serialises the whole {Order}) being emitted twice:
     ///          **+389 bytes (23,983).** via-IR was already sharing it; the flag
     ///          only added a branch and blocked per-site specialisation.
+    ///          STILL TRUE — re-measured 2026-08-25 at **+158 bytes** against the
+    ///          then-current tree. Do not retry this one.
     ///
-    ///      The generalisation, and the reason not to retry this family: under
-    ///      via-IR, solc's own deduplication is already better than hand-rolling for
-    ///      any payload it can encode with a shared routine. Reach for assembly here
-    ///      only where the encoder is genuinely bespoke per call site. See
-    ///      [[settlement-size-via-ir]] for the alternatives rejected before these.
+    ///      SO THE GENERALISATION IS NOT "solc always wins", which is what this note
+    ///      used to say and what {_callWithTail} disproves. It is: **this codegen is
+    ///      cliff-dominated and non-monotonic.** The same transformation can cost
+    ///      1,862 bytes in one tree and save 65 in another; a probe that DELETED the
+    ///      three item encoders outright measured **+692**, i.e. removing code made the
+    ///      contract bigger. Nothing here is predictable from first principles.
+    ///
+    ///      What that means in practice, and it is the whole rule: **measure the real
+    ///      change with `make size-check`, never a probe and never a prediction, and
+    ///      treat every figure on this page as a fact about one tree rather than a law.**
+    ///      A rejected idea is worth re-measuring when the frame around it has moved.
+    ///      See [[settlement-size-via-ir]] for the alternatives rejected before these,
+    ///      and the `optimizer_runs` note in foundry.toml for the day this budget
+    ///      nearly forced the dial down instead.
 
     /// @dev THE ORDER GATE — every authorization check a fill runs before it moves a
     ///      token, in one place and in the one order that is cheapest to be wrong in.

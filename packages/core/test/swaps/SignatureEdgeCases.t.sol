@@ -346,4 +346,57 @@ contract SignatureEdgeCasesTest is MockSettlementBase {
         vm.expectRevert(); // the old signature is meaningless in the new domain
         settlement.fill(o, sig, AMOUNT_IN);
     }
+
+    // ════════════════ Recovered address as a mapping key ════════════════
+
+    /// @dev Provenance: MixBytes' Bebop audit, MEDIUM — "unsafe `ecrecover` usage:
+    ///      return value used as mapping index rather than for comparison only".
+    ///      That is the sharper form of the zero-address class: comparing against a
+    ///      zero recovery merely fails, but INDEXING a registry with it turns every
+    ///      malformed signature into a lookup of `registry[maker][address(0)]`, and
+    ///      any value ever written there authorises all of them.
+    ///
+    ///      {Signatures._verifySignature} does index a registry that way —
+    ///      `orderSignerExpiry[expected][signer]` for maker-delegated signing — so
+    ///      the guard is load-bearing. It is guarded TWICE, independently:
+    ///      `signer != address(0)` before the lookup, and {setOrderSigner} refusing a
+    ///      zero delegate so the slot can never be populated in the first place.
+    ///
+    ///      Tested with a delegation ACTIVE, because that is the only state in which
+    ///      the delegate branch is reachable at all — a maker with no delegate would
+    ///      pass this test whether the guard existed or not.
+    function test_zeroRecovery_cannotAuthorizeViaDelegateRegistry() public {
+        _fund();
+        address delegate = vm.addr(0xDE1E6A7E);
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, block.timestamp + 365 days);
+
+        Order memory o = _order(11);
+        bytes memory sig = _sign(o);
+        bytes32 r;
+        bytes32 s_;
+        assembly {
+            r := mload(add(sig, 0x20))
+            s_ := mload(add(sig, 0x40))
+        }
+
+        // Each of these recovers to address(0); none may reach the registry.
+        vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        settlement.fill(o, abi.encodePacked(r, s_, uint8(0)), AMOUNT_IN);
+
+        vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        settlement.fill(o, abi.encodePacked(bytes32(0), bytes32(0), uint8(27)), AMOUNT_IN);
+
+        // ...and the delegation itself is genuinely live, so the branch above really
+        // was reachable and the rejections came from the zero guard, not from the
+        // registry being empty.
+        assertEq(settlement.filled(_hashOrder(o)), 0, "nothing authorized");
+        // Hoisted: `_signWith` is a call, and it would eat the `vm.prank` below.
+        bytes memory delegateSig = _signWith(o, 0xDE1E6A7E);
+        vm.prank(solver);
+        settlement.fill(o, delegateSig, AMOUNT_IN);
+        assertEq(settlement.filled(_hashOrder(o)), AMOUNT_IN, "the real delegate can sign");
+    }
 }

@@ -142,7 +142,7 @@ an alert.
 | `LegUnfunded(order, leg)` | that input leg ended the context under-covered — the schedule never funded it |
 | `BatchNotWhole(token)` | the plan does not net in `token`; the pool would have ended below its baseline |
 | `LengthMismatch()` / `ZeroFill()` / `FillTooSmall()` | arity, or a fill below the maker's `minFillAnchor` |
-| `MatchSettleItemUnsupported()` / `MatchDuplicateInput()` | the order is not eligible for a netted match — filter it out at build time |
+| `MatchSettleItemUnsupported()` / `MatchDuplicateInput()` / `OutputToSettlement()` | the order is not eligible for a netted match — filter it out at build time. The last one is an output leg addressed at Settlement itself: on the single-order path that is a maker self-burn, but the netted path cannot burn it (a pool→pool self-transfer would leave the amount above the pre-context floor and sweep it to *you*), so it is refused rather than paid. `SettlementLens.validateOrder` reports all three, and it is much cheaper to ask it |
 | `ItemPolicyViolated(order, item)` | the schedule ran that item somewhere the MAKER did not permit — out of signed sequence under `ItemPolicy.ORDERED`, or with a foreign step wedged in under `ATOMIC`. The order is fillable, just not that way: read `timing` bits [96:100) at build time and route accordingly |
 
 **Maker-side — the order is not fillable right now; re-check before retrying.**
@@ -154,6 +154,8 @@ an alert.
 | `InsufficientAllowance` / `AllowanceExpired` (Permit3) | the maker's allowance is gone or lapsed |
 | `TransferFailed` / `TransferFromFailed` | the maker is under-funded, or the token is fee-on-transfer (not supported on the netted path) |
 | `InvalidSigner` / `InvalidSignature` / `OrderNotApproved` | the order's authorization does not hold |
+| `ItemTargetHasNoCode()` | a MAKE or SETTLE item names a module with no code at that address — a malformed maker-signed item, so it will never fill on any path and no retry helps. Blacklist the order. (The check is explicit rather than solc's, because `Base._callWithTail` hand-encodes the item calls; without it the funding step would silently no-op and the fill would settle around the hole) |
+| `MalformedPackedArray()` | a packed blob is internally inconsistent — a declared length running past the end, or an `Item.op` outside `{MAKE, TAKE, SETTLE}`. Same verdict: never fillable, blacklist |
 
 The point of the typed `OrderTaken` is that bucket one costs you a cheap revert and
 needs no investigation — you can tell it apart from bucket two at the log level,

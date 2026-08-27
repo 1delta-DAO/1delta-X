@@ -24,6 +24,10 @@ what we changed in response. It exists for three jobs:
 **Related:** [`/SECURITY.md`](../SECURITY.md) is the reporting policy and trust
 model. This note is the adversarial reading of the design. The
 [settlement README](../packages/core/src/settlement/README.md) is the API.
+[`edge-case-matrix.md`](edge-case-matrix.md) is the other half of this note: where
+this one asks *what has gone wrong elsewhere*, that one asks *what combinations
+exist here* — the F-ledger entries below should each be locatable as a cell in it,
+and the ones that are not mean the matrix is missing an axis.
 
 ---
 
@@ -782,6 +786,192 @@ batch types do not, and inherit Permit2's posture along with its code.
 
 ---
 
+## Second corpus — v4 / EVK / RFQ (2026-08-27)
+
+The original C1–C15 taxonomy was built from 1inch, 0x, CoW, UniswapX and Velora.
+This round adds **Uniswap v4**, **Euler v2 (EVC/EVK)**, **Native** and **Bebop**,
+chosen because the first two attack the parts of our design the first corpus never
+covered: v4's flash accounting is our netted `matchSettle` credit ledger, and the
+EVC's batch-with-deferred-checks is our `MatchPlan` schedule. CoW and Velora were
+already in [Sources](#sources) and are not re-derived here.
+
+**Bebop publishes nine audits**, indexed at
+[docs.bebop.xyz/audits](https://docs.bebop.xyz/audits#security-and-audits) — a
+correction to an earlier draft of this section, which recorded "no public audit
+report" because a keyword search surfaced only their docs. The lesson is worth
+keeping: **a search that finds nothing is not evidence of nothing; check the
+protocol's own docs for an audit index before recording a negative.** The MixBytes
+report is markdown and is summarised as B1–B4 below; the other eight are PDFs that do
+not survive automated fetch.
+
+**Native** has one ([Symbolic Software NAT-001](https://symbolic.software/pdf/nat-001.pdf));
+its published finding (NAT-001-001, immediately-overwritten variables) is a
+code-quality issue with no analogue here, and its architecture (AquaVault treasury +
+`NativePool` verifying maker quote signatures) is the same PMM-quote shape our
+`CosignedQuotePriceModule` already implements.
+
+| # | Class | Source | Our position |
+|---|---|---|---|
+| V1 | **Accounting bugs that still satisfy the settlement invariant.** The PoolManager only checks that a session's currency deltas resolve to zero; it never validates a hook's *internal* accounting, so a wrong sign, a rounding step or a mixed balance bucket leaks value while every transaction stays "valid" | [Trail of Bits — v4 hooks](https://blog.trailofbits.com/2026/07/30/building-secure-uniswap-v4-hooks/) #3; Bunni drained through 44 individually-valid txs | **This is precisely [F15](#f15--a-duplicate-pull-step-burned-maker-allowance-without-extra-fill-progress).** `BatchNotWhole` proves the POOL nets and `LegUnfunded` proves each leg reached its `owed` — neither says anything about how `owed` was rounded, nor about authority consumed on the way. Rounding direction is now pinned by `RoundingDirection.t.sol`: slicing an order must never favour the solver, fixed inputs are exact under any slicing (cumulative-difference form), outputs round toward the maker. |
+| V2 | **Unrestricted hook callbacks / missing caller checks** — the Cork exploit (~$12M) | [ToB](https://blog.trailofbits.com/2026/07/30/building-secure-uniswap-v4-hooks/) #1 | **Clean, and load-bearing.** Every module entrypoint gates on its caller as its first statement: `msg.sender != address(permit3)` for `ITakerModule`, `msg.sender != settlement` for `IMakerModule`. Verified across all ten entrypoints in the aave-v3/v4 and morpho-blue packages during the 2026-08 module audit. |
+| V3 | **Untrusted key/route selection** — attacker-created pools let untrusted `PoolKey` data reach logic that treats it as trusted | [ToB](https://blog.trailofbits.com/2026/07/30/building-secure-uniswap-v4-hooks/) #2 | **Structurally absent.** Our equivalent of a `PoolKey` is the maker-SIGNED order: modules, validators and the pricing module are all fields inside the EIP-712 hash, so a filler cannot substitute a route the maker did not sign. The one attacker-supplied channel is `takerData`, which is documented as adversarial and must be verified by whoever reads it. |
+| V4 | **Logic in the wrong callback / stale cross-callback state** — values cached before an external call are stale after it | [ToB](https://blog.trailofbits.com/2026/07/30/building-secure-uniswap-v4-hooks/) #4, #7 | **Watch item.** `ctx.bump` is pinned once at `_openFill` and reused for every leg — correct, and deliberately so — but it means any future price input that CAN move mid-fill must not be read through `ctx`. `matchSettle` measures item proceeds as balance deltas around each module call rather than caching, which is the right shape. |
+| E1 | **Deferred checks that can be skipped or forgiven.** The EVC lets a batch break invariants mid-flight so long as everything passes at the end; the danger is a path where the end-check does not run | [OpenZeppelin — EVK](https://www.openzeppelin.com/news/euler-vault-kit-evk-audit), [Electisec](https://reports.electisec.com/2024-03-EulerV2) | **Clean by construction.** `_matchFlush` is CONTRACT-owned and loops every order: completeness (`PlanIncomplete`), `_matchReconcileInputs`, then `_runInvariants`. The solver's schedule cannot skip it, reorder it, or address an order out of it — unlike the EVC, where which vaults get checked depends on what the batch touched. |
+| E2 | **Reentrancy during an in-batch transfer**, where checks are forgiven before control returns; mitigated in the EVC by making `checkAccountStatus` a STATICCALL so a share transfer cannot execute attacker code | [OpenZeppelin — EVK](https://www.openzeppelin.com/news/euler-vault-kit-evk-audit) (low) | **Same mitigation, independently arrived at.** Validators, invariants and price modules are all `staticcall`-ed with a one-word return cap, so none can reenter or bomb memory; `matchSettle` is additionally `nonReentrant`. |
+| E3 | **Rounding in loop/self-referential ops** — "expecting 10 units, receiving 11" | [OpenZeppelin — EVK](https://www.openzeppelin.com/news/euler-vault-kit-evk-audit) (low) | Covered by the V1 row's tests for the fill path. |
+
+### Bebop (MixBytes, Jul 2023) — 1 High, 4 Medium, 1 Low
+
+Their findings land almost entirely on the signature surface we hardened this week,
+which is a useful independent check on that work.
+
+Read via local `pdftotext` extraction after WebFetch failed on the binaries — the
+same trick works for every PDF in the index, so "PDF" is not a reason to leave a
+report unread.
+
+| # | Their finding | Our position |
+|---|---|---|
+| B1 | **HIGH — EIP-712 `DOMAIN_SEPARATOR` replay.** Chain id cached in an immutable instead of read per call, so signatures stay valid on a forked network | **Clean, and now pinned.** `EIP712.DOMAIN_SEPARATOR()` serves the cached value only while `block.chainid` matches construction and recomputes otherwise — the Permit2 behaviour, inherited deliberately. `test_domainSeparator_followsChainId` asserts it. This is [S3](#signature-validation--the-published-corpus-vs-our-position) confirmed by an external High. |
+| B2 | **MEDIUM — unsafe `ecrecover`: the return value used as a MAPPING INDEX rather than only for comparison** | **Clean, guarded twice.** This is the sharper form of the zero-address class, and it applies to us: `Signatures._verifySignature` indexes `orderSignerExpiry[expected][signer]` for maker-delegated signing. Guarded by `signer != address(0)` *before* the lookup, and independently by `setOrderSigner` refusing a zero delegate so the slot can never be written. Pinned by `test_zeroRecovery_cannotAuthorizeViaDelegateRegistry`, deliberately run with a delegation ACTIVE — with no delegate the branch is unreachable and the test would pass whether the guard existed or not. |
+| B3 | **MEDIUM — nonce truncation.** A `uint256` nonce cast to `uint64`, silently discarding high bits and colliding | **Structurally absent.** `NonceManager` splits the full `uint256` as `nonce >> 8` (word) and `nonce & 0xff` (bit); nothing is narrowed, so two distinct nonces cannot collide. |
+| B4 | **MEDIUM — excess `msg.value` not refunded**, locking user funds | **Worth a look when native-input lands.** Not applicable to the current core: makers never send native value into a fill (see the native-asset assessment — maker-native-input needs escrow and was kept out of core). Re-check this row if that changes. |
+
+### Bebop (Cyfrin, Router v2.0, Jun 2026) — 1 High, 2 Medium, 18 Low
+
+The richest report in the index, and the one whose High is closest to our own shape.
+
+| # | Their finding | Our position |
+|---|---|---|
+| C-H1 | **HIGH — the signed order authorises the input pull, but UNSIGNED relayer calldata decides the realised output.** The user's digest covered the order fields, not `bebopPmmCalldata`; validation checked token identity and non-zero amounts but not that the delivered amount matched the quote, that the receiver was the router, or that delivery was ERC-20 rather than native. With `limitAmount == 0` there was no output floor either. Three vectors: dust under-fill, receiver redirect, native-delivery accounting bypass — all total loss of the swap | **Same shape, structurally bounded.** Untrusted input reaches our realised price too: a cosigned-quote module derives its answer from filler-supplied `takerData`. The defence is not a check but a clamp — `DutchAuction.priceBump` forces the answer into `[0, BPS]` and maps it through the maker's OWN signed endpoints, so the worst a hostile module achieves is the maker's floor, a price they already declared acceptable. **Bebop's exploitable case was precisely the one with no floor.** Pinned by `HostilePriceModule.t.sol`, including a fuzz over every `uint256` answer. The redirect half is pinned by `FillUpTo.t.sol` — output-leg recipients live inside the signed `legsOut` blob. |
+| C-L02 | **LOW — absolute balances.** `_executeSwapCore` reads the router's whole token balance, so tokens already held from an under-consumed fill, hook overproduction or a direct transfer get folded into the current swap | **Clean — this is [C15](#c15--the-settlers-balance-treated-as-a-shared-pot).** `matchSettle` measures against `st.beforeBal[t]` snapshots and `_sweepSurplus` floors every touched token at its pre-context balance, so a donated balance is unreachable. `_stepPresend` says so explicitly. |
+| C-L05 | **LOW — dust-fill nonce burn.** `exactAmount` is a function argument, not a signed field, so a relayer could partial-fill for dust and permanently consume the user's nonce. *Recommended: include a minimum fill size in the signed order* | **Already implemented, twice.** `Order.minFillAnchor` is exactly that maker-signed floor ({FillTooSmall}), and it gates the CLAMPED delta on `fillUpTo` too. Separately, a fill-once order (`useNonceInvalidator`) rejects partials outright with {FillOnceMustBeFull} — for the identical reason, since there the nonce IS the progress counter. |
+| C-M1 / C-M2 | Leg scaling on maker refunds; relayer-supplied values stranding user input | Our refund path is fixed by construction: `_matchReconcileInputs` returns any surplus to the **maker**, never the solver, and the amount is the `owed` resolved at open rather than a recomputation. |
+
+### Bebop — Decurity (JAM, Nov 2023) and Nethermind (Dec 2024)
+
+Decurity's JAM review (their batch settlement, the closest external analogue to
+`matchSettle` after the EVC) reports one Medium — a taker-loss path in
+`JamBalanceManager` — plus two acknowledged Lows on signing and solver
+observability. Nethermind's single point of attention is more interesting to us:
+
+**Nethermind 7.1 — nonces shared between JamSettlement orders and Permit2.** One
+nonce field feeds three independent invalidation systems (regular orders, limit
+orders, Permit2), so off-chain allocation must satisfy all three at once and an
+unrelated protocol consuming a Permit2 nonce can brick an order.
+
+**Our position: the same sharing exists, but scoped and documented.** Permit3 shares
+ONE bitmap per owner across both signed flows — deliberately, so
+`invalidateUnorderedNonces` is a complete kill switch whichever flow signed, with the
+stated cost that allocation is per-owner rather than per-message-type
+({UnorderedNonces}). Crucially the ORDER nonce space ({NonceManager}) is **separate**
+from the Permit3 space, so we have two clearly-bounded systems rather than three
+implicitly coupled ones. Worth re-reading that header if a third signed flow is added.
+
+### Bebop — Offside Labs (RFQ, Dec 2025)
+
+**Solana**, not EVM (PDAs, signer seeds), so most of it does not transfer. The one
+portable finding is 4.2 (Low, fixed): `output_amount * filled_taker_amount /
+input_amount` overflowed the intermediate product on large quotes, causing a DoS.
+Our pro-rata slice math has the same shape (`delta * tick / anchor`), but in checked
+Solidity 0.8 an overflow reverts rather than wrapping, and reaching it needs
+maker-signed amounts around 1e38 — a self-inflicted DoS on that maker's own order,
+not a lever against anyone else. Noted, not actioned.
+
+**The thread joining V1 and E1**, and the question to carry into the next batching
+feature: *a wholeness check is not an accounting check.* Ours prove the pool nets and
+every leg was funded. They do not prove that the per-order arithmetic was right, that
+no authority was over-consumed reaching it, or that rounding went the intended way —
+each of those needs its own assertion. F15 slipped through precisely because the
+wholeness check passed.
+
+---
+
+## Third corpus — modular signature-validating order protocols (2026-08-27)
+
+A deliberate sweep rather than an opportunistic one: every EVM protocol that (a)
+settles signed orders and (b) is modular in the way we are — pluggable validators,
+hooks, or an allowance hub. Ordered by how closely the architecture maps onto ours.
+
+### Read this round
+
+| Protocol | Why it maps | What it gave us |
+|---|---|---|
+| **Seaport** (OpenSea) — [Code4rena](https://code4rena.com/reports/2022-05-opensea-seaport), OpenZeppelin + Trail of Bits (no majors) | The closest architectural sibling we had not read: EIP-712 **bulk/Merkle signatures**, **zones** (≈ our validators), **conduits** (≈ Permit3), partial fills, counter-based cancellation | **[C4 #168](https://github.com/code-423n4/2022-05-opensea-seaport-findings/issues/168) — an INTERNAL NODE passed off as a leaf.** Criteria trees took the leaf as a caller-supplied `tokenId` with no check that it was a leaf, so a fulfiller could submit an intermediate hash and trade an unlisted NFT. **We are structurally immune and it is now pinned**: `_foldProof(orderHash, …)` derives the leaf from the ORDER BEING FILLED, so a filler controls only the proof and has no field in which to submit a node; the root is additionally wrapped in its own `ORDER_ROOT_TYPEHASH`. See `test_bulkSignature_internalNodeCannotBeUsedAsALeaf`. |
+| **ERC-4337 EntryPoint** — [OpenZeppelin](https://blog.openzeppelin.com/eth-foundation-account-abstraction-audit), [incremental](https://blog.openzeppelin.com/eip-4337-ethereum-account-abstraction-incremental-audit) | Signature validation inside a **batched** execution, plus modular validation and aggregators | Their finding: `validateUserOp` must RETURN `SIG_VALIDATION_FAILED` rather than revert, because a reverting validation inside a bundle takes the whole bundle down. **Our answer is different but sound**: `batchFill` wraps each fill in `try/catch` via `this.fillSelf`, so a bad signature yields `success[i] = false` instead of DoSing the batch, with `revertIfIncomplete` as the caller's explicit all-or-nothing opt-in. Containment at the batch boundary generalises better than a return-code convention, because it works for arbitrary sub-call failures, not just signatures. |
+| **Across / ERC-7683** — [OpenZeppelin](https://www.openzeppelin.com/news/across-v3-incremental-audit), [deposit flow](https://www.openzeppelin.com/news/deposit-flow-audit) | We ship `OriginSettler7683` / `DestinationSettler7683` | A LOW: signed executions lacking single-use replay protection, repeatable until their deadline against a clone that later receives funds. Compare [F11](#f11--open-announced-an-erc-7683-order-without-the-signature-check-openfor-performs) — our own 7683 finding was in the same family (an entrypoint announcing without the check its sibling performs). They also flag **no unit tests for the 7683 depositor contracts**; ours are covered by `Erc7683.t.sol`. |
+| **Balancer V2** — the 3 Nov 2025 exploit ([Trail of Bits](https://blog.trailofbits.com/2025/11/07/balancer-hack-analysis-and-guidance-for-the-defi-ecosystem/), [Check Point](https://research.checkpoint.com/2025/how-an-attacker-drained-128m-from-balancer-through-rounding-error-exploitation/), [OpenZeppelin](https://www.openzeppelin.com/news/understanding-the-balancer-v2-exploit)) | Not an order protocol, included because it is **this taxonomy's largest realised loss** | **~$128M, and the single most instructive item in this document.** Root cause: **asymmetric rounding between the two directions of one conversion** (upscale rounded down, downscale up/down), **amplified by batch atomicity** — 65 tuned micro-swaps in a single `batchSwap` compounded wei-level truncations into a deflated invariant. Each swap was individually negligible and individually valid. It had been audited by Trail of Bits, Spearbit AND Certora. See the lesson below. |
+
+### Surveyed, audited, NOT yet read — queued with rationale
+
+Recorded so the next round starts here instead of re-deriving the list. None is
+believed urgent; each note says what would make it worth the time.
+
+| Protocol | Audits | Why it might matter |
+|---|---|---|
+| **Aori** — [Zellic (v0.3.1)](https://reports.zellic.io/publications/aori-031-upgrade/sections/component-aori-contract-version-031-upgrade-aori-diff/), [Dedaub](https://dedaub.com/audits/aori/aori-margin-prime-may-08-2023/) | **Highest-value of the queue.** An RFQ order book whose deposits and fills support **hooks** — external calls during the fill, i.e. our `Item`/module design. Read before the next module-surface change. |
+| **Valantis** — [Statemind (Core + HOT AMM)](https://docs.valantis.xyz/resources/audits), [Sherlock (Arrakis SOT)](https://github.com/sherlock-protocol/sherlock-reports) | Modular DEX: several AMM modules against one pool, with an **RFQ module** built in. The closest external analogue to our pluggable-module architecture. |
+| **Balancer v3** — Trail of Bits, Spearbit, Certora | Modular **hooks + vault accounting**. Given V2's fate, the v3 hook/accounting reviews are worth reading specifically for how they bound rounding in composite ops. |
+| **Clipper** — Quantstamp, Solidified, Immunefi | RFQ/PMM quote signatures. Smaller surface; low priority. |
+| **Hashflow** — [Cyberscope](https://www.cyberscope.io/audits/coin-hashflow) | Signed RFQ quotes. Vendor-tier audit; low priority. |
+| **Safe** | Not an order protocol, but the 1271 wallet our contract-signer path must interoperate with — relevant if S2 (owner-binding) is ever revisited. |
+
+### The lesson from Balancer, and what we did about it
+
+Three of the best firms in the industry reviewed that code and the bug still shipped,
+because **the defect was not in any one operation** — every swap was individually
+correct and individually valid. It existed only in the *composition*: a rounding
+asymmetry that compounded under batching.
+
+That is the same structure as [V1](#second-corpus--v4--evk--rfq-2026-08-27) (Bunni,
+44 valid transactions) and as our own [F15](#f15--a-duplicate-pull-step-burned-maker-allowance-without-extra-fill-progress)
+(a duplicate step that satisfied every wholeness check). Three independent instances
+of one shape is a pattern, not a coincidence:
+
+> **A per-operation review cannot find a composition bug. State the invariant over
+> the SEQUENCE and test it directly.**
+
+Concretely, `RoundingDirection.t.sol` now asserts the sequence-level property rather
+than any single computation: slicing an order into N fills must never favour the
+solver. Balancer's specific twist — *asymmetry between the two directions of the same
+conversion* — is why that file now covers the **BUY** side as well as SELL: BUY
+inverts which leg is anchored and which is auctioned, so it runs a different branch
+of {Pricing}, and testing one direction proves nothing about the other.
+
+---
+
+## Fourth pass — the forked source's own audit (Permit2, 2026-08-27)
+
+The one we should have read FIRST. `Permit3` ports Permit2's `SignatureVerification`,
+`EIP712`, and the unordered-nonce bitmap close to verbatim (each file says so in its
+header), so [ChainSecurity's Permit2 audit](https://old.chainsecurity.com/wp-content/uploads/2022/11/ChainSecurity_Uniswap_Permit2_audit.pdf)
+is an audit of OUR code's ancestor. Read via `pdftotext`. Every transferable finding
+turned out already handled and already pinned — the value of the pass is the
+*confirmation*, and one strong external precedent for a row I had rated on my own.
+
+| # | ChainSecurity finding | Our position |
+|---|---|---|
+| **6.1** | **HIGH — `Permit2Lib` argument casting.** A `uint256 amount` silently cast to `uint160` for the Permit2 leg: `uint160(2**170) == 0`, the call "succeeds" moving nothing, and the caller believes the transfer happened. Fixed in Permit2 with a SafeCast that reverts | **Clean, and handled more gracefully than the upstream fix.** `Permit3TransferLib.transferFromWithFallback` does NOT cast — it GATES: `amount <= type(uint160).max` uses the Permit3 leg with the in-range value, and anything larger skips Permit3 entirely (`ok` stays false) and falls through to a full-`uint256` direct `safeTransferFrom`. No truncation path exists. Pinned by `test_amountExceedsUint160_skipsPermit3`, which asserts the recipient receives the FULL `2**160` amount — the value assertion, not just the skip. A future "optimisation" to `uint160(amount)` would reintroduce 6.1 and break that test. |
+| **7.1** | **NOTE — nonce overflow via unchecked increment** of the sequential allowance nonce (`uint16`/`uint48`) | **Structurally absent.** Permit3 REMOVED the sequential allowance nonce (`AllowanceTransfer.sol:38`): grants zero the field instead of incrementing it, and replay is stopped by the unordered bitmap alone. `invalidateNonces` / `ExcessiveInvalidation` have no analogue, so neither does the overflow. |
+| **7.2** | **NOTE — signature malleability if misused.** The library accepts EIP-2098 compact AND 65-byte forms and performs no Appendix-F low-`s` check (`0 < s < n/2+1`); *"any reuse of the SignatureVerification library must be done with this attack in mind. OpenZeppelin had such an incident before."* Permit2 is safe only because it binds replay to NONCES, not to the signature | **This is the direct external precedent for [S1](#signature-validation--the-published-corpus-vs-our-position).** It describes our forked library exactly — the missing low-`s` check is inherited, not introduced. We are safe for the same structural reason Permit2 is: order replay binds to `filled[orderHash]` and the book keys by `orderHash`, never by signature bytes. `SignatureEdgeCases.t.sol`'s four-encoding test is the assertion. Having the SOURCE auditor independently name the exact hazard, and the exact reason it is benign, is the strongest confirmation S1 could get. |
+| **7.3** | **NOTE — `invalidateUnorderedNonces` accepts `wordPos` up to `uint256.max`, but a usable nonce only reaches `uint248.max`**, so one can invalidate nonces that can never be used | **Same note applies, same harmless verdict.** Our `nonce >> 8` word derivation caps a usable word at `2**248 - 1`, while `invalidateUnorderedNonces(wordPos, mask)` takes a full `uint256` word. Self-invalidation only (keyed by `msg.sender`), so the worst case is a user wasting gas on their own unreachable words. Inherited verbatim; recorded so it is not "rediscovered" as a finding. |
+| **5.1** | **MEDIUM (risk-accepted) — approval race**, the ERC-20 `approve` front-run, with `lockdown` offered as the batch mitigation | Same posture, already in our ledger: this is the [C12](#c12--revocation-that-does-not-revoke) / [F1](#f1--revoking-permit3-is-not-a-kill-switch-on-its-own) family, and Permit3 carries the same `lockdown` / `lockdownAll` escape hatch (`permit3-audit-fixes` memory). |
+| **6.2** | LOW — `Permit2Lib` reads `DOMAIN_SEPARATOR()` via `CALL` not `STATICCALL`, allowing reentrancy | N/A — we have no `Permit2Lib` analogue; `EIP712` exposes `DOMAIN_SEPARATOR()` as `view` and `_hashTypedData` reads it internally. |
+
+**The takeaway for the process, not just the code:** when a component is forked, its
+upstream audit is the highest-value document in the corpus and should be read before
+any peer protocol — it audits *your* logic, not an analogue. Reading it last was the
+mistake; the finding that it changed nothing is the good outcome.
+
+### Queue additions from this pass
+
+| Protocol | Audits | Note |
+|---|---|---|
+| **deBridge DLN** | [Halborn ×9](https://github.com/debridge-finance/debridge-security) (DLN Taker, EVM Bridge, CrosschainForwarder Allowances, …) | Intent-settlement with a **taker/filler** role like our solver, and a *CrosschainForwarder Allowances* audit specifically — the allowance-hub surface. Highest-value unread in the intent category. |
+| **0x Settler** | [Dedaub](https://dedaub.com/audits/0x/0x-settler-crosschainreceiverfactory-june-10-2025/) (already in Sources) | The closest analogue to our `fillUpTo` aggregator entry; read its findings when that path next changes. |
+| **Aggregator routers** (1inch AggregationRouterV6, KyberSwap MetaAggregationRouter, Odos) | various | Permissionless-router allowance-drain class ([C1](#c1--arbitrary-call-made-from-the-settlers-own-identity)); only worth the time if we add a generic-call surface beyond the current gated modules. |
+
+---
+
 ---
 
 ## Checked and clean
@@ -826,6 +1016,12 @@ Diligence's 0x v4 report, Hacken's Portikus report) return 403 to automated fetc
 their findings enter here only through accessible secondary coverage, flagged where
 it matters.
 
+**This table is the de-duplication ledger — check it before starting a research
+round.** A protocol listed here has been read; one listed with "no public audit
+report" has been searched for and found not to have one. Both are answers. The
+2026-08-27 round added Uniswap v4, Euler v2 and the RFQ venues (Native, Bebop); CoW
+and Velora were already present and were NOT re-derived.
+
 | Source | What it contributes |
 | --- | --- |
 | [OpenZeppelin — 1inch Limit Order Protocol](https://www.openzeppelin.com/news/1inch-limit-order-protocol-audit) | The richest single source: H02 (partial fills leak private orders), H03 (malicious amount getters), M01 (static-after-dynamic encoding), L02, L12. |
@@ -838,3 +1034,9 @@ it matters.
 | [ConsenSys Diligence — 0x Exchange v4](https://diligence.consensys.io/audits/2020/12/0x-exchange-v4/) | The stated non-overfillability invariant. *403 to automated fetch.* |
 | [Hacken — ParaSwap / Velora Portikus](https://hacken.io/audits/paraswap/sca-paraswap-portikus-contracts-sep2024/) | The intent-execution architecture behind Velora Delta: agent registry, module/adapter factories, 100% branch coverage, no severe findings published. *403 to automated fetch.* |
 | [CoW Protocol — GPv2Settlement reference](https://docs.cow.fi/cow-protocol/reference/contracts/core/settlement) | The permissioned-solver-plus-bond model — CoW's structural answer to C1, and the contrast case for our permissionless one. |
+| [Trail of Bits — Building secure Uniswap v4 hooks](https://blog.trailofbits.com/2026/07/30/building-secure-uniswap-v4-hooks/) | The seven recurring hook failure patterns. #3 (accounting bugs that still satisfy the settlement invariant — Bunni, 44 valid txs) is the closest external analogue to F15. Added 2026-08-27. |
+| [OpenZeppelin — Uniswap v4 Core](https://www.openzeppelin.com/news/uniswap-v4-core-audit) / [v4 Periphery + Universal Router](https://www.openzeppelin.com/news/uniswap-v4-periphery-and-universal-router-audit) | Flash-accounting and delta-settlement review; the singleton + transient-delta model our netted `matchSettle` credit ledger parallels. Added 2026-08-27. |
+| [OpenZeppelin — Euler Vault Kit (EVK)](https://www.openzeppelin.com/news/euler-vault-kit-evk-audit) / [Electisec — Euler v2](https://reports.electisec.com/2024-03-EulerV2) | Batch-with-deferred-checks: which checks run at the end of a batch, the STATICCALL mitigation for in-transfer reentrancy, and rounding in looped ops. The EVC batch is the closest external analogue to our `MatchPlan` schedule. Added 2026-08-27. |
+| [Symbolic Software — Native DEX (NAT-001)](https://symbolic.software/pdf/nat-001.pdf) | RFQ/PMM quote-signature architecture (AquaVault + `NativePool`). Published finding is code-quality only; no analogue here. Added 2026-08-27. |
+| [Bebop — audit index](https://docs.bebop.xyz/audits#security-and-audits) | **Nine audits**, all now read. [MixBytes](https://github.com/mixbytes/audits_public/tree/master/Bebop) (B1–B4), [Cyfrin Router v2.0](https://bebop-public-images.s3.eu-west-2.amazonaws.com/2026-06-12-cyfrin-bebop-router-v2.0.pdf) (C-H1 etc. — the richest), [Decurity JAM](https://bebop-public-images.s3.eu-west-2.amazonaws.com/DecurityAudit_November2023.pdf), [Nethermind](https://bebop-public-images.s3.eu-west-2.amazonaws.com/Nethermind-Bebop-Dec%202024.pdf) (shared nonces), [Offside Labs RFQ](https://bebop-public-images.s3.eu-west-2.amazonaws.com/Bebop-RFQ-Dec-2025-OffsideLabs.pdf) (Solana). PDFs were extracted with local `pdftotext` after WebFetch returned raw binary — **use that route, not a fetch, for any vendor PDF**. Added 2026-08-27. |
+| [ChainSecurity — Uniswap Permit2](https://old.chainsecurity.com/wp-content/uploads/2022/11/ChainSecurity_Uniswap_Permit2_audit.pdf) | **The forked source's own audit** — `Permit3` ports Permit2's SignatureVerification / EIP712 / unordered-nonce code. 6.1 casting (clean, pinned), 7.2 malleability (external precedent for S1), 7.1/7.3 nonce notes (absent/harmless). Read via pdftotext. Added 2026-08-27. |

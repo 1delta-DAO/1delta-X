@@ -245,6 +245,19 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   relevant code moves. Companion to [SECURITY.md](../SECURITY.md), which is the
   trust model and the audit log.
 
+- **[edge-case-matrix.md](edge-case-matrix.md)** — the *internal* counterpart to
+  the above: our own state space, crossed. Ten axes (credential, lifecycle state,
+  entry point, pricing mode, kill switch, fill granularity, leg shape, items,
+  exclusivity, token behaviour), ten interaction matrices over the axis **pairs the
+  code actually couples**, and a verdict per cell — *common / rare / never /
+  must-not* — bound to the test that pins it. It exists because three of the last
+  four findings were bugs in a **combination** rather than in a function (F13 =
+  approval × partial fill × non-empty sig; F15 = duplicate `PULL` × finite
+  allowance; F8 = proportional anchor × pegged module), and a per-feature suite
+  cannot find those. Includes a mechanical completeness check — every `revert` in
+  the settler is a must-not cell, so an error with no test is an unpinned
+  combination by definition — and the ranked gap register that check produces.
+
 ## Reading order
 
 New to the codebase: the [settlement README](../packages/core/src/settlement/README.md)
