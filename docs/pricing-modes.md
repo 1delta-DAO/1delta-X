@@ -364,6 +364,26 @@ survive an arbitrary partial-fill schedule; do not "simplify" them to the per-fi
 form the auctioned legs use. See
 [reference-audits.md §C7](reference-audits.md#c7--rounding-direction-and-split-fill-dust).
 
+### In a CoW match
+
+The paragraph above argues the filler absorbs the wei *because the filler is the
+only counterparty*. Under `matchSettle` that is no longer obviously true: two
+makers clear against a shared pool, `BatchNotWhole` only asserts the pool ends
+level across all of them, and the filler may have signed one of the orders. The
+argument still holds, and for a structural reason rather than a numerical one —
+`Pricing` has **no cross-order term**, so a counterparty cannot reprice you, and
+the slack lands in the pool, which is swept to `msg.sender`. Grinding a match into
+dust therefore pays the *victim* more and costs the *grinder* more.
+
+One edge is worth knowing before you quote a BUY: with `anchor = legsOut[0]` and an
+output leg numerically larger than the input leg, a one-unit slice floors the
+maker's charge to **zero** while the cumulative ceil still owes a unit out. Bounded
+at one unit per fill, paid by the filler, and removed outright by a signed
+`minFillAnchor`.
+
+The assessment, the eight-shape matching matrix, and the tests are in
+[match-combinations.md](match-combinations.md).
+
 ---
 
 ## Cost

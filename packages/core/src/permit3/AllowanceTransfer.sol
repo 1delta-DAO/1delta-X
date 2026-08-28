@@ -65,6 +65,33 @@ abstract contract AllowanceTransfer is Permit3Base {
 
     // ──────────────────── Spending ────────────────────
 
+    /// @dev DELIBERATELY NOT `nonReentrant`, and two consequences of that are worth
+    ///      naming because neither is obvious from here.
+    ///
+    ///      1. THE TAKE LOCK IS ONE-DIRECTIONAL. {TakerAllowance.take} holds the guard
+    ///         across its module dispatch, so a module cannot nest a `take` — but it
+    ///         CAN call this, which is the whole point (every pull-funded module funds
+    ///         its leg that way; see {ITakerModule}). The reverse edge is open too and
+    ///         is NOT by design: `_transferFrom` below hands control to a maker-chosen
+    ///         token, and a token with a transfer hook can call `take` from inside it,
+    ///         since nothing here arms `_locked`. Reaching a victim that way still
+    ///         needs a taker allowance keyed to the TOKEN CONTRACT as spender, which
+    ///         no integration grants — so this is a gap in the lock's reach, not a
+    ///         live path. Do not read `take`'s guard as a global "no takes in flight".
+    ///
+    ///      2. ADDING A GUARD HERE WOULD SILENTLY DEGRADE, NOT REVERT.
+    ///         {Permit3TransferLib.transferFromWithFallback} probes this function with
+    ///         a LOW-LEVEL call and treats ANY failure — including a `Reentrancy()`
+    ///         revert — as "Permit3 has no grant, use the direct ERC20 approval". So a
+    ///         guard bolted on here would not stop a re-entrant transfer; it would
+    ///         route it through the payer's standing ERC20 allowance instead, which is
+    ///         the broader authority. Anyone adding one must teach that library to
+    ///         distinguish the two failures first.
+    ///
+    ///      What actually contains a re-entering caller is that this book is keyed by
+    ///      `msg.sender` as the SPENDER, so a module re-entering wields exactly the
+    ///      buckets it was granted itself. Pinned by the cross-function suite in
+    ///      `test/Permit3.t.sol` ({CrossFunctionReentrantModule}).
     function transferFrom(address user, address to, address token, uint160 amount) external override {
         _transferFrom(user, to, token, amount);
     }

@@ -360,6 +360,7 @@ ones whose mechanism changes.
 | S7 | scheduling is liveness-only | S1/S4/S8 are order-independent → any schedule yields a correct settlement or a revert |
 | S8 | **exactly-once execution** | set-and-check bits on DELIVER and ITEM. Double-delivery drains the pool; a double item is a second borrow against the maker. Both must fail *at the step*, not at the end — a mask compared only in Phase 3 would still read "complete" after two executions |
 | S9 | no stranded value | `outstanding` reaching 0 is implied by S1; the sweep floors every touched token at `before[T]` |
+| S10 | **the counterparty cannot reprice a maker** | `Pricing` has no cross-order term — `outs[i]`/`owed[i]` are resolved in Phase 1 from order `i`'s own calldata and its own `FillCtx`. The only cross-order coupling is conservation (`outstanding`, `before[T]`, the sweep), which can refuse a settlement but never reprice one. Consequence: the maker-favourable rounding is charged to `msg.sender`, so grinding a match into dust pays the maker **more** and costs the grinder more. Assessed and swept over every matchable shape in [match-combinations.md](match-combinations.md) |
 
 The load-bearing new check is **S8**, and it is the one an audit should stare at:
 the guards must be *set-and-check at execution time*, never a completeness compare

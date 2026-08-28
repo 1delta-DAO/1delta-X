@@ -88,6 +88,16 @@ selector-pinned to `makeOnBehalf` / `settle`; a scan of every compiled artifact 
 never gets a direct call at all — it routes through `Permit3.take`, whose book is
 keyed by spender **and** module.
 
+**Re-checked for `TAKE_FOR` (2026-08-28).** The composite op widens the dispatch
+surface by two selectors and the verdict survives both. Settlement's own call is to
+`PERMIT3.takeFor` (`0xceaeaa96`) — a **fixed** target, so no maker-chosen address is
+reached from the settler's identity at all; Permit3 then calls the maker-chosen
+module with `takeForOnBehalf` (`0xec0eb1a9`). Scanning `Permit3`, `Settlement`,
+`SettlementLens` and `SolverCallbackExecutor` for all four module-dispatch selectors
+returns one hit — `takeFor` on Permit3, which is the intended target — and no
+collision. A maker naming `module = PERMIT3` or `module = Settlement` in a `TAKE_FOR`
+item therefore reaches a non-existent function and reverts.
+
 *Do not* make the solver's call from `Settlement` "to save the extra CALL". That
 CALL is the security property.
 
@@ -221,6 +231,32 @@ exact-out guarantees. The auctioned side does not: a SELL output is
 both per-fill. Splitting one fill into N therefore costs the **filler** up to one
 wei per leg per fill, in both directions — self-inflicted, since the filler chooses
 the split, and bounded by `minFillAnchor`. Same posture 1inch accepted at L12.
+
+**Two further surfaces carry the same arithmetic, and both were assessed on
+2026-08-28.**
+
+*Netted matching.* `matchSettle` is the case where the single-order argument does not
+carry on its own: two makers clear against a shared pool, `BatchNotWhole` only
+asserts the pool ends level across all of them, and the filler may have signed one of
+the orders. The verdict holds for a structural reason — `Pricing` has **no
+cross-order term**, so a counterparty cannot reprice a maker, and the slack lands in
+the pool and is swept to `msg.sender`, making a finer grind pay the victim *more* and
+cost the grinder more. Swept over every matchable shape and item configuration; see
+[match-combinations.md](match-combinations.md).
+
+*`TAKE_FOR` leg-reference funding.* The composite item's value-IN amount, in its
+leg-reference form, **is** `Pricing.outputAt(ctx, j)` — the same call
+`_deliverOutputs` just made. So a SELL leg's per-fill ceil now also drives a PULL from
+the maker's wallet. The maker's net in that token is exactly zero per fill (they
+receive and fund the same number), so this is not a value leak; but the *cumulative*
+sum of per-fill ceils can exceed the leg's signed total, so a Permit3 token allowance
+sized exactly to that total makes the last slice revert `InsufficientAllowance`. A
+liveness footgun rather than a loss, and it is documented at `Base._forSlice`.
+
+*The BUY dust slice.* `floor(delta · inTick / anchor)` with an output leg numerically
+larger than the input leg rounds a one-unit slice to a **zero** charge while the
+cumulative ceil still owes a unit out. Bounded at one unit per fill, paid by the
+filler, and removed outright by a signed `minFillAnchor`.
 
 ### C8 — Degenerate auction parameters resolving the wrong way
 
@@ -367,6 +403,14 @@ balance, so a donated balance is unreachable; and `_creditItemProceeds` closes t
 one gap the floor could not, by refunding un-attributed item proceeds to the
 **maker** rather than letting the final sweep hand them to the solver.
 
+**Swept combinatorially (2026-08-28).** The "donated balance is unreachable" half is
+no longer asserted only where someone thought to test it: Settlement is seeded with a
+standing balance in every tracked token and re-checked in every cell of the shape and
+item matrices ([match-combinations.md](match-combinations.md)) — 64 + 49 shape cells
+and the two item sub-matrices. The `_creditItemProceeds` half has a negative control:
+rerouting that refund to `msg.sender` fails all four item sweeps, each short by
+exactly the strayed amount.
+
 ---
 
 ## Findings ledger
@@ -376,7 +420,9 @@ independent review pass against the same corpus later that day; two of those arr
 with executed PoCs, and all six were re-derived here before being acted on. **F13–F15**
 arrived as three reported findings and were each verified against the code before
 being acted on — two confirmed with executed PoCs and fixed, one (F14) reviewed and
-judged NOT a vulnerability, with only its misleading comment corrected. See
+judged NOT a vulnerability, with only its misleading comment corrected. **F16** came
+out of the `TAKE_FOR` build itself and is recorded here rather than left in a commit
+message. See
 [Re-audit sweep](#re-audit-sweep--the-generalised-questions-from-f13f15) for the
 generalised questions they imply. Every item below is resolved.
 
@@ -704,6 +750,34 @@ needs nothing, moves nothing and spends no allowance — and additionally makes
 ITEM-then-PULL exact instead of over-pull-then-refund. A `credit != 0` guard would
 have been wrong: `_creditItemProceeds` also credits input legs.
 
+### F16 — A balance-relative `TAKE_FOR` funding leg failed OPEN when the wallet was empty
+
+**New shape: a premise that silently evaluates to "fund nothing" while the other half
+of a composite op still runs in full.** Found and fixed during the `TAKE_FOR` build;
+recorded here because the ledger, not the commit, is where a finding is supposed to
+live.
+
+The balance form of a composite funding descriptor resolves
+`forAmount = min(balanceOf(token, maker), cap)`. When the maker held **none** of the
+token the read returned 0, the module supplied nothing — and the value-OUT leg still
+drew its full amount. "Deposit what I hold and borrow against it" silently became a
+bare, uncollateralised borrow. Reachable with no malice at all: an earlier fill of one
+of the maker's *own* orders can spend the balance, and the filler chooses which order
+goes first. `SafeTransferLib.balanceOf` multiplies by the staticcall's success, so a
+descriptor naming a codeless address read as a zero balance rather than reverting, and
+took the same path.
+
+**Fix.** A zero resolved balance reverts `ForBalanceEmpty`. The premise failing must
+stop the fill, not silently change its shape. A LITERAL or LEG funding slice that
+floors to zero on a dust fill is deliberately *not* covered by this rule — those
+accumulate exactly across slices, so a zero slice is arithmetic rather than a broken
+premise. Pinned by `TakeForItem:test_balance_emptyWallet_reverts` and
+`..._codelessToken_reverts`.
+
+**The generalised question, and it belongs on the sweep below:** *when a composite op's
+two halves are gated separately, can one half's premise fail while the other still
+executes?* Ask it of every op that fuses value-in with value-out.
+
 ---
 
 ## Re-audit sweep — the generalised questions from F13–F15
@@ -1019,10 +1093,36 @@ Things worth re-checking whenever the relevant code moves.
   shape, contained only because the selector is fixed. Re-run the scan if either
   interface signature changes:
   ```
-  cast sig "makeOnBehalf(address,uint256,bytes)"   # 0xb5d2b67f
-  cast sig "settle(address,address,uint256,bytes)" # 0x99bb07b8
+  cast sig "makeOnBehalf(address,uint256,bytes)"                        # 0xb5d2b67f
+  cast sig "settle(address,address,uint256,bytes)"                      # 0x99bb07b8
+  cast sig "takeOnBehalf(address,uint256,address,bytes)"                # 0xddbb4b79
+  cast sig "takeForOnBehalf(address,uint256,uint256,address,bytes)"     # 0xec0eb1a9
   ```
-  Neither may collide with anything on Permit3.
+  None may collide with anything on Permit3 (the last two are dispatched *by*
+  Permit3 to a maker-chosen module, so Permit3 calling itself is the shape to
+  exclude). Last re-run 2026-08-28, clean.
+- **`forAmount` is ungated in `Permit3.takeFor`, by design.** The taker book bounds
+  what LEAVES a position; the composite's funding leg moves value **IN** and is
+  bounded instead by the maker's ordinary Permit3 **token allowance to the module** —
+  the same gate a `MAKE` item's funding leg passes. The chain that makes this safe is
+  worth stating because each link is load-bearing: the funding descriptor is the head
+  of `data`, `data` is maker-signed, and `ref = keccak256(data)` keys the taker
+  allowance — so a filler can move neither the token nor the amount, and the pull is
+  capped independently. Verified end-to-end against
+  `AaveV3TakeForLeverageModule`, which pulls exactly
+  `permit3.transferFrom(onBehalfOf, …, collateralAsset, forAmount)`. **This is a rule
+  for new composite modules:** the funding pull must go through the maker's token
+  allowance, never through an allowance the module holds on someone else.
+- **The witness-typehash overloads accept an arbitrary `bytes32`.**
+  `permitBatchWithWitnessHashIfNeeded` and `permitTakeWithWitnessHash` take the
+  already-concatenated typehash where the string forms derive it. No new power: the
+  caller already chose the typehash indirectly through the string, and a wrong hash
+  simply fails signature recovery. The reachable digest set does widen to typehashes
+  that no valid EIP-712 type string produces — exploiting that would need a
+  pre-existing user signature over an identically-encoded struct under **Permit3's own
+  domain separator**, and Permit3's two witness structs differ in arity
+  (`PermitTake` 8 words, `PermitBatch` 6), so neither can be replayed as the other.
+  Accepted; re-check if a third witness struct is added with a matching layout.
 - **SETTLE modules pulling from the filler.** If a SETTLE module ever moved the
   *filler's* assets, an attacker acting as maker could drain fillers. Both current
   implementations pull only from the `maker` argument Settlement supplies, and both

@@ -98,6 +98,126 @@ contract ReentrantTakerModule is ITakerModule {
     }
 }
 
+/// @dev CROSS-FUNCTION reentrancy probe. `Permit3.take` locks itself and
+///      `permitTake` and NOTHING ELSE — deliberately: a module funds its own leg
+///      with `permit3.transferFrom` from inside `takeOnBehalf`, which every shipped
+///      pull-funded module does ({ERC20PermitTransferModule}, the Dolomite fused
+///      module, the River modules). So the guard is not what keeps a hostile module
+///      contained. THIS is:
+///
+///        every mutating Permit3 entry is keyed by `msg.sender`, either as the
+///        OWNER whose books are written (`approveTaker`, `revokeToken`,
+///        `lockdown*`, `setStrictMode`, `invalidateUnorderedNonces`) or as the
+///        SPENDER whose bucket is spent (`transferFrom`, `take`, and the signed
+///        paths, where the signed spender IS `msg.sender`).
+///
+///      A re-entering module therefore wields exactly the authority it has when
+///      called cold, never the victim's. This module walks into each open door
+///      while dispatched so the tests below can pin that, one entry point at a
+///      time — the classic `take → take` case ({ReentrantTakerModule}) proves only
+///      the guard, which is the smaller half of the story.
+contract CrossFunctionReentrantModule is ITakerModule {
+    enum Attack {
+        None,
+        Take, // the classic — locked
+        PermitTake, // cross-function with `take`: same `_locked`
+        TransferFrom, // open by design — spends the MODULE's own token bucket
+        ApproveTaker, // writes the MODULE's own taker book
+        RevokeTaker,
+        LockdownTakers,
+        LockdownTokens,
+        InvalidateNonces,
+        SetStrictMode,
+        PermitBatchForged // no signature ⇒ no grant, however it is dispatched
+
+    }
+
+    Permit3 public immutable permit3;
+
+    Attack public attack;
+    address public victim;
+    address public victimSpender;
+    address public victimToken;
+    bytes32 public victimRef;
+    uint160 public pullAmount;
+    /// @dev Set only if the re-entrant call RETURNED. A test that expects the outer
+    ///      `take` to survive asserts on this; one that expects a revert cannot.
+    bool public reentered;
+
+    constructor(address _permit3) {
+        permit3 = Permit3(_permit3);
+    }
+
+    function arm(Attack a, address _victim, address _spender, address _token, bytes32 _ref, uint160 _pull) external {
+        attack = a;
+        victim = _victim;
+        victimSpender = _spender;
+        victimToken = _token;
+        victimRef = _ref;
+        pullAmount = _pull;
+    }
+
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data)
+        external
+        override
+    {
+        require(msg.sender == address(permit3), "only permit3");
+        Attack a = attack;
+
+        if (a == Attack.Take) {
+            permit3.take(address(this), onBehalfOf, uint160(amount), receiver, data);
+        } else if (a == Attack.PermitTake) {
+            // The guard is on the modifier, so it fires before the (unsigned) body.
+            IPermit3.PermitTake memory p = IPermit3.PermitTake({
+                module: address(this),
+                ref: keccak256(data),
+                amount: uint160(amount),
+                nonce: 0,
+                deadline: type(uint256).max
+            });
+            permit3.permitTake(p, onBehalfOf, receiver, data, hex"");
+        } else if (a == Attack.TransferFrom) {
+            // Reaches for the VICTIM's tokens. `msg.sender` here is this module, so
+            // the bucket consulted is `[victim][module][token]` — never the one the
+            // victim granted `victimSpender`.
+            permit3.transferFrom(victim, address(this), victimToken, pullAmount);
+        } else if (a == Attack.ApproveTaker) {
+            // Owner is `msg.sender` = this module, so this grants against the
+            // MODULE's own (empty) position, not the victim's.
+            permit3.approveTaker(address(this), address(this), victimRef, type(uint160).max, 0);
+        } else if (a == Attack.RevokeTaker) {
+            permit3.revokeTaker(victimSpender, address(this), victimRef);
+        } else if (a == Attack.LockdownTakers) {
+            IPermit3.SpenderRefPair[] memory pairs = new IPermit3.SpenderRefPair[](1);
+            pairs[0] = IPermit3.SpenderRefPair({spender: victimSpender, module: address(this), ref: victimRef});
+            permit3.lockdownTakers(pairs);
+        } else if (a == Attack.LockdownTokens) {
+            IPermit3.TokenSpenderPair[] memory pairs = new IPermit3.TokenSpenderPair[](1);
+            pairs[0] = IPermit3.TokenSpenderPair({token: victimToken, spender: victimSpender});
+            permit3.lockdown(pairs);
+        } else if (a == Attack.InvalidateNonces) {
+            permit3.invalidateUnorderedNonces(0, type(uint256).max);
+        } else if (a == Attack.SetStrictMode) {
+            permit3.setStrictMode(true);
+        } else if (a == Attack.PermitBatchForged) {
+            IPermit3.PermitBatch memory batch;
+            batch.tokens = new IPermit3.TokenPermit[](1);
+            batch.tokens[0] = IPermit3.TokenPermit({
+                spender: address(this),
+                token: victimToken,
+                amount: type(uint160).max,
+                expiration: 0
+            });
+            batch.takers = new IPermit3.TakerPermit[](0);
+            batch.nonce = 999;
+            batch.deadline = type(uint256).max;
+            // 65 well-formed bytes that recover to somebody else entirely.
+            permit3.permitBatch(victim, batch, abi.encodePacked(bytes32(uint256(1)), bytes32(uint256(2)), uint8(27)));
+        }
+        reentered = true;
+    }
+}
+
 // ──────────────────── Tests ────────────────────
 
 contract Permit3Test is Test {
@@ -752,5 +872,211 @@ contract Permit3Test is Test {
         bytes memory sig = _signBatchWitness(batch, witness, 0xB0B);
         vm.expectRevert();
         permit3.permitBatchWithWitnessIfNeeded(owner, batch, witness, WITNESS_TYPE_STRING, sig);
+    }
+
+    // ════════════════ Cross-function reentrancy (the OTHER doors) ════════════════
+    //
+    // `test_take_nonReentrant` above proves the guard. It does not prove the thing
+    // the guard is NOT: `take` locks only itself and `permitTake`, and every other
+    // Permit3 entry stays open to a dispatched module ON PURPOSE — that is how a
+    // pull-funded module funds its own leg mid-op. What actually contains a hostile
+    // module is that EVERY mutating entry is keyed by `msg.sender`, so the module
+    // re-enters with its own authority and nobody else's. One test per door.
+    //
+    // See {CrossFunctionReentrantModule}.
+
+    address constant GOOD_SPENDER = address(0x5E771E); // stand-in for Settlement
+
+    /// @dev A module the victim has authorised for 100e18 through `GOOD_SPENDER`,
+    ///      plus a 500e18 token grant to `GOOD_SPENDER` for the module to reach for.
+    function _armEvil() internal returns (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) {
+        evil = new CrossFunctionReentrantModule(address(permit3));
+        data = abi.encode(uint256(7));
+        ref = keccak256(data);
+        vm.prank(owner);
+        permit3.approveTaker(GOOD_SPENDER, address(evil), ref, 100e18, 0);
+        vm.prank(owner);
+        permit3.approveToken(GOOD_SPENDER, address(token), 500e18, 0);
+    }
+
+    /// @notice `permitTake` shares `take`'s `_locked`, so the one-shot signed path is
+    ///         not a way around the guard. Untested until now — the classic case only
+    ///         covers `take → take`.
+    function test_reentrancy_permitTake_isLockedBy_take() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.PermitTake, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        vm.prank(GOOD_SPENDER);
+        vm.expectRevert(IPermit3.Reentrancy.selector);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+    }
+
+    /// @notice And the other direction: a module dispatched by `permitTake` cannot
+    ///         re-enter `take`. Same `_locked`, so the lock is genuinely cross-function
+    ///         rather than per-entry.
+    function test_reentrancy_take_isLockedBy_permitTake() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.Take, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        IPermit3.PermitTake memory permit = IPermit3.PermitTake({
+            module: address(evil),
+            ref: ref,
+            amount: 40e18,
+            nonce: 11,
+            deadline: block.timestamp + 1 hours
+        });
+        // The signed spender is always `msg.sender` — here, the test contract.
+        bytes memory sig = _signPermitTake(permit, address(this), ownerPk);
+
+        vm.expectRevert(IPermit3.Reentrancy.selector);
+        permit3.permitTake(permit, owner, recipient, data, sig);
+    }
+
+    /// @notice THE LOAD-BEARING ONE. `transferFrom` is deliberately unguarded, so a
+    ///         dispatched module can call it — but the bucket it reaches is
+    ///         `[victim][MODULE][token]`, never the one the victim granted the
+    ///         spender. A module with no grant of its own gets nothing, and the
+    ///         failure unwinds the whole take.
+    function test_reentrancy_transferFrom_cannotReachTheSpendersBucket() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.TransferFrom, owner, GOOD_SPENDER, address(token), ref, 30e18);
+
+        vm.prank(GOOD_SPENDER);
+        vm.expectRevert(abi.encodeWithSelector(IPermit3.InsufficientAllowance.selector, uint160(0)));
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        (uint160 spenderBucket,) = permit3.tokenAllowance(owner, GOOD_SPENDER, address(token));
+        assertEq(spenderBucket, 500e18, "the spender's grant was never in reach");
+        assertEq(token.balanceOf(address(evil)), 0, "nothing moved");
+    }
+
+    /// @notice The same call with a grant the module DOES hold — the shipped channel
+    ///         ({ERC20PermitTransferModule}, the Dolomite/River fused modules).
+    ///
+    ///         ⚠ AND THE PROPERTY IT PINS: the pull is NOT bounded by the `take`
+    ///         amount. Here a 40e18 take pulls 200e18, because the binding cap for a
+    ///         pull-funded module is the TOKEN-BOOK grant the user made to that
+    ///         module, not the taker allowance the fill consumes. The taker gate
+    ///         sizes the protocol-native op; it says nothing about what the module
+    ///         moves alongside it. What actually pins the side leg is `ref =
+    ///         keccak256(data)` (the amount is inside the maker-signed bytes) plus
+    ///         the module's own full-fill guard — i.e. module code, per the trust
+    ///         model in {ITakerModule}. Asserted rather than assumed, because a
+    ///         reader who takes "amount-gated" at face value would get this wrong.
+    function test_reentrancy_transferFrom_ownBucket_isNotBoundedByTheTakeAmount() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        vm.prank(owner);
+        permit3.approveToken(address(evil), address(token), 500e18, 0);
+        evil.arm(CrossFunctionReentrantModule.Attack.TransferFrom, owner, GOOD_SPENDER, address(token), ref, 200e18);
+
+        vm.prank(GOOD_SPENDER);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        assertTrue(evil.reentered(), "the re-entrant transferFrom returned");
+        assertEq(token.balanceOf(address(evil)), 200e18, "pull exceeds the 40e18 take amount");
+
+        (uint160 moduleBucket,) = permit3.tokenAllowance(owner, address(evil), address(token));
+        assertEq(moduleBucket, 300e18, "spent its OWN bucket");
+        (uint160 spenderBucket,) = permit3.tokenAllowance(owner, GOOD_SPENDER, address(token));
+        assertEq(spenderBucket, 500e18, "the spender's bucket is untouched");
+        (uint160 takerLeft,) = permit3.takerAllowance(owner, GOOD_SPENDER, address(evil), ref);
+        assertEq(takerLeft, 60e18, "taker book decremented by exactly the take");
+    }
+
+    /// @notice `approveTaker` re-entered mid-dispatch grants against the MODULE's own
+    ///         position (owner is `msg.sender`), which is worth nothing. The victim's
+    ///         bucket moves only by the take that is legitimately in flight.
+    function test_reentrancy_approveTaker_writesOnlyItsOwnBook() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.ApproveTaker, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        vm.prank(GOOD_SPENDER);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        (uint160 victimLeft,) = permit3.takerAllowance(owner, GOOD_SPENDER, address(evil), ref);
+        assertEq(victimLeft, 60e18, "only the in-flight take moved the victim's bucket");
+        (uint160 selfGrant,) = permit3.takerAllowance(address(evil), address(evil), address(evil), ref);
+        assertEq(selfGrant, type(uint160).max, "the grant landed under the module's own key");
+    }
+
+    /// @notice Revocation is owner-keyed too, so a module cannot revoke a grant it is
+    ///         being dispatched under (nor any other user's).
+    function test_reentrancy_revokeTaker_cannotTouchTheVictimsGrant() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.RevokeTaker, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        vm.prank(GOOD_SPENDER);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        assertTrue(evil.reentered());
+        (uint160 victimLeft,) = permit3.takerAllowance(owner, GOOD_SPENDER, address(evil), ref);
+        assertEq(victimLeft, 60e18, "victim's taker grant survives");
+    }
+
+    function test_reentrancy_lockdownTakers_cannotTouchTheVictimsGrant() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.LockdownTakers, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        vm.prank(GOOD_SPENDER);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        assertTrue(evil.reentered());
+        (uint160 victimLeft,) = permit3.takerAllowance(owner, GOOD_SPENDER, address(evil), ref);
+        assertEq(victimLeft, 60e18, "victim's taker grant survives");
+    }
+
+    function test_reentrancy_lockdownTokens_cannotTouchTheVictimsGrant() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.LockdownTokens, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        vm.prank(GOOD_SPENDER);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        assertTrue(evil.reentered());
+        (uint160 spenderBucket,) = permit3.tokenAllowance(owner, GOOD_SPENDER, address(token));
+        assertEq(spenderBucket, 500e18, "victim's token grant survives");
+    }
+
+    /// @notice Nonce invalidation is `msg.sender`-keyed, so a module cannot burn a
+    ///         maker's permit nonce mid-fill (which would otherwise be a clean way to
+    ///         brick a gasless order — see {SignedPermits.permitBatchWithWitnessIfNeeded}).
+    function test_reentrancy_invalidateNonces_cannotBurnTheVictimsNonce() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.InvalidateNonces, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        vm.prank(GOOD_SPENDER);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        assertTrue(evil.reentered());
+        assertFalse(permit3.isPermitNonceUsed(owner, 0), "victim's nonce untouched");
+        assertTrue(permit3.isPermitNonceUsed(address(evil), 0), "the module burned its OWN");
+    }
+
+    /// @notice Same for strict mode — a module cannot flip a payer into (or out of)
+    ///         the {Permit3TransferLib} fallback refusal.
+    function test_reentrancy_setStrictMode_onlyItsOwn() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.SetStrictMode, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        vm.prank(GOOD_SPENDER);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        assertTrue(evil.reentered());
+        assertFalse(permit3.strictMode(owner), "victim's flag untouched");
+        assertTrue(permit3.strictMode(address(evil)), "the module set its OWN");
+    }
+
+    /// @notice The signed-grant path needs a signature the module cannot produce, so
+    ///         re-entering it forges nothing and takes the whole fill down with it.
+    function test_reentrancy_permitBatch_cannotForgeAGrant() public {
+        (CrossFunctionReentrantModule evil, bytes memory data, bytes32 ref) = _armEvil();
+        evil.arm(CrossFunctionReentrantModule.Attack.PermitBatchForged, owner, GOOD_SPENDER, address(token), ref, 0);
+
+        vm.prank(GOOD_SPENDER);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        permit3.take(address(evil), owner, 40e18, recipient, data);
+
+        (uint160 moduleBucket,) = permit3.tokenAllowance(owner, address(evil), address(token));
+        assertEq(moduleBucket, 0, "no grant was forged");
     }
 }

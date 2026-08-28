@@ -260,6 +260,24 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   first pass found eleven gaps and six never-tested errors; all are closed (552 →
   603 tests, no contract change), with two combinations recorded as accepted.
 
+- **[match-combinations.md](match-combinations.md)** — one axis pair from the above
+  taken to full depth: **order shape × order shape, under `matchSettle`**. Answers
+  the question the netted path raises and the single-order path does not — *can a
+  CoW counterparty sign an order that makes the maker-favourable rounding pay out of
+  the maker?* The answer is no, structurally: `Pricing` has no cross-order term, so
+  matching cannot reprice a maker, and the slack lands in the pool and is swept to
+  `msg.sender` — grinding a match pays the victim more and costs the grinder more.
+  Carries the eight matchable shapes and the four `matchSettle` refuses
+  (`SETTLE`/`TAKE_FOR` items, duplicate input token, delta-verify), the 64+49-cell
+  shape sweep, two **item sub-matrices** (item config × shape, and item config ×
+  item config across both sides of a match) crossing the one thing a netted match
+  cannot price in advance and must *measure*, what each cell asserts, the mutations
+  used to prove both sweeps bite, and the one residual — a BUY dust slice that
+  charges the maker **zero**, paid by the filler and removed by `minFillAnchor`.
+  Records the single deliberate path divergence: stray `TAKE` proceeds are
+  **stranded** by `fill` and **refunded to the maker** by `matchSettle`, because
+  only the netted path can otherwise lose them to the filler.
+
 ## Reading order
 
 New to the codebase: the [settlement README](../packages/core/src/settlement/README.md)

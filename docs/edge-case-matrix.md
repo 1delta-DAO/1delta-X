@@ -338,6 +338,21 @@ would break that file loudly. `matchSettle`'s `BatchNotWhole` / `LegUnfunded`
 checks do **not** catch it — they assert the pool balances, never the direction of
 the rounding.
 
+**The netted half of the same invariant** is
+[`MatchComboMatrix.t.sol`](../packages/core/test/swaps/MatchComboMatrix.t.sol) and
+[`MatchSettleRoundingAttack.t.sol`](../packages/core/test/swaps/MatchSettleRoundingAttack.t.sol):
+`RoundingDirection` pins the *direction* of the arithmetic, and those two pin that
+**matching cannot change it** — every matchable shape against every other, whole and
+sliced, must produce the maker the same ledger the single-order path would. The
+axis pair is written up at full depth in
+[match-combinations.md](match-combinations.md) — which also crosses the **item**
+axis into it ([`MatchItemMatrix.t.sol`](../packages/core/test/swaps/MatchItemMatrix.t.sol),
+item config × shape and item config × item config), records the four order shapes
+`matchSettle` refuses outright, and names the one residual (a BUY dust slice
+charging zero, paid by the filler) and the one deliberate divergence between the
+two paths (stray `TAKE` proceeds: stranded by `fill`, refunded to the maker by
+`matchSettle`).
+
 ### M5 — fill granularity × leg / item shape
 
 | Shape | Whole | Partial | Notes |
