@@ -6,6 +6,46 @@ export enum ItemOp {
   MAKE = 0,
   TAKE = 1,
   SETTLE = 2,
+  /// Composite: one dispatch that takes `amount` out of a position AND funds the
+  /// value-in side of the same operation (deposit+borrow, repay+withdraw). The
+  /// funding amount is computed by the settler from a descriptor the maker signs
+  /// as the FIRST WORD of `data` — build it with `forLeg()` / `forTotal()`.
+  /// Single-order path only: `matchSettle` refuses it.
+  TAKE_FOR = 3,
+}
+
+/// Funding descriptor for a `TAKE_FOR` item, pointing at output leg `index`.
+///
+/// This is the form to prefer: the funding amount, its token and its decimals stay
+/// in the typed `legsOut[index]` the maker already signs, so there is exactly ONE
+/// copy of the number and no second, mis-scaled one can exist. A decaying leg
+/// carries its auction price into the funding side automatically.
+export function forLeg(index: number): bigint {
+  if (!Number.isInteger(index) || index < 0 || index > 0xffff) {
+    throw new Error(`forLeg: leg index out of range: ${index}`);
+  }
+  return (1n << 255n) | BigInt(index);
+}
+
+/// Funding descriptor for a BALANCE-RELATIVE funding leg: `min(balanceOf(token,
+/// maker), cap)`, resolved at fill time. For the no-conversion shape where there is
+/// no output leg to reference and the maker cannot know the amount at signing time
+/// (accrued interest, an in-flight transfer, a wallet sweep).
+///
+/// The cap is MANDATORY and travels as `data`'s SECOND word, so lay the blob out as
+/// `abi.encode(forBalance(token), cap, ...)`. A balance-funded order is FULL-FILL
+/// ONLY — the settler rejects a sliced fill.
+export function forBalance(token: Address): bigint {
+  return (1n << 255n) | (1n << 254n) | BigInt(token);
+}
+
+/// Funding descriptor carrying a LITERAL total, for a funding leg with no matching
+/// output leg (the maker funds it from their own wallet — a fresh position, a new
+/// trove). The settler slices it with the same differencing it applies to the
+/// item's own `amount`, so partial fills sum exactly to `total`.
+export function forTotal(total: bigint): bigint {
+  if (total < 0n || total >= 1n << 255n) throw new Error(`forTotal: out of range: ${total}`);
+  return total;
 }
 
 /// A single lending item inside an order (deposit/repay = MAKE, borrow/withdraw = TAKE).

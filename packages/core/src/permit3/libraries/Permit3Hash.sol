@@ -115,7 +115,26 @@ library Permit3Hash {
         pure
         returns (bytes32)
     {
-        bytes32 typeHash = keccak256(abi.encodePacked(PERMIT_BATCH_WITNESS_STUB, witnessTypeString));
+        return hashWithWitnessTypeHash(
+            batch, witness, keccak256(abi.encodePacked(PERMIT_BATCH_WITNESS_STUB, witnessTypeString))
+        );
+    }
+
+    /// @notice The same digest, from the ALREADY-CONCATENATED typehash.
+    /// @dev    `typeHash` is `keccak256(PERMIT_BATCH_WITNESS_STUB ‖ witnessTypeString)`
+    ///         — the one value the string is used for. A caller whose witness type is
+    ///         fixed at compile time (a settler, always signing over the same order
+    ///         type) can fold that hash into a constant and never carry the string,
+    ///         which is worth real bytecode: the type string for an `Order` witness is
+    ///         ~470 bytes of the CALLER's runtime, plus a `string` encoder per call
+    ///         site. Nothing is weakened by taking the hash instead — it is exactly
+    ///         what the string version computes on its first line, and a wrong hash
+    ///         simply fails signature recovery.
+    function hashWithWitnessTypeHash(IPermit3.PermitBatch calldata batch, bytes32 witness, bytes32 typeHash)
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(
             abi.encode(
                 typeHash,
@@ -238,7 +257,19 @@ library Permit3Hash {
         bytes32 witness,
         string calldata witnessTypeString
     ) internal pure returns (bytes32) {
-        bytes32 typeHash = keccak256(abi.encodePacked(PERMIT_TAKE_WITNESS_STUB, witnessTypeString));
+        return hashPermitTakeWithWitnessTypeHash(
+            permit, spender, witness, keccak256(abi.encodePacked(PERMIT_TAKE_WITNESS_STUB, witnessTypeString))
+        );
+    }
+
+    /// @notice The same digest, from the already-concatenated typehash — see
+    ///         {hashWithWitnessTypeHash} for why this form exists.
+    function hashPermitTakeWithWitnessTypeHash(
+        IPermit3.PermitTake calldata permit,
+        address spender,
+        bytes32 witness,
+        bytes32 typeHash
+    ) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
                 typeHash, permit.module, permit.ref, permit.amount, spender, permit.nonce, permit.deadline, witness

@@ -186,6 +186,29 @@ interface IPermit3 {
     ///         book. `receiver` is chosen by that trusted spender.
     function take(address module, address user, uint160 amount, address receiver, bytes calldata data) external;
 
+    /// @notice COMPOSITE dispatch: the same amount-gated `take` above, plus a
+    ///         second, value-IN `forAmount` handed to the module so one call can
+    ///         deposit-and-borrow (or repay-and-withdraw) against a single health
+    ///         check. Gates and consumes EXACTLY the same allowance bucket as
+    ///         {take} — `(user, msg.sender, module, keccak256(data))`, decremented
+    ///         by `amount` — then invokes
+    ///         `module.takeForOnBehalf(user, amount, forAmount, receiver, data)`.
+    ///
+    ///         `forAmount` is deliberately NOT gated here: it is value flowing
+    ///         INTO the user's position, bounded by the user's ordinary Permit3
+    ///         token allowance to the module (exactly like a MAKE item's funding
+    ///         leg) and, above that, by the signed leg or literal the caller
+    ///         derived it from. The taker book gates what LEAVES. See
+    ///         {ITakerForModule}.
+    function takeFor(
+        address module,
+        address user,
+        uint160 amount,
+        uint160 forAmount,
+        address receiver,
+        bytes calldata data
+    ) external;
+
     function takerAllowance(address user, address spender, address module, bytes32 ref)
         external
         view
@@ -274,6 +297,23 @@ interface IPermit3 {
         bytes calldata sig
     ) external;
 
+    /// @notice {permitBatchWithWitnessIfNeeded}, taking the ALREADY-CONCATENATED
+    ///         witness typehash instead of the type string.
+    /// @dev    `witnessTypeHash = keccak256(PERMIT_BATCH_WITNESS_STUB ‖
+    ///         witnessTypeString)`. Identical digest, identical verification — the
+    ///         string version's own first line computes exactly this. It exists for
+    ///         callers whose witness type is fixed at compile time: they fold the
+    ///         hash into a `bytes32 constant` and stop carrying ~470 bytes of type
+    ///         string (plus a `string` encoder per call site) in their runtime. A
+    ///         wrong hash cannot forge anything — it just fails signature recovery.
+    function permitBatchWithWitnessHashIfNeeded(
+        address owner,
+        PermitBatch calldata batch,
+        bytes32 witness,
+        bytes32 witnessTypeHash,
+        bytes calldata sig
+    ) external;
+
     /// @notice One-shot signed taker dispatch — the taker-book analogue of
     ///         `permitTransferFrom`. Verifies `owner`'s signature over `permit`
     ///         (whose signed spender is `msg.sender`), spends the nonce, and
@@ -294,6 +334,21 @@ interface IPermit3 {
         bytes calldata data,
         bytes32 witness,
         string calldata witnessTypeString,
+        bytes calldata sig
+    ) external;
+
+    /// @notice {permitTakeWithWitness}, taking the already-concatenated witness
+    ///         typehash instead of the type string — see
+    ///         {permitBatchWithWitnessHashIfNeeded} for the rationale.
+    /// @dev    `witnessTypeHash = keccak256(PERMIT_TAKE_WITNESS_STUB ‖
+    ///         witnessTypeString)`.
+    function permitTakeWithWitnessHash(
+        PermitTake calldata permit,
+        address owner,
+        address receiver,
+        bytes calldata data,
+        bytes32 witness,
+        bytes32 witnessTypeHash,
         bytes calldata sig
     ) external;
 

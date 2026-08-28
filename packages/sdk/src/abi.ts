@@ -464,6 +464,22 @@ export const PERMIT3_ABI = [
     ],
     outputs: [],
   },
+  // Composite dispatch: same taker bucket as `take`, plus the core-computed
+  // value-in `forAmount`. See ItemOp.TAKE_FOR / forLeg() in ./types.
+  {
+    type: "function",
+    name: "takeFor",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "module", type: "address" },
+      { name: "user", type: "address" },
+      { name: "amount", type: "uint160" },
+      { name: "forAmount", type: "uint160" },
+      { name: "receiver", type: "address" },
+      { name: "data", type: "bytes" },
+    ],
+    outputs: [],
+  },
   {
     type: "function",
     name: "takerAllowance",
@@ -532,6 +548,24 @@ export const PERMIT3_ABI = [
     ],
     outputs: [],
   },
+  // Typehash overload: identical digest, but the caller passes
+  // `keccak256(PERMIT_BATCH_WITNESS_STUB ‖ witnessTypeString)`. This is what
+  // Settlement itself calls — it keeps the ~470-byte type string out of the
+  // settler's runtime. Off-chain signing is unaffected (the wallet still sees the
+  // full type string).
+  {
+    type: "function",
+    name: "permitBatchWithWitnessHashIfNeeded",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "batch", type: "tuple", components: permitBatchComponents },
+      { name: "witness", type: "bytes32" },
+      { name: "witnessTypeHash", type: "bytes32" },
+      { name: "sig", type: "bytes" },
+    ],
+    outputs: [],
+  },
   // ── One-shot signed take (audit fix U-2) ──
   {
     type: "function",
@@ -557,6 +591,21 @@ export const PERMIT3_ABI = [
       { name: "data", type: "bytes" },
       { name: "witness", type: "bytes32" },
       { name: "witnessTypeString", type: "string" },
+      { name: "sig", type: "bytes" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "permitTakeWithWitnessHash",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "permit", type: "tuple", components: permitTakeComponents },
+      { name: "owner", type: "address" },
+      { name: "receiver", type: "address" },
+      { name: "data", type: "bytes" },
+      { name: "witness", type: "bytes32" },
+      { name: "witnessTypeHash", type: "bytes32" },
       { name: "sig", type: "bytes" },
     ],
     outputs: [],

@@ -84,8 +84,29 @@ abstract contract SignedPermits is UnorderedNonces, AllowanceTransfer, TakerAllo
         string calldata witnessTypeString,
         bytes calldata sig
     ) external override {
+        _applyBatchIfNeeded(owner, batch, Permit3Hash.hashWithWitness(batch, witness, witnessTypeString), sig);
+    }
+
+    /// @inheritdoc IPermit3
+    /// @dev Byte-for-byte the same path as the string variant above — only where the
+    ///      witness typehash comes from differs. See {IPermit3} for why a caller with
+    ///      a compile-time-fixed witness type wants this one.
+    function permitBatchWithWitnessHashIfNeeded(
+        address owner,
+        PermitBatch calldata batch,
+        bytes32 witness,
+        bytes32 witnessTypeHash,
+        bytes calldata sig
+    ) external override {
+        _applyBatchIfNeeded(owner, batch, Permit3Hash.hashWithWitnessTypeHash(batch, witness, witnessTypeHash), sig);
+    }
+
+    /// @dev Shared body of both `…IfNeeded` entrypoints.
+    function _applyBatchIfNeeded(address owner, PermitBatch calldata batch, bytes32 hashStruct, bytes calldata sig)
+        private
+    {
         if (block.timestamp > batch.deadline) revert PermitExpired();
-        _verifyPermitSig(owner, Permit3Hash.hashWithWitness(batch, witness, witnessTypeString), sig);
+        _verifyPermitSig(owner, hashStruct, sig);
         // Spent bit ⇒ apply NOTHING and return. The signature above is still proven,
         // so this is not an authorisation bypass — it is the S-1 remediation, without
         // which one front-run permanently bricks a gasless order.
@@ -151,6 +172,26 @@ abstract contract SignedPermits is UnorderedNonces, AllowanceTransfer, TakerAllo
         bytes32 hashStruct;
         {
             hashStruct = Permit3Hash.hashPermitTakeWithWitness(permit, msg.sender, witness, witnessTypeString);
+        }
+        _permitTake(permit, owner, receiver, data, hashStruct, sig);
+    }
+
+    /// @inheritdoc IPermit3
+    /// @dev The typehash-taking twin of the above; identical digest and identical
+    ///      verification, with the concatenation done by the caller at compile time.
+    function permitTakeWithWitnessHash(
+        IPermit3.PermitTake calldata permit,
+        address owner,
+        address receiver,
+        bytes calldata data,
+        bytes32 witness,
+        bytes32 witnessTypeHash,
+        bytes calldata sig
+    ) external override nonReentrant {
+        // Nested scope for the same stack reason as the string variant.
+        bytes32 hashStruct;
+        {
+            hashStruct = Permit3Hash.hashPermitTakeWithWitnessTypeHash(permit, msg.sender, witness, witnessTypeHash);
         }
         _permitTake(permit, owner, receiver, data, hashStruct, sig);
     }

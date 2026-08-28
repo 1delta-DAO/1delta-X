@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
 import {DelegationHelper} from "@lib/DelegationHelper.sol";
 
 import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
@@ -108,5 +109,101 @@ contract AaveV3FusedLeverageModule is ITakerModule {
     ///      up so a partial fill is never under-collateralised by rounding.
     function _ceilDiv(uint256 a, uint256 b) private pure returns (uint256) {
         return a == 0 ? 0 : (a - 1) / b + 1;
+    }
+}
+
+// ──────────────── Aave v3 TAKE_FOR leverage module (core-funded) ────────────────
+//
+// The same one-call supply+borrow as {AaveV3FusedLeverageModule} above, but the
+// collateral amount is handed in by the SETTLER instead of being re-derived here.
+//
+//  What changes, and why it matters
+//  ────────────────────────────────
+//  The fused module carries the maker's two TOTALS in `data` and re-derives
+//  `collateral = ceil(amount · collateralTotal / borrowTotal)`. The arithmetic is
+//  sound — the borrow decimals cancel — but `collateralTotal` is a SECOND COPY of
+//  a number the order already signs as an output leg, sitting in a blob the core
+//  never decodes and nothing cross-checks. A mis-scaled copy is silent: too large
+//  and the supply leg pulls up to the maker's standing Permit3 token allowance,
+//  too small and the position is under-collateralised or the borrow reverts. The
+//  ceil is also per-fill, so a partially-filled order over-supplies by up to one
+//  unit per slice.
+//
+//  Here the amount arrives as `forAmount`, resolved by {Base._forSlice} from the
+//  descriptor the maker signed. Point it at the collateral OUTPUT LEG and there is
+//  exactly one copy of the number, with its token and decimals beside it in a
+//  typed leg — the leg the solver just delivered to the maker, which this call
+//  supplies straight back into Aave. It also prices a DECAYING collateral leg
+//  correctly, which a fixed ratio cannot.
+//
+//  `data = abi.encode(forDesc, forCap, pool, borrowAsset, rateMode, collateralAsset
+//                     [, debtToken, deadline, v, r, s])`
+//    — base = 192 bytes; the optional Aave credit-delegation block follows it,
+//      exactly as in {AaveV3BorrowModule} and the fused module above.
+//    — `forDesc` selects where the collateral amount comes from:
+//        `(1 << 255) | legIndex`            fund from `legsOut[legIndex]` — the
+//                                           levered shape, nothing duplicated;
+//        `(3 << 254) | uint160(token)`      fund with `min(balance, forCap)` —
+//                                           the NO-CONVERSION shape (deposit what
+//                                           I hold), full-fill only;
+//        a plain total                      a fixed wallet-funded amount, sliced
+//                                           pro-rata by the core.
+//    — `forCap` is the mandatory cap for the balance form and is IGNORED (pass 0)
+//      by the other two. It is carried unconditionally so this module has ONE
+//      `data` layout instead of one per funding mode.
+//    — rateMode: 1 = stable, 2 = variable (must match `debtToken` if delegating).
+//
+contract AaveV3TakeForLeverageModule is ITakerForModule {
+    IPermit3 public immutable permit3;
+
+    error OnlyPermit3();
+
+    constructor(address _permit3) {
+        permit3 = IPermit3(_permit3);
+    }
+
+    /// @param amount    this fill's slice of the BORROW leg (what the taker
+    ///                  allowance gates).
+    /// @param forAmount this fill's COLLATERAL, computed by the core from the
+    ///                  signed descriptor — no ratio, no second signed total.
+    /// @param receiver  where the borrow proceeds land.
+    function takeForOnBehalf(
+        address onBehalfOf,
+        uint256 amount,
+        uint256 forAmount,
+        address receiver,
+        bytes calldata data
+    ) external override {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        // Decoded in two scopes, as in the fused module above: these packages
+        // compile WITHOUT the optimizer in their fork profile, where one flat
+        // decode of this many fields overflows the stack.
+        address pool;
+        {
+            (,, address p,,, address collateralAsset) =
+                abi.decode(data, (uint256, uint256, address, address, uint256, address));
+            pool = p;
+
+            // ── leg 1: supply the collateral the core sized ──
+            // A dust slice can floor the funding leg to zero while the borrow leg
+            // still rounds up. Skip rather than revert: it accumulates exactly
+            // across fills, the same posture {Base._runItem} takes on a zero slice.
+            if (forAmount != 0) {
+                permit3.transferFrom(onBehalfOf, address(this), collateralAsset, uint160(forAmount));
+                SafeTransferLib.forceApprove(collateralAsset, pool, forAmount);
+                IAaveV3Pool(pool).supply(collateralAsset, forAmount, onBehalfOf, 0);
+            }
+        }
+        {
+            (,,, address borrowAsset, uint256 rateMode) =
+                abi.decode(data, (uint256, uint256, address, address, uint256));
+
+            // ── leg 2: draw the debt against it, in the same call ──
+            // Optional delegation-with-sig, block at 192: (debtToken, deadline, v, r, s).
+            DelegationHelper.replayAaveDelegation(data, 192, onBehalfOf, address(this), amount);
+            IAaveV3Pool(pool).borrow(borrowAsset, amount, rateMode, 0, onBehalfOf);
+            SafeTransferLib.safeTransfer(borrowAsset, receiver, amount);
+        }
     }
 }

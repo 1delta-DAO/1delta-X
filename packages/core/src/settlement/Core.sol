@@ -185,10 +185,11 @@ abstract contract Core is Base {
 
     /// @dev Shared body of both {fillWithPermit} overloads. Extracted because each
     ///      overload otherwise emits its OWN copy of the permit call's encoder — a
-    ///      `PermitBatch` struct (two dynamic arrays of structs) plus the long
-    ///      `WITNESS_TYPESTRING` constant — which is one of the largest single
-    ///      encoders in the contract. MEASURED: **−200 bytes** of Settlement runtime,
-    ///      with the external ABI unchanged.
+    ///      `PermitBatch` struct (two dynamic arrays of structs) — which is one of the
+    ///      largest single encoders in the contract. MEASURED: **−200 bytes** of
+    ///      Settlement runtime, with the external ABI unchanged. (The `string`
+    ///      witness type this used to carry is gone too; see
+    ///      {OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH} for that −583.)
     ///
     ///      IDEMPOTENT permit on purpose: the signature is still verified every time
     ///      (a bad `sig` reverts), but a nonce already spent — by an earlier partial
@@ -211,7 +212,9 @@ abstract contract Core is Base {
         // The permit is an external call, so it goes INSIDE the guard — only the
         // read-only gate above may precede it. See {Base._enter}.
         _enter();
-        PERMIT3.permitBatchWithWitnessIfNeeded(order.maker, batch, orderHash, OrderHash.WITNESS_TYPESTRING, sig);
+        PERMIT3.permitBatchWithWitnessHashIfNeeded(
+            order.maker, batch, orderHash, OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH, sig
+        );
         outs = _fillCore(
             order, fillAmount, msg.sender, address(0), address(0), "",
             CallbackMode.PreDelivery, takerData, false, ctx
@@ -940,6 +943,13 @@ abstract contract Core is Base {
             // Item-free orders have no TAKE proceeds ⇒ proceeds are 0 without a
             // balanceOf (the snapshot was skipped upstream). Item orders measure
             // this fill's proceeds as the balance delta since the snapshot.
+            // CHECKED subtraction, resting on the same invariant {Batch._creditItemProceeds}
+            // spells out: Settlement grants no ERC20 approvals to anyone, so nothing an
+            // item calls can move a token OUT of the pool — a TAKE (and any module
+            // re-entering `Permit3.transferFrom` mid-dispatch, which is the supported
+            // funding channel) can only ADD. A negative-rebasing `tokenIn` is the one
+            // shape that could break it, and reverting the fill is the right outcome:
+            // the alternative is paying the solver against a number the pool cannot back.
             uint256 proceeds = hasItems ? SafeTransferLib.balanceOf(tokenIn, address(this)) - tokenInBefore[i] : 0;
             if (owed == 0) {
                 // Nothing owed on this leg (dust slice, or a zero-amount leg),

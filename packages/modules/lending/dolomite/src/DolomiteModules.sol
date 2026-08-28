@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
@@ -362,6 +363,66 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
             actions[0] = _depositAction(p.borrowMarketId, toRepay, address(this));
             actions[1] = _withdrawAction(p.collMarketId, amount, receiver);
         }
+
+        AccountInfo[] memory accounts = new AccountInfo[](1);
+        accounts[0] = AccountInfo(onBehalfOf, p.accountNumber);
+        IDolomiteMargin(p.dolomite).operate(accounts, actions);
+    }
+}
+
+// ──────────── Dolomite TAKE_FOR open module (core-funded collateral) ────────────
+//
+// The same two-action `operate` (deposit + borrow under ONE collateralisation
+// check) as {DolomiteOperateModule}'s Open path, with the collateral sized by the
+// settler instead of pinned in `data`.
+//
+// Like Euler, Dolomite has no position identity object: a position IS the balance
+// set of the maker-signed `(owner, accountNumber)` sub-account, and `operate` may
+// be applied to it repeatedly. So {DolomiteOperateModule}'s {FullFillGuard} was
+// never protecting a protocol constraint — only the fact that a constant
+// `sideAmount` cannot pro-rate. It is GONE here: every slice is its own two-action
+// `operate` sharing one check.
+//
+// `data = abi.encode(OpenData{forDesc, forCap, dolomite, collMarketId, collToken,
+//                             borrowMarketId, accountNumber})`.
+//
+// Auth is unchanged: `setOperators([{module, true}])` once, and debt must live in a
+// NON-ZERO sub-account (account 0 is lend-only on this deployment).
+//
+contract DolomiteTakeForModule is DolomiteBase, ITakerForModule {
+    struct OpenData {
+        uint256 forDesc; // word 0 — the funding descriptor
+        uint256 forCap; //  word 1 — the balance form's mandatory cap
+        address dolomite;
+        uint256 collMarketId;
+        address collToken;
+        uint256 borrowMarketId;
+        uint256 accountNumber;
+    }
+
+    error OnlyPermit3();
+
+    constructor(address _permit3) DolomiteBase(_permit3) {}
+
+    function takeForOnBehalf(
+        address onBehalfOf,
+        uint256 amount,
+        uint256 forAmount,
+        address receiver,
+        bytes calldata data
+    ) external override {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        OpenData memory p = abi.decode(data, (OpenData));
+
+        ActionArgs[] memory actions = new ActionArgs[](forAmount == 0 ? 1 : 2);
+        uint256 k;
+        if (forAmount != 0) {
+            permit3.transferFrom(onBehalfOf, address(this), p.collToken, uint160(forAmount));
+            SafeTransferLib.forceApprove(p.collToken, p.dolomite, forAmount);
+            actions[k++] = _depositAction(p.collMarketId, forAmount, address(this));
+        }
+        actions[k] = _withdrawAction(p.borrowMarketId, amount, receiver);
 
         AccountInfo[] memory accounts = new AccountInfo[](1);
         accounts[0] = AccountInfo(onBehalfOf, p.accountNumber);

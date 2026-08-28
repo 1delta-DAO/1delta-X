@@ -929,7 +929,13 @@ contract SettlementLens {
         if (done == type(uint256).max) return (false, "order cancelled");
         if (done >= anchor) return (false, "order fully filled");
 
-        return (true, "");
+        // TAKE_FOR descriptors, LAST and returned directly. Every check it makes is
+        // a revert at FILL time in {Base._forSlice}, so catching them here is the
+        // difference between a maker learning at build time and holding a signed
+        // order that is simply dead. It is tail-called rather than checked inline
+        // because this function is already at the legacy codegen's stack limit —
+        // binding its two return values to locals here is stack-too-deep.
+        return _validateTakeForItems(order);
     }
 
     // ──────────────────── Internal helpers ────────────────────
@@ -1086,7 +1092,9 @@ contract SettlementLens {
     ///         Permit3 itself. The allowance is keyed `(maker, settlement, module,
     ///         ref)`, exactly as {Base._runItem}'s `PERMIT3.take` consumes it.
     /// @return out `TakerAllowances{modules, refs, amounts, expirations}`, one entry
-    ///         per TAKE item in signed order. `refs[j] = keccak256(item.data)` (the
+    ///         per TAKE or TAKE_FOR item in signed order (both consume the same
+    ///         book; a TAKE_FOR's FUNDING leg is a token allowance, reported by the
+    ///         token-side preflight instead). `refs[j] = keccak256(item.data)` (the
     ///         position key), `amounts[j]` the live allowance (`uint160.max` =
     ///         infinite), `expirations[j]` its expiry (`0` = never).
     function previewTakerAllowances(Order calldata order) external view returns (TakerAllowances memory out) {
@@ -1097,7 +1105,11 @@ contract SettlementLens {
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < n;) {
             (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
-            if (op == uint256(ItemOp.TAKE)) ++takes;
+            // TAKE_FOR passes through the SAME taker-book bucket as TAKE — its
+            // value-out leg is gated by `(maker, settlement, module, keccak256(data))`
+            // exactly as a plain take is — so it must be surfaced here too, or a
+            // composite order preflights as needing no taker allowance at all.
+            if (op == uint256(ItemOp.TAKE) || op == uint256(ItemOp.TAKE_FOR)) ++takes;
             cursor = next;
             unchecked {
                 ++i;
@@ -1122,6 +1134,70 @@ contract SettlementLens {
         }
     }
 
+    /// @dev The `TAKE_FOR` half of {validateOrder}, in its own frame because that
+    ///      function is already at the legacy codegen's stack limit.
+    ///
+    ///      Mirrors {Base._forSlice} one-for-one — short data, an out-of-range leg,
+    ///      a leg the maker does not receive, a missing/zero balance cap, and the
+    ///      balance form's full-fill requirement — plus one footgun the core cannot
+    ///      judge: a LITERAL funding total of zero, which is a composite item that
+    ///      funds nothing, i.e. a plain `TAKE` wearing the wrong op.
+    ///      Split into a per-item helper for the same reason {_takerItemAt} is: the
+    ///      wide `itemAt` tuple plus the descriptor branches do not fit in one frame
+    ///      under the legacy (non-via-IR) codegen this package builds with.
+    function _validateTakeForItems(Order calldata order) private view returns (bool, string memory) {
+        uint256 n = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
+        uint256 cur = PackedArrays.recordsStart();
+        for (uint256 i; i < n; i++) {
+            (bool ok, string memory why, uint256 nxt) = _takeForItemAt(order, cur);
+            if (!ok) return (false, why);
+            cur = nxt;
+        }
+        return (true, "");
+    }
+
+    /// @dev One item's `TAKE_FOR` checks; a non-composite item passes straight
+    ///      through. Returns the next cursor so the walk needs no re-scan.
+    function _takeForItemAt(Order calldata order, uint256 cursor)
+        private
+        view
+        returns (bool, string memory, uint256)
+    {
+        (uint256 op,,,, bytes calldata data, uint256 nxt) = PackedArrays.itemAt(order.items, cursor);
+        if (op != uint256(ItemOp.TAKE_FOR)) return (true, "", nxt);
+        if (data.length < 32) return (false, "take_for missing funding descriptor", nxt);
+
+        uint256 desc = uint256(bytes32(data[0:32]));
+        if (desc < (uint256(1) << 255)) {
+            // LITERAL total. Zero is a composite item that funds nothing — a plain
+            // TAKE wearing the wrong op. The core cannot judge that; the maker can.
+            if (desc == 0) return (false, "take_for funds nothing (zero literal)", nxt);
+            return (true, "", nxt);
+        }
+        if (desc & (uint256(1) << 254) == 0) {
+            // LEG REFERENCE — mirrors {Base.ForLegMissing} / {Base.ForLegNotMakers}.
+            uint256 j = desc & 0xffff;
+            if (j >= PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE)) {
+                return (false, "take_for leg index out of range", nxt);
+            }
+            address r = _legOutRecipient(order.legsOut, j);
+            if (r != address(0) && r != order.maker) {
+                return (false, "take_for funds a fee leg (not the maker's)", nxt);
+            }
+            return (true, "", nxt);
+        }
+        // BALANCE — mirrors {Base.ForBalanceNeedsCap} / {Base.ForBalanceNeedsFullFill}.
+        // The zero-balance revert ({Base.ForBalanceEmpty}) is deliberately NOT
+        // mirrored: it is a live wallet read, so it is a fillability fact at the
+        // moment of the fill, not a defect in the order the maker is about to sign.
+        if (data.length < 64) return (false, "take_for balance leg needs a cap", nxt);
+        if (uint256(bytes32(data[32:64])) == 0) return (false, "take_for balance cap is zero", nxt);
+        if (order.fillModule == address(0) && order.minFillAnchor != OrderGates.fillDenominator(order)) {
+            return (false, "take_for balance leg requires full-fill", nxt);
+        }
+        return (true, "", nxt);
+    }
+
     /// @dev Memory bundle for {previewTakerAllowances}, so the helper carries one
     ///      pointer instead of four arrays (a stack-limit concession).
     struct TakerAllowances {
@@ -1142,7 +1218,7 @@ contract SettlementLens {
         returns (uint256 next, uint256)
     {
         (uint256 op, address module,,, bytes calldata data, uint256 n2) = PackedArrays.itemAt(order.items, cursor);
-        if (op != uint256(ItemOp.TAKE)) return (n2, k);
+        if (op != uint256(ItemOp.TAKE) && op != uint256(ItemOp.TAKE_FOR)) return (n2, k);
         bytes32 ref = keccak256(data);
         (uint160 amt, uint48 exp) = PERMIT3.takerAllowance(order.maker, address(SETTLEMENT), module, ref);
         out.modules[k] = module;

@@ -210,6 +210,183 @@ fused module relaxes the one-operation rule (see
 recovers the granularity). Ship fused variants for the venues where leverage volume
 justifies them, behind a shared per-shape base — not blanket.
 
+## 8.1 `TAKE_FOR` — the second amount comes from the CORE
+
+The ratio above is decimal-safe (the borrow decimals cancel), but it has a defect
+the arithmetic hides: `collateralTotal` is a **second copy of a number the order
+already signs**. A leverage order's collateral IS `legsOut[0]` — delivered to the
+maker moments earlier in the same fill — and the module restates it inside a blob
+the core deliberately never decodes and nothing cross-checks. Mis-scale that copy
+and the failure is silent: too large and the supply leg pulls up to the maker's
+standing Permit3 token allowance; too small and the position is under-collateralised
+or the borrow reverts at fill time. The per-fill `ceil` is a second, smaller tax.
+
+`ItemOp.TAKE_FOR` (op byte 3) removes the duplicate. The item head is unchanged —
+`op` was already a full byte and `op >= 3` used to revert — so there is **no record
+layout change, no EIP-712 typehash change and no golden-hash break**; existing
+signed orders keep meaning exactly what they were signed to mean.
+
+The maker signs a **funding descriptor** as the first word of `data`, and the core
+resolves it in [`Base._forSlice`](../packages/core/src/settlement/Base.sol):
+
+| descriptor | meaning | `forAmount` |
+| --- | --- | --- |
+| `(1 << 255) \| j` | fund from `legsOut[j]` | `Pricing.outputAt(order, ctx, j)` — the SAME call `_deliverOutputs` just made |
+| `(3 << 254) \| token` | fund with what the maker holds | `min(balanceOf(token, maker), cap)`, cap = `data` word 1, **full-fill only** |
+| any smaller value | a literal total (wallet-funded leg, no matching output) | sliced by the same differencing as `item.amount` |
+
+Settlement then calls `PERMIT3.takeFor(module, maker, amount, forAmount, receiver,
+data)`, which gates `amount` against the **identical** taker-book bucket a plain
+`TAKE` uses and dispatches
+[`ITakerForModule.takeForOnBehalf`](../packages/core/src/interfaces/ITakerForModule.sol).
+`data` is forwarded whole, so `ref = keccak256(data)` still covers the descriptor
+and a filler cannot repoint the funding leg.
+
+**What the leg reference buys.** The amount, its token and its decimals live in one
+typed leg the maker already signed, so a mis-scaled second copy cannot exist. And
+because it is the same pricing call that decided the delivery, the maker's net
+balance in the funding token over a fill is **zero** — what the solver delivered is
+exactly what goes back into the position, on partial fills too. A decaying
+collateral leg carries its auction price into the funding side, which a fixed ratio
+structurally cannot do.
+
+**Measured** (`aave-v3/test/leverage/{FusedLeverage,TakeForLeverage}.t.sol`, each
+against the two-item pair from an identical snapshot, same tree):
+
+| | gas | vs pair |
+| --- | --- | --- |
+| `[MAKE deposit, TAKE borrow]` | 607,824 | — |
+| fused item (ratio in `data`) | 603,867 | −3,957 |
+| `TAKE_FOR` item (leg reference) | 606,096 | −1,727 |
+
+`TAKE_FOR` costs ~2.2k more than the ratio module — `_forSlice` re-prices the leg
+and the dispatch carries one more word — and buys the duplicated-number class of
+bug being unrepresentable. Both beat the pair.
+
+### The no-conversion shape (deposit + borrow, nothing swaps)
+
+The leg reference is for the *levered* order, where the solver delivers collateral
+the maker immediately supplies. The other half is the plain one: **the maker funds
+the collateral from their own wallet and keeps the borrow** — no swap, no
+conversion, no solver capital. There is no output leg to reference, so the funding
+amount comes from the other two forms:
+
+- **fixed** — a literal descriptor. The core slices it pro-rata, so this shape
+  partial-fills normally.
+- **balance-relative** — `(3 << 254) | token`, resolving to
+  `min(balanceOf(token, maker), cap)` read at item time. For the amount a maker
+  cannot know at signing: accrued interest, an in-flight transfer, a wallet sweep.
+
+The **cap is mandatory** (`data` word 1; `0` reverts `ForBalanceNeedsCap`) for the
+reason [`Proportional`](../packages/core/src/settlement/Proportional.sol) spells
+out: a maker's balance is not under their sole control — anyone can raise it by
+transferring tokens to them — so an uncapped "fund with everything I hold" is a
+standing offer to lock the maker's whole holding into a position sized for much
+less. And it is **full-fill only** (`ForBalanceNeedsFullFill`): a live balance
+cannot pro-rate, so each slice would fund the whole remaining balance again. The
+core enforces both, because the core is the only party that knows the fill fraction.
+
+The order itself is the outputless SELL of [relayer-fees.md](relayer-fees.md) — the
+settlement types already express it, with no new machinery:
+
+```
+side    = SELL
+items   = [ TAKE_FOR borrow, recipient = maker, funding = balance(WETH, cap) ]
+legsIn  = [ LegIn{ USDC, start: F0, end: FMAX } ]   rising relayer fee
+legsOut = [ ]                                       EMPTY — nothing converts
+```
+
+The fee **self-funds**: items run before `_payInputsToSolver`, so the borrow lands
+in the maker's wallet first and the fee is pulled out of it. The maker can start
+with an empty USDC wallet and the relayer fronts nothing — one signature opens a
+complete position. Proven on a live Aave fork in
+`aave-v3/test/leverage/TakeForLeverage.t.sol::test_noConversion_depositBalance_andBorrow_withRisingFee`.
+
+The anchor is the fee leg (`legsIn[0].start`), per the outputless-SELL rule; pin
+`minFillAnchor = legsIn[0].start` to make it full-fill-only, which the balance form
+requires anyway.
+
+### Verified against Fluid, the hardest case
+
+Fluid is where the constant-`sideAmount` shape hurt most, so it is the useful
+check. `operate(nftId, newCol, newDebt, to)` applies both legs under ONE health
+check — the reason to fuse at all — but because
+[`FluidOperateModule`](../packages/modules/lending/fluid/src/FluidModules.sol)'s
+collateral amount lives in `data` and cannot pro-rate, it had to reject *every*
+sliced fill, even on an existing position that Fluid is perfectly happy to be added
+to repeatedly. `FluidTakeForModule` takes the amount from the core instead.
+Fork-tested on the mainnet wstETH-USDC T1 vault
+(`fluid/test/leverage/TakeForOpen.t.sol`, 5/5):
+
+| | |
+| --- | --- |
+| existing position, two slices | **works** — one `operate` per slice, NFT round-trips each time, maker nets zero in wstETH, one position grown by both |
+| the same slice on `FluidOperateModule` | reverts `PartialFillUnsupported` — asserted side by side |
+| fresh open (`nftId == 0`), sliced | still reverts, **correctly** |
+| fresh open, full fill | exactly one position minted to the maker |
+| no-conversion wallet-funded open | maker's whole wstETH balance becomes collateral, borrow to their wallet, rising fee self-funds |
+
+The third row is the point worth keeping: `FullFillGuard` is **not** obsoleted by
+`TAKE_FOR`, it is *scoped*. A fresh `operate` MINTS a position, so N slices make N
+positions rather than one partially-opened one — that is position IDENTITY, which no
+amount encoding can fix, and is exactly the case the guard was written for. What
+`TAKE_FOR` removes is the guard's collateral damage: the existing-position path that
+was only full-fill because the arithmetic could not be expressed.
+
+### Euler V2 and Dolomite: the guard comes off entirely
+
+Both are batch-native like Fluid — `EVC.batch` and `operate(accounts, actions)` each
+run ONE status/solvency check per call, which is the reason to fuse — but neither
+has a position identity object. An Euler position is just the balances of an EVC
+account; a Dolomite position is the balance set of the maker-signed
+`(owner, accountNumber)` sub-account. Both can be deposited into and borrowed
+against any number of times.
+
+So on these two venues `FullFillGuard` was **never** protecting a protocol
+constraint. It existed only because a constant `sideAmount` in `data` cannot
+pro-rate. `EulerV2TakeForModule` and `DolomiteTakeForModule` carry **no guard at
+all** — there is no fresh-open carve-out to make, unlike Fluid — and every slice is
+its own two-leg batch under one check. Fork-tested 4/4 each
+(`euler-v2/test/leverage/TakeForOpen.t.sol`,
+`dolomite/test/leverage/TakeForOpen.t.sol`): thirds-then-remainder partial fills
+land the whole signed collateral and debt, the maker nets zero in the funding token
+at every slice, and the identical slice on the old module reverts
+`PartialFillUnsupported` — asserted side by side.
+
+**Measured**, each pair from an identical fork snapshot:
+
+| venue | composite module (old) | `TAKE_FOR` | delta |
+| --- | --- | --- | --- |
+| Euler V2 | 613,921 | 615,494 | +1,573 |
+| Dolomite | 809,879 | 811,355 | +1,476 |
+| Aave v3 | 603,867 | 606,096 | +2,229 |
+
+~1.5–2.2k per fill, consistently: `_forSlice` re-prices the leg and the dispatch
+carries one more word. That is the price of the funding amount being a signed leg
+the core computes rather than a second number in a blob — and on Euler/Dolomite it
+also buys partial fills that were previously impossible. All three still beat the
+two-item `[MAKE, TAKE]` pair they replace.
+
+**Limits, deliberate.**
+
+- **Single-order path only.** `matchSettle` refuses `TAKE_FOR` at
+  `_assertMatchShape`: the funding leg is usually value the maker must already have
+  RECEIVED, and the netted path schedules deliveries and items independently.
+- **No one-shot permit.** A `PermitTake` witnesses `(module, amount)` and nothing
+  about the funding leg, so it cannot authorise this shape; a fill carrying one that
+  reaches only `TAKE_FOR` items fails closed with `PermitTakeNotConsumed`.
+- **Balance form: mind what the read sees.** Items run after output delivery and
+  before the input legs are paid, so a 100%-of-balance funding leg sweeps anything
+  the solver just delivered but does NOT reserve the relayer fee. If the funding
+  token and the fee leg's token are the same, size the cap to leave the fee behind
+  — or fund and pay in different tokens, which is the natural shape (wallet
+  collateral funds the deposit, borrow proceeds pay the fee).
+- **Allow ceil margin on the token allowance.** A SELL output leg is priced per fill
+  with a `ceil`, so N slices can deliver marginally more than the leg total (in the
+  maker's favour, pre-existing). The funding leg pulls exactly that, so the maker's
+  token allowance to the module wants a few units of headroom. BUY legs and the
+  literal form sum exactly.
+
 ## 9. Open / next
 
 - Build the §5 report-verify for fungible-delivering settle modules.

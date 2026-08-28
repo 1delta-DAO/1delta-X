@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
@@ -342,6 +343,81 @@ contract EulerV2BatchModule is ITakerModule {
             onBehalfOfAccount: user,
             value: 0,
             data: abi.encodeCall(IEulerVault.withdraw, (collateralAmount, receiver, user))
+        });
+        IEVC(IEulerVault(p.borrowVault).EVC()).batch(items);
+    }
+}
+
+// ──────────── Euler V2 TAKE_FOR open module (core-funded collateral) ────────────
+//
+// The same one-`EVC.batch` deposit+borrow as {EulerV2BatchModule}'s Open path, with
+// the collateral amount supplied by the settler rather than pinned in `data`.
+//
+// Euler is the EASY case for this, and that is the point: an Euler position has no
+// identity object. It is just the balances of an EVC account, so `deposit` +
+// `borrow` may be applied to it any number of times. {EulerV2BatchModule}'s
+// {FullFillGuard} was therefore never a protocol constraint — it existed only
+// because a constant `sideAmount` in `data` cannot pro-rate. With `forAmount` sized
+// by the core, the guard has nothing left to protect and is GONE: this module
+// partial-fills freely, and every slice is its own two-item batch sharing ONE
+// deferred account/vault status check.
+//
+// Item 0 is authenticated as this module (the funder, so the collateral is pulled
+// from here); item 1 as the user, so the debt and the single liquidity check land
+// on the user's account. A zero funding slice degenerates to a one-item batch
+// rather than a `deposit(0)`.
+//
+// `data = abi.encode(OpenData{forDesc, forCap, collateralVault, borrowVault})` —
+// `forDesc` first and `forCap` second, the two words {Base._forSlice} reads.
+//
+// Auth is unchanged from the batch module: `setAccountOperator(user, module, true)`
+// plus `enableController`/`enableCollateral`, once — all of it survives slicing.
+//
+contract EulerV2TakeForModule is ITakerForModule {
+    IPermit3 public immutable permit3;
+
+    struct OpenData {
+        uint256 forDesc; // word 0 — the funding descriptor
+        uint256 forCap; //  word 1 — the balance form's mandatory cap
+        address collateralVault;
+        address borrowVault;
+    }
+
+    error OnlyPermit3();
+
+    constructor(address _permit3) {
+        permit3 = IPermit3(_permit3);
+    }
+
+    function takeForOnBehalf(
+        address onBehalfOf,
+        uint256 amount,
+        uint256 forAmount,
+        address receiver,
+        bytes calldata data
+    ) external override {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+
+        OpenData memory p = abi.decode(data, (OpenData));
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](forAmount == 0 ? 1 : 2);
+        uint256 k;
+        if (forAmount != 0) {
+            address collateralAsset = IEulerVault(p.collateralVault).asset();
+            permit3.transferFrom(onBehalfOf, address(this), collateralAsset, uint160(forAmount));
+            SafeTransferLib.forceApprove(collateralAsset, p.collateralVault, forAmount);
+            items[k++] = IEVC.BatchItem({
+                targetContract: p.collateralVault,
+                onBehalfOfAccount: address(this),
+                value: 0,
+                data: abi.encodeCall(IEulerVault.deposit, (forAmount, onBehalfOf))
+            });
+        }
+        items[k] = IEVC.BatchItem({
+            targetContract: p.borrowVault,
+            onBehalfOfAccount: onBehalfOf,
+            value: 0,
+            data: abi.encodeCall(IEulerVault.borrow, (amount, receiver))
         });
         IEVC(IEulerVault(p.borrowVault).EVC()).batch(items);
     }

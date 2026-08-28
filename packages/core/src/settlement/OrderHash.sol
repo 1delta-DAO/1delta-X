@@ -51,6 +51,52 @@ library OrderHash {
         "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
+    /// @notice The two EIP-712 typehashes {WITNESS_TYPESTRING} exists to produce —
+    ///         `keccak256(<Permit3 stub> ‖ WITNESS_TYPESTRING)` — folded to constants.
+    ///
+    /// @dev    WHY, and it is worth ~583 bytes of Settlement runtime (measured
+    ///         2026-08-28). Permit3's witness entrypoints take the type STRING and
+    ///         concatenate it themselves, following Permit2. That is right for a
+    ///         generic caller, but Settlement's witness type is fixed at compile
+    ///         time, so passing the string meant embedding all ~470 bytes of it in
+    ///         the settler's runtime AND emitting a `string` ABI encoder at each of
+    ///         the two call sites. Passing the finished hash to
+    ///         {IPermit3.permitBatchWithWitnessHashIfNeeded} /
+    ///         {IPermit3.permitTakeWithWitnessHash} produces an IDENTICAL digest —
+    ///         it is what the string overloads compute on their first line — and a
+    ///         wrong hash forges nothing, it just fails signature recovery.
+    ///
+    ///         Spelled as `keccak256` over ONE string literal — adjacent literals are
+    ///         concatenated at parse time — which is the same idiom as
+    ///         {ORDER_TYPEHASH} above and is what guarantees the fold: solc evaluates
+    ///         it at compile time and emits neither the text nor the hashing. Do NOT
+    ///         rewrite either as `keccak256(abi.encodePacked(STUB, WITNESS_TYPESTRING))`;
+    ///         that is a runtime expression, and it would put ~470 bytes of string
+    ///         back into the runtime and re-hash it on every gasless fill.
+    ///
+    ///         The cost of the fold is that the `Order` type text now appears here as
+    ///         well as in {WITNESS_TYPESTRING}. `HashGolden.t.sol` re-derives both
+    ///         constants from {WITNESS_TYPESTRING} and fails if the copies diverge —
+    ///         and since the contracts are immutable, that check only has to hold at
+    ///         BUILD time. A mismatch cannot reach a deployed instance undetected: it
+    ///         breaks signature recovery for every gasless fill, deterministically and
+    ///         for everyone, which one integration test catches.
+    bytes32 internal constant PERMIT_BATCH_WITNESS_TYPEHASH = keccak256(
+        "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
+        "Order witness)"
+        "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+    );
+
+    bytes32 internal constant PERMIT_TAKE_WITNESS_TYPEHASH = keccak256(
+        "PermitTakeWitness(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline,"
+        "Order witness)"
+        "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
+        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+    );
+
     /// @notice EIP-712 `hashStruct` of an order.
     /// @dev `side` is NOT a field here — it lives in `timing` bit 101 (see
     ///      {DutchAuction.side}), and `expiry` rides in `timing` bits [160:208) (see

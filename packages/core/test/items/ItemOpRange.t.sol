@@ -17,7 +17,8 @@ import {PackedEncode} from "../shared/PackedEncode.sol";
 ///  Before the range check, {Base._runItem} dispatched MAKE, else TAKE, else
 ///  SETTLE — which meant every `op >= 2` ran the SETTLE branch, and
 ///  {Batch._assertMatchShape}'s `op == SETTLE` prohibition could be walked past by
-///  signing `op = 3`. The netted path would then execute the one item kind it
+///  signing `op = 3`. (`op = 3` is TAKE_FOR now and dispatches on purpose; the
+///  range that must stay closed starts one above it.) The netted path would then execute the one item kind it
 ///  declares it cannot account for (SETTLE routes the maker's asset to the filler,
 ///  not to the pool).
 ///
@@ -68,10 +69,10 @@ contract ItemOpRangeTest is CoreSettlementBase {
         assertEq(recorder.callAt(0).slice, QTY, "and carries its full signed amount");
     }
 
-    /// An op past the enum is a malformed record, not a third settle flavour.
-    function test_opAboveSettle_reverts() public {
+    /// An op past the enum is a malformed record, not a fourth op flavour.
+    function test_opAboveEnum_reverts() public {
         _fundSolver();
-        Order memory o = _orderWithRawOp(2, 3);
+        Order memory o = _orderWithRawOp(2, 4);
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
@@ -93,8 +94,8 @@ contract ItemOpRangeTest is CoreSettlementBase {
         settlement.fill(o, sig, PRICE);
     }
 
-    function testFuzz_anyOpAboveSettle_reverts(uint8 op) public {
-        op = uint8(bound(uint256(op), uint256(ItemOp.SETTLE) + 1, type(uint8).max));
+    function testFuzz_anyOpAboveEnum_reverts(uint8 op) public {
+        op = uint8(bound(uint256(op), uint256(ItemOp.TAKE_FOR) + 1, type(uint8).max));
         _fundSolver();
         Order memory o = _orderWithRawOp(4, op);
         bytes memory sig = _sign(o);
@@ -142,11 +143,19 @@ contract ItemOpRangeTest is CoreSettlementBase {
 
     // ──────────────── netted path: the shape guard ────────────────
 
-    /// `matchSettle` refuses a SETTLE item. The guard must key on the DISPATCHER's
-    /// behaviour (`>=`), not on the enum value (`==`) — otherwise `op = 3` reaches
-    /// the SETTLE branch with the prohibition never having fired.
-    function test_matchSettle_rejectsOpAboveSettle_atTheShapeGuard() public {
-        Order memory o = _orderWithRawOp(5, 3);
+    /// `matchSettle` refuses every op at or above SETTLE. TAKE_FOR (3) is a real,
+    /// dispatchable op on the single-order path but is refused here: its funding leg
+    /// is usually an output leg the maker must already have RECEIVED, and this path
+    /// schedules deliveries and items independently.
+    function test_matchSettle_rejectsTakeForOp() public {
+        Order memory o = _orderWithRawOp(5, uint8(ItemOp.TAKE_FOR));
+        _expectMatchSettleRejection(o);
+    }
+
+    /// And an op past the enum is refused at the same guard, in PHASE 1 — the
+    /// original finding: the guard must key on a RANGE, not on one enum value.
+    function test_matchSettle_rejectsOpAboveEnum_atTheShapeGuard() public {
+        Order memory o = _orderWithRawOp(7, 4);
         _expectMatchSettleRejection(o);
     }
 

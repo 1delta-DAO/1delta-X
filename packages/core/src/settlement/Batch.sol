@@ -403,13 +403,20 @@ abstract contract Batch is Core {
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < nItems;) {
             (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
-            // `>=`, NOT `==`, and the difference is load-bearing. `op` is a RAW BYTE
-            // out of the signed blob ({PackedArrays.itemAt} deliberately does not
-            // narrow it), and {Base._runItem} dispatches MAKE, else TAKE, else
-            // SETTLE — so every `op >= 2` runs the SETTLE branch. An equality test
-            // here would let an item signed `op = 3` walk past this guard and then
-            // execute the very thing it exists to forbid. Same rule, asked the way
-            // the dispatcher actually behaves.
+            // `>=`, NOT `==`, and the difference is load-bearing. `op` is a RAW
+            // BYTE out of the signed blob ({PackedArrays.itemAt} deliberately does
+            // not narrow it), so the guard has to name a RANGE rather than one
+            // value. It rejects three things at once:
+            //   • SETTLE (2) — routes to the filler, not the pool;
+            //   • TAKE_FOR (3) — its funding leg is usually one of the order's own
+            //     `legsOut`, i.e. value the maker has to have RECEIVED before the
+            //     item runs. This path lets the solver schedule items and
+            //     deliveries independently, so that precondition is a scheduling
+            //     obligation the netted engine does not currently enforce. Fill
+            //     composite orders through the single-order path, which runs
+            //     deliveries before items by construction;
+            //   • anything above — a malformed record, which {Base._runItem}
+            //     rejects too, so the guard and the dispatcher agree.
             if (op >= uint256(ItemOp.SETTLE)) revert MatchSettleItemUnsupported();
             cursor = next;
             unchecked {
@@ -621,6 +628,11 @@ abstract contract Batch is Core {
 
         uint256 itemCursor = _itemCursor(order.items, k);
         (uint256 kOp,,,,,) = PackedArrays.itemAt(order.items, itemCursor);
+        // ⚠ COUPLED TO `_assertMatchShape`. Only a TAKE produces proceeds this path
+        // has to attribute, and `TAKE_FOR` — the other proceeds-producing op — is
+        // refused up front, so it can never arrive here. If that refusal is ever
+        // lifted, this test must widen with it or a composite item's proceeds go
+        // uncredited and end up swept to the filler.
         if (kOp != uint256(ItemOp.TAKE)) {
             _executeItemAt(order, st.fills[i], order.items, itemCursor);
             return;

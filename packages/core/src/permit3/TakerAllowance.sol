@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {ITakerModule} from "../interfaces/ITakerModule.sol";
+import {ITakerForModule} from "../interfaces/ITakerForModule.sol";
 import {Permit3Base} from "./Permit3Base.sol";
 import {Allowance} from "./libraries/Allowance.sol";
 
@@ -97,6 +98,44 @@ abstract contract TakerAllowance is Permit3Base {
         _takerAllowance[user][msg.sender][module][ref].spend(amount);
         emit Taken(user, msg.sender, ref, module, amount, receiver);
         ITakerModule(module).takeOnBehalf(user, amount, receiver, data);
+    }
+
+    /// @inheritdoc IPermit3
+    /// @dev The COMPOSITE sibling of {take}, and deliberately a near-copy of it:
+    ///      same book, same key, same `ref`, same consume-then-call ordering, same
+    ///      reentrancy lock. The ONLY difference is the extra `forAmount` word
+    ///      forwarded to the module — the value-IN side of a one-call
+    ///      deposit+borrow / repay+withdraw.
+    ///
+    ///      `forAmount` is NOT gated here, and that is the design rather than an
+    ///      omission. The taker book exists to bound what LEAVES a user's position;
+    ///      the funding leg moves value IN and is bounded by the user's token
+    ///      allowance to the module, which is the same gate a `MAKE` item's funding
+    ///      leg passes through. Gating it twice would mean a second book keyed on a
+    ///      number the spender computes per fill — which is not a grant a user can
+    ///      meaningfully sign.
+    ///
+    ///      A module reached through here implements {ITakerForModule}, NOT
+    ///      {ITakerModule}: the selectors differ, so a plain taker module signed
+    ///      into a `TAKE_FOR` item reverts on dispatch instead of being handed a
+    ///      truncated call.
+    function takeFor(
+        address module,
+        address user,
+        uint160 amount,
+        uint160 forAmount,
+        address receiver,
+        bytes calldata data
+    ) external override nonReentrant {
+        // Same zero-amount rejection as {take}, for the same reason: `spend(0)`
+        // succeeds against an empty allowance, so without it an unapproved caller
+        // could reach a module for any `user`. Settlement skips zero slices, so
+        // this is behaviour-preserving on the honest path.
+        if (amount == 0) revert ZeroAmount();
+        bytes32 ref = keccak256(data);
+        _takerAllowance[user][msg.sender][module][ref].spend(amount);
+        emit Taken(user, msg.sender, ref, module, amount, receiver);
+        ITakerForModule(module).takeForOnBehalf(user, amount, forAmount, receiver, data);
     }
 
     function takerAllowance(address user, address spender, address module, bytes32 ref)

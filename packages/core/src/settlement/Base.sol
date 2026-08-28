@@ -9,6 +9,7 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Order, ItemOp, FillCtx} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {DutchAuction} from "./DutchAuction.sol";
+import {Pricing} from "./Pricing.sol";
 import {SolverCallbackExecutor} from "./SolverCallbackExecutor.sol";
 import {Signatures} from "./Signatures.sol";
 import {OrderGates} from "./OrderGates.sol";
@@ -29,6 +30,7 @@ import {OrderHash} from "./OrderHash.sol";
 ///           {Core} → {Batch} → {Settlement}.
 abstract contract Base is Signatures {
     using DutchAuction for Order;
+    using Pricing for Order;
 
     // ──────────────────── Storage ────────────────────
 
@@ -85,6 +87,46 @@ abstract contract Base is Signatures {
     ///      of silently wrapping to a smaller move. (SETTLE is exempt — its module
     ///      interface is `uint256` and never narrows.)
     error AmountOverflow();
+    /// @dev A `TAKE_FOR` item's funding descriptor is unusable: `data` is too short
+    ///      to hold the leading descriptor word, or the descriptor references a
+    ///      `legsOut` index the order does not have. Maker-signed either way, so
+    ///      this is a malformed order rather than an adversarial input — but it is
+    ///      the difference between funding the wrong leg and not filling at all, so
+    ///      it reverts instead of defaulting to leg 0.
+    error ForLegMissing();
+    /// @dev A BALANCE-relative `TAKE_FOR` funding leg was offered a partial fill. The
+    ///      amount is a live `balanceOf` read, so it cannot pro-rate: every slice
+    ///      would fund the FULL remaining balance again. Same rule, and the same
+    ///      reasoning, as {Proportional}'s full-fill requirement — enforced here
+    ///      because only the core knows the fill fraction.
+    error ForBalanceNeedsFullFill();
+    /// @dev A BALANCE-relative funding leg carries no cap (`data` word 1 absent or
+    ///      zero). MANDATORY, for the reason {Proportional} spells out: a maker's
+    ///      balance is not under their sole control — anyone can raise it by
+    ///      transferring tokens to them — so an uncapped "fund with everything I
+    ///      hold" is a standing offer to lock the maker's entire holding into a
+    ///      position sized for much less. `0` is also what an unset word holds, so
+    ///      the dangerous mode would otherwise be the default.
+    error ForBalanceNeedsCap();
+    /// @dev A BALANCE-relative funding leg resolved to ZERO — the maker holds none
+    ///      of the token, or the descriptor names an address with no code (
+    ///      {SafeTransferLib.balanceOf} multiplies by the staticcall's success, so a
+    ///      codeless target reads as a zero balance rather than reverting).
+    ///
+    ///      Reverts rather than funding nothing, because the alternative FAILS OPEN:
+    ///      the value-OUT leg would still execute in full, turning "deposit what I
+    ///      hold and borrow against it" into a bare, uncollateralised borrow. That is
+    ///      reachable without any malice — a maker's balance can be spent by an
+    ///      earlier fill of one of their OWN orders, and the filler picks the order —
+    ///      so the premise failing must stop the fill, not silently change its
+    ///      shape. (A LITERAL or LEG funding slice that floors to zero on a dust fill
+    ///      is different and is allowed: it accumulates exactly across slices.)
+    error ForBalanceEmpty();
+    /// @dev A `TAKE_FOR` funding descriptor referenced an output leg the maker does
+    ///      NOT receive (a fee/originator leg, `recipient` set to a third party).
+    ///      See {_forSlice}: the leg-reference form exists so the funding leg IS the
+    ///      delivery, which only holds for the maker's own legs.
+    error ForLegNotMakers();
     /// @dev An item's `module` (or Permit3) has no code. Solc's own existence check on a
     ///      void external call; kept explicit now that {_callWithTail} hand-encodes.
     error ItemTargetHasNoCode();
@@ -366,7 +408,7 @@ abstract contract Base is Signatures {
             // path should not have two different overflow postures.
             if (slice > type(uint160).max) revert AmountOverflow();
             _callWithTail(
-                module, IMakerModule.makeOnBehalf.selector, 2, uint160(order.maker), slice, 0, 0, itemData
+                module, IMakerModule.makeOnBehalf.selector, 2, uint160(order.maker), slice, 0, 0, 0, itemData
             );
         } else if (op == uint256(ItemOp.TAKE)) {
             // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
@@ -390,6 +432,7 @@ abstract contract Base is Signatures {
                     uint160(order.maker),
                     slice,
                     uint160(to),
+                    0,
                     itemData
                 );
             }
@@ -411,6 +454,39 @@ abstract contract Base is Signatures {
                 uint160(ctx.filler),
                 slice,
                 0,
+                0,
+                itemData
+            );
+        } else if (op == uint256(ItemOp.TAKE_FOR)) {
+            // COMPOSITE: the TAKE branch above PLUS its funding leg, in one dispatch
+            // — deposit+borrow, repay+withdraw. `slice` is the value-OUT side and is
+            // gated exactly as a TAKE is, by the same taker-book bucket. The
+            // value-IN side is computed HERE, from the descriptor the maker signed
+            // as the first word of `data`, and is never a number the module invents;
+            // {ITakerForModule} argues why that distinction is the whole point.
+            //
+            // ⚠ The one-shot permit path is deliberately NOT wired here. A
+            // `PermitTake` witnesses `(module, amount)` and nothing about the
+            // funding leg, so it cannot authorise this shape; a fill that carries
+            // one and reaches only `TAKE_FOR` items leaves it unconsumed and
+            // {Core.fillWithPermitTake} reverts `PermitTakeNotConsumed` — fail
+            // closed, rather than silently drawing a leg the permit never covered.
+            address to = recipient == address(0) ? address(this) : recipient;
+            if (slice > type(uint160).max) revert AmountOverflow();
+            uint256 forSlice = _forSlice(order, ctx, itemData);
+            // Same width posture as the other two value paths: Permit3's book and
+            // the funding pulls underneath are `uint160`, so a wider value reverts
+            // rather than wrapping to a smaller move.
+            if (forSlice > type(uint160).max) revert AmountOverflow();
+            _callWithTail(
+                address(PERMIT3),
+                IPermit3.takeFor.selector,
+                5,
+                uint160(module),
+                uint160(order.maker),
+                slice,
+                forSlice,
+                uint160(to),
                 itemData
             );
         } else {
@@ -429,6 +505,107 @@ abstract contract Base is Signatures {
             // maker can sign themselves into.
             revert PackedArrays.MalformedPackedArray();
         }
+    }
+
+    /// @dev The value-IN amount a `TAKE_FOR` item funds THIS fill with, resolved
+    ///      from the descriptor word the maker signed at the head of `data`.
+    ///
+    ///      Two forms, and the choice is about where the number LIVES:
+    ///
+    ///        • top bit CLEAR — a LITERAL total, for a funding leg with no matching
+    ///          output leg (the maker funds it from their own wallet: a fresh Fluid
+    ///          position, a new trove). Sliced with the SAME differencing
+    ///          {_runItem} applies to `amount`, so N partial fills sum EXACTLY to
+    ///          the signed total — no per-fill ceil drift, and no constant amount
+    ///          re-executed in full on every slice.
+    ///
+    ///        • top bit SET — a REFERENCE into `legsOut` (low 16 bits = index). The
+    ///          amount, its token and its decimals live in the typed leg the maker
+    ///          already signed, so there is exactly ONE copy of the number and a
+    ///          mis-scaled second one cannot exist. It is the SAME
+    ///          {Pricing.outputAt} call `_deliverOutputs` made moments earlier in
+    ///          this fill, so the funding leg and the delivery cannot disagree —
+    ///          whatever the pricing rule, including a decaying leg, where the
+    ///          funding side tracks the auction instead of a fixed ratio. The
+    ///          maker's net balance in that token over the fill is zero: what the
+    ///          solver delivered is exactly what goes back into the position.
+    ///
+    ///        • top bits SET (255 and 254) — BALANCE-relative, the "deposit what I
+    ///          hold" form, for the no-conversion shape where there is no output leg
+    ///          AND the maker cannot know the amount at signing time (interest has
+    ///          accrued, a transfer is in flight, the wallet is being swept). The
+    ///          low 160 bits are the token; `data`'s SECOND word is a MANDATORY cap;
+    ///          `forAmount = min(balanceOf(token, maker), cap)`, and a ZERO balance
+    ///          REVERTS ({ForBalanceEmpty}) rather than funding nothing while the
+    ///          value-out leg still runs. FULL-FILL ONLY — a
+    ///          live balance cannot pro-rate, so every slice would fund the whole
+    ///          remaining balance again. This is {Proportional}'s rule, on the
+    ///          funding side, enforced here because only the core knows the fraction.
+    ///
+    ///      Out-of-range reverts rather than defaulting to leg 0: funding the wrong
+    ///      leg is a worse outcome than not filling.
+    ///
+    ///      ⚠ WHEN THE BALANCE IS READ. Items run AFTER output delivery and BEFORE
+    ///      `_payInputsToSolver`, so a BALANCE read sees anything the solver just
+    ///      delivered but NOT the input legs the maker still owes. If the funding
+    ///      token is also the relayer-fee leg's token, a 100%-of-balance funding leg
+    ///      will deposit the tokens earmarked for that fee and the fee pull then
+    ///      fails: size the cap to leave the fee behind, or fund and pay in
+    ///      different tokens (the natural shape — borrow proceeds pay the fee,
+    ///      wallet collateral funds the deposit).
+    ///
+    ///      ⚠ INTEGRATION NOTE for the leg-reference form. A SELL output leg is
+    ///      priced per fill with a CEIL ({Pricing.outputAt}), so N partial fills can
+    ///      deliver marginally MORE than the leg's signed total — in the maker's
+    ///      favour, and pre-existing behaviour. The funding leg is the same number,
+    ///      so it pulls exactly that too: a maker's Permit3 TOKEN allowance to a
+    ///      composite module should carry a few units of margin over the leg total,
+    ///      or the last slice reverts `InsufficientAllowance`. BUY output legs use
+    ///      cumulative differencing and sum exactly, as does the literal form above.
+    function _forSlice(Order calldata order, FillCtx memory ctx, bytes calldata itemData)
+        private
+        view
+        returns (uint256)
+    {
+        if (itemData.length < 32) revert ForLegMissing();
+        uint256 desc;
+        /// @solidity memory-safe-assembly
+        assembly {
+            desc := calldataload(itemData.offset)
+        }
+        if (desc < (uint256(1) << 255)) {
+            return ctx.fullFill
+                ? desc
+                : (desc * ctx.newFilled) / ctx.anchor - (desc * ctx.prevFilled) / ctx.anchor;
+        }
+        if (desc & (uint256(1) << 254) == 0) {
+            uint256 j = desc & 0xffff;
+            if (j >= PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE)) revert ForLegMissing();
+            // The leg must be one the MAKER receives. The whole guarantee of this
+            // form is that what the solver just delivered is exactly what goes back
+            // into the position — the maker's net balance in that token is zero. A
+            // fee leg is delivered to a THIRD PARTY, so referencing one keeps the
+            // arithmetic but breaks the invariant: the maker would fund the position
+            // out of pocket, to the tune of someone else's fee. Maker-signed, but the
+            // property this form is chosen for should hold unconditionally.
+            (,,, address legRecipient) = PackedArrays.legOut(order.legsOut, j);
+            if (legRecipient != address(0) && legRecipient != order.maker) revert ForLegNotMakers();
+            return order.outputAt(ctx, j);
+        }
+        // BALANCE: `min(balanceOf(token, maker), cap)`. The token is the low 160
+        // bits of the descriptor; the cap is `data`'s SECOND word, and both are
+        // inside `ref = keccak256(data)`, so a filler can move neither.
+        if (!ctx.fullFill) revert ForBalanceNeedsFullFill();
+        if (itemData.length < 64) revert ForBalanceNeedsCap();
+        uint256 cap;
+        /// @solidity memory-safe-assembly
+        assembly {
+            cap := calldataload(add(itemData.offset, 32))
+        }
+        if (cap == 0) revert ForBalanceNeedsCap();
+        uint256 bal = SafeTransferLib.balanceOf(address(uint160(desc)), order.maker);
+        if (bal == 0) revert ForBalanceEmpty();
+        return bal < cap ? bal : cap;
     }
 
     /// @dev Consume the fill's one-shot taker permit for this TAKE item. Its own
@@ -461,8 +638,12 @@ abstract contract Base is Signatures {
         // maker's inputs against their standing allowance. A second TAKE item finds
         // this empty and falls back to the ordinary `PERMIT3.take` allowance gate.
         ctx.permitTake = "";
-        PERMIT3.permitTakeWithWitness(
-            permit, order.maker, to, itemData, ctx.orderHash, OrderHash.WITNESS_TYPESTRING, sig
+        // The HASH overload, not the string one: the witness type is fixed at compile
+        // time here, so carrying the ~470-byte type string (and a `string` encoder)
+        // in the settler's runtime bought nothing. Same digest — see
+        // {OrderHash.PERMIT_TAKE_WITNESS_TYPEHASH}.
+        PERMIT3.permitTakeWithWitnessHash(
+            permit, order.maker, to, itemData, ctx.orderHash, OrderHash.PERMIT_TAKE_WITNESS_TYPEHASH, sig
         );
     }
 
@@ -608,6 +789,7 @@ abstract contract Base is Signatures {
         uint256 a1,
         uint256 a2,
         uint256 a3,
+        uint256 a4,
         bytes calldata tail
     ) private {
         // Kept in Solidity rather than hand-written next to the encoder: the check is
@@ -619,13 +801,17 @@ abstract contract Base is Signatures {
             let p := mload(0x40)
             mstore(p, sel)
             // The static head. Slots past `n` are overwritten by the offset word and
-            // the tail below, so writing all four unconditionally is free — and it
+            // the tail below, so writing all five unconditionally is free — and it
             // keeps this block's live set to ONE local, which is what makes it
-            // compile under the legacy (non-via-IR) profile the tests use.
+            // compile under the legacy (non-via-IR) profile the tests use. (Slot 4
+            // is only live for the five-static `takeFor`; for every smaller `n` it
+            // lands inside the region the offset word, the tail length or the
+            // `calldatacopy` below rewrites.)
             mstore(add(p, 0x04), a0)
             mstore(add(p, 0x24), a1)
             mstore(add(p, 0x44), a2)
             mstore(add(p, 0x64), a3)
+            mstore(add(p, 0x84), a4)
             n := shl(5, add(n, 1)) // reused as `off`: 32 * (n statics + 1 offset word)
             mstore(add(p, sub(n, 0x1c)), n) // the offset word, at head slot `n`
             mstore(add(p, add(n, 0x04)), tail.length)

@@ -15,6 +15,8 @@ import {
 } from "@core/settlement/Settlement.sol";
 import {SettlementLens} from "@periphery/SettlementLens.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
+import {OrderHash} from "@core/settlement/OrderHash.sol";
+import {Permit3Hash} from "@core/permit3/libraries/Permit3Hash.sol";
 import {PackedEncode} from "./shared/PackedEncode.sol";
 
 /// @dev No-fork golden test: pins the EIP-712 struct hash of a canonical order.
@@ -98,5 +100,32 @@ contract HashGoldenTest is Test {
 
     function test_goldenOrderHash() public view {
         assertEq(lens.hashOrder(_canonical()), GOLDEN_ORDER_HASH, "canonical order hashStruct");
+    }
+
+    // ──────────────── the folded witness typehashes ────────────────
+    //
+    // Settlement passes Permit3 the FINISHED witness typehash rather than the type
+    // string, which is what keeps ~470 bytes of string (and two `string` encoders)
+    // out of its runtime. The constants must therefore be literals — only a literal
+    // is guaranteed to fold — and these two tests are what stops a literal from
+    // drifting away from the strings it stands for. If the `Order` type changes,
+    // {OrderHash.WITNESS_TYPESTRING} changes, and these fail until the constants are
+    // regenerated. Without them a stale constant would silently break every gasless
+    // fill: the digest would no longer match what the maker's wallet signed.
+
+    function test_permitBatchWitnessTypeHash_matchesTheTypeString() public pure {
+        assertEq(
+            OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH,
+            keccak256(abi.encodePacked(Permit3Hash.PERMIT_BATCH_WITNESS_STUB, OrderHash.WITNESS_TYPESTRING)),
+            "batch witness typehash drifted from WITNESS_TYPESTRING"
+        );
+    }
+
+    function test_permitTakeWitnessTypeHash_matchesTheTypeString() public pure {
+        assertEq(
+            OrderHash.PERMIT_TAKE_WITNESS_TYPEHASH,
+            keccak256(abi.encodePacked(Permit3Hash.PERMIT_TAKE_WITNESS_STUB, OrderHash.WITNESS_TYPESTRING)),
+            "take witness typehash drifted from WITNESS_TYPESTRING"
+        );
     }
 }

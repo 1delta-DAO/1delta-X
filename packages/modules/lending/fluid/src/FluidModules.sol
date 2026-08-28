@@ -8,6 +8,7 @@ import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
 
 import {IFluidVault, IFluidVaultFactory} from "./interfaces/IFluid.sol";
 
@@ -334,5 +335,88 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         // never a caller-chosen address).
         uint256 left = IERC20(p.fundingToken).balanceOf(address(this));
         if (left > 0) SafeTransferLib.safeTransfer(p.fundingToken, user, left);
+    }
+}
+
+// ──────────────── Fluid TAKE_FOR open module (core-funded collateral) ────────────────
+//
+// The same one-`operate` supply+borrow as {FluidOperateModule}'s Open path, but the
+// collateral amount arrives as the settler's `forAmount` instead of a `sideAmount`
+// constant sitting in `data`. Fluid is the sharpest test of that difference,
+// because Fluid is where the constant hurt most:
+//
+//  1. `operate` applies the collateral leg and the debt leg under ONE health check,
+//     so fusing them is the architectural payoff — unchanged here.
+//  2. But `sideAmount` does not pro-rate, so {FluidOperateModule} had to reject
+//     every partial fill ({FullFillGuard}) even on an EXISTING position, where
+//     Fluid is perfectly happy to be added to repeatedly. `forAmount` is sliced by
+//     the core, so that restriction lifts: an existing-position open now partial-
+//     fills, one `operate` per slice, each supplying exactly what it borrowed
+//     against.
+//  3. `nftId == 0` is genuinely different and STAYS full-fill only. A fresh
+//     `operate` MINTS a position, so N slices make N positions rather than one
+//     partially-opened one. That is position IDENTITY, not arithmetic — no amount
+//     encoding can fix it, which is exactly the case {FullFillGuard} was written
+//     for and the case it is still right for.
+//
+// `data = abi.encode(OpenData{forDesc, forCap, vault, factory, collateralToken,
+//                             nftId, totalAmount})` — `forDesc` FIRST and `forCap`
+// second because {Base._forSlice} reads words 0 and 1 of the blob.
+//   • forDesc `(1 << 255) | j`            fund from `legsOut[j]` (the levered shape)
+//   • forDesc `(3 << 254) | uint160(tok)` fund with `min(balance, forCap)` — the
+//                                         no-conversion "deposit what I hold" shape,
+//                                         which the core makes full-fill only
+//   • forDesc a plain total               a fixed amount, sliced pro-rata
+//   • totalAmount                         only read on the `nftId == 0` path
+//
+// Close (payback + withdraw) is mechanically the same call with the signs flipped;
+// it stays on {FluidOperateModule} because its useful mode is repay-ALL, which is a
+// live-debt sentinel plus an over-pull buffer rather than a settler-sized amount.
+//
+contract FluidTakeForModule is ITakerForModule, FluidBase {
+    error OnlyPermit3();
+    error Reentrancy();
+
+    uint256 private _locked = 1;
+
+    struct OpenData {
+        uint256 forDesc; //        word 0 — the funding descriptor {Base._forSlice} reads
+        uint256 forCap; //         word 1 — the balance form's mandatory cap
+        address vault;
+        address factory;
+        address collateralToken;
+        uint256 nftId; //          0 ⇒ open a FRESH position (full-fill only)
+        uint256 totalAmount; //    the item's full signed amount; fresh-open path only
+    }
+
+    constructor(address _permit3) FluidBase(_permit3) {}
+
+    /// @param amount    this fill's slice of the BORROW leg (taker-allowance gated).
+    /// @param forAmount this fill's COLLATERAL, sized by the core.
+    function takeForOnBehalf(
+        address onBehalfOf,
+        uint256 amount,
+        uint256 forAmount,
+        address receiver,
+        bytes calldata data
+    ) external override {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+        if (_locked != 1) revert Reentrancy();
+        _locked = 2;
+
+        OpenData memory p = abi.decode(data, (OpenData));
+
+        // See note 3 in the header: a fresh mint cannot be sliced, whatever the
+        // amounts say. An existing position is added to and slices freely.
+        if (p.nftId == 0) FullFillGuard.requireFullFill(amount, p.totalAmount);
+
+        if (forAmount != 0) _pullAndApprove(p.collateralToken, forAmount, onBehalfOf, p.vault);
+
+        // Strict-ownerOf: take custody just-in-time and hand it straight back.
+        if (p.nftId != 0) IFluidVaultFactory(p.factory).transferFrom(onBehalfOf, address(this), p.nftId);
+        (uint256 id,,) = IFluidVault(p.vault).operate(p.nftId, _signed(forAmount), _signed(amount), receiver);
+        IFluidVaultFactory(p.factory).transferFrom(address(this), onBehalfOf, p.nftId != 0 ? p.nftId : id);
+
+        _locked = 1;
     }
 }

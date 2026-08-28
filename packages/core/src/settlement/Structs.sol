@@ -22,10 +22,22 @@ pragma solidity ^0.8.28;
 ///                SETTLE pays one CALL only when used. The maker's RECEIPT is
 ///                guaranteed by the order's mandatory `legsOut` delivery and/or
 ///                a post-execution invariant. See {ISettlementModule}.
+///         TAKE_FOR — a TAKE and its funding leg in ONE dispatch (open a levered
+///                position, close one, swap debt or collateral). Settlement calls
+///                `permit3.takeFor`, which gates the value-OUT `amount` against the
+///                same taker book a TAKE uses and hands the module a SECOND,
+///                core-computed `forAmount` for the value-IN side. The point is
+///                that the second amount is not a number the module invents: it is
+///                either one of the order's own `legsOut` (referenced by index, so
+///                there is exactly ONE signed copy of it and it follows the
+///                auction price) or a literal total the core slices with the same
+///                differencing as `amount`. See {ITakerForModule} for the `data`
+///                layout and {Base._forSlice} for the descriptor.
 enum ItemOp {
     MAKE,
     TAKE,
-    SETTLE
+    SETTLE,
+    TAKE_FOR
 }
 
 /// @notice Where the solver callback runs relative to settlement, chosen by the
