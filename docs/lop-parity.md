@@ -199,7 +199,7 @@ Three behaviour-preserving restructurings brought it back:
 | Change | Returned |
 |---|---|
 | move the cold modes out of `bumpBps` into a once-per-fill `resolveBump` (pinned in `FillCtx.bump`) | **1,343** |
-| verify a bulk signature by SWAPPING THE DIGEST into the existing signer set, instead of a second copy of `recoverCalldata`/`verify` | **~1,000** |
+| verify a bulk signature by SWAPPING THE DIGEST into the existing signer set, instead of a second copy of `tryRecoverSigner`/`verify` | **~1,000** |
 | `bytes pricing {target,data}` → `address pricingModule` (a 7th dynamic member grows the `Order` decoder at EVERY external entry point) | **~1,000** |
 
 The same trap recurred later, and the fix is the same shape: the delta-verify guards

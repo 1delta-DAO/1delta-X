@@ -207,7 +207,7 @@ abstract contract Signatures is OrderState {
         //  acceptance rule below — maker, delegate, contract wallet — then applies
         //  unchanged. That is deliberate: verifying the root inline with its own copy
         //  of the signer set measured **+1,343 bytes** of Settlement (2026-08-12,
-        //  against a 404-byte budget), because `recoverCalldata` and `verify` are
+        //  against a 404-byte budget), because `tryRecoverSigner` and `verify` are
         //  library internals the optimizer inlines per site. A bulk signature grants
         //  exactly the authority a single signature would, no more.
         //
@@ -247,7 +247,7 @@ abstract contract Signatures is OrderState {
         // delegation existed: one `ecrecover` and one compare, which is precisely
         // the work {SignatureVerification.verify} would have done. The registry
         // SLOAD sits behind a mismatch, so an ordinary fill never touches it.
-        (bool standardLength, address signer) = SignatureVerification.recoverCalldata(sigBody, digest);
+        (bool standardLength, address signer) = SignatureVerification.tryRecoverSigner(sigBody, digest);
         if (standardLength && signer != address(0)) {
             if (signer == expected) return;
             // Not the maker — but the maker may have nominated this key. The lookup
@@ -302,7 +302,7 @@ abstract contract Signatures is OrderState {
         // COST NOTE: a CONTRACT maker whose 1271 signature happens to be 64 or 65
         // bytes pays one extra (cold) SLOAD for the registry probe above before
         // landing here. Safe wallets and the rest produce longer payloads, which
-        // `recoverCalldata` rejects on length alone, so they skip it entirely.
+        // `tryRecoverSigner` rejects on length alone, so they skip it entirely.
         SignatureVerification.verify(sigBody, digest, expected);
     }
 

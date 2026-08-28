@@ -153,7 +153,7 @@ an alert.
 | `InvariantFailed(index)` | a maker post-condition failed on the end state — note this is now judged on the end of the **whole context**, so a plan mixing two of the same maker's orders can trip it |
 | `InsufficientAllowance` / `AllowanceExpired` (Permit3) | the maker's allowance is gone or lapsed |
 | `TransferFailed` / `TransferFromFailed` | the maker is under-funded, or the token is fee-on-transfer (not supported on the netted path) |
-| `InvalidSigner` / `InvalidSignature` / `OrderNotApproved` | the order's authorization does not hold |
+| `InvalidSigner` / `InvalidSignatureLength` / `InvalidContractSignature` / `OrderNotApproved` | the order's authorization does not hold |
 | `ItemTargetHasNoCode()` | a MAKE or SETTLE item names a module with no code at that address — a malformed maker-signed item, so it will never fill on any path and no retry helps. Blacklist the order. (The check is explicit rather than solc's, because `Base._callWithTail` hand-encodes the item calls; without it the funding step would silently no-op and the fill would settle around the hole) |
 | `MalformedPackedArray()` | a packed blob is internally inconsistent — a declared length running past the end, or an `Item.op` outside `{MAKE, TAKE, SETTLE}`. Same verdict: never fillable, blacklist |
 

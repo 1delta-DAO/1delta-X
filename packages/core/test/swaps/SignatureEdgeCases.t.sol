@@ -100,7 +100,7 @@ contract FlippableWallet is IERC1271 {
 ///
 ///  The classes covered, and what each is really asserting:
 ///
-///   • ECDSA MALLEABILITY (EIP-2; OpenZeppelin advisory 4.7.3). {recoverCalldata}
+///   • ECDSA MALLEABILITY (EIP-2; OpenZeppelin advisory 4.7.3). {tryRecoverSigner}
 ///     applies no lower-half-`s` check AND accepts both the 65-byte and the 64-byte
 ///     EIP-2098 form — the precise combination OZ patched. So ONE authorisation has
 ///     up to FOUR distinct byte encodings. That is not a vulnerability here, and the
@@ -167,7 +167,7 @@ contract SignatureEdgeCasesTest is MockSettlementBase {
     // ════════════════ ECDSA malleability ════════════════
 
     /// @dev The malleable twin authorises just as well as the original. Asserted
-    ///      rather than assumed: {SignatureVerification.recoverCalldata} applies no
+    ///      rather than assumed: {SignatureVerification.tryRecoverSigner} applies no
     ///      lower-half-`s` check, so this is the CURRENT contract, and a future
     ///      decision to add one should break this test loudly rather than silently
     ///      change which signatures the protocol honours.

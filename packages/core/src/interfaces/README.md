@@ -98,8 +98,13 @@ protection), and similar policy checks — all maker-signed.
 
 ## Ambient interfaces
 
-`IPermit3` (allowance book + witness permits), `IERC1271` / `IERC2612`
-(contract-signer + EIP-2612 permit), `IAggregatorV3` (Chainlink-style price feed
-for depeg guards and the oracle price module), and the protocol-auth shims `ICometAllow` /
-`ICreditDelegationToken` / `IMorphoAuth` used by the lending modules to arrange
-on-behalf authority.
+`IPermit3` (allowance book + witness permits), `ISignatureTransfer` (one-shot
+signed transfers) and `IERC1271` (contract-signer verification, used by core, the
+bridge funnel and the attestation validator).
+
+Interfaces with a single consumer live with that consumer, not here:
+`IERC2612` and the protocol-auth shims `ICometAllow` / `ICreditDelegationToken` /
+`IMorphoAuth` are in [`@lib/interfaces`](../../../lib/src/interfaces) next to
+`PermitHelper` / `DelegationHelper`; `IAggregatorV3` is in
+[`@validators/interfaces`](../../../validators/src/interfaces) next to
+`ChainlinkPriceValidators`.

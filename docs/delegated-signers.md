@@ -94,7 +94,7 @@ keeps the hot path free and the delegate branches collision-proof.
 | 6 | anything else | EIP-1271 on the maker (contract wallets, 7702) |
 
 **Step 3 costs exactly what it cost before delegation existed.**
-`SignatureVerification.recoverCalldata` was split out of `verify` (a
+`SignatureVerification.tryRecoverSigner` was split out of `verify` (a
 behaviour-preserving refactor — the `standardLength` flag keeps
 `InvalidSigner` and `InvalidSignatureLength` distinct), so the verifier recovers
 once, compares, and returns. The registry SLOAD sits behind a *mismatch*; an
@@ -199,7 +199,7 @@ every fill.
 ### A contract maker with a 64/65-byte 1271 signature pays one extra SLOAD
 
 It reaches step 4, misses the registry, and continues to step 6. Safe wallets and
-most others produce longer payloads, which `recoverCalldata` rejects on length
+most others produce longer payloads, which `tryRecoverSigner` rejects on length
 alone, so they skip it entirely.
 
 ### Delegation is additive, never substitutive

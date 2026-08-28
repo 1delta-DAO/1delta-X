@@ -356,8 +356,8 @@ See [docs/oco.md](docs/oco.md).
   ERC20 `transferFrom` shape. Both books are **spender-keyed**: a standing
   allowance can only be consumed by Settlement, which then enforces the
   maker-signed recipient. Includes signed allowance grants
-  (`permitBatch(WithWitness)`), one-shot signed transfers, `revokeToken` /
-  `revokeTaker` / `lockdown`, and a standalone signature-free `AllowanceHolder`.
+  (`permitBatch(WithWitness)`), one-shot signed transfers, and `revokeToken` /
+  `revokeTaker` / `lockdown`.
 - **Uniform module gate.** TAKE modules require `msg.sender == permit3`; MAKE and
   SETTLE modules require `msg.sender == settlement`. A rogue module a maker signs
   can only ever touch *that maker's* approved assets.

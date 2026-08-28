@@ -34,12 +34,10 @@ own rules, and `Permit3.sol` is nothing but the point where they meet.
 | [`UnorderedNonces.sol`](UnorderedNonces.sol)     | Nonce bitmap shared by both signed flows + `invalidateUnorderedNonces`.    |
 | [`EIP712.sol`](EIP712.sol)                       | Fork-safe domain separator (verbatim Permit2 port).                       |
 | [`SignatureVerification.sol`](SignatureVerification.sol) | EOA / EIP-2098 / EIP-1271 / EIP-7702 signature checking.           |
-| [`AllowanceHolder.sol`](AllowanceHolder.sol)     | **Standalone.** Signature-free ephemeral allowances (0x port).            |
 | [`libraries/Allowance.sol`](libraries/Allowance.sol)   | Packed grant/spend primitives shared by both books.                 |
 | [`libraries/Permit3Hash.sol`](libraries/Permit3Hash.sol) | Every EIP-712 type string and struct hasher.                      |
 | [`../interfaces/IPermit3.sol`](../interfaces/IPermit3.sol)             | External surface (books + allowance permits).      |
 | [`../interfaces/ISignatureTransfer.sol`](../interfaces/ISignatureTransfer.sol) | External surface (one-shot transfers).   |
-| [`../interfaces/IAllowanceHolder.sol`](../interfaces/IAllowanceHolder.sol)     | External surface (ephemeral allowances). |
 | [`../interfaces/ITakerModule.sol`](../interfaces/ITakerModule.sol)     | Uniform adapter interface modules implement.       |
 
 All libraries are `internal`-only: they inline into their caller, so there is no
@@ -64,7 +62,6 @@ same detail as below — `grep -rn PROVENANCE` to read them in place.
 | `SignatureVerification.sol` | `libraries/SignatureVerification.sol` | adapted (EIP-7702 ordering, calldata reads) |
 | `TakerAllowance.sol`    | —                                     | **new in Permit3** |
 | `Permit3Base.sol`       | —                                     | **new in Permit3** (glue for the extra layers) |
-| `AllowanceHolder.sol`   | —                                     | **not Permit2** — ported from 0x |
 
 ### Symbol map
 
@@ -208,7 +205,7 @@ interface do not change.
 
 ## Granting authority
 
-Four paths, distinguished by how long the authority lives and what it costs to
+Three paths, distinguished by how long the authority lives and what it costs to
 create. The books and the module dispatch are the same underneath.
 
 | Path                     | Where                | Signature? | Survives the call?      |
@@ -216,7 +213,6 @@ create. The books and the module dispatch are the same underneath.
 | `approveToken` / `approveTaker` | `AllowanceTransfer` / `TakerAllowance` | no  | yes — until revoked  |
 | `permitBatch(WithWitness)`      | `SignedPermits`      | one per grant | yes — until spent or expired |
 | `permitTransferFrom`            | `SignatureTransfer`  | one per transfer | **no** — nothing is written |
-| `AllowanceHolder.exec`          | `AllowanceHolder`    | no         | **no** — zeroed before return |
 
 ### Signature transfers (`SignatureTransfer`)
 
@@ -238,46 +234,6 @@ Nonces come from the same per-owner bitmap the allowance permits use. One nonce
 is spendable exactly once, whichever flow spends it, and
 `invalidateUnorderedNonces` cancels both kinds — at the cost that off-chain
 nonce allocation must be per-owner, not per-message-type.
-
-### Ephemeral allowances (`AllowanceHolder`)
-
-The signature-free option, ported from 0x. The owner approves `AllowanceHolder`
-once on the ERC20, then calls
-`exec(operator, token, amount, target, data)`: the holder grants `operator` an
-allowance, calls `target`, and zeroes the allowance before returning. No
-signature, and no standing approval to the consuming contract.
-
-It is deliberately **standalone and unprivileged**, and must stay that way.
-`exec` makes an arbitrary call to an arbitrary target from the holder's address,
-so anything the holder is trusted with, everyone is trusted with. Folded into
-Permit3 the same capability would be a total bypass: taker modules gate on
-`msg.sender == permit3`, so a Permit3 that could be told to call anything would
-let anyone reach `takeOnBehalf` directly. Never grant the holder authority —
-not as a Permit3 spender, not as a module's authorised caller — and never leave
-tokens or ETH sitting in it.
-
-Two guards carry the design:
-
-- **`_rejectIfERC20`** — targets that answer `balanceOf(address)` are refused.
-  Every user's approval sits on the holder, so a direct call to a token would
-  let any caller spend them all (`exec(_, _, 0, USDC, transferFrom(victim, …))`),
-  the `amount` grant being irrelevant. Only *direct* calls are dangerous —
-  through any intermediate contract `msg.sender` is no longer the holder. The
-  probe is a heuristic and deliberately over-broad; loosen it only with a
-  positive allowlist.
-- **`AllowanceInFlight`** — a nested `exec` on the same (operator, owner, token)
-  is rejected rather than allowed to clobber the outer grant and zero it early.
-  Nesting on a *different* triple stays legal, which multi-token flows need.
-
-The grant is a real `SSTORE`, not `TSTORE` — some target chains have no
-transient storage. Set-then-clear inside one transaction refunds the full write
-(EIP-3529), so on any transaction big enough to clear the `gasUsed/5` refund cap
-— a settlement fill is an order of magnitude past it — the net cost is about the
-cold-slot premium (~2.3k gas), not the ~22k headline.
-
-`msg.sender` is appended to `data` as 20 trailing bytes (ERC-2771 style) so a
-target that cares can recover the real caller; Solidity's decoder ignores
-trailing calldata, so targets that don't are unaffected.
 
 ## Usage
 
@@ -485,9 +441,6 @@ Implemented:
 - [x] One-shot signature transfers (`permitTransferFrom`,
       `permitWitnessTransferFrom`, both single and batched) sharing that nonce
       space — Permit2's `SignatureTransfer`, ported.
-- [x] `AllowanceHolder` — signature-free ephemeral allowances, standalone and
-      unprivileged, with the confused-deputy probe and the in-flight guard.
-      **Not wired into Settlement**; see below.
 - [x] Permit2-derived signature stack: `SignatureVerification` (EOA 65-byte +
       EIP-2098 compact + EIP-1271 contract signatures + EIP-7702 accounts,
       verified ecrecover-first then EIP-1271 fallback) and fork-safe `EIP712`
@@ -512,8 +465,7 @@ Added in the 2026-08-17 audit remediation:
       reverting, so front-running the permit can no longer brick a `fillWithPermit`
       order and partial fills reuse one signature. `Core.fillWithPermit` uses it.
 - [x] **Zero-amount guards** (S-3) on `transferFrom` and the transfer library.
-- [x] **`Taken` event** on `take` (S-8); **double-probe** confused-deputy check in
-      `AllowanceHolder` (S-6).
+- [x] **`Taken` event** on `take` (S-8).
 - [x] **`permitTake` / `permitTakeWithWitness`** — the taker-book analogue of
       `permitTransferFrom`: a signature authorising ONE module dispatch with no
       allowance left behind. Shipped as a Permit3 primitive; Settlement wiring is
@@ -531,9 +483,9 @@ Added in the 2026-08-17 audit remediation:
       allowance preflight, which the token-side preview skipped for item orders.
 
 Not yet implemented:
-- [ ] Settlement wiring for `AllowanceHolder` (filler-side, via the `takerData`
-      channel) and for `permitTake` (needs the fill item-loop to be permit-aware).
-      Both are additive fill-path changes with their own gas-snapshot/test surface.
+- [ ] Settlement wiring for `permitTake` (needs the fill item-loop to be
+      permit-aware). An additive fill-path change with its own
+      gas-snapshot/test surface.
 - [ ] Concrete taker modules for chains not yet covered by the `packages/modules`
       tree.
 - [ ] Foundry invariant suite asserting `data` round-trips cleanly through each

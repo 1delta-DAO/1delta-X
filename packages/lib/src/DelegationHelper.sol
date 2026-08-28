@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {ICreditDelegationToken} from "@core/interfaces/ICreditDelegationToken.sol";
-import {ICometAllow} from "@core/interfaces/ICometAllow.sol";
-import {IMorphoAuth} from "@core/interfaces/IMorphoAuth.sol";
+import {ICreditDelegationToken} from "@lib/interfaces/ICreditDelegationToken.sol";
+import {ICometAllow} from "@lib/interfaces/ICometAllow.sol";
+import {IMorphoAuth} from "@lib/interfaces/IMorphoAuth.sol";
 
 // ──────────────────── DelegationHelper ────────────────────
 //

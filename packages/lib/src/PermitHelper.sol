@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IERC2612} from "@core/interfaces/IERC2612.sol";
+import {IERC2612} from "@lib/interfaces/IERC2612.sol";
 
 /// @title PermitHelper
 /// @notice Library for optional EIP-2612 permit replay appended to module `data`.

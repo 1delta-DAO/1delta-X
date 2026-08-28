@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
-import {IAggregatorV3} from "@core/interfaces/IAggregatorV3.sol";
+import {IAggregatorV3} from "@validators/interfaces/IAggregatorV3.sol";
 
 /// @dev Shared, hardened Chainlink read. Reverts the validator (→ fill aborts)
 ///      on a stale, incomplete, or non-positive round. `maxStaleness` is signed

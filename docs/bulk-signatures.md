@@ -62,7 +62,7 @@ fold plus one extra `_hashTypedData`. Non-bulk signatures pay nothing: the branc
 is three comparisons on a length that is already loaded.
 
 Implementation note: verifying the root inline, with its own copy of
-`recoverCalldata`/`verify`, measured **+1,343 bytes** of Settlement against a
+`tryRecoverSigner`/`verify`, measured **+1,343 bytes** of Settlement against a
 404-byte EIP-170 budget. Reusing the existing verifier tail by changing its inputs
 is what made the feature fit at all — see [lop-parity.md](lop-parity.md) §4.
 

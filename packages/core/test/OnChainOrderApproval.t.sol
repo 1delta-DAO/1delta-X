@@ -310,4 +310,62 @@ contract OnChainOrderApprovalTest is MockSettlementBase {
         settlement.fill(o, "", AMOUNT_IN / 10); // maker's approval still stands
         assertGt(settlement.filled(hash), filledBefore, "order still fillable");
     }
+
+    /// @dev REGRESSION: the `order.maker == msg.sender` guard on {OrderState.approveOrder}
+    ///      is LOAD-BEARING, and not for the reason it looks. The approval mapping is
+    ///      keyed by `msg.sender` on write and by `order.maker` on read, so a stranger's
+    ///      row is genuinely never consulted on the fill path — which makes the guard
+    ///      look redundant, and is exactly why it must not be deleted.
+    ///
+    ///      {OrderState.revokeOrderApproval} takes a BARE HASH and uses a set approval
+    ///      flag as PROOF OF MAKERSHIP before parking the cancel sentinel in the
+    ///      globally-keyed `filled` mapping. The guard is what makes that proof sound.
+    ///      Remove it and a stranger owns a two-transaction griefing attack on every
+    ///      partially-filled order in the book, whose struct is public by construction:
+    ///
+    ///        1. `approveOrder(victimOrder)` → sets `orderApproved[attacker][victimHash]`
+    ///        2. `revokeOrderApproval(victimHash)` → flag is set, so
+    ///           `filled[victimHash] = type(uint256).max` — the victim's order is
+    ///           permanently cancelled.
+    ///
+    ///      Both write doors are checked, {approveOrder} and the {approveOrders} batch,
+    ///      because deleting the guard from either one alone opens the same attack.
+    ///      {test_revoke_byNonMaker_cannotCancelSomeoneElsesOrder} pins the second step
+    ///      in isolation; this pins the chain, so the guard cannot be dropped as dead
+    ///      weight without a red test.
+    function test_approveThenRevoke_byStranger_cannotCancelSomeoneElsesOrder() public {
+        address attacker = makeAddr("approval-griefer");
+
+        Order memory o = _order(24);
+        bytes32 hash = _approve(o);
+        vm.prank(solver);
+        settlement.fill(o, "", AMOUNT_IN / 10); // partial → filled != 0, the sentinel's precondition
+        uint256 filledBefore = settlement.filled(hash);
+
+        // Step 1, single — denied. The attacker holds the victim's full order struct.
+        vm.prank(attacker);
+        vm.expectRevert(OrderState.NotOrderMaker.selector);
+        settlement.approveOrder(o);
+
+        // Step 1, batch — the second write site, denied on the same guard.
+        Order[] memory batch = new Order[](1);
+        batch[0] = o;
+        vm.prank(attacker);
+        vm.expectRevert(OrderState.NotOrderMaker.selector);
+        settlement.approveOrders(batch);
+
+        assertFalse(settlement.orderApproved(attacker, hash), "attacker row must never be set");
+
+        // Step 2 — inert without step 1, because `wasApproved` reads the attacker's row.
+        vm.prank(attacker);
+        settlement.revokeOrderApproval(hash);
+
+        assertEq(settlement.filled(hash), filledBefore, "victim's order must not be cancelled");
+        assertTrue(settlement.orderApproved(address(cm), hash), "maker's own approval untouched");
+
+        // And the victim's order is not merely un-cancelled, it is still fillable.
+        vm.prank(solver);
+        settlement.fill(o, "", AMOUNT_IN / 10);
+        assertGt(settlement.filled(hash), filledBefore, "order still fills for its maker");
+    }
 }

@@ -1027,7 +1027,7 @@ contract SettlementLens {
         // Mirrors {Signatures._verifySignature} EXACTLY, including the delegated
         // branch — the drift this whole lens/settler split has already been bitten
         // by once (see {OrderGates}). Maker first, then the maker-nominated signer.
-        (bool standardLength, address signer) = SignatureVerification.recoverCalldata(sigBody, digest);
+        (bool standardLength, address signer) = SignatureVerification.tryRecoverSigner(sigBody, digest);
         if (standardLength && signer != address(0)) {
             if (signer == expected) return;
             uint256 expiry = SETTLEMENT.orderSignerExpiry(expected, signer);

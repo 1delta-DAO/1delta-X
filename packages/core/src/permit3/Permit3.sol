@@ -39,10 +39,6 @@ import {SignatureTransfer} from "./SignatureTransfer.sol";
 ///    • signed one-shot — {SignatureTransfer}: `permitTransferFrom` moves
 ///      tokens once and leaves no allowance behind
 ///
-///  A fourth, signature-free path lives OUTSIDE this contract: {AllowanceHolder}
-///  grants an allowance that exists only for the duration of one call. It is
-///  deliberately a separate, unprivileged contract — see the note there.
-///
 ///  PROVENANCE
 ///  ──────────
 ///  Permit3 is Permit2 (Uniswap, MIT) plus a second allowance book. Every file
@@ -57,7 +53,6 @@ import {SignatureTransfer} from "./SignatureTransfer.sol";
 ///                           batch spanning both books, bitmap nonces, witness
 ///    new in Permit3         {TakerAllowance} {Permit3Base} {Permit3Hash}
 ///                           (allowance-permit half)
-///    not Permit2 at all     {AllowanceHolder} — ported from 0x
 ///
 ///  This file mirrors Permit2's own `Permit2.sol`, which is likewise nothing but
 ///  `contract Permit2 is SignatureTransfer, AllowanceTransfer {}`.
