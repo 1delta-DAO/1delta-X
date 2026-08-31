@@ -263,8 +263,8 @@ abstract contract Core is Base {
     function _permitBatch(address owner, IPermit3.PermitBatch calldata batch, bytes32 witness, bytes calldata sig)
         private
     {
-        (uint256 batchLen, uint256 total) = _permitBatchTail(batch, sig);
-        _permitBatchHead(owner, witness, batchLen, total);
+        (uint256 base, uint256 batchLen, uint256 total) = _permitBatchTail(batch, sig);
+        _permitBatchHead(base, owner, witness, batchLen, total);
     }
 
     /// @dev Writes the ARGUMENT TAIL — the encoded `batch` tuple followed by `sig` —
@@ -276,13 +276,22 @@ abstract contract Core is Base {
     ///      One block referencing all of `batch`'s members, `sig`, `owner`, the hub
     ///      and the typehash at once does not fit the LEGACY codegen's 16-slot reach
     ///      ("stack too deep"), and the legacy profile is the one the test suite
-    ///      builds with. Neither half bumps the free-memory pointer and nothing that
-    ///      allocates runs between them, so both see the same base — that is exactly
-    ///      why the two halves take only value-type arguments.
+    ///      builds with.
+    ///
+    ///      THE BASE POINTER IS RETURNED, NOT RE-DERIVED. Both halves write one
+    ///      region, so they must agree on where it starts. Reading `mload(0x40)`
+    ///      independently in each would make that agreement rest on an unwritten
+    ///      precondition — "nothing between these two calls allocates" — which holds
+    ///      today by inspection and which the next edit to {_permitBatch} could break
+    ///      silently, producing a head and a tail at different bases and a malformed
+    ///      permit call rather than a compile error. Returning it makes the shared
+    ///      base an ordinary data dependency the compiler carries for us. It is also
+    ///      what keeps the tail's stores demonstrably live: the pointer they were
+    ///      written through flows into the `call` that reads them.
     function _permitBatchTail(IPermit3.PermitBatch calldata batch, bytes calldata sig)
         private
         pure
-        returns (uint256 batchLen, uint256 total)
+        returns (uint256 base, uint256 batchLen, uint256 total)
     {
         IPermit3.TokenPermit[] calldata toks = batch.tokens;
         IPermit3.TakerPermit[] calldata taks = batch.takers;
@@ -291,6 +300,7 @@ abstract contract Core is Base {
         /// @solidity memory-safe-assembly
         assembly {
             let p := mload(0x40)
+            base := p
             let tokBytes := mul(toks.length, 0x80) // TokenPermit = 4 static words
             // `batch`'s own tail: 4 head words, then (length + data) per array.
             batchLen := add(0xc0, add(tokBytes, mul(taks.length, 0xa0))) // TakerPermit = 5
@@ -320,17 +330,29 @@ abstract contract Core is Base {
     ///      call, bubbling Permit3's revert verbatim (a bad signature, a lapsed
     ///      deadline and a spent-and-skipped nonce must read exactly as they did
     ///      through the typed call). See {_permitBatchTail} for the split.
-    function _permitBatchHead(address owner, bytes32 witness, uint256 batchLen, uint256 total) private {
+    function _permitBatchHead(uint256 base, address owner, bytes32 witness, uint256 batchLen, uint256 total)
+        private
+    {
         address hub = address(PERMIT3);
         bytes32 typeHash = OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH;
         /// @solidity memory-safe-assembly
         assembly {
-            let p := mload(0x40) // the calldata starts 4 bytes into this word
+            let p := base // the SAME base the tail wrote from; calldata starts at p+0x1c
             // `permitBatchWithWitnessHashIfNeeded(address,((address,address,uint160,
             //  uint48)[],(address,address,bytes32,uint160,uint48)[],uint256,uint256),
             //  bytes32,bytes32,bytes)` — a literal rather than `.selector` because the
-            // extra local does not fit the stack here; `PermitEncoding.t.sol` pins it
-            // against the interface so it cannot drift silently.
+            // extra local does not fit the stack here. `PermitBatchEncoding.t.sol` pins
+            // it against the interface AND pins this whole block's output byte-for-byte
+            // against `abi.encodeCall`, so neither the selector nor an offset can drift
+            // silently.
+            //
+            // NO `extcodesize` GUARD, unlike {Base._callWithTail}, which raises
+            // {ItemTargetHasNoCode} when it hand-encodes. The difference is the target:
+            // there it is a MAKER-SUPPLIED module address, so a codeless one is
+            // reachable input and a bare `call` would silently succeed. Here it is the
+            // immutable `PERMIT3`, fixed at construction and dereferenced by every
+            // other path in this contract — a codeless one is a broken deployment, not
+            // an input, and would fail the fill moments later at the first transfer.
             mstore(p, 0x6c837b2e)
             mstore(add(p, 0x20), and(owner, 0xffffffffffffffffffffffffffffffffffffffff))
             mstore(add(p, 0x40), 0xa0) // offset of `batch`, from the head's start

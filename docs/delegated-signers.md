@@ -212,38 +212,59 @@ Two consequences of the reservation, both deliberate:
 
 ## Caveats
 
-### Revoking a delegate does not invalidate an outstanding permit
+### Revocation is final, and it is one call
 
-A nomination permit burns its bitmap coordinate **only when relayed**. So this
-sequence leaves the delegate live:
+A nomination permit burns its bitmap coordinate only when **relayed**. That used
+to leave a hole: a maker who signed a gasless nomination, never had it landed, and
+then revoked was still exposed — whoever held the message could relay it up to its
+`deadline` and the delegate was live again, its signature settling orders the maker
+never signed.
 
-| | |
-|---|---|
-| T0 | maker signs a gasless nomination for `d`; the relayer never lands it |
-| T1 | maker revokes with `setOrderSigner(d, 0)` — the registry entry is gone |
-| T2 | **anyone** relays the stale permit, up to its `deadline` |
-| T3 | `d` is nominated again, and its signature settles orders |
-
-`test_permit_replayRejected` covers the *relay-then-revoke-then-replay* ordering,
-where the nonce is already spent. The ordering above is the one that bites, and it
-is pinned by `test_permit_staleUnrelayedPermitResurrectsARevokedDelegate`.
-
-**Revocation is therefore two calls, not one** — clear the registry *and* burn the
-permit coordinate:
+The remedy used to be a **two-call discipline** — clear the registry, then
+`cancelOrders([permitNonce | SIGNER_NONCE_NS])`. The SDK emitted both. A wallet, a
+block explorer, or a hand-rolled script emitted one. A safety property that depends
+on the caller making a second call is not a safety property, so it is now the
+contract's job:
 
 ```solidity
-setOrderSigner(d, 0);
-cancelOrders([permitNonce | 1 << 255]);   // ⚠ the NAMESPACED coordinate
+setOrderSigner(d, 0);   // clears the registry AND burns every permit for `d`
 ```
 
-The SDK emits exactly that pair from `encodeRevokeOrderSigner(d)`, and can do so
-without any bookkeeping because `signerPermitNonce(d)` derives the coordinate from
-the delegate address itself. Pinned by
-`test_permit_burningTheCoordinateMakesRevocationFinal`.
+`OrderState._setOrderSigner` writes `nonceBitmap[maker][word] = type(uint256).max`
+on the revoke branch, where `word = SIGNER_NONCE_NS >> 8 | d`. One `SSTORE`, no new
+storage, and every client gets the property whether or not it has ever seen this
+document.
 
-Give permits a bounded `deadline`. An unrelayed permit is a standing right to
-restore the delegate; an unbounded deadline makes it a permanent one. The SDK
-defaults to one hour.
+**That single write covers every outstanding permit only because the coordinate
+space is forced.** A permit's nonce MUST be `(signer << 8) | seq` with `seq` one
+byte — `Signatures` rejects anything else with `SignerPermitNonceMalformed` — so all
+256 coordinates a delegate could ever use live in that one word. Were the nonce
+free-form, a permit could sit in another word and survive the revocation, which is
+the hole all over again. The rule is enforced, not assumed; `test_permit_freeFormNonceRejected`
+is the proof. It also forces `nonce < 2^168`, so a bare nonce can never itself carry
+`SIGNER_NONCE_NS` — without which `n` and `n | SIGNER_NONCE_NS` would be two distinct
+maker-signed permits sharing one coordinate (`test_permit_bareNonceCarryingTheNamespaceRejected`).
+
+**The price, and it is deliberate:** after revoking `d`, gasless **re**-nomination
+of `d` is impossible — every coordinate it could use is spent. Direct
+`setOrderSigner(d, expiry)` still works, and a maker who cannot pay gas can nominate
+a *different* key, which is what you should be doing with a delegate you just
+revoked. Buying re-nomination back would take a per-delegate epoch in the permit
+typehash: a storage slot and a breaking permit type, spent on making a compromised
+key reusable.
+
+`seq` therefore distinguishes *concurrent* nominations of the same delegate — a
+rotation where an older permit may still be in flight — not successive ones across a
+revocation. `encodeBurnSignerPermits` remains for the different job of killing a
+permit **without** revoking: a nomination signed but never wanted relayed, where the
+delegate was never live in the first place.
+
+Pinned by `test_permit_staleUnrelayedPermit_cannotResurrectARevokedDelegate`,
+`test_revocation_burnsEverySeqForThatDelegate` (all 256 die together) and
+`test_revocation_doesNotBurnAnotherDelegatesPermits` (revocation stays per-address —
+burning a word must not become an accidental bulk revoke).
+
+Give permits a bounded `deadline` anyway. The SDK defaults to one hour.
 
 ### There is no bulk revocation, and `rollbackNonces` is not a substitute
 
@@ -342,7 +363,11 @@ capability:
 | `test_signerPermit_cannotCancelALiveOrder` | a nomination permit cannot reach an order's nonce |
 | `test_permit_bareNonceCancellationDoesNotReachIt` | …and the two halves are disjoint in both directions |
 | `test_rollbackNonces_doesNotRevokeANomination` | a rollback retires orders, not the signing key |
-| `test_permit_staleUnrelayedPermitResurrectsARevokedDelegate` | an unrelayed permit outlives a registry revocation |
+| `test_permit_staleUnrelayedPermit_cannotResurrectARevokedDelegate` | revocation burns the permit word, so a stale message is dead |
+| `test_revocation_burnsEverySeqForThatDelegate` | one revoke retires all 256 coordinates, not just the remembered one |
+| `test_revocation_doesNotBurnAnotherDelegatesPermits` | …and only that delegate's — revocation stays per-address |
+| `test_permit_freeFormNonceRejected` | the `(signer << 8) \| seq` derivation is enforced, not assumed |
+| `test_permit_bareNonceCarryingTheNamespaceRejected` | a bare nonce cannot carry `SIGNER_NONCE_NS` |
 | `test_permit_burningTheCoordinateMakesRevocationFinal` | …and the two-call revocation closes it |
 | `test_rollbackNonces_doesNotContainACompromisedDelegate` | a nonce floor is not containment |
 | `test_perAddressRevocation_isTheOnlyContainment` | …naming the delegate is |

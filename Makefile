@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: test build test-all test-fork build-all gas gas-check gas-diff size-check docs-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: test build test-all test-fork build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -164,6 +164,17 @@ GAS_SEED ?= 0x1de17a
 ## CI gate: fail if any doc cites a test that no longer exists.
 docs-check:
 	@python3 tools/check-doc-citations.py
+
+# ── Module shape gate ─────────────────────────────────────────────────────────
+#
+# Permit3's taker book is keyed by `(user, spender, module, ref)` and cannot tell
+# `take` from `takeFor`, so a module implementing BOTH dispatches would let one
+# `approveTaker` authorise either — with nothing in the grant saying which. Every
+# module shipped implements one; this is what makes that a rule rather than a
+# habit. See docs/reference-audits.md F23.
+## CI gate: fail if any contract implements both taker dispatch shapes.
+modules-check:
+	@python3 tools/check-module-shapes.py
 
 ## Regenerate the committed gas baseline (.gas-snapshot) for the core package.
 gas:

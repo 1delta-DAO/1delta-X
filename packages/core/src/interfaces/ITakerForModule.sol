@@ -86,6 +86,13 @@ pragma solidity ^0.8.28;
 ///  maker reading their grant cannot tell which they authorised. Implement one or
 ///  the other per contract, never both.
 ///
+///  ⚠ THIS IS ENFORCED, NOT ADVISED. `make modules-check`
+///  (`tools/check-module-shapes.py`) fails the build on any contract declaring both
+///  `takeOnBehalf` and `takeForOnBehalf`, or inheriting both interfaces. It was a
+///  convention living in this comment until 2026-08-31; see
+///  `docs/reference-audits.md` F23 for why a rule that holds only because every
+///  current integrator follows it is not a rule.
+///
 ///  Modules MUST enforce `msg.sender == permit3` as their first statement, for
 ///  exactly the reason {ITakerModule} gives. `Permit3.takeFor` is `nonReentrant`
 ///  alongside `take`, so a module still cannot nest a second take: a composite op

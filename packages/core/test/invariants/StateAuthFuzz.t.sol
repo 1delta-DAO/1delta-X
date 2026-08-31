@@ -287,8 +287,12 @@ contract StateAuthFuzz is MockSettlementBase {
     ///         coordinate made an unrelayed permit a latent, third-party-triggerable
     ///         cancel on every order the maker later signed with the same nonce; this
     ///         is the property that closed it.
-    function testFuzz_relayedNominationNeverBurnsAnOrderNonce(uint256 nonce, uint256 expiry) public {
-        nonce = bound(nonce, 0, type(uint256).max >> 1); // an ORDER-space coordinate
+    /// @dev `seq`, not a free nonce: the settler forces `nonce >> 8 == uint160(signer)`
+    ///      ({Signatures.SignerPermitNonceMalformed}), so the legal permit space for a
+    ///      delegate is exactly its 256 sequence numbers. Fuzzing outside it would
+    ///      only be fuzzing the revert.
+    function testFuzz_relayedNominationNeverBurnsAnOrderNonce(uint256 seq, uint256 expiry) public {
+        uint256 nonce = (uint256(uint160(delegate)) << 8) | bound(seq, 0, 255);
         expiry = bound(expiry, 1, type(uint256).max);
 
         bytes memory sig = _signPermit(makerPk, delegate, expiry, nonce, block.timestamp + 1 days);
@@ -307,7 +311,10 @@ contract StateAuthFuzz is MockSettlementBase {
     ///         keys for the desk that issued it.
     function testFuzz_delegateCannotRedelegate(address target, uint256 expiry, uint256 nonce) public {
         vm.assume(target != address(0));
-        nonce = bound(nonce, 0, type(uint256).max >> 1);
+        // Derived, so the call fails for the REASON UNDER TEST. With a free nonce it
+        // would revert `SignerPermitNonceMalformed` and the untyped `expectRevert`
+        // below would pass even if re-delegation were wide open.
+        nonce = (uint256(uint160(target)) << 8) | (nonce & 0xff);
 
         vm.prank(maker);
         settlement.setOrderSigner(delegate, block.timestamp + 30 days);

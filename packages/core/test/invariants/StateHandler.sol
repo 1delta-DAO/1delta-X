@@ -218,20 +218,31 @@ contract StateHandler is MockSettlementBase {
     ///      RESERVED half {Signatures.setOrderSignerWithSig} consumes. Watching both
     ///      halves is what turns "a relayed nomination must never burn an order nonce"
     ///      into a checkable diff rather than a comment.
-    function _coord(uint256 c) internal pure returns (uint256) {
+    /// @dev The watched bitmap coordinates: six in ORDER space, then the signer half.
+    ///
+    ///      The signer half is no longer `NS | 0..3`. A permit's nonce is FORCED to
+    ///      `(signer << 8) | seq` ({Signatures.SignerPermitNonceMalformed}), so those
+    ///      coordinates are unreachable and watching them proved nothing. Each
+    ///      candidate delegate gets its own watched coordinate at `seq = 0` instead,
+    ///      which is also what makes the revocation burn observable: revoking a
+    ///      delegate blanks that delegate's whole word, and its watched bit sits in
+    ///      it. The order coordinates live in word 0 and every other delegate in its
+    ///      own, so one revocation can flip exactly one watched bit.
+    ///
+    ///      `c == 9` is a NEGATIVE CONTROL — a free-form signer-space coordinate no
+    ///      legal permit can consume, and no revocation can reach. It must never flip.
+    function _coord(uint256 c) internal view returns (uint256) {
         if (c == 0) return 0;
         if (c == 1) return 1;
         if (c == 2) return 2;
         if (c == 3) return 3;
         if (c == 4) return 7;
         if (c == 5) return 255;
-        if (c == 6) return NS;
-        if (c == 7) return NS | 1;
-        if (c == 8) return NS | 2;
+        if (c < 9) return NS | (uint256(uint160(signers[c - 5])) << 8);
         return NS | 3;
     }
 
-    function _coordIdx(uint256 nonce) internal pure returns (uint256) {
+    function _coordIdx(uint256 nonce) internal view returns (uint256) {
         for (uint256 c; c < N_COORDS; ++c) {
             if (_coord(c) == nonce) return c;
         }
@@ -717,7 +728,13 @@ contract StateHandler is MockSettlementBase {
 
         uint256[] memory before = _snap();
         uint256 m = _makerIdxOf(caller);
-        if (m != type(uint256).max && k != 0) _allow(_iSigner(m, k));
+        if (m != type(uint256).max && k != 0) {
+            _allow(_iSigner(m, k));
+            // A REVOCATION also blanks the delegate's whole permit word — the single
+            // `SSTORE` that makes revocation final ({OrderState._setOrderSigner}).
+            // That delegate's watched coordinate lives in it; nothing else does.
+            if (expiry == 0) _allow(_iBit(m, 5 + k));
+        }
 
         vm.prank(caller);
         try settlement.setOrderSigner(signers[k], expiry) {
@@ -740,7 +757,10 @@ contract StateHandler is MockSettlementBase {
     {
         uint256 m = makerSeed % N_MAKERS;
         uint256 k = (signerSeed % (N_SIGNERS - 1)) + 1;
-        uint256 n = nonceSeed % 4; // consumed at NS|n → watched coords 6..9
+        // FORCED derivation: the settler requires `nonce >> 8 == uint160(signer)`, so
+        // the handler cannot pick a free coordinate even if it wanted to. `seq = 0`
+        // is the one this delegate's watched coordinate tracks.
+        uint256 n = uint256(uint160(signers[k])) << 8;
         uint256 expiry = nonceSeed % 3 == 0 ? 0 : block.timestamp + 7 days;
         uint256 deadline = block.timestamp + 1 days;
         // Every other permit is signed by the WRONG key: an outsider forging a
@@ -750,7 +770,10 @@ contract StateHandler is MockSettlementBase {
 
         uint256[] memory before = _snap();
         _allow(_iSigner(m, k));
-        _allow(_iBit(m, 6 + n)); // the RESERVED coordinate — and only it
+        // The RESERVED coordinate for THIS delegate — and only it. A revocation
+        // (`expiry == 0`) blanks the delegate's whole word, but this is the only
+        // watched bit inside it, so the allowance stays exact either way.
+        _allow(_iBit(m, 5 + k));
 
         bytes32 digest = keccak256(
             abi.encodePacked(

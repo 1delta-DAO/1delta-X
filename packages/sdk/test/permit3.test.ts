@@ -3,6 +3,14 @@ import { decodeFunctionData, getAddress, keccak256, recoverTypedDataAddress, toH
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
+  Permit3MessageKind,
+  permit3Nonce,
+  permit3NonceKind,
+  permit3NonceMask,
+  permit3NonceWord,
+} from "../src/permit3nonce";
+import { permitBatch } from "../src/permit";
+import {
   PERMIT3_ABI,
   buildRevokeAll,
   buildStrictOnboarding,
@@ -45,7 +53,7 @@ describe("Permit3 calldata builders round-trip", () => {
   });
 
   it("permitTake encodes its tuple", () => {
-    const p = permitTake(MODULE, refFor("0xc0ffee"), 500n, 7n, 1_893_456_000n);
+    const p = permitTake(MODULE, refFor("0xc0ffee"), 500n, permit3Nonce(Permit3MessageKind.Take, 7n), 1_893_456_000n);
     const data = encodePermitTake(p, account.address, account.address, "0xc0ffee", SIG);
     const { functionName, args } = decodeFunctionData({ abi: PERMIT3_ABI, data });
     expect(functionName).toBe("permitTake");
@@ -74,7 +82,7 @@ describe("Permit3 calldata builders round-trip", () => {
 
 describe("permitTake signature binds spender and recovers to signer", () => {
   it("recovers to the owner", async () => {
-    const p = permitTake(MODULE, refFor("0xc0ffee"), 500n, 7n, 1_893_456_000n);
+    const p = permitTake(MODULE, refFor("0xc0ffee"), 500n, permit3Nonce(Permit3MessageKind.Take, 7n), 1_893_456_000n);
     const td = permitTakeTypedData(p, SPENDER, DEPLOYMENT);
     const sig = await signPermitTake(account, p, SPENDER, DEPLOYMENT);
     const recovered = await recoverTypedDataAddress({ ...(td as any), signature: sig });
@@ -82,7 +90,7 @@ describe("permitTake signature binds spender and recovers to signer", () => {
   });
 
   it("a different spender changes the digest (leaked sig is useless elsewhere)", async () => {
-    const p = permitTake(MODULE, refFor("0xc0ffee"), 500n, 7n, 1_893_456_000n);
+    const p = permitTake(MODULE, refFor("0xc0ffee"), 500n, permit3Nonce(Permit3MessageKind.Take, 7n), 1_893_456_000n);
     const sig = await signPermitTake(account, p, SPENDER, DEPLOYMENT);
     const otherSpender = getAddress("0x00000000000000000000000000000000000000d4");
     const tdOther = permitTakeTypedData(p, otherSpender, DEPLOYMENT);
@@ -195,3 +203,59 @@ const ERC20_ABI = [
     outputs: [{ name: "", type: "bool" }],
   },
 ] as const;
+
+// ──────────────────── Permit3 nonce namespacing (F23) ────────────────────
+//
+// `UnorderedNonces` keeps ONE bitmap per owner, shared by every signed flow, and
+// says so: "nonce allocation must be per-owner, not per-message-type." Nothing
+// enforced it, so an owner could sign a PermitBatch and a PermitTake onto one
+// coordinate — and whoever held either unrelayed message could burn the bit and
+// DoS the other (batch returns silently on a spent bit; take and transfer revert).
+describe("Permit3 nonce namespacing", () => {
+  it("keeps the kinds disjoint whatever seq each allocator picks", () => {
+    const seqs = [0n, 1n, 7n, 255n, 1n << 200n, (1n << 248n) - 1n];
+    const all = seqs.flatMap((s) => [
+      permit3Nonce(Permit3MessageKind.Batch, s),
+      permit3Nonce(Permit3MessageKind.Take, s),
+      permit3Nonce(Permit3MessageKind.Transfer, s),
+    ]);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("round-trips the kind", () => {
+    for (const k of [Permit3MessageKind.Batch, Permit3MessageKind.Take, Permit3MessageKind.Transfer]) {
+      expect(permit3NonceKind(permit3Nonce(k, 42n))).toBe(k);
+    }
+  });
+
+  it("bounds seq to the 248 bits below the tag", () => {
+    expect(() => permit3Nonce(Permit3MessageKind.Take, 1n << 248n)).toThrow(/out of range/);
+    expect(() => permit3Nonce(Permit3MessageKind.Take, -1n)).toThrow(/out of range/);
+  });
+
+  // The guard is only worth anything at a point every message passes through —
+  // the `assertOrderNonce` lesson from F23, where an exported-but-uncalled helper
+  // read as a guarantee for months.
+  it("is enforced by the builders, not merely exported", () => {
+    expect(() => permitTake(MODULE, refFor("0xdeadbeef"), 1n, 7n, 0n)).toThrow(/expected Take/);
+    expect(() => permitTake(MODULE, refFor("0xdeadbeef"), 1n, permit3Nonce(Permit3MessageKind.Transfer, 7n), 0n)).toThrow(
+      /namespaced for Transfer, expected Take/,
+    );
+    expect(permitTake(MODULE, refFor("0xdeadbeef"), 1n, permit3Nonce(Permit3MessageKind.Take, 7n), 0n).nonce).toBe(
+      permit3Nonce(Permit3MessageKind.Take, 7n),
+    );
+  });
+
+  // Batch is kind 0 on purpose: a legacy small nonce stays valid, and it still
+  // cannot collide with a properly allocated Take or Transfer.
+  it("leaves legacy batch nonces working", () => {
+    expect(permit3NonceKind(7n)).toBe(Permit3MessageKind.Batch);
+    expect(permitBatch([], [], 7n, 0n).nonce).toBe(7n);
+  });
+
+  it("locates the bitmap coordinate for invalidateUnorderedNonces", () => {
+    const n = permit3Nonce(Permit3MessageKind.Take, 259n);
+    expect(permit3NonceWord(n)).toBe(n >> 8n);
+    expect(permit3NonceMask(n)).toBe(1n << 3n);
+  });
+});

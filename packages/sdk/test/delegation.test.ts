@@ -105,51 +105,38 @@ describe("the reserved nonce half (SIGNER_NONCE_NS)", () => {
     expect(signerPermitCoordinate(DELEGATE)).toBe(signerPermitNonce(DELEGATE) | SIGNER_NONCE_NS);
   });
 
-  it("bounds seq to 16 bits", () => {
-    expect(() => signerPermitNonce(DELEGATE, 0x10000)).toThrow(/out of range/);
+  // ONE byte, not two: the settler enforces `nonce >> 8 === delegate`, so every
+  // permit for a delegate shares that delegate's single bitmap word — which is
+  // what lets one revocation retire all 256 of them.
+  it("bounds seq to 8 bits", () => {
+    expect(() => signerPermitNonce(DELEGATE, 0x100)).toThrow(/out of range/);
     expect(() => signerPermitNonce(DELEGATE, -1)).toThrow(/out of range/);
+  });
+
+  it("derives the nonce the settler will accept", () => {
+    expect(signerPermitNonce(DELEGATE, 7) >> 8n).toBe(BigInt(DELEGATE));
+    expect(signerPermitNonce(DELEGATE, 255) >> 8n).toBe(BigInt(DELEGATE));
   });
 });
 
 describe("revocation that sticks (M-1)", () => {
-  // setOrderSigner(d, 0) alone leaves an unrelayed permit live: whoever holds it
-  // can re-nominate. Revocation must ALSO burn the permit's coordinate.
-  it("emits both the registry clear and the permit burn", () => {
+  // This used to emit a clear AND a burn, because `setOrderSigner(d, 0)` alone
+  // left an unrelayed permit live. The settler now burns the delegate's whole
+  // permit word inside that call, so the property no longer depends on the caller
+  // reaching for this helper — and the helper is one call again.
+  it("is a single registry clear", () => {
     const calls = encodeRevokeOrderSigner(DELEGATE);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
 
     const clear = decodeFunctionData({ abi: SETTLEMENT_ABI, data: calls[0] });
     expect(clear.functionName).toBe("setOrderSigner");
     expect(clear.args).toEqual([DELEGATE, 0n]);
-
-    const burn = decodeFunctionData({ abi: SETTLEMENT_ABI, data: calls[1] });
-    expect(burn.functionName).toBe("cancelOrders");
-    expect(burn.args).toEqual([[signerPermitCoordinate(DELEGATE)]]);
-  });
-
-  it("burns every seq it is told about", () => {
-    const burn = decodeFunctionData({ abi: SETTLEMENT_ABI, data: encodeBurnSignerPermits(DELEGATE, [0, 1, 2]) });
-    expect(burn.args).toEqual([[0, 1, 2].map((s) => signerPermitCoordinate(DELEGATE, s))]);
-  });
-
-  // The burn must target the reserved half — burning the BARE nonce would cancel
-  // a live order instead, which is the exact collision the namespace prevents.
-  it("burns only reserved coordinates, never order nonces", () => {
-    const burn = decodeFunctionData({ abi: SETTLEMENT_ABI, data: encodeBurnSignerPermits(DELEGATE, [0, 5]) });
-    for (const n of (burn.args as readonly bigint[][])[0]) expect(isReservedNonce(n)).toBe(true);
-  });
-
-  it("round-trips the relay calldata against the permit", async () => {
-    const { permit, sig } = await nominateOrderSigner(account, account.address, DELEGATE, 99n, d, { now: 1n });
-    const decoded = decodeFunctionData({ abi: SETTLEMENT_ABI, data: encodeSetOrderSignerWithSig(permit, sig) });
-    expect(decoded.functionName).toBe("setOrderSignerWithSig");
-    expect(decoded.args).toEqual([permit.maker, permit.signer, permit.expiry, permit.nonce, permit.deadline, sig]);
   });
 });
 
 describe("bulk revocation (M-3)", () => {
-  it("expands to a clear + burn pair per delegate", () => {
-    expect(encodeRevokeOrderSigners([DELEGATE, OTHER])).toHaveLength(4);
+  it("expands to one clear per delegate", () => {
+    expect(encodeRevokeOrderSigners([DELEGATE, OTHER])).toHaveLength(2);
   });
 
   // There is no on-chain enumeration of delegates, so a maker who has lost the

@@ -10,6 +10,7 @@ import type {
   SpenderRefPair,
   TokenSpenderPair,
 } from "./types";
+import { assertPermit3Nonce, Permit3MessageKind } from "./permit3nonce";
 
 /**
  * Direct Permit3 helpers — typed-data + calldata for the hub's own surface, which
@@ -26,8 +27,9 @@ export function refFor(data: Hex): Hex {
   return keccak256(data);
 }
 
+/** ⚠ Nonce must come from `permit3Nonce(Permit3MessageKind.Take, seq)` — see {@link assertPermit3Nonce}. */
 export function permitTake(module: Address, ref: Hex, amount: bigint, nonce: bigint, deadline: bigint): PermitTake {
-  return { module, ref, amount, nonce, deadline };
+  return { module, ref, amount, nonce: assertPermit3Nonce(nonce, Permit3MessageKind.Take), deadline };
 }
 
 export function tokenSpenderPair(token: Address, spender: Address): TokenSpenderPair {

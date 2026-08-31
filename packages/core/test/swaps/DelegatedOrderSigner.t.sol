@@ -59,6 +59,14 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
         settlement.setOrderSigner(delegate, expiry);
     }
 
+    /// @dev The MANDATORY permit-nonce derivation, mirroring the settler's own
+    ///      `nonce >> 8 == uint160(signer)` check and the SDK's `signerPermitNonce`.
+    ///      Every permit for a delegate therefore shares that delegate's single
+    ///      bitmap word, which is what lets one revocation retire all of them.
+    function _pn(address signer_, uint256 seq) internal pure returns (uint256) {
+        return (uint256(uint160(signer_)) << 8) | seq;
+    }
+
     bytes32 constant SIGNER_TH =
         keccak256("OrderSignerPermit(address maker,address signer,uint256 expiry,uint256 nonce,uint256 deadline)");
 
@@ -81,10 +89,10 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     function test_permit_nominatesGaslessly() public {
         _stage();
         uint256 dl = block.timestamp + 1 hours;
-        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, _pn(delegate, 7), dl);
 
         vm.prank(solver); // ANY relayer may submit it
-        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, _pn(delegate, 7), dl, permit);
         assertEq(settlement.orderSignerExpiry(maker, delegate), type(uint256).max, "nominated");
 
         Order memory order = _order0();
@@ -104,11 +112,11 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
 
         uint256 dl = block.timestamp + 1 hours;
         // The delegate tries to name `outsider` as a signer FOR THE MAKER.
-        bytes memory forged = _signPermit(DELEGATE_PK, maker, outsider, type(uint256).max, 9, dl);
+        bytes memory forged = _signPermit(DELEGATE_PK, maker, outsider, type(uint256).max, _pn(outsider, 9), dl);
 
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
-        settlement.setOrderSignerWithSig(maker, outsider, type(uint256).max, 9, dl, forged);
+        settlement.setOrderSignerWithSig(maker, outsider, type(uint256).max, _pn(outsider, 9), dl, forged);
 
         assertEq(settlement.orderSignerExpiry(maker, outsider), 0, "no second-level delegate");
     }
@@ -116,10 +124,10 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     function test_permit_replayRejected() public {
         _stage();
         uint256 dl = block.timestamp + 1 hours;
-        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, _pn(delegate, 7), dl);
 
         vm.prank(solver);
-        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, _pn(delegate, 7), dl, permit);
 
         // Revoke directly, then try to replay the old nomination permit.
         vm.prank(maker);
@@ -127,7 +135,7 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(OrderState.NonceCancelled.selector);
-        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, _pn(delegate, 7), dl, permit);
         assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "revocation stands");
     }
 
@@ -138,16 +146,16 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     function test_permit_preCancelledNonceRejected() public {
         _stage();
         uint256 dl = block.timestamp + 1 hours;
-        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, _pn(delegate, 7), dl);
 
         uint256[] memory kill = new uint256[](1);
-        kill[0] = 7 | SIGNER_NS;
+        kill[0] = _pn(delegate, 7) | SIGNER_NS;
         vm.prank(maker);
         settlement.cancelOrders(kill);
 
         vm.prank(solver);
         vm.expectRevert(OrderState.NonceCancelled.selector);
-        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, _pn(delegate, 7), dl, permit);
     }
 
     /// Cancelling the BARE nonce does NOT reach the permit — the two live in
@@ -156,7 +164,7 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     function test_permit_bareNonceCancellationDoesNotReachIt() public {
         _stage();
         uint256 dl = block.timestamp + 1 hours;
-        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, _pn(delegate, 7), dl);
 
         uint256[] memory kill = new uint256[](1);
         kill[0] = 7; // the ORDER coordinate, not the permit's
@@ -164,7 +172,7 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
         settlement.cancelOrders(kill);
 
         vm.prank(solver);
-        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, _pn(delegate, 7), dl, permit);
         assertEq(settlement.orderSignerExpiry(maker, delegate), type(uint256).max, "namespaces are disjoint");
     }
 
@@ -187,7 +195,7 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     /// The permit now consumes `N | SIGNER_NONCE_NS`, so T3 cannot reach T2's order.
     function test_signerPermit_cannotCancelALiveOrder() public {
         _stage();
-        uint256 N = 42;
+        uint256 N = _pn(delegate, 42);
         uint256 dl = block.timestamp + 365 days;
 
         // T0 — signed, never relayed.
@@ -217,7 +225,7 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     /// bitmap rather than the per-hash counter.
     function test_orderNonceCancellation_doesNotConsumeTheSignerPermit() public {
         _stage();
-        uint256 N = 42;
+        uint256 N = _pn(delegate, 42);
         uint256 dl = block.timestamp + 365 days;
         bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, N, dl);
 
@@ -237,25 +245,25 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     function test_rollbackNonces_doesNotRevokeANomination() public {
         _stage();
         uint256 dl = block.timestamp + 1 hours;
-        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, _pn(delegate, 7), dl);
 
         vm.prank(maker);
         settlement.rollbackNonces(1_000_000); // far above any order nonce in use
 
         vm.prank(solver);
-        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, _pn(delegate, 7), dl, permit);
         assertEq(settlement.orderSignerExpiry(maker, delegate), type(uint256).max, "rollback does not reach it");
     }
 
     function test_permit_deadlineEnforced() public {
         _stage();
         uint256 dl = block.timestamp + 1 hours;
-        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, _pn(delegate, 7), dl);
 
         vm.warp(dl + 1);
         vm.prank(solver);
         vm.expectRevert(Signatures.SignerPermitExpired.selector);
-        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, _pn(delegate, 7), dl, permit);
     }
 
     // ──────────────────── Contract delegates (Safe / passkey wallets) ────────────────────
@@ -672,50 +680,113 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
 
     // ════════════════ 2026-08-31 audit regressions ════════════════
 
-    /// @dev AUDIT M-1. A permit consumes its bitmap coordinate only WHEN RELAYED.
-    ///      So a maker who signs a gasless nomination, never has it relayed, and
-    ///      then revokes with {OrderState.setOrderSigner} is NOT safe: whoever holds
-    ///      the message can relay it later and the delegate is live again, up to the
-    ///      permit's `deadline` — which nothing caps.
+    /// AUDIT FIX (was `test_permit_staleUnrelayedPermitResurrectsARevokedDelegate`,
+    /// which DOCUMENTED the hole rather than closing it). A nomination permit burns
+    /// its coordinate only when RELAYED, so a maker who signed one, never had it
+    /// landed, and then revoked used to stay exposed: whoever held the message could
+    /// relay it up to its `deadline` and the delegate was live again, its signature
+    /// settling orders the maker never signed.
     ///
-    ///      `test_permit_replayRejected` covers the RELAY-then-revoke-then-replay
-    ///      ordering, where the nonce is already burned. This is the other ordering,
-    ///      and it is the realistic one: a relayer goes offline, the maker revokes,
-    ///      and considers the matter closed.
-    ///
-    ///      Pinned as CURRENT BEHAVIOUR, not as desired behaviour. The fix is
-    ///      procedural and lives in the SDK (`encodeRevokeOrderSigner` emits the
-    ///      burn alongside the clear); the counterpart test below is the correct
-    ///      sequence.
-    function test_permit_staleUnrelayedPermitResurrectsARevokedDelegate() public {
+    /// Revocation now burns the delegate's WHOLE permit word in the same call, so
+    /// the stale message is dead the moment the maker revokes — with no second call,
+    /// no SDK, and no knowledge of which coordinate the permit used. That is only
+    /// sound because {Signatures.SignerPermitNonceMalformed} forces every permit for
+    /// a delegate INTO that word; a freely-chosen coordinate would have survived.
+    function test_permit_staleUnrelayedPermit_cannotResurrectARevokedDelegate() public {
         _stage();
-        uint256 N = 7;
+        uint256 N = _pn(delegate, 7);
         uint256 dl = block.timestamp + 365 days;
 
         // Signed once, handed to a relayer, never landed.
         bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, N, dl);
 
-        // The maker nominates directly, then revokes directly. From their side the
-        // delegate is gone: the registry says so and an order signed now would fail.
+        // The maker nominates directly, then revokes directly. ONE call each.
         _nominate(type(uint256).max);
         vm.prank(maker);
         settlement.setOrderSigner(delegate, 0);
         assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "registry cleared");
 
-        // The permit's coordinate was never burned, so anyone may still relay it.
+        // The stale permit is now unrelayable.
         vm.prank(outsider);
+        vm.expectRevert(OrderState.NonceCancelled.selector);
         settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, N, dl, permit);
-        assertEq(settlement.orderSignerExpiry(maker, delegate), type(uint256).max, "delegate resurrected");
+        assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "revocation is final");
 
-        // And it is a real resurrection, not just a storage write: the delegate's
-        // signature settles an order the maker never signed.
+        // …and the delegate's signature no longer authorizes anything.
         Order memory order = _order0();
-        // Signed on its own line: `vm.sign` inside a call argument consumes the
-        // pending `vm.prank`, so the fill would run as the test contract.
         bytes memory delegateSig = _signAs(DELEGATE_PK, order);
         vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
         settlement.fill(order, delegateSig, USDC_IN);
-        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "a revoked delegate authorized a fill");
+    }
+
+    /// ONE revocation retires EVERY sequence number, not just the one the maker
+    /// happens to remember. This is the property the word alignment buys: a maker
+    /// cannot know how many permits they signed, so a fix that retired one
+    /// coordinate would not be a fix.
+    function test_revocation_burnsEverySeqForThatDelegate() public {
+        _stage();
+        uint256 dl = block.timestamp + 365 days;
+        uint256[3] memory seqs = [uint256(0), 17, 255]; // ends and middle of the word
+        bytes[3] memory permits;
+        for (uint256 i; i < 3; ++i) {
+            permits[i] = _signPermit(makerPk, maker, delegate, type(uint256).max, _pn(delegate, seqs[i]), dl);
+        }
+
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, 0);
+
+        for (uint256 i; i < 3; ++i) {
+            vm.prank(outsider);
+            vm.expectRevert(OrderState.NonceCancelled.selector);
+            settlement.setOrderSignerWithSig(
+                maker, delegate, type(uint256).max, _pn(delegate, seqs[i]), dl, permits[i]
+            );
+        }
+    }
+
+    /// …and it retires ONLY that delegate's. Revocation is per-address; burning a
+    /// word must not become an accidental bulk revocation of the maker's other
+    /// signing keys.
+    function test_revocation_doesNotBurnAnotherDelegatesPermits() public {
+        _stage();
+        uint256 dl = block.timestamp + 365 days;
+        uint256 N = _pn(outsider, 3); // a nomination permit for a DIFFERENT key
+        bytes memory permit = _signPermit(makerPk, maker, outsider, type(uint256).max, N, dl);
+
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, 0); // revoke the OTHER delegate
+
+        vm.prank(solver);
+        settlement.setOrderSignerWithSig(maker, outsider, type(uint256).max, N, dl, permit);
+        assertEq(settlement.orderSignerExpiry(maker, outsider), type(uint256).max, "unrelated key untouched");
+    }
+
+    /// The derivation is MANDATORY, not a convention the SDK happens to follow — a
+    /// permit at a freely-chosen coordinate would sit outside the delegate's word
+    /// and survive a revocation. Rejected even though the maker signed it.
+    function test_permit_freeFormNonceRejected() public {
+        _stage();
+        uint256 dl = block.timestamp + 1 hours;
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+
+        vm.prank(solver);
+        vm.expectRevert(Signatures.SignerPermitNonceMalformed.selector);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+    }
+
+    /// The same check also forbids a bare nonce carrying `SIGNER_NONCE_NS` itself.
+    /// Without it, `n` and `n | SIGNER_NS` would be two distinct maker-signed permits
+    /// sharing one bitmap coordinate.
+    function test_permit_bareNonceCarryingTheNamespaceRejected() public {
+        _stage();
+        uint256 dl = block.timestamp + 1 hours;
+        uint256 N = _pn(delegate, 7) | SIGNER_NS;
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, N, dl);
+
+        vm.prank(solver);
+        vm.expectRevert(Signatures.SignerPermitNonceMalformed.selector);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, N, dl, permit);
     }
 
     /// @dev AUDIT M-1, the correct sequence — exactly what the SDK's
@@ -725,7 +796,7 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     ///      bookkeeping on the maker's side.
     function test_permit_burningTheCoordinateMakesRevocationFinal() public {
         _stage();
-        uint256 N = 7;
+        uint256 N = _pn(delegate, 7);
         uint256 dl = block.timestamp + 365 days;
         bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, N, dl);
 

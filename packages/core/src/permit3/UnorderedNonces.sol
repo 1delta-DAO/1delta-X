@@ -15,7 +15,18 @@ import {Permit3Base} from "./Permit3Base.sol";
 ///         a complete kill switch for a nonce range regardless of which FLOW signed
 ///         against it, and removes any chance of a message being replayed by
 ///         re-submitting it through the other flow. The cost is that off-chain
-///         nonce allocation must be per-owner, not per-message-type.
+///         nonce allocation must be per-owner, not per-message-type — otherwise an
+///         owner can sign two messages of DIFFERENT kinds onto one coordinate, and
+///         whoever holds either unrelayed message can burn the bit and DoS the
+///         other (this layer is idempotent on a spent bit for the batch flow, but
+///         `permitTake` and `permitTransferFrom` revert).
+///
+///         ⚠ ENFORCED IN the SDK's `permit3nonce.ts`, which namespaces the
+///         message kind into the top byte, and ASSERTED in `permitBatch` /
+///         `permitTake` — the constructors every message passes through. Named
+///         here rather than left as "callers must", because a comment that
+///         delegates an invariant to off-chain code without naming a call site is
+///         a claim, not a control (see `docs/reference-audits.md` F23).
 ///
 ///  ⚠ IT KILLS THE GRANTS, NOT THE ORDER. Read the sentence above narrowly: the
 ///  bitmap is a kill switch over PERMITS, and a maker should not read it as one over

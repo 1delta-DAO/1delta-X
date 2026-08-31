@@ -422,7 +422,9 @@ arrived as three reported findings and were each verified against the code befor
 being acted on — two confirmed with executed PoCs and fixed, one (F14) reviewed and
 judged NOT a vulnerability, with only its misleading comment corrected. **F16** came
 out of the `TAKE_FOR` build itself and is recorded here rather than left in a commit
-message. **F17–F20** came out of a clean full re-audit of the core plus the aave-v3
+message. **F17** was a known, accepted caveat that a re-assessment promoted to a
+finding: its remedy existed, but as a caller convention rather than an enforced
+property. **F17–F20** came out of a clean full re-audit of the core plus the aave-v3
 and fluid module packages on 2026-08-29 — F17 with an executed PoC, F18 reviewed and
 **withdrawn** as already covered (kept for the lesson), F19 and F20 confirmed by
 reading. See
@@ -996,16 +998,18 @@ as sound as the binding between the measured token and the declared one. Whereve
 those are two independent statements — one in a signed leg, one in an opaque blob —
 they need an equality check or the gap swallows value silently.
 
-### F23 — OPEN: three invariants documented but unenforced
+### F23 — three invariants documented but unenforced (all now closed)
 
-Not defects, but the same shape three times: a rule that holds only because every
-current integrator happens to follow it.
+Not defects, but the same shape three times: a rule that held only because every
+current integrator happened to follow it. All three now have an enforcement point,
+and none of them is runtime code — the contract had no gas or bytes to spare, and
+none was needed.
 
 | invariant | where it rests | what breaks |
 | --- | --- | --- |
-| a module implements `ITakerModule` **or** `ITakerForModule`, never both | `ITakerForModule` prose | the taker book keys both on `(user, spender, module, keccak256(data))`, so one `approveTaker` would authorise either shape and the grant cannot tell the maker which |
+| ~~a module implements `ITakerModule` **or** `ITakerForModule`, never both~~ **CLOSED** | `make modules-check` | the taker book keys both on `(user, spender, module, keccak256(data))`, so one `approveTaker` would authorise either shape and the grant cannot tell the maker which |
 | ~~an ORDER nonce must not set bit 255~~ **CLOSED** | `packOrder` → `assertOrderNonce` | see below |
-| Permit3 nonces are allocated **per owner**, not per message type | `UnorderedNonces` prose | all three signed flows share one bitmap. `permitBatchWithWitnessIfNeeded` is idempotent on a spent nonce (the S-1 remediation), but `permitTake` and `permitTransferFrom` both revert — so anyone holding an unrelayed signed message can burn its nonce and DoS a *different* message the owner signed at the same coordinate. Exactly §F17's shape, one layer down |
+| ~~Permit3 nonces are allocated **per owner**, not per message type~~ **CLOSED** | `permitBatch`/`permitTake` → `assertPermit3Nonce` | all three signed flows share one bitmap. `permitBatchWithWitnessIfNeeded` is idempotent on a spent nonce (the S-1 remediation), but `permitTake` and `permitTransferFrom` both revert — so anyone holding an unrelayed signed message can burn its nonce and DoS a *different* message the owner signed at the same coordinate. Exactly §F17's shape, one layer down |
 
 **The bit-255 row was worse than "documented but unenforced", and is now fixed.**
 `assertOrderNonce` existed in the SDK, was exported, and its own docstring said *"call
@@ -1017,9 +1021,30 @@ enforced nowhere, while both texts read as a guarantee. It is now wired into
 bit checks already there — and the contract comment names that enforcement point
 instead of asserting a cap. Covered by `delegation.test.ts`.
 
-The other two remain open. Neither is reachable today, and each would cost hot-path
-gas the contract cannot spare (§F1 headroom), so the right home for both is a CI
-assertion or an SDK allocator rather than runtime code.
+**The other two are now closed as well, in the homes this row named for them —
+neither cost a byte of runtime.**
+
+*One module, one shape* is [`tools/check-module-shapes.py`](../tools/check-module-shapes.py),
+wired as `make modules-check`. It scans every `packages/*/src/**/*.sol` for a
+contract declaring both `takeOnBehalf` and `takeForOnBehalf` (or inheriting both
+interfaces) and fails the build. 77 taker contracts scanned, each implementing
+exactly one; verified to bite by planting a violating contract and watching it exit
+1. It reads SOURCE rather than artifacts deliberately: a full-tree `forge build` does
+not currently succeed (a bridge module is stack-too-deep under the default profile),
+so an ABI scan would silently cover a subset — and a gate with unknown coverage is
+worse than no gate. The pattern it must catch is syntactic anyway.
+
+*Permit3 nonce namespacing* is [`permit3nonce.ts`](../packages/sdk/src/permit3nonce.ts).
+The message kind takes the top byte and the sequence the remaining 248 bits, so two
+messages of different kinds can never share a coordinate whatever each allocator
+picks. `Batch` is kind `0` on purpose, which keeps every legacy small nonce valid
+while still making it un-collidable with a properly allocated `Take` or `Transfer` —
+and those two are exactly the flows that REVERT on a spent bit, so they are the ones
+that had to become explicit.
+
+Crucially it is asserted in `permitBatch` and `permitTake`, the constructors every
+message passes through — **not** merely exported. That is the bit-255 row's lesson
+applied rather than restated.
 
 **The generalised question, and it is the lesson of this row.** *A guard that exists
 but is never invoked is indistinguishable from no guard — except that it reads as
@@ -1027,6 +1052,53 @@ one.* Whenever a contract comment delegates an invariant to off-chain code ("the
 ensures…", "builders must…"), grep for a call site. If the named enforcement point has
 no callers, the comment is not documentation, it is a false claim, and it is more
 dangerous than silence because it stops the next reader looking.
+
+### F17 — Revoking a delegate did not invalidate an outstanding nomination permit
+
+**New shape: a safety property whose only enforcement was that the caller made a
+second call.** Known, accepted and documented as a caveat since the delegated-signer
+work; closed 2026-08-31.
+
+A gasless `OrderSignerPermit` burns its bitmap coordinate only when **relayed**. So a
+maker who signed one, never had it landed, and then revoked with
+`setOrderSigner(d, 0)` was still exposed: the registry read as clear, but whoever held
+the message could relay it up to its `deadline` and the delegate came back — its
+signature then settling orders the maker never signed. No malice needed; a relayer
+that simply dropped the transaction is enough.
+
+The documented remedy was to make revocation **two calls**, clearing the registry and
+then burning the coordinate with `cancelOrders`. The SDK emitted the pair. Every other
+client — a wallet, a block explorer, a script — emitted the obvious single call and got
+the hole. That is the [C2](#c2--hand-rolled-calldata-arithmetic-without-a-bounds-proof)
+posture in a different costume: correct code, upheld by convention rather than by the
+compiler.
+
+**Fix, in two halves that only work together.**
+
+1. `OrderState._setOrderSigner`'s revoke branch burns the delegate's entire permit
+   word: `nonceBitmap[maker][SIGNER_NONCE_NS >> 8 | d] = type(uint256).max`. One
+   `SSTORE`, no new storage slot, no typehash change.
+2. `Signatures.setOrderSignerWithSig` now **requires** `nonce >> 8 == uint160(signer)`
+   (`SignerPermitNonceMalformed`). Without this the burn would be worthless: a permit
+   at a freely-chosen coordinate sits in another word and survives the revocation. The
+   derivation had been an SDK convention; it is now an invariant.
+
+Half 2 also closes a smaller residual for free — it forces `nonce < 2^168`, so a bare
+permit nonce can never carry `SIGNER_NONCE_NS` itself, and `n` / `n | NS` can no longer
+be two distinct maker-signed permits sharing one coordinate.
+
+**Cost.** +67 bytes of Settlement (24,159 → 24,226 of 24,576, clean build). And one
+deliberate behaviour loss: gasless *re*-nomination of a revoked delegate is now
+impossible, because every coordinate it could use is spent. Direct `setOrderSigner`
+still works, and the right move after revoking a key is to nominate a different one.
+Buying it back needs a per-delegate epoch in the permit typehash — a storage slot and a
+breaking permit type, spent on making a compromised key reusable.
+
+**The generalised question:** *is any security property here upheld only by a caller
+doing two things in the right order?* If the second call can be skipped by anyone
+reading the ABI rather than the docs, it is not enforcement.
+
+---
 
 ## Re-audit sweep — the generalised questions from F13–F15
 

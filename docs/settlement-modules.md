@@ -480,12 +480,15 @@ preview a broken order as fillable.
   token allowance to the module wants a few units of headroom. BUY legs and the
   literal form sum exactly. `previewItemFunding` reports `required` at full fill and
   cannot know the slice schedule, so size the grant ABOVE what it returns.
-- **One module, one shape — still by convention.** The taker book does not
+- **One module, one shape — enforced.** The taker book does not
   distinguish `take` from `takeFor`: both spend
   `(user, spender, module, keccak256(data))`. A contract implementing both
   `ITakerModule` and `ITakerForModule` would let one `approveTaker` authorise either,
   with nothing in the grant telling the maker which. Every module shipped implements
-  one; the rule is documented in `ITakerForModule`, not enforced.
+  one, and that is now **enforced**: `make modules-check`
+  ([`tools/check-module-shapes.py`](../tools/check-module-shapes.py)) fails the build
+  on any contract declaring both dispatches. It was convention until 2026-08-31 —
+  see [reference-audits.md §F23](reference-audits.md#f23--three-invariants-documented-but-unenforced-all-now-closed).
 
 ## 9. Open / next
 

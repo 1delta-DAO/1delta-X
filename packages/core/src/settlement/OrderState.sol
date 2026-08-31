@@ -197,9 +197,40 @@ abstract contract OrderState is NonceManager {
     ///      event exist ONCE. `maker` is the delegator: `msg.sender` above, or the
     ///      recovered signer of an EIP-712 permit there. Callers own the
     ///      authorization; this owns the write.
+    ///
+    ///  ⚠ REVOCATION ALSO BURNS THE DELEGATE'S WHOLE PERMIT WORD, AND THAT SINGLE
+    ///  `SSTORE` IS WHAT MAKES REVOCATION FINAL. Clearing the registry alone is not
+    ///  enough: a nomination permit consumes its bitmap coordinate only when
+    ///  RELAYED, so a maker who signs one, never has it landed, and then revokes is
+    ///  still exposed — whoever holds the message can relay it up to its `deadline`
+    ///  and the delegate is live again. That used to be a documented two-call
+    ///  discipline (`setOrderSigner(d, 0)` then `cancelOrders([coordinate])`), which
+    ///  the SDK emitted correctly and every other client — a wallet, a block
+    ///  explorer, a hand-rolled script — did not. A safety property that depends on
+    ///  the caller making a second call is not a safety property.
+    ///
+    ///  It costs one word because the permit coordinate is DERIVED FROM THE
+    ///  DELEGATE, not drawn from a counter: a permit's nonce is
+    ///  `(signer << 8) | seq` with `seq` one byte, so every permit for `signer`
+    ///  shares the bitmap word `SIGNER_NONCE_NS >> 8 | signer` and one write
+    ///  retires all 256 of them. The `signer << 8` never reaches bit 247, so the
+    ///  word can collide with no other delegate's and with no order's.
+    ///
+    ///  THE PRICE, AND IT IS DELIBERATE: gasless RE-nomination of the same delegate
+    ///  is afterwards impossible — every coordinate it could use is spent. Direct
+    ///  {setOrderSigner} still works, and a maker who cannot pay gas can nominate a
+    ///  DIFFERENT key, which is what you should be doing with a delegate you just
+    ///  revoked. Buying re-nomination back would take a per-delegate epoch in the
+    ///  permit typehash; it is not worth a storage slot and a breaking permit type
+    ///  to make a compromised key reusable.
     function _setOrderSigner(address maker, address signer, uint256 expiry) internal {
         if (signer == address(0)) revert InvalidOrderSigner();
         orderSignerExpiry[maker][signer] = expiry;
+        // Revocation only. A nomination must NOT burn the word — it is the very
+        // word the permit being relayed right now is spending its own coordinate in.
+        if (expiry == 0) {
+            nonceBitmap[maker][(SIGNER_NONCE_NS >> 8) | uint256(uint160(signer))] = type(uint256).max;
+        }
         emit OrderSignerSet(maker, signer, expiry);
     }
 

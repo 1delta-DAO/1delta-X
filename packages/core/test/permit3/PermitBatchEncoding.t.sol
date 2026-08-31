@@ -7,6 +7,7 @@ import {IERC1271} from "@core/interfaces/IERC1271.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
+import {OrderHash} from "@core/settlement/OrderHash.sol";
 
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
@@ -33,6 +34,24 @@ contract MockTakerStash is ITakerModule {
 ///      hand-rolled encoder: that is the only way to drive `calldatacopy` over a
 ///      multi-word tail and to make the padding word land somewhere other than the
 ///      one offset a 64/65-byte signature can produce.
+/// @dev Etched over Permit3 for the differential test below. `vm.expectCall` cannot
+///      do this job: its calldata form is a PREFIX match, so an encoder emitting a
+///      correct prefix followed by trailing slop — a `total` a word too long, a stale
+///      padding word counted in — satisfies it. Verified: a mutation adding 0x20 to
+///      `total` passes `expectCall` and fails against this. Capturing `msg.data`
+///      verbatim is the only way to compare LENGTH as well as content.
+contract CalldataRecorder {
+    bytes public seen;
+
+    /// @dev SELECTOR-FILTERED, not "first call wins". Once etched, this contract
+    ///      answers EVERY call the fill makes to the hub — the permit, then the
+    ///      transfers that follow it — so an unfiltered recorder ends up holding the
+    ///      last one. (Measured the hard way: it captured a 132-byte `transferFrom`.)
+    fallback() external {
+        if (msg.sig == IPermit3.permitBatchWithWitnessHashIfNeeded.selector) seen = msg.data;
+    }
+}
+
 contract PaddedSigWallet is IERC1271 {
     address public immutable owner;
 
@@ -132,6 +151,108 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
         settlement.fillWithPermit(order, batch, sig, USDC_IN);
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "settled on an empty batch");
+    }
+
+    // ──────────── the differential pin: every byte, against solc's own encoder ────────────
+
+    /// @dev THE STRONGEST PIN AVAILABLE FOR A HAND-ROLLED ENCODER, and the one the
+    ///      behavioural tests below cannot give.
+    ///
+    ///      Every other test in this file asserts an OUTCOME — the fill settled, the
+    ///      permit landed at its index. Those run through Permit3's decoder, which is
+    ///      tolerant: it reads offsets and lengths and ignores anything they do not
+    ///      cover. So a malformed-but-decodable encoding — a slack offset, junk left
+    ///      in a padding word, a `total` a few bytes long — passes every one of them
+    ///      while sending bytes no honest encoder would produce. That matters because
+    ///      the digest Permit3 signs over is computed from the DECODED values, not the
+    ///      wire bytes, so wire-level slop is exactly the class of defect an
+    ///      outcome test is blind to.
+    ///
+    ///      This captures the bytes {Core._permitBatch} actually sends and compares them
+    ///      against `abi.encodeCall` — solc's own encoder, the thing the assembly
+    ///      replaced — by LENGTH and by hash. Note it does NOT use `vm.expectCall`:
+    ///      that cheatcode's calldata form is a PREFIX match, so an encoder emitting
+    ///      a correct prefix followed by trailing slop satisfies it. Measured: a
+    ///      mutation adding one word to `total` passes `expectCall` and fails here.
+    ///
+    ///      MUTATION-TESTED, and the results are worth recording because two of four
+    ///      are NOT caught and pretending otherwise is how a pin rots:
+    ///        • `total` a word too long  → CAUGHT (length assertion)
+    ///        • a wrong `takers` offset  → CAUGHT (hash assertion)
+    ///        • the padding `mstore` deleted → NOT caught. The write is unconditional,
+    ///          so removing it is observable only when the memory above the free
+    ///          pointer is already dirty, which a test cannot arrange reliably. The
+    ///          zeroing rests on review, not on this.
+    ///        • {Core._permitBatchHead} re-deriving its base from `mload(0x40)`
+    ///          instead of taking it → NOT caught, because nothing between the two
+    ///          halves allocates TODAY. That hazard is latent by nature, which is
+    ///          exactly why it is closed by threading the pointer rather than by a
+    ///          test.
+    ///
+    ///      Swept across the shapes whose OFFSETS differ (empty/empty, n/0, 0/n, n/m)
+    ///      crossed with the signature lengths that hit every padding residue: 64
+    ///      (exactly two words, no padding — the case a stale scratch word corrupts),
+    ///      65 (31 bytes of padding, the ECDSA default) and a long 1271 blob spanning
+    ///      several words.
+    function test_handEncodedCalldata_isByteIdenticalToSolcs() public {
+        _assertEncodingMatches(0, 0, 65, 20);
+        _assertEncodingMatches(1, 0, 65, 21);
+        _assertEncodingMatches(0, 1, 65, 22);
+        _assertEncodingMatches(2, 3, 65, 23);
+        _assertEncodingMatches(1, 1, 64, 24); // no padding word at all
+        _assertEncodingMatches(2, 2, 160, 25); // a multi-word 1271-shaped tail
+        _assertEncodingMatches(3, 1, 96, 26); // exactly three words
+    }
+
+    /// @dev Build a batch of the given shape, then assert the settler sends Permit3
+    ///      precisely `abi.encodeCall(...)`. The fill is expected to REVERT (the
+    ///      signature is junk, so Permit3 rejects it) — irrelevant here, because
+    ///      `expectCall` is checked on the calldata that was dispatched, and the
+    ///      encoder runs to completion before Permit3 looks at anything. That is the
+    ///      point: it isolates the ENCODER from every downstream consequence, so this
+    ///      test keeps working even if the permit semantics change.
+    function _assertEncodingMatches(uint256 nTokens, uint256 nTakers, uint256 sigLen, uint256 nonce) private {
+        Order memory order = _order(maker, nonce, USDC, WETH, USDC_IN, WETH_OUT, new Item[](0));
+        uint48 exp = uint48(_expiry(order));
+
+        IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](nTokens);
+        for (uint256 i; i < nTokens; i++) {
+            tp[i] = IPermit3.TokenPermit(address(settlement), USDC, uint160(USDC_IN + i), exp);
+        }
+        IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](nTakers);
+        for (uint256 i; i < nTakers; i++) {
+            tkp[i] = IPermit3.TakerPermit(
+                address(settlement), address(stash), keccak256(abi.encode(i, nonce)), uint160(i + 1), exp
+            );
+        }
+        IPermit3.PermitBatch memory batch = _buildBatch(tp, tkp, nonce, exp);
+
+        // Deliberately NOT a valid signature: this pins the encoder, not the crypto,
+        // and a junk blob is the only way to vary `sig.length` freely.
+        bytes memory sig = new bytes(sigLen);
+        for (uint256 i; i < sigLen; i++) {
+            sig[i] = bytes1(uint8(i + 1));
+        }
+
+        bytes memory expected = abi.encodeCall(
+            IPermit3.permitBatchWithWitnessHashIfNeeded,
+            (maker, batch, _hashOrder(order), OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH, sig)
+        );
+
+        // Etch the recorder over Permit3 so the call lands somewhere that keeps the
+        // bytes. The fill then fails downstream (the hub no longer grants anything) —
+        // caught and discarded, because the encoder has already run by then.
+        bytes memory recorderCode = address(new CalldataRecorder()).code;
+        vm.etch(address(permit3), recorderCode);
+        vm.prank(solver);
+        try settlement.fillWithPermit(order, batch, sig, USDC_IN) {} catch {}
+
+        bytes memory actual = CalldataRecorder(address(permit3)).seen();
+        // LENGTH FIRST, and it is the assertion `expectCall` could not make: a prefix
+        // match is blind to trailing bytes, which is precisely how an off-by-a-word
+        // `total` presents.
+        assertEq(actual.length, expected.length, "hand-encoded calldata is the wrong length");
+        assertEq(keccak256(actual), keccak256(expected), "hand-encoded calldata differs from solc's");
     }
 
     /// @dev THE COVERAGE GAP THIS FILE OPENED WITH: two token permits AND two taker

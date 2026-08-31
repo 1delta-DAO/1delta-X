@@ -30,27 +30,31 @@ import type { Deployment } from "./types";
 export { SIGNER_NONCE_NS, isReservedNonce, assertOrderNonce } from "./types";
 
 /**
- * The permit nonce for a given delegate, derived DETERMINISTICALLY from the
- * delegate address rather than drawn from a counter.
+ * The permit nonce for a given delegate. **The settler ENFORCES this derivation**
+ * (`nonce >> 8 === BigInt(delegate)`, else `SignerPermitNonceMalformed`) — it is
+ * not a convention this SDK follows by choice, and a permit signed with any other
+ * nonce is unrelayable.
  *
- * This is what makes revocation reliable. A permit is consumed only when it is
+ * The reason it is mandatory is revocation. A permit is consumed only when it is
  * RELAYED, so a maker who signs a nomination, never has it relayed, and then
- * revokes with `setOrderSigner(d, 0)` is still exposed: whoever holds that
- * message can relay it later and the delegate is live again, up to its
- * `deadline`. The fix is to burn the permit's bitmap coordinate as part of
- * revoking — which is only possible if the coordinate can be recomputed without
- * bookkeeping. Deriving it from the delegate address makes that true for any
- * client, at any later date, with no stored state.
+ * revokes was once still exposed: whoever held that message could relay it later
+ * and the delegate came back, up to its `deadline`. `setOrderSigner(d, 0)` now
+ * burns the delegate's entire bitmap WORD in the same call — which only retires
+ * every outstanding permit if every permit is forced into that word. Shifting the
+ * address by exactly 8 bits is what puts them there: `seq` is one byte, so all 256
+ * coordinates for `d` share the word `SIGNER_NONCE_NS >> 8 | d`.
  *
- * `seq` distinguishes successive nominations of the SAME delegate (each burn
- * retires one coordinate, so re-nominating a previously revoked delegate
- * gaslessly needs the next `seq`).
+ * `seq` distinguishes concurrent nominations of the SAME delegate — a rotation
+ * where the old permit may still be in flight. It does NOT survive a revocation:
+ * once `d` is revoked, every `seq` is spent and `d` can only be re-nominated with
+ * a direct `setOrderSigner` call. That is deliberate; a revoked key should be
+ * replaced, not resurrected.
  */
 export function signerPermitNonce(delegate: Address, seq = 0): bigint {
-  if (!Number.isInteger(seq) || seq < 0 || seq > 0xffff) {
-    throw new Error(`signerPermitNonce: seq out of range: ${seq}`);
+  if (!Number.isInteger(seq) || seq < 0 || seq > 0xff) {
+    throw new Error(`signerPermitNonce: seq out of range (one byte): ${seq}`);
   }
-  return (BigInt(delegate) << 16n) | BigInt(seq);
+  return (BigInt(delegate) << 8n) | BigInt(seq);
 }
 
 /**
@@ -195,25 +199,26 @@ export function encodeBurnSignerPermits(delegate: Address, seqs: readonly number
 }
 
 /**
- * Revocation that STICKS — the two calls, in order.
+ * Revocation that STICKS — and it is now ONE call.
  *
- * `setOrderSigner(delegate, 0)` alone clears the registry entry but leaves any
- * unrelayed `OrderSignerPermit` for this delegate live: relaying it re-nominates.
- * The second call burns the permit's bitmap coordinate, which is recomputable
- * precisely because {@link signerPermitNonce} is derived from the delegate.
+ * This used to return two: `setOrderSigner(delegate, 0)` cleared the registry but
+ * left any unrelayed `OrderSignerPermit` live, so a second `cancelOrders` was
+ * needed to burn its coordinate. That made the safety of revocation depend on the
+ * caller reaching for this helper rather than the obvious single call — which the
+ * SDK did and a wallet, a block explorer or a hand-rolled script did not.
  *
- * Pass every `seq` ever issued for this delegate (default `[0]`, which is what
- * {@link buildOrderSignerPermit} uses unless told otherwise).
+ * The settler now burns the delegate's whole permit word inside
+ * `setOrderSigner(d, 0)` itself, retiring every `seq` at once. Every client gets
+ * the property, including the ones that never see this file. `seqs` is therefore
+ * no longer needed; {@link encodeBurnSignerPermits} remains for the different job
+ * of killing a permit WITHOUT revoking (a nomination signed but never wanted).
  *
- * ⚠ Neither call reaches an order the delegate has ALREADY part-filled: the
+ * ⚠ It still does not reach an order the delegate has ALREADY part-filled: the
  * settler skips signature re-checks once `filled != 0`. To bind mid-order use
  * `cancelOrder(order)`, nonce cancellation, the deadline, or Permit3 revocation.
  */
-export function encodeRevokeOrderSigner(delegate: Address, opts?: { seqs?: readonly number[] }): Hex[] {
-  return [
-    encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "setOrderSigner", args: [delegate, 0n] }),
-    encodeBurnSignerPermits(delegate, opts?.seqs ?? [0]),
-  ];
+export function encodeRevokeOrderSigner(delegate: Address): Hex[] {
+  return [encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "setOrderSigner", args: [delegate, 0n] })];
 }
 
 /**
@@ -226,11 +231,8 @@ export function encodeRevokeOrderSigner(delegate: Address, opts?: { seqs?: reado
  * simply signs above it. The only other containment is revoking the Permit3
  * allowances that fund the fills, which stops the maker trading too.
  */
-export function encodeRevokeOrderSigners(
-  delegates: readonly Address[],
-  opts?: { seqs?: readonly number[] },
-): Hex[] {
-  return delegates.flatMap((d) => encodeRevokeOrderSigner(d, opts));
+export function encodeRevokeOrderSigners(delegates: readonly Address[]): Hex[] {
+  return delegates.flatMap((d) => encodeRevokeOrderSigner(d));
 }
 
 /**

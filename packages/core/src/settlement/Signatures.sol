@@ -34,6 +34,20 @@ abstract contract Signatures is OrderState {
     /// @dev An empty `sig` was supplied for a fill, but the maker has no matching
     ///      on-chain {OrderState.approveOrder} record for this order.
     error OrderNotApproved();
+    /// @dev A nomination permit's nonce was not `(signer << 8) | seq`. The
+    ///      derivation is MANDATORY, and it is what makes revocation final: because
+    ///      every permit for a delegate is forced into that delegate's single bitmap
+    ///      word, {OrderState._setOrderSigner} can retire all of them with one
+    ///      `SSTORE` when the maker revokes. A permit at a freely-chosen coordinate
+    ///      would sit in some other word and survive the revocation — which is
+    ///      exactly the resurrection this rule exists to prevent, so the rule cannot
+    ///      be a convention the signer is trusted to follow.
+    ///
+    ///      It also forces `nonce < 2^168`, so a permit can never carry
+    ///      {NonceManager.SIGNER_NONCE_NS} in its BARE nonce. Without that, `nonce`
+    ///      and `nonce | SIGNER_NONCE_NS` would be two distinct signed permits
+    ///      sharing one coordinate.
+    error SignerPermitNonceMalformed();
     /// @dev {setOrderSignerWithSig} was presented past its `deadline`. Declared here
     ///      rather than reusing {Base.OrderExpired} because {Base} sits ABOVE this
     ///      layer — and because the two mean different things: an expired order
@@ -170,6 +184,10 @@ abstract contract Signatures is OrderState {
         bytes calldata sig
     ) external {
         if (block.timestamp > deadline) revert SignerPermitExpired();
+        // The coordinate must be the delegate's own. See {SignerPermitNonceMalformed}:
+        // this is the line that turns "revocation is final" from a caller discipline
+        // into a property of the contract.
+        if (nonce >> 8 != uint256(uint160(signer))) revert SignerPermitNonceMalformed();
         // The digest binds the BARE `nonce` — the maker signs what they always
         // signed, so no tooling changes.
         bytes32 digest =

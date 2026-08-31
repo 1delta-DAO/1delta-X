@@ -10,6 +10,7 @@ export * from "./amend";
 export * from "./oco";
 export * from "./permit";
 export * from "./permit3";
+export * from "./permit3nonce";
 export * from "./solving";
 export * from "./proportional";
 export * from "./pricing";
