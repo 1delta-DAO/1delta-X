@@ -337,23 +337,54 @@ struct MatchPlan {
 ///         pays nothing for this. Only the schedule-driven {Batch.matchSettle}, where
 ///         a solver picks the order, can violate one.
 ///
-///         ANY     — the solver may run items in any order, interleaved with any
+///         The values form a LADDER of increasing strictness, so a comparison
+///         orders them and the enforcement is `>=` rather than a switch.
+///
+///         ANY       — the solver may run items in any order, interleaved with any
 ///                   other step. The default, and what every order signed before this
 ///                   existed means. Required to participate in a CYCLE, where an
 ///                   order's borrow is deliberately hoisted ahead of its own delivery.
-///         ORDERED — items must execute in signed index order. Other steps may still
+///         ORDERED   — items must execute in signed index order. Other steps may still
 ///                   interleave. "My deposit happens before my borrow, but you may do
 ///                   other things in between."
-///         ATOMIC  — items must execute in signed index order AND back-to-back, with
+///         ATOMIC    — items must execute in signed index order AND back-to-back, with
 ///                   no other step between them. This is what a lender that checks
 ///                   health inside each call needs: deposit and borrow are one
 ///                   indivisible move. (It constrains the items relative to EACH
 ///                   OTHER; where the group sits in the schedule, and where the
 ///                   delivery that funds it sits, stay the solver's choice.)
+///         CANONICAL — ATOMIC, plus the two constraints ATOMIC deliberately does not
+///                   express: the item group must run AFTER this order's `DELIVER`,
+///                   and BEFORE any `PULL` of this order's input legs. That is
+///                   exactly the fixed shape of the single-order path
+///                   ({Core._settleForward}: deliver → items → pay inputs), so a
+///                   maker who wants the netted path to behave like a plain `fill`
+///                   signs this and no schedule can behave otherwise.
+///
+///                   The two additions each close an ordering that changes VALUE,
+///                   not just intermediate state:
+///                     • ITEM BEFORE DELIVER — the delivery is what funds a
+///                       deposit item ("swap and deposit"). Hoisted ahead of it, the
+///                       item draws the maker's PRE-EXISTING wallet balance and
+///                       standing allowance instead, and for any module that sizes
+///                       itself from live state (a repay capped at the live debt, a
+///                       full-balance withdraw, an "all" sentinel) the amount it
+///                       moves is a different number.
+///                     • PULL BEFORE ITEM — {Batch._stepPull} draws
+///                       `owed − credit`, so a pull scheduled ahead of the TAKE item
+///                       that was going to credit that leg makes the maker front the
+///                       whole leg from their wallet. Phase 3 refunds the tokens; it
+///                       cannot refund the Permit3 ALLOWANCE they were moved with.
+///
+///                   Not free to the solver: this order's inputs arrive last, so a
+///                   plan must fund its deliveries from elsewhere (another order's
+///                   pull, a PRESEND, a CALL). That is the same capital shape a
+///                   single-order `fill` has always had.
 library ItemPolicy {
     uint256 internal constant ANY = 0;
     uint256 internal constant ORDERED = 1;
     uint256 internal constant ATOMIC = 2;
+    uint256 internal constant CANONICAL = 3;
 
     /// @notice Pack a policy into a `timing` word. Off-chain builders mirror this.
     function pack(uint256 timing, uint256 policy) internal pure returns (uint256) {

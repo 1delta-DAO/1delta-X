@@ -4,6 +4,8 @@ pragma solidity ^0.8.28;
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
+import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
@@ -1149,7 +1151,9 @@ contract SettlementLens {
         uint256 n = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
         uint256 cur = PackedArrays.recordsStart();
         for (uint256 i; i < n; i++) {
-            (bool ok, string memory why, uint256 nxt) = _takeForItemAt(order, cur);
+            (bool ok, string memory why, uint256 nxt) = _proceedsItemAt(order, cur);
+            if (!ok) return (false, why);
+            (ok, why,) = _takeForItemAt(order, cur);
             if (!ok) return (false, why);
             cur = nxt;
         }
@@ -1163,7 +1167,8 @@ contract SettlementLens {
         view
         returns (bool, string memory, uint256)
     {
-        (uint256 op,,,, bytes calldata data, uint256 nxt) = PackedArrays.itemAt(order.items, cursor);
+        (uint256 op, address module,,, bytes calldata data, uint256 nxt) =
+            PackedArrays.itemAt(order.items, cursor);
         if (op != uint256(ItemOp.TAKE_FOR)) return (true, "", nxt);
         if (data.length < 32) return (false, "take_for missing funding descriptor", nxt);
 
@@ -1184,14 +1189,39 @@ contract SettlementLens {
             if (r != address(0) && r != order.maker) {
                 return (false, "take_for funds a fee leg (not the maker's)", nxt);
             }
+            // ── the ASSET half of the de-duplication ──
+            // `TAKE_FOR` removes the duplicated funding AMOUNT; the funding ASSET is
+            // still named inside `data`, in a per-module layout the core deliberately
+            // never decodes. If it is not the leg's token, the leg's amount is applied
+            // in the WRONG DECIMALS — the same silent mis-sizing this op exists to
+            // remove, returning through the one door the descriptor left open. Only
+            // the module can read its own blob, so it is asked
+            // ({IFundingSource.fundingSource}); a module that cannot answer reports
+            // `address(0)` and this degrades to the pre-existing gap rather than to a
+            // false rejection of a fillable order.
+            address asset = _fundingAsset(module, order.maker, data);
+            if (asset != address(0) && asset != PackedArrays.legOutToken(order.legsOut, j)) {
+                return (false, "take_for funds a different asset than the leg it is sized by", nxt);
+            }
             return (true, "", nxt);
         }
         // BALANCE — mirrors {Base.ForBalanceNeedsCap} / {Base.ForBalanceNeedsFullFill}.
-        // The zero-balance revert ({Base.ForBalanceEmpty}) is deliberately NOT
+        // The live-balance revert ({Base.ForBalanceBelowFloor}) is deliberately NOT
         // mirrored: it is a live wallet read, so it is a fillability fact at the
         // moment of the fill, not a defect in the order the maker is about to sign.
         if (data.length < 64) return (false, "take_for balance leg needs a cap", nxt);
         if (uint256(bytes32(data[32:64])) == 0) return (false, "take_for balance cap is zero", nxt);
+        // The FLOOR (descriptor bits [160:176), bps of the cap) is the other half of
+        // the bound, and this is the footgun the CORE cannot judge — exactly as with
+        // the zero literal above. Zero is a legal encoding there (it keeps the old
+        // "any non-zero balance will do" rule, so nothing already signed changes
+        // meaning), but it is never what a maker WANTS: the value-OUT leg draws its
+        // full signed size regardless, so a balance dented by an earlier fill of one
+        // of the maker's own orders funds a fraction of the position and borrows all
+        // of it. Above 10000 the floor exceeds the cap and no balance can satisfy it.
+        uint256 floorBps = (desc >> 160) & 0xffff;
+        if (floorBps == 0) return (false, "take_for balance leg needs a funding floor", nxt);
+        if (floorBps > 10_000) return (false, "take_for balance floor exceeds the cap", nxt);
         if (order.fillModule == address(0) && order.minFillAnchor != OrderGates.fillDenominator(order)) {
             return (false, "take_for balance leg requires full-fill", nxt);
         }
@@ -1228,6 +1258,212 @@ contract SettlementLens {
         unchecked {
             return (n2, k + 1);
         }
+    }
+
+    // ──────────────── Funding-leg preflight (the TAKE_FOR value-IN side) ────────────────
+
+    /// @dev `module.fundingSource(user, data)` — best-effort staticcall, the same
+    ///      posture {_erc20Allowance} takes. A module that does not implement it, or
+    ///      reverts on this blob, reports `(address(0), 0)` and every caller here
+    ///      reads that as "unknown", never as "broken": these checks are ADDITIONS to
+    ///      a preflight that shipped without them, so a module that cannot answer must
+    ///      leave the caller with the old behaviour rather than a rejection it would
+    ///      not previously have seen.
+    function _fundingSource(address module, address user, bytes calldata data)
+        private
+        view
+        returns (address asset, uint256 available)
+    {
+        (bool ok, bytes memory ret) =
+            module.staticcall(abi.encodeCall(IFundingSource.fundingSource, (user, data)));
+        if (ok && ret.length >= 64) (asset, available) = abi.decode(ret, (address, uint256));
+    }
+
+    /// @dev The PROCEEDS check for one item, and it applies to a plain `TAKE` as much
+    ///      as to a composite one — which is why it is its own pass rather than a
+    ///      branch inside {_takeForItemAt} (that frame is already at the legacy
+    ///      codegen's stack limit, and this check predates `TAKE_FOR` entirely).
+    ///
+    ///      An item's proceeds are credited by MEASUREMENT — {Core._payInputsToSolver}
+    ///      reads the balance delta of `legsIn[i].token` — while the token actually
+    ///      delivered is named only inside `data`, in a layout the core never decodes.
+    ///      Deliver a token no input leg names and the maker pays TWICE: every leg
+    ///      measures zero proceeds, so the whole `owed` is pulled from their wallet,
+    ///      AND the delivered token is credited to nobody and can never leave the
+    ///      settler (`fill` has no sweep, and Settlement grants no ERC-20 approval to
+    ///      anyone — the same invariant that makes the measurement sound).
+    ///
+    ///      Gated on `recipient == 0` because a signed recipient routes the proceeds
+    ///      away from the settler deliberately. See {IProceedsAsset} and
+    ///      `docs/reference-audits.md` §F22.
+    function _proceedsItemAt(Order calldata order, uint256 cursor)
+        private
+        view
+        returns (bool, string memory, uint256)
+    {
+        (uint256 op, address module,, address to, bytes calldata data, uint256 nxt) =
+            PackedArrays.itemAt(order.items, cursor);
+        if (to != address(0)) return (true, "", nxt);
+        if (op != uint256(ItemOp.TAKE) && op != uint256(ItemOp.TAKE_FOR)) return (true, "", nxt);
+        address got = _proceedsAsset(module, data);
+        if (got != address(0) && !_isInputLegToken(order.legsIn, got)) {
+            return (false, "item delivers a token no input leg can consume", nxt);
+        }
+        return (true, "", nxt);
+    }
+
+    /// @dev `module.proceedsAsset(data)` — best-effort, same posture as
+    ///      {_fundingSource}: silence means "unknown", never "broken".
+    function _proceedsAsset(address module, bytes calldata data) private view returns (address a) {
+        (bool ok, bytes memory ret) = module.staticcall(abi.encodeCall(IProceedsAsset.proceedsAsset, (data)));
+        if (ok && ret.length >= 32) a = abi.decode(ret, (address));
+    }
+
+    /// @dev Is `token` one the order's input legs can consume? SOME leg, deliberately
+    ///      not leg 0 — a rising relayer-fee leg in a different token is legitimate,
+    ///      and proceeds credited to any leg are proceeds that leave the settler.
+    function _isInputLegToken(bytes calldata legsIn, address token) private pure returns (bool) {
+        uint256 n = PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE);
+        for (uint256 i; i < n; i++) {
+            if (PackedArrays.legInToken(legsIn, i) == token) return true;
+        }
+        return false;
+    }
+
+    /// @dev The `asset` half alone — {_takeForItemAt} is stack-tight enough that
+    ///      binding the second return value there does not fit.
+    function _fundingAsset(address module, address user, bytes calldata data) private view returns (address a) {
+        (a,) = _fundingSource(module, user, data);
+    }
+
+    /// @dev Memory bundle for {previewItemFunding}, one slot per `TAKE_FOR` item.
+    ///      `assets[j] == address(0)` means the module did not answer: `required[j]`
+    ///      is still meaningful (the CORE computes it), `available[j]` is not.
+    struct ItemFunding {
+        address[] modules;
+        address[] assets;
+        uint256[] required;
+        uint256[] available;
+    }
+
+    /// @notice The FUNDING side of every item that pulls from the maker — `MAKE` and
+    ///         `TAKE_FOR` alike. The half {previewTakerAllowances} does not report and
+    ///         structurally cannot.
+    ///
+    /// @dev    An item that funds anything pulls it with
+    ///         `permit3.transferFrom(maker, MODULE, asset, …)`, so the grant it spends
+    ///         is `(maker, module, asset)`. Neither of the other two preflights reads
+    ///         that book: {_makerFillableCap} walks `legsIn` with the SETTLER as
+    ///         spender, and {previewTakerAllowances} reads the taker book, which gates
+    ///         what LEAVES a position rather than what funds it. The funding asset
+    ///         need not appear in `legsIn` at all.
+    ///
+    ///         `MAKE` is the common case and predates `TAKE_FOR` by a long way — every
+    ///         deposit and every repay on every venue funds itself this way, and until
+    ///         this view nothing previewed any of them (`docs/reference-audits.md`
+    ///         §F21). A `TAKE_FOR` item is the same pull with the amount resolved from
+    ///         a descriptor instead of read off the item head.
+    ///
+    ///         Without this view an order can pass {validateOrder}, pass
+    ///         {previewTakerAllowances}, and revert on EVERY fill for want of a single
+    ///         `approveToken` — the most likely first-integration failure of the op,
+    ///         and the least legible, because the revert surfaces from inside Permit3
+    ///         two calls deep with nothing naming the missing grant.
+    ///
+    ///         `required[j]` is this order's FULL-FILL funding amount, computed the
+    ///         way {Base._forSlice} computes it, so `available[j] >= required[j]` is
+    ///         the condition for the order to fill whole.
+    ///
+    ///         ⚠ `available >= required` IS NOT A GUARANTEE, for two deliberate
+    ///         reasons. A SELL leg is priced per fill with a `ceil`, so N partial
+    ///         fills can pull a few units MORE than the leg total — size the module's
+    ///         token allowance with margin, not to `required` exactly. And this is a
+    ///         live read: the maker can spend the balance or let the grant lapse
+    ///         between here and the fill.
+    function previewItemFunding(Order calldata order) external view returns (ItemFunding memory out) {
+        bytes calldata items = order.items;
+        uint256 n = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
+
+        uint256 count;
+        uint256 cursor = PackedArrays.recordsStart();
+        for (uint256 i; i < n;) {
+            (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
+            if (op == uint256(ItemOp.MAKE) || op == uint256(ItemOp.TAKE_FOR)) ++count;
+            cursor = next;
+            unchecked {
+                ++i;
+            }
+        }
+
+        out.modules = new address[](count);
+        out.assets = new address[](count);
+        out.required = new uint256[](count);
+        out.available = new uint256[](count);
+        if (count == 0) return out;
+
+        // Full-fill output tick per leg — what the leg-reference descriptor resolves
+        // to when the whole order fills. Hoisted out of the walk: it is identical for
+        // every item and it is the expensive part.
+        uint256[] memory outs = order.currentAmountOut();
+
+        uint256 k;
+        cursor = PackedArrays.recordsStart();
+        for (uint256 i; i < n;) {
+            // One helper for the whole per-item decode+read+write, for the reason
+            // {_takerItemAt} gives: the wide `itemAt` tuple must not share this frame.
+            (cursor, k) = _fundingItemAt(order, outs, out, cursor, k);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @dev One item's funding row. Mirrors {Base._forSlice}'s three descriptor forms
+    ///      at FULL fill; a non-composite item passes straight through.
+    function _fundingItemAt(
+        Order calldata order,
+        uint256[] memory outs,
+        ItemFunding memory out,
+        uint256 cursor,
+        uint256 k
+    ) private view returns (uint256, uint256) {
+        (uint256 op, address module, uint256 amount,, bytes calldata data, uint256 n2) =
+            PackedArrays.itemAt(order.items, cursor);
+        if (op != uint256(ItemOp.MAKE) && op != uint256(ItemOp.TAKE_FOR)) return (n2, k);
+
+        out.modules[k] = module;
+        (out.assets[k], out.available[k]) = _fundingSource(module, order.maker, data);
+        // A MAKE item's funding amount IS the item's own signed amount — there is no
+        // descriptor, because there is nothing to de-duplicate: the number is signed
+        // once, in the item head. `TAKE_FOR` is the case where the amount comes from
+        // elsewhere and has to be resolved.
+        out.required[k] = op == uint256(ItemOp.MAKE) ? amount : _requiredFunding(order, outs, data);
+        unchecked {
+            return (n2, k + 1);
+        }
+    }
+
+    /// @dev The full-fill `forAmount` for one item's descriptor. A malformed one
+    ///      reports `0` rather than reverting — {validateOrder} is where malformed
+    ///      orders are named, and this view must stay callable on a broken order so a
+    ///      UI can show both diagnoses at once.
+    function _requiredFunding(Order calldata order, uint256[] memory outs, bytes calldata data)
+        private
+        view
+        returns (uint256)
+    {
+        if (data.length < 32) return 0;
+        uint256 desc = uint256(bytes32(data[0:32]));
+        if (desc < (uint256(1) << 255)) return desc; // literal total
+        if (desc & (uint256(1) << 254) == 0) {
+            uint256 j = desc & 0xffff;
+            return j < outs.length ? outs[j] : 0; // leg reference
+        }
+        // BALANCE: `min(balanceOf(token, maker), cap)`, exactly as the core reads it.
+        if (data.length < 64) return 0;
+        uint256 cap = uint256(bytes32(data[32:64]));
+        uint256 bal = SafeTransferLib.balanceOf(address(uint160(desc)), order.maker);
+        return bal < cap ? bal : cap;
     }
 
     // NOTE ON describe() (U-5): the human-readable per-position string comes from a

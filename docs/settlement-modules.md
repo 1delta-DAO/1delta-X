@@ -232,7 +232,7 @@ resolves it in [`Base._forSlice`](../packages/core/src/settlement/Base.sol):
 | descriptor | meaning | `forAmount` |
 | --- | --- | --- |
 | `(1 << 255) \| j` | fund from `legsOut[j]` | `Pricing.outputAt(order, ctx, j)` — the SAME call `_deliverOutputs` just made |
-| `(3 << 254) \| token` | fund with what the maker holds | `min(balanceOf(token, maker), cap)`, cap = `data` word 1, **full-fill only** |
+| `(3 << 254) \| floorBps << 160 \| token` | fund with what the maker holds | `min(balanceOf(token, maker), cap)`, cap = `data` word 1, floor = `floorBps` of the cap, **full-fill only** |
 | any smaller value | a literal total (wallet-funded leg, no matching output) | sliced by the same differencing as `item.amount` |
 
 Settlement then calls `PERMIT3.takeFor(module, maker, amount, forAmount, receiver,
@@ -273,7 +273,7 @@ amount comes from the other two forms:
 
 - **fixed** — a literal descriptor. The core slices it pro-rata, so this shape
   partial-fills normally.
-- **balance-relative** — `(3 << 254) | token`, resolving to
+- **balance-relative** — `(3 << 254) | floorBps << 160 | token`, resolving to
   `min(balanceOf(token, maker), cap)` read at item time. For the amount a maker
   cannot know at signing: accrued interest, an in-flight transfer, a wallet sweep.
 
@@ -285,6 +285,31 @@ standing offer to lock the maker's whole holding into a position sized for much
 less. And it is **full-fill only** (`ForBalanceNeedsFullFill`): a live balance
 cannot pro-rate, so each slice would fund the whole remaining balance again. The
 core enforces both, because the core is the only party that knows the fill fraction.
+
+The **floor is the cap's other half**, and it is the one that survives an
+adversarial filler. The cap bounds the amount from above because anyone can *raise*
+a maker's balance; the floor bounds it from below because whoever sequences fills
+can *lower* it — filling another of the maker's live orders that draws the same
+token is an ordinary, profitable act, and the filler picks the order. `min(balance,
+cap)` then shrinks smoothly while the value-OUT `amount` keeps its full signed size,
+so the position comes out under-collateralised rather than unfilled, and nothing
+records that the maker asked for more. Stopping at a zero balance closes the
+boundary and leaves the whole neighbourhood of it open.
+
+So the descriptor carries `floorBps` in bits **[160:176)** — a fraction of the cap,
+not a second absolute amount, because a second amount in the module's own decimals
+is exactly the mis-scaling `TAKE_FOR` exists to remove. `min(balance, cap) <
+cap · floorBps / 10000` reverts `ForBalanceBelowFloor`. It lives in the word the
+maker already signs, inside `ref = keccak256(data)`, so a filler can neither lower
+it nor strip it (the altered blob is a different taker-allowance bucket).
+
+`floorBps == 0` keeps the settler's historical "any non-zero balance will do", so no
+encoding changes meaning — but `SettlementLens.validateOrder` **rejects** it
+(`take_for balance leg needs a funding floor`), the same division of labour it
+applies to a zero LITERAL: the core takes the encoding, the preflight names the
+footgun. The SDK's `forBalance(token, floorBps = 10000)` defaults to "fund the whole
+cap or do not fill", which is what a levered order wants; a genuine sweep whose
+position can absorb the variance lowers it deliberately.
 
 The order itself is the outputless SELL of [relayer-fees.md](relayer-fees.md) — the
 settlement types already express it, with no new machinery:
@@ -367,6 +392,74 @@ the core computes rather than a second number in a blob — and on Euler/Dolomit
 also buys partial fills that were previously impossible. All three still beat the
 two-item `[MAKE, TAKE]` pair they replace.
 
+### The funding leg's own preflight — `IFundingSource`
+
+`TAKE_FOR` de-duplicates the funding **amount**. It does not de-duplicate the
+funding **asset**: that is still named inside `data`, in a layout only the module
+knows — an Aave `collateralAsset` field, a Dolomite `collToken` (beside a
+`collMarketId`, so Dolomite names it twice), an Euler vault the asset is *derived
+from*. Nothing cross-checked it against the leg, so a blob naming a different asset
+than the leg it is sized by applied that amount in the **wrong decimals** — the same
+silent mis-sizing the op exists to remove, returning through the one door the
+descriptor left open.
+
+And the funding pull is authorised by a **different book** from everything the
+preflight already read: it is `permit3.transferFrom(maker, module, …)`, so the
+spender is the MODULE, not the settler, and in the wallet-funded shapes the token
+need not appear in `legsIn` at all. `previewTakerAllowances` reports the taker book;
+`_makerFillableCap` walks `legsIn`. Neither sees it. An order could pass
+`validateOrder`, pass `previewTakerAllowances`, and revert on **every** fill for want
+of one `approveToken`, with the revert surfacing from inside Permit3 two calls deep.
+
+Both are questions only the module can answer, so it is asked:
+
+```solidity
+interface IFundingSource {
+    function fundingSource(address onBehalfOf, bytes calldata data)
+        external view returns (address asset, uint256 available);
+}
+```
+
+- `SettlementLens.validateOrder` → for the leg-reference form, requires
+  `asset == legsOut[j].token`. New reason string: *"take_for funds a different asset
+  than the leg it is sized by"*.
+- `SettlementLens.previewItemFunding(order)` → `{modules, assets, required,
+  available}`, one row per composite item. `required` is the **full-fill** funding
+  amount computed the way `Base._forSlice` computes it, so `available >= required` is
+  the condition for the order to fill whole.
+
+**`asset` is not necessarily an ERC-20.** It is whatever the module draws from. An
+adapter funding a position with an NFT — a concentrated-liquidity position posted as
+collateral, a vault receipt, a trove — reports the ERC-721 and an `available` of 0 or
+1. The lens compares `asset` for *identity* and treats `available` as a *magnitude*,
+and assumes nothing else about either, so no module is forced into ERC-20 shape to
+answer. `address(0)` means "I pull nothing external" and disables both checks.
+
+**Failure to answer degrades to the old behaviour, never to a rejection.** The lens
+calls it with a best-effort `staticcall`; a module that does not implement it, or
+reverts, reports unknown and both checks are skipped. These are *additions* to a
+preflight that shipped without them, so a module that cannot answer has to leave the
+caller exactly where it was — a rejection would silently drop fillable orders out of
+an orderbook. Pinned by `test_lens_silentModule_isNotRejected`.
+
+**Declared in its own file, and that is a size precaution.** `ITakerForModule` is
+imported by `TakerAllowance`, so it rides into `Settlement`'s compilation unit;
+`IFundingSource` is reachable from nothing the settler compiles. Measured on a clean
+`core-deploy` build, this whole change costs the settler **0 bytes** — it is entirely
+module- and lens-side. That matters because the margin it has to fit in is tiny:
+`Settlement` sits at **24,526 of 24,576**, so a feature that touches the settler at
+all is a feature that has to be paid for somewhere else first. `TAKE_FOR` paid for
+itself twice over — folding the `TAKE` and `TAKE_FOR` dispatches into one
+`_dispatchTake` call site returned **−42 bytes**, since the two ops differ by a
+single static word.
+
+The `available` half is `@lib/FundingPreflight.pullable` — shared, not copied,
+because a preflight that disagrees with the pull it predicts is worse than none. It
+is `min(live allowance, balance)` with expiry honoured, and deliberately carries **no
+direct-ERC20 fallback term**: the composite modules call `permit3.transferFrom`
+directly, so a plain approval to the module funds nothing and counting it would
+preview a broken order as fillable.
+
 **Limits, deliberate.**
 
 - **Single-order path only.** `matchSettle` refuses `TAKE_FOR` at
@@ -385,7 +478,14 @@ two-item `[MAKE, TAKE]` pair they replace.
   with a `ceil`, so N slices can deliver marginally more than the leg total (in the
   maker's favour, pre-existing). The funding leg pulls exactly that, so the maker's
   token allowance to the module wants a few units of headroom. BUY legs and the
-  literal form sum exactly.
+  literal form sum exactly. `previewItemFunding` reports `required` at full fill and
+  cannot know the slice schedule, so size the grant ABOVE what it returns.
+- **One module, one shape — still by convention.** The taker book does not
+  distinguish `take` from `takeFor`: both spend
+  `(user, spender, module, keccak256(data))`. A contract implementing both
+  `ITakerModule` and `ITakerForModule` would let one `approveTaker` authorise either,
+  with nothing in the grant telling the maker which. Every module shipped implements
+  one; the rule is documented in `ITakerForModule`, not enforced.
 
 ## 9. Open / next
 

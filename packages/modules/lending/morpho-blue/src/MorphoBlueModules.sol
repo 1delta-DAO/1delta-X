@@ -160,6 +160,12 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
         // base = MarketParams (5 addresses) = 160 bytes; DustAction at 160, permit at 192.
         DustHandler.DustAction action = DustHandler.readAction(data, 160);
         PermitHelper.replayIfPresent(data, 192, loanToken, onBehalfOf, address(permit3), amount);
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(loanToken).balanceOf(address(this));
+
 
         // Repay the entire debt by shares. The exact asset amount is only known
         // after Morpho accrues interest.
@@ -186,7 +192,7 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
         // market (Recycle, best-effort with sweep fallback) or swept to the user
         // (default), never to a caller. In its own frame to keep the decoded
         // locals from overflowing the stack.
-        _disposeResidual(marketParams, loanToken, onBehalfOf, action);
+        _disposeResidual(marketParams, loanToken, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -198,13 +204,22 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
         MarketParams memory marketParams,
         address loanToken,
         address onBehalfOf,
-        DustHandler.DustAction action
+        DustHandler.DustAction action,
+        uint256 floor
     ) private {
-        uint256 residual = IERC20(loanToken).balanceOf(address(this));
-        if (residual == 0) return;
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        uint256 bal = IERC20(loanToken).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
         DustHandler.disposeResidual(
             loanToken,
             residual,
+            floor,
             onBehalfOf,
             action,
             address(morpho),

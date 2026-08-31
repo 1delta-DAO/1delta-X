@@ -5,7 +5,10 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
+import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DelegationHelper} from "@lib/DelegationHelper.sol";
+import {FundingPreflight} from "@lib/FundingPreflight.sol";
 
 import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 
@@ -143,7 +146,9 @@ contract AaveV3FusedLeverageModule is ITakerModule {
 //    — `forDesc` selects where the collateral amount comes from:
 //        `(1 << 255) | legIndex`            fund from `legsOut[legIndex]` — the
 //                                           levered shape, nothing duplicated;
-//        `(3 << 254) | uint160(token)`      fund with `min(balance, forCap)` —
+//        `(3 << 254) | (floorBps << 160)
+//                     | uint160(token)`      fund with `min(balance, forCap)`, and
+//                                           revert below `floorBps` of the cap —
 //                                           the NO-CONVERSION shape (deposit what
 //                                           I hold), full-fill only;
 //        a plain total                      a fixed wallet-funded amount, sliced
@@ -153,7 +158,7 @@ contract AaveV3FusedLeverageModule is ITakerModule {
 //      `data` layout instead of one per funding mode.
 //    — rateMode: 1 = stable, 2 = variable (must match `debtToken` if delegating).
 //
-contract AaveV3TakeForLeverageModule is ITakerForModule {
+contract AaveV3TakeForLeverageModule is ITakerForModule, IFundingSource, IProceedsAsset {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -205,5 +210,27 @@ contract AaveV3TakeForLeverageModule is ITakerForModule {
             IAaveV3Pool(pool).borrow(borrowAsset, amount, rateMode, 0, onBehalfOf);
             SafeTransferLib.safeTransfer(borrowAsset, receiver, amount);
         }
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev `collateralAsset` is field 5 of the layout above — the ONE place this
+    ///      module's funding asset is named, and the one the lens cross-checks
+    ///      against the leg the amount was sized by.
+    function fundingSource(address onBehalfOf, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        (,,,,, asset) = abi.decode(data, (uint256, uint256, address, address, uint256, address));
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The BORROW asset (field 3) — what lands on `receiver`. Its funding
+    ///      counterpart, the collateral, is field 5; the two must not be confused,
+    ///      which is precisely why both are declared rather than inferred.
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (,,, asset) = abi.decode(data, (uint256, uint256, address, address));
     }
 }

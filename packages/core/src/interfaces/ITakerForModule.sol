@@ -44,12 +44,19 @@ pragma solidity ^0.8.28;
 ///      trove). The core slices it with the SAME differencing it applies to
 ///      `amount`, so N partial fills sum EXACTLY to the signed total: no ceil
 ///      drift, no over-pull.
-///    • top TWO bits SET → BALANCE-RELATIVE, `min(balanceOf(token, maker), cap)`.
-///      The token is the descriptor's low 160 bits, the cap is `data`'s SECOND
-///      word and is MANDATORY. For the no-conversion shape where the maker cannot
-///      know the amount at signing time — accrued interest, an in-flight transfer,
-///      a wallet sweep. FULL-FILL ONLY: a live balance cannot pro-rate, so the core
-///      rejects a sliced fill outright ({Base.ForBalanceNeedsFullFill}).
+///    • top TWO bits SET → BALANCE-RELATIVE, `min(balanceOf(token, maker), cap)`,
+///      bounded BOTH ways. The token is the descriptor's low 160 bits, the cap is
+///      `data`'s SECOND word and is MANDATORY, and bits [160:176) carry a FLOOR in
+///      bps of that cap — below it the fill reverts ({Base.ForBalanceBelowFloor})
+///      rather than funding a fraction of the position while the value-out leg
+///      draws in full. The cap is there because anyone can RAISE a maker's balance;
+///      the floor is there because whoever sequences fills can LOWER it — filling
+///      another of the maker's live orders in the same token shrinks this leg
+///      without touching this fill. The form is for the no-conversion shape, where
+///      the maker cannot know the amount at signing time (accrued interest, an
+///      in-flight transfer, a wallet sweep). FULL-FILL ONLY: a live balance cannot
+///      pro-rate, so the core rejects a sliced fill outright
+///      ({Base.ForBalanceNeedsFullFill}).
 ///
 ///  With the balance form the blob is `abi.encode(forDesc, cap, …)` — the cap is
 ///  field 1, so a module's own decode shifts by one word relative to the other two
@@ -102,4 +109,17 @@ interface ITakerForModule {
         address receiver,
         bytes calldata data
     ) external;
+
+    // The funding-leg PREFLIGHT — "what asset does this module draw, and may it?" —
+    // is deliberately NOT declared here. It lives in {IFundingSource}, and a
+    // composite module implements both; only modules and {SettlementLens} import the
+    // preflight one.
+    //
+    // The split is a SIZE PRECAUTION. This interface is imported by
+    // {TakerAllowance}, so it rides into `Settlement`'s compilation unit;
+    // {IFundingSource} is reachable from nothing the settler compiles. `Settlement`
+    // runs at 24,456 of the 24,576-byte EIP-170 limit — a margin at which nobody
+    // should have to re-measure to find out whether a view declaration was free, so
+    // the declaration is kept where it provably cannot matter rather than where it
+    // probably does not.
 }

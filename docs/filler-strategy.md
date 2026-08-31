@@ -80,7 +80,7 @@ Off-chain, in this order:
 | Price a candidate | `SettlementLens.previewFill` — the same {Pricing} math the fill runs |
 | Get the hashes for the guard | `SettlementLens.hashOrder` (or compute the EIP-712 hash yourself) |
 | Snapshot `filled` | `Settlement.filled(hash)` for each order — **these are the `expectedFilled` values** |
-| Read each order's item policy | `Order.timing` bits [96:100) — `ANY` (0) may be interleaved freely, `ORDERED` (1) must keep signed sequence, `ATOMIC` (2) must additionally be emitted back-to-back |
+| Read each order's item policy | `Order.timing` bits [96:100) — `ANY` (0) may be interleaved freely, `ORDERED` (1) must keep signed sequence, `ATOMIC` (2) must additionally be emitted back-to-back, `CANONICAL` (3) must additionally run its items after that order's `DELIVER` and before any `PULL` of its input legs (i.e. schedule it exactly as `fill` would: deliver → items → pull) |
 | Order the steps | topological sort of the produce/consume graph: `PULL` and `ITEM(TAKE)` produce; `DELIVER` and `ITEM(MAKE)` consume — subject to the policy above |
 
 The schedule is the only part the contract does not derive for you — see
@@ -143,7 +143,7 @@ an alert.
 | `BatchNotWhole(token)` | the plan does not net in `token`; the pool would have ended below its baseline |
 | `LengthMismatch()` / `ZeroFill()` / `FillTooSmall()` | arity, or a fill below the maker's `minFillAnchor` |
 | `MatchSettleItemUnsupported()` / `MatchDuplicateInput()` / `OutputToSettlement()` | the order is not eligible for a netted match — filter it out at build time. The last one is an output leg addressed at Settlement itself: on the single-order path that is a maker self-burn, but the netted path cannot burn it (a pool→pool self-transfer would leave the amount above the pre-context floor and sweep it to *you*), so it is refused rather than paid. `SettlementLens.validateOrder` reports all three, and it is much cheaper to ask it |
-| `ItemPolicyViolated(order, item)` | the schedule ran that item somewhere the MAKER did not permit — out of signed sequence under `ItemPolicy.ORDERED`, or with a foreign step wedged in under `ATOMIC`. The order is fillable, just not that way: read `timing` bits [96:100) at build time and route accordingly |
+| `ItemPolicyViolated(order, item)` | the schedule ran that item somewhere the MAKER did not permit — out of signed sequence under `ItemPolicy.ORDERED`, with a foreign step wedged in under `ATOMIC`, or (under `CANONICAL`) an item ahead of that order's delivery / a `PULL` ahead of its items, in which case `item` is the input-leg index. The order is fillable, just not that way: read `timing` bits [96:100) at build time and route accordingly |
 
 **Maker-side — the order is not fillable right now; re-check before retrying.**
 

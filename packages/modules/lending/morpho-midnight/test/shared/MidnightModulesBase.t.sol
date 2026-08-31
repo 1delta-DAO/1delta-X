@@ -136,20 +136,26 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
         return abi.encode(_market());
     }
 
-    function _withdrawCollateralData(uint8 mode) internal view returns (bytes memory) {
-        return abi.encode(uint8(MidnightTakerModule.Op.WithdrawCollateral), _market(), uint256(0), mode);
+    /// @param total the item's full signed amount — read only in `Full` mode
+    ///        ({FullFillGuard}); pass 0 for `Exact`.
+    function _withdrawCollateralData(uint8 mode, uint256 total) internal view returns (bytes memory) {
+        return abi.encode(uint8(MidnightTakerModule.Op.WithdrawCollateral), _market(), uint256(0), mode, total);
     }
 
-    function _withdrawCreditData(uint8 mode) internal view returns (bytes memory) {
-        return abi.encode(uint8(MidnightTakerModule.Op.Withdraw), _market(), uint256(0), mode);
+    function _withdrawCreditData(uint8 mode, uint256 total) internal view returns (bytes memory) {
+        return abi.encode(uint8(MidnightTakerModule.Op.Withdraw), _market(), uint256(0), mode, total);
     }
 
-    function _borrowData(uint256 units) internal view returns (bytes memory) {
-        return abi.encode(_offer(true), bytes(""), units);
+    /// @param total the item's full signed amount. `units` does not pro-rate, so a
+    ///        borrow item is full-fill only ({FullFillGuard}).
+    function _borrowData(uint256 units, uint256 total) internal view returns (bytes memory) {
+        return abi.encode(_offer(true), bytes(""), units, total);
     }
 
-    function _lendData(uint256 units) internal view returns (bytes memory) {
-        return abi.encode(_offer(false), bytes(""), units);
+    /// @param total the item's full signed amount (the maker's BUDGET, which may
+    ///        exceed `units`). Full-fill only — see {_borrowData}.
+    function _lendData(uint256 units, uint256 total) internal view returns (bytes memory) {
+        return abi.encode(_offer(false), bytes(""), units, total);
     }
 
     // ──────────────────── maker-side authorization helpers ────────────────────
@@ -200,5 +206,33 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
 
     function _item(ItemOp op, address module, uint256 amount, bytes memory data) internal pure returns (Item memory) {
         return Item(op, module, amount, address(0), data);
+    }
+
+    // ──────────────────── Position seeding / solver funding ────────────────────
+    //
+    // Shared by every Midnight suite (flows, security). They live here rather than
+    // in one test contract because more than one suite needs to stand a position up
+    // before exercising a module against it.
+
+    function _seedCollateral(address who, uint256 amount) internal {
+        COLL.mint(address(this), amount);
+        COLL.approve(address(midnight), amount);
+        midnight.seedCollateral(_market(), who, 0, amount);
+    }
+
+    function _seedCredit(address who, uint256 units) internal {
+        LOAN.mint(address(this), units);
+        LOAN.approve(address(midnight), units);
+        midnight.seedCredit(_market(), who, units);
+    }
+
+    function _approveSolverColl(uint256 cap) internal {
+        vm.prank(solver);
+        permit3.approveToken(address(settlement), address(COLL), uint160(cap), 0);
+    }
+
+    function _approveSolverLoan(uint256 cap) internal {
+        vm.prank(solver);
+        permit3.approveToken(address(settlement), address(LOAN), uint160(cap), 0);
     }
 }

@@ -112,8 +112,14 @@ contract CompoundV2RepayModule is IMakerModule {
         (address cToken, address underlying) = abi.decode(data, (address, address));
         DustHandler.DustAction action = DustHandler.readAction(data, 64); // base = (address,address)
 
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(underlying).balanceOf(address(this));
+
         _pullAndRepay(cToken, underlying, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
-        _disposeResidual(cToken, underlying, onBehalfOf, action);
+        _disposeResidual(cToken, underlying, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -148,13 +154,28 @@ contract CompoundV2RepayModule is IMakerModule {
     ///      the equivalent best-effort recycle + sweep fallback inline. A
     ///      paused/failed mint leaves the underlying untouched and falls back to the
     ///      sweep floor.
-    function _disposeResidual(address cToken, address underlying, address onBehalfOf, DustHandler.DustAction action)
-        private
-    {
-        uint256 residual = IERC20(underlying).balanceOf(address(this));
-        if (residual == 0) return;
+    function _disposeResidual(
+        address cToken,
+        address underlying,
+        address onBehalfOf,
+        DustHandler.DustAction action,
+        uint256 floor
+    ) private {
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        uint256 bal = IERC20(underlying).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
 
         if (action == DustHandler.DustAction.Recycle) {
+            // The cToken floor too: the mint is the only source of cTokens WITHIN
+            // this call, but a donated balance would otherwise be forwarded to
+            // whoever is filling, exactly as the underlying would.
+            uint256 cFloor = IERC20(cToken).balanceOf(address(this));
             SafeTransferLib.forceApprove(underlying, cToken, residual);
             (bool ok, bytes memory ret) = cToken.call(abi.encodeCall(ICErc20.mint, (residual)));
             SafeTransferLib.forceApprove(underlying, cToken, 0); // never leave a dangling allowance
@@ -163,9 +184,9 @@ contract CompoundV2RepayModule is IMakerModule {
                 // Forward the freshly-minted cToken receipt to the user, then sweep
                 // any underlying the mint didn't consume so the module ends empty.
                 uint256 cBal = IERC20(cToken).balanceOf(address(this));
-                if (cBal != 0) SafeTransferLib.safeTransfer(cToken, onBehalfOf, cBal);
+                if (cBal > cFloor) SafeTransferLib.safeTransfer(cToken, onBehalfOf, cBal - cFloor);
                 uint256 left = IERC20(underlying).balanceOf(address(this));
-                if (left != 0) SafeTransferLib.safeTransfer(underlying, onBehalfOf, left);
+                if (left > floor) SafeTransferLib.safeTransfer(underlying, onBehalfOf, left - floor);
                 return;
             }
             // Mint reverted / returned an error (paused, deprecated market) — the

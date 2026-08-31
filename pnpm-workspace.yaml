@@ -5,6 +5,7 @@ packages:
   # directories still exist on disk — and in a clone, where they do not.
   - "!packages/pitch-deck"
   - "!packages/pitch-deck-rootstock"
+  - "!packages/pitch-deck-vc"
   - "packages/modules/*"
   - "packages/modules/lending/*"
   - "packages/modules/redeem/*"

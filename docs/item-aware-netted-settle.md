@@ -283,9 +283,10 @@ can seed a bootstrap where the batch is short; the match case needs no interacti
    `ItemsBatch` calldata struct keep it under the no-via-IR limit. This deliberate
    path is not stack-golfed; item modules add pay-per-use CALLs.
 5. **Atomicity of a half-run leverage mid-batch.** *Covered by* `nonReentrant` +
-   full-tx revert on any short transfer (`test_wrongSequence_reverts`,
-   `test_itemLeg_underfunded_reverts` assert a mid-sequence failure unwinds the
-   whole batch). A reverting-lender fork test belongs in the modules package.
+   full-tx revert on any short transfer (`MatchSettle:test_badStep_reverts` and the
+   omission/duplication family `..._omittedItem_reverts`, `..._doubleItem_reverts`
+   pin a malformed schedule; `..._itemUnderproduces_legUnfunded` pins a short item
+   leg — each asserts a mid-sequence failure unwinds the whole batch). A reverting-lender fork test belongs in the modules package.
 
 ## Remaining follow-ons (not blocking)
 

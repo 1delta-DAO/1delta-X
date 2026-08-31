@@ -13,6 +13,16 @@ FORGE ?= $(shell command -v forge 2>/dev/null || echo $(HOME)/.foundry/bin/forge
 
 # All packages that have at least one test file.
 # Add modules-erc4626 once that branch is merged to main.
+#
+# ⚠ THREE PACKAGES SPLIT THEIR SUITE ACROSS TWO PROFILES, and the unit-only half is
+# the one named here. `modules-aave-v3` is 6 unit tests; its 56 FORK tests — the
+# leverage, swaps, closing, limit-order and TakerModuleAuth suites, i.e. everything
+# that exercises the module against a real lender — live under
+# `modules-aave-v3-fork` and used to be reachable from no make target at all. Same
+# for compound-v3 and morpho-blue. `test-all` therefore reported green while
+# skipping the majority of those packages' coverage. FORK_PACKAGES below closes it;
+# `test-all` runs both lists. Keep the two in sync when a `-fork` profile is added
+# to foundry.toml.
 PACKAGES := \
 	core \
 	periphery \
@@ -48,7 +58,17 @@ PACKAGES := \
 	modules-maker \
 	modules-oco
 
-.PHONY: test build test-all build-all gas gas-check gas-diff size-check predict-core deploy-core $(addprefix test-,$(PACKAGES)) $(addprefix build-,$(PACKAGES))
+# Fork-only profiles: same sources, the FULL test directory, and an RPC. Listed
+# separately because they are additive to the unit profile of the same name, not a
+# replacement for it — running both is what covers the package.
+FORK_PACKAGES := \
+	modules-aave-v3-fork \
+	modules-compound-v3-fork \
+	modules-morpho-blue-fork
+
+ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
+
+.PHONY: test build test-all test-fork build-all gas gas-check gas-diff size-check docs-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -64,19 +84,27 @@ build:
 
 # ── Per-package shortcuts ─────────────────────────────────────────────────────
 
-$(addprefix test-,$(PACKAGES)): test-%:
+$(addprefix test-,$(ALL_PACKAGES)): test-%:
 	FOUNDRY_PROFILE=$* $(FORGE) test -vv
 
-$(addprefix build-,$(PACKAGES)): build-%:
+$(addprefix build-,$(ALL_PACKAGES)): build-%:
 	FOUNDRY_PROFILE=$* $(FORGE) build
 
 # ── All packages (sequential) ─────────────────────────────────────────────────
+
+## Run ONLY the fork suites (needs an RPC; `ETH_RPC_URL` to pin one).
+test-fork:
+	@set -e; \
+	for pkg in $(FORK_PACKAGES); do \
+		printf "\n\033[1;34m══ %-30s ══\033[0m\n" "$$pkg"; \
+		FOUNDRY_PROFILE=$$pkg $(FORGE) test -vv; \
+	done
 
 ## Run every package's tests one at a time.
 test-all:
 	@set -e; \
 	PASS=0; FAIL=0; \
-	for pkg in $(PACKAGES); do \
+	for pkg in $(ALL_PACKAGES); do \
 		printf "\n\033[1;34m══ %-30s ══\033[0m\n" "$$pkg"; \
 		if FOUNDRY_PROFILE=$$pkg $(FORGE) test -vv; then \
 			PASS=$$((PASS+1)); \
@@ -123,6 +151,19 @@ build-all:
 #   FOUNDRY_PROFILE=modules-aave-v3-fork forge snapshot --snap gas/aave-v3.gas-snapshot
 
 GAS_SEED ?= 0x1de17a
+
+# ── Documentation gate ───────────────────────────────────────────────────────
+#
+# `docs/edge-case-matrix.md` binds every classified combination to the test that
+# pins it, and `docs/reference-audits.md` binds every finding to its regression.
+# Those bindings are prose: rename a test and the table still claims the cell is
+# covered, which is the same drift-between-doc-and-code that produced F13. This
+# gate makes the citations mechanically checkable, like the error sweep in the
+# matrix note's Part 3.
+
+## CI gate: fail if any doc cites a test that no longer exists.
+docs-check:
+	@python3 tools/check-doc-citations.py
 
 ## Regenerate the committed gas baseline (.gas-snapshot) for the core package.
 gas:

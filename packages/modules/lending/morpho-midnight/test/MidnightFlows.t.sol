@@ -24,7 +24,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         LOAN.mint(address(midnight), borrowUnits); //  lender liquidity for the borrow proceeds
 
         bytes memory supplyData = _supplyData();
-        bytes memory borrowData = _borrowData(borrowUnits);
+        bytes memory borrowData = _borrowData(borrowUnits, borrowUnits);
 
         _makerApproveToken(address(supplyModule), address(COLL), collateralIn);
         _makerApproveTaker(address(borrowModule), keccak256(borrowData), borrowUnits);
@@ -63,7 +63,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         LOAN.mint(solver, debtUnits); // solver funds the repayment
 
         bytes memory repayData = _repayData();
-        bytes memory wcData = _withdrawCollateralData(0); // Exact
+        bytes memory wcData = _withdrawCollateralData(0, 0); // Exact
 
         _makerApproveToken(address(repayModule), address(LOAN), debtUnits);
         _makerApproveTaker(address(takerModule), keccak256(wcData), collat);
@@ -100,7 +100,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         LOAN.mint(solver, debtUnits);
 
         bytes memory repayData = _repayData();
-        bytes memory wcData = _withdrawCollateralData(1); // Full
+        bytes memory wcData = _withdrawCollateralData(1, collForward); // Full
 
         _makerApproveToken(address(repayModule), address(LOAN), debtUnits);
         _makerApproveTaker(address(takerModule), keccak256(wcData), collForward);
@@ -135,7 +135,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         LOAN.mint(solver, lendUnits); //  solver funds the LOAN to be lent
         COLL.mint(maker, collCost); //     maker pays COLL for the lend position
 
-        bytes memory lendData = _lendData(lendUnits);
+        bytes memory lendData = _lendData(lendUnits, lendUnits);
 
         _makerApproveToken(address(lendModule), address(LOAN), lendUnits); // lend pulls delivered LOAN
         _makerApproveToken(address(settlement), address(COLL), collCost); //  tokenIn payout to solver
@@ -169,7 +169,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         LOAN.mint(solver, budget);
         COLL.mint(maker, collCost);
 
-        bytes memory lendData = _lendData(lendUnits);
+        bytes memory lendData = _lendData(lendUnits, budget);
 
         _makerApproveToken(address(lendModule), address(LOAN), budget);
         _makerApproveToken(address(settlement), address(COLL), collCost);
@@ -201,7 +201,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         _seedCredit(maker, creditUnits); // mock holds the redeemable LOAN
         COLL.mint(solver, collOut);
 
-        bytes memory wData = _withdrawCreditData(0); // Exact
+        bytes memory wData = _withdrawCreditData(0, 0); // Exact
 
         _makerApproveTaker(address(takerModule), keccak256(wData), creditUnits);
         _makerAuthorize(address(takerModule));
@@ -232,27 +232,5 @@ contract MidnightFlowsTest is MidnightModulesBase {
         assertEq(COLL.balanceOf(address(takerModule)), 0, "taker module COLL drained");
         assertEq(LOAN.balanceOf(address(takerModule)), 0, "taker module LOAN drained");
         assertEq(LOAN.balanceOf(address(borrowModule)), 0, "borrow module LOAN drained");
-    }
-
-    function _seedCollateral(address who, uint256 amount) internal {
-        COLL.mint(address(this), amount);
-        COLL.approve(address(midnight), amount);
-        midnight.seedCollateral(_market(), who, 0, amount);
-    }
-
-    function _seedCredit(address who, uint256 units) internal {
-        LOAN.mint(address(this), units);
-        LOAN.approve(address(midnight), units);
-        midnight.seedCredit(_market(), who, units);
-    }
-
-    function _approveSolverColl(uint256 cap) internal {
-        vm.prank(solver);
-        permit3.approveToken(address(settlement), address(COLL), uint160(cap), 0);
-    }
-
-    function _approveSolverLoan(uint256 cap) internal {
-        vm.prank(solver);
-        permit3.approveToken(address(settlement), address(LOAN), uint160(cap), 0);
     }
 }

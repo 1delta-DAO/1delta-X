@@ -93,7 +93,7 @@ rather than duplicated in the matrix.
 | Refused | Error | Why |
 | --- | --- | --- |
 | a `SETTLE` item | `MatchSettleItemUnsupported` | routes the maker's asset to the **filler**, not the pool — the netted accounting has no entry for it |
-| a `TAKE_FOR` item | `MatchSettleItemUnsupported` | its funding leg is an output the order must already have **received**; a solver-chosen schedule cannot guarantee that ordering |
+| a `TAKE_FOR` item | `MatchSettleItemUnsupported` | its value-IN leg resolves **at item time**, and the netted engine schedules `ITEM` and `DELIVER` independently — so the ordering that makes the resolution deterministic would become the filler's choice. See [§2.1](#21-why-take_for-in-particular-stays-out) |
 | a repeated input token in one order | `MatchDuplicateInput` | item proceeds are attributed per token per step window, so a duplicate leg would double-count one arrival |
 | delta-verified outputs | `DeltaVerifyNotBatchable` | needs a per-order callback and a recipient snapshot the PRESEND/DELIVER flow does not have — refused rather than delivered nominally |
 
@@ -103,6 +103,51 @@ bit can never collide with `DELIVERED_BIT`. And an output leg addressed at
 Settlement itself is refused mid-schedule (`OutputToSettlement`) — on the netted
 path it would be a self-transfer that discharges the obligation while leaving the
 money above the pre-context floor, i.e. a gift to the filler.
+
+### 2.1 Why `TAKE_FOR` in particular stays out
+
+Worth its own section, because the reason is stronger than "the ordering is
+inconvenient" and the guard should not be relaxed on the weaker reading.
+
+`TAKE_FOR` fuses a value-OUT draw with a value-IN funding leg, and the funding
+amount comes from a maker-signed descriptor resolved by `Base._forSlice` **at the
+moment the item runs**. It has three forms, and they do not carry the same risk:
+
+| Descriptor form | Resolved from | Schedule-dependent? |
+| --- | --- | --- |
+| LITERAL | a signed total, cumulated off `ctx` | **no** — same number under any ordering |
+| LEG-reference | `Pricing.outputAt(ctx, j)` | **no** for the amount; yes for whether the maker can *fund* it yet |
+| BALANCE | `min(balanceOf(token, maker), cap)` | **yes — and this is the one that matters** |
+
+On the single-order path the resolution is deterministic because the ordering is a
+property of the **code**: `Core._settleForward` runs `_deliverOutputs` →
+`_executeItems` → `_payInputsToSolver`, and the one mode that reorders those forbids
+items outright (`ReverseModeRequiresNoItems`). That is measured, not assumed —
+`TakeForItem:test_balance_fundsWhateverTheMakerHolds` shows the maker funded with
+`held + WETH_OUT`, i.e. the just-delivered leg included.
+
+Under `matchSettle` the ordering would instead be a property of the **filler's
+schedule**. A filler running the `ITEM` step before the `DELIVER` step resolves the
+same signed descriptor against the maker's *pre-delivery* wallet — funding the
+position with a fraction of the intended collateral while the value-OUT leg still
+draws in full. That is precisely
+[F16](reference-audits.md#f16--a-balance-relative-take_for-funding-leg-failed-open-when-the-wallet-was-empty),
+made filler-controllable, and **`ForBalanceEmpty` does not close it**: that guard
+catches a resolved *zero*, so a maker holding one wei pre-delivery passes it and ends
+up near-totally under-collateralised.
+
+The LEG-reference form is benign by comparison — if the pull succeeds the end state
+is identical whichever order the steps ran in, and if the maker cannot fund it yet
+the fill simply reverts. The LITERAL form is schedule-independent outright. Both are
+refused anyway, because the guard keys on the **op**, not on a descriptor it would
+have to decode.
+
+> **If this is ever narrowed**, it must discriminate by descriptor *form*, not by op,
+> and the BALANCE form must stay out. Pinned per form by
+> `TakeForItem:test_matchSettle_refusesTakeFor_{literal,legRef,balance}Form`, plus
+> `..._pairedWithAPlainOrder` for the per-order property — the refusal fires in
+> Phase 1, so nothing half-settles and the plain order in the same plan does not fill
+> either.
 
 `PROPORTIONAL` is matchable but **full-fill only**
 (`ProportionalNeedsFullFill`): a balance-derived denominator moves between fills,

@@ -167,13 +167,130 @@ named by the maker whose orders it can sign. This is asserted by
 simplify this into `_verifySignature`* note.
 
 **Replay protection reuses the maker's order nonce bitmap** rather than a private
-counter. Two things fall out for free: the permit is consumable exactly once, and
-a maker can pre-emptively kill a nomination they signed but never wanted relayed
-using cancellation primitives they already have — `cancelOrders`,
-`invalidateNonceWord`, `rollbackNonces`. The cost is one nonce out of a 2²⁵⁶
-space.
+counter, but in a **reserved half** of it. The coordinate actually consumed is
+`nonce | SIGNER_NONCE_NS` (bit 255 forced on), never the bare `nonce`. The maker
+still *signs* the bare value, so the EIP-712 payload and every signer is unchanged;
+the reservation costs one `or` on-chain.
+
+> ### ⚠ The namespace is not bookkeeping — it closes a kill switch
+>
+> Sharing the coordinate outright made an **unrelayed** nomination permit a latent,
+> third-party-triggerable cancel on every order the maker later signed with the same
+> nonce:
+>
+> | | |
+> |---|---|
+> | T0 | maker signs a nomination permit on nonce `N`; nobody relays it |
+> | T1 | `isNonceCancelled(maker, N)` reads **false** — an allocator sees `N` as free |
+> | T2 | maker signs and publishes an ordinary order on nonce `N` |
+> | T3 | **anyone** relays the stale permit, at any point before its `deadline` |
+> | T4 | the order is dead, with no action by the maker |
+>
+> Nothing at T3 needs a privilege, and nothing at T1 warns the maker: the bit stays
+> clear until the permit lands. Nonce reuse is not exotic either — a shared nonce is
+> exactly how an [OCO bracket](oco.md) is built, so the order side deliberately
+> reuses the space the permit was drawing from. The SDK leaves nonce allocation to
+> the caller (`amend.ts`), so nothing off-chain caught it either.
+>
+> Pinned by `test_signerPermit_cannotCancelALiveOrder`.
+
+**The residual constraint, and it is one line for order builders:** an *order* must
+not use a nonce with bit 255 set. That is not enforced on the fill path, on purpose
+— a range check there would tax every fill of every order forever to guard a range
+no allocator picks. The SDK exports the constant as `SIGNER_NONCE_NS` and the
+guard as `assertOrderNonce(nonce)` (`packages/sdk/src/delegation.ts`) — call it
+wherever order nonces are allocated.
+
+Two consequences of the reservation, both deliberate:
+
+- pre-emptively killing an unrelayed nomination still works with the primitives the
+  maker already has, but it must name the **namespaced** coordinate:
+  `cancelOrders([nonce | 1 << 255])`, or the matching `invalidateNonceWord`.
+- `rollbackNonces` no longer reaches nominations at all — a floor would have to
+  exceed 2²⁵⁵. That is the better behaviour, not a regression: retiring a ladder of
+  orders should not silently revoke the desk's signing key as well.
 
 ## Caveats
+
+### Revoking a delegate does not invalidate an outstanding permit
+
+A nomination permit burns its bitmap coordinate **only when relayed**. So this
+sequence leaves the delegate live:
+
+| | |
+|---|---|
+| T0 | maker signs a gasless nomination for `d`; the relayer never lands it |
+| T1 | maker revokes with `setOrderSigner(d, 0)` — the registry entry is gone |
+| T2 | **anyone** relays the stale permit, up to its `deadline` |
+| T3 | `d` is nominated again, and its signature settles orders |
+
+`test_permit_replayRejected` covers the *relay-then-revoke-then-replay* ordering,
+where the nonce is already spent. The ordering above is the one that bites, and it
+is pinned by `test_permit_staleUnrelayedPermitResurrectsARevokedDelegate`.
+
+**Revocation is therefore two calls, not one** — clear the registry *and* burn the
+permit coordinate:
+
+```solidity
+setOrderSigner(d, 0);
+cancelOrders([permitNonce | 1 << 255]);   // ⚠ the NAMESPACED coordinate
+```
+
+The SDK emits exactly that pair from `encodeRevokeOrderSigner(d)`, and can do so
+without any bookkeeping because `signerPermitNonce(d)` derives the coordinate from
+the delegate address itself. Pinned by
+`test_permit_burningTheCoordinateMakesRevocationFinal`.
+
+Give permits a bounded `deadline`. An unrelayed permit is a standing right to
+restore the delegate; an unbounded deadline makes it a permanent one. The SDK
+defaults to one hour.
+
+### There is no bulk revocation, and `rollbackNonces` is not a substitute
+
+Revocation is per-address. There is no epoch and no `lockdownAll` analogue, so
+containing a compromised desk means naming every delegate it holds.
+
+`rollbackNonces` looks like the panic button and is not: it sets a nonce **floor**,
+and a delegate simply signs above it
+(`test_rollbackNonces_doesNotContainACompromisedDelegate`). Per-address revocation
+binds on any nonce (`test_perAddressRevocation_isTheOnlyContainment`). The only
+other containment is revoking the Permit3 allowances that fund the fills — which
+stops the maker trading too.
+
+A maker who has lost the list can rebuild it: `expiry == 0` is the revocation
+value, so the live set is a last-write-wins fold over `OrderSignerSet` logs. The
+SDK does that in `liveDelegates(logs, now)` and batches the revocations with
+`encodeRevokeOrderSigners`.
+
+### A delegate cannot cancel on-chain, and two of the cancels fail silently
+
+Every authoritative cancel is keyed by `msg.sender`. A delegate can *sign* orders
+and can *retract* them from off-chain books — the `SoftCancel` verifier accepts the
+same signer set the settler does ([soft-cancel.md](soft-cancel.md)) — but it cannot
+hard-cancel.
+
+`cancelOrder` and `revokeOrderApproval` say so loudly. The **nonce** cancels do
+not: `cancelOrders` / `invalidateNonceWord` / `rollbackNonces` called by a delegate
+succeed, write the *delegate's own* bitmap row, and emit
+`OrdersCancelled(delegate, …)` — indistinguishable, to an operator or a bot
+watching events, from a cancel that worked. Guard with the SDK's
+`assertCanCancelOnChain(caller, maker)`; pinned by
+`test_delegateCannotCancelForItsMaker`.
+
+### Adopting EIP-7702 disables a maker's contract-delegate envelopes
+
+The envelope branch is reachable only when the maker has **no code** — that
+condition is what stops it shadowing a 1271 payload meant for a contract maker. The
+consequence is easy to miss: an EOA maker who later sets an EIP-7702 delegation
+stops reaching the branch, and every unfilled order its Safe/passkey delegate
+signed becomes unauthorized.
+
+Liveness only — nothing becomes authorizable that was not before, and no order is
+stuck (`cancelOrder`, or re-sign). But it is a silent break on the day a principal
+upgrades their wallet. Pinned by
+`test_makerAdopting7702_disablesTheContractDelegateEnvelope`. ECDSA delegates are
+unaffected: their registry probe runs before any `code.length` gate, which is also
+why a **contract** maker may hold an EOA delegate.
 
 ### Revocation does not bind mid-order
 
@@ -210,7 +327,7 @@ The maker's own signature keeps working unchanged whether or not delegates exist
 ## Testing
 
 [`DelegatedOrderSigner.t.sol`](../packages/core/test/swaps/DelegatedOrderSigner.t.sol)
-— 21 tests. The ones that encode the security properties rather than the
+— 35 tests. The ones that encode the security properties rather than the
 capability:
 
 | Test | Property |
@@ -222,6 +339,15 @@ capability:
 | `test_7702RawKeyMaker_unaffectedByDelegation` | 7702 raw-key makers reach neither new branch |
 | `test_7702Delegated1271Maker_stillFallsThroughTo1271` | the registry probe does not swallow the 1271 fallback |
 | `test_permit_replayRejected` / `_preCancelledNonceRejected` | permits are one-shot and pre-cancellable |
+| `test_signerPermit_cannotCancelALiveOrder` | a nomination permit cannot reach an order's nonce |
+| `test_permit_bareNonceCancellationDoesNotReachIt` | …and the two halves are disjoint in both directions |
+| `test_rollbackNonces_doesNotRevokeANomination` | a rollback retires orders, not the signing key |
+| `test_permit_staleUnrelayedPermitResurrectsARevokedDelegate` | an unrelayed permit outlives a registry revocation |
+| `test_permit_burningTheCoordinateMakesRevocationFinal` | …and the two-call revocation closes it |
+| `test_rollbackNonces_doesNotContainACompromisedDelegate` | a nonce floor is not containment |
+| `test_perAddressRevocation_isTheOnlyContainment` | …naming the delegate is |
+| `test_makerAdopting7702_disablesTheContractDelegateEnvelope` | the envelope's codeless-maker precondition has teeth |
+| `test_delegateCannotCancelForItsMaker` | a delegate's nonce cancel hits its own row, silently |
 
 > **Fork-test gotcha.** The pinned-block fork hits a public RPC that rejects
 > archive requests for **uncached** addresses. Any test that `prank`s, `deal`s, or

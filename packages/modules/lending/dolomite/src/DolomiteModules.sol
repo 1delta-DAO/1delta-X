@@ -7,9 +7,12 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
+import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {FundingPreflight} from "@lib/FundingPreflight.sol";
 
 import {
     IDolomiteMargin,
@@ -160,8 +163,14 @@ contract DolomiteRepayModule is DolomiteBase, IMakerModule {
             abi.decode(data, (address, uint256, address, uint256));
         DustHandler.DustAction action = DustHandler.readAction(data, 128); // base = (address,uint256,address,uint256)
 
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(token).balanceOf(address(this));
+
         _pullAndRepay(dolomite, marketId, token, accountNumber, amount, onBehalfOf, action);
-        _disposeResidual(dolomite, marketId, token, accountNumber, onBehalfOf, action);
+        _disposeResidual(dolomite, marketId, token, accountNumber, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -195,19 +204,48 @@ contract DolomiteRepayModule is DolomiteBase, IMakerModule {
         address token,
         uint256 accountNumber,
         address onBehalfOf,
-        DustHandler.DustAction action
+        DustHandler.DustAction action,
+        uint256 floor
     ) private {
-        uint256 residual = IERC20(token).balanceOf(address(this));
-        if (residual == 0) return;
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        //
+        // `bal` is scoped so it dies here: this helper already carries seven
+        // parameters and the legacy (non-via-IR) profile these packages build with
+        // has no slot to spare — see the sibling scoping in `_depositCall`.
+        uint256 residual;
+        {
+            uint256 bal = IERC20(token).balanceOf(address(this));
+            if (bal <= floor) return;
+            unchecked {
+                residual = bal - floor; // bal > floor
+            }
+        }
 
+        DustHandler.disposeResidual(
+            token,
+            residual,
+            floor,
+            onBehalfOf,
+            action,
+            dolomite,
+            _depositCall(marketId, accountNumber, onBehalfOf, residual)
+        );
+    }
+
+    /// @dev The one-action deposit `operate` calldata, built in its own frame so the
+    ///      two memory arrays never join {_disposeResidual}'s live set.
+    function _depositCall(uint256 marketId, uint256 accountNumber, address onBehalfOf, uint256 residual)
+        private
+        view
+        returns (bytes memory)
+    {
         AccountInfo[] memory accounts = new AccountInfo[](1);
         accounts[0] = AccountInfo(onBehalfOf, accountNumber);
         ActionArgs[] memory actions = new ActionArgs[](1);
         actions[0] = _depositAction(marketId, residual, address(this));
-
-        DustHandler.disposeResidual(
-            token, residual, onBehalfOf, action, dolomite, abi.encodeCall(IDolomiteMargin.operate, (accounts, actions))
-        );
+        return abi.encodeCall(IDolomiteMargin.operate, (accounts, actions));
     }
 }
 
@@ -389,7 +427,7 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
 // Auth is unchanged: `setOperators([{module, true}])` once, and debt must live in a
 // NON-ZERO sub-account (account 0 is lend-only on this deployment).
 //
-contract DolomiteTakeForModule is DolomiteBase, ITakerForModule {
+contract DolomiteTakeForModule is DolomiteBase, ITakerForModule, IFundingSource, IProceedsAsset {
     struct OpenData {
         uint256 forDesc; // word 0 — the funding descriptor
         uint256 forCap; //  word 1 — the balance form's mandatory cap
@@ -427,5 +465,36 @@ contract DolomiteTakeForModule is DolomiteBase, ITakerForModule {
         AccountInfo[] memory accounts = new AccountInfo[](1);
         accounts[0] = AccountInfo(onBehalfOf, p.accountNumber);
         IDolomiteMargin(p.dolomite).operate(accounts, actions);
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev Dolomite names the collateral TWICE — `collToken` for the pull and
+    ///      `collMarketId` for the `operate` action — so this module carries the
+    ///      widest identity surface of the four. Only `collToken` is the funding
+    ///      leg's asset and only it is reported; a `collMarketId` naming a different
+    ///      market is a maker-signed mismatch this preflight does not see, and is why
+    ///      the market id belongs beside the token in one signed record rather than
+    ///      as a loose second field.
+    function fundingSource(address onBehalfOf, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        asset = abi.decode(data, (OpenData)).collToken;
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev `address(0)` — HONESTLY UNKNOWN, not opted out. Dolomite identifies the
+    ///      borrow side by `borrowMarketId` alone; the token behind it lives in
+    ///      `IDolomiteMargin.getMarketTokenAddress`, which is a live registry read
+    ///      this pure view cannot make and which the maker does not sign. Reporting a
+    ///      guess would be worse than reporting nothing: the lens would compare a
+    ///      wrong address against the leg and reject fillable orders. Closing this
+    ///      properly means signing the borrow TOKEN beside its market id, the same
+    ///      way `collToken` already sits beside `collMarketId`.
+    function proceedsAsset(bytes calldata) external pure override returns (address) {
+        return address(0);
     }
 }

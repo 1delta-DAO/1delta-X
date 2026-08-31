@@ -212,7 +212,10 @@ always findings.
 | H2 | `MAKE` | ◐ |
 | H3 | `TAKE` (`recipient` = 0 / maker) | ◐ |
 | H4 | `SETTLE` (filler-aware) | ◐ |
-| H5 | Policy `ANY` / `ORDERED` / `ATOMIC` | ◐ |
+| H5 | Policy `ANY` / `ORDERED` / `ATOMIC` / `CANONICAL` | ◐ |
+| H5a | `CANONICAL`: item hoisted ahead of its own `DELIVER` | ✕ `ItemPolicyViolated` |
+| H5b | `CANONICAL`: `PULL` ahead of the item that funds the leg | ✕ `ItemPolicyViolated` |
+| H5c | Two live orders of one maker whose items size from the SAME live state | ● degrades — the second caps to what is left while its value-out leg runs in full; use an OCO group or fill-once |
 | H6 | Op byte > `SETTLE` | ✕ |
 | H7 | Codeless module target | ✕ `ItemTargetHasNoCode` |
 | H8 | `SETTLE` under a partial fill | ✕ `SettleSliceZero` / guard |
@@ -565,6 +568,53 @@ for e in $(grep -rho 'error [A-Z][A-Za-z0-9]*(' src/settlement/*.sol | sed 's/er
 done
 ```
 
+### The second sweep — do the cited tests still exist?
+
+The check above pins *errors*. It says nothing about the other direction, which is
+the one this note's credibility actually rests on: **every cell above names a test,
+and those names are hand-written prose.** Rename or delete a test and the table
+goes on claiming the cell is covered. A coverage claim without coverage is exactly
+what Part 5 warns against, and doc-drifting-from-code is the shape of
+[F13](reference-audits.md#f13--a-revoked-on-chain-order-approval-was-bypassed-by-any-non-empty-signature)
+itself — there, a comment promised the approval record was "re-checked on every
+fill" long after that stopped being true of every branch.
+
+```bash
+make docs-check          # or: python3 tools/check-doc-citations.py
+```
+
+It resolves every backticked citation in `docs/*.md` against the test functions
+declared in the tree, and exits non-zero on the first that does not resolve. The
+citation forms it understands:
+
+```
+Suite:test_name          a specific test
+test_name                a specific test, suite implied by context
+test_prefix_*            a family; at least one member must exist
+..._suffix               prefix elided from the previous citation
+```
+
+Spans inside a fenced block — like the four above — are examples, not citations,
+and are skipped. That is the escape hatch: **to name a test that does not exist,
+fence it or drop the backticks**, otherwise the gate is right to object.
+
+First run found two real ones. `item-aware-netted-settle.md` risk #5 cited
+*test_wrongSequence_reverts* and *test_itemLeg_underfunded_reverts*, both renamed
+long ago to `MatchSettle:test_badStep_reverts` and `..._itemUnderproduces_legUnfunded`.
+The property was covered; the citation was not. Fixed there.
+
+**Two ways this check can lie, both fixed, both worth knowing if you extend it.**
+Markdown pairs backticks, and a ``` fence is an odd run of them — so a naive
+whole-file pairing inverts every span after the first fenced block and silently
+matches nothing. The first version did that and reported a clean sweep on a doc
+that cited a deliberately bogus test. And the set of "tests that exist" must be
+scoped to Solidity under `test/`: a bare recursive scan also matches `function
+test…` inside `node_modules` bundles and stale Foundry artifacts, which is a
+*superset* — and a superset makes this a false negative rather than a failure.
+**A gate whose passing state you have not tried to break is not evidence.** Both
+faults were found by appending a fake citation and watching for the failure that
+should have come; do that after any change to the script.
+
 ---
 
 ## Part 4 — the register
@@ -776,6 +826,11 @@ mechanical check in Part 3 stays clean.
 **When a finding lands.** Locate it as a cell. If it has no cell, this document is
 missing an axis — add it before writing the fix, because the axis is what tells
 you where the *siblings* of the bug are. Findings F13 → M1, F15 → M7, F8 → M9.
+
+**When a test is renamed or deleted.** Run `make docs-check` before the PR lands.
+Every cell in Part 2 names the test that pins it, and a rename silently converts
+that binding into a false coverage claim — the drift is invisible precisely because
+the table still reads correct.
 
 **When a test is written.** Ask the ◐ question: does the setup mask the property?
 Infinite allowances mask allowance consumption. Round numbers mask rounding.

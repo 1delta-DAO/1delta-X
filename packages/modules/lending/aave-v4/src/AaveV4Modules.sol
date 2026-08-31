@@ -106,6 +106,12 @@ contract AaveV4RepayModule is IMakerModule {
             abi.decode(data, (address, address, uint256, address));
         // base = (address,address,uint256,address) = 128 bytes; DustAction at 128, permit at 160.
         DustHandler.DustAction action = DustHandler.readAction(data, 128);
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(asset).balanceOf(address(this));
+
         PermitHelper.replayIfPresent(data, 160, asset, onBehalfOf, address(permit3), amount);
 
         _pullAndRepay(
@@ -115,7 +121,7 @@ contract AaveV4RepayModule is IMakerModule {
         // Dispose of any residual: re-supplied into the user's position (Recycle,
         // best-effort with sweep fallback) or swept to the user (default), never
         // to a caller. In its own frame to keep the decoded locals off the stack.
-        _disposeResidual(spoke, positionManager, reserveId, asset, onBehalfOf, action);
+        _disposeResidual(spoke, positionManager, reserveId, asset, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -157,13 +163,22 @@ contract AaveV4RepayModule is IMakerModule {
         uint256 reserveId,
         address asset,
         address onBehalfOf,
-        DustHandler.DustAction action
+        DustHandler.DustAction action,
+        uint256 floor
     ) private {
-        uint256 residual = IERC20(asset).balanceOf(address(this));
-        if (residual == 0) return;
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
         DustHandler.disposeResidual(
             asset,
             residual,
+            floor,
             onBehalfOf,
             action,
             positionManager,

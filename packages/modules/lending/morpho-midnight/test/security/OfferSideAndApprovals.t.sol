@@ -35,7 +35,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
 
     /// The lend leg is the buy side: `offer.buy == true` is rejected.
     function test_lend_rejectsSellSideOffer() public {
-        bytes memory wrongSide = abi.encode(_offer(true), bytes(""), uint256(1e6));
+        bytes memory wrongSide = abi.encode(_offer(true), bytes(""), uint256(1e6), uint256(1e6));
 
         LOAN.mint(maker, 1e6);
         _makerApproveToken(address(lendModule), address(LOAN), 1e6);
@@ -47,7 +47,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
 
     /// The borrow leg is the sell side: `offer.buy == false` is rejected.
     function test_borrow_rejectsBuySideOffer() public {
-        bytes memory wrongSide = abi.encode(_offer(false), bytes(""), uint256(1e6));
+        bytes memory wrongSide = abi.encode(_offer(false), bytes(""), uint256(1e6), uint256(1e6));
 
         _makerApproveTaker(address(borrowModule), keccak256(wrongSide), 1e6);
         _makerAuthorize(address(borrowModule));
@@ -60,7 +60,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
     /// The side check fires BEFORE the module pulls the maker's budget — the lend
     /// leg fails closed without taking custody of anything.
     function test_lend_wrongSide_takesNoCustody() public {
-        bytes memory wrongSide = abi.encode(_offer(true), bytes(""), uint256(1e6));
+        bytes memory wrongSide = abi.encode(_offer(true), bytes(""), uint256(1e6), uint256(1e6));
 
         LOAN.mint(maker, 1e6);
         _makerApproveToken(address(lendModule), address(LOAN), 1e6);
@@ -83,7 +83,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
         _makerAuthorize(address(lendModule));
 
         vm.prank(address(settlement));
-        lendModule.makeOnBehalf(maker, units, _lendData(units));
+        lendModule.makeOnBehalf(maker, units, _lendData(units, units));
 
         assertGt(_creditOf(maker), 0, "maker holds credit: the lend went through");
     }
@@ -131,7 +131,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
         _makerAuthorize(address(lendModule));
 
         vm.prank(address(settlement));
-        lendModule.makeOnBehalf(maker, units, _lendData(units));
+        lendModule.makeOnBehalf(maker, units, _lendData(units, units));
 
         assertEq(
             IERC20(address(LOAN)).allowance(address(lendModule), address(midnight)),

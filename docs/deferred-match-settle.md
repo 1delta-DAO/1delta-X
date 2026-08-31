@@ -325,6 +325,7 @@ word the maker already signs. The policy lives at [96:100):
 | 0 | `ANY` | any order, any interleaving — **the default, and what every order signed before this existed means** |
 | 1 | `ORDERED` | items in signed index order; other steps may still interleave |
 | 2 | `ATOMIC` | signed order **and** back-to-back, no foreign step between them |
+| 3 | `CANONICAL` | `ATOMIC`, **and** the item group runs after this order's `DELIVER` and before any `PULL` of its input legs |
 
 No `Order` change, no EIP-712 typehash change, **no golden-hash break**, and
 existing orders read back `ANY` — exactly the behaviour they were signed under.
@@ -336,6 +337,31 @@ checkable without a scan. Violations revert `ItemPolicyViolated(order, item)`.
 
 The single-order path (`fill`, `fillUpTo`, `batchFill`) runs items in signed order
 by construction, so it satisfies every policy and pays nothing for this.
+
+**Why `CANONICAL` exists, when `ATOMIC` already pins the items.** `ATOMIC`
+constrains the items relative to *each other*; it says nothing about where the group
+sits relative to the **delivery** that funds it, or to the **pull** that draws the
+order's inputs. Both of those change the *value that moves*, not merely the
+intermediate state:
+
+* **item before `DELIVER`.** For a swap-and-deposit or a leverage loop the delivery
+  *is* the deposit's funding. Hoisted ahead of it, the item draws whatever the maker
+  already holds — spending their wallet and their standing Permit3 allowance — and
+  the delivery then lands in that wallet and stays there. With a module that sizes
+  itself from live state (`min(amount, debt)`, a full-balance withdraw, an "all"
+  sentinel) the amount that moves is simply a *different number* from either
+  position.
+* **`PULL` before the item.** `_stepPull` draws `owed − credit`, so a pull scheduled
+  ahead of the `TAKE` that was going to credit that leg makes the maker front the
+  whole leg from their wallet. Phase 3 refunds the tokens; nothing refunds the
+  allowance they were moved with, and `matchSettle` is permissionless.
+
+`CANONICAL` is exactly the single-order path's fixed shape — deliver → items → pay
+inputs — so an order signed with it settles the same way through `fill` and through
+a match. The cost is to the solver, not the maker: this order's inputs arrive last,
+so the plan must fund its deliveries from elsewhere (another order's pull, a
+`PRESEND`, a `CALL`). Both rules revert `ItemPolicyViolated(order, item)` — for a
+refused pull, `item` is the input-leg index.
 
 **When to reach for it, and when not.** `ATOMIC` is the right answer for a
 multi-item order on a non-deferring lender. But if the pair can be **fused into one

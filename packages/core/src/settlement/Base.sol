@@ -121,7 +121,16 @@ abstract contract Base is Signatures {
     ///      so the premise failing must stop the fill, not silently change its
     ///      shape. (A LITERAL or LEG funding slice that floors to zero on a dust fill
     ///      is different and is allowed: it accumulates exactly across slices.)
-    error ForBalanceEmpty();
+    ///
+    ///      ⚠ ZERO IS ONLY THE FLOOR'S DEFAULT. Stopping at zero closed the boundary
+    ///      but left every value NEAR it open, and the same sequencing that empties a
+    ///      wallet can merely dent it: `min(balance, cap)` shrinks smoothly while the
+    ///      value-OUT leg stays at its full signed size, so the position comes out
+    ///      under-collateralised instead of unfunded. The maker therefore signs a
+    ///      FLOOR in the descriptor (bits [160:176), bps of the cap) and this error
+    ///      names any resolved amount below it — zero being the case where the floor
+    ///      was left at its default.
+    error ForBalanceBelowFloor();
     /// @dev A `TAKE_FOR` funding descriptor referenced an output leg the maker does
     ///      NOT receive (a fee/originator leg, `recipient` set to a third party).
     ///      See {_forSlice}: the leg-reference form exists so the funding leg IS the
@@ -365,6 +374,21 @@ abstract contract Base is Signatures {
         }
     }
 
+    /// @dev THIS FILL'S SHARE of a signed total, by CUMULATIVE DIFFERENCING: what
+    ///      the order owes at `newFilled` minus what it owed at `prevFilled`. N
+    ///      partial fills therefore sum to exactly `total` with no per-fill rounding
+    ///      drift, and the full fill skips the arithmetic entirely.
+    ///
+    ///      Shared by the item slice ({_runItem}) and the LITERAL funding descriptor
+    ///      ({_forSlice}) because they are the same rule — and a composite item's two
+    ///      legs disagreeing about how a partial fill divides is exactly the class of
+    ///      defect `TAKE_FOR` exists to remove. One expression, one auditable rule.
+    function _prorate(uint256 total, FillCtx memory ctx) private pure returns (uint256) {
+        return ctx.fullFill
+            ? total
+            : (total * ctx.newFilled) / ctx.anchor - (total * ctx.prevFilled) / ctx.anchor;
+    }
+
     /// @dev ONE item's slice — the body of {_executeItems}, split out so the
     ///      schedule-driven {Batch.matchSettle} can run items INDIVIDUALLY (an
     ///      order's borrow before its own delivery, interleaved with another
@@ -382,9 +406,7 @@ abstract contract Base is Signatures {
         address recipient,
         bytes calldata itemData
     ) internal {
-        uint256 slice = ctx.fullFill
-            ? amount
-            : (amount * ctx.newFilled) / ctx.anchor - (amount * ctx.prevFilled) / ctx.anchor;
+        uint256 slice = _prorate(amount, ctx);
         if (slice == 0) {
             // A SETTLE slice that floors to 0 would charge the maker's
             // pro-rata payment while delivering NOTHING to this filler (an
@@ -397,44 +419,51 @@ abstract contract Base is Signatures {
             return;
         }
 
+        // THE `uint160` WIDTH CHECK, ONCE, FOR EVERY OP THAT NARROWS. MAKE narrows
+        // one frame further down (a maker module's own `permit3.transferFrom`, and
+        // every shipped one does it UNCHECKED); TAKE and TAKE_FOR narrow at the
+        // dispatch below. Written per branch it was the same comparison twice, in a
+        // contract at the EIP-170 wall. SETTLE is the exemption and keeps it: its
+        // module interface is `uint256` and never narrows, so a wide slice (an
+        // ERC-1155 id count, a lot size) is meaningful there and must stay
+        // expressible. An unknown op picks the check up too — it reverts either way,
+        // just with this error rather than {PackedArrays.MalformedPackedArray} on the
+        // one input that is both malformed AND wider than 2^160.
+        if (op != uint256(ItemOp.SETTLE) && slice > type(uint160).max) revert AmountOverflow();
+
         if (op == uint256(ItemOp.MAKE)) {
-            // Maker module pulls the funding token from order.maker via Permit3
-            // internally — i.e. it narrows `slice` to Permit3's `uint160` book width
-            // exactly as the TAKE branch does, just one frame further down. Every
-            // shipped maker module does that narrowing UNCHECKED, so without this the
-            // MAKE path would silently wrap a >2^160 slice to a smaller pull while
-            // the TAKE path reverts on the identical value. Maker-signed, so not
-            // adversarially reachable — but the asymmetry was gratuitous, and a value
-            // path should not have two different overflow postures.
-            if (slice > type(uint160).max) revert AmountOverflow();
             _callWithTail(
                 module, IMakerModule.makeOnBehalf.selector, 2, uint160(order.maker), slice, 0, 0, 0, itemData
             );
-        } else if (op == uint256(ItemOp.TAKE)) {
+        } else if (op == uint256(ItemOp.TAKE) || op == uint256(ItemOp.TAKE_FOR)) {
             // Taker: Permit3 enforces the gate and dispatches. `recipient = 0` is the
             // classic flow (proceeds to Settlement for tokenIn payout); signing a
             // non-zero recipient (e.g. the maker) chains output into a subsequent item.
+            //
+            // TAKE and TAKE_FOR share this branch because they ARE the same dispatch:
+            // same taker-book bucket, same gate, same proceeds accounting, same
+            // recipient rule. TAKE_FOR only adds a second static word — the funding
+            // amount the core sized — between the amount and the receiver. Written as
+            // two branches this cost a second full `_callWithTail` marshalling site
+            // for a call that differs in one argument; see {ItemOp} for why the op is
+            // nonetheless distinct.
             address to = recipient == address(0) ? address(this) : recipient;
-            if (slice > type(uint160).max) revert AmountOverflow();
             // ONE-SHOT permit path: same dispatch, same proceeds accounting, but the
             // authority is a maker signature consumed here rather than a standing
             // allowance — so nothing is written and nothing survives the fill. The
             // witness binds it to THIS order, so it doubles as the order's
             // authorization (see {Core.fillWithPermitTake}).
-            if (ctx.permitTake.length != 0) {
+            //
+            // ⚠ DELIBERATELY NOT WIRED FOR TAKE_FOR. A `PermitTake` witnesses
+            // `(module, amount)` and nothing about the funding leg, so it cannot
+            // authorise the composite shape; a fill carrying one that reaches only
+            // TAKE_FOR items leaves it unconsumed and {Core.fillWithPermitTake}
+            // reverts `PermitTakeNotConsumed` — fail closed, rather than silently
+            // drawing a leg the permit never covered.
+            if (op == uint256(ItemOp.TAKE) && ctx.permitTake.length != 0) {
                 _takeByPermit(order, ctx, module, slice, to, itemData);
             } else {
-                _callWithTail(
-                    address(PERMIT3),
-                    IPermit3.take.selector,
-                    4,
-                    uint160(module),
-                    uint160(order.maker),
-                    slice,
-                    uint160(to),
-                    0,
-                    itemData
-                );
+                _dispatchTake(order, ctx, module, op, slice, to, itemData);
             }
         } else if (op == uint256(ItemOp.SETTLE)) {
             // SETTLE deliberately keeps NO width check: {ISettlementModule.settle}
@@ -455,38 +484,6 @@ abstract contract Base is Signatures {
                 slice,
                 0,
                 0,
-                itemData
-            );
-        } else if (op == uint256(ItemOp.TAKE_FOR)) {
-            // COMPOSITE: the TAKE branch above PLUS its funding leg, in one dispatch
-            // — deposit+borrow, repay+withdraw. `slice` is the value-OUT side and is
-            // gated exactly as a TAKE is, by the same taker-book bucket. The
-            // value-IN side is computed HERE, from the descriptor the maker signed
-            // as the first word of `data`, and is never a number the module invents;
-            // {ITakerForModule} argues why that distinction is the whole point.
-            //
-            // ⚠ The one-shot permit path is deliberately NOT wired here. A
-            // `PermitTake` witnesses `(module, amount)` and nothing about the
-            // funding leg, so it cannot authorise this shape; a fill that carries
-            // one and reaches only `TAKE_FOR` items leaves it unconsumed and
-            // {Core.fillWithPermitTake} reverts `PermitTakeNotConsumed` — fail
-            // closed, rather than silently drawing a leg the permit never covered.
-            address to = recipient == address(0) ? address(this) : recipient;
-            if (slice > type(uint160).max) revert AmountOverflow();
-            uint256 forSlice = _forSlice(order, ctx, itemData);
-            // Same width posture as the other two value paths: Permit3's book and
-            // the funding pulls underneath are `uint160`, so a wider value reverts
-            // rather than wrapping to a smaller move.
-            if (forSlice > type(uint160).max) revert AmountOverflow();
-            _callWithTail(
-                address(PERMIT3),
-                IPermit3.takeFor.selector,
-                5,
-                uint160(module),
-                uint160(order.maker),
-                slice,
-                forSlice,
-                uint160(to),
                 itemData
             );
         } else {
@@ -535,12 +532,25 @@ abstract contract Base is Signatures {
     ///          AND the maker cannot know the amount at signing time (interest has
     ///          accrued, a transfer is in flight, the wallet is being swept). The
     ///          low 160 bits are the token; `data`'s SECOND word is a MANDATORY cap;
-    ///          `forAmount = min(balanceOf(token, maker), cap)`, and a ZERO balance
-    ///          REVERTS ({ForBalanceEmpty}) rather than funding nothing while the
-    ///          value-out leg still runs. FULL-FILL ONLY — a
-    ///          live balance cannot pro-rate, so every slice would fund the whole
+    ///          `forAmount = min(balanceOf(token, maker), cap)`, bounded BOTH WAYS —
+    ///          by that cap above and by a FLOOR below, `floorBps` of the cap, in
+    ///          descriptor bits [160:176). Anything under the floor REVERTS
+    ///          ({ForBalanceBelowFloor}) rather than funding a fraction of the
+    ///          position while the value-out leg still draws in full. FULL-FILL ONLY —
+    ///          a live balance cannot pro-rate, so every slice would fund the whole
     ///          remaining balance again. This is {Proportional}'s rule, on the
     ///          funding side, enforced here because only the core knows the fraction.
+    ///
+    ///          ⚠ WHY THE FLOOR IS THE CAP'S SIBLING AND NOT OPTIONAL IN SPIRIT. The
+    ///          cap exists because anyone can RAISE a maker's balance; the floor
+    ///          exists because anyone who can sequence fills can LOWER it. Filling
+    ///          another of the maker's live orders that draws the same token — an
+    ///          ordinary, profitable act, and the filler chooses the order — shrinks
+    ///          this leg without touching this fill, and the value-OUT `amount` does
+    ///          not shrink with it. A `floorBps` of 0 keeps the historical "any
+    ///          non-zero balance will do", so existing encodings are unchanged; the
+    ///          SDK defaults it to 10000 (fund the full cap or do not fill), which is
+    ///          the answer a levered order wants.
     ///
     ///      Out-of-range reverts rather than defaulting to leg 0: funding the wrong
     ///      leg is a worse outcome than not filling.
@@ -574,9 +584,7 @@ abstract contract Base is Signatures {
             desc := calldataload(itemData.offset)
         }
         if (desc < (uint256(1) << 255)) {
-            return ctx.fullFill
-                ? desc
-                : (desc * ctx.newFilled) / ctx.anchor - (desc * ctx.prevFilled) / ctx.anchor;
+            return _prorate(desc, ctx);
         }
         if (desc & (uint256(1) << 254) == 0) {
             uint256 j = desc & 0xffff;
@@ -604,8 +612,66 @@ abstract contract Base is Signatures {
         }
         if (cap == 0) revert ForBalanceNeedsCap();
         uint256 bal = SafeTransferLib.balanceOf(address(uint160(desc)), order.maker);
-        if (bal == 0) revert ForBalanceEmpty();
-        return bal < cap ? bal : cap;
+        if (bal > cap) bal = cap;
+        // The FLOOR, in bps of the cap — descriptor bits [160:176), so it rides in
+        // the word the maker already signs and inside `ref = keccak256(data)`, and
+        // costs neither a `data` field (which would shift every module's layout) nor
+        // a typehash change. `cap / 10_000 * bps` rather than `cap * bps / 10_000`:
+        // the cap is an unconstrained maker-signed word, and the product form panics
+        // on a huge one — a floor that is a few wei lenient beats an arithmetic
+        // revert on an order that used to fill. `bps == 0` ⇒ floor 0, and the
+        // zero-balance test below is then the only bound, exactly as before.
+        if (bal == 0 || bal < cap / 10_000 * ((desc >> 160) & 0xffff)) revert ForBalanceBelowFloor();
+        return bal;
+    }
+
+    /// @dev The standing-allowance taker dispatch, for BOTH `TAKE` and `TAKE_FOR`.
+    ///      Its own frame for the same reason {_takeByPermit} has one: the wide
+    ///      `_callWithTail` argument list must not share {_runItem}'s stack, which is
+    ///      at the legacy (non-via-IR) codegen's limit — inlined here it does not
+    ///      compile under the profile the tests use.
+    ///
+    ///      The two ops ARE the same dispatch: same taker-book bucket, same gate,
+    ///      same proceeds accounting, same recipient rule. `TAKE_FOR` only inserts a
+    ///      second static word — the value-IN amount the CORE sized — between the
+    ///      amount and the receiver. Sharing one call site instead of writing the
+    ///      marshalling twice measured **−42 bytes** of Settlement runtime, which at
+    ///      the current margin is most of the budget.
+    function _dispatchTake(
+        Order calldata order,
+        FillCtx memory ctx,
+        address module,
+        uint256 op,
+        uint256 slice,
+        address to,
+        bytes calldata itemData
+    ) private {
+        // The value-IN side, computed HERE from the descriptor the maker signed as
+        // the first word of `data` — never a number the module invents;
+        // {ITakerForModule} argues why that distinction is the whole point. Same
+        // width posture as `slice`: Permit3's book and the funding pulls underneath
+        // are `uint160`, so a wider value reverts rather than wrapping to a smaller
+        // move.
+        uint256 forSlice;
+        if (op == uint256(ItemOp.TAKE_FOR)) {
+            forSlice = _forSlice(order, ctx, itemData);
+            if (forSlice > type(uint160).max) revert AmountOverflow();
+        }
+        // Slot 3 carries the funding amount for `takeFor` and the receiver for
+        // `take`; slot 4 carries the receiver unconditionally, because at `n = 4`
+        // {_callWithTail} overwrites that slot with the offset word — so the plain
+        // take never sees it.
+        _callWithTail(
+            address(PERMIT3),
+            op == uint256(ItemOp.TAKE_FOR) ? IPermit3.takeFor.selector : IPermit3.take.selector,
+            op == uint256(ItemOp.TAKE_FOR) ? 5 : 4,
+            uint160(module),
+            uint160(order.maker),
+            slice,
+            op == uint256(ItemOp.TAKE_FOR) ? forSlice : uint160(to),
+            uint160(to),
+            itemData
+        );
     }
 
     /// @dev Consume the fill's one-shot taker permit for this TAKE item. Its own
@@ -751,6 +817,18 @@ abstract contract Base is Signatures {
     ///      (including the threaded `filler` and the shared `takerData`) but run
     ///      AFTER items execute, so they can assert on the order's side effects
     ///      (e.g. "maker's Aave health factor ≥ 2.0").
+    /// @dev The tail EVERY settle flow ends with — the deferred gates, then the
+    ///      fill's one log line. Shared by {Core._settleForward},
+    ///      {Core._settlePostInputs} and {Batch._matchFlush} rather than written out
+    ///      three times: the event has three indexed topics and the invariant walk a
+    ///      full argument list, so each copy was real bytecode in a contract at the
+    ///      EIP-170 wall — and "invariants run, THEN the fill is announced" is a rule
+    ///      that should exist in one place anyway.
+    function _closeFill(Order calldata order, address filler, bytes memory takerData, bytes32 orderHash) internal {
+        _runInvariants(order, filler, takerData);
+        emit OrderFilled(orderHash, order.maker, filler);
+    }
+
     function _runInvariants(Order calldata order, address filler, bytes memory takerData) internal view {
         bytes calldata vs = order.invariants;
         uint256 len = PackedArrays.validateRecords(vs, PackedArrays.VALIDATOR_HEAD);

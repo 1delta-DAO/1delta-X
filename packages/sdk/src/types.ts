@@ -28,15 +28,35 @@ export function forLeg(index: number): bigint {
 }
 
 /// Funding descriptor for a BALANCE-RELATIVE funding leg: `min(balanceOf(token,
-/// maker), cap)`, resolved at fill time. For the no-conversion shape where there is
-/// no output leg to reference and the maker cannot know the amount at signing time
-/// (accrued interest, an in-flight transfer, a wallet sweep).
+/// maker), cap)`, resolved at fill time, and bounded BOTH ways. For the
+/// no-conversion shape where there is no output leg to reference and the maker
+/// cannot know the amount at signing time (accrued interest, an in-flight transfer,
+/// a wallet sweep).
 ///
 /// The cap is MANDATORY and travels as `data`'s SECOND word, so lay the blob out as
 /// `abi.encode(forBalance(token), cap, ...)`. A balance-funded order is FULL-FILL
 /// ONLY — the settler rejects a sliced fill.
-export function forBalance(token: Address): bigint {
-  return (1n << 255n) | (1n << 254n) | BigInt(token);
+///
+/// `floorBps` is the other half of the bound and rides in descriptor bits
+/// [160:176): the fill reverts (`ForBalanceBelowFloor`) unless the resolved amount
+/// is at least `floorBps` of the cap. The cap exists because anyone can RAISE a
+/// maker's balance; the floor exists because whoever sequences fills can LOWER it —
+/// filling another of the maker's live orders in the same token shrinks this leg
+/// while the value-OUT leg still draws its full signed size, which is an
+/// under-collateralised position rather than an unfilled order. The default of
+/// 10000 means "fund the whole cap or do not fill", which is what a levered order
+/// wants; lower it only for a genuine sweep whose position can take the variance.
+/// `0` is the settler's legacy "any non-zero balance will do" and
+/// `SettlementLens.validateOrder` rejects it.
+export function forBalance(token: Address, floorBps: number | bigint = 10_000): bigint {
+  const floor = BigInt(floorBps);
+  if (floor < 0n || floor > 10_000n) throw new Error(`forBalance: floorBps out of range: ${floorBps}`);
+  return (1n << 255n) | (1n << 254n) | (floor << 160n) | BigInt(token);
+}
+
+/// Read the funding FLOOR (bps of the cap) out of a balance descriptor.
+export function forBalanceFloorBps(desc: bigint): number {
+  return Number((desc >> 160n) & 0xffffn);
 }
 
 /// Funding descriptor carrying a LITERAL total, for a funding leg with no matching
@@ -257,6 +277,55 @@ export function withFillOnce(timing: bigint): bigint {
   return timing | (1n << FILL_ONCE_BIT_INDEX);
 }
 
+/**
+ * How much freedom the maker grants a solver over the ORDER in which their `items`
+ * execute. Mirrors the Solidity `ItemPolicy` library; the value lives in `timing`
+ * bits [96:100), so it costs no field and no typehash change.
+ *
+ * Only `matchSettle` — where a solver supplies the schedule — can violate one. The
+ * single-order path (`fill`, `fillUpTo`, `batchFill`) runs items in signed order
+ * after delivering outputs and before paying inputs, so it satisfies every policy
+ * by construction.
+ *
+ * The values are a LADDER of increasing strictness:
+ *  - `ANY` — any order, any interleaving. The default, and what every order that
+ *    does not set the field means. Required to participate in a CYCLE (an order's
+ *    borrow deliberately hoisted ahead of its own delivery).
+ *  - `ORDERED` — items in signed index order; other steps may interleave.
+ *  - `ATOMIC` — signed order AND back-to-back, no foreign step between them. What a
+ *    lender that checks health inside each call needs.
+ *  - `CANONICAL` — `ATOMIC`, and the item group must run AFTER this order's
+ *    delivery and BEFORE any pull of its input legs. That is exactly the
+ *    single-order path's fixed shape. Sign this for a swap-and-deposit or a
+ *    leverage loop: it is what stops a solver hoisting the deposit ahead of the
+ *    delivery that funds it (so the item draws the maker's own wallet instead), or
+ *    pulling an input leg ahead of the item that was going to fund it (which
+ *    refunds the tokens but not the Permit3 allowance they moved with).
+ */
+export enum ItemPolicy {
+  ANY = 0,
+  ORDERED = 1,
+  ATOMIC = 2,
+  CANONICAL = 3,
+}
+
+/// `timing` bits [96:100) — the maker's {@link ItemPolicy}.
+export const ITEM_POLICY_OFFSET = 96n;
+
+/// Set the {@link ItemPolicy} on a packed `timing` word, replacing any previous
+/// value. Mirrors `ItemPolicy.pack`.
+export function withItemPolicy(timing: bigint, policy: ItemPolicy): bigint {
+  const p = BigInt(policy);
+  if (p < 0n || p > 0xfn) throw new Error(`withItemPolicy: policy out of range: ${policy}`);
+  return (timing & ~(0xfn << ITEM_POLICY_OFFSET)) | (p << ITEM_POLICY_OFFSET);
+}
+
+/// Read the {@link ItemPolicy} out of a packed `timing` word. Solvers building a
+/// `matchSettle` schedule must honour it — see `docs/filler-strategy.md`.
+export function itemPolicyOf(timing: bigint): ItemPolicy {
+  return Number((timing >> ITEM_POLICY_OFFSET) & 0xfn) as ItemPolicy;
+}
+
 /// Read the four `timing` mode flags an author may set. The clocks come from
 /// {@link unpackTiming}; these are the booleans that sit above them.
 export function timingFlags(timing: bigint): {
@@ -330,6 +399,10 @@ const U32 = 0xffff_ffffn;
  * order's clock — block numbers when {@link BLOCK_CLOCK_BIT} is set, else unix seconds —
  * so pass values in one consistent unit (the `expiry` field is separate and always
  * seconds).
+ *
+ * The bits ABOVE the clocks are set with their own helpers, not here: bits [96:100)
+ * with {@link withItemPolicy}, bit 100 with {@link withFillOnce}, and 102–104 with
+ * {@link withBlockClock} / {@link withPriorityAuction} / {@link withDeltaVerifyOutputs}.
  */
 export function packTiming(decayStartTime: number, decayDuration: number, exclusivityEndTime: number): bigint {
   const s = BigInt(decayStartTime);

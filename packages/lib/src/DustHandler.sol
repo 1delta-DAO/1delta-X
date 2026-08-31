@@ -108,6 +108,42 @@ library DustHandler {
         address recycleTarget,
         bytes memory recycleCall
     ) internal {
+        disposeResidual(token, residual, 0, onBehalfOf, action, recycleTarget, recycleCall);
+    }
+
+    /// @notice {disposeResidual} with an explicit FLOOR — the balance of `token` this
+    ///         module already held when the operation began, which is NOT this
+    ///         operation's residual and must not be paid to `onBehalfOf`.
+    ///
+    ///  ⚠ WHY A FLOOR, AND WHY `0` IS THE WRONG DEFAULT FOR NEW CALLERS.
+    ///  The overload above reads a caller-supplied `residual` that every module in
+    ///  this repo computes as `IERC20(token).balanceOf(address(this))` — the module's
+    ///  WHOLE balance, not the delta this call produced. Modules are pull-exact and
+    ///  should never carry a balance between calls, so the two are normally equal.
+    ///  When they are not, "sweep everything" pays the difference to whoever happens
+    ///  to be filling: anyone can transfer tokens to a module address, and anyone can
+    ///  be the maker of a one-unit order against that module and asset, so a stranded
+    ///  balance is claimable by the next filler rather than merely lost.
+    ///
+    ///  Nothing is being stolen from a live position — the destination is still
+    ///  `onBehalfOf`, never a caller-chosen address — but "the module ends empty" is
+    ///  the wrong invariant to enforce with a transfer. The right one is "the module
+    ///  ends where it started", and that needs the floor.
+    ///
+    ///  The recycle branch needs it too, and that is easy to miss: after a partial
+    ///  re-supply it re-reads the balance, so without the floor it would sweep the
+    ///  pre-existing amount even when the caller measured its own residual correctly.
+    ///
+    /// @param floor balance of `token` held before this operation; retained, not swept.
+    function disposeResidual(
+        address token,
+        uint256 residual,
+        uint256 floor,
+        address onBehalfOf,
+        DustAction action,
+        address recycleTarget,
+        bytes memory recycleCall
+    ) internal {
         if (residual == 0) return;
 
         if (action == DustAction.Recycle && recycleTarget.code.length != 0) {
@@ -117,8 +153,10 @@ library DustHandler {
 
             if (ok) {
                 // Recycle may consume all or part of the residual; sweep whatever
-                // remains so the module always ends empty.
-                uint256 left = IERC20(token).balanceOf(address(this));
+                // remains ABOVE the floor, so the module ends where it started rather
+                // than empty.
+                uint256 bal = IERC20(token).balanceOf(address(this));
+                uint256 left = bal > floor ? bal - floor : 0;
                 if (left != 0) SafeTransferLib.safeTransfer(token, onBehalfOf, left);
                 return;
             }

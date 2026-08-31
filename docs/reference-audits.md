@@ -422,7 +422,10 @@ arrived as three reported findings and were each verified against the code befor
 being acted on — two confirmed with executed PoCs and fixed, one (F14) reviewed and
 judged NOT a vulnerability, with only its misleading comment corrected. **F16** came
 out of the `TAKE_FOR` build itself and is recorded here rather than left in a commit
-message. See
+message. **F17–F20** came out of a clean full re-audit of the core plus the aave-v3
+and fluid module packages on 2026-08-29 — F17 with an executed PoC, F18 reviewed and
+**withdrawn** as already covered (kept for the lesson), F19 and F20 confirmed by
+reading. See
 [Re-audit sweep](#re-audit-sweep--the-generalised-questions-from-f13f15) for the
 generalised questions they imply. Every item below is resolved.
 
@@ -767,7 +770,7 @@ goes first. `SafeTransferLib.balanceOf` multiplies by the staticcall's success, 
 descriptor naming a codeless address read as a zero balance rather than reverting, and
 took the same path.
 
-**Fix.** A zero resolved balance reverts `ForBalanceEmpty`. The premise failing must
+**Fix.** A zero resolved balance reverts `ForBalanceBelowFloor`. The premise failing must
 stop the fill, not silently change its shape. A LITERAL or LEG funding slice that
 floors to zero on a dust fill is deliberately *not* covered by this rule — those
 accumulate exactly across slices, so a zero slice is arithmetic rather than a broken
@@ -778,7 +781,236 @@ premise. Pinned by `TakeForItem:test_balance_emptyWallet_reverts` and
 two halves are gated separately, can one half's premise fail while the other still
 executes?* Ask it of every op that fuses value-in with value-out.
 
+**Re-checked in the CoW case (2026-08-31), and the fix is NOT sufficient there.**
+`ForBalanceEmpty` catches a resolved *zero*; it does not bound how far below the
+maker's intent the resolution can be pushed. On the single-order path that does not
+matter, because the ordering is a property of the code — `_settleForward` is
+deliver → items → pay-inputs, and the one mode that reorders it forbids items
+(`ReverseModeRequiresNoItems`). Under `matchSettle`, `ITEM` and `DELIVER` are
+independently schedulable, so a filler could resolve the same descriptor against the
+maker's pre-delivery wallet and fund the position with a wei while the value-OUT leg
+drew in full — passing the zero check. `Batch._assertMatchShape` already refuses every
+`TAKE_FOR` item outright, so this is **not reachable**; it is recorded because the
+guard's stated reason used to be an ordering *inconvenience*, which would have
+justified relaxing it. The reason is now written down as a security property, per
+descriptor form, in [match-combinations.md §2.1](match-combinations.md#21-why-take_for-in-particular-stays-out).
+
 ---
+
+### F17 — an unrelayed delegate-nomination permit could cancel a live order
+
+`setOrderSignerWithSig` consumed the maker's **order** nonce bitmap at the bare
+`nonce`, so relaying a nomination permit ran `_cancelNonce(maker, nonce)` and killed
+every live order carrying it. The permit is relayable by anyone at any point before
+its `deadline`, and the bitmap bit stays clear until then — so the natural off-chain
+"is this nonce free?" check reads free right up to the moment an order signed
+against it dies.
+
+Two things made it more than theoretical. Nonce **reuse is a feature** here — a
+shared nonce is how an OCO bracket is built — and the SDK leaves allocation to the
+caller (`amend.ts`), so neither layer was watching for the collision. The docs
+described the cost as "one nonce out of a 2²⁵⁶ space", which is true of the
+coordinate and false of the consequence.
+
+**Fixed** by reserving a namespace: the permit now consumes
+`nonce | SIGNER_NONCE_NS` (bit 255), while the maker still signs the bare value, so
+no tooling changes. Order nonces below 2²⁵⁵ — every nonce any builder allocates —
+are now unreachable from that function. Costs **7 bytes** of Settlement, against a
+15-byte EIP-170 budget; two inline `or`s measured 9, so the local is load-bearing.
+
+The residual constraint is stated on `NonceManager.SIGNER_NONCE_NS`: an order must
+not use a nonce with bit 255 set. Deliberately **not** enforced on the fill path — a
+range check there taxes every fill forever to guard a range no allocator picks.
+
+Pinned by `test_signerPermit_cannotCancelALiveOrder` plus the two disjointness tests
+either side of it.
+
+**The generalised question.** The bitmap is one space shared by two kinds of signed
+artifact. Any *third* consumer added to it inherits this bug by default, because the
+failure is silent in both directions and only shows once the two artifacts collide.
+Namespace first, then add the consumer.
+
+### F18 — WITHDRAWN: the `TAKE_FOR` leg-reference zero check was not missing
+
+Reported during the 2026-08-29 re-audit and **wrong**. The observation was that
+`SettlementLens._takeForItemAt` rejects a zero LITERAL descriptor
+("take_for funds nothing") but has no equivalent for a leg reference pointing at an
+output leg whose `start` is 0 — which prices to 0 on every fill, so the composite
+degrades to a bare `TAKE` with nothing funding it.
+
+The settler behaviour is real and is now pinned
+(`test_zeroOutputLeg_fundsNothing_butTheTakeStillDraws`), but the preflight gap is
+not: `validateOrder` rejects `start == 0` on **every** output leg of every order,
+on both sides, and that rule runs before the `TAKE_FOR` walk. The case was already
+covered — by a general rule with a different message rather than a
+descriptor-specific one. A second check there would have been dead code.
+
+Recorded rather than deleted because the mistake is instructive: the descriptor
+branch has its own zero check, which makes the neighbouring form look unguarded.
+**When one branch of a validator carries a bespoke check, confirm the sibling is not
+already covered upstream before adding a matching one.**
+`test_lens_flagsZeroAmountOutputLeg_viaTheGeneralRule` now asserts the coverage so
+the question does not get re-opened.
+
+### F19 — module residual disposal swept the module's whole balance
+
+`AaveV3RepayModule._disposeResidual` and `FluidOperateModule._close` read
+`IERC20(token).balanceOf(address(this))` as "this call's residual", and
+`AaveV3WithdrawModule`'s `BalanceMode.Full` calls `withdraw(asset, max, this)`,
+which burns the module's entire aToken balance for that reserve. Modules are
+pull-exact, so the whole balance and the delta are normally equal — but when they
+are not, "sweep everything to `onBehalfOf`" pays the difference to whoever happens
+to be filling.
+
+Not a privilege escalation: the destination is always the order's maker, never a
+caller-chosen address. It is still **claimable rather than merely lost**, which is
+the part worth fixing — anyone can send tokens to a module address, and anyone can
+be the maker of a one-unit order against that module and asset.
+
+Two asymmetries made it worse than the headline. `DustHandler.disposeResidual`
+re-reads the balance after a partial recycle, so it swept the pre-existing amount
+even for a caller that measured its own residual correctly. And
+`FluidOperateModule._open` / `FluidTakeForModule` had **no** residual handling at
+all where Close has always had one, so a short pull stranded the difference
+permanently along with a live vault allowance over it.
+
+**Fixed** by measuring a delta over a `floor` snapshotted before the pull:
+`DustHandler.disposeResidual` gains a floor-aware overload (the old signature is
+retained and delegates with `floor = 0`, so the ten sibling packages compile
+unchanged), Fluid gains `FluidBase._returnUnused`, and Open/`takeFor` gain the
+sweep they lacked. The invariant enforced is now "the module ends where it
+started", not "the module ends empty".
+
+**Swept across all twelve packages** (2026-08-31): aave-v2/v3/v4, compound-v2/v3,
+morpho-blue, venus, silo, exactly, euler-v2, dolomite and fluid now snapshot a
+`floor` before the pull and dispose of the delta over it. Compound v2 keeps its
+inline recycle and gained a second floor for the **cToken** receipt, which the mint
+is the only in-call source of but which a donation would otherwise have forwarded.
+Dolomite's helper needed its locals re-scoped and an `_depositCall` frame to stay
+under the legacy stack limit at seven parameters.
+
+**And the `BalanceMode.Full` variant, which is narrower than it looks.** Fourteen
+packages implement `Full`, and all fourteen measure `received` as an underlying
+delta around the withdraw — correct. What matters is whether the withdraw is scoped
+to the MODULE's receipt balance or the USER's position:
+
+| shape | packages | verdict |
+|---|---|---|
+| `withdraw(asset, type(uint256).max, address(this))` after pulling the user's receipt tokens | **aave-v2, aave-v3** | **defective** — donated receipts inflate `received` and are swept to `onBehalfOf` |
+| withdraw scoped to the user (`supplied`, `vBal`, `maxWithdraw(onBehalfOf)`, `collateralBalanceOf(onBehalfOf)`, `getAccountWei(onBehalfOf)`, `redeem(cBal)`) | aave-v4, compound-v2, compound-v3, venus, euler-v2, silo, morpho-blue, exactly, dolomite, lista, gearbox-v3, midnight | clean |
+
+Both defective sites now subtract the module's pre-existing receipt balance before
+the sweep, saturating so a rounding wei cannot underflow-panic — the `require` stays
+the fail-closed gate.
+
+**The generalised question.** "The module ends empty" and "the module ends where it
+started" are different invariants, and only the second is safe to enforce with a
+transfer. Any `balanceOf(address(this))` that is *read as* this call's output — as a
+residual, as a redeemed amount, as a receipt to forward — needs a floor. The tell is
+a full-balance read with no matching snapshot before the operation that produced it.
+
+### F20 — `make test-all` skipped three packages' real coverage
+
+`PACKAGES` in the Makefile listed `modules-aave-v3`, whose profile compiles only
+`test/unit` — 6 tests. The package's other 56 tests, including
+`leverage/TakeForLeverage.t.sol` and `security/TakerModuleAuth.t.sol`, live under
+the separate `modules-aave-v3-fork` profile, which no make target referenced.
+`modules-compound-v3-fork` and `modules-morpho-blue-fork` were in the same position.
+`test-all` reported green while running a small fraction of those three packages.
+
+**Fixed:** `FORK_PACKAGES` is now a second list, `ALL_PACKAGES` is the union that
+`test-all` and the per-package shortcuts iterate, and `make test-fork` runs the fork
+suites alone. Keep the two lists in sync when a `-fork` profile is added to
+`foundry.toml`.
+
+**The generalised question.** A profile that exists in `foundry.toml` but in no make
+target is invisible coverage. Whenever a package's tests are split across profiles,
+the split has to be represented in the runner too, or the runner silently redefines
+what "the package's tests" means.
+
+### F21 — every `MAKE` item's funding grant was invisible to the preflight
+
+An item that funds anything pulls it with `permit3.transferFrom(maker, MODULE, asset,
+…)`, so the grant it spends is keyed `(maker, module, asset)`. Neither preflight read
+that book. `_makerFillableCap` walks `legsIn` with the **settler** as spender;
+`previewTakerAllowances` reads the **taker** book, which gates what LEAVES a position,
+not what funds it. And the funding asset need not appear in `legsIn` at all.
+
+The consequence is a silent, total liveness failure: an order passes `validateOrder`,
+passes `previewTakerAllowances`, and reverts on **every** fill for want of one
+`approveToken` — with the revert surfacing from inside Permit3 two calls deep, naming
+no missing grant. An orderbook cannot tell such an order from a fillable one.
+
+Scope is the point. This was first noticed on `TAKE_FOR`'s funding leg, but `MAKE` is
+the same pull and is the *common* case: every deposit and every repay on every venue
+(`AaveV3DepositModule.makeOnBehalf` is the canonical shape). `TAKE_FOR` merely made an
+old gap newly load-bearing.
+
+**Fixed:** {IFundingSource} — a module declares `(asset, available)` for whatever its
+funding path actually consults — and `SettlementLens.previewItemFunding`, which walks
+`MAKE` and `TAKE_FOR` and reports `required` vs `available` per item.
+
+**Not an ERC-20 assumption.** `asset` is whatever the module draws from. A module
+funding a position with an NFT reports the ERC-721 and an `available` of 0 or 1; the
+lens compares `asset` for identity and `available` as a magnitude and assumes nothing
+else. `address(0)` means "I pull nothing external".
+
+**The generalised question.** *For every book that can stop a fill, which preflight
+reads it?* Enumerate the books, not the functions. A settler with three
+authorisation books and two preflights is under-covered by construction, and the gap
+is invisible precisely because each preflight is individually correct.
+
+### F22 — an item could deliver a token no leg could consume, stranding it forever
+
+Proceeds are credited by **measurement**: `Core._payInputsToSolver` reads the balance
+delta of `legsIn[i].token` across the item run. The token a module actually delivers
+is named only inside `data`, in a per-module layout the core deliberately never
+decodes, and nothing cross-checked the two.
+
+Point a `TAKE` at token X while every input leg is token Y and the maker pays twice:
+
+1. every leg measures `proceeds = 0`, falls to the `owed > proceeds` branch, and the
+   **full** `owed` is pulled from the maker's own wallet;
+2. token X is credited to nobody, and the single-order `fill` path **has no sweep**.
+   It is not stolen — it simply stays in the settler forever. Nothing can retrieve it,
+   because `Settlement` grants no ERC-20 approval to anyone, which is the same
+   invariant that makes the proceeds measurement sound in the first place (§C15).
+
+No attacker is involved. It is a maker-signed misconfiguration — precisely the class
+`ItemOp.TAKE_FOR` was introduced to make unrepresentable on the *funding* side, which
+had gone unaddressed on the *proceeds* side. `TAKE_FOR` de-duplicated the funding
+AMOUNT; neither asset identity was ever checked.
+
+**Fixed:** {IProceedsAsset} — a module declares the token it delivers — and a
+`validateOrder` rule: proceeds routed to the settler (`item.recipient == 0`) must be a
+token **some** input leg can consume.
+
+Both halves of that rule are load-bearing. *Some* leg, never leg 0: a rising
+relayer-fee leg in a different token is legitimate. And only when `recipient == 0`: a
+signed recipient routes the proceeds away from the settler on purpose (to the maker,
+or chained into a later item), so the settler never holds them.
+
+**The generalised question.** *Where a value is credited by MEASURING a balance, what
+proves the thing measured is the thing that moved?* A measurement-based credit is only
+as sound as the binding between the measured token and the declared one. Wherever
+those are two independent statements — one in a signed leg, one in an opaque blob —
+they need an equality check or the gap swallows value silently.
+
+### F23 — OPEN: three invariants documented but unenforced
+
+Not defects, but the same shape three times: a rule that holds only because every
+current integrator happens to follow it.
+
+| invariant | where it rests | what breaks |
+| --- | --- | --- |
+| a module implements `ITakerModule` **or** `ITakerForModule`, never both | `ITakerForModule` prose | the taker book keys both on `(user, spender, module, keccak256(data))`, so one `approveTaker` would authorise either shape and the grant cannot tell the maker which |
+| an ORDER nonce must not set bit 255 | `NonceManager.SIGNER_NONCE_NS` prose + the SDK's cap | an order signed above 2^255 collides with the delegate-nomination namespace, re-opening §F17 |
+| Permit3 nonces are allocated **per owner**, not per message type | `UnorderedNonces` prose | all three signed flows share one bitmap. `permitBatchWithWitnessIfNeeded` is idempotent on a spent nonce (the S-1 remediation), but `permitTake` and `permitTransferFrom` both revert — so anyone holding an unrelayed signed message can burn its nonce and DoS a *different* message the owner signed at the same coordinate. Exactly §F17's shape, one layer down |
+
+None is reachable today, and each is enforced on the hot path only at a cost the
+contract cannot currently pay (§F1 headroom). The right home for all three is a CI
+assertion or an SDK allocator, not runtime gas — but *documented* is not *enforced*,
+and the ledger should say so rather than let the prose read as a guarantee.
 
 ## Re-audit sweep — the generalised questions from F13–F15
 
@@ -1113,6 +1345,13 @@ Things worth re-checking whenever the relevant code moves.
   `permit3.transferFrom(onBehalfOf, …, collateralAsset, forAmount)`. **This is a rule
   for new composite modules:** the funding pull must go through the maker's token
   allowance, never through an allowance the module holds on someone else.
+- **Any narrowing of the `matchSettle` item-op guard.** `_assertMatchShape` refuses
+  `op >= SETTLE`, which bundles three different reasons under one compare. `TAKE_FOR`
+  is the one to be careful with: its LITERAL and LEG-reference funding forms are
+  schedule-independent and could in principle be allowed, but its **BALANCE** form
+  must not be — see F16's CoW re-check above. A narrowing must therefore discriminate
+  by descriptor *form*, which means decoding `data` inside the guard. Do not relax
+  this on the "it is only an ordering constraint" reading.
 - **The witness-typehash overloads accept an arbitrary `bytes32`.**
   `permitBatchWithWitnessHashIfNeeded` and `permitTakeWithWitnessHash` take the
   already-concatenated typehash where the string forms derive it. No new power: the

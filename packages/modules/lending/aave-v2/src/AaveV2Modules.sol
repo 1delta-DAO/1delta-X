@@ -95,8 +95,14 @@ contract AaveV2RepayModule is IMakerModule {
         // Optional permit at 160 (after base + DustAction slot).
         PermitHelper.replayIfPresent(data, 160, asset, onBehalfOf, address(permit3), amount);
 
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(asset).balanceOf(address(this));
+
         _pullAndRepay(data, amount, onBehalfOf, asset, pool, action == DustHandler.DustAction.Recycle);
-        _disposeResidual(pool, asset, onBehalfOf, action);
+        _disposeResidual(pool, asset, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -129,12 +135,26 @@ contract AaveV2RepayModule is IMakerModule {
         }
     }
 
-    function _disposeResidual(address pool, address asset, address onBehalfOf, DustHandler.DustAction action) private {
-        uint256 residual = IERC20(asset).balanceOf(address(this));
-        if (residual == 0) return;
+    function _disposeResidual(
+        address pool,
+        address asset,
+        address onBehalfOf,
+        DustHandler.DustAction action,
+        uint256 floor
+    ) private {
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
         DustHandler.disposeResidual(
             asset,
             residual,
+            floor,
             onBehalfOf,
             action,
             pool,
@@ -178,11 +198,21 @@ contract AaveV2WithdrawModule is ITakerModule {
             // pro-rated — a sliced fill would unwind the whole position and brick
             // the rest of the order. Require the slice to be the whole item.
             FullFillGuard.requireFullFillFromData(data, 128, amount);
+            // aTokens this module ALREADY held are not this user's, and
+            // `withdraw(max)` burns the module's whole aToken balance — so without
+            // this they would convert into `received` and be swept to `onBehalfOf`
+            // below. aTokens are 1:1 with the underlying, so the pre-existing amount
+            // subtracts directly. (`beforeBal` already excludes pre-existing
+            // UNDERLYING; this is the aToken half of the same measurement.)
+            uint256 aBefore = IERC20(aToken).balanceOf(address(this));
             uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
             permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(bal));
             uint256 beforeBal = IERC20(asset).balanceOf(address(this));
             IAaveV2Pool(pool).withdraw(asset, type(uint256).max, address(this));
             uint256 received = IERC20(asset).balanceOf(address(this)) - beforeBal;
+            // Saturating, so a rounding wei can never underflow-panic; the `require`
+            // below is the fail-closed gate either way.
+            received = received > aBefore ? received - aBefore : 0;
             require(received >= amount, "insufficient withdrawn");
             SafeTransferLib.safeTransfer(asset, receiver, amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);

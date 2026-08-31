@@ -5,6 +5,7 @@ export * from "./eip712";
 export * from "./abi";
 export * from "./orders";
 export * from "./softcancel";
+export * from "./delegation";
 export * from "./amend";
 export * from "./oco";
 export * from "./permit";

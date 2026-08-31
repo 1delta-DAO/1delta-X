@@ -7,6 +7,9 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
+import {FundingPreflight} from "@lib/FundingPreflight.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
@@ -25,7 +28,7 @@ import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 //
 // `data = abi.encode(pool, asset[, deadline, v, r, s])`
 //
-contract AaveV3DepositModule is IMakerModule {
+contract AaveV3DepositModule is IMakerModule, IFundingSource {
     IPermit3 public immutable permit3;
     address public immutable settlement;
 
@@ -47,6 +50,21 @@ contract AaveV3DepositModule is IMakerModule {
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, pool, amount);
         IAaveV3Pool(pool).supply(asset, amount, onBehalfOf, 0);
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev `asset` is field 1 of this module's layout. The pull is
+    ///      `permit3.transferFrom(user, THIS MODULE, asset, …)`, so the grant the lens
+    ///      has to report is `(user, module, asset)` — a book neither the order's
+    ///      input-leg preflight (spender = the settler) nor the taker book reads.
+    function fundingSource(address onBehalfOf, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        (, asset) = abi.decode(data, (address, address));
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
     }
 }
 
@@ -77,7 +95,7 @@ contract AaveV3DepositModule is IMakerModule {
 // — the trailing dust action is optional (absent ⇒ SweepToUser);
 //   the permit block (128 bytes) is optional after the dust action slot.
 //
-contract AaveV3RepayModule is IMakerModule {
+contract AaveV3RepayModule is IMakerModule, IFundingSource {
     IPermit3 public immutable permit3;
     address public immutable settlement;
 
@@ -105,11 +123,31 @@ contract AaveV3RepayModule is IMakerModule {
         DustHandler.DustAction action = DustHandler.readAction(data, 128);
         PermitHelper.replayIfPresent(data, 160, asset, onBehalfOf, address(permit3), amount);
 
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the delta over it, never the whole balance — see {DustHandler.disposeResidual}'s
+        // floor overload for why "the module ends empty" is the wrong invariant.
+        uint256 floor = IERC20(asset).balanceOf(address(this));
+
         _pullAndRepay(data, amount, onBehalfOf, asset, pool, action == DustHandler.DustAction.Recycle);
 
-        _disposeResidual(pool, asset, onBehalfOf, action);
+        _disposeResidual(pool, asset, onBehalfOf, action, floor);
 
         _locked = 1;
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev `asset` is field 1 of this module's layout. The pull is
+    ///      `permit3.transferFrom(user, THIS MODULE, asset, …)`, so the grant the lens
+    ///      has to report is `(user, module, asset)` — a book neither the order's
+    ///      input-leg preflight (spender = the settler) nor the taker book reads.
+    function fundingSource(address onBehalfOf, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        (, asset) = abi.decode(data, (address, address));
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
     }
 
     /// @dev Pull the funding token and repay. SweepToUser pulls only what the
@@ -147,15 +185,32 @@ contract AaveV3RepayModule is IMakerModule {
         }
     }
 
-    /// @dev Dispose of any residual: re-supply into the user's Aave position
-    ///      (Recycle, best-effort with a guaranteed sweep fallback) or sweep to
-    ///      the user (default). In its own frame to keep the stack shallow.
-    function _disposeResidual(address pool, address asset, address onBehalfOf, DustHandler.DustAction action) private {
-        uint256 residual = IERC20(asset).balanceOf(address(this));
-        if (residual == 0) return;
+    /// @dev Dispose of any residual THIS call produced: re-supply into the user's
+    ///      Aave position (Recycle, best-effort with a guaranteed sweep fallback) or
+    ///      sweep to the user (default). In its own frame to keep the stack shallow.
+    ///
+    ///      `floor` is the module's balance before the pull. Measuring the delta
+    ///      rather than reading the whole balance is what stops a stranded or donated
+    ///      amount being paid out to whoever fills next — see the floor overload of
+    ///      {DustHandler.disposeResidual}. On the normal path the module starts empty
+    ///      and `floor` is 0, so this is behaviour-preserving.
+    function _disposeResidual(
+        address pool,
+        address asset,
+        address onBehalfOf,
+        DustHandler.DustAction action,
+        uint256 floor
+    ) private {
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
         DustHandler.disposeResidual(
             asset,
             residual,
+            floor,
             onBehalfOf,
             action,
             pool,
@@ -188,7 +243,7 @@ contract AaveV3RepayModule is IMakerModule {
 //   — Full mode is incompatible with gasless permit (rebasing balance unknown
 //     at signing time); use a standing ERC-20 approval in that case.
 //
-contract AaveV3WithdrawModule is ITakerModule {
+contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -210,11 +265,21 @@ contract AaveV3WithdrawModule is ITakerModule {
             // Full mode: user must have a standing ERC-20 approval on aToken.
             // Pull the user's entire (rebasing) aToken balance and withdraw it all
             // to this module; `withdraw(max)` mops up any 1-wei transfer rounding.
+            // aTokens this module ALREADY held are not this user's, and
+            // `withdraw(max)` burns the module's whole aToken balance — so without
+            // this they would convert into `received` and be swept to `onBehalfOf`
+            // below. aTokens are 1:1 with the underlying, so the pre-existing amount
+            // subtracts directly. (`beforeBal` already excludes pre-existing
+            // UNDERLYING; this is the aToken half of the same measurement.)
+            uint256 aBefore = IERC20(aToken).balanceOf(address(this));
             uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
             permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(bal));
             uint256 beforeBal = IERC20(asset).balanceOf(address(this));
             IAaveV3Pool(pool).withdraw(asset, type(uint256).max, address(this));
             uint256 received = IERC20(asset).balanceOf(address(this)) - beforeBal;
+            // Saturating, so a rounding wei can never underflow-panic; the `require`
+            // below is the fail-closed gate either way.
+            received = received > aBefore ? received - aBefore : 0;
             require(received >= amount, "insufficient withdrawn");
             SafeTransferLib.safeTransfer(asset, receiver, amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
@@ -225,6 +290,29 @@ contract AaveV3WithdrawModule is ITakerModule {
             permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(amount));
             IAaveV3Pool(pool).withdraw(asset, amount, receiver);
         }
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The UNDERLYING (field 1), not the aToken: the aToken is what this module
+    ///      pulls IN to burn, the underlying is what lands on `receiver` and is what
+    ///      an input leg has to be able to consume.
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (, asset) = abi.decode(data, (address, address));
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev The aToken (field 2) — pulled from the user in BOTH modes, so both need
+    ///      the `(user, module, aToken)` grant. In `Full` mode the amount is the
+    ///      user's whole live balance rather than the item's slice, which is why
+    ///      `available` is min(allowance, balance) rather than the allowance alone.
+    function fundingSource(address onBehalfOf, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        (,, asset) = abi.decode(data, (address, address, address));
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
     }
 }
 
@@ -245,7 +333,7 @@ contract AaveV3WithdrawModule is ITakerModule {
 //     bytes32 r, bytes32 s) = 160 bytes.
 //   — rateMode: 1 = stable, 2 = variable (must match the debt token passed).
 //
-contract AaveV3BorrowModule is ITakerModule {
+contract AaveV3BorrowModule is ITakerModule, IProceedsAsset {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -266,5 +354,13 @@ contract AaveV3BorrowModule is ITakerModule {
 
         IAaveV3Pool(pool).borrow(asset, amount, rateMode, 0, onBehalfOf);
         SafeTransferLib.safeTransfer(asset, receiver, amount);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev No {IFundingSource} counterpart: a bare borrow pulls nothing from the
+    ///      user, it only issues debt. The value-OUT declaration is the whole of this
+    ///      module's asset surface.
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (, asset) = abi.decode(data, (address, address));
     }
 }

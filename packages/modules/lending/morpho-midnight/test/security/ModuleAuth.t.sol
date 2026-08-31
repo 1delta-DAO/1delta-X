@@ -21,7 +21,7 @@ contract ModuleAuthTest is MidnightModulesBase {
     function test_make_modules_reject_non_settlement() public {
         bytes memory supplyData = _supplyData();
         bytes memory repayData = _repayData();
-        bytes memory lendData = _lendData(1e6);
+        bytes memory lendData = _lendData(1e6, 1e6);
 
         vm.startPrank(address(0xBAD));
 
@@ -38,8 +38,8 @@ contract ModuleAuthTest is MidnightModulesBase {
     }
 
     function test_taker_modules_reject_non_permit3() public {
-        bytes memory wcData = _withdrawCollateralData(0);
-        bytes memory borrowData = _borrowData(1e6);
+        bytes memory wcData = _withdrawCollateralData(0, 0);
+        bytes memory borrowData = _borrowData(1e6, 1e6);
 
         vm.startPrank(address(0xBAD));
 
@@ -58,7 +58,7 @@ contract ModuleAuthTest is MidnightModulesBase {
     function test_withdraw_without_midnight_auth_reverts() public {
         _seedCollateral(maker, 1e18);
 
-        bytes memory wcData = _withdrawCollateralData(0);
+        bytes memory wcData = _withdrawCollateralData(0, 0);
         _makerApproveTaker(address(takerModule), keccak256(wcData), 1e18);
         // NB: no `_makerAuthorize(takerModule)`.
 
@@ -67,9 +67,4 @@ contract ModuleAuthTest is MidnightModulesBase {
         takerModule.takeOnBehalf(maker, 1e18, solver, wcData);
     }
 
-    function _seedCollateral(address who, uint256 amount) internal {
-        COLL.mint(address(this), amount);
-        COLL.approve(address(midnight), amount);
-        midnight.seedCollateral(_market(), who, 0, amount);
-    }
 }

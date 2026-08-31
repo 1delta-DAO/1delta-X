@@ -58,7 +58,7 @@ contract MigrateMidnightToBlueTest is MidnightModulesBase {
         LOAN.mint(address(blue), debtUnits); // Blue liquidity for the new borrow proceeds
 
         bytes memory repayData = _repayData();
-        bytes memory wcData = _withdrawCollateralData(0); // Exact
+        bytes memory wcData = _withdrawCollateralData(0, 0); // Exact
         bytes memory blueSupplyData = _blueSupplyData();
         bytes memory blueBorrowData = _blueBorrowData();
 
@@ -127,11 +127,6 @@ contract MigrateMidnightToBlueTest is MidnightModulesBase {
         return abi.encode(uint8(MorphoBlueTakerModule.Op.Borrow), _blueMarket());
     }
 
-    function _seedCollateral(address who, uint256 amount) internal {
-        COLL.mint(address(this), amount);
-        COLL.approve(address(midnight), amount);
-        midnight.seedCollateral(_market(), who, 0, amount);
-    }
 
     function _assertDrained() internal view {
         assertEq(LOAN.balanceOf(address(settlement)), 0, "settlement LOAN drained");

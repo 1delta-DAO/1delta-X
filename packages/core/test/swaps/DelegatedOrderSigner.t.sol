@@ -20,6 +20,11 @@ import {MockMakerWallet} from "./PlainSwap.t.sol";
 ///      a protocol-level "operator", where an admin-nominated key signs the order
 ///      and the user signs only a constant.
 contract DelegatedOrderSignerTest is CoreSettlementBase {
+    /// @dev Mirrors {NonceManager.SIGNER_NONCE_NS} — the reserved half of the nonce
+    ///      bitmap that relayed nominations consume. Spelled out rather than
+    ///      imported so the test pins the CONSTANT, not the contract's opinion of it.
+    uint256 constant SIGNER_NS = 1 << 255;
+
     uint256 constant DELEGATE_PK = 0xD11E6A7E;
     uint256 constant OUTSIDER_PK = 0x0157DE12;
 
@@ -126,22 +131,120 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
         assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "revocation stands");
     }
 
-    /// The permit rides the maker's ORDER nonce space, so the cancellation
-    /// primitives they already have kill an outstanding nomination they never
-    /// wanted relayed.
+    /// The permit rides a RESERVED HALF of the maker's order-nonce space, so the
+    /// cancellation primitives they already have still kill an outstanding
+    /// nomination they never wanted relayed — but they must name the NAMESPACED
+    /// coordinate, `nonce | SIGNER_NONCE_NS`. See {NonceManager.SIGNER_NONCE_NS}.
     function test_permit_preCancelledNonceRejected() public {
         _stage();
         uint256 dl = block.timestamp + 1 hours;
         bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
 
         uint256[] memory kill = new uint256[](1);
-        kill[0] = 7;
+        kill[0] = 7 | SIGNER_NS;
         vm.prank(maker);
         settlement.cancelOrders(kill);
 
         vm.prank(solver);
         vm.expectRevert(OrderState.NonceCancelled.selector);
         settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+    }
+
+    /// Cancelling the BARE nonce does NOT reach the permit — the two live in
+    /// disjoint halves of the bitmap, which is the whole point of the namespace.
+    /// The counterpart of `test_signerPermit_cannotCancelALiveOrder` below.
+    function test_permit_bareNonceCancellationDoesNotReachIt() public {
+        _stage();
+        uint256 dl = block.timestamp + 1 hours;
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+
+        uint256[] memory kill = new uint256[](1);
+        kill[0] = 7; // the ORDER coordinate, not the permit's
+        vm.prank(maker);
+        settlement.cancelOrders(kill);
+
+        vm.prank(solver);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        assertEq(settlement.orderSignerExpiry(maker, delegate), type(uint256).max, "namespaces are disjoint");
+    }
+
+    // ──────────────────── The namespace, from the order side ────────────────────
+
+    /// ⚠ THE REGRESSION THIS NAMESPACE EXISTS FOR.
+    ///
+    /// Before the reservation, an UNRELAYED nomination permit was a latent,
+    /// third-party-triggerable cancel on every order the maker later signed with the
+    /// same nonce. The sequence needs no privilege and no maker mistake beyond nonce
+    /// reuse — which is not exotic, since a shared nonce is exactly how an OCO
+    /// bracket is built:
+    ///
+    ///   T0  maker signs a nomination permit on nonce N; nobody relays it
+    ///   T1  `isNonceCancelled(maker, N)` reads FALSE — an allocator sees N as free
+    ///   T2  maker signs and publishes an ordinary order on nonce N
+    ///   T3  ANYONE relays the stale permit, at any time before its deadline
+    ///   T4  the order is dead, with no action by the maker
+    ///
+    /// The permit now consumes `N | SIGNER_NONCE_NS`, so T3 cannot reach T2's order.
+    function test_signerPermit_cannotCancelALiveOrder() public {
+        _stage();
+        uint256 N = 42;
+        uint256 dl = block.timestamp + 365 days;
+
+        // T0 — signed, never relayed.
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, N, dl);
+        // T1 — the allocator's view: free.
+        assertFalse(settlement.isNonceCancelled(maker, N), "order nonce reads free");
+
+        // T2 — a live order on the same nonce.
+        Order memory order = _order(maker, N, USDC, WETH, USDC_IN, WETH_OUT, new Item[](0));
+        bytes memory sig = _sign(order);
+
+        // T3 — anyone relays the stale permit.
+        vm.prank(address(0xDEAD));
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, N, dl, permit);
+
+        // T4 — the order is UNTOUCHED, and the permit landed in its own half.
+        assertFalse(settlement.isNonceCancelled(maker, N), "order nonce survives");
+        assertTrue(settlement.isNonceCancelled(maker, N | SIGNER_NS), "permit burned its own coordinate");
+
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "order still fills");
+    }
+
+    /// And the converse: filling the order does not consume the nomination permit.
+    /// Only relevant for a fill-once order, which is the shape that writes the
+    /// bitmap rather than the per-hash counter.
+    function test_orderNonceCancellation_doesNotConsumeTheSignerPermit() public {
+        _stage();
+        uint256 N = 42;
+        uint256 dl = block.timestamp + 365 days;
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, N, dl);
+
+        uint256[] memory kill = new uint256[](1);
+        kill[0] = N;
+        vm.prank(maker);
+        settlement.cancelOrders(kill); // retire the ORDER ladder
+
+        vm.prank(solver);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, N, dl, permit);
+        assertEq(settlement.orderSignerExpiry(maker, delegate), type(uint256).max, "nomination unaffected");
+    }
+
+    /// `rollbackNonces` deliberately does NOT reach nominations: a floor would have
+    /// to exceed 2^255. Retiring a ladder of orders must not revoke a desk's signing
+    /// key as a side effect.
+    function test_rollbackNonces_doesNotRevokeANomination() public {
+        _stage();
+        uint256 dl = block.timestamp + 1 hours;
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, 7, dl);
+
+        vm.prank(maker);
+        settlement.rollbackNonces(1_000_000); // far above any order nonce in use
+
+        vm.prank(solver);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, 7, dl, permit);
+        assertEq(settlement.orderSignerExpiry(maker, delegate), type(uint256).max, "rollback does not reach it");
     }
 
     function test_permit_deadlineEnforced() public {
@@ -565,5 +668,202 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
         vm.prank(solver);
         settlement.fill(order, sig, USDC_IN / 2);
         assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "the contract-delegate branch behaves identically");
+    }
+
+    // ════════════════ 2026-08-31 audit regressions ════════════════
+
+    /// @dev AUDIT M-1. A permit consumes its bitmap coordinate only WHEN RELAYED.
+    ///      So a maker who signs a gasless nomination, never has it relayed, and
+    ///      then revokes with {OrderState.setOrderSigner} is NOT safe: whoever holds
+    ///      the message can relay it later and the delegate is live again, up to the
+    ///      permit's `deadline` — which nothing caps.
+    ///
+    ///      `test_permit_replayRejected` covers the RELAY-then-revoke-then-replay
+    ///      ordering, where the nonce is already burned. This is the other ordering,
+    ///      and it is the realistic one: a relayer goes offline, the maker revokes,
+    ///      and considers the matter closed.
+    ///
+    ///      Pinned as CURRENT BEHAVIOUR, not as desired behaviour. The fix is
+    ///      procedural and lives in the SDK (`encodeRevokeOrderSigner` emits the
+    ///      burn alongside the clear); the counterpart test below is the correct
+    ///      sequence.
+    function test_permit_staleUnrelayedPermitResurrectsARevokedDelegate() public {
+        _stage();
+        uint256 N = 7;
+        uint256 dl = block.timestamp + 365 days;
+
+        // Signed once, handed to a relayer, never landed.
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, N, dl);
+
+        // The maker nominates directly, then revokes directly. From their side the
+        // delegate is gone: the registry says so and an order signed now would fail.
+        _nominate(type(uint256).max);
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, 0);
+        assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "registry cleared");
+
+        // The permit's coordinate was never burned, so anyone may still relay it.
+        vm.prank(outsider);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, N, dl, permit);
+        assertEq(settlement.orderSignerExpiry(maker, delegate), type(uint256).max, "delegate resurrected");
+
+        // And it is a real resurrection, not just a storage write: the delegate's
+        // signature settles an order the maker never signed.
+        Order memory order = _order0();
+        // Signed on its own line: `vm.sign` inside a call argument consumes the
+        // pending `vm.prank`, so the fill would run as the test contract.
+        bytes memory delegateSig = _signAs(DELEGATE_PK, order);
+        vm.prank(solver);
+        settlement.fill(order, delegateSig, USDC_IN);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "a revoked delegate authorized a fill");
+    }
+
+    /// @dev AUDIT M-1, the correct sequence — exactly what the SDK's
+    ///      `encodeRevokeOrderSigner` emits: clear the registry AND burn the permit
+    ///      coordinate. The coordinate is recomputable from the delegate address
+    ///      alone (`signerPermitNonce`), which is what makes this possible with no
+    ///      bookkeeping on the maker's side.
+    function test_permit_burningTheCoordinateMakesRevocationFinal() public {
+        _stage();
+        uint256 N = 7;
+        uint256 dl = block.timestamp + 365 days;
+        bytes memory permit = _signPermit(makerPk, maker, delegate, type(uint256).max, N, dl);
+
+        _nominate(type(uint256).max);
+        vm.startPrank(maker);
+        settlement.setOrderSigner(delegate, 0); // call 1 — clear
+        uint256[] memory kill = new uint256[](1);
+        kill[0] = N | SIGNER_NS; // ⚠ the NAMESPACED coordinate, not the bare nonce
+        settlement.cancelOrders(kill); // call 2 — burn
+        vm.stopPrank();
+
+        vm.prank(outsider);
+        vm.expectRevert(OrderState.NonceCancelled.selector);
+        settlement.setOrderSignerWithSig(maker, delegate, type(uint256).max, N, dl, permit);
+        assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "revocation is final");
+
+        Order memory order = _order0();
+        bytes memory delegateSig = _signAs(DELEGATE_PK, order);
+        vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        settlement.fill(order, delegateSig, USDC_IN);
+    }
+
+    /// @dev AUDIT M-3. `rollbackNonces` is documented as a kill switch, and for a
+    ///      LADDER it is one — but it is not containment for a compromised delegate.
+    ///      It sets a FLOOR, and a delegate simply signs above it. Worth pinning
+    ///      because "roll the nonces forward" is the instinctive panic response, and
+    ///      it does not work here.
+    ///
+    ///      The only containment is per-address revocation (there is no on-chain
+    ///      bulk revoke — see `liveDelegates` in the SDK for rebuilding the list) or
+    ///      revoking the Permit3 allowances that fund the fills, which also stops the
+    ///      maker trading.
+    function test_rollbackNonces_doesNotContainACompromisedDelegate() public {
+        _stage();
+        _nominate(type(uint256).max);
+
+        vm.prank(maker);
+        settlement.rollbackNonces(1_000_000); // "retire everything outstanding"
+
+        // The delegate mints a fresh order ABOVE the floor and it settles.
+        Order memory order = _order(maker, 1_000_001, USDC, WETH, USDC_IN, WETH_OUT, new Item[](0));
+        bytes memory delegateSig = _signAs(DELEGATE_PK, order);
+        vm.prank(solver);
+        settlement.fill(order, delegateSig, USDC_IN);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "a nonce floor is not containment");
+    }
+
+    /// @dev AUDIT M-3, the counterpart: naming the delegate DOES contain it, on any
+    ///      nonce. This is the pair that shows the difference is the axis, not the
+    ///      magnitude.
+    function test_perAddressRevocation_isTheOnlyContainment() public {
+        _stage();
+        _nominate(type(uint256).max);
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, 0);
+
+        Order memory order = _order(maker, 1_000_001, USDC, WETH, USDC_IN, WETH_OUT, new Item[](0));
+        bytes memory delegateSig = _signAs(DELEGATE_PK, order);
+        vm.prank(solver);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        settlement.fill(order, delegateSig, USDC_IN);
+    }
+
+    /// @dev AUDIT M-4. The contract-delegate envelope is reachable only when the
+    ///      maker has NO CODE — that condition is what keeps the branch from
+    ///      shadowing a 1271 payload meant for a contract maker. The consequence is
+    ///      unobvious and unstated anywhere: an EOA maker who later adopts EIP-7702
+    ///      SILENTLY loses the envelope path, and every unfilled order its contract
+    ///      delegate signed becomes unauthorized.
+    ///
+    ///      Liveness only — no order is stuck (the maker can `cancelOrder` or
+    ///      re-sign) and nothing becomes authorizable that was not before. But a desk
+    ///      whose Safe-based signer stops working the day the principal upgrades
+    ///      their wallet deserves to find this in a test rather than in production.
+    ///
+    ///      `vm.etch` stands in for the delegation: the branch keys on
+    ///      `expected.code.length`, and a 7702 designator is code like any other.
+    function test_makerAdopting7702_disablesTheContractDelegateEnvelope() public {
+        _stage();
+        MockMakerWallet wallet = new MockMakerWallet(delegate);
+        vm.prank(maker);
+        settlement.setOrderSigner(address(wallet), type(uint256).max);
+
+        Order memory order = _order0();
+        bytes memory sig = _envelope(address(wallet), _signAs(DELEGATE_PK, order));
+
+        // Before: the envelope authorizes.
+        uint256 snap = vm.snapshotState();
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "envelope works while the maker is codeless");
+        vm.revertToState(snap);
+
+        // After: the maker has code, so `!standardLength && expected.code.length == 0`
+        // fails and the SAME signature falls through to the maker's own 1271.
+        MockMakerWallet impl = new MockMakerWallet(maker);
+        vm.etch(maker, address(impl).code);
+        assertGt(maker.code.length, 0, "maker now carries code");
+
+        vm.prank(solver);
+        vm.expectRevert(); // the envelope is now read as a 1271 payload for the maker
+        settlement.fill(order, sig, USDC_IN);
+    }
+
+    /// @dev AUDIT L-5. Every authoritative cancel is keyed by `msg.sender`, so a
+    ///      delegate cannot hard-cancel its nominator's orders. `cancelOrder` says so
+    ///      loudly ({NotOrderMaker}); the NONCE cancels do not — they succeed, write
+    ///      the DELEGATE's own bitmap row, and emit `OrdersCancelled(delegate, …)`.
+    ///
+    ///      To an operator or a bot watching events that is indistinguishable from a
+    ///      cancel that worked, while the maker's order stays fillable. The SDK's
+    ///      `assertCanCancelOnChain` is the guard; this pins the on-chain behaviour
+    ///      the guard exists for.
+    function test_delegateCannotCancelForItsMaker() public {
+        _stage();
+        _nominate(type(uint256).max);
+        Order memory order = _order0(); // nonce 0
+
+        // The loud half.
+        vm.prank(delegate);
+        vm.expectRevert(OrderState.NotOrderMaker.selector);
+        settlement.cancelOrder(order);
+
+        // The silent half — no revert.
+        uint256[] memory kill = new uint256[](1);
+        kill[0] = 0;
+        vm.prank(delegate);
+        settlement.cancelOrders(kill);
+
+        assertFalse(settlement.isNonceCancelled(maker, 0), "the maker's nonce is untouched");
+        assertTrue(settlement.isNonceCancelled(delegate, 0), "the delegate cancelled its OWN nonce");
+
+        // Proof it was a no-op where it mattered: the order the delegate "cancelled"
+        // still settles, on the delegate's own signature.
+        bytes memory delegateSig = _signAs(DELEGATE_PK, order);
+        vm.prank(solver);
+        settlement.fill(order, delegateSig, USDC_IN);
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "order the delegate tried to cancel still filled");
     }
 }

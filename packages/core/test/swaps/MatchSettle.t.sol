@@ -63,6 +63,38 @@ contract MockDepositMaker is IMakerModule {
     }
 }
 
+/// @dev MAKE mock that sizes itself from LIVE STATE, the way every real repay
+///      adapter does (`toRepay = min(amount, debt)` — Aave, Comet, Morpho, Compound
+///      all read the live debt and cap to it). `amount` is the maker-signed CEILING,
+///      not the amount moved, which is what makes the ORDER of the calls observable
+///      in the value that moves.
+contract MockCappedRepayMaker is IMakerModule {
+    IPermit3 public immutable permit3;
+    address public immutable settlement;
+
+    mapping(address => uint256) public debt;
+
+    constructor(address _permit3, address _settlement) {
+        permit3 = IPermit3(_permit3);
+        settlement = _settlement;
+    }
+
+    function setDebt(address user, uint256 amount) external {
+        debt[user] = amount;
+    }
+
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        require(msg.sender == settlement, "only settlement");
+        address token = abi.decode(data, (address));
+        uint256 owed = debt[onBehalfOf];
+        uint256 toRepay = amount < owed ? amount : owed;
+        if (toRepay != 0) {
+            permit3.transferFrom(onBehalfOf, address(this), token, uint160(toRepay));
+            debt[onBehalfOf] = owed - toRepay;
+        }
+    }
+}
+
 /// @dev `matchSettle` — the deferred-check, schedule-driven match.
 ///
 /// The headline is the MUTUAL-LEVERAGE CYCLE, which no `sequence` over whole
@@ -720,6 +752,261 @@ contract MatchSettleTest is CoreSettlementBase {
         settlement.fill(lev, sig, USDC_AMT);
 
         assertEq(IERC20(WETH).balanceOf(address(depositor)), WETH_AMT, "ATOMIC order fills normally");
+    }
+
+    // ──────────── CANONICAL: the two orderings ATOMIC does not constrain ────────────
+    //
+    // ATOMIC pins the items relative to EACH OTHER. It says nothing about where the
+    // group sits relative to the DELIVERY that funds it, or to the PULL that draws
+    // the order's inputs — and both of those change the VALUE that moves, not merely
+    // the intermediate state. CANONICAL adds them, which makes the netted path run
+    // this order in exactly the shape `fill` always did: deliver → items → pay.
+
+    /// @dev The hoist, under the DEFAULT policy — this is the behaviour CANONICAL
+    ///      exists to forbid, pinned so it cannot change silently.
+    ///
+    ///      Bob's order says "deliver me 1 WETH, deposit it as collateral, borrow
+    ///      2000 USDC". Running his deposit BEFORE his delivery is a legal `ANY`
+    ///      schedule, and it funds the deposit from the WETH already in his wallet;
+    ///      the delivery then lands in that wallet and stays there. The end state is
+    ///      token-neutral HERE only because the mock deposits a fixed amount — the
+    ///      hazard is that it spends the maker's own balance and standing allowance,
+    ///      and that a module which sizes itself from live state (see
+    ///      {MockCappedRepayMaker}) moves a DIFFERENT amount from either position.
+    function test_hoistedItem_underAny_fundsFromTheMakersOwnWallet() public {
+        Order memory spot = _spot(maker, 1, WETH, WETH_AMT, USDC, USDC_AMT);
+        Order memory lev = _leverage(bob, 2, WETH, WETH_AMT, USDC, USDC_AMT, USDC_AMT);
+        deal(WETH, maker, WETH_AMT);
+        deal(WETH, bob, WETH_AMT); // Bob's OWN collateral, unrelated to this order
+        _approveMakerToSettlement(WETH, WETH_AMT);
+        _authLeverage(bob, lev);
+        deal(USDC, address(taker), USDC_AMT);
+
+        // Build the plan BEFORE the prank: `_signAs` makes cheatcode calls, and those
+        // consume a pending `vm.prank`. (Every assertion here is on the makers, so it
+        // would not change the outcome — but the filler should be the filler.)
+        MatchPlan memory p = _two(spot, lev, makerPk, bobPk, _hoistedSchedule());
+        vm.prank(solver);
+        settlement.matchSettle(p);
+
+        assertEq(IERC20(WETH).balanceOf(address(depositor)), WETH_AMT, "collateral deposited");
+        // The tell: the DELIVERED WETH is still sitting in Bob's wallet, because the
+        // deposit consumed the WETH he already held. Under the canonical ordering he
+        // ends at 0 — see the companion test below.
+        assertEq(IERC20(WETH).balanceOf(bob), WETH_AMT, "delivery landed after the deposit and stayed");
+    }
+
+    /// @dev CANONICAL refuses that schedule: an item may not run before its own
+    ///      order's delivery.
+    function test_itemPolicy_canonical_refusesItemAheadOfDelivery() public {
+        Order memory spot = _spot(maker, 1, WETH, WETH_AMT, USDC, USDC_AMT);
+        Order memory lev = _leverage(bob, 2, WETH, WETH_AMT, USDC, USDC_AMT, USDC_AMT);
+        lev = _withPolicy(lev, ItemPolicy.CANONICAL);
+        deal(WETH, maker, WETH_AMT);
+        deal(WETH, bob, WETH_AMT);
+        _approveMakerToSettlement(WETH, WETH_AMT);
+        _authLeverage(bob, lev);
+        deal(USDC, address(taker), USDC_AMT);
+
+        MatchPlan memory p = _two(spot, lev, makerPk, bobPk, _hoistedSchedule());
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(Base.ItemPolicyViolated.selector, uint256(1), uint256(0)));
+        settlement.matchSettle(p);
+    }
+
+    /// @dev …and accepts the canonical one, which spends Bob's delivery rather than
+    ///      his wallet. Same orders, same amounts, one different schedule.
+    function test_itemPolicy_canonical_acceptsDeliverItemsThenPull() public {
+        Order memory spot = _spot(maker, 1, WETH, WETH_AMT, USDC, USDC_AMT);
+        Order memory lev = _leverage(bob, 2, WETH, WETH_AMT, USDC, USDC_AMT, USDC_AMT);
+        lev = _withPolicy(lev, ItemPolicy.CANONICAL);
+        deal(WETH, maker, WETH_AMT);
+        deal(WETH, bob, WETH_AMT);
+        _approveMakerToSettlement(WETH, WETH_AMT);
+        _authLeverage(bob, lev);
+        _approveBobUsdcToSettlement(USDC_AMT);
+        deal(USDC, address(taker), USDC_AMT);
+
+        uint256[] memory s = new uint256[](6);
+        s[0] = _step(MatchStep.PULL, 0, 0); //    Alice's WETH seeds the pool
+        s[1] = _step(MatchStep.DELIVER, 1, 0); // pool → Bob: 1 WETH
+        s[2] = _step(MatchStep.ITEM, 1, 0); //    deposit it ┐ contiguous, after delivery
+        s[3] = _step(MatchStep.ITEM, 1, 1); //    borrow     ┘
+        s[4] = _step(MatchStep.PULL, 1, 0); //    legal, and a NO-OP: the borrow already credited the leg
+        s[5] = _step(MatchStep.DELIVER, 0, 0); // pool → Alice: 2000 USDC
+
+        MatchPlan memory p = _two(spot, lev, makerPk, bobPk, s);
+        vm.prank(solver);
+        settlement.matchSettle(p);
+
+        assertEq(IERC20(WETH).balanceOf(address(depositor)), WETH_AMT, "collateral deposited");
+        assertEq(IERC20(WETH).balanceOf(bob), WETH_AMT, "his own WETH untouched: the DELIVERY was deposited");
+        assertEq(_bobUsdcAllowance(), USDC_AMT, "the no-op pull drew nothing and spent no allowance");
+    }
+
+    /// @dev The PULL half, under the DEFAULT policy: a pull scheduled ahead of the
+    ///      item that was going to fund the leg makes the maker front the whole leg
+    ///      from their wallet. The tokens come back — {_matchReconcileInputs} refunds
+    ///      the over-credit — but the Permit3 ALLOWANCE they moved with does not, and
+    ///      `matchSettle` is permissionless, so any filler can spend it. Same class as
+    ///      the duplicate-pull finding {_stepPull} documents, reached by ORDERING
+    ///      rather than by repetition.
+    function test_pullAheadOfItem_underAny_spendsTheMakersAllowance() public {
+        (Order memory spot, Order memory lev) = _pullFirstPair(ItemPolicy.ANY);
+
+        MatchPlan memory p = _two(spot, lev, makerPk, bobPk, _pullFirstSchedule());
+        vm.prank(solver);
+        settlement.matchSettle(p);
+
+        assertEq(IERC20(USDC).balanceOf(bob), USDC_AMT, "tokens refunded: the maker is whole");
+        assertEq(_bobUsdcAllowance(), 0, "but the allowance is gone, and nothing gives it back");
+    }
+
+    /// @dev CANONICAL refuses it: this order's inputs are drawn only once the order
+    ///      is otherwise complete, so the item that funds the leg has always run.
+    function test_itemPolicy_canonical_refusesPullAheadOfItem() public {
+        (Order memory spot, Order memory lev) = _pullFirstPair(ItemPolicy.CANONICAL);
+
+        MatchPlan memory p = _two(spot, lev, makerPk, bobPk, _pullFirstSchedule());
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(Base.ItemPolicyViolated.selector, uint256(1), uint256(0)));
+        settlement.matchSettle(p);
+    }
+
+    // ──────────── live-state-sized items across two orders of one maker ────────────
+
+    /// @dev DOCUMENTED BEHAVIOUR, not a settler defect — and the reason a maker with
+    ///      two live orders on the same position wants an OCO group or `fill-once`.
+    ///
+    ///      Every real repay adapter caps to the live debt (`min(amount, debt)`), so
+    ///      the signed `amount` is a CEILING. Bundle two of the maker's own close
+    ///      orders into one plan and the first repay clears the debt; the second caps
+    ///      to zero, pulls nothing — while its value-OUT item (the withdraw) still
+    ///      runs at full size and its proceeds still pay the filler. No policy fixes
+    ///      this: both orders are separately valid, every item runs exactly once, and
+    ///      the ordering that produces it is not even unusual. What fixes it is not
+    ///      having two live orders against one debt.
+    function test_sameMakerOverlap_liveStateItemDegradesButPaysInFull() public {
+        MockCappedRepayMaker repayer = new MockCappedRepayMaker(address(permit3), address(settlement));
+        Order memory a = _close(repayer, 41);
+        Order memory b = _close(repayer, 42);
+
+        repayer.setDebt(maker, USDC_AMT); //     ONE debt, and both orders mean to clear it
+        deal(USDC, maker, USDC_AMT * 2); //      the maker can afford both
+        deal(WETH, address(taker), WETH_AMT * 2); // the "lender" holds the collateral
+        vm.startPrank(maker);
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(repayer), USDC, uint160(USDC_AMT * 2), 0);
+        permit3.approveTaker(
+            address(settlement),
+            address(taker),
+            keccak256(abi.encode(WETH, WETH_AMT)),
+            uint160(WETH_AMT * 2),
+            uint48(block.timestamp + 1 hours)
+        );
+        vm.stopPrank();
+
+        uint256[] memory s = new uint256[](4);
+        s[0] = _step(MatchStep.ITEM, 0, 0); // repay  — takes the whole 2000 debt
+        s[1] = _step(MatchStep.ITEM, 0, 1); // withdraw
+        s[2] = _step(MatchStep.ITEM, 1, 0); // repay  — caps to ZERO, pulls nothing
+        s[3] = _step(MatchStep.ITEM, 1, 1); // withdraw — runs in full anyway
+
+        MatchPlan memory p = _two(a, b, makerPk, makerPk, s);
+        vm.prank(solver);
+        settlement.matchSettle(p);
+
+        assertEq(repayer.debt(maker), 0, "debt cleared, once");
+        assertEq(IERC20(USDC).balanceOf(maker), USDC_AMT, "only ONE order's funding leg actually moved");
+        assertEq(IERC20(WETH).balanceOf(solver), WETH_AMT * 2, "but BOTH value-out legs paid the filler");
+    }
+
+    // ──────────────────── builders for the ordering tests ────────────────────
+
+    /// @dev The leverage order's deposit hoisted AHEAD of the delivery that funds it.
+    function _hoistedSchedule() internal pure returns (uint256[] memory s) {
+        s = new uint256[](5);
+        s[0] = _step(MatchStep.PULL, 0, 0); //    Alice's WETH seeds the pool
+        s[1] = _step(MatchStep.ITEM, 1, 0); //    Bob deposits — BEFORE his delivery
+        s[2] = _step(MatchStep.DELIVER, 1, 0); // pool → Bob: 1 WETH
+        s[3] = _step(MatchStep.ITEM, 1, 1); //    Bob borrows 2000 USDC → pool
+        s[4] = _step(MatchStep.DELIVER, 0, 0); // pool → Alice: 2000 USDC
+    }
+
+    /// @dev A leverage order whose input leg the solver draws from the maker's WALLET
+    ///      before the borrow that was going to fund it, plus the spot order that
+    ///      seeds the pool. Bob holds the USDC and has granted Settlement exactly the
+    ///      leg amount, which is what makes the allowance spend visible.
+    function _pullFirstPair(uint256 policy) internal returns (Order memory spot, Order memory lev) {
+        spot = _spot(maker, 1, WETH, WETH_AMT, USDC, USDC_AMT);
+        lev = _leverage(bob, 2, WETH, WETH_AMT, USDC, USDC_AMT, USDC_AMT);
+        if (policy != ItemPolicy.ANY) lev = _withPolicy(lev, policy);
+        deal(WETH, maker, WETH_AMT);
+        deal(USDC, bob, USDC_AMT);
+        _approveMakerToSettlement(WETH, WETH_AMT);
+        _authLeverage(bob, lev);
+        _approveBobUsdcToSettlement(USDC_AMT);
+        deal(USDC, address(taker), USDC_AMT);
+    }
+
+    function _pullFirstSchedule() internal pure returns (uint256[] memory s) {
+        s = new uint256[](6);
+        s[0] = _step(MatchStep.PULL, 0, 0); //    Alice's WETH seeds the pool
+        s[1] = _step(MatchStep.DELIVER, 1, 0); // pool → Bob: 1 WETH
+        s[2] = _step(MatchStep.ITEM, 1, 0); //    deposit
+        s[3] = _step(MatchStep.PULL, 1, 0); //    Bob's USDC leg — BEFORE the borrow funds it
+        s[4] = _step(MatchStep.ITEM, 1, 1); //    borrow (now redundant funding)
+        s[5] = _step(MatchStep.DELIVER, 0, 0); // pool → Alice: 2000 USDC
+    }
+
+    function _approveBobUsdcToSettlement(uint256 cap) internal {
+        vm.startPrank(bob);
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), USDC, uint160(cap), 0);
+        vm.stopPrank();
+    }
+
+    function _bobUsdcAllowance() internal view returns (uint256) {
+        (uint160 amount,) = permit3.tokenAllowance(bob, address(settlement), USDC);
+        return amount;
+    }
+
+    /// @dev A CLOSE order: repay from the maker's wallet (a live-state-sized MAKE)
+    ///      and withdraw the collateral, whose proceeds pay the filler. No output
+    ///      leg, so nothing is delivered and `DELIVERED_BIT` is pre-set at open.
+    function _close(MockCappedRepayMaker repayer, uint256 nonce) internal view returns (Order memory o) {
+        Item[] memory items = new Item[](2);
+        items[0] = Item({
+            op: ItemOp.MAKE, //     repay, capped at the LIVE debt
+            module: address(repayer),
+            amount: USDC_AMT,
+            recipient: address(0),
+            data: abi.encode(USDC)
+        });
+        items[1] = Item({
+            op: ItemOp.TAKE, //     withdraw the collateral → pool → filler
+            module: address(taker),
+            amount: WETH_AMT,
+            recipient: address(0),
+            data: abi.encode(WETH, WETH_AMT)
+        });
+        o = Order({
+            params: 0,
+            pricingModule: address(0),
+            maker: maker,
+            nonce: nonce,
+            legsIn: _legsIn1(WETH, WETH_AMT),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)),
+            timing: _expiryBits(block.timestamp + 1 hours),
+            exclusiveFiller: address(0),
+            minFillAnchor: 0,
+            curve: PackedEncode.noCurve(),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
+            fillModule: address(0),
+            fillTotal: 0
+        });
     }
 
     // ──────────────────── shape guards ────────────────────

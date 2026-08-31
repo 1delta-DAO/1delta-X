@@ -242,6 +242,16 @@ abstract contract Batch is Core {
     ///      and the two ranges can never collide.
     uint256 private constant DELIVERED_BIT = 1 << 255;
 
+    /// @dev The `done[i]` word of a FULLY executed order: every item bit set, plus
+    ///      {DELIVERED_BIT}. Phase 3 asserts it ({PlanIncomplete}) and a
+    ///      {ItemPolicy.CANONICAL} pull requires it, so it lives in one place rather
+    ///      than being open-coded at both. `countUnchecked` is sound here for the
+    ///      same reason it is in `_stepItem`: `_assertMatchShape` validated this blob
+    ///      at open.
+    function _doneMask(Order calldata order) private pure returns (uint256) {
+        return ((uint256(1) << PackedArrays.countUnchecked(order.items)) - 1) | DELIVERED_BIT;
+    }
+
     /// @notice Settle N orders as one netted match with DEFERRED CHECKS — the
     ///         inventory-free, callback-free, re-entrancy-free order-matching path.
     ///
@@ -529,6 +539,19 @@ abstract contract Batch is Core {
         // `st.credit[i]` was sized from the validated leg count at open, so its
         // length IS that count — no need to re-validate the same blob per step.
         if (j >= st.credit[i].length) revert PlanBadStep(s);
+        // CANONICAL ({ItemPolicy}): the order must be otherwise COMPLETE — delivered,
+        // every item run — before its inputs are drawn. The netting below draws
+        // `owed − credit`, so a pull scheduled AHEAD of the TAKE item that was going
+        // to credit this leg makes the maker front the whole leg from their wallet.
+        // Phase 3 refunds the tokens — it cannot refund the Permit3 ALLOWANCE they
+        // were moved with, which is the same asymmetry the duplicate-pull note above
+        // is about, reached by ordering instead of by repetition.
+        //
+        // It is the SAME word {_matchFlush} asserts at the end, which is what makes
+        // the rule cheap: `_doneMask` exists once and both callers share it.
+        if (order.itemPolicy() >= ItemPolicy.CANONICAL && st.done[i] != _doneMask(order)) {
+            revert ItemPolicyViolated(i, j);
+        }
         uint256 owed = st.owed[i][j]; // resolved at open — single source
         uint256 have = st.credit[i][j]; // already covered by an earlier PULL or ITEM
         // Draw only what is still missing. See the allowance note above for why this
@@ -581,8 +604,9 @@ abstract contract Batch is Core {
                 // shape as malformed for every order; on this path it is exploitable,
                 // so the settler agrees with the lens instead of taking the money.
                 if (to == address(this)) revert OutputToSettlement();
-                bool makerLeg = to == address(0) || to == order.maker;
-                SafeTransferLib.safeTransfer(token, makerLeg ? order.maker : to, amt);
+                // `to == order.maker` and `to == 0` are the same destination, so the
+                // second test only ever picked between two equal addresses.
+                SafeTransferLib.safeTransfer(token, to == address(0) ? order.maker : to, amt);
                 unchecked {
                     st.outstanding[_tokenIndex(st.tokens, token)] -= amt; // seeded at open
                 }
@@ -605,23 +629,40 @@ abstract contract Batch is Core {
     function _stepItem(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 k, uint256 s) internal {
         if (i >= orders.length) revert PlanBadStep(s);
         Order calldata order = orders[i];
-        if (k >= PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD)) revert PlanBadStep(s);
+        // `countUnchecked`, not `validateRecords`: `_assertMatchShape` walked and
+        // validated THIS blob at open, once, for every order in the plan — that is
+        // the {PackedArrays} safety contract (validate once, then index), and it is
+        // what `_matchFlush` and `_itemCursor` already lean on. Re-proving it per
+        // step bought nothing and paid for the walk on every item.
+        if (k >= PackedArrays.countUnchecked(order.items)) revert PlanBadStep(s);
         uint256 bit = uint256(1) << k; // k < 255 by `_assertMatchShape`
         if (st.done[i] & bit != 0) revert PlanBadStep(s);
 
         // The maker's item-execution policy (see {ItemPolicy}). ANY — the default,
         // and what every pre-existing order carries — costs one shifted mask and no
-        // branch beyond this test.
+        // branch beyond this test. The values are a strictness LADDER, so each rule
+        // below is a `>=` against the level that introduces it.
         uint256 policy = order.itemPolicy();
         if (policy != ItemPolicy.ANY) {
             unchecked {
                 uint256 lower = bit - 1; // every item below k
-                // ORDERED: all of them must already have run.
-                if (st.done[i] & lower != lower) revert ItemPolicyViolated(i, k);
-                // ATOMIC: and k-1 must have been the step IMMEDIATELY before this one.
-                if (policy == ItemPolicy.ATOMIC && k != 0 && st.lastItem != (((i + 1) << 16) | (k - 1))) {
-                    revert ItemPolicyViolated(i, k);
-                }
+                // ONE revert site for the three rules, not three: each `revert` of a
+                // two-argument error emits its own encoder, and this contract is at
+                // the EIP-170 wall. Read as a ladder —
+                //   ORDERED:   every item below k has already run;
+                //   ATOMIC:    and k-1 was the step IMMEDIATELY before this one;
+                //   CANONICAL: and this order's outputs are ALREADY delivered — the
+                //              delivery is what funds a deposit item, and hoisted
+                //              ahead of it the item draws the maker's own wallet
+                //              instead, with any module that sizes itself from live
+                //              state moving a different amount. An order with no
+                //              outputs carries `DELIVERED_BIT` from open, so a pure
+                //              gasless deposit needs no DELIVER step to satisfy it.
+                if (
+                    st.done[i] & lower != lower
+                        || (policy >= ItemPolicy.ATOMIC && k != 0 && st.lastItem != (((i + 1) << 16) | (k - 1)))
+                        || (policy >= ItemPolicy.CANONICAL && st.done[i] & DELIVERED_BIT == 0)
+                ) revert ItemPolicyViolated(i, k);
             }
         }
         st.done[i] |= bit;
@@ -750,13 +791,11 @@ abstract contract Batch is Core {
             Order calldata order = p.orders[i];
             // Completeness: outputs delivered, and every item ran. Deliveries and
             // items are scheduled, so this cannot be structural — it is asserted.
-            uint256 full = ((uint256(1) << PackedArrays.countUnchecked(order.items)) - 1) | DELIVERED_BIT;
-            if (st.done[i] != full) revert PlanIncomplete(i);
+            if (st.done[i] != _doneMask(order)) revert PlanIncomplete(i);
             _matchReconcileInputs(order, st.owed[i], st.credit[i], i);
             // The deferred check itself: the order's post-conditions, judged on the
             // end state of the whole context.
-            _runInvariants(order, solver, _tdc(p.takerDatas, i));
-            emit OrderFilled(st.fills[i].orderHash, order.maker, solver);
+            _closeFill(order, solver, _tdc(p.takerDatas, i), st.fills[i].orderHash);
             unchecked {
                 ++i;
             }

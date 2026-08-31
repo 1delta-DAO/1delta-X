@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
 import {IMidnight, Market, Offer, MidnightIdLib} from "./interfaces/IMidnight.sol";
 
@@ -158,7 +159,15 @@ contract MidnightRepayModule is IMakerModule {
 // is `msg.sender`, the maker MUST have authorized this module on Midnight
 // (`setIsAuthorized(module, true, maker)`) — atypical for a MAKE module.
 //
-// `data = abi.encode(Offer offer, bytes ratifierData, uint256 units)`.
+// ⚠ FULL-FILL ONLY. `units` is a side leg: it lives in `data`, which is constant
+// across fills, while `amount` is this fill's pro-rated slice. Every slice would
+// therefore `take` the SAME `units` again — an N-slice fill buys N × the credit
+// the maker signed for, paid out of N × the budget, bounded only by their Permit3
+// allowance. So the maker signs `totalAmount` alongside it and the slice is
+// required to equal it; see {FullFillGuard}, which every other composite module
+// in this repo already uses. This was previously stated in prose only.
+//
+// `data = abi.encode(Offer offer, bytes ratifierData, uint256 units, uint256 totalAmount)`.
 //
 contract MidnightLendModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -182,7 +191,8 @@ contract MidnightLendModule is IMakerModule {
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
-        (Offer memory offer, bytes memory ratifierData, uint256 units) = abi.decode(data, (Offer, bytes, uint256));
+        (Offer memory offer, bytes memory ratifierData, uint256 units, uint256 totalAmount) =
+            abi.decode(data, (Offer, bytes, uint256, uint256));
         // This module is the LEND leg: the taker must be the buyer/lender, which
         // Midnight selects with `offer.buy == false`. The flag is decoded from the
         // order's `data` and drives the entire meaning of the `take` below, but
@@ -193,6 +203,10 @@ contract MidnightLendModule is IMakerModule {
         // hard-codes to `address(0)` — the borrowed funds are burned and the
         // maker keeps the debt. Assert the side rather than trusting the encoder.
         if (offer.buy) revert WrongOfferSide();
+        // `units` does not pro-rate — see the contract note. Reject a sliced fill.
+        // AFTER the side assertion: a wrong-side offer is malformed whatever the
+        // slice, and {WrongOfferSide} says so far more precisely than a size error.
+        FullFillGuard.requireFullFill(amount, totalAmount);
         address loanToken = offer.market.loanToken;
 
         // Pull the maker-signed loan-token budget; Midnight pulls the exact
@@ -231,12 +245,23 @@ contract MidnightLendModule is IMakerModule {
 //   op = 0 (WithdrawCollateral): send the indexed collateral to `receiver`.
 //   op = 1 (Withdraw):           redeem credit units for the loan token.
 //
+// `data = abi.encode(uint8 op, Market market, uint256 collateralIndex,
+//                    uint8 balanceMode, uint256 totalAmount)`
+//
 // `balanceMode` (a tuple field, not a trailing word — the base is dynamic):
 //   0 (Exact): move exactly `amount`.
 //   1 (Full):  move the maker's ENTIRE live balance to this module, forward the
 //              signed `amount` to `receiver`, sweep the excess back to the maker.
 //              Measures the actually-received amount via a balanceOf snapshot, so
-//              a fee-on-transfer / rounding shortfall can't over-forward. Pair
+//              a fee-on-transfer / rounding shortfall can't over-forward.
+//              ⚠ FULL-FILL ONLY, AND NOW ENFORCED via the signed `totalAmount`
+//              field: `Full` reads a LIVE balance, so a 1-unit slice would
+//              force-close the whole position and leave nothing for the rest of
+//              the order. Every sibling package guards this with
+//              {FullFillGuard.requireFullFillFromData}; Midnight cannot use the
+//              trailing-word variant (its base tuple is dynamic, so the offset is
+//              not fixed), so the total is a named field instead. `Exact` ignores
+//              it — encode 0. Pair
 //              with a fill-or-kill order (a dynamic full balance can't be
 //              pro-rata'd across partial fills).
 //
@@ -268,8 +293,14 @@ contract MidnightTakerModule is ITakerModule {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        (uint8 op, Market memory market, uint256 collateralIndex, uint8 balanceMode) =
-            abi.decode(data, (uint8, Market, uint256, uint8));
+        (uint8 op, Market memory market, uint256 collateralIndex, uint8 balanceMode, uint256 totalAmount) =
+            abi.decode(data, (uint8, Market, uint256, uint8, uint256));
+
+        // `Full` liquidates the maker's ENTIRE live balance, so it cannot be
+        // pro-rated: a sliced fill unwinds the whole position and bricks every later
+        // fill of the same order. Asserted HERE rather than inside the two helpers so
+        // their signatures (and this package's non-via-IR stack budget) are untouched.
+        if (balanceMode == uint8(BalanceMode.Full)) FullFillGuard.requireFullFill(amount, totalAmount);
 
         if (op == uint8(Op.WithdrawCollateral)) {
             _withdrawCollateral(market, collateralIndex, onBehalfOf, amount, receiver, balanceMode);
@@ -328,12 +359,12 @@ contract MidnightTakerModule is ITakerModule {
 // which forwards the signed `amount` to `receiver` (Settlement, for the order's
 // `tokenIn` payout) and sweeps any excess back to the maker.
 //
-// `units` is fixed in the maker-signed data, so a borrow item MUST be part of a
+// ⚠ FULL-FILL ONLY, AND NOW ENFORCED. `units` is fixed in the maker-signed data, so a borrow item MUST be part of a
 // fill-or-kill order (a fixed unit count can't be pro-rata'd across partial
 // fills). The maker must have authorized this module on Midnight
 // (`setIsAuthorized(module, true, maker)`); `takerCallback` is forced to zero.
 //
-// `data = abi.encode(Offer offer, bytes ratifierData, uint256 units)`.
+// `data = abi.encode(Offer offer, bytes ratifierData, uint256 units, uint256 totalAmount)`.
 //
 contract MidnightBorrowModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -351,7 +382,8 @@ contract MidnightBorrowModule is ITakerModule {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        (Offer memory offer, bytes memory ratifierData, uint256 units) = abi.decode(data, (Offer, bytes, uint256));
+        (Offer memory offer, bytes memory ratifierData, uint256 units, uint256 totalAmount) =
+            abi.decode(data, (Offer, bytes, uint256, uint256));
         // The BORROW leg's mirror of the lend-side assertion: the taker must be the
         // seller/borrower, i.e. `offer.buy == true`. With `buy == false` the maker
         // becomes the buyer/lender and Midnight pulls `buyerAssets` from the payer
@@ -360,6 +392,12 @@ contract MidnightBorrowModule is ITakerModule {
         // accident: the module keeps no allowance to Midnight, so the pull reverts.
         // Assert the side so the leg's direction never rests on that.
         if (!offer.buy) revert WrongOfferSide();
+        // `units` is constant across fills while `amount` is this fill's slice, so a
+        // sliced fill would sell `units` of debt AGAIN on every slice — N × the debt
+        // the maker signed for, with the excess handed back as loose tokens. The
+        // header has always said a borrow item must be full-fill; this enforces it.
+        // Ordered after the side assertion for the reason given in {MidnightLendModule}.
+        FullFillGuard.requireFullFill(amount, totalAmount);
         address loanToken = offer.market.loanToken;
 
         uint256 before = IERC20(loanToken).balanceOf(address(this));

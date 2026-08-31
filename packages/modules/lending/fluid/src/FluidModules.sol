@@ -5,10 +5,13 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {FundingPreflight} from "@lib/FundingPreflight.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
+import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 
 import {IFluidVault, IFluidVaultFactory} from "./interfaces/IFluid.sol";
 
@@ -73,6 +76,30 @@ abstract contract FluidBase {
     function _pullAndApprove(address token, uint256 amount, address user, address vault) internal {
         permit3.transferFrom(user, address(this), token, uint160(amount));
         SafeTransferLib.forceApprove(token, vault, amount);
+    }
+
+    /// @dev Return everything this module gained in `token` over an operation, and
+    ///      only that, to `user`. `floor` is the balance held BEFORE it began.
+    ///
+    ///      ⚠ A DELTA, NOT THE WHOLE BALANCE. A funding module is pull-exact, so on
+    ///      the normal path `floor` is 0 and this is the plain sweep it replaces. The
+    ///      difference shows when it is not: a module address can be sent tokens by
+    ///      anyone, and "sweep everything to the user" pays that to whoever happens
+    ///      to be filling — and since anyone may be the maker of a one-unit order
+    ///      against this module and asset, a stranded balance is claimable rather
+    ///      than merely lost. The invariant worth holding is "the module ends where
+    ///      it started", not "the module ends empty". Destination is still always
+    ///      `user`, never a caller-chosen address.
+    ///
+    ///      Also clears the vault allowance when the pull was not fully consumed, so
+    ///      no standing grant outlives the call that needed it.
+    function _returnUnused(address token, address user, address vault, uint256 floor) internal {
+        uint256 bal = SafeTransferLib.balanceOf(token, address(this));
+        if (bal <= floor) return;
+        unchecked {
+            SafeTransferLib.safeTransfer(token, user, bal - floor); // bal > floor
+        }
+        SafeTransferLib.forceApprove(token, vault, 0);
     }
 
     /// @dev A single-op module was handed the "open a fresh position" sentinel.
@@ -312,18 +339,27 @@ contract FluidOperateModule is ITakerModule, FluidBase {
     ///      this module then is handed to the user; an existing position is pulled
     ///      in and handed back.
     function _open(OperateData memory p, address user, address receiver, uint256 borrowAmount) private {
+        // The Open path had NO residual handling at all, where Close has always had
+        // one. `operate` is expected to consume the whole supply leg, but "expected
+        // to" is not an invariant this module can enforce from the outside, and the
+        // asymmetry meant a short pull stranded the difference here permanently
+        // along with a live vault allowance over it. Symmetric now.
+        uint256 floor = SafeTransferLib.balanceOf(p.fundingToken, address(this));
         _pullAndApprove(p.fundingToken, p.sideAmount, user, p.vault);
 
         if (p.nftId != 0) IFluidVaultFactory(p.factory).transferFrom(user, address(this), p.nftId);
         (uint256 id,,) = IFluidVault(p.vault).operate(p.nftId, _signed(p.sideAmount), _signed(borrowAmount), receiver);
         uint256 outId = p.nftId != 0 ? p.nftId : id;
         IFluidVaultFactory(p.factory).transferFrom(address(this), user, outId);
+
+        _returnUnused(p.fundingToken, user, p.vault, floor);
     }
 
     /// @dev pay back `sideAmount` debt (module-funded; repay-all over-pulls
     ///      `repayCeiling` and sweeps the residual back to the user) + withdraw
     ///      `colAmount` collateral to `receiver` in one operate.
     function _close(OperateData memory p, address user, address receiver, uint256 colAmount) private {
+        uint256 floor = SafeTransferLib.balanceOf(p.fundingToken, address(this));
         uint256 pullAmt = p.sideAmount == FLUID_ALL ? p.repayCeiling : p.sideAmount;
         if (pullAmt > 0) _pullAndApprove(p.fundingToken, pullAmt, user, p.vault);
 
@@ -331,10 +367,10 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         IFluidVault(p.vault).operate(p.nftId, -_signed(colAmount), _negDelta(p.sideAmount), receiver);
         IFluidVaultFactory(p.factory).transferFrom(address(this), user, p.nftId);
 
-        // Sweep any over-pulled repay buffer back to the user (always the user,
-        // never a caller-chosen address).
-        uint256 left = IERC20(p.fundingToken).balanceOf(address(this));
-        if (left > 0) SafeTransferLib.safeTransfer(p.fundingToken, user, left);
+        // Return the over-pulled repay buffer (always the user, never a
+        // caller-chosen address) — measured as the delta over what this module held
+        // before the pull, not as its whole balance. See {_returnUnused}.
+        _returnUnused(p.fundingToken, user, p.vault, floor);
     }
 }
 
@@ -363,7 +399,8 @@ contract FluidOperateModule is ITakerModule, FluidBase {
 //                             nftId, totalAmount})` — `forDesc` FIRST and `forCap`
 // second because {Base._forSlice} reads words 0 and 1 of the blob.
 //   • forDesc `(1 << 255) | j`            fund from `legsOut[j]` (the levered shape)
-//   • forDesc `(3 << 254) | uint160(tok)` fund with `min(balance, forCap)` — the
+//   • forDesc `(3 << 254) | (floorBps << 160) | uint160(tok)` fund with
+//     `min(balance, forCap)`, reverting below `floorBps` of the cap — the
 //                                         no-conversion "deposit what I hold" shape,
 //                                         which the core makes full-fill only
 //   • forDesc a plain total               a fixed amount, sliced pro-rata
@@ -373,7 +410,7 @@ contract FluidOperateModule is ITakerModule, FluidBase {
 // it stays on {FluidOperateModule} because its useful mode is repay-ALL, which is a
 // live-debt sentinel plus an over-pull buffer rather than a settler-sized amount.
 //
-contract FluidTakeForModule is ITakerForModule, FluidBase {
+contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, FluidBase {
     error OnlyPermit3();
     error Reentrancy();
 
@@ -410,6 +447,7 @@ contract FluidTakeForModule is ITakerForModule, FluidBase {
         // amounts say. An existing position is added to and slices freely.
         if (p.nftId == 0) FullFillGuard.requireFullFill(amount, p.totalAmount);
 
+        uint256 floor = SafeTransferLib.balanceOf(p.collateralToken, address(this));
         if (forAmount != 0) _pullAndApprove(p.collateralToken, forAmount, onBehalfOf, p.vault);
 
         // Strict-ownerOf: take custody just-in-time and hand it straight back.
@@ -417,6 +455,36 @@ contract FluidTakeForModule is ITakerForModule, FluidBase {
         (uint256 id,,) = IFluidVault(p.vault).operate(p.nftId, _signed(forAmount), _signed(amount), receiver);
         IFluidVaultFactory(p.factory).transferFrom(address(this), onBehalfOf, p.nftId != 0 ? p.nftId : id);
 
+        // Anything `operate` did not take is returned, and the vault allowance dies
+        // with the call — see {FluidBase._returnUnused}.
+        _returnUnused(p.collateralToken, onBehalfOf, p.vault, floor);
+
         _locked = 1;
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev Reports the COLLATERAL token only. The position NFT is also pulled from
+    ///      the maker (strict-`ownerOf` custody, handed straight back), but it is not
+    ///      the funding leg: it carries no amount, it is never what a descriptor
+    ///      sizes, and it is authorised by an ERC-721 approval rather than the
+    ///      Permit3 book. Reporting it here would make the lens compare an ERC-721
+    ///      against `legsOut[j].token` and reject every well-formed Fluid order.
+    function fundingSource(address onBehalfOf, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        asset = abi.decode(data, (OpenData)).collateralToken;
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev `address(0)` — HONESTLY UNKNOWN. `OpenData` names the vault and the
+    ///      COLLATERAL token but not the debt token; Fluid holds it on the vault
+    ///      (`IFluidVault` exposes it through a constants read this pure view cannot
+    ///      make). Same remedy as Dolomite: sign the borrow token in `OpenData`.
+    function proceedsAsset(bytes calldata) external pure override returns (address) {
+        return address(0);
     }
 }

@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {OrderState} from "./OrderState.sol";
+import {NonceManager} from "./NonceManager.sol";
 
 /// @title Signatures
 /// @notice Order AUTHORIZATION verification, isolated: the EIP-712 domain and the
@@ -102,22 +103,63 @@ abstract contract Signatures is OrderState {
     ///  every delegate in the book was named by the maker whose orders it can sign.
     ///  Do not "simplify" this into `_verifySignature`.
     ///
-    ///  Replay protection reuses the maker's ORDER nonce bitmap rather than a
-    ///  private counter. Two things fall out for free: the permit can be consumed
-    ///  only once, and a maker can pre-emptively kill an outstanding nomination they
-    ///  never wanted relayed with the cancellation primitives they already have
-    ///  ({NonceManager.cancelOrders} / {invalidateNonceWord} / {rollbackNonces}).
-    ///  The cost is one nonce out of a 2^256 space.
+    ///  Replay protection reuses the maker's ORDER nonce bitmap, but in a RESERVED
+    ///  HALF of it: the coordinate actually consumed is `nonce | SIGNER_NONCE_NS`
+    ///  (bit 255 forced on), never the bare `nonce`. The maker still SIGNS the bare
+    ///  value — the EIP-712 payload is unchanged — so this costs one `or` and no
+    ///  tooling change.
+    ///
+    ///  ⚠ THE NAMESPACE IS THE WHOLE POINT, AND IT FIXES A REAL KILL SWITCH. Sharing
+    ///  the coordinate outright made an UNRELAYED nomination permit a latent,
+    ///  third-party-triggerable cancel on every order the maker later signed with the
+    ///  same nonce. The bit stays CLEAR until the permit is relayed, so the natural
+    ///  off-chain "is this nonce free?" check reads it as free; anyone holding the
+    ///  signed permit could then relay it at any point before its `deadline` and burn
+    ///  the nonce out from under a live order. Nonce reuse is not exotic here either —
+    ///  a shared nonce is exactly how an OCO bracket is built (`docs/oco.md`), so the
+    ///  order side deliberately reuses the space the permit was drawing from.
+    ///
+    ///  With the namespace, a permit can only ever consume a coordinate at or above
+    ///  2^255. Order nonces below that — every nonce any builder allocates today —
+    ///  are now unreachable from this function. The residual constraint is one line
+    ///  for order builders and is stated in {NonceManager}: an ORDER must not use a
+    ///  nonce with bit 255 set. It is not enforced on the fill path on purpose,
+    ///  because that would put a compare on the hot path of every order forever to
+    ///  guard a range no allocator picks.
+    ///
+    ///  Two consequences of the reservation, both deliberate:
+    ///    • pre-emptively killing an unrelayed nomination is still possible with the
+    ///      primitives the maker already has, but it must name the NAMESPACED
+    ///      coordinate: `cancelOrders([nonce | 1 << 255])`, or the matching
+    ///      {NonceManager.invalidateNonceWord}. The SDK mirrors the constant as
+    ///      `SIGNER_NONCE_NS`.
+    ///    • {NonceManager.rollbackNonces} no longer reaches nominations at all — a
+    ///      floor would have to exceed 2^255. That is the better behaviour, not a
+    ///      regression: a rollback aimed at retiring a ladder of orders should not
+    ///      silently revoke the desk's signing key as well.
     ///
     ///  A gasless REVOCATION (`expiry == 0`) is accepted too, but note it depends on
-    ///  someone relaying it. The unconditional kill switch is still the direct
-    ///  {OrderState.setOrderSigner}, plus the order-level gates that bind regardless
-    ///  ({cancelOrder}, nonce cancellation, deadlines, Permit3 revocation).
+    ///  someone relaying it. The direct {OrderState.setOrderSigner} needs no relayer
+    ///  — but do NOT read that as unconditional. It clears the registry entry that
+    ///  {_verifySignature} consults, and that lookup sits BEHIND the first-fill skip,
+    ///  so revocation does not reach the remainder of an order the delegate already
+    ///  part-filled. That is the documented delegate caveat, pinned by
+    ///  `test_revocation_doesNotBindAfterAPartialFill`; see
+    ///  {OrderState.orderSignerExpiry}. Contrast {OrderState.revokeOrderApproval},
+    ///  which escalates a touched order to a full cancel — it has to, because the
+    ///  sigless path's authorization IS that revocable record, whereas a revoked
+    ///  delegate's signature remains a real signature over a maker-committing hash.
+    ///
+    ///  The kill switches that DO bind mid-order are the order-level ones, and they
+    ///  run on every fill through {Base._gateOrderPost} / {OrderState._gateFillState}
+    ///  regardless of which authorization branch the filler steers into:
+    ///  {OrderState.cancelOrder}, nonce cancellation, deadlines, Permit3 revocation.
     ///
     /// @param maker    the delegator, and the address the permit must be signed by.
     /// @param signer   the delegate being nominated (or revoked with `expiry == 0`).
     /// @param expiry   unix time the delegation lapses at; see {orderSignerExpiry}.
-    /// @param nonce    a nonce from the maker's shared order-nonce space.
+    /// @param nonce    the permit's nonce. Consumed at `nonce | SIGNER_NONCE_NS`, so
+    ///                 it can never collide with an ORDER nonce below 2^255.
     /// @param deadline unix time after which this permit may no longer be relayed.
     function setOrderSignerWithSig(
         address maker,
@@ -128,9 +170,16 @@ abstract contract Signatures is OrderState {
         bytes calldata sig
     ) external {
         if (block.timestamp > deadline) revert SignerPermitExpired();
-        if (_isNonceCancelled(maker, nonce)) revert NonceCancelled();
+        // The digest binds the BARE `nonce` — the maker signs what they always
+        // signed, so no tooling changes.
         bytes32 digest =
             _hashTypedData(keccak256(abi.encode(_ORDER_SIGNER_TYPEHASH, maker, signer, expiry, nonce, deadline)));
+        // The bitmap, however, is read and written at the RESERVED coordinate — see
+        // the namespace note above. Derived ONCE and reused, so the check and the
+        // consume cannot drift apart. (Measured: folding it into the local costs 7
+        // bytes of Settlement; two inline `or`s cost 9. The budget is 15.)
+        nonce |= NonceManager.SIGNER_NONCE_NS;
+        if (_isNonceCancelled(maker, nonce)) revert NonceCancelled();
         // Against `maker` ONLY — see the no-re-delegation note above.
         SignatureVerification.verify(sig, digest, maker);
         _cancelNonce(maker, nonce); // consume before the write; nothing external runs here

@@ -7,9 +7,12 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
+import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {FundingPreflight} from "@lib/FundingPreflight.sol";
 
 import {IEulerVault, IEVC} from "./interfaces/IEulerV2.sol";
 
@@ -108,8 +111,14 @@ contract EulerV2RepayModule is IMakerModule {
         address asset = IEulerVault(vault).asset();
         DustHandler.DustAction action = DustHandler.readAction(data, 32); // base = (address)
 
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(asset).balanceOf(address(this));
+
         _pullAndRepay(vault, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
-        _disposeResidual(vault, asset, onBehalfOf, action);
+        _disposeResidual(vault, asset, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -135,11 +144,30 @@ contract EulerV2RepayModule is IMakerModule {
 
     /// @dev Re-supply (opt-in) the residual as a lend balance in the same vault,
     ///      else sweep to the user. Best-effort recycle with a guaranteed sweep.
-    function _disposeResidual(address vault, address asset, address onBehalfOf, DustHandler.DustAction action) private {
-        uint256 residual = IERC20(asset).balanceOf(address(this));
-        if (residual == 0) return;
+    function _disposeResidual(
+        address vault,
+        address asset,
+        address onBehalfOf,
+        DustHandler.DustAction action,
+        uint256 floor
+    ) private {
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
         DustHandler.disposeResidual(
-            asset, residual, onBehalfOf, action, vault, abi.encodeCall(IEulerVault.deposit, (residual, onBehalfOf))
+            asset,
+            residual,
+            floor,
+            onBehalfOf,
+            action,
+            vault,
+            abi.encodeCall(IEulerVault.deposit, (residual, onBehalfOf))
         );
     }
 }
@@ -373,7 +401,7 @@ contract EulerV2BatchModule is ITakerModule {
 // Auth is unchanged from the batch module: `setAccountOperator(user, module, true)`
 // plus `enableController`/`enableCollateral`, once — all of it survives slicing.
 //
-contract EulerV2TakeForModule is ITakerForModule {
+contract EulerV2TakeForModule is ITakerForModule, IFundingSource, IProceedsAsset {
     IPermit3 public immutable permit3;
 
     struct OpenData {
@@ -420,5 +448,28 @@ contract EulerV2TakeForModule is ITakerForModule {
             data: abi.encodeCall(IEulerVault.borrow, (amount, receiver))
         });
         IEVC(IEulerVault(p.borrowVault).EVC()).batch(items);
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev DERIVED, not decoded: Euler names the collateral VAULT in `data` and the
+    ///      underlying is `vault.asset()`. That is strictly better than a decoded
+    ///      field — the asset cannot disagree with the vault the deposit lands in —
+    ///      but it is still a second identity next to `legsOut[j].token`, which is
+    ///      the one the lens checks.
+    function fundingSource(address onBehalfOf, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        asset = IEulerVault(abi.decode(data, (OpenData)).collateralVault).asset();
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev Derived from the BORROW vault, as the funding side is derived from the
+    ///      collateral vault — Euler names vaults, not assets.
+    function proceedsAsset(bytes calldata data) external view override returns (address) {
+        return IEulerVault(abi.decode(data, (OpenData)).borrowVault).asset();
     }
 }

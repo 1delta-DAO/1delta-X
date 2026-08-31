@@ -117,8 +117,14 @@ contract VenusRepayModule is IMakerModule {
         (address vToken, address underlying) = abi.decode(data, (address, address));
         DustHandler.DustAction action = DustHandler.readAction(data, 64); // base = (address,address)
 
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(underlying).balanceOf(address(this));
+
         _pullAndRepay(vToken, underlying, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
-        _disposeResidual(vToken, underlying, onBehalfOf, action);
+        _disposeResidual(vToken, underlying, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -149,13 +155,30 @@ contract VenusRepayModule is IMakerModule {
     ///      user via `mintBehalf`, else sweep to the user. Best-effort recycle with
     ///      a guaranteed sweep fallback (a paused/capped mint returns an error code,
     ///      consumes nothing, and the untouched residual is swept).
-    function _disposeResidual(address vToken, address underlying, address onBehalfOf, DustHandler.DustAction action)
-        private
-    {
-        uint256 residual = IERC20(underlying).balanceOf(address(this));
-        if (residual == 0) return;
+    function _disposeResidual(
+        address vToken,
+        address underlying,
+        address onBehalfOf,
+        DustHandler.DustAction action,
+        uint256 floor
+    ) private {
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        uint256 bal = IERC20(underlying).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
         DustHandler.disposeResidual(
-            underlying, residual, onBehalfOf, action, vToken, abi.encodeCall(IVToken.mintBehalf, (onBehalfOf, residual))
+            underlying,
+            residual,
+            floor,
+            onBehalfOf,
+            action,
+            vToken,
+            abi.encodeCall(IVToken.mintBehalf, (onBehalfOf, residual))
         );
     }
 }

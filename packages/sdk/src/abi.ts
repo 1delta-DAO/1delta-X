@@ -311,6 +311,41 @@ export const SETTLEMENT_ABI = [
     inputs: [{ name: "orderHash", type: "bytes32" }],
     outputs: [],
   },
+  // Gasless nomination. The maker signs an `OrderSignerPermit` (see
+  // `delegation.ts`) and anyone relays it — a maker with no gas is exactly the
+  // audience the gasless-order flow serves, and they cannot send
+  // `setOrderSigner`. The permit is verified against `maker` DIRECTLY, never
+  // through the delegated branch, so a delegate cannot appoint further delegates.
+  //
+  // ⚠ `nonce` is signed BARE but consumed at `nonce | SIGNER_NONCE_NS`, in the
+  // reserved half of the maker's order-nonce bitmap. It is burned only WHEN
+  // RELAYED, so revoking a delegate does not invalidate an outstanding permit —
+  // use `encodeRevokeOrderSigner`, which burns the coordinate too.
+  {
+    type: "function",
+    name: "setOrderSignerWithSig",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "maker", type: "address" },
+      { name: "signer", type: "address" },
+      { name: "expiry", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "sig", type: "bytes" },
+    ],
+    outputs: [],
+  },
+  // Emitted by both setters. `expiry == 0` is a revocation, so the live delegate
+  // set is a last-write-wins fold over these — see `liveDelegates`.
+  {
+    type: "event",
+    name: "OrderSignerSet",
+    inputs: [
+      { name: "maker", type: "address", indexed: true },
+      { name: "signer", type: "address", indexed: true },
+      { name: "expiry", type: "uint256", indexed: false },
+    ],
+  },
   {
     type: "function",
     name: "setOrderSigner",

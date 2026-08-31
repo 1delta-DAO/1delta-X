@@ -103,8 +103,14 @@ contract SiloRepayModule is IMakerModule {
         DustHandler.DustAction action = DustHandler.readAction(data, 64);
         PermitHelper.replayIfPresent(data, 96, asset, onBehalfOf, address(permit3), amount);
 
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(asset).balanceOf(address(this));
+
         _pullAndRepay(silo, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
-        _disposeResidual(silo, asset, onBehalfOf, action);
+        _disposeResidual(silo, asset, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -127,12 +133,26 @@ contract SiloRepayModule is IMakerModule {
     /// @dev Re-supply (opt-in) the residual as a Collateral balance in the same
     ///      silo, else sweep to the user. Best-effort recycle with a guaranteed
     ///      sweep floor.
-    function _disposeResidual(address silo, address asset, address onBehalfOf, DustHandler.DustAction action) private {
-        uint256 residual = IERC20(asset).balanceOf(address(this));
-        if (residual == 0) return;
+    function _disposeResidual(
+        address silo,
+        address asset,
+        address onBehalfOf,
+        DustHandler.DustAction action,
+        uint256 floor
+    ) private {
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
         DustHandler.disposeResidual(
             asset,
             residual,
+            floor,
             onBehalfOf,
             action,
             silo,

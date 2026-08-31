@@ -815,8 +815,7 @@ abstract contract Core is Base {
         uint256[] memory tokenInBefore = hasItems ? _snapshotInputs(order.legsIn) : new uint256[](0);
         _executeItems(order, ctx);
         _payInputsToSolver(order, ctx, tokenInBefore, hasItems);
-        _runInvariants(order, ctx.filler, takerData);
-        emit OrderFilled(ctx.orderHash, order.maker, ctx.filler);
+        _closeFill(order, ctx.filler, takerData, ctx.orderHash);
     }
 
     /// @dev Reverse (PostInputs) flow: pay the solver its tokenIn FIRST, let the
@@ -844,8 +843,7 @@ abstract contract Core is Base {
         _payInputsToSolver(order, ctx, new uint256[](0), false);
         if (callbackTarget != address(0)) _execute(callbackTarget, callbackData);
         outs = _deliverOutputs(order, ctx, outBefore);
-        _runInvariants(order, ctx.filler, takerData);
-        emit OrderFilled(ctx.orderHash, order.maker, ctx.filler);
+        _closeFill(order, ctx.filler, takerData, ctx.orderHash);
     }
 
     /// @dev Deliver every output leg for this fill, solver → the leg's recipient
@@ -879,7 +877,9 @@ abstract contract Core is Base {
             if (amt != 0) {
                 // One decode for both field reads — see {Pricing.outputAt}.
                 (address legToken,,, address to) = PackedArrays.legOut(order.legsOut, j);
-                address recipient = to == address(0) || to == order.maker ? order.maker : to;
+                // A leg addressed AT the maker and one addressed at `0` are the same
+                // destination — the second test only chose between two equal addresses.
+                address recipient = to == address(0) ? order.maker : to;
                 outs[j] = amt;
                 if (verify) {
                     // The required amount is the SAME priced `amt` — every pricing mode

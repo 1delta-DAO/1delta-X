@@ -29,6 +29,24 @@ abstract contract NonceManager {
 
     error RollbackTooLow();
 
+    /// @notice The RESERVED half of the nonce space: coordinates with bit 255 set
+    ///         belong to relayed delegate nominations
+    ///         ({Signatures.setOrderSignerWithSig}), never to orders.
+    ///
+    ///  ⚠ ORDER BUILDERS MUST NOT SIGN AN ORDER WITH BIT 255 SET. The bitmap is one
+    ///  space shared by two kinds of signed artifact, and the namespace is what keeps
+    ///  them from cancelling each other. It is enforced on the nomination side (that
+    ///  function forces the bit on) and NOT on the fill side, deliberately: a range
+    ///  check there would tax every fill of every order forever to guard a range no
+    ///  allocator picks. The SDK caps order nonces below this value.
+    ///
+    ///  A maker pre-emptively killing a nomination they signed but never wanted
+    ///  relayed cancels the NAMESPACED coordinate — `cancelOrders([nonce | NS])` —
+    ///  not the bare nonce. {rollbackNonces} does not reach nominations at all, since
+    ///  a floor would have to exceed 2^255; that is intended (retiring a ladder of
+    ///  orders should not revoke a desk's signing key as a side effect).
+    uint256 internal constant SIGNER_NONCE_NS = 1 << 255;
+
     /// @notice Cancel a list of the caller's order nonces.
     function cancelOrders(uint256[] calldata noncesToCancel) external {
         uint256 len = noncesToCancel.length;

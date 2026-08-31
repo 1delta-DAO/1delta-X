@@ -20,3 +20,4 @@ packages/app/dist/
 # lockfile cleanly.
 packages/pitch-deck/
 packages/pitch-deck-rootstock/
+packages/pitch-deck-vc/

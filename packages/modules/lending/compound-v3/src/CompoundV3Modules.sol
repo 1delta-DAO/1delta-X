@@ -111,12 +111,18 @@ contract CometRepayModule is IMakerModule {
         DustHandler.DustAction action = DustHandler.readAction(data, 64);
         PermitHelper.replayIfPresent(data, 96, asset, onBehalfOf, address(permit3), amount);
 
+        // The balance this module held BEFORE the pull. Everything below disposes of
+        // the DELTA over it, never the whole balance: a module address can be sent
+        // tokens by anyone, and "sweep everything to the user" pays that to whoever
+        // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
+        uint256 floor = IERC20(asset).balanceOf(address(this));
+
         _pullAndRepay(comet, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
 
         // Dispose of any residual: re-supplied into the user's position (Recycle,
         // best-effort with sweep fallback) or swept to the user (default), never
         // to a caller-controlled address.
-        _disposeResidual(comet, asset, onBehalfOf, action);
+        _disposeResidual(comet, asset, onBehalfOf, action, floor);
 
         _locked = 1;
     }
@@ -146,11 +152,30 @@ contract CometRepayModule is IMakerModule {
     /// @dev Re-supply (opt-in) the residual into the user's Comet position (a
     ///      positive base balance), else sweep to the user. Best-effort recycle
     ///      with a guaranteed sweep fallback.
-    function _disposeResidual(address comet, address asset, address onBehalfOf, DustHandler.DustAction action) private {
-        uint256 residual = IERC20(asset).balanceOf(address(this));
-        if (residual == 0) return;
+    function _disposeResidual(
+        address comet,
+        address asset,
+        address onBehalfOf,
+        DustHandler.DustAction action,
+        uint256 floor
+    ) private {
+        // The delta THIS call produced, not the module's whole balance — `floor` is
+        // what it already held. On the normal path a module is pull-exact and starts
+        // empty, so `floor` is 0 and this is behaviour-preserving.
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        if (bal <= floor) return;
+        uint256 residual;
+        unchecked {
+            residual = bal - floor; // bal > floor
+        }
         DustHandler.disposeResidual(
-            asset, residual, onBehalfOf, action, comet, abi.encodeCall(IComet.supplyTo, (onBehalfOf, asset, residual))
+            asset,
+            residual,
+            floor,
+            onBehalfOf,
+            action,
+            comet,
+            abi.encodeCall(IComet.supplyTo, (onBehalfOf, asset, residual))
         );
     }
 }
