@@ -70,6 +70,43 @@ contract NonceCancellationTest is MockSettlementBase {
         assertEq(tA.balanceOf(solver), AMOUNT_IN, "maker's order unaffected by solver's cancel");
     }
 
+    // ──────────────────── The reserved namespace (bit 255) ────────────────────
+    //
+    // Orders and relayed delegate nominations share ONE nonce bitmap, split by bit
+    // 255 ({NonceManager.SIGNER_NONCE_NS}). The nomination side forces the bit on, so
+    // an ORDER carrying it can land on a nomination's coordinate: a permit the maker
+    // signed and never had relayed becomes a third-party-triggerable cancel on the
+    // order, and cancelling the order burns the nomination. That rule used to live
+    // only in the SDK's `assertOrderNonce`, which meant it held for orders packed by
+    // the SDK and not for one packed by a wallet, an explorer or a script. It is now
+    // a property of the contract.
+
+    function test_reservedNonce_isRejectedOnFill() public {
+        Order memory o = _order(uint256(1) << 255);
+        bytes memory sig = _sign(o);
+        vm.prank(solver);
+        vm.expectRevert(Base.OrderNonceReserved.selector);
+        settlement.fill(o, sig, AMOUNT_IN);
+    }
+
+    /// @dev The bit is what is rejected, not the magnitude — a large nonce with bit
+    ///      255 CLEAR is perfectly ordinary and still fills.
+    function test_largeNonceBelowTheNamespace_stillFills() public {
+        Order memory o = _order((uint256(1) << 255) - 1);
+        _fill(o);
+        assertEq(tA.balanceOf(solver), AMOUNT_IN, "a nonce just under the namespace is fine");
+    }
+
+    /// @dev And the rejection reaches every entry, not just the plain one — the guard
+    ///      sits in the shared order gate rather than in one entrypoint.
+    function test_reservedNonce_isRejectedOnFillUpTo() public {
+        Order memory o = _order(uint256(3) << 254); // bit 255 AND bit 254 set
+        bytes memory sig = _sign(o);
+        vm.prank(solver);
+        vm.expectRevert(Base.OrderNonceReserved.selector);
+        settlement.fillUpTo(o, sig, AMOUNT_IN, address(0), 0, "");
+    }
+
     // ──────────────────── Word invalidation (256 at once) ────────────────────
 
     function test_invalidateNonceWord_cancels256() public {

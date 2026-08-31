@@ -303,13 +303,21 @@ cap · floorBps / 10000` reverts `ForBalanceBelowFloor`. It lives in the word th
 maker already signs, inside `ref = keccak256(data)`, so a filler can neither lower
 it nor strip it (the altered blob is a different taker-allowance bucket).
 
-`floorBps == 0` keeps the settler's historical "any non-zero balance will do", so no
-encoding changes meaning — but `SettlementLens.validateOrder` **rejects** it
-(`take_for balance leg needs a funding floor`), the same division of labour it
-applies to a zero LITERAL: the core takes the encoding, the preflight names the
-footgun. The SDK's `forBalance(token, floorBps = 10000)` defaults to "fund the whole
-cap or do not fill", which is what a levered order wants; a genuine sweep whose
-position can absorb the variance lowers it deliberately.
+**An unset `floorBps` (`0`) means the FULL CAP, not "no floor".** `0` is the value of
+a descriptor field nobody filled in, so it must not select the dangerous mode — and
+it used to: it left `bal != 0` as the only bound, letting a leg fund a position with
+one wei while the value-OUT leg borrowed its full signed size. `Base._forSlice` now
+resolves an unset floor to `10_000`, i.e. "fund the whole cap or do not fill", which
+is what a levered order wants and what the SDK's `forBalance(token, floorBps = 10000)`
+already emitted. A genuine sweep whose position can absorb the variance signs an
+explicit low floor (`1` = 0.01% of the cap) — leniency is a choice, never something
+inherited from an omission. Orders already signed with an unset floor **fail closed**:
+they revert rather than funding a fraction of the position.
+
+`SettlementLens.validateOrder` no longer flags `0`, which is a change of fact rather
+than of policy — it is now the strictest encoding available, so rejecting it would
+fail a safe order. The only floor the preflight still refuses is one *above* the cap,
+which no balance can satisfy.
 
 The order itself is the outputless SELL of [relayer-fees.md](relayer-fees.md) — the
 settlement types already express it, with no new machinery:

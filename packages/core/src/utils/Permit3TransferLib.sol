@@ -31,6 +31,15 @@ import {SafeTransferLib} from "./SafeTransferLib.sol";
 ///         also zero the direct ERC20 allowance to the spender. Wallets and UIs
 ///         surfacing a "revoke" action MUST clear both.
 ///
+///         The opt-in kill switch is STRICT MODE, and it comes at two granularities:
+///         {IPermit3.setStrictMode} for the payer's whole portfolio, and
+///         {IPermit3.setStrictModeToken} for a single token. Prefer the per-token one
+///         unless the payer really means "never fall back for anything": a direct
+///         ERC20 approval is per-token, so that is the granularity the exposure has,
+///         and the portfolio-wide flag otherwise forces a payer who wants Permit3 to
+///         bind on ONE token to surrender the fallback on every other token too. The
+///         two OR together — see {IPermit3.isStrict}, which is what this library asks.
+///
 /// @dev    Internal functions inline into the caller, so `msg.sender` seen by
 ///         Permit3 (and by the ERC20 on the fallback) is the CALLING contract —
 ///         which must be the spender approved on Permit3. Do not convert these to
@@ -94,8 +103,16 @@ library Permit3TransferLib {
             // `revokeToken`/`lockdown`/an expiry actually stop settlement rather than
             // being silently overridden by a standing direct approval. The flag is
             // read only HERE, on the already-failed Permit3 leg, so a payer who never
-            // opts in pays nothing. See {IPermit3.setStrictMode}.
-            if (permit3.strictMode(from)) revert IPermit3.Permit3Denied();
+            // opts in pays nothing.
+            //
+            // Asked PER (payer, token) — {IPermit3.isStrict} ORs the payer's global
+            // flag with their per-token one. A direct ERC20 approval is itself a
+            // per-token grant, so that is the granularity the exposure actually has;
+            // the older portfolio-wide `strictMode(from)` forced a payer wanting
+            // Permit3 to bind on ONE token to give up the direct-approval fallback on
+            // every other token too. Still ONE staticcall on the failed leg either way.
+            // See {IPermit3.setStrictMode} / {IPermit3.setStrictModeToken}.
+            if (permit3.isStrict(from, token)) revert IPermit3.Permit3Denied();
             SafeTransferLib.safeTransferFrom(token, from, to, amount);
         }
     }

@@ -194,12 +194,18 @@ the reservation costs one `or` on-chain.
 >
 > Pinned by `test_signerPermit_cannotCancelALiveOrder`.
 
-**The residual constraint, and it is one line for order builders:** an *order* must
-not use a nonce with bit 255 set. That is not enforced on the fill path, on purpose
-— a range check there would tax every fill of every order forever to guard a range
-no allocator picks. The SDK exports the constant as `SIGNER_NONCE_NS` and the
-guard as `assertOrderNonce(nonce)` (`packages/sdk/src/delegation.ts`) — call it
-wherever order nonces are allocated.
+**The residual constraint — an *order* must not use a nonce with bit 255 set — is now
+enforced on-chain.** `Base._gateOrderPost` rejects it with `OrderNonceReserved`, on
+every fill entry. It used to rest on order builders alone, on the reasoning that a
+range check would "tax every fill of every order forever to guard a range no allocator
+picks"; that was true and still the wrong trade, because the tax is one `AND` on a word
+the nonce-cancellation check reads on the very next line, while the guarantee it buys
+must not depend on which client packed the order. A maker signing through a wallet, a
+block explorer or a hand-rolled script now gets it too.
+
+The SDK guard remains as the earlier, better-diagnosed failure: the constant is
+exported as `SIGNER_NONCE_NS` and the check as `assertOrderNonce(nonce)`
+(`packages/sdk/src/delegation.ts`), wired into `packOrder`.
 
 Two consequences of the reservation, both deliberate:
 

@@ -617,15 +617,14 @@ abstract contract Batch is Core {
         }
     }
 
-    /// @dev ITEM — execute ONE of an order's items. A TAKE produces value into the
-    ///      pool, so its proceeds are measured around that single call and credited
-    ///      to the order's input legs (anything landing OUTSIDE them goes back to the
-    ///      maker — see {_creditItemProceeds}); a MAKE only consumes the maker's own
-    ///      funds, so it needs no snapshot. Measuring per CALL rather than per ORDER is
-    ///      what makes interleaving sound: the window is atomic with respect to the
-    ///      schedule, so another order running in between cannot be misattributed.
-    ///      The repeat guard is load-bearing — a second item is a second borrow
-    ///      against the maker's credit.
+    /// @dev ITEM — execute ONE of an order's items, and attribute whatever it
+    ///      produced. Proceeds are measured around that single call and credited to
+    ///      the order's input legs (anything landing OUTSIDE them goes back to the
+    ///      maker — see {_creditItemProceeds}). Measuring per CALL rather than per
+    ///      ORDER is what makes interleaving sound: the window is atomic with respect
+    ///      to the schedule, so another order running in between cannot be
+    ///      misattributed. The repeat guard is load-bearing — a second item is a
+    ///      second borrow against the maker's credit.
     function _stepItem(Order[] calldata orders, MatchCtx memory st, uint256 i, uint256 k, uint256 s) internal {
         if (i >= orders.length) revert PlanBadStep(s);
         Order calldata order = orders[i];
@@ -668,18 +667,29 @@ abstract contract Batch is Core {
         st.done[i] |= bit;
 
         uint256 itemCursor = _itemCursor(order.items, k);
-        (uint256 kOp,,,,,) = PackedArrays.itemAt(order.items, itemCursor);
-        // ⚠ COUPLED TO `_assertMatchShape`. Only a TAKE produces proceeds this path
-        // has to attribute, and `TAKE_FOR` — the other proceeds-producing op — is
-        // refused up front, so it can never arrive here. If that refusal is ever
-        // lifted, this test must widen with it or a composite item's proceeds go
-        // uncredited and end up swept to the filler.
-        if (kOp != uint256(ItemOp.TAKE)) {
-            _executeItemAt(order, st.fills[i], order.items, itemCursor);
-            return;
-        }
         // Measured over the WHOLE token universe, not just this order's `legsIn` —
         // see {_creditItemProceeds} for why that difference is load-bearing.
+        //
+        // ⚠ RUN FOR EVERY OP, NOT ONLY `TAKE`, AND THE DIFFERENCE IS SECURITY-RELEVANT.
+        // This used to snapshot only around a TAKE, on the reasoning that "a MAKE only
+        // consumes the maker's own funds, so it needs no snapshot". That is an
+        // assumption about MODULE behaviour, not a property this contract enforces: a
+        // repay that is handed a protocol overpayment refund to `msg.sender`, or a
+        // deposit whose receipt/share token is minted to Settlement, leaves tokens in
+        // the pool. Those sit ABOVE the pre-context floor {_sweepSurplus} checks, so if
+        // the token appears anywhere in the batch's universe they were paid to the
+        // FILLER — the exact hole {_creditItemProceeds} was written to close for TAKE,
+        // left open for MAKE. Same mis-authored order, and the netted path lost it to
+        // the solver where the single-order path merely strands it, which also gives a
+        // solver a reason to go looking for such orders.
+        //
+        // Costs `2·|tokens|` balance reads per item step on the CoW path (never the
+        // single-order hot path), and on a well-formed MAKE the gain is zero so the
+        // attribution branch is never even entered. Cheaper than reasoning about which
+        // modules can and cannot emit a token, which is not a question the core can
+        // answer. It also removes the coupling to `_assertMatchShape` the op test used
+        // to carry: proceeds are now attributed whatever the op, so widening the set of
+        // permitted ops here can no longer silently leak them.
         uint256[] memory pre = _snapshotBalances(st.tokens);
         _executeItemAt(order, st.fills[i], order.items, itemCursor);
         _creditItemProceeds(order, st, i, pre);

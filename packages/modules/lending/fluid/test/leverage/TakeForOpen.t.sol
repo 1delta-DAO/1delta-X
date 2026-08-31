@@ -74,8 +74,12 @@ contract FluidTakeForOpenTest is FluidModulesBase {
         return (uint256(1) << 255) | j;
     }
 
-    function _forBalance(address token) internal pure returns (uint256) {
-        return (uint256(3) << 254) | uint160(token);
+    /// @dev `(3 << 254) | floorBps << 160 | token`. The floor is EXPLICIT: an unset
+    ///      one (0) means the FULL CAP to the settler — a descriptor field nobody
+    ///      filled in must not select the lenient mode — and the no-conversion case
+    ///      below is a genuine sweep that funds under its ceiling, so it says so.
+    function _forBalance(address token, uint256 floorBps) internal pure returns (uint256) {
+        return (uint256(3) << 254) | (floorBps << 160) | uint160(token);
     }
 
     // ──────────────────── helpers ────────────────────
@@ -276,7 +280,7 @@ contract FluidTakeForOpenTest is FluidModulesBase {
         deal(WSTETH, maker, NC_HELD);
         deal(USDC, maker, 0); // the fee can only come from the borrow
 
-        bytes memory data = _openData(_forBalance(WSTETH), NC_CAP, nftId, NC_DEBT);
+        bytes memory data = _openData(_forBalance(WSTETH, 1), NC_CAP, nftId, NC_DEBT);
         _authTakeFor(data, NC_CAP, NC_DEBT);
         vm.prank(maker);
         permit3.approveToken(address(settlement), USDC, uint160(NC_FEE_CEIL), 0);

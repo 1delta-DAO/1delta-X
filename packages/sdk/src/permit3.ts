@@ -101,6 +101,13 @@ export const encodeLockdownTakers = (approvals: readonly SpenderRefPair[]): Hex 
 
 // Strict mode
 export const encodeSetStrictMode = (enabled: boolean): Hex => enc("setStrictMode", [enabled]);
+/// Per-token strict mode: the same refusal of the direct-approval fallback as
+/// {@link encodeSetStrictMode}, scoped to ONE token instead of the whole portfolio.
+/// A direct ERC20 approval is itself per-token, so this matches the granularity the
+/// exposure actually has — harden the token you hold a standing approval on without
+/// giving up the fallback everywhere else. The two flags OR together on-chain.
+export const encodeSetStrictModeToken = (token: Address, enabled: boolean): Hex =>
+  enc("setStrictModeToken", [token, enabled]);
 
 // Signed grants / one-shot take
 export const encodePermitBatch = (owner: Address, batch: PermitBatch, sig: Hex): Hex =>

@@ -239,6 +239,14 @@ abstract contract Base is Signatures {
     ///      full-fill (`minFillAnchor == anchor`, or a {FullFillModule}) and give
     ///      the item a non-zero `amount` sentinel; see {NftSettlementModule}.
     error SettleSliceZero();
+    /// @dev The order's `nonce` carries {NonceManager.SIGNER_NONCE_NS} (bit 255) —
+    ///      the half of the bitmap reserved for relayed delegate nominations
+    ///      ({Signatures.setOrderSignerWithSig}). The two artifacts share one bitmap
+    ///      and the namespace is what keeps them from cancelling each other, so an
+    ///      order in that range is malformed: a nomination permit the maker signed but
+    ///      never had relayed could be relayed later to burn the order's coordinate,
+    ///      and vice versa.
+    error OrderNonceReserved();
 
     modifier nonReentrant() {
         _enter();
@@ -547,10 +555,16 @@ abstract contract Base is Signatures {
     ///          another of the maker's live orders that draws the same token — an
     ///          ordinary, profitable act, and the filler chooses the order — shrinks
     ///          this leg without touching this fill, and the value-OUT `amount` does
-    ///          not shrink with it. A `floorBps` of 0 keeps the historical "any
-    ///          non-zero balance will do", so existing encodings are unchanged; the
-    ///          SDK defaults it to 10000 (fund the full cap or do not fill), which is
-    ///          the answer a levered order wants.
+    ///          not shrink with it.
+    ///
+    ///          AN UNSET `floorBps` (0) THEREFORE MEANS THE FULL CAP, not "no floor":
+    ///          "fund the whole cap or do not fill", which is the answer a levered
+    ///          order wants and what the SDK already emitted. It used to mean the
+    ///          opposite — any non-zero balance would do — which made the DANGEROUS
+    ///          mode the default of an unfilled descriptor field and let a leg fund a
+    ///          position with one wei while the borrow drew in full. A maker who wants
+    ///          a genuine sweep signs an explicit low `bps` (1 = 0.01% of the cap), so
+    ///          leniency is chosen rather than inherited from an omission.
     ///
     ///      Out-of-range reverts rather than defaulting to leg 0: funding the wrong
     ///      leg is a worse outcome than not filling.
@@ -619,9 +633,29 @@ abstract contract Base is Signatures {
         // a typehash change. `cap / 10_000 * bps` rather than `cap * bps / 10_000`:
         // the cap is an unconstrained maker-signed word, and the product form panics
         // on a huge one — a floor that is a few wei lenient beats an arithmetic
-        // revert on an order that used to fill. `bps == 0` ⇒ floor 0, and the
-        // zero-balance test below is then the only bound, exactly as before.
-        if (bal == 0 || bal < cap / 10_000 * ((desc >> 160) & 0xffff)) revert ForBalanceBelowFloor();
+        // revert on an order that used to fill.
+        //
+        // ⚠ AN UNSET FLOOR MEANS THE FULL CAP, NOT "NO FLOOR". `0` is the value of a
+        // descriptor field nobody filled in, so it must not be the DANGEROUS mode —
+        // and it was: it left `bal != 0` as the only bound, so a leg could fund a
+        // position with ONE WEI while the value-OUT leg still borrowed its full signed
+        // size. That is not theoretical to reach. A maker's balance is lowered by
+        // anyone who can sequence fills — filling another of the maker's live orders
+        // that draws the same token is an ordinary, profitable act, and the FILLER
+        // picks the order — so a solver could drain the funding token through one
+        // order and then take a near-uncollateralised borrow through this one.
+        // Resolving unset to `10_000` makes the default "fund the whole cap or do not
+        // fill", which is the answer a levered order wants and the one the SDK already
+        // emits; a maker who genuinely wants a lenient sweep signs an explicit low
+        // `bps` (1 = 0.01% of the cap) rather than getting leniency by omission.
+        // Orders already signed with an unset floor now FAIL CLOSED — they revert
+        // instead of funding a fraction — which is the correct direction for a bound
+        // whose absence under-collateralises the maker.
+        uint256 floorBps = (desc >> 160) & 0xffff;
+        if (floorBps == 0) floorBps = 10_000;
+        // The zero test stays: `cap / 10_000` truncates to 0 for a cap under 10_000
+        // units, which would let the floor pass a zero balance.
+        if (bal == 0 || bal < cap / 10_000 * floorBps) revert ForBalanceBelowFloor();
         return bal;
     }
 
@@ -805,7 +839,23 @@ abstract contract Base is Signatures {
         view
     {
         ctx.overrideBps = OrderGates.exclusivityOverride(order, filler);
-        if (_isNonceCancelled(order.maker, order.nonce)) revert NonceCancelled();
+        uint256 nonce = order.nonce;
+        // THE RESERVED HALF, ENFORCED HERE RATHER THAN ONLY IN THE BUILDER. Orders and
+        // relayed delegate nominations share one nonce bitmap, split by bit 255 (see
+        // {NonceManager.SIGNER_NONCE_NS}); the nomination side forces the bit ON, and
+        // an order carrying it can collide with a nomination coordinate — so a permit
+        // the maker signed and never relayed becomes a third-party-triggerable cancel
+        // on the order, and cancelling the order burns the nomination. This was
+        // previously left to the SDK's `assertOrderNonce` on the reasoning that a
+        // range check would "tax every fill forever to guard a range no allocator
+        // picks". Both halves of that are true and it is still the wrong trade: the
+        // tax is one `AND` and one branch on a value already in a register (the very
+        // next line reads the same word), while the guarantee it buys is the kind that
+        // must not depend on which client packed the order — a maker signing through a
+        // wallet, an explorer or a hand-rolled script gets it now, and the invariant
+        // becomes a property of the contract rather than a sentence in a doc comment.
+        if (nonce & SIGNER_NONCE_NS != 0) revert OrderNonceReserved();
+        if (_isNonceCancelled(order.maker, nonce)) revert NonceCancelled();
         _runValidators(order, filler, takerData);
     }
 

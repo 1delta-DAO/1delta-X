@@ -281,10 +281,27 @@ contract OcoGroupModuleTest is MockSettlementBase {
         settlement.fill(o, sig, AMOUNT_IN / 2);
     }
 
-    /// `nonce == max` cannot be stored as `nonce + 1`; rejected, never wrapped
-    /// into the "unclaimed" sentinel (which would silently disable the group).
-    function test_oco_maxNonceRejected() public {
+    /// An ORDER nonce of `max` is now refused by the settler before the item ever
+    /// runs: it carries `SIGNER_NONCE_NS` (bit 255), the half of the nonce bitmap
+    /// reserved for relayed delegate nominations, so it is malformed independently of
+    /// what this module would do with it.
+    function test_oco_maxOrderNonceRejectedByTheSettler() public {
         Order memory o = _leg(type(uint256).max, TP_OUT, GROUP);
+        bytes memory sig = _sign(o);
+        vm.prank(solver);
+        vm.expectRevert(Base.OrderNonceReserved.selector);
+        settlement.fill(o, sig, AMOUNT_IN);
+    }
+
+    /// The module's own guard is NOT dead code behind that: the claim nonce lives in
+    /// the item's `data` and is not required to equal the order's nonce, so a maker
+    /// can still present `max` here through an order whose own nonce is ordinary.
+    /// `nonce == max` cannot be stored as `nonce + 1`; rejected, never wrapped into
+    /// the "unclaimed" sentinel (which would silently disable the group).
+    function test_oco_maxClaimNonceRejectedByTheModule() public {
+        Order memory o = _plainOrder(7, address(tA), address(tB), AMOUNT_IN, TP_OUT);
+        o.validators = _ocoValidator(GROUP);
+        o.items = _ocoItem(GROUP, type(uint256).max); // claim nonce ≠ order nonce
         bytes memory sig = _sign(o);
         vm.prank(solver);
         vm.expectRevert(OcoGroupModule.NonceNotRepresentable.selector);

@@ -56,6 +56,12 @@ abstract contract AllowanceTransfer is Permit3Base {
     ///      so it never touches the hot path for anyone who has not opted in.
     mapping(address => bool) private _strict;
 
+    /// @dev user → token → strict mode, the per-token half of the same switch (see
+    ///      {IPermit3.setStrictModeToken}). Read only after the global flag has come
+    ///      back false, on an already-failed Permit3 leg, so opting in per token costs
+    ///      nothing to anyone who has not.
+    mapping(address => mapping(address => bool)) private _strictToken;
+
     // ──────────────────── Grants ────────────────────
 
     function approveToken(address spender, address token, uint160 amount, uint48 expiration) external override {
@@ -127,6 +133,24 @@ abstract contract AllowanceTransfer is Permit3Base {
     /// @inheritdoc IPermit3
     function strictMode(address user) external view override returns (bool) {
         return _strict[user];
+    }
+
+    /// @inheritdoc IPermit3
+    function setStrictModeToken(address token, bool enabled) external override {
+        _strictToken[msg.sender][token] = enabled;
+        emit StrictModeTokenSet(msg.sender, token, enabled);
+    }
+
+    /// @inheritdoc IPermit3
+    function strictModeToken(address user, address token) external view override returns (bool) {
+        return _strictToken[user][token];
+    }
+
+    /// @inheritdoc IPermit3
+    /// @dev The global flag is tested FIRST so a payer who took the portfolio-wide
+    ///      option pays one warm slot and never touches the per-token map.
+    function isStrict(address user, address token) external view override returns (bool) {
+        return _strict[user] || _strictToken[user][token];
     }
 
     // ──────────────────── Revocation ────────────────────

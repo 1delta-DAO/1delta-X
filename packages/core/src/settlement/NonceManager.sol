@@ -33,17 +33,24 @@ abstract contract NonceManager {
     ///         belong to relayed delegate nominations
     ///         ({Signatures.setOrderSignerWithSig}), never to orders.
     ///
-    ///  ⚠ ORDER BUILDERS MUST NOT SIGN AN ORDER WITH BIT 255 SET. The bitmap is one
-    ///  space shared by two kinds of signed artifact, and the namespace is what keeps
-    ///  them from cancelling each other. It is enforced on the nomination side (that
-    ///  function forces the bit on) and NOT on the fill side, deliberately: a range
-    ///  check there would tax every fill of every order forever to guard a range no
-    ///  allocator picks. It is enforced instead where orders are BUILT: the SDK's
-    ///  `packOrder` calls `assertOrderNonce`, which every order passes through, and
-    ///  `assertOrderNonce` is exported for builders that pack an order themselves.
-    ///  (That wiring was missing until 2026-08-31 — the guard existed and nothing
-    ///  called it, so this sentence described an enforcement that was not happening.
-    ///  See `docs/reference-audits.md` §F23.)
+    ///  ⚠ AN ORDER MUST NOT USE A NONCE WITH BIT 255 SET, AND THE SETTLER ENFORCES IT.
+    ///  The bitmap is one space shared by two kinds of signed artifact, and the
+    ///  namespace is what keeps them from cancelling each other: an order inside the
+    ///  reserved half can collide with a nomination coordinate, so a permit the maker
+    ///  signed and never had relayed becomes a third-party-triggerable cancel on the
+    ///  order, and cancelling the order burns the nomination.
+    ///
+    ///  Enforced on BOTH sides now: the nomination side forces the bit ON
+    ///  ({Signatures.setOrderSignerWithSig}), and the order side rejects it in
+    ///  {Base._gateOrderPost} ({Base.OrderNonceReserved}), which every fill entry runs.
+    ///  It was previously left to order BUILDERS — the SDK's `packOrder` calls
+    ///  `assertOrderNonce` — on the reasoning that a range check on the fill path would
+    ///  "tax every fill of every order forever to guard a range no allocator picks".
+    ///  Both halves of that were true and it was still the wrong trade: the tax is one
+    ///  `AND` on a word the very next line already reads, and the guarantee it buys must
+    ///  not depend on which client packed the order — a maker signing through a wallet,
+    ///  a block explorer or a hand-rolled script gets it now. The SDK guard stays as the
+    ///  early, better-diagnosed failure. See `docs/reference-audits.md` §F23.
     ///
     ///  A maker pre-emptively killing a nomination they signed but never wanted
     ///  relayed cancels the NAMESPACED coordinate — `cancelOrders([nonce | NS])` —

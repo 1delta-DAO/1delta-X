@@ -63,6 +63,37 @@ contract MockDepositMaker is IMakerModule {
     }
 }
 
+/// @dev MAKE mock that LEAVES A TOKEN IN SETTLEMENT — the shape a real adapter takes
+///      whenever the protocol hands something back to `msg.sender`: a repay refunding
+///      an overpayment, a deposit minting its receipt/share token to the caller, a
+///      module recycling dust. It pulls the maker's funds like an ordinary deposit and
+///      then transfers `refund` of the same token back to the settler.
+///
+///      The netted path used to snapshot proceeds only around a `TAKE`, so this gain
+///      sat above the pre-context floor and {Batch._sweepSurplus} paid it to the
+///      FILLER. `test_makeProceeds_refundToMaker_notSweptToSolver` is that regression.
+contract MockRefundingDepositMaker is IMakerModule {
+    IPermit3 public immutable permit3;
+    address public immutable settlement;
+    uint256 public refund;
+
+    constructor(address _permit3, address _settlement) {
+        permit3 = IPermit3(_permit3);
+        settlement = _settlement;
+    }
+
+    function setRefund(uint256 r) external {
+        refund = r;
+    }
+
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
+        require(msg.sender == settlement, "only settlement");
+        address token = abi.decode(data, (address));
+        permit3.transferFrom(onBehalfOf, address(this), token, uint160(amount));
+        if (refund != 0) IERC20(token).transfer(msg.sender, refund);
+    }
+}
+
 /// @dev MAKE mock that sizes itself from LIVE STATE, the way every real repay
 ///      adapter does (`toRepay = min(amount, debt)` — Aave, Comet, Morpho, Compound
 ///      all read the live debt and cap to it). `amount` is the maker-signed CEILING,
@@ -144,10 +175,26 @@ contract MatchSettleTest is CoreSettlementBase {
         uint256 debt,
         uint256 produce
     ) internal view returns (Order memory o) {
+        return _leverageWith(address(depositor), who, nonce, collateralToken, collateral, debtToken, debt, produce);
+    }
+
+    /// @dev {_leverage} with the DEPOSIT module named explicitly, so a test can swap in
+    ///      one that behaves differently (e.g. {MockRefundingDepositMaker}) without
+    ///      restating the whole order.
+    function _leverageWith(
+        address depositModule,
+        address who,
+        uint256 nonce,
+        address collateralToken,
+        uint256 collateral,
+        address debtToken,
+        uint256 debt,
+        uint256 produce
+    ) internal view returns (Order memory o) {
         Item[] memory items = new Item[](2);
         items[0] = Item({
             op: ItemOp.MAKE, //           deposit the delivered collateral
-            module: address(depositor),
+            module: depositModule,
             amount: collateral,
             recipient: address(0),
             data: abi.encode(collateralToken)
@@ -301,6 +348,58 @@ contract MatchSettleTest is CoreSettlementBase {
         // Pool: nothing stranded.
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "no WETH pooled");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "no USDC pooled");
+    }
+
+    // ── A MAKE that leaves a token in the pool must go back to the MAKER, never
+    //    be swept to the filler. The netted path snapshots proceeds around EVERY
+    //    item, not just a TAKE. ──
+    //
+    // Before the fix `_stepItem` measured only around `ItemOp.TAKE`, on the
+    // reasoning that "a MAKE only consumes the maker's own funds". That is a claim
+    // about MODULE behaviour, not something the core enforces: any adapter that is
+    // handed something back by the protocol (a repay overpayment, a share token
+    // minted to the caller) leaves it in Settlement. Sitting above the pre-context
+    // floor, it was paid to the solver by `_sweepSurplus` — the very hole
+    // `_creditItemProceeds` exists to close for TAKE — which also gave a solver
+    // positive-EV reason to hunt such orders and bundle them with anything touching
+    // the same token.
+    function test_makeProceeds_refundToMaker_notSweptToSolver() public {
+        MockRefundingDepositMaker refunding = new MockRefundingDepositMaker(address(permit3), address(settlement));
+        uint256 dust = 0.01 ether;
+        refunding.setRefund(dust);
+
+        // Alice deposits WETH collateral through the refunding module; Bob is the
+        // ordinary counterparty. WETH is NOT in Alice's `legsIn` (she owes USDC) but
+        // IS in the universe, because it is Bob's input leg — the only configuration
+        // in which the hazard is reachable at all.
+        Order memory a = _leverageWith(address(refunding), maker, 1, WETH, WETH_AMT, USDC, USDC_AMT, USDC_AMT);
+        Order memory b = _leverage(bob, 2, USDC, USDC_AMT, WETH, WETH_AMT, WETH_AMT);
+
+        vm.startPrank(maker);
+        permit3.approveToken(address(refunding), WETH, uint160(WETH_AMT), 0);
+        permit3.approveTaker(
+            address(settlement),
+            address(taker),
+            keccak256(PackedEncode.getItemData(a.items, 1)),
+            uint160(USDC_AMT),
+            uint48(block.timestamp + 1 hours)
+        );
+        vm.stopPrank();
+        _authLeverage(bob, b);
+        deal(USDC, address(taker), USDC_AMT);
+        deal(WETH, address(taker), WETH_AMT);
+
+        vm.prank(solver);
+        settlement.matchSettle(_two(a, b, makerPk, bobPk, _cycleSchedule()));
+
+        // The refunded dust went back to the maker whose item produced it…
+        assertEq(IERC20(WETH).balanceOf(maker), dust, "MAKE dust refunded to the maker");
+        // …and NOT to the filler, which is what used to happen.
+        assertEq(IERC20(WETH).balanceOf(solver), 0, "solver took none of it");
+        assertEq(IERC20(USDC).balanceOf(solver), 0, "solver flat USDC too");
+        // Nothing stranded, and the position is the deposit minus what came back.
+        assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "no WETH left in the pool");
+        assertEq(IERC20(WETH).balanceOf(address(refunding)), WETH_AMT - dust, "collateral net of the refund");
     }
 
     // ── S8: a repeated DELIVER would pay a maker twice out of what the other

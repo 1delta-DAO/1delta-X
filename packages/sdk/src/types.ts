@@ -43,19 +43,33 @@ export function forLeg(index: number): bigint {
 /// maker's balance; the floor exists because whoever sequences fills can LOWER it —
 /// filling another of the maker's live orders in the same token shrinks this leg
 /// while the value-OUT leg still draws its full signed size, which is an
-/// under-collateralised position rather than an unfilled order. The default of
-/// 10000 means "fund the whole cap or do not fill", which is what a levered order
-/// wants; lower it only for a genuine sweep whose position can take the variance.
-/// `0` is the settler's legacy "any non-zero balance will do" and
-/// `SettlementLens.validateOrder` rejects it.
+/// under-collateralised position rather than an unfilled order.
+///
+/// `0` — an unset field — means the FULL CAP on-chain (`Base._forSlice` resolves it
+/// to 10000), i.e. "fund the whole cap or do not fill". That is the same as this
+/// function's default and is deliberately the SAFE reading: a descriptor field
+/// nobody filled in must not select the dangerous mode. It used to mean "any
+/// non-zero balance will do", which let a leg fund a position with one wei while the
+/// value-OUT leg borrowed in full. For a genuine sweep whose position can take the
+/// variance, sign an explicit low floor (`1` = 0.01% of the cap) — leniency is a
+/// choice now, not something obtained by omission.
 export function forBalance(token: Address, floorBps: number | bigint = 10_000): bigint {
   const floor = BigInt(floorBps);
   if (floor < 0n || floor > 10_000n) throw new Error(`forBalance: floorBps out of range: ${floorBps}`);
   return (1n << 255n) | (1n << 254n) | (floor << 160n) | BigInt(token);
 }
 
-/// Read the funding FLOOR (bps of the cap) out of a balance descriptor.
+/// Read the funding FLOOR (bps of the cap) out of a balance descriptor, AS THE
+/// SETTLER RESOLVES IT: an unset field (`0`) reads back as 10000, because that is
+/// what `Base._forSlice` enforces. Use {@link forBalanceFloorBpsRaw} for the literal
+/// bits if you are inspecting the encoding rather than the behaviour.
 export function forBalanceFloorBps(desc: bigint): number {
+  const raw = forBalanceFloorBpsRaw(desc);
+  return raw === 0 ? 10_000 : raw;
+}
+
+/// The floor field exactly as encoded, without the unset-means-full-cap resolution.
+export function forBalanceFloorBpsRaw(desc: bigint): number {
   return Number((desc >> 160n) & 0xffffn);
 }
 

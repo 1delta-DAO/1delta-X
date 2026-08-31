@@ -1100,6 +1100,62 @@ reading the ABI rather than the docs, it is not enforcement.
 
 ---
 
+### F24 — from-scratch re-audit of core + Permit3 (2026-08-31), four findings closed
+
+A deliberately unbiased sweep: five independent passes over `settlement/` and
+`permit3/`, each reading the source fresh against seven stated principles
+(signature-gating, state integrity, solver reordering with variable spends,
+efficiency, intent, fill-strategy side effects, rounding-driven drain). No Critical or
+High. The reordering class came back structurally closed on the single-order path
+(items walk a cursor in signed order; TAKE proceeds are measured in aggregate against
+a snapshot taken *after* delivery and the callback; surplus routes only to the maker),
+and the rounding architecture came back systematically maker-protective (fixed sides
+telescope exactly, auctioned sides round maker-ward per fill, so fragmenting a fill is
+strictly unprofitable for the solver). Four items were worth changing.
+
+| # | finding | severity | fix |
+| --- | --- | --- | --- |
+| B-1 | `matchSettle` credited item proceeds only around a `TAKE`; a `MAKE` that left a token in the pool was swept to the FILLER | Low/Med | snapshot + `_creditItemProceeds` for **every** item op |
+| F-2 | a balance-relative `TAKE_FOR` with an unset `floorBps` funded on any non-zero balance — one wei against a full-size borrow | Low | unset now resolves to `10_000` (full cap); leniency must be signed |
+| F-3 | "an order nonce must not set bit 255" was enforced only by the SDK | Low | `Base._gateOrderPost` rejects it (`OrderNonceReserved`) |
+| F-4 | strict mode was one global per-payer boolean, so hardening one token surrendered the fallback on all of them | Low | added per-token strict mode; `isStrict(user, token)` ORs the two |
+
+**B-1 is the one that mattered, and its shape is the interesting part.** The netted
+path had already been taught this exact lesson for `TAKE` — `_creditItemProceeds`
+exists because proceeds arriving mid-context sit *above* the pre-context floor that
+`_sweepSurplus` checks, so a mis-authored order's money reaches the solver rather than
+merely being stranded the way the single-order path strands it. The fix was applied to
+`TAKE` and not to `MAKE`, guarded by a comment reasoning that "a MAKE only consumes the
+maker's own funds, so it needs no snapshot". That is a claim about *module* behaviour,
+not a property the core enforces: a repay handed an overpayment refund to `msg.sender`,
+or a deposit minting its receipt token to the caller, breaks it — and this repo ships
+repay modules with dust handling. The op test also silently coupled `_stepItem` to
+`_assertMatchShape`'s refusal list, so widening that list would have leaked proceeds
+again. Removing the branch closes both and is *smaller* code.
+
+**F-2 and the unset-field rule.** `floorBps == 0` selected the dangerous mode, and `0`
+is what an unfilled descriptor field holds. Safety rested on the SDK defaulting to
+10000 and the lens rejecting 0 — the F23 pattern exactly, one layer along: an
+invariant living in the builder. It is reachable without protocol malice, because a
+maker's balance is lowered by anyone who can sequence fills (filling another of the
+maker's live orders in the same token is ordinary and profitable, and the *filler*
+picks the order), so a solver could drain the funding token through one order and take
+a near-uncollateralised borrow through the next. Orders already signed with an unset
+floor now **fail closed**. The lens stopped flagging `0`, which is a change of fact
+rather than policy: it is now the strictest encoding available.
+
+**Cost.** +170 bytes of Settlement (24,220 → 24,390 of 24,576, clean build), and the
+lens got 88 bytes smaller. `matchSettle` pays `2·|tokens|` extra balance reads per
+`MAKE` step; the single-order hot path is untouched by B-1 and pays one `AND` for F-3.
+
+**The generalised question, and it is F23's restated with teeth:** *when a guard is
+applied to one branch of a dispatch, what argues the other branches do not need it?*
+If the answer is a sentence about how the callee behaves rather than a check, it is an
+assumption wearing a comment's clothes. Both B-1 and F-2 were exactly that, and both
+were cheaper to fix than to keep reasoning about.
+
+---
+
 ## Re-audit sweep — the generalised questions from F13–F15
 
 F13–F15 are three instances of two reusable mistakes. Sweep these questions rather

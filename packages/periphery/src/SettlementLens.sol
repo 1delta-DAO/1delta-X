@@ -1212,15 +1212,14 @@ contract SettlementLens {
         if (data.length < 64) return (false, "take_for balance leg needs a cap", nxt);
         if (uint256(bytes32(data[32:64])) == 0) return (false, "take_for balance cap is zero", nxt);
         // The FLOOR (descriptor bits [160:176), bps of the cap) is the other half of
-        // the bound, and this is the footgun the CORE cannot judge — exactly as with
-        // the zero literal above. Zero is a legal encoding there (it keeps the old
-        // "any non-zero balance will do" rule, so nothing already signed changes
-        // meaning), but it is never what a maker WANTS: the value-OUT leg draws its
-        // full signed size regardless, so a balance dented by an earlier fill of one
-        // of the maker's own orders funds a fraction of the position and borrows all
-        // of it. Above 10000 the floor exceeds the cap and no balance can satisfy it.
+        // the bound. ZERO IS NO LONGER FLAGGED, and that is a change of fact rather
+        // than of policy: the core now resolves an unset floor to 10_000 (fund the
+        // whole cap or do not fill) instead of leaving `bal != 0` as the only bound,
+        // so the encoding this used to call malformed is now the STRICTEST one there
+        // is. Rejecting it would fail a safe order. Leniency has moved to where it
+        // belongs — an explicitly signed low `bps` — and the only remaining defect is
+        // a floor ABOVE the cap, which no balance can ever satisfy.
         uint256 floorBps = (desc >> 160) & 0xffff;
-        if (floorBps == 0) return (false, "take_for balance leg needs a funding floor", nxt);
         if (floorBps > 10_000) return (false, "take_for balance floor exceeds the cap", nxt);
         if (order.fillModule == address(0) && order.minFillAnchor != OrderGates.fillDenominator(order)) {
             return (false, "take_for balance leg requires full-fill", nxt);

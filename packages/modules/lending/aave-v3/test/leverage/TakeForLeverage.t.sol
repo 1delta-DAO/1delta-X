@@ -36,9 +36,17 @@ contract TakeForLeverageTest is AaveModulesBase {
         return (uint256(1) << 255) | index;
     }
 
-    /// @dev `(3 << 254) | token` — fund with `min(balanceOf(token, maker), cap)`.
-    function _forBalance(address token) internal pure returns (uint256) {
-        return (uint256(3) << 254) | uint160(token);
+    /// @dev `(3 << 254) | floorBps << 160 | token` — fund with
+    ///      `min(balanceOf(token, maker), cap)`, subject to a floor of `floorBps` of
+    ///      the cap.
+    ///
+    ///      ⚠ THE FLOOR IS EXPLICIT ON PURPOSE. An UNSET floor (0) means the FULL CAP
+    ///      to the settler — "fund the whole cap or do not fill" — because a
+    ///      descriptor field nobody filled in must not select the lenient mode. A
+    ///      genuine sweep like the one below deliberately funds LESS than its ceiling,
+    ///      so it has to say so.
+    function _forBalance(address token, uint256 floorBps) internal pure returns (uint256) {
+        return (uint256(3) << 254) | (floorBps << 160) | uint160(token);
     }
 
     /// @dev No totals, no ratio: the collateral amount is not in here at all.
@@ -47,8 +55,10 @@ contract TakeForLeverageTest is AaveModulesBase {
         return abi.encode(_forLeg(0), uint256(0), AAVE_POOL, USDC, uint256(2), WETH);
     }
 
+    /// @dev A sweep: the maker's wallet is expected to sit UNDER the cap, so the floor
+    ///      is signed low (1 bps) rather than left unset.
     function _takeForBalanceData(uint256 cap) internal view returns (bytes memory) {
-        return abi.encode(_forBalance(WETH), cap, AAVE_POOL, USDC, uint256(2), WETH);
+        return abi.encode(_forBalance(WETH, 1), cap, AAVE_POOL, USDC, uint256(2), WETH);
     }
 
     /// @dev `legsOut[0]` is the WETH collateral — the leg the item funds from.

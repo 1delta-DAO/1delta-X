@@ -400,12 +400,17 @@ contract TakeForItemTest is CoreSettlementBase {
     // flight, the wallet is being swept. The core reads the balance at item time
     // and caps it with the maker's signed ceiling.
 
+    /// @dev The live-balance sweep. Carries an EXPLICIT lenient floor: an unset floor
+    ///      now resolves to the full cap (see
+    ///      `test_balance_unsetFloor_meansFullCap_andFailsClosed`), so "fund with
+    ///      whatever I happen to hold" is a choice the maker signs rather than one
+    ///      they fall into by leaving a descriptor field blank.
     function test_balance_fundsWhateverTheMakerHolds() public {
         _fundSolver();
         uint256 held = 2.5 ether;
         deal(WETH, maker, held);
 
-        bytes memory data = _data(_forBalance(WETH), 10 ether); // cap well above
+        bytes memory data = _data(_forBalanceFloor(WETH, 1), 10 ether); // cap well above
         _authorise(address(takeFor), data, USDC_IN, 10 ether);
         Order memory o = _order(9, address(takeFor), data);
         bytes memory sig = _sign(o);
@@ -535,12 +540,13 @@ contract TakeForItemTest is CoreSettlementBase {
         assertEq(takeFor.forAmounts(0), 5 ether, "at the floor is inside it");
     }
 
-    /// @dev `floorBps == 0` keeps the historical rule — any non-zero balance funds —
-    ///      so nothing already encoded changes meaning. It is the LENS that refuses to
-    ///      let a maker sign it (see `test_lens_flagsMissingFloor`), which is the same
-    ///      division of labour as the zero LITERAL: the core takes the encoding, the
-    ///      preflight names the footgun.
-    function test_balance_zeroFloor_keepsTheLegacyRule() public {
+    /// @dev AN UNSET FLOOR MEANS THE FULL CAP, AND IT FAILS CLOSED. `0` is the value
+    ///      of a descriptor field nobody filled in, so it must not select the
+    ///      dangerous mode — and it used to: it left `bal != 0` as the only bound, so
+    ///      this order funded a position with ONE WEI while the value-OUT leg borrowed
+    ///      its full signed size. Now it resolves to 10_000 bps and the fill reverts
+    ///      rather than under-collateralising the maker.
+    function test_balance_unsetFloor_meansFullCap_andFailsClosed() public {
         _fundSolver();
         deal(WETH, maker, 1); // one wei, against a 10 WETH cap
 
@@ -550,9 +556,50 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
+        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        settlement.fill(o, sig, USDC_IN);
+    }
+
+    /// @dev The sequencing attack the default now closes, end to end. A maker's
+    ///      balance is lowered by anyone who can order fills — draining it through
+    ///      ANOTHER of the maker's live orders is an ordinary, profitable act and the
+    ///      FILLER picks the order — so under the old default a solver could empty the
+    ///      funding token first and then take a near-uncollateralised borrow here.
+    ///      With the unset floor resolving to the full cap, the second fill reverts.
+    function test_balance_unsetFloor_resistsBalanceDrainSequencing() public {
+        _fundSolver();
+        // The maker held enough to collateralise the position when they signed.
+        deal(WETH, maker, 10 ether);
+
+        bytes memory data = _data(_forBalance(WETH), 10 ether);
+        _authorise(address(takeFor), data, USDC_IN, 10 ether);
+        Order memory o = _order(29, address(takeFor), data);
+        bytes memory sig = _sign(o);
+
+        // …and by the time this fill lands, something else has drawn it down.
+        deal(WETH, maker, 0.01 ether);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        settlement.fill(o, sig, USDC_IN);
+    }
+
+    /// @dev Leniency is still expressible — it just has to be SIGNED rather than
+    ///      obtained by omission. An explicit 1 bps floor is the old "any non-trivial
+    ///      balance will do", and it fills.
+    function test_balance_explicitLowFloor_stillFundsWhateverIsHeld() public {
+        _fundSolver();
+        deal(WETH, maker, 1 ether); // far under the cap, but over an explicit 1bps floor
+
+        bytes memory data = _data(_forBalanceFloor(WETH, 1), 10 ether);
+        _authorise(address(takeFor), data, USDC_IN, 10 ether);
+        Order memory o = _order(30, address(takeFor), data);
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
         settlement.fill(o, sig, USDC_IN);
 
-        assertEq(takeFor.forAmounts(0), 1 + WETH_OUT, "no floor signed, so no floor enforced");
+        assertEq(takeFor.forAmounts(0), 1 ether + WETH_OUT, "an explicitly lenient floor still funds");
     }
 
     /// @dev The floor is inside `ref = keccak256(data)`, so a filler cannot lower it:
@@ -700,16 +747,14 @@ contract TakeForItemTest is CoreSettlementBase {
         assertEq(_lensReason(_lensOrder(34, _data(_forBalance(WETH), 0))), "take_for balance cap is zero");
     }
 
-    /// The FLOOR is the other half of the balance form's bound, and a zero one is the
-    /// footgun the core cannot judge — it is a legal encoding (it keeps the old "any
-    /// non-zero balance will do" rule) but never what a maker wants, because the
-    /// value-OUT leg draws in full regardless. Same division of labour as the zero
-    /// LITERAL above.
-    function test_lens_flagsMissingFloor() public {
-        assertEq(
-            _lensReason(_lensOrder(36, _data(_forBalance(WETH), 10 ether))),
-            "take_for balance leg needs a funding floor"
-        );
+    /// An UNSET floor is no longer a defect — the core resolves it to the full cap
+    /// (10000 bps), so the encoding the lens used to reject is now the STRICTEST one
+    /// available and rejecting it would fail a safe order. The footgun moved: leniency
+    /// is now something a maker signs explicitly rather than gets by omission.
+    function test_lens_acceptsAnUnsetFloorAsFullCap() public {
+        Order memory o = _lensOrder(36, _data(_forBalance(WETH), 10 ether));
+        o.minFillAnchor = USDC_IN; // balance legs are full-fill only
+        assertEq(_lensReason(o), "");
     }
 
     /// Above 10000 the floor exceeds the cap, so `min(balance, cap)` can never reach

@@ -43,6 +43,7 @@ contract MockPermit3 {
     bool public succeed;
     uint256 public calls;
     mapping(address => bool) public strictMode;
+    mapping(address => mapping(address => bool)) public strictModeToken;
 
     constructor(bool _succeed) {
         succeed = _succeed;
@@ -54,6 +55,16 @@ contract MockPermit3 {
 
     function setStrict(address user, bool on) external {
         strictMode[user] = on;
+    }
+
+    function setStrictToken(address user, address token, bool on) external {
+        strictModeToken[user][token] = on;
+    }
+
+    /// @dev What the library actually consults — the global flag OR the per-token
+    ///      one, mirroring {AllowanceTransfer.isStrict}.
+    function isStrict(address user, address token) external view returns (bool) {
+        return strictMode[user] || strictModeToken[user][token];
     }
 
     function transferFrom(address from, address to, address token, uint160 amount) external {
@@ -162,5 +173,40 @@ contract Permit3TransferLibTest is Test {
         harness.pull(IPermit3(address(p3)), address(token), payer, recipient, 100 ether);
 
         assertEq(token.balanceOf(recipient), 0, "strict mode blocked the fallback");
+    }
+
+    // ── PER-TOKEN strict mode: binds on the named token, and ONLY on it ──
+    //
+    // The global flag is all-or-nothing, so a payer who wants Permit3's caps to
+    // actually bind on one token used to have to surrender the direct-approval
+    // fallback on every other token too. These two pin the finer switch.
+    function test_strictModeToken_refusesFallbackForThatToken() public {
+        MockPermit3 p3 = new MockPermit3(false); // Permit3 leg always reverts
+        // NOT globally strict — only this one token.
+        p3.setStrictToken(payer, address(token), true);
+        vm.prank(payer);
+        token.approve(address(harness), 100 ether);
+
+        vm.expectRevert(IPermit3.Permit3Denied.selector);
+        harness.pull(IPermit3(address(p3)), address(token), payer, recipient, 100 ether);
+
+        assertEq(token.balanceOf(recipient), 0, "per-token strict blocked the fallback");
+        assertFalse(p3.strictMode(payer), "the global flag was never set");
+    }
+
+    function test_strictModeToken_leavesOtherTokensAlone() public {
+        MockPermit3 p3 = new MockPermit3(false);
+        MockERC20 other = new MockERC20();
+        other.mint(payer, 100 ether);
+        // Strict on `token`, silent on `other`.
+        p3.setStrictToken(payer, address(token), true);
+        vm.prank(payer);
+        other.approve(address(harness), 100 ether);
+
+        // The unhardened token still falls back to the direct approval, exactly as
+        // it did before the per-token flag existed.
+        harness.pull(IPermit3(address(p3)), address(other), payer, recipient, 100 ether);
+
+        assertEq(other.balanceOf(recipient), 100 ether, "other token still falls back");
     }
 }

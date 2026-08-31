@@ -6,6 +6,7 @@ import {
   ITEM_POLICY_OFFSET,
   forBalance,
   forBalanceFloorBps,
+  forBalanceFloorBpsRaw,
   itemPolicyOf,
   packTiming,
   withFillOnce,
@@ -63,8 +64,21 @@ describe("forBalance floor", () => {
     expect(desc >> 254n).toBe(3n); // the two top bits that select the balance form
   });
 
-  it("allows the settler's legacy zero floor explicitly, and nothing above 10000", () => {
-    expect(forBalanceFloorBps(forBalance(WETH, 0))).toBe(0);
+  // An UNSET floor is the FULL CAP, not "no floor". `0` is what an unfilled
+  // descriptor field holds, so it must not select the lenient mode — the settler
+  // resolves it to 10000 (`Base._forSlice`), and the reader reports what the settler
+  // will actually enforce rather than the literal bits.
+  it("reads an unset floor as the full cap, matching the settler", () => {
+    expect(forBalanceFloorBps(forBalance(WETH, 0))).toBe(10_000);
+    expect(forBalanceFloorBpsRaw(forBalance(WETH, 0))).toBe(0);
+  });
+
+  it("keeps an explicitly lenient floor lenient — leniency is signed, not inherited", () => {
+    expect(forBalanceFloorBps(forBalance(WETH, 1))).toBe(1);
+    expect(forBalanceFloorBpsRaw(forBalance(WETH, 1))).toBe(1);
+  });
+
+  it("rejects out-of-range floors", () => {
     expect(() => forBalance(WETH, 10_001)).toThrow();
     expect(() => forBalance(WETH, -1)).toThrow();
   });

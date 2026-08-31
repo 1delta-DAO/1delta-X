@@ -549,6 +549,9 @@ export const PERMIT3_ABI = [
   // ── Strict mode (audit fix U-6) ──
   { type: "function", name: "setStrictMode", stateMutability: "nonpayable", inputs: [{ name: "enabled", type: "bool" }], outputs: [] },
   { type: "function", name: "strictMode", stateMutability: "view", inputs: [{ name: "user", type: "address" }], outputs: [{ name: "", type: "bool" }] },
+  { type: "function", name: "setStrictModeToken", stateMutability: "nonpayable", inputs: [{ name: "token", type: "address" }, { name: "enabled", type: "bool" }], outputs: [] },
+  { type: "function", name: "strictModeToken", stateMutability: "view", inputs: [{ name: "user", type: "address" }, { name: "token", type: "address" }], outputs: [{ name: "", type: "bool" }] },
+  { type: "function", name: "isStrict", stateMutability: "view", inputs: [{ name: "user", type: "address" }, { name: "token", type: "address" }], outputs: [{ name: "", type: "bool" }] },
   // ── Signed grants ──
   {
     type: "function",

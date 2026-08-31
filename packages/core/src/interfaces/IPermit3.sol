@@ -113,6 +113,8 @@ interface IPermit3 {
     event UnorderedNonceInvalidation(address indexed owner, uint256 word, uint256 mask);
     /// @dev A user toggled strict mode — see {strictMode}.
     event StrictModeSet(address indexed user, bool enabled);
+    /// @dev A user toggled PER-TOKEN strict mode — see {setStrictModeToken}.
+    event StrictModeTokenSet(address indexed user, address indexed token, bool enabled);
 
     // ──────────────────── Errors ────────────────────
 
@@ -166,6 +168,33 @@ interface IPermit3 {
 
     /// @notice Whether `user` has opted into strict mode (see {setStrictMode}).
     function strictMode(address user) external view returns (bool);
+
+    /// @notice PER-TOKEN strict mode: the same refusal as {setStrictMode}, scoped to
+    ///         one `token` instead of the payer's whole portfolio.
+    ///
+    ///         {setStrictMode} is a single per-payer boolean, so it is all-or-nothing:
+    ///         a payer who wants Permit3's caps and expiries to actually bind on a
+    ///         token they also hold a direct approval on has to give up the
+    ///         direct-approval convenience on EVERY other token at the same time.
+    ///         That is a coarser instrument than the risk it guards — the exposure is
+    ///         per (payer, token), because that is the granularity a direct ERC20
+    ///         approval has — so it is available at that granularity here.
+    ///
+    ///         The two flags are independent and OR together: the global one still
+    ///         covers everything, and this one hardens a single token without
+    ///         disturbing the rest. See {isStrict}.
+    function setStrictModeToken(address token, bool enabled) external;
+
+    /// @notice Whether `user` has opted into strict mode for `token` specifically
+    ///         (see {setStrictModeToken}). Does NOT include the global flag — use
+    ///         {isStrict} for the question the transfer path actually asks.
+    function strictModeToken(address user, address token) external view returns (bool);
+
+    /// @notice THE EFFECTIVE strict-mode answer for `(user, token)`: the global flag
+    ///         OR the per-token one. This is what {Permit3TransferLib} consults on an
+    ///         already-failed Permit3 leg, so a payer pays for at most one read
+    ///         whichever way they opted in.
+    function isStrict(address user, address token) external view returns (bool);
 
     // ──────────────────── Taker side ────────────────────
     //
