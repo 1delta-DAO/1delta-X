@@ -13,6 +13,7 @@ import {
   isReservedNonce,
   liveDelegates,
   nominateOrderSigner,
+  packOrder,
   ORDER_SIGNER_PERMIT_TYPE,
   ORDER_SIGNER_PERMIT_TYPESTRING,
   orderSignerPermitTypedData,
@@ -22,6 +23,7 @@ import {
   signerPermitNonce,
   type Deployment,
 } from "../src";
+import { CANONICAL_ORDER } from "./canonicalOrder";
 
 const account = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
 const d: Deployment = {
@@ -180,5 +182,37 @@ describe("the cancel asymmetry (L-5)", () => {
 
   it("is case-insensitive on the address comparison", () => {
     expect(() => assertCanCancelOnChain(account.address.toLowerCase() as never, account.address)).not.toThrow();
+  });
+});
+
+// ──────────────── the reserved nonce half is enforced where orders are BUILT ────────────────
+
+describe("order nonces cannot enter the signer-permit namespace", () => {
+  // The settler does not range-check order nonces — that would tax every fill
+  // forever to guard a range no allocator picks — so `packOrder` is the only place
+  // the invariant can be enforced end to end. Before this, `assertOrderNonce`
+  // existed and nothing called it: the guard was written, exported, documented as
+  // "call this wherever order nonces are allocated", and never wired in.
+  it("packOrder rejects a nonce with bit 255 set", () => {
+    const o = { ...CANONICAL_ORDER, nonce: SIGNER_NONCE_NS };
+    expect(() => packOrder(o)).toThrow(/bit 255 set/);
+  });
+
+  it("packOrder rejects a nonce that merely happens to be huge", () => {
+    const o = { ...CANONICAL_ORDER, nonce: (1n << 255n) | 7n };
+    expect(() => packOrder(o)).toThrow(/reserved for OrderSignerPermit/);
+  });
+
+  it("packOrder accepts the largest legal order nonce", () => {
+    const o = { ...CANONICAL_ORDER, nonce: (1n << 255n) - 1n };
+    expect(() => packOrder(o)).not.toThrow();
+  });
+
+  // The permit's own coordinate is the mirror image: always in the reserved half,
+  // and never reachable by an order that passed the guard above.
+  it("a signer-permit coordinate is always in the half orders cannot reach", () => {
+    const coord = signerPermitCoordinate("0x00000000000000000000000000000000000000aa" as `0x${string}`, 3);
+    expect(isReservedNonce(coord)).toBe(true);
+    expect(() => assertOrderNonce(coord)).toThrow();
   });
 });

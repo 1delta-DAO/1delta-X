@@ -1,5 +1,5 @@
 import { numberToHex, type Address, type Hex } from "viem";
-import { packParams } from "./types";
+import { assertOrderNonce, packParams } from "./types";
 import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types";
 
 /**
@@ -191,6 +191,15 @@ export function packOrder(order: Order): WireOrder {
       "Order.timing must leave bit 105 and above clear — `expiry` is folded into bits [160:208) by packOrder",
     );
   }
+  // The nonce bitmap is ONE space shared by two signed artifacts: orders, and the
+  // `OrderSignerPermit` that nominates a delegated signer. The settler keeps them
+  // apart by consuming a permit at `nonce | SIGNER_NONCE_NS` (bit 255), and
+  // deliberately does NOT range-check order nonces — that would tax the hot path of
+  // every fill forever to guard a range no allocator picks. So the guard is here,
+  // which is where the order is actually built. Without it an order signed above
+  // 2^255 collides with a nomination, and relaying that nomination silently cancels
+  // the order. See `NonceManager.SIGNER_NONCE_NS` and `docs/reference-audits.md` §F17.
+  assertOrderNonce(order.nonce);
   return {
     maker: order.maker,
     nonce: order.nonce,

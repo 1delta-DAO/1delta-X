@@ -723,6 +723,21 @@ abstract contract Base is Signatures {
     ///      Settlement BIGGER under the `core-deploy` (via-IR) profile that is the one
     ///      that has to fit:
     ///
+    ///      ⚠ 2026-08-31 — a THIRD data point, and it is the one that pays: with
+    ///      {Core._permitBatch} hand-encoded, Settlement is **297 bytes smaller**
+    ///      than with the typed call, and every `fillWithPermit` runs ~590–1,660 gas
+    ///      cheaper (scaling with permit-array content). The rule the three results
+    ///      share is about the ARGUMENTS, not the call: solc's encoder is near-free
+    ///      for words it can `mstore` one by one (the item dispatches above), and
+    ///      expensive for a nested dynamic type it has to walk (`PermitBatch` = two
+    ///      dynamic arrays of structs, 675 bytes with the call).
+    ///      Measure the specific call, and prefer the ones with a dynamic argument.
+    ///      `permitTakeWithWitnessHash` was measured and NOT converted: its 307 bytes
+    ///      would mostly go back into a memory→memory copy of the signature (its
+    ///      `sig` is an already-decoded `bytes memory`, and without `MCOPY` on every
+    ///      target chain that is a loop), leaving ~100 for a second hand-rolled
+    ///      encoder on a signature-verification path.
+    ///
     ///        • Hand-encoding the three item-dispatch calls (`makeOnBehalf`, `take`,
     ///          `settle`) through one shared assembly encoder, 0x-Settler style:
     ///          **+1,862 bytes (25,456 — over the cap).**

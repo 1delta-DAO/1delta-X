@@ -177,7 +177,11 @@ abstract contract Signatures is OrderState {
         // The bitmap, however, is read and written at the RESERVED coordinate — see
         // the namespace note above. Derived ONCE and reused, so the check and the
         // consume cannot drift apart. (Measured: folding it into the local costs 7
-        // bytes of Settlement; two inline `or`s cost 9. The budget is 15.)
+        // bytes of Settlement, against two inline `or`s at 9. The 15-byte budget that
+        // made those 2 bytes matter is gone — merging the `TAKE`/`TAKE_FOR` dispatch
+        // into {Base._dispatchTake} returned 42 — but the single-local form is still
+        // the one to keep: it is what makes the check and the consume provably the
+        // same coordinate.)
         nonce |= NonceManager.SIGNER_NONCE_NS;
         if (_isNonceCancelled(maker, nonce)) revert NonceCancelled();
         // Against `maker` ONLY — see the no-re-delegation note above.

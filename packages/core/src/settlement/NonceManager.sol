@@ -38,7 +38,12 @@ abstract contract NonceManager {
     ///  them from cancelling each other. It is enforced on the nomination side (that
     ///  function forces the bit on) and NOT on the fill side, deliberately: a range
     ///  check there would tax every fill of every order forever to guard a range no
-    ///  allocator picks. The SDK caps order nonces below this value.
+    ///  allocator picks. It is enforced instead where orders are BUILT: the SDK's
+    ///  `packOrder` calls `assertOrderNonce`, which every order passes through, and
+    ///  `assertOrderNonce` is exported for builders that pack an order themselves.
+    ///  (That wiring was missing until 2026-08-31 — the guard existed and nothing
+    ///  called it, so this sentence described an enforcement that was not happening.
+    ///  See `docs/reference-audits.md` §F23.)
     ///
     ///  A maker pre-emptively killing a nomination they signed but never wanted
     ///  relayed cancels the NAMESPACED coordinate — `cancelOrders([nonce | NS])` —

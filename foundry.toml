@@ -69,6 +69,30 @@ test   = "packages/core/test"
 script = "packages/core/script"
 out    = "out/core"
 
+# Stateful INVARIANT settings for `packages/core/test/invariants` (the only
+# invariant suite in the tree). Sub-table of [profile.core], so it changes nothing
+# for any other package and nothing about bytecode.
+#
+# `fail_on_revert = false` is REQUIRED, not a convenience: the handler drives every
+# lifecycle entry point as every actor — makers, fillers and an unrelated attacker —
+# so most calls are SUPPOSED to revert (a stranger cancelling somebody's order, a
+# fill on a dead nonce). Reverting on those would stop the walk at call 2.
+#
+# ⚠ THE FLIP SIDE, and why the handler records rather than asserts: with this off, a
+# `require`/`assert` that reverted INSIDE the handler is swallowed silently and the
+# suite goes green on a broken contract. {StateHandler} therefore writes findings to
+# one string per state family and {CoreStateInvariants} asserts those strings are
+# empty. Do not "simplify" the handler back to inline assertions.
+#
+# runs × depth = 64 × 96 ≈ 6k actions per suite run. Each action snapshots and diffs
+# 69 storage cells, which is what buys the negative property; raise `depth` rather
+# than `runs` to reach deeper lifecycle states (an order that is part-filled AND
+# approved AND delegated), and `runs` for breadth of opening moves.
+[profile.core.invariant]
+runs = 64
+depth = 96
+fail_on_revert = false
+
 # DEPLOYMENT profile for the core package: identical settings + via-IR, which
 # compiles Settlement ~20% smaller (legacy codegen puts it over EIP-170; via-IR
 # fits at 23,103 / 24,576 at the current `optimizer_runs` — ~1.4KB of margin as of

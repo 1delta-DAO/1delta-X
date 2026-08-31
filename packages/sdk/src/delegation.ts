@@ -3,6 +3,7 @@ import { encodeFunctionData, type Address, type Hex } from "viem";
 import { SETTLEMENT_ABI } from "./abi";
 import { settlementDomain } from "./eip712";
 import type { TypedDataSigner } from "./orders";
+import { SIGNER_NONCE_NS } from "./types";
 import type { Deployment } from "./types";
 
 /**
@@ -23,42 +24,10 @@ import type { Deployment } from "./types";
  *   3. {@link encodeRevokeOrderSigner} — revocation that actually sticks.
  */
 
-// ──────────────────── The reserved nonce half ────────────────────
-
-/**
- * `NonceManager.SIGNER_NONCE_NS` — bit 255. An `OrderSignerPermit` is consumed at
- * `nonce | SIGNER_NONCE_NS`, a coordinate an ORDER can therefore never occupy,
- * so relaying a nomination can never pull the nonce out from under a live order.
- * (Shared order nonces are not exotic — that is exactly how an OCO bracket is
- * built — which is why the two artifacts needed disjoint halves.)
- *
- * ⚠ The settler does NOT check that an order's nonce has bit 255 clear: that
- * would put a compare on the hot path of every fill forever, to guard a range no
- * allocator picks. Guarding it is the builder's job — {@link assertOrderNonce}.
- */
-export const SIGNER_NONCE_NS = 1n << 255n;
-
-/** Whether `nonce` lands in the reserved (signer-permit) half of the bitmap. */
-export function isReservedNonce(nonce: bigint): boolean {
-  return (nonce & SIGNER_NONCE_NS) !== 0n;
-}
-
-/**
- * Throw unless `nonce` is a legal ORDER nonce. Call this wherever order nonces
- * are allocated: an order signed with bit 255 set shares a bitmap coordinate
- * with a nomination permit, so relaying that permit would silently cancel the
- * order (or vice versa).
- */
-export function assertOrderNonce(nonce: bigint): bigint {
-  if (nonce < 0n) throw new Error(`order nonce out of range: ${nonce}`);
-  if (isReservedNonce(nonce)) {
-    throw new Error(
-      `order nonce ${nonce} has bit 255 set, which is reserved for OrderSignerPermit ` +
-        `(NonceManager.SIGNER_NONCE_NS). Order nonces must be < 2^255.`,
-    );
-  }
-  return nonce;
-}
+// The reserved nonce half lives in `./types` — the leaf module `packed.ts` can
+// import without a cycle (packed → delegation → orders → packed). Re-exported here
+// because this is where a reader looks for it.
+export { SIGNER_NONCE_NS, isReservedNonce, assertOrderNonce } from "./types";
 
 /**
  * The permit nonce for a given delegate, derived DETERMINISTICALLY from the

@@ -212,9 +212,7 @@ abstract contract Core is Base {
         // The permit is an external call, so it goes INSIDE the guard — only the
         // read-only gate above may precede it. See {Base._enter}.
         _enter();
-        PERMIT3.permitBatchWithWitnessHashIfNeeded(
-            order.maker, batch, orderHash, OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH, sig
-        );
+        _permitBatch(order.maker, batch, orderHash, sig);
         outs = _fillCore(
             order, fillAmount, msg.sender, address(0), address(0), "",
             CallbackMode.PreDelivery, takerData, false, ctx
@@ -222,6 +220,129 @@ abstract contract Core is Base {
         _exit();
     }
 
+
+    /// @dev `PERMIT3.permitBatchWithWitnessHashIfNeeded(owner, batch, witness,
+    ///      PERMIT_BATCH_WITNESS_TYPEHASH, sig)`, hand-encoded. Same call, same
+    ///      arguments, same revert bubbling — only the encoder changes.
+    ///
+    ///      MEASURED 2026-08-31, hand-encoded vs the typed call. Using assembly here
+    ///      makes Settlement's runtime **297 bytes smaller** (24,159 vs 24,456 under
+    ///      `core-deploy`) and makes every `fillWithPermit` **cheaper**: ~590–630 gas
+    ///      on a single-token-permit fill, up to ~1,660 with multi-element permit
+    ///      arrays, ~90 on the empty-batch floor (legacy-profile numbers; revert
+    ///      paths save too, since encoding precedes Permit3's check). Both wins have
+    ///      one cause: solc's typed encoder walks the two dynamic struct arrays
+    ///      element by element — decode, validate, re-encode — while this block is
+    ///      two `calldatacopy`s and a handful of `mstore`s, so the savings scale
+    ///      with array content. `PermitBatch` makes that walk the largest single
+    ///      encoder left in this contract (deleting the call outright measures −675;
+    ///      the assembly keeps 297 of it). Written out only because of that ratio —
+    ///      see the ledger in {Base._runItem} for the cases where the same trade
+    ///      measured WORSE, including the sibling `permitTakeWithWitnessHash` call,
+    ///      which was measured and left typed.
+    ///
+    ///      WHY IT IS RE-ENCODED FIELD BY FIELD, NOT `calldatacopy`-ed WHOLE. The
+    ///      incoming `batch` region looks contiguous and copyable, and for a
+    ///      canonically-encoded call it is — but ABI offsets are caller-controlled,
+    ///      and solc's decoder accepts non-canonical layouts (reordered tails, gaps)
+    ///      that a verbatim copy would forward as different bytes than the ones the
+    ///      settler itself decoded. Reading `.offset`/`.length` off the decoded
+    ///      calldata arrays and rebuilding the canonical form cannot diverge: the
+    ///      bytes Permit3 hashes are the bytes this function was handed, whatever
+    ///      shape they arrived in. (Same objection {OrderGates.gatePasses} records
+    ///      against copying the order's calldata region verbatim.)
+    ///
+    ///      Both element types are STATIC structs — `TokenPermit` is 4 words,
+    ///      `TakerPermit` is 5 — so each array's elements are contiguous in calldata
+    ///      and copy in one `calldatacopy`. If either struct ever gains a dynamic
+    ///      member, THIS BREAKS and the strides below must go with it.
+    ///
+    ///      Built above the free-memory pointer without bumping it: the bytes are
+    ///      consumed by the CALL and never outlive it, which is what makes the block
+    ///      memory-safe (the same discipline {Permit3TransferLib} uses).
+    function _permitBatch(address owner, IPermit3.PermitBatch calldata batch, bytes32 witness, bytes calldata sig)
+        private
+    {
+        (uint256 batchLen, uint256 total) = _permitBatchTail(batch, sig);
+        _permitBatchHead(owner, witness, batchLen, total);
+    }
+
+    /// @dev Writes the ARGUMENT TAIL — the encoded `batch` tuple followed by `sig` —
+    ///      starting at `mload(0x40) + 0xc0`, which is where the head this function's
+    ///      sibling writes leaves off. Returns the tail's own length and the total
+    ///      calldata length, both of which the head needs for its two offset words.
+    ///
+    ///      ⚠ SPLIT ACROSS TWO FUNCTIONS ON PURPOSE, AND THE SPLIT IS LOAD-BEARING.
+    ///      One block referencing all of `batch`'s members, `sig`, `owner`, the hub
+    ///      and the typehash at once does not fit the LEGACY codegen's 16-slot reach
+    ///      ("stack too deep"), and the legacy profile is the one the test suite
+    ///      builds with. Neither half bumps the free-memory pointer and nothing that
+    ///      allocates runs between them, so both see the same base — that is exactly
+    ///      why the two halves take only value-type arguments.
+    function _permitBatchTail(IPermit3.PermitBatch calldata batch, bytes calldata sig)
+        private
+        pure
+        returns (uint256 batchLen, uint256 total)
+    {
+        IPermit3.TokenPermit[] calldata toks = batch.tokens;
+        IPermit3.TakerPermit[] calldata taks = batch.takers;
+        uint256 nonce = batch.nonce;
+        uint256 deadline = batch.deadline;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let p := mload(0x40)
+            let tokBytes := mul(toks.length, 0x80) // TokenPermit = 4 static words
+            // `batch`'s own tail: 4 head words, then (length + data) per array.
+            batchLen := add(0xc0, add(tokBytes, mul(taks.length, 0xa0))) // TakerPermit = 5
+
+            mstore(add(p, 0xc0), 0x80) // offset of `tokens`, relative to the tuple
+            mstore(add(p, 0xe0), add(0xa0, tokBytes)) // offset of `takers`
+            mstore(add(p, 0x100), nonce)
+            mstore(add(p, 0x120), deadline)
+            mstore(add(p, 0x140), toks.length)
+            calldatacopy(add(p, 0x160), toks.offset, tokBytes)
+            mstore(add(add(p, 0x160), tokBytes), taks.length)
+            calldatacopy(add(add(p, 0x180), tokBytes), taks.offset, mul(taks.length, 0xa0))
+
+            let sp := add(add(p, 0xc0), batchLen) // where `sig` starts
+            mstore(sp, sig.length)
+            calldatacopy(add(sp, 0x20), sig.offset, sig.length)
+            // Zero the final word's padding. Writes up to 32 bytes past the end of
+            // the region being built, which is scratch this frame already owns.
+            mstore(add(add(sp, 0x20), sig.length), 0)
+
+            // 4 (selector) + 5 head words + `batch` + `sig` (length + padded data)
+            total := add(0xc4, add(batchLen, and(add(sig.length, 0x1f), not(0x1f))))
+        }
+    }
+
+    /// @dev Writes the 5-word argument HEAD in front of the tail above and makes the
+    ///      call, bubbling Permit3's revert verbatim (a bad signature, a lapsed
+    ///      deadline and a spent-and-skipped nonce must read exactly as they did
+    ///      through the typed call). See {_permitBatchTail} for the split.
+    function _permitBatchHead(address owner, bytes32 witness, uint256 batchLen, uint256 total) private {
+        address hub = address(PERMIT3);
+        bytes32 typeHash = OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let p := mload(0x40) // the calldata starts 4 bytes into this word
+            // `permitBatchWithWitnessHashIfNeeded(address,((address,address,uint160,
+            //  uint48)[],(address,address,bytes32,uint160,uint48)[],uint256,uint256),
+            //  bytes32,bytes32,bytes)` — a literal rather than `.selector` because the
+            // extra local does not fit the stack here; `PermitEncoding.t.sol` pins it
+            // against the interface so it cannot drift silently.
+            mstore(p, 0x6c837b2e)
+            mstore(add(p, 0x20), and(owner, 0xffffffffffffffffffffffffffffffffffffffff))
+            mstore(add(p, 0x40), 0xa0) // offset of `batch`, from the head's start
+            mstore(add(p, 0x60), witness)
+            mstore(add(p, 0x80), typeHash)
+            mstore(add(p, 0xa0), add(0xa0, batchLen)) // offset of `sig`
+            if iszero(call(gas(), hub, 0, add(p, 0x1c), total, 0x00, 0x00)) {
+                returndatacopy(0x00, 0x00, returndatasize())
+                revert(0x00, returndatasize())
+            }
+        }
+    }
 
     /// @notice Fill a batch of orders in one transaction. Each order is attempted
     ///         independently; an order that reverts (expired, cancelled,

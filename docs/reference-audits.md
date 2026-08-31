@@ -1004,13 +1004,29 @@ current integrator happens to follow it.
 | invariant | where it rests | what breaks |
 | --- | --- | --- |
 | a module implements `ITakerModule` **or** `ITakerForModule`, never both | `ITakerForModule` prose | the taker book keys both on `(user, spender, module, keccak256(data))`, so one `approveTaker` would authorise either shape and the grant cannot tell the maker which |
-| an ORDER nonce must not set bit 255 | `NonceManager.SIGNER_NONCE_NS` prose + the SDK's cap | an order signed above 2^255 collides with the delegate-nomination namespace, re-opening §F17 |
+| ~~an ORDER nonce must not set bit 255~~ **CLOSED** | `packOrder` → `assertOrderNonce` | see below |
 | Permit3 nonces are allocated **per owner**, not per message type | `UnorderedNonces` prose | all three signed flows share one bitmap. `permitBatchWithWitnessIfNeeded` is idempotent on a spent nonce (the S-1 remediation), but `permitTake` and `permitTransferFrom` both revert — so anyone holding an unrelayed signed message can burn its nonce and DoS a *different* message the owner signed at the same coordinate. Exactly §F17's shape, one layer down |
 
-None is reachable today, and each is enforced on the hot path only at a cost the
-contract cannot currently pay (§F1 headroom). The right home for all three is a CI
-assertion or an SDK allocator, not runtime gas — but *documented* is not *enforced*,
-and the ledger should say so rather than let the prose read as a guarantee.
+**The bit-255 row was worse than "documented but unenforced", and is now fixed.**
+`assertOrderNonce` existed in the SDK, was exported, and its own docstring said *"call
+this wherever order nonces are allocated"* — and **nothing called it**. Meanwhile
+`NonceManager`'s prose asserted "the SDK caps order nonces below this value". So the
+contract pointed at the SDK, the SDK pointed at the caller, and the invariant was
+enforced nowhere, while both texts read as a guarantee. It is now wired into
+`packOrder`, which every order the SDK builds passes through, alongside the `timing`
+bit checks already there — and the contract comment names that enforcement point
+instead of asserting a cap. Covered by `delegation.test.ts`.
+
+The other two remain open. Neither is reachable today, and each would cost hot-path
+gas the contract cannot spare (§F1 headroom), so the right home for both is a CI
+assertion or an SDK allocator rather than runtime code.
+
+**The generalised question, and it is the lesson of this row.** *A guard that exists
+but is never invoked is indistinguishable from no guard — except that it reads as
+one.* Whenever a contract comment delegates an invariant to off-chain code ("the SDK
+ensures…", "builders must…"), grep for a call site. If the named enforcement point has
+no callers, the comment is not documentation, it is a false claim, and it is more
+dangerous than silence because it stops the next reader looking.
 
 ## Re-audit sweep — the generalised questions from F13–F15
 
