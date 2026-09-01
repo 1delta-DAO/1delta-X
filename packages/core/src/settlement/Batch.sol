@@ -777,7 +777,29 @@ abstract contract Batch is Core {
     ///      from the pre-context snapshot (a donated balance is unreachable), and
     ///      obligations not yet delivered are netted out first — so unlike a
     ///      fixed-phase pre-send (which nets against ALL obligations before any
-    ///      delivery has happened), this is correct at ANY point in the schedule.
+    ///      delivery has happened), this is correct at ANY point in the schedule
+    ///      FOR DELIVERY OBLIGATIONS.
+    ///
+    ///      ⚠ `outstanding` IS NOT THE WHOLE OF WHAT THE POOL OWES, and this bound
+    ///      alone does not make the schedule safe. It is seeded from output legs
+    ///      ({_matchOpenAll}) and decremented by DELIVER — nothing else. It does NOT
+    ///      include the Phase-3 obligations: {_matchReconcileInputs}'s surplus
+    ///      refund to a maker whose item over-credited an input leg, or
+    ///      {_creditItemProceeds}'s non-leg refunds. So a schedule that runs an ITEM
+    ///      which over-produces an input token and then PRESENDs it hands the solver
+    ///      money the settler still owes a maker, and THIS function will not stop it.
+    ///
+    ///      What stops it is {_sweepSurplus}'s per-token `nowBal >= beforeBal[k]`
+    ///      floor, plus the refund transfer itself reverting on a drained pool —
+    ///      every `legsIn` token is in `st.tokens` by construction of
+    ///      {_collectTokens}, so no refund token escapes that floor. That is the
+    ///      guarantor; name it here so it is not silently removed. Three changes
+    ///      would reopen the hole with nothing else covering it: narrowing the swept
+    ///      token set, moving a refund after {_sweepSurplus}, or adding a Phase-2
+    ///      refund path. Seeding `outstanding` with the reconciliation surplus as it
+    ///      accrues would make the bound self-sufficient; that is a change to a hot
+    ///      path and is deliberately NOT bundled with documenting the status quo
+    ///      (see `docs/audit-2026-09-leads.md` B-1).
     function _stepPresend(MatchCtx memory st, uint256 t, uint256 s) internal {
         if (t >= st.tokens.length) revert PlanBadStep(s);
         address token = st.tokens[t];

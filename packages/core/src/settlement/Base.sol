@@ -653,9 +653,27 @@ abstract contract Base is Signatures {
         // whose absence under-collateralises the maker.
         uint256 floorBps = (desc >> 160) & 0xffff;
         if (floorBps == 0) floorBps = 10_000;
-        // The zero test stays: `cap / 10_000` truncates to 0 for a cap under 10_000
-        // units, which would let the floor pass a zero balance.
-        if (bal == 0 || bal < cap / 10_000 * floorBps) revert ForBalanceBelowFloor();
+        // A floor ABOVE the cap can never be met, so the leg is dead either way --
+        // but `cap / 10_000 * floorBps` would then PANIC (0x11) on a large cap
+        // instead of raising the named error. Clamp so the revert stays legible.
+        if (floorBps > 10_000) floorBps = 10_000;
+        // EXACT floor, without the overflow the naive `cap * floorBps / 10_000`
+        // would risk on an unconstrained maker-signed cap. Dividing FIRST (the
+        // previous form) truncated `cap` to a multiple of 10_000 BEFORE scaling, so
+        // the realised threshold fell short by up to `floorBps` RAW units -- an
+        // ABSOLUTE error, not a relative one. For any cap under 10_000 units it
+        // collapsed to 0 outright, leaving `bal != 0` as the only bound and
+        // re-opening the one-wei-funds-a-full-borrow hole this floor exists to
+        // close. That is not an exotic cap: a 2-decimal token (EURS, GUSD) puts an
+        // ordinary $50 ceiling at 5_000 raw units. The remainder term below is
+        // bounded by 9_999 * 10_000, so it cannot overflow.
+        uint256 need;
+        unchecked {
+            need = cap / 10_000 * floorBps + (cap % 10_000) * floorBps / 10_000;
+        }
+        // The zero test stays: a cap of 0 makes any floor 0, and a zero balance must
+        // never fund a levered position.
+        if (bal == 0 || bal < need) revert ForBalanceBelowFloor();
         return bal;
     }
 

@@ -209,6 +209,13 @@ contract MidnightLendModule is IMakerModule {
         FullFillGuard.requireFullFill(amount, totalAmount);
         address loanToken = offer.market.loanToken;
 
+        // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would
+        // pay out anything already stranded at this shared module address, and
+        // "anyone can be the maker of a one-unit order against that module and
+        // asset" -- so a stray balance would be claimable by whoever fills next.
+        // The invariant is "the module ends where it started", not "ends empty":
+        // the same floor every sibling repay/withdraw module takes.
+        uint256 floor = IERC20(loanToken).balanceOf(address(this));
         // Pull the maker-signed loan-token budget; Midnight pulls the exact
         // `buyerAssets` (≤ budget) from this module via the zero-callback path.
         permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(amount));
@@ -224,9 +231,10 @@ contract MidnightLendModule is IMakerModule {
         midnight.take(offer, ratifierData, units, onBehalfOf, address(0), address(0), "");
         SafeTransferLib.forceApprove(loanToken, address(midnight), 0);
 
-        // Sweep the unspent budget back to the maker (never to a caller).
-        uint256 residual = IERC20(loanToken).balanceOf(address(this));
-        if (residual > 0) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, residual);
+        // Sweep the unspent budget back to the maker (never to a caller), and only
+        // the DELTA this call produced -- never the pre-existing `floor`.
+        uint256 bal = IERC20(loanToken).balanceOf(address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, bal - floor);
 
         _locked = 1;
     }

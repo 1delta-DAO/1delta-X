@@ -64,13 +64,21 @@ contract CompoundV2DepositModule is IMakerModule {
 
         (address cToken, address underlying) = abi.decode(data, (address, address));
 
+        // cToken balance held BEFORE the mint. Forwarding `balanceOf(this)` outright
+        // would hand the user anything already stranded at this shared module, and
+        // anyone can be the maker of a one-unit order against it. The invariant is
+        // "the module ends where it started", not "ends empty" (F19).
+        uint256 floor = IERC20(cToken).balanceOf(address(this));
+
         permit3.transferFrom(onBehalfOf, address(this), underlying, uint160(amount));
         SafeTransferLib.forceApprove(underlying, cToken, amount);
         uint256 err = ICErc20(cToken).mint(amount);
         if (err != 0) revert CompoundV2Error(err);
 
-        // cTokens were minted to this module — forward the receipt to the user.
-        SafeTransferLib.safeTransfer(cToken, onBehalfOf, IERC20(cToken).balanceOf(address(this)));
+        // cTokens were minted to this module — forward THIS MINT's receipt to the
+        // user, never the module's whole balance.
+        uint256 bal = IERC20(cToken).balanceOf(address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(cToken, onBehalfOf, bal - floor);
     }
 }
 

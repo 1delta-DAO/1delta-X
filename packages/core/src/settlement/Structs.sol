@@ -208,7 +208,14 @@ struct Order {
     //                                       bump reaches gasBumpBps
     //                        bits [96:160)  priorityScale — wei of priority fee that buys a FULL
     //                                       bump under the PRIORITY auction (bit 103); 0 = off
-    //                        bits [160:256) free
+    //                        bits [160:208) baselinePriorityFeeWei (uint48; see
+    //                          {DutchAuction.baselinePriorityFeeWei}).
+    //                        bits [208:256) free
+    //                        ⚠ THIS MAP IS WHERE A NEW FIELD GETS PLACED FROM, so it
+    //                          must stay exact: `baselinePriorityFeeWei` occupies
+    //                          [160:208) and was previously undocumented here, while
+    //                          its own note argues at length that overlaying a new
+    //                          meaning onto already-signed bits is unacceptable.
     bytes curve; //                  PACKED {CurvePoint} blob; optional piecewise decay
     //                               shape (shared clock); empty = linear
     bytes items; //                  PACKED {Item} record blob

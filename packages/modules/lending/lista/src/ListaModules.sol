@@ -97,6 +97,12 @@ contract ListaBrokerRepayModule is IMakerModule {
         DustHandler.DustAction action = DustHandler.readAction(data, 96);
         PermitHelper.replayIfPresent(data, 128, loanToken, onBehalfOf, address(permit3), amount);
 
+        // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would pay
+        // out anything already stranded at this shared module address, and anyone can
+        // be the maker of a one-unit order against it — so a stray balance would be
+        // claimable by whoever fills next. The invariant is "the module ends where it
+        // started", not "ends empty" (F19; {DustHandler.disposeResidual}'s floor).
+        uint256 floor = IERC20(loanToken).balanceOf(address(this));
         if (amount > 0) {
             permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(amount));
             SafeTransferLib.forceApprove(loanToken, broker, amount);
@@ -109,8 +115,8 @@ contract ListaBrokerRepayModule is IMakerModule {
             SafeTransferLib.forceApprove(loanToken, broker, 0);
         }
 
-        uint256 residual = IERC20(loanToken).balanceOf(address(this));
-        if (residual != 0) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, residual);
+        uint256 bal = IERC20(loanToken).balanceOf(address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, bal - floor);
         // (action reserved for a future in-position recycle; broker has no
         //  re-supply target, so residual always sweeps to the user.)
         action;

@@ -21,12 +21,26 @@ import {Permit3Base} from "./Permit3Base.sol";
 ///         other (this layer is idempotent on a spent bit for the batch flow, but
 ///         `permitTake` and `permitTransferFrom` revert).
 ///
-///         ⚠ ENFORCED IN the SDK's `permit3nonce.ts`, which namespaces the
-///         message kind into the top byte, and ASSERTED in `permitBatch` /
-///         `permitTake` — the constructors every message passes through. Named
-///         here rather than left as "callers must", because a comment that
-///         delegates an invariant to off-chain code without naming a call site is
-///         a claim, not a control (see `docs/reference-audits.md` F23).
+///         ⚠ ENFORCED ONLY OFF-CHAIN, in the SDK's `permit3nonce.ts`
+///         (`assertPermit3Nonce`, reached from `permit.ts` and `permit3.ts`),
+///         which namespaces the message kind into the top byte. NOTHING ON-CHAIN
+///         ASSERTS IT: neither {SignedPermits.permitBatch} nor
+///         {SignedPermits._permitTake} inspects the top byte, so a maker signing
+///         through a wallet, an explorer or a hand-rolled script can still land
+///         two kinds on one coordinate.
+///
+///         This comment previously claimed the assertion lived in `permitBatch` /
+///         `permitTake` — "the constructors every message passes through". Those
+///         are the SDK's TypeScript builders, not the Solidity functions of the
+///         same name, and the sentence read as an on-chain control while sitting
+///         directly above two functions that do not implement one. Corrected in
+///         F25 rather than closed with code: the fix costs the two reverting
+///         flows their legacy untagged nonces, which is a call worth making
+///         deliberately. Contrast the ORDER nonce namespace, whose half IS
+///         enforced on-chain ({Base._gateOrderPost}, `OrderNonceReserved`) —
+///         precisely because "the guarantee it buys must not depend on which
+///         client packed the order" (see `docs/reference-audits.md` F23, and
+///         `docs/audit-2026-09-leads.md` C).
 ///
 ///  ⚠ IT KILLS THE GRANTS, NOT THE ORDER. Read the sentence above narrowly: the
 ///  bitmap is a kill switch over PERMITS, and a maker should not read it as one over

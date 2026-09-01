@@ -360,8 +360,17 @@ abstract contract Core is Base {
             mstore(add(p, 0x80), typeHash)
             mstore(add(p, 0xa0), add(0xa0, batchLen)) // offset of `sig`
             if iszero(call(gas(), hub, 0, add(p, 0x1c), total, 0x00, 0x00)) {
-                returndatacopy(0x00, 0x00, returndatasize())
-                revert(0x00, returndatasize())
+                // Copied to `p` — the buffer we just built the calldata in, which we
+                // no longer need — NOT to offset 0. Scratch is only 0x00..0x3f, so a
+                // returndata larger than 64 bytes would clobber the free memory
+                // pointer at 0x40 and break the `memory-safe-assembly` annotation on
+                // this block. Harmless at runtime because the revert is immediate,
+                // but it is a lie to the optimizer and the deploy profile is via-IR.
+                // {Core._execute} and {Base._callWithTail} already do it this way;
+                // this was the last site that did not (F25 / lead B-4).
+                let rds := returndatasize()
+                returndatacopy(p, 0, rds)
+                revert(p, rds)
             }
         }
     }
@@ -501,10 +510,12 @@ abstract contract Core is Base {
         _gateOrder(order, orderHash, msg.sender, "", ctx);
         _openFill(order, fillAmount, msg.sender, "", ctx);
         ctx.permitTake = abi.encode(permit, sig);
-        outs = _settleForward(order, ctx, address(0), "", "");
         // The permit MUST have been consumed — it is this fill's only authorization.
-        // See the note in {Base._takeByPermit}.
-        if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
+        // Asserted inside `_settleForward`, immediately after the items run and
+        // BEFORE the maker's inputs are pulled, so the authorization gates the pull
+        // rather than merely being checked once everything has already moved.
+        // See the note there and in {Base._takeByPermit}.
+        outs = _settleForward(order, ctx, address(0), "", "");
     }
 
     // ──────────────────── Custom fill ────────────────────
@@ -566,10 +577,21 @@ abstract contract Core is Base {
     ///             quote to hold should pass this floor rather than skip it. (The
     ///             maker's signed `start` bounds the exposure either way, which the
     ///             unbounded-scaling designs do not.)
+    ///           • a DESCENDING segment of the signed `curve`. {DutchAuction.bumpBps}'s
+    ///             piecewise branch explicitly supports a falling leg
+    ///             (`bps = b0 - ((b0 - b1) * (elapsed - t0)) / span`, "the curve may
+    ///             rise or fall between points"), and a falling bump moves EVERY leg
+    ///             maker-ward: `outTick` rises and `inTick` falls. So the clock is a
+    ///             maker-ward mover too on any order whose curve descends — a filler
+    ///             exposed to it purely by inclusion delay.
     ///         Quote the floor from {SettlementLens.previewFill} — at the gas price
-    ///         you will actually send. Time decay and soft-exclusivity need no
-    ///         protection: time moves the bump filler-ward and the override is signed
-    ///         in the order. Reverts {BumpTooLow}.
+    ///         you will actually send. Soft-exclusivity needs no protection: the
+    ///         override is signed in the order. Time decay needs none only on a
+    ///         MONOTONICALLY RISING curve; this NatSpec previously said "time moves
+    ///         the bump filler-ward" without that qualifier, which steered fillers
+    ///         into passing `0` on exactly the curve shape the floor protects them
+    ///         from (the guard itself already covers it — it reads the resolved
+    ///         bump). Corrected in F25. Reverts {BumpTooLow}.
     /// @param  takerData Filler-supplied blob for validators/invariants (and the
     ///         fill proposal for a fill-module order); `""` for plain orders.
     /// @return delta     The anchor-unit progress actually executed (post-clamp).
@@ -957,6 +979,21 @@ abstract contract Core is Base {
         bool hasItems = PackedArrays.countUnchecked(order.items) != 0;
         uint256[] memory tokenInBefore = hasItems ? _snapshotInputs(order.legsIn) : new uint256[](0);
         _executeItems(order, ctx);
+        // AUTHORIZATION IS A PRE-CONDITION OF THE MAKER'S INPUT PULL, not a
+        // post-condition of the whole fill. On the {Core.fillWithPermitTake} path
+        // this blob IS the order's only authorization — no signature was verified
+        // up front — and `_payInputsToSolver` below draws the maker's wallet
+        // through Permit3. Asserting here rather than after the fill returns means
+        // that pull happens only once the maker's signature has actually been
+        // consumed by a TAKE item, and it costs nothing on every other entry, where
+        // the blob is never set and this is a length test on an empty `bytes`.
+        //
+        // The old placement (after `_settleForward` returned) was safe ONLY because
+        // every item op is atomically revertible — it is void the moment one
+        // acquires an effect that outlives the transaction: a cross-chain message,
+        // a bridge-inbox item, an off-chain-consumed event. See
+        // `docs/audit-2026-09-leads.md` B-2.
+        if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
         _payInputsToSolver(order, ctx, tokenInBefore, hasItems);
         _closeFill(order, ctx.filler, takerData, ctx.orderHash);
     }

@@ -263,16 +263,22 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 //       — op@0, MarketParams@32 (base = 192); auth block (160B) optional at 192.
 //
 //   op = 1 (WithdrawCollateral):
-//     data = abi.encode(uint8(1), MarketParams[, BalanceMode[, nonce, deadline, v, r, s]])
+//     Exact: abi.encode(uint8(1), MarketParams[, BalanceMode(0)[, nonce, deadline, v, r, s]])
 //       — op@0, MarketParams@32 (base = 192); BalanceMode@192; auth@224.
+//     Full:  abi.encode(uint8(1), MarketParams, BalanceMode(1), totalAmount[, nonce, deadline, v, r, s])
+//       — BalanceMode@192; totalAmount@224 (MANDATORY); auth@256.
+//       ⚠ THE TWO MODES PLACE THE AUTH BLOCK AT DIFFERENT OFFSETS. `Full` needs a
+//       maker-signed `totalAmount` ({FullFillGuard}), and it occupies 224 — so the
+//       auth block moves to 256. Sharing 224 (as this once did) made the guard read
+//       the auth `nonce` as the total, which a filler can match on a dust slice.
 //       The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when an
 //       auth block follows, so the block starts at a fixed offset.
 //
 //   op = 2 (Withdraw — loan asset):
-//     data = abi.encode(uint8(2), MarketParams[, BalanceMode[, nonce, deadline, v, r, s]])
-//       — same byte map as op 1; unwinds the maker's supplied LOAN token (the
-//       earn position) via `morpho.withdraw` instead of collateral. Full mode
-//       redeems by shares, so the accrued-interest excess sweeps back in-kind.
+//     data = same byte map as op 1, with uint8(2); unwinds the maker's supplied
+//       LOAN token (the earn position) via `morpho.withdraw` instead of collateral.
+//       Full mode redeems by shares, so the accrued-interest excess sweeps back
+//       in-kind.
 //
 contract MorphoBlueTakerModule is ITakerModule {
     using MarketParamsLib for MarketParams;
@@ -306,29 +312,39 @@ contract MorphoBlueTakerModule is ITakerModule {
             DelegationHelper.replayMorphoAuth(data, 192, address(morpho), onBehalfOf, address(this));
             morpho.borrow(marketParams, amount, 0, onBehalfOf, receiver);
         } else if (op == uint8(Op.WithdrawCollateral)) {
-            // Optional auth-with-sig at offset 224 (after BalanceMode slot at 192).
-            DelegationHelper.replayMorphoAuth(data, 224, address(morpho), onBehalfOf, address(this));
-
+            // ⚠ THE AUTH BLOCK IS BRANCH-SCOPED, and its offset DIFFERS per branch.
+            // Both readers used to sit at 224 unconditionally, which made the guard
+            // read the auth `nonce` as the maker's signed `totalAmount`: with a
+            // sequential Morpho nonce >= 1 a FILLER (who picks `fillAmount`, and so
+            // the pro-rated slice) could satisfy `amount == totalAmount` on a DUST
+            // slice and force-unwind the whole position — exactly what this guard
+            // exists to prevent. `Full` therefore carries the total at 224 and the
+            // auth after it at 256; `Exact` keeps the auth at 224 (unchanged wire).
             if (DustHandler.readBalanceMode(data, 192) == DustHandler.BalanceMode.Full) {
                 // `Full` liquidates the user's ENTIRE live balance, so it cannot be
                 // pro-rated — a sliced fill would unwind the whole position and brick
                 // the rest of the order. Require the slice to be the whole item.
+                // Checked BEFORE the auth replay: a bad slice should fail without
+                // spending an external call.
                 FullFillGuard.requireFullFillFromData(data, 224, amount);
+                DelegationHelper.replayMorphoAuth(data, 256, address(morpho), onBehalfOf, address(this));
                 _withdrawFull(marketParams, onBehalfOf, amount, receiver);
             } else {
+                DelegationHelper.replayMorphoAuth(data, 224, address(morpho), onBehalfOf, address(this));
                 morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
             }
         } else if (op == uint8(Op.Withdraw)) {
-            // Same byte map as WithdrawCollateral: BalanceMode@192, auth@224.
-            DelegationHelper.replayMorphoAuth(data, 224, address(morpho), onBehalfOf, address(this));
-
+            // Same byte map as WithdrawCollateral: BalanceMode@192; auth@256 under
+            // `Full` (total occupies 224), auth@224 under `Exact`. See the note above.
             if (DustHandler.readBalanceMode(data, 192) == DustHandler.BalanceMode.Full) {
                 // `Full` liquidates the user's ENTIRE live balance, so it cannot be
                 // pro-rated — a sliced fill would unwind the whole position and brick
                 // the rest of the order. Require the slice to be the whole item.
                 FullFillGuard.requireFullFillFromData(data, 224, amount);
+                DelegationHelper.replayMorphoAuth(data, 256, address(morpho), onBehalfOf, address(this));
                 _withdrawLoanFull(marketParams, onBehalfOf, amount, receiver);
             } else {
+                DelegationHelper.replayMorphoAuth(data, 224, address(morpho), onBehalfOf, address(this));
                 // Exact-assets withdrawal of the supplied loan token (shares = 0).
                 morpho.withdraw(marketParams, amount, 0, onBehalfOf, receiver);
             }

@@ -12,7 +12,8 @@ surface for `account`. Troves are address-keyed (≤1 per user per TroveManager,
 id/discovery) — the cleanest of the CDPs.
 
 The twist: CDP value-out carries **no receiver**. ✅ **Fork-validated on the
-deployed Hemi diamond**: when a delegate drives the op, value-out is delivered
+deployed diamond** (originally on Hemi, now on BNB Smart Chain — same diamond
+address, same behaviour): when a delegate drives the op, value-out is delivered
 to **`msg.sender` (the module)** — not to `account` as the Prisma-lineage docs
 suggested. The taker modules settle proceeds direction-agnostically
 (`RiverProceeds.settle`): pay the order's `receiver` first from the module's own
@@ -40,7 +41,7 @@ pre-existing balance.
 | borrow (withdrawDebt) | `xapp.setDelegateApproval(module, true)` | taker allowance (+ satUSD token allowance to the module only on `account`-routing deployments) |
 | withdraw (withdrawColl) | `xapp.setDelegateApproval(module, true)` | taker allowance (+ collateral token allowance to the module only on `account`-routing deployments) |
 
-✅ **Fork finding:** the deployed Hemi diamond enforces its caller-or-delegate
+✅ **Fork finding:** the deployed diamond enforces its caller-or-delegate
 check on EVERY op — value-in included (`addColl` reverts "Caller not approved"
 without the grant). Every module needs `setDelegateApproval`.
 
@@ -52,7 +53,7 @@ The taker modules enforce `msg.sender == permit3`; the MAKE modules enforce
 - **Fund-flow assumption:** value-in is pulled from `msg.sender` (the module,
   funded via Permit3); value-out lands on `account` (the maker) and is swept to
   `receiver`. This follows the Prisma/Liquity-V1 lineage — **validate against the
-  deployed diamond on a Hemi/Base fork** before mainnet use.
+  deployed diamond on a fork of the target chain** before mainnet use.
 - Partial repay only; a full close is `closeTrove` (satUSD burned, collateral
   returned) — wire that as a dedicated flow. Recovery Mode (TCR < 150%) blocks
   withdrawals/close.
@@ -61,8 +62,18 @@ The taker modules enforce `msg.sender == permit3`; the MAKE modules enforce
 
 ## Tests
 
-Fork Hemi / Base / BNB where River is deployed (set an RPC endpoint). The
-`security/` auth checks run without a fork.
+The `leverage/` suite forks **BNB Smart Chain** (default endpoint
+`https://bsc-dataseed1.bnbchain.org`; override with `BSC_RPC_URL`) against the
+BTCB TroveManager. It previously forked Hemi and was moved because the public
+Hemi endpoint rate-limits at 300 req/60s, which a fork run exceeds — the suite
+failed with HTTP 429 rather than on any assertion.
+
+⚠ If you point these at another chain, re-read `collateralToken()` on the
+TroveManager first. The diamond and satUSD share an address across chains but
+**TroveManagers do not map to the same collateral**: `0xb655…` is WETH on Hemi
+and WBTC on BSC, and BSC's WBTC has 8 decimals against BTCB's 18.
+
+The `unit/` and `security/` checks run without a fork.
 
 ```
 FOUNDRY_PROFILE=modules-river forge test --root ../../../..

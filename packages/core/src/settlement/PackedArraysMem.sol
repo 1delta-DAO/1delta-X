@@ -17,18 +17,54 @@ import {PackedArrays} from "./PackedArrays.sol";
 ///  them here rather than widening {PackedArrays} — the split is what keeps the hot
 ///  path free of memory handling.
 ///
-///  ⚠ Same safety contract as {PackedArrays}: call {count} (or a validating read on
-///  the calldata side) before indexing, and never pass an index at or beyond it. A
-///  memory read past the blob returns whatever follows in memory rather than
-///  reverting.
+///  ⚠ Same safety contract as {PackedArrays}: call {validateLegsIn} /
+///  {validateLegsOut} before indexing, and never pass an index at or beyond what
+///  they return. A memory read past the blob returns whatever follows in memory
+///  rather than reverting, so an unvalidated count is not a bound — it is a number
+///  the blob's author chose.
+///
+///  This header used to point callers at `count`, which is the memory twin of
+///  {PackedArrays.countUnchecked} — the function the calldata library explicitly
+///  forbids as a bound ("deliberately proves nothing about the bytes that follow…
+///  the count must always come from the validator"). `bytes.concat(hex"03")`
+///  reports three legs while holding none. The unchecked reader is still here, now
+///  named to say so; every caller that goes on to index was repointed at a
+///  validator. See `docs/audit-2026-09-leads.md` B-5.
 library PackedArraysMem {
-    /// @dev Element count from the blob's one-byte prefix. `b.length` is the BYTE
-    ///      length and is NOT the count — a well-formed empty array is `0x00`.
-    function count(bytes memory b) internal pure returns (uint256 n) {
+    /// @notice The declared element count, WITHOUT validating the blob.
+    /// @dev For "is this array empty?" tests ONLY, exactly as
+    ///      {PackedArrays.countUnchecked}. Callers that index MUST use
+    ///      {validateLegsIn} / {validateLegsOut} instead.
+    function countUnchecked(bytes memory b) internal pure returns (uint256 n) {
         if (b.length == 0) return 0;
         assembly {
             n := byte(0, mload(add(b, 0x20)))
         }
+    }
+
+    /// @notice Bounds-check a fixed-stride MEMORY blob and return its element count.
+    /// @dev The memory mirror of {PackedArrays.validateFixed}, and the only sound
+    ///      source of a bound for the accessors below. An empty blob reads as zero
+    ///      elements, so an order that omits an optional array costs nothing.
+    function validateFixed(bytes memory b, uint256 stride) internal pure returns (uint256 n) {
+        if (b.length == 0) return 0;
+        assembly {
+            n := byte(0, mload(add(b, 0x20)))
+        }
+        // `1 + n * stride` cannot overflow: n <= 255 and stride is a small constant.
+        unchecked {
+            if (b.length < 1 + n * stride) revert PackedArrays.MalformedPackedArray();
+        }
+    }
+
+    /// @notice Validated element count of a packed `LegIn` blob.
+    function validateLegsIn(bytes memory b) internal pure returns (uint256) {
+        return validateFixed(b, PackedArrays.LEG_IN_STRIDE);
+    }
+
+    /// @notice Validated element count of a packed `LegOut` blob.
+    function validateLegsOut(bytes memory b) internal pure returns (uint256) {
+        return validateFixed(b, PackedArrays.LEG_OUT_STRIDE);
     }
 
     /// @notice `token` of input leg `i`.

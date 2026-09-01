@@ -237,7 +237,7 @@ contract OriginSettler7683 is IOriginSettler {
         r.fillDeadline = fillDeadline != 0 && fillDeadline < orderDeadline ? fillDeadline : orderDeadline;
         r.orderId = orderHash;
 
-        uint256 nOut = PackedArraysMem.count(p.order.legsOut);
+        uint256 nOut = PackedArraysMem.validateLegsOut(p.order.legsOut);
         r.maxSpent = new Output[](nOut);
         for (uint256 j; j < nOut; j++) {
             address recipient = PackedArraysMem.legOutRecipient(p.order.legsOut, j);
@@ -249,7 +249,7 @@ contract OriginSettler7683 is IOriginSettler {
             });
         }
 
-        uint256 nIn = PackedArraysMem.count(p.order.legsIn);
+        uint256 nIn = PackedArraysMem.validateLegsIn(p.order.legsIn);
         r.minReceived = new Output[](nIn);
         for (uint256 i; i < nIn; i++) {
             r.minReceived[i] = Output({

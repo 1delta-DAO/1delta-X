@@ -205,8 +205,13 @@ contract CometRepayModule is IMakerModule {
 //       — allow-by-sig block (5 × 32 = 160B) optional at offset 96.
 //
 //   op = 1 (Withdraw):
-//     data = abi.encode(uint8(1), comet, asset[, BalanceMode[, nonce, expiry, v, r, s]])
+//     Exact: abi.encode(uint8(1), comet, asset[, BalanceMode(0)[, nonce, expiry, v, r, s]])
 //       — BalanceMode@96; allow-by-sig block optional at offset 128.
+//     Full:  abi.encode(uint8(1), comet, asset, BalanceMode(1), totalAmount[, nonce, expiry, v, r, s])
+//       — BalanceMode@96; totalAmount@128 (MANDATORY); allow block at 160.
+//       ⚠ THE TWO MODES PLACE THE ALLOW BLOCK AT DIFFERENT OFFSETS, for the same
+//       reason as the Morpho Blue module: `Full` needs a maker-signed `totalAmount`
+//       ({FullFillGuard}) and it occupies 128, so the allow block moves to 160.
 //       The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when an
 //       allow block follows, so the block starts at a fixed offset.
 //
@@ -237,14 +242,22 @@ contract CometTakerModule is ITakerModule {
             DelegationHelper.replayCometAllow(data, 96, comet, onBehalfOf, address(this));
             IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
         } else if (op == uint8(Op.Withdraw)) {
-            // Optional Comet allow-by-sig at offset 128 (after BalanceMode slot at 96).
-            DelegationHelper.replayCometAllow(data, 128, comet, onBehalfOf, address(this));
-
+            // ⚠ THE ALLOW BLOCK IS BRANCH-SCOPED, and its offset DIFFERS per branch.
+            // Both readers used to sit at 128 unconditionally, which made the guard
+            // read the allow-by-sig `nonce` as the maker's signed `totalAmount`:
+            // with a sequential Comet nonce >= 1 a FILLER (who picks `fillAmount`,
+            // and so the pro-rated slice) could satisfy `amount == totalAmount` on a
+            // DUST slice and force-unwind the whole position — exactly what this
+            // guard exists to prevent. `Full` therefore carries the total at 128 and
+            // the allow block after it at 160; `Exact` keeps it at 128 (unchanged).
             if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
                 // `Full` liquidates the user's ENTIRE live balance, so it cannot be
                 // pro-rated — a sliced fill would unwind the whole position and brick
                 // the rest of the order. Require the slice to be the whole item.
+                // Checked BEFORE the allow replay: a bad slice should fail without
+                // spending an external call.
                 FullFillGuard.requireFullFillFromData(data, 128, amount);
+                DelegationHelper.replayCometAllow(data, 160, comet, onBehalfOf, address(this));
                 uint256 bal = IComet(comet).collateralBalanceOf(onBehalfOf, asset);
                 uint256 beforeBal = IERC20(asset).balanceOf(address(this));
                 IComet(comet).withdrawFrom(onBehalfOf, address(this), asset, bal);
@@ -253,6 +266,7 @@ contract CometTakerModule is ITakerModule {
                 SafeTransferLib.safeTransfer(asset, receiver, amount);
                 if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
             } else {
+                DelegationHelper.replayCometAllow(data, 128, comet, onBehalfOf, address(this));
                 IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
             }
         } else {

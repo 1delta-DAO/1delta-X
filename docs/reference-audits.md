@@ -1156,6 +1156,147 @@ were cheaper to fix than to keep reasoning about.
 
 ---
 
+### F25 — 12-lens parallel re-audit of core + four lending modules (2026-09-01)
+
+Twelve independent attacker passes over `packages/core/src` and the aave-v3 /
+aave-v4 / morpho-blue / morpho-midnight modules (36 files, 10,083 lines): nine
+single-specialty lenses (math-precision, access-control, economic-security,
+execution-trace, invariant, periphery, first-principles, asymmetry, boundary) and
+three gap-hunters that look for bugs living at the SEAM between two lenses
+(numerical-gap, trust-gap, flow-gap). No Critical. Four findings fixed.
+
+The headline is not any single finding. **Every one is a break in a discipline this
+repo already established elsewhere** — two of them are missed instances of findings
+already in this ledger. The failure mode is not "we did not know the rule"; it is
+"the rule was applied to N-1 of N call sites".
+
+| # | finding | severity | fix | ancestor |
+| --- | --- | --- | --- | --- |
+| G-1 | `MidnightLendModule.makeOnBehalf` swept `balanceOf(this)` with no floor | Med | pre-pull `floor`, sweep `bal - floor` | **missed instance of F19** |
+| G-2 | Morpho auth block and the `FullFillGuard` total both read `data` offset 224 | Med | branch-scoped offsets (Full: total@224, auth@256) | new |
+| G-3 | same collision in `CometTakerModule` at offset 128 | Med | branch-scoped (Full: total@128, allow@160) | variant of G-2 |
+| G-4 | the `TAKE_FOR` balance floor divided before it scaled | Med | exact remainder term + `floorBps` clamp | **arithmetic hole in F16/F-2's fix** |
+| G-5 | `MidnightLoopCallback.onSell` never checked it was the fill's `receiver` | Low | assert `receiver == address(this)` | new |
+| G-6 | five more unfloored residual sweeps, found by variant analysis | Med | pre-pull `floor` in each | **F19 again, ×5** |
+| G-7 | Aave v3's three borrow paths forwarded a nominal amount, never a measured delta | Med | `balBefore`/`received` + `require`, matching Aave v4 | **H-3 River shape** |
+| G-8 | six Aave approvals to an order-supplied spender were never cleared | Low | `forceApprove(..., 0)` after each protocol call | hardening |
+| G-9 | `Core._permitBatchHead` was the last `returndatacopy` into scratch under a `memory-safe-assembly` annotation | Low | copy into the calldata buffer, as `_execute` does | hardening |
+| G-10 | seven comments asserted invariants the code does not hold | — | corrected (see below) | **F23 again** |
+
+**G-1 is F19 with one call site missed.** F19 established "the module ends where it
+started, not empty" and `DustHandler.disposeResidual` grew a `floor` overload whose
+doc-block *is* this bug. Eleven of the twelve lenses independently found that
+`MidnightLendModule` never took it — the single unfloored residual path in the
+bundle, against ten sibling packages that all do it correctly (`grep floor` returns
+0 hits in `MidnightModules.sol`, 3 each in the Aave/Morpho module files). **G-6 closed the same bug in five more places**, found by asking the
+variant question rather than by re-auditing: `LiquityV2Modules.sol`,
+`RiverModules.sol`, `TellerModules.sol`, `ListaModules.sol` (all repay-leg BOLD /
+debt / principal / loan token sweeps) and `CompoundV2Modules.sol` (which forwarded
+its whole **cToken** balance as a mint receipt). Six instances of one rule, in one
+sweep, in packages that each had the correct pattern elsewhere in the same file —
+`LiquityV2Modules.sol:274-280` and `ListaModules.sol:183-185` both use before/after
+deltas a few functions away.
+
+The regression tests are in `morpho-midnight/test/security/StrandedBalance.t.sol`
+and assert the invariant directly — *the module ends where it started* — rather
+than asserting a particular refund amount. Against the pre-fix code the module ends
+at 0 instead of holding the stranded balance.
+
+**G-7 is the same story in the other direction: a guard that exists in the newer
+package and never got back-ported to the older one.** All three Aave **v3** borrow
+paths (`AaveV3BorrowModule.takeOnBehalf`, and both leverage modules in
+`AaveV3FusedModules.sol`) did `pool.borrow(...)` followed by
+`safeTransfer(asset, receiver, amount)` — forwarding the *requested* amount with no
+measurement. `AaveV4BorrowModule` carries the delta check and names the class
+in-line as "the H-3 River shape". Every other value-out hop in the audited set had
+it; these three did not. No mainnet v3 reserve is known to under-deliver, so the
+precondition stays unproven — but the guard costs one `balanceOf` pair and the
+alternative is an open-ended assumption about every present and future reserve.
+
+**G-2 is the one worth reading closely, because eleven of twelve lenses got its
+severity WRONG.** Four called it fail-closed (a bricked order, funds safe); one saw
+the fail-open and was right. `FullFillGuard.requireFullFill` passes iff
+`amount == totalAmount && totalAmount != 0`. With both readers at offset 224 the
+"total" it compares against is really the Morpho auth `nonce` — and Morpho nonces
+are sequential from 0, so a maker's second gasless auth carries `nonce == 1`. The
+slice is `Base._prorate(total, ctx)`, whose `newFilled` comes from the FILLER's
+`fillAmount`. A filler can therefore steer the slice to equal the nonce, satisfy the
+guard on a **dust slice**, and force `_withdrawFull` to unwind the maker's entire
+position — precisely the outcome the guard exists to prevent. The majority verdict
+missed only one thing: that the slice is filler-chosen.
+
+Scope of G-2, stated precisely, because it bounds the severity: the collision needs
+`Full` mode AND an embedded auth block. Without the block, `replayMorphoAuth`
+returns early on its length check and the guard reads the real total — the common
+path was always correct. And `_withdrawFull` returns the excess to `onBehalfOf`, so
+the harm is **forced position closure plus a bricked order at a filler-chosen
+moment, not theft**.
+
+The fix mirrors `AaveV3WithdrawModule`, which had the same two readers at offset 128
+and was never vulnerable because they sit on mutually exclusive branches. Morpho
+cannot copy that exactly — Aave's Exact-mode permit is only needed in one branch,
+while Morpho's authorization is needed in both — so the offsets are branch-scoped
+instead: `Full` carries the total at 224 and the auth at 256, `Exact` keeps the auth
+at 224. Nothing on the wire breaks: the only encoding that moves is `Full` + auth,
+which could never fill.
+
+**G-4 is F16/F-2 finished.** F16 closed "empty wallet fails open"; F-2 made an unset
+`floorBps` mean the full cap. Both left the floor's *arithmetic* as
+`cap / 10_000 * floorBps` — divide-first, to dodge an overflow on an unconstrained
+maker-signed cap. That truncates `cap` to a multiple of 10,000 before scaling, so
+the threshold falls short by up to `floorBps` **raw** units. The error is absolute,
+not relative, so its significance is set entirely by the token's decimals: a
+2-decimal token (EURS, GUSD) puts an ordinary $50 cap at 5,000 raw units, where the
+floor evaluates to **zero** and `bal != 0` is once more the only bound — F16's
+original hole, reopened one layer down. Every existing floor test used a `10 ether`
+cap, where the truncation is invisible; the three added in `TakeForItem.t.sol` fail
+against the old expression (two reach `InsufficientAllowance`, proving the fill got
+*past* an inert floor; the third panics `0x11`, the unclamped-`floorBps` overflow).
+
+**G-5**: `ISellCallback` hands the callback a `receiver`, and the implementation
+declared it as a bare unnamed `address`. Its own doc-comment asserted the
+assumption — "we are `receiverIfMakerIsSeller`" — that nothing checked. Since
+`offer.callback` is authored by the counterparty and `_swap` spends `sellerAssets`
+out of this contract, an offer could name the contract as callback while routing
+proceeds elsewhere. Bounded by whatever residue the contract holds, which is
+designed to be zero — hence Low, but the check is one line.
+
+**Method note.** The two disagreements above were both settled by reading the source
+rather than by counting lenses, and the majority was wrong both times (G-2 severity;
+G-4, which one lens downgraded to "dust" on an implicit 18-decimal assumption).
+Convergence is good evidence for *existence* and poor evidence for *severity*.
+
+**G-8 through G-10 are the hardening pass**, landed together because none of them
+changes behaviour a caller can observe. G-8 clears the `forceApprove` in the four
+Aave deposit/repay modules **and the two fused leverage modules** — six sites, not
+the four the lead predicted; the variant question paid again. `pool` is decoded
+from order `data` on a shared singleton, so the spender is attacker-choosable, and
+while `forceApprove` writes an exact amount rather than accumulating (so there is
+no direct theft), what it leaves is a standing third-party claim on any FUTURE
+balance of that token — exactly what turns a later residual-stranding bug into a
+theft. G-1 and G-6 were six such bugs, in sibling packages, in this same audit.
+Regression tests in `aave-v3/test/unit/DanglingApproval.t.sol` use a pool that
+pulls *nothing*, which is the worst case and the one that proves the clear does not
+depend on the target having consumed anything.
+
+**G-10 is the F23 pattern once more, and worth listing explicitly** because each
+comment was load-bearing for someone:
+
+| where | claimed | actual |
+| --- | --- | --- |
+| `UnorderedNonces` | the nonce-namespace rule is "ASSERTED in `permitBatch` / `permitTake`" | no on-chain assertion exists; the named "constructors" are the **SDK builders** |
+| `Structs.sol` | `params` bits `[160:256)` free | `baselinePriorityFeeWei` occupies `[160:208)` — and this map is where a new field gets placed from |
+| `OrderGates.anchorTotal` | `0` "leaves the leg uncapped" | `Proportional.resolve` reverts `ProportionalNeedsCap`; a `0` makes every fill revert |
+| `Core.fillUpTo` | "time moves the bump filler-ward" | true only on a rising curve; a descending segment is a fourth maker-ward mover, and the advice steered fillers into skipping the floor that protects them |
+| `MidnightLoopCallback` | a thin `minCollateralOut` "simply fails Midnight's solvency check" | the check is against the WHOLE position, so a borrower with headroom can be sandwiched for it while the fill succeeds |
+| Aave v3 / v4 withdraw byte maps | no `totalAmount` field | `FullFillGuard` requires one and fails closed without it — a maker encoding `Full` from those maps signed an unfillable order |
+
+The last row is the one with a live consequence: the maps are what an integrator
+encodes from, and the SDK ships no module-`data` encoder at all (`grep` for
+`totalAmount` / `BalanceMode` across `packages/sdk/src/` returns nothing), so those
+headers are the only specification there is.
+
+
 ## Re-audit sweep — the generalised questions from F13–F15
 
 F13–F15 are three instances of two reusable mistakes. Sweep these questions rather

@@ -83,6 +83,12 @@ contract TellerRepayModule is IMakerModule {
             abi.decode(data, (address, address, uint256, bool));
         PermitHelper.replayIfPresent(data, 128, principalToken, onBehalfOf, address(permit3), amount);
 
+        // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would pay
+        // out anything already stranded at this shared module address, and anyone can
+        // be the maker of a one-unit order against it — so a stray balance would be
+        // claimable by whoever fills next. The invariant is "the module ends where it
+        // started", not "ends empty" (F19; {DustHandler.disposeResidual}'s floor).
+        uint256 floor = IERC20(principalToken).balanceOf(address(this));
         if (amount > 0) {
             permit3.transferFrom(onBehalfOf, address(this), principalToken, uint160(amount));
             SafeTransferLib.forceApprove(principalToken, tellerV2, amount);
@@ -94,9 +100,10 @@ contract TellerRepayModule is IMakerModule {
             SafeTransferLib.forceApprove(principalToken, tellerV2, 0);
         }
 
-        // Sweep the unused buffer (repayLoanFull pulls only what is owed).
-        uint256 residual = IERC20(principalToken).balanceOf(address(this));
-        if (residual != 0) SafeTransferLib.safeTransfer(principalToken, onBehalfOf, residual);
+        // Sweep the unused buffer (repayLoanFull pulls only what is owed) — the
+        // DELTA this call produced, never the pre-existing `floor`.
+        uint256 bal = IERC20(principalToken).balanceOf(address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(principalToken, onBehalfOf, bal - floor);
 
         _locked = 1;
     }

@@ -56,8 +56,17 @@ contract AaveV4DepositModule is IMakerModule {
         PermitHelper.replayIfPresent(data, 128, asset, onBehalfOf, address(permit3), amount);
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
+        // Scoped approve + CLEAR, not a standing grant. `positionManager` is decoded from the
+        // order's `data` on a SHARED singleton module, so it is attacker-choosable —
+        // anyone can author an order naming themselves as maker. A target that
+        // consumes less than approved would leave this module holding a permanent
+        // third-party claim on any FUTURE balance of `asset`, which is what turns a
+        // later residual-stranding bug into a theft. {SafeTransferLib.ensureApproval}'s
+        // own note forbids exactly this shape, and every Midnight module already
+        // clears. F25 / lead A-3.
         SafeTransferLib.forceApprove(asset, positionManager, amount);
         IGiverPositionManager(positionManager).supplyOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
+        SafeTransferLib.forceApprove(asset, positionManager, 0);
     }
 }
 
@@ -150,8 +159,17 @@ contract AaveV4RepayModule is IMakerModule {
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
         }
         if (toRepay > 0) {
+            // Scoped approve + CLEAR, not a standing grant. `positionManager` is decoded from the
+            // order's `data` on a SHARED singleton module, so it is attacker-choosable —
+            // anyone can author an order naming themselves as maker. A target that
+            // consumes less than approved would leave this module holding a permanent
+            // third-party claim on any FUTURE balance of `asset`, which is what turns a
+            // later residual-stranding bug into a theft. {SafeTransferLib.ensureApproval}'s
+            // own note forbids exactly this shape, and every Midnight module already
+            // clears. F25 / lead A-3.
             SafeTransferLib.forceApprove(asset, positionManager, toRepay);
             IGiverPositionManager(positionManager).repayOnBehalfOf(spoke, reserveId, toRepay, onBehalfOf);
+            SafeTransferLib.forceApprove(asset, positionManager, 0);
         }
     }
 
@@ -200,7 +218,15 @@ contract AaveV4RepayModule is IMakerModule {
 // `receiver`, and sweep the accrued excess back to `onBehalfOf`. Fill-or-kill
 // only, and only after debt is cleared.
 //
-// `data = abi.encode(spoke, positionManager, reserveId, asset[, DustHandler.BalanceMode])`.
+// Exact: `abi.encode(spoke, positionManager, reserveId, asset[, BalanceMode(0)])`
+//   — BalanceMode at 128.
+// Full:  `abi.encode(spoke, positionManager, reserveId, asset, BalanceMode(1), totalAmount)`
+//   — BalanceMode at 128, `totalAmount` at 160 and MANDATORY.
+//   — `totalAmount` is the item's full maker-signed amount; {FullFillGuard} asserts
+//     the slice equals it and FAILS CLOSED when the word is absent
+//     (`PartialFillUnsupported(amount, 0)`). It was previously undeclared here, so
+//     a maker encoding `Full` from this map signed an order no filler could ever
+//     settle. Declared in F25 (lead A-2).
 //
 contract AaveV4WithdrawModule is ITakerModule {
     IPermit3 public immutable permit3;

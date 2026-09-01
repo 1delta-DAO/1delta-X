@@ -165,7 +165,7 @@ abstract contract BaseFlashSolver {
         // leg. A multi-input order would collect only legsIn[0] here and turn
         // legs [1..] into maker shortfalls, so reject it (see _fillAndSwapAll for
         // the multi-input variant).
-        if (PackedArraysMem.count(order.legsIn) != 1) revert MultiInputUnsupported();
+        if (PackedArraysMem.validateLegsIn(order.legsIn) != 1) revert MultiInputUnsupported();
 
         settlement.fill(order, sig, fillAmountIn);
 
@@ -188,7 +188,7 @@ abstract contract BaseFlashSolver {
     ) internal {
         settlement.fill(order, sig, fillAmountIn);
 
-        uint256 n = PackedArraysMem.count(order.legsIn);
+        uint256 n = PackedArraysMem.validateLegsIn(order.legsIn);
         for (uint256 i; i < n; i++) {
             address tokenIn = PackedArraysMem.legInToken(order.legsIn, i);
             if (tokenIn == tokenOut) continue; // already the collateral asset

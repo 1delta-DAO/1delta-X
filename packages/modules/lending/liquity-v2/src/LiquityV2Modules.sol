@@ -188,6 +188,12 @@ contract LiquityV2RepayModule is IMakerModule {
         // debt read, the repay and the ownership check all share one root.
         address borrowerOps = LiquityV2TroveAuth.authorizeTrove(troveManager, troveId, onBehalfOf);
 
+        // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would pay
+        // out anything already stranded at this shared module address, and anyone can
+        // be the maker of a one-unit order against it — so a stray balance would be
+        // claimable by whoever fills next. The invariant is "the module ends where it
+        // started", not "ends empty" (F19; {DustHandler.disposeResidual}'s floor).
+        uint256 floor = IERC20(boldToken).balanceOf(address(this));
         LatestTroveData memory d = ILiquityV2TroveManager(troveManager).getLatestTroveData(troveId);
         uint256 toRepay = amount < d.entireDebt ? amount : d.entireDebt;
 
@@ -197,8 +203,8 @@ contract LiquityV2RepayModule is IMakerModule {
             ILiquityV2BorrowerOperations(borrowerOps).repayBold(troveId, toRepay);
         }
 
-        uint256 residual = IERC20(boldToken).balanceOf(address(this));
-        if (residual != 0) SafeTransferLib.safeTransfer(boldToken, onBehalfOf, residual);
+        uint256 bal = IERC20(boldToken).balanceOf(address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(boldToken, onBehalfOf, bal - floor);
 
         _locked = 1;
     }

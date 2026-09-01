@@ -151,6 +151,12 @@ contract RiverRepayModule is IMakerModule {
             abi.decode(data, (address, address, address, address, address));
 
         (uint256 debt,,,) = IRiverTroveManager(tm).getEntireDebtAndColl(onBehalfOf);
+        // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would pay
+        // out anything already stranded at this shared module address, and anyone can
+        // be the maker of a one-unit order against it — so a stray balance would be
+        // claimable by whoever fills next. The invariant is "the module ends where it
+        // started", not "ends empty" (F19; {DustHandler.disposeResidual}'s floor).
+        uint256 floor = IERC20(debtToken).balanceOf(address(this));
         uint256 toRepay = amount < debt ? amount : debt;
 
         if (toRepay > 0) {
@@ -160,9 +166,10 @@ contract RiverRepayModule is IMakerModule {
             SafeTransferLib.forceApprove(debtToken, xapp, 0);
         }
 
-        // Sweep any satUSD not consumed by the burn back to the maker.
-        uint256 residual = IERC20(debtToken).balanceOf(address(this));
-        if (residual != 0) SafeTransferLib.safeTransfer(debtToken, onBehalfOf, residual);
+        // Sweep any satUSD not consumed by the burn back to the maker — the DELTA
+        // this call produced, never the pre-existing `floor`.
+        uint256 bal = IERC20(debtToken).balanceOf(address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(debtToken, onBehalfOf, bal - floor);
 
         _locked = 1;
     }

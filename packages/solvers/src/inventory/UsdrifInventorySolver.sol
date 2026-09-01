@@ -196,7 +196,7 @@ contract UsdrifInventorySolver {
         private
         returns (uint256[] memory paid)
     {
-        uint256 n = PackedArraysMem.count(order.legsOut);
+        uint256 n = PackedArraysMem.validateLegsOut(order.legsOut);
         uint256[] memory before = new uint256[](n);
         for (uint256 j; j < n; ++j) {
             before[j] = IERC20(PackedArraysMem.legOutToken(order.legsOut, j)).balanceOf(address(this));

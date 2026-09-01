@@ -48,8 +48,17 @@ contract AaveV3DepositModule is IMakerModule, IFundingSource {
         PermitHelper.replayIfPresent(data, 64, asset, onBehalfOf, address(permit3), amount);
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
+        // Scoped approve + CLEAR, not a standing grant. `pool` is decoded from the
+        // order's `data` on a SHARED singleton module, so it is attacker-choosable —
+        // anyone can author an order naming themselves as maker. A target that
+        // consumes less than approved would leave this module holding a permanent
+        // third-party claim on any FUTURE balance of `asset`, which is what turns a
+        // later residual-stranding bug into a theft. {SafeTransferLib.ensureApproval}'s
+        // own note forbids exactly this shape, and every Midnight module already
+        // clears. F25 / lead A-3.
         SafeTransferLib.forceApprove(asset, pool, amount);
         IAaveV3Pool(pool).supply(asset, amount, onBehalfOf, 0);
+        SafeTransferLib.forceApprove(asset, pool, 0);
     }
 
     /// @inheritdoc IFundingSource
@@ -180,8 +189,17 @@ contract AaveV3RepayModule is IMakerModule, IFundingSource {
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
         }
         if (toRepay > 0) {
+            // Scoped approve + CLEAR, not a standing grant. `pool` is decoded from the
+            // order's `data` on a SHARED singleton module, so it is attacker-choosable —
+            // anyone can author an order naming themselves as maker. A target that
+            // consumes less than approved would leave this module holding a permanent
+            // third-party claim on any FUTURE balance of `asset`, which is what turns a
+            // later residual-stranding bug into a theft. {SafeTransferLib.ensureApproval}'s
+            // own note forbids exactly this shape, and every Midnight module already
+            // clears. F25 / lead A-3.
             SafeTransferLib.forceApprove(asset, pool, toRepay);
             IAaveV3Pool(pool).repay(asset, toRepay, rateMode, onBehalfOf);
+            SafeTransferLib.forceApprove(asset, pool, 0);
         }
     }
 
@@ -238,10 +256,20 @@ contract AaveV3RepayModule is IMakerModule, IFundingSource {
 // explicitly (as 0 = Exact) when including the permit block so the offsets
 // are unambiguous.
 //
-// `data = abi.encode(pool, asset, aToken[, BalanceMode[, deadline, v, r, s]])`
+// Exact: `abi.encode(pool, asset, aToken[, BalanceMode(0)[, deadline, v, r, s]])`
 //   — BalanceMode at 96, permit block at 128 (EXACT mode only).
+// Full:  `abi.encode(pool, asset, aToken, BalanceMode(1), totalAmount)`
+//   — BalanceMode at 96, `totalAmount` at 128 and MANDATORY.
+//   — `totalAmount` is the item's full maker-signed amount; {FullFillGuard} asserts
+//     the slice equals it, and FAILS CLOSED when the word is absent
+//     (`PartialFillUnsupported(amount, 0)`). It was previously undeclared here, so
+//     a maker encoding `Full` from this map signed an order no filler could ever
+//     settle. Declared in F25 (lead A-2).
 //   — Full mode is incompatible with gasless permit (rebasing balance unknown
-//     at signing time); use a standing ERC-20 approval in that case.
+//     at signing time); use a standing ERC-20 approval in that case. That is why
+//     the permit block and `totalAmount` can share offset 128: the two modes are
+//     mutually exclusive branches. (Contrast the Morpho Blue / Comet modules, where
+//     the auth block IS needed in both modes and the offsets had to diverge.)
 //
 contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource {
     IPermit3 public immutable permit3;
@@ -352,8 +380,18 @@ contract AaveV3BorrowModule is ITakerModule, IProceedsAsset {
         // Block at 96: (debtToken, deadline, v, r, s) = 160 bytes.
         DelegationHelper.replayAaveDelegation(data, 96, onBehalfOf, address(this), amount);
 
+        // Measure the delta rather than assuming the requested `amount` arrived: an
+        // under-delivering borrow (fee-on-transfer underlying, a capped or
+        // partially-filled reserve) would otherwise be topped up from any balance the
+        // module happens to hold and paid to the solver, while the user keeps the full
+        // debt — the H-3 River shape. Fail closed instead. Matches
+        // {AaveV4BorrowModule}, which already carried this guard.
+        uint256 balBefore = IERC20(asset).balanceOf(address(this));
         IAaveV3Pool(pool).borrow(asset, amount, rateMode, 0, onBehalfOf);
+        uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+        require(received >= amount, "insufficient borrowed");
         SafeTransferLib.safeTransfer(asset, receiver, amount);
+        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }
 
     /// @inheritdoc IProceedsAsset

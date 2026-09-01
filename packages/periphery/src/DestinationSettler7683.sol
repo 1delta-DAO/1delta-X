@@ -90,8 +90,8 @@ contract DestinationSettler7683 is IDestinationSettler {
         // clamp, so `paid[j]` is exactly what the (clamped) fill pulls per output leg.
         (,, uint256[] memory paid) = LENS.previewFill(p.order, p.fillAmount, address(this), p.takerData);
 
-        uint256 nOut = PackedArraysMem.count(p.order.legsOut);
-        uint256 nIn = PackedArraysMem.count(p.order.legsIn);
+        uint256 nOut = PackedArraysMem.validateLegsOut(p.order.legsOut);
+        uint256 nIn = PackedArraysMem.validateLegsIn(p.order.legsIn);
 
         // The floor is taken over the UNION of every touched token, BEFORE any caller
         // funds arrive — the true on-entry balance. A token that appears on both sides

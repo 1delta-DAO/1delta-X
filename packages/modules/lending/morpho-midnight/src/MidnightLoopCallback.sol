@@ -42,9 +42,17 @@ interface IUniV3Router {
 ///  collateral to anyone) — so, unlike the value-out modules, it needs NO
 ///  `setIsAuthorized` grant. The maker-signed `callbackData` is the only tunable:
 ///  it names the collateral index, the swap pool fee, and a slippage floor, all
-///  bound into the offer the maker signed. A too-thin `minCollateralOut` (or a
-///  loop that otherwise under-collateralizes) simply fails Midnight's solvency
-///  check and reverts the whole fill.
+///  bound into the offer the maker signed.
+///
+///  ⚠ `minCollateralOut` IS THE REAL SLIPPAGE BOUND — Midnight's solvency check is
+///  NOT a backstop for it. This note used to claim a too-thin floor "simply fails
+///  Midnight's solvency check and reverts the whole fill". That holds only for a
+///  position with no pre-existing headroom: the check is against the WHOLE
+///  position, so a borrower who already has collateral can be sandwiched for the
+///  full headroom while the fill still succeeds. The offer is fillable by ANY
+///  lender, so the sandwicher and the filler need not be the same party. Size the
+///  floor properly; do not rely on the solvency check to catch a loose one.
+///  Corrected in F25 (see `docs/audit-2026-09-leads.md` C).
 contract MidnightLoopCallback is ISellCallback {
     IMidnight public immutable midnight;
     IUniV3Router public immutable router;
@@ -63,7 +71,8 @@ contract MidnightLoopCallback is ISellCallback {
     /// @inheritdoc ISellCallback
     /// @dev `data = abi.encode(uint256 collateralIndex, uint24 dexFee, uint256 minCollateralOut)`.
     ///      The borrowed `sellerAssets` (loan token) are already sitting in this
-    ///      contract when Midnight calls in (we are `receiverIfMakerIsSeller`).
+    ///      contract when Midnight calls in — but ONLY when we are the fill's
+    ///      `receiver`, which is why the check below exists.
     function onSell(
         bytes32,
         Market memory market,
@@ -71,10 +80,19 @@ contract MidnightLoopCallback is ISellCallback {
         uint256,
         uint256,
         address seller,
-        address,
+        address receiver,
         bytes memory data
     ) external override returns (bytes32) {
         if (msg.sender != address(midnight)) revert OnlyMidnight();
+        // ⚠ `msg.sender == midnight` is NOT sufficient. Midnight dispatches whatever
+        // `offer.callback` names, and the offer is authored by the COUNTERPARTY. An
+        // offer can therefore name this contract as the sell-side callback while
+        // routing the borrowed proceeds to `receiverIfMakerIsSeller = attacker`.
+        // `_swap` spends `sellerAssets` of `loanToken` OUT OF THIS CONTRACT, so
+        // without this check such an offer buys the attacker collateral using any
+        // balance this contract happens to hold. The interface hands us `receiver`
+        // precisely so the assumption above can be asserted rather than assumed.
+        if (receiver != address(this)) revert OnlyMidnight();
 
         (uint256 collateralIndex, uint24 dexFee, uint256 minCollateralOut) =
             abi.decode(data, (uint256, uint24, uint256));

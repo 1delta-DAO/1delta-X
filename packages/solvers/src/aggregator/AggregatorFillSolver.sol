@@ -264,7 +264,9 @@ contract AggregatorFillSolver {
     ///      caller owes the maker nothing) while still naming a token here. Reject
     ///      the empty blob and that shape cannot be built.
     function _plan(Order calldata order, RoutePlan calldata plan) private view returns (FillRoute memory) {
-        if (PackedArraysMem.count(order.legsIn) == 0 || PackedArraysMem.count(order.legsOut) == 0) revert NoLegs();
+        if (PackedArraysMem.validateLegsIn(order.legsIn) == 0 || PackedArraysMem.validateLegsOut(order.legsOut) == 0) {
+            revert NoLegs();
+        }
         address tokenIn = PackedArraysMem.legInToken(order.legsIn, 0);
         address tokenOut = PackedArraysMem.legOutToken(order.legsOut, 0);
         return FillRoute({

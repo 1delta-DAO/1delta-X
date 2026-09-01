@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {IERC20} from "forge-std/interfaces/IERC20.sol";
+
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
@@ -93,8 +95,17 @@ contract AaveV3FusedLeverageModule is ITakerModule {
             uint256 collateral = _ceilDiv(amount * collateralTotal, borrowTotal);
             if (collateral != 0) {
                 permit3.transferFrom(onBehalfOf, address(this), collateralAsset, uint160(collateral));
+                // Scoped approve + CLEAR, not a standing grant. `pool` is decoded from the
+                // order's `data` on a SHARED singleton module, so it is attacker-choosable —
+                // anyone can author an order naming themselves as maker. A target that
+                // consumes less than approved would leave this module holding a permanent
+                // third-party claim on any FUTURE balance of `collateralAsset`, which is what turns a
+                // later residual-stranding bug into a theft. {SafeTransferLib.ensureApproval}'s
+                // own note forbids exactly this shape, and every Midnight module already
+                // clears. F25 / lead A-3.
                 SafeTransferLib.forceApprove(collateralAsset, pool, collateral);
                 IAaveV3Pool(pool).supply(collateralAsset, collateral, onBehalfOf, 0);
+                SafeTransferLib.forceApprove(collateralAsset, pool, 0);
             }
         }
         {
@@ -103,8 +114,20 @@ contract AaveV3FusedLeverageModule is ITakerModule {
             // ── leg 2: draw the debt against it, in the same call ──
             // Optional delegation-with-sig, block at 192: (debtToken, deadline, v, r, s).
             DelegationHelper.replayAaveDelegation(data, 192, onBehalfOf, address(this), amount);
+            // Measure the delta rather than assuming the requested `amount` arrived:
+            // an under-delivering borrow (fee-on-transfer underlying, a capped or
+            // partially-filled reserve) would otherwise be topped up from any balance
+            // the module happens to hold and paid to the solver, while the user keeps
+            // the full debt — the H-3 River shape. Fail closed instead. Matches
+            // {AaveV4BorrowModule}, which already carried this guard.
+            uint256 balBefore = IERC20(borrowAsset).balanceOf(address(this));
             IAaveV3Pool(pool).borrow(borrowAsset, amount, rateMode, 0, onBehalfOf);
+            uint256 received = IERC20(borrowAsset).balanceOf(address(this)) - balBefore;
+            require(received >= amount, "insufficient borrowed");
             SafeTransferLib.safeTransfer(borrowAsset, receiver, amount);
+            if (received > amount) {
+                SafeTransferLib.safeTransfer(borrowAsset, onBehalfOf, received - amount);
+            }
         }
     }
 
@@ -196,8 +219,17 @@ contract AaveV3TakeForLeverageModule is ITakerForModule, IFundingSource, IProcee
             // across fills, the same posture {Base._runItem} takes on a zero slice.
             if (forAmount != 0) {
                 permit3.transferFrom(onBehalfOf, address(this), collateralAsset, uint160(forAmount));
+                // Scoped approve + CLEAR, not a standing grant. `pool` is decoded from the
+                // order's `data` on a SHARED singleton module, so it is attacker-choosable —
+                // anyone can author an order naming themselves as maker. A target that
+                // consumes less than approved would leave this module holding a permanent
+                // third-party claim on any FUTURE balance of `collateralAsset`, which is what turns a
+                // later residual-stranding bug into a theft. {SafeTransferLib.ensureApproval}'s
+                // own note forbids exactly this shape, and every Midnight module already
+                // clears. F25 / lead A-3.
                 SafeTransferLib.forceApprove(collateralAsset, pool, forAmount);
                 IAaveV3Pool(pool).supply(collateralAsset, forAmount, onBehalfOf, 0);
+                SafeTransferLib.forceApprove(collateralAsset, pool, 0);
             }
         }
         {
@@ -207,8 +239,20 @@ contract AaveV3TakeForLeverageModule is ITakerForModule, IFundingSource, IProcee
             // ── leg 2: draw the debt against it, in the same call ──
             // Optional delegation-with-sig, block at 192: (debtToken, deadline, v, r, s).
             DelegationHelper.replayAaveDelegation(data, 192, onBehalfOf, address(this), amount);
+            // Measure the delta rather than assuming the requested `amount` arrived:
+            // an under-delivering borrow (fee-on-transfer underlying, a capped or
+            // partially-filled reserve) would otherwise be topped up from any balance
+            // the module happens to hold and paid to the solver, while the user keeps
+            // the full debt — the H-3 River shape. Fail closed instead. Matches
+            // {AaveV4BorrowModule}, which already carried this guard.
+            uint256 balBefore = IERC20(borrowAsset).balanceOf(address(this));
             IAaveV3Pool(pool).borrow(borrowAsset, amount, rateMode, 0, onBehalfOf);
+            uint256 received = IERC20(borrowAsset).balanceOf(address(this)) - balBefore;
+            require(received >= amount, "insufficient borrowed");
             SafeTransferLib.safeTransfer(borrowAsset, receiver, amount);
+            if (received > amount) {
+                SafeTransferLib.safeTransfer(borrowAsset, onBehalfOf, received - amount);
+            }
         }
     }
 

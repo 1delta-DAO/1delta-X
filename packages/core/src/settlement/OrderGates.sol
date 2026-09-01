@@ -156,8 +156,10 @@ library OrderGates {
             // On a proportional leg `end` is not a ramp endpoint — there is nothing
             // to ramp — it is the maker's absolute CAP. See {Proportional} for why
             // an uncapped proportional order is a footgun and this is not optional
-            // in practice. `0` keeps the historical "no second endpoint" meaning and
-            // leaves the leg uncapped.
+            // in practice — it is MANDATORY, not merely advisable: {Proportional.resolve}
+            // opens with `if (cap == 0) revert ProportionalNeedsCap()`. A `0` here
+            // therefore does NOT "leave the leg uncapped" (as this comment used to
+            // say); it makes every fill of the order revert. Corrected in F25.
             return Proportional.resolve(token, order.maker, startIn, endIn);
         }
         return startIn;

@@ -245,6 +245,17 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   relevant code moves. Companion to [SECURITY.md](../SECURITY.md), which is the
   trust model and the audit log.
 
+- **[audit-2026-09-leads.md](audit-2026-09-leads.md)** — the open **leads** from the
+  F25 twelve-lens re-audit (the findings themselves are closed, in
+  `reference-audits.md`). A lead is a place where the code depends on something it
+  does not enforce; most resolve into "correct, but for a reason that lives
+  somewhere else", which is exactly what a later local change breaks. Tiered by
+  what to do about them — verified-real (A), fragility worth documenting rather
+  than fixing (B), doc drift (C), blocked on upstream Midnight (D), and closed by
+  inspection (E) so nobody re-opens them. **Tier B is the part to read**: in each
+  entry the safety argument runs through a different part of the system than the
+  one that looks responsible.
+
 - **[edge-case-matrix.md](edge-case-matrix.md)** — the *internal* counterpart to
   the above: our own state space, crossed. Ten axes (credential, lifecycle state,
   entry point, pricing mode, kill switch, fill granularity, leg shape, items,

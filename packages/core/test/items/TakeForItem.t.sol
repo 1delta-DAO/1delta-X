@@ -1187,4 +1187,70 @@ contract TakeForItemTest is CoreSettlementBase {
         );
         assertEq(IERC20(USDC).balanceOf(maker), before, "the plain order settled anyway");
     }
+
+    // ──────────── the floor's ARITHMETIC, not just its presence ────────────
+    //
+    // AUDIT 2026-09. The floor was computed as `cap / 10_000 * floorBps` — divide
+    // first, to dodge an overflow on an unconstrained maker-signed cap. That
+    // truncates `cap` to a multiple of 10_000 BEFORE scaling, so the realised
+    // threshold fell short by up to `floorBps` RAW units. The error is ABSOLUTE,
+    // not relative, so its significance is set by the token's decimals — and every
+    // floor test above uses a `10 ether` cap, where it is invisible.
+
+    /// @dev AUDIT FIX. THE COLLAPSE. For any cap under 10_000 raw units the old
+    ///      expression evaluated to `0 * floorBps == 0`, so the floor was not merely
+    ///      lenient — it was absent, and `bal != 0` was the only surviving bound.
+    ///      That is exactly the one-wei-funds-a-full-borrow hole the floor was added
+    ///      to close, reachable through the same balance-drain sequencing.
+    ///      Not an exotic cap: a 2-decimal token (EURS, GUSD) puts an ordinary $50
+    ///      ceiling at 5_000 raw units.
+    function test_balance_floorBelowTenThousandUnits_doesNotCollapse() public {
+        _fundSolver();
+        deal(DAI, maker, 1); // one raw unit against a "fund the whole cap" floor
+
+        bytes memory data = _dataFunding(_forBalanceFloor(DAI, 0), 5_000, DAI);
+        _authorise(address(takeFor), data, USDC_IN, 10 ether);
+        Order memory o = _order(70, address(takeFor), data);
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        settlement.fill(o, sig, USDC_IN);
+    }
+
+    /// @dev AUDIT FIX. THE SHORTFALL, away from the boundary. `floorBps` unset means
+    ///      "fund the whole cap or do not fill", yet the truncated form accepted a
+    ///      balance 9_999 units short of it. Small here, but the gap is `cap mod
+    ///      10_000` scaled by the bps — it does not shrink as the cap grows.
+    function test_balance_floorRemainder_isNotDiscarded() public {
+        _fundSolver();
+        deal(DAI, maker, 1_000_000_000); // old threshold: floor(cap/1e4)*1e4 == 1e9
+
+        bytes memory data = _dataFunding(_forBalanceFloor(DAI, 0), 1_000_009_999, DAI);
+        _authorise(address(takeFor), data, USDC_IN, 10 ether);
+        Order memory o = _order(71, address(takeFor), data);
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        settlement.fill(o, sig, USDC_IN);
+    }
+
+    /// @dev AUDIT FIX. `floorBps` is a 16-bit field and was never bounded to `BPS`.
+    ///      A floor above the cap can never be met, so the leg is dead either way —
+    ///      but on a large cap the unclamped multiply PANICKED (0x11) instead of
+    ///      raising the named error the rest of this path is careful to give.
+    function test_balance_floorBpsAboveBps_revertsNamed() public {
+        _fundSolver();
+        deal(DAI, maker, 1 ether);
+
+        bytes memory data = _dataFunding(_forBalanceFloor(DAI, 65_535), 5e76, DAI);
+        _authorise(address(takeFor), data, USDC_IN, 10 ether);
+        Order memory o = _order(72, address(takeFor), data);
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        settlement.fill(o, sig, USDC_IN);
+    }
 }
