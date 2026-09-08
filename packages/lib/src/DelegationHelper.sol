@@ -5,12 +5,31 @@ import {ICreditDelegationToken} from "@lib/interfaces/ICreditDelegationToken.sol
 import {ICometAllow} from "@lib/interfaces/ICometAllow.sol";
 import {IMorphoAuth} from "@lib/interfaces/IMorphoAuth.sol";
 
+// The one slice of the Ethereum Vault Connector's surface the EVC permit replay
+// needs. Declared here (not under the shared interfaces dir) because this lib
+// must not depend on the euler-v2 package's fuller `IEVC`, and no other lib
+// consumer needs it. `permit` executes `data` as an EVC self-call authenticated
+// as `signer`; `sender == address(0)` lets anyone submit.
+interface IEVCPermit {
+    function permit(
+        address signer,
+        address sender,
+        uint256 nonceNamespace,
+        uint256 nonce,
+        uint256 deadline,
+        uint256 value,
+        bytes calldata data,
+        bytes calldata signature
+    ) external payable;
+}
+
 // ──────────────────── DelegationHelper ────────────────────
 //
 // Shared library for optional EIP-712 delegation-sig replay in taker modules.
 // Each protocol has its own delegation mechanism; the library exposes one
-// helper per protocol. All delegation blocks are exactly 160 bytes (5 ABI-
-// padded words) appended after the module's base `data`.
+// helper per protocol. The delegation block is appended after the module's base
+// `data` — exactly 160 bytes (5 ABI-padded words) for the fixed-shape protocols
+// below; the EVC block alone is dynamic (it carries the signed self-call bytes).
 //
 // The caller passes `data`, the byte offset at which the delegation block
 // starts, plus the protocol-specific context. If `data` is too short (block
@@ -113,5 +132,48 @@ library DelegationHelper {
                 IMorphoAuth.Signature({v: v, r: r, s: s})
             ) {}
             catch {}
+    }
+
+    // ── Euler V2 (Ethereum Vault Connector) ───────────────────────────────────
+    //
+    // Block at `baseLen` — DYNAMIC, unlike the fixed 160-byte blocks above,
+    // because it carries the signed self-call bytes:
+    //   abi.encode(uint256 nonceNamespace, uint256 nonce, uint256 deadline,
+    //              bytes evcData, bytes sig)
+    //
+    // `evcData` is an EVC self-call the maker signed under the EVC's own EIP-712
+    // `Permit` — typically `abi.encodeCall(IEVC.batch, (items))` whose items
+    // target the EVC itself: `setAccountOperator(signer, module, true)`,
+    // `enableController(signer, borrowVault)`, `enableCollateral(signer,
+    // collateralVault)`. Replaying it in-fill makes the maker's ENTIRE Euler
+    // auth surface signature-only — the EVC analogue of Aave's
+    // `delegationWithSig`, covering operator, controller AND collateral in one
+    // sealed blob (the EVC has no per-grant sig entrypoints, only `permit`).
+    //
+    // `sender = address(0)` is DELIBERATE: the EVC only lets the named `sender`
+    // submit a permit, and the maker cannot know which filler wins the order, so
+    // the maker signs an any-sender permit. That is safe here for the same
+    // reason it is best-effort: the permit is nonce-bound and grants exactly
+    // what the fill needs — whoever lands it first (this fill or a front-runner)
+    // leaves the same state behind. `value = 0` always: the replayed grants move
+    // no ETH.
+    //
+    // Best-effort per the header: the EVC burns the nonce on use AND
+    // `setAccountOperator` reverts when the status is already set, so a
+    // front-runner lifting `(nonce, deadline, evcData, sig)` from pending
+    // calldata and landing the permit directly would otherwise brick the fill
+    // forever (the bytes are frozen into the order hash and the taker ref). The
+    // real gate stays the EVC-routed call that follows, which still fails if the
+    // grants are genuinely absent.
+    //
+    // A malformed tail (maker-authored — it is under the order signature)
+    // reverts the decode and thus the fill: fail closed, nothing granted.
+    //
+    function replayEvcPermit(bytes calldata data, uint256 baseLen, address evc, address signer) internal {
+        if (data.length <= baseLen) return;
+        (uint256 nonceNamespace, uint256 nonce, uint256 deadline, bytes memory evcData, bytes memory sig) =
+            abi.decode(data[baseLen:], (uint256, uint256, uint256, bytes, bytes));
+        // Best-effort — see the front-run note in the header.
+        try IEVCPermit(evc).permit(signer, address(0), nonceNamespace, nonce, deadline, 0, evcData, sig) {} catch {}
     }
 }

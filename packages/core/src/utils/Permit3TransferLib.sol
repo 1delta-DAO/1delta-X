@@ -59,8 +59,21 @@ library Permit3TransferLib {
         // strict tokens reject. Settlement already zero-guards its call sites, so
         // this only hardens the library against a future caller that does not.
         if (amount == 0) return;
+        // ⚠ A MOVE TOO WIDE FOR THE BOOK IS REFUSED, NOT ROUTED AROUND IT. This used
+        // to fall straight through to the direct-approval fallback, so an amount above
+        // `uint160` skipped the Permit3 allowance entirely — its cap, its expiration,
+        // `revokeToken` and `lockdown` — with no signal. Both payers on this path move
+        // their own money under their own signature, so it was not exploitable; but
+        // {Base.AmountOverflow} promises the settler never silently narrows, and
+        // silently WIDENING past the gate is the same promise broken from the other
+        // side. Unreachable with any real token, which is the point: it should say so.
+        // Reuses {IPermit3.Permit3Denied} rather than declaring its own error: this
+        // library INLINES at every delivery and every shortfall pull, so a fresh
+        // selector is paid once per site, and the meaning carries — the book refused
+        // to gate this move. Settlement runs on a two-digit EIP-170 margin.
+        if (amount > type(uint160).max) revert IPermit3.Permit3Denied();
         bool ok;
-        if (amount <= type(uint160).max) {
+        {
             // Low-level call so a Permit3 failure is caught rather than reverting,
             // exactly as Euler wraps the Permit2 leg. `transferFrom` is overloaded
             // on IPermit3, so the single-leg selector is pinned explicitly:

@@ -21,3 +21,8 @@ packages/app/dist/
 packages/pitch-deck/
 packages/pitch-deck-rootstock/
 packages/pitch-deck-vc/
+
+# Transient build state from the solidity-auditor skill (source copies + skill
+# instructions). Scope and findings are captured in docs/audit-runs.md and the
+# F-ledger; the bundles themselves are disposable.
+.audit-*/

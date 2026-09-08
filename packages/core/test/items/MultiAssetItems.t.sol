@@ -396,7 +396,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
     // ──────────────────── One-shot permit-funded TAKE (U-2) ────────────────────
 
     bytes32 constant PERMIT_TAKE_WITNESS_TH = keccak256(bytes(
-        "PermitTakeWitness(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline,Order witness)Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
+        "PermitTakeWitness(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline,Order witness)Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
     ));
 
     function _signPermitTakeWitness(IPermit3.PermitTake memory p, bytes32 witness) internal view returns (bytes memory) {

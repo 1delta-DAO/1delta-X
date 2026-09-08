@@ -28,7 +28,7 @@ contract MockTakeFor is ITakerForModule, IFundingSource, IProceedsAsset {
     uint256[] public forAmounts;
     uint256 public totalFor;
 
-    function takeForOnBehalf(address onBehalfOf, uint256 amount, uint256 forAmount, address receiver, bytes calldata data)
+    function takeForOnBehalf(address, address onBehalfOf, uint256 amount, uint256 forAmount, address receiver, bytes calldata data)
         external
         override
     {
@@ -85,7 +85,7 @@ contract MockSilentTakeFor is ITakerForModule, IFundingSource {
         permit3 = IPermit3(_permit3);
     }
 
-    function takeForOnBehalf(address onBehalfOf, uint256 amount, uint256 forAmount, address receiver, bytes calldata data)
+    function takeForOnBehalf(address, address onBehalfOf, uint256 amount, uint256 forAmount, address receiver, bytes calldata data)
         external
         override
     {
@@ -97,6 +97,54 @@ contract MockSilentTakeFor is ITakerForModule, IFundingSource {
 
     function fundingSource(address, bytes calldata) external pure override returns (address, uint256) {
         revert("no preflight");
+    }
+}
+
+/// @dev PRE-FUNDED composite mock: the funding leg is DELIVERED to this module
+///      (the order signs `legsOut[j].recipient = module`), so `takeForOnBehalf`
+///      consumes its own balance instead of pulling from the maker — the maker
+///      grants NO token allowance and needs NO ERC20 approval on the funding
+///      asset. An unfunded balance fails closed, standing in for a real venue's
+///      supply reverting.
+contract MockPreFundTakeFor is ITakerForModule, IFundingSource, IProceedsAsset {
+    IPermit3 public immutable permit3;
+
+    uint256[] public forAmounts;
+    uint256 public totalFor;
+
+    constructor(address _permit3) {
+        permit3 = IPermit3(_permit3);
+    }
+
+    function takeForOnBehalf(address, address, uint256 amount, uint256 forAmount, address receiver, bytes calldata data)
+        external
+        override
+    {
+        require(msg.sender == address(permit3), "only permit3");
+        (,, address fundingToken, address proceedsToken) = abi.decode(data, (uint256, uint256, address, address));
+        require(IERC20(fundingToken).balanceOf(address(this)) >= forAmount, "unfunded");
+        // The "deposit": the delivered funding stays here, tracked, standing in for
+        // a protocol supply. Nothing is pulled from anyone.
+        forAmounts.push(forAmount);
+        totalFor += forAmount;
+        IERC20(proceedsToken).transfer(receiver, amount);
+    }
+
+    /// @dev Same asset field as the pull mock; `available` is unbounded because the
+    ///      funding arrives with the fill's own delivery — a wallet/allowance read
+    ///      would preview a self-funding order as short.
+    function fundingSource(address, bytes calldata data)
+        external
+        pure
+        override
+        returns (address asset, uint256 available)
+    {
+        (,, asset,) = abi.decode(data, (uint256, uint256, address, address));
+        available = type(uint256).max;
+    }
+
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (,,, asset) = abi.decode(data, (uint256, uint256, address, address));
     }
 }
 
@@ -133,6 +181,7 @@ contract MockPlainTaker is ITakerModule {
 ///  what went back into the position, on full and partial fills alike.
 contract TakeForItemTest is CoreSettlementBase {
     MockTakeFor takeFor;
+    MockPreFundTakeFor preFundTakeFor;
     MockPlainTaker plainTaker;
 
     address constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
@@ -148,11 +197,14 @@ contract TakeForItemTest is CoreSettlementBase {
     function setUp() public override {
         super.setUp();
         takeFor = new MockTakeFor(address(permit3));
+        preFundTakeFor = new MockPreFundTakeFor(address(permit3));
         plainTaker = new MockPlainTaker(address(permit3));
         vm.label(address(takeFor), "mockTakeFor");
+        vm.label(address(preFundTakeFor), "mockPreFundTakeFor");
 
-        // Borrow inventory the mock hands out as proceeds.
+        // Borrow inventory the mocks hand out as proceeds.
         deal(USDC, address(takeFor), USDC_IN * 10);
+        deal(USDC, address(preFundTakeFor), USDC_IN * 10);
         // The maker's side of the funding pull.
         vm.prank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
@@ -709,6 +761,198 @@ contract TakeForItemTest is CoreSettlementBase {
         settlement.fill(o, sig, USDC_IN);
     }
 
+    // ──────────── pre-funded: the leg is delivered to the item's OWN module ────────────
+    //
+    // `legsOut[j].recipient = module` + the leg-reference descriptor: the funding
+    // never transits the maker's wallet, so the maker's ONLY grant is the taker
+    // allowance — no Permit3 token allowance to the module and, decisively, no
+    // on-chain ERC20 approval of a token they may never have held (the delivered
+    // collateral on a cross-asset open, the debt token on every deleverage).
+
+    /// @dev {_order} with the output leg addressed to `recipient` instead of the
+    ///      maker, and an optional decaying `end`.
+    function _preFundOrder(uint256 nonce, address module, bytes memory data, address recipient, uint256 outEnd)
+        internal
+        view
+        returns (Order memory o)
+    {
+        o = _order(nonce, module, data);
+        LegOut[] memory legsOut = new LegOut[](1);
+        legsOut[0] = LegOut(WETH, WETH_OUT, outEnd, recipient);
+        o.legsOut = PackedEncode.legsOut(legsOut);
+        if (outEnd != 0) o.timing |= _packTiming(uint32(block.timestamp), 1000, 0);
+    }
+
+    /// The headline property: the fill lands with the maker holding ZERO grants on
+    /// the funding side — the base ERC20 approval to Permit3 is explicitly revoked
+    /// and no token allowance to the module is ever created. One less transfer, two
+    /// less approvals.
+    function test_preFund_fullFill_zeroMakerFundingApprovals() public {
+        _fundSolver();
+        // Strip the receive-side surface entirely: no ERC20 approve, no Permit3
+        // token allowance. Only the taker allowance (the borrow gate) remains.
+        vm.prank(maker);
+        IERC20(WETH).approve(address(permit3), 0);
+
+        bytes memory data = _data(_forLegPreFund(0));
+        vm.prank(maker);
+        permit3.approveTaker(
+            address(settlement), address(preFundTakeFor), keccak256(data), uint160(USDC_IN), uint48(block.timestamp + 1 hours)
+        );
+        Order memory o = _preFundOrder(70, address(preFundTakeFor), data, address(preFundTakeFor), 0);
+        bytes memory sig = _sign(o);
+
+        uint256 makerWeth = IERC20(WETH).balanceOf(maker);
+
+        vm.prank(solver);
+        settlement.fill(o, sig, USDC_IN);
+
+        assertEq(preFundTakeFor.totalFor(), WETH_OUT, "the delivered leg funded the position in full");
+        assertEq(IERC20(WETH).balanceOf(address(preFundTakeFor)), WETH_OUT, "delivery landed at the module directly");
+        assertEq(IERC20(WETH).balanceOf(maker), makerWeth, "the maker's wallet was never touched");
+        assertEq(IERC20(USDC).balanceOf(solver), USDC_IN, "solver paid from the take's proceeds");
+    }
+
+    /// Partial fills: what each slice delivers to the module is exactly what that
+    /// slice funds — the same net-zero property the maker-addressed form has, held
+    /// at the module instead of the wallet.
+    function test_preFund_partialFills_fundExactlyTheDelivery() public {
+        deal(WETH, solver, WETH_OUT * 2);
+        _approveSolverSide(WETH_OUT * 2, WETH);
+        uint256 solverBefore = IERC20(WETH).balanceOf(solver);
+        bytes memory data = _data(_forLegPreFund(0));
+        vm.prank(maker);
+        permit3.approveTaker(
+            address(settlement), address(preFundTakeFor), keccak256(data), uint160(USDC_IN), uint48(block.timestamp + 1 hours)
+        );
+        Order memory o = _preFundOrder(71, address(preFundTakeFor), data, address(preFundTakeFor), 0);
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
+        settlement.fill(o, sig, USDC_IN / 3);
+        vm.prank(solver);
+        settlement.fill(o, sig, USDC_IN - USDC_IN / 3);
+
+        uint256 delivered = solverBefore - IERC20(WETH).balanceOf(solver);
+        assertEq(preFundTakeFor.totalFor(), delivered, "funded == delivered, every slice");
+        assertEq(IERC20(WETH).balanceOf(address(preFundTakeFor)), delivered, "and it all sits in the position");
+    }
+
+    /// A DECAYING module-addressed leg: the funding tracks the auction exactly,
+    /// which is the combination no wallet-routed or ratio-in-data shape can offer
+    /// without either an approval surface or a mis-sized leg.
+    function test_preFund_decayedLeg_tracksTheAuction() public {
+        _fundSolver();
+        bytes memory data = _data(_forLegPreFund(0));
+        vm.prank(maker);
+        permit3.approveTaker(
+            address(settlement), address(preFundTakeFor), keccak256(data), uint160(USDC_IN), uint48(block.timestamp + 1 hours)
+        );
+        Order memory o = _preFundOrder(72, address(preFundTakeFor), data, address(preFundTakeFor), 0.9 ether);
+        bytes memory sig = _sign(o);
+
+        vm.warp(block.timestamp + 500); // mid-decay: 1.0 → 0.9 prices at 0.95
+        vm.prank(solver);
+        settlement.fill(o, sig, USDC_IN);
+
+        assertEq(preFundTakeFor.totalFor(), 0.95 ether, "funds the auction-priced delivery exactly");
+    }
+
+    /// The relaxation is to the item's OWN module and nothing else: a leg addressed
+    /// to a DIFFERENT module is still a third-party leg and still reverts. Without
+    /// this the fee-leg guard could be stepped around by routing the fee to any
+    /// module-shaped address.
+    function test_preFund_otherModuleRecipient_reverts() public {
+        _fundSolver();
+        bytes memory data = _data(_forLeg(0));
+        vm.prank(maker);
+        permit3.approveTaker(
+            address(settlement), address(preFundTakeFor), keccak256(data), uint160(USDC_IN), uint48(block.timestamp + 1 hours)
+        );
+        // Recipient is a module — just not the item's.
+        Order memory o = _preFundOrder(73, address(preFundTakeFor), data, address(plainTaker), 0);
+        bytes memory sig = _sign(o);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.ForLegNotMakers.selector);
+        settlement.fill(o, sig, USDC_IN);
+    }
+
+    /// @dev bit 253 on top of a leg reference declares the PRE-FUND shape.
+    function _forLegPreFund(uint256 index) internal view returns (uint256) {
+        // Bits [16:176) bind the funding TOKEN — `_data` funds in WETH.
+        return _forLeg(index) | (uint256(1) << 253) | (uint256(uint160(WETH)) << 16);
+    }
+
+    /// @notice F27/H-1 regression. Without the bit, `_forSlice` admits a referenced
+    ///         leg whose recipient is `address(0)` or the MAKER — which is correct
+    ///         for the pull shape (the module pulls the delivery back out of the
+    ///         wallet) and silently wrong for the pre-fund shape, where the module funds
+    ///         from its OWN balance against a delivery that went somewhere else.
+    ///         The core cannot tell the shapes apart, so the maker declares it.
+    function test_preFundDescriptor_requiresModuleAddressedLeg() public {
+        deal(WETH, solver, WETH_OUT);
+        _approveSolverSide(WETH_OUT, WETH);
+        // Same order, same module, same leg index — only the leg's RECIPIENT
+        // differs, and only the PRE-FUND bit makes the core care. `maker` is a
+        // recipient the loose check admits.
+        bytes memory data = _data(_forLegPreFund(0));
+        vm.prank(maker);
+        permit3.approveTaker(
+            address(settlement), address(preFundTakeFor), keccak256(data), uint160(USDC_IN), uint48(block.timestamp + 1 hours)
+        );
+        Order memory bad = _preFundOrder(76, address(preFundTakeFor), data, maker, 0);
+        bytes memory sig = _sign(bad);
+        vm.prank(solver);
+        vm.expectRevert(Base.ForLegNotMakers.selector);
+        settlement.fill(bad, sig, USDC_IN);
+    }
+
+    /// …and the same descriptor over a module-addressed leg still fills.
+    function test_preFundDescriptor_acceptsModuleAddressedLeg() public {
+        deal(WETH, solver, WETH_OUT);
+        _approveSolverSide(WETH_OUT, WETH);
+        bytes memory data = _data(_forLegPreFund(0));
+        vm.prank(maker);
+        permit3.approveTaker(
+            address(settlement), address(preFundTakeFor), keccak256(data), uint160(USDC_IN), uint48(block.timestamp + 1 hours)
+        );
+        Order memory good = _preFundOrder(77, address(preFundTakeFor), data, address(preFundTakeFor), 0);
+        bytes memory sig = _sign(good);
+        vm.prank(solver);
+        settlement.fill(good, sig, USDC_IN);
+        assertEq(preFundTakeFor.totalFor(), WETH_OUT, "the delivered leg funded the position in full");
+    }
+
+    /// THE BIJECTION, at the preflight. A module-addressed leg is legal ONLY under
+    /// the PRE-FUND descriptor: with bit 253 set the lens accepts it (and the fill
+    /// succeeds), and with the bit clear it is refused — because a pull-shaped module
+    /// under a module-addressed leg draws a SECOND copy from the maker's wallet and
+    /// strands the delivery on a shared singleton. The lens used to accept both, which
+    /// made it LOOSER than the settler is now.
+    function test_lens_moduleRecipientLeg_onlyUnderThePreFundBit() public {
+        SettlementLens l = new SettlementLens(address(settlement));
+
+        Order memory pre =
+            _preFundOrder(74, address(preFundTakeFor), _data(_forLegPreFund(0)), address(preFundTakeFor), 0);
+        (bool ok, string memory why) = l.validateOrder(pre);
+        assertTrue(ok, why);
+
+        Order memory pull =
+            _preFundOrder(76, address(preFundTakeFor), _data(_forLeg(0)), address(preFundTakeFor), 0);
+        (bool ok2, string memory why2) = l.validateOrder(pull);
+        assertFalse(ok2, "lens still accepts a pull descriptor over a module-addressed leg");
+        assertEq(why2, "take_for funds a fee leg (not the maker's)");
+    }
+
+    /// …and still flags every other non-maker recipient.
+    function test_lens_flagsOtherModuleRecipient() public {
+        SettlementLens l = new SettlementLens(address(settlement));
+        Order memory o = _preFundOrder(75, address(preFundTakeFor), _data(_forLeg(0)), address(plainTaker), 0);
+        (, string memory why) = l.validateOrder(o);
+        assertEq(why, "take_for funds a fee leg (not the maker's)");
+    }
+
     // ──────────────── lens preflight ────────────────
     //
     // Every descriptor defect above is a revert at FILL time. `validateOrder` is
@@ -865,17 +1109,23 @@ contract TakeForItemTest is CoreSettlementBase {
     /// the maker is about to sign, so the preflight catches it earlier and the fill
     /// path pays nothing. This test pins the settler side so the split stays
     /// deliberate — if the core ever starts reverting, this is the test to update.
-    function test_zeroOutputLeg_fundsNothing_butTheTakeStillDraws() public {
+    /// A zero funding slice against a non-zero draw is an UNCOLLATERALISED SLICE and
+    /// is now refused. This test used to assert the opposite — its old name said it
+    /// outright ("fundsNothing_butTheTakeStillDraws") — which is the shape
+    /// {Base.ForBalanceBelowFloor} already rejected for the BALANCE descriptor while
+    /// the LEG-REF and LITERAL forms had no equivalent floor.
+    function test_zeroOutputLeg_refusesTheBareTake() public {
         bytes memory data = _data(_forLeg(0));
         _authorise(address(takeFor), data, USDC_IN, WETH_OUT);
         Order memory o = _zeroLegOrder(38, data);
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
+        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
         settlement.fill(o, sig, USDC_IN);
-
-        assertEq(takeFor.amounts(0), USDC_IN, "the value-OUT leg drew in full");
-        assertEq(takeFor.forAmounts(0), 0, "and nothing funded it: a bare take");
+        // Nothing was recorded because nothing was dispatched — the module's log is
+        // empty, so indexing it would itself revert.
+        assertEq(takeFor.calls(), 0, "no dispatch happened at all");
     }
 
     /// And the preflight DOES name it — through the general output-leg rule, not a
@@ -919,6 +1169,41 @@ contract TakeForItemTest is CoreSettlementBase {
         // Deliberately MISMATCHED (DAI vs the WETH leg) — the check would bite if the
         // module answered, so this pins that a failed staticcall skips it.
         (bool ok,) = lens.validateOrder(_order(62, address(silent), _dataFunding(_forLeg(0), 0, DAI)));
+        assertTrue(ok, "a module that cannot answer must not fail the order");
+    }
+
+    /// AUDIT 2026-09 (lead B-3). The BALANCE form left the same door open that the
+    /// leg-reference form above closes. The core sizes `forAmount` from
+    /// `balanceOf(descriptorToken, maker)` while the module spends an asset named
+    /// separately in `data`; nothing on-chain reconciles them, so a 6-decimal read
+    /// funding an 18-decimal deposit mis-sizes the leg while the borrow draws full.
+    /// The sibling shape guards were all promoted from lens advice to on-chain
+    /// reverts; this one stays in the lens because Settlement has 91 bytes of
+    /// headroom and both halves are maker-signed (no filler chooses either).
+    function test_lens_flagsBalanceDescriptorAssetMismatch() public {
+        // Descriptor reads the maker's WETH balance; the blob funds DAI.
+        Order memory o = _order(64, address(takeFor), _dataFunding(_forBalance(WETH), 10 ether, DAI));
+        o.minFillAnchor = USDC_IN; // balance form is full-fill only; that check runs first
+        assertEq(_lensReason(o), "take_for balance leg reads a different asset than the module funds");
+    }
+
+    /// The matching case still passes — this is a binding, not a ban.
+    function test_lens_acceptsMatchingBalanceDescriptorAsset() public {
+        SettlementLens lens = new SettlementLens(address(settlement));
+        Order memory o = _order(65, address(takeFor), _dataFunding(_forBalance(DAI), 10 ether, DAI));
+        o.minFillAnchor = USDC_IN; // balance form is full-fill only
+        (bool ok, string memory why) = lens.validateOrder(o);
+        assertTrue(ok, why);
+    }
+
+    /// Same degradation rule as the leg form: a module that cannot answer must skip
+    /// the check rather than fail an order that is perfectly fillable.
+    function test_lens_balanceForm_silentModule_isNotRejected() public {
+        MockSilentTakeFor silent = new MockSilentTakeFor(address(permit3));
+        SettlementLens lens = new SettlementLens(address(settlement));
+        Order memory o = _order(66, address(silent), _dataFunding(_forBalance(WETH), 10 ether, DAI));
+        o.minFillAnchor = USDC_IN;
+        (bool ok,) = lens.validateOrder(o);
         assertTrue(ok, "a module that cannot answer must not fail the order");
     }
 

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 /// @title IMakerModule
-/// @notice Uniform "make (push) value into a user's position" adapter — the
+/// @notice Uniform "make (pre-fund) value into a user's position" adapter — the
 ///         inverse of `ITakerModule`. Used for deposit and repay ops.
 ///
 ///         Naming mirrors limit-order parlance: takers draw value out, makers
@@ -33,7 +33,7 @@ pragma solidity ^0.8.28;
 ///  `permit3.transferFrom(user, address(this), token, amount)` and forwards
 ///  it to the protocol.
 interface IMakerModule {
-    /// @notice Push `amount` of value from `onBehalfOf` into the protocol
+    /// @notice Pre-fund `amount` of value from `onBehalfOf` into the protocol
     ///         position identified by `data`.
     /// @dev    Called by Settlement. Module MUST pull the funding token
     ///         from `onBehalfOf` via `permit3.transferFrom(...)` — the

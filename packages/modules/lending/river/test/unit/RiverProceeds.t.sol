@@ -43,7 +43,8 @@ contract MockXApp {
     RvrToken public collToken;
     uint256 public deliveryBps = 10_000;
     /// @dev false = deliver to `account` (Prisma lineage); true = deliver to
-    ///      `msg.sender` (the FORK-VALIDATED Hemi diamond behaviour).
+    ///      `msg.sender` — the FORK-VALIDATED behaviour of the deployed diamond
+    ///      (observed first on Hemi, since re-confirmed on BNB Smart Chain).
     bool public mintToCaller;
 
     constructor(address _debt, address _coll) {
@@ -204,12 +205,13 @@ contract RiverProceedsTest is Test {
         assertEq(satUSD.balanceOf(maker), MAKER_SAVINGS + (BORROW * 500) / 10_000, "surplus kept by the maker");
     }
 
-    // ──────────────── The Hemi direction (fork-validated) ────────────────
+    // ─────────── The caller direction (fork-validated) ───────────
 
-    /// The deployed Hemi diamond delivers value-out to msg.sender — the MODULE —
-    /// not to `account`. The direction-agnostic settle pays the solver from the
-    /// module's own delta; the maker's wallet is never touched.
-    function test_borrow_hemiDirection_paysFromModuleDelta() public {
+    /// The deployed diamond delivers value-out to msg.sender — the MODULE — not
+    /// to `account`. The direction-agnostic settle pays the solver from the
+    /// module's own delta; the maker's wallet is never touched. Named for the
+    /// DIRECTION, not the chain: first measured on Hemi, re-confirmed on BSC.
+    function test_borrow_callerDirection_paysFromModuleDelta() public {
         xapp.setMintToCaller(true);
 
         _take(_borrowData(), BORROW);
@@ -219,9 +221,9 @@ contract RiverProceedsTest is Test {
         assertEq(satUSD.balanceOf(address(takerModule)), 0, "module ends empty");
     }
 
-    /// Hemi direction with over-delivery: the module-held surplus is the maker's
-    /// and is swept there, never left on the shared module.
-    function test_hemiDirection_moduleSurplusSweptToMaker() public {
+    /// Caller direction with over-delivery: the module-held surplus is the
+    /// maker's and is swept there, never left on the shared module.
+    function test_callerDirection_moduleSurplusSweptToMaker() public {
         xapp.setMintToCaller(true);
         xapp.setDeliveryBps(10_500);
 

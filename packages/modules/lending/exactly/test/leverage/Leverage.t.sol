@@ -120,13 +120,15 @@ contract ExactlyLeverageTest is Test {
         return abi.encode(MARKET_USDC, USDC, uint256(0), uint256(0));
     }
 
+    /// @dev `totalAmount` is the item's full signed amount — it scales the absolute
+    ///      `maxAssets` ceiling with the slice (F26 / {ProratedBound}).
     function _borrowData(uint256 maturity, uint256 maxAssets) internal pure returns (bytes memory) {
-        return abi.encode(uint8(ExactlyTakerModule.Op.Borrow), MARKET_USDC, USDC, maturity, maxAssets);
+        return abi.encode(uint8(ExactlyTakerModule.Op.Borrow), MARKET_USDC, USDC, maturity, maxAssets, FIXED_BORROW);
     }
 
     function _withdrawData() internal pure returns (bytes memory) {
         // floating, BalanceMode absent ⇒ exact-amount withdraw
-        return abi.encode(uint8(ExactlyTakerModule.Op.Withdraw), MARKET_USDC, USDC, uint256(0), uint256(0));
+        return abi.encode(uint8(ExactlyTakerModule.Op.Withdraw), MARKET_USDC, USDC, uint256(0), uint256(0), uint256(0));
     }
 
     // ──────────────── drivers ────────────────
@@ -237,7 +239,7 @@ contract ExactlyLeverageTest is Test {
         vm.prank(maker);
         IERC20(MARKET_WETH).approve(address(takerModule), type(uint256).max);
 
-        bytes memory data = abi.encode(uint8(ExactlyTakerModule.Op.Borrow), MARKET_WETH, WETH, uint256(0), uint256(0));
+        bytes memory data = abi.encode(uint8(ExactlyTakerModule.Op.Borrow), MARKET_WETH, WETH, uint256(0), uint256(0), uint256(0));
         vm.prank(maker);
         permit3.approveTaker(settlement, address(takerModule), keccak256(data), type(uint160).max, 0);
 

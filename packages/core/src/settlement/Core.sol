@@ -481,12 +481,22 @@ abstract contract Core is Base {
     ///  That is correct, not a gap, and it is the same rule every other entry runs
     ///  under: a non-zero counter proves some earlier fill presented valid
     ///  authorization for that maker-committing hash, and here the permit's witness
-    ///  IS the order hash. It is also close to unreachable, because
-    ///  {Base._takeByPermit} requires `permit.amount == slice` and a pro-rata slice
-    ///  below the permit's amount cannot match — so this entry is implicitly
-    ///  full-fill and normally leaves no remainder at all. A maker who wants the
-    ///  remainder of a partly-filled order to stop dead should use {cancelOrder},
-    ///  exactly as an EIP-1271 maker must.
+    ///  IS the order hash.
+    ///
+    ///  ⚠ IT IS NOT "IMPLICITLY FULL-FILL", which this NatSpec used to claim on the
+    ///  reasoning that {Base._takeByPermit} requires `permit.amount == slice` and "a
+    ///  pro-rata slice below the permit's amount cannot match". That is arithmetically
+    ///  false: `slice = _prorate(item.amount, ctx)` and the FILLER picks `fillAmount`,
+    ///  so for any `permit.amount` BELOW `item.amount` there are fill sizes whose slice
+    ///  matches exactly — leaving a remainder with a non-zero counter behind it.
+    ///
+    ///  What actually bounds the exposure is narrower, and worth stating as what it
+    ///  is: the remainder's TAKE item falls back to `PERMIT3.take`, which reverts
+    ///  without a standing taker allowance — precisely the allowance a maker using
+    ///  this entry chose not to grant. The bound is LIVENESS, not authorization. A
+    ///  maker who signs `permit.amount == item.amount` (the SDK convention) leaves no
+    ///  remainder at all; one who wants a partly-filled order to stop dead should use
+    ///  {cancelOrder}, exactly as an EIP-1271 maker must.
     ///
     ///  Shape: the order carries its TAKE item exactly as it would for {fill}; only
     ///  the funding of that item changes ({Base._runItem} dispatches through
@@ -509,7 +519,32 @@ abstract contract Core is Base {
         FillCtx memory ctx;
         _gateOrder(order, orderHash, msg.sender, "", ctx);
         _openFill(order, fillAmount, msg.sender, "", ctx);
-        ctx.permitTake = abi.encode(permit, sig);
+        // Hand-built, and the reason it is safe is that the PRODUCER and the CONSUMER
+        // are the same contract one frame apart: {Base._takeByPermit} reads this back
+        // with pointer arithmetic at the same fixed offsets, so the blob never has to
+        // survive a round-trip through anyone else's encoder. Layout, from `blob+0x20`:
+        //   0x00..0x9F  `permit`, five static words, copied straight from calldata
+        //   0xA0        the offset word for `sig`, always 0xC0
+        //   0xC0        `sig.length`, then its data at 0xE0
+        // `abi.encode` of a struct-plus-`bytes` tuple emits a general encoder solc
+        // cannot share with anything else here; the matching `abi.decode` emits a
+        // validating decoder whose bounds checks re-prove what calldata typing already
+        // proved on entry. Together they were 169 bytes of a contract with none.
+        bytes memory blob;
+        /// @solidity memory-safe-assembly
+        assembly {
+            blob := mload(0x40)
+            let n := sig.length
+            let total := add(0xE0, and(add(n, 31), not(31)))
+            mstore(blob, total)
+            calldatacopy(add(blob, 0x20), permit, 0xa0)
+            mstore(add(blob, 0xc0), 0xc0)
+            mstore(add(blob, 0xe0), n)
+            calldatacopy(add(blob, 0x100), sig.offset, n)
+            mstore(add(add(blob, 0x100), n), 0) // zero the padding tail
+            mstore(0x40, add(add(blob, 0x20), total))
+        }
+        ctx.permitTake = blob;
         // The permit MUST have been consumed — it is this fill's only authorization.
         // Asserted inside `_settleForward`, immediately after the items run and
         // BEFORE the maker's inputs are pulled, so the authorization gates the pull
@@ -931,19 +966,25 @@ abstract contract Core is Base {
                     ++k;
                 }
             }
-            // A maker-bound leg whose token is also pulled FROM the maker as an input
-            // would measure net, not gross.
-            if (recipient == order.maker) {
-                for (uint256 i; i < nIn;) {
-                    if (PackedArrays.legInToken(order.legsIn, i) == token) revert DeltaVerifySameToken();
-                    unchecked {
-                        ++i;
-                    }
+            // ⚠ APPLIED TO EVERY RECIPIENT, NOT ONLY THE MAKER. A leg whose token is
+            // also an INPUT token cannot be delta-verified: the input pull moves that
+            // token between the snapshot and the check, so the measured delta is a NET
+            // figure while the check compares it against the GROSS amount. The rule was
+            // guarded on `recipient == order.maker`, which covers the maker's own legs
+            // and misses the filler's: under {CallbackMode.PostInputs} the maker pays
+            // `payTo` BEFORE delivery, so a leg addressed at the filler in an input
+            // token has its obligation discharged by the maker's own payment. The
+            // measurement is unsound for any recipient the input pull can credit, so
+            // the shape is refused outright.
+            for (uint256 i; i < nIn;) {
+                if (PackedArrays.legInToken(order.legsIn, i) == token) revert DeltaVerifySameToken();
+                unchecked {
+                    ++i;
                 }
             }
             toks[j] = token;
             recips[j] = recipient;
-            before[j] = SafeTransferLib.balanceOf(token, recipient);
+            before[j] = _balanceOfChecked(token, recipient);
             unchecked {
                 ++j;
             }
@@ -970,6 +1011,13 @@ abstract contract Core is Base {
         if (callbackTarget != address(0)) _execute(callbackTarget, callbackData);
 
         outs = _deliverOutputs(order, ctx, outBefore);
+        // HAND THE DELIVERY LEDGER TO THE ITEMS. One MSTORE, and it is what lets a
+        // funding descriptor ({Base._forSlice}) SPEND what was delivered instead of
+        // re-pricing it. Set here rather than inside `_deliverOutputs` so the
+        // ordering stays visible: items may consume a delivery only because the
+        // delivery provably ran first, which is true on this path by construction and
+        // NOT true of the scheduled netted path (which rejects the ops that read it).
+        ctx.outs = outs;
 
         // Snapshot each tokenIn before items so the payout uses ONLY this fill's
         // TAKE proceeds — never a pre-existing/donated Settlement balance. Skipped
@@ -1020,6 +1068,15 @@ abstract contract Core is Base {
         // No items ⇒ no TAKE proceeds ⇒ proceeds are 0 by construction, so
         // `_payInputsToSolver` (hasItems=false) pulls exactly `owed` from the
         // maker → solver with no balance snapshot needed.
+        // The same authorization pre-condition {_settleForward} carries, and for the
+        // same reason: this pulls the maker's inputs, and on the
+        // {fillWithPermitTake} path a permit blob still set means NO signature has
+        // been verified. Unreachable today (only that entry sets the blob, and it
+        // calls `_settleForward` directly, and this flow rejects item-bearing orders
+        // anyway) — which is exactly why the asymmetry was worth removing rather than
+        // relying on: it is a latent fail-open the moment the blob is wired through
+        // `_fillCore`.
+        if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
         _payInputsToSolver(order, ctx, new uint256[](0), false);
         if (callbackTarget != address(0)) _execute(callbackTarget, callbackData);
         outs = _deliverOutputs(order, ctx, outBefore);

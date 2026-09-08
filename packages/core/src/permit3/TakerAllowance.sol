@@ -75,12 +75,19 @@ abstract contract TakerAllowance is Permit3Base {
     // ──────────────────── Spending ────────────────────
 
     /// @notice Amount-gated taker dispatch. The allowance is keyed by
-    ///         `(user, msg.sender, ref)` where `ref = keccak256(data)` — so only a
-    ///         spender the user approved (e.g. Settlement) can consume it,
+    ///         `(user, msg.sender, module, ref)` where `ref = keccak256(data)` — so
+    ///         only a spender the user approved (e.g. Settlement) can consume it,
     ///         mirroring the token book. `receiver` is chosen by the (trusted,
-    ///         approved) spender, just as `to` is on `transferFrom`. The dispatched
-    ///         `module` is bound by the maker's signed order (Settlement only ever
-    ///         calls the order's own `item.module`), so it need not enter `ref`.
+    ///         approved) spender, just as `to` is on `transferFrom`.
+    ///
+    ///         ⚠ THE MODULE IS PART OF THE KEY, and this doc used to say the opposite
+    ///         — that the module "need not enter `ref`" because the maker's signed
+    ///         order pins it. That was true of the older three-part key and is stale:
+    ///         the storage below is `[user][spender][module][ref]`, and the mapping's
+    ///         own comment explains why (the shipped `data` layouts are minimal, so
+    ///         two distinct modules routinely share a `ref`; the containment was the
+    ///         order signature, never the key). Prose claiming LESS than the code
+    ///         enforces still misleads a reader deciding what a grant covers.
     function take(address module, address user, uint160 amount, address receiver, bytes calldata data)
         external
         override
@@ -107,13 +114,26 @@ abstract contract TakerAllowance is Permit3Base {
     ///      forwarded to the module — the value-IN side of a one-call
     ///      deposit+borrow / repay+withdraw.
     ///
-    ///      `forAmount` is NOT gated here, and that is the design rather than an
-    ///      omission. The taker book exists to bound what LEAVES a user's position;
-    ///      the funding leg moves value IN and is bounded by the user's token
-    ///      allowance to the module, which is the same gate a `MAKE` item's funding
-    ///      leg passes through. Gating it twice would mean a second book keyed on a
-    ///      number the spender computes per fill — which is not a grant a user can
-    ///      meaningfully sign.
+    ///      `forAmount` is NOT gated here, and cannot be: it is a number the spender
+    ///      computes per fill, so a second book keyed on it is not a grant a user
+    ///      could meaningfully sign. The taker book bounds what LEAVES a user's
+    ///      position; the funding leg moves value IN.
+    ///
+    ///      WHAT BOUNDS IT INSTEAD — and the correction that F27/C-1 forced. This
+    ///      comment used to claim `forAmount` was "bounded by the user's token
+    ///      allowance to the module". That is a PULL-module premise: it holds when
+    ///      the module calls {transferFrom} to draw the funding leg out of the
+    ///      user's wallet, where a self-granting caller can only rob themselves. A
+    ///      PUSH module never calls `transferFrom` — it funds from its OWN balance —
+    ///      so on that shape the premise is vacuous and `forAmount` was bounded by
+    ///      nothing at all. Since {approveTaker} lets any caller name ITSELF spender,
+    ///      one self-grant of a single unit drained a pre-funded singleton outright.
+    ///
+    ///      The bound now lives at the module, which is the only place that knows
+    ///      its own funding shape: `msg.sender` is forwarded as `spender`, a pre-fund
+    ///      module requires it to equal its pinned Settlement, and takes a balance
+    ///      floor on top. `msg.sender == permit3` authorises NOTHING by itself —
+    ///      this is a permissionless entrypoint.
     ///
     ///      A module reached through here implements {ITakerForModule}, NOT
     ///      {ITakerModule}: the selectors differ, so a plain taker module signed
@@ -134,8 +154,14 @@ abstract contract TakerAllowance is Permit3Base {
         if (amount == 0) revert ZeroAmount();
         bytes32 ref = keccak256(data);
         _takerAllowance[user][msg.sender][module][ref].spend(amount);
-        emit Taken(user, msg.sender, ref, module, amount, receiver);
-        ITakerForModule(module).takeForOnBehalf(user, amount, forAmount, receiver, data);
+        // `forAmount` rides the log: it is the one quantity here nothing meters, so
+        // this is its only protocol-level trace. See {IPermit3.TakenFor}.
+        emit TakenFor(user, msg.sender, ref, module, amount, forAmount, receiver);
+        // Forward the spender. `forAmount` is deliberately NOT metered here (see
+        // below), so a PRE-FUND module — which funds from its OWN balance rather than
+        // from the user's allowance — has no other way to tell a Settlement-
+        // dispatched fill from a direct call by anyone (F27/C-1).
+        ITakerForModule(module).takeForOnBehalf(msg.sender, user, amount, forAmount, receiver, data);
     }
 
     function takerAllowance(address user, address spender, address module, bytes32 ref)

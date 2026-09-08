@@ -32,12 +32,14 @@ interface IListaBrokerViews {
 ///  0x9321…B79A): when a provider is registered for a market's COLLATERAL token,
 ///  `supplyCollateral` requires `msg.sender == provider` and `withdrawCollateral`
 ///  requires `msg.sender == provider && receiver == provider` — both revert
-///  `"not provider"` for any module. The slisBNB/WBNB market (id 0x2269…3cac) has
-///  provider 0x33f7…​ registered for slisBNB, so the collateral legs of the
-///  package are structurally unusable THERE. An on-chain scan of all 225 Lista
-///  markets found 20 brokered ones; the USD1/BTCB market below is brokered with
-///  NO provider on either token, an empty per-market whitelist, and ~450k USD1
-///  of free liquidity — the collateral legs behave exactly like Morpho Blue.
+///  `"not provider"` for any module calling Moolah DIRECTLY. Provider-gated
+///  markets are served by routing through the provider instead
+///  ({ProviderMarkets.t.sol}: erc20 forwarder via the venue word + taker op 2;
+///  native via {ListaNativeModules}; SmartLP via {ListaSmartModules}, see
+///  {SmartLp.t.sol}). The USD1/BTCB market below is brokered with NO provider
+///  on either token, an empty per-market whitelist, and ~450k USD1 of free
+///  liquidity — the collateral legs behave exactly like Morpho Blue, which is
+///  what this base fixture exercises.
 ///
 ///  Verified on-chain facts (2026-07-30, block ~113.02M):
 ///    • Moolah (Morpho-fork singleton): 0x8F73…5D8C
@@ -242,4 +244,34 @@ abstract contract ListaModulesBase is CoreSettlementBase {
         });
         order = _order(maker, 2, BTCB, USD1, withdrawAmount, usd1Out, items);
     }
+
+    // ──────────────────── Moolah sig-auth helper ────────────────────
+
+    /// @dev Morpho Blue's authorization typehash — the deployed Moolah's
+    ///      `setAuthorizationWithSig` is byte-identical (fork-verified in
+    ///      {MoolahAuthWithSigTest}); only the domain VIEW is renamed
+    ///      `domainSeparator()`.
+    bytes32 internal constant MOOLAH_AUTH_TYPEHASH =
+        keccak256("Authorization(address authorizer,address authorized,bool isAuthorized,uint256 nonce,uint256 deadline)");
+
+    /// @dev Signs the maker's Moolah authorization of `authorized` against the
+    ///      LIVE domain separator; returns the 160-byte
+    ///      {DelegationHelper.replayMorphoAuth} block
+    ///      `abi.encode(nonce, deadline, v, r, s)` for a module data tail.
+    function _moolahAuthBlock(address authorized, uint256 deadline) internal view returns (bytes memory) {
+        uint256 nonce = IMoolahSigViews(MOOLAH).nonce(maker);
+        bytes32 structHash = keccak256(abi.encode(MOOLAH_AUTH_TYPEHASH, maker, authorized, true, nonce, deadline));
+        bytes32 digest =
+            keccak256(abi.encodePacked("\x19\x01", IMoolahSigViews(MOOLAH).domainSeparator(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPk, digest);
+        return abi.encode(nonce, deadline, v, r, s);
+    }
+}
+
+/// @dev The deployed Moolah's sig-auth views (⚠ `domainSeparator()`, not
+///      Morpho's `DOMAIN_SEPARATOR()`).
+interface IMoolahSigViews {
+    function domainSeparator() external view returns (bytes32);
+    function nonce(address authorizer) external view returns (uint256);
+    function isAuthorized(address authorizer, address authorized) external view returns (bool);
 }

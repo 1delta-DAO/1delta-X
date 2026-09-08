@@ -533,13 +533,31 @@ contract DelegatedOrderSignerTest is CoreSettlementBase {
     }
 
     function test_setOrderSigner_emitsAndStores() public {
+        // A LIVE expiry is stored verbatim. (It has to be in the future: a lapsed one
+        // is normalised to a revocation — see the next test.)
+        uint256 live = block.timestamp + 12345;
         vm.prank(maker);
         vm.expectEmit(true, true, false, true);
-        emit OrderState.OrderSignerSet(maker, delegate, 12345);
-        settlement.setOrderSigner(delegate, 12345);
+        emit OrderState.OrderSignerSet(maker, delegate, live);
+        settlement.setOrderSigner(delegate, live);
 
-        assertEq(settlement.orderSignerExpiry(maker, delegate), 12345, "stored");
+        assertEq(settlement.orderSignerExpiry(maker, delegate), live, "stored");
         assertEq(settlement.orderSignerExpiry(maker, outsider), 0, "unrelated key unset");
+    }
+
+    /// A LAPSED expiry is a revocation, and is normalised to one — which is what
+    /// makes it final. Storing it verbatim cleared the registry but left the
+    /// delegate's UNRELAYED nomination permits replayable, so a maker who "revoked"
+    /// this way could have the delegate resurrected by whoever held one.
+    function test_setOrderSigner_lapsedExpiryIsARevocation() public {
+        vm.prank(maker);
+        vm.expectEmit(true, true, false, true);
+        emit OrderState.OrderSignerSet(maker, delegate, 0); // normalised
+        settlement.setOrderSigner(delegate, block.timestamp - 1);
+
+        assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "lapsed expiry reads as revoked");
+        // …and the permit word is burned, so no unrelayed nomination can revive it.
+        assertTrue(settlement.isNonceCancelled(maker, _pn(delegate, 7) | (uint256(1) << 255)), "permit word burned");
     }
 
     // ──────────────────── Preflight agreement ────────────────────

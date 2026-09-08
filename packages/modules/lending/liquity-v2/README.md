@@ -24,6 +24,17 @@ The value-out ops carry no receiver, so the taker module **measures** what lande
 | `LiquityV2RepayModule` | MAKE | read debt → `repayBold(min(amount,debt))`; sweep residual | `abi.encode(borrowerOps, troveManager, troveId, bold)` |
 | `LiquityV2TakerModule` (op 0) | TAKE | `withdrawBold` → forward → receiver | `abi.encode(uint8(0), borrowerOps, troveId, bold, maxUpfrontFee)` |
 | `LiquityV2TakerModule` (op 1) | TAKE | `withdrawColl` → forward → receiver | `abi.encode(uint8(1), borrowerOps, troveId, coll)` |
+| `LiquityV2PreFundAddCollModule` | TAKE_FOR (preFund) | `addColl` the core-delivered leg from the module's own balance | `abi.encode(forDesc, branchIndex, troveId, coll)` |
+| `LiquityV2PreFundRepayModule` | TAKE_FOR (preFund) | `repayBold(min(forAmount,debt))` from the module's own balance; venue clamps at `entireDebt − MIN_DEBT`; sweep surplus → maker | `abi.encode(forDesc, branchIndex, troveId, bold)` |
+
+The pre-fund modules (`LiquityV2PreFundModules.sol`) are the one-sided "add/repay
+whatever the conversion delivered" shape: the maker routes the signed output leg
+to the module (`recipient = module`), so the DELIVERED asset needs no ERC20
+approval and no Permit3 token allowance. Value-in is permissionless while the
+trove has NO add manager set; a maker who has set one must point it at the
+module (`setAddManager(troveId, module)` — a venue authorization, not a token
+approval). Both pre-fund modules keep the registry-rooted `LiquityV2TroveAuth`
+ownership binding.
 
 ## Authorization (per leg)
 

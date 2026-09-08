@@ -136,18 +136,22 @@ contract Permit3TransferLibTest is Test {
         harness.pull(IPermit3(address(p3)), address(token), payer, recipient, 100 ether);
     }
 
-    // ── amount > uint160 max → Permit3 skipped entirely, straight to fallback ──
-    function test_amountExceedsUint160_skipsPermit3() public {
+    // ── amount > uint160 max → refused; the book must not be routed around ──
+    /// A move too wide for the allowance book is REFUSED, not silently routed around
+    /// it. It used to fall through to the direct-approval fallback, which skips the
+    /// book's cap, expiration, `revokeToken` and `lockdown` with no signal.
+    function test_amountExceedsUint160_reverts() public {
         MockPermit3 p3 = new MockPermit3(true); // would succeed if called
         uint256 big = uint256(type(uint160).max) + 1;
         token.mint(payer, big);
         vm.prank(payer);
         token.approve(address(harness), big);
 
+        vm.expectRevert(IPermit3.Permit3Denied.selector);
         harness.pull(IPermit3(address(p3)), address(token), payer, recipient, big);
 
-        assertEq(p3.calls(), 0, "permit3 skipped for > uint160 amount");
-        assertEq(token.balanceOf(recipient), big, "recipient funded via fallback");
+        assertEq(p3.calls(), 0, "permit3 not called");
+        assertEq(token.balanceOf(recipient), 0, "nothing moved around the book");
     }
 
     // ── Zero amount is a pure no-op: NEITHER leg runs ──

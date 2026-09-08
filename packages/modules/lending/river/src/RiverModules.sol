@@ -10,6 +10,7 @@ import {DustHandler} from "@lib/DustHandler.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {Narrow160} from "@lib/Narrow160.sol";
 
 import {IRiverXApp, IRiverTroveManager} from "./interfaces/IRiver.sol";
 
@@ -21,8 +22,9 @@ import {IRiverXApp, IRiverTroveManager} from "./interfaces/IRiver.sol";
 //  `setDelegateApproval(module, true)`, and the Permit3 allowances still cap every
 //  fill. Troves are address-keyed (≤1 per user per TroveManager).
 //
-//  CDP value-out has NO receiver parameter. ✅ FORK-VALIDATED (Hemi diamond
-//  0x07Bb…AA4Ec): when a DELEGATE drives the op, the deployed diamond delivers
+//  CDP value-out has NO receiver parameter. ✅ FORK-VALIDATED (diamond
+//  0x07Bb…AA4Ec, the same address on Hemi and BNB Smart Chain; the leverage
+//  suite now forks BSC): when a DELEGATE drives the op, the deployed diamond delivers
 //  value-out to **`msg.sender` (the module)**, not to `account` — `openTrove`'s
 //  mint was measured landing 100% on the delegate (see
 //  test/leverage/Leverage.t.sol, which grew out of that probe). The original
@@ -50,8 +52,8 @@ import {IRiverXApp, IRiverTroveManager} from "./interfaces/IRiver.sol";
 /// @notice Direction-agnostic settlement of a River CDP op's value-out.
 /// @dev Mirrors the measure-then-forward discipline used by every other taker
 ///      package (Aave, Morpho, Liquity, Silo, Venus), extended to two landing
-///      spots because deployments differ on where value-out arrives (Hemi:
-///      `msg.sender`; the Prisma lineage documents `account`).
+///      spots because deployments differ on where value-out arrives (the
+///      deployed diamond: `msg.sender`; the Prisma lineage documents `account`).
 library RiverProceeds {
     /// @dev The CDP op produced less than the fill owes. Fail closed rather than
     ///      making up the difference from the maker's own balance.
@@ -115,6 +117,13 @@ contract RiverAddCollModule is IMakerModule {
         permit3.transferFrom(onBehalfOf, address(this), collateralToken, uint160(amount));
         SafeTransferLib.forceApprove(collateralToken, xapp, amount);
         IRiverXApp(xapp).addColl(tm, onBehalfOf, amount, upper, lower);
+        // Clear the scoped grant: `xapp` is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an
+        // order naming themselves as maker. A target that consumes less than
+        // approved would leave a standing third-party claim on any FUTURE balance
+        // of this module, which is what turns a later stranded-balance bug into a
+        // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+        SafeTransferLib.forceApprove(collateralToken, xapp, 0);
     }
 }
 
@@ -238,8 +247,8 @@ contract RiverTakerModule is ITakerModule {
     }
 
     /// @dev Mint satUSD via `withdrawDebt`, then settle exactly `amount` to
-    ///      `receiver` from wherever the deployment landed it (Hemi: this module;
-    ///      Prisma lineage: the maker) — see {RiverProceeds.settle}. Own frame
+    ///      `receiver` from wherever the deployment landed it (deployed diamond:
+    ///      this module; Prisma lineage: the maker) — see {RiverProceeds.settle}. Own frame
     ///      (the measured deltas push the combined dispatch over the stack
     ///      limit); struct decode keeps the frame at one pointer.
     function _borrow(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) private {
@@ -300,21 +309,29 @@ contract RiverOpenModule is ITakerModule {
         // `data` and does NOT pro-rate. Reject a sliced fill outright — see {FullFillGuard}.
         FullFillGuard.requireFullFill(amount, p.totalAmount);
 
-        permit3.transferFrom(onBehalfOf, address(this), p.collateralToken, uint160(p.sideAmount));
+        // Pre-pull floor: the sweep at the end of this function used to return the
+        // module's WHOLE collateral balance, so a stranded balance was claimable by
+        // whoever authored the next order. The debt side of this same function is
+        // already delta-measured ({RiverProceeds}); the collateral side was not.
+        // F19 / F26/2a.
+        uint256 collFloor = SafeTransferLib.balanceOf(p.collateralToken, address(this));
+        permit3.transferFrom(onBehalfOf, address(this), p.collateralToken, Narrow160.to160(p.sideAmount));
         SafeTransferLib.forceApprove(p.collateralToken, p.xapp, p.sideAmount);
 
         RiverProceeds.Snap memory s = RiverProceeds.snapshot(p.debtToken, onBehalfOf);
         IRiverXApp(p.xapp)
             .openTrove(p.tm, onBehalfOf, p.maxFeePercentage, p.sideAmount, amount, p.upperHint, p.lowerHint);
         // Settle the minted `amount` to `receiver` from wherever it landed
-        // (Hemi mints to this module) — only what the open actually produced.
+        // (the deployed diamond mints to this module) — only what the open produced.
         RiverProceeds.settle(permit3, p.debtToken, onBehalfOf, receiver, amount, s);
 
         // Leave nothing standing and nothing held: `xapp` comes from `data`, so a
         // residual allowance would be a claim on any future balance of this shared
         // module, and unconsumed collateral belongs to the maker.
         SafeTransferLib.forceApprove(p.collateralToken, p.xapp, 0);
-        uint256 leftColl = SafeTransferLib.balanceOf(p.collateralToken, address(this));
-        if (leftColl != 0) SafeTransferLib.safeTransfer(p.collateralToken, onBehalfOf, leftColl);
+        uint256 collNow = SafeTransferLib.balanceOf(p.collateralToken, address(this));
+        if (collNow > collFloor) {
+            SafeTransferLib.safeTransfer(p.collateralToken, onBehalfOf, collNow - collFloor);
+        }
     }
 }

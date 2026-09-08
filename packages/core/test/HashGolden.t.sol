@@ -124,8 +124,8 @@ contract HashGoldenTest is Test {
     function test_permitTakeWitnessTypeHash_matchesTheTypeString() public pure {
         assertEq(
             OrderHash.PERMIT_TAKE_WITNESS_TYPEHASH,
-            keccak256(abi.encodePacked(Permit3Hash.PERMIT_TAKE_WITNESS_STUB, OrderHash.WITNESS_TYPESTRING)),
-            "take witness typehash drifted from WITNESS_TYPESTRING"
+            keccak256(abi.encodePacked(Permit3Hash.PERMIT_TAKE_WITNESS_STUB, OrderHash.PERMIT_TAKE_WITNESS_TYPESTRING)),
+            "take witness typehash drifted from PERMIT_TAKE_WITNESS_TYPESTRING"
         );
     }
 }

@@ -7,7 +7,7 @@ import {Order, Item, ItemOp, LegOut} from "@core/settlement/Settlement.sol";
 import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
-import {AaveV3TakeForLeverageModule} from "../../src/AaveV3FusedModules.sol";
+import {AaveV3LeverageModule} from "../../src/AaveV3FusedModules.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev The `TAKE_FOR` item on a real lender: supply + borrow in ONE dispatch,
@@ -20,15 +20,19 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 /// maker moments earlier in the same fill — so there is exactly ONE signed copy of
 /// that number, and over any fill the maker's WETH balance nets to zero.
 contract TakeForLeverageTest is AaveModulesBase {
-    AaveV3TakeForLeverageModule takeForModule;
+    AaveV3LeverageModule takeForModule;
 
     uint256 constant COLLATERAL = 1 ether; //  supplied — and the order's output leg
     uint256 constant BORROW = 1_500e6; //      drawn against it
 
+    AaveV3LeverageModule pushModule;
+
     function setUp() public override {
         super.setUp();
-        takeForModule = new AaveV3TakeForLeverageModule(address(permit3));
+        takeForModule = new AaveV3LeverageModule(address(permit3), address(settlement));
+        pushModule = new AaveV3LeverageModule(address(permit3), address(settlement));
         vm.label(address(takeForModule), "aaveV3TakeForLeverageModule");
+        vm.label(address(pushModule), "aaveV3PreFundLeverageModule");
     }
 
     /// @dev `(1 << 255) | index` — fund from `legsOut[index]`.
@@ -255,5 +259,93 @@ contract TakeForLeverageTest is AaveModulesBase {
         assertEq(IERC20(USDC).balanceOf(solver) - solverUsdcBefore, fee, "relayer earned the auction-tick fee");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement never held the borrow");
         assertEq(IERC20(WETH).balanceOf(address(takeForModule)), 0, "module drained");
+    }
+
+    // ── PRE-FUNDED: the collateral leg is delivered to the MODULE, which supplies
+    //    it from its own balance. The maker's receive side is strictly EMPTY — the
+    //    ERC20 approval of WETH to Permit3 is revoked outright and no token
+    //    allowance to the module ever exists. The only grants are the borrow gate
+    //    (taker allowance) and Aave's own credit delegation. Run back-to-back with
+    //    the pull variant from an identical fork state: same position, one less
+    //    ERC20 transfer, two fewer approvals. ──
+    /// @dev bit 253 on top of the leg reference = the PRE-FUND shape, which makes the
+    ///      core require `legsOut[0].recipient == module` (F27/H-1). The pull
+    ///      sibling above deliberately does NOT set it: its leg is wallet-addressed.
+    function _forLegPreFund(uint256 index, address token) internal pure returns (uint256) {
+        return _forLeg(index) | (uint256(1) << 253) | (uint256(uint160(token)) << 16);
+    }
+
+    function _preFundData() internal view returns (bytes memory) {
+        return abi.encode(_forLegPreFund(0, WETH), uint256(0), AAVE_POOL, USDC, uint256(2), WETH);
+    }
+
+    function test_preFundFunded_samePosition_zeroReceiveSideApprovals_andCostsLess() public {
+        deal(WETH, solver, COLLATERAL);
+        _approveSolverSide(COLLATERAL, WETH);
+
+        // ---- authorize BOTH variants so the two runs differ only in funding path ----
+        _authTakeFor(COLLATERAL, BORROW); // pull variant: token allowance + ERC20 approve
+        vm.startPrank(maker);
+        permit3.approveTaker(
+            address(settlement),
+            address(pushModule),
+            keccak256(_preFundData()),
+            uint160(BORROW),
+            uint48(block.timestamp + 1 hours)
+        );
+        IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(pushModule), type(uint256).max);
+        vm.stopPrank();
+
+        Order memory pull = _takeForOrder(101, COLLATERAL, BORROW);
+        bytes memory pullSig = _sign(pull);
+
+        Order memory preFund = _takeForOrder(102, COLLATERAL, BORROW);
+        {
+            Item[] memory items = new Item[](1);
+            items[0] = Item(ItemOp.TAKE_FOR, address(pushModule), BORROW, address(0), _preFundData());
+            preFund.items = PackedEncode.items(items);
+            LegOut[] memory legsOut = new LegOut[](1);
+            legsOut[0] = LegOut(WETH, COLLATERAL, 0, address(pushModule)); // ← delivered to the module
+            preFund.legsOut = PackedEncode.legsOut(legsOut);
+        }
+        bytes memory pushSig = _sign(preFund);
+
+        uint256 aBefore = IERC20(aWETH).balanceOf(maker);
+        uint256 dBefore = IERC20(usdcDebtToken).balanceOf(maker);
+        uint256 snap = vm.snapshotState();
+
+        // ---- A: pull-funded (wallet transit) ----
+        vm.prank(solver);
+        uint256 g0 = gasleft();
+        settlement.fill(pull, pullSig, BORROW);
+        uint256 pullGas = g0 - gasleft();
+        uint256 aPull = IERC20(aWETH).balanceOf(maker) - aBefore;
+        uint256 dPull = IERC20(usdcDebtToken).balanceOf(maker) - dBefore;
+
+        // ---- B: pre-funded, from the SAME starting state, with the maker's
+        //         receive side stripped to NOTHING ----
+        vm.revertToState(snap);
+        vm.startPrank(maker);
+        IERC20(WETH).approve(address(permit3), 0); //     no base ERC20 approval
+        permit3.approveToken(address(takeForModule), WETH, 0, 0); // and no module allowance
+        vm.stopPrank();
+        uint256 makerWeth = IERC20(WETH).balanceOf(maker);
+
+        vm.prank(solver);
+        g0 = gasleft();
+        settlement.fill(preFund, pushSig, BORROW);
+        uint256 pushGas = g0 - gasleft();
+
+        assertApproxEqAbs(IERC20(aWETH).balanceOf(maker) - aBefore, aPull, 2, "same collateral supplied");
+        assertApproxEqAbs(IERC20(usdcDebtToken).balanceOf(maker) - dBefore, dPull, 2, "same debt drawn");
+        assertEq(IERC20(WETH).balanceOf(maker), makerWeth, "the maker's wallet was never touched");
+        assertEq(IERC20(WETH).balanceOf(address(pushModule)), 0, "module drained: delivery fully supplied");
+        assertEq(IERC20(USDC).balanceOf(address(pushModule)), 0, "module drained");
+        assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement drained");
+
+        emit log_named_uint("pull-funded (gas)", pullGas);
+        emit log_named_uint("pre-funded (gas)", pushGas);
+        emit log_named_int("saved       (gas)", int256(pullGas) - int256(pushGas));
+        assertLt(pushGas, pullGas, "one less ERC20 transfer must not cost more");
     }
 }

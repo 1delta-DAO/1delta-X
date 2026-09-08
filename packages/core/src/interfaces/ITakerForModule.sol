@@ -77,28 +77,155 @@ pragma solidity ^0.8.28;
 ///    • the value-IN leg by the maker's Permit3 TOKEN allowance to this module —
 ///      and, above that, by the signed leg or literal the descriptor names.
 ///
-///  ⚠ ONE MODULE, ONE SHAPE. The taker book does NOT distinguish `take` from
+///  ⚠ ONE GRANT, ONE DISPATCH. The taker book does NOT distinguish `take` from
 ///  `takeFor`: both consume the same `(user, spender, module, keccak256(data))`
 ///  bucket. A contract implementing BOTH {ITakerModule} and this interface would
 ///  therefore let a single `approveTaker` grant authorise either shape — the plain
 ///  take or the composite one with a funding leg attached. Settlement picks the
 ///  entrypoint from the maker-signed `op` byte, so a filler cannot switch it, but a
-///  maker reading their grant cannot tell which they authorised. Implement one or
-///  the other per contract, never both.
+///  maker reading their grant could not tell which they authorised.
 ///
-///  ⚠ THIS IS ENFORCED, NOT ADVISED. `make modules-check`
-///  (`tools/check-module-shapes.py`) fails the build on any contract declaring both
-///  `takeOnBehalf` and `takeForOnBehalf`, or inheriting both interfaces. It was a
-///  convention living in this comment until 2026-08-31; see
-///  `docs/reference-audits.md` F23 for why a rule that holds only because every
-///  current integrator follows it is not a rule.
+///  ⚠ THE RULE IS THE DATA-SPACE SPLIT, NOT "ONE MODULE, ONE SHAPE" — and this
+///  header said otherwise, which is itself the §F23 failure mode it invokes below.
+///  It claimed `make modules-check` "fails the build on any contract declaring both
+///  `takeOnBehalf` and `takeForOnBehalf`". It does not, and has not since the merge
+///  was allowed: the checker's own header states "a contract MAY now implement both,
+///  but ONLY with both guards present", and one shipped contract
+///  (`AaveV3LeverageModule`) does exactly that.
+///
+///  What is actually enforced is the weaker property that suffices: NO `data` blob is
+///  accepted by both entrypoints, so no `ref` can ever be valid for both and the grant
+///  is unambiguous again. A merged contract asserts its own half in each —
+///  {PreFundGuard.requireLegRef} or {PreFundGuard.requireFundingDescriptor} in
+///  `takeForOnBehalf`, {PreFundGuard.requirePlainTake} in `takeOnBehalf` — and
+///  `tools/check-module-shapes.py` fails the build if a dual-shape contract is missing
+///  either guard. Implement one shape per contract, or both WITH both guards; never
+///  both without them. See `docs/reference-audits.md` F23 for why a rule that holds
+///  only because every current integrator follows it is not a rule — which applies to
+///  a rule the docs assert and the checker does not, too.
+///
+///  Pull-funded vs PRE-FUNDED — the approval surface
+///  ──────────────────────────────────────────────────
+///  A composite module comes in one of two funding shapes, and a maker signs the
+///  leg recipient to match:
+///    • PULL (classic): the funding leg is delivered to the MAKER and the module
+///      pulls it back with `permit3.transferFrom` — which needs the maker's Permit3
+///      token allowance to the module AND, beneath it, an on-chain ERC20 approval
+///      of the funding token to Permit3 (a token the maker may never have held:
+///      the delivered collateral on a cross-asset open, the debt token on every
+///      deleverage).
+///    • PRE-FUND: the maker signs `legsOut[j].recipient = module` — {Base._forSlice}
+///      admits the item's own module as the referenced leg's recipient — and the
+///      module supplies the instructed `forAmount` from its OWN balance. No pull,
+///      no token allowance, no ERC20 approval: the maker's only grant is the taker
+///      allowance, and the fill makes one less transfer. Pooled balances cannot be
+///      consumed across orders ONLY while both halves below hold — F27/C-1 broke
+///      each of them independently, and this prose asserted the conclusion without
+///      either premise being enforced:
+///        (1) `forAmount` is core-sized. TRUE only when `spender == SETTLEMENT`;
+///            `Permit3.approveTaker` lets any caller name itself spender, so a
+///            direct `takeFor` supplies an arbitrary `forAmount`. Modules MUST
+///            check the forwarded `spender`.
+///        (2) the delivery landed HERE. NOT implied by (1): {Base._forSlice} binds
+///            neither the referenced leg's recipient nor its token. Modules MUST
+///            take the balance floor below.
+///      This accounting is exactly why pre-fund-funding exists ONLY on the TAKE_FOR
+///      seam: a module funding from balance against a number the core did NOT size
+///      to an enforced delivery (a maker-signed MAKE total, a module-invented
+///      amount) lets one order's item consume another order's delivery.
+///  One CONTRACT implements one shape (a pre-fund module simply never calls
+///  `transferFrom`). Mis-pairing fails closed ONLY through an explicit floor:
+///  `uint256 floor = IERC20(asset).balanceOf(address(this)) - forAmount;` as the
+///  first act of the funded body. The underflow IS the check — a leg not addressed
+///  to this module leaves `entry < forAmount`. It is a real mis-pairing detector
+///  only because (1) above pins `forAmount` to the core; with an attacker-chosen
+///  `forAmount` the same subtraction proves nothing (F27/C-4), which is how the one
+///  module that had it was still drained. Sweeps clamp to `bal - floor`, never the
+///  whole balance.
+///
+///  Pre-funding also carries the ONE-SIDED ops (deposit-only, repay-only —
+///  "supply/retire whatever the conversion delivered"): a composite whose
+///  value-OUT side moves NOTHING. `amount` is then a pacing figure (sign the
+///  order's anchor total) and the taker allowance is read as the maker's
+///  execution authorization for `(module, keccak256(data))` rather than as an
+///  asset bound — still granted by signature, so the shape costs zero on-chain
+///  approvals end to end. See the `AaveV3PreFundDepositModule` /
+///  `AaveV3PreFundRepayModule` headers for why these ride this seam and not MAKE.
 ///
 ///  Modules MUST enforce `msg.sender == permit3` as their first statement, for
-///  exactly the reason {ITakerModule} gives. `Permit3.takeFor` is `nonReentrant`
+///  exactly the reason {ITakerModule} gives, and a PRE-FUND module MUST follow it with
+///  `spender == SETTLEMENT`: `msg.sender == permit3` alone authorises nothing,
+///  because `Permit3.takeFor` is a permissionless entrypoint (F27/C-1). `Permit3.takeFor` is `nonReentrant`
 ///  alongside `take`, so a module still cannot nest a second take: a composite op
 ///  spanning TWO protocols is two items, not one. `Permit3.transferFrom` is not
 ///  locked, which is how the funding leg is pulled.
 interface ITakerForModule {
+    /// @param spender    the `Permit3.takeFor` caller, forwarded verbatim. A PUSH
+    ///                   module MUST require this to equal its pinned Settlement:
+    ///                   `forAmount` is core-derived ONLY on that path, and
+    ///                   `approveTaker` lets any caller name itself spender (F27/C-1).
+    ///
+    ///  WHY A THIRD ADDRESS, WHEN WE ALREADY HAD TWO
+    ///  ────────────────────────────────────────────
+    ///  The question is not whether the values differ — on the composite path
+    ///  `spender` and `receiver` are both Settlement — but where each COMES FROM:
+    ///
+    ///    spender     `Permit3.takeFor`'s own `msg.sender`. Asserted by the EVM.
+    ///                The caller cannot choose it.
+    ///    receiver    an ARGUMENT of `takeFor`. Caller-chosen on a direct call.
+    ///    onBehalfOf  an ARGUMENT of `takeFor` (`user`). Caller-chosen likewise.
+    ///
+    ///  A gate written against either of the two that already existed is therefore
+    ///  worthless — the attacker just passes the value the gate wants. Both cases
+    ///  are pinned by tests (`PreFundSpenderAuth`).
+    ///
+    ///  `spender == onBehalfOf` is NOT the invariant. On every honest fill the
+    ///  maker grants SETTLEMENT (`approveTaker(settlement, module, ref, …)` writes
+    ///  `_takerAllowance[maker][settlement][module][ref]`), so the two are
+    ///  necessarily different: requiring equality would mean only a maker could
+    ///  ever trigger their own fill, and no solver-driven fill could exist.
+    ///
+    ///  What the taker book DOES guarantee is that `spender` holds a grant from
+    ///  `onBehalfOf` — the pair is the key. That is exactly enough for a PULL
+    ///  module, where the value moved comes out of `onBehalfOf`'s wallet and a
+    ///  self-granting caller can only rob themselves. It is not enough for a PUSH
+    ///  module, where the value comes out of the MODULE's balance: the book proves
+    ///  the user's consent, never the caller's identity, and only the latter
+    ///  distinguishes Settlement from anyone.
+    ///
+    ///  Why it must be a parameter. The comparison needs two facts that live on
+    ///  opposite sides of the Permit3 boundary: Permit3 knows `msg.sender` but not
+    ///  which Settlement a module trusts, and the module knows its Settlement but
+    ///  not who called Permit3. One must cross. Permit3 holding a canonical
+    ///  Settlement would invert the dependency — Settlement pins Permit3, not the
+    ///  reverse, and Permit3 is the shared Permit2-style hub deployed at an
+    ///  identical address on every chain. A `currentSpender()` view would need
+    ///  storage (or transient, which some target EVMs lack). One forwarded word is
+    ///  the floor. It costs Settlement nothing: `takeFor`'s own ABI is unchanged.
+    ///
+    ///  ⚠ "SPENDER" IS THE TAKER-BOOK SENSE, NOT THE `transferFrom` SENSE. On the
+    ///  pre-fund shape nobody pulls anything: the module is PRE-FUNDED by the fill's
+    ///  own delivery and never calls `transferFrom`, so in token terms there is no
+    ///  spender at all — which invites the reading that this should therefore be
+    ///  `address(0)`. It should not, for two reasons.
+    ///
+    ///  First, something IS spent on every pre-funded fill: `Permit3.takeFor` debits
+    ///  `_takerAllowance[user][spender][module][ref]` by `amount` BEFORE dispatching.
+    ///  The pre-fund headers call that `amount` "vestigial" because no asset leaves the
+    ///  position — but the grant is real, it is metered, and Settlement is the party
+    ///  the maker authorised to consume it. `spender` names the key of the book
+    ///  actually being debited, and matches `IPermit3.approveTaker(spender, …)`.
+    ///
+    ///  Second, `address(0)` would delete the only authenticated value the module
+    ///  receives, and with it the only thing distinguishing a Settlement fill from
+    ///  a direct `takeFor` by anyone — i.e. it reinstates F27/C-1 exactly.
+    ///
+    ///  ⚠ IT IS AN IDENTITY TO COMPARE, NEVER AN ADDRESS TO PULL FROM OR SEND TO.
+    ///  No shipped module reads it for anything but the equality check. Misuse is
+    ///  bounded anyway — `Permit3.transferFrom` gates on
+    ///  `_tokenAllowance[from][module]`, so naming any address as a source without
+    ///  its grant reverts — but the name is Permit3's book terminology
+    ///  (`_takerAllowance[user][spender]`), not an instruction.
     /// @param onBehalfOf the order's maker — whose position is opened/closed.
     /// @param amount     this fill's slice of the value-OUT leg, already gated by
     ///                   the taker allowance.
@@ -110,6 +237,7 @@ interface ITakerForModule {
     ///                   classic flow, so they fund the order's input legs.
     /// @param data       the maker-signed blob, descriptor word FIRST.
     function takeForOnBehalf(
+        address spender,
         address onBehalfOf,
         uint256 amount,
         uint256 forAmount,

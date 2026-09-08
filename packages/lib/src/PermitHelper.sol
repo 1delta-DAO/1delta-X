@@ -64,4 +64,33 @@ library PermitHelper {
         // real gate.
         try IERC2612(token).permit(owner, spender, amount, deadline, v, r, s) {} catch {}
     }
+
+    /// @notice Variant carrying an EXPLICIT `value` word in the tail — for permits
+    ///         whose approval amount is NOT this fill's `amount` (e.g. a venue's
+    ///         ERC-4626 share allowance sized to the whole item, spent across many
+    ///         fills). An EIP-2612 signature commits to `value`, so a module that
+    ///         cannot derive it from its arguments must carry it alongside the
+    ///         signature.
+    ///
+    ///  Encoding convention (appended after the module's fixed base params):
+    ///    abi.encode(value, deadline, v, r, s)   — 160 bytes
+    ///
+    ///  Shorter data ⇒ no-op (the module falls back to a standing on-chain
+    ///  allowance). Same BEST-EFFORT try/catch as {replayIfPresent}, for the same
+    ///  reason: a front-run replay of the lifted permit leaves exactly the
+    ///  allowance the fill wants, and the venue call that follows is the real gate.
+    ///
+    /// @param data     The full module data blob.
+    /// @param baseLen  Byte length of the fixed base params before the permit block.
+    /// @param token    ERC-2612 token to call `permit` on.
+    /// @param owner    The token holder whose signature is being replayed.
+    /// @param spender  The address being approved (here typically the module itself).
+    function replayValueIfPresent(bytes calldata data, uint256 baseLen, address token, address owner, address spender)
+        internal
+    {
+        if (data.length < baseLen + 160) return;
+        (uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) =
+            abi.decode(data[baseLen:baseLen + 160], (uint256, uint256, uint8, bytes32, bytes32));
+        try IERC2612(token).permit(owner, spender, value, deadline, v, r, s) {} catch {}
+    }
 }

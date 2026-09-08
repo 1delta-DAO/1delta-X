@@ -25,7 +25,7 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
 
     function setUp() public override {
         super.setUp();
-        takeForModule = new DolomiteTakeForModule(address(permit3));
+        takeForModule = new DolomiteTakeForModule(address(permit3), address(settlement));
         vm.label(address(takeForModule), "dolomiteTakeForModule");
 
         vm.startPrank(maker);

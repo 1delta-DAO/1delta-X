@@ -75,6 +75,11 @@ contract VenusDepositModule is IMakerModule {
         underlying.forceApprove(vToken, amount);
         uint256 err = IVToken(vToken).mintBehalf(onBehalfOf, amount);
         if (err != 0) revert VenusError(err);
+        // Clear the scoped grant: the target is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable. A target consuming less than
+        // approved leaves a standing third-party claim on any FUTURE balance of this
+        // module. {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
+        underlying.forceApprove(vToken, 0);
     }
 }
 
@@ -148,6 +153,11 @@ contract VenusRepayModule is IMakerModule {
             underlying.forceApprove(vToken, toRepay);
             uint256 err = IVToken(vToken).repayBorrowBehalf(onBehalfOf, toRepay);
             if (err != 0) revert VenusError(err);
+            // Clear the scoped grant: the target is decoded from the order's `data` on a
+            // SHARED singleton, so it is attacker-choosable. A target consuming less than
+            // approved leaves a standing third-party claim on any FUTURE balance of this
+            // module. {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
+            underlying.forceApprove(vToken, 0);
         }
     }
 
@@ -246,9 +256,19 @@ contract VenusTakerModule is ITakerModule {
         (uint8 op, address vToken, address underlying) = abi.decode(data, (uint8, address, address));
 
         if (op == uint8(Op.Borrow)) {
+            // Measure what the protocol actually delivered rather than forwarding
+            // the nominal `amount`. The `Full` branch below already does this; these
+            // two did not, so an under-delivering vToken (fee-on-transfer underlying
+            // on BSC, a capped market) was topped up from any balance this module
+            // held and paid to the solver while the maker kept the full debt — the
+            // H-3 River shape. Fail closed instead. F26/2b.
+            uint256 balBefore = IERC20(underlying).balanceOf(address(this));
             uint256 err = IVToken(vToken).borrowBehalf(onBehalfOf, amount);
             if (err != 0) revert VenusError(err);
+            uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+            if (received < amount) revert InsufficientWithdrawn();
             underlying.safeTransfer(receiver, amount);
+            if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
         } else if (op == uint8(Op.Withdraw)) {
             // BalanceMode slot at byte 96 (op@0 + vToken@32 + underlying@64).
             if (DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full) {
@@ -270,9 +290,14 @@ contract VenusTakerModule is ITakerModule {
                 underlying.safeTransfer(receiver, amount);
                 if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
             } else {
+                // Same measured-delta discipline as the `Full` branch above. F26/2b.
+                uint256 balBefore = IERC20(underlying).balanceOf(address(this));
                 uint256 err = IVToken(vToken).redeemUnderlyingBehalf(onBehalfOf, amount);
                 if (err != 0) revert VenusError(err);
+                uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+                if (received < amount) revert InsufficientWithdrawn();
                 underlying.safeTransfer(receiver, amount);
+                if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
             }
         } else {
             revert BadOp(op);

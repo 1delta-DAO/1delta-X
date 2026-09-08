@@ -185,11 +185,23 @@ abstract contract OrderState is NonceManager {
     ///         returns `address(0)` on a malformed signature, so an authorized zero
     ///         address would turn every unrecoverable signature into a valid one.
     /// @param  expiry unix time the delegation lapses at. `0` revokes;
-    ///         `type(uint256).max` never lapses. A past value is accepted and is
-    ///         simply already-expired — it reads identically to a revocation and
-    ///         needs no special case.
+    ///         `type(uint256).max` never lapses. A value already in the past is
+    ///         NORMALISED TO `0` — it is a revocation, and is treated as one, which
+    ///         is what makes it final (see the body). It used to be stored verbatim,
+    ///         which left the delegate's unrelayed nomination permits live.
     function setOrderSigner(address signer, uint256 expiry) external {
-        _setOrderSigner(msg.sender, signer, expiry);
+        // A LAPSED EXPIRY *IS* A REVOCATION, AND IS NORMALISED TO ONE HERE. Only the
+        // `expiry == 0` branch of {_setOrderSigner} burns the delegate's permit word,
+        // so passing an already-past timestamp used to clear the registry while
+        // leaving every UNRELAYED nomination permit for that delegate replayable — a
+        // maker who "revoked" that way could have the delegate resurrected by anyone
+        // holding one, up to its own deadline. This NatSpec promised the two spellings
+        // "read identically"; now they do.
+        //
+        // `>=`, not `>`: {Signatures._verifySignature} accepts `block.timestamp <=
+        // expiry`, so a nomination expiring exactly this block is still live and must
+        // not be normalised away.
+        _setOrderSigner(msg.sender, signer, expiry >= block.timestamp ? expiry : 0);
     }
 
     /// @dev The write itself, shared with the relayed variant

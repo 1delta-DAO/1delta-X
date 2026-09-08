@@ -6,7 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
-import {AaveV3FusedLeverageModule} from "../../src/AaveV3FusedModules.sol";
+import {AaveV3LeverageModule} from "../../src/AaveV3FusedModules.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev The FUSED leverage item: supply + borrow in ONE `takeOnBehalf`, against the
@@ -19,14 +19,14 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 /// produces an IDENTICAL position, prices the difference, and covers the pro-rata
 /// derivation that lets one gated `amount` drive both legs.
 contract FusedLeverageTest is AaveModulesBase {
-    AaveV3FusedLeverageModule fused;
+    AaveV3LeverageModule fused;
 
     uint256 constant COLLATERAL = 1 ether; //  supplied
     uint256 constant BORROW = 1_500e6; //      drawn against it
 
     function setUp() public override {
         super.setUp();
-        fused = new AaveV3FusedLeverageModule(address(permit3));
+        fused = new AaveV3LeverageModule(address(permit3), address(settlement));
         vm.label(address(fused), "aaveV3FusedLeverageModule");
     }
 
@@ -184,7 +184,7 @@ contract FusedLeverageTest is AaveModulesBase {
 
         bytes memory sig = _sign(o);
         vm.prank(solver);
-        vm.expectRevert(AaveV3FusedLeverageModule.InvalidRatio.selector);
+        vm.expectRevert(AaveV3LeverageModule.InvalidRatio.selector);
         settlement.fill(o, sig, BORROW);
     }
 }

@@ -11,20 +11,91 @@ export enum ItemOp {
   /// funding amount is computed by the settler from a descriptor the maker signs
   /// as the FIRST WORD of `data` — build it with `forLeg()` / `forTotal()`.
   /// Single-order path only: `matchSettle` refuses it.
+  ///
+  /// ⚠ ONE-SIDED ops do NOT belong here. "Supply/retire whatever the conversion
+  /// delivered" moves nothing out of the position, so it is a `MAKE` carrying a
+  /// {@link forLegPreFund} descriptor — no taker allowance, no Permit3 hop, and
+  /// `item.amount` unread. `TAKE_FOR` is for composites whose value-OUT side is
+  /// real.
   TAKE_FOR = 3,
 }
 
-/// Funding descriptor for a `TAKE_FOR` item, pointing at output leg `index`.
+/// Funding descriptor pointing at output leg `index`, PULL-shaped: the leg is
+/// delivered to the maker's WALLET and the module draws it back through their
+/// Permit3 token allowance. For the pre-funded shape — which is what every
+/// one-sided deposit/repay and every conversion-funded composite wants — use
+/// {@link forLegPreFund}.
 ///
 /// This is the form to prefer: the funding amount, its token and its decimals stay
 /// in the typed `legsOut[index]` the maker already signs, so there is exactly ONE
 /// copy of the number and no second, mis-scaled one can exist. A decaying leg
 /// carries its auction price into the funding side automatically.
+///
+/// Pair it with a maker-addressed leg (`recipient` 0 or the maker). It needs BOTH
+/// receive-side grants: a Permit3 token allowance to the module and an on-chain
+/// ERC20 approval of the received asset.
 export function forLeg(index: number): bigint {
   if (!Number.isInteger(index) || index < 0 || index > 0xffff) {
     throw new Error(`forLeg: leg index out of range: ${index}`);
   }
   return (1n << 255n) | BigInt(index);
+}
+
+/// PRE-FUNDED funding descriptor for output leg `index` — the shape to prefer, and
+/// the only one the `*PreFundModule` contracts accept.
+///
+/// Sets descriptor bit 253 on top of the leg reference. The referenced leg's
+/// `recipient` MUST be the item's own module; the settler enforces it
+/// (`Base.ForLegNotMakers`) and `SettlementLens.validateOrder` flags it before you
+/// sign. The leg is delivered straight to the module, which funds the operation
+/// from its own balance, so the maker needs NO Permit3 token allowance to the
+/// module and NO on-chain ERC20 approval of the received asset — an asset they may
+/// never have held.
+///
+/// TWO SEAMS TAKE THIS DESCRIPTOR:
+///
+///   • `ItemOp.MAKE` — every ONE-SIDED op (deposit-only, repay-only,
+///     supply-collateral-only). Nothing leaves the position, so there is NO taker
+///     allowance to grant and `item.amount` is UNREAD: the settler sizes the item
+///     from this descriptor. Sign `amount: 0n`. Settlement dispatches the module
+///     directly, which is both cheaper (~28k gas: no taker-allowance slot, no
+///     Permit3 hop) and simpler to authorise — the order signature is the whole
+///     authorization.
+///
+///   • `ItemOp.TAKE_FOR` — genuine COMPOSITES, where value also leaves the
+///     position (deposit+borrow, repay+withdraw). There `amount` is the real
+///     value-OUT side and still needs a taker allowance.
+///
+/// Unsure which you have? Does the operation send anything to a `receiver`?
+/// No ⇒ MAKE.
+/// `token` is the asset the MODULE will spend, and it is mandatory: the settler
+/// requires `legsOut[index].token` to equal it (`Base._forSlice`), and
+/// `PreFundGuard.floorOf` requires the module's own decoded asset to equal it too.
+/// One signed word, checked on both sides — without it the core proves that N units
+/// of some token arrived while the module spends N units of another.
+export function forLegPreFund(index: number, token: `0x${string}`): bigint {
+  if (!Number.isInteger(index) || index < 0 || index > 0xffff) {
+    throw new Error(`forLegPreFund: leg index out of range: ${index}`);
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(token)) {
+    throw new Error(`forLegPreFund: funding token must be a 20-byte address: ${token}`);
+  }
+  return (5n << 253n) | (BigInt(token) << 16n) | BigInt(index);
+}
+
+/// The funding token a pre-fund descriptor names — bits [16:176). Mirrors
+/// `PreFundGuard.fundingToken`.
+export function preFundToken(desc: bigint): `0x${string}` {
+  if (!isPreFundDesc(desc)) throw new Error("preFundToken: not a pre-fund descriptor");
+  return `0x${((desc >> 16n) & ((1n << 160n) - 1n)).toString(16).padStart(40, "0")}`;
+}
+
+/// Is `desc` a PRE-FUNDED leg reference (bits 255 and 253 set, 254 clear)? Exactly
+/// the predicate `Base._isPreFundDesc` and `PreFundGuard.requireLegRef` apply, so
+/// this is the one test that decides whether the settler sizes a `MAKE` item from
+/// the descriptor instead of from `item.amount`.
+export function isPreFundDesc(desc: bigint): boolean {
+  return desc >> 253n === 5n;
 }
 
 /// Funding descriptor for a BALANCE-RELATIVE funding leg: `min(balanceOf(token,
@@ -338,6 +409,41 @@ export function withItemPolicy(timing: bigint, policy: ItemPolicy): bigint {
 /// `matchSettle` schedule must honour it — see `docs/filler-strategy.md`.
 export function itemPolicyOf(timing: bigint): ItemPolicy {
   return Number((timing >> ITEM_POLICY_OFFSET) & 0xfn) as ItemPolicy;
+}
+
+/**
+ * Warn when an order carries items but leaves a `matchSettle` solver free to
+ * schedule them. Returns `null` when there is nothing to say.
+ *
+ * `ItemPolicy.ANY` is the value an unset field holds, so it is what an order gets
+ * by omission rather than by choice — and it is the one value that lets a solver
+ * put a `PULL` of an input leg AHEAD of the item that was going to fund it. The
+ * tokens are refunded at the end of the batch; the Permit3 allowance they moved
+ * with is NOT. `matchSettle` is permissionless, so the solver picks the order.
+ *
+ * The repo already judged the sibling asymmetry — a DUPLICATE `PULL` — worth
+ * fixing in the contract for exactly this reason (`docs/reference-audits.md` F15).
+ * The ordering variant was left to this maker opt-in, which is why the SDK says so
+ * out loud rather than leaving it to whoever reads {@link ItemPolicy}.
+ *
+ * Deliberately a WARNING and not a throw. The gate cannot live in
+ * {@link packOrder}: the golden-hash fixture and several conformance tests sign
+ * item-bearing orders at `ANY` on purpose, and rejecting them there would either
+ * break the pinned hash or force a wire change to buy nothing. `ANY` is also
+ * REQUIRED to participate in a cycle. Call this from your own order builder and
+ * decide there.
+ *
+ * @see `docs/audit-2026-09-leads.md` A-4
+ */
+export function itemPolicyWarning(order: Order): string | null {
+  if (order.items.length === 0) return null;
+  if (itemPolicyOf(order.timing) !== ItemPolicy.ANY) return null;
+  return (
+    "order has items with ItemPolicy.ANY (the value an unset field holds): a matchSettle " +
+    "solver may pull an input leg ahead of the item meant to fund it, which refunds the " +
+    "tokens but not the Permit3 allowance. Sign ItemPolicy.CANONICAL unless this order " +
+    "participates in a cycle — withItemPolicy(timing, ItemPolicy.CANONICAL)."
+  );
 }
 
 /// Read the four `timing` mode flags an author may set. The clocks come from

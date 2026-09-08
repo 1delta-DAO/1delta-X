@@ -136,6 +136,13 @@ contract GearboxPoolDepositModule is IMakerModule {
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, pool, amount);
         IGearboxPoolV3(pool).deposit(amount, onBehalfOf);
+        // Clear the scoped grant: `pool` is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an
+        // order naming themselves as maker. A target that consumes less than
+        // approved would leave a standing third-party claim on any FUTURE balance
+        // of this module, which is what turns a later stranded-balance bug into a
+        // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+        SafeTransferLib.forceApprove(asset, pool, 0);
     }
 }
 
@@ -215,6 +222,10 @@ contract GearboxCreditAddCollateralModule is IMakerModule, IGearboxBot {
         (address creditAccount, address token) = abi.decode(data, (address, address));
         (address creditManager, address facade) = GearboxCreditAuth.authorize(creditAccount, onBehalfOf);
 
+        // Balance held BEFORE the pull — "the module ends where it started", not
+        // "ends empty". Sweeping `balanceOf(this)` outright would pay a stranded
+        // balance to whoever names this module in the next order (F19 / F25 G-1).
+        uint256 floor = IERC20(token).balanceOf(address(this));
         PermitHelper.replayIfPresent(data, 64, token, onBehalfOf, address(permit3), amount);
         permit3.transferFrom(onBehalfOf, address(this), token, uint160(amount));
         SafeTransferLib.forceApprove(token, creditManager, amount);
@@ -229,8 +240,8 @@ contract GearboxCreditAddCollateralModule is IMakerModule, IGearboxBot {
         // any amount the manager did not pull, so no residual is left for a later
         // order to name.
         SafeTransferLib.forceApprove(token, creditManager, 0);
-        uint256 left = IERC20(token).balanceOf(address(this));
-        if (left != 0) SafeTransferLib.safeTransfer(token, onBehalfOf, left);
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(token, onBehalfOf, bal - floor);
     }
 }
 
@@ -280,6 +291,10 @@ contract GearboxCreditRepayModule is IMakerModule, IGearboxBot {
         (address creditAccount, address asset) = abi.decode(data, (address, address));
         (address creditManager, address facade) = GearboxCreditAuth.authorize(creditAccount, onBehalfOf);
 
+        // Balance held BEFORE the pull — "the module ends where it started", not
+        // "ends empty". Sweeping `balanceOf(this)` outright would pay a stranded
+        // balance to whoever names this module in the next order (F19 / F25 G-1).
+        uint256 floor = IERC20(asset).balanceOf(address(this));
         PermitHelper.replayIfPresent(data, 64, asset, onBehalfOf, address(permit3), amount);
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, creditManager, amount);
@@ -295,8 +310,8 @@ contract GearboxCreditRepayModule is IMakerModule, IGearboxBot {
 
         // End holding nothing and granting nothing.
         SafeTransferLib.forceApprove(asset, creditManager, 0);
-        uint256 left = IERC20(asset).balanceOf(address(this));
-        if (left != 0) SafeTransferLib.safeTransfer(asset, onBehalfOf, left);
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(asset, onBehalfOf, bal - floor);
     }
 }
 

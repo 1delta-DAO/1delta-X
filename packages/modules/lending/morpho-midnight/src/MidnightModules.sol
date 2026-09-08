@@ -78,14 +78,29 @@ contract MidnightSupplyCollateralModule is IMakerModule {
         address collateralToken = market.collateralParams[collateralIndex].token;
 
         permit3.transferFrom(onBehalfOf, address(this), collateralToken, uint160(amount));
-        // Scoped approve + clear, NOT a standing max approval. `midnight` being an
-        // immutable, trusted target is not sufficient here: Midnight's `take` pulls
-        // the buy-side assets from a payer that the CALLER names (`takerCallback`,
-        // falling back to `msg.sender` only when it is zero). So any external
-        // account can call `take` designating THIS module as the payer, and a
-        // standing allowance is what would let that pull succeed against whatever
-        // the module holds. Approving exactly what this call funds — and clearing
-        // the remainder — removes the standing grant the attack depends on.
+        // Scoped approve + clear, NOT a standing max approval.
+        //
+        // ⚠ THE ORIGINAL JUSTIFICATION HERE WAS WRONG, and the corrected one is
+        // weaker — kept because the practice is still right. This comment used to
+        // claim that "any external account can call `take` designating THIS module
+        // as the payer, and a standing allowance is what would let that pull
+        // succeed". Read against the deployed source (morpho-org/midnight
+        // `Midnight.sol`), a standing allowance is NOT sufficient and never was:
+        //
+        //   address payer = buyerCallback != address(0) ? buyerCallback : ...
+        //   if (buyerCallback != address(0)) require(IBuyCallback(buyerCallback)
+        //       .onBuy(...) == CALLBACK_SUCCESS, WrongBuyCallbackReturnValue());
+        //   SafeTransferLib.safeTransferFrom(loanToken, payer, ...);   // AFTER
+        //
+        // Naming an address as payer means naming it as the CALLBACK, and Midnight
+        // invokes it and requires the success sentinel BEFORE it pulls. The same
+        // shape holds on every other payer path — `repay` (onRepay), `liquidate`
+        // (onLiquidate), `flashLoan` (onFlashLoan). No module in this package
+        // implements any of them, so no module can be named as payer by anyone.
+        //
+        // What the scoping still buys: defence in depth if a module ever gains a
+        // callback, and no residual allowance outliving the call that needed it.
+        // See `docs/audit-2026-09-leads.md` D-1 for the full resolution.
         SafeTransferLib.forceApprove(collateralToken, address(midnight), amount);
         midnight.supplyCollateral(market, collateralIndex, amount, onBehalfOf);
         SafeTransferLib.forceApprove(collateralToken, address(midnight), 0);

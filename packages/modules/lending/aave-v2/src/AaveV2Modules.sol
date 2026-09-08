@@ -49,6 +49,13 @@ contract AaveV2DepositModule is IMakerModule {
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, pool, amount);
         IAaveV2Pool(pool).deposit(asset, amount, onBehalfOf, 0);
+        // Clear the scoped grant: `pool` is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an
+        // order naming themselves as maker. A target that consumes less than
+        // approved would leave a standing third-party claim on any FUTURE balance
+        // of this module, which is what turns a later stranded-balance bug into a
+        // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+        SafeTransferLib.forceApprove(asset, pool, 0);
     }
 }
 
@@ -132,6 +139,13 @@ contract AaveV2RepayModule is IMakerModule {
         if (toRepay > 0) {
             SafeTransferLib.forceApprove(asset, pool, toRepay);
             IAaveV2Pool(pool).repay(asset, toRepay, rateMode, onBehalfOf);
+            // Clear the scoped grant: `pool` is decoded from the order's `data` on a
+            // SHARED singleton, so it is attacker-choosable — anyone can author an
+            // order naming themselves as maker. A target that consumes less than
+            // approved would leave a standing third-party claim on any FUTURE balance
+            // of this module, which is what turns a later stranded-balance bug into a
+            // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+            SafeTransferLib.forceApprove(asset, pool, 0);
         }
     }
 
@@ -246,7 +260,16 @@ contract AaveV2BorrowModule is ITakerModule {
 
         (address pool, address asset, uint256 rateMode) = abi.decode(data, (address, address, uint256));
 
+        // Measure the delta rather than assuming the requested `amount` arrived: an
+        // under-delivering borrow (fee-on-transfer underlying, a capped or
+        // partially-filled reserve) would otherwise be topped up from any balance the
+        // module happens to hold and paid to the solver, while the user keeps the full
+        // debt — the H-3 River shape. Fail closed instead. Matches AaveV3/V4.
+        uint256 balBefore = IERC20(asset).balanceOf(address(this));
         IAaveV2Pool(pool).borrow(asset, amount, rateMode, 0, onBehalfOf);
+        uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+        require(received >= amount, "insufficient borrowed");
         SafeTransferLib.safeTransfer(asset, receiver, amount);
+        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }
 }

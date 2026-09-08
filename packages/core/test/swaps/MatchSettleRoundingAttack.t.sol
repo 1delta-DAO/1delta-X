@@ -23,7 +23,7 @@ contract GrindSolver {
         settlement.matchSettle(p);
     }
 
-    /// @dev Push a fixed pad of both tokens into the pool mid-schedule. Deliberately
+    /// @dev Send a fixed pad of both tokens into the pool mid-schedule. Deliberately
     ///      generous: the unused remainder is swept back, so over-padding cannot
     ///      flatter the accounting.
     function pad(address t0, address t1, uint256 amt) external {

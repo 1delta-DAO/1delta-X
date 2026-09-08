@@ -74,6 +74,13 @@ contract CompoundV2DepositModule is IMakerModule {
         SafeTransferLib.forceApprove(underlying, cToken, amount);
         uint256 err = ICErc20(cToken).mint(amount);
         if (err != 0) revert CompoundV2Error(err);
+        // Clear the scoped grant: `cToken` is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an
+        // order naming themselves as maker. A target that consumes less than
+        // approved would leave a standing third-party claim on any FUTURE balance
+        // of this module, which is what turns a later stranded-balance bug into a
+        // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+        SafeTransferLib.forceApprove(underlying, cToken, 0);
 
         // cTokens were minted to this module — forward THIS MINT's receipt to the
         // user, never the module's whole balance.
@@ -264,12 +271,26 @@ contract CompoundV2WithdrawModule is ITakerModule {
             // exactly `amount`, return any cToken remainder to the user.
             uint256 rate = ICErc20(cToken).exchangeRateCurrent();
             uint256 cAmount = (amount * 1e18 + rate - 1) / rate;
+            // Pre-pull cToken floor. The sweep below used to hand out the module's
+            // WHOLE cToken balance, so anything stranded at this shared singleton was
+            // claimable by whoever authored the next one-unit order. Not an edge
+            // case either: the pull ceils and Compound's burn truncates, so a
+            // remainder exists on EVERY fill. F19 / F26/2a.
+            uint256 cFloor = IERC20(cToken).balanceOf(address(this));
             permit3.transferFrom(onBehalfOf, address(this), cToken, uint160(cAmount));
+            // Measure what the redeem actually delivered rather than forwarding the
+            // nominal `amount` — the Full branch above already does this and says
+            // why. Forwarding unmeasured lets a short delivery be topped up from any
+            // balance the module holds. F26/2b.
+            uint256 balBefore = IERC20(underlying).balanceOf(address(this));
             uint256 err = ICErc20(cToken).redeemUnderlying(amount);
             if (err != 0) revert CompoundV2Error(err);
+            uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+            require(received >= amount, "insufficient withdrawn");
             SafeTransferLib.safeTransfer(underlying, receiver, amount);
-            uint256 leftC = IERC20(cToken).balanceOf(address(this));
-            if (leftC != 0) SafeTransferLib.safeTransfer(cToken, onBehalfOf, leftC);
+            if (received > amount) SafeTransferLib.safeTransfer(underlying, onBehalfOf, received - amount);
+            uint256 cBalNow = IERC20(cToken).balanceOf(address(this));
+            if (cBalNow > cFloor) SafeTransferLib.safeTransfer(cToken, onBehalfOf, cBalNow - cFloor);
         }
     }
 }

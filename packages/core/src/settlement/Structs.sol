@@ -288,6 +288,25 @@ struct FillCtx {
     ///      and takes the classic `PERMIT3.take` path, so the hot path pays one
     ///      memory word and one length check. See {Core.fillWithPermitTake}.
     bytes permitTake;
+    /// @dev PER-`legsOut` amounts actually DELIVERED by {Core._deliverOutputs}, and
+    ///      the bitmask of those a funding descriptor has already consumed.
+    ///
+    ///      The output-side twin of `receipts` below, and it exists for both of that
+    ///      field's reasons at once. GAS: {Base._forSlice} used to re-run
+    ///      {Pricing.outputAt} for a leg the delivery step had priced moments earlier
+    ///      — the same duplicate pass `receipts` removed on the input side, measured
+    ///      there at 795 gas for one fixed leg and 3,583 for a two-leg order with a
+    ///      rising leg, against ~40 to record it. CORRECTNESS: a re-pricing carries no
+    ///      bookkeeping, so N items could each name leg `j` and each be handed the
+    ///      full delivery (F27/H-1 mechanism 3). A ledger can be spent; a formula
+    ///      cannot.
+    ///
+    ///      EMPTY except on the single-order forward path, which is the only path that
+    ///      delivers before it runs items — so a leg reference reached from anywhere
+    ///      else fails closed on `j >= outs.length` rather than pricing a leg nothing
+    ///      paid.
+    uint256[] outs;
+    uint256 outsUsed;
     uint256[] receipts; //    per-`legsIn` amounts actually paid to `payTo`, recorded by
     //                       `_payInputsToSolver` as it pays them. `fillUpTo` returns
     //                       this instead of re-deriving it: a second {Pricing} pass

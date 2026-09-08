@@ -239,7 +239,7 @@ always findings.
 | --- | --- | --- |
 | J1 | Standard ERC-20 | ● |
 | J2 | Fee-on-transfer **with** delta-verify (`timing` bit 104) | ◐ |
-| J3 | Fee-on-transfer **without** delta-verify (nominal push) | ◐ |
+| J3 | Fee-on-transfer **without** delta-verify (nominal preFund) | ◐ |
 | J4 | Missing-return / non-standard | ◐ |
 | J5 | An **item slice** wider than `uint160` (Permit3's book width) | ✕ `AmountOverflow` |
 

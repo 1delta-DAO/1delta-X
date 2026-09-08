@@ -8,7 +8,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Order, Item, ItemOp, OrderSide, LegIn, LegOut, Validator, CurvePoint} from "@core/settlement/Settlement.sol";
 
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
-import {AaveV3FusedLeverageModule} from "../../src/AaveV3FusedModules.sol";
+import {AaveV3LeverageModule} from "../../src/AaveV3FusedModules.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev A DUTCH-AUCTIONED leverage fill on the fused module.
@@ -35,7 +35,7 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 /// CEILING.** Sized at the floor, a late fill owes more than the borrow produced and
 /// `_payInputsToSolver` pulls the shortfall out of the maker's wallet.
 contract FusedDutchAuctionTest is AaveModulesBase {
-    AaveV3FusedLeverageModule fused;
+    AaveV3LeverageModule fused;
 
     uint256 constant COLLATERAL = 1 ether; //   fixed: what the maker ends up holding
     uint256 constant DEBT_FLOOR = 1_500e6; //   t=0   — best for the maker
@@ -44,7 +44,7 @@ contract FusedDutchAuctionTest is AaveModulesBase {
 
     function setUp() public override {
         super.setUp();
-        fused = new AaveV3FusedLeverageModule(address(permit3));
+        fused = new AaveV3LeverageModule(address(permit3), address(settlement));
         vm.label(address(fused), "aaveV3FusedLeverageModule");
     }
 

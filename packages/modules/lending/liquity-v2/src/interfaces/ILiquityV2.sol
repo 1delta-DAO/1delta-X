@@ -42,6 +42,19 @@ interface ILiquityV2BorrowerOperations {
 // address chain therefore has to be rooted at the TroveManager, which does expose
 // both `troveNFT()` and `borrowerOperations()`. See {LiquityV2TroveAuth}.
 
+/// @notice The per-deployment branch registry — the ONLY trusted root.
+/// @dev    `getTroveManager(index)` maps a branch index to its TroveManager. This
+///         is what makes {LiquityV2TroveAuth} sound: the registry address is an
+///         immutable fixed at construction, so a caller can choose WHICH branch to
+///         act on but cannot invent one. Verified on Ethereum mainnet —
+///         registry 0xf949982B91C8c61e952B3bA942cbbfaef5386684,
+///         `getTroveManager(0) == 0x7bcb64B2c9206a5B699eD43363f6F98D4776Cf5A`
+///         (the WETH branch), `totalCollaterals() == 3`.
+interface ICollateralRegistry {
+    function getTroveManager(uint256 _index) external view returns (address);
+    function totalCollaterals() external view returns (uint256);
+}
+
 /// @notice Troves are ERC-721s and `troveId` IS the token id, so ownership is a
 ///         plain `ownerOf`. Reverts for a non-existent trove, which is what makes
 ///         a fabricated id fail closed rather than resolve to `address(0)`.

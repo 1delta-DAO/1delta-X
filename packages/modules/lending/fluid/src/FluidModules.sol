@@ -5,11 +5,13 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {Narrow160} from "@lib/Narrow160.sol";
 import {FundingPreflight} from "@lib/FundingPreflight.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 
@@ -73,8 +75,12 @@ abstract contract FluidBase {
     /// @dev Pull `amount` of `token` from `user` and approve the VAULT to collect
     ///      it during `operate` — the vault's `liquidityCallback` runs the actual
     ///      `transferFrom(module → Liquidity)`, so the vault is the ERC20 spender.
+    /// @dev ONE narrowing for both halves. The pull clips to `uint160` and the
+    ///      approve did not, so a `data`-supplied amount just over 2^160 (the
+    ///      composite paths pass `p.sideAmount`) pulled one wei while approving
+    ///      ~1.46e48 to a `data`-chosen vault. F26/2d.
     function _pullAndApprove(address token, uint256 amount, address user, address vault) internal {
-        permit3.transferFrom(user, address(this), token, uint160(amount));
+        permit3.transferFrom(user, address(this), token, Narrow160.to160(amount));
         SafeTransferLib.forceApprove(token, vault, amount);
     }
 
@@ -160,8 +166,16 @@ contract FluidDepositModule is IMakerModule, FluidBase {
         (address vault, address collateralToken, uint256 nftId) = abi.decode(data, (address, address, uint256));
         _requireExistingPosition(nftId);
 
+        uint256 floor = SafeTransferLib.balanceOf(collateralToken, address(this));
         _pullAndApprove(collateralToken, amount, onBehalfOf, vault);
         IFluidVault(vault).operate(nftId, _signed(amount), 0, address(0));
+        // Return what `operate` did not consume AND clear the vault grant. The
+        // composite `_open` path was already fixed for exactly this ("a short pull
+        // stranded the difference here permanently along with a live vault allowance
+        // over it. Symmetric now") — these two single-op makers were never migrated,
+        // so `vault`, decoded from order `data` on a shared singleton, kept a
+        // standing claim and any short-pull was stranded forever. F26/2c.
+        _returnUnused(collateralToken, onBehalfOf, vault, floor);
     }
 }
 
@@ -198,8 +212,16 @@ contract FluidRepayModule is IMakerModule, FluidBase {
         _requireExistingPosition(nftId);
 
         if (amount > 0) {
+            uint256 floor = SafeTransferLib.balanceOf(debtToken, address(this));
             _pullAndApprove(debtToken, amount, onBehalfOf, vault);
             IFluidVault(vault).operate(nftId, 0, -_signed(amount), address(0));
+        // Return what `operate` did not consume AND clear the vault grant. The
+        // composite `_open` path was already fixed for exactly this ("a short pull
+        // stranded the difference here permanently along with a live vault allowance
+        // over it. Symmetric now") — these two single-op makers were never migrated,
+        // so `vault`, decoded from order `data` on a shared singleton, kept a
+        // standing claim and any short-pull was stranded forever. F26/2c.
+            _returnUnused(debtToken, onBehalfOf, vault, floor);
         }
 
         _locked = 1;
@@ -411,6 +433,10 @@ contract FluidOperateModule is ITakerModule, FluidBase {
 // live-debt sentinel plus an over-pull buffer rather than a settler-sized amount.
 //
 contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, FluidBase {
+    /// @dev The ONLY spender allowed to reach this module's PRE-FUND funding.
+    ///      `Permit3.takeFor` is permissionless (F27/C-1).
+    address public immutable settlement;
+
     error OnlyPermit3();
     error Reentrancy();
 
@@ -426,11 +452,14 @@ contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, 
         uint256 totalAmount; //    the item's full signed amount; fresh-open path only
     }
 
-    constructor(address _permit3) FluidBase(_permit3) {}
+    constructor(address _permit3, address _settlement) FluidBase(_permit3) {
+        settlement = _settlement;
+    }
 
     /// @param amount    this fill's slice of the BORROW leg (taker-allowance gated).
     /// @param forAmount this fill's COLLATERAL, sized by the core.
     function takeForOnBehalf(
+        address spender,
         address onBehalfOf,
         uint256 amount,
         uint256 forAmount,
@@ -438,6 +467,9 @@ contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, 
         bytes calldata data
     ) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
+        // Pinned for BOTH shapes: Settlement is the sole legitimate spender
+        // either way, and one unconditional check beats a branch (F27/C-1).
+        PreFundGuard.requireSettlement(spender, settlement);
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
@@ -447,8 +479,33 @@ contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, 
         // amounts say. An existing position is added to and slices freely.
         if (p.nftId == 0) FullFillGuard.requireFullFill(amount, p.totalAmount);
 
-        uint256 floor = SafeTransferLib.balanceOf(p.collateralToken, address(this));
-        if (forAmount != 0) _pullAndApprove(p.collateralToken, forAmount, onBehalfOf, p.vault);
+        // ⚠ THE FLOOR MUST BE THE *PRE-DELIVERY* BALANCE, AND ON THE PUSH SHAPE THAT
+        // IS NOT WHAT `balanceOf` READS. Settlement delivers output legs BEFORE it
+        // runs items, so by the time this module has control the pre-funded leg has
+        // already landed: a plain `balanceOf` here is `preExisting + forAmount`. With
+        // that as the floor, `bal <= floor` held for EVERY outcome, so
+        // `_returnUnused` short-circuited unconditionally — the maker never got the
+        // unconsumed remainder back, and the scoped `forceApprove(vault, 0)` that
+        // lives inside its taken branch was unreachable, leaving a standing grant to
+        // an order-decoded (attacker-choosable) `vault`. Subtracting the delivery
+        // restores both: an under-consuming `operate` now leaves `bal > floor`, which
+        // refunds the maker AND clears the grant.
+        bool isPreFund = uint256(bytes32(data[0:32])) >> 253 == 5;
+        uint256 floor = isPreFund
+            ? PreFundGuard.floorOf(data, p.collateralToken, forAmount)
+            : SafeTransferLib.balanceOf(p.collateralToken, address(this));
+        if (forAmount != 0) {
+            if (isPreFund) {
+                // PRE-FUND: the delivery already landed here, and `floor` above
+                // subtracted it — so the floor really is the pre-existing balance and
+                // the delta accounting below is exact. The vault's
+                // `liquidityCallback` still pulls via the approval.
+                SafeTransferLib.forceApprove(p.collateralToken, p.vault, forAmount);
+            } else {
+                // PULL: drawn out of the maker's wallet, then approved to the vault.
+                _pullAndApprove(p.collateralToken, forAmount, onBehalfOf, p.vault);
+            }
+        }
 
         // Strict-ownerOf: take custody just-in-time and hand it straight back.
         if (p.nftId != 0) IFluidVaultFactory(p.factory).transferFrom(onBehalfOf, address(this), p.nftId);
@@ -476,7 +533,9 @@ contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, 
         returns (address asset, uint256 available)
     {
         asset = abi.decode(data, (OpenData)).collateralToken;
-        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+        available = uint256(bytes32(data[0:32])) >> 253 == 5
+            ? type(uint256).max
+            : FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
     }
 
     /// @inheritdoc IProceedsAsset

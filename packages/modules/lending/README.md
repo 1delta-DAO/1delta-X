@@ -15,6 +15,47 @@ maker via Permit3 and pushes it into the lender; **TAKE** = value-out
 at `receiver`. `module` + `data` are inside the maker's EIP-712 hash, so a solver
 can never repoint which pool/asset is touched or how much.
 
+## Funding shapes — PRE-FUND is the default
+
+Funding source and item op are **two independent axes**, and conflating them is
+what the 2026-09 rework fixed:
+
+|  | value IN only | value OUT only | both |
+| --- | --- | --- | --- |
+| **PULL** (maker's wallet, via `permit3.transferFrom`) | `MAKE` — the plain deposit/repay modules | — | `TAKE_FOR`, maker-addressed leg |
+| **PRE-FUND** (the module's own balance) | `MAKE` + `(5 << 253)` descriptor — the `*PreFundModule` contracts | — | `TAKE_FOR`, module-addressed leg |
+
+The op says which way value moves for the user; the descriptor says where the
+module's funding comes from. A taker allowance is required exactly when value
+leaves the position — which is why the 15 one-sided `*PreFundModule` contracts need
+none at all.
+
+Pre-funded is the canonical shape: any flow where the funding leg arrives from a
+conversion —
+loops, cross-asset opens, deleverage, swap-and-deposit, swap-and-repay, i.e. the
+commonly used shapes — should sign the funding output leg with `recipient = the
+module` and use the venue's `PreFund…` module. The core sizes `forAmount` to exactly
+that delivered leg (`Base._forSlice` admits the item's own module as the
+referenced leg's recipient), so the module supplies from its own balance and the
+maker's receive side needs **nothing**: no Permit3 token allowance to the module
+and no on-chain ERC20 approval of a token they may never have held. It is also
+one ERC20 transfer cheaper per fill (measured −28.6k gas on Aave v3).
+
+The **pull-funded** variants (`…TakeFor…` with a maker-addressed leg, and the
+plain MAKE deposit/repay modules) remain for exactly one family: the **plain
+deposit / repay / deposit+borrow funded from the maker's own wallet** — no loop,
+no conversion — where there is no delivered leg to push and the wallet is the
+funding source by definition (the literal and balance descriptor forms).
+
+One-sided pre-fund modules ("deposit/repay whatever the conversion delivered") ride
+the same seam with a vestigial take side — see the *Pull-funded vs PRE-FUNDED*
+section of [`ITakerForModule.sol`](../../core/src/interfaces/ITakerForModule.sol)
+for the convention and the soundness argument, and `aave-v3`'s
+`AaveV3PreFundModules.sol` for the reference implementations. For venues with
+transferable receipt tokens (aTokens, cTokens, ERC-4626 shares), plain
+swap-and-deposit needs no module at all: sign the receipt token as the output
+leg.
+
 ## The wireability test
 
 A lender is wireable **iff**, for each leg it needs, there is a *grantable
@@ -54,7 +95,7 @@ Status: ✅ shipped · 🟡 partial (subset of legs) · ⛔ blocked (can't wire)
 | Euler V2 | [`euler-v2`](euler-v2) | EVC `setAccountOperator` | ✅ (SDK marks this "unused") |
 | Morpho Blue | [`morpho-blue`](morpho-blue) | `setAuthorization` | ✅ |
 | Morpho Midnight | [`morpho-midnight`](morpho-midnight) | `setIsAuthorized` | ✅ order-book |
-| Fluid | [`fluid`](fluid) | just-in-time position-NFT custody | ✅ (SDK marks ❌) |
+| Fluid | [`fluid`](fluid) | just-in-time position-NFT custody | ✅ T1 (SDK marks ❌); T2/T3/T4 smart-vault design in [`fluid/README.md`](fluid/README.md) |
 | Dolomite | [`dolomite`](dolomite) | `setOperators` (local operator) | ✅ (SDK marks ❌) |
 
 ### Added in this pass

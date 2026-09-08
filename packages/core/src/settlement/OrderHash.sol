@@ -46,6 +46,16 @@ library OrderHash {
     ///         whose witness is an `Order`. Permit3 prepends its standard stub and
     ///         concatenates this. Type definitions in alphabetical order (Order,
     ///         TakerPermit, TokenPermit).
+    /// @notice The witness type string for a `PermitTake` witness — `Order` ONLY.
+    /// @dev EIP-712 `encodeType` appends exactly the transitively-referenced types.
+    ///      `PermitTakeWitness` references `Order` and nothing else, so unlike
+    ///      {WITNESS_TYPESTRING} below (whose primary type really does carry the two
+    ///      permit arrays) this one must NOT append them. Kept as its own constant so
+    ///      `HashGolden.t.sol` can re-derive {PERMIT_TAKE_WITNESS_TYPEHASH} from a
+    ///      string rather than from a second copy of the folded hash.
+    string internal constant PERMIT_TAKE_WITNESS_TYPESTRING = "Order witness)"
+        "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)";
+
     string internal constant WITNESS_TYPESTRING = "Order witness)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
         "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
@@ -89,12 +99,20 @@ library OrderHash {
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
     );
 
+    /// @dev ⚠ NO `TakerPermit` / `TokenPermit` TAIL, unlike its sibling above, and
+    ///      that asymmetry is EIP-712 correctness rather than an oversight. `encodeType`
+    ///      appends exactly the types the primary type TRANSITIVELY REFERENCES, in
+    ///      alphabetical order. `PermitBatchWitness` really does reference both permit
+    ///      arrays; `PermitTakeWitness` is `(address, bytes32, uint160, address,
+    ///      uint256, uint256, Order)` and references only `Order`. Appending them made
+    ///      the typehash non-canonical, so a wallet computing `encodeType` to spec
+    ///      produced a DIFFERENT digest and its signature simply failed to recover —
+    ///      and `fillWithPermitTake` is the one gasless path whose sole authorization
+    ///      is that digest, so only SDK-built signatures ever worked.
     bytes32 internal constant PERMIT_TAKE_WITNESS_TYPEHASH = keccak256(
         "PermitTakeWitness(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline,"
         "Order witness)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
-        "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
-        "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
     );
 
     /// @notice EIP-712 `hashStruct` of an order.

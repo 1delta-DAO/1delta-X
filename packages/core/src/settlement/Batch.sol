@@ -412,7 +412,7 @@ abstract contract Batch is Core {
         uint256 nItems = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < nItems;) {
-            (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
+            (uint256 op,,,, bytes calldata idata, uint256 next) = PackedArrays.itemAt(items, cursor);
             // `>=`, NOT `==`, and the difference is load-bearing. `op` is a RAW
             // BYTE out of the signed blob ({PackedArrays.itemAt} deliberately does
             // not narrow it), so the guard has to name a RANGE rather than one
@@ -427,7 +427,16 @@ abstract contract Batch is Core {
             //     deliveries before items by construction;
             //   • anything above — a malformed record, which {Base._runItem}
             //     rejects too, so the guard and the dispatcher agree.
-            if (op >= uint256(ItemOp.SETTLE)) revert MatchSettleItemUnsupported();
+            //   • a PRE-FUNDED MAKE (op 0, so the range test above sails past it) —
+            //     its funding leg is one of the order's own `legsOut`, i.e. value the
+            //     module has to have RECEIVED before the item runs. The forward path
+            //     guarantees that by construction; here deliveries and items are
+            //     INDEPENDENTLY SCHEDULED steps, so the precondition would be a
+            //     solver obligation. It does not fail closed either: the module's
+            //     balance floor underflows only on an empty module, so a schedule
+            //     that ran the item first would silently consume whatever residue
+            //     was sitting there. Same exclusion, same reason, as TAKE_FOR.
+            if (op >= uint256(ItemOp.SETTLE) || _isPreFundDesc(idata)) revert MatchSettleItemUnsupported();
             cursor = next;
             unchecked {
                 ++i;

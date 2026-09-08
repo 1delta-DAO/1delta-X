@@ -245,6 +245,15 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   relevant code moves. Companion to [SECURITY.md](../SECURITY.md), which is the
   trust model and the audit log.
 
+- **[audit-2026-09-modules-plan.md](audit-2026-09-modules-plan.md)** — the
+  remediation plan for the twelve-lens read of the 14 previously-unaudited lending
+  packages. One Critical (a forged auth root, PoC'd), one class that harms makers
+  who signed correct orders (unscaled slippage bounds diluted by filler-chosen
+  slicing), and the F19/A-3/H-3 hygiene family again. **Read the first section even
+  if you skip the rest**: it is a post-mortem of why the previous sweep reported
+  "zero remaining" while missing sites in every class it had swept, and each cause
+  becomes a rule the plan is built on.
+
 - **[audit-2026-09-leads.md](audit-2026-09-leads.md)** — the open **leads** from the
   F25 twelve-lens re-audit (the findings themselves are closed, in
   `reference-audits.md`). A lead is a place where the code depends on something it

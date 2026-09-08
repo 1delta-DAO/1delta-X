@@ -31,6 +31,15 @@ pre-existing balance.
 | `RiverTakerModule` (op 0) | TAKE | `withdrawDebt` → Permit3-sweep satUSD → receiver | `abi.encode(uint8(0), xapp, tm, debtToken, maxFee, upper, lower)` |
 | `RiverTakerModule` (op 1) | TAKE | `withdrawColl` → Permit3-sweep collateral → receiver | `abi.encode(uint8(1), xapp, tm, coll, upper, lower)` |
 | `RiverOpenModule` | TAKE (Level B) | pull collateral + `openTrove` → sweep satUSD → receiver | `abi.encode(OpenData{...})` |
+| `RiverPreFundAddCollModule` | TAKE_FOR (preFund) | `addColl` the core-delivered leg from the module's own balance | `abi.encode(forDesc, xapp, tm, coll, upper, lower)` |
+| `RiverPreFundRepayModule` | TAKE_FOR (preFund) | `repayDebt(min(forAmount,debt))` from the module's own balance; sweep surplus → maker | `abi.encode(forDesc, xapp, tm, debtToken, upper, lower)` |
+
+The pre-fund modules (`RiverPreFundModules.sol`) are the one-sided "add/repay whatever
+the conversion delivered" shape: the maker routes the signed output leg to the
+module (`recipient = module`), so the DELIVERED asset needs no ERC20 approval and
+no Permit3 token allowance — only the taker allowance and the diamond's
+`setDelegateApproval(module, true)` (a venue authorization the deployed diamond
+enforces on value-in ops too) remain.
 
 ## Authorization (per leg)
 

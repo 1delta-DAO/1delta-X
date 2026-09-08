@@ -29,6 +29,8 @@ interface IBorrowerOpsFork {
 abstract contract LiquityV2ForkBase is Test {
     // ── Verified Ethereum mainnet addresses (Liquity V2, WETH branch) ──
     address internal constant TROVE_MANAGER = 0x7bcb64B2c9206a5B699eD43363f6F98D4776Cf5A;
+    address internal constant COLLATERAL_REGISTRY = 0xf949982B91C8c61e952B3bA942cbbfaef5386684;
+    uint256 internal constant BRANCH = 0; // WETH branch — getTroveManager(0) == TROVE_MANAGER
     address internal constant TROVE_NFT = 0x1A0FC0b843aFD9140267D25d4E575Cb37a838013;
     address internal constant BORROWER_OPS = 0x372ABD1810eAF23Cb9D941BbE7596DFb2c46BC65;
     address internal constant BOLD = 0x6440f144b7e50D6a8439336510312d2F54beB01D;
@@ -77,8 +79,8 @@ abstract contract LiquityV2ForkBase is Test {
         _forkMainnet();
 
         permit3 = new Permit3();
-        takerModule = new LiquityV2TakerModule(address(permit3));
-        addCollModule = new LiquityV2AddCollModule(address(permit3), settlement);
+        takerModule = new LiquityV2TakerModule(address(permit3), COLLATERAL_REGISTRY);
+        addCollModule = new LiquityV2AddCollModule(address(permit3), settlement, COLLATERAL_REGISTRY);
 
         vm.label(TROVE_MANAGER, "TroveManager");
         vm.label(TROVE_NFT, "TroveNFT");
@@ -87,10 +89,13 @@ abstract contract LiquityV2ForkBase is Test {
         vm.label(TROVE_OWNER, "troveOwner");
     }
 
-    /// @dev `op = 0` (Borrow) payload. Leading address is the TroveManager — the
-    ///      single caller-supplied root the rest of the chain is derived from.
+    /// @dev `op = 0` (Borrow) payload. The second word is a branch INDEX resolved
+    ///      through the immutable registry; the trailing word is the item total that
+    ///      scales the fee ceiling (F26).
     function _borrowData(uint256 troveId) internal pure returns (bytes memory) {
-        return abi.encode(uint8(0), TROVE_MANAGER, troveId, BOLD, type(uint256).max);
+        // Bound is the `no ceiling` sentinel, so the total only has to be non-zero
+        // ({ProratedBound} passes the sentinel through untouched).
+        return abi.encode(uint8(0), BRANCH, troveId, BOLD, type(uint256).max, uint256(100e18));
     }
 
     function _debtOf(uint256 troveId) internal view returns (uint256) {

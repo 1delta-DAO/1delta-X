@@ -13,20 +13,20 @@ contract LiquityV2TakerModuleAuthTest is Test {
     address permit3 = address(0xBEEF);
     address maker = address(0xA11CE);
     address attacker = address(0xBAD);
-    address ops = address(0x0B5);
+    address registry = address(0x0B5); // unused: every test here reverts on the msg.sender gate first
     uint256 troveId = uint256(keccak256("trove"));
     address token = address(0x5A7);
 
     function setUp() public {
-        taker = new LiquityV2TakerModule(permit3);
+        taker = new LiquityV2TakerModule(permit3, registry);
     }
 
     function _borrowData() internal view returns (bytes memory) {
-        return abi.encode(uint8(LiquityV2TakerModule.Op.Borrow), ops, troveId, token, uint256(1e16));
+        return abi.encode(uint8(LiquityV2TakerModule.Op.Borrow), uint256(0), troveId, token, uint256(1e16), uint256(1e18));
     }
 
     function _withdrawData() internal view returns (bytes memory) {
-        return abi.encode(uint8(LiquityV2TakerModule.Op.WithdrawColl), ops, troveId, token);
+        return abi.encode(uint8(LiquityV2TakerModule.Op.WithdrawColl), uint256(0), troveId, token);
     }
 
     function test_borrow_rejects_non_permit3() public {

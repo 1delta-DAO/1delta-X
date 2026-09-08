@@ -20,6 +20,16 @@ import {LatestTroveData} from "../../src/interfaces/ILiquityV2.sol";
 //   3. value-out ops carrying NO receiver — proceeds land on the trove's
 //      configured receiver, which the maker sets to the module.
 
+/// @dev The immutable branch registry the modules are now rooted at. A caller
+///      picks a branch INDEX; it cannot invent a branch.
+contract LqtyRegistry {
+    mapping(uint256 => address) internal _tm;
+
+    function set(uint256 i, address t) external { _tm[i] = t; }
+    function getTroveManager(uint256 i) external view returns (address) { return _tm[i]; }
+    function totalCollaterals() external pure returns (uint256) { return 1; }
+}
+
 contract LqtyToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -188,6 +198,8 @@ contract LiquityV2TroveAuthTest is Test {
     LqtyTroveManager tm;
     LqtyBorrowerOperations bo;
 
+    LqtyRegistry internal registry;
+    uint256 internal constant BRANCH = 0;
     LiquityV2AddCollModule addCollModule;
     LiquityV2RepayModule repayModule;
     LiquityV2TakerModule takerModule;
@@ -212,9 +224,11 @@ contract LiquityV2TroveAuthTest is Test {
         bo = new LqtyBorrowerOperations(address(tm), address(bold), address(collateral));
         tm.setBorrowerOperations(address(bo));
 
-        addCollModule = new LiquityV2AddCollModule(address(permit3), settlement);
-        repayModule = new LiquityV2RepayModule(address(permit3), settlement);
-        takerModule = new LiquityV2TakerModule(address(permit3));
+        registry = new LqtyRegistry();
+        registry.set(BRANCH, address(tm));
+        addCollModule = new LiquityV2AddCollModule(address(permit3), settlement, address(registry));
+        repayModule = new LiquityV2RepayModule(address(permit3), settlement, address(registry));
+        takerModule = new LiquityV2TakerModule(address(permit3), address(registry));
 
         nft.mint(MAKER_TROVE, maker);
         nft.mint(ATTACKER_TROVE, attacker);
@@ -237,18 +251,18 @@ contract LiquityV2TroveAuthTest is Test {
     }
 
     function _borrowData(uint256 troveId) internal view returns (bytes memory) {
-        return abi.encode(uint8(0), address(tm), troveId, address(bold), uint256(0));
+        return abi.encode(uint8(0), BRANCH, troveId, address(bold), uint256(0), BORROW);
     }
 
     function _withdrawCollData(uint256 troveId) internal view returns (bytes memory) {
-        return abi.encode(uint8(1), address(tm), troveId, address(collateral));
+        return abi.encode(uint8(1), BRANCH, troveId, address(collateral));
     }
 
     // ──────────────── Scenario 1: add collateral ────────────────
 
     function test_addColl_creditsOwnTrove() public {
         vm.prank(settlement);
-        addCollModule.makeOnBehalf(maker, ADD_COLL, abi.encode(address(tm), MAKER_TROVE, address(collateral)));
+        addCollModule.makeOnBehalf(maker, ADD_COLL, abi.encode(BRANCH, MAKER_TROVE, address(collateral)));
 
         assertEq(tm.coll(MAKER_TROVE), 25e18, "collateral added to the maker's trove");
         assertEq(collateral.balanceOf(maker), 0, "pulled from the maker");
@@ -335,7 +349,7 @@ contract LiquityV2TroveAuthTest is Test {
 
         vm.prank(settlement);
         vm.expectRevert(LiquityV2TroveAuth.InvalidCaller.selector);
-        addCollModule.makeOnBehalf(attacker, ADD_COLL, abi.encode(address(tm), MAKER_TROVE, address(collateral)));
+        addCollModule.makeOnBehalf(attacker, ADD_COLL, abi.encode(BRANCH, MAKER_TROVE, address(collateral)));
 
         assertEq(tm.coll(MAKER_TROVE), 20e18, "victim's trove untouched");
     }
@@ -366,7 +380,7 @@ contract LiquityV2TroveAuthTest is Test {
 
         // data no longer carries `troveManager` — it is derived from `borrowerOps`.
         vm.prank(settlement);
-        repayModule.makeOnBehalf(maker, BORROW, abi.encode(address(tm), MAKER_TROVE, address(bold)));
+        repayModule.makeOnBehalf(maker, BORROW, abi.encode(BRANCH, MAKER_TROVE, address(bold)));
 
         assertEq(tm.debt(MAKER_TROVE), 0, "debt repaid");
         assertEq(bold.balanceOf(address(repayModule)), 0, "no residue left on the module");
@@ -383,7 +397,7 @@ contract LiquityV2TroveAuthTest is Test {
 
         vm.prank(settlement);
         vm.expectRevert(LiquityV2TroveAuth.InvalidCaller.selector);
-        repayModule.makeOnBehalf(attacker, BORROW, abi.encode(address(tm), MAKER_TROVE, address(bold)));
+        repayModule.makeOnBehalf(attacker, BORROW, abi.encode(BRANCH, MAKER_TROVE, address(bold)));
 
         assertEq(tm.debt(MAKER_TROVE), BORROW, "victim's debt unchanged");
     }

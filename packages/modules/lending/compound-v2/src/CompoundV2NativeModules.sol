@@ -61,22 +61,49 @@ contract CompoundV2NativeDepositModule is IMakerModule {
 
         // Pull WETH from the maker, unwrap, mint cEther to THIS module (cEther has no
         // `mintBehalf`), then forward the receipt cTokens to the maker.
+        // Balance held BEFORE the operation. Sweeping `balanceOf(this)` outright
+        // would pay out anything already stranded at this shared module, and anyone
+        // can be the maker of a one-unit order against it. "The module ends where it
+        // started", not "ends empty" — F19 / F25 G-1.
+        uint256 cFloor = IERC20(cEther).balanceOf(address(this));
+        uint256 ethFloor = address(this).balance;
         permit3.transferFrom(onBehalfOf, address(this), address(weth), uint160(amount));
         weth.withdraw(amount);
         ICEther(cEther).mint{value: amount}(); // reverts on error
-        SafeTransferLib.safeTransfer(cEther, onBehalfOf, IERC20(cEther).balanceOf(address(this)));
-        _sweepNativeAsWeth(onBehalfOf);
+        uint256 cBalNow = IERC20(cEther).balanceOf(address(this));
+        if (cBalNow > cFloor) SafeTransferLib.safeTransfer(cEther, onBehalfOf, cBalNow - cFloor);
+        _sweepNativeAsWeth(onBehalfOf, ethFloor);
     }
 
-    /// @dev Wrap any residual native balance and return it to `to`. `receive()` is
-    ///      open and these modules have no owner or rescue path, so ETH left behind
-    ///      would be stranded forever. Wrapping (rather than a raw `.call{value:}`)
-    ///      keeps the sweep reentrancy-free.
-    function _sweepNativeAsWeth(address to) private {
+    /// @dev Wrap the native balance THIS CALL produced and return it to `to`.
+    ///
+    ///  ⚠ THE `floor` IS NOT OPTIONAL, and the reasoning that once justified
+    ///  omitting it was wrong. This used to wrap `address(this).balance` outright,
+    ///  argued as: `receive()` is open and these modules have no owner or rescue
+    ///  path, so ETH left behind would be stranded forever — "a donor's ETH is a
+    ///  gift to the maker, not a loss".
+    ///
+    ///  That silently assumes the maker is a legitimate counterparty. **Anyone can
+    ///  be the maker of a one-wei order.** It was not a gift to the maker; it was a
+    ///  gift to whoever called first, which is the F19 shape this repo rules out
+    ///  everywhere else. Worse, `CompoundV2NativeRepayModule` reaches the sweep with
+    ///  NO pull at all when the live debt is zero, so the claim cost only gas.
+    ///
+    ///  The cost of the floor is honest and worth stating: ETH donated to this
+    ///  address is now unrecoverable rather than claimable. That matches how every
+    ///  other module in the tree treats a donated ERC-20, and "nobody gets it" beats
+    ///  "the fastest attacker gets it". Giving these modules a rescue path is a
+    ///  separate decision — see `docs/audit-2026-09-modules-plan.md`.
+    ///
+    ///  Wrapping (rather than a raw `.call{value:}`) keeps the sweep reentrancy-free.
+    function _sweepNativeAsWeth(address to, uint256 floor) private {
         uint256 bal = address(this).balance;
-        if (bal != 0) {
-            weth.deposit{value: bal}();
-            SafeTransferLib.safeTransfer(address(weth), to, bal);
+        if (bal > floor) {
+            unchecked {
+                uint256 delta = bal - floor;
+                weth.deposit{value: delta}();
+                SafeTransferLib.safeTransfer(address(weth), to, delta);
+            }
         }
     }
 
@@ -113,6 +140,12 @@ contract CompoundV2NativeRepayModule is IMakerModule {
 
         address cEther = abi.decode(data, (address));
 
+        // ⚠ Taken BEFORE the pull, and load-bearing: with a zero live debt `toRepay`
+        // is 0 and the whole block below is skipped, so this function reaches the
+        // sweep having pulled NOTHING. Unfloored, that made every wei of ETH at this
+        // shared module claimable for gas by anyone. F26/2a.
+        uint256 ethFloor = address(this).balance;
+
         uint256 debt = ICEther(cEther).borrowBalanceCurrent(onBehalfOf);
         uint256 toRepay = amount < debt ? amount : debt;
         if (toRepay > 0) {
@@ -121,19 +154,39 @@ contract CompoundV2NativeRepayModule is IMakerModule {
             ICEther(cEther).repayBorrowBehalf{value: toRepay}(onBehalfOf); // reverts on error
         }
 
-        _sweepNativeAsWeth(onBehalfOf);
+        _sweepNativeAsWeth(onBehalfOf, ethFloor);
         _locked = 1;
     }
 
-    /// @dev Wrap any residual native balance and return it to `to`. `receive()` is
-    ///      open and these modules have no owner or rescue path, so ETH left behind
-    ///      would be stranded forever. Wrapping (rather than a raw `.call{value:}`)
-    ///      keeps the sweep reentrancy-free.
-    function _sweepNativeAsWeth(address to) private {
+    /// @dev Wrap the native balance THIS CALL produced and return it to `to`.
+    ///
+    ///  ⚠ THE `floor` IS NOT OPTIONAL, and the reasoning that once justified
+    ///  omitting it was wrong. This used to wrap `address(this).balance` outright,
+    ///  argued as: `receive()` is open and these modules have no owner or rescue
+    ///  path, so ETH left behind would be stranded forever — "a donor's ETH is a
+    ///  gift to the maker, not a loss".
+    ///
+    ///  That silently assumes the maker is a legitimate counterparty. **Anyone can
+    ///  be the maker of a one-wei order.** It was not a gift to the maker; it was a
+    ///  gift to whoever called first, which is the F19 shape this repo rules out
+    ///  everywhere else. Worse, `CompoundV2NativeRepayModule` reaches the sweep with
+    ///  NO pull at all when the live debt is zero, so the claim cost only gas.
+    ///
+    ///  The cost of the floor is honest and worth stating: ETH donated to this
+    ///  address is now unrecoverable rather than claimable. That matches how every
+    ///  other module in the tree treats a donated ERC-20, and "nobody gets it" beats
+    ///  "the fastest attacker gets it". Giving these modules a rescue path is a
+    ///  separate decision — see `docs/audit-2026-09-modules-plan.md`.
+    ///
+    ///  Wrapping (rather than a raw `.call{value:}`) keeps the sweep reentrancy-free.
+    function _sweepNativeAsWeth(address to, uint256 floor) private {
         uint256 bal = address(this).balance;
-        if (bal != 0) {
-            weth.deposit{value: bal}();
-            SafeTransferLib.safeTransfer(address(weth), to, bal);
+        if (bal > floor) {
+            unchecked {
+                uint256 delta = bal - floor;
+                weth.deposit{value: delta}();
+                SafeTransferLib.safeTransfer(address(weth), to, delta);
+            }
         }
     }
 
@@ -164,6 +217,13 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
 
         address cEther = abi.decode(data, (address));
 
+        // Floors for BOTH sides, taken before anything moves. The WETH sweep used to
+        // return the module's whole balance, and the native wrap used to wrap the
+        // whole balance — so stranded WETH or ETH was claimable by whoever authored
+        // the next one-wei order. F19 / F26/2a.
+        uint256 wethFloor = SafeTransferLib.balanceOf(address(weth), address(this));
+        uint256 ethFloor = address(this).balance;
+
         // base = (address) = 32 bytes ⇒ optional BalanceMode at offset 32.
         if (DustHandler.readBalanceMode(data, 32) == DustHandler.BalanceMode.Full) {
             // `Full` liquidates the user's ENTIRE live balance, so it cannot be
@@ -179,36 +239,40 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
             if (err != 0) revert CompoundV2Error(err);
             uint256 received = address(this).balance - beforeEth;
             require(received >= amount, "insufficient withdrawn");
-            // Wrap the ENTIRE native balance, not just the redeem delta. `receive()`
-            // is open to anyone and this module has no owner, no rescue and no other
-            // path that touches native, so ETH left outside the delta would be
-            // stranded forever. Wrapping everything keeps the "module ends each call
-            // empty" invariant; a donor's ETH is a gift to the maker, not a loss.
-            weth.deposit{value: address(this).balance}();
+            // Wrap only what this call produced. Wrapping the ENTIRE balance was
+            // argued as "a donor's ETH is a gift to the maker, not a loss" — but the
+            // maker is whoever authored the order, so it was a gift to the fastest
+            // caller. See {_sweepNativeAsWeth} for the full correction. F26/2a.
+            weth.deposit{value: address(this).balance - ethFloor}();
             SafeTransferLib.safeTransfer(address(weth), receiver, amount);
-            _sweepWeth(onBehalfOf);
+            _sweepWeth(onBehalfOf, wethFloor);
         } else {
             // Pull the ceiling cEther needed for `amount` ETH, redeem exactly `amount`,
             // wrap to WETH, forward, and return any cToken remainder to the maker.
             uint256 rate = ICEther(cEther).exchangeRateCurrent();
             uint256 cAmount = (amount * 1e18 + rate - 1) / rate;
+            // Pre-pull cEther floor — see the deposit module. A stranded cToken
+            // balance is not this maker's remainder and must not be swept to them.
+            uint256 cFloor = IERC20(cEther).balanceOf(address(this));
             permit3.transferFrom(onBehalfOf, address(this), cEther, uint160(cAmount));
             uint256 err = ICEther(cEther).redeemUnderlying(amount);
             if (err != 0) revert CompoundV2Error(err);
-            // Wrap everything, not just `amount` — see the Full branch.
-            weth.deposit{value: address(this).balance}();
+            // Wrap only this call's delta — see the Full branch and {_sweepNativeAsWeth}.
+            weth.deposit{value: address(this).balance - ethFloor}();
             SafeTransferLib.safeTransfer(address(weth), receiver, amount);
-            uint256 leftC = IERC20(cEther).balanceOf(address(this));
-            if (leftC != 0) SafeTransferLib.safeTransfer(cEther, onBehalfOf, leftC);
-            _sweepWeth(onBehalfOf);
+            uint256 cBalNow = IERC20(cEther).balanceOf(address(this));
+            if (cBalNow > cFloor) SafeTransferLib.safeTransfer(cEther, onBehalfOf, cBalNow - cFloor);
+            _sweepWeth(onBehalfOf, wethFloor);
         }
     }
 
-    /// @dev Return any WETH the module is holding to the maker, so it ends every
-    ///      call empty on both the native and wrapped side.
-    function _sweepWeth(address to) private {
-        uint256 left = SafeTransferLib.balanceOf(address(weth), address(this));
-        if (left != 0) SafeTransferLib.safeTransfer(address(weth), to, left);
+    /// @dev Return the WETH THIS CALL produced. `floor` is the balance held before
+    ///      it began — WETH is an ordinary ERC-20 and gets the ordinary F19
+    ///      treatment ("the module ends where it started"). The native-side
+    ///      justification never covered the wrapped side; see {_sweepNativeAsWeth}.
+    function _sweepWeth(address to, uint256 floor) private {
+        uint256 bal = SafeTransferLib.balanceOf(address(weth), address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(address(weth), to, bal - floor);
     }
 
     receive() external payable {} // ETH from cEther.redeem*

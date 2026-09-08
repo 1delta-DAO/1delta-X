@@ -63,6 +63,13 @@ contract SiloDepositModule is IMakerModule {
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, silo, amount);
         ISilo(silo).deposit(amount, onBehalfOf);
+        // Clear the scoped grant: `silo` is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an
+        // order naming themselves as maker. A target that consumes less than
+        // approved would leave a standing third-party claim on any FUTURE balance
+        // of this module, which is what turns a later stranded-balance bug into a
+        // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+        SafeTransferLib.forceApprove(asset, silo, 0);
     }
 }
 
@@ -127,6 +134,13 @@ contract SiloRepayModule is IMakerModule {
         if (toRepay > 0) {
             SafeTransferLib.forceApprove(asset, silo, toRepay);
             ISilo(silo).repay(toRepay, onBehalfOf);
+            // Clear the scoped grant: `silo` is decoded from the order's `data` on a
+            // SHARED singleton, so it is attacker-choosable — anyone can author an
+            // order naming themselves as maker. A target that consumes less than
+            // approved would leave a standing third-party claim on any FUTURE balance
+            // of this module, which is what turns a later stranded-balance bug into a
+            // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+            SafeTransferLib.forceApprove(asset, silo, 0);
         }
     }
 

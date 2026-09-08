@@ -48,13 +48,30 @@ interface IExactlyMarket {
     function borrowAtMaturity(uint256 maturity, uint256 assets, uint256 maxAssets, address receiver, address borrower)
         external
         returns (uint256 assetsOwed);
+    // ⚠ ONE return word, matching the deployed Market.sol (`actualRepayAssets`).
+    // This was declared as a two-word tuple until 2026-09-03 — a latent mismatch
+    // that never surfaced because {ExactlyRepayModule} ignores the return (solc
+    // skips return-data decoding for unused typed returns). Any caller that USES
+    // the return would have reverted on decode against the live market; the
+    // pre-funded repay module found it (its sweep needs `actualRepay`).
     function repayAtMaturity(uint256 maturity, uint256 positionAssets, uint256 maxAssets, address borrower)
         external
-        returns (uint256 actualRepay, uint256 borrowShares);
+        returns (uint256 actualRepayAssets);
 
     // ── views ──
     function previewDebt(address borrower) external view returns (uint256 debt);
     function maxWithdraw(address owner) external view returns (uint256);
+
+    // ── EIP-2612 (solmate ERC20 base) ──
+    // The deployed Markets expose the full solmate permit triple, verified
+    // on-fork against Optimism MarketUSDC/MarketWETH (each proxy computes its
+    // own DOMAIN_SEPARATOR — they differ per market, so no cross-market permit
+    // replay). This is what makes the share allowance a SIGNATURE instead of an
+    // on-chain `approve`; see the permit tail in {ExactlyTakerModule}.
+    function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        external;
+    function nonces(address owner) external view returns (uint256);
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
 }
 
 /// @notice The cross-margin risk hub. `enterMarket` is a maker-side permission

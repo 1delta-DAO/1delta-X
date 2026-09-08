@@ -231,13 +231,39 @@ resolves it in [`Base._forSlice`](../packages/core/src/settlement/Base.sol):
 
 | descriptor | meaning | `forAmount` |
 | --- | --- | --- |
-| `(1 << 255) \| j` | fund from `legsOut[j]` | `Pricing.outputAt(order, ctx, j)` — the SAME call `_deliverOutputs` just made |
+| `(1 << 255) \| j` | fund from `legsOut[j]`, delivered to the maker's WALLET (PULL) | the amount `_deliverOutputs` recorded for leg `j` in `ctx.outs`, **consumed** |
+| `(5 << 253) \| j` | fund from `legsOut[j]`, delivered to **the item's own module** (PRE-FUND) | the same, and `legsOut[j].recipient == module` is **enforced** |
 | `(3 << 254) \| floorBps << 160 \| token` | fund with what the maker holds | `min(balanceOf(token, maker), cap)`, cap = `data` word 1, floor = `floorBps` of the cap, **full-fill only** |
 | any smaller value | a literal total (wallet-funded leg, no matching output) | sliced by the same differencing as `item.amount` |
 
-Settlement then calls `PERMIT3.takeFor(module, maker, amount, forAmount, receiver,
-data)`, which gates `amount` against the **identical** taker-book bucket a plain
-`TAKE` uses and dispatches
+The amount is **read from a ledger, not re-priced**: `_deliverOutputs` records what
+it actually paid for each leg in `ctx.outs`, and `_forSlice` spends that entry.
+One delivery funds ONE item — a second item naming the same leg reverts
+`ForLegReused`.
+
+### Two seams take this descriptor
+
+The `(5 << 253)` pre-fund form is valid on **both** item ops, and which one you want
+is decided by a single question: *does anything leave the position?*
+
+| | op | `item.amount` | taker allowance | dispatch |
+| --- | --- | --- | --- | --- |
+| one-sided (deposit-only, repay-only) | `MAKE` | **unread** — sign `0` | **none** | Settlement → module |
+| composite (deposit+borrow, repay+withdraw) | `TAKE_FOR` | the value-OUT side | required | Settlement → Permit3 → module |
+
+A one-sided pre-funded op is a `MAKE`. It moves nothing out, so the taker book —
+whose whole purpose is bounding what *leaves* a position — has nothing to bound,
+and the order signature is the authorization. The caller pin is `msg.sender ==
+settlement`, asserted by the EVM rather than carried in a forwarded `spender` word.
+Measured against the composite shape it used to wear: **860,684 → 820,877 gas**.
+
+`matchSettle` refuses a pre-funded `MAKE` for the same reason it refuses `TAKE_FOR`:
+it schedules deliveries and items independently, so "the delivery landed before the
+item ran" would become a solver obligation rather than a structural fact.
+
+For a **composite**, Settlement calls `PERMIT3.takeFor(module, maker, amount,
+forAmount, receiver, data)`, which gates `amount` against the **identical**
+taker-book bucket a plain `TAKE` uses and dispatches
 [`ITakerForModule.takeForOnBehalf`](../packages/core/src/interfaces/ITakerForModule.sol).
 `data` is forwarded whole, so `ref = keccak256(data)` still covers the descriptor
 and a filler cannot repoint the funding leg.

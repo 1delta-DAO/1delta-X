@@ -7,11 +7,13 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {Narrow160} from "@lib/Narrow160.sol";
 import {FundingPreflight} from "@lib/FundingPreflight.sol";
 
 import {
@@ -126,6 +128,13 @@ contract DolomiteDepositModule is DolomiteBase, IMakerModule {
         permit3.transferFrom(onBehalfOf, address(this), token, uint160(amount));
         SafeTransferLib.forceApprove(token, dolomite, amount);
         _operate(dolomite, onBehalfOf, accountNumber, _depositAction(marketId, amount, address(this)));
+        // Clear the scoped grant: `dolomite` is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an
+        // order naming themselves as maker. A target that consumes less than
+        // approved would leave a standing third-party claim on any FUTURE balance
+        // of this module, which is what turns a later stranded-balance bug into a
+        // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+        SafeTransferLib.forceApprove(token, dolomite, 0);
     }
 }
 
@@ -193,6 +202,13 @@ contract DolomiteRepayModule is DolomiteBase, IMakerModule {
         if (toRepay > 0) {
             SafeTransferLib.forceApprove(token, dolomite, toRepay);
             _operate(dolomite, onBehalfOf, accountNumber, _depositAction(marketId, toRepay, address(this)));
+            // Clear the scoped grant: `dolomite` is decoded from the order's `data` on a
+            // SHARED singleton, so it is attacker-choosable — anyone can author an
+            // order naming themselves as maker. A target that consumes less than
+            // approved would leave a standing third-party claim on any FUTURE balance
+            // of this module, which is what turns a later stranded-balance bug into a
+            // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+            SafeTransferLib.forceApprove(token, dolomite, 0);
         }
     }
 
@@ -384,10 +400,12 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
         FullFillGuard.requireFullFill(amount, p.totalAmount);
 
         ActionArgs[] memory actions = new ActionArgs[](2);
+        address fundedToken; // hoisted so the grant can be cleared after `operate`
         if (BatchMode(uint8(p.mode)) == BatchMode.Open) {
             // Pull collateral to fund the deposit leg, then deposit + borrow.
-            permit3.transferFrom(onBehalfOf, address(this), p.collToken, uint160(p.sideAmount));
+            permit3.transferFrom(onBehalfOf, address(this), p.collToken, Narrow160.to160(p.sideAmount));
             SafeTransferLib.forceApprove(p.collToken, p.dolomite, p.sideAmount);
+            fundedToken = p.collToken;
             actions[0] = _depositAction(p.collMarketId, p.sideAmount, address(this));
             actions[1] = _withdrawAction(p.borrowMarketId, amount, receiver);
         } else {
@@ -397,6 +415,7 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
             if (toRepay > 0) {
                 permit3.transferFrom(onBehalfOf, address(this), p.borrowToken, uint160(toRepay));
                 SafeTransferLib.forceApprove(p.borrowToken, p.dolomite, toRepay);
+                fundedToken = p.borrowToken;
             }
             actions[0] = _depositAction(p.borrowMarketId, toRepay, address(this));
             actions[1] = _withdrawAction(p.collMarketId, amount, receiver);
@@ -405,6 +424,11 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
         AccountInfo[] memory accounts = new AccountInfo[](1);
         accounts[0] = AccountInfo(onBehalfOf, p.accountNumber);
         IDolomiteMargin(p.dolomite).operate(accounts, actions);
+        // Clear the scoped grant: `p.dolomite` is decoded from the order's `data` on
+        // a SHARED singleton, so it is attacker-choosable. A target consuming less
+        // than approved leaves a standing third-party claim on any FUTURE balance of
+        // this module. {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
+        if (fundedToken != address(0)) SafeTransferLib.forceApprove(fundedToken, p.dolomite, 0);
     }
 }
 
@@ -438,11 +462,18 @@ contract DolomiteTakeForModule is DolomiteBase, ITakerForModule, IFundingSource,
         uint256 accountNumber;
     }
 
+    /// @dev The ONLY spender allowed to reach this module's PRE-FUND funding.
+    ///      `Permit3.takeFor` is permissionless (F27/C-1).
+    address public immutable settlement;
+
     error OnlyPermit3();
 
-    constructor(address _permit3) DolomiteBase(_permit3) {}
+    constructor(address _permit3, address _settlement) DolomiteBase(_permit3) {
+        settlement = _settlement;
+    }
 
     function takeForOnBehalf(
+        address spender,
         address onBehalfOf,
         uint256 amount,
         uint256 forAmount,
@@ -450,14 +481,27 @@ contract DolomiteTakeForModule is DolomiteBase, ITakerForModule, IFundingSource,
         bytes calldata data
     ) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
+        // Pinned for BOTH shapes: Settlement is the sole legitimate spender
+        // either way, and one unconditional check beats a branch (F27/C-1).
+        PreFundGuard.requireSettlement(spender, settlement);
 
         OpenData memory p = abi.decode(data, (OpenData));
 
         ActionArgs[] memory actions = new ActionArgs[](forAmount == 0 ? 1 : 2);
         uint256 k;
+        address fundedToken; // hoisted so the grant can be cleared after `operate`
         if (forAmount != 0) {
-            permit3.transferFrom(onBehalfOf, address(this), p.collToken, uint160(forAmount));
+            if (uint256(bytes32(data[0:32])) >> 253 == 5) {
+                // PRE-FUND: the delivery already landed here; the floor is what proves
+                // it, and what fails closed on a mis-paired leg (F27/H-1).
+                PreFundGuard.requireDelivered(data, p.collToken, forAmount);
+            } else {
+                // PULL: the classic shape — drawn back out of the maker's wallet
+                // through their Permit3 token allowance.
+                permit3.transferFrom(onBehalfOf, address(this), p.collToken, uint160(forAmount));
+            }
             SafeTransferLib.forceApprove(p.collToken, p.dolomite, forAmount);
+            fundedToken = p.collToken;
             actions[k++] = _depositAction(p.collMarketId, forAmount, address(this));
         }
         actions[k] = _withdrawAction(p.borrowMarketId, amount, receiver);
@@ -465,6 +509,11 @@ contract DolomiteTakeForModule is DolomiteBase, ITakerForModule, IFundingSource,
         AccountInfo[] memory accounts = new AccountInfo[](1);
         accounts[0] = AccountInfo(onBehalfOf, p.accountNumber);
         IDolomiteMargin(p.dolomite).operate(accounts, actions);
+        // Clear the scoped grant: `p.dolomite` is decoded from the order's `data` on
+        // a SHARED singleton, so it is attacker-choosable. A target consuming less
+        // than approved leaves a standing third-party claim on any FUTURE balance of
+        // this module. {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
+        if (fundedToken != address(0)) SafeTransferLib.forceApprove(fundedToken, p.dolomite, 0);
     }
 
     /// @inheritdoc IFundingSource
@@ -482,7 +531,9 @@ contract DolomiteTakeForModule is DolomiteBase, ITakerForModule, IFundingSource,
         returns (address asset, uint256 available)
     {
         asset = abi.decode(data, (OpenData)).collToken;
-        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+        available = uint256(bytes32(data[0:32])) >> 253 == 5
+            ? type(uint256).max
+            : FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
     }
 
     /// @inheritdoc IProceedsAsset

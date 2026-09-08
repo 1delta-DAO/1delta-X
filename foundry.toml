@@ -231,7 +231,34 @@ evm_version    = "cancun"
 # runs [profile.core] at 20,000. The 2026-08-23 sweep above says 1..200 buys
 # ~90–190 bytes, but it too was taken warm and wants re-running clean before anyone
 # leans on it. Spend code first. See docs/lop-parity-plan.md §7.
-optimizer_runs = 400
+# ⚠ LOWERED 400 -> 100 (measured, this tree). `optimizer_runs` is a hint about how
+# often the deployed code is CALLED, i.e. how much bytecode SIZE to spend on runtime
+# speed. At 400 the audit-remediation pass left Settlement at 24,569 / 24,576 — SEVEN
+# bytes, which is not a margin anyone can ship against. Measured here:
+#
+#     runs      Settlement runtime      free
+#     400            24,569               7     <- was here
+#     200            24,551              25
+#     100            24,476             100     <- here
+#       1            24,444             132
+#
+# The note above says "Spend code first", and that was tried first: the `_forSlice`
+# recipient check became a single assembly flag (-43), the zero-slice op test
+# collapsed to one comparison (-19), the BALANCE branch's revert sites merged (-2).
+# What remained were bad trades — consolidating the `ForBalance*` and `ForLeg*` error
+# families buys ~59 bytes by deleting diagnosis from a security path, and re-decoding
+# the delta-verify scans instead of caching them measured +2. The dial is the honest
+# lever here, not the lazy one.
+#
+# TWO CONSEQUENCES, BOTH DELIBERATE:
+#   • RUNTIME GAS. Every fill pays a little more, and the committed baseline CANNOT
+#     SEE IT — `make gas` runs [profile.core] at 20,000, not this profile. Re-measure
+#     against a deployed build before quoting fill costs.
+#   • THIS IS A DETERMINISM PIN: it starts a NEW CREATE2 ADDRESS FAMILY. Free while
+#     nothing is deployed; a MIGRATION afterwards. If the singletons are already live,
+#     revert both this and the periphery copy to 400 and take the error-consolidation
+#     route instead.
+optimizer_runs = 100
 
 # ── Periphery, validators and shared libs, split out of core 2026-08-24 ──────
 #
@@ -288,7 +315,10 @@ via_ir = true
 bytecode_hash  = "none"
 cbor_metadata  = false
 evm_version    = "cancun"
-optimizer_runs = 400
+# Kept byte-identical to [profile.core-deploy] — see the note there for why 400 -> 100.
+# The lens has ~2.4KB spare and does not need the bytes; it changes because these two
+# profiles must not drift, or the lens alone lands on a new address family.
+optimizer_runs = 100
 
 [profile.solvers]
 src    = "packages/solvers/src"

@@ -99,9 +99,29 @@ interface IPermit3 {
     );
     /// @dev A taker dispatch actually occurred. The taker book is the novel half
     ///      of Permit3 and — unlike the token book, covered by ERC20 `Transfer`
-    ///      events — has no protocol-level trace of its own. Emitted by `take`.
+    ///      events — has no protocol-level trace of its own. Emitted by `take` and by
+    ///      the one-shot {permitTake}; the COMPOSITE dispatch emits {TakenFor}
+    ///      instead, so an indexer can tell the two shapes apart.
     event Taken(
         address indexed user, address indexed spender, bytes32 indexed ref, address module, uint160 amount, address receiver
+    );
+    /// @dev A COMPOSITE taker dispatch ({takeFor}). Identical to {Taken} plus
+    ///      `forAmount` — the value-IN side.
+    ///
+    ///      ⚠ `forAmount` IS THE ONE QUANTITY IN THIS CONTRACT NOTHING METERS. The
+    ///      taker book bounds `amount`; the funding leg is a number the spender
+    ///      computes per fill, so a log entry is its only protocol-level trace. It was
+    ///      previously folded into {Taken} and dropped, which left the exact axis
+    ///      F27/C-1 was exploited on invisible to indexers and monitors — a detection
+    ///      gap on precisely the half that has no gate.
+    event TakenFor(
+        address indexed user,
+        address indexed spender,
+        bytes32 indexed ref,
+        address module,
+        uint160 amount,
+        uint160 forAmount,
+        address receiver
     );
     event PermitBatchApplied(address indexed owner, uint256 indexed nonce);
     /// @dev Token-book lockdown. Matches Permit2's `Lockdown` event shape.
@@ -201,9 +221,13 @@ interface IPermit3 {
     // The taker book mirrors the token book: it is keyed by `spender` (the
     // approved caller of `take`, e.g. the Settlement contract), so only that
     // spender can consume the allowance. `ref = keccak256(data)` is the
-    // module-defined position key (reproducible off-chain); the dispatched module
-    // is bound by the maker's signed order, so it need not enter `ref`. Asset
-    // identity is encoded inside `data`.
+    // module-defined position key (reproducible off-chain). The dispatched MODULE is
+    // part of the key too — the book is `[user][spender][module][ref]` — so a grant on
+    // one module can never be consumed dispatching another, whatever the data. (This
+    // used to say the module "need not enter `ref`" because the signed order pins it;
+    // that was true when the key was `(user, spender, ref)` and is now simply stale —
+    // the containment is the key, not only the signature.) Asset identity is encoded
+    // inside `data`.
 
     function approveTaker(address spender, address module, bytes32 ref, uint160 amount, uint48 expiration) external;
 
@@ -221,14 +245,30 @@ interface IPermit3 {
     ///         check. Gates and consumes EXACTLY the same allowance bucket as
     ///         {take} — `(user, msg.sender, module, keccak256(data))`, decremented
     ///         by `amount` — then invokes
-    ///         `module.takeForOnBehalf(user, amount, forAmount, receiver, data)`.
+    ///         `module.takeForOnBehalf(msg.sender, user, amount, forAmount, receiver,
+    ///         data)`. Note the FIRST argument: this function's own `msg.sender`,
+    ///         forwarded as `spender`. It is not decoration — see below.
     ///
-    ///         `forAmount` is deliberately NOT gated here: it is value flowing
-    ///         INTO the user's position, bounded by the user's ordinary Permit3
-    ///         token allowance to the module (exactly like a MAKE item's funding
-    ///         leg) and, above that, by the signed leg or literal the caller
-    ///         derived it from. The taker book gates what LEAVES. See
-    ///         {ITakerForModule}.
+    ///         `forAmount` is deliberately NOT gated here: it is value flowing INTO
+    ///         the user's position, and a second book keyed on it is not a grant a
+    ///         user could meaningfully sign. The taker book gates what LEAVES.
+    ///
+    ///         ⚠ WHAT BOUNDS IT INSTEAD — AND WHAT DOES NOT. This used to say
+    ///         `forAmount` is "bounded by the user's ordinary Permit3 token allowance
+    ///         to the module". That is a PULL-module premise: true when the module
+    ///         draws the funding leg out of the user's wallet, where a self-granting
+    ///         caller can only rob themselves. A PUSH module never calls
+    ///         `transferFrom` — it funds from its OWN balance — so on that shape the
+    ///         premise is vacuous and `forAmount` was bounded by nothing at all.
+    ///         `approveTaker` lets ANY caller name itself spender, so this is a
+    ///         permissionless entrypoint and `msg.sender == permit3` authorises
+    ///         NOTHING by itself (F27/C-1).
+    ///
+    ///         The bound therefore lives at the MODULE, which is the only party that
+    ///         knows its own funding shape: a push module must require the forwarded
+    ///         `spender` to equal its pinned Settlement, and must take a balance floor
+    ///         on top. {ITakerForModule} and {PreFundModuleBase} carry the rule;
+    ///         `tools/check-module-shapes.py` enforces it. See {ITakerForModule}.
     function takeFor(
         address module,
         address user,

@@ -1182,6 +1182,9 @@ already in this ledger. The failure mode is not "we did not know the rule"; it i
 | G-8 | six Aave approvals to an order-supplied spender were never cleared | Low | `forceApprove(..., 0)` after each protocol call | hardening |
 | G-9 | `Core._permitBatchHead` was the last `returndatacopy` into scratch under a `memory-safe-assembly` annotation | Low | copy into the calldata buffer, as `_execute` does | hardening |
 | G-10 | seven comments asserted invariants the code does not hold | — | corrected (see below) | **F23 again** |
+| G-11 | `fillWithPermitTake`'s authorization was a post-condition of the whole fill | Low | assertion moved ahead of the maker's input pull | hardening |
+| G-12 | `PackedArraysMem` documented an UNCHECKED count as its bounds source | Low | real validators; seven call sites repointed | hardening |
+| G-13 | **systematic variant sweep of all 18 lending packages** for the four confirmed classes | Med | 21 further sites fixed | **the method, not a finding** |
 
 **G-1 is F19 with one call site missed.** F19 established "the module ends where it
 started, not empty" and `DustHandler.disposeResidual` grew a `floor` overload whose
@@ -1279,6 +1282,78 @@ Regression tests in `aave-v3/test/unit/DanglingApproval.t.sol` use a pool that
 pulls *nothing*, which is the worst case and the one that proves the clear does not
 depend on the target having consumed anything.
 
+**G-13 is the one to copy, because it is a method rather than a finding.** The
+audit read 5 packages of 18. Three of the four fix classes had already turned out
+to have more instances than the finding that surfaced them (6 vs 1, 6 vs 4, 7 vs
+2), so the remaining 13 packages were swept mechanically for all four:
+
+| class | new sites | packages |
+| --- | --- | --- |
+| unfloored residual sweep | 5 | compound-v2-native (×3), liquity-v2, gearbox-v3 (×2) |
+| offset collision | **0** | — clean everywhere |
+| nominal forward, no delta | 1 | aave-v2 |
+| approval to an order-decoded spender, never cleared | 15 | aave-v2, compound-v2, compound-v3, dolomite, euler-v2, exactly, gearbox-v3, river, silo, teller |
+
+Three things worth keeping from how it went.
+
+**`LiquityV2Modules.sol` needed a SECOND fix in a file already fixed.** G-6 closed
+the `boldToken` sweep at line 200; the `collateralToken` sweep at 148 was in the
+same file and was missed. Fixing a file is not fixing a class.
+
+**A deliberate design decision was left alone.** `CompoundV2NativeModules`'
+`_sweepWeth` / `_sweepNativeAsWeth` sweep the module's whole native and WETH
+balance, and the source says why: `receive()` is open, the module has no owner and
+no rescue path, so a floor would strand a donation *forever* rather than merely
+misdirect it. That is a real trade-off, argued in place, and it was not overridden
+— only the cEther (ERC-20 receipt) sweeps in the same file were floored, matching
+the non-native sibling. If the "always empty" posture is wrong, the fix is a rescue
+path, not a floor.
+
+**A test was asserting the vulnerable behaviour.**
+`CreditRepayAuth.t.sol::test_repay_sweepsResidualToMaker` pre-minted 123e18 to the
+module and asserted `balanceOf(module) == 0` — "module drained" — which is exactly
+the invariant `DustHandler` calls the wrong one. It only passed before because its
+Permit3 stub was a no-op, so a pre-mint was the only way to fake custody. The stub
+now moves tokens for real, the test asserts the module ends where it *started*, and
+a sibling test pins that a stranded balance is not claimable. A regression test that
+encodes the bug is worse than no test: it converts the fix into a red build and
+invites reverting it.
+
+**G-11 and G-12 are the fragility half of the lead list, landed as Phase 2.**
+
+`Core.fillWithPermitTake` verifies no signature up front — the `PermitTake` blob
+IS the order's authorization — and the "was it consumed?" assertion used to run
+only after `_settleForward` returned, i.e. after `_openFill` had written state,
+items had dispatched to maker-supplied modules, and `_payInputsToSolver` had drawn
+the maker's wallet. Four lenses attacked that and found no live exploit: the
+deferred check plus atomic revert closes every path. It is nonetheless safe only
+BECAUSE every item op is atomically revertible, and that stops being true the
+moment one acquires an effect outliving the transaction — a cross-chain message, a
+bridge-inbox item, an off-chain-consumed event. The assertion now sits immediately
+after `_executeItems` and BEFORE the input pull, so authorization gates the pull
+rather than being audited once the money has moved. Zero cost elsewhere: on every
+other entry the blob is never set and this is a length test on empty `bytes`.
+
+`PackedArraysMem`'s header told callers to "call {count} … before indexing", but
+`count` was the memory twin of `PackedArrays.countUnchecked` — the function the
+calldata library explicitly forbids as a bound ("deliberately proves nothing about
+the bytes that follow"). `bytes.concat(hex"03")` reports three legs while holding
+none. The unchecked reader is now named `countUnchecked`, `validateFixed` /
+`validateLegsIn` / `validateLegsOut` mirror the calldata validator, and **seven**
+call sites across five files were repointed — `BaseFlashSolver` (×2),
+`UsdrifInventorySolver`, `AggregatorFillSolver`, and both ERC-7683 adapters (×2
+each), the last two of which the lead had not identified.
+
+`Batch._stepPresend` was deliberately left as a comment change rather than a code
+change. Its bound is sound today, but not for the reason the comment gave: the
+`outstanding` ledger excludes both Phase-3 refund paths, and what actually stops
+the extraction is `_sweepSurplus`'s per-token floor plus the refund transfer
+reverting on a drained pool. The guarantor is now named at the PRESEND site along
+with the three changes that would reopen the hole. Seeding `outstanding` with the
+reconciliation surplus would make the bound self-sufficient, but that is a change
+to the netted hot path and should be justified on its own merits rather than
+smuggled in as documentation.
+
 **G-10 is the F23 pattern once more, and worth listing explicitly** because each
 comment was load-bearing for someone:
 
@@ -1296,6 +1371,251 @@ encodes from, and the SDK ships no module-`data` encoder at all (`grep` for
 `totalAmount` / `BalanceMode` across `packages/sdk/src/` returns nothing), so those
 headers are the only specification there is.
 
+
+### F26 — twelve-lens read of the 14 previously-unaudited lending packages (2026-09-02)
+
+The complement of F25: those covered core + aave-v3/v4 + morpho-blue/midnight, this
+covers everything else (15 files, 4,718 lines). One **Critical**, fixed below; the
+rest is written up in
+[audit-2026-09-modules-plan.md](./audit-2026-09-modules-plan.md).
+
+**The headline is that a mechanical sweep could never have found this.** G-13 had
+already grepped all 18 packages for the four known classes and pronounced them
+clean. Reading them found a Critical, two novel classes, and — embarrassingly —
+more instances of the four classes the sweep had just certified. The three reasons
+the sweep lied are recorded at the top of the plan doc; they are properties of the
+detector, not of the code.
+
+#### C-1 — `LiquityV2TroveAuth.authorizeTrove` trusted a caller-supplied auth root
+
+Any trove that had onboarded (granted the module `setRemoveManagerWithReceiver`)
+was drainable by anyone, for gas, with **no order, no maker signature and no
+Settlement** — `Permit3.approveTaker` lets a caller name itself spender, so
+`take` is reachable directly.
+
+The library derived both its ownership oracle and its dispatch target from one
+address taken from `data`, and its header argued that this made forgery
+impossible: *"a fabricated root sends the op into attacker-land, where there is no
+real trove to drain."*
+
+A shared root forces consistency only when the root is **trusted**. An
+attacker-deployed root has two independent return statements:
+
+```
+troveNFT()           -> puppet answering ownerOf(anything) = attacker
+borrowerOperations() -> the REAL BorrowerOperations
+```
+
+The op does not land in attacker-land. It lands on the real protocol, which
+permits it because the module genuinely *is* the victim's registered remove
+manager. PoC drained 3,000 BOLD and 5e18 collateral from a victim trove.
+
+**Fix.** Root the chain at an immutable `ICollateralRegistry` set in each module's
+constructor; `data` now carries a branch **index**, so a caller chooses which
+branch to act on and cannot invent one. The index occupies the slot the address
+did, so every downstream offset (permit blocks included) is unchanged. Registry
+verified live on mainnet: `getTroveManager(0)` returns exactly the WETH-branch
+TroveManager the fork test pins, `totalCollaterals() == 3` — and the fork test now
+resolves through the real registry rather than a hardcoded address, which is a
+strictly stronger assertion than it made before.
+
+`authorizeTrove` also returns the resolved `troveManager` so the repay leg's debt
+read uses the same trusted resolution instead of re-deriving its own.
+
+**Why Settlement-side validation would not have worked**, and why this had to be an
+immutable: the attack never touches Settlement.
+
+**The contrast that makes the diagnosis precise.** `GearboxCreditAuth` survives the
+identical attack — not because it is careful, but because its caller-supplied
+`creditAccount` is *also* the dispatch parameter, so the real facade re-validates
+it. Fluid survives because the real vault consults its own immutable factory.
+Liquity was the one place where the oracle and the dispatch target could decouple.
+**Where those two can decouple, a caller-supplied root is never sufficient.**
+
+Regression: `liquity-v2/test/unit/ForgedRootAuth.t.sol` — the forged root is still
+deployable and still lies; it simply has nowhere to go, because no field in `data`
+points at it any more. Four tests pin the non-owner reject, the unknown-branch
+reject, and that the trove's real owner is still served.
+
+#### H-1 — a maker-signed slippage ceiling was applied per-slice, not per-order
+
+The one finding here where the victim did nothing wrong. No stranded balance, no
+fake contract, no self-harm: the maker signs a correct order and an input they
+never consented to — the **slice count** — dilutes their protection.
+
+`Base._executeItems` pro-rates an item's `amount` per fill but hands the module
+`item.data` byte-for-byte. {FullFillGuard} was written for the case where a
+constant in `data` is an AMOUNT; nobody applied the same reasoning when it is a
+**bound**:
+
+| module | bound | direction |
+| --- | --- | --- |
+| `ExactlyTakerModule` (`borrowAtMaturity`) | `maxAssets` | max — **fails OPEN** |
+| `LiquityV2TakerModule` (`withdrawBold`) | `maxUpfrontFee` | max — **fails OPEN** |
+| `ExactlyTakerModule` (`withdrawAtMaturity`), `ExactlyDepositModule` | `minAssetsRequired` | min — fails CLOSED |
+
+Quantified by the regression test against the pre-fix code: a maker signing
+"borrow 10,000, never owe more than 11,000" filled in 7 slices had **7× their
+signed ceiling** admitted (`77000000000 > 11000000000`), and a single 10% slice
+carried the whole 11,000 ceiling (`11000000000 != 1100000000`) — a 1,000 borrow
+authorised to owe 11,000.
+
+**Fix.** New shared library `@lib/ProratedBound`, and a MANDATORY maker-signed
+`totalAmount` in both modules' `data`. Rounding is FLOOR so
+`sum(floor(bound·aᵢ/total)) <= bound` — the ceiling holds however the filler
+slices. In Exactly the new field also **removes a redundancy**: the `Full` withdraw
+guard now reads that same total at 160 instead of carrying a second copy at 192.
+
+**Three things the work itself taught, all worth keeping:**
+
+**The min-direction bounds were deliberately NOT touched.** Applied unscaled to a
+slice a FLOOR is *stricter* than the maker asked for, so a partial fill reverts —
+fail-closed. Scaling them would loosen a guard that is currently safe, and would
+separately enable partial fills on a leg that does not support them. The plan said
+so before the code was written, and holding to it under the temptation to "fix all
+four" is the point.
+
+**`type(uint256).max` must pass through untouched.** It is the conventional "no
+ceiling" sentinel, and scaling it overflows the multiply and reverts a legitimate
+fill. The first version of the library got this wrong and
+`liquity-v2/test/leverage/Leverage.t.sol` — which signs exactly that sentinel —
+caught it. A library written for safety that bricks the unbounded case is not safe.
+
+**The legacy profile has no stack to spare.** Adding `totalAmount` to Exactly's
+decode tuple, and then even passing the scale as a call argument, both blew the
+stack limit on the non-via-IR profile these packages build with. The total is read
+from calldata in its own frame and the scaled value reuses `bound`'s slot.
+
+#### F26 Phase 2 — the F19 / A-3 / H-3 hygiene family, closed as classes
+
+Every site below is Medium: the exploit needs a balance at a shared module that is
+not the attacker's. That precondition is real (these modules are pull-exact and end
+empty on the honest path), which is why this phase is hardening rather than an
+emergency — and why it ran after the Critical and the maker-harm class.
+
+| class | sites | packages |
+| --- | --- | --- |
+| unfloored whole-balance sweeps | 5 | compound-v2 (cToken exact + 3 native), river |
+| value-out forwarding a nominal amount | 3 | venus (×2), compound-v2 |
+| approvals to a `data`-decoded spender, never cleared | 9 | venus ×2, lista, euler ×4, dolomite ×3, fluid ×2 |
+| `uint160`-clipped pull vs unclipped approve | 5 | exactly, euler, dolomite, river, fluid |
+
+Final census across all 18 packages: **0 remaining in every class.**
+
+**The native sweeps were the interesting one, because the previous round declined
+to fix them on the strength of a source comment.** That comment argued: `receive()`
+is open, these modules have no owner or rescue path, so a floor would strand a
+donation forever — "a donor's ETH is a gift to the maker, not a loss". The premise
+is false. It assumes the maker is a legitimate counterparty, and **anyone can be
+the maker of a one-wei order**; it was a gift to whoever called first. Worse,
+`CompoundV2NativeRepayModule` reaches the sweep with NO pull at all when the live
+debt is zero, so the claim cost only gas. Both sides are now floored, and the
+honest cost is stated in the code: donated ETH is unrecoverable rather than
+claimable, which is how every other module treats a donated ERC-20. *Auditing a
+conclusion is not auditing its premise.*
+
+**Two negative results worth keeping.** `AaveV2WithdrawModule`'s exact branch calls
+`pool.withdraw(asset, amount, receiver)` — the pool pays the receiver **directly**,
+so the module never holds the funds and there is nothing to measure; the reported
+lead was wrong about the shape. And of the 23 pull/approve pairs sharing the
+truncation syntax, only 5 are exploitable: the rest approve an amount the core has
+already width-checked (`Base._runItem` on `slice`, `_dispatchTake` on `forSlice`).
+**Enumerate that class by the provenance of the amount, never by the shape of the
+call** — fixing all 23 is churn, trusting a hand-listed 6 misses one.
+
+Two shared libraries came out of this and are the first instances of the Phase 3
+shape: `@lib/ProratedBound` (F26/H-1) and `@lib/Narrow160`. Fluid's six call sites
+funnel through one `_pullAndApprove`, so the narrowing landed once and covered all
+of them.
+
+Regression: `compound-v2/test/security/StrandedCTokens.t.sol` (converted from the
+audit PoC; both tests fail against the pre-fix code, `0 != 500000000000000000000`).
+
+### F27 — twelve-lens audit of the new pre-fund-module family (2026-09-03)
+
+Scope: the 15 `*PreFundModules.sol` files (24 contracts) plus `Base.sol` — 3,942
+lines. **Four Criticals, three with executed PoCs.** Full write-up in
+[audit-2026-09-pre-fund-family.md](./audit-2026-09-pre-fund-family.md).
+
+The pre-fund shape was introduced to minimise approvals, and it does. It also removed
+the thing that had been bounding `forAmount` without replacing it. On a *pull*
+module the value moved comes out of `onBehalfOf`'s own wallet, so a self-granting
+attacker can only rob themselves; `Permit3.takeFor` leaves `forAmount` ungated for
+exactly that reason, and says so in a comment. On the *push* shape the value comes
+out of the **module's** balance, so the same self-grant robs a third party. One
+`approveTaker(self, module, keccak256(data), 1, max)` plus one `takeFor` drains a
+singleton — no order, no signature, no Settlement, no capital.
+
+- **C-1** `forAmount` is unauthenticated (10/12 agents, PoCs). 28 contracts.
+- **C-2** `Base._runItem` skips a zero-slice `TAKE_FOR` *after* `_deliverOutputs`
+  paid the leg — the only finding with an honest victim, and the residue generator
+  that supplies C-1's precondition (6/12 agents, PoC).
+- **C-3** Morpho/Exactly size the sweep from a caller-chosen venue's return value —
+  2× `forAmount` extracted (PoC).
+- **C-4** Teller's `balanceOf(this) - forAmount` floor, the family's only guard,
+  rejects only the over-ask an attacker never needs (5/12 agents, PoC).
+
+**Two lessons worth more than the findings.**
+
+*Our own plan doc was the counter-example.* Its REASSESSMENT section ranked this at
+Medium and proposed a one-line `_forSlice` recipient check. The primary channel
+never enters the core, so that fix would have read as closed while the drain
+stayed open. The fix direction moved four times across the run; only the fourth
+reading survived all twelve lenses.
+
+*A passing PoC is not a proved invariant.* Our staged Teller "is immune" case
+passes — it asserts immunity to `forAmount > balance`, the one case an attacker
+never uses. It and its refutation now both pass, which is the contradiction that
+exposed it.
+
+Also: F26/H-1's `ProratedBound` fix never reached this family — `ExactlyPreFundRepay`
+reintroduced the unscaled bound. Detectors must gate new files, not just sweep
+existing ones.
+
+**FIXED** (2026-09-04), C-1 through C-4 plus H-2. `Permit3.takeFor` forwards its
+`msg.sender` as `spender`; 28 pre-fund contracts pin an immutable Settlement and take
+a `@lib/PreFundGuard` balance floor. `takeFor`'s own ABI is unchanged, so Settlement's
+bytecode was untouched by that half — only C-2's zero-slice revert cost anything,
+20 bytes (24,522 → 24,542 of 24,576).
+
+The nicest part of the fix is the sweep. Every repay module now returns everything
+above the pre-delivery floor, which IS `forAmount − consumed` by construction —
+so C-3 (a lying venue's return value) and M-1 (a pre-call clamp that over-states
+the pull) both close without anyone computing `consumed` at all, and the local
+disappears from all 13 modules. The measurement that cannot be wrong is the one
+nobody performs.
+
+H-1's core-side binding and H-3 followed. Descriptor **bit 253** declares the PUSH
+shape and `_forSlice` then demands `legRecipient == module`; the 15 one-sided push
+modules require the bit, so a maker cannot opt back into the loose check. The
+obvious two-branch form measured **3 bytes OVER** EIP-170 — folding it to one
+revert site saved 11 and landed at 24,568 / 24,576. The token and consumption axes
+stay module-side: neither fits in the 8 bytes left, and saying so beats pretending.
+
+A consequence worth knowing: pull and push can no longer share one signed blob,
+because the shape is now part of what the maker signs. Three fused packages had
+comparison tests built on byte-identical data and now build two blobs with two
+taker grants.
+
+H-3 scales Exactly's fixed-branch face with the slice (new trailing word,
+BREAKING). The Midnight lead closed without its fork check — there is no deployed
+Midnight to read, and `sweepSurplus` had already removed the strand that made the
+unit mixing matter.
+
+Coverage is now tracked separately in [audit-runs.md](./audit-runs.md), written
+when the runs' bundle directories were cleaned up. It records what each round
+actually READ, and it immediately paid for itself: **four pre-fund contracts
+(`AaveV3PreFundLeverageModule`, `DolomitePreFundTakeForModule`, `EulerV2PreFundTakeForModule`,
+`FluidPreFundTakeForModule`) appear in neither run's source snapshot.** They were
+written after the last bundle was built, so no lens has ever read them — the
+post-fix census is the only thing that has, and it found all four missing the
+balance floor and the descriptor-bit requirement. Same defect as H-3 in a different
+costume: a scope fixed at bundle-build time cannot cover code written afterwards.
+
+Two of my own comments were wrong and are corrected in the tree: the templated
+floor note I scripted onto Lista and River claimed an approval-free burn, which is
+true only of Liquity's `repayBold`. Scripted comments inherit a claim they were
+never checked against.
 
 ## Re-audit sweep — the generalised questions from F13–F15
 

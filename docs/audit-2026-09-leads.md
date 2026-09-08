@@ -14,7 +14,7 @@ re-derives the same ground. Verification status is mine, not the reporting lens'
 
 ---
 
-## Tier A — verified real, needs a decision
+## Tier A — ~~verified real, needs a decision~~ — **ALL CLOSED**
 
 ### A-1. ~~Aave v3 borrow forwards a nominal amount, never a measured delta~~ — **CLOSED**
 
@@ -44,107 +44,69 @@ Retained here for the reasoning: there was no exploit, and it was fixed anyway
 because a standing claim on a shared singleton's future balance is what converts
 someone else's later bug into a theft.
 
-### A-4. `matchSettle` schedule ordering burns maker allowance
+### A-4. ~~`ItemPolicy.ANY` leaves makers exposed by default~~ — **RESOLVED**
 
-`Batch._stepPull`.
+The blocking unknown is answered: `packages/app/src/config/deployments.ts` states
+plainly that **nothing is deployed yet**, so the finite-allowance population this
+turned on is **zero**. No signed orders to migrate, no live exposure.
 
-**Verified.** `_stepPull` draws `owed - credit`, and credit from a TAKE item exists
-only if the ITEM step precedes the PULL. Scheduled the other way the maker fronts
-the whole leg from their wallet; Phase 3 refunds the **tokens** but cannot refund
-the **allowance**. `matchSettle` is permissionless, so the solver writes the order.
+Option B (netting the pull against a projected item credit in `_stepPull`) is
+therefore unjustified — a change to the netted hot path bought with no present
+risk. Option A landed instead, adapted: the SDK has no single order builder to
+carry a default, so it gained `itemPolicyWarning(order)` beside `withItemPolicy` /
+`itemPolicyOf`.
 
-**Verified precedent.** The repo already judged the *repetition* variant (a
-duplicate PULL) worth fixing in code, for this reason stated in-source: "the TOKENS
-are indeed refunded — but the Permit3 ALLOWANCE spent to move them is not". The
-*ordering* variant was left to a maker opt-in (`ItemPolicy.CANONICAL`), while
-`ItemPolicy.ANY` is the default and what every pre-existing order reads back.
+**Why a warning and not a gate.** The obvious home for a hard check is `packOrder`,
+alongside `assertOrderNonce`. It cannot go there: the golden-hash fixture and
+several conformance tests deliberately sign item-bearing orders at `ANY`, so
+rejecting them would either break the pinned EIP-712 hash or force a wire change to
+buy nothing — and `ANY` is REQUIRED to participate in a cycle. The gate belongs in
+whatever order builder ships to users; the SDK's job is to make the hazard
+impossible to miss, which the function's doc-block now does.
 
-**Open.** How many live orders carry a finite (non-`uint160.max`) allowance — that
-is the population this bites. `uint160.max` grants are immune.
 
-**Recommendation.** Default new orders to `CANONICAL` in the SDK builder, or net
-the pull against a projected item credit. Griefing only, no fund loss.
-
----
-
-## Tier B — fragility: correct today, for reasons nothing enforces
+## Tier B — ~~fragility: correct today, for reasons nothing enforces~~ — **ALL CLOSED**
 
 These are the entries most worth keeping. In each case the safety argument runs
 through a *different* part of the system than the one that looks responsible, so a
 local, reasonable-looking change breaks it silently.
 
-### B-1. `outstanding` undercounts what the pool owes
+### B-1. ~~`outstanding` undercounts what the pool owes~~ — **DOCUMENTED** (F25/G-11)
 
-`Batch._stepPresend`.
+The guarantor is now named at the PRESEND site: `_sweepSurplus`'s per-token floor
+plus the refund transfer reverting on a drained pool, NOT the `outstanding` ledger
+its comment used to credit. The three changes that would reopen the hole are listed
+there. The ledger itself is unchanged by choice — seeding it with the reconciliation
+surplus would make the bound self-sufficient, but that is a hot-path change and
+should be argued on its own merits rather than smuggled in as a doc fix.
 
-**Verified.** `st.outstanding[t]` is seeded only from output legs and decremented
-only by DELIVER. It does not include Phase-3 obligations —
-`_matchReconcileInputs`'s surplus refund to the maker, or `_creditItemProceeds`'s
-non-leg refunds. A schedule that over-produces an input token via an ITEM and then
-PRESENDs it hands the solver money the settler still owes a maker.
+### B-2. ~~`fillWithPermitTake` treats authorization as a post-condition~~ — **CLOSED** (F25/G-11)
 
-**Verified safe — but not by the ledger.** Three lenses each traced the extraction
-and it fails closed *via `_sweepSurplus`'s `nowBal >= beforeBal[k]` floor*, and via
-the refund transfer itself reverting on an empty pool. Every `legsIn` token is in
-`st.tokens` by construction of `_collectTokens`, so no refund token escapes the
-floor.
+The `PermitTakeNotConsumed` assertion moved into `_settleForward`, immediately
+after `_executeItems` and BEFORE `_payInputsToSolver`, so the maker's wallet is
+drawn only once their signature has actually been consumed. Free on every other
+entry (a length test on empty `bytes`). This was the item to land before the bridge
+work: the old placement was safe only because every item op is atomically
+revertible, which a cross-chain message is not.
 
-**The problem is the comment.** The PRESEND site claims its bound "is correct at
-ANY point in the schedule". That is true for *delivery* obligations only. Three
-specific future changes turn this into solver-extractable maker money with no other
-guard: narrowing the swept token set; moving a refund after `_sweepSurplus`; adding
-a Phase-2 refund path.
+### B-3. ~~The funding leg's token is never bound~~ — **CLOSED IN THE LENS**
 
-**Recommendation.** Either seed `outstanding` with the reconciliation surplus as it
-accrues, or state at the PRESEND site that `_sweepSurplus` is the sole guarantor.
-The second is free and prevents the class.
+Landed as the recommended middle path: `SettlementLens` now cross-checks the
+BALANCE form's descriptor token against `IFundingSource.fundingSource`, exactly as
+it already did for the leg-reference form, with the same degradation rule (a module
+that cannot answer reports `address(0)` and the check skips rather than rejecting a
+fillable order). Three tests in `TakeForItem.t.sol` cover mismatch, match, and the
+silent module.
 
-### B-2. `fillWithPermitTake` treats authorization as a post-condition
+**Deliberately NOT promoted to an on-chain revert**, unlike its siblings
+(`DeltaVerifySameToken`, `DeltaVerifyDuplicateLeg`, `OutputToSettlement`). Two
+reasons, the second binding: both halves are maker-signed, so no filler chooses
+either and the realistic failure is an order builder getting it wrong — which a
+preflight catches. And Settlement now has **91 bytes** of EIP-170 headroom
+(24,485 / 24,576) after Phase 2, while the lens has ~3KB spare. Spending core
+bytecode on a check only a malformed order can trip is the wrong trade at that
+margin. Revisit if headroom is recovered.
 
-`Core.fillWithPermitTake`.
-
-**Verified.** This entry never calls `_verifySignature`. `_gateOrder` → `_openFill`
-→ `_settleForward` all run against an unauthenticated `Order`: `_openFill` writes
-`filled[orderHash]`, `_deliverOutputs` runs, `_executeItems` dispatches to
-**maker-supplied module addresses**, a `TAKE_FOR` item reaches `PERMIT3.takeFor`
-against the victim's **standing** taker allowance, and `_payInputsToSolver` pulls
-the victim's inputs. Authorization arrives only if a TAKE item consumes the permit,
-enforced by `if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed()` *after*
-`_settleForward` returns.
-
-**Verified safe.** Four lenses attacked it independently — arbitrary pre-auth module
-call from Settlement's identity, pre-auth `takeFor` against a standing allowance,
-clearing `ctx.permitTake` without the Permit3 call, `fillModule` pointing at
-attacker code (it is `view`, hence STATICCALL). All unwound by the deferred check
-plus atomic revert.
-
-**The exposure.** It is void the moment any item op acquires an effect that
-outlives the transaction — a cross-chain message, a bridge-inbox item, an
-off-chain-consumed event. The bridge-inbox package is precisely that shape.
-
-**Recommendation.** Move the `permitTake` consumption assertion to immediately after
-`_executeItems`, or gate item dispatch on the permit already being consumed. Turns
-a post-condition into a pre-condition at no functional cost.
-
-### B-3. The funding leg's token is never bound to the module's funding asset
-
-`Base._forSlice`, `AaveV3TakeForLeverageModule.takeForOnBehalf`. Four lenses.
-
-**Verified.** The leg-reference form checks the referenced leg's *recipient*
-(`ForLegNotMakers`) and *index* (`ForLegMissing`) but never its **token**; the
-balance form reads `balanceOf(descriptor-named token)` while the module pulls
-`collateralAsset` from field 5 of its own `data`. Nothing on-chain reconciles them.
-A 3000e6 USDC leg funding a WETH deposit is 3e-9 WETH while the borrow draws full.
-
-**Why it is a lead.** Both halves are maker-signed and inside `ref = keccak256(data)`,
-so no filler can choose either — a malformed-order footgun, not an attack.
-
-**Why it still matters.** The whole stated point of the leg-reference form is that
-"there is exactly ONE copy of the number". And the sibling shape guards —
-`DeltaVerifySameToken`, `DeltaVerifyDuplicateLeg`, `OutputToSettlement` — were all
-*promoted from lens advice to on-chain reverts* for this exact reason. This one was
-not. `IFundingSource.fundingSource` exists so the lens can cross-check it; the lens
-does so for the leg form and **not** for the balance form.
 
 ### B-4. ~~`_permitBatchHead` is the last returndata-to-scratch site~~ — **CLOSED**
 
@@ -154,23 +116,13 @@ runtime was never wrong — the revert is immediate — but the `memory-safe-ass
 annotation was a false promise to an optimizer that is entitled to believe it, and
 the deploy profile is via-IR.
 
-### B-5. `PackedArraysMem.count` is documented as a bounds source
+### B-5. ~~`PackedArraysMem.count` documented as a bounds source~~ — **CLOSED** (F25/G-12)
 
-**Verified.** `PackedArraysMem` has no memory-side `validateFixed`, and its header
-says to "call `count` … before indexing". But `count` is the memory twin of
-`countUnchecked`, which `PackedArrays` documents as *deliberately proving nothing
-about the bytes that follow* and forbids as a bound: "the count must always come
-from the validator, never from a caller-supplied number".
-
-**Verified callers.** `UsdrifInventorySolver.sol:199-208` takes
-`n = PackedArraysMem.count(order.legsOut)` and indexes `0..n-1`;
-`AggregatorFillSolver.sol:267` uses `count(...) == 0` as its only guard before
-indexing leg 0. A blob of `bytes.concat(hex"03")` reports 3 legs while holding zero.
-
-**Open.** What a garbage token address actually buys an attacker in those solvers —
-they are out of the audited scope and hold solver inventory, not maker funds.
-
----
+`count` is now `countUnchecked`, matching the calldata library's naming so the
+hazard is visible at the call site, and `validateFixed` / `validateLegsIn` /
+`validateLegsOut` mirror the real validator. **Seven** call sites across five files
+were repointed — two more than this lead identified, since both ERC-7683 adapters
+also indexed against the unchecked count.
 
 ## Tier C — ~~documentation drift~~ — **ALL CLOSED**
 
@@ -180,38 +132,48 @@ rather than duplicated here because the interesting part is the pattern, not the
 individual lines: every one of them asserted an invariant that lived somewhere else
 or nowhere at all, which is the F23 shape this repo has now hit three times.
 
-## Tier D — blocked on information outside this repo
+## Tier D — ~~blocked on information outside this repo~~ — **RESOLVED**
 
-### D-1. Live allowance across a counterparty-chosen callback
+### D-1. ~~Live allowance across a counterparty-chosen callback~~ — **CLOSED, and it corrected one of our own comments**
 
-`MidnightLendModule.makeOnBehalf` (and `MidnightSupplyCollateralModule`,
-`MidnightRepayModule`). Six lenses raised it; none could close it.
+Resolved by reading the deployed source (`morpho-org/midnight`, `src/Midnight.sol`).
+The answer settles the contradiction between our two in-repo documents, and
+`ICallbacks.sol` was the one telling the truth.
 
-`forceApprove(loanToken, midnight, amount)` is live across `midnight.take`, and
-because `offer.buy == false` is asserted, `sellerCallback = offer.callback` — the
-**counterparty's** contract gets control while the module holds both the unspent
-budget and a matching allowance.
+`take` resolves the payer and pulls in this order:
 
-**Two in-repo documents contradict each other, and which is right decides this:**
+```solidity
+address payer = buyerCallback != address(0) ? buyerCallback : (offer.buy ? buyer : msg.sender);
+if (buyerCallback != address(0))
+    require(IBuyCallback(buyerCallback).onBuy(...) == CALLBACK_SUCCESS, ...);
+SafeTransferLib.safeTransferFrom(loanToken, payer, ...);   // AFTER the callback
+if (sellerCallback != address(0)) ISellCallback(sellerCallback).onSell(...);
+```
 
-- `ICallbacks.sol` says a non-zero `takerCallback` must return
-  `keccak256("morpho.midnight.callbackSuccess")`. `MidnightLendModule` implements
-  no `onBuy`, so a nested payer-nominated `take` would revert — blocked, but
-  **incidentally, by an interface gap**.
-- `MidnightSupplyCollateralModule`'s comment asserts the opposite: "any external
-  account can call `take` designating THIS module as the payer, and a standing
-  allowance is what would let that pull succeed."
+Three consequences:
 
-**To resolve.** Read `morpho-org/midnight`'s `take`: does the buy-side pull precede
-the seller callback, and does a `takerCallback` payer require `isAuthorized`? Also
-unexamined: `repay(callback)` and `flashLoan(callback)`, which may pull from a
-named payer *without* invoking it — that would route around the interface gap.
+1. **Naming an address as payer means naming it as the CALLBACK**, and Midnight
+   invokes it and requires the success sentinel *before* it pulls. The same shape
+   holds on every other payer path — `repay` (`onRepay`), `liquidate`
+   (`onLiquidate`), `flashLoan` (`onFlashLoan`). A standing allowance is never
+   sufficient on its own.
+2. **No module in the package implements any of those callbacks**, so no module can
+   be named as payer by anyone. The window is closed.
+3. The buy-side pull happens BEFORE `onSell`, so by the time counterparty code runs
+   the module's remaining allowance is the unspent budget — and re-entering to draw
+   it still requires `onBuy`.
 
-**Regardless of the answer**, the window is closable structurally: approve exactly
-`buyerAssets` rather than the whole budget, or clear before returning from a
-callback-bearing `take`. Recommended either way — the current safety is accidental.
+**`MidnightSupplyCollateralModule`'s comment was wrong** and has been corrected. It
+claimed "any external account can call `take` designating THIS module as the payer,
+and a standing allowance is what would let that pull succeed". It cannot. The
+scoped approve + clear is kept — defence in depth if a module ever gains a
+callback, and no allowance outliving the call that needed it — but the justification
+now matches the code.
 
----
+Also checked: `MidnightFlashSolver` DOES implement `onFlashLoan` and so IS nameable
+as a flash payer, but it is guarded by `msg.sender == midnight` plus an in-flight
+flag it arms itself. Not reachable by an outside caller.
+
 
 ## Tier E — closed by inspection (recorded so they are not re-opened)
 
@@ -303,7 +265,7 @@ That is the second time in this audit that asking "where else?" found 50% more
 instances than the finding named. It is worth making that question a standing step
 rather than an instinct.
 
-## Phase 2 — invariant hardening; small, local, no signature changes
+## ~~Phase 2 — invariant hardening~~ — **DONE** (F25 / G-11, G-12)
 
 | lead | change | note |
 | --- | --- | --- |
@@ -322,7 +284,12 @@ should be justified on its own merits, not smuggled in as a doc fix.
 is atomic-revert, and it is void the moment an item op acquires an effect that
 outlives the transaction. A cross-chain message is precisely that.
 
-## Phase 3 — needs a decision before any code
+## ~~Phase 3 — needs a decision before any code~~ — **DONE**
+
+All three decisions were resolvable without guessing. D-1 by reading the deployed
+Midnight source; A-4 because `deployments.ts` says nothing is live, so the
+population it hinged on is zero; B-3 by the 91-byte bytecode margin, which settled
+lens-vs-on-chain on its own. The original write-ups follow for the reasoning.
 
 These two are not "fix or don't". Each has a real trade-off and the answer changes
 what gets written.

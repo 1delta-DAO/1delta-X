@@ -7,11 +7,14 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
+import {DelegationHelper} from "@lib/DelegationHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {Narrow160} from "@lib/Narrow160.sol";
 import {FundingPreflight} from "@lib/FundingPreflight.sol";
 
 import {IEulerVault, IEVC} from "./interfaces/IEulerV2.sol";
@@ -68,6 +71,13 @@ contract EulerV2DepositModule is IMakerModule {
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, vault, amount);
         IEulerVault(vault).deposit(amount, onBehalfOf);
+        // Clear the scoped grant: `vault` is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an
+        // order naming themselves as maker. A target that consumes less than
+        // approved would leave a standing third-party claim on any FUTURE balance
+        // of this module, which is what turns a later stranded-balance bug into a
+        // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+        SafeTransferLib.forceApprove(asset, vault, 0);
     }
 }
 
@@ -139,6 +149,13 @@ contract EulerV2RepayModule is IMakerModule {
         if (toRepay > 0) {
             SafeTransferLib.forceApprove(asset, vault, toRepay);
             IEulerVault(vault).repay(toRepay, onBehalfOf);
+            // Clear the scoped grant: `vault` is decoded from the order's `data` on a
+            // SHARED singleton, so it is attacker-choosable — anyone can author an
+            // order naming themselves as maker. A target that consumes less than
+            // approved would leave a standing third-party claim on any FUTURE balance
+            // of this module, which is what turns a later stranded-balance bug into a
+            // theft. {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+            SafeTransferLib.forceApprove(asset, vault, 0);
         }
     }
 
@@ -328,7 +345,7 @@ contract EulerV2BatchModule is ITakerModule {
     ///      the single liquidity check land on the user's account.
     function _open(BatchData memory p, address user, address receiver, uint256 borrowAmount) private {
         address collateralAsset = IEulerVault(p.collateralVault).asset();
-        permit3.transferFrom(user, address(this), collateralAsset, uint160(p.sideAmount));
+        permit3.transferFrom(user, address(this), collateralAsset, Narrow160.to160(p.sideAmount));
         SafeTransferLib.forceApprove(collateralAsset, p.collateralVault, p.sideAmount);
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
@@ -345,6 +362,12 @@ contract EulerV2BatchModule is ITakerModule {
             data: abi.encodeCall(IEulerVault.borrow, (borrowAmount, receiver))
         });
         IEVC(IEulerVault(p.borrowVault).EVC()).batch(items);
+        // Clear the scoped grant. The vault is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an order
+        // naming themselves as maker. A target consuming less than approved would
+        // leave a standing third-party claim on any FUTURE balance of this module.
+        // {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
+        SafeTransferLib.forceApprove(collateralAsset, p.collateralVault, 0);
     }
 
     /// @dev repay up to `sideAmount` (capped at live debt, module-funded) +
@@ -373,6 +396,12 @@ contract EulerV2BatchModule is ITakerModule {
             data: abi.encodeCall(IEulerVault.withdraw, (collateralAmount, receiver, user))
         });
         IEVC(IEulerVault(p.borrowVault).EVC()).batch(items);
+        // Clear the scoped grant. The vault is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an order
+        // naming themselves as maker. A target consuming less than approved would
+        // leave a standing third-party claim on any FUTURE balance of this module.
+        // {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
+        if (toRepay > 0) SafeTransferLib.forceApprove(borrowAsset, p.borrowVault, 0);
     }
 }
 
@@ -418,6 +447,7 @@ contract EulerV2TakeForModule is ITakerForModule, IFundingSource, IProceedsAsset
     }
 
     function takeForOnBehalf(
+        address,
         address onBehalfOf,
         uint256 amount,
         uint256 forAmount,
@@ -430,8 +460,10 @@ contract EulerV2TakeForModule is ITakerForModule, IFundingSource, IProceedsAsset
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](forAmount == 0 ? 1 : 2);
         uint256 k;
+        address fundedAsset; // hoisted so the grant can be cleared after the batch
         if (forAmount != 0) {
             address collateralAsset = IEulerVault(p.collateralVault).asset();
+            fundedAsset = collateralAsset;
             permit3.transferFrom(onBehalfOf, address(this), collateralAsset, uint160(forAmount));
             SafeTransferLib.forceApprove(collateralAsset, p.collateralVault, forAmount);
             items[k++] = IEVC.BatchItem({
@@ -448,6 +480,12 @@ contract EulerV2TakeForModule is ITakerForModule, IFundingSource, IProceedsAsset
             data: abi.encodeCall(IEulerVault.borrow, (amount, receiver))
         });
         IEVC(IEulerVault(p.borrowVault).EVC()).batch(items);
+        // Clear the scoped grant. The vault is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an order
+        // naming themselves as maker. A target consuming less than approved would
+        // leave a standing third-party claim on any FUTURE balance of this module.
+        // {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
+        if (fundedAsset != address(0)) SafeTransferLib.forceApprove(fundedAsset, p.collateralVault, 0);
     }
 
     /// @inheritdoc IFundingSource
@@ -464,6 +502,159 @@ contract EulerV2TakeForModule is ITakerForModule, IFundingSource, IProceedsAsset
     {
         asset = IEulerVault(abi.decode(data, (OpenData)).collateralVault).asset();
         available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev Derived from the BORROW vault, as the funding side is derived from the
+    ///      collateral vault — Euler names vaults, not assets.
+    function proceedsAsset(bytes calldata data) external view override returns (address) {
+        return IEulerVault(abi.decode(data, (OpenData)).borrowVault).asset();
+    }
+}
+
+// ──────────── Euler V2 PRE-FUNDED TAKE_FOR open module ────────────
+//
+// The same one-`EVC.batch` deposit+borrow as {EulerV2TakeForModule}, with the
+// collateral PUSHED to this module by the fill instead of pulled back out of the
+// maker's wallet: the maker signs the collateral output leg with `recipient =
+// address(this module)` and `forDesc` pointing at it ({Base._forSlice} admits the
+// item's own module as a leg recipient). The pattern is
+// {AaveV3PreFundLeverageModule}'s, ported onto Euler's EVC batch.
+//
+// Why: the APPROVAL SURFACE. Under the pull shape the funding leg needs TWO maker
+// grants on the collateral token — the Permit3 token allowance to this module
+// and, beneath it, an on-chain ERC20 approve of that token to Permit3 — for a
+// token the maker may never have held (the delivered collateral on a cross-asset
+// open). Pre-funded, the receive side needs NOTHING: no Permit3 book entry, no
+// ERC20 approve, and the fill makes one less ERC20 transfer (solver → module,
+// instead of solver → maker → module). The maker's only grants are the borrow's
+// taker allowance plus the one-time EVC operator/controller/collateral setup.
+//
+// Soundness is the TAKE_FOR seam's, argued in {ITakerForModule}'s "Pull-funded vs
+// PRE-FUNDED" section: every module-addressed delivery is paid by that fill's
+// solver, and every `forAmount` deposited here is CORE-SIZED to that same order's
+// own enforced leg — deposits instructed == deliveries enforced, per token, per
+// order, so one order's item can never consume another order's delivery.
+//
+// Pairing rule: sign this module ONLY with a module-addressed funding leg. A
+// maker-addressed leg leaves this module unfunded and the deposit reverts — fail
+// closed, nothing stranded. `data` is byte-identical to {EulerV2TakeForModule}'s
+// {OpenData}, so off-chain builders switch variants by switching the module
+// address and the leg recipient, nothing else. A partial fill's per-fill CEIL can
+// leave a wei of dust here; it is consumed by the next slice's deposit.
+//
+// OPTIONAL EVC-PERMIT TAIL — the maker's entire Euler auth surface, signature-
+// only. `data` may extend past the 128-byte {OpenData} head with a
+// {DelegationHelper.replayEvcPermit} block: an EVC `permit` the maker signed
+// whose self-call grants this module operator rights and enables the
+// controller / collateral — the three on-chain transactions the pull/batch
+// variants require up front. The replay runs BEFORE the batch that needs the
+// grants, best-effort (a front-runner landing the lifted permit leaves exactly
+// the grants the fill wanted — see the DelegationHelper header). Combined with
+// the pre-funding shape, a maker opens a levered Euler position with ZERO
+// prior on-chain transactions: order sig + EVC permit sig (+ a Permit3 witness
+// batch for the allowances). Orders without the tail behave exactly as before —
+// the replay is a no-op and the pre-granted path is untouched.
+//
+contract EulerV2PreFundTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset {
+    IPermit3 public immutable permit3;
+    /// @dev The ONLY spender allowed to reach this module's pre-funding.
+    ///      `Permit3.takeFor` is permissionless (F27/C-1).
+    address public immutable settlement;
+
+    struct OpenData {
+        uint256 forDesc; // word 0 — the funding descriptor
+        uint256 forCap; //  word 1 — the balance form's mandatory cap
+        address collateralVault;
+        address borrowVault;
+    }
+
+    error OnlyPermit3();
+
+    constructor(address _permit3, address _settlement) {
+        permit3 = IPermit3(_permit3);
+        settlement = _settlement;
+    }
+
+    /// @param amount    this fill's slice of the BORROW leg (what the taker
+    ///                  allowance gates).
+    /// @param forAmount this fill's COLLATERAL — core-sized to the module-addressed
+    ///                  output leg the fill just delivered HERE.
+    /// @param receiver  where the borrow proceeds land.
+    function takeForOnBehalf(
+        address spender,
+        address onBehalfOf,
+        uint256 amount,
+        uint256 forAmount,
+        address receiver,
+        bytes calldata data
+    ) external override {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+        PreFundGuard.requireSettlement(spender, settlement);
+        PreFundGuard.requireLegRef(data);
+
+        // {OpenData} is 4 static words — the decode reads only the 128-byte head,
+        // so the optional EVC-permit tail behind it passes through untouched.
+        OpenData memory p = abi.decode(data, (OpenData));
+        address evc = IEulerVault(p.borrowVault).EVC();
+
+        // Optional EVC-permit tail at 128 — replayed BEFORE the batch that needs
+        // the grants (operator / controller / collateral), best-effort, `onBehalfOf`
+        // as the permit signer. No tail ⇒ no-op. See the module header.
+        DelegationHelper.replayEvcPermit(data, 128, evc, onBehalfOf);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](forAmount == 0 ? 1 : 2);
+        uint256 k;
+        address fundedAsset; // hoisted so the grant can be cleared after the batch
+        if (forAmount != 0) {
+            // No pull: the order's module-addressed output leg already landed the
+            // collateral here, sized by the same {Pricing.outputAt} call that sized
+            // `forAmount`. An unfunded balance (a mis-paired maker-addressed leg)
+            // makes the deposit revert — fail closed.
+            address collateralAsset = IEulerVault(p.collateralVault).asset();
+            fundedAsset = collateralAsset;
+            // The delivery must have landed HERE, in THIS token (F27/C-1, B). The
+            // header's "an unfunded balance makes the venue call revert — fail
+            // closed" is true only at EXACTLY zero balance: with any residue on
+            // this shared singleton the call succeeds and spends it.
+            PreFundGuard.requireDelivered(data, collateralAsset, forAmount);
+            SafeTransferLib.forceApprove(collateralAsset, p.collateralVault, forAmount);
+            items[k++] = IEVC.BatchItem({
+                targetContract: p.collateralVault,
+                onBehalfOfAccount: address(this),
+                value: 0,
+                data: abi.encodeCall(IEulerVault.deposit, (forAmount, onBehalfOf))
+            });
+        }
+        items[k] = IEVC.BatchItem({
+            targetContract: p.borrowVault,
+            onBehalfOfAccount: onBehalfOf,
+            value: 0,
+            data: abi.encodeCall(IEulerVault.borrow, (amount, receiver))
+        });
+        IEVC(evc).batch(items);
+        // Clear the scoped grant. The vault is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an order
+        // naming themselves as maker. A target consuming less than approved would
+        // leave a standing third-party claim on any FUTURE balance of this module.
+        // {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
+        if (fundedAsset != address(0)) SafeTransferLib.forceApprove(fundedAsset, p.collateralVault, 0);
+    }
+
+    /// @inheritdoc IFundingSource
+    /// @dev Same DERIVED asset as the pull variant (`vault.asset()`, so it cannot
+    ///      disagree with the vault the deposit lands in). `available` is reported
+    ///      as unbounded: this module is funded by the fill's OWN delivery, not by
+    ///      a wallet balance or allowance that could be previewed short. A wallet
+    ///      read here would preview a self-funding order as a shortfall.
+    function fundingSource(address, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 available)
+    {
+        asset = IEulerVault(abi.decode(data, (OpenData)).collateralVault).asset();
+        available = type(uint256).max;
     }
 
     /// @inheritdoc IProceedsAsset

@@ -21,11 +21,11 @@ contract ExactlyTakerModuleAuthTest is Test {
     }
 
     function _borrowData() internal view returns (bytes memory) {
-        return abi.encode(uint8(ExactlyTakerModule.Op.Borrow), market, asset, uint256(0), uint256(0));
+        return abi.encode(uint8(ExactlyTakerModule.Op.Borrow), market, asset, uint256(0), uint256(0), uint256(0));
     }
 
     function _withdrawData() internal view returns (bytes memory) {
-        return abi.encode(uint8(ExactlyTakerModule.Op.Withdraw), market, asset, uint256(0), uint256(0));
+        return abi.encode(uint8(ExactlyTakerModule.Op.Withdraw), market, asset, uint256(0), uint256(0), uint256(0));
     }
 
     function test_borrow_rejects_non_permit3() public {

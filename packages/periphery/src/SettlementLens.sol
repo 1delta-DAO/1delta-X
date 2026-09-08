@@ -317,6 +317,8 @@ contract SettlementLens {
             prevFilled == 0 && newFilled == total,
             DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData),
             "",
+            new uint256[](0), // no delivery ledger in a preview — nothing was delivered
+            0,
             new uint256[](0)
         );
     }
@@ -382,6 +384,8 @@ contract SettlementLens {
             // exactly what that filler would get. Pinned the same way a fill pins it.
             DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData),
             "", // no one-shot taker permit in a preview — see {FillCtx.permitTake}
+            new uint256[](0), // no delivery ledger in a preview — nothing was delivered
+            0,
             new uint256[](0) // preview prices legs directly; no payout ledger to record
         );
     }
@@ -1169,7 +1173,18 @@ contract SettlementLens {
     {
         (uint256 op, address module,,, bytes calldata data, uint256 nxt) =
             PackedArrays.itemAt(order.items, cursor);
-        if (op != uint256(ItemOp.TAKE_FOR)) return (true, "", nxt);
+        // A PRE-FUNDED `MAKE` carries the very same funding descriptor as a
+        // composite's value-IN side — {Base._runItem} sizes it through the same
+        // {Base._forSlice} — so it needs the same preflight. It is opt-in at word 0,
+        // and the test has to fail SOFT: a plain pull `MAKE` opens with an address
+        // (`>> 253 == 0`) and is none of this function's business, so anything that
+        // is not the pre-fund shape passes straight through rather than being
+        // rejected for a descriptor it never claimed to carry.
+        if (op == uint256(ItemOp.MAKE)) {
+            if (data.length < 32 || uint256(bytes32(data[0:32])) >> 253 != 5) return (true, "", nxt);
+        } else if (op != uint256(ItemOp.TAKE_FOR)) {
+            return (true, "", nxt);
+        }
         if (data.length < 32) return (false, "take_for missing funding descriptor", nxt);
 
         uint256 desc = uint256(bytes32(data[0:32]));
@@ -1185,8 +1200,39 @@ contract SettlementLens {
             if (j >= PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE)) {
                 return (false, "take_for leg index out of range", nxt);
             }
+            // The maker's own legs are the classic pull-funded shape; a leg addressed
+            // to the item's OWN module is the pre-funded one (the module supplies the
+            // instructed `forAmount` from its balance — no receive-side approvals).
+            // Whether the signed module actually funds from balance is a semantic the
+            // lens cannot read; the asset cross-check below still applies to both
+            // shapes, and a pull-style module under a module-addressed leg surfaces at
+            // preflight as `available == 0` once the maker holds no funding allowance.
             address r = _legOutRecipient(order.legsOut, j);
-            if (r != address(0) && r != order.maker) {
+            // ⚠ THE PRE-FUND BIT MAKES THE RULE STRICT, and the lens used to be
+            // LOOSER here than the settler. {Base._forSlice} accepts a
+            // maker-addressed leg only while bit 253 is CLEAR; with it set the leg
+            // must be addressed to the item's own module, because the module funds
+            // from a balance the delivery has to have landed in. A pre-fund
+            // descriptor over a maker-addressed leg therefore reverts
+            // `ForLegNotMakers` at fill time — exactly the class of defect a
+            // preflight exists to catch before a signature exists, and now the
+            // dominant one, since every one-sided pre-fund op is this shape.
+            //
+            // The two shapes are DISJOINT, mirroring {Base._forSlice}'s bijection: the
+            // pull form must NOT name the module either. Admitting it here (this used
+            // to read `&& r != module`) whitelisted the one pairing that pulls a second
+            // copy from the maker's wallet and strands the delivery on a shared
+            // singleton — the residue an unbound funding token then makes claimable.
+            // A preflight that accepts what the settler rejects is worse than no
+            // preflight, so the two must agree exactly.
+            if (desc & (uint256(1) << 253) != 0) {
+                if (r != module) return (false, "pre-funded leg must be addressed to the item's module", nxt);
+                // Bits [16:176) name the asset the module spends; the settler
+                // requires the leg to be denominated in it.
+                if (PackedArrays.legOutToken(order.legsOut, j) != address(uint160(desc >> 16))) {
+                    return (false, "pre-funded leg token != the descriptor's funding token", nxt);
+                }
+            } else if (r != address(0) && r != order.maker) {
                 return (false, "take_for funds a fee leg (not the maker's)", nxt);
             }
             // ── the ASSET half of the de-duplication ──
@@ -1223,6 +1269,24 @@ contract SettlementLens {
         if (floorBps > 10_000) return (false, "take_for balance floor exceeds the cap", nxt);
         if (order.fillModule == address(0) && order.minFillAnchor != OrderGates.fillDenominator(order)) {
             return (false, "take_for balance leg requires full-fill", nxt);
+        }
+        // ── the ASSET half, for the BALANCE form ──
+        // The same de-duplication the leg reference gets above, applied to the door
+        // the balance descriptor leaves open. The core sizes `forAmount` from
+        // `balanceOf(address(uint160(desc)), maker)` — a token named by the
+        // DESCRIPTOR — while the module spends an asset named separately inside its
+        // own `data`. Nothing on-chain reconciles the two, so a descriptor reading a
+        // 6-decimal balance while the module funds an 18-decimal asset silently
+        // mis-sizes the funding leg while the value-OUT leg still draws in full: a
+        // 3,000e6 USDC read funding 3e-9 WETH. Both halves are maker-signed, so no
+        // filler can choose either and this is a malformed-order footgun rather than
+        // an attack — which is exactly what a preflight is for. Same degradation
+        // rule as the leg form: a module that cannot answer reports `address(0)` and
+        // this falls back to the pre-existing gap rather than rejecting a fillable
+        // order. See `docs/audit-2026-09-leads.md` B-3.
+        address balAsset = _fundingAsset(module, order.maker, data);
+        if (balAsset != address(0) && balAsset != address(uint160(desc))) {
+            return (false, "take_for balance leg reads a different asset than the module funds", nxt);
         }
         return (true, "", nxt);
     }

@@ -8,6 +8,8 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {ProratedBound} from "@lib/ProratedBound.sol";
+import {Narrow160} from "@lib/Narrow160.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
@@ -26,7 +28,10 @@ import {IExactlyMarket} from "./interfaces/IExactly.sol";
 //    • deposit / repay — permissionless value-in; no grant.
 //    • borrow / withdraw — the maker signs one `market.approve(module, max)`
 //      (ERC-4626 share allowance); Exactly consumes it when principal != caller.
-//      The Permit3 taker allowance bounds the per-fill amount.
+//      The Permit3 taker allowance bounds the per-fill amount. SIGNATURE-ONLY
+//      alternative: the Market's shares are EIP-2612 (solmate ERC20 base), so the
+//      approval can instead ride inside the order as an optional permit tail on
+//      the taker data — see {ExactlyTakerModule}. No on-chain grant remains.
 // ════════════════════════════════════════════════════════════════════════════
 
 // ──────────────────── Exactly deposit maker module ────────────────────
@@ -65,6 +70,13 @@ contract ExactlyDepositModule is IMakerModule {
         } else {
             IExactlyMarket(market).depositAtMaturity(maturity, amount, minAssetsRequired, onBehalfOf);
         }
+        // Clear the scoped grant: `market` is decoded from the order's `data` on a
+        // SHARED singleton, so it is attacker-choosable — anyone can author an order
+        // naming themselves as maker. A target that consumes less than approved would
+        // leave a standing third-party claim on any FUTURE balance of this module,
+        // which is what turns a later stranded-balance bug into a theft.
+        // {SafeTransferLib.ensureApproval} forbids this shape. F25 / A-3.
+        SafeTransferLib.forceApprove(asset, market, 0);
     }
 }
 
@@ -140,7 +152,7 @@ contract ExactlyRepayModule is IMakerModule {
             // Pull the bound, let the Market take only what it needs; the surplus
             // is disposed below.
             if (maxAssets > 0) {
-                permit3.transferFrom(onBehalfOf, address(this), asset, uint160(maxAssets));
+                permit3.transferFrom(onBehalfOf, address(this), asset, Narrow160.to160(maxAssets));
                 SafeTransferLib.forceApprove(asset, market, maxAssets);
             }
             IExactlyMarket(market).repayAtMaturity(maturity, amount, maxAssets, onBehalfOf);
@@ -185,12 +197,47 @@ contract ExactlyRepayModule is IMakerModule {
 // separate amount-gated taker allowance per leg; the shared ERC-4626 share
 // allowance (`market.approve(module, max)`) is per-address by construction.
 //
-//   base: op@0, market@32, asset@64, maturity@96, bound@128 (base length 160)
+//   base: op@0, market@32, asset@64, maturity@96, bound@128, totalAmount@160
+//         (base length 192)
 //     — `bound` = maxAssets (borrow-at-maturity) / minAssetsRequired (withdraw-at-maturity).
-//   op = 0 (Borrow):    data = abi.encode(uint8(0), market, asset, maturity, maxAssets)
-//   op = 1 (Withdraw):  data = abi.encode(uint8(1), market, asset, maturity, minAssets[, BalanceMode])
-//     — BalanceMode@160 (floating only). `Full` withdraws the whole floating
+//     — `totalAmount` is the item's FULL maker-signed amount. BREAKING (F26): it is
+//       new, and it is MANDATORY on the at-maturity borrow leg, where it scales the
+//       absolute `maxAssets` ceiling with the slice ({ProratedBound}). One field
+//       serves both users of a total: the `Full` withdraw guard now reads it at 160
+//       instead of carrying a second copy at 192.
+//   op = 0 (Borrow):    data = abi.encode(uint8(0), market, asset, maturity, maxAssets, totalAmount[, value, deadline, v, r, s])
+//   op = 1 (Withdraw):  data = abi.encode(uint8(1), market, asset, maturity, minAssets, totalAmount[, BalanceMode[, value, deadline, v, r, s]])
+//     — BalanceMode@192 (floating only). `Full` withdraws the whole floating
 //       position and sweeps the excess to the user.
+//
+//  Optional SHARE-PERMIT tail — the signature-only grant. Exactly's Market is
+//  solmate ERC4626, so its shares are EIP-2612: instead of a prior on-chain
+//  `market.approve(module, …)`, the maker can sign a 2612 permit over the
+//  MARKET's shares approving THIS MODULE and append it to the data:
+//    `(uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)` — 160 bytes,
+//    at a FIXED offset: Borrow ⇒ @192; Withdraw ⇒ @224 (i.e. AFTER the
+//    BalanceMode slot, which MUST then be encoded — pad 0 = Exact — even on the
+//    at-maturity leg, where it is otherwise ignored). Absent tail ⇒ byte-exact
+//    no-op: the module falls back to the standing share allowance.
+//    The module replays `market.permit(onBehalfOf, module, value, …)` BEST-EFFORT
+//    (see {PermitHelper}) before the venue call — a front-run replay of the
+//    lifted permit leaves exactly the allowance the fill wants, and the Market's
+//    own allowance check is the real gate.
+//
+//  Sizing `value` (the maker's call): the allowance goes only to this
+//  maker-signed module, and every spend through it is gated by the Permit3 taker
+//  book, so `type(uint256).max` is defensible — but signing the order's actual
+//  SHARE cap is tighter. Beware the units: the order is denominated in ASSETS
+//  while the Market debits the allowance in SHARE units at its own conversion
+//  (`previewWithdraw(assets)` for withdraw / borrowAtMaturity, `previewBorrow`
+//  — floating-borrow shares — for floating borrow), and the shares:assets rate
+//  DRIFTS as interest accrues between signing and fill. Both share prices start
+//  at 1 and rise with accrual, so the share cost of a fixed asset amount falls
+//  over time and `value = the order's total asset amount` is a natural
+//  over-approximation; `convertToShares`/preview at signing plus rounding margin
+//  is tighter but leans on the price never dipping (an extreme bad-debt event
+//  could move it). An under-sized `value` fails CLOSED: the Market reverts on
+//  allowance, killing the fill — never over-spending.
 //
 contract ExactlyTakerModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -210,23 +257,48 @@ contract ExactlyTakerModule is ITakerModule {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
+        // NOTE: `totalAmount@160` is deliberately NOT in this tuple. Adding a sixth
+        // local pushes this frame over the stack limit on the legacy (non-via-IR)
+        // profile these packages build with, so the branch that needs it reads it
+        // straight from calldata instead.
         (uint8 op, address market, address asset, uint256 maturity, uint256 bound) =
             abi.decode(data, (uint8, address, address, uint256, uint256));
+
+        // Optional share-permit tail (see the header): replay the maker's 2612
+        // signature over the MARKET's shares approving this module, best-effort,
+        // so no prior on-chain `market.approve` is needed. Borrow data has no
+        // BalanceMode slot, so its tail sits one word earlier.
+        PermitHelper.replayValueIfPresent(
+            data, op == uint8(Op.Borrow) ? 192 : 224, market, onBehalfOf, address(this)
+        );
 
         if (op == uint8(Op.Borrow)) {
             if (maturity == 0) {
                 IExactlyMarket(market).borrow(amount, receiver, onBehalfOf);
             } else {
+                // `maxAssets` is an ABSOLUTE ceiling the maker sized against the whole
+                // item, and the FILLER chooses how many slices to fill it in. Passing
+                // it unscaled multiplied the maker's signed slippage tolerance by N.
+                // Scale it with the slice; see {ProratedBound} for the full write-up.
+                // Reuses `bound`'s slot rather than introducing a local: an extra
+                // stack item here overflows the legacy profile's frame.
+                bound = _scaledBound(data, bound, amount);
                 IExactlyMarket(market).borrowAtMaturity(maturity, amount, bound, receiver, onBehalfOf);
             }
         } else if (op == uint8(Op.Withdraw)) {
             if (maturity != 0) {
+                // NOT scaled, deliberately. Here `bound` is `minAssetsRequired` — a
+                // FLOOR. Applied unscaled to a slice it is STRICTER than the maker
+                // asked for, so a partial fill reverts: fail-closed. Scaling it would
+                // loosen a guard that is currently safe, and separately would enable
+                // partial fills on a leg that does not support them today. See the
+                // ⚠ note in {ProratedBound}.
                 IExactlyMarket(market).withdrawAtMaturity(maturity, amount, bound, receiver, onBehalfOf);
-            } else if (DustHandler.readBalanceMode(data, 160) == DustHandler.BalanceMode.Full) {
+            } else if (DustHandler.readBalanceMode(data, 192) == DustHandler.BalanceMode.Full) {
                 // `Full` liquidates the user's ENTIRE live balance, so it cannot be
                 // pro-rated — a sliced fill would unwind the whole position and brick
                 // the rest of the order. Require the slice to be the whole item.
-                FullFillGuard.requireFullFillFromData(data, 192, amount);
+                FullFillGuard.requireFullFillFromData(data, 160, amount);
                 _withdrawFull(market, asset, onBehalfOf, amount, receiver);
             } else {
                 IExactlyMarket(market).withdraw(amount, receiver, onBehalfOf);
@@ -234,6 +306,15 @@ contract ExactlyTakerModule is ITakerModule {
         } else {
             revert BadOp(op);
         }
+    }
+
+    /// @dev Reads the maker-signed `totalAmount@160` and scales an absolute max
+    ///      bound with the slice. Its own frame so `takeOnBehalf` stays under the
+    ///      legacy profile's stack limit. Fails closed when the word is absent —
+    ///      an order without a total is exactly the order that was unprotected.
+    function _scaledBound(bytes calldata data, uint256 bound, uint256 amount) private pure returns (uint256) {
+        if (data.length < 192) revert ProratedBound.BoundTotalMissing();
+        return ProratedBound.scale(bound, amount, uint256(bytes32(data[160:192])));
     }
 
     /// @dev Full mode (floating): withdraw the user's entire position to this

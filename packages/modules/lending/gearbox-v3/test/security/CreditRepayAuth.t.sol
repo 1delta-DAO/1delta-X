@@ -13,6 +13,11 @@ contract MockERC20R {
         balanceOf[to] += amount;
     }
 
+    /// @dev Test-only, so the Permit3 stub can move custody without an allowance.
+    function burnFrom(address from, uint256 amount) external {
+        if (balanceOf[from] >= amount) balanceOf[from] -= amount;
+    }
+
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
         return true;
@@ -32,9 +37,16 @@ contract MockERC20R {
     }
 }
 
-/// @dev No-op Permit3: the pull is a stub; token custody is simulated by minting.
+/// @dev Permit3 stub that ACTUALLY MOVES the tokens. It used to be a no-op, with
+///      custody faked by pre-minting to the module — which the residual floor
+///      (F25/G-1) correctly reads as a pre-existing stranded balance rather than as
+///      this call's proceeds. Minting inside the pull is what makes the delta real,
+///      so the sweep tests below exercise the code rather than the simulation.
 contract MockPermit3R {
-    function transferFrom(address, address, address, uint160) external {}
+    function transferFrom(address from, address to, address token, uint160 amount) external {
+        MockERC20R(token).burnFrom(from, amount);
+        MockERC20R(token).mint(to, amount);
+    }
 }
 
 contract MockCreditManagerR {
@@ -135,15 +147,34 @@ contract GearboxCreditRepayAuthTest is Test {
         assertEq(asset.allowance(address(repayModule), address(cm)), 0, "manager allowance reset");
     }
 
-    /// @dev Anything the manager did not pull returns to the maker — the module
-    ///      ends every call holding nothing (simulated by pre-minting a residual).
+    /// @dev Anything the manager did not pull returns to the maker. The mock facade
+    ///      pulls nothing, so the whole pulled amount is the residual and comes back.
     function test_repay_sweepsResidualToMaker() public {
-        asset.mint(address(repayModule), 123e18); // the "unpulled" remainder
+        asset.mint(user, 1e18);
+        uint256 before = asset.balanceOf(user);
+
         vm.prank(settlement);
         repayModule.makeOnBehalf(user, 1e18, abi.encode(ca, address(asset)));
 
-        assertEq(asset.balanceOf(address(repayModule)), 0, "module drained");
-        assertEq(asset.balanceOf(user), 123e18, "residual swept to the maker");
+        assertEq(asset.balanceOf(address(repayModule)), 0, "module ends where it started (empty)");
+        assertEq(asset.balanceOf(user), before, "the unpulled amount came back to the maker");
+    }
+
+    /// @dev F25/G-1. A balance already sitting at the module is NOT this call's
+    ///      residual: it is a donation, or someone else's stranded funds, and
+    ///      sweeping it would hand it to whoever authors the next order against this
+    ///      shared module. The invariant is "the module ends where it STARTED", not
+    ///      "ends empty" — see {DustHandler.disposeResidual}'s floor overload.
+    function test_repay_doesNotSweepAStrandedBalance() public {
+        asset.mint(address(repayModule), 123e18); // stranded/donated, not this maker's
+        asset.mint(user, 1e18);
+        uint256 before = asset.balanceOf(user);
+
+        vm.prank(settlement);
+        repayModule.makeOnBehalf(user, 1e18, abi.encode(ca, address(asset)));
+
+        assertEq(asset.balanceOf(address(repayModule)), 123e18, "stranded balance stays put");
+        assertEq(asset.balanceOf(user), before, "maker gets back only their own unpulled amount");
     }
 
     function test_requiredPermissions_mask() public view {
