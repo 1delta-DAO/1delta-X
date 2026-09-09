@@ -256,8 +256,12 @@ contract AaveV4WithdrawModule is ITakerModule {
             uint256 balBefore = IERC20(asset).balanceOf(address(this));
             ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, supplied, onBehalfOf);
             uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
-            require(received >= amount, "insufficient withdrawn");
-            SafeTransferLib.safeTransfer(asset, receiver, amount);
+            // Deliver the measured proceeds, capped at the signed amount; any excess
+            // goes to the maker below. Never exceeds `received`, so a short delivery
+            // (a fake/under-delivering venue) can never be topped up from a stray
+            // balance the module holds — it simply delivers less and the fill's
+            // output check fails downstream. Replaces a `received >= amount` gate.
+            SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
             // Measure what actually landed rather than forwarding the PM's
@@ -272,8 +276,12 @@ contract AaveV4WithdrawModule is ITakerModule {
             uint256 balBefore = IERC20(asset).balanceOf(address(this));
             ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
             uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
-            require(received >= amount, "insufficient withdrawn");
-            SafeTransferLib.safeTransfer(asset, receiver, amount);
+            // Deliver the measured proceeds, capped at the signed amount; any excess
+            // goes to the maker below. Never exceeds `received`, so a short delivery
+            // (a fake/under-delivering venue) can never be topped up from a stray
+            // balance the module holds — it simply delivers less and the fill's
+            // output check fails downstream. Replaces a `received >= amount` gate.
+            SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
             // A withdraw that over-delivers (rounding in the user's favour) must
             // not leave the surplus parked in the module for the next fill to
             // sweep — it belongs to the position owner.
@@ -314,9 +322,9 @@ contract AaveV4BorrowModule is ITakerModule {
         uint256 balBefore = IERC20(asset).balanceOf(address(this));
         ITakerPositionManager(positionManager).borrowOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
         uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
-        require(received >= amount, "insufficient borrowed");
-        // Forward to Permit3's requested receiver (Settlement in our flow).
-        SafeTransferLib.safeTransfer(asset, receiver, amount);
+        // Forward to Permit3's requested receiver (Settlement in our flow) the
+        // measured proceeds, capped at the signed amount; excess to the user below.
+        SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
         // Any excess is the user's, not the next fill's.
         if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }

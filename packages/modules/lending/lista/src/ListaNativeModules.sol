@@ -75,9 +75,20 @@ contract ListaNativeSupplyCollateralModule is IMakerModule {
         uint256 ethFloor = address(this).balance;
         permit3.transferFrom(onBehalfOf, address(this), wnative, uint160(amount));
         IWETH(wnative).withdraw(amount);
-        // Payable supply: the amount is `msg.value`; the provider wraps and
-        // books exactly it on the maker's Moolah position.
-        IListaNativeProvider(provider).supplyCollateral{value: amount}(mp, onBehalfOf, "");
+        // SPEND THE MEASURED DELTA, NOT THE SIGNED AMOUNT. `wnative` is
+        // `mp.collateralToken` — decoded from order `data` on a SHARED singleton, so
+        // it is attacker-choosable (anyone may author an order naming themselves
+        // maker). A fake wrapper makes `withdraw` a no-op, and the `{value: amount}`
+        // below would then be paid out of native this module ALREADY held: `ethFloor`
+        // guarded only the refund branch, never the spend. Requiring the unwrap to
+        // have actually credited `amount` is what binds the two.
+        //
+        // Supply the MEASURED unwrap delta, never the nominal `amount`: a fake
+        // `wnative` makes `withdraw` a no-op, and spending `{value: amount}` would
+        // then draw on native this module already held. Spending `received` binds
+        // the payable supply to what the unwrap actually produced.
+        uint256 received = address(this).balance - ethFloor;
+        IListaNativeProvider(provider).supplyCollateral{value: received}(mp, onBehalfOf, "");
         // Residue above the pre-call floor (none expected) wraps back to the maker.
         uint256 bal = address(this).balance;
         if (bal > ethFloor) {
@@ -137,9 +148,10 @@ contract ListaNativeCollateralTakerModule is ITakerModule {
         uint256 ethFloor = address(this).balance;
         IListaNativeProvider(provider).withdrawCollateral(mp, burn, onBehalfOf, address(this));
         uint256 received = address(this).balance - ethFloor;
-        require(received >= amount, "insufficient withdrawn");
         IWETH(wnative).deposit{value: received}();
-        SafeTransferLib.safeTransfer(wnative, receiver, amount);
+        // Deliver the measured (wrapped) proceeds, capped at the signed amount; the
+        // excess goes to the maker below. Never exceeds what this unwrap produced.
+        SafeTransferLib.safeTransfer(wnative, receiver, received < amount ? received : amount);
         // Full mode's excess over the signed amount goes to the MAKER, never a caller.
         if (received > amount) SafeTransferLib.safeTransfer(wnative, onBehalfOf, received - amount);
     }

@@ -75,13 +75,33 @@ contract MockComet {
         isAllowed[msg.sender][manager] = _isAllowed;
     }
 
+    uint256 public withdrawCalls;
+    address public lastWithdrawTo;
+    uint256 public lastWithdrawAmount;
+
     function withdrawFrom(address src, address to, address asset, uint256 amount) external {
         require(isAllowed[src][msg.sender], "comet: not authorized");
+        withdrawCalls++;
+        lastWithdrawTo = to;
+        lastWithdrawAmount = amount;
         MockERC20(asset).transferFrom(src, to, amount);
     }
 
     function collateralBalanceOf(address account, address asset) external view returns (uint128) {
         return collateralBalances[account][asset];
+    }
+
+    // Comet's BASE supply is `balanceOf` — a different ledger from
+    // `collateralBalanceOf`, which returns 0 for the base asset on the real thing.
+    // Full-mode withdraw must read this one when `asset == baseToken`.
+    mapping(address => uint256) public baseBalances;
+
+    function setBaseBalance(address user, uint256 amount) external {
+        baseBalances[user] = amount;
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        return baseBalances[account];
     }
 
     function borrowBalanceOf(address) external pure returns (uint256) {
@@ -103,6 +123,7 @@ contract MockPermit3 {
 // and (3) an unknown op fails closed.
 contract CometTakerModuleTest is Test {
     MockERC20 asset;
+    MockERC20 base;
     MockComet comet;
     MockPermit3 permit3;
     CometTakerModule module;
@@ -116,7 +137,12 @@ contract CometTakerModuleTest is Test {
 
     function setUp() public {
         asset = new MockERC20();
-        comet = new MockComet(asset);
+        // The base token must be a DIFFERENT token from the collateral under test:
+        // on real Comet an asset is base XOR collateral, and the two live in
+        // different ledgers (`balanceOf` vs `collateralBalanceOf`). Wiring `asset`
+        // as both hid which one Full mode reads.
+        base = new MockERC20();
+        comet = new MockComet(base);
         permit3 = new MockPermit3();
         module = new CometTakerModule(address(permit3));
 
@@ -124,6 +150,11 @@ contract CometTakerModuleTest is Test {
         comet.setCollateral(user, address(asset), uint128(AMOUNT * 10));
         vm.prank(user);
         asset.approve(address(comet), type(uint256).max);
+
+        base.mint(user, AMOUNT * 10);
+        comet.setBaseBalance(user, AMOUNT * 10);
+        vm.prank(user);
+        base.approve(address(comet), type(uint256).max);
     }
 
     // ── Borrow leg (op = 0) ───────────────────────────────────────────────────
@@ -215,12 +246,12 @@ contract CometTakerModuleTest is Test {
         vm.prank(user);
         comet.allow(address(module), true);
 
-        // BalanceMode = Full (1): withdraw the entire collateral, forward `amount`,
-        // sweep the rest back to the user. Collateral seeded = AMOUNT * 10.
-        // In this Comet mock the user's collateral IS their wallet balance
-        // (withdrawFrom pulls via transferFrom), so a full withdraw removes the
-        // whole balance and sweeps the excess back. Assert absolute end-balances:
-        // the user nets out at total − AMOUNT, receiver gets AMOUNT, module keeps 0.
+        // BalanceMode = Full (1) on a COLLATERAL asset: the position is read from
+        // `collateralBalanceOf`, then paid out as two exact withdraws straight to
+        // their destinations — `amount` to `receiver`, the rest back to the user.
+        // The module is never a waypoint. Collateral seeded = AMOUNT * 10; in this
+        // mock the user's collateral IS their wallet balance (withdrawFrom pulls
+        // via transferFrom), so assert absolute end-balances.
         uint256 total = AMOUNT * 10;
         bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(asset), uint8(1), AMOUNT);
 
@@ -230,6 +261,35 @@ contract CometTakerModuleTest is Test {
         assertEq(asset.balanceOf(receiver), AMOUNT, "receiver got signed amount");
         assertEq(asset.balanceOf(user), total - AMOUNT, "excess swept to user");
         assertEq(asset.balanceOf(address(module)), 0, "module retains nothing");
+    }
+
+    /// @dev R2-L3 regression. Comet splits the two ledgers: the BASE asset's supply
+    ///      is `balanceOf`, and `collateralBalanceOf` returns 0 for it. Sizing a
+    ///      Full-mode base withdraw off `collateralBalanceOf` therefore resolved the
+    ///      position to 0 and silently skipped the maker's sweep. Seed the two
+    ///      ledgers DIFFERENTLY so a module reading the wrong one cannot pass.
+    function test_withdraw_fullMode_baseAsset_readsBaseBalance() public {
+        vm.prank(user);
+        comet.allow(address(module), true);
+
+        uint256 total = AMOUNT * 10;
+        // Base supply = total, base COLLATERAL = 0 (as on the real Comet).
+        assertEq(comet.collateralBalanceOf(user, address(base)), 0, "base has no collateral ledger");
+
+        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(base), uint8(1), AMOUNT);
+
+        vm.prank(address(permit3));
+        module.takeOnBehalf(user, AMOUNT, receiver, data);
+
+        assertEq(base.balanceOf(receiver), AMOUNT, "receiver got signed amount");
+        assertEq(base.balanceOf(address(module)), 0, "module retains nothing");
+        // The sweep here is user→user, so WALLET balances cannot tell the two
+        // implementations apart — assert on the calls. Reading the collateral
+        // ledger resolves the base position to 0, so `bal > amount` is false and
+        // the second withdraw never happens: exactly one call instead of two.
+        assertEq(comet.withdrawCalls(), 2, "base position resolved from balanceOf, so the remainder is swept");
+        assertEq(comet.lastWithdrawTo(), user, "remainder goes to the maker");
+        assertEq(comet.lastWithdrawAmount(), total - AMOUNT, "remainder is the whole rest of the base supply");
     }
 
     // ── Cross-cutting ─────────────────────────────────────────────────────────

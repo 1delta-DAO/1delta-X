@@ -212,26 +212,25 @@ contract AaveV2WithdrawModule is ITakerModule {
             // pro-rated — a sliced fill would unwind the whole position and brick
             // the rest of the order. Require the slice to be the whole item.
             FullFillGuard.requireFullFillFromData(data, 128, amount);
-            // aTokens this module ALREADY held are not this user's, and
-            // `withdraw(max)` burns the module's whole aToken balance — so without
-            // this they would convert into `received` and be swept to `onBehalfOf`
-            // below. aTokens are 1:1 with the underlying, so the pre-existing amount
-            // subtracts directly. (`beforeBal` already excludes pre-existing
-            // UNDERLYING; this is the aToken half of the same measurement.)
-            uint256 aBefore = IERC20(aToken).balanceOf(address(this));
+            // Resolve "full" to the USER's live aToken balance, pull exactly that,
+            // and withdraw EXACT amounts straight to their destinations.
+            //
+            // ⚠ NEVER `withdraw(max)`. `max` burns every aToken THIS MODULE holds of
+            // `asset`, which conflates the user's position with the module's own —
+            // that is what previously required a two-stage "harvest" to separate
+            // them, plus self-custody, a delta measurement and a capped payout. With
+            // exact amounts the module only ever burns what it just pulled and the
+            // pool pays each destination directly, so none of that is needed.
             uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
-            permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(bal));
-            uint256 beforeBal = IERC20(asset).balanceOf(address(this));
-            IAaveV2Pool(pool).withdraw(asset, type(uint256).max, address(this));
-            uint256 received = IERC20(asset).balanceOf(address(this)) - beforeBal;
-            // Saturating, so a rounding wei can never underflow-panic; the `require`
-            // below is the fail-closed gate either way.
-            received = received > aBefore ? received - aBefore : 0;
-            require(received >= amount, "insufficient withdrawn");
-            SafeTransferLib.safeTransfer(asset, receiver, amount);
-            if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
+            SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), bal);
+            // The signed amount to the order's receiver; interest accrued since
+            // signing stays the maker's. A position that SHRANK below `amount` makes
+            // the pool revert on insufficient aTokens — fail closed, no gate needed.
+            IAaveV2Pool(pool).withdraw(asset, amount, receiver);
+            if (bal > amount) IAaveV2Pool(pool).withdraw(asset, bal - amount, onBehalfOf);
         } else {
-            permit3.transferFrom(onBehalfOf, address(this), aToken, uint160(amount));
+            // Direct ERC-20 pull on the module's own allowance (not Permit3).
+            SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), amount);
             IAaveV2Pool(pool).withdraw(asset, amount, receiver);
         }
     }
@@ -268,8 +267,12 @@ contract AaveV2BorrowModule is ITakerModule {
         uint256 balBefore = IERC20(asset).balanceOf(address(this));
         IAaveV2Pool(pool).borrow(asset, amount, rateMode, 0, onBehalfOf);
         uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
-        require(received >= amount, "insufficient borrowed");
-        SafeTransferLib.safeTransfer(asset, receiver, amount);
+        // Deliver the measured proceeds, capped at the signed amount; any excess
+        // goes to the maker below. Never exceeds `received`, so a short delivery
+        // (a fake/under-delivering venue) can never be topped up from a stray
+        // balance the module holds — it simply delivers less and the fill's
+        // output check fails downstream. Replaces a `received >= amount` gate.
+        SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }
 }

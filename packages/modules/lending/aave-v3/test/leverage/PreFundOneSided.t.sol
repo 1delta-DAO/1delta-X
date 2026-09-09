@@ -294,8 +294,7 @@ contract PreFundOneSidedTest is AaveModulesBase {
 
         vm.startPrank(maker);
         // The position asset — the ONE thing the maker approves, and they own it.
-        IERC20(aWETH).approve(address(permit3), type(uint256).max);
-        permit3.approveToken(address(withdrawModule), aWETH, uint160(1.01 ether), 0);
+        IERC20(aWETH).approve(address(withdrawModule), type(uint256).max);
         permit3.approveTaker(
             address(settlement), address(withdrawModule), keccak256(dataW), uint160(1 ether), uint48(block.timestamp + 1 hours)
         );

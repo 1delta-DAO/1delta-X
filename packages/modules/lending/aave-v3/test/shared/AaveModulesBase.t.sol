@@ -66,7 +66,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
 
         // Maker bare-approves aWETH to Permit3 (the withdraw module pulls it).
         vm.prank(maker);
-        IERC20(aWETH).approve(address(permit3), type(uint256).max);
+        IERC20(aWETH).approve(address(withdrawModule), type(uint256).max);
     }
 
     // ──────────────────── Position seeding ────────────────────
@@ -129,8 +129,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         permit3.approveToken(address(settlement), WETH, uint160(wethIn), 0);
         // Withdraw module pulls aWETH via Permit3 — user infinite-approves aToken,
         // caps the per-module allowance at the order size.
-        IERC20(aWETH).approve(address(permit3), type(uint256).max);
-        permit3.approveToken(address(withdrawModule), aWETH, uint160(wethIn), 0);
+        IERC20(aWETH).approve(address(withdrawModule), type(uint256).max);
         // Taker-allowance gate on the exact position.
         permit3.approveTaker(address(settlement), address(withdrawModule), ref, uint160(wethIn), 0);
         vm.stopPrank();
@@ -187,8 +186,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         permit3.approveToken(address(settlement), USDC, uint160(bufferedRepay), 0);
 
         // [1] Aave withdraw leg: withdrawModule pulls aWETH via Permit3.
-        IERC20(aWETH).approve(address(permit3), type(uint256).max);
-        permit3.approveToken(address(withdrawModule), aWETH, uint160(exactWeth), 0);
+        IERC20(aWETH).approve(address(withdrawModule), type(uint256).max);
         bytes memory aaveWithdrawData = abi.encode(AAVE_POOL, WETH, aWETH);
         permit3.approveTaker(address(settlement), address(withdrawModule), keccak256(aaveWithdrawData), uint160(exactWeth), 0);
 

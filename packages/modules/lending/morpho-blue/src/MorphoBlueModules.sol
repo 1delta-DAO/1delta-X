@@ -360,16 +360,14 @@ contract MorphoBlueTakerModule is ITakerModule {
     function _withdrawFull(MarketParams memory marketParams, address onBehalfOf, uint256 amount, address receiver)
         private
     {
-        address collateralToken = marketParams.collateralToken;
+        // EXACT amounts straight to their destinations: the signed `amount` to
+        // `receiver`, the remainder back to `onBehalfOf`. The venue pays each
+        // recipient directly, so the module never takes custody — no delta
+        // measurement, no split transfers, and a stray module balance can never be
+        // part of the payout. A position below `amount` reverts in the venue.
         uint256 bal = morpho.position(marketParams.id(), onBehalfOf).collateral;
-        uint256 before = IERC20(collateralToken).balanceOf(address(this));
-        morpho.withdrawCollateral(marketParams, bal, onBehalfOf, address(this));
-        uint256 received = IERC20(collateralToken).balanceOf(address(this)) - before;
-        require(received >= amount, "insufficient withdrawn");
-        SafeTransferLib.safeTransfer(collateralToken, receiver, amount);
-        if (received > amount) {
-            SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
-        }
+        morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
+        if (bal > amount) morpho.withdrawCollateral(marketParams, bal - amount, onBehalfOf, onBehalfOf);
     }
 
     /// @dev Full mode for the loan leg: redeem the user's ENTIRE supply by
@@ -380,15 +378,12 @@ contract MorphoBlueTakerModule is ITakerModule {
     function _withdrawLoanFull(MarketParams memory marketParams, address onBehalfOf, uint256 amount, address receiver)
         private
     {
-        address loanToken = marketParams.loanToken;
-        uint256 shares = morpho.position(marketParams.id(), onBehalfOf).supplyShares;
-        uint256 before = IERC20(loanToken).balanceOf(address(this));
-        morpho.withdraw(marketParams, 0, shares, onBehalfOf, address(this));
-        uint256 received = IERC20(loanToken).balanceOf(address(this)) - before;
-        require(received >= amount, "insufficient withdrawn");
-        SafeTransferLib.safeTransfer(loanToken, receiver, amount);
-        if (received > amount) {
-            SafeTransferLib.safeTransfer(loanToken, onBehalfOf, received - amount);
-        }
+        // The signed `amount` by ASSETS to `receiver`, then everything still left by
+        // SHARES to the maker — shares are the exact remainder even as interest
+        // accrues during the first call, so the position ends fully unwound with no
+        // custody and no delta measurement. A supply below `amount` reverts.
+        morpho.withdraw(marketParams, amount, 0, onBehalfOf, receiver);
+        uint256 left = morpho.position(marketParams.id(), onBehalfOf).supplyShares;
+        if (left > 0) morpho.withdraw(marketParams, 0, left, onBehalfOf, onBehalfOf);
     }
 }

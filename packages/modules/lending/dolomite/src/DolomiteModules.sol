@@ -298,8 +298,14 @@ contract DolomiteRepayModule is DolomiteBase, IMakerModule {
 //     data = abi.encode(uint8(0), dolomite, marketId, token, accountNumber)
 //
 //   op = 1 (Withdraw):
-//     data = abi.encode(uint8(1), dolomite, marketId, token, accountNumber[, BalanceMode])
+//     data = abi.encode(uint8(1), dolomite, marketId, token, accountNumber[, BalanceMode[, total]])
 //       — BalanceMode slot at offset 160. `Full` ⇒ custody+sweep branch.
+//       — total@192, and MANDATORY whenever the mode is `Full`: the maker-signed
+//         full item amount, which {FullFillGuard.requireFullFillFromData} compares
+//         the slice against. It FAILS CLOSED when the word is absent, so a `Full`
+//         order encoded from a map that omits it is one no filler can ever settle.
+//         (Undeclared here until now — the same drift F25/A-2 corrected on
+//         {AaveV3WithdrawModule}.)
 //
 contract DolomiteTakerModule is DolomiteBase, ITakerModule {
     enum Op {
@@ -333,8 +339,12 @@ contract DolomiteTakerModule is DolomiteBase, ITakerModule {
             _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, bal, address(this)));
             uint256 received = IERC20(token).balanceOf(address(this)) - snapshot;
 
-            require(received >= amount, "insufficient withdrawn");
-            SafeTransferLib.safeTransfer(token, receiver, amount);
+            // Deliver the measured proceeds, capped at the signed amount; any excess
+            // goes to the maker below. Never exceeds `received`, so a short delivery
+            // (a fake/under-delivering venue) can never be topped up from a stray
+            // balance the module holds — it simply delivers less and the fill's
+            // output check fails downstream. Replaces a `received >= amount` gate.
+            SafeTransferLib.safeTransfer(token, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(token, onBehalfOf, received - amount);
         } else if (op == uint8(Op.Borrow) || op == uint8(Op.Withdraw)) {
             // Borrow == exact withdraw: a single negative delta sent to `receiver`.
@@ -413,7 +423,7 @@ contract DolomiteOperateModule is DolomiteBase, ITakerModule {
             uint256 debt = _debtOf(p.dolomite, onBehalfOf, p.accountNumber, p.borrowMarketId);
             uint256 toRepay = p.sideAmount < debt ? p.sideAmount : debt;
             if (toRepay > 0) {
-                permit3.transferFrom(onBehalfOf, address(this), p.borrowToken, uint160(toRepay));
+                permit3.transferFrom(onBehalfOf, address(this), p.borrowToken, Narrow160.to160(toRepay));
                 SafeTransferLib.forceApprove(p.borrowToken, p.dolomite, toRepay);
                 fundedToken = p.borrowToken;
             }

@@ -213,7 +213,13 @@ contract EulerV2RepayModule is IMakerModule {
 //   op = 0 (Borrow):
 //     data = abi.encode(uint8(0), vault)
 //   op = 1 (Withdraw):
-//     data = abi.encode(uint8(1), vault[, BalanceMode]) — BalanceMode@64
+//     data = abi.encode(uint8(1), vault[, BalanceMode[, total]]) — BalanceMode@64
+//       — total@96, and MANDATORY whenever the mode is `Full`: the maker-signed
+//         full item amount, which {FullFillGuard.requireFullFillFromData} compares
+//         the slice against. It FAILS CLOSED when the word is absent, so a `Full`
+//         order encoded from a map that omits it is one no filler can ever settle.
+//         (Undeclared here until now — the same drift F25/A-2 corrected on
+//         {AaveV3WithdrawModule}.)
 //
 contract EulerV2TakerModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -257,21 +263,22 @@ contract EulerV2TakerModule is ITakerModule {
         }
     }
 
-    /// @dev Full mode: withdraw the user's entire withdrawable balance to this
-    ///      module, forward the signed `amount` to `receiver`, and sweep the
-    ///      excess back to the user. Measures what actually landed (the vault may
-    ///      credit less than the pre-call `maxWithdraw` estimate) and requires it
-    ///      to cover the order. Its own frame keeps the stack shallow.
+    /// @dev Full mode: EXACT amounts straight to their destinations — the signed
+    ///      `amount` to `receiver`, the remainder back to `onBehalfOf`. The vault's
+    ///      ERC4626 `withdraw` takes a receiver (the Exact branch above uses it the
+    ///      same way), so the module never takes custody: no delta measurement, no
+    ///      split transfers, and a stray module balance can never be part of the
+    ///      payout. A position below `amount` reverts in the vault. Its own frame
+    ///      keeps the stack shallow.
     function _withdrawFull(address vault, address onBehalfOf, uint256 amount, address receiver) private {
-        address asset = IEulerVault(vault).asset();
+        address evc = IEulerVault(vault).EVC();
         uint256 bal = IEulerVault(vault).maxWithdraw(onBehalfOf);
-        uint256 balBefore = IERC20(asset).balanceOf(address(this));
-        IEVC(IEulerVault(vault).EVC())
-            .call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), onBehalfOf)));
-        uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
-        require(received >= amount, "insufficient withdrawn");
-        SafeTransferLib.safeTransfer(asset, receiver, amount);
-        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
+        IEVC(evc).call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf)));
+        if (bal > amount) {
+            IEVC(evc).call(
+                vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal - amount, onBehalfOf, onBehalfOf))
+            );
+        }
     }
 }
 
@@ -378,7 +385,7 @@ contract EulerV2BatchModule is ITakerModule {
         uint256 toRepay = p.sideAmount < debt ? p.sideAmount : debt;
 
         if (toRepay > 0) {
-            permit3.transferFrom(user, address(this), borrowAsset, uint160(toRepay));
+            permit3.transferFrom(user, address(this), borrowAsset, Narrow160.to160(toRepay));
             SafeTransferLib.forceApprove(borrowAsset, p.borrowVault, toRepay);
         }
 
@@ -433,6 +440,13 @@ contract EulerV2BatchModule is ITakerModule {
 contract EulerV2TakeForModule is ITakerForModule, IFundingSource, IProceedsAsset {
     IPermit3 public immutable permit3;
 
+    /// @dev The ONLY spender allowed to reach this module. `Permit3.takeFor` is a
+    ///      PERMISSIONLESS entrypoint and `approveTaker` lets a caller name ITSELF
+    ///      spender, so `msg.sender == permit3` authorises nothing on its own
+    ///      (F27/C-1). Every sibling `takeForOnBehalf` in the tree pins this
+    ///      unconditionally; this one did not.
+    address public immutable settlement;
+
     struct OpenData {
         uint256 forDesc; // word 0 — the funding descriptor
         uint256 forCap; //  word 1 — the balance form's mandatory cap
@@ -442,12 +456,13 @@ contract EulerV2TakeForModule is ITakerForModule, IFundingSource, IProceedsAsset
 
     error OnlyPermit3();
 
-    constructor(address _permit3) {
+    constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
+        settlement = _settlement;
     }
 
     function takeForOnBehalf(
-        address,
+        address spender,
         address onBehalfOf,
         uint256 amount,
         uint256 forAmount,
@@ -455,8 +470,24 @@ contract EulerV2TakeForModule is ITakerForModule, IFundingSource, IProceedsAsset
         bytes calldata data
     ) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
+        // See {settlement}. The PULL shape does not strictly need this — the funding
+        // comes out of `onBehalfOf`'s own wallet under their own allowance, so a
+        // self-granting caller only robs themselves — but one unconditional check
+        // beats a premise that has to keep holding across future edits, which is the
+        // rule {AaveV3LeverageModule} states and all four siblings follow.
+        PreFundGuard.requireSettlement(spender, settlement);
 
         OpenData memory p = abi.decode(data, (OpenData));
+        // THIS MODULE IS PULL-ONLY, SO IT MUST REFUSE THE PUSH DESCRIPTOR.
+        // Bit 253 makes {Base._forSlice} require `legsOut[j].recipient == module` and
+        // deliver the funding leg HERE. This body then pull-funds anyway, charging the
+        // maker a SECOND copy and stranding the delivered one on a shared singleton
+        // with no sweep — verbatim the pairing the core's own note says bit 253 exists
+        // to prevent. The core cannot know a module's funding shape; the module is the
+        // only place that can refuse. Siblings that serve BOTH shapes branch here
+        // instead ({PreFundModuleBase._fundingShape}); this one serves one, so it
+        // rejects.
+        if (p.forDesc >> 253 == 5) revert PreFundGuard.PreFundDescriptorNotAllowed();
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](forAmount == 0 ? 1 : 2);
         uint256 k;
@@ -613,10 +644,8 @@ contract EulerV2PreFundTakeForModule is ITakerForModule, IFundingSource, IProcee
             // makes the deposit revert — fail closed.
             address collateralAsset = IEulerVault(p.collateralVault).asset();
             fundedAsset = collateralAsset;
-            // The delivery must have landed HERE, in THIS token (F27/C-1, B). The
-            // header's "an unfunded balance makes the venue call revert — fail
-            // closed" is true only at EXACTLY zero balance: with any residue on
-            // this shared singleton the call succeeds and spends it.
+            // The delivery must have landed HERE, in THIS token (F27/C-1, B).
+            // Underflows if it did not.
             PreFundGuard.requireDelivered(data, collateralAsset, forAmount);
             SafeTransferLib.forceApprove(collateralAsset, p.collateralVault, forAmount);
             items[k++] = IEVC.BatchItem({

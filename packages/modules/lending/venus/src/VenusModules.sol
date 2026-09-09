@@ -241,7 +241,6 @@ contract VenusTakerModule is ITakerModule {
 
     error OnlyPermit3();
     error VenusError(uint256 code);
-    error InsufficientWithdrawn();
     error BadOp(uint8 op);
 
     constructor(address _permit3) {
@@ -266,8 +265,10 @@ contract VenusTakerModule is ITakerModule {
             uint256 err = IVToken(vToken).borrowBehalf(onBehalfOf, amount);
             if (err != 0) revert VenusError(err);
             uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
-            if (received < amount) revert InsufficientWithdrawn();
-            underlying.safeTransfer(receiver, amount);
+            // Deliver the measured proceeds, capped at the signed amount; excess to the
+            // maker below. Never exceeds `received`, so an under-delivering vToken
+            // cannot be topped up from a stray module balance.
+            underlying.safeTransfer(receiver, received < amount ? received : amount);
             if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
         } else if (op == uint8(Op.Withdraw)) {
             // BalanceMode slot at byte 96 (op@0 + vToken@32 + underlying@64).
@@ -286,8 +287,10 @@ contract VenusTakerModule is ITakerModule {
                 uint256 err = IVToken(vToken).redeemBehalf(onBehalfOf, vBal);
                 if (err != 0) revert VenusError(err);
                 uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
-                if (received < amount) revert InsufficientWithdrawn();
-                underlying.safeTransfer(receiver, amount);
+                // Deliver the measured proceeds, capped at the signed amount; excess to the
+                // maker below. Never exceeds `received`, so an under-delivering vToken
+                // cannot be topped up from a stray module balance.
+                underlying.safeTransfer(receiver, received < amount ? received : amount);
                 if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
             } else {
                 // Same measured-delta discipline as the `Full` branch above. F26/2b.
@@ -295,8 +298,10 @@ contract VenusTakerModule is ITakerModule {
                 uint256 err = IVToken(vToken).redeemUnderlyingBehalf(onBehalfOf, amount);
                 if (err != 0) revert VenusError(err);
                 uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
-                if (received < amount) revert InsufficientWithdrawn();
-                underlying.safeTransfer(receiver, amount);
+                // Deliver the measured proceeds, capped at the signed amount; excess to the
+                // maker below. Never exceeds `received`, so an under-delivering vToken
+                // cannot be topped up from a stray module balance.
+                underlying.safeTransfer(receiver, received < amount ? received : amount);
                 if (received > amount) underlying.safeTransfer(onBehalfOf, received - amount);
             }
         } else {

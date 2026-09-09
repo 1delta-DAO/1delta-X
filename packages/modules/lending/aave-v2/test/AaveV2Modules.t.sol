@@ -237,10 +237,11 @@ contract AaveV2ModulesTest is Test {
     // ── Withdraw ──────────────────────────────────────────────────────────────
 
     function test_withdraw() public {
-        // Give user aTokens and approve module via permit3
+        // Give user aTokens and approve the MODULE directly (aToken pull is a plain
+        // ERC-20 transferFrom on the module's own allowance, not a Permit3 pull).
         aToken.mint(user, AMOUNT);
         vm.prank(user);
-        aToken.approve(address(permit3), type(uint256).max);
+        aToken.approve(address(withdrawModule), type(uint256).max);
 
         bytes memory data = abi.encode(address(pool), address(asset), address(aToken));
         vm.prank(address(permit3));

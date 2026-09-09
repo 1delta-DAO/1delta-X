@@ -13,6 +13,7 @@ import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DelegationHelper} from "@lib/DelegationHelper.sol";
 import {FundingPreflight} from "@lib/FundingPreflight.sol";
+import {Narrow160} from "@lib/Narrow160.sol";
 
 import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 
@@ -106,9 +107,16 @@ contract AaveV3LeverageModule is PreFundModuleBase, ITakerModule, ITakerForModul
         // funding leg.
         PreFundGuard.requireFundingDescriptor(data);
 
-        // Leg 1 in its own frame: these packages compile WITHOUT the optimizer in
-        // their fork profile, and the shape branch plus this decode overflows the
+        // Leg 1 in its own frame: the shape branch plus this decode overflows the
         // stack when inlined alongside the borrow leg.
+        //
+        // ⚠ The original rationale — "these packages compile WITHOUT the optimizer in
+        // their fork profile" — no longer holds: `modules-aave-v3-fork` was the ONLY
+        // profile setting `optimizer = false`, and that flag made the profile fail to
+        // compile outright (core outgrew the unoptimised stack in `Base._forSlice`),
+        // so its 56 fork tests were not running. The flag is gone. The split stays —
+        // it is free and keeps this function readable — but do not cite a profile
+        // setting that no longer exists as the reason for it.
         address pool = _supplyLeg(onBehalfOf, forAmount, data);
         {
             (,,, address borrowAsset, uint256 rateMode) =
@@ -124,8 +132,12 @@ contract AaveV3LeverageModule is PreFundModuleBase, ITakerModule, ITakerForModul
             uint256 balBefore = IERC20(borrowAsset).balanceOf(address(this));
             IAaveV3Pool(pool).borrow(borrowAsset, amount, rateMode, 0, onBehalfOf);
             uint256 received = IERC20(borrowAsset).balanceOf(address(this)) - balBefore;
-            require(received >= amount, "insufficient borrowed");
-            SafeTransferLib.safeTransfer(borrowAsset, receiver, amount);
+            // Deliver the measured proceeds, capped at the signed amount; any excess
+            // goes to the maker below. Never exceeds `received`, so a short delivery
+            // (a fake/under-delivering venue) can never be topped up from a stray
+            // balance the module holds — it simply delivers less and the fill's
+            // output check fails downstream. Replaces a `received >= amount` gate.
+            SafeTransferLib.safeTransfer(borrowAsset, receiver, received < amount ? received : amount);
             if (received > amount) {
                 SafeTransferLib.safeTransfer(borrowAsset, onBehalfOf, received - amount);
             }
@@ -141,11 +153,21 @@ contract AaveV3LeverageModule is PreFundModuleBase, ITakerModule, ITakerForModul
         // rounds up. Skip rather than revert: it accumulates exactly across fills,
         // the same posture {Base._runItem} takes on a zero slice.
         if (forAmount == 0) return pool;
-        if (_fundingShape(data)) {
+        uint256 floor;
+        bool preFund = _fundingShape(data);
+        if (preFund) {
             // PRE-FUND: the delivery must have landed HERE, in THIS token — the core
             // binds the leg's recipient (bit 253) but not its token (F27/H-1).
             // Underflows if it did not.
-            PreFundGuard.requireDelivered(data, collateralAsset, forAmount);
+            //
+            // ⚠ THE FLOOR IS KEPT, NOT DISCARDED. This half used the weaker
+            // `requireDelivered`, which proves the same thing and throws the number
+            // away; a venue consuming LESS than instructed then left the remainder
+            // resident on a SHARED SINGLETON. {AaveV3PreFundModule._supply} was
+            // migrated off exactly this shape and states the reason — residue on a
+            // pre-fund singleton is the precondition the unbound-token drain
+            // monetised. This is the last body in the package still on the old form.
+            floor = PreFundGuard.floorOf(data, collateralAsset, forAmount);
         } else {
             // PULL: the classic shape — the leg was delivered to the maker's wallet
             // and is drawn back through their Permit3 token allowance.
@@ -157,31 +179,69 @@ contract AaveV3LeverageModule is PreFundModuleBase, ITakerModule, ITakerForModul
         SafeTransferLib.forceApprove(collateralAsset, pool, forAmount);
         IAaveV3Pool(pool).supply(collateralAsset, forAmount, onBehalfOf, 0);
         SafeTransferLib.forceApprove(collateralAsset, pool, 0);
+        // PRE-FUND only: the pull shape drew exactly `forAmount` from the maker's
+        // wallet, so there is no pre-existing floor to sweep down to.
+        if (preFund) PreFundGuard.sweepSurplus(collateralAsset, onBehalfOf, floor);
+    }
+
+    /// @dev WHICH OF THIS CONTRACT'S TWO `data` LAYOUTS `data` IS IN, and the reason
+    ///      the views below cannot decode blindly. This is the one shipped module
+    ///      hosting BOTH taker seams, and their byte maps are not aligned:
+    ///
+    ///        TAKE_FOR   0=forDesc 1=forCap 2=pool   3=borrowAsset    4=rateMode 5=collateralAsset
+    ///        plain TAKE 0=pool    1=borrow 2=rate   3=collateralAsset 4=collTotal 5=borrowTotal
+    ///
+    ///      Field 3 is the borrow asset in one and the collateral asset in the other,
+    ///      and a plain-TAKE blob decodes CLEANLY against the TAKE_FOR map (`rateMode`
+    ///      is 1 or 2, a valid `address`), so a single decode does not revert — it
+    ///      returns the wrong token, silently, which is worse. {SettlementLens} runs
+    ///      `_proceedsItemAt` for `TAKE` as well as `TAKE_FOR`, so the §F22
+    ///      stranded-proceeds preflight was reading `collateralAsset` and answering
+    ///      about the wrong leg in both directions.
+    ///
+    ///      The discriminator is the one the ENTRYPOINTS already enforce, so the views
+    ///      and the dispatch cannot disagree: {takeOnBehalf} pins
+    ///      `PreFundGuard.requirePlainTake` (`word0 >> 253 == 0` — word 0 is a `pool`
+    ///      address) and {takeForOnBehalf} pins `requireFundingDescriptor` (bit 255
+    ///      set, i.e. `>> 253` in 4..7). The two spaces are disjoint by construction,
+    ///      which is the same property that keeps one `ref` from authorising both.
+    function _isRatioLayout(bytes calldata data) private pure returns (bool) {
+        return uint256(bytes32(data[0:32])) >> 253 == 0;
     }
 
     /// @inheritdoc IFundingSource
-    /// @dev `collateralAsset` is field 5 — the ONE place this module's funding asset
-    ///      is named, and the one the lens cross-checks against the leg the amount
-    ///      was sized by. `available` is shape-dependent: a wallet/allowance read
-    ///      would preview a PRE-FUND (self-funding) order as short.
+    /// @dev The COLLATERAL asset — field 5 on the `takeFor` map, field 3 on the ratio
+    ///      map. The ONE place this module's funding asset is named, and the one the
+    ///      lens cross-checks against the leg the amount was sized by. `available` is
+    ///      shape-dependent: a wallet/allowance read would preview a PRE-FUND
+    ///      (self-funding) order as short.
     function fundingSource(address onBehalfOf, bytes calldata data)
         external
         view
         override
         returns (address asset, uint256 available)
     {
-        (,,,,, asset) = abi.decode(data, (uint256, uint256, address, address, uint256, address));
+        if (_isRatioLayout(data)) {
+            (,,, asset) = abi.decode(data, (uint256, uint256, uint256, address));
+        } else {
+            (,,,,, asset) = abi.decode(data, (uint256, uint256, address, address, uint256, address));
+        }
         available = _fundingShape(data)
             ? type(uint256).max
             : FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
     }
 
     /// @inheritdoc IProceedsAsset
-    /// @dev The BORROW asset (field 3) — what lands on `receiver`. Its funding
-    ///      counterpart, the collateral, is field 5; the two must not be confused,
-    ///      which is precisely why both are declared rather than inferred.
+    /// @dev The BORROW asset — what lands on `receiver`. Field 3 on the `takeFor` map,
+    ///      field 1 on the ratio map. Its funding counterpart, the collateral, is the
+    ///      other of the two; they must not be confused, which is precisely why both
+    ///      are declared rather than inferred — and why {_isRatioLayout} exists.
     function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
-        (,,, asset) = abi.decode(data, (uint256, uint256, address, address));
+        if (_isRatioLayout(data)) {
+            (, asset) = abi.decode(data, (uint256, address));
+        } else {
+            (,,, asset) = abi.decode(data, (uint256, uint256, address, address));
+        }
     }
 
     // ──────────────── the RATIO-sized sibling, on the plain `take` seam ────────────────
@@ -217,7 +277,7 @@ contract AaveV3LeverageModule is PreFundModuleBase, ITakerModule, ITakerForModul
             // ── leg 1: supply the pro-rata collateral on the maker's behalf ──
             uint256 collateral = _ceilDiv(amount * collateralTotal, borrowTotal);
             if (collateral != 0) {
-                permit3.transferFrom(onBehalfOf, address(this), collateralAsset, uint160(collateral));
+                permit3.transferFrom(onBehalfOf, address(this), collateralAsset, Narrow160.to160(collateral));
                 // Scoped approve + CLEAR, not a standing grant. `pool` is decoded from the
                 // order's `data` on a SHARED singleton module, so it is attacker-choosable —
                 // anyone can author an order naming themselves as maker. A target that
@@ -237,17 +297,19 @@ contract AaveV3LeverageModule is PreFundModuleBase, ITakerModule, ITakerForModul
             // ── leg 2: draw the debt against it, in the same call ──
             // Optional delegation-with-sig, block at 192: (debtToken, deadline, v, r, s).
             DelegationHelper.replayAaveDelegation(data, 192, onBehalfOf, address(this), amount);
-            // Measure the delta rather than assuming the requested `amount` arrived:
-            // an under-delivering borrow (fee-on-transfer underlying, a capped or
-            // partially-filled reserve) would otherwise be topped up from any balance
-            // the module happens to hold and paid to the solver, while the user keeps
-            // the full debt — the H-3 River shape. Fail closed instead. Matches
-            // {AaveV4BorrowModule}, which already carried this guard.
+            // Measure the borrow's delta (`balBefore` excludes residue) and deliver
+            // that measured amount, capped at `amount`, below — never a nominal top-up
+            // from a stray balance; a short/fake-pool borrow delivers less and fails
+            // the output check downstream. (No FoT borrow reserves by policy.)
             uint256 balBefore = IERC20(borrowAsset).balanceOf(address(this));
             IAaveV3Pool(pool).borrow(borrowAsset, amount, rateMode, 0, onBehalfOf);
             uint256 received = IERC20(borrowAsset).balanceOf(address(this)) - balBefore;
-            require(received >= amount, "insufficient borrowed");
-            SafeTransferLib.safeTransfer(borrowAsset, receiver, amount);
+            // Deliver the measured proceeds, capped at the signed amount; any excess
+            // goes to the maker below. Never exceeds `received`, so a short delivery
+            // (a fake/under-delivering venue) can never be topped up from a stray
+            // balance the module holds — it simply delivers less and the fill's
+            // output check fails downstream. Replaces a `received >= amount` gate.
+            SafeTransferLib.safeTransfer(borrowAsset, receiver, received < amount ? received : amount);
             if (received > amount) {
                 SafeTransferLib.safeTransfer(borrowAsset, onBehalfOf, received - amount);
             }

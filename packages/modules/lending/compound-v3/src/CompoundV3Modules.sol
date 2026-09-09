@@ -272,13 +272,21 @@ contract CometTakerModule is ITakerModule {
                 // spending an external call.
                 FullFillGuard.requireFullFillFromData(data, 128, amount);
                 DelegationHelper.replayCometAllow(data, 160, comet, onBehalfOf, address(this));
-                uint256 bal = IComet(comet).collateralBalanceOf(onBehalfOf, asset);
-                uint256 beforeBal = IERC20(asset).balanceOf(address(this));
-                IComet(comet).withdrawFrom(onBehalfOf, address(this), asset, bal);
-                uint256 received = IERC20(asset).balanceOf(address(this)) - beforeBal;
-                require(received >= amount, "insufficient withdrawn");
-                SafeTransferLib.safeTransfer(asset, receiver, amount);
-                if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
+                // ⚠ COMET KEEPS THE BASE ASSET IN A DIFFERENT BOOK. `collateralBalanceOf`
+                // covers every NON-base asset and returns 0 for the base token, so
+                // reading it unconditionally made a `Full` withdraw of a base SUPPLY
+                // resolve to `bal = 0` — an order that could never fill. Read
+                // `baseToken()` on-chain rather than taking an `isBase` flag in `data`:
+                // it needs no byte-map change and cannot be mis-encoded by the maker.
+                uint256 bal = asset == IComet(comet).baseToken()
+                    ? IComet(comet).balanceOf(onBehalfOf)
+                    : IComet(comet).collateralBalanceOf(onBehalfOf, asset);
+                // Withdraw EXACT amounts straight to their destinations. Comet
+                // withdraws from the USER's position directly, so the module never
+                // takes custody: no delta measurement, no split transfers, and no
+                // stray module balance can ever be part of the payout.
+                IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
+                if (bal > amount) IComet(comet).withdrawFrom(onBehalfOf, onBehalfOf, asset, bal - amount);
             } else {
                 DelegationHelper.replayCometAllow(data, 128, comet, onBehalfOf, address(this));
                 IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);

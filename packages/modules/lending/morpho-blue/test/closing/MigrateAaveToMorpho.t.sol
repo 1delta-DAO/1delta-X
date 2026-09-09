@@ -49,9 +49,10 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         vm.label(address(aaveRepayModule), "aaveV3RepayModule");
         vm.label(address(aaveWithdrawModule), "aaveV3WithdrawModule");
 
-        // Withdraw module pulls aWstETH from the maker via Permit3 — bare-approve it.
+        // Withdraw module pulls aWstETH from the maker with a DIRECT ERC-20
+        // transferFrom on its own allowance (not Permit3) — approve the module.
         vm.prank(maker);
-        IERC20(aWstETH).approve(address(permit3), type(uint256).max);
+        IERC20(aWstETH).approve(address(aaveWithdrawModule), type(uint256).max);
     }
 
     // ──────────────────── Position seeding ────────────────────
@@ -166,8 +167,8 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         permit3.approveToken(address(aaveRepayModule), USDC, uint160(bufferedRepay), 0);
         permit3.approveToken(address(settlement), USDC, uint160(bufferedRepay), 0);
 
-        // [1] Aave withdraw: withdrawModule pulls aWstETH via Permit3 + taker cap.
-        permit3.approveToken(address(aaveWithdrawModule), aWstETH, uint160(exactWeth), 0);
+        // [1] Aave withdraw: aWstETH is a direct ERC-20 approval to the module
+        //     (granted in setUp); Permit3 only carries the taker cap here.
         permit3.approveTaker(address(settlement), address(aaveWithdrawModule), keccak256(_aaveWithdrawData()), uint160(exactWeth), 0);
 
         // [2] Morpho supply: supplyModule pulls wstETH from maker via Permit3.
@@ -202,13 +203,13 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         order = _buildMigrationOrder(bufferedRepay, exactWeth, debt);
         uint48 exp = uint48(_expiry(order));
 
-        // Four token permits — the Aave withdraw needs an aWstETH pull; the Morpho
-        // borrow needs none (collateral isn't tokenised, debt isn't pulled).
-        IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](4);
+        // Three token permits. The Aave withdraw's aWstETH grant is NOT here — it is
+        // a direct ERC-20 approval to the withdraw module (the aToken pull no longer
+        // goes through Permit3's token book); the maker sets it once in setUp.
+        IPermit3.TokenPermit[] memory tp = new IPermit3.TokenPermit[](3);
         tp[0] = IPermit3.TokenPermit(address(aaveRepayModule), USDC, uint160(bufferedRepay), exp);
-        tp[1] = IPermit3.TokenPermit(address(aaveWithdrawModule), aWstETH, uint160(exactWeth), exp);
-        tp[2] = IPermit3.TokenPermit(address(supplyModule), WSTETH, uint160(exactWeth), exp);
-        tp[3] = IPermit3.TokenPermit(address(settlement), USDC, uint160(bufferedRepay), exp);
+        tp[1] = IPermit3.TokenPermit(address(supplyModule), WSTETH, uint160(exactWeth), exp);
+        tp[2] = IPermit3.TokenPermit(address(settlement), USDC, uint160(bufferedRepay), exp);
 
         IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](2);
         tkp[0] = IPermit3.TakerPermit(address(settlement), address(aaveWithdrawModule), keccak256(_aaveWithdrawData()), uint160(exactWeth), exp);

@@ -341,8 +341,12 @@ contract LiquityV2TakerModule is ITakerModule {
             ILiquityV2BorrowerOperations(borrowerOps).withdrawColl(troveId, amount);
         }
         uint256 received = IERC20(token).balanceOf(address(this)) - before;
-        require(received >= amount, "proceeds not received");
-        SafeTransferLib.safeTransfer(token, receiver, amount);
+        // Deliver the measured proceeds, capped at the signed amount; any excess
+        // goes to the maker below. Never exceeds `received`, so a short delivery
+        // (a fake/under-delivering venue) can never be topped up from a stray
+        // balance the module holds — it simply delivers less and the fill's
+        // output check fails downstream. Replaces a `received >= amount` gate.
+        SafeTransferLib.safeTransfer(token, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(token, onBehalfOf, received - amount);
     }
 }

@@ -287,13 +287,13 @@ contract ListaTakerModule is ITakerModule {
         uint256 amount,
         address receiver
     ) private {
-        address collateralToken = mp.collateralToken;
+        // EXACT amounts straight to their destinations: the signed `amount` to
+        // `receiver`, the remainder back to `onBehalfOf`. The venue pays each
+        // recipient directly, so the module never takes custody — no delta
+        // measurement, no split transfers, and a stray module balance can never be
+        // part of the payout. A position below `amount` reverts in the venue.
         uint256 bal = IMoolah(moolah).position(mp.id(), onBehalfOf).collateral;
-        uint256 before = IERC20(collateralToken).balanceOf(address(this));
-        IMoolah(venue).withdrawCollateral(mp, bal, onBehalfOf, address(this));
-        uint256 received = IERC20(collateralToken).balanceOf(address(this)) - before;
-        require(received >= amount, "insufficient withdrawn");
-        SafeTransferLib.safeTransfer(collateralToken, receiver, amount);
-        if (received > amount) SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
+        IMoolah(venue).withdrawCollateral(mp, amount, onBehalfOf, receiver);
+        if (bal > amount) IMoolah(venue).withdrawCollateral(mp, bal - amount, onBehalfOf, onBehalfOf);
     }
 }

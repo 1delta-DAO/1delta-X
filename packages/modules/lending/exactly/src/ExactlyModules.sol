@@ -317,18 +317,18 @@ contract ExactlyTakerModule is ITakerModule {
         return ProratedBound.scale(bound, amount, uint256(bytes32(data[160:192])));
     }
 
-    /// @dev Full mode (floating): withdraw the user's entire position to this
-    ///      module, forward the signed `amount` to `receiver`, sweep the excess
-    ///      back to the user — always to `onBehalfOf`, never a caller.
-    function _withdrawFull(address market, address asset, address onBehalfOf, uint256 amount, address receiver)
+    /// @dev Full mode (floating): unwind the user's entire position with
+    ///      EXACT amounts sent straight to their destinations — the signed `amount`
+    ///      to `receiver`, the remainder back to `onBehalfOf`. ERC-4626 `withdraw`
+    ///      burns the OWNER's shares and pays `receiver` directly, so the module
+    ///      never takes custody: no delta measurement, no split transfers, and a
+    ///      stray module balance can never become part of the payout. A position
+    ///      smaller than `amount` reverts in the vault — fail closed, no gate.
+    function _withdrawFull(address market, address, address onBehalfOf, uint256 amount, address receiver)
         private
     {
         uint256 max = IExactlyMarket(market).maxWithdraw(onBehalfOf);
-        uint256 before = IERC20(asset).balanceOf(address(this));
-        IExactlyMarket(market).withdraw(max, address(this), onBehalfOf);
-        uint256 received = IERC20(asset).balanceOf(address(this)) - before;
-        require(received >= amount, "insufficient withdrawn");
-        SafeTransferLib.safeTransfer(asset, receiver, amount);
-        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
+        IExactlyMarket(market).withdraw(amount, receiver, onBehalfOf);
+        if (max > amount) IExactlyMarket(market).withdraw(max - amount, onBehalfOf, onBehalfOf);
     }
 }

@@ -238,13 +238,15 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
             uint256 err = ICEther(cEther).redeem(cBal);
             if (err != 0) revert CompoundV2Error(err);
             uint256 received = address(this).balance - beforeEth;
-            require(received >= amount, "insufficient withdrawn");
             // Wrap only what this call produced. Wrapping the ENTIRE balance was
             // argued as "a donor's ETH is a gift to the maker, not a loss" — but the
             // maker is whoever authored the order, so it was a gift to the fastest
             // caller. See {_sweepNativeAsWeth} for the full correction. F26/2a.
             weth.deposit{value: address(this).balance - ethFloor}();
-            SafeTransferLib.safeTransfer(address(weth), receiver, amount);
+            // Deliver the measured (wrapped) proceeds, capped at the signed amount;
+            // the surplus is swept to the maker by _sweepWeth. Never exceeds what
+            // this call produced, so a stray WETH balance is never paid out.
+            SafeTransferLib.safeTransfer(address(weth), receiver, received < amount ? received : amount);
             _sweepWeth(onBehalfOf, wethFloor);
         } else {
             // Pull the ceiling cEther needed for `amount` ETH, redeem exactly `amount`,

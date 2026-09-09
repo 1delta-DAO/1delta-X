@@ -343,7 +343,12 @@ src       = "packages/modules/lending/aave-v3/src"
 test      = "packages/modules/lending/aave-v3/test"
 script    = "packages/modules/lending/aave-v3/script"
 out       = "out/modules-aave-v3"
-optimizer = false
+# ⚠ `optimizer = false` REMOVED — it made this profile fail to COMPILE, so the 56
+# fork tests the Makefile calls "everything that exercises the module against a
+# real lender" were not running at all. Core outgrew the unoptimised stack:
+# `Base._forSlice` hits "Stack too deep" at the `ctx.outsUsed` reuse check. Every
+# other `-fork` profile already inherits `optimizer = true` from [default]; this
+# was the only one overriding it. Verified pre-existing on a clean tree at fb14b7c.
 
 [profile.modules-aave-v4]
 src    = "packages/modules/lending/aave-v4/src"

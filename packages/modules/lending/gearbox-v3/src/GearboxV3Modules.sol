@@ -171,13 +171,14 @@ contract GearboxPoolWithdrawModule is ITakerModule {
             // pro-rated — a sliced fill would unwind the whole position and brick
             // the rest of the order. Require the slice to be the whole item.
             FullFillGuard.requireFullFillFromData(data, 96, amount);
+            // EXACT amounts straight to their destinations: the signed `amount` to
+            // `receiver`, the remainder back to `onBehalfOf`. ERC-4626 `withdraw`
+            // burns the OWNER's shares and pays `receiver` directly, so the module
+            // never takes custody — no delta measurement, no split transfers, and a
+            // stray module balance can never be part of the payout.
             uint256 max = IGearboxPoolV3(pool).maxWithdraw(onBehalfOf);
-            uint256 before = IERC20(asset).balanceOf(address(this));
-            IGearboxPoolV3(pool).withdraw(max, address(this), onBehalfOf);
-            uint256 received = IERC20(asset).balanceOf(address(this)) - before;
-            require(received >= amount, "insufficient withdrawn");
-            SafeTransferLib.safeTransfer(asset, receiver, amount);
-            if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
+            IGearboxPoolV3(pool).withdraw(amount, receiver, onBehalfOf);
+            if (max > amount) IGearboxPoolV3(pool).withdraw(max - amount, onBehalfOf, onBehalfOf);
         } else {
             IGearboxPoolV3(pool).withdraw(amount, receiver, onBehalfOf);
         }

@@ -262,8 +262,12 @@ contract CompoundV2WithdrawModule is ITakerModule {
             uint256 err = ICErc20(cToken).redeem(cBal);
             if (err != 0) revert CompoundV2Error(err);
             uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
-            require(received >= amount, "insufficient withdrawn");
-            SafeTransferLib.safeTransfer(underlying, receiver, amount);
+            // Deliver the measured proceeds, capped at the signed amount; any excess
+            // goes to the maker below. Never exceeds `received`, so a short delivery
+            // (a fake/under-delivering venue) can never be topped up from a stray
+            // balance the module holds — it simply delivers less and the fill's
+            // output check fails downstream. Replaces a `received >= amount` gate.
+            SafeTransferLib.safeTransfer(underlying, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(underlying, onBehalfOf, received - amount);
         } else {
             // Pull the ceiling cTokens needed for `amount` underlying (rate accrued
@@ -286,8 +290,12 @@ contract CompoundV2WithdrawModule is ITakerModule {
             uint256 err = ICErc20(cToken).redeemUnderlying(amount);
             if (err != 0) revert CompoundV2Error(err);
             uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
-            require(received >= amount, "insufficient withdrawn");
-            SafeTransferLib.safeTransfer(underlying, receiver, amount);
+            // Deliver the measured proceeds, capped at the signed amount; any excess
+            // goes to the maker below. Never exceeds `received`, so a short delivery
+            // (a fake/under-delivering venue) can never be topped up from a stray
+            // balance the module holds — it simply delivers less and the fill's
+            // output check fails downstream. Replaces a `received >= amount` gate.
+            SafeTransferLib.safeTransfer(underlying, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(underlying, onBehalfOf, received - amount);
             uint256 cBalNow = IERC20(cToken).balanceOf(address(this));
             if (cBalNow > cFloor) SafeTransferLib.safeTransfer(cToken, onBehalfOf, cBalNow - cFloor);

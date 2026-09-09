@@ -115,8 +115,7 @@ contract WithdrawAndSwapTest is AaveModulesBase {
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), WETH, uint160(wethIn), 0);
         // Full-balance pull needs an uncapped aWETH token allowance to the module.
-        IERC20(aWETH).approve(address(permit3), type(uint256).max);
-        permit3.approveToken(address(withdrawModule), aWETH, type(uint160).max, 0);
+        IERC20(aWETH).approve(address(withdrawModule), type(uint256).max);
         // Taker gate still bounds the order slice that reaches the solver.
         permit3.approveTaker(address(settlement), address(withdrawModule), ref, uint160(wethIn), 0);
         vm.stopPrank();

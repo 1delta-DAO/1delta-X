@@ -305,7 +305,6 @@ contract MidnightTakerModule is ITakerModule {
     }
 
     error OnlyPermit3();
-    error InsufficientWithdrawn();
     error BadOp(uint8 op);
 
     constructor(address _permit3, address _midnight) {
@@ -346,14 +345,16 @@ contract MidnightTakerModule is ITakerModule {
             midnight.withdrawCollateral(market, collateralIndex, amount, onBehalfOf, receiver);
             return;
         }
-        address collateralToken = market.collateralParams[collateralIndex].token;
+        // EXACT amounts straight to their destinations: the signed `amount` to
+        // `receiver`, the remainder back to `onBehalfOf`. The venue pays each
+        // recipient directly, so the module never takes custody — no delta
+        // measurement, no split transfers, and a stray module balance can never be
+        // part of the payout. A position below `amount` reverts in the venue.
         uint256 bal = midnight.collateral(MidnightIdLib.toId(market), onBehalfOf, collateralIndex);
-        uint256 before = IERC20(collateralToken).balanceOf(address(this));
-        midnight.withdrawCollateral(market, collateralIndex, bal, onBehalfOf, address(this));
-        uint256 received = IERC20(collateralToken).balanceOf(address(this)) - before;
-        if (received < amount) revert InsufficientWithdrawn();
-        SafeTransferLib.safeTransfer(collateralToken, receiver, amount);
-        if (received > amount) SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
+        midnight.withdrawCollateral(market, collateralIndex, amount, onBehalfOf, receiver);
+        if (bal > amount) {
+            midnight.withdrawCollateral(market, collateralIndex, bal - amount, onBehalfOf, onBehalfOf);
+        }
     }
 
     function _withdraw(Market memory market, address onBehalfOf, uint256 amount, address receiver, uint8 balanceMode)
@@ -363,14 +364,14 @@ contract MidnightTakerModule is ITakerModule {
             midnight.withdraw(market, amount, onBehalfOf, receiver);
             return;
         }
-        address loanToken = market.loanToken;
+        // EXACT amounts straight to their destinations: the signed `amount` to
+        // `receiver`, the remainder back to `onBehalfOf`. The venue pays each
+        // recipient directly, so the module never takes custody — no delta
+        // measurement, no split transfers, and a stray module balance can never be
+        // part of the payout. A position below `amount` reverts in the venue.
         uint256 bal = midnight.credit(MidnightIdLib.toId(market), onBehalfOf);
-        uint256 before = IERC20(loanToken).balanceOf(address(this));
-        midnight.withdraw(market, bal, onBehalfOf, address(this));
-        uint256 received = IERC20(loanToken).balanceOf(address(this)) - before;
-        if (received < amount) revert InsufficientWithdrawn();
-        SafeTransferLib.safeTransfer(loanToken, receiver, amount);
-        if (received > amount) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, received - amount);
+        midnight.withdraw(market, amount, onBehalfOf, receiver);
+        if (bal > amount) midnight.withdraw(market, bal - amount, onBehalfOf, onBehalfOf);
     }
 }
 
@@ -394,7 +395,6 @@ contract MidnightBorrowModule is ITakerModule {
     IMidnight public immutable midnight;
 
     error OnlyPermit3();
-    error InsufficientProceeds();
     error WrongOfferSide();
 
     constructor(address _permit3, address _midnight) {
@@ -429,8 +429,10 @@ contract MidnightBorrowModule is ITakerModule {
         midnight.take(offer, ratifierData, units, onBehalfOf, address(this), address(0), "");
         uint256 received = IERC20(loanToken).balanceOf(address(this)) - before;
 
-        if (received < amount) revert InsufficientProceeds();
-        SafeTransferLib.safeTransfer(loanToken, receiver, amount);
+        // Deliver the measured proceeds, capped at the signed amount; excess to the
+        // maker below. Never exceeds `received`, so an under-delivering venue
+        // cannot be topped up from a stray module balance.
+        SafeTransferLib.safeTransfer(loanToken, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, received - amount);
     }
 }

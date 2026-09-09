@@ -17,8 +17,7 @@ contract TakerModuleAuthTest is AaveModulesBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(AAVE_POOL, 1 ether);
         IAaveV3Pool(AAVE_POOL).supply(WETH, 1 ether, maker, 0);
-        IERC20(aWETH).approve(address(permit3), type(uint256).max);
-        permit3.approveToken(address(withdrawModule), aWETH, type(uint160).max, 0);
+        IERC20(aWETH).approve(address(withdrawModule), type(uint256).max);
         // (No taker approval — simulating a user who hasn't granted this specific op.)
         vm.stopPrank();
 

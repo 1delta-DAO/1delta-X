@@ -24,7 +24,7 @@ contract EulerTakeForOpenTest is EulerV2ModulesBase {
 
     function setUp() public override {
         super.setUp();
-        takeForModule = new EulerV2TakeForModule(address(permit3));
+        takeForModule = new EulerV2TakeForModule(address(permit3), address(settlement));
         vm.label(address(takeForModule), "eulerTakeForModule");
 
         vm.startPrank(maker);

@@ -230,9 +230,11 @@ contract AaveV3WithdrawModuleTest is Test {
     }
 
     function test_withdraw_withoutPermit_standingApproval() public {
-        // User pre-approves permit3 for aTokens at ERC-20 level.
+        // User pre-approves THE MODULE for aTokens at ERC-20 level — the aToken pull
+        // is a direct ERC-20 transferFrom on the module's own allowance, not a Permit3
+        // pull (the position-access grant lives on the aToken itself).
         vm.prank(user);
-        aToken.approve(address(permit3), type(uint256).max);
+        aToken.approve(address(module), type(uint256).max);
 
         bytes memory data = abi.encode(address(pool), address(asset), address(aToken));
 

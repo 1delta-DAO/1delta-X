@@ -90,6 +90,68 @@ PRE_FUNDED = re.compile(
     r"|balanceOf\s*\(\s*address\(this\)\s*\)\s*-\s*\w*[fF]or\w*"
 )
 
+# ── (5) a data-derived pull amount must be width-checked, not truncated ──────
+#
+# Permit3's token book is `uint160`. A module pulls with
+# `permit3.transferFrom(user, to, token, uint160(X))`. When `X` is the core-sized
+# slice (`amount`) or the core-sized funding leg (`forAmount`), it is already
+# proven `<= type(uint160).max` by {Base._runItem}, so the cast is a no-op and safe.
+#
+# When `X` is DERIVED FROM ORDER DATA — a ratio (`ceil(amount*collateralTotal/
+# borrowTotal)`), a repay clamp against a signed `sideAmount`, anything the maker
+# put in the blob — it can exceed `2^160`, and then `uint160(X)` SILENTLY WRAPS.
+# The paired `forceApprove(token, venue, X)` uses the FULL `uint256`, so the module
+# pulls `X mod 2^160` (e.g. 1 wei) while approving `X` (e.g. ~1.46e48) to an
+# order-decoded, attacker-choosable venue — the F-2 drain. The fix is
+# `Narrow160.to160(X)`, which REVERTS on overflow instead of wrapping.
+#
+# So: every `uint160(...)` feeding a `transferFrom` amount must be either `amount`,
+# `forAmount`, or justified HERE as bounded. `Narrow160.to160(...)` is not matched —
+# it is the safe form. Add a row when you add a data-derived pull, with the reason
+# it cannot exceed `2^160` (or route it through Narrow160 and add nothing).
+PULL_NARROW = re.compile(r"transferFrom\s*\([^;]*?\buint160\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\)\s*\)")
+NARROW_SAFE_EXPR = {"amount", "forAmount"}  # core-sized, proven <= 2^160 by Base._runItem
+NARROW_EXEMPT = {
+    # `toPull = recycle ? amount : min(amount, debt)` — both arms <= `amount`, the
+    # core slice, so <= 2^160. The recycle/repay modules across every venue.
+    ("SiloRepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("VenusRepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("ExactlyRepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("EulerV2RepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("AaveV2RepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("AaveV3RepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("AaveV4RepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("CompoundV2RepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("CometRepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("DolomiteRepayModule", "toPull"): "toPull <= amount (core slice)",
+    # `toRepay = min(amount, debt)` — the amount-bounded clamp (SAFE), as opposed to
+    # the `min(sideAmount, debt)` form that WAS the F-2 bug and now uses Narrow160.
+    ("RiverRepayModule", "toRepay"): "toRepay = min(amount, debt) <= amount",
+    ("MidnightRepayModule", "toRepay"): "toRepay = min(amount, debt) <= amount",
+    ("LiquityV2RepayModule", "toRepay"): "toRepay = min(amount, entireDebt) <= amount",
+    ("CompoundV2NativeRepayModule", "toRepay"): "toRepay = min(amount, debt) <= amount",
+    # Full-mode cToken/aToken balance pulls: an under-pull redeems LESS and reverts at
+    # `require(received >= amount)`, and there is no paired approve to widen — so a
+    # truncating cast fails closed, it does not drain.
+    ("CompoundV2WithdrawModule", "cBal"): "Full-mode balance; under-pull fails closed at require(received>=amount), no paired approve",
+    ("CompoundV2NativeWithdrawModule", "cBal"): "Full-mode balance; under-pull fails closed at require(received>=amount), no paired approve",
+    # Exact-mode ceiling cAmount: an under-pull makes `redeemUnderlying(amount)`
+    # revert on insufficient cTokens; no paired approve.
+    ("CompoundV2WithdrawModule", "cAmount"): "Exact-mode ceiling; under-pull reverts redeemUnderlying(amount), no paired approve",
+    ("CompoundV2NativeWithdrawModule", "cAmount"): "Exact-mode ceiling; under-pull reverts redeemUnderlying(amount), no paired approve",
+    # `fromMaker = amount - fromSelf`, fromSelf <= amount, so fromMaker <= amount.
+    ("RiverBorrowModule", "fromMaker"): "fromMaker = amount - fromSelf <= amount",
+    # explicit `if (pull > type(uint160).max) revert AmountOverflow()` precedes the
+    # cast — the Narrow160 semantics, inlined.
+    ("ProportionalSweepModule", "pull"): "guarded by an inline `> type(uint160).max` revert",
+    # `bal` is the user's aToken balance; truncation UNDER-pulls and fails closed at
+    # `require(received >= amount)`, and there is no paired approve to widen.
+    # Morpho repay callback: `assets` is Morpho's own repay accounting, `morpho` is
+    # an IMMUTABLE (not order-decoded), so the paired approve cannot reach a hostile
+    # venue and there is nothing to amplify.
+    ("MorphoBlueRepayModule", "assets"): "morpho is immutable, not order-decoded; assets is Morpho's accounting",
+}
+
 # ── (4) the MAKE data space must stay disjoint ───────────────────────────────
 #
 # {Base._runItem} decides whether a MAKE item is pre-funded by reading word 0 of
@@ -185,6 +247,7 @@ def main() -> int:
     unpinned_make = []
     unpinned_prefund = []
     word0 = []
+    narrow = []
     scanned = 0
     makes = 0
     dual = 0
@@ -209,6 +272,15 @@ def main() -> int:
         ):
             continue
         for name, inherits, body in contract_spans(src):
+            # ── (5) every data-derived pull is width-checked, not truncated ──
+            for m in PULL_NARROW.finditer(body):
+                expr = m.group(1)
+                if expr in NARROW_SAFE_EXPR:
+                    continue
+                if (name, expr) in NARROW_EXEMPT:
+                    continue
+                narrow.append((path.relative_to(ROOT), name, expr))
+
             # ── (2) every `makeOnBehalf` pins its dispatcher ──
             #
             # A maker module acts on a position under the maker's signature alone.
@@ -290,6 +362,20 @@ def main() -> int:
             "on TAKE_FOR it is `_gatePreFund` / requireSettlement(spender, ...), because\n"
             "`Permit3.takeFor` is permissionless and `approveTaker` lets a caller name\n"
             "itself spender (F27/C-1).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if narrow:
+        print(f"{len(narrow)} data-derived pull(s) truncate to uint160 instead of Narrow160:\n", file=sys.stderr)
+        for rel, name, expr in narrow:
+            print(f"  {rel}: contract {name}\n      `permit3.transferFrom(..., uint160({expr}))`", file=sys.stderr)
+        print(
+            "\nPermit3's book is uint160. `uint160(X)` on a DATA-DERIVED amount wraps silently\n"
+            "when X exceeds 2^160, so the module pulls `X mod 2^160` while a paired\n"
+            "`forceApprove(token, venue, X)` approves the full X to an order-decoded venue —\n"
+            "the F-2 drain. Use `Narrow160.to160(X)` (reverts on overflow), or add\n"
+            "(contract, expr) to NARROW_EXEMPT with the reason X cannot exceed 2^160.",
             file=sys.stderr,
         )
         return 1

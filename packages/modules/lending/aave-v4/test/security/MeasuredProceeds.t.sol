@@ -63,8 +63,13 @@ contract DivergentPositionManager {
 ///  full debt or loses collateral they never received credit for.
 ///
 ///  This is the same shape as the H-3 River finding and the M-4 measured-delta
-///  rule already applied elsewhere; the `Full` branch of this very module already
-///  measured. Both legs now measure a balance delta and fail closed below it.
+///  rule already applied elsewhere. Both legs now forward the MEASURED delta,
+///  capped at the signed amount — so a short delivery hands the receiver only what
+///  actually arrived and never a wei of the module's stray balance. A genuine short
+///  is caught by Settlement's output check, not a module-level revert (the old
+///  `require(received >= amount)` gate was dropped 2026-09 — see the measured-
+///  delivery posture, module-security-model.md I-8). The property under test is
+///  unchanged: the stray balance is never what pays the order.
 contract AaveV4MeasuredProceedsTest is Test {
     address constant PERMIT3 = address(0xBEEF);
     address constant SPOKE = address(0x5904E);
@@ -110,17 +115,18 @@ contract AaveV4MeasuredProceedsTest is Test {
         assertEq(token.balanceOf(address(withdrawModule)), 0, "module ends empty");
     }
 
-    /// The defect: the PM claims 100 but delivers 90. Nominal forwarding would
-    /// hand the receiver 100, taking 10 from the module's stray balance.
-    function test_withdraw_underDelivery_failsClosed() public {
+    /// The defect it guards: the PM claims 100 but delivers 90. Nominal forwarding
+    /// would hand the receiver 100, taking 10 from the module's stray balance. The
+    /// module now forwards the MEASURED 90, so the stray is never touched; the 10
+    /// short is caught by Settlement's output check, not here.
+    function test_withdraw_underDelivery_deliversMeasured() public {
         _seedStray(address(withdrawModule), 50e6);
         pm.set(90e6, 100e6); // delivers 90, reports 100
 
         vm.prank(PERMIT3);
-        vm.expectRevert("insufficient withdrawn");
         withdrawModule.takeOnBehalf(maker, 100e6, receiver, _data());
 
-        assertEq(token.balanceOf(receiver), 0, "receiver paid nothing");
+        assertEq(token.balanceOf(receiver), 90e6, "receiver gets only what was delivered");
         assertEq(token.balanceOf(address(withdrawModule)), 50e6, "stray balance untouched");
     }
 
@@ -150,30 +156,31 @@ contract AaveV4MeasuredProceedsTest is Test {
     }
 
     /// The sharper of the two: the old borrow path ignored the return value
-    /// entirely and transferred the requested `amount`. A short borrow was paid
-    /// out of the module's stray balance while the maker kept the whole debt.
-    function test_borrow_underDelivery_failsClosed() public {
+    /// entirely and transferred the requested `amount`, paying a short borrow out
+    /// of the module's stray balance. It now forwards the MEASURED 90; the stray is
+    /// untouched and the short is Settlement's to catch.
+    function test_borrow_underDelivery_deliversMeasured() public {
         _seedStray(address(borrowModule), 50e6);
         pm.set(90e6, 90e6);
 
         vm.prank(PERMIT3);
-        vm.expectRevert("insufficient borrowed");
         borrowModule.takeOnBehalf(maker, 100e6, receiver, _data());
 
-        assertEq(token.balanceOf(receiver), 0, "receiver paid nothing");
+        assertEq(token.balanceOf(receiver), 90e6, "receiver gets only what was borrowed");
         assertEq(token.balanceOf(address(borrowModule)), 50e6, "stray balance untouched");
     }
 
-    /// A borrow that delivers nothing at all must not pay out either.
-    function test_borrow_zeroDelivery_failsClosed() public {
+    /// A borrow that delivers nothing at all pays out nothing — the measured
+    /// delivery is 0, so the receiver gets 0 and the stray balance stays put.
+    function test_borrow_zeroDelivery_paysNothing() public {
         _seedStray(address(borrowModule), 100e6);
         pm.set(0, 100e6);
 
         vm.prank(PERMIT3);
-        vm.expectRevert("insufficient borrowed");
         borrowModule.takeOnBehalf(maker, 100e6, receiver, _data());
 
         assertEq(token.balanceOf(receiver), 0, "no payout from a zero borrow");
+        assertEq(token.balanceOf(address(borrowModule)), 100e6, "stray balance untouched");
     }
 
     function test_borrow_overDelivery_surplusToUser() public {
@@ -190,7 +197,8 @@ contract AaveV4MeasuredProceedsTest is Test {
     // ── The property both legs now hold ───────────────────────────────────────
 
     /// However the op under-delivers, the module's pre-existing balance is never
-    /// what pays the order.
+    /// what pays the order: the receiver gets EXACTLY the measured delivery, and the
+    /// stray balance is fully intact afterwards.
     function testFuzz_strayBalanceNeverCoversAShortfall(uint96 stray, uint96 shortfall) public {
         uint256 request = 100e6;
         vm.assume(shortfall > 0 && shortfall <= request);
@@ -198,9 +206,9 @@ contract AaveV4MeasuredProceedsTest is Test {
         pm.set(request - shortfall, request);
 
         vm.prank(PERMIT3);
-        vm.expectRevert("insufficient borrowed");
         borrowModule.takeOnBehalf(maker, request, receiver, _data());
 
-        assertEq(token.balanceOf(receiver), 0, "receiver never paid from stray funds");
+        assertEq(token.balanceOf(receiver), request - shortfall, "receiver paid only the measured delivery");
+        assertEq(token.balanceOf(address(borrowModule)), stray, "stray balance fully intact");
     }
 }

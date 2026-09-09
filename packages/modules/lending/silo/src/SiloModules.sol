@@ -188,9 +188,15 @@ contract SiloRepayModule is IMakerModule {
 //
 //   base: op@0, silo@32, asset@64 (base length 96)
 //   op = 0 (Borrow):    data = abi.encode(uint8(0), silo, asset)
-//   op = 1 (Withdraw):  data = abi.encode(uint8(1), silo, asset[, BalanceMode])
+//   op = 1 (Withdraw):  data = abi.encode(uint8(1), silo, asset[, BalanceMode[, total]])
 //     — BalanceMode@96. `Full` ⇒ withdraw the entire position and sweep the
 //       excess back to the user (fill-or-kill; only after debt is cleared).
+//     — total@128, and MANDATORY whenever the mode is `Full`: the maker-signed
+//       full item amount, which {FullFillGuard.requireFullFillFromData} compares
+//       the slice against. It FAILS CLOSED when the word is absent, so a `Full`
+//       order encoded from a map that omits it is one no filler can ever settle.
+//       (Undeclared here until now — the same drift F25/A-2 corrected on
+//       {AaveV3WithdrawModule}.)
 //
 contract SiloTakerModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -232,17 +238,17 @@ contract SiloTakerModule is ITakerModule {
         }
     }
 
-    /// @dev Full mode: withdraw the user's entire (liquidity-bounded) position to
-    ///      this module, forward the signed `amount` to `receiver`, and sweep the
-    ///      excess back to the user — always to `onBehalfOf`, never a caller.
-    ///      Measures what actually landed rather than trusting the static `amount`.
-    function _withdrawFull(address silo, address asset, address onBehalfOf, uint256 amount, address receiver) private {
+    /// @dev Full mode: unwind the user's entire (liquidity-bounded) position with
+    ///      EXACT amounts sent straight to their destinations — the signed `amount`
+    ///      to `receiver`, the remainder back to `onBehalfOf`. ERC-4626 `withdraw`
+    ///      burns the OWNER's shares and pays `receiver` directly, so the module
+    ///      never takes custody: no delta measurement, no split transfers, and a
+    ///      stray module balance can never become part of the payout. A position
+    ///      smaller than `amount` makes the first call revert in the vault — fail
+    ///      closed, no gate needed.
+    function _withdrawFull(address silo, address, address onBehalfOf, uint256 amount, address receiver) private {
         uint256 max = ISilo(silo).maxWithdraw(onBehalfOf);
-        uint256 before = IERC20(asset).balanceOf(address(this));
-        ISilo(silo).withdraw(max, address(this), onBehalfOf);
-        uint256 received = IERC20(asset).balanceOf(address(this)) - before;
-        require(received >= amount, "insufficient withdrawn");
-        SafeTransferLib.safeTransfer(asset, receiver, amount);
-        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
+        ISilo(silo).withdraw(amount, receiver, onBehalfOf);
+        if (max > amount) ISilo(silo).withdraw(max - amount, onBehalfOf, onBehalfOf);
     }
 }
