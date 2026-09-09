@@ -283,13 +283,14 @@ contract CometTakerModuleTest is Test {
 
         assertEq(base.balanceOf(receiver), AMOUNT, "receiver got signed amount");
         assertEq(base.balanceOf(address(module)), 0, "module retains nothing");
-        // The sweep here is user→user, so WALLET balances cannot tell the two
-        // implementations apart — assert on the calls. Reading the collateral
-        // ledger resolves the base position to 0, so `bal > amount` is false and
-        // the second withdraw never happens: exactly one call instead of two.
-        assertEq(comet.withdrawCalls(), 2, "base position resolved from balanceOf, so the remainder is swept");
-        assertEq(comet.lastWithdrawTo(), user, "remainder goes to the maker");
-        assertEq(comet.lastWithdrawAmount(), total - AMOUNT, "remainder is the whole rest of the base supply");
+        // The single withdraw must be sized from the BASE ledger. Reading the
+        // collateral ledger resolves the base position to 0, so the module would
+        // withdraw 0, measure `received == 0`, and pay the receiver nothing — the
+        // assertion above already fails. Pin the amount too, so the reason is
+        // legible rather than just the symptom.
+        assertEq(comet.withdrawCalls(), 1, "one venue withdraw, then an ERC-20 split");
+        assertEq(comet.lastWithdrawTo(), address(module), "the whole position lands on the module");
+        assertEq(comet.lastWithdrawAmount(), total, "sized from balanceOf, not collateralBalanceOf");
     }
 
     // ── Cross-cutting ─────────────────────────────────────────────────────────

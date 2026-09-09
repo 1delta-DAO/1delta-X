@@ -228,6 +228,54 @@ is the same everywhere:
 See [reference-audits.md §C9](reference-audits.md#c9--one-side-spends-the-other-sides-gas)
 for the audit precedent this posture is inherited from.
 
+## 8. Dynamically-sized orders (`fillModule` with `dynamicSize`)
+
+Most of this page assumes an order's size is a function of the order plus the clock.
+One class breaks that: an order carrying a `fillModule` whose
+`IFillModuleDescribe.describeFill()` reports `dynamicSize` — today, position-sized
+lending exits (`PositionFillModule`, see `docs/position-sized-fills.md`). Its size is
+resolved from live chain state at fill time.
+
+Three consequences, none of which the rest of this page covers:
+
+1. **§3's guard does not cover it.** `_requireUntouched` compares `filled[hash]`,
+   which is the right proxy for "has someone else taken this order". It is blind to
+   *this* class: a lending index ticking, or anyone calling
+   `supply(..., onBehalfOf = maker)`, changes the resolved size without touching
+   `filled`. There is no cheap-loss primitive for it.
+
+2. **Your bound is `fillAmounts[i]`, and it is not optional.** Probe with
+   `lens.previewFill(order, order.fillTotal, ...)`, then submit the returned `delta`
+   — on the single path *and* in `MatchPlan.fillAmounts`. It is honoured as a
+   ceiling that reverts (`PositionExceedsQuote`) during phase 1, before any token
+   moves. Passing `fillTotal` in a plan discards it.
+
+3. **Prefer orders that carry a `minFillAnchor`.** `fillAmounts[i]` is a ceiling, so
+   it bounds only the *growth* direction. A position that SHRANK below what your plan
+   needs is caught at open only if the maker signed a floor — otherwise the plan opens
+   fine and dies when a `DELIVER` finds the pool short. Measured on a netted exit:
+   **66,864 gas** caught at open versus **370,169** dying late, for the same drift
+   (`PositionSizedMatch.t.sol`). Both are atomic, so that 5.5× is entirely yours.
+
+4. **Never bundle two orders that resolve against the same position.** Phase 1
+   resolves every order's delta before any withdraw runs, so both see the same
+   balance and the plan tries to spend it twice. It fails closed at the venue, as an
+   untyped `TransferFromFailed` — which will send you looking at maker funding
+   rather than at your plan.
+
+Two errors belong in the failure taxonomy above and are not in it:
+
+| error | who | what to do |
+| --- | --- | --- |
+| `PositionExceedsQuote(position, offered)` | neither — the position moved | re-quote and resubmit; this is the cheap failure working as intended |
+| `AlreadyFilled()` | your bug | the order is one-shot (`describeFill().oneShot`); it was already filled, do not retry |
+
+And note the taxonomy's placement of `BatchNotWhole` / `LegUnfunded` under *"your
+bug — should never reach chain"* does **not** hold for this class. For a
+dynamically-sized order those can be the size drifting between simulation and
+inclusion, which no plan builder can prevent — only the `fillAmounts[i]` bound in (2)
+turns them into a cheap phase-1 revert instead.
+
 ## Related
 
 * [deferred-match-settle.md](deferred-match-settle.md) — the engine: step encoding,

@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
@@ -152,7 +153,7 @@ contract GearboxPoolDepositModule is IMakerModule {
 // max)`; the module burns the maker's shares and sends the underlying to
 // `receiver`. `data = abi.encode(pool, asset[, BalanceMode])` — base = 64.
 //
-contract GearboxPoolWithdrawModule is ITakerModule {
+contract GearboxPoolWithdrawModule is ITakerModule, IPositionSource {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -171,17 +172,47 @@ contract GearboxPoolWithdrawModule is ITakerModule {
             // pro-rated — a sliced fill would unwind the whole position and brick
             // the rest of the order. Require the slice to be the whole item.
             FullFillGuard.requireFullFillFromData(data, 96, amount);
-            // EXACT amounts straight to their destinations: the signed `amount` to
-            // `receiver`, the remainder back to `onBehalfOf`. ERC-4626 `withdraw`
-            // burns the OWNER's shares and pays `receiver` directly, so the module
-            // never takes custody — no delta measurement, no split transfers, and a
-            // stray module balance can never be part of the payout.
-            uint256 max = IGearboxPoolV3(pool).maxWithdraw(onBehalfOf);
-            IGearboxPoolV3(pool).withdraw(amount, receiver, onBehalfOf);
-            if (max > amount) IGearboxPoolV3(pool).withdraw(max - amount, onBehalfOf, onBehalfOf);
+            // ONE venue withdraw, then an ERC-20 SPLIT — the whole position lands here and
+            // the signed `amount` goes on to `receiver`, the rest back to `onBehalfOf`. A
+            // second venue withdraw would re-do the venue's burn and accounting; a transfer
+            // does not.
+            //
+            // ⚠ THE CAP IS WHAT MAKES THE CUSTODY SAFE, and it is not optional here: the
+            // module holds the asset between the withdraw and the split, so `floor` excludes
+            // any balance already sitting here and `min(received, amount)` makes it
+            // structurally impossible for a short or fake-venue delivery to be topped up out
+            // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
+            // Through {positionOf}, so the number a fill is priced against and the
+            // number this branch withdraws are the same function.
+            (, uint256 max) = positionOf(onBehalfOf, data);
+            uint256 floor = IERC20(asset).balanceOf(address(this));
+            IGearboxPoolV3(pool).withdraw(max, address(this), onBehalfOf);
+            uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+            SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
+            if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
             IGearboxPoolV3(pool).withdraw(amount, receiver, onBehalfOf);
         }
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev Single-op module, so there is no op byte to police — the blob is
+    ///      `(pool, asset)` and the only thing it can express is this withdraw.
+    ///
+    ///      `maxWithdraw` — not `convertToAssets(balanceOf)` — is deliberate: it is
+    ///      already in ASSET units (so it needs no conversion to leg units) and it
+    ///      already accounts for what would make a larger withdraw revert, namely
+    ///      pool illiquidity. `asset` comes from the POOL, never from `data`: it is
+    ///      the token the withdraw actually pays out, so it is the only honest
+    ///      answer to the caller's units check.
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        (address pool,) = abi.decode(data, (address, address));
+        return (IGearboxPoolV3(pool).asset(), IGearboxPoolV3(pool).maxWithdraw(user));
     }
 }
 

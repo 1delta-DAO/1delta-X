@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -229,12 +230,35 @@ contract CometRepayModule is IMakerModule {
 //       The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when an
 //       allow block follows, so the block starts at a fixed offset.
 //
-contract CometTakerModule is ITakerModule {
+contract CometTakerModule is ITakerModule, IPositionSource {
     IPermit3 public immutable permit3;
 
     enum Op {
         Borrow, // 0
         Withdraw // 1
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev ⚠ COMET KEEPS THE BASE ASSET IN A DIFFERENT BOOK. The base supply is
+    ///      `balanceOf`, while `collateralBalanceOf` returns ZERO for it — reading
+    ///      one ledger for both would size a base exit at 0. `baseToken()` is read
+    ///      on-chain rather than taken as a flag in `data` so the two cannot be
+    ///      signed inconsistently. Both are plain token amounts, already in `asset`
+    ///      units. The borrow op is refused: sizing a borrow leg from a supply
+    ///      position would price the fill off an unrelated number.
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        uint256 op;
+        address comet;
+        (op, comet, asset) = abi.decode(data, (uint8, address, address));
+        if (op != uint256(Op.Withdraw)) revert BadOp(uint8(op));
+        amount = asset == IComet(comet).baseToken()
+            ? IComet(comet).balanceOf(user)
+            : IComet(comet).collateralBalanceOf(user, asset);
     }
 
     error OnlyPermit3();
@@ -278,15 +302,32 @@ contract CometTakerModule is ITakerModule {
                 // resolve to `bal = 0` — an order that could never fill. Read
                 // `baseToken()` on-chain rather than taking an `isBase` flag in `data`:
                 // it needs no byte-map change and cannot be mis-encoded by the maker.
-                uint256 bal = asset == IComet(comet).baseToken()
-                    ? IComet(comet).balanceOf(onBehalfOf)
-                    : IComet(comet).collateralBalanceOf(onBehalfOf, asset);
-                // Withdraw EXACT amounts straight to their destinations. Comet
-                // withdraws from the USER's position directly, so the module never
-                // takes custody: no delta measurement, no split transfers, and no
-                // stray module balance can ever be part of the payout.
-                IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
-                if (bal > amount) IComet(comet).withdrawFrom(onBehalfOf, onBehalfOf, asset, bal - amount);
+                // ONE venue withdraw, then an ERC-20 SPLIT. The venue pays this module the
+                // whole position; the signed `amount` goes on to `receiver` and the rest back
+                // to `onBehalfOf`. Cheaper than paying each destination from its own venue
+                // call — a second withdraw re-does the venue's burn and accounting, an ERC-20
+                // transfer does not. (Measured on an aave-v3 loop close: 536,396 -> 525,457.)
+                //
+                // ⚠ STILL NEVER `withdraw(max)`. `max` burns every receipt THIS MODULE holds,
+                // conflating the user's position with the module's own. "Full" is resolved
+                // from the USER's position and that exact amount is withdrawn.
+                //
+                // ⚠ AND THE CAP IS WHAT MAKES THE CUSTODY SAFE — it is not optional here. The
+                // module holds the underlying between the withdraw and the split, so the
+                // payout MUST be bounded by what THIS withdraw produced: `floor` excludes any
+                // balance already sitting here, and `min(received, amount)` makes it
+                // structurally impossible for a short or fake-venue delivery to be topped up
+                // out of it. A nominal `safeTransfer(receiver, amount)` here would be the H-3
+                // drain. Direct-to-destination needed neither, which is why it was the shape
+                // until the split measured cheaper.
+                // Through {positionOf} — one implementation of the base/collateral
+                // split, so a fill priced against it withdraws the same number.
+                uint256 floor = IERC20(asset).balanceOf(address(this));
+                (, uint256 bal) = positionOf(onBehalfOf, data);
+                IComet(comet).withdrawFrom(onBehalfOf, address(this), asset, bal);
+                uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+                SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
+                if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
             } else {
                 DelegationHelper.replayCometAllow(data, 128, comet, onBehalfOf, address(this));
                 IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);

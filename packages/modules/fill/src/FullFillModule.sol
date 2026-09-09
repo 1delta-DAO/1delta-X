@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
+import {IFillModuleDescribe} from "@core/interfaces/IFillModuleDescribe.sol";
 import {Order} from "@core/settlement/Structs.sol";
 
 /// @title FullFillModule
@@ -24,7 +25,7 @@ import {Order} from "@core/settlement/Structs.sol";
 ///         `1`). With `fillTotal == 0` the first fill computes `0 - 0 = 0`, which
 ///         the settlement rejects with `ZeroFill` — fail-closed, so a module
 ///         order that forgot its total simply cannot fill.
-contract FullFillModule is IFillModule {
+contract FullFillModule is IFillModule, IFillModuleDescribe {
     /// @inheritdoc IFillModule
     function resolveFill(Order calldata order, uint256 prevFilled, uint256, bytes calldata)
         external
@@ -33,5 +34,13 @@ contract FullFillModule is IFillModule {
     {
         // Entire remaining denominator ⇒ one fill completes the order.
         return order.fillTotal - prevFilled;
+    }
+
+    /// @inheritdoc IFillModuleDescribe
+    /// @dev Not dynamic: the delta is `fillTotal - prevFilled`, a signed constant.
+    ///      One-shot because that first fill completes the order and a second
+    ///      computes 0, which the settlement rejects {ZeroFill}.
+    function describeFill() external pure override returns (bytes32 kind, bool dynamicSize, bool oneShot) {
+        return ("FULL_FILL", false, true);
     }
 }

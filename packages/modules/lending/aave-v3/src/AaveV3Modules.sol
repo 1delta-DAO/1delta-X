@@ -9,6 +9,7 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {FundingPreflight} from "@lib/FundingPreflight.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
@@ -271,7 +272,7 @@ contract AaveV3RepayModule is IMakerModule, IFundingSource {
 //     mutually exclusive branches. (Contrast the Morpho Blue / Comet modules, where
 //     the auth block IS needed in both modes and the offsets had to diverge.)
 //
-contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource {
+contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource, IPositionSource {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -293,19 +294,34 @@ contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource {
             // Resolve "full" to the USER's live aToken balance, pull exactly that,
             // and withdraw EXACT amounts straight to their destinations.
             //
-            // ⚠ NEVER `withdraw(max)`. `max` burns every aToken THIS MODULE holds of
-            // `asset`, which conflates the user's position with the module's own —
-            // that is what previously required a two-stage "harvest" to separate
-            // them, plus self-custody, a delta measurement and a capped payout. With
-            // exact amounts the module only ever burns what it just pulled and the
-            // pool pays each destination directly, so none of that is needed.
-            uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
+                        // ONE venue withdraw, then an ERC-20 SPLIT. The venue pays this module the
+            // whole position; the signed `amount` goes on to `receiver` and the rest back
+            // to `onBehalfOf`. Cheaper than paying each destination from its own venue
+            // call — a second withdraw re-does the venue's burn and accounting, an ERC-20
+            // transfer does not. (Measured on an aave-v3 loop close: 536,396 -> 525,457.)
+            //
+            // ⚠ STILL NEVER `withdraw(max)`. `max` burns every receipt THIS MODULE holds,
+            // conflating the user's position with the module's own. "Full" is resolved
+            // from the USER's position and that exact amount is withdrawn.
+            //
+            // ⚠ AND THE CAP IS WHAT MAKES THE CUSTODY SAFE — it is not optional here. The
+            // module holds the underlying between the withdraw and the split, so the
+            // payout MUST be bounded by what THIS withdraw produced: `floor` excludes any
+            // balance already sitting here, and `min(received, amount)` makes it
+            // structurally impossible for a short or fake-venue delivery to be topped up
+            // out of it. A nominal `safeTransfer(receiver, amount)` here would be the H-3
+            // drain. Direct-to-destination needed neither, which is why it was the shape
+            // until the split measured cheaper.
+            // Through {positionOf}, NOT a second inline read: the number a
+            // {PositionFillModule} prices a fill against and the number this branch
+            // actually withdraws are then the same function.
+            uint256 floor = IERC20(asset).balanceOf(address(this));
+            (, uint256 bal) = positionOf(onBehalfOf, data);
             SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), bal);
-            // The signed amount to the order's receiver; interest accrued since
-            // signing stays the maker's. A position that SHRANK below `amount` makes
-            // the pool revert on insufficient aTokens — fail closed, no gate needed.
-            IAaveV3Pool(pool).withdraw(asset, amount, receiver);
-            if (bal > amount) IAaveV3Pool(pool).withdraw(asset, bal - amount, onBehalfOf);
+            IAaveV3Pool(pool).withdraw(asset, bal, address(this));
+            uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+            SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
+            if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
             // Exact mode: optional EIP-2612 permit on aToken at offset 128, approving
             // THIS MODULE (not Permit3). The aToken pull is a direct ERC-20
@@ -341,6 +357,27 @@ contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource {
         uint256 allowed = IERC20(asset).allowance(onBehalfOf, address(this));
         uint256 held = IERC20(asset).balanceOf(onBehalfOf);
         available = allowed < held ? allowed : held;
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev aTokens rebase 1:1 with the underlying, so the balance is already in
+    ///      `asset` units and needs no conversion — the simplest venue for this.
+    ///
+    ///      Note the deliberate difference from {fundingSource} directly above,
+    ///      which reports the same position bounded by this module's allowance.
+    ///      That is the right answer for a preflight ("can this be pulled?") and
+    ///      the WRONG one for sizing a fill: a short approval must make the fill
+    ///      revert on the pull, not quietly sell a fraction and consume the
+    ///      maker's one-shot exit order. Raw position here, on purpose.
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        address aToken;
+        (, asset, aToken) = abi.decode(data, (address, address, address));
+        amount = IERC20(aToken).balanceOf(user);
     }
 }
 

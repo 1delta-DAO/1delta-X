@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
 import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
@@ -221,12 +222,41 @@ contract EulerV2RepayModule is IMakerModule {
 //         (Undeclared here until now — the same drift F25/A-2 corrected on
 //         {AaveV3WithdrawModule}.)
 //
-contract EulerV2TakerModule is ITakerModule {
+contract EulerV2TakerModule is ITakerModule, IPositionSource {
     IPermit3 public immutable permit3;
 
     enum Op {
         Borrow, // 0
         Withdraw // 1
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev `maxWithdraw` — not `convertToAssets(balanceOf)` — is deliberate, and is
+    ///      the same reader the `Full` branch uses. It is already denominated in the
+    ///      vault's ASSET (so it needs no conversion to leg units) and it already
+    ///      accounts for the constraints that would make a larger withdraw revert: a
+    ///      borrow against the position, or vault illiquidity. Sizing off the raw
+    ///      share balance would price a withdraw the venue then refuses.
+    ///
+    ///      `asset` comes from the VAULT, never from `data`: it is the token the
+    ///      withdraw actually pays out, so it is the only honest answer to the
+    ///      caller's units check.
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        (uint256 op, address vault) = abi.decode(data, (uint8, address));
+        if (op != uint256(Op.Withdraw)) revert BadOp(uint8(op));
+        return _vaultPositionOf(vault, user);
+    }
+
+    /// @dev The vault read itself, taking the vault address so the internal `Full`
+    ///      path can share it — that path has already decoded the blob and cannot
+    ///      hand a calldata slice back.
+    function _vaultPositionOf(address vault, address user) private view returns (address asset, uint256 amount) {
+        return (IEulerVault(vault).asset(), IEulerVault(vault).maxWithdraw(user));
     }
 
     error OnlyPermit3();
@@ -271,14 +301,24 @@ contract EulerV2TakerModule is ITakerModule {
     ///      payout. A position below `amount` reverts in the vault. Its own frame
     ///      keeps the stack shallow.
     function _withdrawFull(address vault, address onBehalfOf, uint256 amount, address receiver) private {
+        // ONE venue withdraw, then an ERC-20 SPLIT — the whole position lands here and
+        // the signed `amount` goes on to `receiver`, the rest back to `onBehalfOf`. A
+        // second venue withdraw would re-do the venue's burn and accounting; a transfer
+        // does not.
+        //
+        // ⚠ THE CAP IS WHAT MAKES THE CUSTODY SAFE, and it is not optional here: the
+        // module holds the asset between the withdraw and the split, so `floor` excludes
+        // any balance already sitting here and `min(received, amount)` makes it
+        // structurally impossible for a short or fake-venue delivery to be topped up out
+        // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
         address evc = IEulerVault(vault).EVC();
-        uint256 bal = IEulerVault(vault).maxWithdraw(onBehalfOf);
-        IEVC(evc).call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf)));
-        if (bal > amount) {
-            IEVC(evc).call(
-                vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal - amount, onBehalfOf, onBehalfOf))
-            );
-        }
+        address asset = IEulerVault(vault).asset();
+        uint256 floor = IERC20(asset).balanceOf(address(this));
+        (, uint256 bal) = _vaultPositionOf(vault, onBehalfOf);
+        IEVC(evc).call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), onBehalfOf)));
+        uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+        SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
+        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }
 }
 

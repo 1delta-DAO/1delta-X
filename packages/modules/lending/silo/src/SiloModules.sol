@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
@@ -198,12 +199,41 @@ contract SiloRepayModule is IMakerModule {
 //       (Undeclared here until now — the same drift F25/A-2 corrected on
 //       {AaveV3WithdrawModule}.)
 //
-contract SiloTakerModule is ITakerModule {
+contract SiloTakerModule is ITakerModule, IPositionSource {
     IPermit3 public immutable permit3;
 
     enum Op {
         Borrow, // 0
         Withdraw // 1
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev `maxWithdraw` — not `convertToAssets(balanceOf)` — is deliberate, and is
+    ///      the same reader the `Full` branch uses. It is already denominated in the
+    ///      vault's ASSET (so it needs no conversion to leg units) and it already
+    ///      accounts for the constraints that would make a larger withdraw revert: a
+    ///      borrow against the position, or vault illiquidity. Sizing off the raw
+    ///      share balance would price a withdraw the venue then refuses.
+    ///
+    ///      `asset` comes from the VAULT, never from `data`: it is the token the
+    ///      withdraw actually pays out, so it is the only honest answer to the
+    ///      caller's units check.
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        (uint256 op, address vault) = abi.decode(data, (uint8, address));
+        if (op != uint256(Op.Withdraw)) revert BadOp(uint8(op));
+        return _vaultPositionOf(vault, user);
+    }
+
+    /// @dev The vault read itself, taking the vault address so the internal `Full`
+    ///      path can share it — that path has already decoded the blob and cannot
+    ///      hand a calldata slice back.
+    function _vaultPositionOf(address vault, address user) private view returns (address asset, uint256 amount) {
+        return (ISilo(vault).asset(), ISilo(vault).maxWithdraw(user));
     }
 
     error OnlyPermit3();
@@ -247,8 +277,26 @@ contract SiloTakerModule is ITakerModule {
     ///      smaller than `amount` makes the first call revert in the vault — fail
     ///      closed, no gate needed.
     function _withdrawFull(address silo, address, address onBehalfOf, uint256 amount, address receiver) private {
-        uint256 max = ISilo(silo).maxWithdraw(onBehalfOf);
-        ISilo(silo).withdraw(amount, receiver, onBehalfOf);
-        if (max > amount) ISilo(silo).withdraw(max - amount, onBehalfOf, onBehalfOf);
+        // Through {positionOf}, so the number a fill is priced against and the
+        // number this branch withdraws are the same function.
+        // ONE venue withdraw, then an ERC-20 SPLIT — the whole position lands here and
+        // the signed `amount` goes on to `receiver`, the rest back to `onBehalfOf`. A
+        // second venue withdraw would re-do the venue's burn and accounting; a transfer
+        // does not.
+        //
+        // ⚠ THE CAP IS WHAT MAKES THE CUSTODY SAFE, and it is not optional here: the
+        // module holds the asset between the withdraw and the split, so `floor` excludes
+        // any balance already sitting here and `min(received, amount)` makes it
+        // structurally impossible for a short or fake-venue delivery to be topped up out
+        // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
+        // Through the same reader {positionOf} uses, so a fill priced against the
+        // position withdraws exactly that number.
+        (, uint256 max) = _vaultPositionOf(silo, onBehalfOf);
+        address asset = ISilo(silo).asset();
+        uint256 floor = IERC20(asset).balanceOf(address(this));
+        ISilo(silo).withdraw(max, address(this), onBehalfOf);
+        uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+        SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
+        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }
 }

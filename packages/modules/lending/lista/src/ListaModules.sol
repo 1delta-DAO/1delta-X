@@ -287,13 +287,22 @@ contract ListaTakerModule is ITakerModule {
         uint256 amount,
         address receiver
     ) private {
-        // EXACT amounts straight to their destinations: the signed `amount` to
-        // `receiver`, the remainder back to `onBehalfOf`. The venue pays each
-        // recipient directly, so the module never takes custody — no delta
-        // measurement, no split transfers, and a stray module balance can never be
-        // part of the payout. A position below `amount` reverts in the venue.
+        // ONE venue withdraw, then an ERC-20 SPLIT — the whole position lands here and
+        // the signed `amount` goes on to `receiver`, the rest back to `onBehalfOf`. A
+        // second venue withdraw would re-do the venue's burn and accounting; a transfer
+        // does not.
+        //
+        // ⚠ THE CAP IS WHAT MAKES THE CUSTODY SAFE, and it is not optional here: the
+        // module holds the asset between the withdraw and the split, so `floor` excludes
+        // any balance already sitting here and `min(received, amount)` makes it
+        // structurally impossible for a short or fake-venue delivery to be topped up out
+        // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
+        address collateralToken = mp.collateralToken;
+        uint256 floor = IERC20(collateralToken).balanceOf(address(this));
         uint256 bal = IMoolah(moolah).position(mp.id(), onBehalfOf).collateral;
-        IMoolah(venue).withdrawCollateral(mp, amount, onBehalfOf, receiver);
-        if (bal > amount) IMoolah(venue).withdrawCollateral(mp, bal - amount, onBehalfOf, onBehalfOf);
+        IMoolah(venue).withdrawCollateral(mp, bal, onBehalfOf, address(this));
+        uint256 received = IERC20(collateralToken).balanceOf(address(this)) - floor;
+        SafeTransferLib.safeTransfer(collateralToken, receiver, received < amount ? received : amount);
+        if (received > amount) SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
+import {IFillModuleDescribe} from "@core/interfaces/IFillModuleDescribe.sol";
 import {Order} from "@core/settlement/Structs.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
@@ -43,7 +44,7 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///         neither mutate state nor reenter. Requires `fillTotal % minFillAnchor
 ///         == 0` (equal parts, no dust remainder that would trip the core's
 ///         `delta >= minFillAnchor` floor on the last part).
-contract TwapFillModule is IFillModule {
+contract TwapFillModule is IFillModule, IFillModuleDescribe {
     using DutchAuction for Order;
 
     error TwapNotConfigured();
@@ -83,5 +84,13 @@ contract TwapFillModule is IFillModule {
             if (wholeParts == 0) revert TwapPartUnavailable(); // requested less than a part
             delta = wholeParts * partSize;
         }
+    }
+
+    /// @inheritdoc IFillModuleDescribe
+    /// @dev Dynamic in the CLOCK rather than in chain state — how much is available
+    ///      depends on how many schedule parts have opened. Not one-shot: the whole
+    ///      point is a sequence of fills across the window.
+    function describeFill() external pure override returns (bytes32 kind, bool dynamicSize, bool oneShot) {
+        return ("TWAP", true, false);
     }
 }

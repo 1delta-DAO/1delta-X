@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -280,7 +281,7 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 //       Full mode redeems by shares, so the accrued-interest excess sweeps back
 //       in-kind.
 //
-contract MorphoBlueTakerModule is ITakerModule {
+contract MorphoBlueTakerModule is ITakerModule, IPositionSource {
     using MarketParamsLib for MarketParams;
 
     IPermit3 public immutable permit3;
@@ -290,6 +291,40 @@ contract MorphoBlueTakerModule is ITakerModule {
         Borrow, // 0
         WithdrawCollateral, // 1
         Withdraw // 2 — supplied loan asset (earn position)
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev COLLATERAL ONLY, deliberately. `position().collateral` is a plain token
+    ///      amount that does not accrue, so it is exact and already in `asset`
+    ///      units. `Op.Withdraw` — the supplied-loan/earn side — is REFUSED: that
+    ///      position is denominated in SHARES, and an honest conversion needs the
+    ///      market's ACCRUED totals. Getting it subtly wrong would mis-price the
+    ///      maker's fill rather than revert, which is the one failure mode worth
+    ///      refusing outright. (`_withdrawLoanFull` sidesteps the same problem by
+    ///      settling its remainder BY shares — an option a fill module lacks, since
+    ///      it must hand the core a number in leg units.) The earn side therefore
+    ///      keeps `BalanceMode.Full` until a share→asset reader lands.
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        (uint256 op, MarketParams memory marketParams) = abi.decode(data, (uint8, MarketParams));
+        if (op != uint256(Op.WithdrawCollateral)) revert BadOp(uint8(op));
+        return _collateralOf(marketParams, user);
+    }
+
+    /// @dev The ledger read itself, taking `MarketParams` in memory so the internal
+    ///      `Full` path can share it — that path has already decoded the blob and
+    ///      cannot hand a calldata slice back.
+    function _collateralOf(MarketParams memory marketParams, address user)
+        private
+        view
+        returns (address asset, uint256 amount)
+    {
+        asset = marketParams.collateralToken;
+        amount = morpho.position(marketParams.id(), user).collateral;
     }
 
     error OnlyPermit3();
@@ -360,14 +395,25 @@ contract MorphoBlueTakerModule is ITakerModule {
     function _withdrawFull(MarketParams memory marketParams, address onBehalfOf, uint256 amount, address receiver)
         private
     {
-        // EXACT amounts straight to their destinations: the signed `amount` to
-        // `receiver`, the remainder back to `onBehalfOf`. The venue pays each
-        // recipient directly, so the module never takes custody — no delta
-        // measurement, no split transfers, and a stray module balance can never be
-        // part of the payout. A position below `amount` reverts in the venue.
-        uint256 bal = morpho.position(marketParams.id(), onBehalfOf).collateral;
-        morpho.withdrawCollateral(marketParams, amount, onBehalfOf, receiver);
-        if (bal > amount) morpho.withdrawCollateral(marketParams, bal - amount, onBehalfOf, onBehalfOf);
+        // ONE venue withdraw, then an ERC-20 SPLIT — the whole position lands here and
+        // the signed `amount` goes on to `receiver`, the rest back to `onBehalfOf`. A
+        // second venue withdraw would re-do the venue's burn and accounting; a transfer
+        // does not.
+        //
+        // ⚠ THE CAP IS WHAT MAKES THE CUSTODY SAFE, and it is not optional here: the
+        // module holds the asset between the withdraw and the split, so `floor` excludes
+        // any balance already sitting here and `min(received, amount)` makes it
+        // structurally impossible for a short or fake-venue delivery to be topped up out
+        // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
+        // Through the same reader {positionOf} uses, so a fill priced against the
+        // position withdraws exactly that number.
+        address collateralToken = marketParams.collateralToken;
+        uint256 floor = IERC20(collateralToken).balanceOf(address(this));
+        (, uint256 bal) = _collateralOf(marketParams, onBehalfOf);
+        morpho.withdrawCollateral(marketParams, bal, onBehalfOf, address(this));
+        uint256 received = IERC20(collateralToken).balanceOf(address(this)) - floor;
+        SafeTransferLib.safeTransfer(collateralToken, receiver, received < amount ? received : amount);
+        if (received > amount) SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
     }
 
     /// @dev Full mode for the loan leg: redeem the user's ENTIRE supply by
@@ -378,12 +424,25 @@ contract MorphoBlueTakerModule is ITakerModule {
     function _withdrawLoanFull(MarketParams memory marketParams, address onBehalfOf, uint256 amount, address receiver)
         private
     {
-        // The signed `amount` by ASSETS to `receiver`, then everything still left by
-        // SHARES to the maker — shares are the exact remainder even as interest
-        // accrues during the first call, so the position ends fully unwound with no
-        // custody and no delta measurement. A supply below `amount` reverts.
-        morpho.withdraw(marketParams, amount, 0, onBehalfOf, receiver);
-        uint256 left = morpho.position(marketParams.id(), onBehalfOf).supplyShares;
-        if (left > 0) morpho.withdraw(marketParams, 0, left, onBehalfOf, onBehalfOf);
+        // ONE venue withdraw, then an ERC-20 SPLIT — the whole position lands here and
+        // the signed `amount` goes on to `receiver`, the rest back to `onBehalfOf`. A
+        // second venue withdraw would re-do the venue's burn and accounting; a transfer
+        // does not.
+        //
+        // ⚠ THE CAP IS WHAT MAKES THE CUSTODY SAFE, and it is not optional here: the
+        // module holds the asset between the withdraw and the split, so `floor` excludes
+        // any balance already sitting here and `min(received, amount)` makes it
+        // structurally impossible for a short or fake-venue delivery to be topped up out
+        // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
+        // Withdrawn by SHARES, which is the exact whole position even as interest
+        // accrues during the call — the assets figure would be stale. The split is
+        // then in assets, against what actually landed.
+        address loanToken = marketParams.loanToken;
+        uint256 floor = IERC20(loanToken).balanceOf(address(this));
+        uint256 shares = morpho.position(marketParams.id(), onBehalfOf).supplyShares;
+        morpho.withdraw(marketParams, 0, shares, onBehalfOf, address(this));
+        uint256 received = IERC20(loanToken).balanceOf(address(this)) - floor;
+        SafeTransferLib.safeTransfer(loanToken, receiver, received < amount ? received : amount);
+        if (received > amount) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, received - amount);
     }
 }
