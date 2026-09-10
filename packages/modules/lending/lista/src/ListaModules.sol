@@ -12,22 +12,27 @@ import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
-import {IMoolah, IListaBroker, MarketParams, Position, Id, MarketParamsLib} from "./interfaces/ILista.sol";
+import {IMoolah, MarketParams, Position, Id, MarketParamsLib} from "./interfaces/ILista.sol";
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Lista DAO (Moolah + LendingBroker) modules
 //
-//  Collateral lives in the Moolah singleton (a Morpho fork), so the
-//  supply-collateral / withdraw-collateral legs mirror the Morpho Blue modules
-//  and are gated by Moolah `setAuthorization(module, true)`. The debt side of a
-//  brokered market runs through a `LendingBroker`:
+//  Lista splits its lending stack in two, and so do these modules. COLLATERAL
+//  lives in the Moolah singleton (a Morpho Blue fork) and is what THIS file
+//  covers; DEBT lives in a `LendingBroker` and is served, in full, by
+//  {ListaBrokerModule}.
 //
-//    supply-collateral / repay → value-in  (MAKE)
-//    broker-borrow / withdraw-collateral → value-out (TAKE), forwarded to `receiver`
+//    supply-collateral   → value-in  (MAKE)
+//    withdraw-collateral → value-out (TAKE), forwarded to `receiver`
 //
-//  Only the FIXED-term broker borrow is delegable; the flex borrow is
-//  `msg.sender`-only (out of scope). All market/broker/term identifiers are
-//  maker-signed in `data`.
+//  Both legs mirror the Morpho Blue modules and are gated by Moolah
+//  `setAuthorization(module, true)`. All market identifiers are maker-signed in
+//  `data`.
+//
+//  ⚠ The broker BORROW used to live here as this file's taker op 0. It moved to
+//  {ListaBrokerModule} so that every broker call — borrow and both funding
+//  shapes of repay — sits in one contract and cannot drift apart again. Op 0 is
+//  RESERVED below rather than reused, so ops 1 and 2 keep their wire values.
 // ════════════════════════════════════════════════════════════════════════════
 
 // ──────────────────── Lista supply-collateral maker module ────────────────────
@@ -72,110 +77,17 @@ contract ListaSupplyCollateralModule is IMakerModule {
     }
 }
 
-// ──────────────────── Lista broker repay maker module ────────────────────
+// ──────────────────── Lista Moolah collateral taker module ────────────────────
 //
-// Closes (up to `amount`) of the user's broker debt. Pulls the maker-signed
-// ceiling, approves the broker, then calls `repay(amount, …)` — the broker
-// `transferFrom`s the LITERAL amount, consumes up to the live debt
-// (interest-first, early-repay penalty included) and refunds the surplus to its
-// caller, i.e. back here, which is then swept to the user (or recycled).
-// NOT `repay(0, …)`: every deployed broker reverts `ZeroAmount()` on a zero
-// amount (source-verified on the chain-1 impl 0x63fa…96f0 and fork-measured on
-// BSC — there is no "0 = repay from balance" convention on the broker; the
-// same correction the pre-fund sibling {ListaPreFundBrokerRepayModule} carries).
-// `loanId == type(uint128).max` selects the flex position;
-// `loanId == type(uint256).max` closes EVERYTHING via `repayAll` — dynamic +
-// every fixed position by shares, immune to the refinance-bot race. `repayAll`
-// pulls EXACTLY the live total debt (no refund), capped by this module's
-// approval at the maker-signed ceiling, so a ceiling short of the live debt
-// fails closed in the broker's `transferFrom` and the un-pulled remainder
-// sweeps back to the maker. Any other `loanId` targets a fixed position.
+// The Moolah withdraw-collateral value-out legs behind a leading `op` flag: the
+// direct form and the provider-forwarded one. They hash to different
+// `keccak256(data)` refs (separate amount-gated taker allowances) and share the
+// one Moolah `setAuthorization(module)` grant, per-address by construction.
 //
-// `nonReentrant` guards weird-token transfer hooks.
-// `data = abi.encode(broker, loanToken, loanId[, DustAction[, deadline, v, r, s]])`
-//   — base = 96; DustAction@96; permit@128.
-//
-contract ListaBrokerRepayModule is IMakerModule {
-    uint256 private constant DYNAMIC_LOAN = type(uint128).max;
-    /// @dev Full-close sentinel — maps to `repayAll(onBehalf)`. Fixed posIds are
-    ///      small sequential uuids, so neither sentinel can collide with one.
-    uint256 private constant REPAY_ALL = type(uint256).max;
-
-    IPermit3 public immutable permit3;
-    address public immutable settlement;
-
-    uint256 private _locked = 1;
-
-    error Reentrancy();
-    error NotSettlement();
-
-    constructor(address _permit3, address _settlement) {
-        permit3 = IPermit3(_permit3);
-        settlement = _settlement;
-    }
-
-    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
-        if (msg.sender != settlement) revert NotSettlement();
-        if (_locked != 1) revert Reentrancy();
-        _locked = 2;
-
-        (address broker, address loanToken, uint256 loanId) = abi.decode(data, (address, address, uint256));
-        DustHandler.DustAction action = DustHandler.readAction(data, 96);
-        PermitHelper.replayIfPresent(data, 128, loanToken, onBehalfOf, address(permit3), amount);
-
-        // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would pay
-        // out anything already stranded at this shared module address, and anyone can
-        // be the maker of a one-unit order against it — so a stray balance would be
-        // claimable by whoever fills next. The invariant is "the module ends where it
-        // started", not "ends empty" (F19; {DustHandler.disposeResidual}'s floor).
-        uint256 floor = IERC20(loanToken).balanceOf(address(this));
-        if (amount > 0) {
-            permit3.transferFrom(onBehalfOf, address(this), loanToken, uint160(amount));
-            SafeTransferLib.forceApprove(loanToken, broker, amount);
-            // `repay(amount, …)` ⇒ the broker pulls the literal ceiling, repays up
-            // to the live debt, refunds the rest here (swept below). `repay(0, …)`
-            // reverts `ZeroAmount()` on every deployed broker — see the header.
-            if (loanId == REPAY_ALL) {
-                // Pulls exactly the live total debt (dynamic + every fixed, by
-                // shares) — no literal amount, the approval above is the cap.
-                IListaBroker(broker).repayAll(onBehalfOf);
-            } else if (loanId == DYNAMIC_LOAN) {
-                IListaBroker(broker).repay(amount, onBehalfOf);
-            } else {
-                IListaBroker(broker).repay(amount, loanId, onBehalfOf);
-            }
-            SafeTransferLib.forceApprove(loanToken, broker, 0);
-        }
-
-        uint256 bal = IERC20(loanToken).balanceOf(address(this));
-        if (bal > floor) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, bal - floor);
-        // (action reserved for a future in-position recycle; broker has no
-        //  re-supply target, so residual always sweeps to the user.)
-        action;
-
-        _locked = 1;
-    }
-}
-
-// ──────────────────── Lista combined taker module ────────────────────
-//
-// Fuses the FIXED-term broker borrow and the Moolah withdraw-collateral value-out
-// legs behind a leading `op` flag. Borrow-data and withdraw-data hash to
-// different `keccak256(data)` refs (separate amount-gated taker allowances); both
-// legs share the one Moolah `setAuthorization(module)` grant, per-address by
-// construction.
-//
-//   op = 0 (Broker borrow):  data = abi.encode(uint8(0), broker, termId[, moolah, nonce, deadline, v, r, s])
-//     — base = 96. Optional signature-only Moolah grant: base data carries no
-//       moolah word (the borrow itself routes through the broker), so the tail
-//       prefixes it — moolah@96, then the standard 160-byte
-//       {DelegationHelper.replayMorphoAuth} block @128 (tail = 192 bytes,
-//       total 288). Verified on the deployed BSC Moolah: `setAuthorizationWithSig`
-//       is byte-identical to Morpho Blue's (typehash, struct, Signature tuple,
-//       sequential `nonce(address)`, Morpho's chainId+contract domain scheme —
-//       only the domain VIEW is renamed `domainSeparator()`), so the Morpho
-//       helper is reused unchanged. Everything in the tail is maker-signed via
-//       `data`; a wrong moolah address just makes the best-effort replay a no-op.
+//   op = 0: RESERVED — the fixed-term broker borrow that used to live here, now
+//       in {ListaBrokerModule}. Reverts `BadOp(0)`. The slot is not reused so
+//       ops 1 and 2 keep their on-the-wire values, and so a borrow blob signed
+//       for the broker module can never be reinterpreted against a grant here.
 //   op = 1 (Withdraw coll):   data = abi.encode(uint8(1), moolah, MarketParams[, BalanceMode[, ...]])
 //     — op@0, moolah@32, MarketParams@64 (base = 224); BalanceMode@224.
 //       ⚠ THE OPTIONAL AUTH BLOCK IS BRANCH-SCOPED AND ITS OFFSET DIFFERS PER
@@ -209,7 +121,12 @@ contract ListaTakerModule is ITakerModule {
     IPermit3 public immutable permit3;
 
     enum Op {
-        Borrow, // 0 — fixed-term broker borrow
+        /// @dev 0 — the fixed-term broker borrow, MOVED to {ListaBrokerModule}
+        ///      together with the rest of the broker surface. The slot is KEPT so
+        ///      ops 1 and 2 retain their on-the-wire values; op 0 now reverts
+        ///      {BadOp} here, which is what stops a borrow blob from being
+        ///      reinterpreted as a withdraw against this module's grant.
+        MovedToBrokerModule_Borrow,
         WithdrawCollateral, // 1 — Moolah collateral, direct
         ProviderWithdrawCollateral // 2 — provider-gated markets (Morpho-shaped forwarders)
     }
@@ -226,17 +143,7 @@ contract ListaTakerModule is ITakerModule {
 
         uint8 op = uint8(uint256(bytes32(data[:32])));
 
-        if (op == uint8(Op.Borrow)) {
-            (, address broker, uint256 termId) = abi.decode(data, (uint8, address, uint256));
-            // Optional signature-only Moolah grant (see the header byte map):
-            // maker-signed moolah@96, auth block@128. The broker's on-behalf
-            // borrow is gated by the maker's Moolah authorization of this module.
-            if (data.length >= 288) {
-                address moolah = abi.decode(data[96:128], (address));
-                DelegationHelper.replayMorphoAuth(data, 128, moolah, onBehalfOf, address(this));
-            }
-            IListaBroker(broker).borrow(amount, termId, onBehalfOf, receiver);
-        } else if (op == uint8(Op.WithdrawCollateral)) {
+        if (op == uint8(Op.WithdrawCollateral)) {
             (, address moolah, MarketParams memory mp) = abi.decode(data, (uint8, address, MarketParams));
             if (DustHandler.readBalanceMode(data, 224) == DustHandler.BalanceMode.Full) {
                 // `Full` liquidates the user's ENTIRE live balance, so it cannot be
@@ -302,6 +209,12 @@ contract ListaTakerModule is ITakerModule {
         uint256 bal = IMoolah(moolah).position(mp.id(), onBehalfOf).collateral;
         IMoolah(venue).withdrawCollateral(mp, bal, onBehalfOf, address(this));
         uint256 received = IERC20(collateralToken).balanceOf(address(this)) - floor;
+        // The lower bound the venue used to enforce. Before the split rewrite the
+        // venue call was sized at `amount`, so a short position reverted inside it;
+        // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+        // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+        // `amount` is the signed TOTAL, never a pro-rated slice.
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(collateralToken, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
     }

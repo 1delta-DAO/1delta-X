@@ -369,7 +369,13 @@ contract LiquityV2TroveAuthTest is Test {
 
     // ──────────────── Repay (derived troveManager) ────────────────
 
+    /// @dev A PARTIAL repay, which is the only shape this module supports on a trove
+    /// venue. This used to repay the WHOLE debt and assert it reached zero — but the
+    /// mock has no minimum-debt floor, so it was asserting an outcome the real
+    /// BorrowerOperations rejects (`_requireAtLeastMinDebt`). See the full-close test
+    /// below for what the module now does with that case.
     function test_repay_reducesOwnDebt_withDerivedTroveManager() public {
+        uint256 slice = BORROW / 3;
         tm.setDebt(MAKER_TROVE, BORROW);
         bold.mint(maker, BORROW);
 
@@ -380,10 +386,35 @@ contract LiquityV2TroveAuthTest is Test {
 
         // data no longer carries `troveManager` — it is derived from `borrowerOps`.
         vm.prank(settlement);
+        repayModule.makeOnBehalf(maker, slice, abi.encode(BRANCH, MAKER_TROVE, address(bold)));
+
+        assertEq(tm.debt(MAKER_TROVE), BORROW - slice, "debt reduced by the repaid slice");
+        assertEq(bold.balanceOf(address(repayModule)), 0, "no residue left on the module");
+    }
+
+    /// @dev AUDIT REGRESSION. `min(amount, entireDebt)` is copied from siblings where
+    /// saturating at the live debt is the GOOD path. On a trove venue it is not:
+    /// `repayBold` enforces a minimum debt, so the clamp's own success case
+    /// (`toRepay == entireDebt` ⇒ `newDebt == 0`) reverts *inside the venue* — an
+    /// opaque failure for the whole fill. The module now fails closed itself, with a
+    /// name that says what to reach for instead (`closeTrove`, wired separately).
+    ///
+    /// The mock has no min-debt floor, which is precisely why this was invisible to
+    /// the suite before.
+    function test_repay_fullDebt_failsClosedWithANamedError() public {
+        tm.setDebt(MAKER_TROVE, BORROW);
+        bold.mint(maker, BORROW);
+
+        vm.startPrank(maker);
+        bold.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(repayModule), address(bold), uint160(BORROW), 0);
+        vm.stopPrank();
+
+        vm.prank(settlement);
+        vm.expectRevert(abi.encodeWithSelector(LiquityV2RepayModule.FullCloseNotSupported.selector, BORROW));
         repayModule.makeOnBehalf(maker, BORROW, abi.encode(BRANCH, MAKER_TROVE, address(bold)));
 
-        assertEq(tm.debt(MAKER_TROVE), 0, "debt repaid");
-        assertEq(bold.balanceOf(address(repayModule)), 0, "no residue left on the module");
+        assertEq(tm.debt(MAKER_TROVE), BORROW, "nothing moved");
     }
 
     function test_attacker_cannot_repay_into_victim_trove() public {

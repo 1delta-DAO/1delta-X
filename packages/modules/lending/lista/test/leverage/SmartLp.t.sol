@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {ListaSmartSupplyCollateralModule, ListaSmartTakerModule} from "../../src/ListaSmartModules.sol";
+import {ListaBrokerModule} from "../../src/ListaBrokerModule.sol";
 import {ListaModulesBase, IMoolahSigViews, IListaBrokerViews} from "../shared/ListaModulesBase.t.sol";
 import {IMoolah, MarketParams, MarketParamsLib} from "../../src/interfaces/ILista.sol";
 
@@ -66,9 +67,13 @@ contract ListaSmartLpTest is ListaModulesBase {
     }
 
     /// @dev Moolah custodies all listed tokens — the guaranteed live whale.
-    function _giveSlis(address to, uint256 amount) internal {
+    function _give(address token, address to, uint256 amount) internal {
         vm.prank(MOOLAH);
-        IERC20(SLISBNB).transfer(to, amount);
+        IERC20(token).transfer(to, amount);
+    }
+
+    function _giveSlis(address to, uint256 amount) internal {
+        _give(SLISBNB, to, amount);
     }
 
     /// @dev Zap `COIN_IN` slisBNB into LP collateral via the MAKE module.
@@ -107,7 +112,7 @@ contract ListaSmartLpTest is ListaModulesBase {
 
         bytes memory data = abi.encode(PROVIDER_SMART, SLISBNB, uint256(1), MIN_LP_RATE, _mpSmart());
         vm.prank(address(settlement));
-        vm.expectRevert();
+        vm.expectRevert(bytes("amount1 should equal msg.value"));
         smartSupply.makeOnBehalf(maker, COIN_IN, data);
     }
 
@@ -150,9 +155,129 @@ contract ListaSmartLpTest is ListaModulesBase {
     function test_smartWithdraw_requiresAuth() public {
         uint256 minted = _supplyLp();
         vm.prank(address(permit3));
-        vm.expectRevert();
+        vm.expectRevert(bytes("unauthorized sender"));
         smartTaker.takeOnBehalf(maker, minted / 2, solver, _smartWithdrawData());
+        assertEq(_collateral(), minted, "position untouched");
     }
+
+    // ──────────────────── The signed slippage floors ────────────────────
+    //
+    // Both SmartLP legs cross a POOL, so both carry a maker-signed 1e18-scaled
+    // RATE rather than an absolute minimum — the module multiplies it by the
+    // per-slice amount so a partial fill gets a proportional floor. A floor that
+    // is carried in `data` but never enforced is indistinguishable from a floor
+    // that is, until the day the pool moves, so each direction gets a case that
+    // makes it bite.
+
+    /// @dev Supply: `minLpRate` is LP-wei per coin-wei. One slisBNB mints ≈1 LP,
+    ///      so demanding 100 LP per coin cannot be met and the mint must revert
+    ///      rather than credit the position with whatever the pool gave.
+    function test_smartSupply_minLpRate_floorBites() public {
+        _giveSlis(maker, COIN_IN);
+        vm.startPrank(maker);
+        IERC20(SLISBNB).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(smartSupply), SLISBNB, uint160(COIN_IN), 0);
+        vm.stopPrank();
+
+        uint256 before = _collateral();
+        bytes memory data = abi.encode(PROVIDER_SMART, SLISBNB, uint256(0), uint256(100e18), _mpSmart());
+
+        // The pool's own check, reached because the module forwarded
+        // `amount * minLpRate / 1e18` as the venue's `minLp` argument.
+        vm.prank(address(settlement));
+        vm.expectRevert(bytes("Slippage screwed you"));
+        smartSupply.makeOnBehalf(maker, COIN_IN, data);
+
+        assertEq(_collateral(), before, "no collateral credited");
+        assertEq(IERC20(SLISBNB).balanceOf(maker), COIN_IN, "the maker's coin stayed put");
+    }
+
+    /// @dev Withdraw: `minOutRate` is coin-wei per LP-wei — the inverse leg. One
+    ///      LP burns to ≲1 slisBNB, so demanding 100 must revert; without the
+    ///      floor a drained pool would pay the receiver dust for a real burn.
+    function test_smartWithdraw_minOutRate_floorBites() public {
+        uint256 minted = _supplyLp();
+        uint256 burn = minted / 2;
+
+        vm.prank(maker);
+        IMoolah(MOOLAH).setAuthorization(address(smartTaker), true);
+
+        bytes memory data = abi.encode(PROVIDER_SMART, MOOLAH, uint256(0), uint256(100e18), _mpSmart());
+
+        // The pool's own check on the way out, reached because the module
+        // forwarded `amount * minOutRate / 1e18` as the venue's minimum.
+        vm.prank(address(permit3));
+        vm.expectRevert(bytes("Not enough coins removed"));
+        smartTaker.takeOnBehalf(maker, burn, solver, data);
+
+        assertEq(_collateral(), minted, "no LP burned");
+        assertEq(IERC20(SLISBNB).balanceOf(solver), 0, "receiver got nothing");
+    }
+
+    // ──────────────────── The coin/index pairing ────────────────────
+
+    /// @dev `coin` and `coinIndex` are two independent maker-signed fields naming
+    ///      ONE thing, and the module never derives either from the other — the
+    ///      roster's coin order is authoritative. A mismatched pair must fail
+    ///      closed: the module pulls and approves the `coin` it was given, while
+    ///      the provider `transferFrom`s the coin its INDEX names, which this
+    ///      module never approved. Pinned because "fails closed" here rests on
+    ///      the venue, not on a check in our own code.
+    function test_smartSupply_coinIndexMismatch_failsClosed() public {
+        _giveSlis(maker, COIN_IN);
+        _give(WBNB, maker, COIN_IN);
+        // Approve BOTH coins all the way through, so the mismatch is the only
+        // thing left that can fail. Without this the call dies on the module's
+        // own pull and the test would pass without ever reaching the provider.
+        vm.startPrank(maker);
+        IERC20(SLISBNB).approve(address(permit3), type(uint256).max);
+        IERC20(WBNB).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(smartSupply), SLISBNB, uint160(COIN_IN), 0);
+        permit3.approveToken(address(smartSupply), WBNB, uint160(COIN_IN), 0);
+        vm.stopPrank();
+
+        uint256 before = _collateral();
+
+        // coinIndex 0 (slisBNB) paired with WBNB as the pulled coin. The module
+        // pulls and approves WBNB; the provider `transferFrom`s slisBNB — the coin
+        // the INDEX names — from a module that approved it nothing.
+        vm.prank(address(settlement));
+        vm.expectRevert(bytes("ERC20: insufficient allowance"));
+        smartSupply.makeOnBehalf(maker, COIN_IN, abi.encode(PROVIDER_SMART, WBNB, uint256(0), MIN_LP_RATE, _mpSmart()));
+
+        assertEq(_collateral(), before, "no collateral credited");
+        assertEq(IERC20(SLISBNB).balanceOf(address(smartSupply)), 0, "module holds no coin");
+        assertEq(IERC20(WBNB).balanceOf(address(smartSupply)), 0, "module holds no coin");
+
+        // The positive control: the SAME grants with a correctly-paired blob go
+        // through, which is what isolates the pairing as the cause above.
+        vm.prank(address(settlement));
+        smartSupply.makeOnBehalf(maker, COIN_IN, _smartSupplyData());
+        assertGt(_collateral(), before, "the correctly-paired blob credits collateral");
+    }
+
+    /// @dev The header's fail-closed claim for a position that moved between
+    ///      signing and filling: `amount` is LP UNITS and there is no BalanceMode
+    ///      here, so a burn larger than the live position reverts in the venue
+    ///      rather than silently taking whatever is left.
+    function test_smartWithdraw_burnAbovePosition_failsClosed() public {
+        uint256 minted = _supplyLp();
+
+        vm.prank(maker);
+        IMoolah(MOOLAH).setAuthorization(address(smartTaker), true);
+
+        // Fails as an arithmetic PANIC, not a `require` — Moolah subtracts the
+        // burn from the position and underflows. Pinned as such because "reverts"
+        // and "reverts with a checked message" are different guarantees, and only
+        // one of them survives a venue upgrade that adds unchecked math.
+        vm.prank(address(permit3));
+        vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x11));
+        smartTaker.takeOnBehalf(maker, minted + 1, solver, _smartWithdrawData());
+
+        assertEq(_collateral(), minted, "position untouched");
+    }
+
+
 
     // ──────────────────── The LP BROKER combination ────────────────────
 
@@ -164,14 +289,16 @@ contract ListaSmartLpTest is ListaModulesBase {
         assertGt(minted, 0, "LP collateral in place");
 
         vm.prank(maker);
-        IMoolah(MOOLAH).setAuthorization(address(takerModule), true);
+        IMoolah(MOOLAH).setAuthorization(address(brokerModule), true);
 
         uint256[3][] memory terms = IListaBrokerViews(BROKER_SMART).getFixedTerms();
         assertGt(terms.length, 0, "live term menu non-empty");
         uint256 borrowOut = 0.05e18; // WBNB, > minLoan (~0.021)
 
         vm.prank(address(permit3));
-        takerModule.takeOnBehalf(maker, borrowOut, solver, abi.encode(uint8(0), BROKER_SMART, terms[0][0]));
+        brokerModule.takeOnBehalf(
+            maker, borrowOut, solver, abi.encode(uint8(ListaBrokerModule.Op.Borrow), BROKER_SMART, terms[0][0])
+        );
 
         assertEq(IERC20(WBNB).balanceOf(solver), borrowOut, "WBNB debt proceeds delivered ERC20");
         assertGe(IListaBrokerViews(BROKER_SMART).getUserTotalDebt(maker), borrowOut, "broker debt on the maker");

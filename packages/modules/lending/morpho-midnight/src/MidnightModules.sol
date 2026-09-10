@@ -360,6 +360,12 @@ contract MidnightTakerModule is ITakerModule {
         uint256 bal = midnight.collateral(MidnightIdLib.toId(market), onBehalfOf, collateralIndex);
         midnight.withdrawCollateral(market, collateralIndex, bal, onBehalfOf, address(this));
         uint256 received = IERC20(collateralToken).balanceOf(address(this)) - floor;
+        // The lower bound the venue used to enforce. Before the split rewrite the
+        // venue call was sized at `amount`, so a short position reverted inside it;
+        // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+        // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+        // `amount` is the signed TOTAL, never a pro-rated slice.
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(collateralToken, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
     }
@@ -386,6 +392,12 @@ contract MidnightTakerModule is ITakerModule {
         uint256 bal = midnight.credit(MidnightIdLib.toId(market), onBehalfOf);
         midnight.withdraw(market, bal, onBehalfOf, address(this));
         uint256 received = IERC20(loanToken).balanceOf(address(this)) - floor;
+        // The lower bound the venue used to enforce. Before the split rewrite the
+        // venue call was sized at `amount`, so a short position reverted inside it;
+        // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+        // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+        // `amount` is the signed TOTAL, never a pro-rated slice.
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(loanToken, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, received - amount);
     }

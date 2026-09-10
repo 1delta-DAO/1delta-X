@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
 
 import {Order, Item, ItemOp, MatchPlan} from "@core/settlement/Settlement.sol";
 import {PositionFillModule} from "@lib/PositionFillModule.sol";
@@ -128,7 +129,7 @@ contract PositionSizedWithdrawTest is AaveModulesBase {
         _seedAWethPosition(position);
         deal(USDC, solver, signedQuote);
 
-        bytes memory takerData = abi.encode(AAVE_POOL, WETH, aWETH, uint8(1), signedAmount);
+        bytes memory takerData = abi.encode(AAVE_POOL, WETH, aWETH, DustHandler.encodeMode(DustHandler.BalanceMode.Full), signedAmount);
         _approve(signedAmount, takerData);
         _approveSolverSide(signedQuote, USDC);
 
@@ -468,6 +469,59 @@ contract PositionSizedWithdrawTest is AaveModulesBase {
         settlement.matchSettle(plan);
 
         assertEq(IERC20(aWETH).balanceOf(maker), live, "position untouched");
+    }
+
+    /// @dev AUDIT REGRESSION — the anchor leg must be FIXED. `_positionFor` asserts
+    /// `legsIn[0].start == fillTotal` to make the pro-rate exact, but that argument
+    /// only describes {Pricing.inputOwed}'s FIXED branch. With `end != 0` the
+    /// auctioned branch charges `delta · inTick(start,end,bump) / anchor`, which
+    /// EXCEEDS the position the item withdrew — and the core pulls the difference
+    /// from the maker's wallet, in an amount the FILLER picks by choosing the
+    /// inclusion block. Refused now.
+    function test_risingAnchorLeg_reverts() public {
+        _seedAWethPosition(1.3 ether);
+        bytes memory takerData = abi.encode(AAVE_POOL, WETH, aWETH);
+        _approve(CAP, takerData);
+        _approveSolverSide(QUOTE_AT_CAP, USDC);
+
+        Item[] memory items = new Item[](1);
+        items[0] =
+            Item({op: ItemOp.TAKE, module: address(withdrawModule), amount: CAP, recipient: address(0), data: takerData});
+        Order memory order = _positionOrderWith(30, address(fillModule), CAP, CAP, items);
+        // A RISING input leg: legally signable on a SELL, and it breaks exactness.
+        order.legsIn = _legsIn1Rising(WETH, CAP, CAP + 0.1 ether);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(
+            abi.encodeWithSelector(PositionFillModule.DenominatorMismatch.selector, uint256(0.1 ether + CAP), 0)
+        );
+        settlement.fill(order, sig, CAP);
+    }
+
+    /// @dev AUDIT REGRESSION — a CODE-LESS item module must be SKIPPED, not revert
+    /// the resolve. try/catch cannot catch this: a STATICCALL to a code-less address
+    /// SUCCEEDS with empty returndata and solc decodes the tuple in the caller's
+    /// frame, so the decode failure escapes `catch`. With an explicit
+    /// `code.length == 0` skip, the order fails with the honest `NoPositionItem`.
+    function test_codelessItemModule_skipsRatherThanBricking() public {
+        _seedAWethPosition(1.3 ether);
+        _approveSolverSide(QUOTE_AT_CAP, USDC);
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({
+            op: ItemOp.TAKE,
+            module: address(0xDEAD), //          no code
+            amount: CAP,
+            recipient: address(0),
+            data: abi.encode(AAVE_POOL, WETH, aWETH)
+        });
+        Order memory order = _positionOrderWith(31, address(fillModule), CAP, CAP, items);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(PositionFillModule.NoPositionItem.selector);
+        settlement.fill(order, sig, CAP);
     }
 
     /// @dev THE UNITS CHECK. The module reports what token its position is

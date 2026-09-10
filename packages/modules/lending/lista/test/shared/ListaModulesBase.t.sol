@@ -9,6 +9,7 @@ import {Settlement, Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
 import {ListaSupplyCollateralModule, ListaTakerModule} from "../../src/ListaModules.sol";
+import {ListaBrokerModule} from "../../src/ListaBrokerModule.sol";
 import {IMoolah, MarketParams, MarketParamsLib, Id} from "../../src/interfaces/ILista.sol";
 
 /// @dev Broker views used only by the tests (not part of the module surface).
@@ -69,6 +70,8 @@ abstract contract ListaModulesBase is CoreSettlementBase {
 
     ListaSupplyCollateralModule internal supplyModule;
     ListaTakerModule internal takerModule;
+    /// @dev The whole broker surface — repay (both funding shapes) AND borrow.
+    ListaBrokerModule internal brokerModule;
 
     function setUp() public virtual override {
         _forkBsc();
@@ -78,6 +81,7 @@ abstract contract ListaModulesBase is CoreSettlementBase {
 
         supplyModule = new ListaSupplyCollateralModule(address(permit3), address(settlement));
         takerModule = new ListaTakerModule(address(permit3));
+        brokerModule = new ListaBrokerModule(address(permit3), address(settlement));
 
         vm.label(maker, "maker");
         vm.label(solver, "solver");
@@ -85,6 +89,7 @@ abstract contract ListaModulesBase is CoreSettlementBase {
         vm.label(address(settlement), "settlement");
         vm.label(address(supplyModule), "listaSupplyModule");
         vm.label(address(takerModule), "listaTakerModule");
+        vm.label(address(brokerModule), "listaBrokerModule");
         vm.label(MOOLAH, "moolah");
         vm.label(BROKER, "listaBroker");
         vm.label(USD1, "USD1");
@@ -144,9 +149,11 @@ abstract contract ListaModulesBase is CoreSettlementBase {
         return IMoolah(MOOLAH).position(_marketId(), maker).collateral;
     }
 
-    /// @dev data blob of the fixed-term broker borrow TAKE leg (op 0).
+    /// @dev data blob of the fixed-term broker borrow TAKE leg — {ListaBrokerModule}
+    ///      op 1. Ops are numbered across both of that contract's seams, so the
+    ///      value differs from the withdraw module's op numbering below.
     function _borrowData() internal pure returns (bytes memory) {
-        return abi.encode(uint8(0), BROKER, TERM_7D);
+        return abi.encode(uint8(ListaBrokerModule.Op.Borrow), BROKER, TERM_7D);
     }
 
     /// @dev data blob of the withdraw-collateral TAKE leg (op 1, Exact mode).
@@ -183,10 +190,10 @@ abstract contract ListaModulesBase is CoreSettlementBase {
 
         // Protocol-native grant: the broker's on-behalf borrow is gated by the
         // maker's Moolah authorization of the calling module.
-        if (authorizeMoolah) IMoolah(MOOLAH).setAuthorization(address(takerModule), true);
+        if (authorizeMoolah) IMoolah(MOOLAH).setAuthorization(address(brokerModule), true);
 
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(brokerModule), keccak256(_borrowData()), uint160(borrowOut), 0);
 
         // USD1 fallback allowance for the tokenIn shortfall path — never triggers
         // here (the borrow fully funds tokenIn) but keeps the flow shaped like
@@ -226,7 +233,7 @@ abstract contract ListaModulesBase is CoreSettlementBase {
             data: _supplyData()
         });
         items[1] = Item({
-            op: ItemOp.TAKE, module: address(takerModule), amount: borrowOut, recipient: address(0), data: _borrowData()
+            op: ItemOp.TAKE, module: address(brokerModule), amount: borrowOut, recipient: address(0), data: _borrowData()
         });
         order = _order(maker, 1, USD1, BTCB, borrowOut, collateralIn, items);
     }

@@ -7,6 +7,7 @@ import {MarketParams} from "../../src/interfaces/IMorphoBlue.sol";
 
 // Reuse the mocks + helper from the split-module unit test.
 import {MockERC20, MockMorpho, MockPermit3, dummyMarketParams} from "./MorphoBlueTakerModulesTest.t.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
 
 // ── MorphoBlueTakerModule (combined borrow + withdraw) tests ──────────────────
 //
@@ -123,7 +124,7 @@ contract MorphoBlueCombinedTakerModuleTest is Test {
         // BalanceMode = Full (1): withdraw entire collateral, forward `amount`,
         // sweep the rest back to the user.
         uint256 total = WITHDRAW * 10;
-        bytes memory data = abi.encode(OP_WITHDRAW, market, uint8(1), WITHDRAW);
+        bytes memory data = abi.encode(OP_WITHDRAW, market, DustHandler.encodeMode(DustHandler.BalanceMode.Full), WITHDRAW);
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, WITHDRAW, receiver, data);
@@ -177,7 +178,7 @@ contract MorphoBlueCombinedTakerModuleTest is Test {
         // BalanceMode = Full (1): redeem the entire supply by shares, forward
         // `amount`, sweep the accrued excess back to the user.
         uint256 total = WITHDRAW * 10;
-        bytes memory data = abi.encode(OP_WITHDRAW_LOAN, market, uint8(1), WITHDRAW);
+        bytes memory data = abi.encode(OP_WITHDRAW_LOAN, market, DustHandler.encodeMode(DustHandler.BalanceMode.Full), WITHDRAW);
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, WITHDRAW, receiver, data);

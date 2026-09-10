@@ -86,11 +86,37 @@ library DustHandler {
     ///         maker who encoded `Full` in a wider word would get an exact
     ///         withdraw, and the `FullFillGuard` total they appended after the
     ///         mode slot would go unread.
+    /// @notice The tag every non-default `BalanceMode` word must carry.
+    ///
+    /// @dev ⚠ WHY THE WORD IS TAGGED. The absent-mode test is a LENGTH LOWER BOUND,
+    ///      so a maker who omits the optional mode word but appends an auth/permit
+    ///      tail has the TAIL'S FIRST WORD read as the mode. Every byte map in the
+    ///      tree already says the mode word is mandatory whenever a tail follows —
+    ///      but nothing enforced it, and the consequence was severe: a Comet or
+    ///      Morpho auth `nonce` of 1 read as `Full`, after which
+    ///      {FullFillGuard.requireFullFillFromData} read the auth `expiry` as the
+    ///      maker-signed `totalAmount`, which a filler can satisfy on a DUST slice —
+    ///      a filler-reachable force-unwind of the whole position.
+    ///
+    ///      The tag closes it without changing what "absent" means: a zero word
+    ///      still reads `Exact` (so an omitted mode plus a fresh nonce of 0 is still
+    ///      the intended `Exact`), and anything else present must be tagged or the
+    ///      read REVERTS. An untagged 1 is now loud instead of silently `Full`.
+    ///
+    ///      Encode through {encodeMode}; never hand-roll `uint8(1)`.
+    uint256 internal constant MODE_TAG = 0xB0DE0000;
+
+    /// @notice The word a maker must sign to select `mode`.
+    function encodeMode(BalanceMode mode) internal pure returns (uint256) {
+        return mode == BalanceMode.Exact ? 0 : MODE_TAG | uint256(uint8(mode));
+    }
+
     function readBalanceMode(bytes calldata data, uint256 baseLen) internal pure returns (BalanceMode) {
         if (data.length < baseLen + 32) return BalanceMode.Exact;
         uint256 word = uint256(bytes32(data[baseLen:baseLen + 32]));
-        if (word > uint256(type(BalanceMode).max)) revert InvalidModeWord(word);
-        return BalanceMode(uint8(word));
+        if (word == 0) return BalanceMode.Exact;
+        if (word == (MODE_TAG | uint256(uint8(BalanceMode.Full)))) return BalanceMode.Full;
+        revert InvalidModeWord(word);
     }
 
     /// @notice Dispose of a module's `residual` balance of `token`.

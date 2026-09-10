@@ -50,6 +50,15 @@ interface ISilo {
 
     /// @notice Max underlying `owner` can withdraw right now (liquidity-bounded).
     function maxWithdraw(address owner) external view returns (uint256 assets);
+
+    /// @notice The owner's RAW position in asset units — share balance converted at
+    ///         the current rate, with NO solvency or liquidity clamp.
+    /// @dev This, not {maxWithdraw}, is what {IPositionSource.positionOf} must report:
+    ///      `maxWithdraw` is a REACHABILITY figure (clipped by open debt and by vault
+    ///      cash, both of which third parties move), and pricing a one-shot exit off
+    ///      it lets a fill resolve small instead of reverting.
+    function balanceOf(address owner) external view returns (uint256 shares);
+    function previewRedeem(uint256 shares) external view returns (uint256 assets);
 }
 
 /// @notice The Silo debt share token's reverse-approval primitive. The borrower

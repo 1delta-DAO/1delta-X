@@ -9,6 +9,7 @@ import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {PositionFillModule} from "@lib/PositionFillModule.sol";
 
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
+import {CometTakerModule} from "../../src/CompoundV3Modules.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
 /// @dev FULL CLOSE OF A WETH/USDC COMET LOOP, position-sized.
@@ -136,5 +137,39 @@ contract PositionSizedLoopCloseTest is CompoundV3ModulesBase {
         vm.prank(solver);
         vm.expectRevert(); // Comet: not collateralized
         settlement.fill(order, sig, CAP);
+    }
+
+    /// @dev AUDIT REGRESSION — Comet is the ONE venue where an over-sized withdraw is
+    /// a BORROW, not a revert. Its own interface says so: "asset == base -> withdraw
+    /// a base supply, or BORROW past it". Without a supply bound, a maker-signed
+    /// WITHDRAW grant silently opens debt they never signed for, and the "a short
+    /// position fails closed" premise every sibling relies on is false here.
+    function test_baseWithdrawPastSupply_revertsInsteadOfBorrowing() public {
+        uint256 baseSupply = 500e6;
+        _seedWethCollateral(4 ether); //          plenty of collateral to borrow against
+        vm.startPrank(maker);
+        deal(USDC, maker, baseSupply);
+        IERC20(USDC).approve(COMET, baseSupply);
+        IComet(COMET).supply(USDC, baseSupply);
+        vm.stopPrank();
+
+        // Ask for MORE base than the live supply. On raw Comet this borrows.
+        uint256 ask = baseSupply * 2;
+        bytes memory takerData = _withdrawData(COMET, USDC);
+        vm.startPrank(maker);
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), USDC, uint160(ask), 0);
+        permit3.approveTaker(address(settlement), address(takerModule), keccak256(takerData), uint160(ask), 0);
+        vm.stopPrank();
+
+        uint256 live = _baseSupply(maker);
+        assertLt(live, ask, "the ask exceeds the live base supply");
+        uint256 debtBefore = _usdcDebt(maker);
+
+        vm.prank(address(permit3));
+        vm.expectRevert(abi.encodeWithSelector(CometTakerModule.WouldBorrow.selector, ask, live));
+        takerModule.takeOnBehalf(maker, ask, address(settlement), takerData);
+
+        assertEq(_usdcDebt(maker), debtBefore, "no debt opened");
     }
 }

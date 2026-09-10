@@ -47,6 +47,8 @@ library FullFillGuard {
     ///      here — a maker who omits the field gets a revert rather than a silently
     ///      unguarded pull.
     error PartialFillUnsupported(uint256 amount, uint256 totalAmount);
+    /// @dev A `Full`-mode withdraw produced less than the maker's signed amount.
+    error ShortWithdraw(uint256 received, uint256 amount);
 
     /// @param amount      this fill's pro-rated slice, as passed to the module
     /// @param totalAmount the item's full maker-signed amount, carried in `data`
@@ -76,5 +78,26 @@ library FullFillGuard {
         // the order that was vulnerable, so it must not keep working silently.
         if (data.length < offset + 32) revert PartialFillUnsupported(amount, 0);
         requireFullFill(amount, uint256(bytes32(data[offset:offset + 32])));
+    }
+
+    /// @notice Require a `Full`-mode withdraw to have produced the signed amount.
+    ///
+    /// @dev ⚠ THIS RESTORES A BOUND THE VENUE USED TO ENFORCE, AND IT IS NOT THE
+    ///      GATE THAT WAS DELETED. Before the withdraw-once-then-split rewrite the
+    ///      venue call itself was sized at `amount`, so a position short of it
+    ///      reverted inside the venue — "fail closed, no gate needed". The rewrite
+    ///      withdraws the whole position and splits it, so nothing reverts on a
+    ///      short any more, and the substitute the posture note cited (Settlement's
+    ///      output validation) does not cover this side of the ledger: a withdraw
+    ///      item funds an INPUT leg, and {Core._payInputsToSolver} silently pulls
+    ///      `owed - proceeds` out of the MAKER'S WALLET.
+    ///
+    ///      Safe to apply only on `Full` legs, which is why it lives beside
+    ///      {requireFullFill}: there `amount == totalAmount` is the maker's signed
+    ///      TOTAL, not a pro-rated slice, so the comparison cannot misfire on a
+    ///      partial fill. Do NOT add it to an `Exact` branch, where `amount` is a
+    ///      slice and a short delivery is the core's business, not the module's.
+    function requireDelivered(uint256 received, uint256 amount) internal pure {
+        if (received < amount) revert ShortWithdraw(received, amount);
     }
 }

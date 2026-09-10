@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {IMorphoAuth} from "@lib/interfaces/IMorphoAuth.sol";
 
+import {ListaBrokerModule} from "../../src/ListaBrokerModule.sol";
 import {ListaModulesBase, IListaBrokerViews} from "../shared/ListaModulesBase.t.sol";
 
 /// @dev Views the deployed Moolah exposes around its Morpho-style sig-auth.
@@ -79,11 +80,13 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
 
     // ──────────────────── Tailed data blobs ────────────────────
 
-    /// @dev op-0 borrow data with the optional auth tail: base 96, moolah at 96,
-    ///      auth block at 128 (total 288).
+    /// @dev {ListaBrokerModule} op-1 borrow data with the optional auth tail: base
+    ///      96, moolah at 96, auth block at 128 (total 288). The auth target is the
+    ///      BROKER module now — it is the contract the broker's on-behalf gate sees.
     function _borrowDataWithAuth(uint256 deadline) internal view returns (bytes memory) {
         return abi.encodePacked(
-            abi.encode(uint8(0), BROKER, TERM_7D, MOOLAH), _signMoolahAuth(address(takerModule), deadline)
+            abi.encode(uint8(ListaBrokerModule.Op.Borrow), BROKER, TERM_7D, MOOLAH),
+            _signMoolahAuth(address(brokerModule), deadline)
         );
     }
 
@@ -112,13 +115,13 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
         vm.startPrank(maker);
         IERC20(BTCB).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(supplyModule), BTCB, uint160(COLLATERAL_IN), 0);
-        permit3.approveTaker(address(settlement), address(takerModule), keccak256(borrowData), uint160(BORROW_OUT), 0);
+        permit3.approveTaker(address(settlement), address(brokerModule), keccak256(borrowData), uint160(BORROW_OUT), 0);
         IERC20(USD1).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), USD1, uint160(BORROW_OUT), 0);
         vm.stopPrank();
         _approveSolverSide(COLLATERAL_IN, BTCB);
 
-        assertFalse(IMoolahAuthViews(MOOLAH).isAuthorized(maker, address(takerModule)), "no prior on-chain grant");
+        assertFalse(IMoolahAuthViews(MOOLAH).isAuthorized(maker, address(brokerModule)), "no prior on-chain grant");
 
         Item[] memory items = new Item[](2);
         items[0] = Item({
@@ -129,7 +132,7 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
             data: _supplyData()
         });
         items[1] = Item({
-            op: ItemOp.TAKE, module: address(takerModule), amount: BORROW_OUT, recipient: address(0), data: borrowData
+            op: ItemOp.TAKE, module: address(brokerModule), amount: BORROW_OUT, recipient: address(0), data: borrowData
         });
         Order memory order = _order(maker, 1, USD1, BTCB, BORROW_OUT, COLLATERAL_IN, items);
         bytes memory sig = _sign(order);
@@ -141,7 +144,7 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
         assertEq(paid, COLLATERAL_IN, "solver paid the full collateral");
 
         // The signature became a live authorization, and the borrow landed on it.
-        assertTrue(IMoolahAuthViews(MOOLAH).isAuthorized(maker, address(takerModule)), "sig-auth replayed in-call");
+        assertTrue(IMoolahAuthViews(MOOLAH).isAuthorized(maker, address(brokerModule)), "sig-auth replayed in-call");
         assertEq(_makerCollateral(), COLLATERAL_IN, "maker Moolah collateral up");
         assertGe(IListaBrokerViews(BROKER).getUserTotalDebt(maker) - debtBefore, BORROW_OUT, "broker debt opened");
         assertEq(IERC20(USD1).balanceOf(solver), BORROW_OUT, "solver received the borrow proceeds");
@@ -208,7 +211,7 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
         vm.startPrank(maker);
         IERC20(BTCB).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(supplyModule), BTCB, uint160(COLLATERAL_IN), 0);
-        permit3.approveTaker(address(settlement), address(takerModule), keccak256(borrowData), uint160(BORROW_OUT), 0);
+        permit3.approveTaker(address(settlement), address(brokerModule), keccak256(borrowData), uint160(BORROW_OUT), 0);
         IERC20(USD1).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), USD1, uint160(BORROW_OUT), 0);
         vm.stopPrank();
@@ -221,11 +224,11 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
         vm.prank(address(0xBAD));
         IMorphoAuth(MOOLAH).setAuthorizationWithSig(
             IMorphoAuth.Authorization({
-                authorizer: maker, authorized: address(takerModule), isAuthorized: true, nonce: nonce, deadline: deadline
+                authorizer: maker, authorized: address(brokerModule), isAuthorized: true, nonce: nonce, deadline: deadline
             }),
             IMorphoAuth.Signature({v: v, r: r, s: s})
         );
-        assertTrue(IMoolahAuthViews(MOOLAH).isAuthorized(maker, address(takerModule)), "front-runner spent the nonce");
+        assertTrue(IMoolahAuthViews(MOOLAH).isAuthorized(maker, address(brokerModule)), "front-runner spent the nonce");
 
         Item[] memory items = new Item[](2);
         items[0] = Item({
@@ -236,7 +239,7 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
             data: _supplyData()
         });
         items[1] = Item({
-            op: ItemOp.TAKE, module: address(takerModule), amount: BORROW_OUT, recipient: address(0), data: borrowData
+            op: ItemOp.TAKE, module: address(brokerModule), amount: BORROW_OUT, recipient: address(0), data: borrowData
         });
         Order memory order = _order(maker, 1, USD1, BTCB, BORROW_OUT, COLLATERAL_IN, items);
         bytes memory sig = _sign(order);

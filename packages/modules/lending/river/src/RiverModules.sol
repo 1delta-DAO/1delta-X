@@ -138,6 +138,10 @@ contract RiverAddCollModule is IMakerModule {
 // `data = abi.encode(xapp, troveManager, debtToken, upperHint, lowerHint)` — base = 160.
 //
 contract RiverRepayModule is IMakerModule {
+    /// @dev A repay sized at the WHOLE trove debt. The venue enforces a minimum
+    ///      debt, so zeroing it reverts inside the venue; a full close is
+    ///      `closeTrove`, which this module deliberately does not wire.
+    error FullCloseNotSupported(uint256 entireDebt);
     IPermit3 public immutable permit3;
     address public immutable settlement;
 
@@ -166,7 +170,16 @@ contract RiverRepayModule is IMakerModule {
         // claimable by whoever fills next. The invariant is "the module ends where it
         // started", not "ends empty" (F19; {DustHandler.disposeResidual}'s floor).
         uint256 floor = IERC20(debtToken).balanceOf(address(this));
+        // ⚠ A FULL CLOSE IS NOT EXPRESSIBLE HERE, AND THE CLAMP MUST SAY SO.
+        // The `min(amount, debt)` shape is copied from siblings where saturating at
+        // the live debt is the GOOD path. On a trove venue it is not: `repayDebt`
+        // enforces a MINIMUM DEBT, so the clamp's own success case — `toRepay ==
+        // entireDebt`, i.e. `newDebt == 0` — reverts inside the venue. A maker who
+        // over-sizes a repay therefore gets an opaque venue revert for the whole
+        // fill. Fail closed HERE instead, with a name that says what to do: a full
+        // close is `closeTrove`, wired separately.
         uint256 toRepay = amount < debt ? amount : debt;
+        if (toRepay != 0 && toRepay == debt) revert FullCloseNotSupported(debt);
 
         if (toRepay > 0) {
             permit3.transferFrom(onBehalfOf, address(this), debtToken, uint160(toRepay));

@@ -57,7 +57,42 @@ contract DustHandlerModeWordTest is Test {
 
     function test_inRange_balanceMode() public view {
         assertEq(uint256(reader.balanceMode(_blob(0), BASE_LEN)), uint256(DustHandler.BalanceMode.Exact));
-        assertEq(uint256(reader.balanceMode(_blob(1), BASE_LEN)), uint256(DustHandler.BalanceMode.Full));
+        assertEq(
+            uint256(reader.balanceMode(_blob(DustHandler.encodeMode(DustHandler.BalanceMode.Full)), BASE_LEN)),
+            uint256(DustHandler.BalanceMode.Full)
+        );
+    }
+
+    // ── The TAG: an omitted mode word must not be read out of the auth tail ───
+
+    /// @dev THE FINDING THIS TAG EXISTS FOR. The absent-mode test is a length LOWER
+    /// bound, so a maker who omits the optional mode word but appends an auth or
+    /// permit tail used to have the TAIL'S FIRST WORD read as the mode. On Comet and
+    /// Morpho that word is an allow-by-sig `nonce`, and a nonce of 1 read as `Full` —
+    /// after which {FullFillGuard.requireFullFillFromData} read the auth `expiry` as
+    /// the maker-signed `totalAmount`, a value a filler can match on a DUST slice.
+    /// That is a filler-reachable force-unwind of the maker's whole position.
+    ///
+    /// The tag makes an untagged non-zero word LOUD instead of silently `Full`.
+    function test_untaggedOne_reverts_insteadOfReadingAsFull() public {
+        vm.expectRevert(abi.encodeWithSelector(DustHandler.InvalidModeWord.selector, uint256(1)));
+        reader.balanceMode(_blob(1), BASE_LEN);
+    }
+
+    /// @dev A fresh sequential nonce of 0 still reads as `Exact` — which is what a
+    /// maker who omitted the mode word actually meant, so the tag does not break the
+    /// benign case it needs to keep working.
+    function test_untaggedZero_stillReadsExact() public view {
+        assertEq(uint256(reader.balanceMode(_blob(0), BASE_LEN)), uint256(DustHandler.BalanceMode.Exact));
+    }
+
+    /// @dev Realistic aliasing values from the two byte maps that carry an auth tail:
+    /// a Comet/Morpho nonce and a permit deadline. All must revert, none may resolve.
+    function testFuzz_noUntaggedWordEverReadsAsFull(uint256 word) public {
+        vm.assume(word != 0);
+        vm.assume(word != DustHandler.encodeMode(DustHandler.BalanceMode.Full));
+        vm.expectRevert(abi.encodeWithSelector(DustHandler.InvalidModeWord.selector, word));
+        reader.balanceMode(_blob(word), BASE_LEN);
     }
 
     /// An absent trailing field is still the documented default, not a revert.

@@ -182,7 +182,7 @@ contract AaveV2RepayModule is IMakerModule {
 // Single-op taker module. The user holds aTokens (Aave V2's interest-bearing
 // receipt token) and pre-approves this module at the ERC-20 level. Permit3
 // decrements the taker allowance, then invokes `takeOnBehalf` here. The module
-// pulls aTokens from the user via the Permit3 token allowance, calls
+// pulls aTokens from the user via a DIRECT ERC-20 allowance to this module (NOT Permit3), calls
 // `pool.withdraw` (which burns the module's aTokens and sends underlying to
 // `receiver`).
 //
@@ -190,7 +190,12 @@ contract AaveV2RepayModule is IMakerModule {
 // balance, forward the signed `amount` to `receiver`, sweep accrued excess
 // back to `onBehalfOf`.
 //
-// `data = abi.encode(pool, asset, aToken[, DustHandler.BalanceMode])`.
+// `data = abi.encode(pool, asset, aToken[, DustHandler.BalanceMode[, total]])`
+//   — mode@96, and `total`@128 is MANDATORY whenever the mode is `Full`: it is
+//     the maker-signed full item amount {FullFillGuard.requireFullFillFromData}
+//     compares the slice against, and it FAILS CLOSED when absent — so a `Full`
+//     order encoded from a map that omits it is one no filler can ever settle.
+//     (Was undeclared here; the same F25/A-2 drift already corrected on aave-v3.)
 //
 contract AaveV2WithdrawModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -238,6 +243,12 @@ contract AaveV2WithdrawModule is ITakerModule {
             SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), bal);
             IAaveV2Pool(pool).withdraw(asset, bal, address(this));
             uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+            // The lower bound the venue used to enforce. Before the split rewrite the
+            // venue call was sized at `amount`, so a short position reverted inside it;
+            // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+            // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+            // `amount` is the signed TOTAL, never a pro-rated slice.
+            FullFillGuard.requireDelivered(received, amount);
             SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {

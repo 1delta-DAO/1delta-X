@@ -256,7 +256,10 @@ contract EulerV2TakerModule is ITakerModule, IPositionSource {
     ///      path can share it — that path has already decoded the blob and cannot
     ///      hand a calldata slice back.
     function _vaultPositionOf(address vault, address user) private view returns (address asset, uint256 amount) {
-        return (IEulerVault(vault).asset(), IEulerVault(vault).maxWithdraw(user));
+        return (
+            IEulerVault(vault).asset(),
+            IEulerVault(vault).convertToAssets(IEulerVault(vault).balanceOf(user))
+        );
     }
 
     error OnlyPermit3();
@@ -296,9 +299,8 @@ contract EulerV2TakerModule is ITakerModule, IPositionSource {
     /// @dev Full mode: EXACT amounts straight to their destinations — the signed
     ///      `amount` to `receiver`, the remainder back to `onBehalfOf`. The vault's
     ///      ERC4626 `withdraw` takes a receiver (the Exact branch above uses it the
-    ///      same way), so the module never takes custody: no delta measurement, no
-    ///      split transfers, and a stray module balance can never be part of the
-    ///      payout. A position below `amount` reverts in the vault. Its own frame
+    ///      same way), the module DOES take custody between the withdraw and the
+        // split, which is why the floor + cap + bound below are load-bearing. A position below `amount` reverts in the vault. Its own frame
     ///      keeps the stack shallow.
     function _withdrawFull(address vault, address onBehalfOf, uint256 amount, address receiver) private {
         // ONE venue withdraw, then an ERC-20 SPLIT — the whole position lands here and
@@ -317,6 +319,12 @@ contract EulerV2TakerModule is ITakerModule, IPositionSource {
         (, uint256 bal) = _vaultPositionOf(vault, onBehalfOf);
         IEVC(evc).call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), onBehalfOf)));
         uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+        // The lower bound the venue used to enforce. Before the split rewrite the
+        // venue call was sized at `amount`, so a short position reverted inside it;
+        // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+        // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+        // `amount` is the signed TOTAL, never a pro-rated slice.
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }

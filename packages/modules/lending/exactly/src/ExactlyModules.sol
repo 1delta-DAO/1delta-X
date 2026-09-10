@@ -115,7 +115,11 @@ contract ExactlyRepayModule is IMakerModule {
         (address market, address asset, uint256 maturity, uint256 maxAssets) =
             abi.decode(data, (address, address, uint256, uint256));
         DustHandler.DustAction action = DustHandler.readAction(data, 128);
-        PermitHelper.replayIfPresent(data, 160, asset, onBehalfOf, address(permit3), amount);
+        // ⚠ BRANCH-SCOPED TAIL. The FIXED branch carries a maker-signed `totalAmount`
+        // at 160 (it needs one — see {_scaledBound}), so its permit tail sits at 192.
+        // The floating branch has no total and keeps the permit at 160. Same rule the
+        // Comet/Morpho/Lista taker maps already use for their `Full` tails.
+        PermitHelper.replayIfPresent(data, maturity == 0 ? 160 : 192, asset, onBehalfOf, address(permit3), amount);
 
         // The balance this module held BEFORE the pull. Everything below disposes of
         // the DELTA over it, never the whole balance: a module address can be sent
@@ -123,10 +127,25 @@ contract ExactlyRepayModule is IMakerModule {
         // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
         uint256 floor = IERC20(asset).balanceOf(address(this));
 
+        // The FIXED branch's `maxAssets` is scaled HERE, where `data` is still in
+        // scope — see {_scaledBound}. Reassigned in place rather than passed as a
+        // ternary: this function is already at the legacy codegen stack limit.
+        // The floating branch has no absolute bound to scale.
+        if (maturity != 0) maxAssets = _scaledBound(data, maxAssets, amount);
+
         _pullAndRepay(market, asset, maturity, amount, maxAssets, onBehalfOf, action == DustHandler.DustAction.Recycle);
         _disposeResidual(market, asset, onBehalfOf, action, floor);
 
         _locked = 1;
+    }
+
+    /// @dev Reads the maker-signed `totalAmount@160` and scales an absolute bound
+    ///      with the slice. Fails closed when the word is absent — an order without
+    ///      a total is exactly the order that was unprotected. Mirrors
+    ///      {ExactlyTakerModule._scaledBound}.
+    function _scaledBound(bytes calldata data, uint256 bound, uint256 amount) private pure returns (uint256) {
+        if (data.length < 192) revert ProratedBound.BoundTotalMissing();
+        return ProratedBound.scale(bound, amount, uint256(bytes32(data[160:192])));
     }
 
     function _pullAndRepay(
@@ -139,8 +158,19 @@ contract ExactlyRepayModule is IMakerModule {
         bool recycle
     ) private {
         if (maturity == 0) {
-            // Floating: pull-exact against the live debt.
-            uint256 debt = IExactlyMarket(market).previewDebt(onBehalfOf);
+            // Floating: pull-exact against the live FLOATING debt.
+            //
+            // ⚠ NOT `previewDebt`, which is floating + EVERY fixed-maturity
+            // position. `repay` settles the FLOATING book only, so clamping against
+            // the combined figure measures against a book this call does not touch:
+            // a maker holding both would have their floating debt zeroed while the
+            // whole fixed position stands, and the `[repay, withdraw]` close then
+            // reverts on health with nothing to point at. The over-read direction
+            // was never a loss (the Market caps at the borrower's own shares and the
+            // surplus is swept), but the module's idea of "the debt" was wrong.
+            uint256 debt = IExactlyMarket(market).previewRefund(
+                IExactlyMarket(market).floatingBorrowShares(onBehalfOf)
+            );
             uint256 toRepay = amount < debt ? amount : debt;
             uint256 toPull = recycle ? amount : toRepay;
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));
@@ -152,6 +182,14 @@ contract ExactlyRepayModule is IMakerModule {
             // Fixed: `amount` = face to repay; `maxAssets` bounds the transfer.
             // Pull the bound, let the Market take only what it needs; the surplus
             // is disposed below.
+            // ⚠ SCALE THE BOUND WITH THE SLICE. `maxAssets` is an ABSOLUTE
+            // slippage ceiling and `amount` is a pro-rated face, so passing the
+            // whole order's ceiling to every slice lets a filler-chosen slice count
+            // N multiply the maker's signed tolerance by N — and post-maturity,
+            // where Exactly charges a PENALTY rather than a discount, that is a
+            // straight overpay. The pull is scaled too, or N slices would draw
+            // N x maxAssets from the maker's allowance. {ProratedBound} is already
+            // applied to `borrowAtMaturity` in this same file.
             if (maxAssets > 0) {
                 permit3.transferFrom(onBehalfOf, address(this), asset, Narrow160.to160(maxAssets));
                 SafeTransferLib.forceApprove(asset, market, maxAssets);
@@ -265,8 +303,15 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
         override
         returns (address asset, uint256 amount)
     {
-        (uint256 op, address vault) = abi.decode(data, (uint8, address));
-        if (op != uint256(Op.Withdraw)) revert BadOp(uint8(op));
+        // ⚠ TWO DISCRIMINATORS, NOT ONE. Exactly keeps a FLOATING ERC-4626 book and
+        // a separate FIXED book per maturity, and `takeOnBehalf` branches on
+        // `maturity` BEFORE it looks at anything else. `_vaultPositionOf` reads the
+        // floating book only — which is why the `Full` branch that shares it sits
+        // behind `maturity == 0`. Sizing a fixed-maturity exit off the floating
+        // ledger would price the fill against a position the item never touches, so
+        // refuse it: {IPositionSource} requires a revert, not a plausible number.
+        (uint256 op, address vault,, uint256 maturity) = abi.decode(data, (uint8, address, address, uint256));
+        if (op != uint256(Op.Withdraw) || maturity != 0) revert BadOp(uint8(op));
         return _vaultPositionOf(vault, user);
     }
 
@@ -274,7 +319,10 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
     ///      path can share it — that path has already decoded the blob and cannot
     ///      hand a calldata slice back.
     function _vaultPositionOf(address vault, address user) private view returns (address asset, uint256 amount) {
-        return (IExactlyMarket(vault).asset(), IExactlyMarket(vault).maxWithdraw(user));
+        return (
+            IExactlyMarket(vault).asset(),
+            IExactlyMarket(vault).previewRedeem(IExactlyMarket(vault).balanceOf(user))
+        );
     }
 
     error OnlyPermit3();
@@ -351,7 +399,9 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
     ///      EXACT amounts sent straight to their destinations — the signed `amount`
     ///      to `receiver`, the remainder back to `onBehalfOf`. ERC-4626 `withdraw`
     ///      burns the OWNER's shares and pays `receiver` directly, so the module
-    ///      never takes custody: no delta measurement, no split transfers, and a
+    ///      DOES take custody between the withdraw and the split, which is why the
+    ///      floor, the `min(received, amount)` cap and the `requireDelivered` bound
+    ///      below are all load-bearing rather than defence-in-depth. A
     ///      stray module balance can never become part of the payout. A position
     ///      smaller than `amount` reverts in the vault — fail closed, no gate.
     function _withdrawFull(address market, address, address onBehalfOf, uint256 amount, address receiver)
@@ -374,6 +424,12 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
         uint256 floor = IERC20(asset).balanceOf(address(this));
         IExactlyMarket(market).withdraw(max, address(this), onBehalfOf);
         uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+        // The lower bound the venue used to enforce. Before the split rewrite the
+        // venue call was sized at `amount`, so a short position reverted inside it;
+        // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+        // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+        // `amount` is the signed TOTAL, never a pro-rated slice.
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }

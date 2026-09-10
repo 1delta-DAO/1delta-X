@@ -59,7 +59,7 @@ contract RepayTest is CompoundV3ModulesBase {
         assertEq(paid, bufferedAmount, "solver paid buffered USDC");
 
         // Debt fully closed (≤1 wei of Comet rounding tolerated).
-        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "debt zeroed");
+        assertEq(_usdcDebt(maker), 0, "debt zeroed");
 
         // Dust refunded to maker: the buffer that wasn't consumed by the repay
         // came back to the wallet, NOT converted into a Comet supply balance.
@@ -109,7 +109,7 @@ contract RepayTest is CompoundV3ModulesBase {
         vm.prank(solver);
         settlement.fillWithPermit(order, batch, sig, 1 ether);
 
-        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "debt zeroed");
+        assertEq(_usdcDebt(maker), 0, "debt zeroed");
         assertGt(IERC20(USDC).balanceOf(maker), 0, "dust refunded");
         assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "module drained");
     }
@@ -153,7 +153,7 @@ contract RepayTest is CompoundV3ModulesBase {
         settlement.fill(order, sig, wethForSolver);
 
         // Debt closed.
-        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "debt zeroed");
+        assertEq(_usdcDebt(maker), 0, "debt zeroed");
 
         // Surplus was NOT swept to the wallet — it was recycled into the position.
         uint256 expectedDust = bufferedAmount - makerDebtBefore;

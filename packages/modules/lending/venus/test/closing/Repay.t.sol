@@ -54,7 +54,7 @@ contract VenusRepayTest is VenusModulesBase {
         assertEq(paid, buffered, "solver paid buffered USDC");
 
         // Debt fully closed (Compound rounding tolerated).
-        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "debt zeroed");
+        assertEq(_usdcDebt(maker), 0, "debt zeroed");
 
         // The unused buffer was never pulled — it stays in the solver-funded flow
         // and is refunded to the maker (SweepToUser), not parked in the module.
@@ -112,7 +112,7 @@ contract VenusRepayTest is VenusModulesBase {
         vm.prank(solver);
         settlement.fill(order, sig, wethForSolver);
 
-        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "debt zeroed");
+        assertEq(_usdcDebt(maker), 0, "debt zeroed");
 
         // Surplus recycled into the position (vUSDC collateral up), wallet unchanged.
         assertApproxEqAbs(IERC20(USDC).balanceOf(maker), makerUsdcBefore, 2, "wallet unchanged (no sweep)");

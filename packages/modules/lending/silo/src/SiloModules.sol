@@ -233,7 +233,10 @@ contract SiloTakerModule is ITakerModule, IPositionSource {
     ///      path can share it — that path has already decoded the blob and cannot
     ///      hand a calldata slice back.
     function _vaultPositionOf(address vault, address user) private view returns (address asset, uint256 amount) {
-        return (ISilo(vault).asset(), ISilo(vault).maxWithdraw(user));
+        return (
+            ISilo(vault).asset(),
+            ISilo(vault).previewRedeem(ISilo(vault).balanceOf(user))
+        );
     }
 
     error OnlyPermit3();
@@ -272,7 +275,9 @@ contract SiloTakerModule is ITakerModule, IPositionSource {
     ///      EXACT amounts sent straight to their destinations — the signed `amount`
     ///      to `receiver`, the remainder back to `onBehalfOf`. ERC-4626 `withdraw`
     ///      burns the OWNER's shares and pays `receiver` directly, so the module
-    ///      never takes custody: no delta measurement, no split transfers, and a
+    ///      DOES take custody between the withdraw and the split, which is why the
+    ///      floor, the `min(received, amount)` cap and the `requireDelivered` bound
+    ///      below are all load-bearing rather than defence-in-depth. A
     ///      stray module balance can never become part of the payout. A position
     ///      smaller than `amount` makes the first call revert in the vault — fail
     ///      closed, no gate needed.
@@ -296,6 +301,12 @@ contract SiloTakerModule is ITakerModule, IPositionSource {
         uint256 floor = IERC20(asset).balanceOf(address(this));
         ISilo(silo).withdraw(max, address(this), onBehalfOf);
         uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+        // The lower bound the venue used to enforce. Before the split rewrite the
+        // venue call was sized at `amount`, so a short position reverted inside it;
+        // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+        // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+        // `amount` is the signed TOTAL, never a pro-rated slice.
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
     }

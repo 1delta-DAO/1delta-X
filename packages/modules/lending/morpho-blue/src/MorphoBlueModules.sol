@@ -412,6 +412,12 @@ contract MorphoBlueTakerModule is ITakerModule, IPositionSource {
         (, uint256 bal) = _collateralOf(marketParams, onBehalfOf);
         morpho.withdrawCollateral(marketParams, bal, onBehalfOf, address(this));
         uint256 received = IERC20(collateralToken).balanceOf(address(this)) - floor;
+        // The lower bound the venue used to enforce. Before the split rewrite the
+        // venue call was sized at `amount`, so a short position reverted inside it;
+        // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+        // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+        // `amount` is the signed TOTAL, never a pro-rated slice.
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(collateralToken, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(collateralToken, onBehalfOf, received - amount);
     }
@@ -442,6 +448,12 @@ contract MorphoBlueTakerModule is ITakerModule, IPositionSource {
         uint256 shares = morpho.position(marketParams.id(), onBehalfOf).supplyShares;
         morpho.withdraw(marketParams, 0, shares, onBehalfOf, address(this));
         uint256 received = IERC20(loanToken).balanceOf(address(this)) - floor;
+        // The lower bound the venue used to enforce. Before the split rewrite the
+        // venue call was sized at `amount`, so a short position reverted inside it;
+        // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+        // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+        // `amount` is the signed TOTAL, never a pro-rated slice.
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(loanToken, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(loanToken, onBehalfOf, received - amount);
     }

@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {CometTakerModule} from "../../src/CompoundV3Modules.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -253,7 +254,7 @@ contract CometTakerModuleTest is Test {
         // mock the user's collateral IS their wallet balance (withdrawFrom pulls
         // via transferFrom), so assert absolute end-balances.
         uint256 total = AMOUNT * 10;
-        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(asset), uint8(1), AMOUNT);
+        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(asset), DustHandler.encodeMode(DustHandler.BalanceMode.Full), AMOUNT);
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, AMOUNT, receiver, data);
@@ -276,7 +277,7 @@ contract CometTakerModuleTest is Test {
         // Base supply = total, base COLLATERAL = 0 (as on the real Comet).
         assertEq(comet.collateralBalanceOf(user, address(base)), 0, "base has no collateral ledger");
 
-        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(base), uint8(1), AMOUNT);
+        bytes memory data = abi.encode(OP_WITHDRAW, address(comet), address(base), DustHandler.encodeMode(DustHandler.BalanceMode.Full), AMOUNT);
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, AMOUNT, receiver, data);

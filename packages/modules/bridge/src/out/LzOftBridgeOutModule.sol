@@ -129,6 +129,9 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         // Zero is the one value that is unambiguously an unpopulated field.
         if (s.dstEid == 0) revert BadDestination();
 
+        // Snapshot before the pull — see {_sweep}: the sweep must return only what
+        // THIS fill brought in, never a balance that was already resident.
+        uint256 floor = _floorOf(s.inputToken);
         _pull(onBehalfOf, s.inputToken, amount);
 
         IOFT.SendParam memory sp = IOFT.SendParam({
@@ -161,6 +164,6 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         IOFT(s.oft).send{value: fee}(sp, IOFT.MessagingFee({nativeFee: fee, lzTokenFee: 0}), s.feePayer);
 
         if (pulls) SafeTransferLib.forceApprove(s.inputToken, s.oft, 0);
-        _sweep(s.inputToken, onBehalfOf);
+        _sweep(s.inputToken, onBehalfOf, floor);
     }
 }

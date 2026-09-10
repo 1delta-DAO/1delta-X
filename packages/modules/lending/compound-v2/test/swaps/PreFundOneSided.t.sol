@@ -135,7 +135,7 @@ contract CompoundV2PreFundOneSidedTest is CompoundV2ModulesBase {
         vm.prank(solver);
         settlement.fill(o, sig, usdcSold);
 
-        assertApproxEqAbs(_daiDebt(maker), 0, 1e12, "the debt is retired in full");
+        assertEq(_daiDebt(maker), 0, "the debt is retired in full");
         // Surplus = delivered − actual (accrued) debt repaid; wide-ish band for accrual.
         assertApproxEqAbs(
             IERC20(DAI).balanceOf(maker) - makerDai, daiIn - debtBefore, 1e16, "the surplus was swept to the maker"

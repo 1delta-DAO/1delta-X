@@ -75,4 +75,36 @@ contract FullFillGuardTest is Test {
         vm.expectRevert(abi.encodeWithSelector(FullFillGuard.PartialFillUnsupported.selector, slice, BORROW_TOTAL));
         m.execute(slice, SIDE, BORROW_TOTAL);
     }
+
+    // ── requireDelivered: the bound the sweep rewrite removed ─────────────────
+
+    /// @dev AUDIT REGRESSION. Before the withdraw-once-then-split rewrite, a `Full`
+    /// leg called the venue FOR THE SIGNED AMOUNT, so a position short of it reverted
+    /// inside the venue — "fail closed, no gate needed". The rewrite withdraws the
+    /// whole position and splits it, so nothing reverts on a short; and the substitute
+    /// the posture note cited (Settlement's output validation) does not cover this
+    /// side of the ledger — a withdraw item funds an INPUT leg, and
+    /// `Core._payInputsToSolver` pulls `owed - proceeds` from the MAKER'S WALLET.
+    function test_requireDelivered_shortWithdrawReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(FullFillGuard.ShortWithdraw.selector, uint256(9), uint256(10)));
+        this.delivered(9, 10);
+    }
+
+    function test_requireDelivered_exactAndOverPass() public view {
+        this.delivered(10, 10);
+        this.delivered(11, 10); // over-delivery is the normal accrual case
+    }
+
+    function testFuzz_requireDelivered_boundIsExactlyReceivedGteAmount(uint256 received, uint256 amount) public {
+        if (received >= amount) {
+            this.delivered(received, amount);
+        } else {
+            vm.expectRevert(abi.encodeWithSelector(FullFillGuard.ShortWithdraw.selector, received, amount));
+            this.delivered(received, amount);
+        }
+    }
+
+    function delivered(uint256 received, uint256 amount) external pure {
+        FullFillGuard.requireDelivered(received, amount);
+    }
 }

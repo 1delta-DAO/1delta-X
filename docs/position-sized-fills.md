@@ -82,7 +82,7 @@ by the `try`/`catch` and surfaces as `NoPositionItem`.
 ### Where the venue knowledge lives
 
 `PositionFillModule` holds **none**. It takes no constructor arguments and there is
-one deployment for every venue. It reads item 0 out of the maker-signed order and
+one deployment for every venue. It finds the position-bearing item in the maker-signed order (see above) and
 asks *that* module what the position is, through
 [`IPositionSource`](../packages/core/src/interfaces/IPositionSource.sol):
 
@@ -169,13 +169,19 @@ side identically.
 | aave-v3 | `aToken.balanceOf(user)` — rebases 1:1 | the underlying, from `data` |
 | compound-v3 | `baseToken()` split: `balanceOf` for base, `collateralBalanceOf` otherwise | the asset, from `data` |
 | morpho-blue | `position(id, user).collateral` — asset-denominated and exact | `marketParams.collateralToken` |
-| silo, euler-v2, exactly, gearbox-v3 | `maxWithdraw(user)` | `vault.asset()`, read from the **vault**, never from `data` |
+| silo, euler-v2, exactly, gearbox-v3 | `previewRedeem(balanceOf(user))` / `convertToAssets(balanceOf(user))` — the RAW position | `vault.asset()`, read from the **vault**, never from `data` |
 
 
-`maxWithdraw` — not `convertToAssets(balanceOf)` — is deliberate: it is already in
-asset units *and* already accounts for the constraints that would make a larger
-withdraw revert (a borrow against the position, vault illiquidity). Sizing off the raw
-share balance would price a withdraw the venue then refuses.
+⚠ **NOT `maxWithdraw`, and this was a real bug until 2026-09-10.** `maxWithdraw` is a
+REACHABILITY figure — `ISilo` calls it *"liquidity-bounded"*, `IEulerV2` *"given
+liquidity & health"* — and `IPositionSource` forbids it in capitals. Two things went
+wrong while it was there: on a `[repay, withdraw]` close `resolveFill` runs *before*
+the repay, so the number reflected a debt the fill was about to retire and the close
+**half-exited while succeeding**; and vault cash is third-party movable, so a flash
+loan collapsed the delta to dust and consumed the maker's one-shot order for ~nothing.
+The raw share conversion is what this package's own fork tests already used, for
+exactly this reason. If the position is unreachable the venue's withdraw reverts —
+which is the loud failure the interface asks for.
 
 `positionOf` returns the **raw** position, deliberately *not* bounded by the module's
 allowance the way `fundingSource` is. That is the right answer for a preflight ("can
@@ -186,7 +192,7 @@ small.
 
 ### Deliberately not covered
 
-- **Morpho Blue's loan/earn side (`Op.Withdraw`)** is refused with `WrongOp`. The
+- **Morpho Blue's loan/earn side (`Op.Withdraw`)** is refused with the module's own `BadOp`. The
   position is denominated in **shares**, and the module must return assets. The honest
   conversion needs the market's *accrued* totals, and getting it subtly wrong
   mis-prices the maker's fill rather than reverting. The paired `_withdrawLoanFull`
@@ -246,7 +252,14 @@ same live balance and the plan tries to withdraw it twice. The one-shot guard do
 not help — it keys on the order hash, and these are two different orders. It fails
 closed, but only because the venue's own receipt transfer reverts on a drained
 balance, not because the settler noticed; the solver sees an untyped
-`TransferFromFailed`. Pinned by `test_matchSettle_twoOrdersOneposition_failsClosed`.
+`TransferFromFailed`.
+
+⚠ **And that is venue-specific.** It holds for Aave, Morpho and Comet *collateral*,
+but **not** for Comet's BASE ledger, where the repo's own interface says
+`withdrawFrom` will *"withdraw a base supply, **or BORROW past it**"* — so a second
+drain becomes new debt on the maker rather than a revert. `CometTakerModule` now
+bounds a base withdraw by the live supply (`WouldBorrow`) precisely so this premise
+holds everywhere. Pinned by `test_matchSettle_twoOrdersOneposition_failsClosed`.
 
 ### The netting recipe, and why it works
 
@@ -341,6 +354,20 @@ not a quote. Use `previewFill` for the size.
 - `packages/modules/lending/compound-v3/test/swaps/PositionSizedWithdraw.t.sol` — both
   Comet ledgers, seeded to **different** amounts so a reader consulting the wrong one
   cannot coincidentally pass, plus the wrong-op guard.
+- **All seven venues now have `positionOf` coverage** (the audit found only three
+  did, and the four gaps were exactly where findings 1, 3 and 12 lived):
+  `silo/test/fork/PositionSized.t.sol`, `euler-v2/test/fork/PositionSized.t.sol` and
+  `exactly/test/fork/PositionSized.t.sol` open a **levered** position so
+  `maxWithdraw` is clipped strictly below the real balance, then assert the reader
+  reports the raw one — reverting silo's reader to `maxWithdraw` makes it report
+  **3.32 wstETH against a real 5.0**, which is the bug quantified on live mainnet
+  state. Gearbox has **both**: `gearbox-v3/test/fork/PoolPositionSized.t.sol` proves the
+  reader against the real PoolV3 — whose address is **derived from
+  `CreditManagerV3.pool()`** on the credit manager the package already pins, so it is
+  authoritative for the block rather than a guessed constant — and
+  `test/unit/GearboxPoolPositionSized.t.sol` keeps the mock, because only a mock can
+  FORCE both divergences (a clipped `maxWithdraw`, and a `data.asset` disagreeing
+  with `pool.asset()`) that a liquid live pool will not reliably produce.
 - `packages/modules/lending/morpho-blue/test/closing/PositionSizedLoopClose.t.sol` and
   `packages/modules/lending/compound-v3/test/closing/PositionSizedLoopClose.t.sol` — the
   same close on a storage-only position (morpho) and on Comet's collateral ledger, each

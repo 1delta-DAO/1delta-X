@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {ListaBrokerRepayModule} from "../../src/ListaModules.sol";
+import {ListaBrokerModule} from "../../src/ListaBrokerModule.sol";
 import {IListaBroker} from "../../src/interfaces/ILista.sol";
 import {ListaModulesBase, IListaBrokerViews} from "../shared/ListaModulesBase.t.sol";
 
@@ -18,8 +18,10 @@ interface IListaBrokerSeed {
     function userFixedPositions(address user) external view returns (uint256[8][] memory);
 }
 
-/// @dev The pull-funded {ListaBrokerRepayModule} against the LIVE broker on a
-///      BSC fork. This coverage exists because the module shipped encoding
+/// @dev {ListaBrokerModule}'s PULL-funded repay against the LIVE broker on a
+///      BSC fork. (The same contract's pre-funded repay — the other half of the
+///      merged body — is covered in `leverage/PreFundOneSided.t.sol`, and its
+///      borrow in `leverage/DepositBorrow.t.sol`.) This coverage exists because the module shipped encoding
 ///      `repay(0, …)` — a convention the deployed broker does not have: every
 ///      broker `transferFrom`s the LITERAL amount and reverts `ZeroAmount()` on
 ///      zero (source-verified on the chain-1 impl, pinned here against the
@@ -30,17 +32,19 @@ contract ListaBrokerRepayTest is ListaModulesBase {
     uint256 constant DYNAMIC_LOAN = type(uint128).max;
     uint256 constant REPAY_ALL = type(uint256).max;
 
-    ListaBrokerRepayModule repayModule;
+    /// @dev The merged broker module, built by {ListaModulesBase}.
+    ListaBrokerModule repayModule;
 
     function setUp() public override {
         super.setUp();
-        repayModule = new ListaBrokerRepayModule(address(permit3), address(settlement));
-        vm.label(address(repayModule), "listaBrokerRepayModule");
+        repayModule = brokerModule;
     }
 
-    /// @dev Repay blob (base = 96: broker, loanToken, loanId — no tail).
+    /// @dev Pull-funded repay blob (base = 128: op, broker, loanToken, loanId —
+    ///      no tail). Word 0 is the `uint8` op, which is what keeps this blob out
+    ///      of the pre-fund descriptor space AND out of the borrow op.
     function _repayData(uint256 loanId) internal pure returns (bytes memory) {
-        return abi.encode(BROKER, USD1, loanId);
+        return abi.encode(uint8(ListaBrokerModule.Op.Repay), BROKER, USD1, loanId);
     }
 
     /// @dev The maker's grants for the pull-funded repay: the ERC20 approval to
@@ -170,8 +174,13 @@ contract ListaBrokerRepayTest is ListaModulesBase {
         deal(USD1, maker, ceiling);
         _approveRepay(ceiling);
 
+        // The cap is the module's scoped ERC20 approval, so the failure surfaces
+        // as the broker's own `transferFrom` running out of allowance — not as a
+        // check in our code. Pinned to that message: if a broker upgrade ever made
+        // `repayAll` part-close instead, the maker would be charged the ceiling for
+        // a position that stayed open, and this is the line that would notice.
         vm.prank(address(settlement));
-        vm.expectRevert();
+        vm.expectRevert(bytes("ERC20: insufficient allowance"));
         repayModule.makeOnBehalf(maker, ceiling, _repayData(REPAY_ALL));
     }
 

@@ -260,8 +260,15 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
             uint256 err = ICEther(cEther).redeemUnderlying(amount);
             if (err != 0) revert CompoundV2Error(err);
             // Wrap only this call's delta — see the Full branch and {_sweepNativeAsWeth}.
-            weth.deposit{value: address(this).balance - ethFloor}();
-            SafeTransferLib.safeTransfer(address(weth), receiver, amount);
+            // Measure the wrap delta and CAP the payout, exactly as the `Full` branch
+            // above does. A nominal `amount` here is the H-3 shape: `cEther` is
+            // decoded from order `data` on a shared singleton and `Permit3.take` is
+            // permissionless, so a fake cEther that redeems nothing would have paid
+            // this out of the module's OWN resident WETH — and `_sweepWeth`'s
+            // `bal > floor` then declines silently instead of catching the deficit.
+            uint256 received = address(this).balance - ethFloor;
+            weth.deposit{value: received}();
+            SafeTransferLib.safeTransfer(address(weth), receiver, received < amount ? received : amount);
             uint256 cBalNow = IERC20(cEther).balanceOf(address(this));
             if (cBalNow > cFloor) SafeTransferLib.safeTransfer(cEther, onBehalfOf, cBalNow - cFloor);
             _sweepWeth(onBehalfOf, wethFloor);

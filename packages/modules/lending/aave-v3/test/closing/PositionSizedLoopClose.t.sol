@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {console2} from "forge-std/console2.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
 
 import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 import {Chains, Lenders, Tokens} from "@coretest/data/LenderRegistry.sol";
@@ -253,7 +254,7 @@ contract PositionSizedLoopCloseTest is AaveModulesBase {
         //    the same state. `Full` still exits the position, but the maker is paid
         //    only for the signed amount and the excess returns as raw wstETH.
         vm.revertToState(snap);
-        bytes memory fullData = abi.encode(AAVE_POOL, WSTETH, aWSTETH, uint8(1), COLLATERAL);
+        bytes memory fullData = abi.encode(AAVE_POOL, WSTETH, aWSTETH, DustHandler.encodeMode(DustHandler.BalanceMode.Full), COLLATERAL);
         vm.startPrank(maker);
         permit3.approveTaker(address(settlement), address(withdrawModule), keccak256(fullData), uint160(COLLATERAL), 0);
         vm.stopPrank();

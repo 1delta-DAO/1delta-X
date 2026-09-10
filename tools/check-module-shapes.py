@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Module-seam invariants that are otherwise only prose.
 
-Three properties, all syntactic, all previously asserted in file headers and
+Six properties, all syntactic, all previously asserted in file headers and
 enforced nowhere — which is the §F23 failure mode this file exists to avoid.
 
   1. A taker grant must be unambiguous about which dispatch it authorises.
   2. Every `makeOnBehalf` must pin its dispatcher.
   3. Every entrypoint that spends the module's OWN balance must pin its caller.
   4. A PULL `makeOnBehalf` blob must not be readable as a pre-fund descriptor.
+  5. A data-derived Permit3 pull amount is width-checked, not truncated (I-5).
+  6. A venue value-IN call is never handed a max sentinel (I-15).
 
 ────────────────────────────────────────────────────────────────────────────────
 (1) A taker grant must be unambiguous about which dispatch it authorises.
@@ -131,10 +133,14 @@ NARROW_EXEMPT = {
     ("LiquityV2RepayModule", "toRepay"): "toRepay = min(amount, entireDebt) <= amount",
     ("CompoundV2NativeRepayModule", "toRepay"): "toRepay = min(amount, debt) <= amount",
     # Full-mode cToken/aToken balance pulls: an under-pull redeems LESS and reverts at
-    # `require(received >= amount)`, and there is no paired approve to widen — so a
-    # truncating cast fails closed, it does not drain.
-    ("CompoundV2WithdrawModule", "cBal"): "Full-mode balance; under-pull fails closed at require(received>=amount), no paired approve",
-    ("CompoundV2NativeWithdrawModule", "cBal"): "Full-mode balance; under-pull fails closed at require(received>=amount), no paired approve",
+    # NOTE (2026-09-10): these reasons used to cite `require(received >= amount)`,
+    # which was deleted in the 2026-09 gate strip and then RESTORED only on `Full`
+    # legs as `FullFillGuard.requireDelivered`. compound-v2 has no `positionOf` and
+    # so no sweep-shaped Full branch, so the live justification is the narrower one:
+    # there is no paired `forceApprove` to widen, so a truncating cast under-pulls
+    # and the venue call reverts on insufficient cTokens. Fails closed either way.
+    ("CompoundV2WithdrawModule", "cBal"): "Full-mode balance; under-pull reverts in the venue on insufficient cTokens, no paired approve",
+    ("CompoundV2NativeWithdrawModule", "cBal"): "Full-mode balance; under-pull reverts in the venue on insufficient cTokens, no paired approve",
     # Exact-mode ceiling cAmount: an under-pull makes `redeemUnderlying(amount)`
     # revert on insufficient cTokens; no paired approve.
     ("CompoundV2WithdrawModule", "cAmount"): "Exact-mode ceiling; under-pull reverts redeemUnderlying(amount), no paired approve",
@@ -151,6 +157,73 @@ NARROW_EXEMPT = {
     # venue and there is nothing to amplify.
     ("MorphoBlueRepayModule", "assets"): "morpho is immutable, not order-decoded; assets is Morpho's accounting",
 }
+
+# ── (6) a venue value-IN call is never handed a max sentinel (I-15) ──────────
+#
+# The repay mirror of I-10. I-10 forbids a max sentinel on the value-OUT side
+# because a venue max burns whatever the MODULE holds; the value-IN side has the
+# same defect with the sign flipped, and it is the more dangerous half because it
+# reads as a convenience.
+#
+# The test is WHICH ACTOR the venue resolves the sentinel against:
+#
+#   • Against `onBehalfOf`'s DEBT — aave's `repay(asset, max, ...)`, euler's
+#     `repay(max, account)`, compound v2's `repayBorrowBehalf(user, -1)`. These
+#     compute exactly what our own clamp computes, so they are merely redundant.
+#   • Against the CALLER'S BALANCE — comet's `supplyTo(dst, asset, max)` resolves
+#     `max` to the MODULE's balance of `asset` and `doTransferIn`s it. On a shared
+#     singleton that is "supply everything this contract is holding, including
+#     another order's residue, into this order's position". Same shape as F-3,
+#     opposite direction.
+#
+# The two are indistinguishable at the call site, and the second is a silent
+# cross-order fund transfer rather than a revert. So the rule is flat: a venue
+# amount argument is a clamped local (`toRepay`, `min(amount, debt)`) or a
+# core-sized one (`amount` / `forAmount`) — never a sentinel. "Repay everything"
+# uses a DEDICATED venue entrypoint that names the actor itself and takes no
+# amount (lista's `repayAll(onBehalfOf)`, teller's `repayLoanFull(bidId)`,
+# fluid's `operate(nftId, ..)` where the position is the actor), which cannot be
+# resolved against the module by construction.
+#
+# Adding a row here is a decision that the venue resolves against the USER, with
+# the reason written down — not a way to silence the check.
+#
+# COVERAGE LIMIT, stated so it is not mistaken for a proof: this reads the CALL
+# SITE only. A sentinel laundered through a helper is invisible to it — fluid's
+# `operate(nftId, ..., _negDelta(p.sideAmount), ...)` hides `type(int256).min`
+# inside `_negDelta`, and does not fire. That one is safe for the reason above
+# (Fluid resolves it against the position NFT named in the same call, never
+# against the caller's balance; pinned by `fluid/test/integration/FluidFullClose.t.sol`),
+# but the check did not establish that — a reviewer did. Treat a clean run as
+# "no sentinel is written at a venue call site", not "no sentinel reaches a venue".
+VALUE_IN_CALL = re.compile(
+    r"\.\s*(repay|repayBorrow|repayBorrowBehalf|repayOnBehalfOf|repayDebt|repayBold|"
+    r"repayAtMaturity|repayLoan|supplyTo|supply|payback|decreaseDebt|mint)\s*\(",
+)
+SENTINEL = re.compile(
+    r"type\s*\(\s*u?int\d+\s*\)\s*\.\s*(?:max|min)"  # type(uint256).max / type(int256).min
+    r"|\buint\d*\s*\(\s*-\s*1\s*\)"                     # uint256(-1)
+    r"|\b0x[fF]{40,}\b"                                      # 0xffff… (aave's literal form)
+    r"|\b[A-Z_]*_ALL\b"                                      # REPAY_ALL / FLUID_ALL constants
+)
+# Empty on purpose: every venue call in the tree passes a clamped or core-sized
+# amount today, so there is nothing to exempt. Rows go here only when a venue's
+# sentinel is proven to resolve against `onBehalfOf`, with that proof written out.
+REPAY_SENTINEL_EXEMPT: dict[tuple[str, str], str] = {}
+
+
+def arg_span(body: str, open_paren: int) -> str:
+    """The text between a call's parens, balanced, so multi-line args are covered."""
+    depth = 0
+    for i in range(open_paren, len(body)):
+        if body[i] == "(":
+            depth += 1
+        elif body[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return body[open_paren + 1 : i]
+    return ""
+
 
 # ── (4) the MAKE data space must stay disjoint ───────────────────────────────
 #
@@ -248,6 +321,7 @@ def main() -> int:
     unpinned_prefund = []
     word0 = []
     narrow = []
+    sentinels = []
     scanned = 0
     makes = 0
     dual = 0
@@ -272,6 +346,16 @@ def main() -> int:
         ):
             continue
         for name, inherits, body in contract_spans(src):
+            # ── (6) no venue value-IN call is handed a max sentinel ──
+            for m in VALUE_IN_CALL.finditer(body):
+                callee = m.group(1)
+                if (name, callee) in REPAY_SENTINEL_EXEMPT:
+                    continue
+                args = arg_span(body, m.end() - 1)
+                hit = SENTINEL.search(args)
+                if hit:
+                    sentinels.append((path.relative_to(ROOT), name, callee, hit.group(0)))
+
             # ── (5) every data-derived pull is width-checked, not truncated ──
             for m in PULL_NARROW.finditer(body):
                 expr = m.group(1)
@@ -362,6 +446,26 @@ def main() -> int:
             "on TAKE_FOR it is `_gatePreFund` / requireSettlement(spender, ...), because\n"
             "`Permit3.takeFor` is permissionless and `approveTaker` lets a caller name\n"
             "itself spender (F27/C-1).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if sentinels:
+        print(f"{len(sentinels)} venue value-IN call(s) handed a max sentinel:\n", file=sys.stderr)
+        for rel, name, callee, tok in sentinels:
+            print(f"  {rel}: contract {name}\n      `{callee}(... {tok} ...)`", file=sys.stderr)
+        print(
+            "\nI-15, the repay mirror of I-10. A venue resolves a max sentinel against ONE of\n"
+            "two actors, and the call site cannot tell you which: against `onBehalfOf`'s debt\n"
+            "(aave/euler/compound-v2 — merely redundant with our own clamp), or against the\n"
+            "CALLER'S BALANCE (comet's `supplyTo(dst, asset, max)` does a `doTransferIn` of\n"
+            "the MODULE's whole balance of `asset`). On a shared singleton the second is a\n"
+            "silent cross-order fund transfer, not a revert.\n\n"
+            "Pass a clamped local (`toRepay`) or the core-sized `amount`/`forAmount`. For\n"
+            "\"repay everything\", use the venue's dedicated entrypoint that names the actor\n"
+            "and takes no amount (`repayAll(onBehalfOf)`, `repayLoanFull(bidId)`). If the\n"
+            "sentinel really does resolve against the USER, add (contract, callee) to\n"
+            "REPAY_SENTINEL_EXEMPT with that reason.",
             file=sys.stderr,
         )
         return 1

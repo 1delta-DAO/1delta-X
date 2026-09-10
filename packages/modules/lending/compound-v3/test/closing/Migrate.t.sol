@@ -59,7 +59,7 @@ contract MigrateTest is CompoundV3ModulesBase {
 
         // Maker ended with: USDC-Comet debt 0, USDC-Comet collateral ≈ 1 WETH
         // (10 supplied - 9 withdrawn), USDS-Comet collateral ≈ 9 WETH, USDS debt.
-        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "USDC-Comet debt closed");
+        assertEq(_usdcDebt(maker), 0, "USDC-Comet debt closed");
         assertApproxEqAbs(
             _wethCollateral(maker), makerUsdcCollatBefore - exactWeth, 2, "USDC-Comet collateral reduced by exactWeth"
         );
@@ -158,7 +158,7 @@ contract MigrateTest is CompoundV3ModulesBase {
     }
 
     function _assertMigration() internal view {
-        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "USDC-Comet debt closed");
+        assertEq(_usdcDebt(maker), 0, "USDC-Comet debt closed");
         assertApproxEqAbs(
             uint256(IComet(COMET_USDS).collateralBalanceOf(maker, WETH)), 9 ether, 2, "USDS-Comet collateral opened"
         );

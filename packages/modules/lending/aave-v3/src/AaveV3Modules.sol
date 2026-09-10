@@ -320,6 +320,12 @@ contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource, I
             SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), bal);
             IAaveV3Pool(pool).withdraw(asset, bal, address(this));
             uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+            // The lower bound the venue used to enforce. Before the split rewrite the
+            // venue call was sized at `amount`, so a short position reverted inside it;
+            // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+            // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+            // `amount` is the signed TOTAL, never a pro-rated slice.
+            FullFillGuard.requireDelivered(received, amount);
             SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {

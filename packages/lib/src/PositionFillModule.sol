@@ -185,8 +185,16 @@ contract PositionFillModule is IFillModule, IFillModuleDescribe {
         (uint256 itemAmount, address asset, uint256 position) = _findPositionItem(order);
         if (itemAmount != total) revert DenominatorMismatch(itemAmount, total);
 
-        (address legToken, uint256 anchorStart,) = PackedArrays.legIn(order.legsIn, 0);
+        (address legToken, uint256 anchorStart, uint256 anchorEnd) = PackedArrays.legIn(order.legsIn, 0);
         if (anchorStart != total) revert DenominatorMismatch(anchorStart, total);
+        // ⚠ AND IT MUST BE FIXED. The exactness argument above describes
+        // {Pricing.inputOwed}'s FIXED branch; with `end != 0` the auctioned branch
+        // runs instead and charges `delta · inTick(start, end, bump) / anchor`, which
+        // EXCEEDS the position the item withdrew — and {Core._payInputsToSolver}
+        // pulls the difference from the maker's wallet, in an amount the filler picks
+        // by choosing the inclusion block. A rising anchor leg is a shape that can
+        // only be signed wrongly on a position-sized exit, so it is refused.
+        if (anchorEnd != 0) revert DenominatorMismatch(anchorEnd, 0);
         if (asset != legToken) revert PositionAssetMismatch(asset, legToken);
         return position;
     }
@@ -218,7 +226,14 @@ contract PositionFillModule is IFillModule, IFillModuleDescribe {
         view
         returns (uint256 itemAmount, address asset, uint256 position)
     {
-        uint256 n = PackedArrays.countUnchecked(order.items);
+        // ⚠ validateRecords, NOT countUnchecked. {PackedArrays}' safety contract is
+        // explicit: the count must come from the validator, never from the blob's own
+        // byte, because an accessor past the validated count reads adjacent calldata
+        // as if it were order data. `resolveFill` is the FIRST consumer of this blob
+        // on the single-order path — {Base._executeItems} does not validate until
+        // after — so the proof has to happen here, exactly as it already does for
+        // `legsIn` above.
+        uint256 n = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
         // Record blobs are cursor-walked from {recordsStart}, PAST the count byte —
         // a raw `0` cursor reads the count into the top byte of `op` and shifts every
         // field one byte left.
@@ -260,6 +275,14 @@ contract PositionFillModule is IFillModule, IFillModuleDescribe {
         address module;
         bytes calldata itemData;
         (, module, amount,, itemData, next) = PackedArrays.itemAt(order.items, cursor);
+        // ⚠ try/catch CANNOT catch this case. A STATICCALL to a code-less address
+        // SUCCEEDS with empty returndata; solc then decodes the return tuple in the
+        // caller's frame, so the decode failure propagates instead of reaching
+        // `catch` — the whole resolve reverts rather than skipping the item. Verified
+        // under solc 0.8.34 for both a code-less address and a permissive
+        // `fallback()`. Skip explicitly so the documented "not a reporter ⇒ skipped"
+        // rule actually holds.
+        if (module.code.length == 0) return (amount, address(0), 0, next);
         try IPositionSource(module).positionOf(order.maker, itemData) returns (address a, uint256 p) {
             (asset, position) = (a, p);
         } catch {}

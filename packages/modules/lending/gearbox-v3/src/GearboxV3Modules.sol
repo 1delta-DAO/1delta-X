@@ -151,7 +151,15 @@ contract GearboxPoolDepositModule is IMakerModule {
 //
 // ERC-4626 owner-allowance withdrawal: the maker grants `pool.approve(module,
 // max)`; the module burns the maker's shares and sends the underlying to
-// `receiver`. `data = abi.encode(pool, asset[, BalanceMode])` — base = 64.
+// `receiver`. `data = abi.encode(pool, asset[, BalanceMode[, total]])` — base = 64;
+// mode@64, and `total`@96 is MANDATORY under `Full`: it is what
+// {FullFillGuard.requireFullFillFromData} compares the slice against, and it
+// FAILS CLOSED when absent — so a `Full` order encoded from a map that omits it
+// is one no filler can ever settle. (Was undeclared; the F25/A-2 drift already
+// corrected on aave-v3/euler-v2/silo and missed here.)
+//
+// ⚠ `asset` is measured/paid from `pool.asset()`, NOT from this word — see the
+//   Full branch. The word is retained only for the byte map's stability.
 //
 contract GearboxPoolWithdrawModule is ITakerModule, IPositionSource {
     IPermit3 public immutable permit3;
@@ -184,10 +192,22 @@ contract GearboxPoolWithdrawModule is ITakerModule, IPositionSource {
             // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
             // Through {positionOf}, so the number a fill is priced against and the
             // number this branch withdraws are the same function.
-            (, uint256 max) = positionOf(onBehalfOf, data);
+            // ⚠ TAKE THE ASSET FROM THE READER, NOT FROM `data`. `pool.withdraw`
+            // pays out `pool.asset()`; measuring the floor and the delta on a
+            // `data`-supplied token that disagrees would read 0 and strand the whole
+            // withdrawn position on a shared singleton. Every sibling re-derives it
+            // from the venue for this reason — this one used to keep the `data` word.
+            uint256 max;
+            (asset, max) = positionOf(onBehalfOf, data);
             uint256 floor = IERC20(asset).balanceOf(address(this));
             IGearboxPoolV3(pool).withdraw(max, address(this), onBehalfOf);
             uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+            // The lower bound the venue used to enforce. Before the split rewrite the
+            // venue call was sized at `amount`, so a short position reverted inside it;
+            // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+            // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+            // `amount` is the signed TOTAL, never a pro-rated slice.
+            FullFillGuard.requireDelivered(received, amount);
             SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
@@ -212,7 +232,10 @@ contract GearboxPoolWithdrawModule is ITakerModule, IPositionSource {
         returns (address asset, uint256 amount)
     {
         (address pool,) = abi.decode(data, (address, address));
-        return (IGearboxPoolV3(pool).asset(), IGearboxPoolV3(pool).maxWithdraw(user));
+        return (
+            IGearboxPoolV3(pool).asset(),
+            IGearboxPoolV3(pool).previewRedeem(IGearboxPoolV3(pool).balanceOf(user))
+        );
     }
 }
 
@@ -287,11 +310,26 @@ contract GearboxCreditAddCollateralModule is IMakerModule, IGearboxBot {
 //   facade.multicall(ca, [setBotPermissions(module, 0x05)])
 // `data = abi.encode(creditAccount, asset[, deadline, v, r, s])` — base = 64.
 //
-// Semantics are EXACT-amount: `amount` is the maker-signed repay size, pro-rated
-// by partial fills like every MAKE item. A slice exceeding the live debt reverts
-// inside Gearbox (`decreaseDebt` does not cap) — the conservative direction; for
-// a full close, sign the order full-fill and size `amount` off the accrued debt
-// with headroom on the collateral side instead. Approval goes to the CREDIT
+// Semantics are SIGNED-amount, and this module is the ONE repay module in the
+// family that does not clamp against the live debt — it has no cheap debt read
+// (Gearbox stores a principal plus an index snapshot, and the accrued figure is
+// pool-index arithmetic we decline to re-implement here). What that hands to
+// Gearbox is safe but asymmetric, so state it exactly:
+//
+//   • Over-signing does NOT revert. `decreaseDebt` caps at the outstanding debt,
+//     and the surplus — already funded in by the preceding `addCollateral` — stays
+//     as COLLATERAL on the maker's own credit account. The maker is charged the
+//     full signed `amount`; nothing is lost, nothing is stranded on the module,
+//     and nothing reaches the filler. It is a forced `Recycle`: there is no
+//     sweep-to-user path here, unlike every other repay module.
+//   • Under-signing a FULL close reverts. Interest accrues against the pool index
+//     while the stored principal stays put, so an `amount` quoted off that
+//     principal pays interest first and leaves a residual below `minDebt`, which
+//     Gearbox rejects with `BorrowAmountOutOfLimitsException`.
+//
+// So a full close is signed full-fill WITH HEADROOM (the Fluid-ceiling recipe),
+// and the cap absorbs the difference. Both directions are pinned by fork tests in
+// `test/fork/CreditFlow.t.sol`. Approval goes to the CREDIT
 // MANAGER (it runs `addCollateral`'s transferFrom), is reset after, and any
 // unpulled residual returns to the maker — same end-holding-nothing posture as
 // the add-collateral module. Same best-effort caveat as the other credit-account

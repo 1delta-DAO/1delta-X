@@ -50,7 +50,7 @@ contract CompoundV2RepayTest is CompoundV2ModulesBase {
         assertEq(paid, buffered, "solver paid buffered DAI");
 
         // Debt fully closed.
-        assertApproxEqAbs(_daiDebt(maker), 0, 1e12, "debt zeroed");
+        assertEq(_daiDebt(maker), 0, "debt zeroed");
 
         // The unused buffer was refunded to the maker (SweepToUser), not parked.
         uint256 makerDaiDelta = IERC20(DAI).balanceOf(maker) - makerDaiBefore;
@@ -106,7 +106,7 @@ contract CompoundV2RepayTest is CompoundV2ModulesBase {
         vm.prank(solver);
         settlement.fill(order, sig, usdcForSolver);
 
-        assertApproxEqAbs(_daiDebt(maker), 0, 1e12, "debt zeroed");
+        assertEq(_daiDebt(maker), 0, "debt zeroed");
 
         // Surplus recycled into the position (cDAI up), wallet unchanged.
         assertApproxEqAbs(IERC20(DAI).balanceOf(maker), makerDaiBefore, 1e12, "wallet unchanged (no sweep)");

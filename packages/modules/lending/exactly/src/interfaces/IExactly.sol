@@ -60,7 +60,27 @@ interface IExactlyMarket {
 
     // ── views ──
     function previewDebt(address borrower) external view returns (uint256 debt);
+
+    /// @notice The borrower's FLOATING borrow shares.
+    /// @dev ⚠ `previewDebt` is floating + EVERY fixed-maturity position, while
+    ///      `repay` touches the FLOATING book only. Clamping a floating repay
+    ///      against `previewDebt` therefore measures against a book the call does
+    ///      not settle. These two give the floating-only figure:
+    ///      `previewRefund(floatingBorrowShares(borrower))`.
+    function floatingBorrowShares(address borrower) external view returns (uint256 shares);
+
+    /// @notice Assets owed for `shares` of floating borrow, rounded UP.
+    function previewRefund(uint256 shares) external view returns (uint256 assets);
     function maxWithdraw(address owner) external view returns (uint256);
+
+    /// @notice The owner's RAW position in asset units — share balance converted at
+    ///         the current rate, with NO solvency or liquidity clamp.
+    /// @dev This, not {maxWithdraw}, is what {IPositionSource.positionOf} must report:
+    ///      `maxWithdraw` is a REACHABILITY figure (clipped by open debt and by vault
+    ///      cash, both of which third parties move), and pricing a one-shot exit off
+    ///      it lets a fill resolve small instead of reverting.
+    function balanceOf(address owner) external view returns (uint256 shares);
+    function previewRedeem(uint256 shares) external view returns (uint256 assets);
 
     // ── EIP-2612 (solmate ERC20 base) ──
     // The deployed Markets expose the full solmate permit triple, verified

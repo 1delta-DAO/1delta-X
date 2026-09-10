@@ -51,10 +51,12 @@ contract RepayV4Test is AaveV4ModulesBase {
         assertEq(ISpokeV4(MAIN_SPOKE).getUserTotalDebt(usdcReserveId, maker), 0, "debt zeroed");
 
         // Dust refunded to maker.
-        uint256 actualRepaid = makerDebtBefore; //                 ≈ debtAmount + tiny accrual
-        uint256 expectedDust = bufferedAmount - actualRepaid;
+        // `makerDebtBefore` was read in the SAME block as the fill, so the module
+        // repaid exactly it and the refund is exact — no tolerance is warranted
+        // here, and a loose one would hide share-rounding residue.
+        uint256 expectedDust = bufferedAmount - makerDebtBefore;
         uint256 makerUsdcDelta = IERC20(USDC).balanceOf(maker) - makerUsdcBefore;
-        assertApproxEqAbs(makerUsdcDelta, expectedDust, 1e6, "dust refunded to maker");
+        assertEq(makerUsdcDelta, expectedDust, "dust refunded to maker");
         assertGt(makerUsdcDelta, 0, "some dust exists given the buffer");
 
         // Solver spent USDC, gained WETH.
@@ -65,5 +67,45 @@ contract RepayV4Test is AaveV4ModulesBase {
         // Module holds nothing — residual was swept, dust returned to maker.
         assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "repay module USDC drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
+    }
+
+    /// @dev The regime the buffer exists for: v4 accounts debt in SHARES and the
+    ///      module repays an ASSET amount, so a full close after real accrual is
+    ///      where an asset↔share conversion would strand a wei of debt behind a
+    ///      "closed" position. Warp first so the live debt is strictly above the
+    ///      borrowed principal, then require `getUserTotalDebt` to be exactly zero
+    ///      and the refund to be exact.
+    function test_repay_afterAccrual_zeroesDebt_aaveV4() public {
+        uint256 debtAmount = 3_000e6;
+        uint256 buffer = 50e6;
+        uint256 bufferedAmount = debtAmount + buffer;
+        uint256 wethForSolver = 1 ether;
+
+        _openV4UsdcDebt(debtAmount);
+
+        // Accrue. Everything below (quote, signature, fill) happens after the warp,
+        // so the order deadline is measured against the new timestamp.
+        vm.warp(block.timestamp + 30 days);
+
+        deal(USDC, solver, bufferedAmount);
+        _approveMakerRepaySide(bufferedAmount, wethForSolver);
+        _approveSolverSide(bufferedAmount, USDC);
+
+        uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
+        uint256 liveDebt = ISpokeV4(MAIN_SPOKE).getUserTotalDebt(usdcReserveId, maker);
+        assertGt(liveDebt, debtAmount, "interest accrued past the borrowed principal");
+        assertLt(liveDebt, bufferedAmount, "the buffer still covers the live debt");
+
+        Order memory order = _buildV4RepayOrder(bufferedAmount, wethForSolver);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        settlement.fill(order, sig, wethForSolver);
+
+        assertEq(ISpokeV4(MAIN_SPOKE).getUserTotalDebt(usdcReserveId, maker), 0, "accrued debt closed to exactly zero");
+        assertEq(
+            IERC20(USDC).balanceOf(maker) - makerUsdcBefore, bufferedAmount - liveDebt, "unused buffer refunded exactly"
+        );
+        assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "repay module USDC drained");
     }
 }

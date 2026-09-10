@@ -157,13 +157,14 @@ source-level, fails CI). `test` = a named test. `gate` = a `make` target. `prose
 | I-5 | A data-derived Permit3 pull amount is `Narrow160.to160(X)`, never `uint160(X)` | `uint160(X)` wraps silently; a paired `forceApprove(venue, X)` then hands the untruncated `X` to an attacker-decoded venue — **the F-2 drain** | **shapes** (check 5, with `NARROW_EXEMPT`) |
 | I-6 | A pre-fund module spending from its own balance takes a balance floor (`floorOf`/`requireDelivered`) bound to the asset it moves, and the funding-token is bound to the leg | the core binds the leg's recipient (bit 253) but not its token; the module is the only place that sees the asset it actually spends | **shapes** (check 3 detects the floor; token binding is in `PreFundGuard.floorOf`) + **test** (per-package leverage suites) |
 | I-7 | `AaveV3LeverageModule._supplyLeg` sweeps its pre-fund surplus to the maker | it is the one contract where residue *and* a permissionless primitive (`takeOnBehalf` ratio path) co-locate; residue there is drainable **[A2]** | **test** (aave-v3 fork leverage suite) — *prose for the invariant itself* |
-| I-8 | A `Full`-mode leg makes **ONE venue withdraw of the whole position to itself**, then splits it with ERC-20 transfers: `min(received, amount)` to `receiver`, the rest to `onBehalfOf`. `received` is a balance delta against a `floor` taken before the withdraw | a second venue withdraw re-does the venue's burn and accounting; a transfer does not (measured on an aave-v3 loop close: 536,396 → 525,457). **The cap is what makes the custody safe and is NOT optional**: the module holds the asset between withdraw and split, so `floor` excludes any balance already there and `min(received, amount)` makes it structurally impossible for a short or fake-venue delivery to be topped up out of it. A nominal `safeTransfer(receiver, amount)` here is the H-3 drain. **SUPERSEDES the direct-to-destination form** (2026-09), which needed neither but paid for a second venue call | **test** (per-package withdraw + loop-close suites) |
+| I-8 | A `Full`-mode leg makes **ONE venue withdraw of the whole position to itself**, then splits it with ERC-20 transfers — and **requires `received >= amount`** (`FullFillGuard.requireDelivered`) before doing so. `received` is a balance delta against a `floor` taken before the withdraw | the split is cheaper than a second venue call, but it removed a bound the venue used to enforce for free: the OLD form called the venue *for the signed amount*, so a short position reverted inside it. Nothing does now, and the substitute this row used to cite (Settlement's output validation) does **not** cover this side of the ledger — a withdraw item funds an INPUT leg, and `Core._payInputsToSolver` silently pulls `owed - proceeds` from the **maker's wallet**. So the guard is back, and it is safe *only* on `Full` legs, where `amount == totalAmount` is the maker's signed TOTAL rather than a pro-rated slice. The `floor` + `min(received, amount)` cap stays too: it is what stops a stray module balance being paid out (H-3). **Restored 2026-09-10 after the audit; do not remove either half** | **test** (per-package withdraw + loop-close suites) |
 | I-8b | Where the venue **cannot** name a recipient (proceeds land at the caller by construction: every borrow leg, cToken `redeem`, aave-v4's PM, native unwrap), the leg **delivers the measured `received`** (a `balBefore` snapshot excludes residue), **capped at `amount`**, with any excess to the maker — never a nominal `amount` | a nominal payout on a short/fake-pool delivery would be topped up from a stray module balance (H-3); capping at `received` makes that structurally impossible, and a short delivers less and fails the fill's output check downstream. **Replaces the old `require(received >= amount)` gate** (dropped 2026-09 as reviewer-confusing; the cap is the same protection without a revert) | **test** (borrow/withdraw suites) + this posture |
 | I-9 | A native leg spends/delivers the measured unwrap delta (`{value: received}` / `safeTransfer(receiver, min(received, amount))`), not the signed amount | a fake `wnative` makes `withdraw` a no-op; spending the nominal amount would draw the module's own native. Custody is forced (raw native must land here to be wrapped), so this is I-8b's form | **test** (lista/compound native suites) + this posture |
 | I-10 | A Full-mode leg **never passes the venue a max sentinel** (`type(uint256).max`, aave's `0xffff…`). "Full" is resolved from the *user's own* position (`balanceOf`/`maxWithdraw`/`position().collateral`/`collateralBalanceOf`) and then spent as exact amounts | a venue max burns whatever the **module** holds too — an aave `withdraw(max)` burns the module's own aTokens, which is what previously forced a two-stage "harvest" and a delta measurement (**the F-3 shape**). Resolving from the user's balance deletes the whole class, and is what makes I-8 possible | **shapes**-eligible (grep for a max sentinel in a venue amount) — *prose today* |
 | I-11 | A dual-layout module (`takeOnBehalf` + `takeForOnBehalf`) decodes its `IProceedsAsset`/`IFundingSource` views on the word-0 discriminator, not a single fixed layout | the two seams have different byte maps; a blind decode returns the wrong token to `SettlementLens`, defeating the off-chain stranded-proceeds preflight — **the F-4 shape** | **prose** — *candidate for a `shapes` check* |
 | I-12 | A relayed delegate-signer revocation normalises a lapsed expiry to `0` (burns the permit word), matching the direct setter | otherwise a stale unrelayed nomination resurrects a revoked delegate — **the F-1 shape** | **test** (`DelegateRevocationResurrect` relayed cases) |
 | I-13 | Settlement stays within EIP-170 | a fix that spends the last bytes bricks deployment | **gate** (`make size-check`, clean `out/core-deploy`) |
+| I-15 | A value-IN (repay/supply) leg **never hands the venue a max sentinel**. "Repay everything" is either a clamp against the user's own live debt spent as an exact amount, or a DEDICATED venue entrypoint that names the actor and takes no amount at all (`repayAll(onBehalfOf)`, `repayLoanFull(bidId)`, fluid's `operate` where the position NFT is the actor) | the repay mirror of I-10, and the more dangerous half because it reads as a convenience. A venue resolves a sentinel against one of two actors and the call site cannot tell you which: against **`onBehalfOf`'s debt** (aave `repay(asset, max, …)`, euler `repay(max, account)`, compound-v2 `repayBorrowBehalf(user, -1)` — merely redundant with the clamp we already do), or against the **caller's balance** — comet's `supplyTo(dst, asset, max)` `doTransferIn`s the **module's** whole balance of `asset`. On a shared singleton that is *"supply everything this contract happens to be holding, including another order's residue, into this order's position"* — the F-3 shape with the sign flipped, and a silent cross-order transfer rather than a revert. Gearbox is the one module with no clamp (it has no cheap debt read); it is safe because `decreaseDebt` caps and the surplus lands as collateral on the **maker's own** account, but it is therefore a forced `Recycle` with no sweep-to-user path — see the module header | **shapes** (check 6) + **test** (`gearbox-v3/test/fork/CreditFlow.t.sol`, `fluid/test/integration/FluidFullClose.t.sol`, `dolomite/test/integration/RepayToZero.t.sol`). *Check 6 reads call sites only — a sentinel laundered through a helper (fluid's `_negDelta`) is outside its reach; see the note in the tool* |
 | I-14 | Doc-cited tests exist | prose drifts ahead of code; a citation to a renamed/deleted test hides that | **gate** (`make docs-check`) |
 
 ---
@@ -177,12 +178,26 @@ order:
    both taker seams whose `proceedsAsset`/`fundingSource` do a single
    `abi.decode(data, ...)` without branching on `data[0:32] >> 253` is a candidate
    offender. Worth adding to `check-module-shapes.py` as check 6.
-2. **I-8 / I-8b / I-9 / I-10 (delivery family) — POSTURE NOTE, REVISED 2026-09.** The form is now **one venue withdraw + an ERC-20 split**, for every `Full`-mode leg, with the measured cap mandatory. This REVERSES the direct-to-destination posture recorded here earlier the same day: that shape had the stronger property (no custody at all, so nothing to measure) but paid for a second venue call, which measured 10,939 gas on an aave-v3 loop close. The decision was to take the gas and carry the cap. **Do not "simplify" the cap away** — it is the entire safety argument for the custody the split reintroduces. I-8b (venues whose API forces custody: borrows, cToken `redeem`, aave-v4's PM, native unwrap) is now the same shape as I-8 rather than a fallback, and (I-10) still never pass a max sentinel: resolve "full" from the user's own position. Those legs deliberately carry **no `require(received >= amount)` gate** (removed 2026-09 as reviewer-confusing — it read like dead code because a real lender is exact). The protection is instead structural: the payout is `safeTransfer(receiver, received < amount ? received : amount)` (and `{value: received}` for native), so it can **never exceed what this fill actually withdrew** and therefore can never dip into a stray/donated module balance. A genuine short delivers less and is caught by Settlement's output validation, not a module revert. **Do not "add back" a `received >= amount` check** — its absence is intentional and this row is where that is recorded. Where custody remains, the measurement and the residue exclusion it feeds are load-bearing and must stay; only the revert gate was dropped. These are still
-   "the amount forwarded/spent must be a measured balance delta, not a nominal." A
-   weak proxy (flag `{value: <ident>}` and `safeTransfer(receiver, amount)` that are
-   not preceded by a `balanceOf` delta in the same function) would have false
-   positives; today these rest on per-package tests. Keep them as tests, but list
-   the tests here so a module added without one is visible.
+2. **I-8 / I-8b / I-9 / I-10 (delivery family) — POSTURE NOTE, CORRECTED 2026-09-10.**
+   The shape is one venue withdraw + an ERC-20 split, with **two** guards, and the
+   2026-09 audit established that both are load-bearing:
+   - the **cap** `min(received, amount)` with a pre-call `floor` — stops a stray or
+     donated module balance topping up a short delivery (H-3);
+   - the **bound** `received >= amount` on `Full` legs — restores what the venue
+     enforced before the split rewrite.
+   ⚠ **The earlier version of this row told readers not to add the bound back.** That
+   was wrong, and the reason it was wrong is worth keeping: it justified the removal
+   by pointing at "Settlement's output validation", which does not exist on the input
+   side. A withdraw item funds an INPUT leg, and `Core._payInputsToSolver` handles
+   `proceeds < owed` by pulling the difference out of the maker's wallet — silently,
+   with the order marked fully consumed. Removing the gates was safe *while* the venue
+   call was sized at `amount`; the sweep took that away and the gate was already gone.
+   Neither change was wrong alone. The composition was.
+   The bound belongs on `Full` legs ONLY (there `amount` is the signed total, so it
+   cannot misfire on a partial); I-8b's forced-custody legs — borrows, cToken
+   `redeem`, aave-v4's PM, native unwrap — keep the cap alone, because there `amount`
+   IS a slice.
+
 3. **I-6 / I-7 (residue floor + sweep).** Under **[A1]+[A2]** these are
    defense-in-depth on every contract except `AaveV3LeverageModule` (I-7), where the
    sweep is load-bearing. The 2026-09 re-assessment **removed** the sweep from the
@@ -204,8 +219,18 @@ Before it ships, `make modules-check` must pass, which means:
 - a pull `makeOnBehalf` opens `data` with an `address`/dynamic struct, or is added
   to `WORD0_EXEMPT` with the reason (I-4);
 - every `uint160(X)` feeding a pull is `Narrow160.to160`, `amount`/`forAmount`, or
-  added to `NARROW_EXEMPT` with the reason `X <= 2^160` (I-5).
+  added to `NARROW_EXEMPT` with the reason `X <= 2^160` (I-5);
+- no venue value-IN call is handed a max sentinel — pass a clamp against the user's
+  own debt, or use the venue's dedicated no-amount "repay all" entrypoint (I-15).
 
 If the module holds a balance and exposes a permissionless entrypoint, it needs the
 sweep (I-7) and the borrow/withdraw/native measured-delta guards (I-8/9/10) — and it
 should grow a test named in §2 so the obligation is visible, not remembered.
+
+A repay leg carries one obligation the checker cannot see: **prove it closes to
+exactly zero after real accrual**, not in the same block the position was opened.
+The same-block form is the degenerate case where the live debt equals the signed
+principal and a stale quote is indistinguishable from a live one; every venue in
+the tree now has a `vm.warp`-then-close test, and three of them behave differently
+there (fluid needs its sentinel, gearbox reverts below `minDebt` unless over-signed,
+aave-v4's share-denominated debt still lands exactly on zero).

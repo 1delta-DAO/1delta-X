@@ -84,11 +84,14 @@ contract AcrossBridgeOutModule is BridgeOutBase {
         AcrossSpec memory s = abi.decode(data, (AcrossSpec));
         _checkDestination(s.dstRecipient, s.dstChainId);
 
+        // Snapshot before the pull — see {_sweep}: the sweep must return only what
+        // THIS fill brought in, never a balance that was already resident.
+        uint256 floor = _floorOf(s.inputToken);
         _pull(onBehalfOf, s.inputToken, amount);
         SafeTransferLib.forceApprove(s.inputToken, address(SPOKE_POOL), amount);
         _deposit(s, onBehalfOf, amount);
         SafeTransferLib.forceApprove(s.inputToken, address(SPOKE_POOL), 0);
-        _sweep(s.inputToken, onBehalfOf);
+        _sweep(s.inputToken, onBehalfOf, floor);
     }
 
     /// @dev The deposit itself, in its own frame: `depositV3` takes twelve

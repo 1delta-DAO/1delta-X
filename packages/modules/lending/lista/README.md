@@ -18,26 +18,46 @@ side of a brokered market runs through a **`LendingBroker`**. Depends on `@core`
 | Contract | Op | `data` |
 |---|---|---|
 | `ListaSupplyCollateralModule` | MAKE | `abi.encode(moolah, MarketParams[, permit])` |
-| `ListaBrokerRepayModule` | MAKE | `abi.encode(broker, loanToken, loanId[, DustAction[, permit]])` |
-| `ListaTakerModule` (op 0) | TAKE | `abi.encode(uint8(0), broker, termId)` — fixed-term borrow → receiver |
+| `ListaBrokerModule` (op 0) | MAKE | `abi.encode(uint8(0), broker, loanToken, loanId[, DustAction[, permit]])` — PULL-funded repay |
+| `ListaBrokerModule` (op 0) | MAKE (preFund) | `abi.encode(forDesc, broker, loanToken, loanId)` — same repay, funded from the delivered leg; op rides in descriptor bits [244,252) |
+| `ListaBrokerModule` (op 1) | TAKE | `abi.encode(uint8(1), broker, termId[, moolah, authBlock])` — fixed-term borrow → receiver |
+| `ListaTakerModule` (op 0) | — | RESERVED. The borrow used to live here; the slot is kept so ops 1/2 keep their wire values, and reverts `BadOp(0)` |
 | `ListaTakerModule` (op 1) | TAKE | `abi.encode(uint8(1), moolah, MarketParams[, BalanceMode])` — withdraw collateral → receiver |
 | `ListaTakerModule` (op 2) | TAKE | `abi.encode(uint8(2), provider, moolah, MarketParams[, BalanceMode])` — withdraw via an ERC20-forwarding provider; venue and auth target split |
 | `ListaNativeSupplyCollateralModule` | MAKE | `abi.encode(provider, MarketParams[, permit])` — pull wrapped native, unwrap, payable supply |
 | `ListaNativeCollateralTakerModule` | TAKE | `abi.encode(provider, moolah, MarketParams[, BalanceMode])` — provider pays native, wrapped back → receiver |
 | `ListaSmartSupplyCollateralModule` | MAKE | `abi.encode(provider, coin, coinIndex, minLpRateE18, MarketParams[, permit])` — one-sided coin zap into LP collateral |
 | `ListaSmartTakerModule` | TAKE | `abi.encode(provider, moolah, coinIndex, minOutRateE18, MarketParams)` — burn LP units, one coin → receiver |
-| `ListaPreFundSupplyCollateralModule` | TAKE_FOR (preFund) | `abi.encode(forDesc, moolah, MarketParams)` — supply the core-delivered leg from the module's own balance |
-| `ListaPreFundBrokerRepayModule` | TAKE_FOR (preFund) | `abi.encode(forDesc, broker, loanToken, loanId)` — `repay(forAmount, …)` from the module's own balance; broker refunds the excess, swept → maker |
+| `ListaPreFundModule` | MAKE (preFund) | `abi.encode(forDesc, moolah, MarketParams)` — supply the core-delivered leg from the module's own balance |
 
-The pre-fund modules (`ListaPreFundModules.sol`) are the one-sided "supply/repay
-whatever the conversion delivered" shape: the maker routes the signed output leg
-to the module (`recipient = module`), so the DELIVERED asset needs no ERC20
-approval, no Permit3 token allowance and no Moolah `setAuthorization` (both
-value-in venue ops are permissionless on behalf; the provider-gate caveat above
-still applies to supply-collateral). ⚠ Fork-validated deviation: the DEPLOYED
-broker rejects `repay(0, …)` (`ZeroAmount()`), so the pre-fund repay passes the
-literal `forAmount` and relies on the broker's repay-up-to-debt/refund-excess
-behaviour (measured on a BSC fork).
+### The two files, split by venue
+
+`ListaModules.sol` + `ListaPreFundModules.sol` are the **Moolah** (collateral)
+half. `ListaBrokerModule.sol` is the **broker** (debt) half — all of it: borrow,
+and repay in BOTH funding shapes behind one body.
+
+That merge is not cosmetic. The broker repay branch used to be written twice —
+once on a pull-funded maker module, once inside the pre-funded sibling — and it
+drifted: the `repayAll` full-close sentinel landed on the pull twin and not on
+the pre-funded one, so a maker signing the documented sentinel handed the broker
+`type(uint256).max` as a literal fixed-position id. One body, one meaning for
+`loanId`, and the two shapes can no longer disagree.
+
+Hosting a MAKE and a TAKE seam on one contract is safe because they draw on
+DIFFERENT Permit3 books (token vs taker), and the op word makes it structural
+anyway: each entrypoint asserts its own op and reverts `BadOp` on the other's.
+See `test/security/TakerModuleAuth.t.sol`.
+
+**The pre-fund shape** ("supply/repay whatever the conversion delivered"): the
+maker routes the signed output leg to the module (`recipient = module`), so the
+DELIVERED asset needs no ERC20 approval, no Permit3 token allowance and no
+Moolah `setAuthorization` (both value-in venue ops are permissionless on behalf;
+the provider-gate caveat above still applies to supply-collateral). Only that
+branch is descriptor-restricted — on `ListaBrokerModule` everything else is the
+PULL branch, gated by the maker's Permit3 token allowance instead. ⚠
+Fork-validated deviation: the DEPLOYED broker rejects `repay(0, …)`
+(`ZeroAmount()`), so both shapes pass a literal amount and rely on the broker's
+repay-up-to-debt/refund-excess behaviour (measured on a BSC fork).
 
 ## Collateral-provider coverage
 
@@ -80,8 +100,8 @@ provider shapes, oracle wiring, mutable term menus).
   then zero-checks; there is no repay-from-balance convention). Both repay
   modules therefore pass the explicit amount and rely on repay-up-to-debt +
   refund-to-`msg.sender` (the refund lands on the module, swept to the
-  maker): the pre-fund module passes `forAmount`, and `ListaBrokerRepayModule`
-  (MAKE) passes the maker-signed ceiling — **fixed 2026-09-04** (it
+  maker): `ListaBrokerModule` passes `forAmount` on the pre-fund shape and the
+  maker-signed ceiling on the pull shape — **fixed 2026-09-04** (it
   originally encoded `repay(0, …)` and could not execute; fork-proven since
   by `test/leverage/BrokerRepay.t.sol`, which closes a flex and a fixed
   position against the live BSC broker and pins the `ZeroAmount()` revert).

@@ -263,6 +263,9 @@ contract CometTakerModule is ITakerModule, IPositionSource {
 
     error OnlyPermit3();
     error BadOp(uint8 op);
+    /// @dev A base-asset `Op.Withdraw` larger than the live supply would take the
+    ///      Comet balance NEGATIVE, i.e. open a borrow the maker never signed for.
+    error WouldBorrow(uint256 amount, uint256 supply);
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
@@ -326,10 +329,28 @@ contract CometTakerModule is ITakerModule, IPositionSource {
                 (, uint256 bal) = positionOf(onBehalfOf, data);
                 IComet(comet).withdrawFrom(onBehalfOf, address(this), asset, bal);
                 uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
+                // The lower bound the venue used to enforce. Before the split rewrite the
+                // venue call was sized at `amount`, so a short position reverted inside it;
+                // now nothing does, and {Core._payInputsToSolver} would bill the shortfall to
+                // the MAKER'S WALLET. Safe here and only here: `Full` is full-fill, so
+                // `amount` is the signed TOTAL, never a pro-rated slice.
+                FullFillGuard.requireDelivered(received, amount);
                 SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
                 if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
             } else {
                 DelegationHelper.replayCometAllow(data, 128, comet, onBehalfOf, address(this));
+                // ⚠ ON COMET, AN OVER-SIZED WITHDRAW IS A BORROW, NOT A REVERT. The
+                // interface says it outright: "asset == base -> withdraw a base
+                // supply, or BORROW past it". Comet is the only venue here where a
+                // short position does not fail closed, so the premise every sibling
+                // relies on — and that this module's own header states ("the flag
+                // cannot be flipped to spend a borrow allowance on a withdraw") —
+                // has to be enforced explicitly. A `ref` bounds a NUMBER, not a
+                // venue's semantics.
+                if (asset == IComet(comet).baseToken()) {
+                    (, uint256 supply) = positionOf(onBehalfOf, data);
+                    if (amount > supply) revert WouldBorrow(amount, supply);
+                }
                 IComet(comet).withdrawFrom(onBehalfOf, receiver, asset, amount);
             }
         } else {

@@ -59,7 +59,7 @@ contract CompoundV2NativeSettlementTest is CompoundV2ModulesBase {
     ///        full-fill only — it liquidates the entire live balance, so it cannot
     ///        be pro-rated (see {FullFillGuard}).
     function _withdrawEthFullData(uint256 itemTotal) internal pure returns (bytes memory) {
-        return abi.encode(address(CETH), uint8(DustHandler.BalanceMode.Full), itemTotal);
+        return abi.encode(address(CETH), DustHandler.encodeMode(DustHandler.BalanceMode.Full), itemTotal);
     }
 
     function _repayUsdcData() internal view returns (bytes memory) {
@@ -194,7 +194,7 @@ contract CompoundV2NativeSettlementTest is CompoundV2ModulesBase {
         settlement.fill(order, sig, wethToSolver);
 
         // Position closed: debt cleared, collateral fully redeemed.
-        assertApproxEqAbs(CUSDC.borrowBalanceStored(maker), 0, 1, "USDC debt closed");
+        assertEq(CUSDC.borrowBalanceStored(maker), 0, "USDC debt closed");
         assertEq(IERC20(address(CETH)).balanceOf(maker), 0, "cETH fully redeemed");
 
         // The leftover collateral was swept back to the maker AS WETH (never raw ETH).
@@ -257,7 +257,7 @@ contract CompoundV2NativeSettlementTest is CompoundV2ModulesBase {
         settlement.fill(order, sig, usdcToSolver);
 
         // Native ETH debt cleared (repaid via unwrap INSIDE the module).
-        assertApproxEqAbs(CETH.borrowBalanceStored(maker), 0, 1, "ETH debt closed");
+        assertEq(CETH.borrowBalanceStored(maker), 0, "ETH debt closed");
         // Pull-exact: only the live debt was pulled; the buffer stays with the maker.
         assertApproxEqAbs(IERC20(WETH).balanceOf(maker), wethRepay - debt, 1e12, "repay buffer kept by maker");
         // Solver received the maker's USDC.

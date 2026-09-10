@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
@@ -9,24 +8,27 @@ import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 
-import {IMoolah, IListaBroker, MarketParams} from "./interfaces/ILista.sol";
+import {IMoolah, MarketParams} from "./interfaces/ILista.sol";
 
-// ──────────────── Lista (Moolah + LendingBroker) PRE-FUNDED one-sided modules ────────────────
+// ──────────────── Lista Moolah PRE-FUNDED one-sided module ────────────────
 //
-// "Supply-collateral whatever the conversion delivered" and "repay whatever the
-// conversion delivered", with ZERO receive-side approvals: the maker signs the
-// converted output leg with `recipient = module` and a `TAKE_FOR` item whose
-// leg-reference descriptor points at it. The core sizes `forAmount` to exactly
-// what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}), auction
-// decay included, and this module supplies/repays it from its own balance. The
-// maker's only grants are the ones they had anyway: the ERC20+Permit3 approval
-// on the asset they are CONVERTING FROM (the input leg), and the taker allowance
-// below. The received asset needs nothing — it never transits the maker's
-// wallet, and both value-in venue ops are PERMISSIONLESS on someone else's
-// behalf (Moolah `supplyCollateral(…, onBehalf, …)` is Morpho-shaped; the
-// broker's `repay(amount, [loanId,] onBehalf)` takes anyone's money), so unlike the
-// borrow/withdraw taker legs these need no Moolah `setAuthorization` either:
-// the receive side is empty end to end.
+// "Supply-collateral whatever the conversion delivered", with ZERO receive-side
+// approvals: the maker signs the converted output leg with `recipient = module`
+// and a `TAKE_FOR` item whose leg-reference descriptor points at it. The core
+// sizes `forAmount` to exactly what the fill delivered here ({Base._forSlice} →
+// {Pricing.outputAt}), auction decay included, and this module supplies it from
+// its own balance. The maker's only grants are the ones they had anyway: the
+// ERC20+Permit3 approval on the asset they are CONVERTING FROM (the input leg),
+// and the taker allowance below. The received asset needs nothing — it never
+// transits the maker's wallet, and Moolah's `supplyCollateral(…, onBehalf, …)`
+// is Morpho-shaped and PERMISSIONLESS on someone else's behalf, so unlike the
+// withdraw taker leg this needs no Moolah `setAuthorization` either: the
+// receive side is empty end to end.
+//
+// ⚠ The pre-funded broker REPAY used to live here as op 1. It moved to
+// {ListaBrokerModule}, which now carries both of its funding shapes behind one
+// body — the duplication between this file and the pull-funded twin is what let
+// the `repayAll` sentinel land on one and not the other.
 //
 //  ⚠ Provider-gated markets. Lista's Moolah diverges from Morpho Blue with a
 //  per-market `providers[id][token]` gate: when a provider is registered for a
@@ -70,23 +72,23 @@ import {IMoolah, IListaBroker, MarketParams} from "./interfaces/ILista.sol";
 // 224 bytes total — the same byte map as the Morpho Blue pre-fund siblings.
 
 
-/// @notice ONE contract for every pre-funded one-sided op on Lista.
-/// @dev    Replaces {ListaPreFundSupplyCollateralModule}, {ListaPreFundBrokerRepayModule}. `Op` rides in
-///         descriptor bits [244,252) — see {PreFundModuleBase._preFundOp} for why the
+/// @notice The pre-funded Moolah supply-collateral op.
+/// @dev    Replaces {ListaPreFundSupplyCollateralModule}. `Op` rides in descriptor
+///         bits [244,252) — see {PreFundModuleBase._preFundOp} for why the
 ///         discriminator lives in the word the maker already signs rather than in a
-///         new `data` field. Merging is safe because the op is INSIDE `data`, and `data` is
-///         inside the maker's ORDER signature: an item signed for one op cannot be
-///         executed as another. Each op keeps its own decode, so the
-///         per-op `data` layouts are unchanged apart from the descriptor bits.
+///         new `data` field: it is INSIDE `data`, and `data` is inside the maker's
+///         ORDER signature, so an item signed for one op cannot be executed as
+///         another. {ListaBrokerModule} numbers its own ops independently — the two
+///         contracts are different addresses, so their op spaces never meet.
 contract ListaPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
+    /// @dev One op today. The discriminator stays because it is what keeps this
+    ///      module's blobs from being replayable as a FUTURE sibling's, and
+    ///      because {PreFundModuleBase._preFundOp} reads it whether or not this
+    ///      contract branches on it — an unchecked op would let any of the 256
+    ///      values through as "supply".
     enum Op {
-        SupplyCollateral,
-        BrokerRepay
+        SupplyCollateral
     }
-
-    /// @dev Sentinel `loanId` meaning "the broker's dynamic loan", mirroring
-    ///      {ListaModules}' private constant of the same name.
-    uint256 private constant DYNAMIC_LOAN = type(uint128).max;
 
     /// @dev The descriptor named an op this module does not implement.
     error BadOp(uint256 op);
@@ -103,14 +105,8 @@ contract ListaPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
         // module does — it accumulates exactly across fills.
         if (forAmount == 0) return;
         uint256 op = _preFundOp(data);
-        if (op == uint256(Op.SupplyCollateral)) {
+        if (op != uint256(Op.SupplyCollateral)) revert BadOp(op);
         _supplyCollateral(onBehalfOf, forAmount, data);
-        } else if (op == uint256(Op.BrokerRepay)) {
-        // Its own frame — see the supply sibling.
-        _repay(onBehalfOf, forAmount, data);
-        } else {
-            revert BadOp(op);
-        }
     }
 
 
@@ -131,57 +127,17 @@ contract ListaPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
         SafeTransferLib.forceApprove(mp.collateralToken, moolah, 0);
     }
 
-    function _repay(address onBehalfOf, uint256 forAmount, bytes calldata data) private {
-        (, address broker, address loanToken, uint256 loanId) =
-            abi.decode(data, (uint256, address, address, uint256));
-        // The pre-existing floor — see {PreFundGuard}. A funding leg not addressed to
-        // THIS module in THIS token underflows here, so the mis-pairing fails
-        // closed; sound because `msg.sender == settlement` pins `forAmount` to the
-        // core (F27/C-1, C-4). Unlike Liquity's sibling this module needs no extra
-        // token-binding argument: the venue pulls through the scoped approval
-        // below, so the token it takes and the token measured here are the same by
-        // construction. (H-2 is specific to a venue that moves value WITHOUT an
-        // approval — `repayBold` burns directly from `msg.sender`.)
-        uint256 floor = PreFundGuard.floorOf(data, loanToken, forAmount);
-        // The broker pulls the LITERAL amount and refunds what the debt did not
-        // consume, so the consumed amount has to be MEASURED. The approval caps
-        // the pull at `forAmount`, so the delta can never dip into another
-        // fill's dust.
-        // Scoped approve + CLEAR: `broker` is decoded from order data on a shared
-        // singleton, so it is attacker-choosable (F25 / lead A-3).
-        SafeTransferLib.forceApprove(loanToken, broker, forAmount);
-        // `repay(forAmount, …)` ⇒ repay up to the live debt, refund the rest here.
-        // NOT `repay(0, …)`: the deployed broker reverts `ZeroAmount()` on it —
-        // see the header.
-        if (loanId == DYNAMIC_LOAN) {
-            IListaBroker(broker).repay(forAmount, onBehalfOf);
-        } else {
-            IListaBroker(broker).repay(forAmount, loanId, onBehalfOf);
-        }
-        SafeTransferLib.forceApprove(loanToken, broker, 0);
-        // The delivered surplus belongs to the maker, not to this singleton.
-        PreFundGuard.sweepSurplus(loanToken, onBehalfOf, floor);
-    }
-
-
     /// @inheritdoc IFundingSource
     /// @dev Funded by the fill's OWN delivery — a wallet/allowance read would
-    ///      preview a self-funding order as short. PER-OP: SupplyCollateral's third field is a `MarketParams` STRUCT and
-    ///      BrokerRepay's is a plain `address`, so one decode cannot serve both —
-    ///      reading the repay blob as a struct would follow a head offset into
-    ///      nonsense.
+    ///      preview a self-funding order as short.
     function fundingSource(address, bytes calldata data)
         external
         pure
         override
         returns (address asset, uint256 available)
     {
-        if (_preFundOp(data) == uint256(Op.BrokerRepay)) {
-            (,, asset,) = abi.decode(data, (uint256, address, address, uint256));
-        } else {
-            (,, MarketParams memory mp) = abi.decode(data, (uint256, address, MarketParams));
-            asset = mp.collateralToken;
-        }
+        (,, MarketParams memory mp) = abi.decode(data, (uint256, address, MarketParams));
+        asset = mp.collateralToken;
         available = type(uint256).max;
     }
 }

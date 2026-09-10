@@ -149,9 +149,19 @@ abstract contract BridgeOutBase is IMakerModule {
 
     /// @dev Return anything the bridge did not consume to the maker — never to a
     ///      caller-chosen address — so the module ends every fill empty.
-    function _sweep(address token, address to) internal {
-        uint256 left = SafeTransferLib.balanceOf(token, address(this));
-        if (left != 0) SafeTransferLib.safeTransfer(token, to, left);
+    /// @dev ⚠ `floor` IS NOT OPTIONAL. `token` comes from the maker-signed spec on a
+    ///      shared singleton, so a whole-balance sweep hands any stray/donated
+    ///      balance to whoever authors the next one-wei order. "The module ends every
+    ///      fill EMPTY" is the wrong invariant — the right one is "ends where it
+    ///      started", and that needs the floor.
+    function _sweep(address token, address to, uint256 floor) internal {
+        uint256 bal = SafeTransferLib.balanceOf(token, address(this));
+        if (bal > floor) SafeTransferLib.safeTransfer(token, to, bal - floor);
+    }
+
+    /// @dev The pre-fill balance the matching {_sweep} must not dip below.
+    function _floorOf(address token) internal view returns (uint256) {
+        return SafeTransferLib.balanceOf(token, address(this));
     }
 
     /// @dev The 64-byte payload the destination {BridgedOrderInbox} reads — or

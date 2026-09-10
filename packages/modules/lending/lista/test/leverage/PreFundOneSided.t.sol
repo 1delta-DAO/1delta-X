@@ -7,6 +7,8 @@ import {Order, Item, ItemOp, LegOut} from "@core/settlement/Settlement.sol";
 import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 
 import {ListaPreFundModule} from "../../src/ListaPreFundModules.sol";
+import {ListaBrokerModule} from "../../src/ListaBrokerModule.sol";
+import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {ListaModulesBase, IListaBrokerViews} from "../shared/ListaModulesBase.t.sol";
@@ -31,6 +33,9 @@ interface IListaBrokerFlex {
 /// `setAuthorization` either: the receive side is empty end to end.
 contract ListaPreFundOneSidedTest is ListaModulesBase {
     ListaPreFundModule preFund;
+    /// @dev The repay half of the pre-fund shape lives on the merged broker
+    ///      module — same descriptor mechanics, different contract.
+    ListaBrokerModule broker_;
 
     uint256 constant USD1_IN = 1_000e18; //  maker's equity sold on the supply flow
     uint256 constant BTCB_OUT = 0.01e18; //  delivered conversion output (~$1.1k)
@@ -38,7 +43,8 @@ contract ListaPreFundOneSidedTest is ListaModulesBase {
     function setUp() public override {
         super.setUp();
         preFund = new ListaPreFundModule(address(permit3), address(settlement));
-        }
+        broker_ = brokerModule;
+    }
 
     /// @dev `(1 << 255) | index` — fund from `legsOut[index]`.
     function _forLeg(uint256 index, address token) internal pure returns (uint256) {
@@ -48,8 +54,8 @@ contract ListaPreFundOneSidedTest is ListaModulesBase {
     }
 
     /// @dev Same leg reference, with the op in descriptor bits [244,252).
-    function _forLegOp(uint256 index, address token, ListaPreFundModule.Op op) internal pure returns (uint256) {
-        return _forLeg(index, token) | (uint256(op) << 244);
+    function _forLegOp(uint256 index, address token, uint256 op) internal pure returns (uint256) {
+        return _forLeg(index, token) | (op << 244);
     }
 
     /// @dev Push supply blob: descriptor word FIRST, then the Moolah singleton,
@@ -59,8 +65,11 @@ contract ListaPreFundOneSidedTest is ListaModulesBase {
     }
 
     /// @dev Push repay blob targeting the FLEX position (dynamic sentinel).
+    ///      {ListaBrokerModule} numbers its ops from its own space, so repay is 0.
     function _preFundRepayData() internal pure returns (bytes memory) {
-        return abi.encode(_forLegOp(0, USD1, ListaPreFundModule.Op.BrokerRepay), BROKER, USD1, uint256(type(uint128).max));
+        return abi.encode(
+            _forLegOp(0, USD1, uint256(ListaBrokerModule.Op.Repay)), BROKER, USD1, uint256(type(uint128).max)
+        );
     }
 
     /// @dev Address one output leg to `to` (the pre-fund shape).
@@ -144,9 +153,9 @@ contract ListaPreFundOneSidedTest is ListaModulesBase {
         assertEq(IERC20(USD1).allowance(maker, address(permit3)), 0, "the loan token is approved nowhere");
 
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.MAKE, address(preFund), 0, address(0), data); //  pacing amount
+        items[0] = Item(ItemOp.MAKE, address(broker_), 0, address(0), data); //  pacing amount
         Order memory o = _order(maker, 502, BTCB, USD1, btcbIn, usd1Out, items);
-        _routeLegOut(o, USD1, usd1Out, 0, address(preFund));
+        _routeLegOut(o, USD1, usd1Out, 0, address(broker_));
         bytes memory sig = _sign(o);
 
         // The live debt right before the fill — exactly what the repay consumes.
@@ -159,7 +168,7 @@ contract ListaPreFundOneSidedTest is ListaModulesBase {
 
         assertEq(IListaBrokerViews(BROKER).getUserTotalDebt(maker), 0, "the flex debt is retired in full");
         assertEq(IERC20(USD1).balanceOf(maker), makerUsd1 + (usd1Out - debt), "the surplus was swept to the maker");
-        assertEq(IERC20(USD1).balanceOf(address(preFund)), 0, "module drained");
+        assertEq(IERC20(USD1).balanceOf(address(broker_)), 0, "module drained");
         assertEq(IERC20(BTCB).balanceOf(solver), btcbIn, "solver received the input leg");
         assertEq(IERC20(USD1).allowance(maker, address(permit3)), 0, "the loan-token approval stayed zero throughout");
     }
@@ -171,7 +180,7 @@ contract ListaPreFundOneSidedTest is ListaModulesBase {
         preFund.makeOnBehalf(maker, 1, _preFundSupplyData());
         vm.prank(address(0xBAD));
         vm.expectRevert(PreFundGuard.OnlySettlement.selector);
-        preFund.makeOnBehalf(maker, 1, _preFundRepayData());
+        broker_.makeOnBehalf(maker, 1, _preFundRepayData());
     }
 
     // ── The descriptor gate: only a `legsOut` REFERENCE — the one form whose
@@ -188,10 +197,29 @@ contract ListaPreFundOneSidedTest is ListaModulesBase {
         preFund.makeOnBehalf(maker, 1, literal);
         vm.expectRevert(PreFundGuard.PreFundDescriptorRequired.selector);
         preFund.makeOnBehalf(maker, 1, balance);
-        vm.expectRevert(PreFundGuard.PreFundDescriptorRequired.selector);
-        preFund.makeOnBehalf(maker, 1, literalRepay);
-        vm.expectRevert(PreFundGuard.PreFundDescriptorRequired.selector);
-        preFund.makeOnBehalf(maker, 1, balanceRepay);
+        vm.stopPrank();
+
+        // The repay half of the same shape, on the MERGED broker module, where the
+        // rule is deliberately different — and this is the asymmetry to understand
+        // before signing a repay item.
+        //
+        // {ListaBrokerModule} serves BOTH funding shapes off one entrypoint, so
+        // only the PRE-FUND branch is descriptor-restricted ({_fundingShape}).
+        // Everything else is the PULL branch, and the pull branch's gate is not a
+        // descriptor at all — it is the maker's Permit3 TOKEN allowance.
+        //
+        //   • a BALANCE descriptor has a dirty word 0, which is not a valid op, so
+        //     it dies on {BadOp} before touching anything;
+        //   • a LITERAL descriptor is word 0 == 0 == `Op.Repay`, which is
+        //     BYTE-IDENTICAL to a well-formed pull-repay blob — and the core agrees,
+        //     because {Base._isPreFundDesc} classifies that same word as a pull MAKE
+        //     and sizes the item from `item.amount`. So it is not a mis-decode; it
+        //     IS a pull repay, and it stops at the allowance the maker never gave.
+        vm.startPrank(address(settlement));
+        vm.expectPartialRevert(ListaBrokerModule.BadOp.selector);
+        broker_.makeOnBehalf(maker, 1, balanceRepay);
+        vm.expectRevert(abi.encodeWithSelector(IPermit3.InsufficientAllowance.selector, uint160(0)));
+        broker_.makeOnBehalf(maker, 1, literalRepay);
         vm.stopPrank();
     }
 }

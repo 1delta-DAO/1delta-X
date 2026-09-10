@@ -20,7 +20,8 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///
 ///           fillTotal       = total amount to trade (the denominator)
 ///           minFillAnchor   = part size  ⇒ parts = fillTotal / minFillAnchor
-///           decayStartTime  = TWAP start (unix)
+///           decayStartTime  = TWAP start (order's own clock: unix, or BLOCK
+///                             when `timing` bit 102 is set — see {DutchAuction.nowTick})
 ///           decayDuration   = total window ⇒ partDuration = decayDuration / parts
 ///
 ///         Behavior:
@@ -69,8 +70,15 @@ contract TwapFillModule is IFillModule, IFillModuleDescribe {
         if (partDuration == 0) revert TwapNotConfigured();
 
         // Parts whose window has opened by now (1-indexed; nothing before start).
-        if (block.timestamp < start) revert TwapPartUnavailable();
-        uint256 partsOpen = (block.timestamp - start) / partDuration + 1;
+        // ⚠ THE ORDER PICKS THE CLOCK, NOT THIS MODULE. `decayStartTime` and
+        // `decayDuration` are bare uint32s whose UNIT is chosen by the order's
+        // `blockClock` bit; {DutchAuction.nowTick} is the reader that honours it.
+        // Reading `block.timestamp` against a block-clocked schedule compares ~1.7e9
+        // to ~2.1e7, saturates `partsOpen`, and releases the ENTIRE denominator on
+        // the first fill — silently voiding the schedule this module exists to keep.
+        uint256 nowTick = order.nowTick();
+        if (nowTick < start) revert TwapPartUnavailable();
+        uint256 partsOpen = (nowTick - start) / partDuration + 1;
         if (partsOpen > parts) partsOpen = parts;
 
         uint256 openAmount = partsOpen * partSize; // total unlocked by now (≤ total)

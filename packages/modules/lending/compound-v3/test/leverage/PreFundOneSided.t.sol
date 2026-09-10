@@ -132,7 +132,7 @@ contract CometPreFundOneSidedTest is CompoundV3ModulesBase {
         vm.prank(solver);
         settlement.fill(o, sig, 1 ether);
 
-        assertApproxEqAbs(_usdcDebt(maker), 0, 2, "the debt is retired in full");
+        assertEq(_usdcDebt(maker), 0, "the debt is retired in full");
         // Surplus = delivered − actual (accrued) debt repaid; small band for accrual.
         assertApproxEqAbs(
             IERC20(USDC).balanceOf(maker) - makerUsdc, usdcIn - debtBefore, 1e4, "the surplus was swept to the maker"

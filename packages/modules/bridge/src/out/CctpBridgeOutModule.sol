@@ -110,6 +110,9 @@ contract CctpBridgeOutModule is BridgeOutBase {
         CctpSpec memory s = abi.decode(data, (CctpSpec));
         _checkDestination(s.dstRecipient, s.dstChainId);
 
+        // Snapshot before the pull — see {_sweep}: the sweep must return only what
+        // THIS fill brought in, never a balance that was already resident.
+        uint256 floor = _floorOf(s.inputToken);
         _pull(onBehalfOf, s.inputToken, amount);
         SafeTransferLib.forceApprove(s.inputToken, address(TOKEN_MESSENGER), amount);
         uint64 nonce = TOKEN_MESSENGER.depositForBurn(
@@ -119,6 +122,6 @@ contract CctpBridgeOutModule is BridgeOutBase {
         // Mirrors the Across module: drop the allowance and return anything the
         // messenger did not take, so this module ends every fill holding nothing.
         SafeTransferLib.forceApprove(s.inputToken, address(TOKEN_MESSENGER), 0);
-        _sweep(s.inputToken, onBehalfOf);
+        _sweep(s.inputToken, onBehalfOf, floor);
     }
 }

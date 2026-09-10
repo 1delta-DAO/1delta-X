@@ -124,6 +124,31 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
         vm.stopPrank();
     }
 
+    /// @dev Dolomite prices its markets through a Chainlink oracle with a staleness
+    ///      window, so ANY `vm.warp` past the feed heartbeat makes every `operate`
+    ///      revert with "Chainlink price expired" — a fork-harness artifact, not
+    ///      module behaviour. Pin both markets at their live fork prices so
+    ///      time-dependent tests (interest accrual) can warp freely and the price
+    ///      does not drift underneath the assertions either.
+    function _freezeOracles() internal {
+        _freezeOracle(COLL_MARKET, COLL);
+        _freezeOracle(DEBT_MARKET, DEBT);
+    }
+
+    function _freezeOracle(uint256 marketId, address token) private {
+        (bool ok, bytes memory oracleRet) =
+            address(DOLOMITE).staticcall(abi.encodeWithSignature("getMarketPriceOracle(uint256)", marketId));
+        require(ok, "getMarketPriceOracle failed");
+        address oracle = abi.decode(oracleRet, (address));
+
+        // `getMarketPrice` and the oracle's `getPrice` both return `MonetaryPrice`
+        // (a single-word struct), so the live return data is replayable verbatim.
+        (bool ok2, bytes memory priceRet) =
+            address(DOLOMITE).staticcall(abi.encodeWithSignature("getMarketPrice(uint256)", marketId));
+        require(ok2, "getMarketPrice failed");
+        vm.mockCall(oracle, abi.encodeWithSignature("getPrice(address)", token), priceRet);
+    }
+
     // ──────────────────── Position reads ────────────────────
 
     function _collateralOf(address who) internal view returns (uint256) {

@@ -287,6 +287,68 @@ contract GearboxCreditFlowTest is Test {
         assertEq(IERC20(WSTETH).balanceOf(address(repayModule)), 0, "repay module holds nothing");
     }
 
+    /// {GearboxCreditRepayModule} does NOT read the live debt and does NOT clamp.
+    /// What Gearbox does with an over-signed repay is therefore load-bearing, and
+    /// it is not a revert: `decreaseDebt` caps at the outstanding debt, and the
+    /// surplus — already funded into the account by the preceding `addCollateral`
+    /// — simply STAYS as collateral on the maker's own credit account. So the
+    /// maker is charged the full signed amount, but nothing is lost and nothing is
+    /// stranded on the module: the overshoot is a forced `Recycle`, not a refund.
+    /// Callers wanting the unused portion back must size `amount` off the live
+    /// debt; there is no sweep-to-user path here.
+    function test_repayModule_overRepay_capsAndKeepsSurplusAsCollateral() public {
+        _makeAddCollateral(COLLATERAL);
+        vm.roll(block.number + 1);
+        _takeBorrow(BORROW, user);
+
+        vm.roll(block.number + 1);
+        uint256 debt = _debtOf(creditAccount);
+        uint256 surplus = 1e18;
+        uint256 userBefore = IERC20(WSTETH).balanceOf(user);
+        uint256 caBefore = _caBalance();
+
+        _makeRepay(debt + surplus);
+
+        assertEq(_debtOf(creditAccount), 0, "decreaseDebt capped at the outstanding debt");
+        assertEq(userBefore - IERC20(WSTETH).balanceOf(user), debt + surplus, "maker charged the FULL signed amount");
+        assertEq(_caBalance() - caBefore, surplus, "the surplus stayed as collateral on the maker's account");
+        assertEq(IERC20(WSTETH).balanceOf(address(repayModule)), 0, "repay module holds nothing");
+        assertEq(IERC20(WSTETH).allowance(address(repayModule), CREDIT_MANAGER), 0, "repay module granted nothing");
+    }
+
+    /// The liveness edge, and the reason a Gearbox full close must be signed with
+    /// headroom rather than at the exact principal: interest accrues against the
+    /// pool's base index while `creditAccountInfo.debt` (the stored PRINCIPAL)
+    /// stays put, so a repay quoted off that principal pays the interest first and
+    /// leaves a residual principal far below `minDebt`. Gearbox rejects that with
+    /// `BorrowAmountOutOfLimitsException` — the close does not land "with dust left
+    /// over" the way it would on a clamping venue, it reverts outright.
+    ///
+    /// The recipe that works is the one the Fluid ceiling uses: over-sign, and let
+    /// the cap absorb the difference (see the over-repay test above for where the
+    /// surplus goes).
+    function test_repayModule_staleFullCloseQuote_afterAccrual_revertsBelowMinDebt() public {
+        _makeAddCollateral(COLLATERAL);
+        vm.roll(block.number + 1);
+        _takeBorrow(BORROW, user);
+
+        vm.roll(block.number + 1);
+        vm.warp(block.timestamp + 30 days);
+        assertEq(_debtOf(creditAccount), BORROW, "the STORED principal does not move with time");
+
+        // Quoting that principal under-repays: interest comes off first.
+        vm.expectRevert(abi.encodeWithSignature("BorrowAmountOutOfLimitsException()"));
+        _makeRepay(BORROW);
+
+        assertEq(_debtOf(creditAccount), BORROW, "position left exactly as it was");
+
+        // Headroom absorbs the accrued interest and the close lands.
+        uint256 userBefore = IERC20(WSTETH).balanceOf(user);
+        _makeRepay(BORROW + 1e18);
+        assertEq(_debtOf(creditAccount), 0, "over-signed quote closes the position");
+        assertEq(userBefore - IERC20(WSTETH).balanceOf(user), BORROW + 1e18, "maker charged the full signed amount");
+    }
+
     /// The exact-mask rule the module docs rely on, proven on the REAL BotListV3:
     /// granting anything other than `requiredPermissions()` reverts, so a maker
     /// cannot accidentally hand the deposit-only bot borrow rights.

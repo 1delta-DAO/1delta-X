@@ -307,7 +307,7 @@ market once set — cache forever) instead of hardcoding this table.
    `borrow(amount, termId, user, receiver)` exists on every deployed broker,
    gates on `MOOLAH.isAuthorized(user, msg.sender)` (the Moolah
    `setAuthorization` grant), requires `receiver != 0`, and always pays ERC20.
-   That grant is now **signature-only capable**: `ListaTakerModule` accepts an
+   That grant is now **signature-only capable**: `ListaBrokerModule` accepts an
    optional maker-signed auth tail (op 0: `moolah@96`, 160-byte
    `replayMorphoAuth` block @128; op 1: block @256 in `Exact`, @288 in `Full`
    — BalanceMode must then be encoded explicitly) and replays
@@ -316,7 +316,7 @@ market once set — cache forever) instead of hardcoding this table.
    `test/security/MoolahAuthWithSig.t.sol`).
 2. **`repay(0, …)` reverting `ZeroAmount()` is a SOURCE fact, not a fork
    quirk** — `_pullPayment` transfers the literal amount, then zero-checks.
-   `ListaBrokerRepayModule` (the MAKE module in `ListaModules.sol`)
+   `ListaBrokerModule` (the merged broker module, `ListaBrokerModule.sol`)
    originally encoded `repay(0, …)` and could not execute against any
    deployed broker; **fixed 2026-09-04** with the pre-fund-module correction —
    it passes the explicit maker-signed ceiling and relies on
@@ -328,7 +328,7 @@ market once set — cache forever) instead of hardcoding this table.
    verified source shows the same semantics — plus a pin that `repay(0, …)`
    reverts `ZeroAmount()` on both overloads.
 3. **`repayAll(onBehalf)` is the clean full-close — now a module op**
-   (2026-09-05): `loanId == type(uint256).max` on `ListaBrokerRepayModule`
+   (2026-09-05): `loanId == type(uint256).max` on `ListaBrokerModule`
    maps to it (in `ILista.sol`; selector `0x7c27383b`, verified present on
    both impl generations, §1). One call retires dynamic + all fixed positions
    by SHARES (no dust), immune to the refinance race, and refunds nothing —
@@ -361,9 +361,9 @@ market once set — cache forever) instead of hardcoding this table.
    `test/leverage/SmartLp.t.sol`.
 8. **Flex borrow and `convertDynamicToFixed` are `msg.sender`-only** — EOA
    direct, permanently outside module reach (correctly omitted).
-9. **The push (TAKE_FOR) siblings need NOTHING on the receive side.**
-   `ListaPreFundModules.sol` adds `ListaPreFundSupplyCollateralModule` and
-   `ListaPreFundBrokerRepayModule`: the maker signs the converted output leg
+9. **The pre-funded (push) shape needs NOTHING on the receive side.**
+   `ListaPreFundModule` (supply-collateral) and `ListaBrokerModule`'s
+   pre-fund branch (repay): the maker signs the converted output leg
    with `recipient = module`, the core sizes `forAmount` to exactly that
    delivery, and the module supplies/repays it from its own balance —
    possible precisely because both value-in venue ops are permissionless on
@@ -373,12 +373,26 @@ market once set — cache forever) instead of hardcoding this table.
    sweep exactly `forAmount − consumed` back to the maker. The provider gate
    (§4-C) still excludes provider-gated markets from the push
    supply-collateral leg — check `providers[id][collateralToken] == 0`
-   off-chain. Leg-reference descriptors only (literal/balance forms are
-   rejected); fork-proven by `test/leverage/PreFundOneSided.t.sol`. The push
-   repay deliberately keeps the literal-amount overloads and NOT `repayAll`:
-   `forAmount` is delivery-sized, and a delivery a wei short of the live debt
-   would revert the whole fill on `repayAll`'s exact pull, where the literal
-   repay degrades gracefully to a partial close.
+   off-chain. Fork-proven by `test/leverage/PreFundOneSided.t.sol`.
+
+   Two corrections to what this section used to say:
+
+   • **Descriptor form.** "Leg-reference only" holds for `ListaPreFundModule`.
+     It does NOT hold for `ListaBrokerModule`, which serves both funding shapes
+     off one `makeOnBehalf`: only the pre-fund BRANCH is descriptor-restricted,
+     and a non-descriptor word 0 is not an error there — it is the pull shape,
+     gated by the maker's Permit3 token allowance instead.
+
+   • **`repayAll` on the pre-fund shape.** This used to read "deliberately keeps
+     the literal-amount overloads and NOT `repayAll`". That was a description of
+     a BUG, not a decision: the sentinel branch existed on the pull twin and had
+     simply never been copied across, so the documented `type(uint256).max` fell
+     through to the literal overload and was handed to the broker as a fixed
+     position id. Both shapes now serve it from one body. The underlying caveat
+     is real but belongs to the CALLER, not the module: `repayAll` pulls exactly
+     the live debt, so a delivery a wei short reverts the whole fill, where the
+     literal overload degrades to a partial close. Size a pre-funded full close
+     with headroom, or sign the literal overload.
 
 ## 7. Related in-repo references (lending-sdks workspace)
 
