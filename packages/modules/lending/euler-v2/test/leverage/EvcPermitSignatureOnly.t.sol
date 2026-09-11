@@ -8,7 +8,7 @@ import {Order, Item, ItemOp, LegOut} from "@core/settlement/Settlement.sol";
 import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 
 import {IEVC} from "../../src/interfaces/IEulerV2.sol";
-import {EulerV2PreFundTakeForModule} from "../../src/EulerV2Modules.sol";
+import {EulerV2OperatorModule} from "../../src/EulerV2OperatorModule.sol";
 import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
 
 /// @dev The slice of the LIVE EVC's surface this test needs beyond the package's
@@ -55,7 +55,6 @@ interface IEVCPermitViews {
 /// `test_preFundFunded_samePosition_andCostsNoMore`) run tail-less `OpenData`
 /// against pre-granted makers in this same suite.
 contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
-    EulerV2PreFundTakeForModule pushModule;
 
     uint256 constant COLLATERAL = 1 ether;
     uint256 constant BORROW = 1_500e6;
@@ -70,8 +69,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
 
     function setUp() public override {
         super.setUp();
-        pushModule = new EulerV2PreFundTakeForModule(address(permit3), address(settlement));
-        vm.label(address(pushModule), "eulerPreFundTakeForModule");
+        vm.label(address(operatorModule), "eulerPreFundTakeForModule");
 
         // Rebind the harness's maker to a FRESH key with zero history: the base
         // setUp granted operator/controller/collateral (and ERC20 approvals) to
@@ -113,7 +111,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
             targetContract: address(EVC),
             onBehalfOfAccount: address(0),
             value: 0,
-            data: abi.encodeCall(IEVC.setAccountOperator, (maker, address(pushModule), true))
+            data: abi.encodeCall(IEVC.setAccountOperator, (maker, address(operatorModule), true))
         });
         items[1] = IEVC.BatchItem({
             targetContract: address(EVC),
@@ -139,7 +137,10 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
     function _forLeg(uint256 j, address token) internal pure returns (uint256) {
         // bit 255 = leg reference; bit 253 = the PRE-FUND shape, which makes the core
         // require `legsOut[j].recipient == module` (F27/H-1).
-        return (uint256(1) << 255) | (uint256(1) << 253) | (uint256(uint160(token)) << 16) | j;
+        // The op rides bits [244,252) — see {EulerV2OperatorModule}. Inside `ref`, so
+        // the taker grant binds it.
+        return (uint256(1) << 255) | (uint256(EulerV2OperatorModule.Op.Open) << 244)
+            | (uint256(1) << 253) | (uint256(uint160(token)) << 16) | j;
     }
 
     /// @dev The 128-byte {OpenData} head + the {DelegationHelper.replayEvcPermit}
@@ -150,7 +151,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         returns (bytes memory)
     {
         bytes memory head = abi.encode(
-            EulerV2PreFundTakeForModule.OpenData({
+            EulerV2OperatorModule.OpenData({
                 forDesc: _forLeg(0, WETH),
                 forCap: 0,
                 collateralVault: address(EWETH),
@@ -162,21 +163,21 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
 
     function _preFundOrder(uint256 nonce, bytes memory data) internal view returns (Order memory o) {
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE_FOR, address(pushModule), BORROW, address(0), data);
+        items[0] = Item(ItemOp.TAKE_FOR, address(operatorModule), BORROW, address(0), data);
         o = _order(maker, nonce, USDC, WETH, BORROW, COLLATERAL, items);
         LegOut[] memory legsOut = new LegOut[](1);
-        legsOut[0] = LegOut(WETH, COLLATERAL, 0, address(pushModule)); // delivered to the module
+        legsOut[0] = LegOut(WETH, COLLATERAL, 0, address(operatorModule)); // delivered to the module
         o.legsOut = PackedEncode.legsOut(legsOut);
     }
 
     function _assertNoGrants() internal view {
-        assertFalse(EVC.isAccountOperatorAuthorized(maker, address(pushModule)), "no operator grant pre-fill");
+        assertFalse(EVC.isAccountOperatorAuthorized(maker, address(operatorModule)), "no operator grant pre-fill");
         assertFalse(IEVCPermitViews(address(EVC)).isControllerEnabled(maker, address(EUSDC)), "no controller pre-fill");
         assertFalse(IEVCPermitViews(address(EVC)).isCollateralEnabled(maker, address(EWETH)), "no collateral pre-fill");
     }
 
     function _assertGrants() internal view {
-        assertTrue(EVC.isAccountOperatorAuthorized(maker, address(pushModule)), "operator granted");
+        assertTrue(EVC.isAccountOperatorAuthorized(maker, address(operatorModule)), "operator granted");
         assertTrue(IEVCPermitViews(address(EVC)).isControllerEnabled(maker, address(EUSDC)), "controller enabled");
         assertTrue(IEVCPermitViews(address(EVC)).isCollateralEnabled(maker, address(EWETH)), "collateral enabled");
     }
@@ -214,7 +215,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         assertEq(vm.getNonce(maker), 0, "the maker never broadcast a transaction");
         assertEq(IERC20(WETH).allowance(maker, address(permit3)), 0, "no ERC20 approval, receive side");
         assertEq(IERC20(USDC).allowance(maker, address(permit3)), 0, "no ERC20 approval, debt side");
-        (uint160 amt,) = permit3.tokenAllowance(maker, address(pushModule), WETH);
+        (uint160 amt,) = permit3.tokenAllowance(maker, address(operatorModule), WETH);
         assertEq(amt, 0, "no Permit3 book entry");
 
         // Signature 1: the EVC permit, sealed into the item's data tail.
@@ -232,7 +233,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         // shape needs none.
         IPermit3.PermitBatch memory batch = _buildBatch(
             new IPermit3.TokenPermit[](0),
-            _takerPermits1(address(settlement), address(pushModule), keccak256(data), BORROW),
+            _takerPermits1(address(settlement), address(operatorModule), keccak256(data), BORROW),
             0,
             _expiry(o)
         );
@@ -251,7 +252,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
 
         // Standard push asserts: nothing transited the maker, nothing stranded.
         assertEq(IERC20(WETH).balanceOf(maker), 0, "the maker's wallet never saw the WETH");
-        assertEq(IERC20(WETH).balanceOf(address(pushModule)), 0, "module drained: delivery fully deposited");
+        assertEq(IERC20(WETH).balanceOf(address(operatorModule)), 0, "module drained: delivery fully deposited");
         assertEq(IERC20(USDC).balanceOf(solver), BORROW, "solver received the input leg");
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement drained");
         assertEq(vm.getNonce(maker), 0, "still zero maker transactions: signature-only throughout");
@@ -274,7 +275,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         Order memory o = _preFundOrder(32, data);
         IPermit3.PermitBatch memory batch = _buildBatch(
             new IPermit3.TokenPermit[](0),
-            _takerPermits1(address(settlement), address(pushModule), keccak256(data), BORROW),
+            _takerPermits1(address(settlement), address(operatorModule), keccak256(data), BORROW),
             0,
             _expiry(o)
         );
@@ -294,6 +295,6 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
 
         assertApproxEqRel(_wethCollateral(maker) - col0, COLLATERAL, 1e15, "position opened regardless");
         assertApproxEqRel(_usdcDebt(maker) - debt0, BORROW, 1e15, "debt drawn regardless");
-        assertEq(IERC20(WETH).balanceOf(address(pushModule)), 0, "module drained");
+        assertEq(IERC20(WETH).balanceOf(address(operatorModule)), 0, "module drained");
     }
 }

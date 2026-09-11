@@ -90,7 +90,7 @@ bytes memory data = abi.encode(
 ## 2. Credit Delegation Signature — taker modules (borrow)
 
 **Library:** `DelegationHelper.replayAaveDelegation`  
-**Applies to:** `AaveV3BorrowModule`
+**Applies to:** `AaveV3CreditModule` (both ops, and both of its seams)
 
 ### When to use
 

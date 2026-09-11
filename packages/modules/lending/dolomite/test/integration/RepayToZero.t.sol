@@ -4,8 +4,9 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
+import {DolomiteOperatorModule} from "../../src/DolomiteOperatorModule.sol";
 
-/// @dev Repay-to-zero coverage for {DolomiteRepayModule}.
+/// @dev Repay-to-zero coverage for {DolomiteOperatorModule}.
 ///
 /// Dolomite has NO "repay all" sentinel: the module reads the live debt
 /// (`getAccountWei`) and clamps `min(amount, debt)`, then deposits exactly that
@@ -28,14 +29,14 @@ contract DolomiteRepayToZeroTest is DolomiteModulesBase {
     uint256 constant PRINCIPAL = 1_000e6;
 
     function _repayData() internal view returns (bytes memory) {
-        return abi.encode(address(DOLOMITE), DEBT_MARKET, DEBT, ACCOUNT);
+        return abi.encode(uint8(DolomiteOperatorModule.Op.Repay), address(DOLOMITE), DEBT_MARKET, DEBT, ACCOUNT);
     }
 
     /// @dev Fund the maker and open the Permit3 token allowance the repay module pulls on.
     function _fundRepay(uint256 amount) internal {
         deal(DEBT, maker, amount);
         vm.prank(maker);
-        permit3.approveToken(address(repayModule), DEBT, uint160(amount), 0);
+        permit3.approveToken(address(operatorModule), DEBT, uint160(amount), 0);
     }
 
     function test_dolomite_repay_full_leavesExactlyZeroDebt() public {
@@ -54,12 +55,12 @@ contract DolomiteRepayToZeroTest is DolomiteModulesBase {
         uint256 makerBefore = IERC20(DEBT).balanceOf(maker);
 
         vm.prank(address(settlement));
-        repayModule.makeOnBehalf(maker, ceiling, _repayData());
+        operatorModule.makeOnBehalf(maker, ceiling, _repayData());
 
         assertEq(_debtOf(maker), 0, "debt closed to exactly zero");
         assertEq(makerBefore - IERC20(DEBT).balanceOf(maker), debt, "maker charged the live debt, not the ceiling");
-        assertEq(IERC20(DEBT).balanceOf(address(repayModule)), 0, "repay module holds no residual");
-        assertEq(IERC20(DEBT).allowance(address(repayModule), address(DOLOMITE)), 0, "scoped grant cleared");
+        assertEq(IERC20(DEBT).balanceOf(address(operatorModule)), 0, "repay module holds no residual");
+        assertEq(IERC20(DEBT).allowance(address(operatorModule), address(DOLOMITE)), 0, "scoped grant cleared");
     }
 
     /// @dev Quoting the *opening* principal after interest accrued under-repays —
@@ -76,7 +77,7 @@ contract DolomiteRepayToZeroTest is DolomiteModulesBase {
         _fundRepay(PRINCIPAL);
 
         vm.prank(address(settlement));
-        repayModule.makeOnBehalf(maker, PRINCIPAL, _repayData());
+        operatorModule.makeOnBehalf(maker, PRINCIPAL, _repayData());
 
         uint256 left = _debtOf(maker);
         assertGt(left, 0, "stale principal cannot close the position");
@@ -93,10 +94,10 @@ contract DolomiteRepayToZeroTest is DolomiteModulesBase {
         uint256 makerBefore = IERC20(DEBT).balanceOf(maker);
 
         vm.prank(address(settlement));
-        repayModule.makeOnBehalf(maker, part, _repayData());
+        operatorModule.makeOnBehalf(maker, part, _repayData());
 
         assertEq(makerBefore - IERC20(DEBT).balanceOf(maker), part, "maker charged exactly the partial amount");
         assertApproxEqAbs(_debtOf(maker), debt - part, 2, "debt reduced by the partial amount");
-        assertEq(IERC20(DEBT).balanceOf(address(repayModule)), 0, "repay module holds no residual");
+        assertEq(IERC20(DEBT).balanceOf(address(operatorModule)), 0, "repay module holds no residual");
     }
 }

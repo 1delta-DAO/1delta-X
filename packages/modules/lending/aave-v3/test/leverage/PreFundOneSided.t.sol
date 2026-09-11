@@ -9,7 +9,7 @@ import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 import {Chains, Tokens} from "@coretest/data/LenderRegistry.sol";
 
 import {IAaveV3Pool} from "../../src/interfaces/IAaveV3.sol";
-import {AaveV3LeverageModule} from "../../src/AaveV3FusedModules.sol";
+import {AaveV3CreditModule} from "../../src/AaveV3CreditModule.sol";
 import {AaveV3PreFundModule} from "../../src/AaveV3PreFundModules.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
@@ -191,7 +191,7 @@ contract PreFundOneSidedTest is AaveModulesBase {
         address DAI = tokens[Chains.ETHEREUM_MAINNET][Tokens.DAI];
         uint256 daiIn = 2_000e18; //  X — the maker's equity, sold to the solver
         uint256 borrow = 1_000e6; //  A — drawn against the new collateral
-        AaveV3LeverageModule lever = new AaveV3LeverageModule(address(permit3), address(settlement));
+        AaveV3CreditModule lever = new AaveV3CreditModule(address(permit3), address(settlement));
 
         // The item data: fused base layout + the delegation-with-sig block, signed
         // against the REAL debt token's EIP-712 domain — no on-chain
@@ -213,7 +213,17 @@ contract PreFundOneSidedTest is AaveModulesBase {
                 keccak256(abi.encodePacked("\x19\x01", IDebtTokenSig(usdcDebtToken).DOMAIN_SEPARATOR(), structHash))
             );
             data = abi.encode(
-                _forLeg(0, WETH), uint256(0), AAVE_POOL, USDC, uint256(2), WETH, usdcDebtToken, deadline, v, r, s
+                _forLeg(0, WETH) | DESC_OP_LEVERAGE,
+                uint256(0),
+                AAVE_POOL,
+                USDC,
+                uint256(2),
+                WETH,
+                usdcDebtToken,
+                deadline,
+                v,
+                r,
+                s
             );
         }
 

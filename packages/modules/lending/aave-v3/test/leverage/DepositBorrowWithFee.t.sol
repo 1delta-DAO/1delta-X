@@ -39,10 +39,10 @@ contract DepositBorrowWithFeeTest is AaveModulesBase {
         });
         items[1] = Item({
             op: ItemOp.TAKE,
-            module: address(borrowModule),
+            module: address(creditModule),
             amount: borrowOut,
             recipient: address(0),
-            data: abi.encode(AAVE_POOL, USDC, uint256(2))
+            data: abi.encode(OP_BORROW, AAVE_POOL, USDC, uint256(2))
         });
         Order memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
         _splitFeeLeg(order, feeRecipient, fee); // fee as its own output leg

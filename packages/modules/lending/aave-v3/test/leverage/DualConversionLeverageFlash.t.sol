@@ -70,10 +70,10 @@ contract DualConversionLeverageFlashTest is AaveModulesBase {
         // collateral during the deposit-output delivery.
         multiSolver.setupTokenApproval(WETH);
 
-        bytes memory borrowData = abi.encode(AAVE_POOL, USDC, uint256(2));
+        bytes memory borrowData = abi.encode(OP_BORROW, AAVE_POOL, USDC, uint256(2));
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(AAVE_POOL, WETH));
-        items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), borrowData);
+        items[1] = Item(ItemOp.TAKE, address(creditModule), borrowOut, address(0), borrowData);
 
         Order memory order = Order({
             params: 0,

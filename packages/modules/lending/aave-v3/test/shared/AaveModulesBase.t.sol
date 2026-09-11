@@ -13,12 +13,8 @@ import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 
 import {IAaveV3Pool, IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
-import {
-    AaveV3DepositModule,
-    AaveV3RepayModule,
-    AaveV3WithdrawModule,
-    AaveV3BorrowModule
-} from "../../src/AaveV3Modules.sol";
+import {AaveV3DepositModule, AaveV3RepayModule, AaveV3WithdrawModule} from "../../src/AaveV3Modules.sol";
+import {AaveV3CreditModule} from "../../src/AaveV3CreditModule.sol";
 
 /// @dev Aave integration harness. Extends the module-free CoreSettlementBase and
 /// layers the Aave adapter fixtures (deposit / withdraw / borrow / repay) plus a
@@ -29,9 +25,22 @@ import {
 abstract contract AaveModulesBase is CoreSettlementBase {
     AaveV3DepositModule depositModule;
     AaveV3WithdrawModule withdrawModule;
-    AaveV3BorrowModule borrowModule;
+    /// @dev ONE address for every op that draws against the maker's Aave credit
+    ///      line — the bare borrow and the fused leverage ops alike. That is the
+    ///      point of {AaveV3CreditModule}: `approveDelegation` is called once, in
+    ///      `_approveMakerDepositBorrowSide`, and every borrow-shaped op in this
+    ///      suite rides it.
+    AaveV3CreditModule creditModule;
     AaveV3RepayModule repayModule;
     LimitOrderLeverageSolver leverageSolver;
+
+    /// @dev {AaveV3CreditModule.Op}, as plain words. On the plain-`take` seam the op
+    ///      IS word 0 of `data`; on the `TAKE_FOR` seam it rides the funding
+    ///      descriptor's free bits [244,252). Same numbering on both.
+    uint256 internal constant OP_BORROW = uint256(AaveV3CreditModule.Op.Borrow);
+    uint256 internal constant OP_LEVERAGE = uint256(AaveV3CreditModule.Op.Leverage);
+    /// @dev The `TAKE_FOR` seam's op slot — OR this into a funding descriptor.
+    uint256 internal constant DESC_OP_LEVERAGE = OP_LEVERAGE << 244;
 
     address AAVE_POOL;
     address aWETH;
@@ -46,7 +55,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
 
         depositModule = new AaveV3DepositModule(address(permit3), address(settlement));
         withdrawModule = new AaveV3WithdrawModule(address(permit3));
-        borrowModule = new AaveV3BorrowModule(address(permit3));
+        creditModule = new AaveV3CreditModule(address(permit3), address(settlement));
         repayModule = new AaveV3RepayModule(address(permit3), address(settlement));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
@@ -58,7 +67,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
 
         vm.label(address(depositModule), "aaveV3DepositModule");
         vm.label(address(withdrawModule), "aaveV3WithdrawModule");
-        vm.label(address(borrowModule), "aaveV3BorrowModule");
+        vm.label(address(creditModule), "aaveV3CreditModule");
         vm.label(address(repayModule), "aaveV3RepayModule");
         vm.label(address(leverageSolver), "leverageSolver");
         vm.label(AAVE_POOL, "aaveV3Pool");
@@ -136,7 +145,7 @@ abstract contract AaveModulesBase is CoreSettlementBase {
     }
 
     function _approveMakerDepositBorrowSide(uint256 collateralIn, uint256 borrowOut) internal {
-        bytes memory borrowData = abi.encode(AAVE_POOL, USDC, uint256(2));
+        bytes memory borrowData = abi.encode(OP_BORROW, AAVE_POOL, USDC, uint256(2));
         bytes32 borrowRef = keccak256(borrowData);
 
         vm.startPrank(maker);
@@ -147,10 +156,10 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         // Credit delegation: Aave-native authorisation for the borrow module to
         // incur USDC debt on the maker's behalf. Infinite here — the Permit3
         // taker allowance is what actually caps this fill.
-        IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(borrowModule), type(uint256).max);
+        IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(creditModule), type(uint256).max);
 
         // Permit3 taker gate on the exact borrow position + amount.
-        permit3.approveTaker(address(settlement), address(borrowModule), borrowRef, uint160(borrowOut), 0);
+        permit3.approveTaker(address(settlement), address(creditModule), borrowRef, uint160(borrowOut), 0);
 
         // USDC fallback allowance for _payTokenInToSolver — never triggers here
         // since the borrow fully funds tokenIn, but keeps the shortfall path safe.
@@ -195,9 +204,9 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         permit3.approveToken(address(depositModule), WETH, uint160(exactWeth), 0);
 
         // [3] Spark borrow leg: protocol-native credit delegation + Permit3 taker cap.
-        IAaveCreditDelegation(sparkUsdcDebt).approveDelegation(address(borrowModule), type(uint256).max);
-        bytes memory sparkBorrowData = abi.encode(SPARK_POOL, USDC, uint256(2));
-        permit3.approveTaker(address(settlement), address(borrowModule), keccak256(sparkBorrowData), uint160(debt), 0);
+        IAaveCreditDelegation(sparkUsdcDebt).approveDelegation(address(creditModule), type(uint256).max);
+        bytes memory sparkBorrowData = abi.encode(OP_BORROW, SPARK_POOL, USDC, uint256(2));
+        permit3.approveTaker(address(settlement), address(creditModule), keccak256(sparkBorrowData), uint160(debt), 0);
 
         vm.stopPrank();
     }
@@ -231,10 +240,10 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         });
         items[1] = Item({
             op: ItemOp.TAKE,
-            module: address(borrowModule),
+            module: address(creditModule),
             amount: borrowOut,
             recipient: address(0),
-            data: abi.encode(AAVE_POOL, USDC, uint256(2))
+            data: abi.encode(OP_BORROW, AAVE_POOL, USDC, uint256(2))
         });
         order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
     }
@@ -308,10 +317,10 @@ abstract contract AaveModulesBase is CoreSettlementBase {
         });
         items[3] = Item({
             op: ItemOp.TAKE,
-            module: address(borrowModule),
+            module: address(creditModule),
             amount: debt,
             recipient: address(0), //      default = Settlement for tokenIn payout
-            data: abi.encode(SPARK_POOL, USDC, uint256(2))
+            data: abi.encode(OP_BORROW, SPARK_POOL, USDC, uint256(2))
         });
 
         order = Order({

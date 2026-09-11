@@ -277,7 +277,7 @@ contract PositionSizedWithdrawTest is AaveModulesBase {
 
         Item[] memory items = new Item[](1);
         items[0] =
-            Item({op: ItemOp.TAKE, module: address(borrowModule), amount: CAP, recipient: address(0), data: takerData});
+            Item({op: ItemOp.TAKE, module: address(creditModule), amount: CAP, recipient: address(0), data: takerData});
         Order memory order = _positionOrderWith(8, address(fillModule), CAP, CAP, items);
 
         bytes memory sig = _sign(order);

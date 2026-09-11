@@ -204,29 +204,6 @@ library PreFundGuard {
         floorOf(data, asset, forAmount);
     }
 
-    /// @notice What this module may still pay out without dipping below `floor`.
-    /// @dev Clamps a computed surplus to the balance actually available. Repay
-    ///      modules that size a sweep from a venue's RETURN VALUE (rather than a
-    ///      measured delta) must route it through here: a caller-chosen venue can
-    ///      pull the approval and still report `repaid = 0`, which asks for a
-    ///      second `forAmount` (F27/C-3).
-    function sweepable(address asset, uint256 floor, uint256 want) internal view returns (uint256) {
-        uint256 bal = IERC20(asset).balanceOf(address(this));
-        if (bal <= floor) return 0;
-        uint256 avail = bal - floor;
-        return want < avail ? want : avail;
-    }
-
-    /// @notice Return this fill's unused surplus to the maker, floor-clamped.
-    /// @dev One statement, deliberately: the equivalent inline
-    ///      `if (want != 0) safeTransfer(asset, to, sweepable(...))` overflows the
-    ///      stack in the repay modules that carry the most locals, on the fork
-    ///      profiles that compile without the optimizer.
-    function sweepTo(address asset, address to, uint256 floor, uint256 want) internal {
-        uint256 amt = sweepable(asset, floor, want);
-        if (amt != 0) SafeTransferLib.safeTransfer(asset, to, amt);
-    }
-
     /// @notice Return everything this module holds ABOVE `floor` to the maker.
     /// @dev The measured surplus, by construction. `floor` was the balance before
     ///      this fill's delivery, so after the venue has taken what it takes, the
@@ -238,6 +215,10 @@ library PreFundGuard {
     ///      difference when the venue consumes less than it was asked for
     ///      (F27/M-1). This is immune to both, and drops the local the two
     ///      stack-tightest repay modules could not afford.
+    ///
+    ///      The return-value-sized route (`sweepable` / `sweepTo`, a floor-clamped
+    ///      `want`) was removed 2026-09-11 once its last caller migrated here: a
+    ///      helper for the weaker pattern is an invitation to use it.
     function sweepSurplus(address asset, address to, uint256 floor) internal {
         uint256 bal = IERC20(asset).balanceOf(address(this));
         if (bal > floor) SafeTransferLib.safeTransfer(asset, to, bal - floor);

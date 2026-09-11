@@ -37,17 +37,6 @@ abstract contract PreFundModuleBase {
         settlement = _settlement;
     }
 
-    /// @notice The full pre-fund admission check: right hub, right spender, right
-    ///         descriptor form.
-    /// @dev Ordered cheapest-first, and the order is load-bearing in one place:
-    ///      `msg.sender == permit3` authorises NOTHING on its own, so the spender
-    ///      pin must follow it rather than replace it.
-    function _gatePreFund(address spender, bytes calldata data) internal view {
-        if (msg.sender != address(permit3)) revert OnlyPermit3();
-        PreFundGuard.requireSettlement(spender, settlement);
-        PreFundGuard.requireLegRef(data);
-    }
-
     /// @notice Require a leg-reference descriptor and report which FUNDING shape
     ///         the maker signed: bit 253 set = PUSH (pre-funded), clear = PULL.
     /// @dev This is what lets ONE contract serve both funding shapes of a `TAKE_FOR`
@@ -112,7 +101,13 @@ abstract contract PreFundModuleBase {
     }
 
     /// @notice The full admission check for a PRE-FUNDED MAKE item.
-    /// @dev The MAKE-seam twin of {_gatePreFund}, and deliberately SHORTER by one line.
+    /// @dev The MAKE-seam form of the pre-fund gate. On the TAKE_FOR seam the same
+    ///      three checks are written inline — `msg.sender == permit3`,
+    ///      `requireSettlement(spender)`, then a descriptor pin — because every
+    ///      shipped pre-fund `takeForOnBehalf` now serves BOTH funding shapes and so
+    ///      pins `requireFundingDescriptor` rather than `requireLegRef`; the
+    ///      single-shape `_gatePreFund` helper that folded them had no callers left
+    ///      and was removed (2026-09-11). This one is SHORTER by the hub pin:
     ///      MAKE is dispatched Settlement → module directly, so the caller is
     ///      `msg.sender` — asserted by the EVM, not carried in a parameter a module
     ///      has to remember to compare. There is no permissionless hub in front of

@@ -141,7 +141,7 @@ relocates `_tokenAllowance` would strand allowances mid-migration.
                                         │  3. takeOnBehalf(...)
                                         ▼
                      ┌──────────────────────────┐
-                     │     ITakerModule(A)      │   e.g. AaveV3BorrowModule
+                     │     ITakerModule(A)      │   e.g. AaveV3CreditModule
                      │                          │
                      │   takeOnBehalf(...)      │   calls protocol
                      └──────────────────────────┘
@@ -192,9 +192,9 @@ Every `ITakerModule` performs exactly one operation. The op is identified
 by the module's address; the position is identified by `keccak256(data)`.
 This has three consequences:
 
-- Approvals are legible: `approveTaker(settlement, AaveV3BorrowModule, ref, 1000
+- Approvals are legible: `approveTaker(settlement, AaveV3CreditModule, ref, 1000
   USDC)` is unambiguously a borrow authorisation — the spender is Settlement, and
-  the module (`AaveV3BorrowModule`) is a signed part of the key.
+  the module (`AaveV3CreditModule`) is a signed part of the key.
 - Module code stays tiny — one protocol call, one optional
   `permit3.transferFrom` for ERC20 legs, nothing else.
 - A compromised borrow module cannot be used to withdraw collateral, and

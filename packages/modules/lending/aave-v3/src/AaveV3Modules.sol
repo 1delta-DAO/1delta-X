@@ -14,7 +14,6 @@ import {FundingPreflight} from "@lib/FundingPreflight.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
-import {DelegationHelper} from "@lib/DelegationHelper.sol";
 
 import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 
@@ -387,64 +386,16 @@ contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource, I
     }
 }
 
-// ──────────────────── Aave v3 borrow taker module ────────────────────
+// ──────────────────── Aave v3 borrow taker module — MOVED ────────────────────
 //
-// Single-op taker module. Issues a variable-rate borrow on behalf of the
-// user and forwards proceeds to `receiver`.
+// `AaveV3BorrowModule` lived here. It now lives in {AaveV3CreditModule} as
+// `Op.Borrow`, alongside the fused leverage op that draws against the SAME Aave
+// credit delegation. The merge is by GRANT, not by seam: a maker delegates their
+// credit line to one address instead of one per borrow-shaped module, and a
+// borrow-shaped op added later costs them no new approval. See that file's header
+// for the op discriminator and the redeploy-coupling cost the split of grant
+// classes exists to bound.
 //
-// Optional EIP-712 delegation-with-sig replay: appending a delegation block
-// to `data` grants this module credit delegation on-the-fly — no prior
-// on-chain `approveDelegation` needed. The user signs a `delegationWithSig`
-// on the variable/stable debt token and includes the sig + the debt token
-// address in the order data. The delegation cap is set to `amount`.
-//
-// `data = abi.encode(pool, asset, rateMode[, debtToken, deadline, v, r, s])`
-//   — base = 96 bytes (pool, asset, rateMode).
-//   — delegation block at 96: (address debtToken, uint256 deadline, uint8 v,
-//     bytes32 r, bytes32 s) = 160 bytes.
-//   — rateMode: 1 = stable, 2 = variable (must match the debt token passed).
-//
-contract AaveV3BorrowModule is ITakerModule, IProceedsAsset {
-    IPermit3 public immutable permit3;
-
-    error OnlyPermit3();
-
-    constructor(address _permit3) {
-        permit3 = IPermit3(_permit3);
-    }
-
-    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
-        if (msg.sender != address(permit3)) revert OnlyPermit3();
-
-        (address pool, address asset, uint256 rateMode) = abi.decode(data, (address, address, uint256));
-
-        // Optional delegation-with-sig: grants this module borrow rights on
-        // the debt token without a prior on-chain `approveDelegation`.
-        // Block at 96: (debtToken, deadline, v, r, s) = 160 bytes.
-        DelegationHelper.replayAaveDelegation(data, 96, onBehalfOf, address(this), amount);
-
-        // Measure the borrow's delta (`balBefore` snapshot excludes any residue) and
-        // deliver that measured amount, capped at `amount`, below — never a nominal
-        // top-up from a stray balance. A short/fake-pool borrow therefore delivers
-        // less and fails the fill's output check downstream rather than socialising
-        // residue. (No FoT/rebasing borrow reserves by policy; see module-security-model.)
-        uint256 balBefore = IERC20(asset).balanceOf(address(this));
-        IAaveV3Pool(pool).borrow(asset, amount, rateMode, 0, onBehalfOf);
-        uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
-        // Deliver the measured proceeds, capped at the signed amount; any excess
-        // goes to the maker below. Never exceeds `received`, so a short delivery
-        // (a fake/under-delivering venue) can never be topped up from a stray
-        // balance the module holds — it simply delivers less and the fill's
-        // output check fails downstream. Replaces a `received >= amount` gate.
-        SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
-        if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
-    }
-
-    /// @inheritdoc IProceedsAsset
-    /// @dev No {IFundingSource} counterpart: a bare borrow pulls nothing from the
-    ///      user, it only issues debt. The value-OUT declaration is the whole of this
-    ///      module's asset surface.
-    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
-        (, asset) = abi.decode(data, (address, address));
-    }
-}
+// The data layout gained a leading op word:
+//   was  `abi.encode(pool, asset, rateMode[, debtToken, deadline, v, r, s])`
+//   now  `abi.encode(uint256(Op.Borrow), pool, asset, rateMode[, ...])`

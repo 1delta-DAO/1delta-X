@@ -24,8 +24,7 @@ The value-out ops carry no receiver, so the taker module **measures** what lande
 | `LiquityV2RepayModule` | MAKE | read debt → `repayBold(min(amount,debt))`; sweep residual | `abi.encode(borrowerOps, troveManager, troveId, bold)` |
 | `LiquityV2TakerModule` (op 0) | TAKE | `withdrawBold` → forward → receiver | `abi.encode(uint8(0), borrowerOps, troveId, bold, maxUpfrontFee)` |
 | `LiquityV2TakerModule` (op 1) | TAKE | `withdrawColl` → forward → receiver | `abi.encode(uint8(1), borrowerOps, troveId, coll)` |
-| `LiquityV2PreFundAddCollModule` | TAKE_FOR (preFund) | `addColl` the core-delivered leg from the module's own balance | `abi.encode(forDesc, branchIndex, troveId, coll)` |
-| `LiquityV2PreFundRepayModule` | TAKE_FOR (preFund) | `repayBold(min(forAmount,debt))` from the module's own balance; venue clamps at `entireDebt − MIN_DEBT`; sweep surplus → maker | `abi.encode(forDesc, branchIndex, troveId, bold)` |
+| `LiquityV2PreFundModule` | MAKE (pre-funded) | ONE contract, two ops selected by descriptor bits [244,252): `Op.AddColl` — `addColl` the core-delivered leg from the module's own balance; `Op.Repay` — `repayBold(min(forAmount, debt))` from its own balance, venue clamps at `entireDebt − MIN_DEBT`, surplus swept to the maker. Rides the MAKE seam, not `TAKE_FOR` | `abi.encode(forDesc, branchIndex, troveId, collateralToken \| bold)` — descriptor word first, op in its bits |
 
 The pre-fund modules (`LiquityV2PreFundModules.sol`) are the one-sided "add/repay
 whatever the conversion delivered" shape: the maker routes the signed output leg

@@ -8,17 +8,32 @@ pragma solidity ^0.8.28;
 ///  user's position in some external protocol and forwards it to a receiver.
 ///  Examples (each a separate module):
 ///
-///    - AaveV3BorrowModule         — borrow-on-behalf
+///    - AaveV3CreditModule         — borrow-on-behalf (and fused leverage)
 ///    - AaveV3WithdrawModule       — withdraw collateral on-behalf
 ///    - MorphoBlueBorrowModule     — borrow from a specific market
 ///    - CometWithdrawModule        — withdrawFrom(src=user)
 ///    - LidoUnstakeModule          — initiate stETH unstake
 ///    - LidoClaimModule            — claim a matured unstake NFT
 ///
-///  Single-op modules keep the blast radius small: a user approving
-///  `AaveV3BorrowModule` for 1000 USDC only authorises borrows — never
-///  withdrawals — and the operation is legible from the module address
-///  alone.
+///  Blast radius is bounded by the GRANT, not by the contract. A taker allowance
+///  is keyed `(user, spender, module, ref = keccak256(data))`, so approving
+///  1000 USDC against a borrow `ref` authorises borrows at those parameters —
+///  never withdrawals — whether or not the withdraw op happens to live at the
+///  same address.
+///
+///  That is what lets a module host several ops: put the op INSIDE `data` and it
+///  is inside `ref`, so a grant signed for one op cannot be replayed as another.
+///  {AaveV3CreditModule} does this deliberately, and for a reason the per-`ref`
+///  keying does not cover: Aave's credit delegation is a STANDING,
+///  protocol-native authorisation outside Permit3 entirely. Split across one
+///  contract per borrow-shaped op, it becomes one permanent liability per
+///  contract for the maker to audit and revoke. Merged by grant class, it is one.
+///
+///  ⚠ MERGE BY GRANT, NOT BY VENUE. A merged contract redeploys as a unit, so ops
+///  that consume DIFFERENT standing grants must stay at different addresses —
+///  otherwise a bugfix in one op forces a re-approval of a grant it never
+///  touched. Aave v3 keeps three: the credit line, the aToken, the wallet
+///  allowance.
 ///
 ///  Trust model
 ///  ───────────
@@ -77,11 +92,16 @@ interface ITakerModule {
     ///         The allowance `ref` is `keccak256(data)` — the position key — but the
     ///         taker book is keyed `(user, spender, MODULE, ref)`, so the module is
     ///         part of the allowance identity. Two modules that decode the same
-    ///         `data` layout (`AaveV2BorrowModule` / `AaveV3BorrowModule`, both
-    ///         reading `(address pool, address asset, uint256 rateMode)`) therefore
-    ///         have SEPARATE allowance buckets: approving one can never be consumed
-    ///         dispatching the other, whatever the data. "Single-op modules keep the
-    ///         blast radius small" holds per-allowance, not merely per-signature.
+    ///         `data` layout (`AaveV2BorrowModule` / `AaveV3CreditModule`, both
+    ///         reading `(address pool, address asset, uint256 rateMode)` after their
+    ///         leading word) therefore have SEPARATE allowance buckets: approving one
+    ///         can never be consumed dispatching the other, whatever the data.
+    ///
+    ///         The same keying is what makes several OPS on one module safe, and by
+    ///         the same argument one level down: put the op inside `data` and it is
+    ///         inside `ref`, so the buckets separate per op exactly as they separate
+    ///         per module. Blast radius is bounded by the allowance, not by the
+    ///         address.
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external;
 }
 

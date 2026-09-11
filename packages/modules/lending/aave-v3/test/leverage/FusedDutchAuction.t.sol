@@ -8,7 +8,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Order, Item, ItemOp, OrderSide, LegIn, LegOut, Validator, CurvePoint} from "@core/settlement/Settlement.sol";
 
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
-import {AaveV3LeverageModule} from "../../src/AaveV3FusedModules.sol";
+import {AaveV3CreditModule} from "../../src/AaveV3CreditModule.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev A DUTCH-AUCTIONED leverage fill on the fused module.
@@ -35,7 +35,7 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 /// CEILING.** Sized at the floor, a late fill owes more than the borrow produced and
 /// `_payInputsToSolver` pulls the shortfall out of the maker's wallet.
 contract FusedDutchAuctionTest is AaveModulesBase {
-    AaveV3LeverageModule fused;
+    AaveV3CreditModule fused;
 
     uint256 constant COLLATERAL = 1 ether; //   fixed: what the maker ends up holding
     uint256 constant DEBT_FLOOR = 1_500e6; //   t=0   — best for the maker
@@ -44,13 +44,13 @@ contract FusedDutchAuctionTest is AaveModulesBase {
 
     function setUp() public override {
         super.setUp();
-        fused = new AaveV3LeverageModule(address(permit3), address(settlement));
+        fused = new AaveV3CreditModule(address(permit3), address(settlement));
         vm.label(address(fused), "aaveV3FusedLeverageModule");
     }
 
     function _data() internal view returns (bytes memory) {
         // The ratio is exact because BOTH totals are fixed quantities on a BUY.
-        return abi.encode(AAVE_POOL, USDC, uint256(2), WETH, COLLATERAL, DEBT_CEIL);
+        return abi.encode(OP_LEVERAGE, AAVE_POOL, USDC, uint256(2), WETH, COLLATERAL, DEBT_CEIL);
     }
 
     /// @dev BUY: fixed collateral out, rising debt in, one fused item at the ceiling.
@@ -174,7 +174,7 @@ contract FusedDutchAuctionTest is AaveModulesBase {
     //    under-produces on a late fill, and the shortfall is pulled from the maker's
     //    own wallet rather than from the borrow. Size TAKE items at the CEILING. ──
     function test_takeItemSizedAtFloor_pullsShortfallFromMaker() public {
-        bytes memory floorData = abi.encode(AAVE_POOL, USDC, uint256(2), WETH, COLLATERAL, DEBT_FLOOR);
+        bytes memory floorData = abi.encode(OP_LEVERAGE, AAVE_POOL, USDC, uint256(2), WETH, COLLATERAL, DEBT_FLOOR);
         Order memory o = _auctionedLeverage();
         // Resize the single TAKE item to the auction FLOOR (`o.items` is a packed blob
         // now, so rebuild it rather than index into it). ← floor, not ceiling

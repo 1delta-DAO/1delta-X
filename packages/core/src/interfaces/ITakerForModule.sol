@@ -91,7 +91,7 @@ pragma solidity ^0.8.28;
 ///  `takeOnBehalf` and `takeForOnBehalf`". It does not, and has not since the merge
 ///  was allowed: the checker's own header states "a contract MAY now implement both,
 ///  but ONLY with both guards present", and one shipped contract
-///  (`AaveV3LeverageModule`) does exactly that.
+///  (`AaveV3CreditModule`) does exactly that.
 ///
 ///  What is actually enforced is the weaker property that suffices: NO `data` blob is
 ///  accepted by both entrypoints, so no `ref` can ever be valid for both and the grant

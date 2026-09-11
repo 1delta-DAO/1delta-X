@@ -16,6 +16,18 @@ Citation forms recognised inside backticks:
     test_prefix_*            a family (at least one must exist)
     ..._suffix               prefix elided from the previous citation
 
+Second pass — MODULE READMEs NAME REAL CONTRACTS. Each `packages/modules/**/README.md`
+is checked so that every `SomethingModule` token it mentions is declared in that
+package's `src/`. This is the doc-side twin of the test check: three READMEs
+(liquity-v2, river, morpho-blue) were found on 2026-09-11 still describing
+contracts — and in two cases a SEAM — that an earlier merge had folded away,
+with tables that a reader would take as the wire layout. A README that names a
+contract which does not compile is a promise the package no longer keeps.
+
+Designs that are documented but deliberately unbuilt, and historical names a
+README keeps on purpose, are listed in `README_NAME_OK` with the reason; the
+README itself must also say so.
+
 Usage:  python3 tools/check-doc-citations.py [docs/foo.md ...]
 """
 import re
@@ -77,6 +89,70 @@ def check(doc: Path, tests: set[str]) -> list[str]:
     return failures
 
 
+# Contract names a module README may mention WITHOUT them existing in any src/.
+# Two legitimate reasons, each of which the README must ALSO say in prose:
+#   • a documented design that is deliberately unbuilt ("NOT yet implemented");
+#   • a HISTORICAL name — a contract the README explains was replaced, kept so the
+#     audit reasoning behind its successor stays legible.
+# Keep the reason on every row. A name that is neither is drift, and the fix is
+# the README, not this table.
+README_NAME_OK = {
+    "fluid": {
+        "FluidSmartDepositModule",
+        "FluidSmartOperateModule",
+        "FluidSmartTakeForModule",
+        "FluidSmartTakerModule",
+    },  # "Smart vaults T2 / T3 / T4 — design (NOT yet implemented)" section
+    "bridge": {"GenericCallModule"},  # historical: "the old GenericCallModule … reduced to PermissionlessCallModule"
+    "maker": {"GenericCallModule"},  # historical: "its predecessor GenericCallModule" (2026-08 audit)
+}
+
+MODULE_NAME = re.compile(r"\b[A-Z][A-Za-z0-9]+Module\b")
+# Any declared type a README might name: contracts, interfaces, libraries.
+CONTRACT_DECL = re.compile(r"^\s*(?:abstract\s+contract|contract|interface|library)\s+(\w+)", re.M)
+
+
+_ALL_DECLARED: set[str] | None = None
+
+
+def _all_declared() -> set[str]:
+    global _ALL_DECLARED
+    if _ALL_DECLARED is None:
+        _ALL_DECLARED = set()
+        # src/ for real contracts, test/ for the mocks a README may legitimately
+        # point at ("core's dispatch tests run against `ProgressBumpModule`").
+        for pat in ("src/**/*.sol", "test/**/*.sol"):
+            for o in (ROOT / "packages").rglob(pat):
+                if "node_modules" in str(o) or "/out/" in str(o):
+                    continue
+                _ALL_DECLARED |= set(CONTRACT_DECL.findall(o.read_text(encoding="utf-8")))
+    return _ALL_DECLARED
+
+
+def check_module_readmes() -> tuple[int, list[str]]:
+    """Every `*Module` a package README names must be declared in that package's src/."""
+    failures = []
+    readmes = sorted((ROOT / "packages" / "modules").rglob("README.md"))
+    for readme in readmes:
+        pkg = readme.parent
+        src = pkg / "src"
+        if not src.is_dir():
+            continue
+        declared = set()
+        for sol in src.rglob("*.sol"):
+            declared |= set(CONTRACT_DECL.findall(sol.read_text(encoding="utf-8")))
+        ok_unbuilt = README_NAME_OK.get(pkg.name, set())
+        for name in sorted(set(MODULE_NAME.findall(readme.read_text(encoding="utf-8")))):
+            if name in declared or name in ok_unbuilt:
+                continue
+            # A name from ANOTHER package's src (core interfaces, a sibling venue) is a
+            # cross-reference, not drift.
+            if name in _all_declared():
+                continue
+            failures.append(f"{readme.relative_to(ROOT)}: names `{name}`, not declared in {src.relative_to(ROOT)}/")
+    return len(readmes), failures
+
+
 def main() -> int:
     tests = existing_tests()
     if not tests:
@@ -86,13 +162,24 @@ def main() -> int:
     docs = [Path(a) for a in sys.argv[1:]] or sorted((ROOT / "docs").glob("*.md"))
     failures = [f for d in docs for f in check(d, tests)]
 
-    print(f"{len(tests)} test functions in tree; checked {len(docs)} docs")
+    n_readmes, readme_failures = check_module_readmes()
+
+    print(f"{len(tests)} test functions in tree; checked {len(docs)} docs, {n_readmes} module READMEs")
     if failures:
         print(f"\n{len(failures)} stale citation(s):\n")
         for f in failures:
             print("  " + f)
+    if readme_failures:
+        print(f"\n{len(readme_failures)} module README(s) name a contract that does not exist:\n")
+        for f in readme_failures:
+            print("  " + f)
+        print("\nEither the README is stale (a merge or rename folded the contract away — fix the\n"
+              "table, and check whether the SEAM it documents moved too), or it documents an\n"
+              "unbuilt design or a deliberately-kept historical name: say so in the README\n"
+              "and add the name to README_NAME_OK with the reason.")
+    if failures or readme_failures:
         return 1
-    print("all doc-to-test citations resolve")
+    print("all doc-to-test citations resolve; all module README contract names exist")
     return 0
 
 

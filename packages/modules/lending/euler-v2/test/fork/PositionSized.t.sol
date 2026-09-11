@@ -7,7 +7,7 @@ import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {PositionFillModule} from "@lib/PositionFillModule.sol";
 
-import {EulerV2TakerModule} from "../../src/EulerV2Modules.sol";
+import {EulerV2OperatorModule} from "../../src/EulerV2OperatorModule.sol";
 import {IEulerVault} from "../../src/interfaces/IEulerV2.sol";
 import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
 
@@ -34,7 +34,7 @@ contract EulerV2PositionSizedTest is EulerV2ModulesBase {
     }
 
     function _withdrawData() internal pure returns (bytes memory) {
-        return abi.encode(uint8(EulerV2TakerModule.Op.Withdraw), address(EWETH));
+        return abi.encode(uint8(EulerV2OperatorModule.Op.Withdraw), address(EWETH));
     }
 
     /// @dev The RAW position — shares converted at the current rate, no health or
@@ -47,7 +47,7 @@ contract EulerV2PositionSizedTest is EulerV2ModulesBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), WETH, uint160(cap), 0);
-        permit3.approveTaker(address(settlement), address(takerModule), keccak256(data), uint160(cap), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(data), uint160(cap), 0);
         vm.stopPrank();
     }
 
@@ -55,7 +55,7 @@ contract EulerV2PositionSizedTest is EulerV2ModulesBase {
         Item[] memory items = new Item[](1);
         items[0] = Item({
             op: ItemOp.TAKE,
-            module: address(takerModule),
+            module: address(operatorModule),
             amount: CAP,
             recipient: address(0),
             data: _withdrawData()
@@ -76,7 +76,7 @@ contract EulerV2PositionSizedTest is EulerV2ModulesBase {
         assertGt(raw, 0, "position exists");
         assertLt(reachable, raw, "maxWithdraw IS clipped by the open debt: the finding premise");
 
-        (address asset, uint256 reported) = takerModule.positionOf(maker, _withdrawData());
+        (address asset, uint256 reported) = operatorModule.positionOf(maker, _withdrawData());
         assertEq(asset, EWETH.asset(), "asset read from the vault");
         assertEq(reported, raw, "positionOf reports the RAW position");
         assertGt(reported, reachable, "and therefore NOT maxWithdraw");
@@ -115,7 +115,7 @@ contract EulerV2PositionSizedTest is EulerV2ModulesBase {
         assertEq(IERC20(USDC).balanceOf(maker) - makerUsdcBefore, paid, "maker received it");
         assertApproxEqAbs(IERC20(WETH).balanceOf(solver), delta, 2, "solver bought the position");
         assertLe(_rawPosition(maker), 2, "position fully exited");
-        assertEq(IERC20(WETH).balanceOf(address(takerModule)), 0, "module drained");
+        assertEq(IERC20(WETH).balanceOf(address(operatorModule)), 0, "module drained");
     }
 
     /// @dev FINDING 2 REGRESSION on this venue: a short `Full` leg must revert
@@ -125,7 +125,7 @@ contract EulerV2PositionSizedTest is EulerV2ModulesBase {
         uint256 signed = 3 ether;
 
         bytes memory data = abi.encode(
-            uint8(EulerV2TakerModule.Op.Withdraw),
+            uint8(EulerV2OperatorModule.Op.Withdraw),
             address(EWETH),
             DustHandler.encodeMode(DustHandler.BalanceMode.Full),
             signed
@@ -134,6 +134,6 @@ contract EulerV2PositionSizedTest is EulerV2ModulesBase {
 
         vm.prank(address(permit3));
         vm.expectRevert(); // ShortWithdraw, or the vault on insufficient shares
-        takerModule.takeOnBehalf(maker, signed, address(settlement), data);
+        operatorModule.takeOnBehalf(maker, signed, address(settlement), data);
     }
 }

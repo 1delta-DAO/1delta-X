@@ -21,7 +21,7 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 ///
 /// Items:
 ///   [0] MAKE  AaveV3DepositModule   supply WETH
-///   [1] TAKE  AaveV3BorrowModule    borrow USDC (variable rate)
+///   [1] TAKE  AaveV3CreditModule    borrow USDC (variable rate)
 contract DepositBorrowTest is AaveModulesBase {
     // ──────────────────── Direct fill ────────────────────
 
@@ -61,7 +61,7 @@ contract DepositBorrowTest is AaveModulesBase {
         assertEq(IERC20(WETH).balanceOf(address(settlement)), 0, "settlement WETH drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module WETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module USDC drained");
+        assertEq(IERC20(USDC).balanceOf(address(creditModule)), 0, "borrow module USDC drained");
     }
 
     // ──────────────────── Single-signature permit fill ────────────────────
@@ -76,13 +76,13 @@ contract DepositBorrowTest is AaveModulesBase {
 
         // Credit delegation: Aave-native, separate from Permit3.
         vm.prank(maker);
-        IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(borrowModule), type(uint256).max);
+        IAaveCreditDelegation(usdcDebtToken).approveDelegation(address(creditModule), type(uint256).max);
 
-        bytes memory borrowData = abi.encode(AAVE_POOL, USDC, uint256(2));
+        bytes memory borrowData = abi.encode(OP_BORROW, AAVE_POOL, USDC, uint256(2));
 
         Item[] memory items = new Item[](2);
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(AAVE_POOL, WETH));
-        items[1] = Item(ItemOp.TAKE, address(borrowModule), borrowOut, address(0), borrowData);
+        items[1] = Item(ItemOp.TAKE, address(creditModule), borrowOut, address(0), borrowData);
 
         Order memory order = _order(maker, 2, USDC, WETH, borrowOut, collateralIn, items);
 
@@ -91,7 +91,7 @@ contract DepositBorrowTest is AaveModulesBase {
         tp[1] = IPermit3.TokenPermit(address(depositModule), WETH, uint160(collateralIn), uint48(_expiry(order)));
 
         IPermit3.PermitBatch memory batch =
-            _buildBatch(tp, _takerPermits1(address(settlement), address(borrowModule), keccak256(borrowData), borrowOut), 1, _expiry(order));
+            _buildBatch(tp, _takerPermits1(address(settlement), address(creditModule), keccak256(borrowData), borrowOut), 1, _expiry(order));
 
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 

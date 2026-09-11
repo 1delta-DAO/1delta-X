@@ -8,12 +8,8 @@ import {LimitOrderLeverageSolver} from "@solvers/single-input/LimitOrderLeverage
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
 import {IEulerVault, IEVC} from "../../src/interfaces/IEulerV2.sol";
-import {
-    EulerV2DepositModule,
-    EulerV2RepayModule,
-    EulerV2TakerModule,
-    EulerV2BatchModule
-} from "../../src/EulerV2Modules.sol";
+import {EulerV2DepositModule, EulerV2RepayModule} from "../../src/EulerV2Modules.sol";
+import {EulerV2OperatorModule} from "../../src/EulerV2OperatorModule.sol";
 
 /// @dev Euler V2 integration harness. Forks mainnet at the default block (the EVC
 /// and both vaults are live there) and drives a WETH-collateral / USDC-debt
@@ -33,8 +29,11 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
 
     EulerV2DepositModule depositModule;
     EulerV2RepayModule repayModule;
-    EulerV2TakerModule takerModule;
-    EulerV2BatchModule batchModule;
+    /// @dev ONE address for every op that acts as the maker's EVC account. Euler's
+    ///      `setAccountOperator` is an unscoped, uncapped, non-expiring boolean, so
+    ///      the four contracts this replaced meant four independent total-control
+    ///      grants over the same account. It is granted once, below.
+    EulerV2OperatorModule operatorModule;
     LimitOrderLeverageSolver leverageSolver;
 
     function setUp() public virtual override {
@@ -42,8 +41,7 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
 
         depositModule = new EulerV2DepositModule(address(permit3), address(settlement));
         repayModule = new EulerV2RepayModule(address(permit3), address(settlement));
-        takerModule = new EulerV2TakerModule(address(permit3));
-        batchModule = new EulerV2BatchModule(address(permit3));
+        operatorModule = new EulerV2OperatorModule(address(permit3), address(settlement));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
             address(permit3),
@@ -57,8 +55,7 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
         vm.label(address(EUSDC), "eUSDC-2");
         vm.label(address(depositModule), "eulerDepositModule");
         vm.label(address(repayModule), "eulerRepayModule");
-        vm.label(address(takerModule), "eulerTakerModule");
-        vm.label(address(batchModule), "eulerBatchModule");
+        vm.label(address(operatorModule), "eulerOperatorModule");
         vm.label(address(leverageSolver), "leverageSolver");
 
         // Euler-native authorisation for the value-out (EVC-routed) modules: the
@@ -68,8 +65,7 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         EVC.enableCollateral(maker, address(EWETH));
         EVC.enableController(maker, address(EUSDC));
-        EVC.setAccountOperator(maker, address(takerModule), true);
-        EVC.setAccountOperator(maker, address(batchModule), true);
+        EVC.setAccountOperator(maker, address(operatorModule), true);
         vm.stopPrank();
     }
 
@@ -115,10 +111,10 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
         items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), abi.encode(address(EWETH)));
         items[1] = Item(
             ItemOp.TAKE,
-            address(takerModule),
+            address(operatorModule),
             borrowOut,
             address(0),
-            abi.encode(uint8(EulerV2TakerModule.Op.Borrow), address(EUSDC))
+            abi.encode(uint8(EulerV2OperatorModule.Op.Borrow), address(EUSDC))
         );
         return _order(maker, 1, USDC, WETH, borrowOut, collateralIn, items);
     }
@@ -127,7 +123,7 @@ abstract contract EulerV2ModulesBase is CoreSettlementBase {
         vm.startPrank(maker);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(depositModule), WETH, uint160(collateralIn), 0);
-        permit3.approveTaker(address(settlement), address(takerModule), keccak256(abi.encode(uint8(EulerV2TakerModule.Op.Borrow), address(EUSDC))),
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(abi.encode(uint8(EulerV2OperatorModule.Op.Borrow), address(EUSDC))),
             uint160(borrowOut),
             0
         );

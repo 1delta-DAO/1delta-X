@@ -89,8 +89,8 @@ funds the `tokenIn` the solver is paid with.
 ```
 order: tokenIn = loanToken, tokenOut = collateral   items = [MAKE supplyCollateral, TAKE borrow]
 
-  [0] MAKE  SupplyCollateralModule  maker ──collateral──▶ supplyCollateral(onBehalf = maker)
-  [1] TAKE  BorrowModule            borrow(onBehalf = maker) ──loanToken──▶ Settlement
+  [0] MAKE  MorphoBlueSupplyCollateralModule  maker ──collateral──▶ supplyCollateral(onBehalf = maker)
+  [1] TAKE  MorphoBlueTakerModule (op=Borrow)   borrow(onBehalf = maker) ──loanToken──▶ Settlement
                                     └─ Morpho setAuthorization permits the debt
   settle:   Settlement ──loanToken──▶ solver        (entirely from borrow proceeds)
             solver     ──collateral──▶ maker        (tokenOut, the added collateral)
@@ -105,7 +105,7 @@ plus the taker gate is the whole authorization story.
 ```
 order: tokenIn = collateral, tokenOut = loanToken   items = [TAKE withdrawCollateral]
 
-  [0] TAKE  WithdrawCollateralModule  withdrawCollateral ──collateral──▶ Settlement
+  [0] TAKE  MorphoBlueTakerModule (op=WithdrawCollateral)  withdrawCollateral ──collateral──▶ Settlement
   settle:   Settlement ──collateral──▶ solver
             solver     ──loanToken───▶ maker
 ```
@@ -120,7 +120,7 @@ to, and the module sweeps the remainder back to the maker.
 ```
 order: items = [MAKE repay]
 
-  [0] MAKE  RepayModule   maker ──loanToken(buffered)──▶ repay(shares = borrowShares)
+  [0] MAKE  MorphoBlueRepayModule   maker ──loanToken(buffered)──▶ repay(shares = borrowShares)
                           └─ residual buffer ──loanToken──▶ maker   (never to solver)
 ```
 

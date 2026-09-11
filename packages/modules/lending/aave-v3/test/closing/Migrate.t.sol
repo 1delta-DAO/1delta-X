@@ -20,7 +20,7 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 ///   [0] MAKE  AaveV3RepayModule         repay (debt + buffer), dust → maker
 ///   [1] TAKE  AaveV3WithdrawModule      withdraw `exactWeth` WETH, recipient = maker
 ///   [2] MAKE  AaveV3DepositModule→Spark deposit `exactWeth` WETH onto Spark
-///   [3] TAKE  AaveV3BorrowModule→Spark  borrow USDC on Spark, recipient = Settlement
+///   [3] TAKE  AaveV3CreditModule→Spark  borrow USDC on Spark, recipient = Settlement
 contract MigrateTest is AaveModulesBase {
     // ──────────────────── Direct fill (4-item order, exact amounts) ────────────────────
 
@@ -81,7 +81,7 @@ contract MigrateTest is AaveModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "repay module drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module drained");
         assertEq(IERC20(WETH).balanceOf(address(withdrawModule)), 0, "withdraw module drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module drained");
+        assertEq(IERC20(USDC).balanceOf(address(creditModule)), 0, "borrow module drained");
     }
 
     // ──────────────────── Single-signature permit fill (4-item order, one signature) ────────────────────
@@ -102,7 +102,7 @@ contract MigrateTest is AaveModulesBase {
         _openAaveV3Position(10 ether, 3_000e6);
         deal(USDC, solver, 3_050e6);
         vm.prank(maker);
-        IAaveCreditDelegation(sparkUsdcDebt).approveDelegation(address(borrowModule), type(uint256).max);
+        IAaveCreditDelegation(sparkUsdcDebt).approveDelegation(address(creditModule), type(uint256).max);
     }
 
     function _buildMigrationOrderAndBatch()
@@ -112,7 +112,7 @@ contract MigrateTest is AaveModulesBase {
     {
         address SPARK_POOL = lendingControllers[Chains.ETHEREUM_MAINNET][Lenders.SPARK];
         bytes memory aaveWithdrawData = abi.encode(AAVE_POOL, WETH, aWETH);
-        bytes memory sparkBorrowData = abi.encode(SPARK_POOL, USDC, uint256(2));
+        bytes memory sparkBorrowData = abi.encode(OP_BORROW, SPARK_POOL, USDC, uint256(2));
         uint48 exp = uint48(block.timestamp + 1 hours);
 
         Item[] memory items = new Item[](4);
@@ -125,7 +125,7 @@ contract MigrateTest is AaveModulesBase {
         );
         items[1] = Item(ItemOp.TAKE, address(withdrawModule), 9 ether, maker, aaveWithdrawData);
         items[2] = Item(ItemOp.MAKE, address(depositModule), 9 ether, address(0), abi.encode(SPARK_POOL, WETH));
-        items[3] = Item(ItemOp.TAKE, address(borrowModule), 3_000e6, address(0), sparkBorrowData);
+        items[3] = Item(ItemOp.TAKE, address(creditModule), 3_000e6, address(0), sparkBorrowData);
 
         order = _order(maker, 7, USDC, USDC, 3_000e6, 3_050e6, items);
 
@@ -137,7 +137,7 @@ contract MigrateTest is AaveModulesBase {
 
         IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](2);
         tkp[0] = IPermit3.TakerPermit(address(settlement), address(withdrawModule), keccak256(aaveWithdrawData), uint160(9 ether), exp);
-        tkp[1] = IPermit3.TakerPermit(address(settlement), address(borrowModule), keccak256(sparkBorrowData), uint160(3_000e6), exp);
+        tkp[1] = IPermit3.TakerPermit(address(settlement), address(creditModule), keccak256(sparkBorrowData), uint160(3_000e6), exp);
 
         batch = _buildBatch(tp, tkp, 3, _expiry(order));
     }

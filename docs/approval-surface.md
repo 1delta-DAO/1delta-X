@@ -43,7 +43,7 @@ end to end (beyond the once-ever pay-asset approve).
 | Compound v3 | `allow(manager)` | ✅ `allowBySig` replayed in-call |
 | Morpho Blue | `setAuthorization` | ✅ `setAuthorizationWithSig` replayed in-call |
 | Lista (Moolah) | `setAuthorization` | ✅ `setAuthorizationWithSig` replayed in-call (deployed Moolah accepts Morpho's shape verbatim; only the domain VIEW is renamed `domainSeparator()`, an off-chain-signing detail) |
-| Euler V2 | EVC `setAccountOperator` + `enableController` + `enableCollateral` | ✅ one EVC `permit` (self-call batch installing all three) replayed in-call from the pre-fund module's data tail |
+| Euler V2 | EVC `setAccountOperator` + `enableController` + `enableCollateral` | ✅ one EVC `permit` (self-call batch installing all three) replayed in-call from `EulerV2OperatorModule`'s data tail — **both** funding shapes since the merge |
 | Dolomite | `setOperators` | on-chain |
 | Venus | `updateDelegate` | on-chain |
 | Silo | `setReceiveApproval` (borrow) / share approve (withdraw) | on-chain |
@@ -52,6 +52,40 @@ end to end (beyond the once-ever pay-asset approve).
 | River | `setDelegateApproval` — ⚠ gates value-in too | on-chain |
 | Liquity v2 | per-trove `setAddManager` / `setRemoveManagerWithReceiver`; add-coll needs none while no add manager is set | on-chain |
 | Compound v2 / Teller / Gearbox pool | no borrow surface shipped; value-in permissionless | — |
+
+## How many ADDRESSES hold the grant (2026-09-10)
+
+The rows above say what a maker must grant. This says how many separate
+contracts they must grant it to — a dimension the matrix hid, because a venue
+whose authority is one unscoped boolean multiplies that boolean by the number
+of module addresses that need it.
+
+Modules are therefore grouped by **the standing grant they consume**, not by
+seam or by op:
+
+| Venue | Grant | Addresses before | After |
+|---|---|---|---|
+| Aave v3 | credit delegation (scoped: one debt token, one cap) | 2 (`Borrow`, `Leverage`) | **1** — `AaveV3CreditModule` |
+| Euler v2 | EVC `setAccountOperator` — unscoped boolean, total account control | 4 (taker, batch, takeFor, preFund-takeFor) | **1** — `EulerV2OperatorModule` |
+| Dolomite | `setOperators` — unscoped boolean, total account control, and needed for value-IN too | 5 (deposit, repay, taker, operate, takeFor) | **1** — `DolomiteOperatorModule` |
+
+The op moves INSIDE `data`, hence inside `ref = keccak256(data)`, so Permit3's
+taker book still separates the per-op, amount-capped allowances exactly as it did
+when they were separate contracts. Only the coarse standing flag consolidates —
+and that flag was never per-op.
+
+⚠ **The split BETWEEN grant classes is deliberate.** A merged contract redeploys
+as a unit, so a bugfix in one op invalidates the grant every other op in that
+contract relies on. Aave keeps three addresses because it has three genuinely
+different grants (credit line / aToken / wallet allowance) and that boundary buys
+real containment. Euler and Dolomite collapse to one because there is no boundary
+left to contain: every address already required the identical unscoped flag, so
+splitting them bought nothing and cost three or four extra approvals. Copying
+Aave's partition to those venues would have been the wrong answer.
+
+Venues already at one address (their `*TakerModule` multiplexes borrow/withdraw
+behind a leading `op`): Comet, Morpho Blue, Silo, Venus, Exactly, Liquity v2,
+Lista, River.
 
 ## What made this hold
 
@@ -91,7 +125,7 @@ already rides in-module (`AaveV3WithdrawModule`'s optional permit block).
 ## Residual venue-grant wiring — DONE (2026-09-03)
 
 - **Euler**: `DelegationHelper.replayEvcPermit` — a dynamic tail block after
-  `EulerV2PreFundTakeForModule`'s 128-byte head carrying one maker-signed EVC
+  `EulerV2OperatorModule`'s 128-byte {OpenData} head carrying one maker-signed EVC
   `permit` whose self-call batch installs operator + controller + collateral in
   the fill itself. Domain/typehash validated against the live EVC (note: the
   EVC domain has NO `version` field); front-run of the lifted permit is

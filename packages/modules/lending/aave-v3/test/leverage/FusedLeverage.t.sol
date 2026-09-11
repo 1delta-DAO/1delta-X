@@ -6,7 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
-import {AaveV3LeverageModule} from "../../src/AaveV3FusedModules.sol";
+import {AaveV3CreditModule} from "../../src/AaveV3CreditModule.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev The FUSED leverage item: supply + borrow in ONE `takeOnBehalf`, against the
@@ -19,21 +19,21 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 /// produces an IDENTICAL position, prices the difference, and covers the pro-rata
 /// derivation that lets one gated `amount` drive both legs.
 contract FusedLeverageTest is AaveModulesBase {
-    AaveV3LeverageModule fused;
+    AaveV3CreditModule fused;
 
     uint256 constant COLLATERAL = 1 ether; //  supplied
     uint256 constant BORROW = 1_500e6; //      drawn against it
 
     function setUp() public override {
         super.setUp();
-        fused = new AaveV3LeverageModule(address(permit3), address(settlement));
+        fused = new AaveV3CreditModule(address(permit3), address(settlement));
         vm.label(address(fused), "aaveV3FusedLeverageModule");
     }
 
     /// @dev `data` for the fused item. Carries the maker's intended TOTALS; the
     ///      module re-derives the collateral for whatever slice it is handed.
     function _fusedData(uint256 collateralTotal, uint256 borrowTotal) internal view returns (bytes memory) {
-        return abi.encode(AAVE_POOL, USDC, uint256(2), WETH, collateralTotal, borrowTotal);
+        return abi.encode(OP_LEVERAGE, AAVE_POOL, USDC, uint256(2), WETH, collateralTotal, borrowTotal);
     }
 
     /// @dev One fused item replaces the MAKE+TAKE pair. `amount` is the BORROW leg
@@ -170,7 +170,7 @@ contract FusedLeverageTest is AaveModulesBase {
         deal(WETH, solver, COLLATERAL);
         _approveSolverSide(COLLATERAL, WETH);
 
-        bytes memory data = abi.encode(AAVE_POOL, USDC, uint256(2), WETH, COLLATERAL, uint256(0));
+        bytes memory data = abi.encode(OP_LEVERAGE, AAVE_POOL, USDC, uint256(2), WETH, COLLATERAL, uint256(0));
         Item[] memory items = new Item[](1);
         items[0] = Item(ItemOp.TAKE, address(fused), BORROW, address(0), data);
         Order memory o = _order(maker, 111, USDC, WETH, BORROW, COLLATERAL, items);
@@ -184,7 +184,7 @@ contract FusedLeverageTest is AaveModulesBase {
 
         bytes memory sig = _sign(o);
         vm.prank(solver);
-        vm.expectRevert(AaveV3LeverageModule.InvalidRatio.selector);
+        vm.expectRevert(AaveV3CreditModule.InvalidRatio.selector);
         settlement.fill(o, sig, BORROW);
     }
 }

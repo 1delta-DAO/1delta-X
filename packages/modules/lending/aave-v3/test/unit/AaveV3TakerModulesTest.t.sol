@@ -2,7 +2,10 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
-import {AaveV3BorrowModule, AaveV3WithdrawModule} from "../../src/AaveV3Modules.sol";
+import {AaveV3WithdrawModule} from "../../src/AaveV3Modules.sol";
+import {AaveV3CreditModule} from "../../src/AaveV3CreditModule.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
+import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -121,30 +124,37 @@ contract MockPermit3 {
     }
 }
 
-// ── AaveV3BorrowModule tests ──────────────────────────────────────────────────
+// ── AaveV3CreditModule: Op.Borrow ─────────────────────────────────────────────
 
-contract AaveV3BorrowModuleTest is Test {
+contract AaveV3CreditModuleBorrowTest is Test {
     MockERC20 asset;
     MockDebtToken debtToken;
     MockAaveV3Pool pool;
     MockPermit3 permit3;
-    AaveV3BorrowModule module;
+    AaveV3CreditModule module;
 
     address user = address(0xABCD);
     address receiver = address(0xCAFE);
+    address settlement = address(0x5E77);
     uint256 constant AMOUNT = 500e18;
+
+    /// @dev Word 0 of a plain-`take` blob IS the op. Small enough that `>> 253 == 0`,
+    ///      which is what {PreFundGuard.requirePlainTake} demands — so the
+    ///      discriminator doubles as the data-space pin.
+    uint256 constant OP_BORROW = uint256(AaveV3CreditModule.Op.Borrow);
 
     function setUp() public {
         asset = new MockERC20();
         debtToken = new MockDebtToken();
         pool = new MockAaveV3Pool(asset, new MockAToken());
         permit3 = new MockPermit3();
-        module = new AaveV3BorrowModule(address(permit3));
+        module = new AaveV3CreditModule(address(permit3), settlement);
     }
 
     function test_borrow_withDelegationSig() public {
-        // data = abi.encode(pool, asset, rateMode, debtToken, deadline, v, r, s)
+        // data = abi.encode(op, pool, asset, rateMode, debtToken, deadline, v, r, s)
         bytes memory data = abi.encode(
+            OP_BORROW,
             address(pool),
             address(asset),
             uint256(2),
@@ -167,7 +177,7 @@ contract AaveV3BorrowModuleTest is Test {
 
     function test_borrow_withoutDelegationSig_standingAuth() public {
         // No delegation block — relies on standing approveDelegation.
-        bytes memory data = abi.encode(address(pool), address(asset), uint256(2));
+        bytes memory data = abi.encode(OP_BORROW, address(pool), address(asset), uint256(2));
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, AMOUNT, receiver, data);
@@ -177,8 +187,33 @@ contract AaveV3BorrowModuleTest is Test {
     }
 
     function test_borrow_revertsIfNotPermit3() public {
-        bytes memory data = abi.encode(address(pool), address(asset), uint256(2));
-        vm.expectRevert(AaveV3BorrowModule.OnlyPermit3.selector);
+        bytes memory data = abi.encode(OP_BORROW, address(pool), address(asset), uint256(2));
+        vm.expectRevert(PreFundModuleBase.OnlyPermit3.selector);
+        module.takeOnBehalf(user, AMOUNT, receiver, data);
+    }
+
+    /// @dev An op this seam does not implement is rejected by NAME, not left to a
+    ///      decode that happens to fail. The merge's whole safety argument is that
+    ///      the op is inside `data` and therefore inside `ref = keccak256(data)`;
+    ///      that only holds if an unknown op is a hard error rather than a silent
+    ///      fall-through to op 0.
+    function test_borrow_revertsOnUnknownOp() public {
+        bytes memory data = abi.encode(uint256(7), address(pool), address(asset), uint256(2));
+        vm.prank(address(permit3));
+        vm.expectRevert(abi.encodeWithSelector(AaveV3CreditModule.BadOp.selector, uint256(7)));
+        module.takeOnBehalf(user, AMOUNT, receiver, data);
+    }
+
+    /// @dev The plain seam must refuse a blob carrying a FUNDING DESCRIPTOR in word 0.
+    ///      Without this the two data spaces overlap and one `approveTaker` could
+    ///      authorise either dispatch — the ambiguity
+    ///      {PreFundGuard.requirePlainTake} exists to close, now load-bearing on this
+    ///      contract because it hosts both entrypoints.
+    function test_borrow_revertsOnFundingDescriptorBlob() public {
+        bytes memory data =
+            abi.encode((uint256(1) << 255) | (uint256(1) << 253), address(pool), address(asset), uint256(2));
+        vm.prank(address(permit3));
+        vm.expectRevert(PreFundGuard.PreFundDescriptorNotAllowed.selector);
         module.takeOnBehalf(user, AMOUNT, receiver, data);
     }
 }

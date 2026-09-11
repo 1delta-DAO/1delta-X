@@ -5,7 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
-import {EulerV2BatchModule} from "../../src/EulerV2Modules.sol";
+import {EulerV2OperatorModule} from "../../src/EulerV2OperatorModule.sol";
 
 /// @dev Level B: atomically repay the USDC debt AND withdraw WETH collateral in a
 /// SINGLE `EVC.batch` — one deferred liquidity check covers both legs. The check
@@ -14,7 +14,7 @@ import {EulerV2BatchModule} from "../../src/EulerV2Modules.sol";
 ///
 ///   tokenIn  = WETH  (solver receives the withdrawn collateral)
 ///   tokenOut = USDC  (solver funds the repay)
-///   [0] TAKE EulerV2BatchModule (Close)  repay debt + withdraw collateral
+///   [0] TAKE EulerV2OperatorModule (Close)  repay debt + withdraw collateral
 contract EulerCloseAtomicTest is EulerV2ModulesBase {
     uint256 constant DEBT = 1_000e6;
     uint256 constant REPAY_CEIL = 1_002e6; // debt + interest headroom
@@ -26,8 +26,8 @@ contract EulerCloseAtomicTest is EulerV2ModulesBase {
         // Solver funds the repay in USDC.
         deal(USDC, solver, REPAY_CEIL);
 
-        EulerV2BatchModule.BatchData memory p = EulerV2BatchModule.BatchData({
-            mode: uint256(EulerV2BatchModule.BatchMode.Close),
+        EulerV2OperatorModule.BatchData memory p = EulerV2OperatorModule.BatchData({
+            op: uint256(EulerV2OperatorModule.Op.BatchClose),
             collateralVault: address(EWETH),
             borrowVault: address(EUSDC),
             sideAmount: REPAY_CEIL,
@@ -39,14 +39,14 @@ contract EulerCloseAtomicTest is EulerV2ModulesBase {
         // allowance on the collateral leg. (Operator/controller set in setUp.)
         vm.startPrank(maker);
         IERC20(USDC).approve(address(permit3), type(uint256).max);
-        permit3.approveToken(address(batchModule), USDC, uint160(REPAY_CEIL), 0);
-        permit3.approveTaker(address(settlement), address(batchModule), keccak256(data), uint160(WETH_OUT), 0);
+        permit3.approveToken(address(operatorModule), USDC, uint160(REPAY_CEIL), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(data), uint160(WETH_OUT), 0);
         vm.stopPrank();
 
         _approveSolverSide(REPAY_CEIL, USDC);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE, address(batchModule), WETH_OUT, address(0), data);
+        items[0] = Item(ItemOp.TAKE, address(operatorModule), WETH_OUT, address(0), data);
         Order memory order = _order(maker, 2, WETH, USDC, WETH_OUT, REPAY_CEIL, items);
         bytes memory sig = _sign(order);
 
@@ -63,7 +63,7 @@ contract EulerCloseAtomicTest is EulerV2ModulesBase {
 
         // Solver received the withdrawn WETH; modules end empty.
         assertEq(IERC20(WETH).balanceOf(solver), WETH_OUT, "solver received withdrawn WETH");
-        assertEq(IERC20(WETH).balanceOf(address(batchModule)), 0, "batch module WETH drained");
-        assertEq(IERC20(USDC).balanceOf(address(batchModule)), 0, "batch module USDC drained");
+        assertEq(IERC20(WETH).balanceOf(address(operatorModule)), 0, "batch module WETH drained");
+        assertEq(IERC20(USDC).balanceOf(address(operatorModule)), 0, "batch module USDC drained");
     }
 }

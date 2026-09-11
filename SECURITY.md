@@ -89,7 +89,7 @@ be used to withdraw collateral. Modules come in two shapes:
   amount, and (since S-2) unusable to dispatch any other module — and the value-in
   leg is separately capped by the maker's ordinary token allowance to that module.
   Reference implementation + the equivalence and pro-rata tests:
-  `packages/modules/lending/aave-v3/src/AaveV3FusedModules.sol`.
+  `packages/modules/lending/aave-v3/src/AaveV3CreditModule.sol`.
 - **Maker modules** (`IMakerModule.makeOnBehalf`) — deposit/repay. Called
   **only** by Settlement; they enforce `msg.sender == settlement`.
 

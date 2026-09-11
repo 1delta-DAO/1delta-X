@@ -85,8 +85,8 @@ Settlement and the solver can never widen them:
 order: tokenIn = LOAN, tokenOut = COLL   items = [MAKE supplyCollateral, TAKE borrow]
 
   deliver: solver ──COLL──▶ maker                     (tokenOut)
-  [0] MAKE  SupplyCollateralModule  maker ──COLL──▶ supplyCollateral(onBehalf = maker)
-  [1] TAKE  BorrowModule            take(offer.buy, taker = maker) ──LOAN──▶ Settlement
+  [0] MAKE  MidnightSupplyCollateralModule  maker ──COLL──▶ supplyCollateral(onBehalf = maker)
+  [1] TAKE  MidnightBorrowModule    take(offer.buy, taker = maker) ──LOAN──▶ Settlement
   pay:      Settlement ──LOAN──▶ solver               (borrow proceeds)
 ```
 
@@ -100,8 +100,8 @@ fills).
 order: tokenIn = COLL, tokenOut = LOAN   items = [MAKE repay, TAKE withdrawCollateral]
 
   deliver: solver ──LOAN──▶ maker
-  [0] MAKE  RepayModule             repay(min(amount, debt))          (pull-exact, callback = 0)
-  [1] TAKE  TakerModule (op=0)      withdrawCollateral ──COLL──▶ Settlement
+  [0] MAKE  MidnightRepayModule     repay(min(amount, debt))          (pull-exact, callback = 0)
+  [1] TAKE  MidnightTakerModule (op=0)  withdrawCollateral ──COLL──▶ Settlement
   pay:      Settlement ──COLL──▶ solver
 ```
 

@@ -10,6 +10,9 @@ enforced nowhere — which is the §F23 failure mode this file exists to avoid.
   4. A PULL `makeOnBehalf` blob must not be readable as a pre-fund descriptor.
   5. A data-derived Permit3 pull amount is width-checked, not truncated (I-5).
   6. A venue value-IN call is never handed a max sentinel (I-15).
+  7. A multi-op module rejects an op it does not implement.
+  8. A module never pays out a RAW self-balance — every `balanceOf(address(this))`
+     is a floor or a delta.
 
 ────────────────────────────────────────────────────────────────────────────────
 (1) A taker grant must be unambiguous about which dispatch it authorises.
@@ -78,8 +81,10 @@ PIN_MAKE = re.compile(
     r"msg\.sender\s*!=\s*(?:address\(\s*)?_?[sS][eE][tT][tT][lL][eE][mM][eE][nN][tT]|"
     r"\bonlySettlement\b"
 )
-# `_gatePreFund` folds the hub pin, the spender pin and the descriptor check.
-PIN_FOR = re.compile(r"_gatePreFund\s*\(|PreFundGuard\.requireSettlement\s*\(\s*spender")
+# The spender pin on the TAKE_FOR seam. (`_gatePreFund`, which folded it with the
+# hub pin and a leg-ref check, was removed 2026-09-11 — every pre-fund takeFor is
+# dual-shape now and writes the three checks inline.)
+PIN_FOR = re.compile(r"PreFundGuard\.requireSettlement\s*\(\s*spender")
 # Spending from the module's own balance. `requireDelivered`/`floorOf` ARE the
 # balance floor, so their presence is exactly the "this is pre-funded" signal.
 PRE_FUNDED = re.compile(
@@ -125,7 +130,7 @@ NARROW_EXEMPT = {
     ("AaveV4RepayModule", "toPull"): "toPull <= amount (core slice)",
     ("CompoundV2RepayModule", "toPull"): "toPull <= amount (core slice)",
     ("CometRepayModule", "toPull"): "toPull <= amount (core slice)",
-    ("DolomiteRepayModule", "toPull"): "toPull <= amount (core slice)",
+    ("DolomiteOperatorModule", "toPull"): "toPull <= amount (core slice)",
     # `toRepay = min(amount, debt)` — the amount-bounded clamp (SAFE), as opposed to
     # the `min(sideAmount, debt)` form that WAS the F-2 bug and now uses Narrow160.
     ("RiverRepayModule", "toRepay"): "toRepay = min(amount, debt) <= amount",
@@ -146,7 +151,7 @@ NARROW_EXEMPT = {
     ("CompoundV2WithdrawModule", "cAmount"): "Exact-mode ceiling; under-pull reverts redeemUnderlying(amount), no paired approve",
     ("CompoundV2NativeWithdrawModule", "cAmount"): "Exact-mode ceiling; under-pull reverts redeemUnderlying(amount), no paired approve",
     # `fromMaker = amount - fromSelf`, fromSelf <= amount, so fromMaker <= amount.
-    ("RiverBorrowModule", "fromMaker"): "fromMaker = amount - fromSelf <= amount",
+    ("RiverProceeds", "fromMaker"): "fromMaker = amount - fromSelf <= amount (library; core slice)",
     # explicit `if (pull > type(uint160).max) revert AmountOverflow()` precedes the
     # cast — the Narrow160 semantics, inlined.
     ("ProportionalSweepModule", "pull"): "guarded by an inline `> type(uint160).max` revert",
@@ -157,6 +162,75 @@ NARROW_EXEMPT = {
     # venue and there is nothing to amplify.
     ("MorphoBlueRepayModule", "assets"): "morpho is immutable, not order-decoded; assets is Morpho's accounting",
 }
+
+# ── (7) a multi-op module rejects an unknown op ──────────────────────────────
+#
+# Several ops may share one contract — and several ops SHOULD share one contract
+# whenever they consume the same standing grant, because that grant is what a
+# maker actually has to hand over and revoke. `AaveV3CreditModule` holds Aave's
+# credit delegation for both the bare borrow and the fused leverage op precisely
+# so a maker delegates their credit line once.
+#
+# That merge is safe for exactly one reason: the op lives INSIDE `data`, so it is
+# inside `ref = keccak256(data)`, and Permit3's taker book keys on `ref`. A grant
+# signed for one op therefore cannot be replayed as another.
+#
+# THE PROPERTY THAT ARGUMENT DEPENDS ON, and the one this rule pins: an op the
+# module does not implement must REVERT. A dispatcher written as
+#
+#     if (op == A) { ... } else { ...B... }          // ← no reject branch
+#
+# silently maps every unknown op onto B. The grant was then signed for a `data`
+# blob naming an op that does not exist, and the module runs a DIFFERENT op with
+# it — the exact substitution the `ref` keying is supposed to make impossible. The
+# omission is invisible at the type level (an `enum` does not constrain a
+# `uint256` decoded from calldata) and costs one line to prevent.
+#
+# The test is syntactic and deliberately loose: a contract that declares an op
+# enum or reads an op discriminator must also contain a `revert` naming an op
+# error. It cannot prove the branch is reachable — that is what
+# `test_*_revertsOnUnknownOp` is for — but it does catch the whole-branch
+# omission, which is the failure that actually happens.
+# Call sites only — `(?<!function )` — so the abstract base that DECLARES
+# `_preFundOp` is not mistaken for a dispatcher that reads it.
+OP_DISPATCH = re.compile(r"\benum\s+Op\s*\{|(?<!function )_preFundOp\s*\(|(?<!function )_plainOp\s*\(")
+OP_REJECT = re.compile(r"\brevert\s+(?:\w+\.)?(?:BadOp|UnknownOp|InvalidOp|UnsupportedOp)\s*\(")
+
+
+# ── (8) a module never pays out a raw self-balance ───────────────────────────
+#
+# THE INVARIANT THE MODULE-LEVEL REENTRANCY GUARDS WERE STANDING IN FOR, made explicit
+# so the guards can go.
+#
+# Every module entrypoint is reached through a locked dispatcher — Settlement for
+# MAKE, Permit3.take / takeFor for the taker seams — with ONE window Permit3 leaves
+# open on purpose ({AllowanceTransfer.transferFrom} is "DELIBERATELY NOT
+# nonReentrant"): a MAKE pull hands control to a maker-chosen token, and a hook
+# can reach `Permit3.take` from inside it. It can only land `takeOnBehalf(X, …)`
+# for an X that granted the HOOK CONTRACT a taker bucket — i.e. the attacker
+# themselves (core `test_reentrancy_transferFrom_cannotReachTheSpendersBucket`).
+# So the question is only ever: can an interleaved call, on ITS OWN account, on
+# the SAME module balance, disturb what the in-flight fill measures?
+#
+# It cannot, as long as every payout is a same-call delta: `bal - floor`,
+# `received - snapshot`, `min(received, amount)`. Nothing is ever paid from a
+# balance read alone, so an interleaving that adds to or removes from the shared
+# balance changes nothing the victim's fill pays out (dolomite
+# `test_hookReentersTakeMidRepay_victimAccountingUnchanged_attackerMovesOnlyOwnFunds`
+# runs exactly that interleaving with the guard removed). A census on 2026-09-11
+# found all 77 self-balance reads in the tree already delta-measured.
+#
+# This rule pins it: a local assigned from `balanceOf(address(this))` must appear
+# in a subtraction or comparison afterwards, and must NEVER be the amount argument
+# of a transfer. A module that breaks it is exactly a module that would need a
+# reentrancy guard back — and, more to the point, one that pays another fill's
+# residue to whoever calls next (H-3, F-3).
+SELF_BAL = re.compile(r"(\w+)\s*=\s*IERC20\(\w+\)\.balanceOf\(address\(this\)\)\s*;")
+# also the direct form: `IERC20(t).balanceOf(address(this))` as a transfer amount
+SELF_BAL_RAW_PAY = re.compile(
+    r"(?:safeTransfer(?:From)?|\.transfer)\([^;]*?,\s*IERC20\(\w+\)\.balanceOf\(address\(this\)\)\s*\)"
+)
+
 
 # ── (6) a venue value-IN call is never handed a max sentinel (I-15) ──────────
 #
@@ -241,9 +315,20 @@ def arg_span(body: str, open_paren: int) -> str:
 # `ForLegMissing`), so the realistic damage is a permanently unfillable order
 # shape rather than a theft — but "almost certainly" is not an invariant.
 #
-# Anything whose first decoded field is not an `address` therefore has to be
+# Anything whose first decoded field is not provably bounded therefore has to be
 # justified HERE, once, in writing. Add a row when you add such a module.
-FIRST_FIELD = re.compile(r"abi\.decode\(\s*data(?:\[[^\]]*\])?\s*,\s*\(([^)]*)\)")
+# ⚠ NO SLICE. This rule is about WORD 0 of `item.data`, so only a decode of the
+# WHOLE blob can answer it: `abi.decode(data[64:], (uint256, …))` is a TAIL read —
+# every repay module in the tree does one — and its first field says nothing about
+# word 0. Matching sliced decodes reported `AaveV2RepayModule` and
+# `AaveV3RepayModule` as colliding on a `uint256` that is their `rateMode`.
+FIRST_FIELD = re.compile(r"abi\.decode\(\s*data\s*,\s*\(([^)]*)\)")
+# First-field types that CANNOT reach `>> 253 == 5`, by their own width:
+#   `address`  < 2^160, the original case;
+#   `uint8`    <= 255 — and it is the shape a merged-by-grant module opens with,
+#              because its leading word is an OP discriminator. That is strictly
+#              safer than an address, not a special case being waved through.
+SAFE_FIRST_FIELD = {"address", "uint8", "uint16", "bool"}
 WORD0_EXEMPT = {
     # struct is DYNAMIC (contains a `bytes`/array member), so word 0 is an ABI
     # offset — a small number, never near 2^255.
@@ -264,7 +349,13 @@ WORD0_EXEMPT = {
     "LiquityV2RepayModule": "word 0 is `branchIndex`, a small collateral-branch ordinal",
 }
 # `contract X is A, B {` — the name plus its inheritance list, up to the brace.
-CONTRACT = re.compile(r"\bcontract\s+(\w+)\s*(?:is\s+([^{]*))?\{")
+# ⚠ LIBRARIES TOO. This matched `contract` only, so a `library` living beside the
+#   modules — `RiverProceeds`, whose `settle` does a Permit3 pull sized from a
+#   computed amount — was never scanned by rules 5/6/8, while a NARROW_EXEMPT row
+#   keyed to a contract that no longer exists (`RiverBorrowModule`) made it look
+#   covered. Found by a dead-code sweep on 2026-09-11. The entrypoint rules (1–4, 7)
+#   simply find nothing in a library and fall through.
+CONTRACT = re.compile(r"\b(?:contract|library)\s+(\w+)\s*(?:is\s+([^{]*))?\{")
 
 
 def function_body(body: str, fname: str) -> str:
@@ -276,8 +367,11 @@ def function_body(body: str, fname: str) -> str:
     unguarded second entrypoint was reported clean. The CALLER PIN and the DATA-SPACE
     guards are per-entrypoint obligations and are now checked per entrypoint.
 
-    (The balance FLOOR deliberately stays contract-wide: it legitimately lives in a
-    private helper the entrypoint calls, e.g. `_supply` / `_repayAndSweep`.)
+    (The balance FLOOR used to stay contract-wide, because it legitimately lives in a
+    private helper the entrypoint calls, e.g. `_supply` / `_repayAndSweep`. It is now
+    checked over the entrypoint's REACHABLE set instead — see {reachable_body}, which
+    keeps that property while attributing the floor to the seam that actually takes
+    it.)
     """
     m = re.search(r"\bfunction\s+" + re.escape(fname) + r"\s*\(", body)
     if not m:
@@ -298,6 +392,57 @@ def function_body(body: str, fname: str) -> str:
                 # unpinned when they are pinned exactly as intended.
                 return body[m.start() : k + 1]
     return ""
+
+
+# All functions declared in a contract body, brace-matched, as {name: body}.
+FUNCTION_DECL = re.compile(r"\bfunction\s+(\w+)\s*\(")
+
+
+def all_functions(body: str) -> dict:
+    out = {}
+    for m in FUNCTION_DECL.finditer(body):
+        out[m.group(1)] = function_body(body, m.group(1))
+    return out
+
+
+def reachable_body(body: str, entry: str) -> str:
+    """`entry`'s body plus every function reachable from it, concatenated.
+
+    WHY THIS EXISTS. The balance-floor test asks "does this entrypoint spend the
+    module's OWN balance?", and the floor legitimately sits in a private helper
+    (`_supply`, `_repayAndSweep`, `_open`). Run per-function it missed those; run
+    contract-wide it could not tell WHICH seam took the floor — and once one
+    contract hosts several seams, that stopped being a rounding error.
+
+    A module merged by GRANT hosts every op that one standing authorisation covers,
+    so a pull-shaped `makeOnBehalf` now routinely sits beside a pre-funded
+    `takeForOnBehalf` (`DolomiteOperatorModule`). Contract-wide, the make seam
+    inherits the takeFor seam's floor and is reported unpinned for a balance it
+    never touches — a false positive, and a false positive on a security check is
+    how a check stops being read.
+
+    Transitive closure by NAME, which is all that is needed here: these are single
+    files with no dynamic dispatch, so an identifier appearing in a body and naming
+    a function of the same contract is a call.
+    """
+    fns = all_functions(body)
+    if entry not in fns:
+        return ""
+    # Declaration order, entrypoint first — deterministic, so a check that reads the
+    # FIRST match in the concatenation (rule 4) gets the same answer every run.
+    order = [entry]
+    seen = {entry}
+    i = 0
+    while i < len(order):
+        cur_body = fns.get(order[i], "")
+        i += 1
+        for name in fns:
+            if name in seen:
+                continue
+            if re.search(r"\b" + re.escape(name) + r"\s*\(", cur_body):
+                seen.add(name)
+                order.append(name)
+    return "\n".join(fns[n] for n in order)
 
 
 def contract_spans(src: str):
@@ -322,6 +467,8 @@ def main() -> int:
     word0 = []
     narrow = []
     sentinels = []
+    bad_ops = []
+    raw_pay = []
     scanned = 0
     makes = 0
     dual = 0
@@ -346,6 +493,26 @@ def main() -> int:
         ):
             continue
         for name, inherits, body in contract_spans(src):
+            # ── (7) a multi-op module rejects an op it does not implement ──
+            if OP_DISPATCH.search(body) and not OP_REJECT.search(body):
+                bad_ops.append((path.relative_to(ROOT), name))
+
+            # ── (8) no raw self-balance payout ──
+            if SELF_BAL_RAW_PAY.search(body):
+                raw_pay.append((path.relative_to(ROOT), name, "<inline balanceOf(this) as a transfer amount>"))
+            for m in SELF_BAL.finditer(body):
+                var = m.group(1)
+                after = body[m.end():]
+                paid_raw = re.search(
+                    r"(?:safeTransfer(?:From)?|\.transfer)\([^;]*?,\s*" + re.escape(var) + r"\s*\)", after
+                )
+                measured = re.search(
+                    r"-\s*" + re.escape(var) + r"\b|\b" + re.escape(var) + r"\s*-|\b" + re.escape(var) + r"\s*[<>]=?|[<>]=?\s*" + re.escape(var) + r"\b",
+                    after,
+                )
+                if paid_raw or not measured:
+                    raw_pay.append((path.relative_to(ROOT), name, var))
+
             # ── (6) no venue value-IN call is handed a max sentinel ──
             for m in VALUE_IN_CALL.finditer(body):
                 callee = m.group(1)
@@ -383,11 +550,25 @@ def main() -> int:
                 # way is the F27/C-4 shape.
                 if "_gatePreFundMake(" not in make_body:
                     # ── (4) a PULL make must not be readable as a pre-fund blob ──
-                    m = FIRST_FIELD.search(body)
-                    first = m.group(1).split(",")[0].strip() if m else "address"
-                    if first != "address" and name not in WORD0_EXEMPT:
+                    # Over what `makeOnBehalf` REACHES, not the whole contract: a
+                    # module merged by grant also hosts `takeOnBehalf` /
+                    # `takeForOnBehalf`, whose blobs have their own layouts, and the
+                    # first `abi.decode` in the file may well belong to one of those.
+                    # Scanning contract-wide read the wrong seam's map.
+                    m = FIRST_FIELD.search(reachable_body(body, "makeOnBehalf")) or FIRST_FIELD.search(body)
+                    # ⚠ FAIL CLOSED when no unsliced decode is visible. This used to
+                    #   default to "address" — i.e. a module that reads word 0 some way
+                    #   this regex cannot see (a `calldataload`, a `data[0:32]` slice, a
+                    #   helper in a base contract) was silently assumed safe. No shipped
+                    #   maker hits this today (verified 2026-09-11); a future one must
+                    #   either open with a visible decode or take a WORD0_EXEMPT row.
+                    first = m.group(1).split(",")[0].strip() if m else "<no unsliced abi.decode(data, …) reachable>"
+                    if first not in SAFE_FIRST_FIELD and name not in WORD0_EXEMPT:
                         word0.append((path.relative_to(ROOT), name, first))
-                if PRE_FUNDED.search(body) and "_gatePreFundMake(" not in make_body:
+                # Over what `makeOnBehalf` can actually REACH, not the whole contract —
+                # see {reachable_body}. A merged-by-grant module's pull `makeOnBehalf`
+                # must not inherit its `takeForOnBehalf` sibling's floor.
+                if PRE_FUNDED.search(reachable_body(body, "makeOnBehalf")) and "_gatePreFundMake(" not in make_body:
                     unpinned_prefund.append(
                         (path.relative_to(ROOT), name, "makeOnBehalf funds from balance without _gatePreFundMake")
                     )
@@ -400,7 +581,11 @@ def main() -> int:
             # of the user's own wallet), which is exactly why it must be checked
             # rather than assumed: the two shapes look identical at this seam.
             take_for_body = function_body(body, "takeForOnBehalf")
-            if TAKE_FOR.search(body) and PRE_FUNDED.search(body) and not PIN_FOR.search(take_for_body):
+            if (
+                TAKE_FOR.search(body)
+                and PRE_FUNDED.search(reachable_body(body, "takeForOnBehalf"))
+                and not PIN_FOR.search(take_for_body)
+            ):
                 unpinned_prefund.append(
                     (path.relative_to(ROOT), name, "takeForOnBehalf funds from balance without a spender pin")
                 )
@@ -443,7 +628,7 @@ def main() -> int:
         print(
             "\nA module that spends its OWN balance is only as safe as the number it is\n"
             "handed and the caller that hands it over. On MAKE that is `_gatePreFundMake`;\n"
-            "on TAKE_FOR it is `_gatePreFund` / requireSettlement(spender, ...), because\n"
+            "on TAKE_FOR it is requireSettlement(spender, ...), because\n"
             "`Permit3.takeFor` is permissionless and `approveTaker` lets a caller name\n"
             "itself spender (F27/C-1).",
             file=sys.stderr,
@@ -510,6 +695,37 @@ def main() -> int:
             "dispatches apart, so one approveTaker would authorise either. A dual-shape\n"
             "contract must make the two data spaces disjoint at word 0: add the guards\n"
             "above, or split the contract.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if raw_pay:
+        print(f"{len(raw_pay)} self-balance read(s) are paid out RAW or never measured:\n", file=sys.stderr)
+        for rel, name, var in raw_pay:
+            print(f"  {rel}: contract {name}\n      `{var}`", file=sys.stderr)
+        print(
+            "\nA module's own balance is SHARED across every fill that transits it. Paying\n"
+            "it out raw hands the next caller whatever the last one stranded (H-3, F-3) —\n"
+            "and it is the one shape an interleaved call could exploit, which is why the\n"
+            "module-level reentrancy guards could be dropped: every payout is a same-call\n"
+            "delta. Measure `bal - floor` / `received - snapshot`, cap at `amount`, and pay\n"
+            "THAT.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if bad_ops:
+        print(f"{len(bad_ops)} multi-op module(s) do not reject an unknown op:\n", file=sys.stderr)
+        for rel, name in bad_ops:
+            print(f"  {rel}: contract {name}", file=sys.stderr)
+        print(
+            "\nOps share a contract so a maker hands over ONE standing grant. That is sound\n"
+            "only because the op lives inside `data`, hence inside `ref = keccak256(data)`,\n"
+            "so a grant signed for one op cannot be replayed as another. A dispatcher with\n"
+            "no reject branch breaks exactly that: every unknown op falls through to the\n"
+            "last one, and the module runs an op the grant did not name. Add a final\n"
+            "`else revert BadOp(op);` — and a `test_*_revertsOnUnknownOp` to prove it is\n"
+            "reachable.",
             file=sys.stderr,
         )
         return 1

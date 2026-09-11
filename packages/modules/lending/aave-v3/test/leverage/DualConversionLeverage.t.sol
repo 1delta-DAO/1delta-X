@@ -27,7 +27,7 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 ///   tokenOut = [WETH]        solver → maker → deposited as collateral
 ///   items:
 ///     [0] MAKE  AaveV3DepositModule   supply WETH  (funded by the delivered WETH)
-///     [1] TAKE  AaveV3BorrowModule    borrow USDC  (proceeds → Settlement → solver)
+///     [1] TAKE  AaveV3CreditModule    borrow USDC  (proceeds → Settlement → solver)
 ///
 /// Note on solvers: the shipped LimitOrderLeverageSolver rejects multi-input
 /// orders (`order.tokenIn.length != 1`), because its flash→swap→repay core only
@@ -61,7 +61,7 @@ contract DualConversionLeverageTest is AaveModulesBase {
         // Solver authorises Settlement to pull the WETH it delivers.
         _approveSolverSide(collateralIn, WETH);
 
-        bytes memory borrowData = abi.encode(AAVE_POOL, USDC, uint256(2));
+        bytes memory borrowData = abi.encode(OP_BORROW, AAVE_POOL, USDC, uint256(2));
         Item[] memory items = new Item[](2);
         items[0] = Item({
             op: ItemOp.MAKE,
@@ -72,7 +72,7 @@ contract DualConversionLeverageTest is AaveModulesBase {
         });
         items[1] = Item({
             op: ItemOp.TAKE,
-            module: address(borrowModule),
+            module: address(creditModule),
             amount: borrowOut,
             recipient: address(0), // proceeds → Settlement → solver (tokenIn[0])
             data: borrowData
@@ -128,6 +128,6 @@ contract DualConversionLeverageTest is AaveModulesBase {
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
         assertEq(IERC20(DAI).balanceOf(address(settlement)), 0, "settlement DAI drained");
         assertEq(IERC20(WETH).balanceOf(address(depositModule)), 0, "deposit module drained");
-        assertEq(IERC20(USDC).balanceOf(address(borrowModule)), 0, "borrow module drained");
+        assertEq(IERC20(USDC).balanceOf(address(creditModule)), 0, "borrow module drained");
     }
 }

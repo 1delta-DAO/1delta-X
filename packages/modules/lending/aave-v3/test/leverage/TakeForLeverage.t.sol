@@ -7,7 +7,7 @@ import {Order, Item, ItemOp, LegOut} from "@core/settlement/Settlement.sol";
 import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 
 import {IAaveCreditDelegation} from "../../src/interfaces/IAaveV3.sol";
-import {AaveV3LeverageModule} from "../../src/AaveV3FusedModules.sol";
+import {AaveV3CreditModule} from "../../src/AaveV3CreditModule.sol";
 import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 
 /// @dev The `TAKE_FOR` item on a real lender: supply + borrow in ONE dispatch,
@@ -20,24 +20,32 @@ import {AaveModulesBase} from "../shared/AaveModulesBase.t.sol";
 /// maker moments earlier in the same fill — so there is exactly ONE signed copy of
 /// that number, and over any fill the maker's WETH balance nets to zero.
 contract TakeForLeverageTest is AaveModulesBase {
-    AaveV3LeverageModule takeForModule;
+    AaveV3CreditModule takeForModule;
 
     uint256 constant COLLATERAL = 1 ether; //  supplied — and the order's output leg
     uint256 constant BORROW = 1_500e6; //      drawn against it
 
-    AaveV3LeverageModule pushModule;
+    AaveV3CreditModule pushModule;
 
     function setUp() public override {
         super.setUp();
-        takeForModule = new AaveV3LeverageModule(address(permit3), address(settlement));
-        pushModule = new AaveV3LeverageModule(address(permit3), address(settlement));
+        takeForModule = new AaveV3CreditModule(address(permit3), address(settlement));
+        pushModule = new AaveV3CreditModule(address(permit3), address(settlement));
         vm.label(address(takeForModule), "aaveV3TakeForLeverageModule");
         vm.label(address(pushModule), "aaveV3PreFundLeverageModule");
     }
 
-    /// @dev `(1 << 255) | index` — fund from `legsOut[index]`.
+    /// @dev `(1 << 255) | op << 244 | index` — fund from `legsOut[index]`, and name
+    ///      the op {AaveV3CreditModule} should dispatch.
+    ///
+    ///      ⚠ THE OP IS PART OF THE DESCRIPTOR, not a separate field, and that is what
+    ///      makes one address safe to share between the bare borrow and the fused
+    ///      leverage op: word 0 is inside `ref = keccak256(data)`, so the taker grant
+    ///      binds the op and a grant signed for one cannot be replayed as the other.
+    ///      Bits [244,252) are free — {Base._forSlice} reads only 255, 254, 253 and
+    ///      [0,16) — so this changes nothing the core sees.
     function _forLeg(uint256 index) internal pure returns (uint256) {
-        return (uint256(1) << 255) | index;
+        return (uint256(1) << 255) | DESC_OP_LEVERAGE | index;
     }
 
     /// @dev `(3 << 254) | floorBps << 160 | token` — fund with
@@ -50,7 +58,7 @@ contract TakeForLeverageTest is AaveModulesBase {
     ///      genuine sweep like the one below deliberately funds LESS than its ceiling,
     ///      so it has to say so.
     function _forBalance(address token, uint256 floorBps) internal pure returns (uint256) {
-        return (uint256(3) << 254) | (floorBps << 160) | uint160(token);
+        return (uint256(3) << 254) | DESC_OP_LEVERAGE | (floorBps << 160) | uint160(token);
     }
 
     /// @dev No totals, no ratio: the collateral amount is not in here at all.

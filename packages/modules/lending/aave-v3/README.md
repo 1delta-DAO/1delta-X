@@ -66,12 +66,43 @@ module, while the Permit3 taker allowance is what actually caps the fill size.
 | [`AaveV3DepositModule`](src/AaveV3Modules.sol) | MAKE | pull asset from maker → `pool.supply(onBehalfOf = maker)` | `abi.encode(pool, asset)` |
 | [`AaveV3RepayModule`](src/AaveV3Modules.sol) | MAKE | pull buffered amount → `pool.repay`; sweep over-repay dust back to maker | `abi.encode(pool, asset, rateMode)` |
 | [`AaveV3WithdrawModule`](src/AaveV3Modules.sol) | TAKE | pull maker's aToken → `pool.withdraw` → `receiver` | `abi.encode(pool, asset, aToken)` |
-| [`AaveV3BorrowModule`](src/AaveV3Modules.sol) | TAKE | `pool.borrow(onBehalfOf = maker)` → forward to `receiver` | `abi.encode(pool, asset, rateMode)` |
+| [`AaveV3CreditModule`](src/AaveV3CreditModule.sol) | TAKE | `Op.Borrow` — `pool.borrow(onBehalfOf = maker)` → forward to `receiver` | `abi.encode(Op.Borrow, pool, asset, rateMode)` |
+| [`AaveV3CreditModule`](src/AaveV3CreditModule.sol) | TAKE | `Op.Leverage` — supply a ratio-derived collateral, then borrow, in one dispatch | `abi.encode(Op.Leverage, pool, borrowAsset, rateMode, collateralAsset, collateralTotal, borrowTotal)` |
+| [`AaveV3CreditModule`](src/AaveV3CreditModule.sol) | TAKE_FOR | `Op.Leverage` — same, with the collateral **core-sized** from the funding descriptor | `abi.encode(forDesc, forCap, pool, borrowAsset, rateMode, collateralAsset)` |
 | [`interfaces/IAaveV3.sol`](src/interfaces/IAaveV3.sol) | — | minimal Aave v3 pool + credit-delegation surface | — |
 
 Because the modules are pool-address-agnostic, the **same** deposit/borrow
 modules drive Aave v3, Spark, or any Aave-v3-fork by passing a different `pool`
 in `data` — which is exactly what the migration flow exploits.
+
+### One address per grant class
+
+The modules are split by **the standing authorisation a maker has to give them**,
+not by seam or by op:
+
+| Grant | Held by |
+|---|---|
+| Aave **credit delegation** (`approveDelegation` on the debt token) | `AaveV3CreditModule` |
+| **aToken** ERC-20 approval | `AaveV3WithdrawModule` |
+| Permit3 token allowance (underlying) | `AaveV3DepositModule`, `AaveV3RepayModule` |
+| *none* — funded by the fill's own delivery | `AaveV3PreFundModule` |
+
+A credit delegation is standing, protocol-native and in practice granted at
+`max`. Every borrow-shaped module used to be a separate permanent liability for
+the maker to audit and revoke, and each new one meant another approval prompt
+over the same credit line. `AaveV3CreditModule` holds all of them, so a
+borrow-shaped op added later costs the maker no new approval. The op rides
+inside `data` — and therefore inside `ref = keccak256(data)` — so a taker grant
+signed for one op cannot be replayed as another.
+
+The split *between* grant classes is deliberate and bounds the cost of the
+merge: a merged contract redeploys as a unit, so folding the aToken-spending or
+wallet-allowance ops in here would mean a leverage bugfix forcing every maker to
+re-approve their *collateral* too.
+
+A maker who wants no standing delegation at all needs none: every op accepts an
+optional EIP-712 `delegationWithSig` block appended to `data`, which grants
+per-order and leaves nothing behind.
 
 > Aave **v4** ships as a separate package,
 > [`@1delta-x/modules-aave-v4`](../aave-v4), because v4's Hub/Spoke +
@@ -89,7 +120,7 @@ the borrowed USDC funds the `tokenIn` the solver is paid with.
 order: tokenIn = USDC, tokenOut = WETH      items = [MAKE deposit, TAKE borrow]
 
   [0] MAKE  AaveV3DepositModule   maker ──WETH──▶ pool.supply(onBehalfOf = maker)
-  [1] TAKE  AaveV3BorrowModule    pool.borrow(onBehalfOf = maker) ──USDC──▶ Settlement
+  [1] TAKE  AaveV3CreditModule    pool.borrow(onBehalfOf = maker) ──USDC──▶ Settlement
                                   └─ Aave credit delegation authorises the debt
   settle:   Settlement ──USDC──▶ solver        (entirely from borrow proceeds)
             solver     ──WETH──▶ maker         (tokenOut, the added collateral)

@@ -403,7 +403,7 @@ against any number of times.
 
 So on these two venues `FullFillGuard` was **never** protecting a protocol
 constraint. It existed only because a constant `sideAmount` in `data` cannot
-pro-rate. `EulerV2TakeForModule` and `DolomiteTakeForModule` carry **no guard at
+pro-rate. `EulerV2OperatorModule` and `DolomiteOperatorModule`'s `Op.Open` carry **no guard at
 all** — there is no fresh-open carve-out to make, unlike Fluid — and every slice is
 its own two-leg batch under one check. Fork-tested 4/4 each
 (`euler-v2/test/leverage/TakeForOpen.t.sol`,

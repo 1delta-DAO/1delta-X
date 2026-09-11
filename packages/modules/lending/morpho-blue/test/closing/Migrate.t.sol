@@ -12,7 +12,8 @@ import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
 // composability claim made concrete — the Morpho repay/withdraw modules and the
 // Aave deposit/borrow modules plug into one signed order.
 import {IAaveV3Pool, IAaveCreditDelegation} from "../../../aave-v3/src/interfaces/IAaveV3.sol";
-import {AaveV3DepositModule, AaveV3BorrowModule} from "../../../aave-v3/src/AaveV3Modules.sol";
+import {AaveV3DepositModule} from "../../../aave-v3/src/AaveV3Modules.sol";
+import {AaveV3CreditModule} from "../../../aave-v3/src/AaveV3CreditModule.sol";
 
 import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 
@@ -26,10 +27,10 @@ import {MorphoModulesBase} from "../shared/MorphoModulesBase.t.sol";
 ///   [0] MAKE  MorphoBlueRepayModule             repay (debt + buffer), dust → maker
 ///   [1] TAKE  MorphoBlueTakerModule (op=Withdraw)  withdraw `exactWeth` wstETH, recipient = maker
 ///   [2] MAKE  AaveV3DepositModule               deposit `exactWeth` wstETH onto Aave
-///   [3] TAKE  AaveV3BorrowModule                borrow USDC on Aave, recipient = Settlement
+///   [3] TAKE  AaveV3CreditModule                borrow USDC on Aave, recipient = Settlement
 contract MigrateTest is MorphoModulesBase {
     AaveV3DepositModule aaveDepositModule;
-    AaveV3BorrowModule aaveBorrowModule;
+    AaveV3CreditModule aaveCreditModule;
 
     address AAVE_POOL;
     address aWstETH;
@@ -42,12 +43,12 @@ contract MigrateTest is MorphoModulesBase {
         aaveUsdcDebt = lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][USDC].debt;
 
         aaveDepositModule = new AaveV3DepositModule(address(permit3), address(settlement));
-        aaveBorrowModule = new AaveV3BorrowModule(address(permit3));
+        aaveCreditModule = new AaveV3CreditModule(address(permit3), address(settlement));
 
         vm.label(AAVE_POOL, "aaveV3Pool");
         vm.label(aWstETH, "aWstETH");
         vm.label(address(aaveDepositModule), "aaveV3DepositModule");
-        vm.label(address(aaveBorrowModule), "aaveV3BorrowModule");
+        vm.label(address(aaveCreditModule), "aaveV3CreditModule");
     }
 
     // ──────────────────── Direct fill (4-item order, exact amounts) ────────────────────
@@ -95,7 +96,7 @@ contract MigrateTest is MorphoModulesBase {
         assertEq(IERC20(WSTETH).balanceOf(address(settlement)), 0, "settlement wstETH drained");
         assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "repay module drained");
         assertEq(IERC20(WSTETH).balanceOf(address(aaveDepositModule)), 0, "deposit module drained");
-        assertEq(IERC20(USDC).balanceOf(address(aaveBorrowModule)), 0, "borrow module drained");
+        assertEq(IERC20(USDC).balanceOf(address(aaveCreditModule)), 0, "borrow module drained");
     }
 
     // ──────────────────── Single-signature permit fill ────────────────────
@@ -111,7 +112,7 @@ contract MigrateTest is MorphoModulesBase {
         // Native delegations (outside the signed batch).
         vm.startPrank(maker);
         MORPHO.setAuthorization(address(takerModule), true);
-        IAaveCreditDelegation(aaveUsdcDebt).approveDelegation(address(aaveBorrowModule), type(uint256).max);
+        IAaveCreditDelegation(aaveUsdcDebt).approveDelegation(address(aaveCreditModule), type(uint256).max);
         vm.stopPrank();
 
         (Order memory order, IPermit3.PermitBatch memory batch) =
@@ -129,7 +130,7 @@ contract MigrateTest is MorphoModulesBase {
     // ──────────────────── Helpers ────────────────────
 
     function _aaveBorrowData() internal view returns (bytes memory) {
-        return abi.encode(AAVE_POOL, USDC, uint256(2));
+        return abi.encode(uint256(AaveV3CreditModule.Op.Borrow), AAVE_POOL, USDC, uint256(2));
     }
 
     function _approveMigrationSide(uint256 bufferedRepay, uint256 exactWeth, uint256 debt) internal {
@@ -150,8 +151,8 @@ contract MigrateTest is MorphoModulesBase {
         permit3.approveToken(address(aaveDepositModule), WSTETH, uint160(exactWeth), 0);
 
         // [3] Aave borrow: credit delegation + Permit3 taker cap.
-        IAaveCreditDelegation(aaveUsdcDebt).approveDelegation(address(aaveBorrowModule), type(uint256).max);
-        permit3.approveTaker(address(settlement), address(aaveBorrowModule), keccak256(_aaveBorrowData()), uint160(debt), 0);
+        IAaveCreditDelegation(aaveUsdcDebt).approveDelegation(address(aaveCreditModule), type(uint256).max);
+        permit3.approveTaker(address(settlement), address(aaveCreditModule), keccak256(_aaveBorrowData()), uint160(debt), 0);
 
         vm.stopPrank();
     }
@@ -165,7 +166,7 @@ contract MigrateTest is MorphoModulesBase {
         items[0] = Item(ItemOp.MAKE, address(repayModule), bufferedRepay, address(0), _marketData());
         items[1] = Item(ItemOp.TAKE, address(takerModule), exactWeth, maker, _withdrawData());
         items[2] = Item(ItemOp.MAKE, address(aaveDepositModule), exactWeth, address(0), abi.encode(AAVE_POOL, WSTETH));
-        items[3] = Item(ItemOp.TAKE, address(aaveBorrowModule), debt, address(0), _aaveBorrowData());
+        items[3] = Item(ItemOp.TAKE, address(aaveCreditModule), debt, address(0), _aaveBorrowData());
         order = _order(maker, 7, USDC, USDC, debt, bufferedRepay, items);
     }
 
@@ -185,7 +186,7 @@ contract MigrateTest is MorphoModulesBase {
 
         IPermit3.TakerPermit[] memory tkp = new IPermit3.TakerPermit[](2);
         tkp[0] = IPermit3.TakerPermit(address(settlement), address(takerModule), keccak256(_withdrawData()), uint160(exactWeth), exp);
-        tkp[1] = IPermit3.TakerPermit(address(settlement), address(aaveBorrowModule), keccak256(_aaveBorrowData()), uint160(debt), exp);
+        tkp[1] = IPermit3.TakerPermit(address(settlement), address(aaveCreditModule), keccak256(_aaveBorrowData()), uint160(debt), exp);
 
         batch = _buildBatch(tp, tkp, 3, _expiry(order));
     }

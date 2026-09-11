@@ -7,43 +7,49 @@ import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
 import {OperatorArg} from "../../src/interfaces/IDolomite.sol";
-import {DolomiteTakeForModule, DolomiteOperateModule} from "../../src/DolomiteModules.sol";
+import {DolomiteOperatorModule} from "../../src/DolomiteOperatorModule.sol";
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 
 /// @dev `TAKE_FOR` on Dolomite. Like Euler, Dolomite has no position identity
 /// object: a position IS the balance set of the maker-signed `(owner,
 /// accountNumber)` sub-account, and `operate` may be applied to it repeatedly. So
-/// {DolomiteOperateModule}'s {FullFillGuard} was never protecting a protocol
+/// {DolomiteOperatorModule}'s {FullFillGuard} was never protecting a protocol
 /// constraint — only the fact that a constant `sideAmount` cannot pro-rate.
-/// {DolomiteTakeForModule} carries no guard: it partial-fills freely, every slice
+/// {DolomiteOperatorModule} carries no guard: it partial-fills freely, every slice
 /// being its own two-action `operate` under ONE end-of-call solvency check.
 contract DolomiteTakeForOpenTest is DolomiteModulesBase {
-    DolomiteTakeForModule takeForModule;
+    // ⚠ ONE module, every op. Inherited from the base where it is deployed and
+    //   made a local operator ONCE — see {DolomiteOperatorModule}.
 
     uint256 constant COLLATERAL = 1 ether;
     uint256 constant BORROW = 1_000e6;
 
     function setUp() public override {
         super.setUp();
-        takeForModule = new DolomiteTakeForModule(address(permit3), address(settlement));
-        vm.label(address(takeForModule), "dolomiteTakeForModule");
+        vm.label(address(operatorModule), "dolomiteTakeForModule");
 
         vm.startPrank(maker);
         OperatorArg[] memory ops = new OperatorArg[](1);
-        ops[0] = OperatorArg(address(takeForModule), true);
+        ops[0] = OperatorArg(address(operatorModule), true);
         DOLOMITE.setOperators(ops);
         IERC20(COLL).approve(address(permit3), type(uint256).max);
         IERC20(DEBT).approve(address(permit3), type(uint256).max);
         vm.stopPrank();
     }
 
+    /// @dev ⚠ THE OP RIDES THE DESCRIPTOR — bits [244,252). {DolomiteOperatorModule}
+    ///      hosts every op the maker's `setOperators` grant covers, so the `TAKE_FOR`
+    ///      seam has to name which one. It goes here rather than in a new field
+    ///      because word 0 is inside `ref = keccak256(data)`, so the taker grant binds
+    ///      the op. {Base._forSlice} reads only bits 255, 254, 253 and [0,16), so
+    ///      these bits are invisible to the core.
     function _forLeg(uint256 j) internal pure returns (uint256) {
-        return (uint256(1) << 255) | j;
+        return (uint256(1) << 255) | (uint256(DolomiteOperatorModule.Op.Open) << 244) | j;
     }
 
     function _data() internal view returns (bytes memory) {
         return abi.encode(
-            DolomiteTakeForModule.OpenData({
+            DolomiteOperatorModule.OpenData({
                 forDesc: _forLeg(0),
                 forCap: 0,
                 dolomite: address(DOLOMITE),
@@ -57,15 +63,15 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
 
     function _auth(bytes memory data, uint256 colCap, uint256 debtCap) internal {
         vm.startPrank(maker);
-        permit3.approveToken(address(takeForModule), COLL, uint160(colCap), 0);
-        permit3.approveTaker(address(settlement), address(takeForModule), keccak256(data), uint160(debtCap), 0);
+        permit3.approveToken(address(operatorModule), COLL, uint160(colCap), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(data), uint160(debtCap), 0);
         permit3.approveToken(address(settlement), DEBT, uint160(debtCap), 0);
         vm.stopPrank();
     }
 
     function _order_(uint256 nonce, bytes memory data) internal view returns (Order memory) {
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE_FOR, address(takeForModule), BORROW, address(0), data);
+        items[0] = Item(ItemOp.TAKE_FOR, address(operatorModule), BORROW, address(0), data);
         return _order(maker, nonce, DEBT, COLL, BORROW, COLLATERAL, items);
     }
 
@@ -97,7 +103,7 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
         assertApproxEqAbs(_collateralOf(maker) - col0, COLLATERAL, 2, "collateral = the whole signed leg");
         assertApproxEqAbs(_debtOf(maker) - debt0, BORROW, 2, "debt = the whole signed amount");
         assertEq(IERC20(DEBT).balanceOf(solver), BORROW, "solver received the whole borrow");
-        assertEq(IERC20(COLL).balanceOf(address(takeForModule)), 0, "module drained");
+        assertEq(IERC20(COLL).balanceOf(address(operatorModule)), 0, "module drained");
         assertEq(IERC20(DEBT).balanceOf(address(settlement)), 0, "settlement drained");
     }
 
@@ -108,8 +114,8 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
         _approveSolverSide(COLLATERAL, COLL);
 
         bytes memory data = abi.encode(
-            DolomiteOperateModule.BatchData({
-                mode: 0,
+            DolomiteOperatorModule.BatchData({
+                op: uint256(DolomiteOperatorModule.Op.BatchOpen),
                 dolomite: address(DOLOMITE),
                 collMarketId: COLL_MARKET,
                 collToken: COLL,
@@ -121,12 +127,12 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
             })
         );
         vm.startPrank(maker);
-        permit3.approveToken(address(operateModule), COLL, uint160(COLLATERAL), 0);
-        permit3.approveTaker(address(settlement), address(operateModule), keccak256(data), uint160(BORROW), 0);
+        permit3.approveToken(address(operatorModule), COLL, uint160(COLLATERAL), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(data), uint160(BORROW), 0);
         vm.stopPrank();
 
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE, address(operateModule), BORROW, address(0), data);
+        items[0] = Item(ItemOp.TAKE, address(operatorModule), BORROW, address(0), data);
         Order memory o = _order(maker, 22, DEBT, COLL, BORROW, COLLATERAL, items);
         bytes memory sig = _sign(o);
 
@@ -173,8 +179,8 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
         bytes memory tfSig = _sign(tf);
 
         bytes memory oData = abi.encode(
-            DolomiteOperateModule.BatchData({
-                mode: 0,
+            DolomiteOperatorModule.BatchData({
+                op: uint256(DolomiteOperatorModule.Op.BatchOpen),
                 dolomite: address(DOLOMITE),
                 collMarketId: COLL_MARKET,
                 collToken: COLL,
@@ -186,11 +192,11 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
             })
         );
         vm.startPrank(maker);
-        permit3.approveToken(address(operateModule), COLL, uint160(COLLATERAL), 0);
-        permit3.approveTaker(address(settlement), address(operateModule), keccak256(oData), uint160(BORROW), 0);
+        permit3.approveToken(address(operatorModule), COLL, uint160(COLLATERAL), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(oData), uint160(BORROW), 0);
         vm.stopPrank();
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE, address(operateModule), BORROW, address(0), oData);
+        items[0] = Item(ItemOp.TAKE, address(operatorModule), BORROW, address(0), oData);
         Order memory o = _order(maker, 25, DEBT, COLL, BORROW, COLLATERAL, items);
         bytes memory oSig = _sign(o);
 
@@ -207,8 +213,8 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
         settlement.fill(tf, tfSig, BORROW);
         uint256 takeForGas = g0 - gasleft();
 
-        emit log_named_uint("DolomiteOperateModule (gas)", operateGas);
-        emit log_named_uint("DolomiteTakeForModule (gas)", takeForGas);
+        emit log_named_uint("DolomiteOperatorModule (gas)", operateGas);
+        emit log_named_uint("DolomiteOperatorModule (gas)", takeForGas);
         emit log_named_int("delta                 (gas)", int256(takeForGas) - int256(operateGas));
     }
 }

@@ -18,12 +18,7 @@ import {
     ActionArgs,
     OperatorArg
 } from "../../src/interfaces/IDolomite.sol";
-import {
-    DolomiteDepositModule,
-    DolomiteRepayModule,
-    DolomiteTakerModule,
-    DolomiteOperateModule
-} from "../../src/DolomiteModules.sol";
+import {DolomiteOperatorModule} from "../../src/DolomiteOperatorModule.sol";
 
 /// @dev Dolomite integration harness. DolomiteMargin deployed on mainnet after the
 /// default harness block, so we pin a later fork. Drives the canonical WETH-
@@ -56,10 +51,13 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
     // (account number 0), which is lend-only and rejected by the risk override.
     uint256 constant ACCOUNT = 1;
 
-    DolomiteDepositModule depositModule;
-    DolomiteRepayModule repayModule;
-    DolomiteTakerModule takerModule;
-    DolomiteOperateModule operateModule;
+    /// @dev ONE address for EVERY Dolomite op. `operate` admits only a local
+    ///      operator of the account, and that grant is a bare boolean — unscoped by
+    ///      market, token, amount or sub-account. Dolomite has no permissionless
+    ///      value-in path either, so the deposit and repay makers need the same total
+    ///      -control flag as the takers: the four contracts this replaced meant four
+    ///      independent copies of one unscoped grant. It is set once, below.
+    DolomiteOperatorModule operatorModule;
     LimitOrderLeverageSolver leverageSolver;
 
     /// @dev DolomiteMargin's account risk-override setter. On mainnet it gates which
@@ -92,10 +90,7 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
         COLL = WETH;
         DEBT = USDC;
 
-        depositModule = new DolomiteDepositModule(address(permit3), address(settlement));
-        repayModule = new DolomiteRepayModule(address(permit3), address(settlement));
-        takerModule = new DolomiteTakerModule(address(permit3));
-        operateModule = new DolomiteOperateModule(address(permit3));
+        operatorModule = new DolomiteOperatorModule(address(permit3), address(settlement));
         // Balancer v2 Vault + UniswapV3 SwapRouter — mainnet canonical addresses.
         leverageSolver = new LimitOrderLeverageSolver(
             address(permit3),
@@ -106,20 +101,15 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
 
         vm.label(address(DOLOMITE), "DolomiteMargin");
         vm.label(address(leverageSolver), "leverageSolver");
-        vm.label(address(depositModule), "dolomiteDepositModule");
-        vm.label(address(repayModule), "dolomiteRepayModule");
-        vm.label(address(takerModule), "dolomiteTakerModule");
-        vm.label(address(operateModule), "dolomiteOperateModule");
+        vm.label(address(operatorModule), "dolomiteOperatorModule");
 
         // Dolomite-native authorisation: the maker makes each module a local
         // operator of their account. `operate` rejects any other caller; the
         // Permit3 allowance caps the per-fill amount.
         vm.startPrank(maker);
-        OperatorArg[] memory ops = new OperatorArg[](4);
-        ops[0] = OperatorArg(address(depositModule), true);
-        ops[1] = OperatorArg(address(repayModule), true);
-        ops[2] = OperatorArg(address(takerModule), true);
-        ops[3] = OperatorArg(address(operateModule), true);
+        // ONE operator. This was four — the merge's entire point.
+        OperatorArg[] memory ops = new OperatorArg[](1);
+        ops[0] = OperatorArg(address(operatorModule), true);
         DOLOMITE.setOperators(ops);
         vm.stopPrank();
     }
@@ -225,31 +215,31 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
     // ──────────────────── Order builders ────────────────────
 
     function _depositData() internal view returns (bytes memory) {
-        return abi.encode(address(DOLOMITE), COLL_MARKET, COLL, ACCOUNT);
+        return abi.encode(uint8(DolomiteOperatorModule.Op.Deposit), address(DOLOMITE), COLL_MARKET, COLL, ACCOUNT);
     }
 
     // Taker data is op-prefixed: op 0 = Borrow, op 1 = Withdraw. The op makes the
     // borrow/withdraw refs (keccak256(data)) distinct under the single module.
     function _borrowData() internal view returns (bytes memory) {
-        return abi.encode(uint8(DolomiteTakerModule.Op.Borrow), address(DOLOMITE), DEBT_MARKET, DEBT, ACCOUNT);
+        return abi.encode(uint8(DolomiteOperatorModule.Op.Borrow), address(DOLOMITE), DEBT_MARKET, DEBT, ACCOUNT);
     }
 
     function _withdrawData() internal view returns (bytes memory) {
-        return abi.encode(uint8(DolomiteTakerModule.Op.Withdraw), address(DOLOMITE), COLL_MARKET, COLL, ACCOUNT);
+        return abi.encode(uint8(DolomiteOperatorModule.Op.Withdraw), address(DOLOMITE), COLL_MARKET, COLL, ACCOUNT);
     }
 
     function _buildDepositBorrowOrder(uint256 collateralIn, uint256 borrowOut) internal view returns (Order memory) {
         Item[] memory items = new Item[](2);
-        items[0] = Item(ItemOp.MAKE, address(depositModule), collateralIn, address(0), _depositData());
-        items[1] = Item(ItemOp.TAKE, address(takerModule), borrowOut, address(0), _borrowData());
+        items[0] = Item(ItemOp.MAKE, address(operatorModule), collateralIn, address(0), _depositData());
+        items[1] = Item(ItemOp.TAKE, address(operatorModule), borrowOut, address(0), _borrowData());
         return _order(maker, 1, DEBT, COLL, borrowOut, collateralIn, items);
     }
 
     function _approveDepositBorrowSide(uint256 collateralIn, uint256 borrowOut) internal {
         vm.startPrank(maker);
         IERC20(COLL).approve(address(permit3), type(uint256).max);
-        permit3.approveToken(address(depositModule), COLL, uint160(collateralIn), 0);
-        permit3.approveTaker(address(settlement), address(takerModule), keccak256(_borrowData()), uint160(borrowOut), 0);
+        permit3.approveToken(address(operatorModule), COLL, uint160(collateralIn), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(_borrowData()), uint160(borrowOut), 0);
         IERC20(DEBT).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), DEBT, uint160(borrowOut), 0);
         vm.stopPrank();

@@ -5,7 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
-import {DolomiteOperateModule} from "../../src/DolomiteModules.sol";
+import {DolomiteOperatorModule} from "../../src/DolomiteOperatorModule.sol";
 
 /// @dev Level B: deposit WETH collateral AND borrow USDC against it in a SINGLE
 /// `operate` — one end-of-call solvency check covers both legs (Dolomite's
@@ -13,7 +13,7 @@ import {DolomiteOperateModule} from "../../src/DolomiteModules.sol";
 ///
 ///   tokenIn  = USDC  (solver receives the borrow proceeds)
 ///   tokenOut = WETH  (solver funds the collateral)
-///   [0] TAKE DolomiteOperateModule (Open)  Deposit collateral + Withdraw borrow
+///   [0] TAKE DolomiteOperatorModule (Open)  Deposit collateral + Withdraw borrow
 contract DolomiteAtomicOpenTest is DolomiteModulesBase {
     uint256 constant COLLATERAL_IN = 1 ether;
     uint256 constant BORROW_OUT = 1_000e6;
@@ -22,8 +22,8 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
         _neutralizeRiskOverride();
         deal(COLL, solver, COLLATERAL_IN);
 
-        DolomiteOperateModule.BatchData memory p = DolomiteOperateModule.BatchData({
-            mode: uint256(DolomiteOperateModule.BatchMode.Open),
+        DolomiteOperatorModule.BatchData memory p = DolomiteOperatorModule.BatchData({
+            op: uint256(DolomiteOperatorModule.Op.BatchOpen),
             dolomite: address(DOLOMITE),
             collMarketId: COLL_MARKET,
             collToken: COLL,
@@ -39,8 +39,8 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
         // leg; taker allowance on the borrow leg. (Operator set in setUp.)
         vm.startPrank(maker);
         IERC20(COLL).approve(address(permit3), type(uint256).max);
-        permit3.approveToken(address(operateModule), COLL, uint160(COLLATERAL_IN), 0);
-        permit3.approveTaker(address(settlement), address(operateModule), keccak256(data), uint160(BORROW_OUT), 0);
+        permit3.approveToken(address(operatorModule), COLL, uint160(COLLATERAL_IN), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(data), uint160(BORROW_OUT), 0);
         IERC20(DEBT).approve(address(permit3), type(uint256).max);
         permit3.approveToken(address(settlement), DEBT, uint160(BORROW_OUT), 0);
         vm.stopPrank();
@@ -48,7 +48,7 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
         _approveSolverSide(COLLATERAL_IN, COLL);
 
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE, address(operateModule), BORROW_OUT, address(0), data);
+        items[0] = Item(ItemOp.TAKE, address(operatorModule), BORROW_OUT, address(0), data);
         Order memory order = _order(maker, 2, DEBT, COLL, BORROW_OUT, COLLATERAL_IN, items);
         bytes memory sig = _sign(order);
 
@@ -63,7 +63,7 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
         assertApproxEqAbs(_debtOf(maker) - debtBefore, BORROW_OUT, 2, "debt up ~1000 USDC");
 
         assertEq(IERC20(DEBT).balanceOf(solver), BORROW_OUT, "solver received borrow proceeds");
-        assertEq(IERC20(COLL).balanceOf(address(operateModule)), 0, "operate module WETH drained");
-        assertEq(IERC20(DEBT).balanceOf(address(operateModule)), 0, "operate module USDC drained");
+        assertEq(IERC20(COLL).balanceOf(address(operatorModule)), 0, "operate module WETH drained");
+        assertEq(IERC20(DEBT).balanceOf(address(operatorModule)), 0, "operate module USDC drained");
     }
 }

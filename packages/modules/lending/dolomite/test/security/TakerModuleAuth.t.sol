@@ -2,29 +2,31 @@
 pragma solidity ^0.8.28;
 
 import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
-import {DolomiteTakerModule, DolomiteOperateModule} from "../../src/DolomiteModules.sol";
+import {DolomiteOperatorModule} from "../../src/DolomiteOperatorModule.sol";
+import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 
 /// @dev The taker modules MUST reject any caller other than Permit3 — otherwise a
 /// direct `takeOnBehalf(victim, amount, attacker, data)` would bypass the Permit3
 /// allowance gate and drain the victim via their Dolomite operator grant.
-contract DolomiteTakerModuleAuthTest is DolomiteModulesBase {
+contract DolomiteOperatorModuleAuthTest is DolomiteModulesBase {
     address attacker = address(0xBAD);
 
     function test_withdraw_rejects_non_permit3() public {
         vm.prank(attacker);
-        vm.expectRevert(DolomiteTakerModule.OnlyPermit3.selector);
-        takerModule.takeOnBehalf(maker, 1 ether, attacker, _withdrawData());
+        vm.expectRevert(PreFundModuleBase.OnlyPermit3.selector);
+        operatorModule.takeOnBehalf(maker, 1 ether, attacker, _withdrawData());
     }
 
     function test_borrow_rejects_non_permit3() public {
         vm.prank(attacker);
-        vm.expectRevert(DolomiteTakerModule.OnlyPermit3.selector);
-        takerModule.takeOnBehalf(maker, 1_000e6, attacker, _borrowData());
+        vm.expectRevert(PreFundModuleBase.OnlyPermit3.selector);
+        operatorModule.takeOnBehalf(maker, 1_000e6, attacker, _borrowData());
     }
 
     function test_operate_rejects_non_permit3() public {
-        DolomiteOperateModule.BatchData memory p = DolomiteOperateModule.BatchData({
-            mode: uint256(DolomiteOperateModule.BatchMode.Close),
+        DolomiteOperatorModule.BatchData memory p = DolomiteOperatorModule.BatchData({
+            op: uint256(DolomiteOperatorModule.Op.BatchClose),
             dolomite: address(DOLOMITE),
             collMarketId: COLL_MARKET,
             collToken: COLL,
@@ -35,7 +37,7 @@ contract DolomiteTakerModuleAuthTest is DolomiteModulesBase {
             totalAmount: 1e18
         });
         vm.prank(attacker);
-        vm.expectRevert(DolomiteOperateModule.OnlyPermit3.selector);
-        operateModule.takeOnBehalf(maker, 1 ether, attacker, abi.encode(p));
+        vm.expectRevert(PreFundModuleBase.OnlyPermit3.selector);
+        operatorModule.takeOnBehalf(maker, 1 ether, attacker, abi.encode(p));
     }
 }

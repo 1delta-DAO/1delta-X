@@ -6,40 +6,46 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
-import {EulerV2TakeForModule, EulerV2BatchModule} from "../../src/EulerV2Modules.sol";
+import {EulerV2OperatorModule} from "../../src/EulerV2OperatorModule.sol";
 import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
 
 /// @dev `TAKE_FOR` on Euler V2. Euler is the EASY case, and that is the finding: an
 /// Euler position has no identity object — it is just the balances of an EVC
 /// account — so `deposit` + `borrow` may be applied to it any number of times.
-/// {EulerV2BatchModule}'s {FullFillGuard} was therefore never protecting a protocol
+/// {EulerV2OperatorModule}'s {FullFillGuard} was therefore never protecting a protocol
 /// constraint, only the fact that a constant `sideAmount` in `data` cannot pro-rate.
-/// {EulerV2TakeForModule} carries no guard at all: it partial-fills freely, every
+/// {EulerV2OperatorModule} carries no guard at all: it partial-fills freely, every
 /// slice being its own two-item `EVC.batch` under ONE deferred status check.
 contract EulerTakeForOpenTest is EulerV2ModulesBase {
-    EulerV2TakeForModule takeForModule;
 
     uint256 constant COLLATERAL = 1 ether;
     uint256 constant BORROW = 1_500e6;
 
     function setUp() public override {
         super.setUp();
-        takeForModule = new EulerV2TakeForModule(address(permit3), address(settlement));
-        vm.label(address(takeForModule), "eulerTakeForModule");
-
+        // No `setAccountOperator` here any more. The base grants it ONCE to
+        // `operatorModule`, and every op this suite exercises rides that one grant —
+        // which is the merge's whole point. Re-granting would revert: the EVC rejects
+        // a `setAccountOperator` that does not change the flag.
         vm.startPrank(maker);
-        EVC.setAccountOperator(maker, address(takeForModule), true);
         IERC20(WETH).approve(address(permit3), type(uint256).max);
         vm.stopPrank();
     }
 
+    /// @dev ⚠ THE OP RIDES THE DESCRIPTOR — bits [244,252). {EulerV2OperatorModule}
+    ///      hosts every op the maker's EVC operator grant covers, so the `TAKE_FOR`
+    ///      seam has to name which one. It goes here rather than in a new field
+    ///      because word 0 is inside `ref = keccak256(data)`, so the taker grant binds
+    ///      the op: a grant signed for `Open` cannot be replayed as anything else.
+    ///      {Base._forSlice} reads only bits 255, 254, 253 and [0,16), so these bits
+    ///      are invisible to the core.
     function _forLeg(uint256 j) internal pure returns (uint256) {
-        return (uint256(1) << 255) | j;
+        return (uint256(1) << 255) | (uint256(EulerV2OperatorModule.Op.Open) << 244) | j;
     }
 
     function _data() internal pure returns (bytes memory) {
         return abi.encode(
-            EulerV2TakeForModule.OpenData({
+            EulerV2OperatorModule.OpenData({
                 forDesc: _forLeg(0),
                 forCap: 0,
                 collateralVault: address(EWETH),
@@ -50,14 +56,14 @@ contract EulerTakeForOpenTest is EulerV2ModulesBase {
 
     function _auth(bytes memory data, uint256 colCap, uint256 debtCap) internal {
         vm.startPrank(maker);
-        permit3.approveToken(address(takeForModule), WETH, uint160(colCap), 0);
-        permit3.approveTaker(address(settlement), address(takeForModule), keccak256(data), uint160(debtCap), 0);
+        permit3.approveToken(address(operatorModule), WETH, uint160(colCap), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(data), uint160(debtCap), 0);
         vm.stopPrank();
     }
 
     function _order_(uint256 nonce, bytes memory data) internal view returns (Order memory) {
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE_FOR, address(takeForModule), BORROW, address(0), data);
+        items[0] = Item(ItemOp.TAKE_FOR, address(operatorModule), BORROW, address(0), data);
         return _order(maker, nonce, USDC, WETH, BORROW, COLLATERAL, items);
     }
 
@@ -88,7 +94,7 @@ contract EulerTakeForOpenTest is EulerV2ModulesBase {
         assertApproxEqRel(_wethCollateral(maker) - col0, COLLATERAL, 1e15, "collateral = the whole signed leg");
         assertApproxEqRel(_usdcDebt(maker) - debt0, BORROW, 1e15, "debt = the whole signed amount");
         assertEq(IERC20(USDC).balanceOf(solver), BORROW, "solver received the whole borrow");
-        assertEq(IERC20(WETH).balanceOf(address(takeForModule)), 0, "module drained");
+        assertEq(IERC20(WETH).balanceOf(address(operatorModule)), 0, "module drained");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement drained");
     }
 
@@ -98,8 +104,8 @@ contract EulerTakeForOpenTest is EulerV2ModulesBase {
         _approveSolverSide(COLLATERAL, WETH);
 
         bytes memory data = abi.encode(
-            EulerV2BatchModule.BatchData({
-                mode: 0,
+            EulerV2OperatorModule.BatchData({
+                op: uint256(EulerV2OperatorModule.Op.BatchOpen),
                 collateralVault: address(EWETH),
                 borrowVault: address(EUSDC),
                 sideAmount: COLLATERAL,
@@ -107,12 +113,12 @@ contract EulerTakeForOpenTest is EulerV2ModulesBase {
             })
         );
         vm.startPrank(maker);
-        permit3.approveToken(address(batchModule), WETH, uint160(COLLATERAL), 0);
-        permit3.approveTaker(address(settlement), address(batchModule), keccak256(data), uint160(BORROW), 0);
+        permit3.approveToken(address(operatorModule), WETH, uint160(COLLATERAL), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(data), uint160(BORROW), 0);
         vm.stopPrank();
 
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE, address(batchModule), BORROW, address(0), data);
+        items[0] = Item(ItemOp.TAKE, address(operatorModule), BORROW, address(0), data);
         Order memory o = _order(maker, 12, USDC, WETH, BORROW, COLLATERAL, items);
         bytes memory sig = _sign(o);
 
@@ -159,8 +165,8 @@ contract EulerTakeForOpenTest is EulerV2ModulesBase {
         bytes memory tfSig = _sign(tf);
 
         bytes memory bData = abi.encode(
-            EulerV2BatchModule.BatchData({
-                mode: 0,
+            EulerV2OperatorModule.BatchData({
+                op: uint256(EulerV2OperatorModule.Op.BatchOpen),
                 collateralVault: address(EWETH),
                 borrowVault: address(EUSDC),
                 sideAmount: COLLATERAL,
@@ -168,11 +174,11 @@ contract EulerTakeForOpenTest is EulerV2ModulesBase {
             })
         );
         vm.startPrank(maker);
-        permit3.approveToken(address(batchModule), WETH, uint160(COLLATERAL), 0);
-        permit3.approveTaker(address(settlement), address(batchModule), keccak256(bData), uint160(BORROW), 0);
+        permit3.approveToken(address(operatorModule), WETH, uint160(COLLATERAL), 0);
+        permit3.approveTaker(address(settlement), address(operatorModule), keccak256(bData), uint160(BORROW), 0);
         vm.stopPrank();
         Item[] memory items = new Item[](1);
-        items[0] = Item(ItemOp.TAKE, address(batchModule), BORROW, address(0), bData);
+        items[0] = Item(ItemOp.TAKE, address(operatorModule), BORROW, address(0), bData);
         Order memory b = _order(maker, 15, USDC, WETH, BORROW, COLLATERAL, items);
         bytes memory bSig = _sign(b);
 
@@ -189,8 +195,8 @@ contract EulerTakeForOpenTest is EulerV2ModulesBase {
         settlement.fill(tf, tfSig, BORROW);
         uint256 takeForGas = g0 - gasleft();
 
-        emit log_named_uint("EulerV2BatchModule  (gas)", batchGas);
-        emit log_named_uint("EulerV2TakeForModule(gas)", takeForGas);
+        emit log_named_uint("EulerV2OperatorModule  (gas)", batchGas);
+        emit log_named_uint("EulerV2OperatorModule(gas)", takeForGas);
         emit log_named_int("delta               (gas)", int256(takeForGas) - int256(batchGas));
     }
 }

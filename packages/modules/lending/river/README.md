@@ -31,8 +31,7 @@ pre-existing balance.
 | `RiverTakerModule` (op 0) | TAKE | `withdrawDebt` → Permit3-sweep satUSD → receiver | `abi.encode(uint8(0), xapp, tm, debtToken, maxFee, upper, lower)` |
 | `RiverTakerModule` (op 1) | TAKE | `withdrawColl` → Permit3-sweep collateral → receiver | `abi.encode(uint8(1), xapp, tm, coll, upper, lower)` |
 | `RiverOpenModule` | TAKE (Level B) | pull collateral + `openTrove` → sweep satUSD → receiver | `abi.encode(OpenData{...})` |
-| `RiverPreFundAddCollModule` | TAKE_FOR (preFund) | `addColl` the core-delivered leg from the module's own balance | `abi.encode(forDesc, xapp, tm, coll, upper, lower)` |
-| `RiverPreFundRepayModule` | TAKE_FOR (preFund) | `repayDebt(min(forAmount,debt))` from the module's own balance; sweep surplus → maker | `abi.encode(forDesc, xapp, tm, debtToken, upper, lower)` |
+| `RiverPreFundModule` | MAKE (pre-funded) | ONE contract, two ops selected by descriptor bits [244,252): `Op.AddColl` — `addColl` the core-delivered leg from the module's own balance; `Op.Repay` — `repayDebt(min(forAmount, debt))` from its own balance, surplus swept to the maker. Rides the MAKE seam (Settlement dispatches directly; `forAmount` is core-sized from the descriptor), not `TAKE_FOR` | `abi.encode(forDesc, xapp, troveManager, collateralToken \| debtToken, upperHint, lowerHint)` — descriptor word first, op in its bits |
 
 The pre-fund modules (`RiverPreFundModules.sol`) are the one-sided "add/repay whatever
 the conversion delivered" shape: the maker routes the signed output leg to the
