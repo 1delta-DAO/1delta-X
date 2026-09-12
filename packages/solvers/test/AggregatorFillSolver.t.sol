@@ -6,7 +6,14 @@ import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 import {Order, CallbackMode} from "@core/settlement/Settlement.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
-import {AggregatorFillSolver, RoutePlan, FillRoute, NO_PATCH} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {
+    AggregatorFillSolver,
+    RoutePlan,
+    FillRoute,
+    SurplusPolicy,
+    NO_PATCH,
+    PPM
+} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 import {MockSettlementBase} from "@coretest/shared/MockSettlementBase.t.sol";
 
@@ -51,10 +58,10 @@ contract AggregatorFillSolverTest is MockSettlementBase {
     AggregatorFillSolver aggSolver;
     MockRouter router;
 
-    function setUp() public override {
+    function setUp() public virtual override {
         super.setUp();
         router = new MockRouter(address(tA), address(tB));
-        aggSolver = new AggregatorFillSolver(address(settlement), _routers(address(router)));
+        aggSolver = new AggregatorFillSolver(address(settlement), _routers(address(router)), _noSplit());
         vm.label(address(aggSolver), "aggregatorSolver");
         vm.label(address(router), "mockRouter");
 
@@ -62,6 +69,12 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         _makerApprove(address(settlement), address(tA), type(uint160).max);
         // The router is the venue's liquidity — it holds the output side.
         tB.mint(address(router), 1_000e18);
+    }
+
+    /// @dev The zero policy: the whole spread stays with the filler, which is the
+    ///      shape every test outside {AggregatorSurplusSplitTest} assumes.
+    function _noSplit() internal pure returns (SurplusPolicy memory) {
+        return SurplusPolicy({makerPpm: 0, protocolPpm: 0, protocolRecipient: address(0)});
     }
 
     /// @dev The constructor's router allowlist. One venue is enough for the suite;
@@ -102,6 +115,8 @@ contract AggregatorFillSolverTest is MockSettlementBase {
             maxPay: 0,
             amountInOffset: offset,
             profitRecipient: address(0),
+            originator: address(0),
+            originatorPpm: 0,
             data: abi.encodeCall(MockRouter.swap, (quotedIn, recipient))
         });
     }
@@ -276,6 +291,8 @@ contract AggregatorFillSolverTest is MockSettlementBase {
             maxPay: 0,
             amountInOffset: NO_PATCH,
             profitRecipient: address(0),
+            originator: address(0),
+            originatorPpm: 0,
             data: hex"deadbeef"
         });
         vm.expectRevert();
@@ -480,6 +497,8 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
             maxPay: 0,
             amountInOffset: NO_PATCH,
             profitRecipient: to,
+            originator: address(0),
+            originatorPpm: 0,
             data: data
         });
     }
@@ -557,11 +576,11 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
         address[] memory rs = new address[](1);
         rs[0] = address(settlement);
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.RouterIsProtocol.selector, address(settlement)));
-        new AggregatorFillSolver(address(settlement), rs);
+        new AggregatorFillSolver(address(settlement), rs, _noSplit());
 
         rs[0] = address(permit3);
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.RouterIsProtocol.selector, address(permit3)));
-        new AggregatorFillSolver(address(settlement), rs);
+        new AggregatorFillSolver(address(settlement), rs, _noSplit());
     }
 }
 
@@ -572,5 +591,198 @@ contract Puppet {
 
     fallback() external payable {
         calls++;
+    }
+}
+
+// ───────────── surplus capture: maker, protocol, originator, filler ─────────────
+
+/// @title AggregatorSurplusSplitTest
+/// @notice The {SurplusPolicy}: everything the route produced ABOVE the maker's
+///         signed price is split — price improvement back to the maker, a share
+///         to the protocol / route provider, an optional originator share out of
+///         the filler's remainder, and the rest to the filler. The maker's signed
+///         delivery is untouched by any of it: the split only ever moves the
+///         spread.
+///
+///         Numbers: the order sells 100 A for 90 B; the router pays 1:1, so the
+///         spread is 10 B. Policy: 50% maker, 10% protocol.
+contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
+    address constant PROTOCOL = address(0x9407);
+    address constant ORIGINATOR = address(0x0816);
+    address constant FILLER = address(0xF111E5);
+
+    uint32 constant MAKER_PPM = 500_000; // 50%
+    uint32 constant PROTOCOL_PPM = 100_000; // 10%
+    uint256 constant SPREAD = AMOUNT_IN - AMOUNT_OUT; // 10e18
+
+    AggregatorFillSolver splitSolver;
+
+    function setUp() public override {
+        super.setUp();
+        splitSolver = new AggregatorFillSolver(
+            address(settlement),
+            _routers(address(router)),
+            SurplusPolicy({makerPpm: MAKER_PPM, protocolPpm: PROTOCOL_PPM, protocolRecipient: PROTOCOL})
+        );
+        vm.label(address(splitSolver), "splitSolver");
+    }
+
+    function _splitPlan(address originator, uint32 originatorPpm) internal view returns (RoutePlan memory p) {
+        p = _planFor(AMOUNT_IN, address(splitSolver), AMOUNT_OUT, NO_PATCH);
+        p.originator = originator;
+        p.originatorPpm = originatorPpm;
+    }
+
+    /// @dev The policy is a property of the deployment, readable on chain.
+    function test_split_policyIsImmutableAndReadable() public view {
+        assertEq(splitSolver.MAKER_SURPLUS_PPM(), MAKER_PPM);
+        assertEq(splitSolver.PROTOCOL_SURPLUS_PPM(), PROTOCOL_PPM);
+        assertEq(splitSolver.PROTOCOL_RECIPIENT(), PROTOCOL);
+    }
+
+    /// @dev THE MECHANIC. The maker gets its signed 90 B PLUS 50% of the 10 B
+    ///      spread; the protocol 10%; the filler the remaining 40%. Nothing stays
+    ///      in the contract.
+    function test_split_makerProtocolFiller() public {
+        Order memory o = _order(50);
+        bytes memory sig = _sign(o);
+        RoutePlan memory plan = _splitPlan(address(0), 0);
+        uint256 makerBefore = tB.balanceOf(maker);
+
+        vm.expectEmit(true, true, false, true, address(splitSolver));
+        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 5e18, 1e18, 0, 4e18);
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+
+        assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT + 5e18, "maker: signed price + 50% improvement");
+        assertEq(tB.balanceOf(PROTOCOL), 1e18, "protocol: 10% of the spread");
+        assertEq(tB.balanceOf(FILLER), 4e18, "filler: the remainder");
+        assertEq(tB.balanceOf(address(splitSolver)), 0, "nothing strands");
+    }
+
+    /// @dev The originator's share comes OUT OF THE FILLER'S remainder: maker and
+    ///      protocol are unchanged by it.
+    function test_split_originatorIsCarvedFromTheFiller() public {
+        Order memory o = _order(51);
+        bytes memory sig = _sign(o);
+        RoutePlan memory plan = _splitPlan(ORIGINATOR, 200_000); // 20%
+        uint256 makerBefore = tB.balanceOf(maker);
+
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+
+        assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT + 5e18, "maker unchanged by the originator share");
+        assertEq(tB.balanceOf(PROTOCOL), 1e18, "protocol unchanged by the originator share");
+        assertEq(tB.balanceOf(ORIGINATOR), 2e18, "originator: 20%");
+        assertEq(tB.balanceOf(FILLER), 2e18, "filler: 40% - 20%");
+    }
+
+    /// @dev A caller can give away exactly its remainder and no more. Checked
+    ///      BEFORE the fill, so the round fails without moving the maker's funds.
+    function test_split_originatorCannotExceedTheRemainder() public {
+        Order memory o = _order(52);
+        bytes memory sig = _sign(o);
+        RoutePlan memory ok = _splitPlan(ORIGINATOR, uint32(PPM) - MAKER_PPM - PROTOCOL_PPM); // exactly the remainder
+        RoutePlan memory over = _splitPlan(ORIGINATOR, uint32(PPM) - MAKER_PPM - PROTOCOL_PPM + 1);
+
+        uint256 makerBefore = tA.balanceOf(maker);
+        vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, over, "");
+        assertEq(tA.balanceOf(maker), makerBefore, "nothing moved");
+
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, ok, "");
+        assertEq(tB.balanceOf(ORIGINATOR), 4e18, "originator took the whole remainder");
+        assertEq(tB.balanceOf(FILLER), 0, "filler gave it all away");
+    }
+
+    /// @dev A non-zero share must have somewhere to go.
+    function test_split_originatorShareNeedsARecipient() public {
+        Order memory o = _order(53);
+        bytes memory sig = _sign(o);
+        RoutePlan memory plan = _splitPlan(address(0), 1);
+        vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+    }
+
+    /// @dev No surplus, no split: a route quoted exactly at the maker's price
+    ///      pays the maker its signed amount and nobody else anything.
+    function test_split_noSurplusNothingMoves() public {
+        router.setRate(9_000); // 100 A → 90 B: exactly the signed price
+        Order memory o = _order(54);
+        bytes memory sig = _sign(o);
+        uint256 makerBefore = tB.balanceOf(maker);
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, _splitPlan(ORIGINATOR, 100_000), "");
+        assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT, "maker: signed price only");
+        assertEq(tB.balanceOf(PROTOCOL), 0);
+        assertEq(tB.balanceOf(ORIGINATOR), 0);
+        assertEq(tB.balanceOf(FILLER), 0);
+    }
+
+    /// @dev `maxPay` and the split compose: the cap bounds what Settlement pulls,
+    ///      the split governs what is left. The filler's `profitRecipient` is where
+    ///      ITS share goes — not the whole spread.
+    function test_split_respectsProfitRecipient() public {
+        address treasury = address(0x7EA5);
+        Order memory o = _order(55);
+        bytes memory sig = _sign(o);
+        RoutePlan memory plan = _splitPlan(address(0), 0);
+        plan.maxPay = AMOUNT_OUT;
+        plan.profitRecipient = treasury;
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        assertEq(tB.balanceOf(treasury), 4e18, "filler share to the named recipient");
+        assertEq(tB.balanceOf(FILLER), 0, "caller got nothing directly");
+        assertEq(tB.balanceOf(PROTOCOL), 1e18);
+    }
+
+    /// @dev Rounding dust goes to the filler with its remainder — never strands.
+    function test_split_roundingDustGoesToTheFiller() public {
+        // 100 A → 90 B + 7 wei: a spread of 10e18 + 7 whose 50%/10% shares floor.
+        router.setRate(10_000);
+        tB.mint(address(router), 7);
+        Order memory o = _plainOrder(56, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT - 7);
+        bytes memory sig = _sign(o);
+        uint256 makerBefore = tB.balanceOf(maker);
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, _splitPlan(address(0), 0), "");
+        uint256 spread = SPREAD + 7;
+        uint256 toMaker = (spread * MAKER_PPM) / PPM;
+        uint256 toProtocol = (spread * PROTOCOL_PPM) / PPM;
+        assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT - 7 + toMaker);
+        assertEq(tB.balanceOf(PROTOCOL), toProtocol);
+        assertEq(tB.balanceOf(FILLER), spread - toMaker - toProtocol, "filler absorbs the rounding");
+        assertEq(tB.balanceOf(address(splitSolver)), 0, "nothing strands");
+    }
+
+    /// @dev Policy validation at construction.
+    function test_split_constructorRejectsBadPolicy() public {
+        address[] memory rs = _routers(address(router));
+        vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
+        new AggregatorFillSolver(
+            address(settlement), rs, SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_001, protocolRecipient: PROTOCOL})
+        );
+        vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
+        new AggregatorFillSolver(
+            address(settlement), rs, SurplusPolicy({makerPpm: 0, protocolPpm: 1, protocolRecipient: address(0)})
+        );
+        // The boundary is allowed: 100% away from the filler.
+        new AggregatorFillSolver(
+            address(settlement), rs, SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_000, protocolRecipient: PROTOCOL})
+        );
+    }
+
+    /// @dev The zero policy is the pre-existing behaviour: the whole spread to the
+    ///      filler, no event-visible shares elsewhere.
+    function test_split_zeroPolicyIsTheOldBehaviour() public {
+        Order memory o = _order(57);
+        bytes memory sig = _sign(o);
+        RoutePlan memory plan = _plan(address(aggSolver), AMOUNT_OUT);
+        vm.expectEmit(true, true, false, true, address(aggSolver));
+        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 0, 0, 0, SPREAD);
+        vm.prank(FILLER);
+        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        assertEq(tB.balanceOf(FILLER), SPREAD);
     }
 }

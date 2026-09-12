@@ -54,7 +54,14 @@ entrypoint is owner/operator-gated.
     Same reasoning as the owner-whitelisted venue list in
     `UsdrifInventorySolver`, minus the owner. Every amount it spends, approves or
     sweeps is a **delta** measured against a pre-fill snapshot, so a residue an
-    earlier fill left behind is not reachable by the next caller.
+    earlier fill left behind is not reachable by the next caller. **The output
+    surplus is split, not swept**: a constructor `SurplusPolicy` (immutable,
+    like the router set) returns `makerPpm` of the spread to the maker as price
+    improvement and `protocolPpm` to the route/API provider; the caller may
+    carve an originator share out of its own remainder (`RoutePlan.originator`
+    / `originatorPpm`), and keeps the rest. This is the only place a surplus
+    split is *enforceable* — the contract is the swapper, so it can measure the
+    surplus; Settlement never sees it. See docs/originator-fees.md §5.
   - `FillRecovery.sol` — rebuild the in-flight `FillCtx` from inside a callback
     when the order shape allows it. Refuses proportional-under-`PostInputs`,
     fill-module and fill-once orders, whose delta it cannot recover by

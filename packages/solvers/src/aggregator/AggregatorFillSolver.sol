@@ -104,8 +104,17 @@ import {Settlement, Order, CallbackMode} from "@core/settlement/Settlement.sol";
 ///        REWRITE with the amount actually received, or {NO_PATCH} to leave the
 ///        calldata exactly as the aggregator returned it. See the ⚠ note on
 ///        {AggregatorFillSolver} about resolved amounts.
-/// @param profitRecipient where the spread goes once the maker is paid;
-///        `address(0)` = `msg.sender`
+/// @param profitRecipient where the FILLER'S share of the spread goes once the
+///        maker is paid and the {SurplusPolicy} has taken the maker's and the
+///        protocol's shares; `address(0)` = `msg.sender`
+/// @param originator the party that sourced the order (frontend, wallet, API
+///        integrator) — paid `originatorPpm` of the output surplus. `address(0)`
+///        with `originatorPpm == 0` = no originator share
+/// @param originatorPpm the originator's share of the output surplus, in parts
+///        per million. Carved out of the FILLER'S remainder — the maker's and
+///        the protocol's immutable shares come first — so a caller can only give
+///        away what would otherwise be its own; the sum of the three must not
+///        exceed {PPM}
 /// @param data  the aggregator's own calldata, quoted with `recipient = the solver`
 struct RoutePlan {
     address router;
@@ -113,8 +122,50 @@ struct RoutePlan {
     uint256 maxPay;
     uint256 amountInOffset;
     address profitRecipient;
+    address originator;
+    uint32 originatorPpm;
     bytes data;
 }
+
+/// @notice How this instance splits the OUTPUT SURPLUS of a fill — the `tokenOut`
+///         the route produced beyond what Settlement delivered against the
+///         maker's signed price. Fixed at construction, like the router set.
+///
+///  WHY THIS IS THE PLACE, and not the settler
+///  ──────────────────────────────────────────
+///  Settlement never sees a conversion's surplus: a solver holds the maker's
+///  input, swaps it wherever it likes and delivers exactly the priced amount, so
+///  anything above the auction tick stays in the solver's own contract and no
+///  settler-side rule can reach it. A split is only ENFORCEABLE where the swap
+///  itself runs in observable custody — which is precisely what this contract
+///  is (the same reason 0x Settler can run `POSITIVE_SLIPPAGE`: it IS the
+///  swapper). So the mechanic lives here, applies to every fill routed through
+///  this instance whoever calls it, and a filler that would rather keep 100% of
+///  the spread is free to run its own contract and compete in the auction.
+///
+///  The split is by construction the ANALOGUE of what non-conversion orders
+///  already have: on a deposit the relayer earns a rising fee leg and the
+///  originator a fee leg, both maker-signed (docs/originator-fees.md,
+///  docs/relayer-fees.md). On a conversion the maker-signed pieces are the
+///  auction band (the filler's spread) and any fee leg (the originator's
+///  floor); the surplus split adds the VARIABLE part on top — price improvement
+///  back to the maker, a protocol share for whoever provides the route, and an
+///  originator share out of the filler's remainder.
+///
+/// @param makerPpm share of the output surplus returned to `order.maker` as
+///        price improvement, in parts per million
+/// @param protocolPpm share of the output surplus paid to `protocolRecipient` —
+///        the API / route provider — in parts per million
+/// @param protocolRecipient where the protocol share goes; must be non-zero when
+///        `protocolPpm` is
+struct SurplusPolicy {
+    uint32 makerPpm;
+    uint32 protocolPpm;
+    address protocolRecipient;
+}
+
+/// @dev Parts per million — the unit every surplus share is expressed in.
+uint256 constant PPM = 1_000_000;
 
 /// @dev `RoutePlan.amountInOffset` sentinel: use the aggregator's calldata verbatim.
 uint256 constant NO_PATCH = type(uint256).max;
@@ -155,7 +206,30 @@ contract AggregatorFillSolver {
     ///         deploying another instance, which keeps the contract ownerless.
     mapping(address => bool) public isAllowedRouter;
 
+    /// @notice The surplus split — see {SurplusPolicy}. Immutable for the same
+    ///         reason the router set is: `executeFill` is permissionless, so a
+    ///         mutable policy would be one more thing a caller could turn on
+    ///         itself.
+    uint32 public immutable MAKER_SURPLUS_PPM;
+    uint32 public immutable PROTOCOL_SURPLUS_PPM;
+    address public immutable PROTOCOL_RECIPIENT;
+
+    /// @notice One fill's output-surplus split. `toFiller` is what reached
+    ///         `RoutePlan.profitRecipient`; the input-side residue (an
+    ///         under-consumed route) is NOT surplus and goes there unlogged.
+    event SurplusSplit(
+        address indexed token,
+        address indexed maker,
+        uint256 toMaker,
+        uint256 toProtocol,
+        uint256 toOriginator,
+        uint256 toFiller
+    );
+
     error OnlyExecutor();
+    /// @dev `makerPpm + protocolPpm + originatorPpm` exceeded {PPM}, or a
+    ///      non-zero share named `address(0)` as its recipient.
+    error BadSurplusSplit();
     error NotArmed();
     error InsufficientOutput(uint256 got, uint256 wanted);
     error RouterCallFailed(bytes ret);
@@ -172,7 +246,12 @@ contract AggregatorFillSolver {
     ///      legs with trailing bytes would otherwise name an arbitrary token.
     error NoLegs();
 
-    constructor(address settlement, address[] memory routers) {
+    constructor(address settlement, address[] memory routers, SurplusPolicy memory policy) {
+        if (uint256(policy.makerPpm) + policy.protocolPpm > PPM) revert BadSurplusSplit();
+        if (policy.protocolPpm != 0 && policy.protocolRecipient == address(0)) revert BadSurplusSplit();
+        MAKER_SURPLUS_PPM = policy.makerPpm;
+        PROTOCOL_SURPLUS_PPM = policy.protocolPpm;
+        PROTOCOL_RECIPIENT = policy.protocolRecipient;
         SETTLEMENT = Settlement(payable(settlement));
         address executor = address(Settlement(payable(settlement)).EXECUTOR());
         EXECUTOR = executor;
@@ -194,11 +273,13 @@ contract AggregatorFillSolver {
     /// @param  takerData forwarded to the order's validators, invariants and
     ///         price module — carry the cosigned quote here for a
     ///         `ClockFlooredQuoteModule` order.
-    /// @dev    The spread is swept to `plan.profitRecipient` AFTER the fill
-    ///         returns, because the surplus is only knowable once Settlement has
-    ///         taken its share. Whoever executes takes the risk and keeps the
-    ///         profit — which is what lets this contract stay ownerless and hold
-    ///         nothing between fills.
+    /// @dev    The spread is split AFTER the fill returns, because the surplus is
+    ///         only knowable once Settlement has taken its share: the maker's and
+    ///         the protocol's {SurplusPolicy} shares first, the originator's out
+    ///         of what is left, and the remainder to `plan.profitRecipient`.
+    ///         Whoever executes takes the risk and keeps that remainder — which is
+    ///         what lets this contract stay ownerless and hold nothing between
+    ///         fills.
     function executeFill(
         Order calldata order,
         bytes calldata sig,
@@ -227,9 +308,10 @@ contract AggregatorFillSolver {
         // outlive the fill, or a later balance would be pullable against it.
         SafeTransferLib.forceApprove(route.tokenOut, address(SETTLEMENT), 0);
 
-        // Sweep BOTH sides: the output surplus is the spread, and any input the
-        // route did not consume (an unpatched under-quote) would otherwise sit
-        // here unaccounted.
+        // Sweep BOTH sides: the output surplus is the spread — split per the
+        // policy — and any input the route did not consume (an unpatched
+        // under-quote) would otherwise sit here unaccounted. The input residue
+        // is the filler's alone: it is a quoting artefact, not price improvement.
         //
         // ⚠ THE DELTA, NOT THE BALANCE, and this is a security boundary rather
         // than tidiness. `executeFill` is permissionless and `order` is the
@@ -239,8 +321,37 @@ contract AggregatorFillSolver {
         // against the pre-fill snapshot means the caller can only ever take what
         // its own fill produced.
         address to = plan.profitRecipient == address(0) ? msg.sender : plan.profitRecipient;
-        _sweepDelta(route.tokenOut, route.outBefore, to);
+        _splitSurplus(route, order.maker, plan, to);
         _sweepDelta(route.tokenIn, route.inBefore, to);
+    }
+
+    /// @dev Split this fill's INCREASE in `tokenOut` — the spread — per the
+    ///      {SurplusPolicy} and the plan's originator share. Silent when nothing
+    ///      was left over, which is the normal case for a route quoted at the
+    ///      maker's price. Shares floor; the filler takes the rounding dust
+    ///      along with its remainder, so nothing strands here.
+    ///
+    ///      `plan.originatorPpm` was bounded in {_plan}, BEFORE the fill, so a
+    ///      mis-set share fails the round rather than reverting after the maker
+    ///      has already been paid.
+    function _splitSurplus(FillRoute memory route, address maker, RoutePlan calldata plan, address filler) private {
+        address token = route.tokenOut;
+        uint256 bal = SafeTransferLib.balanceOf(token, address(this));
+        if (bal <= route.outBefore) return;
+        uint256 surplus = bal - route.outBefore;
+
+        uint256 toMaker = (surplus * MAKER_SURPLUS_PPM) / PPM;
+        uint256 toProtocol = (surplus * PROTOCOL_SURPLUS_PPM) / PPM;
+        uint256 toOriginator = (surplus * plan.originatorPpm) / PPM;
+        // The sum of the three ppm values is ≤ PPM (checked in `_plan`), so the
+        // three floors sum to ≤ surplus and this cannot underflow.
+        uint256 toFiller = surplus - toMaker - toProtocol - toOriginator;
+
+        if (toMaker != 0) SafeTransferLib.safeTransfer(token, maker, toMaker);
+        if (toProtocol != 0) SafeTransferLib.safeTransfer(token, PROTOCOL_RECIPIENT, toProtocol);
+        if (toOriginator != 0) SafeTransferLib.safeTransfer(token, plan.originator, toOriginator);
+        if (toFiller != 0) SafeTransferLib.safeTransfer(token, filler, toFiller);
+        emit SurplusSplit(token, maker, toMaker, toProtocol, toOriginator, toFiller);
     }
 
     /// @dev Move this fill's INCREASE in `token` to `to`. Silent when the balance
@@ -267,6 +378,12 @@ contract AggregatorFillSolver {
         if (PackedArraysMem.validateLegsIn(order.legsIn) == 0 || PackedArraysMem.validateLegsOut(order.legsOut) == 0) {
             revert NoLegs();
         }
+        // The originator's share is the caller's to give, but only out of its own
+        // remainder: the maker's and the protocol's shares are fixed, so the three
+        // together may not exceed the whole. Checked here so a bad plan fails
+        // before any token moves.
+        if (uint256(plan.originatorPpm) + MAKER_SURPLUS_PPM + PROTOCOL_SURPLUS_PPM > PPM) revert BadSurplusSplit();
+        if (plan.originatorPpm != 0 && plan.originator == address(0)) revert BadSurplusSplit();
         address tokenIn = PackedArraysMem.legInToken(order.legsIn, 0);
         address tokenOut = PackedArraysMem.legOutToken(order.legsOut, 0);
         return FillRoute({

@@ -183,7 +183,53 @@ Practical notes:
 
 ---
 
-## 5. Boundaries and caveats
+## 5. Conversions: surplus capture (`AggregatorFillSolver.SurplusPolicy`)
+
+Everything above is the **fixed** part of a conversion's revenue: the maker
+signs an auction band (the filler's spread) and, optionally, a fee leg (the
+originator's floor). What none of it reaches is the **variable** part — the
+`tokenOut` a route produces *above* the auction tick. Settlement cannot see it:
+the solver holds the maker's input, swaps wherever it likes and delivers
+exactly the priced amount, so anything better than the tick stays in the
+solver's contract and no settler-side rule can touch it. The dutch auction is
+the mechanism that competes it away; a *split* of it is only enforceable where
+the swap runs in observable custody.
+
+That place exists:
+[`AggregatorFillSolver`](../packages/solvers/src/aggregator/AggregatorFillSolver.sol)
+*is* the swapper (`PostInputs` mode: take `tokenIn`, route it, deliver
+`tokenOut`), so it measures the surplus as a balance delta and splits it — the
+same reason 0x Settler can run its `POSITIVE_SLIPPAGE` action. The split is a
+constructor `SurplusPolicy`, immutable like the router allowlist, and applies
+to every fill routed through that instance whoever calls it:
+
+| Share | Set by | Goes to |
+| --- | --- | --- |
+| `makerPpm` | deployment (immutable) | `order.maker` — price improvement above the signed price |
+| `protocolPpm` | deployment (immutable) | `protocolRecipient` — the API / route provider |
+| `RoutePlan.originatorPpm` | the caller, per fill | `RoutePlan.originator` — carved **out of the filler's remainder** |
+| remainder | — | `RoutePlan.profitRecipient` (`address(0)` = caller), rounding dust included |
+
+`makerPpm + protocolPpm + originatorPpm ≤ 1e6`, checked before any token moves;
+input-side residue (an under-consumed route) is a quoting artefact, not
+surplus, and goes to the filler as before. One `SurplusSplit` event per fill
+carries the four amounts.
+
+This is the conversion analogue of §1–§3: relayer revenue = the band (or the
+rising input leg on a deposit), originator revenue = the fee leg (or fee item),
+and now the **surplus** is shared instead of silently kept. What it is *not*: a
+protocol-wide rule. A filler that would rather keep 100% of its spread runs its
+own contract and competes in the auction on price — which is the intended
+market outcome, exactly as for a no-fee order below. The policy binds the
+route-provider's own fill path (and any keeper that chooses it), which is where
+the API provider's and the originator's variable revenue actually originates.
+
+Tests: `AggregatorSurplusSplitTest` in
+[`AggregatorFillSolver.t.sol`](../packages/solvers/test/AggregatorFillSolver.t.sol).
+
+---
+
+## 6. Boundaries and caveats
 
 - **The fee is consent-based, not enforceable.** Positions are user-owned; a
   user can always exit the underlying protocol directly and pay nothing. Fee
