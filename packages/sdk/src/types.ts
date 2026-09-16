@@ -566,6 +566,13 @@ export function feeSplitLegs(
   if (feeBps !== 0n && BigInt(recipient) === 0n) throw new Error("fee set without recipient");
   const startFee = (startAmount * feeBps) / BPS;
   const endFee = (endAmount * feeBps) / BPS;
+  // `end == 0` is the contract's FIXED-leg sentinel. A decaying leg whose fee
+  // share floors to 0 at `end` would be emitted as a fee leg that is fixed at
+  // `startFee` — the encoder producing a mode word by arithmetic (F29 lead, B4).
+  // Only reachable on dust-denominated legs; refuse rather than mis-encode.
+  if (endAmount !== 0n && startFee !== 0n && endFee === 0n) {
+    throw new Error("feeSplitLegs: fee share of `endAmount` floors to 0 — the fee leg would read as fixed");
+  }
   const zero = "0x0000000000000000000000000000000000000000" as Address;
   return [
     { token, start: startAmount - startFee, end: endAmount === 0n ? 0n : endAmount - endFee, recipient: zero },

@@ -85,9 +85,9 @@ contract LzPathTest is BridgeTestBase {
         // lzCompose: the separate transaction that attributes them.
         oft.deliverCompose(0, DELIVERED);
         assertEq(inbox.rescuable(address(tA)), 0, "now owed to the commitment");
-        assertEq(inbox.missingFunding(dstHash, DELIVERED), 0, "fully funded");
+        assertEq(_missing(dstHash, DELIVERED), 0, "fully funded");
 
-        inbox.activate(dst);
+        inbox.activate(dst, beneficiary);
         _fundSolverOut(DST_OUT);
         vm.prank(solver);
         settlement.fill(dst, "", DELIVERED);
@@ -143,19 +143,25 @@ contract LzPathTest is BridgeTestBase {
 
     /// @dev A token mismatch against an existing commitment parks rather than
     ///      reverting, unlike the Across path where reverting is safe.
-    function test_compose_tokenMismatch_doesNotRevert() public {
+    /// @dev A compose delivery in a different token for the same hash lands in its
+    ///      OWN row (the token is part of the key, F29 finding 4) — never orphaned,
+    ///      never a mismatch, and refundable to its beneficiary; the tA row is untouched.
+    function test_compose_otherToken_isItsOwnRow() public {
         Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
         bytes32 h = _hashOrder(dst);
-        _acrossDeliver(DELIVERED, _commitmentFor(h)); // commit is now bound to tA
+        _acrossDeliver(DELIVERED, _commitmentFor(h));
 
         vm.startPrank(inboxOwner);
         inbox.enableToken(address(tC));
         inbox.setComposeSource(address(oft), address(tC));
         vm.stopPrank();
 
-        tC.mint(address(inbox), 5e18);
+        tC.mint(address(inbox), DELIVERED); // `_wrap` reports the base fixture's amountLD
         lzEndpoint.deliverCompose(address(inbox), address(oft), bytes32(uint256(9)), _wrap(_commitmentFor(h)));
-        assertEq(inbox.rescuable(address(tC)), 5e18, "parked, not credited");
+        assertEq(inbox.rescuable(address(tC)), 0, "credited, not parked");
+        (,, uint256 cCredited,,,,,) = inbox.commits(inbox.commitKey(h, beneficiary, address(tC)));
+        assertEq(cCredited, DELIVERED, "its own row");
+        assertEq(_credited(h), DELIVERED, "the tA row is untouched");
     }
 
     /// @dev Orphaned deliveries are exactly what {rescue} exists for.
@@ -202,8 +208,8 @@ contract LzPathTest is BridgeTestBase {
         lzEndpoint.deliverCompose(address(inbox), address(oft), guid, p2);
 
         assertEq(inbox.liability(address(tA)), DELIVERED * 2, "both credited under one guid");
-        assertEq(inbox.missingFunding(_hashOrder(d1), DELIVERED), 0, "first funded");
-        assertEq(inbox.missingFunding(_hashOrder(d2), DELIVERED), 0, "second funded");
+        assertEq(_missing(_hashOrder(d1), DELIVERED), 0, "first funded");
+        assertEq(_missing(_hashOrder(d2), DELIVERED), 0, "second funded");
     }
 
     function test_compose_duplicateGuid_ignored() public {

@@ -87,6 +87,7 @@ contract SiloDepositModule is IMakerModule {
 // `nonReentrant` guards weird-token transfer hooks.
 // `data = abi.encode(silo, asset[, DustHandler.DustAction[, deadline, v, r, s]])`.
 //
+//   — base = 64; DustAction@64; permit@96.
 contract SiloRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;

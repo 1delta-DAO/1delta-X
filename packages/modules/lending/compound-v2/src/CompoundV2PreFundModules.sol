@@ -121,11 +121,18 @@ contract CompoundV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSou
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
-        PreFundGuard.requireDelivered(data, underlying, forAmount);
+        // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
+        // and throws the number away; a venue that consumes LESS than instructed then
+        // leaves the remainder resident on a SHARED SINGLETON — the residue that every
+        // pre-fund drain so far has monetised. Measured against the pre-delivery floor,
+        // never sized from the venue's return value (F27/C-3). Aligned with the aave-v3
+        // sibling and every `_repay` half (F28, 2026-09-12).
+        uint256 uFloor = PreFundGuard.floorOf(data, underlying, forAmount);
         SafeTransferLib.forceApprove(underlying, cToken, forAmount);
         uint256 err = ICErc20(cToken).mint(forAmount);
         if (err != 0) revert CompoundV2Error(err);
         SafeTransferLib.forceApprove(underlying, cToken, 0);
+        PreFundGuard.sweepSurplus(underlying, onBehalfOf, uFloor);
         uint256 bal = IERC20(cToken).balanceOf(address(this));
         if (bal > floor) SafeTransferLib.safeTransfer(cToken, onBehalfOf, bal - floor);
     }

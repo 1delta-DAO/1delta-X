@@ -14,7 +14,7 @@ import {
   encodeSoftCancel,
 } from "./proto/codec";
 import { StreamKind } from "./proto/schema";
-import { cancelTopic, orderTopic } from "./topics";
+import { cancelTopic, orderTopic, replaceTopic } from "./topics";
 import type { MessageHandler, Transport, Unsubscribe } from "./transport";
 
 /**
@@ -78,6 +78,7 @@ export class HttpTransport implements Transport {
   private readonly streamUrl: string;
   private readonly orders: string;
   private readonly cancels: string;
+  private readonly replaces: string;
   private readonly wsFactory: WSFactory;
   private readonly doFetch: typeof fetch;
   private ws: WSLike | undefined;
@@ -88,6 +89,7 @@ export class HttpTransport implements Transport {
     this.streamUrl = opts.streamUrl ?? `${this.baseUrl.replace(/^http/, "ws")}/stream`;
     this.orders = orderTopic(opts.config.chainId, opts.config.settlement);
     this.cancels = cancelTopic(opts.config.chainId, opts.config.settlement);
+    this.replaces = replaceTopic(opts.config.chainId, opts.config.settlement);
     const g = globalThis as { WebSocket?: new (url: string) => WSLike; fetch?: typeof fetch };
     const WS = opts.webSocket ?? (g.WebSocket ? (url: string) => new g.WebSocket!(url) : undefined);
     if (!WS) throw new Error("no WebSocket available — pass options.webSocket");
@@ -98,7 +100,8 @@ export class HttpTransport implements Transport {
   }
 
   async publish(topic: string, payload: Uint8Array): Promise<void> {
-    const path = topic === this.orders ? "/orders" : topic === this.cancels ? "/cancels" : undefined;
+    const path =
+      topic === this.orders ? "/orders" : topic === this.cancels ? "/cancels" : topic === this.replaces ? "/replaces" : undefined;
     if (!path) throw new Error(`HttpTransport: unsupported topic ${topic}`);
     const res = await this.doFetch(`${this.baseUrl}${path}`, {
       method: "POST",
@@ -163,8 +166,10 @@ export class HttpTransport implements Transport {
     } else if (msg.kind === StreamKind.CANCEL) {
       this.fanout(this.cancels, encodeSoftCancel(msg.cancel));
     } else {
-      // A replace is an add + a retraction; fan it out on BOTH topics so a
-      // subscriber that only cares about one still sees its half.
+      // A replace is an add + a retraction; fan it out on BOTH halves' topics so a
+      // subscriber that only cares about one still sees its half — and whole on
+      // the replace topic for {subscribeReplaces}.
+      this.fanout(this.replaces, encodeOrderReplace(msg.replace));
       this.fanout(this.orders, encodeOrderAnnounce(msg.replace.announce));
       this.fanout(this.cancels, encodeSoftCancel(msg.replace.cancel));
     }
@@ -208,6 +213,9 @@ export class OrderbookClient {
   private get cancels(): string {
     return cancelTopic(this.config.chainId, this.config.settlement);
   }
+  private get replaces(): string {
+    return replaceTopic(this.config.chainId, this.config.settlement);
+  }
 
   async publishOrder(order: Order, sig: Hex, opts?: PublishOrderOpts): Promise<void> {
     await this.publishAnnounce({ order, sig, ...opts });
@@ -222,16 +230,17 @@ export class OrderbookClient {
   }
 
   /**
-   * Publish a cancel-and-replace. Goes out on the ORDER topic, because the
-   * message a book must act on is the one carrying the replacement — a node that
-   * saw only the cancel would drop the maker's quote instead of re-pricing it.
+   * Publish a cancel-and-replace on the REPLACE topic. One message carries both
+   * the retraction and the replacement, so a node never sees the cancel alone and
+   * drops the maker's quote instead of re-pricing it. (It used to ride the order
+   * topic, which no book decoded as a replace — F29 P6.)
    */
   async replaceOrder(replace: OrderReplace): Promise<void> {
-    await this.transport.publish(this.orders, encodeOrderReplace(replace));
+    await this.transport.publish(this.replaces, encodeOrderReplace(replace));
   }
 
   async subscribeReplaces(onReplace: (r: OrderReplace) => void): Promise<Unsubscribe> {
-    return this.transport.subscribe(this.orders, (b) => {
+    return this.transport.subscribe(this.replaces, (b) => {
       try {
         onReplace(decodeOrderReplace(b));
       } catch {

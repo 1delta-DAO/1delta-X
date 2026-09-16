@@ -96,10 +96,17 @@ contract AaveV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSource 
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
-        PreFundGuard.requireDelivered(data, asset, forAmount);
+        // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
+        // and throws the number away; a venue that consumes LESS than instructed then
+        // leaves the remainder resident on a SHARED SINGLETON — the residue that every
+        // pre-fund drain so far has monetised. Measured against the pre-delivery floor,
+        // never sized from the venue's return value (F27/C-3). Aligned with the aave-v3
+        // sibling and every `_repay` half (F28, 2026-09-12).
+        uint256 floor = PreFundGuard.floorOf(data, asset, forAmount);
         SafeTransferLib.forceApprove(asset, pool, forAmount);
         IAaveV2Pool(pool).deposit(asset, forAmount, onBehalfOf, 0);
         SafeTransferLib.forceApprove(asset, pool, 0);
+        PreFundGuard.sweepSurplus(asset, onBehalfOf, floor);
         } else if (op == uint256(Op.Repay)) {
         // Its own frame, matching the v3 sibling: an optimizer-less compile of the
         // five-field decode plus the repay call overflows this function's stack.

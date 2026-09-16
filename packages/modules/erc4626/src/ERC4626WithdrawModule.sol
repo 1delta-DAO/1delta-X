@@ -5,6 +5,7 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
 import {ITimelockERC4626} from "./interfaces/ITimelockERC4626.sol";
 
@@ -33,7 +34,17 @@ import {ITimelockERC4626} from "./interfaces/ITimelockERC4626.sol";
 //   vault returns above it goes to the beneficiary. `minAssets` (maker-signed,
 //   inside `data`) is the separate slippage floor.
 //
-//   `data = abi.encode(vault, requestId, minAssets)`
+//   `data = abi.encode(vault, requestId, minAssets, totalAmount)`
+//
+//   `totalAmount` (trailing word) is the item's FULL maker-signed amount and the
+//   slice must equal it ({FullFillGuard.requireFullFillFromData}): the claim is
+//   INDIVISIBLE — it consumes the whole matured request and deletes it — while the
+//   core pro-rates `amount`, so without the gate a 1-wei fill claimed everything,
+//   forwarded 1 wei, returned the rest to the maker in-kind and bricked the rest
+//   of the order (`NoPendingWithdrawal`). No theft, but any filler could unwind a
+//   maker's Phase-2 order for one unit of allowance — the exact class the guard
+//   exists for on `BalanceMode.Full` legs (F28, 2026-09-12). BREAKING: a
+//   three-word blob now reverts `PartialFillUnsupported(amount, 0)`.
 //
 //   BREAKING vs. the previous `abi.encode(vault, asset, requestId)`: `asset` is
 //   now READ FROM THE VAULT rather than supplied by the caller, and `minAssets`
@@ -64,6 +75,8 @@ import {ITimelockERC4626} from "./interfaces/ITimelockERC4626.sol";
 // The reentrancy guard is shared across both entry points — a nested call into
 // either phase during execution of the other will revert.
 //
+// Byte maps — Phase 1 (MAKE): vault@0, shareToken@32 (base = 64).
+//             Phase 2 (TAKE): vault@0, requestId@32, minAssets@64, totalAmount@96 (base = 128).
 contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
     // ── Immutables ────────────────────────────────────────────────────────────
 
@@ -193,6 +206,8 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
         _locked = 2;
 
         (address vault, uint256 requestId, uint256 minAssets) = abi.decode(data, (address, uint256, uint256));
+        // The claim is indivisible: the slice must be the whole item (see header).
+        FullFillGuard.requireFullFillFromData(data, 96, amount);
 
         PendingWithdrawal storage pw = pendingWithdrawals[vault][requestId];
 
@@ -219,6 +234,11 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
         uint256 received = SafeTransferLib.balanceOf(asset, address(this)) - assetFloor;
 
         if (received < minAssets) revert InsufficientAssets(received, minAssets);
+        // I-8: the slice IS the signed total (gated above), so a claim short of it
+        // must revert here rather than have {Core._payInputsToSolver} bill the
+        // shortfall to the maker's wallet. `minAssets` is the maker's own, possibly
+        // stricter, floor; this one is the funding leg's.
+        FullFillGuard.requireDelivered(received, amount);
 
         // `amount` is the Permit3 allowance CAP: forward at most that much, and
         // return anything the vault yielded above it to the beneficiary. Yield

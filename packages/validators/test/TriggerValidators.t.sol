@@ -225,9 +225,10 @@ contract TriggerValidatorsTest is MockSettlementBase {
 
     // ──────────────────── ChainlinkTickFloor (TWAP market limit) ────────────────────
 
-    /// @dev SELL 1000 tA → 2e18..1e18 tB decaying. Tick rate = out/in (1e18).
+    /// @dev SELL 1000 tA → 2e18..1e18 tB decaying. Tick rate = out/in.
     ///      Feed reports tB-per-tA at 1e8 decimals; the maker folds decimals +
-    ///      tolerance into `scale` = 1e18·(1−tol)·10^(18−18−8) = (1e10·(10000−tol))/10000.
+    ///      tolerance into the rational `num/den` = (10000−tol)/10000 · 10^(18−18−8),
+    ///      i.e. `num = 10000 − tol`, `den = 10000 · 1e8`.
     function _decayingSell(uint256 nonce) internal view returns (Order memory o) {
         o = _plainOrder(nonce, address(tA), address(tB), 1_000e18, 2e18);
         o.legsOut = PackedEncode.setLegOutEnd(o.legsOut, 0, 1e18);
@@ -238,8 +239,8 @@ contract TriggerValidatorsTest is MockSettlementBase {
     function test_tickFloor_passesWithinTolerance_failsWhenMarketRunsAway() public {
         // Mid-decay: out = 1.5e18 per 1000e18 in → rate 1.5e15 (1e18-scaled).
         Order memory o = _decayingSell(12);
-        uint256 tolScale = (1e10 * (10_000 - 200)) / 10_000; // 2% tolerance, decimals folded
-        bytes memory d = abi.encode(address(feed), uint256(1 hours), tolScale);
+        // 2% tolerance, decimals folded: num/den = 9800 / (10000 · 1e8)
+        bytes memory d = abi.encode(address(feed), uint256(1 hours), uint256(9_800), uint256(10_000 * 1e8));
         vm.warp(block.timestamp + 500);
 
         feed.set(int256(0.0015e8), block.timestamp); // market == tick → within tolerance
@@ -252,8 +253,8 @@ contract TriggerValidatorsTest is MockSettlementBase {
     function test_tickFloor_gatesFill_andReleasesAsDecayCatchesUp() public {
         _fund();
         Order memory o = _decayingSell(13);
-        uint256 tolScale = 1e10; // zero tolerance: tick must be ≥ market exactly
-        o = _withValidator(o, address(tickFloor), abi.encode(address(feed), uint256(1 hours), tolScale));
+        // zero tolerance: tick must be ≥ market exactly — num/den = 1 / 1e8
+        o = _withValidator(o, address(tickFloor), abi.encode(address(feed), uint256(1 hours), uint256(1), uint256(1e8)));
         bytes memory sig = _sign(o);
 
         // Auction starts at 2e18 out (tick rate 2e15). Set the market ABOVE the
@@ -273,11 +274,46 @@ contract TriggerValidatorsTest is MockSettlementBase {
     function test_tickFloor_staleFeed_abortsFill() public {
         _fund();
         Order memory o = _decayingSell(14);
-        o = _withValidator(o, address(tickFloor), abi.encode(address(feed), uint256(1 hours), uint256(1e10)));
+        o = _withValidator(o, address(tickFloor), abi.encode(address(feed), uint256(1 hours), uint256(1), uint256(1e8)));
         bytes memory sig = _sign(o);
         feed.set(int256(0.001e8), block.timestamp - 2 hours);
         vm.prank(solver);
         vm.expectRevert(abi.encodeWithSelector(Base.ValidationFailed.selector, 0));
         settlement.fill(o, sig, 1_000e18);
+    }
+
+    /// @dev F29 finding 1 — the shape that broke the 1e18 `scale`: an 18-decimal
+    ///      input, a 6-decimal output and an 8-decimal feed (WETH → USDC against
+    ///      ETH/USD). The exponent is −20, so the old scale was 0.0098 → 0 and the
+    ///      gate passed at ANY price. With the rational form it blocks a runaway
+    ///      market and passes at market.
+    function test_tickFloor_18in6out8feed_blocksRunawayMarket() public {
+        // sell 1e18 (18-dec) for 2500e6 (6-dec), fixed; market 4000 USD/ETH at 1e8.
+        Order memory o = _plainOrder(15, address(tA), address(tB), 1e18, 2_500e6);
+        // 2% tolerance: num/den = 9800 / (10000 · 1e20)
+        bytes memory d = abi.encode(address(feed), uint256(1 hours), uint256(9_800), uint256(10_000) * 1e20);
+
+        feed.set(int256(4_000e8), block.timestamp);
+        assertFalse(tickFloor.validate(o, solver, d, ""), "2500 < 4000 * 0.98: blocked");
+        feed.set(int256(1_000_000e8), block.timestamp);
+        assertFalse(tickFloor.validate(o, solver, d, ""), "runaway market: blocked");
+        feed.set(int256(2_500e8), block.timestamp);
+        assertTrue(tickFloor.validate(o, solver, d, ""), "at market: passes");
+        feed.set(int256(2_550e8), block.timestamp);
+        assertTrue(tickFloor.validate(o, solver, d, ""), "within 2% of market: passes");
+    }
+
+    /// @dev A zero on either side is not a market limit: refused, which
+    ///      {OrderGates.gatePasses} folds to a failed fill.
+    function test_tickFloor_zeroRatio_reverts() public {
+        Order memory o = _plainOrder(16, address(tA), address(tB), 1e18, 2_500e6);
+        feed.set(int256(2_500e8), block.timestamp);
+        vm.expectRevert(ChainlinkTickFloorValidator.ZeroRatio.selector);
+        tickFloor.validate(o, solver, abi.encode(address(feed), uint256(1 hours), uint256(0), uint256(1e8)), "");
+        vm.expectRevert(ChainlinkTickFloorValidator.ZeroRatio.selector);
+        tickFloor.validate(o, solver, abi.encode(address(feed), uint256(1 hours), uint256(1), uint256(0)), "");
+        // The pre-F29 three-word blob decodes short: fails closed, never passes.
+        vm.expectRevert();
+        tickFloor.validate(o, solver, abi.encode(address(feed), uint256(1 hours), uint256(0)), "");
     }
 }

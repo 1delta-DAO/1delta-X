@@ -1,5 +1,5 @@
 import { numberToHex, type Address, type Hex } from "viem";
-import { assertOrderNonce, packParams } from "./types";
+import { OrderSide, assertOrderNonce, packParams } from "./types";
 import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types";
 
 /**
@@ -200,15 +200,23 @@ export function packOrder(order: Order): WireOrder {
   // 2^255 collides with a nomination, and relaying that nomination silently cancels
   // the order. See `NonceManager.SIGNER_NONCE_NS` and `docs/reference-audits.md` §F17.
   assertOrderNonce(order.nonce);
+  // The two fields this function folds into bit positions must be in range, or
+  // the fold writes a NEIGHBOURING flag: `side = 2` would set bit 102 (the BLOCK
+  // clock) and read back as SELL, and an `expiry` above 2^48 would wrap into a
+  // dead order — every sibling packer throws on overflow; these two silently did
+  // not (F29 leads, encoder/interpreter drift class B4).
+  if (order.side !== OrderSide.SELL && order.side !== OrderSide.BUY) {
+    throw new Error(`packOrder: side must be SELL (0) or BUY (1), got ${order.side}`);
+  }
+  if (order.expiry < 0n || order.expiry >> 48n !== 0n) {
+    throw new Error(`packOrder: expiry ${order.expiry} exceeds uint48`);
+  }
   return {
     maker: order.maker,
     nonce: order.nonce,
     legsIn: packLegsIn(order.legsIn),
     legsOut: packLegsOut(order.legsOut),
-    timing:
-      order.timing |
-      (BigInt(order.side) << SIDE_BIT) |
-      (BigInt.asUintN(48, order.expiry) << EXPIRY_OFFSET),
+    timing: order.timing | (BigInt(order.side) << SIDE_BIT) | (order.expiry << EXPIRY_OFFSET),
     exclusiveFiller: order.exclusiveFiller,
     minFillAnchor: order.minFillAnchor,
     params: packParams(

@@ -39,6 +39,7 @@ import {IComet} from "./interfaces/ICompoundV3.sol";
 // Optional EIP-2612 permit replay for gasless deposits.
 // `data = abi.encode(comet, asset[, deadline, v, r, s])`.
 //
+//   — base = 64; permit@64.
 contract CometDepositModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -95,6 +96,7 @@ contract CometDepositModule is IMakerModule {
 // `data = abi.encode(comet, asset[, DustHandler.DustAction[, deadline, v, r, s]])`.
 // Dust action optional (absent ⇒ SweepToUser); permit block optional after it.
 //
+//   — base = 64; DustAction@64; permit@96.
 contract CometRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;

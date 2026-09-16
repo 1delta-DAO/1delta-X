@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {PackedArrays} from "@core/settlement/PackedArrays.sol";
+import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -123,19 +124,32 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///         would strand the {rescue} escape hatch permanently.
     address public pendingOwner;
 
+    /// @dev One escrow ROW. Keyed by `keccak256(orderHash, beneficiary, token)` —
+    ///      see {commitKey} — so the row's identity is the whole commitment, not the
+    ///      order hash alone. Amounts are CUMULATIVE and never reset: `credited`
+    ///      arrived, `spentAccounted` was pulled by fills (see {sync}), `refunded`
+    ///      went back to the beneficiary. What the row still holds is the
+    ///      difference, and that is what `liability[token]` sums.
     struct Commit {
-        address token; //         the credited ERC20; fixed by the first credit
-        address beneficiary; //   refund target, from the bridged commitment
-        uint256 credited; //      total arrived for this order hash
-        uint256 spentAccounted; //`filled` already reflected in `liability`; see {sync}
-        uint64 expiry; //         bridged fallback unlock, used until an order activates
-        uint64 deadline; //       the activated order's deadline; authoritative once set
-        bool approved; //         {activate} has run
-        bool settled; //          {settle} has run; terminal
+        address token; //         the credited ERC20 (part of the key; stored for {settle})
+        address beneficiary; //   refund target (part of the key; stored for {settle})
+        uint256 credited; //      cumulative arrivals
+        uint256 spentAccounted; //cumulative `filled` already reflected in `liability`
+        uint256 refunded; //      cumulative refunds paid by {settle}
+        uint64 expiry; //         bridged fallback unlock, MAX over credits (see {_credit})
+        uint64 deadline; //       the activated order's deadline; authoritative while approved
+        bool approved; //         this row is the one funding the order right now
     }
 
-    /// @notice destination order hash → escrow record.
+    /// @notice escrow row key → record. See {commitKey}.
     mapping(bytes32 => Commit) public commits;
+
+    /// @notice destination order hash → the ONE row currently funding it (0 = none).
+    ///         An order is approved on-chain at most once at a time and its
+    ///         `filled` counter is per hash, so exactly one row may back it; a
+    ///         second row for the same hash — another beneficiary's or another
+    ///         token's — can only ever refund to its own beneficiary.
+    mapping(bytes32 => bytes32) public activeRow;
 
     /// @notice token → funds this contract still holds on behalf of live commits.
     ///         Balance above this is unattributed and is what {rescue} may take.
@@ -192,9 +206,10 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     error UntrustedComposeSource();
     error BadCommitment();
     error WrongChain();
-    error TokenMismatch();
     error TokenNotEnabled();
-    error AlreadySettled();
+    /// @dev Another row is funding this order hash right now; it refunds (or the
+    ///      order expires) before a different row may take over.
+    error RowActive();
     error Underfunded();
     error NotYetRefundable();
     error UnsupportedOrderShape();
@@ -332,97 +347,160 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
             emit Orphaned(_guid, token, amount, "token");
             return;
         }
-        Commit storage existing = commits[c.orderHash];
-        if (existing.settled || (existing.token != address(0) && existing.token != token)) {
-            emit Orphaned(_guid, token, amount, "commit");
-            return;
-        }
+        // Every well-formed delivery has a row of its own now (the key is the whole
+        // commitment), so nothing here can be refused as a mismatch any more.
         _credit(c, token, amount);
     }
 
     // ──────────────────── Escrow accounting ────────────────────
 
-    /// @dev Additive. Several deliveries may back one destination order — a
-    ///      partially-filled source order bridges more than once, and each
-    ///      delivery simply accumulates until {activate} can be satisfied.
+    /// @notice The escrow row a commitment lands in.
+    /// @dev THE ROW IS THE WHOLE COMMITMENT, NOT THE ORDER HASH. Bridge deliveries
+    ///      are unauthenticated on this chain — any depositor can author a
+    ///      commitment naming any order hash — and the order hash commits to the
+    ///      maker, legs and recipients but NOT to the refund target or the token.
+    ///      Keyed by hash alone, whichever delivery landed FIRST owned the record:
+    ///      F28 found the beneficiary hijack (a 1-wei front-credit became the refund
+    ///      recipient of the victim's principal) and pinned the beneficiary; F29
+    ///      found what the pin left — a 1-wei credit still OCCUPIED the hash, so the
+    ///      victim's real delivery reverted (Across) or orphaned (LayerZero), and a
+    ///      dust credit in another enabled token pinned the token the same way.
+    ///      With `(orderHash, beneficiary, token)` in the key a stranger's credit
+    ///      lands in a row of its own: it can neither block, redirect nor settle
+    ///      the victim's. A credit that copies the victim's whole commitment is a
+    ///      gift to the victim's row.
+    function commitKey(bytes32 orderHash, address beneficiary, address token) public pure returns (bytes32) {
+        return keccak256(abi.encode(orderHash, beneficiary, token));
+    }
+
+    /// @dev Additive. Several deliveries may back one row — a partially-filled
+    ///      source order bridges more than once, and each delivery simply
+    ///      accumulates until {activate} can be satisfied.
+    ///
+    ///      `expiry` is the MAXIMUM over credits, and that is safe ONLY because the
+    ///      row is per-commitment: a stranger can raise the fallback unlock only on
+    ///      a row that carries the victim's exact beneficiary and token — i.e. by
+    ///      giving the victim money — and even then {settleExpired} refunds the row
+    ///      the moment the ORDER's own deadline has passed, whatever the fallback
+    ///      says. (F28 briefly took the minimum so a copycat could not park the
+    ///      unlock in 2106; the minimum let the same copycat force an early refund
+    ///      instead. The deadline path removes the need to choose.)
     function _credit(CommitmentCodec.Commitment memory c, address token, uint256 amount) internal {
-        Commit storage k = commits[c.orderHash];
-        if (k.settled) revert AlreadySettled();
+        bytes32 key = commitKey(c.orderHash, c.beneficiary, token);
+        Commit storage k = commits[key];
         if (k.token == address(0)) {
             k.token = token;
             k.beneficiary = c.beneficiary;
-        } else if (k.token != token) {
-            revert TokenMismatch();
         }
         k.credited += amount;
         if (c.expiry > k.expiry) k.expiry = c.expiry;
         liability[token] += amount;
-        emit Credited(c.orderHash, token, amount, k.beneficiary);
+        emit Credited(c.orderHash, token, amount, c.beneficiary);
     }
 
-    /// @notice Authorize a fully-funded destination order on-chain. Permissionless
-    ///         and preimage-gated: the caller supplies the ORDER, the inbox hashes
-    ///         it and matches against what the bridge committed. A caller can
-    ///         therefore only ever activate the exact order the source chain named.
+    /// @notice Authorize a fully-funded destination order on-chain from the row
+    ///         `(orderHash, beneficiary, legsIn[0].token)`. Permissionless and
+    ///         preimage-gated: the caller supplies the ORDER, the inbox hashes it and
+    ///         matches against what the bridge committed. A caller can therefore
+    ///         only ever activate the exact order the source chain named, and only
+    ///         out of a row that names the same token the order sells.
     ///
-    ///         Idempotent — safe to call again once more funds have landed, and a
-    ///         no-op once approved.
+    ///         Idempotent for the active row — safe to call again once more funds
+    ///         have landed, and a no-op once approved. A DIFFERENT row for the same
+    ///         hash cannot activate while one is active: the settlement's `filled`
+    ///         counter is per hash, so two rows could not both be charged for it.
     ///
     /// @dev    `approveOrder` runs before the funding check purely to reuse the
     ///         hash it returns; a failed check reverts the whole call, so the
     ///         approval never survives an invalid activation.
-    function activate(Order calldata order) external returns (bytes32 orderHash) {
+    function activate(Order calldata order, address beneficiary) external returns (bytes32 orderHash) {
         _checkShape(order);
 
         orderHash = SETTLEMENT.approveOrder(order); // reverts unless order.maker == this
-        Commit storage k = commits[orderHash];
-        if (k.settled) revert AlreadySettled();
-        if (k.credited == 0) revert BadCommitment(); // nothing was ever bridged for this hash
-        if (PackedArrays.legInToken(order.legsIn, 0) != k.token) revert TokenMismatch();
-        if (!tokenEnabled[k.token]) revert TokenNotEnabled();
+        address token = PackedArrays.legInToken(order.legsIn, 0);
+        bytes32 key = commitKey(orderHash, beneficiary, token);
+        Commit storage k = commits[key];
+        if (k.credited == 0) revert BadCommitment(); // nothing was ever bridged for this row
+        if (!tokenEnabled[token]) revert TokenNotEnabled();
+        bytes32 active = activeRow[orderHash];
+        if (active != bytes32(0) && active != key) revert RowActive();
 
         // THE funding invariant. See the contract-level note: this, plus the
         // settlement's own `filled <= anchor` cap, is what makes cross-order
-        // isolation hold without any pull-time bookkeeping.
+        // isolation hold without any pull-time bookkeeping. `refunded` is
+        // subtracted because a row that was settled and re-credited must fund the
+        // order out of what it holds NOW.
         uint256 anchor = _legInStart(order.legsIn, 0);
-        if (k.credited < anchor) revert Underfunded();
+        if (k.credited - k.refunded < anchor) revert Underfunded();
 
         k.approved = true;
+        activeRow[orderHash] = key;
         // The order's own deadline now governs the refund gate, replacing rather
         // than extending the bridged fallback expiry. Past the deadline the
         // settlement itself refuses to fill, so nothing is gained by holding the
         // beneficiary's funds any longer — and the fallback is typically the more
         // distant of the two.
         k.deadline = uint64(DutchAuction.expiry(order));
-        emit Activated(orderHash, k.token, anchor, k.deadline);
+        emit Activated(orderHash, token, anchor, k.deadline);
     }
 
-    /// @notice Terminal wind-up: send the beneficiary everything the order did not
-    ///         consume, and clear the liability. Permissionless — the recipient is
-    ///         fixed by the bridged commitment, so the caller has no discretion.
+    /// @notice Wind-up: send the beneficiary everything the row holds that no fill
+    ///         consumed, and clear the liability. Permissionless — the recipient is
+    ///         part of the row's key, so the caller has no discretion.
     ///
-    ///         Gated on {refundAfter}: the activated order's deadline when there
-    ///         is one, the commitment's own expiry when no order ever showed up.
-    ///         Past the deadline the settlement itself refuses to fill, so there
-    ///         is no race with an in-flight solver.
-    function settle(bytes32 orderHash) external nonReentrant returns (uint256 refunded) {
-        Commit storage k = commits[orderHash];
-        if (k.settled) revert AlreadySettled();
+    ///         Gated on {refundAfter}: the order's deadline once the row has ever
+    ///         activated, the row's own fallback expiry otherwise. Past the deadline the
+    ///         settlement itself refuses to fill, so there is no race with an
+    ///         in-flight solver.
+    ///
+    ///         NOT terminal. A late delivery for an already-settled row credits it
+    ///         again and is refundable again (or, if the order is still live,
+    ///         re-activates it); nothing a stranger can do to a row closes it for the
+    ///         beneficiary. The one-shot `settled` flag of earlier versions is what
+    ///         let a dust credit plus one `settle` call retire a victim's hash.
+    function settle(bytes32 orderHash, address beneficiary, address token)
+        external
+        nonReentrant
+        returns (uint256 refunded)
+    {
+        bytes32 key = commitKey(orderHash, beneficiary, token);
+        if (block.timestamp <= refundAfter(orderHash, beneficiary, token)) revert NotYetRefundable();
+        return _settle(orderHash, key);
+    }
+
+    /// @notice {settle} for a row whose ORDER has expired, whatever the row's bridged
+    ///         fallback expiry says. The order is the pre-image of the hash and its
+    ///         deadline is signed, so this needs no trust in the commitment's
+    ///         `expiry` — which is exactly the field a copycat credit can inflate.
+    ///         Refunds the row keyed by `(hash(order), beneficiary, legsIn[0].token)`.
+    function settleExpired(Order calldata order, address beneficiary) external nonReentrant returns (uint256) {
+        if (DutchAuction.expiry(order) > block.timestamp) revert NotYetRefundable();
+        bytes32 orderHash = OrderHash.hash(order);
+        address token = PackedArrays.legInToken(order.legsIn, 0);
+        return _settle(orderHash, commitKey(orderHash, beneficiary, token));
+    }
+
+    function _settle(bytes32 orderHash, bytes32 key) private returns (uint256 refunded) {
+        Commit storage k = commits[key];
         if (k.credited == 0) revert BadCommitment();
-        if (block.timestamp <= refundAfter(orderHash)) revert NotYetRefundable();
 
         // Bring `liability` current with whatever fills already took, then release
-        // only what is left. Total released across sync + settle is exactly
-        // `credited`, so the figure lands at zero for this commit either way.
-        uint256 spent = sync(orderHash);
-        refunded = k.credited - spent;
+        // only what is left. Across sync + settle the whole of `credited` leaves
+        // `liability` exactly once.
+        uint256 spent = _sync(orderHash, key);
+        refunded = k.credited - spent - k.refunded;
 
-        k.settled = true;
+        k.refunded += refunded;
         liability[k.token] -= refunded;
 
-        // Withdraw the standing approval so a late `approveOrder` record cannot
-        // be re-used against a re-credited hash.
-        if (k.approved) SETTLEMENT.revokeOrderApproval(orderHash);
+        if (k.approved) {
+            // Withdraw the standing approval so a late `approveOrder` record cannot
+            // be re-used against a re-credited row, and free the hash for a later
+            // activation (only reachable while the order is still live).
+            k.approved = false;
+            delete activeRow[orderHash];
+            SETTLEMENT.revokeOrderApproval(orderHash);
+        }
         if (refunded != 0) SafeTransferLib.safeTransfer(k.token, k.beneficiary, refunded);
         emit Settled(orderHash, k.beneficiary, spent, refunded);
     }
@@ -453,20 +531,26 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         emit Rescued(token, to, amount);
     }
 
-    /// @notice Reconcile `liability` with what fills have already pulled for one
-    ///         commit. Permissionless and idempotent.
+    /// @notice Reconcile `liability` with what fills have already pulled for the
+    ///         row currently funding `orderHash`. Permissionless and idempotent.
     ///
     ///         Settlement moves an approved order's inputs through Permit3 without
     ///         calling this contract, so nothing here observes a fill as it happens.
     ///         Left unreconciled, `liability` keeps counting funds that are long
     ///         gone, which understates {rescuable} — and since there is usually
-    ///         SOME filled-but-unsettled commit, that would keep the escape hatch
+    ///         SOME filled-but-unsettled row, that would keep the escape hatch
     ///         pinned at zero exactly when it is needed. {settle} calls this, but
     ///         waiting for a deadline is too late for a recovery path.
     /// @return spent Cumulative amount this order has pulled, in `token` units.
     function sync(bytes32 orderHash) public returns (uint256 spent) {
-        Commit storage k = commits[orderHash];
-        if (!k.approved || k.settled) return k.spentAccounted;
+        bytes32 key = activeRow[orderHash];
+        if (key == bytes32(0)) return 0;
+        return _sync(orderHash, key);
+    }
+
+    function _sync(bytes32 orderHash, bytes32 key) private returns (uint256 spent) {
+        Commit storage k = commits[key];
+        if (!k.approved) return k.spentAccounted;
         // For the shape `_checkShape` enforces, `filled` is denominated in
         // `legsIn[0]` units — it IS the amount of `token` pulled from here.
         // Clamped because a cancelled order parks `filled` at the uint256 sentinel.
@@ -486,9 +570,12 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///         its deadline is authoritative — it is the moment the order stops
     ///         being fillable. Before that there is no deadline to key on, so the
     ///         bridged fallback expiry applies.
-    function refundAfter(bytes32 orderHash) public view returns (uint64) {
-        Commit storage k = commits[orderHash];
-        return k.approved ? k.deadline : k.expiry;
+    function refundAfter(bytes32 orderHash, address beneficiary, address token) public view returns (uint64) {
+        Commit storage k = commits[commitKey(orderHash, beneficiary, token)];
+        // A row that ever activated keeps the order's deadline as its gate for good:
+        // past it the order can never fill again, so a late credit into a settled
+        // row is refundable at once rather than waiting out its own fallback.
+        return k.deadline != 0 ? k.deadline : k.expiry;
     }
 
     /// @notice What {rescue} would currently release; 0 when nothing is loose.
@@ -502,9 +589,14 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///         Zero means {activate} will succeed on shape alone. The off-chain
     ///         book uses this to keep a bridged order pending rather than dropping
     ///         it while the bridge is in flight.
-    function missingFunding(bytes32 orderHash, uint256 anchor) external view returns (uint256) {
-        uint256 credited = commits[orderHash].credited;
-        return credited >= anchor ? 0 : anchor - credited;
+    function missingFunding(bytes32 orderHash, address beneficiary, address token, uint256 anchor)
+        external
+        view
+        returns (uint256)
+    {
+        Commit storage k = commits[commitKey(orderHash, beneficiary, token)];
+        uint256 held = k.credited - k.refunded;
+        return held >= anchor ? 0 : anchor - held;
     }
 
     // ──────────────────── Order shape ────────────────────

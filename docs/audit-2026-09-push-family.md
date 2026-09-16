@@ -395,9 +395,14 @@ allowance is live across the maker-chosen `accrueInterest` call (C-3b).
 **C-4.** Fixed by A: Teller's floor was never the problem, its unpinned
 `forAmount` was.
 
-**H-2.** Closed by B rather than by re-rooting the token: the floor requires the
+**H-2.** ~~Closed by B rather than by re-rooting the token: the floor requires the
 delivery in the *named* `boldToken`, which ties the accounting token back to the
-burned one. Re-deriving it from the TroveManager was rejected for now — the
+burned one.~~ ⚠ **WRONG — reopened and closed properly by F28 (2026-09-12, finding 6).**
+Requiring the delivery in the named token ties delivery to *measurement*; it never
+tied measurement to the *burn*, which always hits the branch's real BOLD. The token
+IS now re-rooted: `CollateralRegistry.boldToken()` exists and is chain-verified
+(`0xf949…6684` → `0x6440…B01D`), and `LiquityV2TroveAuth.requireBold` pins the named
+word to it. Original rationale kept below for the record. Re-deriving it from the TroveManager was rejected for now — the
 interface notes `boldToken()` REVERTS on mainnet BorrowerOperations, and I could
 not fork-verify whether TroveManager exposes it. Liquity also had to authorize
 *before* measuring, so a foreign trove still reports `InvalidCaller` rather than an
@@ -441,10 +446,14 @@ short and reverts. Only the cap stays imprecise. Documented at the site.
 ### Corrections made while fixing
 
 - The templated floor comment I scripted onto Lista and River claimed the venue
-  moves a root-derived asset without an approval. False for both — they pull
+  moves a root-derived asset without an approval. ~~False for both — they pull
   through a scoped approval, which binds the token by construction. **H-2 is
-  specific to Liquity**, whose `repayBold` burns directly from `msg.sender` with no
-  approval at all.
+  specific to Liquity**~~ ⚠ **Half wrong (F28, 2026-09-12):** true of Lista, false
+  of River. The deployed Satoshi diamond's `repayDebt` burns satUSD from
+  `msg.sender` with ZERO allowance (fork-probed on BSC), so the scoped approve on
+  River is inert and River had H-2 too. Both River repay legs now pin the named
+  token to `IRiverTroveManager.debtToken()`. A "correction" that was itself never
+  checked against the venue — the same failure as the comment it replaced.
 - Liquity had to authorize *before* measuring, or a foreign trove reported an
   arithmetic panic instead of `InvalidCaller`.
 

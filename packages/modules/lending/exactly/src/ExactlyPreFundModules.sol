@@ -88,6 +88,9 @@ import {IExactlyMarket} from "./interfaces/IExactly.sol";
 ///         inside the maker's ORDER signature: an item signed for one op cannot be
 ///         executed as another. Each op keeps its own decode, so the
 ///         per-op `data` layouts are unchanged apart from the descriptor bits.
+// Byte maps — Supply: forDesc@0, market@32, asset@64, maturity@96, minAssetsRequired@128 (base = 160).
+//             Repay:  forDesc@0, market@32, asset@64, maturity@96, positionAssets@128 (base = 160);
+//                     totalAmount@160 (fixed branch only, MANDATORY there — see `_scaledFace`).
 contract ExactlyPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     enum Op {
         Deposit,
@@ -133,7 +136,13 @@ contract ExactlyPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
-        PreFundGuard.requireDelivered(data, asset, forAmount);
+        // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
+        // and throws the number away; a venue that consumes LESS than instructed then
+        // leaves the remainder resident on a SHARED SINGLETON — the residue that every
+        // pre-fund drain so far has monetised. Measured against the pre-delivery floor,
+        // never sized from the venue's return value (F27/C-3). Aligned with the aave-v3
+        // sibling and every `_repay` half (F28, 2026-09-12).
+        uint256 floor = PreFundGuard.floorOf(data, asset, forAmount);
         SafeTransferLib.forceApprove(asset, market, forAmount);
         if (maturity == 0) {
             IExactlyMarket(market).deposit(forAmount, onBehalfOf);
@@ -141,6 +150,7 @@ contract ExactlyPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource
             IExactlyMarket(market).depositAtMaturity(maturity, forAmount, minAssetsRequired, onBehalfOf);
         }
         SafeTransferLib.forceApprove(asset, market, 0);
+        PreFundGuard.sweepSurplus(asset, onBehalfOf, floor);
     }
 
     function _repayAndSweep(address onBehalfOf, uint256 forAmount, bytes calldata data) private {
@@ -198,12 +208,18 @@ contract ExactlyPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource
         return face * forAmount / total;
     }
 
-    /// @dev Cap at the LIVE floating debt, exactly as {ExactlyRepayModule} does.
+    /// @dev Cap at the LIVE floating debt, exactly as {ExactlyRepayModule} does —
+    ///      `previewRefund(floatingBorrowShares)`, NOT `previewDebt`, which is
+    ///      floating + every fixed-maturity position while `repay` settles the
+    ///      floating book only. The pull sibling was corrected in F26; this twin
+    ///      kept the over-read until F28 (2026-09-12). Never a loss (the Market caps
+    ///      at the borrower's shares and the surplus is swept), but the wrong book.
     function _repayFloating(address market, address asset, address onBehalfOf, uint256 forAmount)
         private
         returns (uint256 spent)
     {
-        uint256 debt = IExactlyMarket(market).previewDebt(onBehalfOf);
+        (,, uint256 floatingShares) = IExactlyMarket(market).accounts(onBehalfOf);
+        uint256 debt = IExactlyMarket(market).previewRefund(floatingShares);
         uint256 toRepay = forAmount < debt ? forAmount : debt;
         if (toRepay != 0) {
             SafeTransferLib.forceApprove(asset, market, toRepay);

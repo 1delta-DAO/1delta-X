@@ -2,6 +2,10 @@
 # packages/* are compiled together; cross-package Solidity imports resolve via
 # the remappings in remappings.txt (@core/, @coretest/).
 [profile.default]
+# Read-only access to the SDK's committed encoding vectors, consumed by
+# `packages/core/test/EncodingGolden.t.sol` — the one fixture both the SDK (encoder)
+# and the contracts (interpreter) test against. Read-only, one directory.
+fs_permissions = [{ access = "read", path = "./packages/sdk/test/fixtures" }]
 src = "packages"
 test = "packages"
 script = "packages"

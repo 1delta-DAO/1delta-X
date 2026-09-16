@@ -29,8 +29,11 @@ const config: OrderbookConfig = {
   rpcUrl: "",
 };
 
-// Admit everything except the sentinel nonce 999 (to exercise a 422).
+// Admit everything except the sentinel nonce 999 (to exercise a 422). Layer 1 is
+// stubbed as "proven maker, nothing deferred": the routes charge the per-maker
+// bucket only after Layer 1 (F29 P3), so the stub must expose it.
 const stubVerifier = {
+  verifyLayer1: async (a: OrderAnnounce) => ({ ok: true, orderHash: hashOrderStruct(a.order), deferSig: false }),
   verifyAnnounce: async (a: OrderAnnounce) => {
     const orderHash = hashOrderStruct(a.order);
     if (a.order.nonce === 999n) return { ok: false, reason: "stub-reject", orderHash };
@@ -49,7 +52,7 @@ function orderFor(maker: Hex, nonce = 1n): Order {
     maker,
     side: OrderSide.SELL,
     nonce,
-    deadline: anHourFromNow(),
+    expiry: anHourFromNow(),
     legsIn: [{ token: "0x1111111111111111111111111111111111111111", start: 1000n, end: 0n }],
     legsOut: [{ token: "0x2222222222222222222222222222222222222222", start: 900n, end: 800n, recipient: zeroAddress }],
     timing: 0n,
@@ -65,6 +68,7 @@ function orderFor(maker: Hex, nonce = 1n): Order {
     fillModule: zeroAddress,
     fillTotal: 0n,
     priorityScale: 0n,
+    baselinePriorityFeeWei: 0n,
     pricingModule: "0x0000000000000000000000000000000000000000" as Address,
   };
 }

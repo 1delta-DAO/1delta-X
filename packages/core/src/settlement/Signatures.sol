@@ -205,28 +205,18 @@ abstract contract Signatures is OrderState {
         // Against `maker` ONLY — see the no-re-delegation note above.
         SignatureVerification.verify(sig, digest, maker);
         _cancelNonce(maker, nonce); // consume before the write; nothing external runs here
-        // A LAPSED EXPIRY *IS* A REVOCATION HERE TOO. Identical normalisation to
-        // {OrderState.setOrderSigner}, and load-bearing for the same reason: only the
-        // `expiry == 0` branch of {_setOrderSigner} burns the delegate's permit word,
-        // and that single `SSTORE` is what makes revocation final. Storing a past
-        // timestamp verbatim cleared the registry while leaving every UNRELAYED
-        // nomination permit for that delegate replayable up to its own `deadline` —
-        // so a maker who revoked GASLESSLY this way could have the delegate
-        // resurrected by whoever held one. The direct setter was fixed; this twin was
-        // not, and its own NatSpec claimed the two spellings "read identically".
-        //
-        // ⚠ ACCEPTED CONSEQUENCE, and it is unique to the relayed path: the CALLER
-        // picks when the permit lands, so a nomination relayed AFTER its own `expiry`
-        // (but before its `deadline`) now normalises to 0 and burns the delegate's
-        // word. Anyone holding a stale permit can therefore permanently end GASLESS
-        // nomination of that delegate address. That is deliberate — it is the
-        // over-revoke direction, never the under-revoke one — and it is not a
-        // lockout: {OrderState.setOrderSigner} still nominates the same delegate
-        // on-chain (it consumes no bitmap coordinate), and a fresh delegate address
-        // restores the gasless path. Rejecting a lapsed `expiry` outright would avoid
-        // the window, but costs a new error selector on a contract at the EIP-170
-        // wall; this costs one ternary.
-        _setOrderSigner(maker, signer, expiry >= block.timestamp ? expiry : 0);
+        // A LAPSED NOMINATION IS REFUSED, NOT NORMALISED. The direct setter reads a
+        // past `expiry` as a revocation ({OrderState.setOrderSigner}); this path used
+        // to mirror that — and because the RELAYER picks when a permit lands, a
+        // nomination relayed after its own `expiry` (but before its `deadline`) then
+        // became a revocation that burned the delegate's permit word AND cleared a
+        // CURRENT direct nomination the maker had made in the meantime. Anyone holding
+        // a stale nomination could revoke a live desk key (F29 finding 7). A permit
+        // that says "nominate until T" and arrives after T authorises nothing, so it
+        // does nothing: reverted under the same selector as a lapsed `deadline`. A
+        // gasless revocation is still spelled `expiry == 0` explicitly.
+        if (expiry != 0 && expiry < block.timestamp) revert SignerPermitExpired();
+        _setOrderSigner(maker, signer, expiry);
     }
 
     /// @dev Authorize `orderHash` for `expected` (the order's maker). Either the

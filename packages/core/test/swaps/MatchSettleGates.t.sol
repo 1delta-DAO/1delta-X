@@ -432,6 +432,34 @@ contract MatchSettleGatesTest is MockSettlementBase {
         settlement.matchSettle(p);
     }
 
+    /// @dev F29 finding 5 — the 1-wei grief. A proportional anchor resolves from the
+    ///      live balance, so a plan naming the size exactly is reverted by a
+    ///      stranger's dust transfer to the maker. Naming `type(uint256).max` means
+    ///      "the whole remaining anchor" (as in `fillUpTo`) and lands regardless.
+    function test_gate_proportionalAnchor_maxSentinel_absorbsDonation() public {
+        uint256 excess = tA.balanceOf(maker) - A_IN;
+        vm.prank(maker);
+        tA.transfer(address(0xdead), excess);
+
+        Order memory a = _aliceOrder(1);
+        LegIn[] memory legs = new LegIn[](1);
+        legs[0] = LegIn({token: address(tA), start: Proportional.encode(10_000), end: A_IN + 1}); // cap above
+        a.legsIn = PackedEncode.legsIn(legs);
+
+        // The griefer's wei lands after the solver built the exact plan...
+        MatchPlan memory exact = _plan(a, _bobOrder(2), A_IN, B_OUT, false);
+        tA.mint(maker, 1);
+        vm.prank(solver);
+        vm.expectRevert(Proportional.ProportionalNeedsFullFill.selector);
+        settlement.matchSettle(exact);
+
+        // ...but a plan that names the sentinel fills the live anchor whole.
+        MatchPlan memory whole = _plan(a, _bobOrder(2), type(uint256).max, B_OUT, false);
+        vm.prank(solver);
+        settlement.matchSettle(whole);
+        assertEq(tA.balanceOf(maker), 0, "the whole live balance, wei included, was swept");
+    }
+
     // ════════════════════ the one deliberate feature exclusion ════════════════════
 
     /// @dev DELTA-VERIFY delivery (timing bit 104) verifies each output against the

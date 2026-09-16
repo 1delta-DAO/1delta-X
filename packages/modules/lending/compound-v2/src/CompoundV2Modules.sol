@@ -104,6 +104,7 @@ contract CompoundV2DepositModule is IMakerModule {
 // `data = abi.encode(cToken, underlying[, DustHandler.DustAction])` — trailing
 // action optional; absent ⇒ SweepToUser.
 //
+//   — base = 64; DustAction@64.
 contract CompoundV2RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -158,6 +159,13 @@ contract CompoundV2RepayModule is IMakerModule {
             SafeTransferLib.forceApprove(underlying, cToken, toRepay);
             uint256 err = ICErc20(cToken).repayBorrowBehalf(onBehalfOf, toRepay);
             if (err != 0) revert CompoundV2Error(err);
+            // Never leave a dangling allowance (F25/A-3). `cToken` is order-supplied
+            // on a shared singleton: a maker-chosen venue that consumes less than
+            // `toRepay` would otherwise keep a standing claim on every FUTURE
+            // `underlying` balance of this module, turning a later residue bug into
+            // a theft. The deposit sibling, the Recycle branch and the pre-fund
+            // twin all clear; this was the site the A-3 fix missed (2026-09-12).
+            SafeTransferLib.forceApprove(underlying, cToken, 0);
         }
     }
 
@@ -231,6 +239,7 @@ contract CompoundV2RepayModule is IMakerModule {
 //
 // `data = abi.encode(cToken, underlying[, DustHandler.BalanceMode])`.
 //
+//   — base = 64; BalanceMode@64; total@96 (MANDATORY under `Full`).
 contract CompoundV2WithdrawModule is ITakerModule {
     IPermit3 public immutable permit3;
 
@@ -262,11 +271,17 @@ contract CompoundV2WithdrawModule is ITakerModule {
             uint256 err = ICErc20(cToken).redeem(cBal);
             if (err != 0) revert CompoundV2Error(err);
             uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+            // The lower bound the venue used to enforce (I-8). Before the split rewrite
+            // the venue call was sized at `amount`, so a short position reverted inside
+            // it; now nothing does, and {Core._payInputsToSolver} would bill the
+            // shortfall to the MAKER'S WALLET. Safe here and only here: `Full` is
+            // full-fill, so `amount` is the signed TOTAL, never a pro-rated slice.
+            // (2026-09-12 audit: the sibling the 2026-09-10 restoration missed.)
+            FullFillGuard.requireDelivered(received, amount);
             // Deliver the measured proceeds, capped at the signed amount; any excess
             // goes to the maker below. Never exceeds `received`, so a short delivery
             // (a fake/under-delivering venue) can never be topped up from a stray
-            // balance the module holds — it simply delivers less and the fill's
-            // output check fails downstream. Replaces a `received >= amount` gate.
+            // balance the module holds.
             SafeTransferLib.safeTransfer(underlying, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(underlying, onBehalfOf, received - amount);
         } else {

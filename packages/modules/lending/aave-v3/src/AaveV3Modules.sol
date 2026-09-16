@@ -28,6 +28,7 @@ import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 //
 // `data = abi.encode(pool, asset[, deadline, v, r, s])`
 //
+//   — base = 64; permit@64.
 contract AaveV3DepositModule is IMakerModule, IFundingSource {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -104,6 +105,7 @@ contract AaveV3DepositModule is IMakerModule, IFundingSource {
 // — the trailing dust action is optional (absent ⇒ SweepToUser);
 //   the permit block (128 bytes) is optional after the dust action slot.
 //
+//   — pool@0, asset@32, rateMode@64, debtToken@96 (base = 128); DustAction@128; permit@160.
 contract AaveV3RepayModule is IMakerModule, IFundingSource {
     IPermit3 public immutable permit3;
     address public immutable settlement;

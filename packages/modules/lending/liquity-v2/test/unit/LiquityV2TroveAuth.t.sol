@@ -28,6 +28,8 @@ contract LqtyRegistry {
     function set(uint256 i, address t) external { _tm[i] = t; }
     function getTroveManager(uint256 i) external view returns (address) { return _tm[i]; }
     function totalCollaterals() external pure returns (uint256) { return 1; }
+    address public boldToken;
+    function setBold(address b) external { boldToken = b; }
 }
 
 contract LqtyToken {
@@ -226,6 +228,7 @@ contract LiquityV2TroveAuthTest is Test {
 
         registry = new LqtyRegistry();
         registry.set(BRANCH, address(tm));
+        registry.setBold(address(bold));
         addCollModule = new LiquityV2AddCollModule(address(permit3), settlement, address(registry));
         repayModule = new LiquityV2RepayModule(address(permit3), settlement, address(registry));
         takerModule = new LiquityV2TakerModule(address(permit3), address(registry));

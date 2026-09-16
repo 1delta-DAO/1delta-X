@@ -114,11 +114,18 @@ contract VenusPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
-        PreFundGuard.requireDelivered(data, underlying, forAmount);
+        // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
+        // and throws the number away; a venue that consumes LESS than instructed then
+        // leaves the remainder resident on a SHARED SINGLETON — the residue that every
+        // pre-fund drain so far has monetised. Measured against the pre-delivery floor,
+        // never sized from the venue's return value (F27/C-3). Aligned with the aave-v3
+        // sibling and every `_repay` half (F28, 2026-09-12).
+        uint256 floor = PreFundGuard.floorOf(data, underlying, forAmount);
         SafeTransferLib.forceApprove(underlying, vToken, forAmount);
         uint256 err = IVToken(vToken).mintBehalf(onBehalfOf, forAmount);
         if (err != 0) revert VenusError(err);
         SafeTransferLib.forceApprove(underlying, vToken, 0);
+        PreFundGuard.sweepSurplus(underlying, onBehalfOf, floor);
     }
 
     function _repayAndSweep(address onBehalfOf, uint256 forAmount, bytes calldata data) private {

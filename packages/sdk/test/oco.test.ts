@@ -14,6 +14,8 @@ import {
   ocoNonceGroup,
   OrderSide,
   type Order,
+  renonceOcoItems,
+  patchOrder,
 } from "../src";
 import { CANONICAL_ORDER } from "./canonicalOrder";
 
@@ -111,5 +113,29 @@ describe("ocoGroup — the partial-fill bracket", () => {
   it("refuses a zero anchor and an unrepresentable nonce", () => {
     expect(() => ocoGroupItem(MODULE, GROUP, 1n, 0n)).toThrow(/anchor/);
     expect(() => ocoGroupItem(MODULE, GROUP, (1n << 256n) - 1n, 100n)).toThrow(/not representable/);
+  });
+});
+
+describe("cancel-and-replace keeps the claim item bound to the new nonce (F29 finding 3)", () => {
+  it("patchOrder re-homes the OCO claim item", () => {
+    const tp = ocoGroupLeg({ ...leg(1n, 900n), fillTotal: 0n }, MODULE, GROUP);
+    const replaced = patchOrder(tp, 3n, { minFillAnchor: 5n });
+    const claim = replaced.items.find((i) => i.module === MODULE)!;
+    expect(claim).toBeDefined();
+    expect(claim.data).toBe(ocoGroupItem(MODULE, GROUP, 3n, anchorOf(tp)).data);
+    // the predecessor's copy is gone
+    expect(replaced.items.some((i) => i.data === ocoGroupItem(MODULE, GROUP, 1n, anchorOf(tp)).data)).toBe(false);
+  });
+
+  it("renonceOcoItems leaves unrelated items alone", () => {
+    const tp = ocoGroupLeg({ ...leg(1n, 900n), fillTotal: 0n }, MODULE, GROUP);
+    const items = renonceOcoItems(tp.items, 42n, 3n); // prevNonce does not match: nothing rewritten
+    expect(items).toEqual(tp.items);
+  });
+
+  it("an explicit items patch is taken verbatim (the caller owns it)", () => {
+    const tp = ocoGroupLeg({ ...leg(1n, 900n), fillTotal: 0n }, MODULE, GROUP);
+    const replaced = patchOrder(tp, 3n, { items: [] });
+    expect(replaced.items).toEqual([]);
   });
 });

@@ -35,6 +35,7 @@ import {IGiverPositionManager, ITakerPositionManager, ISpokeV4} from "./interfac
 // the module replays them before `permit3.transferFrom` (gasless deposits).
 //
 // `data = abi.encode(spoke, positionManager, reserveId, asset[, deadline, v, r, s])`
+//   — base = 128; permit@128.
 contract AaveV4DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -92,6 +93,7 @@ contract AaveV4DepositModule is IMakerModule {
 // — the trailing dust action is optional (absent ⇒ SweepToUser);
 //   the permit block (128 bytes) is optional after the dust action slot.
 //
+//   — base = 128; DustAction@128; permit@160.
 contract AaveV4RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -256,11 +258,17 @@ contract AaveV4WithdrawModule is ITakerModule {
             uint256 balBefore = IERC20(asset).balanceOf(address(this));
             ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, supplied, onBehalfOf);
             uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+            // The lower bound the venue used to enforce (I-8). Before the split rewrite
+            // the venue call was sized at `amount`, so a short position reverted inside
+            // it; now nothing does, and {Core._payInputsToSolver} would bill the
+            // shortfall to the MAKER'S WALLET. Safe here and only here: `Full` is
+            // full-fill, so `amount` is the signed TOTAL, never a pro-rated slice.
+            // (2026-09-12 audit: the sibling the 2026-09-10 restoration missed.)
+            FullFillGuard.requireDelivered(received, amount);
             // Deliver the measured proceeds, capped at the signed amount; any excess
             // goes to the maker below. Never exceeds `received`, so a short delivery
             // (a fake/under-delivering venue) can never be topped up from a stray
-            // balance the module holds — it simply delivers less and the fill's
-            // output check fails downstream. Replaces a `received >= amount` gate.
+            // balance the module holds.
             SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {

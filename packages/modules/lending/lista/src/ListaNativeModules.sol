@@ -131,7 +131,8 @@ contract ListaNativeCollateralTakerModule is ITakerModule {
             abi.decode(data, (address, address, MarketParams));
 
         uint256 burn = amount;
-        if (DustHandler.readBalanceMode(data, 224) == DustHandler.BalanceMode.Full) {
+        bool full = DustHandler.readBalanceMode(data, 224) == DustHandler.BalanceMode.Full;
+        if (full) {
             // Full liquidates the ENTIRE live balance — cannot be pro-rated
             // (op-1's rule); the maker-signed total pins the slice to the item.
             FullFillGuard.requireFullFillFromData(data, 256, amount);
@@ -149,6 +150,12 @@ contract ListaNativeCollateralTakerModule is ITakerModule {
         IListaNativeProvider(provider).withdrawCollateral(mp, burn, onBehalfOf, address(this));
         uint256 received = address(this).balance - ethFloor;
         IWETH(wnative).deposit{value: received}();
+        // Full mode's lower bound (I-8). The Exact branch is sized at `amount` and
+        // the provider reverts on a short position; Full burns the LIVE collateral,
+        // so nothing reverts on a short and {Core._payInputsToSolver} would bill the
+        // shortfall to the MAKER'S WALLET. Safe on Full only: there `amount` is the
+        // signed TOTAL, never a pro-rated slice. (2026-09-12 audit.)
+        if (full) FullFillGuard.requireDelivered(received, amount);
         // Deliver the measured (wrapped) proceeds, capped at the signed amount; the
         // excess goes to the maker below. Never exceeds what this unwrap produced.
         SafeTransferLib.safeTransfer(wnative, receiver, received < amount ? received : amount);

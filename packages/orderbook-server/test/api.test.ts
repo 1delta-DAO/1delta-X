@@ -44,7 +44,7 @@ function orderFor(maker: Address, over: Partial<Order> = {}): Order {
     maker,
     side: OrderSide.SELL,
     nonce: 1n,
-    deadline: hour(),
+    expiry: hour(),
     legsIn: [{ token: WETH, start: 1_000n, end: 0n }],
     legsOut: [{ token: USDC, start: 2_000n, end: 0n, recipient: zeroAddress }],
     timing: 0n,
@@ -79,6 +79,9 @@ const okState: Layer2Result = {
  */
 function stubVerifier(state: Layer2Result = okState): Verifier {
   return {
+    // Layer 1 as "proven maker, nothing deferred": the routes charge the maker
+    // bucket only after it (F29 P3).
+    verifyLayer1: async (a: OrderAnnounce) => ({ ok: true, orderHash: hashOrderStruct(a.order), deferSig: false }),
     verifyAnnounce: async (a: OrderAnnounce) => {
       const orderHash = hashOrderStruct(a.order);
       if (a.order.nonce === 999n) {
@@ -128,7 +131,7 @@ async function announce(s: OrderbookServer, order: Order): Promise<Hex> {
 describe("admission — what never reaches the chain", () => {
   it("refuses an order that expires too soon to be worth an eth_call", async () => {
     server = await makeServer();
-    const order = orderFor(alice.address, { deadline: BigInt(Math.floor(Date.now() / 1000) + 2) });
+    const order = orderFor(alice.address, { expiry: BigInt(Math.floor(Date.now() / 1000) + 2) });
     const res = await server.app.inject(post("/orders", encodeOrderAnnounce({ order, sig: "0x" })));
     expect(res.statusCode).toBe(422);
     expect(res.json().error).toMatch(/expires in/);
@@ -252,6 +255,28 @@ describe("rate limiting", () => {
     // A single write costs 10 and cannot be afforded out of 9.
     const res = await server.app.inject(post("/orders", encodeOrderAnnounce({ order: orderFor(alice.address), sig: "0x" })));
     expect(res.statusCode).toBe(429);
+  });
+
+  /// F29 P3: a request that names a maker but cannot prove it (fails Layer 1)
+  /// must not spend that maker's budget.
+  it("does not charge a maker's bucket for an unverified announce", async () => {
+    const failing = {
+      verifyLayer1: async (a: OrderAnnounce) => ({ ok: false, reason: "signature does not recover", orderHash: hashOrderStruct(a.order), deferSig: false }),
+      verifyAnnounce: async () => ({ ok: false, reason: "unreachable" }),
+      refreshStates: async () => new Map(),
+    } as unknown as Verifier;
+    server = await buildServer({
+      config,
+      verifier: failing,
+      transport: new InMemoryTransport(),
+      logger: false,
+      rateLimit: { ip: { capacity: 1_000, refillPerSecond: 0 }, maker: { capacity: 10, refillPerSecond: 0 } },
+    });
+    const victim = "0x00000000000000000000000000000000000000ab" as const;
+    for (let i = 0; i < 5; i++) {
+      const res = await server.app.inject(post("/orders", encodeOrderAnnounce({ order: orderFor(victim, { nonce: BigInt(i + 1) }), sig: "0x" })));
+      expect(res.statusCode).toBe(422); // rejected, never 429: the victim's budget is untouched
+    }
   });
 
   it("meters a maker independently of the IP it arrives from", async () => {

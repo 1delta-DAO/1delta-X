@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: test build test-all test-fork build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: test test-sdk test-ts build test-all test-fork build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -76,6 +76,23 @@ ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 test:
 	@test -n "$(PKG)" || (echo "Usage: make test PKG=<package-name>"; exit 1)
 	FOUNDRY_PROFILE=$(PKG) $(FORGE) test -vv
+
+## SDK (vitest). Includes `encodingGolden.test.ts`, which shares
+## `packages/sdk/test/fixtures/encoding-vectors.json` with
+## `packages/core/test/EncodingGolden.t.sol`: the SDK must REPRODUCE the fixture,
+## the core suite must INTERPRET it. Regenerate only with a contract change, via
+## `UPDATE_FIXTURES=1 make test-sdk`, and commit both.
+test-sdk:
+	cd packages/sdk && npx vitest run
+
+## The whole TypeScript side: SDK, orderbook, orderbook-server. BUILDS THE DISTS
+## FIRST — the orderbook and server packages import `@1delta-x/sdk` and
+## `@1delta-x/orderbook` through their compiled `dist/`, so a stale build ran the
+## server suite against months-old code and hid a broken lens call (F29 P1).
+test-ts:
+	cd packages/sdk && npx tsc -p tsconfig.json && npx vitest run
+	cd packages/orderbook && npx tsc -p tsconfig.json && npx vitest run
+	cd packages/orderbook-server && npx tsc --noEmit -p tsconfig.json && npx vitest run
 
 ## Compile one package: make build PKG=modules-aave-v3
 build:

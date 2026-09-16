@@ -61,6 +61,34 @@ Write-up: [audit-2026-09-pre-fund-family.md](./audit-2026-09-pre-fund-family.md)
 
 ---
 
+### F28 — 2026-09-12 · bundle `.audit-RdeHOS` · 120 files
+
+The whole tree: every `packages/*/src/**/*.sol` except `interfaces/`, `vendor/`,
+`script/` and `periphery/src/SettlementLens.sol` (view-only, 1,539 lines — readable
+by the lenses as out-of-scope context, not bundled). 27,803 source lines; the first
+run to read `packages/core/src` beyond `Base.sol`, `packages/solvers`,
+`packages/validators`, `packages/periphery` (minus the lens) and the non-lending
+modules. Write-up: [audit-2026-09-12-full-tree.md](./audit-2026-09-12-full-tree.md).
+
+- `packages/core/src/**` — permit3 (11), settlement (16), utils (2)
+- `packages/modules/lending/*/src/*.sol` — all 17 venues, 41 files, every
+  `*PreFundModules.sol` including the four contracts F27 never read
+- `packages/modules/{bridge,erc4626,fill,maker,nft,oco,pricing,redeem,transfer}/src/**`
+- `packages/periphery/src/*.sol` except `SettlementLens.sol`
+- `packages/solvers/src/**` (16), `packages/validators/src/*.sol` (8)
+
+With this run the "not covered by any run" list below is reduced to
+`SettlementLens.sol` and the `interfaces/` / `vendor/` / `script/` trees.
+
+### F29 — 2026-09-14 · bundle `.screen-1jmsP6` · 121 Solidity files + periphery
+
+Six lenses, each assigned two or three of `reference-bounties.md`'s B-classes as
+variant hunts. Same Solidity scope as F28 **plus the periphery, read for the first
+time**: `packages/periphery/src/SettlementLens.sol` (read from disk by the
+periphery lens), `packages/sdk/src/*.ts`, `packages/orderbook/src/*.ts`,
+`packages/orderbook-server/src/*.ts` (bundled for three lenses). Write-up:
+[audit-2026-09-14-bounty-screening.md](./audit-2026-09-14-bounty-screening.md).
+
 ## The coverage gap this register exists to make visible
 
 19 files now contain pre-fund contracts. 18 were in the F27 bundle. **`AaveV3FusedModules.sol`
@@ -94,8 +122,11 @@ file it happens to share.
 
 ## Not covered by any run
 
-103 of 134 source files (excluding `interfaces/` and `mocks/`) have never been
-through a twelve-lens run — including all of `packages/core/src` except
+As of F29 (2026-09-14): the `interfaces/`, `vendor/` and `script/` trees only —
+`SettlementLens.sol` and the TypeScript periphery were read by F29 (and produced
+eight of its fourteen findings/defects). Before F28, 103 of 134 source
+files had never been through a twelve-lens run — all of `packages/core/src` except
 `settlement/Base.sol`, `packages/solvers`, `packages/periphery` and
-`packages/validators`. Core and Permit3 have had their own dedicated rounds (F24,
-F25, and the Permit3 rounds in the ledger); the rest have not.
+`packages/validators` (core and Permit3 had their own dedicated rounds: F24, F25 and
+the Permit3 rounds in the ledger). Code written after 2026-09-12 is, again, unread
+until the next run.

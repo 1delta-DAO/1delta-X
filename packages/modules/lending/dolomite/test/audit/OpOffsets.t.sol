@@ -194,6 +194,54 @@ contract DolomiteOpOffsetsTest is DolomiteModulesBase {
         assertEq(IERC20(DEBT).allowance(address(operatorModule), address(DOLOMITE)), 0, "scoped grant cleared");
     }
 
+    // ──────────────────── withdraw-past-supply IS a borrow (F28 #3, F29 #6) ────────────────────
+
+    /// @dev On Dolomite `Withdraw` and `Borrow` build the same negative-delta action;
+    ///      a withdraw past the live supply opens DEBT against the sub-account's other
+    ///      collateral. An Exact `Withdraw` larger than the supply must therefore
+    ///      revert, not borrow — the guard Comet always had.
+    function test_withdraw_exact_pastSupply_revertsWouldBorrow() public {
+        _seedDolomiteCollateral(COLLATERAL);
+        uint256 amount = COLLATERAL + 1;
+
+        vm.prank(address(permit3));
+        vm.expectRevert(abi.encodeWithSelector(DolomiteOperatorModule.WouldBorrow.selector, amount, COLLATERAL));
+        operatorModule.takeOnBehalf(maker, amount, receiver, _withdrawData());
+    }
+
+    /// @dev The fused close is the same withdraw one op over: after a partial
+    ///      liquidation shrank the collateral below the signed `amount`, the close
+    ///      must refuse rather than repay-and-borrow.
+    function test_batchClose_withdrawPastSupply_revertsWouldBorrow() public {
+        _neutralizeRiskOverride();
+        _openDolomitePosition(COLLATERAL, PRINCIPAL);
+        _freezeOracles();
+
+        uint256 debt = _debtOf(maker);
+        uint256 withdrawColl = COLLATERAL + 1 ether; // more than the position holds
+        deal(DEBT, maker, debt);
+        vm.prank(maker);
+        permit3.approveToken(address(operatorModule), DEBT, uint160(debt), 0);
+
+        bytes memory data = abi.encode(
+            DolomiteOperatorModule.BatchData({
+                op: uint256(DolomiteOperatorModule.Op.BatchClose),
+                dolomite: address(DOLOMITE),
+                collMarketId: COLL_MARKET,
+                collToken: COLL,
+                borrowMarketId: DEBT_MARKET,
+                borrowToken: DEBT,
+                accountNumber: ACCOUNT,
+                sideAmount: debt,
+                totalAmount: withdrawColl
+            })
+        );
+
+        vm.prank(address(permit3));
+        vm.expectRevert(abi.encodeWithSelector(DolomiteOperatorModule.WouldBorrow.selector, withdrawColl, COLLATERAL));
+        operatorModule.takeOnBehalf(maker, withdrawColl, receiver, data);
+    }
+
     // ──────────────────── the two findings the differential review added ────────────────────
 
     /// @dev I-8. A `Full` leg whose live position is SHORT of the signed total must

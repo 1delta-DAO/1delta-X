@@ -404,3 +404,15 @@ signed against the settlement's `DOMAIN_SEPARATOR()`. An orderbook validating a
 delegated order must consult `orderSignerExpiry(maker, signer)` — or simply call
 `SettlementLens.getOrderRelevantState`, which mirrors the settler's full
 verification order including both delegate branches.
+
+## Lapsed nomination permits are refused (F29)
+
+`setOrderSignerWithSig` used to read a permit whose `expiry` had already passed
+as a revocation, mirroring the direct setter. Because the relayer picks when a
+permit lands, anyone holding a stale *nomination* could turn it into a
+revocation — burning the delegate's permit word AND clearing a live direct
+nomination the maker had made in the meantime. Since F29 a permit with
+`0 < expiry < block.timestamp` reverts `SignerPermitExpired` and changes nothing;
+a gasless revocation is spelled `expiry == 0` explicitly (the SDK's only
+spelling). Pinned by `test_relayedStalePermit_cannotRevokeALiveDelegate`.
+

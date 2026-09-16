@@ -94,6 +94,8 @@ library LiquityV2TroveAuth {
     error InvalidCaller();
     /// @dev `branchIndex` names no branch the immutable registry knows.
     error UnknownBranch();
+    /// @dev The maker-named BOLD is not the registry's BOLD.
+    error BoldTokenMismatch(address named, address actual);
 
     /// @param registry    the IMMUTABLE branch registry, fixed at construction —
     ///                    the trusted root. NEVER take this from `data`.
@@ -120,6 +122,24 @@ library LiquityV2TroveAuth {
         // fails closed instead of resolving to `address(0)`.
         if (ITroveNFT(troveNFT).ownerOf(troveId) != principal) revert InvalidCaller();
         borrowerOps = ILiquityV2TroveManager(troveManager).borrowerOperations();
+    }
+
+    /// @notice Pin a `data`-named BOLD to the registry's real one.
+    ///
+    /// @dev WHY THE FLOOR ALONE WAS NOT ENOUGH. `repayBold` burns the branch's REAL
+    ///      BOLD from `msg.sender` with NO ERC-20 approval and no token argument,
+    ///      while every repay leg measures, pulls/floors and sweeps a token it
+    ///      decoded from maker-signed `data`. Requiring the delivery (or the pull)
+    ///      in the named token ties delivery to measurement — it never tied
+    ///      measurement to the BURN. So a maker naming a worthless `boldToken` had
+    ///      that token pulled and swept straight back, while the venue retired
+    ///      their debt out of whatever real BOLD sat on this shared singleton
+    ///      (2026-09-12 audit, finding 6 — the F27/H-2 note claimed this closed).
+    ///      Residue-bounded today, but the same class the rest of the tree closes
+    ///      with floors. Reading the token from the trusted root removes the axis.
+    function requireBold(address registry, address named) internal view {
+        address actual = ICollateralRegistry(registry).boldToken();
+        if (named != actual) revert BoldTokenMismatch(named, actual);
     }
 }
 
@@ -235,6 +255,9 @@ contract LiquityV2RepayModule is IMakerModule {
         // debt read, the repay and the ownership check all share one root.
         (address borrowerOps, address troveManager) =
             LiquityV2TroveAuth.authorizeTrove(collateralRegistry, branchIndex, troveId, onBehalfOf);
+        // The token pulled and swept must be the token the venue BURNS — see
+        // {LiquityV2TroveAuth.requireBold}.
+        LiquityV2TroveAuth.requireBold(collateralRegistry, boldToken);
 
         // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would pay
         // out anything already stranded at this shared module address, and anyone can
@@ -321,6 +344,10 @@ contract LiquityV2TakerModule is ITakerModule {
             // manager role, so this check is the only thing standing between a
             // maker's trove and any filler who knows its id.
             (address borrowerOps,) = LiquityV2TroveAuth.authorizeTrove(collateralRegistry, branchIndex, troveId, onBehalfOf);
+            // The delta below is measured on `boldToken`; a mis-named token would
+            // strand the REAL BOLD the venue minted here — the residue the repay
+            // legs' pin exists to keep off this singleton.
+            LiquityV2TroveAuth.requireBold(collateralRegistry, boldToken);
             _withdrawAndForward(boldToken, onBehalfOf, amount, receiver, borrowerOps, troveId, maxUpfrontFee, true);
         } else if (op == uint8(Op.WithdrawColl)) {
             (, uint256 branchIndex, uint256 troveId, address collateralToken) =

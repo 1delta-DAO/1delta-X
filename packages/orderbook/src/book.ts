@@ -94,7 +94,7 @@ export class Book {
   /** Backfill, subscribe to live orders + cancels, and start the re-check timer. */
   async start(): Promise<void> {
     const { transport, config } = this.opts;
-    const { orders, cancels } = topicsFor(config);
+    const { orders, cancels, replaces } = topicsFor(config);
 
     if (this.opts.backfill !== false && transport.queryHistory) {
       const history = await transport.queryHistory(orders);
@@ -102,8 +102,10 @@ export class Book {
     }
 
     this.unsubs.push(await transport.subscribe(orders, (b) => void this.ingestAnnounceBytes(b)));
-    // Replaces ride the ORDER topic (they carry an announce), cancels their own.
     this.unsubs.push(await transport.subscribe(cancels, (b) => void this.ingestCancelBytes(b)));
+    // Replaces have their own topic — see {replaceTopic} for why they cannot share
+    // the order topic.
+    this.unsubs.push(await transport.subscribe(replaces, (b) => void this.ingestReplaceBytes(b)));
 
     if (this.opts.watcher) this.unsubs.push(this.opts.watcher.on((e) => this.applyChainEvent(e)));
 

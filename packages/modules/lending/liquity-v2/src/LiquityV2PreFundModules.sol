@@ -144,10 +144,17 @@ contract LiquityV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSour
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
-        PreFundGuard.requireDelivered(data, collateralToken, forAmount);
+        // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
+        // and throws the number away; a venue that consumes LESS than instructed then
+        // leaves the remainder resident on a SHARED SINGLETON — the residue that every
+        // pre-fund drain so far has monetised. Measured against the pre-delivery floor,
+        // never sized from the venue's return value (F27/C-3). Aligned with the aave-v3
+        // sibling and every `_repay` half (F28, 2026-09-12).
+        uint256 floor = PreFundGuard.floorOf(data, collateralToken, forAmount);
         SafeTransferLib.forceApprove(collateralToken, borrowerOps, forAmount);
         ILiquityV2BorrowerOperations(borrowerOps).addColl(troveId, forAmount);
         SafeTransferLib.forceApprove(collateralToken, borrowerOps, 0);
+        PreFundGuard.sweepSurplus(collateralToken, onBehalfOf, floor);
     }
 
     function _repay(address onBehalfOf, uint256 forAmount, bytes calldata data) private {
@@ -159,13 +166,16 @@ contract LiquityV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSour
         // `InvalidCaller` rather than an arithmetic panic.
         (address borrowerOps, address troveManager) =
             LiquityV2TroveAuth.authorizeTrove(collateralRegistry, branchIndex, troveId, onBehalfOf);
+        // `repayBold` burns the branch's REAL BOLD with no approval and no token
+        // argument, while the floor and sweep below run on the `data`-named one.
+        // Requiring the delivery in `boldToken` ties delivery to measurement, NOT
+        // measurement to the burn (F27/H-2 was NOT closed by that alone — 2026-09-12
+        // audit, finding 6): pin the named token to the registry's BOLD first.
+        LiquityV2TroveAuth.requireBold(collateralRegistry, boldToken);
         // The pre-existing floor — see {PreFundGuard}. A funding leg not addressed to
         // THIS module in THIS token underflows here, so the mis-pairing fails
         // closed; sound because `msg.sender == settlement` pins `forAmount` to the
-        // core (F27/C-1, C-4). For this module it ALSO binds the accounting token:
-        // `repayBold` burns a root-derived asset with NO approval while the surplus
-        // is measured on a `data`-supplied one, so the two could disagree (F27/H-2);
-        // requiring the delivery in `boldToken` is what ties them back together.
+        // core (F27/C-1, C-4).
         uint256 floor = PreFundGuard.floorOf(data, boldToken, forAmount);
         uint256 toRepay;
         {

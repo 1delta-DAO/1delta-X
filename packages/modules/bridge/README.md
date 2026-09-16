@@ -124,6 +124,25 @@ delivers the sent amount less deterministic shared-decimal dust. Surplus above t
 floor stays credited and refunds to the beneficiary via `settle`. Authoring above
 the floor is fail-safe: the order simply never activates and the funds come back.
 
+**The escrow row is the whole commitment.** Deliveries are unauthenticated on the
+destination — any depositor can author a commitment naming any order hash — and
+the order hash commits to neither the refund target nor the token. Keyed by hash
+alone, whichever delivery landed first owned the record: a 1-wei front-credit
+became the refund recipient of the victim's principal (F28), and once that was
+pinned, the same wei still *occupied* the hash and made the victim's real delivery
+revert or orphan (F29). Rows are therefore keyed by
+`commitKey(orderHash, beneficiary, token)`: a stranger's credit lands in a row of
+its own and can neither block, redirect nor settle the victim's; one that copies
+the victim's whole commitment is a gift to the victim's row. `activate(order,
+beneficiary)` funds the order from the `(hash, beneficiary, legsIn[0].token)` row
+and only one row may back a hash at a time (`RowActive`); `settle(hash,
+beneficiary, token)` refunds a row and is **not terminal** — a late delivery
+re-credits it; `settleExpired(order, beneficiary)` refunds once the ORDER's signed
+deadline has passed, whatever the row's bridged fallback `expiry` (the max over
+credits) says, so a copycat cannot park the unlock in 2106. Consequence for
+source-side authors: pick one beneficiary per destination order; every delivery
+carrying it accumulates in one row.
+
 ## Bridge paths
 
 | | Across | Stargate V2 | OFT (USDT0) | CCTP |

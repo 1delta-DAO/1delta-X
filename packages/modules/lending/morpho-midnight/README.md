@@ -62,7 +62,7 @@ Settlement and the solver can never widen them:
 | Gate | Who enforces | What it caps |
 |---|---|---|
 | Permit3 **token** allowance (`approveToken(module, token, cap)`) | Permit3 | MAKE legs — how much of *this token* the module may pull (supply, repay, lend budget) |
-| Permit3 **taker** allowance (`approveTaker(settlement, ref, cap)`) | Permit3, TAKE only | how much may be drawn on *this exact item* (`ref = keccak256(data)`); keyed by **spender = Settlement** |
+| Permit3 **taker** allowance (`approveTaker(settlement, module, ref, cap, expiry)`) | Permit3, TAKE only | how much may be drawn on *this exact item* (`ref = keccak256(data)`); keyed by **spender = Settlement** |
 | Midnight **authorization** (`setIsAuthorized(module, true, maker)`) | Midnight | any leg where the module acts as `taker`/`onBehalf` ≠ `msg.sender` |
 
 > **Midnight's coarse auth.** `setIsAuthorized(module, true, maker)` grants the

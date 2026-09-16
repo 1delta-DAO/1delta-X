@@ -233,16 +233,57 @@ contract OcoGroupModuleTest is MockSettlementBase {
     /// signed. These two tests assert what each half is load-bearing FOR, by
     /// signing the degenerate shapes deliberately.
     ///
-    /// Validator only ⇒ reads the gate but never claims it, so two such legs BOTH
-    /// fill. The item is what closes the group.
-    function test_oco_validatorWithoutItem_doesNotRetireSiblings() public {
+    /// Validator only ⇒ no claim item to bind to, so the leg is unfillable at all
+    /// (F29 finding 3: the validator now REQUIRES the item that encodes this
+    /// order's nonce). Nothing claims the group.
+    function test_oco_validatorWithoutItem_isUnfillable() public {
         Order memory a = _legValidatorOnly(1, TP_OUT, GROUP);
-        Order memory b = _legValidatorOnly(2, SL_OUT, GROUP);
 
-        _fill(a, AMOUNT_IN);
-        _fill(b, AMOUNT_IN);
+        bytes memory sig = _sign(a);
+        vm.prank(solver);
+        _expectValidationFailed();
+        settlement.fill(a, sig, AMOUNT_IN);
 
         assertEq(oco.claim(maker, GROUP), 0, "nothing ever claimed the group");
+    }
+
+    // ──────────────────── The binding (F29 finding 3) ────────────────────
+
+    /// The live shape that broke: cancel-and-replace with the item copied
+    /// verbatim. TP' (nonce 3) still carries item (GROUP, 1). Before the binding,
+    /// a dust fill of TP' claimed the group for nonce 1 — the soft-cancelled TP —
+    /// which then filled in full at the stale price while TP' and SL both died.
+    /// Now TP' fails validation before its item runs; TP and SL are untouched.
+    function test_oco_itemNonceMismatch_failsClosed_predecessorNotRevived() public {
+        Order memory tp = _leg(TP_NONCE, TP_OUT, GROUP);
+        Order memory sl = _leg(SL_NONCE, SL_OUT, GROUP);
+        Order memory tp2 = _leg(3, TP_OUT + 1e18, GROUP);
+        tp2.items = _ocoItem(GROUP, TP_NONCE); // the copied predecessor item
+
+        bytes memory sig = _sign(tp2);
+        vm.prank(solver);
+        _expectValidationFailed();
+        settlement.fill(tp2, sig, 1e18);
+
+        assertEq(oco.claim(maker, GROUP), 0, "the mismatched leg claimed nothing");
+        // The bracket is intact: SL (or TP) can still win normally.
+        _fill(sl, AMOUNT_IN);
+        assertEq(oco.claim(maker, GROUP), SL_NONCE + 1);
+        bytes memory tpSig = _sign(tp);
+        vm.prank(solver);
+        _expectValidationFailed();
+        settlement.fill(tp, tpSig, AMOUNT_IN);
+    }
+
+    /// A claim item for a DIFFERENT group than the validator reads is the same
+    /// mismatch: refused.
+    function test_oco_itemGroupMismatch_failsClosed() public {
+        Order memory a = _leg(TP_NONCE, TP_OUT, GROUP);
+        a.items = _ocoItem(GROUP + 1, TP_NONCE);
+        bytes memory sig = _sign(a);
+        vm.prank(solver);
+        _expectValidationFailed();
+        settlement.fill(a, sig, AMOUNT_IN);
     }
 
     /// Item only ⇒ claims but never reads. The module's fail-closed backstop
@@ -293,19 +334,26 @@ contract OcoGroupModuleTest is MockSettlementBase {
         settlement.fill(o, sig, AMOUNT_IN);
     }
 
-    /// The module's own guard is NOT dead code behind that: the claim nonce lives in
-    /// the item's `data` and is not required to equal the order's nonce, so a maker
-    /// can still present `max` here through an order whose own nonce is ordinary.
-    /// `nonce == max` cannot be stored as `nonce + 1`; rejected, never wrapped into
-    /// the "unclaimed" sentinel (which would silently disable the group).
+    /// `nonce == max` cannot be stored as `nonce + 1`. Since F29 the validator
+    /// binds the item's nonce to the order's, so `max` can only reach `settle`
+    /// through an item-only leg (no validator) — where the module's own guard
+    /// rejects it rather than wrapping into the "unclaimed" sentinel. A leg WITH
+    /// the validator and a mismatched `max` item fails validation first.
     function test_oco_maxClaimNonceRejectedByTheModule() public {
         Order memory o = _plainOrder(7, address(tA), address(tB), AMOUNT_IN, TP_OUT);
-        o.validators = _ocoValidator(GROUP);
-        o.items = _ocoItem(GROUP, type(uint256).max); // claim nonce ≠ order nonce
+        o.items = _ocoItem(GROUP, type(uint256).max); // item only, claim nonce = max
         bytes memory sig = _sign(o);
         vm.prank(solver);
         vm.expectRevert(OcoGroupModule.NonceNotRepresentable.selector);
         settlement.fill(o, sig, AMOUNT_IN);
+
+        Order memory withValidator = _plainOrder(8, address(tA), address(tB), AMOUNT_IN, TP_OUT);
+        withValidator.validators = _ocoValidator(GROUP);
+        withValidator.items = _ocoItem(GROUP, type(uint256).max);
+        sig = _sign(withValidator);
+        vm.prank(solver);
+        _expectValidationFailed();
+        settlement.fill(withValidator, sig, AMOUNT_IN);
     }
 
     // ──────────────────── The zero-contract path ────────────────────

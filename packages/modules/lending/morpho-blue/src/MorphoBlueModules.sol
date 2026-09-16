@@ -131,6 +131,7 @@ contract MorphoBlueSupplyModule is IMakerModule {
 // `data = abi.encode(MarketParams[, DustHandler.DustAction[, deadline, v, r, s]])` —
 // dust action optional (absent ⇒ SweepToUser); permit block optional after it.
 //
+//   base = 160; DustAction@160; permit@192.
 contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
     using MarketParamsLib for MarketParams;
 

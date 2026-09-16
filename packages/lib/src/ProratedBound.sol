@@ -43,6 +43,9 @@ library ProratedBound {
     ///      silently treating the slice as a full fill — an order that omits the
     ///      field is exactly the order that was unprotected before this existed.
     error BoundTotalMissing();
+    /// @dev The slice exceeds the total it is supposedly a fraction of — a blob whose
+    ///      "total" word is something else (see {scale}).
+    error BoundSliceExceedsTotal(uint256 amount, uint256 totalAmount);
 
     /// @param bound       the maker's absolute ceiling, sized for the WHOLE item
     /// @param amount      this fill's pro-rated slice
@@ -55,9 +58,16 @@ library ProratedBound {
         // (Caught by `liquity-v2/test/leverage/Leverage.t.sol`, which signs exactly
         // that sentinel — the first version of this library bricked it.)
         if (bound == type(uint256).max) return bound;
-        // Full fill (or an over-fill the core already rejects) needs no arithmetic,
-        // which keeps the dominant path free of a multiply that could overflow.
-        if (amount >= totalAmount) return bound;
+        // A slice LARGER than the signed total is not a fill the core can produce
+        // (it caps cumulative fills at the anchor, and the slice is a fraction of
+        // `item.amount`). It IS what a mis-encoded blob produces: F29 finding 2 put a
+        // permit `deadline` (~1.7e9) in the total's slot, and `amount >= total`
+        // then handed back the WHOLE ceiling on every 18-decimal slice. Refuse it
+        // — fail closed — rather than read it as a full fill.
+        if (amount > totalAmount) revert BoundSliceExceedsTotal(amount, totalAmount);
+        // Full fill needs no arithmetic, which keeps the dominant path free of a
+        // multiply that could overflow.
+        if (amount == totalAmount) return bound;
         // Checked: an overflow here reverts, which is the fail-closed direction.
         return bound * amount / totalAmount;
     }

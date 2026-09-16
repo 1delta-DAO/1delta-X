@@ -158,7 +158,7 @@ source-level, fails CI). `test` = a named test. `gate` = a `make` target. `prose
 | I-6 | A pre-fund module spending from its own balance takes a balance floor (`floorOf`/`requireDelivered`) bound to the asset it moves, and the funding-token is bound to the leg | the core binds the leg's recipient (bit 253) but not its token; the module is the only place that sees the asset it actually spends | **shapes** (check 3 detects the floor; token binding is in `PreFundGuard.floorOf`) + **test** (per-package leverage suites) |
 | I-7 | `AaveV3CreditModule._fundedSupplyLeg` sweeps its pre-fund surplus to the maker | it is the one contract where residue *and* a permissionless primitive (`takeOnBehalf` ratio path) co-locate; residue there is drainable **[A2]** | **test** (aave-v3 fork leverage suite) — *prose for the invariant itself* |
 | I-8 | A `Full`-mode leg makes **ONE venue withdraw of the whole position to itself**, then splits it with ERC-20 transfers — and **requires `received >= amount`** (`FullFillGuard.requireDelivered`) before doing so. `received` is a balance delta against a `floor` taken before the withdraw | the split is cheaper than a second venue call, but it removed a bound the venue used to enforce for free: the OLD form called the venue *for the signed amount*, so a short position reverted inside it. Nothing does now, and the substitute this row used to cite (Settlement's output validation) does **not** cover this side of the ledger — a withdraw item funds an INPUT leg, and `Core._payInputsToSolver` silently pulls `owed - proceeds` from the **maker's wallet**. So the guard is back, and it is safe *only* on `Full` legs, where `amount == totalAmount` is the maker's signed TOTAL rather than a pro-rated slice. The `floor` + `min(received, amount)` cap stays too: it is what stops a stray module balance being paid out (H-3). **Restored 2026-09-10 after the audit; do not remove either half** | **test** (per-package withdraw + loop-close suites) |
-| I-8b | Where the venue **cannot** name a recipient (proceeds land at the caller by construction: every borrow leg, cToken `redeem`, aave-v4's PM, native unwrap), the leg **delivers the measured `received`** (a `balBefore` snapshot excludes residue), **capped at `amount`**, with any excess to the maker — never a nominal `amount` | a nominal payout on a short/fake-pool delivery would be topped up from a stray module balance (H-3); capping at `received` makes that structurally impossible, and a short delivers less and fails the fill's output check downstream. **Replaces the old `require(received >= amount)` gate** (dropped 2026-09 as reviewer-confusing; the cap is the same protection without a revert) | **test** (borrow/withdraw suites) + this posture |
+| I-8b | Where the venue **cannot** name a recipient (proceeds land at the caller by construction: every borrow leg, cToken `redeem`, aave-v4's PM, native unwrap), the leg **delivers the measured `received`** (a `balBefore` snapshot excludes residue), **capped at `amount`**, with any excess to the maker — never a nominal `amount`. **This is the CAP, not a substitute for I-8's BOUND**: a forced-custody leg whose branch asserts `amount == totalAmount` (`requireFullFillFromData`) is a `Full` leg and carries `requireDelivered` too | a nominal payout on a short/fake-pool delivery would be topped up from a stray module balance (H-3); capping at `received` makes that structurally impossible. ⚠ An earlier version of this row said the cap "replaces the old `require(received >= amount)` gate" and exempted these legs because "there `amount` IS a slice" — false for their `Full` branches, where `amount` is the signed TOTAL. That prose, mirrored in `check-module-shapes.py`, is why five Full branches (Venus, aave-v4, compound-v2 ×2, lista-native) shipped without the bound until the 2026-09-12 audit; shapes rule 9 now enforces `requireFullFillFromData ⇒ requireDelivered` | **shapes** (rule 9) + **test** (borrow/withdraw suites) |
 | I-9 | A native leg spends/delivers the measured unwrap delta (`{value: received}` / `safeTransfer(receiver, min(received, amount))`), not the signed amount | a fake `wnative` makes `withdraw` a no-op; spending the nominal amount would draw the module's own native. Custody is forced (raw native must land here to be wrapped), so this is I-8b's form | **test** (lista/compound native suites) + this posture |
 | I-10 | A Full-mode leg **never passes the venue a max sentinel** (`type(uint256).max`, aave's `0xffff…`). "Full" is resolved from the *user's own* position (`balanceOf`/`maxWithdraw`/`position().collateral`/`collateralBalanceOf`) and then spent as exact amounts | a venue max burns whatever the **module** holds too — an aave `withdraw(max)` burns the module's own aTokens, which is what previously forced a two-stage "harvest" and a delta measurement (**the F-3 shape**). Resolving from the user's balance deletes the whole class, and is what makes I-8 possible | **shapes**-eligible (grep for a max sentinel in a venue amount) — *prose today* |
 | I-11 | A dual-layout module (`takeOnBehalf` + `takeForOnBehalf`) decodes its `IProceedsAsset`/`IFundingSource` views on the word-0 discriminator, not a single fixed layout | the two seams have different byte maps; a blind decode returns the wrong token to `SettlementLens`, defeating the off-chain stranded-proceeds preflight — **the F-4 shape** | **prose** — *candidate for a `shapes` check* |
@@ -195,9 +195,13 @@ order:
    call was sized at `amount`; the sweep took that away and the gate was already gone.
    Neither change was wrong alone. The composition was.
    The bound belongs on `Full` legs ONLY (there `amount` is the signed total, so it
-   cannot misfire on a partial); I-8b's forced-custody legs — borrows, cToken
-   `redeem`, aave-v4's PM, native unwrap — keep the cap alone, because there `amount`
-   IS a slice.
+   cannot misfire on a partial). ⚠ "`Full` leg" is decided by the BRANCH, not the
+   venue: I-8b's forced-custody venues (cToken `redeem`, aave-v4's PM, lista-native)
+   have Exact branches where `amount` IS a slice and the cap alone is right — and
+   `Full` branches where it is the signed total and the bound is mandatory. The
+   earlier wording exempted the venues wholesale, and five of their Full branches
+   shipped without the bound until the 2026-09-12 audit (finding 4). Shapes rule 9
+   now ties `requireFullFillFromData` to `requireDelivered` mechanically.
 
 3. **I-6 / I-7 (residue floor + sweep).** Under **[A1]+[A2]** these are
    defense-in-depth on every contract except `AaveV3CreditModule` (I-7), where the
@@ -207,6 +211,13 @@ order:
    residue — see `[[audit-2026-09-08-fixes]]`. Do **not** re-add sweeps to a
    settlement-gated module on "consistency" grounds; add one only where a
    permissionless self-balance-paying primitive co-locates.
+   ⚠ That rule is about sweeping **pre-existing residue** (balance below the
+   floor). It is NOT about the fill's own delivery: every pre-fund op — repay
+   halves since F27, deposit halves since F28 (2026-09-12) — takes `floorOf` and
+   `sweepSurplus(asset, onBehalfOf, floor)`, returning whatever the venue did not
+   consume of THIS fill's delivery to the maker. That is value the solver already
+   paid for the maker, not residue defence, and a `requireDelivered`-only deposit
+   op was the one place a venue consuming less than instructed could strand it.
 
 ---
 

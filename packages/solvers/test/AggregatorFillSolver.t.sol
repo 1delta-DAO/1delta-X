@@ -705,6 +705,34 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
     }
 
+    /// @dev THE INPUT SIDE IS SPLIT TOO (F28, 2026-09-12). A route that consumes
+    ///      only a quarter of the input — the exact-output shape a caller could
+    ///      use to move the whole spread into unspent `tokenIn`, where the old
+    ///      `_sweepDelta` handed it 100% to the filler — now splits the residue by
+    ///      the same policy, in `tokenIn` units. Numbers: loose order 100 A → 20 B;
+    ///      quoted 25 A → 25 B at 1:1. Output spread 5 B, input residue 75 A.
+    function test_split_inputResidueIsSplitByTheSamePolicy() public {
+        Order memory o = _plainOrder(55, address(tA), address(tB), AMOUNT_IN, 20e18);
+        bytes memory sig = _sign(o);
+        RoutePlan memory plan = _planFor(AMOUNT_IN / 4, address(splitSolver), 1, NO_PATCH);
+        uint256 makerA = tA.balanceOf(maker);
+        uint256 makerB = tB.balanceOf(maker);
+
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+
+        // output spread 5 B: 50% / 10% / 40%
+        assertEq(tB.balanceOf(maker) - makerB, 20e18 + 2.5e18, "maker: signed + 50% of the B spread");
+        assertEq(tB.balanceOf(PROTOCOL), 0.5e18, "protocol: 10% of the B spread");
+        assertEq(tB.balanceOf(FILLER), 2e18, "filler: 40% of the B spread");
+        // input residue 75 A: the same 50% / 10% / 40%, not 100% to the filler
+        assertEq(makerA - tA.balanceOf(maker), AMOUNT_IN - 37.5e18, "maker: paid 100 A, 50% of the unspent 75 A back");
+        assertEq(tA.balanceOf(PROTOCOL), 7.5e18, "protocol: 10% of the unspent input");
+        assertEq(tA.balanceOf(FILLER), 30e18, "filler: 40% of the unspent input");
+        assertEq(tA.balanceOf(address(splitSolver)), 0, "no A strands");
+        assertEq(tB.balanceOf(address(splitSolver)), 0, "no B strands");
+    }
+
     /// @dev No surplus, no split: a route quoted exactly at the maker's price
     ///      pays the maker its signed amount and nobody else anything.
     function test_split_noSurplusNothingMoves() public {

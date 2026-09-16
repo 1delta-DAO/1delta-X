@@ -368,6 +368,10 @@ contract SettlementLens {
         if (delta < order.minFillAnchor) revert FillTooSmall();
         uint256 newFilled = prevFilled + delta;
         if (newFilled > total) revert OverFill();
+        // Mirror of {OrderState._openFill}: a FILL-ONCE order (timing bit 100) is
+        // whole or nothing, and a preview that quoted a partial was quoting a fill
+        // the settler reverts (F29 finding 8a).
+        if (order.useNonceInvalidator() && newFilled != total) revert FillOnceMustBeFull();
 
         return FillCtx(
             orderHash,
@@ -418,6 +422,7 @@ contract SettlementLens {
     error OverFill();
     error FillTooSmall();
     error OrderCancelled();
+    error FillOnceMustBeFull();
 
     // ──────────────────── Solver preflight ────────────────────
 
@@ -552,6 +557,9 @@ contract SettlementLens {
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (OrderStatus.Cancelled, 0);
 
         uint256 anchor = OrderGates.fillDenominator(order);
+        // A {Proportional} anchor resolves from the maker's LIVE balance and can be
+        // 0 right now; that is "nothing to fill yet", not "filled" (F29 finding 8f).
+        if (anchor == 0) return (OrderStatus.Fillable, 0);
         if (done >= anchor) return (OrderStatus.Filled, 0);
 
         fillableAmount = anchor - done;
@@ -562,6 +570,9 @@ contract SettlementLens {
             uint256 cap = _makerFillableCap(order, anchor);
             if (cap < fillableAmount) fillableAmount = cap;
         }
+        // A FILL-ONCE order is whole or nothing: a capacity below the anchor means
+        // it cannot fill at all, not that it can fill partially (F29 finding 8a).
+        if (order.useNonceInvalidator() && fillableAmount != anchor) fillableAmount = 0;
         status = OrderStatus.Fillable;
     }
 
@@ -589,7 +600,10 @@ contract SettlementLens {
             (uint160 allowed, uint48 expiration) = PERMIT3.tokenAllowance(order.maker, spender, token);
             uint256 capacity = allowed;
             if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
-            uint256 direct = _erc20Allowance(token, order.maker, spender);
+            // ...unless the maker set Permit3 STRICT mode for this token, which is
+            // exactly the switch that makes {Permit3TransferLib} refuse the fallback
+            // (F29 finding 8d).
+            uint256 direct = PERMIT3.isStrict(order.maker, token) ? 0 : _erc20Allowance(token, order.maker, spender);
             if (direct > capacity) capacity = direct; // fallback path funds the same pull
             uint256 bal = SafeTransferLib.balanceOf(token, order.maker);
             if (bal < capacity) capacity = bal;
@@ -637,7 +651,11 @@ contract SettlementLens {
                     return (false, "duplicate input token");
                 }
             }
-            if (PackedArrays.countUnchecked(order.items) == 0) {
+            // Item-free orders: an input that is also an output is a no-op the
+            // maker did not mean. DELTA-VERIFY orders (timing bit 104): the settler
+            // rejects it for EVERY output leg, items or not
+            // ({Core._snapshotOutRecipients} → `DeltaVerifySameToken`) — F29 8c.
+            if (PackedArrays.countUnchecked(order.items) == 0 || order.deltaVerifyOutputs()) {
                 for (uint256 j; j < nOut; j++) {
                     if (PackedArrays.legInToken(order.legsIn, i) == PackedArrays.legOutToken(order.legsOut, j)) {
                         return (false, "input token == output token");
@@ -803,17 +821,9 @@ contract SettlementLens {
         // quantities (`amount > 1`, e.g. {Erc1155SettlementModule}) compose with
         // partial fills — each fill transfers its exact pro-rata slice — and are
         // deliberately allowed through.
-        if (order.fillModule == address(0) && order.minFillAnchor != anchor) {
-            bytes calldata its = order.items;
-            uint256 nItems = PackedArrays.validateRecords(its, PackedArrays.ITEM_HEAD);
-            uint256 cur = PackedArrays.recordsStart();
-            for (uint256 s; s < nItems; s++) {
-                (uint256 iop,, uint256 iamt,,, uint256 nxt) = PackedArrays.itemAt(its, cur);
-                if (iop == uint256(ItemOp.SETTLE) && iamt <= 1) {
-                    return (false, "settle item requires full-fill");
-                }
-                cur = nxt;
-            }
+        {
+            (bool okItems, string memory whyItems) = _validateItemSlices(order, anchor);
+            if (!okItems) return (false, whyItems);
         }
         if (order.decayDuration() != 0 && order.decayStartTime() == 0) {
             return (false, "decay set without decayStartTime");
@@ -924,6 +934,10 @@ contract SettlementLens {
         }
 
         // ── current fillability (time/state-dependent) ──
+        // The top half of the nonce space is reserved for delegated-signer permits
+        // ({NonceManager.SIGNER_NONCE_NS}); {Base._gateOrderPost} reverts
+        // `OrderNonceReserved` on every fill of such an order (F29 finding 8b).
+        if (order.nonce >> 255 != 0) return (false, "nonce in the reserved signer-permit half");
         if (order.expiry() < block.timestamp) return (false, "order expired");
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (false, "nonce cancelled");
         // The per-hash cancellation sentinel, named as itself. `filled == max` is
@@ -1140,6 +1154,60 @@ contract SettlementLens {
         }
     }
 
+    /// @dev The item-slice half of {validateOrder}, in its own frame (that function
+    ///      sits at the legacy codegen's stack limit). Mirrors the three per-item
+    ///      reverts the settler raises before any item runs:
+    ///
+    ///        • an op byte above the enum → {Base.MalformedPackedArray} (F29 8e);
+    ///        • an INDIVISIBLE SETTLE or TAKE_FOR (`amount <= 1`) on a partial-
+    ///          fillable order → every partial slice floors to 0 and the settler
+    ///          reverts {Base.SettleSliceZero}, so the order fills in one shot or
+    ///          not at all. Divisible amounts are deliberately allowed: a dust fill
+    ///          that floors to 0 is refused by the settler for THAT fill only, and
+    ///          a larger fill goes through — that is a filler-side sizing rule, not
+    ///          an unfillable order. TAKE_FOR joins SETTLE here (it reverts on a
+    ///          zero slice too; it used to be unchecked). Full-fill-only orders
+    ///          (`minFillAnchor == anchor`) and fill-module orders are exempt;
+    ///        • two funding descriptors naming the SAME output leg →
+    ///          {Base.ForLegReused} (the leg-reference forms only).
+    function _validateItemSlices(Order calldata order, uint256 anchor) private pure returns (bool, string memory) {
+        uint256 nItems = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
+        uint256 cur = PackedArrays.recordsStart();
+        uint256 legsUsed;
+        for (uint256 s; s < nItems; s++) {
+            (bool ok, string memory why, uint256 nxt, uint256 legBit) = _itemSliceAt(order, cur, anchor);
+            if (!ok) return (false, why);
+            if (legBit != 0) {
+                if (legsUsed & legBit != 0) return (false, "two items fund from the same output leg");
+                legsUsed |= legBit;
+            }
+            cur = nxt;
+        }
+        return (true, "");
+    }
+
+    /// @dev One item's slice checks (see {_validateItemSlices}); returns the next
+    ///      cursor and, for a leg-reference funding descriptor, the bit of the leg it
+    ///      spends (0 otherwise). Its own frame: the wide `itemAt` tuple does not fit
+    ///      beside the loop state under legacy codegen.
+    function _itemSliceAt(Order calldata order, uint256 cursor, uint256 anchor)
+        private
+        pure
+        returns (bool, string memory, uint256, uint256)
+    {
+        (uint256 iop,, uint256 iamt,, bytes calldata idata, uint256 nxt) = PackedArrays.itemAt(order.items, cursor);
+        if (iop > uint256(ItemOp.TAKE_FOR)) return (false, "unknown item op", nxt, 0);
+        if (order.fillModule == address(0) && order.minFillAnchor != anchor && iop >= uint256(ItemOp.SETTLE) && iamt <= 1) {
+            return (false, "settle item requires full-fill", nxt, 0);
+        }
+        if (idata.length < 32) return (true, "", nxt, 0);
+        uint256 desc = uint256(bytes32(idata[0:32]));
+        // Leg-reference funding descriptors only: TAKE_FOR's, or a pre-fund MAKE's.
+        if (iop != uint256(ItemOp.TAKE_FOR) && desc >> 253 != 5) return (true, "", nxt, 0);
+        if (desc < (uint256(1) << 255) || desc & (uint256(1) << 254) != 0) return (true, "", nxt, 0);
+        return (true, "", nxt, uint256(1) << (desc & 0xffff));
+    }
+
     /// @dev The `TAKE_FOR` half of {validateOrder}, in its own frame because that
     ///      function is already at the legacy codegen's stack limit.
     ///
@@ -1227,6 +1295,12 @@ contract SettlementLens {
             // preflight, so the two must agree exactly.
             if (desc & (uint256(1) << 253) != 0) {
                 if (r != module) return (false, "pre-funded leg must be addressed to the item's module", nxt);
+                // {Base._forSlice} refuses the pre-fund form whenever the soft-
+                // exclusivity override is live — any in-window outsider's fill of
+                // this order reverts `ForLegNotMakers` (F29 finding 8e).
+                if (order.overrideBps() != 0) {
+                    return (false, "pre-funded leg with an exclusivity override (outsiders revert)", nxt);
+                }
                 // Bits [16:176) name the asset the module spends; the settler
                 // requires the leg to be denominated in it.
                 if (PackedArrays.legOutToken(order.legsOut, j) != address(uint160(desc >> 16))) {

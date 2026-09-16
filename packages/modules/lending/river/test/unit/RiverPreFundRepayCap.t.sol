@@ -40,6 +40,11 @@ contract PreFundToken {
 /// @dev TroveManager stand-in with a settable live debt.
 contract MockPreFundTM {
     uint256 public debt;
+    address public debtToken;
+
+    function setDebtToken(address t) external {
+        debtToken = t;
+    }
 
     function setDebt(uint256 d) external {
         debt = d;
@@ -91,6 +96,7 @@ contract RiverPreFundRepayCapTest is Test {
     function setUp() public {
         satUSD = new PreFundToken();
         tm = new MockPreFundTM();
+        tm.setDebtToken(address(satUSD));
         xapp = new MockPreFundXApp(satUSD, tm);
         preFund = new RiverPreFundModule(PERMIT3, address(settlement));
     }

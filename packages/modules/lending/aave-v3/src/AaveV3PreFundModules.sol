@@ -65,6 +65,8 @@ import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 ///         Merging is safe here because the taker grant is keyed on
 ///         `keccak256(data)` and the op is inside `data`: a grant signed for
 ///         Supply cannot be replayed as Repay.
+// Byte maps — Supply: forDesc@0, pool@32, asset@64 (base = 96).
+//             Repay:  forDesc@0, pool@32, asset@64, rateMode@96, debtToken@128 (base = 160).
 contract AaveV3PreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     enum Op {
         Supply,

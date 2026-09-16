@@ -22,7 +22,11 @@ what we changed in response. It exists for three jobs:
   "That's a C4" is a complete review comment.
 
 **Related:** [`/SECURITY.md`](../SECURITY.md) is the reporting policy and trust
-model. This note is the adversarial reading of the design. The
+model. This note is the adversarial reading of the design.
+[`reference-bounties.md`](reference-bounties.md) is its post-deployment twin: what
+bug bounties and live incidents found at the same protocols and at the venues our
+modules drive — a different distribution (units, offsets, encoder/interpreter
+drift, periphery), with its own class keys `B1…B14`. The
 [settlement README](../packages/core/src/settlement/README.md) is the API.
 [`edge-case-matrix.md`](edge-case-matrix.md) is the other half of this note: where
 this one asks *what has gone wrong elsewhere*, that one asks *what combinations
@@ -1620,6 +1624,64 @@ floor note I scripted onto Lista and River claimed an approval-free burn, which 
 true only of Liquity's `repayBold`. Scripted comments inherit a claim they were
 never checked against.
 
+### F28 — twelve-lens audit of the full tree: lending × matching × pre-fund (2026-09-12)
+
+Scope: 120 files, 27,803 lines — every `packages/*/src` file outside `interfaces/`,
+`vendor/`, `script/` and the view-only lens. **Six findings, two with executed
+PoCs; all fixed 2026-09-14.** Write-up in
+[audit-2026-09-12-full-tree.md](./audit-2026-09-12-full-tree.md).
+
+The emphasised seams — `_forSlice` ↔ `ctx.outs` ↔ `floorOf`, the `takeFor` spender
+pins, the `matchSettle` ledger — cleared every lens. What broke was outside them:
+
+- **BridgedOrderInbox** keyed the refund beneficiary and expiry to whichever bridge
+  delivery for an order hash landed FIRST; a 1-wei front-credit hijacked the
+  victim's whole escrow (PoC). Later credits now must match the beneficiary;
+  expiry is the minimum.
+- **NativeUnwrapModule** — the one push-funded MAKE outside the pre-fund seam —
+  unwrapped a signed constant against an auction-priced delivery; the difference
+  stranded on the singleton and a zero-leg self-order took it (PoC). It is now a
+  pre-fund leg-ref consumer (**BREAKING** data shape).
+- **Dolomite Exact withdraw** past the supply is a borrow on that venue — the
+  `WouldBorrow` guard Comet had, Dolomite did not.
+- **Five `Full` branches** (Venus, aave-v4, compound-v2 ×2, lista-native) lacked
+  I-8's `requireDelivered`; a short position billed the maker's wallet. The I-8b
+  prose that exempted them by venue was wrong for their Full branches, and the
+  shapes checker had encoded it. Shapes rule 9 now enforces
+  `requireFullFillFromData ⇒ requireDelivered`.
+- **CompoundV2RepayModule** never cleared its scoped approval — A-3's seventh site.
+- **Liquity / River repay** measured a `data`-named token while the venue burns the
+  real one approval-free. Both now pin the named token to the trusted root
+  (`registry.boldToken()`, `tm.debtToken()`, both chain-verified). ⚠ This corrects
+  F27's closing paragraph: River's `repayDebt` does NOT pull through the scoped
+  approval — fork-probed, it burns from `msg.sender` with zero allowance. The
+  comment F27 "corrected" was right about the mechanism and wrong only in scope.
+
+Three of six are the "patch hit one sibling, missed the neighbour" pattern again;
+two of six were invariants asserted in a comment that nothing enforced.
+
+### F29 — bounty-corpus screening: six lenses over B1…B14, first read of the periphery (2026-09-14)
+
+Scope: the full tree plus `SettlementLens.sol`, `packages/sdk/src`,
+`packages/orderbook/src`, `packages/orderbook-server/src`. **Eight findings (four
+PoC'd), six periphery defects, 22 leads.** Write-up in
+[audit-2026-09-14-bounty-screening.md](./audit-2026-09-14-bounty-screening.md).
+
+The classes in [reference-bounties.md](./reference-bounties.md) were used as hunting
+lenses rather than as verdicts, and two of the registry's own verdicts fell: B1
+("there is no 1e18 quantity to truncate") — `ChainlinkTickFloorValidator.scale` is
+one, and it is 0 for the WETH/USDC/8-dec shape, so the market limit never gates;
+B3 ("byte maps checked by the shapes tool") — the tool checks pins and floors, not
+offsets, and `ExactlyRepayModule`'s header puts the permit where the fixed branch
+reads `totalAmount`. The OCO claim nonce is bound to `order.nonce` nowhere on-chain
+(B6), so cancel-and-replace revives the predecessor. F28's inbox fix is reopened:
+first-writer ownership of `commits[H]` remains (B12). The periphery — never read
+before — yielded six defects, one of which (`verifyLayer2` passes an unpacked order
+to the lens ABI) means the demo book cannot admit any order against a real lens.
+
+Lesson: a registry verdict written from memory of the code is a claim; the lens
+that hunts the class finds the exception. Keep the classes, re-run the hunt.
+
 ## Re-audit sweep — the generalised questions from F13–F15
 
 F13–F15 are three instances of two reusable mistakes. Sweep these questions rather
@@ -2022,4 +2084,5 @@ and Velora were already present and were NOT re-derived.
 | [OpenZeppelin — Euler Vault Kit (EVK)](https://www.openzeppelin.com/news/euler-vault-kit-evk-audit) / [Electisec — Euler v2](https://reports.electisec.com/2024-03-EulerV2) | Batch-with-deferred-checks: which checks run at the end of a batch, the STATICCALL mitigation for in-transfer reentrancy, and rounding in looped ops. The EVC batch is the closest external analogue to our `MatchPlan` schedule. Added 2026-08-27. |
 | [Symbolic Software — Native DEX (NAT-001)](https://symbolic.software/pdf/nat-001.pdf) | RFQ/PMM quote-signature architecture (AquaVault + `NativePool`). Published finding is code-quality only; no analogue here. Added 2026-08-27. |
 | [Bebop — audit index](https://docs.bebop.xyz/audits#security-and-audits) | **Nine audits**, all now read. [MixBytes](https://github.com/mixbytes/audits_public/tree/master/Bebop) (B1–B4), [Cyfrin Router v2.0](https://bebop-public-images.s3.eu-west-2.amazonaws.com/2026-06-12-cyfrin-bebop-router-v2.0.pdf) (C-H1 etc. — the richest), [Decurity JAM](https://bebop-public-images.s3.eu-west-2.amazonaws.com/DecurityAudit_November2023.pdf), [Nethermind](https://bebop-public-images.s3.eu-west-2.amazonaws.com/Nethermind-Bebop-Dec%202024.pdf) (shared nonces), [Offside Labs RFQ](https://bebop-public-images.s3.eu-west-2.amazonaws.com/Bebop-RFQ-Dec-2025-OffsideLabs.pdf) (Solana). PDFs were extracted with local `pdftotext` after WebFetch returned raw binary — **use that route, not a fetch, for any vendor PDF**. Added 2026-08-27. |
+| [reference-bounties.md](reference-bounties.md) | **The bug-bounty and incident corpus**, kept separately: the 1inch Aqua H1 2026 HackenProof report (9 paid findings, classes B1–B5), the 0x Settler changelog's Immunefi citations (#88903 two-copies-of-the-sell-token, #89191 unbounded bps, #78645 metaTx malleability), Dedaub's Universal Router reentrancy, the Velora v6 callback, Dolomite/Exactly/Euler/Venus/Silo/Liquity venue incidents, Across and Morpho periphery incidents. Added 2026-09-14. |
 | [ChainSecurity — Uniswap Permit2](https://old.chainsecurity.com/wp-content/uploads/2022/11/ChainSecurity_Uniswap_Permit2_audit.pdf) | **The forked source's own audit** — `Permit3` ports Permit2's SignatureVerification / EIP712 / unordered-nonce code. 6.1 casting (clean, pinned), 7.2 malleability (external precedent for S1), 7.1/7.3 nonce notes (absent/harmless). Read via pdftotext. Added 2026-08-27. |

@@ -61,13 +61,26 @@ interface IExactlyMarket {
     // ── views ──
     function previewDebt(address borrower) external view returns (uint256 debt);
 
-    /// @notice The borrower's FLOATING borrow shares.
+    /// @notice The borrower's account record; the THIRD field is the FLOATING
+    ///         borrow shares.
     /// @dev ⚠ `previewDebt` is floating + EVERY fixed-maturity position, while
     ///      `repay` touches the FLOATING book only. Clamping a floating repay
     ///      against `previewDebt` therefore measures against a book the call does
-    ///      not settle. These two give the floating-only figure:
-    ///      `previewRefund(floatingBorrowShares(borrower))`.
-    function floatingBorrowShares(address borrower) external view returns (uint256 shares);
+    ///      not settle. The floating-only figure is
+    ///      `previewRefund(accounts(borrower).floatingBorrowShares)`.
+    ///
+    ///      ⚠ There is NO `floatingBorrowShares(address)` getter on the Market —
+    ///      the shares live in `mapping(address => Account) public accounts`, whose
+    ///      auto-getter returns `(fixedDeposits, fixedBorrows, floatingBorrowShares)`.
+    ///      Verified against exaUSDC on Optimism (0x6926…A8bb): `accounts(a)`
+    ///      answers, `floatingBorrowShares(a)` reverts. The F26 fix to the pull
+    ///      repay module declared the getter that does not exist and its floating
+    ///      branch reverted on the live Market until F28 (2026-09-12) — the fork
+    ///      suite covered the fixed branch and the pre-fund twin only.
+    function accounts(address borrower)
+        external
+        view
+        returns (uint256 fixedDeposits, uint256 fixedBorrows, uint256 floatingBorrowShares);
 
     /// @notice Assets owed for `shares` of floating borrow, rounded UP.
     function previewRefund(uint256 shares) external view returns (uint256 assets);

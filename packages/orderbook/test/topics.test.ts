@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { cancelTopic, orderTopic, topicsFor } from "../src/topics";
+import { cancelTopic, orderTopic, replaceTopic, topicsFor } from "../src/topics";
 
 const SETTLEMENT = "0xAbC0000000000000000000000000000000000001" as const;
 
@@ -10,10 +10,11 @@ describe("content topics", () => {
     expect(cancelTopic(30, SETTLEMENT)).toBe("/1delta/1/cancels-30-0xabc0000000000000000000000000000000000001/proto");
   });
 
-  it("topicsFor returns the pair", () => {
+  it("topicsFor returns the triple", () => {
     expect(topicsFor({ chainId: 31, settlement: SETTLEMENT })).toEqual({
       orders: orderTopic(31, SETTLEMENT),
       cancels: cancelTopic(31, SETTLEMENT),
+      replaces: replaceTopic(31, SETTLEMENT),
     });
   });
 });

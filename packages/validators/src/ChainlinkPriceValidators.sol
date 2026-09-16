@@ -67,7 +67,7 @@ contract ChainlinkPriceLte is IOrderValidator {
 ///         market-limit that makes long-lived schedules (TWAP) and slow decays
 ///         safe when the market runs away from the signed curve. Passes iff
 ///
-///             currentOut0 · 1e18  >=  currentIn0 · price(feed) · scale / 1e18
+///             currentOut0 · den  >=  currentIn0 · price(feed) · num
 ///
 ///         i.e. "the rate this fill would clear at (leg-0 out per leg-0 in, at
 ///         the live decay/gas-bump tick) is no worse for the maker than the
@@ -75,17 +75,30 @@ contract ChainlinkPriceLte is IOrderValidator {
 ///         this validator is a complete oracle-limited TWAP: the schedule meters
 ///         the size, this gates every part on the market.
 ///
-/// @dev    `data = abi.encode(address feed, uint256 maxStaleness, uint256 scale)`.
-///         `scale` folds EVERYTHING the contract deliberately has no opinion on
-///         into one maker-signed number — feed decimals, the two tokens'
-///         decimals, feed orientation, and the tolerance — defined by
-///         `rate1e18 >= price(feed) · scale`, i.e.
+/// @dev    `data = abi.encode(address feed, uint256 maxStaleness, uint256 num, uint256 den)`.
+///         `num / den` folds EVERYTHING the contract deliberately has no opinion on
+///         into one maker-signed RATIONAL — feed decimals, the two tokens'
+///         decimals, feed orientation, and the tolerance:
 ///
-///             scale = 1e18 · (10000 − tolBps)/10000 · 10^(dOut − dIn − dFeed)
+///             num / den = (10000 − tolBps) / 10000 · 10^(dOut − dIn − dFeed)
 ///
-///         (inverted-feed and BUY-side caps fold in the same way — a cap on
-///         in-per-out is a floor on out-per-in). The SDK computes it; on-chain
-///         stays a single mulDiv against the hardened {ChainlinkRead}.
+///         Both halves are plain integers for EVERY decimal shape: put the power of
+///         ten on whichever side makes the exponent non-negative (18-in / 6-out /
+///         8-dec feed ⇒ exponent −20 ⇒ `num = 10000 − tolBps`, `den = 10000 · 1e20`).
+///         The SDK's `tickFloorRatio` computes it. (Inverted-feed and BUY-side caps
+///         fold in the same way — a cap on in-per-out is a floor on out-per-in.)
+///
+///         ⚠ WHY A RATIONAL, NOT A 1e18 SCALE. The first version signed one
+///         `scale = 1e18 · (10000 − tolBps)/10000 · 10^(dOut − dIn − dFeed)` and
+///         checked `out0 · 1e18 >= in0 · ref · scale`. For the dominant pair shape
+///         (18-decimal input, 6-decimal output, 8-decimal feed) the exponent is
+///         −20, so `scale = 0.0098` — an integer of ZERO — and the check read
+///         `>= 0`: the market limit never gated, and nothing rejected it. The
+///         1inch Aqua `uint32 decayFactor` failure in this codebase's own clothes
+///         (docs/reference-bounties.md B1; F29 finding 1). A zero on either side
+///         now reverts, which {OrderGates.gatePasses} folds to `false` — fail closed.
+///         BREAKING: a three-word blob decodes short and reverts, i.e. also fails
+///         closed rather than silently passing.
 ///         Anchored on leg 0 of BOTH sides — the canonical 1-in/1-out TWAP/limit
 ///         shape; multi-leg baskets need a bespoke validator. Reverts (aborting
 ///         the fill) on an empty leg, mirroring the conservative feed guards.
@@ -100,6 +113,9 @@ contract ChainlinkTickFloorValidator is IOrderValidator {
     ///      this validator is only sound for clock-priced orders. (Preflight then
     ///      reports the order as failing this validator, surfacing the misconfig.)
     error UnsupportedPricingMode();
+    /// @dev `num == 0` would pass every price; `den == 0` would pass none. Neither is
+    ///      a market limit, so neither is accepted.
+    error ZeroRatio();
 
     function validate(Order calldata order, address, bytes calldata data, bytes calldata)
         external
@@ -108,13 +124,18 @@ contract ChainlinkTickFloorValidator is IOrderValidator {
         returns (bool)
     {
         if (order.pricingModule != address(0) || order.priorityAuction()) revert UnsupportedPricingMode();
-        (address feed, uint256 maxStaleness, uint256 scale) = abi.decode(data, (address, uint256, uint256));
+        (address feed, uint256 maxStaleness, uint256 num, uint256 den) =
+            abi.decode(data, (address, uint256, uint256, uint256));
+        if (num == 0 || den == 0) revert ZeroRatio();
+        // Its own frame: the four decoded words plus the two tick reads push this
+        // function past the legacy-codegen stack limit.
+        return _tickAtLeast(order, uint256(ChainlinkRead.read(feed, maxStaleness)) * num, den);
+    }
+
+    /// @dev rate = out0/in0; pass iff rate >= (ref·num)/den — kept in the
+    ///      multiplied-out form so there is no division/precision loss.
+    function _tickAtLeast(Order calldata order, uint256 refNum, uint256 den) private view returns (bool) {
         uint256 bump = order.bumpBps();
-        uint256 out0 = order.amountOutAt(0, bump);
-        uint256 in0 = order.amountInAt(0, bump);
-        uint256 ref = uint256(ChainlinkRead.read(feed, maxStaleness));
-        // rate1e18 = out0·1e18/in0; pass iff rate1e18 >= ref·scale — kept in the
-        // multiplied-out form so there is no division/precision loss.
-        return out0 * 1e18 >= in0 * ref * scale;
+        return order.amountOutAt(0, bump) * den >= order.amountInAt(0, bump) * refNum;
     }
 }

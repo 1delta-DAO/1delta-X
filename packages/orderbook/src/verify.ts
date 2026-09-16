@@ -1,5 +1,5 @@
-import { hashOrderStruct, orderTypedData, OrderSide, SETTLEMENT_LENS_ABI, type Order } from "@1delta-x/sdk";
-import { recoverTypedDataAddress, type Hex, type PublicClient } from "viem";
+import { hashOrderStruct, orderTypedData, packOrder, OrderSide, SETTLEMENT_LENS_ABI, type Order } from "@1delta-x/sdk";
+import { keccak256, recoverTypedDataAddress, type Hex, type PublicClient } from "viem";
 
 import { fillerOf, toDeployment, type OrderbookConfig } from "./config";
 import type { OrderAnnounce } from "./messages";
@@ -99,8 +99,12 @@ export class Verifier {
       } catch {
         return { ok: false, reason: "signature does not recover", orderHash, deferSig: false };
       }
+      // A recover to someone other than the maker is not a rejection: the settler
+      // (and the lens) accept a maker-NOMINATED delegate (`orderSignerExpiry`),
+      // which this local step cannot see. Defer to Layer 2, which reads the
+      // registry, instead of refusing every session-key-signed order (F29 lead).
       if (recovered.toLowerCase() !== order.maker.toLowerCase()) {
-        return { ok: false, reason: "signature not by maker", orderHash, deferSig: false };
+        return { ok: true, orderHash, deferSig: true };
       }
       return { ok: true, orderHash, deferSig: false };
     }
@@ -129,7 +133,15 @@ export class Verifier {
       }
       return out;
     }
-    const orders = entries.map((e) => e.order);
+    // PACK FIRST. The lens ABI takes the WIRE order (`bytes legsIn/legsOut/curve/
+    // items/…`, `uint256 params`), not the authoring `Order` the book holds. This
+    // used to pass the authoring struct straight through; viem's encoder threw on
+    // the first `bytes` field, so against a real lens no order could ever be
+    // admitted and the periodic re-check never evicted anything — only stubbed
+    // `readContract`s kept the tests green (F29 P1; the same drift the SDK's
+    // `sdk-packed-order-sync` closed). Every other lens/settlement call site in
+    // the SDK packs; this one now does too.
+    const orders = entries.map((e) => packOrder(e.order));
     const sigs = entries.map((e) => e.sig);
     const takerDatas = entries.map(() => "0x" as Hex);
 
@@ -137,7 +149,7 @@ export class Verifier {
       address: this.config.lens,
       abi: SETTLEMENT_LENS_ABI,
       functionName: "getOrderRelevantStates",
-      args: [orders as never, sigs, fillerOf(this.config), takerDatas],
+      args: [orders, sigs, fillerOf(this.config), takerDatas],
     })) as readonly [readonly number[], readonly bigint[], readonly boolean[], readonly boolean[]];
 
     const [statuses, fillableAmounts, sigValids, validatorsPass] = result;
@@ -172,19 +184,31 @@ export class Verifier {
     entries.forEach((e, i) => {
       const s = states[i];
       if (s) {
-        this.cache.set(e.orderHash, { res: s, at: Date.now() });
+        this.cache.set(Verifier.cacheKey(e.orderHash, e.announce), { res: s, at: Date.now() });
         out.set(e.orderHash, s);
       }
     });
     return out;
   }
 
+  /**
+   * The cache key is the ANNOUNCE, not the order hash. A verdict proves the pair
+   * `(order, sig)` the lens saw; served for any other `sig` under the same hash it
+   * let an unauthenticated re-announce carrying garbage (or `sigless`) inherit the
+   * honest announce's verdict, overwrite the served signature and get the order
+   * evicted on the next sweep (F29 P2).
+   */
+  private static cacheKey(orderHash: Hex, a: { sig: Hex; sigless?: boolean }): Hex {
+    return keccak256(`${orderHash}${a.sigless ? "01" : "00"}${keccak256(a.sig).slice(2)}` as Hex);
+  }
+
   private async layer2Cached(orderHash: Hex, a: OrderAnnounce): Promise<Layer2Result> {
-    const hit = this.cache.get(orderHash);
+    const key = Verifier.cacheKey(orderHash, a);
+    const hit = this.cache.get(key);
     if (hit && Date.now() - hit.at < this.cacheTtlMs) return hit.res;
     const [res] = await this.verifyLayer2([{ order: a.order, sig: a.sig, sigless: a.sigless }]);
     const r: Layer2Result = res ?? { ok: false, status: OrderStatus.Invalid, fillableAmount: 0n, isSignatureValid: false, validatorsPass: false };
-    this.cache.set(orderHash, { res: r, at: Date.now() });
+    this.cache.set(key, { res: r, at: Date.now() });
     return r;
   }
 }

@@ -75,4 +75,10 @@ interface IRiverTroveManager {
         returns (uint256 debt, uint256 coll, uint256 pendingDebtReward, uint256 pendingCollateralReward);
     function getTroveStatus(address _borrower) external view returns (uint256);
     function collateralToken() external view returns (address);
+    /// @notice The debt token this TroveManager's troves are denominated in —
+    ///         `IDebtToken public debtToken` in the Prisma lineage. Verified on BSC:
+    ///         TM 0x5EA26D0A1a9aa6731F9BFB93fCd654cd1C3079Ec →
+    ///         `debtToken() == 0xb4818BB69478730EF4e33Cc068dD94278e2766cB` (satUSD).
+    ///         The repay legs pin the maker-named token to this.
+    function debtToken() external view returns (address);
 }

@@ -88,6 +88,8 @@ contract RiverPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
 
     /// @dev The descriptor named an op this module does not implement.
     error BadOp(uint256 op);
+    /// @dev The maker-named debt token is not the TroveManager's.
+    error DebtTokenMismatch(address named, address actual);
 
 
     constructor(address _permit3, address _settlement) PreFundModuleBase(_permit3, _settlement) {}
@@ -123,23 +125,40 @@ contract RiverPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
-        PreFundGuard.requireDelivered(data, collateralToken, forAmount);
+        // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
+        // and throws the number away; a venue that consumes LESS than instructed then
+        // leaves the remainder resident on a SHARED SINGLETON — the residue that every
+        // pre-fund drain so far has monetised. Measured against the pre-delivery floor,
+        // never sized from the venue's return value (F27/C-3). Aligned with the aave-v3
+        // sibling and every `_repay` half (F28, 2026-09-12).
+        uint256 floor = PreFundGuard.floorOf(data, collateralToken, forAmount);
         SafeTransferLib.forceApprove(collateralToken, xapp, forAmount);
         IRiverXApp(xapp).addColl(tm, onBehalfOf, forAmount, upper, lower);
         SafeTransferLib.forceApprove(collateralToken, xapp, 0);
+        PreFundGuard.sweepSurplus(collateralToken, onBehalfOf, floor);
     }
 
     function _repay(address onBehalfOf, uint256 forAmount, bytes calldata data) private {
         (, address xapp, address tm, address debtToken, address upper, address lower) =
             abi.decode(data, (uint256, address, address, address, address, address));
+        // THE VENUE BURNS, IT DOES NOT PULL. The deployed diamond retires debt by
+        // burning satUSD straight from `msg.sender` (this module) with NO allowance
+        // (fork-verified 2026-09-12: `repayDebt` succeeds with zero approval to the
+        // xapp) — the scoped approve below is inert, so it never tied the token
+        // measured here to the token burned. A maker naming a worthless `debtToken`
+        // had it pulled/delivered and swept straight back while the venue retired
+        // their debt out of whatever REAL satUSD sat on this shared singleton.
+        // Residue-bounded, but the class the rest of the tree closes with floors:
+        // pin the named token to the TroveManager's own before measuring anything.
+        // (2026-09-12 audit, finding 6; the earlier "same by construction" note
+        // was wrong about the mechanism.)
+        if (debtToken != IRiverTroveManager(tm).debtToken()) {
+            revert DebtTokenMismatch(debtToken, IRiverTroveManager(tm).debtToken());
+        }
         // The pre-existing floor — see {PreFundGuard}. A funding leg not addressed to
         // THIS module in THIS token underflows here, so the mis-pairing fails
         // closed; sound because `msg.sender == settlement` pins `forAmount` to the
-        // core (F27/C-1, C-4). Unlike Liquity's sibling this module needs no extra
-        // token-binding argument: the venue pulls through the scoped approval
-        // below, so the token it takes and the token measured here are the same by
-        // construction. (H-2 is specific to a venue that moves value WITHOUT an
-        // approval — `repayBold` burns directly from `msg.sender`.)
+        // core (F27/C-1, C-4).
         uint256 floor = PreFundGuard.floorOf(data, debtToken, forAmount);
         // Cap at the LIVE debt — the maker cannot know accrued interest at
         // signing, and the diamond rejects repaying more than is owed.

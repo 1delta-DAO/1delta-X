@@ -308,10 +308,15 @@ contract AggregatorFillSolver {
         // outlive the fill, or a later balance would be pullable against it.
         SafeTransferLib.forceApprove(route.tokenOut, address(SETTLEMENT), 0);
 
-        // Sweep BOTH sides: the output surplus is the spread — split per the
-        // policy — and any input the route did not consume (an unpatched
-        // under-quote) would otherwise sit here unaccounted. The input residue
-        // is the filler's alone: it is a quoting artefact, not price improvement.
+        // Split BOTH sides by the same policy. The output surplus is the spread;
+        // the input residue — what the route did not consume — is the SAME spread
+        // in the other denomination. It used to go to the filler alone as "a
+        // quoting artefact", which made the policy optional: the caller supplies
+        // `plan.data`, so an exact-output route (`amountOut = the priced amount`,
+        // `amountInMaximum = the whole input`) moves the entire spread into unspent
+        // input and the maker's and protocol's shares read zero. Splitting the
+        // residue in `tokenIn` units, unpriced, closes that without an oracle: the
+        // residue IS maker input that was never needed (F28, 2026-09-12).
         //
         // ⚠ THE DELTA, NOT THE BALANCE, and this is a security boundary rather
         // than tidiness. `executeFill` is permissionless and `order` is the
@@ -321,24 +326,26 @@ contract AggregatorFillSolver {
         // against the pre-fill snapshot means the caller can only ever take what
         // its own fill produced.
         address to = plan.profitRecipient == address(0) ? msg.sender : plan.profitRecipient;
-        _splitSurplus(route, order.maker, plan, to);
-        _sweepDelta(route.tokenIn, route.inBefore, to);
+        _splitSurplus(route.tokenOut, route.outBefore, order.maker, plan, to);
+        _splitSurplus(route.tokenIn, route.inBefore, order.maker, plan, to);
     }
 
-    /// @dev Split this fill's INCREASE in `tokenOut` — the spread — per the
-    ///      {SurplusPolicy} and the plan's originator share. Silent when nothing
-    ///      was left over, which is the normal case for a route quoted at the
-    ///      maker's price. Shares floor; the filler takes the rounding dust
-    ///      along with its remainder, so nothing strands here.
+    /// @dev Split this fill's INCREASE in `token` — the spread, in whichever
+    ///      denomination it landed — per the {SurplusPolicy} and the plan's
+    ///      originator share. Silent when nothing was left over, which is the
+    ///      normal case for a route quoted at the maker's price. Shares floor;
+    ///      the filler takes the rounding dust along with its remainder, so
+    ///      nothing strands here.
     ///
     ///      `plan.originatorPpm` was bounded in {_plan}, BEFORE the fill, so a
     ///      mis-set share fails the round rather than reverting after the maker
     ///      has already been paid.
-    function _splitSurplus(FillRoute memory route, address maker, RoutePlan calldata plan, address filler) private {
-        address token = route.tokenOut;
+    function _splitSurplus(address token, uint256 before, address maker, RoutePlan calldata plan, address filler)
+        private
+    {
         uint256 bal = SafeTransferLib.balanceOf(token, address(this));
-        if (bal <= route.outBefore) return;
-        uint256 surplus = bal - route.outBefore;
+        if (bal <= before) return;
+        uint256 surplus = bal - before;
 
         uint256 toMaker = (surplus * MAKER_SURPLUS_PPM) / PPM;
         uint256 toProtocol = (surplus * PROTOCOL_SURPLUS_PPM) / PPM;
@@ -352,15 +359,6 @@ contract AggregatorFillSolver {
         if (toOriginator != 0) SafeTransferLib.safeTransfer(token, plan.originator, toOriginator);
         if (toFiller != 0) SafeTransferLib.safeTransfer(token, filler, toFiller);
         emit SurplusSplit(token, maker, toMaker, toProtocol, toOriginator, toFiller);
-    }
-
-    /// @dev Move this fill's INCREASE in `token` to `to`. Silent when the balance
-    ///      did not grow — a fill that left no surplus is the normal case, not an
-    ///      error, and a balance that shrank (Settlement pulled the delivery out
-    ///      of it) is the other normal case.
-    function _sweepDelta(address token, uint256 before, address to) private {
-        uint256 bal = SafeTransferLib.balanceOf(token, address(this));
-        if (bal > before) SafeTransferLib.safeTransfer(token, to, bal - before);
     }
 
     /// @dev Resolve the route against the order, in its OWN frame: the two decoded

@@ -111,6 +111,23 @@ abstract contract BridgeTestBase is MockSettlementBase {
         );
     }
 
+    /// @dev The escrow row the base fixtures land in: `(hash, beneficiary, tA)`.
+    function _row(bytes32 orderHash) internal view returns (bytes32) {
+        return inbox.commitKey(orderHash, beneficiary, address(tA));
+    }
+
+    function _credited(bytes32 orderHash) internal view returns (uint256 credited) {
+        (,, credited,,,,,) = inbox.commits(_row(orderHash));
+    }
+
+    function _settle(bytes32 orderHash) internal returns (uint256) {
+        return inbox.settle(orderHash, beneficiary, address(tA));
+    }
+
+    function _missing(bytes32 orderHash, uint256 anchor) internal view returns (uint256) {
+        return inbox.missingFunding(orderHash, beneficiary, address(tA), anchor);
+    }
+
     /// @dev Deliver `amount` of the bridged token to the inbox with `message`,
     ///      exactly as an Across relayer would.
     function _acrossDeliver(uint256 amount, bytes memory message) internal {

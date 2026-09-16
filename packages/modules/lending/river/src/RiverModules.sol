@@ -142,6 +142,8 @@ contract RiverRepayModule is IMakerModule {
     ///      debt, so zeroing it reverts inside the venue; a full close is
     ///      `closeTrove`, which this module deliberately does not wire.
     error FullCloseNotSupported(uint256 entireDebt);
+    /// @dev The maker-named debt token is not the TroveManager's.
+    error DebtTokenMismatch(address named, address actual);
     IPermit3 public immutable permit3;
     address public immutable settlement;
 
@@ -162,6 +164,20 @@ contract RiverRepayModule is IMakerModule {
 
         (address xapp, address tm, address debtToken, address upper, address lower) =
             abi.decode(data, (address, address, address, address, address));
+        // THE VENUE BURNS, IT DOES NOT PULL. The deployed diamond retires debt by
+        // burning satUSD straight from `msg.sender` (this module) with NO allowance
+        // (fork-verified 2026-09-12: `repayDebt` succeeds with zero approval to the
+        // xapp) — the scoped approve below is inert, so it never tied the token
+        // measured here to the token burned. A maker naming a worthless `debtToken`
+        // had it pulled/delivered and swept straight back while the venue retired
+        // their debt out of whatever REAL satUSD sat on this shared singleton.
+        // Residue-bounded, but the class the rest of the tree closes with floors:
+        // pin the named token to the TroveManager's own before measuring anything.
+        // (2026-09-12 audit, finding 6; the earlier "same by construction" note
+        // was wrong about the mechanism.)
+        if (debtToken != IRiverTroveManager(tm).debtToken()) {
+            revert DebtTokenMismatch(debtToken, IRiverTroveManager(tm).debtToken());
+        }
 
         (uint256 debt,,,) = IRiverTroveManager(tm).getEntireDebtAndColl(onBehalfOf);
         // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would pay

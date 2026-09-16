@@ -323,6 +323,18 @@ export class FillIndex {
     }
   }
 
+  /**
+   * Difference `filled(hash)` AT THE EVENT'S BLOCK against the cumulative known
+   * before it. Reading at HEAD (the old form) was wrong in three ways the
+   * bounty-corpus screen listed (F29 P5): two fills of one order in the same block
+   * made the first row carry both amounts and the second zero; a fill followed by
+   * `cancelOrder`/`revokeOrderApproval` read the `2^256-1` sentinel as an amount;
+   * and a fill-once order (progress recorded in the nonce, `filled` stays 0)
+   * read as a real zero. Now: the read is pinned to `log.blockNumber` (so two
+   * same-block fills share one cumulative and the amount is attributed to the
+   * LAST row of that block, the others `null`), the sentinel and a zero cumulative
+   * are reported as `null`, never as an amount.
+   */
   private async resolveAmount(record: FillRecord): Promise<void> {
     try {
       const total = (await this.opts.client.readContract({
@@ -330,10 +342,21 @@ export class FillIndex {
         abi: SETTLEMENT_ABI,
         functionName: "filled",
         args: [record.orderHash],
+        ...(record.blockNumber !== 0n ? { blockNumber: record.blockNumber } : {}),
       })) as bigint;
+      const CANCELLED = (1n << 256n) - 1n;
+      if (total === CANCELLED || total === 0n) {
+        // Cancelled after (or in) this block, or a fill-once order: the counter
+        // does not carry this fill's size.
+        record.cumulative = null;
+        record.amount = null;
+        return;
+      }
       const previous = this.cumulative.get(record.orderHash);
       record.cumulative = total;
-      record.amount = previous === undefined ? null : total - previous;
+      // Same cumulative as the last row ⇒ a same-block sibling already carried
+      // the delta (or nothing moved); report `null`, never a phantom zero.
+      record.amount = previous === undefined || total === previous ? null : total - previous;
       this.cumulative.set(record.orderHash, total);
     } catch (err) {
       this.opts.onError?.(err);

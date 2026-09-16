@@ -97,6 +97,7 @@ contract VenusDepositModule is IMakerModule {
 // `data = abi.encode(vToken, underlying[, DustHandler.DustAction])` — trailing
 // action optional; absent ⇒ SweepToUser.
 //
+//   — base = 64; DustAction@64.
 contract VenusRepayModule is IMakerModule {
     using SafeTransferLib for address;
 
@@ -229,6 +230,7 @@ contract VenusRepayModule is IMakerModule {
 //       → Full:  `redeemBehalf(user, balanceOf)` to this module, forward the
 //         signed `amount`, sweep the underlying excess back to the user.
 //
+//     Withdraw: BalanceMode@96; total@128 (MANDATORY under `Full`).
 contract VenusTakerModule is ITakerModule {
     using SafeTransferLib for address;
 
@@ -287,6 +289,13 @@ contract VenusTakerModule is ITakerModule {
                 uint256 err = IVToken(vToken).redeemBehalf(onBehalfOf, vBal);
                 if (err != 0) revert VenusError(err);
                 uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+                // The lower bound the venue used to enforce (I-8). Before the split rewrite
+                // the venue call was sized at `amount`, so a short position reverted inside
+                // it; now nothing does, and {Core._payInputsToSolver} would bill the
+                // shortfall to the MAKER'S WALLET. Safe here and only here: `Full` is
+                // full-fill, so `amount` is the signed TOTAL, never a pro-rated slice.
+                // (2026-09-12 audit: the sibling the 2026-09-10 restoration missed.)
+                FullFillGuard.requireDelivered(received, amount);
                 // Deliver the measured proceeds, capped at the signed amount; excess to the
                 // maker below. Never exceeds `received`, so an under-delivering vToken
                 // cannot be topped up from a stray module balance.

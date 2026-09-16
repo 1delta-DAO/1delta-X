@@ -90,8 +90,22 @@ contract ExactlyDepositModule is IMakerModule {
 // recycled). Either way disposal is locked to `onBehalfOf` / the market.
 //
 // `nonReentrant` guards weird-token transfer hooks.
-// `data = abi.encode(market, asset, maturity, maxAssets[, DustAction[, deadline, v, r, s]])`
-//   — base = 128; DustAction@128; permit@160.
+// Byte map — BRANCH-SCOPED TAIL, read the maturity word first:
+//   floating (`maturity == 0`):
+//     `data = abi.encode(market, asset, 0, maxAssets[, DustAction[, deadline, v, r, s]])`
+//     — base = 128; DustAction@128; permit@160.
+//   fixed (`maturity != 0`):
+//     `data = abi.encode(market, asset, maturity, maxAssets, DustAction, totalAmount[, deadline, v, r, s])`
+//     — base = 128; DustAction@128; totalAmount@160 (MANDATORY: the item's FULL
+//       maker-signed amount, which `_scaledBound` divides by); permit@192.
+//
+//   ⚠ The earlier header wrote `permit@160` for BOTH branches while the fixed
+//   branch had read `totalAmount@160` since F26. An encoder following it handed a
+//   permit `deadline` (~1.7e9) to `ProratedBound.scale` as the total, so every
+//   18-decimal slice presented the WHOLE `maxAssets` ceiling — the slice-dilution
+//   class the scaler exists to close (F29 finding 2, PoC'd). `check-module-shapes.py`
+//   rule 9b now holds every read offset to this header, and {ProratedBound.scale}
+//   refuses a total smaller than the slice.
 //
 contract ExactlyRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -168,9 +182,8 @@ contract ExactlyRepayModule is IMakerModule {
             // reverts on health with nothing to point at. The over-read direction
             // was never a loss (the Market caps at the borrower's own shares and the
             // surplus is swept), but the module's idea of "the debt" was wrong.
-            uint256 debt = IExactlyMarket(market).previewRefund(
-                IExactlyMarket(market).floatingBorrowShares(onBehalfOf)
-            );
+            (,, uint256 floatingShares) = IExactlyMarket(market).accounts(onBehalfOf);
+            uint256 debt = IExactlyMarket(market).previewRefund(floatingShares);
             uint256 toRepay = amount < debt ? amount : debt;
             uint256 toPull = recycle ? amount : toRepay;
             if (toPull > 0) permit3.transferFrom(onBehalfOf, address(this), asset, uint160(toPull));

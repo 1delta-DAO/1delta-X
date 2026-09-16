@@ -94,11 +94,18 @@ contract SiloPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
-        PreFundGuard.requireDelivered(data, asset, forAmount);
+        // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
+        // and throws the number away; a venue that consumes LESS than instructed then
+        // leaves the remainder resident on a SHARED SINGLETON — the residue that every
+        // pre-fund drain so far has monetised. Measured against the pre-delivery floor,
+        // never sized from the venue's return value (F27/C-3). Aligned with the aave-v3
+        // sibling and every `_repay` half (F28, 2026-09-12).
+        uint256 floor = PreFundGuard.floorOf(data, asset, forAmount);
         SafeTransferLib.forceApprove(asset, silo, forAmount);
         // The 2-arg overload — standard Collateral, same leg {SiloDepositModule} drives.
         ISilo(silo).deposit(forAmount, onBehalfOf);
         SafeTransferLib.forceApprove(asset, silo, 0);
+        PreFundGuard.sweepSurplus(asset, onBehalfOf, floor);
         } else if (op == uint256(Op.Repay)) {
         // Its own frame, matching the reference pre-fund modules: keeps this function
         // compilable on an optimizer-less profile should one ever cover it.

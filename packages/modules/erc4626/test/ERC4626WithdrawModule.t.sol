@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {ERC4626WithdrawModule} from "../src/ERC4626WithdrawModule.sol";
 import {ITimelockERC4626} from "../src/interfaces/ITimelockERC4626.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
 // ── Minimal mock contracts ────────────────────────────────────────────────────
 
@@ -190,7 +191,7 @@ contract ERC4626WithdrawModuleTest is Test {
 
         vm.warp(block.timestamp + LOCK);
 
-        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0), SHARES);
         vm.prank(address(permit3));
         module.takeOnBehalf(user, SHARES, receiver, claimData);
 
@@ -207,7 +208,7 @@ contract ERC4626WithdrawModuleTest is Test {
 
         vm.warp(block.timestamp + LOCK - 1);
 
-        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0), SHARES);
         vm.prank(address(permit3));
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -223,7 +224,7 @@ contract ERC4626WithdrawModuleTest is Test {
         uint256 requestId = _doRequest();
         vm.warp(block.timestamp + LOCK);
 
-        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0), SHARES);
         vm.expectRevert(ERC4626WithdrawModule.OnlyPermit3.selector);
         module.takeOnBehalf(user, SHARES, receiver, claimData);
     }
@@ -232,14 +233,14 @@ contract ERC4626WithdrawModuleTest is Test {
         uint256 requestId = _doRequest();
         vm.warp(block.timestamp + LOCK);
 
-        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0), SHARES);
         vm.prank(address(permit3));
         vm.expectRevert(ERC4626WithdrawModule.NotBeneficiary.selector);
         module.takeOnBehalf(address(0xDEAD), SHARES, receiver, claimData);
     }
 
     function test_claimRevertsIfNoPendingWithdrawal() public {
-        bytes memory claimData = abi.encode(address(vault), uint256(99), uint256(0));
+        bytes memory claimData = abi.encode(address(vault), uint256(99), uint256(0), SHARES);
         vm.prank(address(permit3));
         vm.expectRevert(ERC4626WithdrawModule.NoPendingWithdrawal.selector);
         module.takeOnBehalf(user, SHARES, receiver, claimData);
@@ -251,7 +252,7 @@ contract ERC4626WithdrawModuleTest is Test {
 
         // The slippage floor now lives in `data` (maker-signed); `amount` is the
         // Permit3 cap, not the floor.
-        bytes memory claimData = abi.encode(address(vault), requestId, SHARES + 1);
+        bytes memory claimData = abi.encode(address(vault), requestId, SHARES + 1, SHARES);
         vm.prank(address(permit3));
         vm.expectRevert(abi.encodeWithSelector(ERC4626WithdrawModule.InsufficientAssets.selector, SHARES, SHARES + 1));
         module.takeOnBehalf(user, SHARES, receiver, claimData);
@@ -270,7 +271,7 @@ contract ERC4626WithdrawModuleTest is Test {
         uint256 cap = SHARES / 4;
         uint256 userBefore = underlyingAsset.balanceOf(user);
 
-        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0), cap);
         vm.prank(address(permit3));
         module.takeOnBehalf(user, cap, receiver, claimData);
 
@@ -293,7 +294,7 @@ contract ERC4626WithdrawModuleTest is Test {
         // would have handed over.
         shareToken.mint(address(module), 5_000e18);
 
-        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0), SHARES);
         vm.prank(address(permit3));
         module.takeOnBehalf(user, SHARES, receiver, claimData);
 
@@ -328,5 +329,33 @@ contract ERC4626WithdrawModuleTest is Test {
         // The first beneficiary's entry survives intact.
         (address beneficiary,) = module.pendingWithdrawals(address(vault), requestId);
         assertEq(beneficiary, user, "original beneficiary preserved");
+    }
+
+    /// @dev F28 (2026-09-12): the claim is indivisible, so a pro-rated slice — the
+    ///      1-wei fill that used to claim the whole request, forward 1 wei and brick
+    ///      the order — is refused before anything is touched.
+    function test_claim_partialSliceReverts_requestSurvives() public {
+        uint256 requestId = _doRequest();
+        vm.warp(block.timestamp + LOCK);
+
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0), SHARES);
+        vm.prank(address(permit3));
+        vm.expectRevert(abi.encodeWithSelector(FullFillGuard.PartialFillUnsupported.selector, 1, SHARES));
+        module.takeOnBehalf(user, 1, receiver, claimData);
+
+        (address beneficiary,) = module.pendingWithdrawals(address(vault), requestId);
+        assertEq(beneficiary, user, "request untouched");
+    }
+
+    /// @dev A three-word blob (the pre-F28 shape) fails closed rather than silently
+    ///      running unguarded.
+    function test_claim_legacyThreeWordData_reverts() public {
+        uint256 requestId = _doRequest();
+        vm.warp(block.timestamp + LOCK);
+
+        bytes memory claimData = abi.encode(address(vault), requestId, uint256(0));
+        vm.prank(address(permit3));
+        vm.expectRevert(abi.encodeWithSelector(FullFillGuard.PartialFillUnsupported.selector, SHARES, 0));
+        module.takeOnBehalf(user, SHARES, receiver, claimData);
     }
 }

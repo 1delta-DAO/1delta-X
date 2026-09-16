@@ -135,6 +135,16 @@ ceiling and the clamp never raises it, so a maker balance that grew past what th
 solver quoted arrives as a partial fill and is refused. The solver is never
 silently made to buy more than it priced.
 
+## On the netted path: name `type(uint256).max`
+
+`matchSettle` prices a plan on exact `fillAmounts[i]` and has no clamp — so a
+proportional anchor in a plan was reverted, plan and all, by any stranger's 1-wei
+transfer to the maker between plan construction and inclusion (F29 finding 5).
+`Batch._openGated` now honours the same sentinel `fillUpTo` does: `fillAmounts[i]
+= type(uint256).max` means "the whole remaining anchor", resolved at the gate.
+Every other amount is still taken literally. The ceiling semantics above are
+unchanged — the sentinel is the one way to say "whatever it is".
+
 ## Consistency: one balance read
 
 The anchor is resolved **once**, in `OrderGates.anchorTotal` (which is `view`

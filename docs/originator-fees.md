@@ -210,10 +210,16 @@ to every fill routed through that instance whoever calls it:
 | `RoutePlan.originatorPpm` | the caller, per fill | `RoutePlan.originator` — carved **out of the filler's remainder** |
 | remainder | — | `RoutePlan.profitRecipient` (`address(0)` = caller), rounding dust included |
 
-`makerPpm + protocolPpm + originatorPpm ≤ 1e6`, checked before any token moves;
-input-side residue (an under-consumed route) is a quoting artefact, not
-surplus, and goes to the filler as before. One `SurplusSplit` event per fill
-carries the four amounts.
+`makerPpm + protocolPpm + originatorPpm ≤ 1e6`, checked before any token moves.
+**Both sides are split.** Input-side residue (what the route did not consume)
+used to go to the filler alone as "a quoting artefact" — which made the policy
+optional: the caller supplies the route, so an exact-output route
+(`amountOut = the priced amount`, `amountInMaximum = the whole input`) moved
+the entire spread into unspent input and the maker's and protocol's shares read
+zero (F28, 2026-09-12). The residue is now split by the same shares, in `tokenIn`
+units, unpriced — it is maker input that was never needed, so no oracle is
+required to hand the maker's share back. One `SurplusSplit` event per token per
+fill carries the four amounts.
 
 This is the conversion analogue of §1–§3: relayer revenue = the band (or the
 rising input leg on a deposit), originator revenue = the fee leg (or fee item),

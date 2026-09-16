@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
-import {ExactlyDepositModule, ExactlyTakerModule} from "../../src/ExactlyModules.sol";
+import {ExactlyDepositModule, ExactlyRepayModule, ExactlyTakerModule} from "../../src/ExactlyModules.sol";
 import {IExactlyMarket, IExactlyAuditor} from "../../src/interfaces/IExactly.sol";
 
 /// @title ExactlyLeverageTest
@@ -257,5 +257,32 @@ contract ExactlyLeverageTest is Test {
 
         assertEq(IERC20(WETH).balanceOf(solver), wethOut, "WETH routed to the receiver");
         assertApproxEqAbs(IExactlyMarket(MARKET_WETH).previewDebt(maker), wethOut, 2, "WETH debt on the maker");
+    }
+
+    /// F28 (2026-09-12): the floating pull repay against the LIVE Market. The F26
+    /// fix pointed the clamp at a `floatingBorrowShares(address)` getter the Market
+    /// does not have (the shares are the third field of `accounts(address)`), so
+    /// this branch reverted on-chain and no fork test noticed — the fork suite
+    /// covered borrows and the pre-fund twin only.
+    function test_repay_make_floating_clampsAtLiveDebt() public {
+        _makeDeposit(DEPOSIT);
+        _enterMarket();
+        _take(_borrowData(0, 0), BORROW, solver);
+
+        ExactlyRepayModule repayModule = new ExactlyRepayModule(address(permit3), settlement);
+        uint256 budget = BORROW + 100e6; // over-sized: the clamp must cap at the debt
+        deal(USDC, maker, budget);
+        vm.prank(maker);
+        permit3.approveToken(address(repayModule), USDC, type(uint160).max, 0);
+
+        bytes memory data = abi.encode(MARKET_USDC, USDC, uint256(0), uint256(0));
+        vm.prank(settlement);
+        repayModule.makeOnBehalf(maker, budget, data);
+
+        assertEq(IExactlyMarket(MARKET_USDC).previewDebt(maker), 0, "floating debt retired");
+        // Only the live debt (±1 wei of share rounding) left the maker's wallet.
+        assertApproxEqAbs(IERC20(USDC).balanceOf(maker), budget - BORROW, 2, "unspent budget never pulled");
+        assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "repay module drained");
+        assertEq(IERC20(USDC).allowance(address(repayModule), MARKET_USDC), 0, "venue approval cleared");
     }
 }

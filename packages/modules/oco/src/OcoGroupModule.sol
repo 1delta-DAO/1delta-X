@@ -3,7 +3,8 @@ pragma solidity ^0.8.28;
 
 import {ISettlementModule} from "@core/interfaces/ISettlementModule.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
-import {Order} from "@core/settlement/Settlement.sol";
+import {Order, ItemOp} from "@core/settlement/Settlement.sol";
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 
 /// @title OcoGroupModule
 /// @notice One-cancels-other (OCO) and N-way brackets: a maker-chosen GROUP of
@@ -71,13 +72,26 @@ import {Order} from "@core/settlement/Settlement.sol";
 ///  single-signature model and is not attempted here).
 ///
 ///  ⚠ The nonce is read from the ITEM DATA, not from the order — `settle`
-///  receives only `(maker, filler, amount, data)`, with no order context. That is
-///  safe because `item.data` is inside the signed order hash: a solver cannot
-///  rewrite it, and a maker that signs a nonce other than its own can only
-///  retire its own order early. {OcoGroupModule.validate} is the half that reads
-///  the REAL `order.nonce`, so the two only agree when the maker encoded
-///  honestly — a mismatch simply makes the order unfillable after its first
-///  fill, never exploitable.
+///  receives only `(maker, filler, amount, data)`, with no order context. It is
+///  inside the signed order hash, so a solver cannot rewrite it. But the item's
+///  copy and the REAL `order.nonce` are TWO copies of one value, and the earlier
+///  version of this note claimed a mismatch "simply makes the order unfillable
+///  after its first fill, never exploitable". That was wrong: a mismatched item
+///  claims the group for the nonce IT names, which keeps the SIBLING carrying
+///  that nonce alive. The live shape is cancel-and-replace — the SDK's
+///  `patchOrder` used to copy `items` verbatim, so an amended take-profit still
+///  named its predecessor's nonce; a dust fill of the replacement then claimed
+///  the group for the soft-cancelled predecessor, which a filler holding it
+///  filled in full at the stale price while the replacement and the stop-loss
+///  both died (docs/reference-bounties.md B6; F29 finding 3, PoC'd).
+///
+///  {validate} therefore BINDS the two copies: it walks `order.items` for the
+///  SETTLE record on this module and passes only if that record encodes
+///  `(groupId, order.nonce)`. A leg with no such item, a MAKE-op claim (which
+///  would skip on a zero slice), a different group or a different nonce fails
+///  closed — the fill reverts `ValidationFailed` before any item runs. The old
+///  "validator-only leg reads the gate but never claims it" shape is therefore
+///  no longer fillable at all; every leg carries both halves or none.
 ///
 ///  Cheaper alternative, no contract at all
 ///  ───────────────────────────────────────
@@ -171,6 +185,9 @@ contract OcoGroupModule is ISettlementModule, IOrderValidator {
         returns (bool)
     {
         uint256 groupId = abi.decode(data, (uint256));
+        // THE BINDING. The claim item's `(groupId, nonce)` must be THIS order's —
+        // see the contract note on why two copies of the nonce were exploitable.
+        if (!_claimItemMatches(order, groupId)) return false;
         uint256 current = claim[order.maker][groupId];
         if (current == 0) return true; // nobody went yet
         unchecked {
@@ -179,6 +196,28 @@ contract OcoGroupModule is ISettlementModule, IOrderValidator {
             // because {makeOnBehalf} refuses to store it.
             return current == order.nonce + 1;
         }
+    }
+
+    /// @dev Does `order.items` carry a SETTLE record on this module encoding
+    ///      `(groupId, order.nonce)`? Walks the packed blob the same way the settler
+    ///      does ({PackedArrays.validateRecords} then sequential {itemAt}); a
+    ///      malformed blob reverts here exactly as it would in the fill.
+    function _claimItemMatches(Order calldata order, uint256 groupId) private view returns (bool) {
+        bytes calldata items = order.items;
+        uint256 n = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
+        uint256 cursor = PackedArrays.recordsStart();
+        for (uint256 i; i < n;) {
+            (uint256 op, address module,,, bytes calldata d, uint256 next) = PackedArrays.itemAt(items, cursor);
+            if (module == address(this) && op == uint256(ItemOp.SETTLE) && d.length == 64) {
+                (uint256 g, uint256 nonce) = abi.decode(d, (uint256, uint256));
+                if (g == groupId && nonce == order.nonce) return true;
+            }
+            cursor = next;
+            unchecked {
+                ++i;
+            }
+        }
+        return false;
     }
 
     // ──────────────────── views ────────────────────

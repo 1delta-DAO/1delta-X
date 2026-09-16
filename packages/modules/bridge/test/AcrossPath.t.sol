@@ -70,9 +70,9 @@ contract AcrossPathTest is BridgeTestBase {
 
         // Relayer delivers on the destination — tokens and message together.
         spokePool.relay(0);
-        assertEq(inbox.missingFunding(dstHash, DELIVERED), 0, "fully funded");
+        assertEq(_missing(dstHash, DELIVERED), 0, "fully funded");
 
-        inbox.activate(dst);
+        inbox.activate(dst, beneficiary);
         _fundSolverOut(DST_OUT);
         vm.prank(solver);
         settlement.fill(dst, "", DELIVERED);
@@ -93,10 +93,10 @@ contract AcrossPathTest is BridgeTestBase {
         spokePool.relay(0);
 
         vm.expectRevert(BridgedOrderInbox.Underfunded.selector);
-        inbox.activate(dst);
+        inbox.activate(dst, beneficiary);
 
         vm.warp(block.timestamp + COMMITMENT_EXPIRY_OFFSET + 1);
-        inbox.settle(dstHash);
+        _settle(dstHash);
         assertEq(tA.balanceOf(beneficiary), DELIVERED, "user made whole on the destination");
     }
 
@@ -175,8 +175,8 @@ contract AcrossPathTest is BridgeTestBase {
         spokePool.relay(0);
         spokePool.relay(1);
 
-        assertEq(inbox.missingFunding(dstHash, DELIVERED), 0, "two slices covered the floor");
-        inbox.activate(dst);
+        assertEq(_missing(dstHash, DELIVERED), 0, "two slices covered the floor");
+        inbox.activate(dst, beneficiary);
 
         _fundSolverOut(DST_OUT);
         vm.prank(solver);

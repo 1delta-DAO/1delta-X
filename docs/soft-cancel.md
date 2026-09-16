@@ -135,6 +135,14 @@ nonce siblings alone. Or sign the pair as an [OCO group](oco.md), and the
 predecessor is retired **on-chain** by the replacement's first fill, with no
 transaction and no trust in any book.
 
+⚠ An OCO leg's claim item names the order's nonce a second time, and the
+contract binds the two (`OcoGroupModule.validate` fails unless the item encodes
+`order.nonce`). `patchOrder` re-homes the claim item to the new nonce for you;
+if you re-nonce an OCO leg by hand, call `renonceOcoItems`. Before that binding
+existed, a replacement that copied the predecessor's item claimed the group FOR
+the predecessor — the soft-cancelled order then filled in full while the
+replacement and its sibling died (F29 finding 3).
+
 Two signature prompts, not one. Collapsing them would mean asking the maker to
 authorize an order and a retraction under a single opaque digest.
 

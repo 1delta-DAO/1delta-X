@@ -42,6 +42,7 @@ import {PermitHelper} from "@lib/PermitHelper.sol";
 //   transferAmount — tokens reaching `recipient`; must be ≤ `amount`
 //   deadline/v/r/s — optional 128-byte EIP-2612 permit block (absent → standing ERC-20 allowance required)
 //
+// Byte map: token@0, recipient@32, transferAmount@64 (base = 96); permit tail @96.
 contract ERC20PermitTransferModule is ITakerModule {
     IPermit3 public immutable permit3;
 

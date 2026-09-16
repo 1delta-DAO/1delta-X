@@ -67,6 +67,8 @@ import {ITellerPool, ITellerV2} from "./interfaces/ITeller.sol";
 ///         inside the maker's ORDER signature: an item signed for one op cannot be
 ///         executed as another. Each op keeps its own decode, so the
 ///         per-op `data` layouts are unchanged apart from the descriptor bits.
+// Byte maps — Deposit: forDesc@0, pool@32, asset@64 (base = 96).
+//             Repay:   forDesc@0, pool@32, asset@64, bidId@96, full@128 (base = 160).
 contract TellerPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     enum Op {
         PoolDeposit,
@@ -97,10 +99,17 @@ contract TellerPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource 
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
-        PreFundGuard.requireDelivered(data, asset, forAmount);
+        // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
+        // and throws the number away; a venue that consumes LESS than instructed then
+        // leaves the remainder resident on a SHARED SINGLETON — the residue that every
+        // pre-fund drain so far has monetised. Measured against the pre-delivery floor,
+        // never sized from the venue's return value (F27/C-3). Aligned with the aave-v3
+        // sibling and every `_repay` half (F28, 2026-09-12).
+        uint256 floor = PreFundGuard.floorOf(data, asset, forAmount);
         SafeTransferLib.forceApprove(asset, pool, forAmount);
         ITellerPool(pool).deposit(forAmount, onBehalfOf);
         SafeTransferLib.forceApprove(asset, pool, 0);
+        PreFundGuard.sweepSurplus(asset, onBehalfOf, floor);
         } else if (op == uint256(Op.Repay)) {
         // Its own frame: the fork profiles compile without the optimizer, where the
         // five-field decode plus the repay-and-sweep logic overflows this stack.

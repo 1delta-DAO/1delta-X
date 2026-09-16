@@ -20,12 +20,31 @@ export function cancelTopic(chainId: number, settlement: Address): string {
   return `/1delta/1/cancels-${chainId}-${settlement.toLowerCase()}/proto`;
 }
 
+/**
+ * Cancel-and-replace topic. Its own topic, not a second frame kind on the order
+ * topic: a `Book` subscribes the order topic to the ANNOUNCE decoder only, so a
+ * replace published there was decoded as a garbage announce and dropped by every
+ * transport-fed node — only the REST `/replaces` route ever reached
+ * `ingestReplace` (F29 P6).
+ */
+export function replaceTopic(chainId: number, settlement: Address): string {
+  return `/1delta/1/replaces-${chainId}-${settlement.toLowerCase()}/proto`;
+}
+
 /** RFQ / exclusive-quote topic (encrypted-to-filler flow lives here). */
 export function rfqTopic(chainId: number, settlement: Address): string {
   return `/1delta/1/rfq-${chainId}-${settlement.toLowerCase()}/proto`;
 }
 
-/** The two topics a `Book` subscribes to for a given deployment. */
-export function topicsFor(cfg: Pick<OrderbookConfig, "chainId" | "settlement">): { orders: string; cancels: string } {
-  return { orders: orderTopic(cfg.chainId, cfg.settlement), cancels: cancelTopic(cfg.chainId, cfg.settlement) };
+/** The three topics a `Book` subscribes to for a given deployment. */
+export function topicsFor(cfg: Pick<OrderbookConfig, "chainId" | "settlement">): {
+  orders: string;
+  cancels: string;
+  replaces: string;
+} {
+  return {
+    orders: orderTopic(cfg.chainId, cfg.settlement),
+    cancels: cancelTopic(cfg.chainId, cfg.settlement),
+    replaces: replaceTopic(cfg.chainId, cfg.settlement),
+  };
 }

@@ -24,7 +24,7 @@ import {
   type OrderSummary,
   type SortKey,
 } from "@1delta-x/orderbook";
-import { encodeFillUpTo, hashOrderStruct, OrderSide, SETTLEMENT_LENS_ABI } from "@1delta-x/sdk";
+import { encodeFillUpTo, hashOrderStruct, packOrder, OrderSide, SETTLEMENT_LENS_ABI } from "@1delta-x/sdk";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import { createPublicClient, http, isAddress, type Address, type Hex, type PublicClient } from "viem";
@@ -313,10 +313,21 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
       return reply.code(verdict.capacity ? 503 : 422).send({ error: verdict.reason ?? "rejected" });
     }
 
-    if (!gateMaker(announce.order.maker, reply, ROUTE_COST.write)) return reply;
+    // THE MAKER BUCKET IS CHARGED TO A PROVEN MAKER, NEVER A CLAIMED ONE. Charging
+    // before verification let any client name a victim in `order.maker`, fail
+    // verification, and still drain that maker's write budget — one IP could lock
+    // one maker out of posting and cancelling for as long as it cared to (F29 P3).
+    // Layer 1 recovers an EOA signature locally, so for those the charge lands
+    // right after it; a deferred signature (contract wallet, delegate) is only
+    // proven by the lens, so those are charged on success. Unverified spam costs
+    // only the sender's IP budget either way.
+    const l1 = await verifier.verifyLayer1(announce);
+    if (!l1.ok) return reply.code(422).send({ error: l1.reason ?? "rejected", orderHash: l1.orderHash });
+    if (!l1.deferSig && !gateMaker(announce.order.maker, reply, ROUTE_COST.write)) return reply;
 
     const res = await verifier.verifyAnnounce(announce);
     if (!res.ok) return reply.code(422).send({ error: res.reason ?? "rejected", orderHash: res.orderHash });
+    if (l1.deferSig && !gateMaker(announce.order.maker, reply, ROUTE_COST.write)) return reply;
     await transport.publish(ordersTopic, body!); // Book ingests (cache hit) → onAdd → broadcast
     return reply.code(202).send({ orderHash: res.orderHash });
   });
@@ -414,10 +425,11 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     } catch {
       return reply.code(400).send({ error: "undecodable SoftCancel" });
     }
-    if (!gateMaker(cancel.cancel.maker, reply, ROUTE_COST.cancel)) return reply;
-
     const verdict = await cancelVerifier.verify(cancel);
     if (!verdict.ok) return reply.code(403).send({ error: verdict.reason ?? "rejected" });
+    // Charged to the PROVEN signer's maker (see /orders): the cancel verifier has
+    // just established who signed.
+    if (!gateMaker(cancel.cancel.maker, reply, ROUTE_COST.cancel)) return reply;
 
     // Which of the named hashes this maker actually owns here. A verified
     // signature proves who signed, never what they may retract — the book
@@ -441,17 +453,29 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     } catch {
       return reply.code(400).send({ error: "undecodable OrderReplace" });
     }
-    if (!gateMaker(replace.announce.order.maker, reply, ROUTE_COST.write)) return reply;
-
+    // `known` is EARNED, not assumed: a replacement is exempt from the book-size
+    // and per-maker caps only when it really replaces a live order of the same
+    // maker. Hard-coding it let a maker name a never-seen predecessor and grow the
+    // book without bound, one signature per order (F29 P4).
+    const predecessor = book.get(replace.replaces);
+    const known =
+      predecessor !== undefined &&
+      predecessor.announce.order.maker.toLowerCase() === replace.announce.order.maker.toLowerCase();
     const verdict = checkAdmission(
       replace.announce.order,
-      { size: book.size, makerCount, now: Math.floor(Date.now() / 1000), known: true },
+      { size: book.size, makerCount, now: Math.floor(Date.now() / 1000), known },
       admission,
     );
-    if (!verdict.ok) return reply.code(422).send({ error: verdict.reason ?? "rejected" });
+    if (!verdict.ok) return reply.code(verdict.capacity ? 503 : 422).send({ error: verdict.reason ?? "rejected" });
+
+    // Maker bucket after proof, as on /orders (F29 P3).
+    const l1 = await verifier.verifyLayer1(replace.announce);
+    if (!l1.ok) return reply.code(422).send({ error: l1.reason ?? "rejected", orderHash: l1.orderHash });
+    if (!l1.deferSig && !gateMaker(replace.announce.order.maker, reply, ROUTE_COST.write)) return reply;
 
     const res = await book.ingestReplace(replace);
     if (!res.ok) return reply.code(422).send({ error: res.reason ?? "rejected" });
+    if (l1.deferSig && !gateMaker(replace.announce.order.maker, reply, ROUTE_COST.write)) return reply;
 
     broadcast(encodeStreamMessage({ kind: StreamKind.REPLACE, replace }));
     return reply.code(202).send({ orderHash: res.orderHash, replaces: replace.replaces });
@@ -491,7 +515,9 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
         address: config.lens as Address,
         abi: SETTLEMENT_LENS_ABI,
         functionName: "previewFill",
-        args: [order as never, fillAmount, q.filler as Address, takerData],
+        // The lens takes the WIRE order (packed blobs), never the authoring struct
+        // — see `Verifier.verifyLayer2` (F29 P1).
+        args: [packOrder(order), fillAmount, q.filler as Address, takerData],
       })) as [bigint, readonly bigint[], readonly bigint[]];
     } catch (err) {
       const msg = err instanceof Error ? err.message.split("\n")[0] : "preview reverted";

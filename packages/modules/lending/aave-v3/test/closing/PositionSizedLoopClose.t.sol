@@ -40,6 +40,12 @@ contract PositionSizedLoopCloseTest is AaveModulesBase {
     PositionFillModule internal fillModule;
     NativeUnwrapModule internal unwrapModule;
 
+    /// @dev The unwrap item's pre-fund leg reference: leg 1 (the module-addressed
+    ///      WETH leg), funding token WETH — the SDK's `forLegPreFund(1, WETH)`.
+    function _unwrapDesc() internal view returns (uint256) {
+        return (uint256(5) << 253) | (uint256(uint160(WETH)) << 16) | 1;
+    }
+
     address internal WSTETH;
     address internal aWSTETH;
     address internal wethDebtToken;
@@ -143,9 +149,9 @@ contract PositionSizedLoopCloseTest is AaveModulesBase {
         items[2] = Item({
             op: ItemOp.MAKE,
             module: address(unwrapModule),
-            amount: NATIVE_LEG,
+            amount: 0, //                        sized from the delivery ledger (leg 1)
             recipient: address(0),
-            data: abi.encode(address(0)) //      address(0) = pay the maker
+            data: abi.encode(_unwrapDesc(), address(0)) // pay the maker
         });
 
         LegOut[] memory outs = new LegOut[](2);
@@ -277,9 +283,9 @@ contract PositionSizedLoopCloseTest is AaveModulesBase {
         items[2] = Item({
             op: ItemOp.MAKE,
             module: address(unwrapModule),
-            amount: NATIVE_LEG,
+            amount: 0, // sized from the delivery ledger (leg 1)
             recipient: address(0),
-            data: abi.encode(address(0))
+            data: abi.encode(_unwrapDesc(), address(0))
         });
         LegOut[] memory outs = new LegOut[](2);
         outs[0] = LegOut({token: WETH, start: REPAY_LEG, end: 0, recipient: address(0)});
@@ -373,9 +379,9 @@ contract PositionSizedLoopCloseTest is AaveModulesBase {
         items[2] = Item({
             op: ItemOp.MAKE,
             module: address(unwrapModule),
-            amount: NATIVE_LEG,
+            amount: 0, // sized from the delivery ledger (leg 1)
             recipient: address(0),
-            data: abi.encode(address(0))
+            data: abi.encode(_unwrapDesc(), address(0))
         });
         order.items = PackedEncode.items(items);
         bytes memory sig = _sign(order);

@@ -254,6 +254,35 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   "zero remaining" while missing sites in every class it had swept, and each cause
   becomes a rule the plan is built on.
 
+- **[reference-bounties.md](reference-bounties.md)** — the post-deployment twin of
+  `reference-audits.md`: paid bug-bounty disclosures and live incidents at the
+  comparable intent settlers (1inch Aqua H1 2026, 0x Settler's Immunefi citations,
+  Uniswap, Velora) and at every lending venue we drive (Silo, Venus, Euler, Exactly,
+  Dolomite, Liquity, Morpho, Across, LayerZero). Fourteen classes `B1…B14` that the
+  audit corpus does not have — units, offsets, encoder/interpreter drift, stale
+  approvals, donation-inflated accounting, loosely-keyed ledgers — each with a
+  verdict here. **The registry table is the de-duplication ledger**: which programs
+  publish per-finding detail (few) and which were searched and found closed.
+
+- **[audit-2026-09-14-bounty-screening.md](audit-2026-09-14-bounty-screening.md)** —
+  the bounty classes used as hunting lenses over the whole tree AND, for the first
+  time, the periphery (lens, SDK, orderbook, server). Eight findings (four PoC'd):
+  a market-limit validator whose `scale` truncates to 0, an Exactly byte-map
+  header that disagrees with its reader, the OCO claim nonce unbound on-chain, the
+  F28 inbox fix reopened, the proportional grief on every entry, a Dolomite
+  sibling, a stale permit revoking a live delegate, six lens/settler gate
+  disagreements; plus six orderbook defects — the book cannot admit an order
+  against a real lens. Two registry verdicts corrected.
+
+- **[audit-2026-09-12-full-tree.md](audit-2026-09-12-full-tree.md)** — the
+  twelve-lens read of the WHOLE tree (120 files), briefed on lending modules ×
+  `matchSettle` × the pre-fund seams. The seams held; six findings landed outside
+  them, two PoC'd, all fixed: the bridge inbox's first-credit-wins beneficiary,
+  `NativeUnwrapModule` sized off a signed constant instead of the delivery
+  (**BREAKING** data shape), Dolomite's withdraw-is-a-borrow, five `Full` legs
+  without I-8's bound (now shapes rule 9), a seventh dangling-approval site, and
+  Liquity/River measuring a token the venue does not burn. Ends with the open leads.
+
 - **[audit-2026-09-leads.md](audit-2026-09-leads.md)** — the open **leads** from the
   F25 twelve-lens re-audit (the findings themselves are closed, in
   `reference-audits.md`). A lead is a place where the code depends on something it

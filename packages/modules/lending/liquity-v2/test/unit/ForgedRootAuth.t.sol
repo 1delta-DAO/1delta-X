@@ -66,6 +66,8 @@ contract Registry {
     function set(uint256 i, address t) external { _tm[i] = t; }
     function getTroveManager(uint256 i) external view returns (address) { return _tm[i]; }
     function totalCollaterals() external pure returns (uint256) { return 1; }
+    address public boldToken;
+    function setBold(address b) external { boldToken = b; }
 }
 
 // ── The attacker's forged root ────────────────────────────────────────────────
@@ -110,6 +112,7 @@ contract ForgedRootAuthTest is Test {
         tm.setBO(address(bo));
         registry = new Registry();
         registry.set(BRANCH, address(tm));
+        registry.setBold(address(bold));
         takerModule = new LiquityV2TakerModule(address(permit3), address(registry));
 
         nft.mint(VICTIM_TROVE, victim);

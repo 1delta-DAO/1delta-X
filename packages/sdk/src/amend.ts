@@ -1,6 +1,7 @@
 import type { Hex } from "viem";
 
 import { hashOrderStruct, signOrder, type TypedDataSigner } from "./orders";
+import { renonceOcoItems } from "./oco";
 import { buildSoftCancel, signSoftCancel, type SoftCancel } from "./softcancel";
 import type { Deployment, Order } from "./types";
 
@@ -80,7 +81,13 @@ export type OrderPatch = Partial<Omit<Order, "maker" | "nonce">> & { nonce?: big
  * amends race.
  */
 export function patchOrder(prev: Order, nextNonce: bigint, patch: OrderPatch = {}): Order {
-  return { ...prev, ...patch, maker: prev.maker, nonce: patch.nonce ?? nextNonce };
+  const nonce = patch.nonce ?? nextNonce;
+  // An OCO claim item names the order's nonce a second time; carrying the
+  // predecessor's copy onto the replacement is exactly the cancel-and-replace
+  // shape that revived a soft-cancelled leg (F29 finding 3). Re-home it unless
+  // the patch supplies its own items.
+  const items = patch.items ?? renonceOcoItems(prev.items, prev.nonce, nonce);
+  return { ...prev, ...patch, items, maker: prev.maker, nonce };
 }
 
 /**

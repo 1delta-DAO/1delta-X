@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
+import {Signatures} from "@core/settlement/Signatures.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 
 /// @notice REGRESSION — {OrderState.setOrderSigner}'s NatSpec told makers that a
@@ -102,38 +103,22 @@ contract DelegateRevocationResurrectTest is Test {
         assertEq(settlement.orderSignerExpiry(maker, delegate), farExpiry, "renewal is intended here");
     }
 
-    /// REGRESSION — THE RELAYED TWIN. Every test above drives the DIRECT setter, and
-    /// that is exactly how the gap survived: {OrderState.setOrderSigner} normalises a
-    /// lapsed expiry to `0`, but {Signatures.setOrderSignerWithSig} used to store the
-    /// signed value verbatim. A maker revoking GASLESSLY — the entire audience for
-    /// that entrypoint — therefore cleared the registry without burning the delegate's
-    /// permit word, and any older unrelayed nomination resurrected the delegate.
-    ///
-    /// Same scenario as `test_pastExpiryRevocation_alsoBurnsUnrelayedPermits`, routed
-    /// through the relayed path instead of the direct one.
-    function test_relayedPastExpiryRevocation_alsoBurnsUnrelayedPermits() public {
-        uint256 farExpiry = block.timestamp + 365 days;
+    /// THE RELAYED TWIN, F29. {OrderState.setOrderSigner} normalises a lapsed expiry
+    /// to a revocation; the relayed path used to mirror that — and because the
+    /// RELAYER picks when a permit lands, a nomination relayed after its own
+    /// `expiry` turned into a revocation that burned the delegate's word AND cleared
+    /// a live direct nomination (finding 7). A permit whose `expiry` has passed now
+    /// authorises nothing and is refused. The gasless revocation is spelled
+    /// `expiry == 0` (the SDK's only spelling; see
+    /// `test_relayedZeroRevocation_burnsThePermitWord`).
+    function test_relayedPastExpiryPermit_isRefused() public {
         uint256 deadline = block.timestamp + 30 days;
-
-        // Permit A: a real nomination, signed and handed to a relayer, never landed.
-        uint256 nonceA = _pn(delegate, 7);
-        bytes memory permitA = _signPermit(delegate, farExpiry, nonceA, deadline);
-
-        // Permit B: the maker's GASLESS revocation, spelled as an already-past
-        // timestamp rather than `0`. A different coordinate in the same word.
         uint256 nonceB = _pn(delegate, 8);
         bytes memory permitB = _signPermit(delegate, block.timestamp - 1, nonceB, deadline);
 
         vm.prank(relayer);
+        vm.expectRevert(Signatures.SignerPermitExpired.selector);
         settlement.setOrderSignerWithSig(maker, delegate, block.timestamp - 1, nonceB, deadline, permitB);
-        assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "lapsed expiry reads as revoked");
-
-        // Permit A must now be dead: the revocation burned the delegate's whole word.
-        vm.prank(relayer);
-        vm.expectRevert(OrderState.NonceCancelled.selector);
-        settlement.setOrderSignerWithSig(maker, delegate, farExpiry, nonceA, deadline, permitA);
-
-        assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "delegate was resurrected");
     }
 
     /// The relayed `expiry == 0` spelling, for symmetry with
@@ -157,45 +142,35 @@ contract DelegateRevocationResurrectTest is Test {
         assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "revocation stands");
     }
 
-    /// ⚠ THE COST OF THE NORMALISATION, PINNED SO IT IS A KNOWN PROPERTY AND NOT A
-    /// SURPRISE. On the relayed path the CALLER picks when a permit lands, so a
-    /// nomination relayed after its own `expiry` (but before its `deadline`) is now
-    /// read as a revocation and burns the delegate's word. Anyone holding a stale
-    /// permit can therefore end GASLESS nomination of that delegate address.
-    ///
-    /// This is the over-revoke direction, never the under-revoke one, and it is not a
-    /// lockout — the direct setter still nominates the same delegate, because it
-    /// consumes no bitmap coordinate. The direct path has no equivalent window: only
-    /// the maker can call it.
-    function test_relayedStalePermit_burnsTheWord_isTheAcceptedCost() public {
+    /// F29 finding 7 — a stale nomination held by a third party can no longer
+    /// revoke a LIVE delegate. The maker nominates directly after signing the
+    /// permit; the relayer lands the lapsed permit later; the live nomination and
+    /// the delegate's gasless path both survive.
+    function test_relayedStalePermit_cannotRevokeALiveDelegate() public {
         uint256 shortExpiry = block.timestamp + 1 hours;
         uint256 deadline = block.timestamp + 30 days;
         uint256 nonce = _pn(delegate, 7);
         bytes memory permit = _signPermit(delegate, shortExpiry, nonce, deadline);
 
-        // The relayer sits on it until the nomination it carries has lapsed.
+        // Meanwhile the maker nominates the same desk key directly, for a year.
+        uint256 live = block.timestamp + 365 days;
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, live);
+
+        // The relayer sits on the permit until the nomination it carries has lapsed.
         vm.warp(block.timestamp + 2 hours);
         vm.prank(relayer);
+        vm.expectRevert(Signatures.SignerPermitExpired.selector);
         settlement.setOrderSignerWithSig(maker, delegate, shortExpiry, nonce, deadline, permit);
 
-        // Read as a revocation rather than stored as a dead expiry.
-        assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "lapsed nomination normalises to 0");
+        assertEq(settlement.orderSignerExpiry(maker, delegate), live, "the live nomination is untouched");
 
-        // The gasless path for THIS delegate is now closed...
+        // ...and the gasless path for this delegate is still open.
         uint256 nonce2 = _pn(delegate, 9);
         bytes memory permit2 = _signPermit(delegate, block.timestamp + 365 days, nonce2, deadline);
         vm.prank(relayer);
-        vm.expectRevert(OrderState.NonceCancelled.selector);
         settlement.setOrderSignerWithSig(maker, delegate, block.timestamp + 365 days, nonce2, deadline, permit2);
-
-        // ...but the maker is NOT locked out: the direct setter still works.
-        vm.prank(maker);
-        settlement.setOrderSigner(delegate, block.timestamp + 365 days);
-        assertEq(
-            settlement.orderSignerExpiry(maker, delegate),
-            block.timestamp + 365 days,
-            "direct nomination is unaffected"
-        );
+        assertEq(settlement.orderSignerExpiry(maker, delegate), block.timestamp + 365 days, "gasless renewal works");
     }
 
     /// The contrast: the `expiry == 0` form burns the delegate's whole permit word,

@@ -153,6 +153,8 @@ contract DolomiteOperatorModule is
     ///      seam check is the point: it is what keeps the shared `>> 253 == 0` data
     ///      space between `MAKE` and plain `TAKE` from meaning anything.
     error BadOp(uint256 op);
+    /// @dev An Exact `Withdraw` larger than the live supply would open debt.
+    error WouldBorrow(uint256 amount, uint256 supply);
 
     /// @dev `data` is too short to carry an op word. Rejected rather than defaulted:
     ///      classifying a sub-word blob would read the op out of whatever calldata
@@ -348,6 +350,23 @@ contract DolomiteOperatorModule is
     function _withdraw(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) private {
         (, address dolomite, uint256 marketId, address token, uint256 accountNumber) = _single(data);
         if (DustHandler.readBalanceMode(data, 160) != DustHandler.BalanceMode.Full) {
+            // ON DOLOMITE A WITHDRAW PAST THE SUPPLY IS A BORROW. `Withdraw` and
+            // `Borrow` build the identical negative-delta action; the venue does not
+            // distinguish "take out my deposit" from "take out a loan" — if the
+            // balance crosses zero and the account stays collateralised, the rest is
+            // DEBT against whatever else the sub-account holds. Every other venue's
+            // Exact withdraw reverts on a short position (aToken transfer, ERC-4626
+            // burn, Morpho underflow); Comet, the one sibling with this semantics,
+            // guards it with `WouldBorrow`. Without the guard a `Withdraw` grant for X
+            // was economically a `Borrow` grant for X once the supply dropped below X
+            // (partial liquidation is permissionless, the filler picks the timing) —
+            // the containment the header promises, broken by the venue rather than
+            // the ref. `Op.Borrow` remains the only op that may go negative.
+            // (2026-09-12 audit, finding 3.)
+            WeiBalance memory cur =
+                IDolomiteMargin(dolomite).getAccountWei(AccountInfo(onBehalfOf, accountNumber), marketId);
+            uint256 supply = cur.sign ? cur.value : 0;
+            if (amount > supply) revert WouldBorrow(amount, supply);
             _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, amount, receiver));
             return;
         }
@@ -409,6 +428,16 @@ contract DolomiteOperatorModule is
                 fundedToken = p.borrowToken;
             }
             actions[0] = _depositAction(p.borrowMarketId, toRepay, address(this));
+            // The same `WouldBorrow` bound the Exact `Withdraw` op carries (F28
+            // finding 3): on Dolomite a withdraw past the live supply is a BORROW,
+            // and a partial liquidation before this close can shrink the collateral
+            // below the signed `amount`. The sibling the F28 patch missed (F29
+            // finding 6). Read BEFORE the repay lands — the collateral balance is
+            // independent of it.
+            WeiBalance memory coll =
+                IDolomiteMargin(p.dolomite).getAccountWei(AccountInfo(onBehalfOf, p.accountNumber), p.collMarketId);
+            uint256 supply = coll.sign ? coll.value : 0;
+            if (amount > supply) revert WouldBorrow(amount, supply);
             actions[1] = _withdrawAction(p.collMarketId, amount, receiver);
         }
 

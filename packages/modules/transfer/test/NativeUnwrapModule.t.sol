@@ -6,7 +6,9 @@ import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp, LegIn, LegOut, Validator} from "@core/settlement/Settlement.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {NativeUnwrapModule} from "../src/NativeUnwrapModule.sol";
+import {PreFundGuard} from "@lib/PreFundGuard.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 
@@ -26,9 +28,11 @@ contract StatefulReceiver {
 
 /// @dev In-fill native-out ({NativeUnwrapModule}): the maker sells USDC and
 /// receives raw ETH — a WETH output leg delivered to the module singleton, then
-/// a MAKE item that unwraps exactly this fill's slice and pushes it on. The
-/// leg and the item carry the SAME signed amount and slice by the same fill
-/// fraction, which the partial-fill test pins with prime amounts.
+/// a pre-funded MAKE item that unwraps exactly what this fill DELIVERED for that
+/// leg (sized by the settler from its delivery ledger) and pushes it on. The
+/// partial-fill test pins that with prime amounts; the residue tests pin the
+/// property the ledger sizing exists for — an auction-priced leg leaves nothing
+/// behind for a stranger to claim.
 contract NativeUnwrapModuleTest is CoreSettlementBase {
     NativeUnwrapModule unwrapModule;
 
@@ -41,9 +45,26 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
         vm.label(address(unwrapModule), "nativeUnwrapModule");
     }
 
+    /// @dev The pre-fund leg reference the item carries: leg `j`, funding token WETH
+    ///      (mirror of the SDK's `forLegPreFund`).
+    function _forLeg(uint256 j) internal view returns (uint256) {
+        return (uint256(5) << 253) | (uint256(uint160(WETH)) << 16) | j;
+    }
+
     /// @dev USDC→native order: WETH leg to the module + the matching unwrap item.
-    ///      `payout = address(0)` exercises the maker default.
+    ///      `payout = address(0)` exercises the maker default. `ethEnd != 0` makes
+    ///      the WETH leg a Dutch auction (`start → end` over `DECAY`).
     function _nativeOutOrder(uint256 nonce, uint256 usdcIn, uint256 ethOut, address payout)
+        internal
+        view
+        returns (Order memory order)
+    {
+        return _nativeOutOrder(nonce, usdcIn, ethOut, 0, payout);
+    }
+
+    uint32 constant DECAY = 1000;
+
+    function _nativeOutOrder(uint256 nonce, uint256 usdcIn, uint256 ethOut, uint256 ethEnd, address payout)
         internal
         view
         returns (Order memory order)
@@ -52,14 +73,16 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
         items[0] = Item({
             op: ItemOp.MAKE,
             module: address(unwrapModule),
-            amount: ethOut,
+            amount: 0, // sized from the delivery ledger, not signed
             recipient: address(0),
-            data: abi.encode(payout)
+            data: abi.encode(_forLeg(0), payout)
         });
         LegIn[] memory legsIn = new LegIn[](1);
         legsIn[0] = LegIn(USDC, usdcIn, 0);
         LegOut[] memory legsOut = new LegOut[](1);
-        legsOut[0] = LegOut(WETH, ethOut, 0, address(unwrapModule));
+        legsOut[0] = LegOut(WETH, ethOut, ethEnd, address(unwrapModule));
+        uint256 timing = _expiryBits(block.timestamp + 1 hours);
+        if (ethEnd != 0) timing |= _packTiming(uint32(block.timestamp), DECAY, 0);
         order = Order({
             params: 0,
             pricingModule: address(0),
@@ -67,7 +90,7 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
             nonce: nonce,
             legsIn: PackedEncode.legsIn(legsIn),
             legsOut: PackedEncode.legsOut(legsOut),
-            timing: _expiryBits(block.timestamp + 1 hours),
+            timing: timing,
             exclusiveFiller: address(0),
             minFillAnchor: 0,
             curve: PackedEncode.noCurve(),
@@ -118,20 +141,23 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
         vm.prank(solver);
         settlement.fill(order, sig, usdcIn / 3);
         assertGt(maker.balance, makerEthBefore, "first slice arrived as ETH");
-        // Legs slice by cumulative CEIL (maker-favoring), items by cumulative
-        // FLOOR — so mid-order the module may hold ceil−floor = at most 1 wei,
-        // and the item is never underfunded. Both telescope to the exact signed
-        // amount at completion (asserted below).
-        assertLe(IERC20(WETH).balanceOf(address(unwrapModule)), 1, "transient residue bounded by 1 wei");
+        // The item is sized from the delivery ledger, so each fill unwraps
+        // exactly what its leg delivered: nothing is ever parked here, not even
+        // mid-order.
+        assertEq(IERC20(WETH).balanceOf(address(unwrapModule)), 0, "no transient residue");
 
         vm.prank(solver);
         settlement.fill(order, sig, usdcIn - usdcIn / 3);
 
-        // The maker's receipt is the cumulative-floor item sum — exactly the
-        // signed amount. The per-fill ceil over-delivery (≤ 1 wei per extra
-        // fill) stays behind as module dust, never mispays a maker.
-        assertEq(maker.balance - makerEthBefore, ethOut, "full amount accumulated exactly");
-        assertLe(IERC20(WETH).balanceOf(address(unwrapModule)), 1, "dust bounded by fills-1 wei");
+        // SELL legs round up PER FILL in the maker's favour, so across two fills
+        // the maker may receive up to 1 wei over the signed amount — and receives
+        // it as ETH, rather than leaving it stranded on the singleton (the
+        // pre-audit behaviour, where the item unwrapped a cumulative-floor
+        // constant and the ceil excess accrued here as "dust").
+        uint256 got = maker.balance - makerEthBefore;
+        assertGe(got, ethOut, "at least the signed amount");
+        assertLe(got, ethOut + 1, "at most one wei of per-fill ceil");
+        assertEq(IERC20(WETH).balanceOf(address(unwrapModule)), 0, "nothing stranded");
         assertEq(address(unwrapModule).balance, 0, "no stranded ETH");
     }
 
@@ -167,7 +193,27 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
     // ── Auth: only Settlement may dispatch the unwrap ──
     function test_directCall_reverts() public {
         vm.expectRevert(NativeUnwrapModule.OnlySettlement.selector);
-        unwrapModule.makeOnBehalf(maker, 1e18, abi.encode(address(0)));
+        unwrapModule.makeOnBehalf(maker, 1e18, abi.encode(_forLeg(0), address(0)));
+    }
+
+    // ── The old plain-address blob (signed constant) is refused outright ──
+    function test_nativeOut_plainAddressData_reverts() public {
+        _fund(USDC_IN, ETH_OUT);
+        Order memory order = _nativeOutOrder(7, USDC_IN, ETH_OUT, address(0));
+        Item[] memory items = new Item[](1);
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(unwrapModule),
+            amount: ETH_OUT,
+            recipient: address(0),
+            data: abi.encode(address(0)) // the pre-audit shape
+        });
+        order.items = PackedEncode.items(items);
+        bytes memory sig = _sign(order);
+
+        vm.prank(solver);
+        vm.expectRevert(PreFundGuard.PreFundDescriptorRequired.selector);
+        settlement.fill(order, sig, USDC_IN);
     }
 
     // ── Item without its funding leg fails loud (no donation, no payout) ──
@@ -179,7 +225,104 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(); // WETH9: withdraw exceeds balance
+        vm.expectRevert(Base.ForLegMissing.selector); // the descriptor names a leg that is not there
         settlement.fill(order, sig, USDC_IN);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    //  2026-09-12 audit, finding 2 — auction-priced leg vs signed constant.
+    //  Before: the item unwrapped a pro-rated CONSTANT while the leg delivered
+    //  `Pricing.outputAt`; on a Dutch leg the difference stranded on this shared
+    //  singleton and a zero-leg self-order withdrew it to a stranger. Now the
+    //  item is sized from the delivery ledger, so nothing is ever left behind.
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// @dev Full fill of a 1e18 → 0.9e18 Dutch leg halfway through the decay:
+    ///      the maker receives the resolved tick as ETH and the module ends empty.
+    function test_nativeOut_dutchLeg_unwrapsExactlyTheDelivery() public {
+        uint256 ethEnd = 0.9e18;
+        _fund(USDC_IN, ETH_OUT);
+        Order memory order = _nativeOutOrder(5, USDC_IN, ETH_OUT, ethEnd, address(0));
+        bytes memory sig = _sign(order);
+
+        vm.warp(block.timestamp + DECAY / 2); // tick = 0.95e18
+        uint256 makerEthBefore = maker.balance;
+        vm.prank(solver);
+        settlement.fill(order, sig, USDC_IN);
+
+        uint256 got = maker.balance - makerEthBefore;
+        assertGt(got, ethEnd, "maker received more than the floor");
+        assertLt(got, ETH_OUT, "and less than the start: the resolved tick");
+        assertEq(IERC20(WETH).balanceOf(address(unwrapModule)), 0, "no auction improvement stranded");
+        assertEq(address(unwrapModule).balance, 0, "no ETH stranded");
+    }
+
+    /// @dev The attacker's claim order: WETH donated/stranded on the module, a
+    ///      self-signed order with NO output leg and an item naming the residue.
+    ///      The descriptor points at a leg that does not exist ⇒ fails closed;
+    ///      a plain-address blob is refused by the module. Either way the residue
+    ///      stays put — donations are no longer claimable through a fill.
+    function test_nativeOut_residueCannotBeClaimedByZeroLegOrder() public {
+        deal(WETH, address(unwrapModule), 0.1e18); // "stranded" WETH
+        address attacker = makeAddr("attacker");
+        deal(USDC, attacker, 1);
+        vm.prank(attacker);
+        permit3.approveToken(address(settlement), USDC, 1, 0);
+
+        Item[] memory items = new Item[](1);
+        items[0] = Item({
+            op: ItemOp.MAKE,
+            module: address(unwrapModule),
+            amount: 0.1e18,
+            recipient: address(0),
+            data: abi.encode(_forLeg(0), attacker)
+        });
+        LegIn[] memory legsIn = new LegIn[](1);
+        legsIn[0] = LegIn(USDC, 1, 0);
+        Order memory order = Order({
+            params: 0,
+            pricingModule: address(0),
+            maker: attacker,
+            nonce: 99,
+            legsIn: PackedEncode.legsIn(legsIn),
+            legsOut: PackedEncode.legsOut(new LegOut[](0)),
+            timing: _expiryBits(block.timestamp + 1 hours),
+            exclusiveFiller: address(0),
+            minFillAnchor: 0,
+            curve: PackedEncode.noCurve(),
+            items: PackedEncode.items(items),
+            validators: PackedEncode.noValidators(),
+            invariants: PackedEncode.noValidators(),
+            fillModule: address(0),
+            fillTotal: 0
+        });
+        // The attacker approves the order on-chain (no key for makeAddr) — the
+        // shape is what matters, not the signature path.
+        vm.prank(attacker);
+        settlement.approveOrder(order);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.ForLegMissing.selector);
+        settlement.fill(order, "", 1);
+
+        assertEq(IERC20(WETH).balanceOf(address(unwrapModule)), 0.1e18, "residue untouched");
+        assertEq(attacker.balance, 0, "attacker got nothing");
+    }
+
+    /// @dev A 1-wei under-delivering leg cannot lever a stranded balance either:
+    ///      the item is sized from the ledger (1 wei), and the floor proves only
+    ///      that 1 wei arrived.
+    function test_nativeOut_underDeliveringLegUnwrapsOnlyItsDelivery() public {
+        deal(WETH, address(unwrapModule), 0.1e18); // "stranded" WETH
+        _fund(1, 1);
+        Order memory order = _nativeOutOrder(6, 1, 1, address(0));
+        bytes memory sig = _sign(order);
+
+        uint256 makerEthBefore = maker.balance;
+        vm.prank(solver);
+        settlement.fill(order, sig, 1);
+
+        assertEq(maker.balance - makerEthBefore, 1, "exactly the 1 wei delivered");
+        assertEq(IERC20(WETH).balanceOf(address(unwrapModule)), 0.1e18, "residue untouched");
     }
 }

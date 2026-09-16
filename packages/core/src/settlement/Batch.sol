@@ -110,6 +110,14 @@ abstract contract Batch is Core {
         bytes32 orderHash = order.hash();
         _verifySignature(orderHash, sig, order.maker);
         _gateOrder(order, orderHash, solver, takerData, ctx);
+        // `type(uint256).max` = "the whole remaining anchor", the same sentinel
+        // `fillUpTo` honours. It exists for a {Proportional} anchor: that resolves
+        // from the maker's LIVE balance at the gate above, a proportional fill must
+        // be whole, and a plan naming the size exactly is reverted — plan and all —
+        // by any stranger's 1-wei transfer to the maker before inclusion (F29
+        // finding 5). Every other amount is still taken literally: a netted plan is
+        // priced on exact sizes and this path does not clamp them.
+        if (fillAmount == type(uint256).max) fillAmount = ctx.anchor - ctx.prevFilled;
         _openFill(order, fillAmount, solver, takerData, ctx);
     }
 

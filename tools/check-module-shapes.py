@@ -97,6 +97,17 @@ PRE_FUNDED = re.compile(
     r"|balanceOf\s*\(\s*address\(this\)\s*\)\s*-\s*\w*[fF]or\w*"
 )
 
+# ── (9b) literal `data` offsets vs the header byte map ──────────────────────
+DATA_OFFSET_READ = re.compile(
+    # the offset argument may be an expression (`maturity == 0 ? 160 : 192`): take
+    # every literal in it, so a branch-scoped tail is held to the header too.
+    r"(?:readAction|readBalanceMode|requireFullFillFromData|replay[A-Za-z]*)\(\s*data\s*,\s*([^,)]+)"
+    r"|\bdata\[\s*(\d+)\s*:"
+)
+# Offsets every blob shares and no header spells out: word 0/1/2 of the base tuple.
+OFFSET_EXEMPT_VALUES = {0, 32}
+OFFSET_EXEMPT: dict = {}
+
 # ── (5) a data-derived pull amount must be width-checked, not truncated ──────
 #
 # Permit3's token book is `uint160`. A module pulls with
@@ -445,8 +456,23 @@ def reachable_body(body: str, entry: str) -> str:
     return "\n".join(fns[n] for n in order)
 
 
+def header_of(src: str, contract_start: int) -> str:
+    """The comment block that documents a contract: every `//` / `///` line directly
+    above its declaration (blank lines included), up to the first code line. This is
+    where the module's byte map lives, and rule (9b) holds the code to it."""
+    lines = src[:contract_start].split("\n")
+    out = []
+    for line in reversed(lines):
+        t = line.strip()
+        if t == "" or t.startswith("//"):
+            out.append(line)
+            continue
+        break
+    return "\n".join(reversed(out))
+
+
 def contract_spans(src: str):
-    """(name, body) for each contract, sliced by brace depth."""
+    """(name, inherits, body, header) for each contract, sliced by brace depth."""
     for m in CONTRACT.finditer(src):
         start = m.end() - 1
         depth = 0
@@ -456,7 +482,7 @@ def contract_spans(src: str):
             elif src[i] == "}":
                 depth -= 1
                 if depth == 0:
-                    yield m.group(1), m.group(2) or "", src[start : i + 1]
+                    yield m.group(1), m.group(2) or "", src[start : i + 1], header_of(src, m.start())
                     break
 
 
@@ -469,6 +495,8 @@ def main() -> int:
     sentinels = []
     bad_ops = []
     raw_pay = []
+    unbounded_full = []
+    header_drift = []
     scanned = 0
     makes = 0
     dual = 0
@@ -492,7 +520,7 @@ def main() -> int:
             and "makeOnBehalf" not in src
         ):
             continue
-        for name, inherits, body in contract_spans(src):
+        for name, inherits, body, header in contract_spans(src):
             # ── (7) a multi-op module rejects an op it does not implement ──
             if OP_DISPATCH.search(body) and not OP_REJECT.search(body):
                 bad_ops.append((path.relative_to(ROOT), name))
@@ -548,7 +576,13 @@ def main() -> int:
                 # The core sizes `forAmount` from the descriptor; a module that
                 # funds from balance against a number the core did NOT size that
                 # way is the F27/C-4 shape.
-                if "_gatePreFundMake(" not in make_body:
+                # `_gatePreFundMake` is `requireSettlement(msg.sender) + requireLegRef`;
+                # a module that does not inherit {PreFundModuleBase} (it needs no
+                # Permit3 — NativeUnwrapModule) writes the same two checks inline.
+                gated = "_gatePreFundMake(" in make_body or (
+                    PIN_MAKE.search(make_body) and "PreFundGuard.requireLegRef(" in make_body
+                )
+                if not gated:
                     # ── (4) a PULL make must not be readable as a pre-fund blob ──
                     # Over what `makeOnBehalf` REACHES, not the whole contract: a
                     # module merged by grant also hosts `takeOnBehalf` /
@@ -568,7 +602,7 @@ def main() -> int:
                 # Over what `makeOnBehalf` can actually REACH, not the whole contract —
                 # see {reachable_body}. A merged-by-grant module's pull `makeOnBehalf`
                 # must not inherit its `takeForOnBehalf` sibling's floor.
-                if PRE_FUNDED.search(reachable_body(body, "makeOnBehalf")) and "_gatePreFundMake(" not in make_body:
+                if PRE_FUNDED.search(reachable_body(body, "makeOnBehalf")) and not gated:
                     unpinned_prefund.append(
                         (path.relative_to(ROOT), name, "makeOnBehalf funds from balance without _gatePreFundMake")
                     )
@@ -589,6 +623,43 @@ def main() -> int:
                 unpinned_prefund.append(
                     (path.relative_to(ROOT), name, "takeForOnBehalf funds from balance without a spender pin")
                 )
+
+            # ── (9b) every literal `data` offset the code reads is in the header byte map ──
+            #
+            # A module's `data` blob is `abi.encode`d by an integrator against the
+            # module's header comment — the SDK ships no builders, so the header IS
+            # the encoder spec. Every `readAction(data, N)` / `readBalanceMode(data, N)`
+            # / `requireFullFillFromData(data, N)` / `replay*(data, N)` / `data[N:M]`
+            # in the code is a claim that word N means something; if the header says
+            # otherwise, an honest encoder builds a blob the reader misparses. F29
+            # finding 2: ExactlyRepayModule's header said `permit@160` while its fixed
+            # branch read `totalAmount@160` and the permit at 192, so a permit
+            # `deadline` became the slippage bound's denominator. This rule cannot
+            # know what word N MEANS, but it can insist that the header mentions N
+            # at all — the drift above would have failed it (`192` appeared nowhere).
+            if header:
+                mentioned = set(int(x) for x in re.findall(r"(?<![0-9A-Za-z_])(\d{2,3})(?![0-9])", header))
+                used = set()
+                for a, b in DATA_OFFSET_READ.findall(body):
+                    used.update(int(x) for x in re.findall(r"(?<![A-Za-z0-9_])\d+", a or b))
+                missing = sorted(n for n in used if n not in mentioned and n not in OFFSET_EXEMPT_VALUES)
+                if missing and name not in OFFSET_EXEMPT:
+                    header_drift.append((path.relative_to(ROOT), name, missing))
+
+            # ── (9) a `Full`-mode leg carries the delivered bound (I-8) ──
+            #
+            # `requireFullFillFromData` marks a branch that withdraws the user's
+            # WHOLE live position and splits it; on that branch `amount` is the
+            # signed TOTAL, and without `requireDelivered(received, amount)` a
+            # position short of it is silently topped up out of the MAKER'S WALLET
+            # by `Core._payInputsToSolver`. The 2026-09-10 restoration reached 13
+            # of 18 Full branches; the 2026-09-12 audit found the other five, and
+            # the I-8b prose ("there `amount` IS a slice") that hid them was wrong
+            # for exactly the branches that assert `amount == totalAmount`.
+            for entry in ("takeOnBehalf", "takeForOnBehalf"):
+                reach = reachable_body(body, entry)
+                if "requireFullFillFromData(" in reach and "FullFillGuard.requireDelivered(" not in reach:
+                    unbounded_full.append((path.relative_to(ROOT), name, entry))
 
             if not (TAKE.search(body) or TAKE_FOR.search(body)):
                 continue
@@ -631,6 +702,37 @@ def main() -> int:
             "on TAKE_FOR it is requireSettlement(spender, ...), because\n"
             "`Permit3.takeFor` is permissionless and `approveTaker` lets a caller name\n"
             "itself spender (F27/C-1).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if header_drift:
+        print(f"{len(header_drift)} module(s) read a `data` offset their header byte map never mentions:\n", file=sys.stderr)
+        for rel, name, missing in header_drift:
+            print(f"  {rel}: contract {name}\n      offsets read but undocumented: {missing}", file=sys.stderr)
+        print(
+            "\nThe header comment above a module is the ENCODER SPEC for its `data` blob (the SDK\n"
+            "ships no builders). Every literal offset the code reads — `readAction(data, N)`,\n"
+            "`requireFullFillFromData(data, N)`, `replay*(data, N)`, `data[N:M]` — must appear\n"
+            "in that header as the byte it names. F29 finding 2 was a header that placed the\n"
+            "permit at the offset the code read as `totalAmount`. Document the offset (e.g.\n"
+            "`total@160`, `permit@192`) or, for an offset that is genuinely internal, add the\n"
+            "contract to OFFSET_EXEMPT with the reason.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if unbounded_full:
+        print(f"{len(unbounded_full)} `Full`-mode leg(s) lack the delivered bound (I-8):\n", file=sys.stderr)
+        for rel, name, entry in unbounded_full:
+            print(f"  {rel}: contract {name} ({entry})", file=sys.stderr)
+        print(
+            "\nA branch gated by `FullFillGuard.requireFullFillFromData` withdraws the WHOLE\n"
+            "live position and forwards `min(received, amount)`. There `amount` is the signed\n"
+            "TOTAL, so `FullFillGuard.requireDelivered(received, amount)` is safe — and\n"
+            "without it a position short of the total (partial liquidation, a prior fill)\n"
+            "delivers less and `Core._payInputsToSolver` bills the shortfall to the MAKER'S\n"
+            "WALLET. Add the bound right after `received` is measured.",
             file=sys.stderr,
         )
         return 1

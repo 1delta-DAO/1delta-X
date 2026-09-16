@@ -200,6 +200,8 @@ contract CompoundV2NativeRepayModule is IMakerModule {
 // approves cEther to this module), redeems to native ETH, WRAPS it to WETH, and
 // forwards WETH to `receiver` — so the value re-enters the ERC20 settlement flow
 // (solver payout or the maker's wallet). `data = abi.encode(cEther[, BalanceMode])`.
+// `data = abi.encode(cEther[, DustHandler.BalanceMode[, total]])` — base = 32; BalanceMode@32;
+// total@64 (MANDATORY under `Full`).
 contract CompoundV2NativeWithdrawModule is ITakerModule {
     IPermit3 public immutable permit3;
     IWETH public immutable weth;
@@ -243,6 +245,13 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
             // maker is whoever authored the order, so it was a gift to the fastest
             // caller. See {_sweepNativeAsWeth} for the full correction. F26/2a.
             weth.deposit{value: address(this).balance - ethFloor}();
+            // The lower bound the venue used to enforce (I-8). Before the split rewrite
+            // the venue call was sized at `amount`, so a short position reverted inside
+            // it; now nothing does, and {Core._payInputsToSolver} would bill the
+            // shortfall to the MAKER'S WALLET. Safe here and only here: `Full` is
+            // full-fill, so `amount` is the signed TOTAL, never a pro-rated slice.
+            // (2026-09-12 audit: the sibling the 2026-09-10 restoration missed.)
+            FullFillGuard.requireDelivered(received, amount);
             // Deliver the measured (wrapped) proceeds, capped at the signed amount;
             // the surplus is swept to the maker by _sweepWeth. Never exceeds what
             // this call produced, so a stray WETH balance is never paid out.

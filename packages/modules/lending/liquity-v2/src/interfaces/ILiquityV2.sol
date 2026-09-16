@@ -53,6 +53,13 @@ interface ILiquityV2BorrowerOperations {
 interface ICollateralRegistry {
     function getTroveManager(uint256 _index) external view returns (address);
     function totalCollaterals() external view returns (uint256);
+    /// @notice The deployment's ONE BOLD token (`IBoldToken public immutable
+    ///         boldToken` on the registry). Verified on Ethereum mainnet —
+    ///         registry 0xf949982B91C8c61e952B3bA942cbbfaef5386684,
+    ///         `boldToken() == 0x6440f144b7e50D6a8439336510312d2F54beB01D`.
+    ///         The repay legs pin the maker-named accounting token to this, see
+    ///         {LiquityV2TroveAuth.requireBold}.
+    function boldToken() external view returns (address);
 }
 
 /// @notice Troves are ERC-721s and `troveId` IS the token id, so ownership is a

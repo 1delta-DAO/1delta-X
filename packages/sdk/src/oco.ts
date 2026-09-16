@@ -1,4 +1,4 @@
-import { encodeAbiParameters, type Address } from "viem";
+import { decodeAbiParameters, encodeAbiParameters, type Address } from "viem";
 
 import { FILL_ONCE_BIT_INDEX, ItemOp, type Item, type Order, type Validator } from "./types";
 
@@ -86,6 +86,32 @@ export function ocoGroupItem(module: Address, groupId: bigint, nonce: bigint, an
     recipient: "0x0000000000000000000000000000000000000000",
     data: encodeAbiParameters([{ type: "uint256" }, { type: "uint256" }], [groupId, nonce]),
   };
+}
+
+/**
+ * Re-home every OCO claim item on `items` to `nonce`.
+ *
+ * The claim item carries the order's nonce as a SECOND copy, and the contract
+ * now binds the two (`OcoGroupModule.validate` fails unless the item encodes
+ * `order.nonce`). A cancel-and-replace that copies `items` verbatim therefore
+ * yields an unfillable replacement — and, before the binding existed, revived
+ * the soft-cancelled predecessor instead (docs/reference-bounties.md B6; F29
+ * finding 3). `patchOrder` calls this; call it yourself whenever you re-nonce
+ * an order by hand.
+ *
+ * Detection is structural: a SETTLE item with exactly two words of data whose
+ * second word equals `prevNonce`. No module address is needed, and a SETTLE
+ * item on some other module that happens to match is rewritten too — which is
+ * the safe direction, since such an item would otherwise be stale for the same
+ * reason.
+ */
+export function renonceOcoItems(items: readonly Item[], prevNonce: bigint, nonce: bigint): Item[] {
+  return items.map((it) => {
+    if (it.op !== ItemOp.SETTLE || it.data.length !== 2 + 128) return it;
+    const [groupId, itemNonce] = decodeAbiParameters([{ type: "uint256" }, { type: "uint256" }], it.data);
+    if (itemNonce !== prevNonce) return it;
+    return { ...it, data: encodeAbiParameters([{ type: "uint256" }, { type: "uint256" }], [groupId, nonce]) };
+  });
 }
 
 /** The order's fill denominator — what {@link ocoGroupItem} needs as `anchor`. */
