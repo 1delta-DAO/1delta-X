@@ -24,7 +24,7 @@ import {StateHandler} from "./StateHandler.sol";
 ///  NEGATIVE fact over a scenario space nobody enumerated: across a random walk of
 ///  every lifecycle entry point, called by every actor (three makers, two fillers and
 ///  an unrelated attacker) in every order, *no write ever lands in a cell its caller
-///  had no authority over*. {StateHandler} snapshots all 69 watched cells before each
+///  had no authority over*. {StateHandler} snapshots all 81 watched cells before each
 ///  action and diffs them after, so griefing, front-running and outright theft — all
 ///  of which reduce, on-chain, to a write in somebody else's cell — surface as an
 ///  unallowed diff rather than as an absent test.
@@ -33,6 +33,15 @@ import {StateHandler} from "./StateHandler.sol";
 ///  safe to build an orderbook on: `filled` never rewinds, a cancellation sentinel is
 ///  never cleared, a cancelled nonce never comes back to life, the rollback floor
 ///  never retreats — and each settled fill conserves value to the wei.
+///
+///  The NETTED path is walked the same way ({StateHandler.doMatchSettle}): two or
+///  three orders under a solver-fuzzed schedule — shuffled, a `PULL` duplicated, a
+///  step dropped, a `PRESEND` inserted, an ITEM or DELIVER re-run — and every
+///  settlement that survives is held to the same wei-exact ledger over makers,
+///  solver and lender. That is the `Batch.matchSettle` claim "any schedule yields a
+///  correct settlement or a revert" as a checked property: the credit ledger's
+///  `PULL` netting, `_creditItemProceeds`' excess-to-maker attribution, and
+///  `_sweepSurplus`' wholeness floor are what make it hold.
 ///
 ///  ⚠ `fail_on_revert = false` (see `[profile.core.invariant]`): a fuzzer allowed to
 ///  call anything as anyone reverts constantly and that is the intended behaviour. It
@@ -49,7 +58,7 @@ contract CoreStateInvariants is MockSettlementBase {
         handler = new StateHandler();
         handler.init(permit3, settlement, tA, tB);
 
-        bytes4[] memory sel = new bytes4[](14);
+        bytes4[] memory sel = new bytes4[](16);
         sel[0] = StateHandler.doFill.selector;
         sel[1] = StateHandler.doFillSigless.selector;
         sel[2] = StateHandler.doFillAsDelegate.selector;
@@ -64,6 +73,8 @@ contract CoreStateInvariants is MockSettlementBase {
         sel[11] = StateHandler.doSetOrderSigner.selector;
         sel[12] = StateHandler.doSetOrderSignerWithSig.selector;
         sel[13] = StateHandler.doWarp.selector;
+        sel[14] = StateHandler.doMatchSettle.selector;
+        sel[15] = StateHandler.doDonate.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -71,8 +82,10 @@ contract CoreStateInvariants is MockSettlementBase {
     // ═══════════════ 1. FILL STATE ═══════════════
 
     /// @notice Nothing ever moved `filled` — or the nonce a fill-once order records its
-    ///         progress in — outside the fill that was entitled to move it, `filled`
-    ///         never rewound, and no fill ever mis-priced itself.
+    ///         progress in — outside the fill or match that was entitled to move it,
+    ///         `filled` never rewound, no fill ever mis-priced itself, and no netted
+    ///         match ever settled off its signed arithmetic, incomplete, short, or
+    ///         with an exactly-once step run twice.
     function invariant_fillState() public view {
         assertEq(bytes(handler.fillViolation()).length, 0, handler.fillViolation());
     }
@@ -81,7 +94,7 @@ contract CoreStateInvariants is MockSettlementBase {
     ///         value above it is the cancellation sentinel, which is unambiguous
     ///         because a token amount can never reach 2^256-1.
     function invariant_fillNeverExceedsTheOrderTotal() public view {
-        for (uint256 i; i < 6; ++i) {
+        for (uint256 i; i < handler.N_ORDERS(); ++i) {
             uint256 f = settlement.filled(handler.orderHashes(i));
             if (f == CANCELLED) continue;
             assertLe(f, handler.orderTotal(i), "filled exceeded the order's denominator");
@@ -95,7 +108,7 @@ contract CoreStateInvariants is MockSettlementBase {
     ///         slot it was created to avoid, and worse, the two progress records can
     ///         disagree.
     function invariant_fillOnceOrdersKeepNoCounter() public view {
-        for (uint256 i; i < 6; ++i) {
+        for (uint256 i; i < handler.N_ORDERS(); ++i) {
             if (!handler.isFillOnce(i)) continue;
             uint256 f = settlement.filled(handler.orderHashes(i));
             assertTrue(f == 0 || f == CANCELLED, "a fill-once order accrued a filled counter");
@@ -144,13 +157,15 @@ contract CoreStateInvariants is MockSettlementBase {
 
     // ═══════════════ CROSS-CUTTING ═══════════════
 
-    /// @notice The settler is a pass-through and custodies nothing between fills. A
-    ///         non-zero balance here is either a stranded maker/filler payment or a
-    ///         pool anyone could sweep — the residue class that shows up in every
-    ///         settlement-layer audit.
-    function invariant_settlementCustodiesNothing() public view {
-        assertEq(tA.balanceOf(address(settlement)), 0, "tA stranded in the settler");
-        assertEq(tB.balanceOf(address(settlement)), 0, "tB stranded in the settler");
+    /// @notice The settler is a pass-through and custodies nothing between fills —
+    ///         except what was DONATED to it, which it holds forever and to the wei.
+    ///         Above the donation is a stranded maker/filler payment or an item's
+    ///         proceeds nobody reconciled — the residue class that shows up in every
+    ///         settlement-layer audit; below it is a sweep or a proceeds window that
+    ///         reached past its snapshot into money that was already there.
+    function invariant_settlementCustodiesOnlyDonations() public view {
+        assertEq(tA.balanceOf(address(settlement)), handler.donated(address(tA)), "tA in the settler != donated");
+        assertEq(tB.balanceOf(address(settlement)), handler.donated(address(tB)), "tB in the settler != donated");
         assertEq(tA.balanceOf(address(permit3)), 0, "tA stranded in Permit3");
         assertEq(tB.balanceOf(address(permit3)), 0, "tB stranded in Permit3");
     }
@@ -173,6 +188,10 @@ contract CoreStateInvariants is MockSettlementBase {
     ///      which is why neither is a gate. This test is the rot guard instead.
     function test_handlerActuallyMutatesState() public {
         handler.doFill(0, 3, 0); //            order 0, filler 0, full remaining
+        handler.doFill(8, 4, 1); //            order 8 (item-funded), filler 1, a 2-wei slice: the item's excess goes back
+        handler.doDonate(5, 0, 0); //          attacker donates 1 wei of tA to the settler
+        handler.doMatchSettle(2, 1, 1, 0, 3, 0); // order 2 vs order 7, canonical schedule
+        handler.doMatchSettle(6, 0, 1, 0, 4, 0); // order 8 vs order 6: the item funds part, PULL the rest
         handler.doApproveOrder(1, 0); //       maker 0 approves its own order 1
         handler.doFillSigless(1, 4); //        filler 1 settles it with an empty sig
         handler.doSetOrderSigner(0, 1, 1); //  maker 0 nominates signers[1]
@@ -180,7 +199,8 @@ contract CoreStateInvariants is MockSettlementBase {
         handler.doCancelOrder(5, 2); //        maker 2 cancels its own order 5
         handler.doCancelNonces(1, 4, 5); //    maker 1 cancels two nonces
 
-        assertGe(handler.fillsSettled(), 2, "no fill ever settled");
+        assertGe(handler.fillsSettled(), 3, "no fill ever settled");
+        assertEq(handler.matchesSettled(), 2, "the canonical matches did not settle");
         assertGe(handler.approvalsRecorded(), 1, "no approval was ever recorded");
         assertGe(handler.delegationsWritten(), 2, "no delegation was ever written");
         assertGe(handler.ordersCancelled(), 1, "no order was ever cancelled");

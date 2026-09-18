@@ -176,17 +176,21 @@ An unknown kind or out-of-range index reverts `PlanBadStep(stepIndex)`.
 
 ### 5.1 `PULL(i, j)`
 
-*(as built — the credit is the MEASURED delta, per the §13.4 decision, not the
-nominal `owed`: it keeps the whole ledger on one footing and makes a
-fee-on-transfer input fail as `LegUnfunded(i, j)` at the leg that came up short
-rather than surfacing later as a puzzling `BatchNotWhole`.)*
+*(as built — the credit is the NOMINAL `owed`, not a measured delta: §9.1(2)
+reversed the §13.4 recommendation. A pull moves a known amount, so the settler
+skips measurement here exactly as `_payInputsToSolver` does on the hot path;
+measurement stays in `_stepItem`, where a module produces an amount the settler
+cannot predict. A fee-on-transfer input therefore surfaces as `BatchNotWhole` at
+the end of the context rather than `LegUnfunded(i, j)` at the leg — both fail
+closed, and such tokens are already out of scope on this path.)*
 
 ```solidity
-uint256 owed = order.inputOwed(st.fills[i], j);           // shared Pricing, unchanged
-if (owed != 0) {
-    uint256 pre = SafeTransferLib.balanceOf(token, address(this));
-    Permit3TransferLib.transferFromWithFallback(PERMIT3, token, order.maker, address(this), owed);
-    st.credit[i][j] += SafeTransferLib.balanceOf(token, address(this)) - pre;
+uint256 owed = st.owed[i][j];                             // resolved at open — single source
+uint256 have = st.credit[i][j];                           // covered by an earlier PULL or ITEM
+uint256 need = owed > have ? owed - have : 0;             // draw only what is still missing
+if (need != 0) {
+    Permit3TransferLib.transferFromWithFallback(PERMIT3, token, order.maker, address(this), need);
+    st.credit[i][j] = have + need;
 }
 ```
 
@@ -596,6 +600,27 @@ burning a transaction.
 | `test_settleItem_reverts` / `test_duplicateInput_reverts` / `test_lengthMismatch_reverts` | shape and arity guards |
 | `test_spotFundsLeverage_zeroSolverCapital` | parity: the old `batchSettleItems` headline as a schedule |
 
+**Stateful walk** — `packages/core/test/invariants/StateHandler.sol:doMatchSettle`
+(2026-09-17). The unit tests above each pin one schedule; the invariant walk
+fuzzes the schedule itself. Two or three orders from a fixed book (six tA sellers,
+two tB mirrors, one TAKE-funded order whose module produces a fixed amount that
+is below a full fill's debt and above a small slice's), sized so a balanced
+coincidence of wants is common but not guaranteed, under a canonical
+`[PULL…, ITEM…, DELIVER…]` schedule that is then shuffled, has a `PULL`
+duplicated, a step dropped, a `PRESEND` inserted anywhere, or an ITEM/DELIVER
+re-run. Nothing asserts that a schedule settles; everything asserts what must
+hold if it did — every maker, the solver and the lender moved by exactly the
+signed arithmetic (so the credit ledger's `owed − credit` netting, the
+excess-to-maker refund and the sweep floor are checked to the wei on every
+interleaving), the schedule was complete, no exactly-once step ran twice, the
+pool was never short, no dead order settled, `filled` advanced by the resolved
+sizes, and — via the 81-cell snapshot diff — only the plan's own cells moved.
+A `doDonate` action seeds the pool mid-walk; the settler must then hold exactly
+the donation, so a sweep or proceeds window that reached past its snapshot
+surfaces as an over-paid solver. Mutation-checked: dropping the leg credit in
+`_creditItemProceeds` and sweeping `nowBal` instead of `nowBal − before` are
+both caught (`make test-invariant`).
+
 Still outstanding: a **fork test in `modules-euler-v2`** proving an uncollateralized
 `borrow` succeeds inside `EVC.batch` and that the account check fires at the
 outermost frame. The core suite proves the mechanism with a mock TAKE module that
@@ -675,8 +700,8 @@ Checked rather than assumed:
 
 Three behaviours genuinely change. All three are now settled: (1) accepted and
 tested (`test_deferredInvariant_restoredByLaterOrder`) and documented in the
-settlement README; (2) **taken** — `PULL` credits the measured delta (§5.1); (3)
-accepted as-is.
+settlement README; (2) **recommended here, then reversed** — `PULL` credits the
+nominal `owed` (§9.1(2), §5.1); (3) accepted as-is.
 
 1. **Deferred invariants assert a later state.** `MinBalanceInvariant` and
    `OwnershipInvariants` move from end-of-*order* to end-of-*context*. Where one
@@ -687,14 +712,16 @@ accepted as-is.
    behaviour change on a maker-facing safety primitive and should be called out,
    not slipped in.
 
-2. **`PULL` should credit a *measured* delta, not `owed`.** The draft in §5.1
-   credits the nominal `owed`. Measuring `balanceOf` around the pull instead makes
-   the whole ledger uniformly measured, and a fee-on-transfer input then fails
-   with `LegUnfunded(i, j)` — pointing at the actual leg — instead of surfacing
-   later as a confusing `BatchNotWhole`. Today's `_batchPullInputs` has the same
-   nominal assumption, so this is an improvement rather than a regression; the
-   cost is 2 extra `balanceOf` per pulled leg (warm, ~200 gas). **Recommend
-   measured.**
+2. **Should `PULL` credit a *measured* delta, not `owed`?** The draft in §5.1
+   credited the nominal `owed`. Measuring `balanceOf` around the pull would make
+   the whole ledger uniformly measured, and a fee-on-transfer input would then
+   fail with `LegUnfunded(i, j)` — pointing at the actual leg — instead of
+   surfacing later as `BatchNotWhole`; the cost is 2 extra `balanceOf` per pulled
+   leg (warm, ~200 gas). This pass recommended measured; the §9.1 efficiency pass
+   **reversed it to nominal** — a pull moves a known amount, so measuring it buys
+   only a more precise error for a token class that is out of scope on this path
+   anyway, and the hot path's `_payInputsToSolver` makes the same nominal
+   assumption. The shipped `_stepPull` credits `owed − credit` nominally.
 
 3. **`OrderFilled` now emits in Phase 3**, so every fill event follows every
    transfer rather than interleaving. The event is deliberately data-less and
@@ -741,6 +768,10 @@ are live deployments to migrate is an open question for the team.
 3. **Dedup of identical deferred invariants** across orders in one context (EVC
    dedups its check set). Cheap to add later — an O(n²) compare over
    `(target, data)` — and worth nothing until orders commonly share invariants.
-4. **Partial-fill interaction with the credit ledger.** Slices are pro-rata as
-   today; the ledger is per-context, so nothing accumulates across transactions.
-   Believed fully covered by reusing `Pricing`; wants an explicit fuzz test.
+4. ~~**Partial-fill interaction with the credit ledger.**~~ *Resolved: covered.*
+   Slices are pro-rata as today; the ledger is per-context, so nothing
+   accumulates across transactions. The stateful walk (§12) fuzzes partial
+   sizes on both sides of a match — including against the item-funded order,
+   where a slice below the module's fixed production exercises the refund
+   branch and one above it the `PULL` top-up — and holds every party to the
+   pro-rata arithmetic.

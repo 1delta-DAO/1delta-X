@@ -89,7 +89,7 @@ out    = "out/core"
 # empty. Do not "simplify" the handler back to inline assertions.
 #
 # runs × depth = 64 × 96 ≈ 6k actions per suite run. Each action snapshots and diffs
-# 69 storage cells, which is what buys the negative property; raise `depth` rather
+# 81 storage cells, which is what buys the negative property; raise `depth` rather
 # than `runs` to reach deeper lifecycle states (an order that is part-filled AND
 # approved AND delegated), and `runs` for breadth of opening moves.
 [profile.core.invariant]

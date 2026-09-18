@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: test test-sdk test-ts build test-all test-fork build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: test test-sdk test-ts build test-all test-fork test-invariant build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -116,6 +116,18 @@ test-fork:
 		printf "\n\033[1;34m══ %-30s ══\033[0m\n" "$$pkg"; \
 		FOUNDRY_PROFILE=$$pkg $(FORGE) test -vv; \
 	done
+
+## Run the stateful invariant suite under the CORE profile's invariant settings.
+# `[profile.core.invariant]` is the `core` profile's `invariant` SECTION, not a
+# separate profile — so it activates under `FOUNDRY_PROFILE=core`, NOT
+# `core.invariant` (which resolves as a fresh profile inheriting `default`'s
+# whole-monorepo `src` and pulls every module in). `fail_on_revert = false` there
+# is REQUIRED, not a convenience (foundry.toml): the handler drives every
+# lifecycle entry as every actor, so most calls are SUPPOSED to revert — without
+# it the walk stops at call 2. Scoped to `--match-path` so the rest of the core
+# suite keeps its normal profile; run via `make test-core` / `make gas-check`.
+test-invariant:
+	FOUNDRY_PROFILE=core $(FORGE) test --match-path "packages/core/test/invariants/*" -vv
 
 ## Run every package's tests one at a time.
 test-all:

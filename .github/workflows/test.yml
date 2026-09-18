@@ -1,0 +1,45 @@
+name: test
+
+# Test + gate workflow — the checks `gas.yml` does not cover.
+#
+# `gas.yml` runs `make gas-check`, which re-runs every CORE unit test as a gas
+# side effect (a failing test fails the snapshot compare). That leaves these
+# unwired:
+#
+#   • the STATEFUL INVARIANT suite, which must run under `[profile.core.invariant]`
+#     (`fail_on_revert = false` — see foundry.toml) — `make test-invariant`;
+#   • the module shape gate (`tools/check-module-shapes.py`) — the I-invariants'
+#     mechanical enforcement — `make modules-check`;
+#   • the doc-citation gate — every edge-case-matrix / reference-audits cell must
+#     name a test that still exists — `make docs-check`.
+#
+# `make test-all` / `make test-fork` / `make test-ts` remain manual: fork suites
+# need an RPC, and the TypeScript side needs a node install, both of which are
+# deliberately kept out of this fast gate.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: invariant + gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "1.5.1"
+
+      - name: Stateful invariant suite
+        run: make test-invariant
+
+      - name: Module shape gate
+        run: make modules-check
+
+      - name: Doc citation gate
+        run: make docs-check

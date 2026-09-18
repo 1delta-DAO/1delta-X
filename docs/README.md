@@ -274,6 +274,22 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   disagreements; plus six orderbook defects — the book cannot admit an order
   against a real lens. Two registry verdicts corrected.
 
+- **[audit-2026-09-17.md](audit-2026-09-17.md)** — the consolidated record of the
+  2026-09-17 independent pass over `packages/core`: security verdict (**no new
+  Critical/High/Medium**; one documentation drift in `deferred-match-settle.md`'s
+  PULL-credit note), the Slither/Semgrep tooling results (clean of true positives),
+  the architecture assessment (Permit3 two books, the Settlement memory-context
+  `matchSettle` and its EIP-170 bytecode wall, the module invariant matrix), and the
+  focused checks on exotic/NFT settlements, generic-execution intents, and the
+  lending allowance constellation — all previously separate notes, now merged here.
+
+- **[agent-skill-safety.md](agent-skill-safety.md)** — the operating policy for
+  adding agent skills / MCP servers to the audit workflow. Two halves: the risk
+  register (skills that leak keys or broadcast mainnet transactions — rejected),
+  and the skill manifest (the incremental additions from the 2026-09-17
+  assessment: slither/semgrep, the missing Trail of Bits skills, Solodit, the EVM
+  debugger — and where each pays off, which is the periphery, not core).
+
 - **[audit-2026-09-12-full-tree.md](audit-2026-09-12-full-tree.md)** — the
   twelve-lens read of the WHOLE tree (120 files), briefed on lending modules ×
   `matchSettle` × the pre-fund seams. The seams held; six findings landed outside

@@ -347,7 +347,9 @@ struct MatchPlan {
 ///         settler is bytecode-bound, and a denser packing would cost more code
 ///         than it saves in calldata.
 ///
-///         PULL     — maker → pool for one input leg; credits what actually arrived.
+///         PULL     — maker → pool for one input leg; draws and credits the NOMINAL
+///                    gap `owed − credit` (a pull moves a known amount — see
+///                    {Batch._stepPull}), so a duplicate costs nothing.
 ///         DELIVER  — pool → recipients for every output leg of an order.
 ///         ITEM     — execute one MAKE/TAKE item; a TAKE's proceeds are credited to
 ///                    the order's input legs, measured around that single call.
