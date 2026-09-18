@@ -26,3 +26,6 @@ packages/pitch-deck-vc/
 # instructions). Scope and findings are captured in docs/audit-runs.md and the
 # F-ledger; the bundles themselves are disposable.
 .audit-*/
+
+# Local-only strategy documents (GTM, roadmap, partner briefings).
+docs/local/
