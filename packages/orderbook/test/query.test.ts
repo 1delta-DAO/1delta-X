@@ -233,6 +233,34 @@ describe("checkAdmission", () => {
     expect(checkAdmission(order({ legsIn }), ctx).reason).toMatch(/input legs/);
   });
 
+  describe("requireDeltaVerifyOutputs", () => {
+    const strict = { ...DEFAULT_ADMISSION, requireDeltaVerifyOutputs: true };
+    const DELTA_VERIFY = 1n << 104n;
+
+    it("is off by default, so a general book relays what makers sign", () => {
+      expect(DEFAULT_ADMISSION.requireDeltaVerifyOutputs).toBe(false);
+      expect(checkAdmission(order(), ctx).ok).toBe(true);
+    });
+
+    it("rejects an order that would make its filler approve the settlement", () => {
+      const res = checkAdmission(order(), ctx, strict);
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/timing bit 104/);
+    });
+
+    it("admits one that delivers by balance delta", () => {
+      expect(checkAdmission(order({ timing: DELTA_VERIFY }), ctx, strict).ok).toBe(true);
+    });
+
+    it("reads bit 104 and not its neighbours", () => {
+      for (const bit of [103n, 105n]) {
+        expect(checkAdmission(order({ timing: 1n << bit }), ctx, strict).ok).toBe(false);
+      }
+      // …and survives the other flags being set alongside it.
+      expect(checkAdmission(order({ timing: DELTA_VERIFY | (1n << 100n) | 12345n }), ctx, strict).ok).toBe(true);
+    });
+  });
+
   it("refuses new orders at book capacity, and flags it as capacity", () => {
     const res = checkAdmission(order(), { ...ctx, size: DEFAULT_ADMISSION.maxOrders });
     expect(res.ok).toBe(false);

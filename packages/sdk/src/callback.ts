@@ -20,6 +20,22 @@ export enum CallbackMode {
   PreDeliveryTyped = 2,
   /** {@link PostInputs}, with the fill's resolved context handed to the callback. */
   PostInputsTyped = 3,
+  /**
+   * Bit 2 — DIRECT OUTPUTS: the filler funds its output legs by a plain ERC20
+   * approval to Settlement and says so, and delivery skips the Permit3 leg and
+   * the strict-mode probe (−8.2k gas per fill for a filler without a Permit3
+   * allowance). A hint about the filler's OWN funding path only; the maker's
+   * input pull is unchanged.
+   */
+  PreDeliveryDirect = 4,
+  PostInputsDirect = 5,
+  PreDeliveryTypedDirect = 6,
+  PostInputsTypedDirect = 7,
+}
+
+/** True when the mode delivers outputs by direct ERC20 `transferFrom` (bit 2). */
+export function isDirectMode(mode: CallbackMode): boolean {
+  return (mode & 4) === 4;
 }
 
 /** True when the mode hands the callback an {@link SettlementFillContext}. */

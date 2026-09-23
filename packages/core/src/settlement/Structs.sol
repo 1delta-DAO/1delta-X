@@ -53,7 +53,20 @@ enum CallbackMode {
     // `(target, data)` verbatim and can invoke ANY function on ANY contract, which
     // the typed shape cannot express.
     PreDeliveryTyped,
-    PostInputsTyped
+    PostInputsTyped,
+    // Bit 2 = DIRECT OUTPUTS: the filler declares it funds its output legs by a
+    // plain ERC20 approval to Settlement, so delivery skips the Permit3 leg and
+    // the strict-mode probe and goes straight to `transferFrom`. Purely a gas
+    // hint about the FILLER'S OWN funding path (measured −8.2k per fill for a
+    // filler without a Permit3 allowance, which is every callback solver in
+    // this repo); the maker's input pull is untouched. A filler that does hold
+    // a Permit3 allowance and sets this simply has its direct approval used
+    // instead — its own money, its own choice, which is also why the strict
+    // flag it could have set on itself is not consulted.
+    PreDeliveryDirect,
+    PostInputsDirect,
+    PreDeliveryTypedDirect,
+    PostInputsTypedDirect
 }
 
 /// @notice Which leg of the order is the auction (variable) side and which is

@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { buildSoftCancel, signOrder, signSoftCancel } from "@1delta-x/sdk";
-import { zeroAddress } from "viem";
+import { formatUnits, zeroAddress } from "viem";
 
 import { orderbook } from "./backend/mock";
 import type { SignedOrder } from "./backend/api";
 import { Header } from "./components/Header";
 import { MarketPicker } from "./components/MarketPicker";
 import { OrderBook } from "./components/OrderBook";
-import { OrderForm, type Gate, type Receipt } from "./components/OrderForm";
+import { OrderForm, type AllowanceView, type Gate, type Receipt } from "./components/OrderForm";
 import { Orders } from "./components/Orders";
+import { PreAuditGate, PreAuditStrip, useAcknowledgement } from "./components/PreAudit";
+import { RaffleNotice } from "./components/Raffle";
 import { Stats } from "./components/Stats";
+import { TERMS_UPDATED, TermsDialog } from "./components/Terms";
 import { chainLabel } from "./config/chains";
 import { deploymentFor } from "./config/deployments";
 import { symbolsOn } from "./config/markets";
@@ -22,7 +25,8 @@ import { useTicket, type TicketDeps } from "./hooks/useTicket";
 import { useTokenIndex } from "./hooks/useTokenIndex";
 import { fmtAmt, fmtPrice } from "./lib/format";
 import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/ladder";
-import { buildOrder } from "./lib/order";
+import { buildOrder, toWei } from "./lib/order";
+import { useAllowance } from "./wallet/useAllowance";
 import { useBalances } from "./wallet/useBalances";
 import { useSigner } from "./wallet/useSigner";
 import { useWallet } from "./wallet/useWallet";
@@ -125,10 +129,105 @@ export default function App() {
     });
   }, [ready, merged, ticket.side, ticket.amount, ticket.mode, ticket.limit]);
 
+  const payMeta = tokens.view(ticket.payToken);
+
+  /**
+   * What the next signature actually commits.
+   *
+   * The approval and the order are both sized from this one value. Deriving
+   * them separately is how an interface ends up approving one amount and
+   * signing another — which, under an exact-amount allowance policy, is not a
+   * cosmetic mismatch but a fill that cannot happen.
+   */
+  const plan = useMemo(() => {
+    if (!q || !pool.book || ticket.amount <= 0 || q.totalIn <= 0) return null;
+    const price = ticket.limit ?? pool.book.mid;
+
+    // A TWAP signs one slice at a time, so the slice — not the notional — is
+    // what gets committed and what gets approved.
+    if (ticket.mode === "twap") {
+      const amountIn = ticket.amount / ticket.slices;
+      const out = ticket.side === "sell" ? amountIn * price : amountIn / price;
+      return {
+        kind: "twap" as const,
+        price,
+        amountIn,
+        targetOut: out,
+        minOut: out,
+        ttlSeconds: ticket.everyMin * 60 + 60,
+        decaySeconds: 0,
+      };
+    }
+    // Only the part that does not cross now is signed; the rest settles against
+    // the book on screen.
+    if (ticket.mode === "limit" && q.resting && ticket.limit) {
+      const amountIn = ticket.side === "sell" ? q.resting.size : q.resting.size * ticket.limit;
+      const out = ticket.side === "sell" ? q.resting.size * ticket.limit : q.resting.size;
+      return {
+        kind: "resting" as const,
+        price,
+        amountIn,
+        targetOut: out,
+        minOut: out,
+        ttlSeconds: DAY_MS / 1000,
+        decaySeconds: 0,
+      };
+    }
+    // A market order is a short dutch auction: the maker names the price the
+    // book shows now and a floor, and lets fillers compete in between.
+    return {
+      kind: "market" as const,
+      price,
+      amountIn: q.totalIn,
+      targetOut: q.crossedOut,
+      minOut: q.minReceived,
+      ttlSeconds: MARKET_TTL_SECONDS,
+      decaySeconds: MARKET_TTL_SECONDS,
+    };
+  }, [q, pool.book, ticket.amount, ticket.everyMin, ticket.limit, ticket.mode, ticket.side, ticket.slices]);
+
+  // Permit3 is what pulls the maker's input, so Permit3 is what gets approved.
+  // With nothing deployed nothing can pull, so there is no approval to ask for
+  // and the signature is a demonstration either way.
+  const spender = deployment && deployment.permit3 !== zeroAddress ? deployment.permit3 : null;
+
+  const allowanceState = useAllowance({
+    provider: wallet.provider,
+    owner: wallet.address,
+    chainId,
+    onChain,
+    token: payMeta.address ?? null,
+    spender,
+  });
+
+  // PRE-AUDIT POLICY: approve exactly this order and nothing more. An unaudited
+  // contract can then only ever reach the trade the user was looking at when
+  // they approved it, and no allowance outlives an order that never fills.
+  const requiredWei = useMemo(
+    () => (plan && payMeta.decimals !== undefined ? toWei(plan.amountIn, payMeta.decimals) : 0n),
+    [plan, payMeta.decimals],
+  );
+
+  const allowance: AllowanceView = {
+    spender,
+    required: plan?.amountIn ?? 0,
+    current:
+      allowanceState.allowance !== undefined && payMeta.decimals !== undefined
+        ? Number(formatUnits(allowanceState.allowance, payMeta.decimals))
+        : undefined,
+    covered: requiredWei > 0n && allowanceState.allowance !== undefined && allowanceState.allowance >= requiredWei,
+    approving: allowanceState.approving,
+    error: allowanceState.error,
+    approve: () => void allowanceState.approve(requiredWei),
+  };
+
   const [signing, setSigning] = useState(false);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [signError, setSignError] = useState<string | null>(null);
   const [connectRequest, setConnectRequest] = useState(0);
+  const [termsOpen, setTermsOpen] = useState(false);
+  const [riskOpen, setRiskOpen] = useState(false);
+  const { acknowledged, accept } = useAcknowledgement();
 
   // A receipt describes one ticket; switching market, side or type makes it stale.
   useEffect(() => {
@@ -177,32 +276,23 @@ export default function App() {
   );
 
   const sign = useCallback(async () => {
-    if (!q || !pool.book) return;
+    if (!q || !plan) return;
     setSigning(true);
     try {
-      const { marketId, side, mode, payToken, recvToken, amount } = ticket;
-      const price = ticket.limit ?? pool.book.mid;
+      const { marketId, side, payToken, recvToken, amount } = ticket;
       const undeployed = deployment === null ? " · domain not deployed" : "";
 
-      if (mode === "twap") {
+      if (plan.kind === "twap") {
         // A TWAP is N independent orders on a schedule, so only the slice that
         // is due can be signed now. Signing the whole notional up front would
         // hand a filler the entire size at the first tick.
-        const sliceIn = amount / ticket.slices;
-        const sliceOut = side === "sell" ? sliceIn * price : sliceIn / price;
-        const signed = await signDraft({
-          amountIn: sliceIn,
-          targetOut: sliceOut,
-          minOut: sliceOut,
-          ttlSeconds: ticket.everyMin * 60 + 60,
-          decaySeconds: 0,
-        });
+        const signed = await signDraft(plan);
         const order = await orderbook.place({
           marketId,
           side,
           type: "twap",
-          size: side === "sell" ? amount : amount / price,
-          price,
+          size: side === "sell" ? amount : amount / plan.price,
+          price: plan.price,
           ttlMs: ticket.slices * ticket.everyMin * 60_000 + 60_000,
           slices: { total: ticket.slices, everyMin: ticket.everyMin },
           signed,
@@ -210,7 +300,7 @@ export default function App() {
         setReceipt({
           hash: order.id,
           headline: `${fmtAmt(amount)} ${payToken} in ${ticket.slices} slices, ${ticket.everyMin} min apart`,
-          detail: `slice 1 signed at ${fmtPrice(price, tick)} ${ticket.market.quote}/${ticket.market.base} — the rest are signed as they come due`,
+          detail: `slice 1 signed at ${fmtPrice(plan.price, tick)} ${ticket.market.quote}/${ticket.market.base} — the rest are signed as they come due`,
           note: `scheduled · 0 gas${undeployed}`,
         });
         ticket.clearAmount();
@@ -224,18 +314,11 @@ export default function App() {
         orderbook.recordTake({ marketId, side, size: q.crossedBase, price: q.avg, bySource: q.bySource });
       }
 
-      let signed: SignedOrder;
-      let hash: string;
-      if (mode === "limit" && q.resting && ticket.limit) {
-        const restingIn = side === "sell" ? q.resting.size : q.resting.size * ticket.limit;
-        const restingOut = side === "sell" ? q.resting.size * ticket.limit : q.resting.size;
-        signed = await signDraft({
-          amountIn: restingIn,
-          targetOut: restingOut,
-          minOut: restingOut,
-          ttlSeconds: DAY_MS / 1000,
-          decaySeconds: 0,
-        });
+      const signed = await signDraft(plan);
+      // A resting order is identified by the book's id, a market one by its
+      // own struct hash — so the widened type is the honest one.
+      let hash: string = signed.hash;
+      if (plan.kind === "resting" && q.resting && ticket.limit) {
         const order = await orderbook.place({
           marketId,
           side,
@@ -246,17 +329,6 @@ export default function App() {
           signed,
         });
         hash = order.id;
-      } else {
-        // A market order is a short dutch auction: the maker names the price the
-        // book shows now and a floor, and lets fillers compete in between.
-        signed = await signDraft({
-          amountIn: q.totalIn,
-          targetOut: q.crossedOut,
-          minOut: q.minReceived,
-          ttlSeconds: MARKET_TTL_SECONDS,
-          decaySeconds: MARKET_TTL_SECONDS,
-        });
-        hash = signed.hash;
       }
 
       setReceipt({
@@ -268,6 +340,9 @@ export default function App() {
         note: `${q.resting ? "resting · free to cancel" : "settled · 0 gas"}${undeployed}`,
       });
       ticket.clearAmount();
+      // The allowance was sized for exactly this order, so once it is signed
+      // what the chain grants is no longer what the next ticket will need.
+      allowanceState.refresh();
     } catch (e) {
       // A rejected signature is a normal outcome, not a crash — say what
       // happened and leave the ticket exactly as it was.
@@ -276,7 +351,7 @@ export default function App() {
     } finally {
       setSigning(false);
     }
-  }, [deployment, pool.book, q, signDraft, tick, ticket]);
+  }, [allowanceState, deployment, plan, q, signDraft, tick, ticket]);
 
   /**
    * Retraction is a signed EIP-712 message, not a transaction: free, instant,
@@ -323,6 +398,8 @@ export default function App() {
 
   return (
     <>
+      <PreAuditStrip onDetails={() => setRiskOpen(true)} />
+
       <Header
         chainId={chainId}
         onChainChange={ticket.setChain}
@@ -344,6 +421,8 @@ export default function App() {
           />
         </div>
 
+        <RaffleNotice chainId={chainId} onTerms={() => setTermsOpen(true)} />
+
         <Stats bids={merged.bids} asks={merged.asks} base={ticket.market.base} venues={pool.book?.venues ?? []} />
 
         <div className="deck">
@@ -358,6 +437,7 @@ export default function App() {
             signing={signing}
             receipt={receipt}
             gate={gate}
+            allowance={allowance}
             signError={signError}
             domain={{
               settlement: deployment?.settlement ?? zeroAddress,
@@ -401,7 +481,26 @@ export default function App() {
           . Order distribution runs against an in-browser mock of the orderbook backend, so signing, resting
           and cancelling are simulated locally and nothing is broadcast.
         </p>
+        <p>
+          <button type="button" className="linkbtn" onClick={() => setTermsOpen(true)}>
+            Prize draw Terms &amp; Conditions
+          </button>
+          {TERMS_UPDATED && <> · last updated {TERMS_UPDATED}</>}
+        </p>
       </footer>
+
+      {(!acknowledged || riskOpen) && (
+        <PreAuditGate
+          review={acknowledged}
+          onAccept={accept}
+          onClose={() => setRiskOpen(false)}
+          onTerms={() => setTermsOpen(true)}
+        />
+      )}
+      {/* Last, so it paints above the disclosure that can open it: the draw's
+          terms are reachable from inside the gate, and a dialog that opens
+          behind the thing you opened it from reads as a dead link. */}
+      <TermsDialog open={termsOpen} onClose={() => setTermsOpen(false)} />
     </>
   );
 }

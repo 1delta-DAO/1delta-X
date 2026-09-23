@@ -23,6 +23,7 @@ comes entirely from the maker's signature plus its Permit3 allowances.
 |---|---|
 | [FEATURES.md](FEATURES.md) | Complete inventory of what the protocol does today — order model, entry points, items, pricing, fees, netting, conditions, coverage, limits. **Start here.** |
 | [SECURITY.md](SECURITY.md) | Trust model, security invariants, integrator caveats, all three audits with findings and fixes, disclosure policy. |
+| [packages/docs-site/](packages/docs-site/README.md) | The public documentation site — what the protocol does, how it works, the security model, the optimization record. Static, searchable, deploys to Cloudflare Pages. |
 | [docs/](docs/README.md) | Topic-level design notes: netted settlement, pricing modes, fill modules, bulk signatures, condition trees, fees, proportional legs, deterministic deployment, orderbook transport. |
 | [settlement README](packages/core/src/settlement/README.md) | API reference for the fill flow, item ops, denominator, fees. |
 | [permit3 README](packages/core/src/permit3/README.md) | The token / taker allowance hub, and what it keeps from and changes versus Uniswap's Permit2. |
@@ -53,6 +54,7 @@ packages/
 ├── sdk/                        TypeScript SDK — order packing, EIP-712 signing, calldata
 ├── orderbook/                  Transport-agnostic order distribution (protobuf, verifier, book)
 ├── orderbook-server/           Demo backend for the orderbook (Fastify REST + WS)
+├── docs-site/                  Public documentation site — static, searchable, Cloudflare Pages
 └── app/                        Reference trading interface (React + Vite) — live Uniswap v3
                                 depth from the Oku API merged with resting limit orders
 ```

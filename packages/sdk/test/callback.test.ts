@@ -4,6 +4,7 @@ import { decodeFunctionData, encodeFunctionData, type Address, type Hex } from "
 import { SETTLEMENT_ABI, SETTLEMENT_CALLBACK_ABI } from "../src/abi";
 import {
   CallbackMode,
+  isDirectMode,
   decodeSettlementCallback,
   encodeFillWithCallback,
   fillDelta,
@@ -24,6 +25,11 @@ describe("CallbackMode", () => {
     expect(CallbackMode.PostInputs).toBe(1);
     expect(CallbackMode.PreDeliveryTyped).toBe(2);
     expect(CallbackMode.PostInputsTyped).toBe(3);
+    // Bit 2 = direct outputs, orthogonal to the other two.
+    expect(CallbackMode.PreDeliveryDirect).toBe(4);
+    expect(CallbackMode.PostInputsDirect).toBe(5);
+    expect(CallbackMode.PreDeliveryTypedDirect).toBe(6);
+    expect(CallbackMode.PostInputsTypedDirect).toBe(7);
   });
 
   it("classifies every mode", () => {
@@ -36,6 +42,14 @@ describe("CallbackMode", () => {
     expect(isPostInputs(CallbackMode.PostInputs)).toBe(true);
     expect(isPostInputs(CallbackMode.PreDeliveryTyped)).toBe(false);
     expect(isPostInputs(CallbackMode.PostInputsTyped)).toBe(true);
+
+    for (const m of [CallbackMode.PreDelivery, CallbackMode.PostInputs, CallbackMode.PreDeliveryTyped, CallbackMode.PostInputsTyped]) {
+      expect(isDirectMode(m)).toBe(false);
+      expect(isDirectMode(m | 4)).toBe(true);
+      // The direct bit changes neither the ordering nor the payload shape.
+      expect(isPostInputs(m | 4)).toBe(isPostInputs(m));
+      expect(isTypedMode(m | 4)).toBe(isTypedMode(m));
+    }
   });
 });
 

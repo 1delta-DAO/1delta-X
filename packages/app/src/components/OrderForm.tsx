@@ -1,5 +1,3 @@
-import { useEffect, useState } from "react";
-
 import { pairsWith, symbolsOn } from "../config/markets";
 import type { Ticket } from "../hooks/useTicket";
 import type { TokenIndex } from "../hooks/useTokenIndex";
@@ -21,6 +19,27 @@ export interface Gate {
   action: () => void;
 }
 
+/**
+ * The ERC-20 allowance the order needs, and how to grant it.
+ *
+ * Pre-audit the grant is the exact input of the order on screen — never an
+ * unlimited approval — so the form states the number it is asking for rather
+ * than calling it "one time" and hiding the amount.
+ */
+export interface AllowanceView {
+  /** Permit3. Null when nothing is deployed that could pull, so nothing to approve. */
+  spender: string | null;
+  /** Exactly what this order commits, in human units. */
+  required: number;
+  /** What the chain grants today. `undefined` means not read yet, never zero. */
+  current: number | undefined;
+  /** Whether the standing allowance already covers this order. */
+  covered: boolean;
+  approving: boolean;
+  error: string | null;
+  approve: () => void;
+}
+
 interface OrderFormProps {
   ticket: Ticket;
   quote: Quote | null;
@@ -33,6 +52,7 @@ interface OrderFormProps {
   signing: boolean;
   receipt: Receipt | null;
   gate: Gate | null;
+  allowance: AllowanceView;
   /** Why the last signature attempt failed — a declined wallet prompt, usually. */
   signError: string | null;
   /** The EIP-712 domain orders are signed into, so it is never a mystery. */
@@ -51,32 +71,18 @@ function cssVar(name: string): string {
 }
 
 export function OrderForm(props: OrderFormProps) {
-  const { ticket, quote, tokens, balances, tick, mid, ready, signing, receipt, gate, signError, domain, onSign } =
+  const { ticket, quote, tokens, balances, tick, mid, ready, signing, receipt, gate, allowance, signError, domain, onSign } =
     props;
-  const [approved, setApproved] = useState(false);
-  const [approving, setApproving] = useState(false);
 
   const { amount, payToken, recvToken, mode, side, market, payBalance } = ticket;
 
-  // An allowance is per token and per chain, so either changing invalidates it.
-  useEffect(() => {
-    setApproved(false);
-    setApproving(false);
-  }, [payToken, ticket.chainId]);
+  // Nothing deployed means nothing can pull the input, so the approval step is
+  // not skipped for convenience — there is genuinely nothing to approve.
+  const needsApproval = allowance.spender !== null && !allowance.covered;
 
   const resting = quote?.resting ?? null;
   const overBalance = payBalance !== undefined && amount > payBalance;
   const twapMinutes = ticket.slices * ticket.everyMin;
-
-  const approve = () => {
-    setApproving(true);
-    // Stands in for the allowance transaction; the sign step stays gated on it
-    // so the two-step shape of a first trade is visible.
-    setTimeout(() => {
-      setApproving(false);
-      setApproved(true);
-    }, 800);
-  };
 
   const bar: Array<{ key: string; pct: number; color: string; label: string }> = [];
   if (quote && amount > 0 && quote.filledIn > 0) {
@@ -129,7 +135,7 @@ export function OrderForm(props: OrderFormProps) {
     rows.push(["Expires", mode === "market" ? "60 seconds" : mode === "twap" ? "on completion" : "24 hours", ""]);
   }
 
-  const canSign = ready && approved && !signing && amount > 0 && !overBalance && !!quote && quote.totalIn > 0;
+  const canSign = ready && !needsApproval && !signing && amount > 0 && !overBalance && !!quote && quote.totalIn > 0;
 
   return (
     <div className="box">
@@ -338,18 +344,31 @@ export function OrderForm(props: OrderFormProps) {
             </button>
           ) : (
             <>
-              <button
-                type="button"
-                className={approved ? "cta ok" : "cta line"}
-                disabled={approved || approving}
-                onClick={approve}
-              >
-                {approved
-                  ? "✓ Permission granted"
-                  : approving
-                    ? "Granting permission…"
-                    : `Approve ${payToken} · one time`}
-              </button>
+              {allowance.spender !== null && (
+                <>
+                  <button
+                    type="button"
+                    className={allowance.covered ? "cta ok" : "cta line"}
+                    disabled={allowance.covered || allowance.approving || allowance.required <= 0}
+                    onClick={allowance.approve}
+                  >
+                    {allowance.covered
+                      ? `✓ ${fmtAmt(allowance.required)} ${payToken} approved`
+                      : allowance.approving
+                        ? "Approving…"
+                        : allowance.required > 0
+                          ? `Approve exactly ${fmtAmt(allowance.required)} ${payToken}`
+                          : `Approve ${payToken}`}
+                  </button>
+                  <span className="capnote dim">
+                    Pre-audit: the approval covers this order only — no standing allowance is left behind
+                    {allowance.current !== undefined && allowance.current > 0 && !allowance.covered && (
+                      <> · currently approved {fmtAmt(allowance.current)} {payToken}</>
+                    )}
+                  </span>
+                  {allowance.error && <div className="signerr">{allowance.error}</div>}
+                </>
+              )}
               <button type="button" className="cta" disabled={!canSign} onClick={onSign}>
                 {signing ? "Waiting for signature…" : "Sign order"}
               </button>
@@ -357,6 +376,12 @@ export function OrderForm(props: OrderFormProps) {
           )}
           <div className="gas">
             Network fee <b>0</b> — the filler pays
+            {allowance.spender !== null && !allowance.covered && (
+              <>
+                <br />
+                the approval above is the only transaction you send
+              </>
+            )}
           </div>
           <div className="domain" title="EIP-712 verifyingContract — a signature is bound to this address and chain">
             {domain.deployed ? (

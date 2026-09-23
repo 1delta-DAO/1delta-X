@@ -2,6 +2,7 @@ import {
   OrderSide,
   hashOrderStruct,
   packTiming,
+  withDeltaVerifyOutputs,
   type LegIn,
   type LegOut,
   type Order,
@@ -119,7 +120,14 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     expiry: BigInt(now + ttlSeconds),
     legsIn,
     legsOut,
-    timing: decaying ? packTiming(now, decaySeconds, 0) : packTiming(0, 0, 0),
+    // DIRECT DELIVERY (timing bit 104): the filler's route pays this maker
+    // straight from the venue and the contract verifies the balance delta,
+    // instead of pulling a nominal amount from the filler afterwards. Same
+    // guarantee — the delta must cover the priced amount — but ~30k gas less
+    // per fill for the solver, which on a gas-expensive chain is the difference
+    // between a fill being worth racing for or not. Every order here is a plain
+    // one-in/one-out swap, which is the shape the mode is defined for.
+    timing: withDeltaVerifyOutputs(decaying ? packTiming(now, decaySeconds, 0) : packTiming(0, 0, 0)),
     exclusiveFiller: zeroAddress,
     minFillAnchor: 0n,
     exclusivityOverrideBps: 0n,

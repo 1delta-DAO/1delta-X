@@ -161,6 +161,7 @@ pnpm --filter @1delta-x/orderbook-server start    # tsx src/bin.ts
 | `MAX_ORDERS_PER_MAKER` | | `500` | one account cannot own the book |
 | `MIN_TTL_SECONDS` | | `15` | below this an order is not worth an `eth_call` |
 | `MAX_TTL_SECONDS` | | `7776000` (90d) | above this it is squatting, not a quote |
+| `REQUIRE_DELTA_VERIFY` | | `false` | admit only `timing` bit-104 orders, so no fill ever makes its filler approve the settlement |
 | `RATE_LIMIT_IP_CAPACITY` / `_REFILL` | | `120` / `1` | burst / tokens per second |
 | `RATE_LIMIT_MAKER_CAPACITY` / `_REFILL` | | `120` / `1` | per signing account |
 | `MAX_BODY_BYTES` | | `65536` | |

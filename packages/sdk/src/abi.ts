@@ -157,8 +157,9 @@ export const SETTLEMENT_ABI = [
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
   },
   // The callback fills. `mode` is {CallbackMode}: 0 PreDelivery, 1 PostInputs,
-  // 2 PreDeliveryTyped, 3 PostInputsTyped — bit 0 is the ordering, bit 1 opts into
-  // the typed {ISettlementCallback} payload.
+  // 2 PreDeliveryTyped, 3 PostInputsTyped, 4–7 the same with DIRECT outputs — bit 0
+  // is the ordering, bit 1 opts into the typed {ISettlementCallback} payload, bit 2
+  // delivers outputs by direct ERC20 `transferFrom` (no Permit3 probe).
   {
     type: "function",
     name: "fillWithCallback",

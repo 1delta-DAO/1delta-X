@@ -550,7 +550,7 @@ abstract contract Core is Base {
         // BEFORE the maker's inputs are pulled, so the authorization gates the pull
         // rather than merely being checked once everything has already moved.
         // See the note there and in {Base._takeByPermit}.
-        outs = _settleForward(order, ctx, address(0), "", "");
+        outs = _settleForward(order, ctx, address(0), "", "", false);
     }
 
     // ──────────────────── Custom fill ────────────────────
@@ -777,9 +777,11 @@ abstract contract Core is Base {
         // Bit 1 = typed: swap the callback PAYLOAD, never the ordering, so the two
         // settle flows below are untouched and still see only bytes.
         if (uint8(mode) & 2 == 2) callbackData = _typedPayload(order, ctx, callbackData);
+        // Bit 2 = direct outputs: a funding hint for the delivery step, see {CallbackMode}.
+        bool direct = uint8(mode) & 4 == 4;
         outs = uint8(mode) & 1 == 1
-            ? _settlePostInputs(order, ctx, callbackTarget, callbackData, takerData)
-            : _settleForward(order, ctx, callbackTarget, callbackData, takerData);
+            ? _settlePostInputs(order, ctx, callbackTarget, callbackData, takerData, direct)
+            : _settleForward(order, ctx, callbackTarget, callbackData, takerData, direct);
     }
 
     /// @dev `EXECUTOR.execute(target, data)`, hand-encoded.
@@ -1000,7 +1002,8 @@ abstract contract Core is Base {
         FillCtx memory ctx,
         address callbackTarget,
         bytes memory callbackData,
-        bytes memory takerData
+        bytes memory takerData,
+        bool direct
     ) internal returns (uint256[] memory outs) {
         // DELTA-VERIFY delivery: snapshot the output recipients BEFORE the callback
         // delivers, so `_deliverOutputs` can verify the measured delta. `outBefore`
@@ -1010,7 +1013,7 @@ abstract contract Core is Base {
         if (DutchAuction.deltaVerifyOutputs(order)) outBefore = _snapshotOutRecipients(order);
         if (callbackTarget != address(0)) _execute(callbackTarget, callbackData);
 
-        outs = _deliverOutputs(order, ctx, outBefore);
+        outs = _deliverOutputs(order, ctx, outBefore, direct);
         // HAND THE DELIVERY LEDGER TO THE ITEMS. One MSTORE, and it is what lets a
         // funding descriptor ({Base._forSlice}) SPEND what was delivered instead of
         // re-pricing it. Set here rather than inside `_deliverOutputs` so the
@@ -1057,7 +1060,8 @@ abstract contract Core is Base {
         FillCtx memory ctx,
         address callbackTarget,
         bytes memory callbackData,
-        bytes memory takerData
+        bytes memory takerData,
+        bool direct
     ) internal returns (uint256[] memory outs) {
         if (PackedArrays.countUnchecked(order.items) != 0) revert ReverseModeRequiresNoItems();
         // DELTA-VERIFY delivery: snapshot output recipients before anything moves
@@ -1079,7 +1083,7 @@ abstract contract Core is Base {
         if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
         _payInputsToSolver(order, ctx, new uint256[](0), false);
         if (callbackTarget != address(0)) _execute(callbackTarget, callbackData);
-        outs = _deliverOutputs(order, ctx, outBefore);
+        outs = _deliverOutputs(order, ctx, outBefore, direct);
         _closeFill(order, ctx.filler, takerData, ctx.orderHash);
     }
 
@@ -1095,7 +1099,7 @@ abstract contract Core is Base {
     ///        `tokenOut` via Permit3, falling back to a direct ERC20 transferFrom
     ///        when the solver approved Settlement directly (see
     ///        `_transferFromWithFallback`).
-    function _deliverOutputs(Order calldata order, FillCtx memory ctx, uint256[] memory outBefore)
+    function _deliverOutputs(Order calldata order, FillCtx memory ctx, uint256[] memory outBefore, bool direct)
         internal
         returns (uint256[] memory outs)
     {
@@ -1124,6 +1128,10 @@ abstract contract Core is Base {
                     // delta ≥ priced amount, fee-on-transfer / rebasing safe.
                     uint256 bal = SafeTransferLib.balanceOf(legToken, recipient);
                     if (bal < outBefore[j] || bal - outBefore[j] < amt) revert DeltaTooLow();
+                } else if (direct) {
+                    // {CallbackMode} bit 2: the filler funds this leg by a direct ERC20
+                    // approval and said so — no Permit3 probe, no strict-mode read.
+                    SafeTransferLib.safeTransferFrom(legToken, ctx.filler, recipient, amt);
                 } else {
                     Permit3TransferLib.transferFromWithFallback(PERMIT3, legToken, ctx.filler, recipient, amt);
                 }

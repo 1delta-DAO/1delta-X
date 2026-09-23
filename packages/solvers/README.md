@@ -2,6 +2,18 @@
 
 Off-chain filler / solver reference implementations for `Settlement`.
 
+**Where asset weirdness is handled.** The settler is general and immutable, so
+it carries fee-on-transfer and rebasing tokens for every maker who signs for
+them — `timing` bit 104 enforces the maker's floor NET of the fee, and an
+unmarked order delivers nominally, which is the maker's own signed choice
+(`core/test/swaps/DeltaVerifyDelivery.t.sol` pins both). A SOLVER is the
+opposite kind of contract: one per deployment, replaceable, and free to
+specialise — a solver that cannot carry an odd token simply is not pointed at
+one. So narrowing belongs here or in the book's token policy, never in the core.
+(`AggregatorFillSolver` happens to carry them anyway: its balance-delta
+discipline is FoT-correct as a side effect, and dropping it measured a net
+saving of ~0 — see the note on custody.)
+
 Most of these contracts are permissionless fillers: anyone may run one to fill
 an order. They hold no funds between fills — each fill sources its collateral
 inventory from a flash-loan provider, routes it through Settlement to satisfy
@@ -65,6 +77,65 @@ entrypoint is owner/operator-gated.
     This is the only place a surplus split is *enforceable* — the contract is
     the swapper, so it can measure the surplus; Settlement never sees it. See
     docs/originator-fees.md §5.
+    **An optional operator set** (constructor, immutable, empty = anyone) gates
+    `executeFill`. It is a ring-fence, not a security boundary — nothing above
+    depends on it — but it is what makes `Order.exclusiveFiller = thisSolver`
+    mean anything: core compares the exclusive filler to the fill's
+    `msg.sender`, which is the solver *contract*, so on an open instance an
+    order exclusive to it is exclusive to anyone willing to route through it.
+    A gated instance (a capped beta, a solver that wants the whole remainder)
+    narrows that to its operators; a new operator means a new instance. Both
+    sets are immutables (≤ 4 entries each), not mappings — a membership test
+    is then a compare rather than a cold SLOAD, −2.1k gas per fill per set.
+    Fills start as `CallbackMode.PostInputsDirect`: the contract never holds a
+    Permit3 allowance, so bit 2 tells the core to pull its output legs by plain
+    `transferFrom` instead of probing Permit3, failing, reading the strict flag
+    and only then falling back (−9.0k per fill on the pull path).
+    **Direct delivery.** On an order signed with `timing` bit 104
+    (`DutchAuction.deltaVerifyOutputs`, SDK `withDeltaVerifyOutputs`) the route
+    pays the maker itself and the core verifies the balance delta, so this
+    contract never approves Settlement and never holds `tokenOut`: quote the
+    route with `recipient = order.maker`, exact-output for the priced amount,
+    and the unspent input comes back as the spread (`tokenIn` residue, same
+    policy). Detected from the order — the caller cannot choose it — and
+    `minOut`/`maxPay` are ignored on that path. Measured 167.1k → 142.7k per
+    fill; the app signs every order this way.
+    **`STANDING_ALLOWANCE` (constructor, immutable).** Fund routes from standing
+    max approvals instead of writing the allowance slot twice per fill —
+    measured 132,740 → 98,545 on a live Rootstock pool, 13% of a whole
+    DEX-routed fill. It gives up "no allowance survives the fill" on the input
+    side, so it is only sound for a router that pulls **exclusively from its own
+    `msg.sender`**; SwapRouter02 does (`payer = msg.sender` in its own callback
+    data, and `verifyCallback` rejects any non-pool caller — both halves tested
+    against the live router), but an aggregator whose API takes a `payer`/`from`
+    parameter does **not**, and a standing approval there is a standing drain.
+    Verify that per router before deploying with it on. ⚠ The per-fill approval
+    was ALSO A BOUND — it capped the route at the delta the fill delivered
+    whatever the calldata said — so a standing instance re-imposes that as a
+    measurement (`RouteOverspent`): the route may spend what this fill brought
+    and not one wei more. Without it the caller picks `amountInOffset`, declines
+    the patch and has the router sweep the contract's own balance. Tokens are primed by the
+    constructor or by the permissionless `prime(token)`; `onFill` never checks —
+    an unprimed token fails at the router's own pull, which costs the caller its
+    own gas and is repaired by anyone.
+    **Custody: hold DUST, not value.** These are two separate decisions and only
+    one of them pays.
+    *Dust is worth having.* An inbound transfer to a zero balance costs the
+    token's 0→non-zero SSTORE; one wei of each traded token parked here makes it
+    a non-zero→non-zero write instead, measured at **−17,153 per fill** on a live
+    Rootstock pool (`test/RawSwapComparison.t.sol`, `NoFloorTest` is the honest
+    no-floor baseline). The floor is self-sustaining: the route consumes exactly
+    what the fill delivered, so the wei stays.
+    *Retained value is not.* `RoutePlan.profitRecipient = the solver` measured
+    **0** against paying the spread straight out on the direct-delivery path —
+    an exact-input route leaves no residue to retain — and ~3k on the pull path.
+    So point `profitRecipient` at a treasury and let the contract hold dust only:
+    it is permissionlessly callable and holds the maker's input mid-fill, so
+    every wei parked here is something a future mistake can be paired with. On
+    the direct path it never touches `tokenOut` at all.
+    ⚠ Measuring this: EIP-2200 prices an SSTORE against the slot's value at the
+    START OF THE TRANSACTION, so a benchmark that seeds a floor and zeroes it
+    inline measures a dirty-slot write and reports the floor as worthless.
   - `FillRecovery.sol` — rebuild the in-flight `FillCtx` from inside a callback
     when the order shape allows it. Refuses proportional-under-`PostInputs`,
     fill-module and fill-once orders, whose delta it cannot recover by

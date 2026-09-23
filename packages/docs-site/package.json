@@ -1,0 +1,13 @@
+{
+  "name": "@1delta-x/docs-site",
+  "license": "MIT",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Static documentation site for 1delta x — dependency-free generator, client-side search, deployed to Cloudflare Pages.",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --serve",
+    "deploy": "node build.mjs && wrangler pages deploy dist"
+  }
+}

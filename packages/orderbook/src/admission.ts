@@ -33,6 +33,23 @@ export interface AdmissionPolicy {
    * quote, it is a squatting instruction — and it never expires its way out.
    */
   maxTtlSeconds: number;
+  /**
+   * Admit only orders that deliver their outputs by BALANCE DELTA (`timing`
+   * bit 104, {@link DELTA_VERIFY_OUTPUTS_BIT}).
+   *
+   * Not a preference — it decides which code path every fill of this book takes.
+   * A delta-verified order is paid by the filler's own route straight to the
+   * recipient and the settler verifies the increase, so the filler approves the
+   * settlement for NOTHING. Without the bit the settler PULLS from the filler,
+   * which means an approval exists mid-fill and a residue of it can outlive the
+   * fill; solvers then carry the discipline of clearing it, and a book that
+   * serves both shapes makes that discipline load-bearing for every filler it
+   * onboards. Requiring the bit removes the path instead of guarding it.
+   *
+   * Off by default: a general book should relay what makers sign. Turn it on for
+   * a deployment whose orders all come from a front end you control.
+   */
+  requireDeltaVerifyOutputs: boolean;
 }
 
 export const DEFAULT_ADMISSION: AdmissionPolicy = {
@@ -44,6 +61,7 @@ export const DEFAULT_ADMISSION: AdmissionPolicy = {
   maxValidators: 8,
   minTtlSeconds: 15,
   maxTtlSeconds: 90 * 24 * 3600,
+  requireDeltaVerifyOutputs: false,
 };
 
 export interface AdmissionContext {
@@ -84,6 +102,11 @@ export function checkAdmission(
   }
   if (order.validators.length + order.invariants.length > policy.maxValidators) {
     return { ok: false, reason: `too many validators (max ${policy.maxValidators})` };
+  }
+
+  // `timing` bit 104 — see {@link AdmissionPolicy.requireDeltaVerifyOutputs}.
+  if (policy.requireDeltaVerifyOutputs && (order.timing >> 104n) % 2n === 0n) {
+    return { ok: false, reason: "this book admits delta-verified orders only (timing bit 104)" };
   }
 
   const ttl = Number(order.expiry) - ctx.now;

@@ -113,7 +113,7 @@ That asymmetry is deliberate, load-bearing, and the direct subject of matrix
 | # | Value | Where | Freq |
 | --- | --- | --- | --- |
 | C1 | `fill` (3-arg / 4-arg with `takerData`) | `Core.sol` | ● |
-| C2 | `fillWithCallback` × 4 `CallbackMode`s | `Core.sol` | ● |
+| C2 | `fillWithCallback` × 8 `CallbackMode`s (ordering × typed × direct-outputs) | `Core.sol` | ● |
 | C3 | `fillWithPermit` | `Core.sol` | ◐ |
 | C4 | `fillWithPermitTake` | `Core.sol` | ◐ |
 | C5 | `fillSelf` | `Core.sol` | ◐ |

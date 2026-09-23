@@ -474,3 +474,88 @@ footer a { color: var(--dim); }
 }
 @keyframes venue-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) { .bkfoot .venue-wait em { animation: none; } }
+
+/* ── pre-audit disclosure ──────────────────────────────── */
+/* A strip above the chrome rather than inside it: the warning is about the
+   whole deployment, not about whatever control it happens to sit beside. */
+.preaudit {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 24px; font-size: 12.5px; line-height: 1.5; color: var(--dim);
+  background: var(--raise); border-bottom: 1px solid var(--line);
+}
+.preaudit b { color: var(--orange); font-weight: 700; }
+.pill-orange { background: var(--orange); }
+
+.linkbtn {
+  background: none; border: 0; padding: 0; color: var(--ink);
+  text-decoration: underline; text-underline-offset: 3px; font-size: inherit;
+}
+.linkbtn:hover { color: var(--lime); }
+
+.scrim {
+  position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .74);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  backdrop-filter: blur(3px);
+}
+:root[data-theme="light"] .scrim { background: rgba(0, 0, 0, .38); }
+
+.sheet {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r);
+  width: min(760px, 100%); max-height: min(86vh, 900px); display: flex; flex-direction: column; overflow: hidden;
+}
+.sheet.narrow { width: min(540px, 100%); }
+.sheethead {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 15px 22px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+}
+.sheetbody { padding: 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+
+.gatetitle { font-size: clamp(22px, 3.6vw, 30px); line-height: 1.12; letter-spacing: -.025em; font-weight: 700; margin: 0; }
+.gatelist { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 11px; font-size: 13.5px; color: var(--dim); line-height: 1.6; }
+.gatelist b { color: var(--ink); font-weight: 700; }
+
+.check { display: flex; gap: 11px; align-items: flex-start; font-size: 13px; line-height: 1.55; color: var(--ink); cursor: pointer; }
+.check input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--lime); flex: 0 0 auto; cursor: pointer; }
+
+/* The terms document itself — measured for reading, not for the dense
+   tabular type the rest of the app uses. */
+.md { font-size: 14px; line-height: 1.68; color: var(--dim); gap: 0; }
+.md h2 { font-size: 22px; line-height: 1.2; letter-spacing: -.02em; color: var(--ink); margin: 0 0 6px; }
+.md h3 { font-size: 14px; line-height: 1.4; color: var(--ink); margin: 26px 0 8px; font-weight: 700; }
+.md p { margin: 0 0 11px; }
+.md ul { margin: 0 0 11px; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.md strong { color: var(--ink); font-weight: 700; }
+.md a { color: var(--lime); }
+.md .mdquote {
+  margin: 0 0 18px; padding: 13px 16px; border-left: 2px solid var(--orange);
+  background: var(--raise); border-radius: 0 10px 10px 0; color: var(--ink);
+}
+
+.capnote.dim { color: var(--faint); line-height: 1.5; display: block; text-align: center; }
+
+@media (max-width: 640px) {
+  .preaudit { padding-inline: 16px; }
+  .scrim { padding: 0; }
+  .sheet, .sheet.narrow { width: 100%; max-height: 100vh; height: 100%; border-radius: 0; border: 0; }
+}
+
+/* ── prize draw notice ─────────────────────────────────── */
+/* Violet, not the warning orange: this is an offer, and dressing it as a risk
+   would be as misleading as dressing a risk as an offer. */
+.raffle {
+  display: flex; gap: 14px; align-items: flex-start;
+  border: 1px solid var(--line); border-left: 2px solid var(--violet);
+  border-radius: var(--r); background: var(--card); padding: 15px 18px;
+}
+.rfbody { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.rflead { font-size: 13.5px; line-height: 1.55; color: var(--ink); }
+.rflead b { font-weight: 700; color: var(--violet); }
+/* The qualifications are part of the offer, so they sit with it rather than
+   behind a link — smaller, but not hidden. */
+.rffine { font-size: 11.5px; line-height: 1.6; color: var(--faint); }
+.rffine b { color: var(--dim); font-weight: 700; }
+.rffine .linkbtn { font-size: inherit; color: var(--dim); }
+
+@media (max-width: 640px) {
+  .raffle { flex-direction: column; gap: 10px; }
+}

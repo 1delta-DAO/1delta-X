@@ -6,6 +6,8 @@ import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 import {Order, CallbackMode} from "@core/settlement/Settlement.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
+import {OrderGates} from "@core/settlement/OrderGates.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {
     AggregatorFillSolver,
     RoutePlan,
@@ -15,7 +17,7 @@ import {
     PPM
 } from "@solvers/aggregator/AggregatorFillSolver.sol";
 
-import {MockSettlementBase} from "@coretest/shared/MockSettlementBase.t.sol";
+import {MockSettlementBase, MockERC20} from "@coretest/shared/MockSettlementBase.t.sol";
 
 /// @dev A stand-in for an aggregator router. Behaves like the real thing in the
 ///      one way that matters here: it PULLS its input from `msg.sender`, which is
@@ -40,6 +42,16 @@ contract MockRouter {
         SafeTransferLib.safeTransferFrom(TOKEN_IN, msg.sender, address(this), amountIn);
         SafeTransferLib.safeTransfer(TOKEN_OUT, recipient, (amountIn * rateBps) / 10_000);
     }
+
+    /// @notice Exact-output: pull only the input `amountOut` costs at the current
+    ///         rate, capped at `maxIn`, and pay `amountOut` to `recipient`. The
+    ///         direct-delivery shape, where the unspent input is the spread.
+    function swapExactOut(uint256 amountOut, uint256 maxIn, address recipient) external {
+        uint256 amountIn = (amountOut * 10_000 + rateBps - 1) / rateBps;
+        require(amountIn <= maxIn, "too much in");
+        SafeTransferLib.safeTransferFrom(TOKEN_IN, msg.sender, address(this), amountIn);
+        SafeTransferLib.safeTransfer(TOKEN_OUT, recipient, amountOut);
+    }
 }
 
 /// @title AggregatorFillSolverTest
@@ -61,7 +73,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
     function setUp() public virtual override {
         super.setUp();
         router = new MockRouter(address(tA), address(tB));
-        aggSolver = new AggregatorFillSolver(address(settlement), _routers(address(router)), _noSplit());
+        aggSolver = new AggregatorFillSolver(address(settlement), _routers(address(router)), _open(), _noSplit(), false, _none());
         vm.label(address(aggSolver), "aggregatorSolver");
         vm.label(address(router), "mockRouter");
 
@@ -84,6 +96,18 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         rs[0] = one;
     }
 
+    /// @dev The empty operator set: `executeFill` open to anyone, which is the
+    ///      shape every test outside {AggregatorOperatorGateTest} assumes.
+    function _open() internal pure returns (address[] memory) {
+        return new address[](0);
+    }
+
+    /// @dev No tokens to prime — the per-fill-approval instance every test but
+    ///      {AggregatorStandingAllowanceTest} uses.
+    function _none() internal pure returns (address[] memory) {
+        return new address[](0);
+    }
+
     function _order(uint256 nonce) internal view returns (Order memory o) {
         o = _plainOrder(nonce, address(tA), address(tB), AMOUNT_IN, AMOUNT_OUT);
     }
@@ -95,6 +119,24 @@ contract AggregatorFillSolverTest is MockSettlementBase {
     ///      is unfillable" — see docs/filler-strategy.md.
     function _wrapped(bytes memory inner) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(SolverCallbackExecutor.CallbackFailed.selector, inner);
+    }
+
+    /// @dev The same order signed for DIRECT delivery (`timing` bit 104): the
+    ///      core verifies the maker's balance delta instead of pulling from us.
+    function _directOrder(uint256 nonce) internal view returns (Order memory o) {
+        o = _order(nonce);
+        o.timing |= uint256(1) << 104;
+    }
+
+    /// @dev An exact-output route paying `amountOut` to `recipient` out of at most
+    ///      `maxIn` — what a direct-delivery quote looks like.
+    function _exactOutPlan(uint256 amountOut, uint256 maxIn, address recipient)
+        internal
+        view
+        returns (RoutePlan memory p)
+    {
+        p = _planFor(AMOUNT_IN, recipient, 0, NO_PATCH);
+        p.data = abi.encodeCall(MockRouter.swapExactOut, (amountOut, maxIn, recipient));
     }
 
     /// @dev A route quoted FOR `recipient` — mirrors what an aggregator returns.
@@ -140,8 +182,8 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         assertEq(tA.balanceOf(address(aggSolver)), 0, "no input left stranded");
     }
 
-    /// @dev Anyone may call `executeFill` — the security boundary is the maker's
-    ///      signature, not an operator list.
+    /// @dev With an empty operator set anyone may call `executeFill` — the
+    ///      security boundary is the maker's signature, not an operator list.
     function test_agg_fillIsPermissionless() public {
         Order memory o = _order(2);
         // `_sign` is a cheatcode call and would consume the prank below if it were
@@ -231,6 +273,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
                 amountInOffset: NO_PATCH,
                 inBefore: 0,
                 outBefore: 0,
+                direct: false,
                 data: ""
             })
         );
@@ -253,6 +296,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
                 amountInOffset: NO_PATCH,
                 inBefore: 0,
                 outBefore: 0,
+                direct: false,
                 data: ""
             })
         );
@@ -275,6 +319,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
                 amountInOffset: NO_PATCH,
                 inBefore: 0,
                 outBefore: 0,
+                direct: false,
                 data: ""
             })
         );
@@ -576,11 +621,11 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
         address[] memory rs = new address[](1);
         rs[0] = address(settlement);
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.RouterIsProtocol.selector, address(settlement)));
-        new AggregatorFillSolver(address(settlement), rs, _noSplit());
+        new AggregatorFillSolver(address(settlement), rs, _open(), _noSplit(), false, _none());
 
         rs[0] = address(permit3);
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.RouterIsProtocol.selector, address(permit3)));
-        new AggregatorFillSolver(address(settlement), rs, _noSplit());
+        new AggregatorFillSolver(address(settlement), rs, _open(), _noSplit(), false, _none());
     }
 }
 
@@ -622,7 +667,10 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         splitSolver = new AggregatorFillSolver(
             address(settlement),
             _routers(address(router)),
-            SurplusPolicy({makerPpm: MAKER_PPM, protocolPpm: PROTOCOL_PPM, protocolRecipient: PROTOCOL})
+            _open(),
+            SurplusPolicy({makerPpm: MAKER_PPM, protocolPpm: PROTOCOL_PPM, protocolRecipient: PROTOCOL}),
+            false,
+            _none()
         );
         vm.label(address(splitSolver), "splitSolver");
     }
@@ -789,15 +837,15 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         address[] memory rs = _routers(address(router));
         vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
         new AggregatorFillSolver(
-            address(settlement), rs, SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_001, protocolRecipient: PROTOCOL})
+            address(settlement), rs, _open(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_001, protocolRecipient: PROTOCOL}), false, _none()
         );
         vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
         new AggregatorFillSolver(
-            address(settlement), rs, SurplusPolicy({makerPpm: 0, protocolPpm: 1, protocolRecipient: address(0)})
+            address(settlement), rs, _open(), SurplusPolicy({makerPpm: 0, protocolPpm: 1, protocolRecipient: address(0)}), false, _none()
         );
         // The boundary is allowed: 100% away from the filler.
         new AggregatorFillSolver(
-            address(settlement), rs, SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_000, protocolRecipient: PROTOCOL})
+            address(settlement), rs, _open(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_000, protocolRecipient: PROTOCOL}), false, _none()
         );
     }
 
@@ -812,5 +860,527 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         vm.prank(FILLER);
         aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
         assertEq(tB.balanceOf(FILLER), SPREAD);
+    }
+}
+
+/// @title AggregatorOperatorGateTest
+/// @notice The immutable operator set: a ring-fence on WHO may drive this
+///         instance, and the reason it exists — an order that names the solver
+///         contract as its exclusive filler is only exclusive to the operators
+///         if the contract itself is gated.
+contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
+    address constant OPERATOR = address(0x0Be7A);
+    address constant STRANGER = address(0xD00D);
+
+    AggregatorFillSolver gated;
+
+    function setUp() public override {
+        super.setUp();
+        address[] memory ops = new address[](1);
+        ops[0] = OPERATOR;
+        gated = new AggregatorFillSolver(address(settlement), _routers(address(router)), ops, _noSplit(), false, _none());
+        vm.label(address(gated), "gatedSolver");
+    }
+
+    function test_gate_flagsReflectConstructor() public view {
+        assertTrue(gated.GATED(), "non-empty set gates");
+        assertTrue(gated.isOperator(OPERATOR));
+        assertFalse(gated.isOperator(STRANGER));
+        assertFalse(aggSolver.GATED(), "empty set stays open");
+    }
+
+    /// @dev The gate runs before {_plan}, so a stranger is refused before any
+    ///      balance is read or token moves.
+    function test_gate_strangerReverts() public {
+        Order memory o = _order(1);
+        bytes memory sig = _sign(o);
+        vm.prank(STRANGER);
+        vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, STRANGER));
+        gated.executeFill(o, sig, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
+        assertEq(tB.balanceOf(maker), 0, "nothing settled");
+    }
+
+    /// @dev The operator's fill is the ordinary permissionless fill in every
+    ///      other respect: same route, same delivery, same spread to the caller.
+    function test_gate_operatorFills() public {
+        Order memory o = _order(2);
+        bytes memory sig = _sign(o);
+        vm.prank(OPERATOR);
+        gated.executeFill(o, sig, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
+        assertEq(tB.balanceOf(OPERATOR), AMOUNT_IN - AMOUNT_OUT, "operator keeps the spread");
+        assertEq(tB.balanceOf(address(gated)), 0, "no output retained");
+    }
+
+    /// @dev THE POINT OF THE GATE. `exclusiveFiller` is compared to the fill's
+    ///      `msg.sender`, which is the solver CONTRACT. On the open instance a
+    ///      stranger routing through it therefore passes the maker's exclusivity
+    ///      gate; on the gated instance the same stranger is stopped one call
+    ///      earlier, so "exclusive to this solver" means "exclusive to its
+    ///      operators".
+    function test_gate_exclusiveFillerIsOnlyExclusiveWhenGated() public {
+        // Open instance: the stranger fills an order exclusive to the contract.
+        Order memory open = _order(3);
+        open.exclusiveFiller = address(aggSolver);
+        _setExclusivityEnd(open, block.timestamp + 1 hours);
+        bytes memory sigOpen = _sign(open);
+        vm.prank(STRANGER);
+        aggSolver.executeFill(open, sigOpen, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "stranger filled through the open instance");
+
+        // Gated instance: the same shape, same stranger, refused.
+        Order memory g = _order(4);
+        g.exclusiveFiller = address(gated);
+        _setExclusivityEnd(g, block.timestamp + 1 hours);
+        bytes memory sigG = _sign(g);
+        vm.prank(STRANGER);
+        vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, STRANGER));
+        gated.executeFill(g, sigG, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
+
+        // ...and the operator, being the contract's caller, passes both gates.
+        vm.prank(OPERATOR);
+        gated.executeFill(g, sigG, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
+        assertEq(tB.balanceOf(maker), 2 * AMOUNT_OUT, "operator filled the exclusive order");
+    }
+
+    /// @dev A direct fill by the operator EOA is still refused by the core's
+    ///      exclusivity gate — the order names the contract, not the operator.
+    ///      Documents that the gate composes with, rather than replaces, core.
+    function test_gate_operatorCannotBypassContract() public {
+        Order memory g = _order(5);
+        g.exclusiveFiller = address(gated);
+        _setExclusivityEnd(g, block.timestamp + 1 hours);
+        bytes memory sig = _sign(g);
+        vm.prank(OPERATOR);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        settlement.fill(g, sig, AMOUNT_IN);
+    }
+
+    /// @dev The sets are immutables with {MAX_SET} slots: an empty router set and
+    ///      an oversized set of either kind are refused at construction, and every
+    ///      entry of a partially-filled set is a member.
+    function test_gate_setSizes() public {
+        address[] memory none = new address[](0);
+        vm.expectRevert(AggregatorFillSolver.BadSetSize.selector);
+        new AggregatorFillSolver(address(settlement), none, none, _noSplit(), false, _none());
+
+        address[] memory five = new address[](5);
+        for (uint256 i; i < 5; i++) five[i] = address(bytes20(keccak256(abi.encode("r", i))));
+        vm.expectRevert(AggregatorFillSolver.BadSetSize.selector);
+        new AggregatorFillSolver(address(settlement), five, none, _noSplit(), false, _none());
+        vm.expectRevert(AggregatorFillSolver.BadSetSize.selector);
+        new AggregatorFillSolver(address(settlement), _routers(address(router)), five, _noSplit(), false, _none());
+
+        address[] memory two = new address[](2);
+        two[0] = address(router);
+        two[1] = address(0xBEEF);
+        address[] memory four = new address[](4);
+        for (uint256 i; i < 4; i++) four[i] = address(bytes20(keccak256(abi.encode("o", i))));
+        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), two, four, _noSplit(), false, _none());
+        assertTrue(s.isAllowedRouter(address(router)));
+        assertTrue(s.isAllowedRouter(address(0xBEEF)));
+        assertFalse(s.isAllowedRouter(address(0xCAFE)));
+        assertFalse(s.isAllowedRouter(address(0)), "unused slots repeat entry 0, never zero");
+        for (uint256 i; i < 4; i++) assertTrue(s.isOperator(four[i]));
+        assertFalse(s.isOperator(address(0)));
+        assertFalse(aggSolver.isOperator(address(this)), "open instance: nobody is an operator");
+    }
+
+    function test_gate_constructorRejectsZeroOperator() public {
+        address[] memory ops = new address[](1);
+        ops[0] = address(0);
+        vm.expectRevert(AggregatorFillSolver.BadOperator.selector);
+        new AggregatorFillSolver(address(settlement), _routers(address(router)), ops, _noSplit(), false, _none());
+    }
+}
+
+/// @title AggregatorDirectDeliveryTest
+/// @notice The direct-delivery path: on an order signed with `timing` bit 104
+///         the route pays the maker itself, the core verifies the delta, and
+///         this contract never approves Settlement nor touches `tokenOut`.
+contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
+    /// @dev Exact-output route to the maker; the unspent input is the spread and
+    ///      comes back to the caller in `tokenIn` units. No `tokenOut` ever lands
+    ///      on the solver and no allowance to Settlement is ever set.
+    function test_direct_exactOutputPaysMakerAndKeepsSpreadAsInput() public {
+        Order memory o = _directOrder(1);
+        bytes memory sig = _sign(o);
+        uint256[] memory outs = aggSolver.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker), "");
+
+        assertEq(outs[0], AMOUNT_OUT, "core reports the priced leg");
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid by the router directly");
+        assertEq(tB.balanceOf(address(aggSolver)), 0, "no output ever here");
+        assertEq(tA.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "spread returned as unspent input");
+        assertEq(tA.balanceOf(address(aggSolver)), 0, "no input left");
+        assertEq(tB.allowance(address(aggSolver), address(settlement)), 0, "Settlement was never approved");
+    }
+
+    /// @dev A route quoted for the SOLVER (the pull-path habit) on a direct order
+    ///      pays the wrong recipient: the core's delta check fails the whole fill,
+    ///      and the tokens are back where they started.
+    function test_direct_routeQuotedForSolver_failsDeltaCheck() public {
+        Order memory o = _directOrder(2);
+        bytes memory sig = _sign(o);
+        vm.expectRevert(Base.DeltaTooLow.selector);
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, address(aggSolver)), "");
+        assertEq(tA.balanceOf(maker), 1_000e18, "maker untouched");
+    }
+
+    /// @dev Under-delivery is the core's revert, not this contract's: `minOut` is
+    ///      not consulted on the direct path.
+    function test_direct_underDelivery_isTheCoresRevert() public {
+        Order memory o = _directOrder(3);
+        bytes memory sig = _sign(o);
+        RoutePlan memory p = _exactOutPlan(AMOUNT_OUT - 1, AMOUNT_IN, maker);
+        p.minOut = AMOUNT_OUT; // would be InsufficientOutput on the pull path
+        vm.expectRevert(Base.DeltaTooLow.selector);
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+    }
+
+    /// @dev Over-delivery is price improvement the maker keeps; the spread just
+    ///      shrinks. An exact-input route works too, it merely gives up the spread.
+    function test_direct_exactInputRoute_givesTheMakerEverything() public {
+        Order memory o = _directOrder(4);
+        bytes memory sig = _sign(o);
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(maker, 0), "");
+        assertEq(tB.balanceOf(maker), AMOUNT_IN, "the whole swap output went to the maker");
+        assertEq(tA.balanceOf(address(this)), 0, "no spread left for the caller");
+    }
+
+    /// @dev The surplus policy still applies — in `tokenIn` units, on the residue.
+    function test_direct_surplusPolicyAppliesToTheResidue() public {
+        address[] memory ops = new address[](0);
+        AggregatorFillSolver split = new AggregatorFillSolver(
+            address(settlement),
+            _routers(address(router)),
+            ops,
+            SurplusPolicy({makerPpm: 500_000, protocolPpm: 0, protocolRecipient: address(0)}),
+            false,
+            _none()
+        );
+        Order memory o = _directOrder(5);
+        bytes memory sig = _sign(o);
+        uint256 makerABefore = tA.balanceOf(maker);
+        split.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker), "");
+        uint256 spread = AMOUNT_IN - AMOUNT_OUT;
+        // The maker paid AMOUNT_IN and got half the residue back, in the same token.
+        assertEq(makerABefore - tA.balanceOf(maker), AMOUNT_IN - spread / 2, "maker's half of the residue, as price improvement");
+        assertEq(tA.balanceOf(address(this)), spread - spread / 2, "caller's half");
+    }
+
+    /// @dev The order flag is what selects the path — the same route on an
+    ///      unflagged order goes through the pull path and, quoted for the maker,
+    ///      fails this contract's own output check as before.
+    function test_direct_flagSelectsThePath() public {
+        Order memory o = _order(6); // NOT flagged
+        bytes memory sig = _sign(o);
+        RoutePlan memory p = _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker);
+        p.minOut = AMOUNT_OUT;
+        vm.expectRevert(
+            _wrapped(abi.encodeWithSelector(AggregatorFillSolver.InsufficientOutput.selector, 0, AMOUNT_OUT))
+        );
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+    }
+}
+
+/// @title AggregatorStandingAllowanceTest
+/// @notice {AggregatorFillSolver.STANDING_ALLOWANCE}: fund routes from standing
+///         approvals instead of writing an allowance slot twice per fill.
+contract AggregatorStandingAllowanceTest is AggregatorFillSolverTest {
+    AggregatorFillSolver internal standing;
+
+    function _primeList() internal view returns (address[] memory t) {
+        t = new address[](1);
+        t[0] = address(tA);
+    }
+
+    function setUp() public override {
+        super.setUp();
+        standing =
+            new AggregatorFillSolver(address(settlement), _routers(address(router)), _open(), _noSplit(), true, _primeList());
+        vm.label(address(standing), "standingSolver");
+    }
+
+    function test_standing_constructorPrimesTheGivenTokens() public view {
+        assertTrue(standing.STANDING_ALLOWANCE(), "flag set");
+        assertEq(tA.allowance(address(standing), address(router)), type(uint256).max, "primed at construction");
+        assertFalse(aggSolver.STANDING_ALLOWANCE(), "the default instance approves per fill");
+    }
+
+    /// @dev The fill behaves identically and leaves the standing approval in
+    ///      place — the whole point, and the property the default instance
+    ///      deliberately does not have.
+    function test_standing_fillsAndKeepsTheApproval() public {
+        Order memory o = _order(1);
+        bytes memory sig = _sign(o);
+        standing.executeFill(o, sig, AMOUNT_IN, _plan(address(standing), AMOUNT_OUT), "");
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid as usual");
+        assertEq(tA.allowance(address(standing), address(router)), type(uint256).max, "approval survives");
+        assertEq(tA.balanceOf(address(standing)), 0, "no input stranded");
+    }
+
+    /// @dev DECLARED, NOT DISCOVERED: `onFill` never asks whether a token is
+    ///      primed. An unprimed one fails at the router's own pull — the caller's
+    ///      gas, nobody else's — and anyone may fix it permissionlessly.
+    function test_standing_unprimedTokenFailsThenPrimeFixesIt() public {
+        MockERC20 tC = new MockERC20("C");
+        MockRouter r2 = new MockRouter(address(tC), address(tB));
+        address[] memory rs = new address[](1);
+        rs[0] = address(r2);
+        AggregatorFillSolver s2 =
+            new AggregatorFillSolver(address(settlement), rs, _open(), _noSplit(), true, _none());
+
+        tC.mint(maker, AMOUNT_IN);
+        vm.startPrank(maker);
+        tC.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tC), uint160(AMOUNT_IN), 0);
+        vm.stopPrank();
+        tB.mint(address(r2), AMOUNT_OUT * 2);
+
+        Order memory o = _plainOrder(2, address(tC), address(tB), AMOUNT_IN, AMOUNT_OUT);
+        bytes memory sig = _sign(o);
+        RoutePlan memory p = _planFor(AMOUNT_IN, address(s2), AMOUNT_OUT, NO_PATCH);
+        p.router = address(r2);
+        p.data = abi.encodeCall(MockRouter.swap, (AMOUNT_IN, address(s2)));
+
+        vm.expectRevert(); // the router cannot pull: nothing was ever approved
+        s2.executeFill(o, sig, AMOUNT_IN, p, "");
+
+        // Anyone repairs it, and the same fill then succeeds.
+        vm.prank(address(0xD00D));
+        s2.prime(address(tC));
+        s2.executeFill(o, sig, AMOUNT_IN, p, "");
+        assertEq(tB.balanceOf(maker), AMOUNT_OUT, "filled after priming");
+    }
+
+    /// @dev `prime` exists only on an instance that declared the trade-off, and a
+    ///      deployment that names tokens without declaring it is refused rather
+    ///      than silently downgraded.
+    function test_standing_primeRefusedOnAPerFillInstance() public {
+        vm.expectRevert(AggregatorFillSolver.NotStandingAllowance.selector);
+        aggSolver.prime(address(tA));
+
+        vm.expectRevert(AggregatorFillSolver.NotStandingAllowance.selector);
+        new AggregatorFillSolver(address(settlement), _routers(address(router)), _open(), _noSplit(), false, _primeList());
+    }
+
+    /// @dev Priming covers EVERY router in the set, not just the first, and
+    ///      tolerates a partially-filled set (whose unused slots repeat entry 0).
+    function test_standing_primeCoversEveryRouter() public {
+        MockRouter r2 = new MockRouter(address(tA), address(tB));
+        address[] memory rs = new address[](2);
+        rs[0] = address(router);
+        rs[1] = address(r2);
+        AggregatorFillSolver s2 =
+            new AggregatorFillSolver(address(settlement), rs, _open(), _noSplit(), true, _primeList());
+        assertEq(tA.allowance(address(s2), address(router)), type(uint256).max);
+        assertEq(tA.allowance(address(s2), address(r2)), type(uint256).max);
+    }
+}
+
+/// @title AggregatorStaleApprovalTest
+/// @notice Why `executeFill` clears its Settlement approval, PoC'd.
+///
+///  The clear is not a hedge against a buggy settler. It defends against
+///  Settlement doing EXACTLY what it is specified to do — delivering an order's
+///  output legs by pulling them from the filler — while the filler is this
+///  contract and the order was signed by the attacker.
+///
+///  `onFill` approves Settlement for ONE token: `legsOut[0]`, the route's own
+///  product, capped at this fill's proceeds. Every OTHER output leg is delivered
+///  from whatever standing approval already exists. So a leftover approval on any
+///  token this contract has traded before is directly spendable by a self-signed
+///  order that names that token in a later leg — paired with the balance floor
+///  and the retained spread the contract deliberately holds.
+contract AggregatorStaleApprovalTest is AggregatorFillSolverTest {
+    uint256 internal constant EVE_PK = 0xE7E;
+    uint256 internal constant STALE = 500e18;
+
+    /// @dev The residue an un-cleared fill would leave: a balance in a token the
+    ///      solver has traded, and Settlement still approved over it.
+    function _leaveStaleApproval(MockERC20 token) internal {
+        token.mint(address(aggSolver), STALE);
+        vm.prank(address(aggSolver));
+        token.approve(address(settlement), STALE);
+    }
+
+    function test_stale_settlementApprovalIsDrainableByASelfSignedOrder() public {
+        address eve = vm.addr(EVE_PK);
+        MockERC20 tC = new MockERC20("C");
+        _leaveStaleApproval(tC);
+
+        // Eve funds her own order's input — she is a legitimate maker of her own
+        // order, which is all this contract's permissionless entry requires.
+        tA.mint(eve, AMOUNT_IN);
+        vm.startPrank(eve);
+        tA.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tA), uint160(AMOUNT_IN), 0);
+        vm.stopPrank();
+
+        // Leg 0 is the route's product, so `onFill` approves that one freshly.
+        // Leg 1 is the stranded token, delivered from the stale approval.
+        address[] memory outs = new address[](2);
+        outs[0] = address(tB);
+        outs[1] = address(tC);
+        uint256[] memory amts = new uint256[](2);
+        amts[0] = AMOUNT_OUT;
+        amts[1] = STALE;
+
+        Order memory o = _plainOrderMultiOut(99, address(tA), AMOUNT_IN, outs, amts);
+        o.maker = eve;
+        bytes memory sig = _signWith(o, EVE_PK);
+
+        vm.prank(eve);
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
+
+        assertEq(tC.balanceOf(eve), STALE, "the stale approval paid a stranger out of the solver's balance");
+        assertEq(tC.balanceOf(address(aggSolver)), 0, "and the solver was emptied of it");
+    }
+
+    /// @dev "It holds nothing, so an allowance is worthless" — except the balance
+    ///      is NOT under any single party's control, which is what makes the clear
+    ///      structural rather than belt-and-braces.
+    ///
+    ///      `executeFill` is permissionless and `RoutePlan.profitRecipient` is
+    ///      CALLER-SUPPLIED. A caller that names the solver keeps its share of the
+    ///      spread here (retain mode), so one caller's choice leaves value on a
+    ///      SHARED contract for the next caller's stale approval to find. Nobody
+    ///      operating this instance can enforce "holds nothing" on anyone else.
+    function test_stale_anyCallerCanLeaveValueOnTheSharedContract() public {
+        assertEq(tB.balanceOf(address(aggSolver)), 0, "starts empty");
+        Order memory o = _order(50);
+        bytes memory sig = _sign(o);
+        RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
+        p.profitRecipient = address(aggSolver); // retain — any caller may ask for it
+
+        vm.prank(address(0xD00D));
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+
+        assertEq(
+            tB.balanceOf(address(aggSolver)),
+            AMOUNT_IN - AMOUNT_OUT,
+            "a stranger's fill parked the spread on the shared contract"
+        );
+        // …and the approval that paid this fill is nonetheless gone, which is the
+        // only reason that balance is not now a standing target.
+        assertEq(tB.allowance(address(aggSolver), address(settlement)), 0, "no approval outlived the fill");
+    }
+
+    /// @dev Anyone can also simply SEND tokens here. There is no permission to
+    ///      refuse an ERC20 transfer, so "holds nothing" can never be an invariant
+    ///      the contract enforces — only one it hopes for.
+    function test_stale_anyoneCanDonateABalance() public {
+        MockERC20 tC = new MockERC20("C");
+        tC.mint(address(this), 1_000e18);
+        tC.transfer(address(aggSolver), 1_000e18);
+        assertEq(tC.balanceOf(address(aggSolver)), 1_000e18, "unsolicited, unrefusable");
+    }
+
+    /// @dev The control: with the clear in place no such approval can exist, so
+    ///      the identical order finds nothing to spend and the fill reverts.
+    function test_stale_withoutTheResidueTheSameOrderFails() public {
+        address eve = vm.addr(EVE_PK);
+        MockERC20 tC = new MockERC20("C");
+        tC.mint(address(aggSolver), STALE); // balance, but NO approval — the invariant
+
+        tA.mint(eve, AMOUNT_IN);
+        vm.startPrank(eve);
+        tA.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tA), uint160(AMOUNT_IN), 0);
+        vm.stopPrank();
+
+        address[] memory outs = new address[](2);
+        outs[0] = address(tB);
+        outs[1] = address(tC);
+        uint256[] memory amts = new uint256[](2);
+        amts[0] = AMOUNT_OUT;
+        amts[1] = STALE;
+
+        Order memory o = _plainOrderMultiOut(98, address(tA), AMOUNT_IN, outs, amts);
+        o.maker = eve;
+        bytes memory sig = _signWith(o, EVE_PK);
+
+        vm.prank(eve);
+        vm.expectRevert();
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
+        assertEq(tC.balanceOf(address(aggSolver)), STALE, "balance alone is not reachable");
+    }
+}
+
+/// @title AggregatorStandingAllowanceBoundTest
+/// @notice What ELSE the per-fill approval was doing.
+///
+///  `forceApprove(tokenIn, router, amountIn)` was not only an approval, it was a
+///  SECOND BOUND on the route: whatever figure the caller's calldata named, the
+///  router could never pull more than the delta this fill actually delivered,
+///  because the allowance was exactly that. `STANDING_ALLOWANCE` removes the
+///  approval and therefore removes the bound, leaving only `_patched` — and the
+///  caller chooses `amountInOffset`, so it can decline the patch ({NO_PATCH}) or
+///  aim it at the wrong word.
+contract AggregatorStandingAllowanceBoundTest is AggregatorFillSolverTest {
+    AggregatorFillSolver internal standing;
+
+    function setUp() public override {
+        super.setUp();
+        address[] memory prime = new address[](1);
+        prime[0] = address(tA);
+        standing =
+            new AggregatorFillSolver(address(settlement), _routers(address(router)), _open(), _noSplit(), true, prime);
+        tB.mint(address(router), 10_000e18);
+    }
+
+    /// @dev Eve's own small order, a route quoting MORE input than it delivers,
+    ///      and {NO_PATCH} so the quote is used verbatim. The excess can only come
+    ///      out of what the solver was already holding.
+    function test_bound_unpatchedRouteReachesTheSolversOwnBalance() public {
+        uint256 parked = 400e18;
+        tA.mint(address(standing), parked); // residue, floor, a donation - any of them
+
+        address eve = vm.addr(0xE7E);
+        uint256 evesInput = 10e18;
+        tA.mint(eve, evesInput);
+        vm.startPrank(eve);
+        tA.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tA), uint160(evesInput), 0);
+        vm.stopPrank();
+
+        Order memory o = _plainOrder(77, address(tA), address(tB), evesInput, 1);
+        o.maker = eve;
+        bytes memory sig = _signWith(o, 0xE7E);
+
+        // The route claims to spend Eve's input PLUS everything parked here.
+        RoutePlan memory p = _planFor(evesInput + parked, address(standing), 0, NO_PATCH);
+        p.profitRecipient = eve;
+
+        vm.prank(eve);
+        vm.expectRevert(_wrapped(abi.encodeWithSelector(AggregatorFillSolver.RouteOverspent.selector)));
+        standing.executeFill(o, sig, evesInput, p, "");
+
+        assertEq(tA.balanceOf(address(standing)), parked, "the solver keeps what it was holding");
+    }
+
+    /// @dev The bound is a measurement, not a ban: a route that spends exactly
+    ///      what the fill delivered passes, patched or not.
+    function test_bound_routeThatSpendsOnlyTheFillPasses() public {
+        tA.mint(address(standing), 400e18); // still parked, still untouchable
+
+        address eve = vm.addr(0xE7E);
+        uint256 evesInput = 10e18;
+        tA.mint(eve, evesInput);
+        vm.startPrank(eve);
+        tA.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tA), uint160(evesInput), 0);
+        vm.stopPrank();
+
+        Order memory o = _plainOrder(78, address(tA), address(tB), evesInput, 1);
+        o.maker = eve;
+        bytes memory sig = _signWith(o, 0xE7E);
+
+        RoutePlan memory p = _planFor(evesInput, address(standing), 0, NO_PATCH);
+        p.profitRecipient = eve;
+
+        vm.prank(eve);
+        standing.executeFill(o, sig, evesInput, p, "");
+        assertEq(tA.balanceOf(address(standing)), 400e18, "only the fill's own input was spent");
     }
 }

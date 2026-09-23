@@ -54,7 +54,54 @@ curl -X POST https://<your-domain>/api/oku/rootstock/cush/liveBlock \
 | Wallet connection, chain switching, balances | **Live.** EIP-6963 + viem, read through the wallet |
 | Ladder merge, fill simulation, resting/crossing split | **Real.** `src/lib/univ3.ts`, `src/lib/ladder.ts` |
 | Order distribution: signing, resting, cancelling, fills | **Mocked in-browser.** `src/backend/mock.ts` |
-| Allowances and settlement transactions | **Simulated.** No chain writes |
+| ERC-20 allowances | **Live.** A real `approve`, capped at the exact input of the order being signed |
+| Settlement transactions | **Simulated.** Signing is real; nothing is broadcast to a filler |
+| Pre-audit disclosure and draw Terms | **Live.** Acknowledgement gate + `TC.md` rendered in-app |
+
+## Pre-audit posture
+
+The Rootstock beta runs on contracts that have not been audited, so the
+interface is built to bound what an unaudited contract can reach rather than to
+assume it is safe.
+
+**Exact-amount allowances.** `approve` is called with the input of the single
+order about to be signed — never `type(uint256).max`, never a rounded-up
+headroom. The spender is Permit3, which is what actually pulls the maker's
+input. Every trade therefore costs one approval, and an order that is signed but
+never filled leaves no standing allowance behind. A TWAP approves one slice at a
+time, because one slice is what each signature commits.
+
+The amount approved and the amount signed come from the same `plan` value in
+`App.tsx`. Deriving them separately is how an interface ends up approving one
+number and signing another, which under this policy is not cosmetic — it is a
+fill that cannot happen.
+
+**The prize draw.** `config/promotion.ts` is the single place the draw is
+described, and `components/Raffle.tsx` is the only place it is mentioned in the
+trading UI. `TC.md` fixes no numbers on purpose — §4.2 leaves the qualifying
+criteria to "official channels" and §2.1 does the same for the period — so every
+figure there is a display string the promoter writes, not a number the app
+computes, and `VITE_PROMOTION` overrides it at deploy time without a code
+change. `{"live":false}` removes every mention of the draw, including the bullet
+in the acknowledgement gate: with no draw running, describing one is not a
+disclosure but an advertisement for something that does not exist.
+
+The copy has one distinction to hold: a draw is not a reward. Trading qualifies
+an address for a random selection, it does not earn anything, and more volume
+does not improve the odds within a draw. "Draw", "qualify" and "at random" are
+load-bearing words there, not decoration.
+
+**Disclosure.** A first visit is gated on reading and accepting the pre-audit
+warning; `ACK_VERSION` in `components/PreAudit.tsx` is bumped whenever the text
+changes, so nobody inherits consent to wording they never saw. A strip stays
+above the chrome for the rest of the session and reopens that same disclosure
+read-only — a warning you can only ever see once is one you cannot check back
+on. The strip links there and nowhere else: the draw's terms are a marketing
+document, and putting them in a risk banner would say the audit status and the
+draw are one subject. The promotion terms are rendered
+from `TC.md` at the repository root — the site shows that file rather than a
+copy of it, because the one text that must not drift is the one people agreed
+to.
 
 ## The ladder
 
@@ -172,9 +219,12 @@ src/
   lib/tokens.ts         1delta token lists, lazily loaded and cached
   backend/api.ts        the order-distribution seam
   backend/mock.ts       in-browser stand-in
-  wallet/               EIP-6963 discovery, connection, chain switch, balances
+  lib/markdown.tsx      the markdown subset TC.md uses, rendered dependency-free
+  wallet/               EIP-6963 discovery, connection, chain switch, allowances, balances
   hooks/                usePoolBook, useChainPools, useTokenIndex, useTicket, …
-  components/           Header, MarketPicker, Stats, OrderForm, OrderBook, Orders
+  config/promotion.ts   the prize draw, as the UI is allowed to describe it
+  components/           Header, MarketPicker, Stats, OrderForm, OrderBook, Orders,
+                        PreAudit (banner + acknowledgement gate), Raffle, Terms (TC.md)
   styles.css            the whole design system, dark + light
 ```
 

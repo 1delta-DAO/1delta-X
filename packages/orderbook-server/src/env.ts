@@ -120,6 +120,7 @@ export function loadEnv(): ServerEnv {
     maxValidators: num("MAX_VALIDATORS", DEFAULT_ADMISSION.maxValidators),
     minTtlSeconds: num("MIN_TTL_SECONDS", DEFAULT_ADMISSION.minTtlSeconds),
     maxTtlSeconds: num("MAX_TTL_SECONDS", DEFAULT_ADMISSION.maxTtlSeconds),
+    requireDeltaVerifyOutputs: bool("REQUIRE_DELTA_VERIFY", DEFAULT_ADMISSION.requireDeltaVerifyOutputs),
   };
 
   const rateLimit: RateLimitOptions = {
