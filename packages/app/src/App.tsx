@@ -13,7 +13,7 @@ import { Orders } from "./components/Orders";
 import { PreAuditGate, PreAuditStrip, useAcknowledgement } from "./components/PreAudit";
 import { RaffleNotice } from "./components/Raffle";
 import { Stats } from "./components/Stats";
-import { TERMS_UPDATED, TermsDialog } from "./components/Terms";
+import { TermsLink } from "./components/TermsLink";
 import { chainLabel } from "./config/chains";
 import { deploymentFor } from "./config/deployments";
 import { symbolsOn } from "./config/markets";
@@ -225,7 +225,6 @@ export default function App() {
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [signError, setSignError] = useState<string | null>(null);
   const [connectRequest, setConnectRequest] = useState(0);
-  const [termsOpen, setTermsOpen] = useState(false);
   const [riskOpen, setRiskOpen] = useState(false);
   const { acknowledged, accept } = useAcknowledgement();
 
@@ -422,7 +421,7 @@ export default function App() {
           />
         </div>
 
-        <RaffleNotice chainId={chainId} onTerms={() => setTermsOpen(true)} />
+        <RaffleNotice chainId={chainId} />
 
         <Stats bids={merged.bids} asks={merged.asks} base={ticket.market.base} venues={pool.book?.venues ?? []} />
 
@@ -483,25 +482,13 @@ export default function App() {
           and cancelling are simulated locally and nothing is broadcast.
         </p>
         <p>
-          <button type="button" className="linkbtn" onClick={() => setTermsOpen(true)}>
-            Prize draw Terms &amp; Conditions
-          </button>
-          {TERMS_UPDATED && <> · last updated {TERMS_UPDATED}</>}
+          <TermsLink>Prize draw Terms &amp; Conditions</TermsLink>
         </p>
       </footer>
 
       {(!acknowledged || riskOpen) && (
-        <PreAuditGate
-          review={acknowledged}
-          onAccept={accept}
-          onClose={() => setRiskOpen(false)}
-          onTerms={() => setTermsOpen(true)}
-        />
+        <PreAuditGate review={acknowledged} onAccept={accept} onClose={() => setRiskOpen(false)} />
       )}
-      {/* Last, so it paints above the disclosure that can open it: the draw's
-          terms are reachable from inside the gate, and a dialog that opens
-          behind the thing you opened it from reads as a dead link. */}
-      <TermsDialog open={termsOpen} onClose={() => setTermsOpen(false)} />
     </>
   );
 }

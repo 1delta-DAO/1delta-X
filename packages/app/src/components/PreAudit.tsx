@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { PROMOTION } from "../config/promotion";
+import { TermsLink } from "./TermsLink";
 
 /**
  * Bump when the disclosure itself changes — everyone acknowledges the new text
@@ -64,13 +65,11 @@ export function PreAuditGate({
   review,
   onAccept,
   onClose,
-  onTerms,
 }: {
   /** True when this is a re-read rather than the gate. */
   review: boolean;
   onAccept: () => void;
   onClose: () => void;
-  onTerms: () => void;
 }) {
   const [checked, setChecked] = useState(false);
 
@@ -127,10 +126,7 @@ export function PreAuditGate({
             <li>
               Trading can qualify your address for a <b>random prize draw</b>. Qualifying does not earn a prize and
               no amount of volume guarantees one. The{" "}
-              <button type="button" className="linkbtn" onClick={onTerms}>
-                Terms &amp; Conditions
-              </button>{" "}
-              exclude U.S. Persons and sanctioned jurisdictions, and USDRIF carries its own transfer restrictions.
+              <TermsLink>Terms &amp; Conditions</TermsLink> exclude U.S. Persons and sanctioned jurisdictions, and USDRIF carries its own transfer restrictions.
             </li>
             )}
             <li>Nothing here is financial, investment, legal or tax advice.</li>

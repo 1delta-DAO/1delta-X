@@ -1,5 +1,6 @@
 import { chainLabel } from "../config/chains";
 import { PROMOTION, promotionRunsOn } from "../config/promotion";
+import { TermsLink } from "./TermsLink";
 
 /**
  * What the promotion is, said plainly.
@@ -11,7 +12,7 @@ import { PROMOTION, promotionRunsOn } from "../config/promotion";
  * do not create — so "draw", "qualify" and "at random" are load-bearing words
  * here, not decoration.
  */
-export function RaffleNotice({ chainId, onTerms }: { chainId: number; onTerms: () => void }) {
+export function RaffleNotice({ chainId }: { chainId: number }) {
   if (!promotionRunsOn(chainId)) return null;
 
   return (
@@ -28,9 +29,7 @@ export function RaffleNotice({ chainId, onTerms }: { chainId: number; onTerms: (
           does not earn a prize, and no amount of volume guarantees one. Figures are approximate and the criteria,
           schedule and pool can change. Not open to U.S. Persons or persons in sanctioned jurisdictions, and USDRIF
           carries its own transfer restrictions. Winning addresses may be published.{" "}
-          <button type="button" className="linkbtn" onClick={onTerms}>
-            Full Terms
-          </button>
+          <TermsLink>Full Terms</TermsLink>
         </p>
       </div>
     </aside>

@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -31,5 +33,18 @@ export default defineConfig({
       },
     },
   },
-  build: { outDir: "dist", assetsDir: "assets" },
+  build: {
+    outDir: "dist",
+    assetsDir: "assets",
+    // Two entries, not a router. `terms.html` is a static legal document with no
+    // wallet, feed or order state, and it has to be linkable from announcements
+    // and support replies — a real URL that survives being pasted somewhere the
+    // app is not running. Cloudflare Pages serves it at `/terms` as well.
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, "index.html"),
+        terms: resolve(__dirname, "terms.html"),
+      },
+    },
+  },
 });

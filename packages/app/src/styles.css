@@ -559,3 +559,16 @@ footer a { color: var(--dim); }
 @media (max-width: 640px) {
   .raffle { flex-direction: column; gap: 10px; }
 }
+
+/* ── terms page ────────────────────────────────────────── */
+/* Its own entry point, so the chrome it borrows has to survive being an <a>:
+   both the brand and the back pill are links here, not buttons. */
+a.brand, a.netpill { text-decoration: none; }
+a.brand { color: inherit; }
+
+/* Narrower than the trading grid — a legal document is read in one column, and
+   1240px of it is a wall nobody finishes. */
+main.reading { max-width: 760px; padding-top: 8px; }
+main.reading .md { display: block; }
+main.reading .md h2 { margin-bottom: 14px; }
+main.reading .md .mdquote { margin-bottom: 26px; }

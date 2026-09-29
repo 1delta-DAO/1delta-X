@@ -56,7 +56,8 @@ curl -X POST https://<your-domain>/api/oku/rootstock/cush/liveBlock \
 | Order distribution: signing, resting, cancelling, fills | **Mocked in-browser.** `src/backend/mock.ts` |
 | ERC-20 allowances | **Live.** A real `approve`, capped at the exact input of the order being signed |
 | Settlement transactions | **Simulated.** Signing is real; nothing is broadcast to a filler |
-| Pre-audit disclosure and draw Terms | **Live.** Acknowledgement gate + `TC.md` rendered in-app |
+| Pre-audit disclosure | **Live.** Acknowledgement gate, reopenable from the strip |
+| Draw Terms | **Live.** Own page at `/terms.html`, rendered from `TC.md` |
 
 ## Pre-audit posture
 
@@ -102,6 +103,24 @@ draw are one subject. The promotion terms are rendered
 from `TC.md` at the repository root — the site shows that file rather than a
 copy of it, because the one text that must not drift is the one people agreed
 to.
+
+**The terms are a page, not a dialog.** `terms.html` is a second Vite entry
+point, so `/terms.html` is a real URL that can be announced, pasted into a
+support reply and unfurled, and it opens in a new tab so reading it never
+interrupts a half-built order. Cloudflare Pages serves it at `/terms` too. A
+second entry rather than a router: the document has no wallet, feed or order
+state, so a route would only buy the ability to ship the 350 KB trading bundle
+to someone who came to read a legal page.
+
+That split is why `components/TermsLink.tsx` imports nothing. The trading app
+needs the *address* of the document, not the document; exporting the link from
+the page that holds the text pulls the whole of `TC.md` into the trading bundle
+for the sake of an href, which is exactly what the first version did.
+
+`lib/markdown.tsx` covers only the syntax `TC.md` actually uses and renders
+anything else as the literal text it is — for a legal document that is the right
+failure, since a paragraph showing its own asterisks is readable and one
+silently dropped by a parser is not.
 
 ## The ladder
 
@@ -220,11 +239,13 @@ src/
   backend/api.ts        the order-distribution seam
   backend/mock.ts       in-browser stand-in
   lib/markdown.tsx      the markdown subset TC.md uses, rendered dependency-free
+  terms.tsx             second entry point — the standalone /terms.html page
   wallet/               EIP-6963 discovery, connection, chain switch, allowances, balances
   hooks/                usePoolBook, useChainPools, useTokenIndex, useTicket, …
   config/promotion.ts   the prize draw, as the UI is allowed to describe it
   components/           Header, MarketPicker, Stats, OrderForm, OrderBook, Orders,
-                        PreAudit (banner + acknowledgement gate), Raffle, Terms (TC.md)
+                        PreAudit (banner + acknowledgement gate), Raffle,
+                        Terms (the /terms.html page), TermsLink (just the href)
   styles.css            the whole design system, dark + light
 ```
 
