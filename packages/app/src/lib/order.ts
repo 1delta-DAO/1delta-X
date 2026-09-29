@@ -32,6 +32,12 @@ export interface BuildOrderArgs {
   ttlSeconds: number;
   /** Auction length in seconds. `0` signs fixed legs — a plain limit order. */
   decaySeconds: number;
+  /**
+   * The operator-gated solver to name as `exclusiveFiller`. When set, the order
+   * uses DIRECT delivery (timing bit 104) and ONLY this filler can fill it; when
+   * unset (zero / omitted), it signs plain pull delivery, fillable by anyone.
+   */
+  solver?: Address;
   /** Injectable so tests and the golden-hash check can pin them. */
   nonce?: bigint;
   now?: number;
@@ -111,6 +117,10 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     ];
   }
 
+  const timing = decaying ? packTiming(now, decaySeconds, 0) : packTiming(0, 0, 0);
+  const solver = args.solver ?? zeroAddress;
+  const direct = solver !== zeroAddress;
+
   const order: Order = {
     maker,
     side: sdkSide,
@@ -127,8 +137,14 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     // per fill for the solver, which on a gas-expensive chain is the difference
     // between a fill being worth racing for or not. Every order here is a plain
     // one-in/one-out swap, which is the shape the mode is defined for.
-    timing: withDeltaVerifyOutputs(decaying ? packTiming(now, decaySeconds, 0) : packTiming(0, 0, 0)),
-    exclusiveFiller: zeroAddress,
+    //
+    // ⚠ ONLY WITH A NAMED SOLVER. A balance delta cannot tell this fill's
+    // delivery from an inflow the maker paid for elsewhere (their other open
+    // order on another venue), so the settler lets ONLY the order's
+    // `exclusiveFiller` fill a delta-verify order. We name our operator-gated
+    // solver; without one configured we sign plain pull delivery, open to all.
+    timing: direct ? withDeltaVerifyOutputs(timing) : timing,
+    exclusiveFiller: direct ? solver : zeroAddress,
     minFillAnchor: 0n,
     exclusivityOverrideBps: 0n,
     curve: [],

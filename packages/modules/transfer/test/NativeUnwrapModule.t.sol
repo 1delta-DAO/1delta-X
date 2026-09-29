@@ -225,7 +225,7 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegMissing.selector); // the descriptor names a leg that is not there
+        vm.expectRevert(Base.ForLegInvalid.selector); // the descriptor names a leg that is not there
         settlement.fill(order, sig, USDC_IN);
     }
 
@@ -302,7 +302,7 @@ contract NativeUnwrapModuleTest is CoreSettlementBase {
         settlement.approveOrder(order);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegMissing.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(order, "", 1);
 
         assertEq(IERC20(WETH).balanceOf(address(unwrapModule)), 0.1e18, "residue untouched");

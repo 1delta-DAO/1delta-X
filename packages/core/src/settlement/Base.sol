@@ -87,66 +87,60 @@ abstract contract Base is Signatures {
     ///      of silently wrapping to a smaller move. (SETTLE is exempt — its module
     ///      interface is `uint256` and never narrows.)
     error AmountOverflow();
-    /// @dev A `TAKE_FOR` item's funding descriptor is unusable: `data` is too short
-    ///      to hold the leading descriptor word, or the descriptor references a
-    ///      `legsOut` index the order does not have. Maker-signed either way, so
-    ///      this is a malformed order rather than an adversarial input — but it is
-    ///      the difference between funding the wrong leg and not filling at all, so
-    ///      it reverts instead of defaulting to leg 0.
-    error ForLegMissing();
-    /// @dev A BALANCE-relative `TAKE_FOR` funding leg was offered a partial fill. The
-    ///      amount is a live `balanceOf` read, so it cannot pro-rate: every slice
-    ///      would fund the FULL remaining balance again. Same rule, and the same
-    ///      reasoning, as {Proportional}'s full-fill requirement — enforced here
-    ///      because only the core knows the fill fraction.
-    error ForBalanceNeedsFullFill();
-    /// @dev A BALANCE-relative funding leg carries no cap (`data` word 1 absent or
-    ///      zero). MANDATORY, for the reason {Proportional} spells out: a maker's
-    ///      balance is not under their sole control — anyone can raise it by
-    ///      transferring tokens to them — so an uncapped "fund with everything I
-    ///      hold" is a standing offer to lock the maker's entire holding into a
-    ///      position sized for much less. `0` is also what an unset word holds, so
-    ///      the dangerous mode would otherwise be the default.
-    error ForBalanceNeedsCap();
-    /// @dev A BALANCE-relative funding leg resolved to ZERO — the maker holds none
-    ///      of the token. (A descriptor naming an address with no code no longer
-    ///      lands here: {SafeTransferLib.balanceOf} now REVERTS `BalanceReadFailed`
-    ///      on an unreadable balance rather than yielding zero. Both fail closed;
-    ///      this one says which.)
+    /// @dev A `TAKE_FOR` / pre-fund item's LEG-REFERENCE funding descriptor is
+    ///      unusable. ONE error for three rules — merged 2026-09-25 to pay for the
+    ///      re-audit's settler-bound permit witness and delta-verify filler pin under
+    ///      EIP-170 (−59 bytes, measured clean). The on-chain revert no longer says
+    ///      WHICH rule failed; {SettlementLens.validateOrder} still does, rule by rule,
+    ///      off-chain. The three rules:
     ///
-    ///      Reverts rather than funding nothing, because the alternative FAILS OPEN:
-    ///      the value-OUT leg would still execute in full, turning "deposit what I
-    ///      hold and borrow against it" into a bare, uncollateralised borrow. That is
-    ///      reachable without any malice — a maker's balance can be spent by an
-    ///      earlier fill of one of their OWN orders, and the filler picks the order —
-    ///      so the premise failing must stop the fill, not silently change its
-    ///      shape. (A LITERAL or LEG funding slice that floors to zero on a dust fill
-    ///      is different and is allowed: it accumulates exactly across slices.)
+    ///      • MISSING — `data` is too short to hold the leading descriptor word, or it
+    ///        references a `legsOut` index the order does not have. Maker-signed, so a
+    ///        malformed order rather than an adversarial input — but it is the
+    ///        difference between funding the wrong leg and not filling at all, so it
+    ///        reverts instead of defaulting to leg 0.
+    ///      • NOT THE MAKER'S — the referenced output leg is received by neither the
+    ///        maker NOR the item's own module (a fee/originator leg, `recipient` set to
+    ///        a third party). See {_forSlice}: the leg-reference form exists so the
+    ///        funding leg IS the delivery, which only holds for a leg the position
+    ///        operation actually consumes — the maker's wallet (pull-funded) or the
+    ///        composite module itself (pre-funded).
+    ///      • REUSED — two items named the SAME `legsOut` index. One delivery funds ONE
+    ///        item: `_forSlice` spends `ctx.outs[j]` rather than re-pricing it, so the
+    ///        second claim has nothing left to spend. Before the ledger this was a
+    ///        pure re-pricing with no bookkeeping while {_executeItems} walked every
+    ///        item unconditionally, so N items each received the FULL delivery —
+    ///        F27/H-1 mechanism 3, the one that survived the recipient and token
+    ///        bindings because neither is a counter.
+    error ForLegInvalid();
+    /// @dev A BALANCE-relative `TAKE_FOR` funding leg is unusable. ONE error for three
+    ///      rules, merged with {ForLegInvalid} and for the same reason; the lens still
+    ///      tells them apart. The three rules:
     ///
-    ///      ⚠ ZERO IS ONLY THE FLOOR'S DEFAULT. Stopping at zero closed the boundary
-    ///      but left every value NEAR it open, and the same sequencing that empties a
-    ///      wallet can merely dent it: `min(balance, cap)` shrinks smoothly while the
-    ///      value-OUT leg stays at its full signed size, so the position comes out
-    ///      under-collateralised instead of unfunded. The maker therefore signs a
-    ///      FLOOR in the descriptor (bits [160:176), bps of the cap) and this error
-    ///      names any resolved amount below it — zero being the case where the floor
-    ///      was left at its default.
-    error ForBalanceBelowFloor();
-    /// @dev A `TAKE_FOR` funding descriptor referenced an output leg neither the
-    ///      maker NOR the item's own module receives (a fee/originator leg,
-    ///      `recipient` set to a third party). See {_forSlice}: the leg-reference
-    ///      form exists so the funding leg IS the delivery, which only holds for a
-    ///      leg the position operation actually consumes — the maker's wallet
-    ///      (pull-funded) or the composite module itself (pre-funded).
-    error ForLegNotMakers();
-    /// @dev Two items named the SAME `legsOut` index as their funding leg. One
-    ///      delivery funds ONE item: `_forSlice` spends `ctx.outs[j]` rather than
-    ///      re-pricing it, so the second claim has nothing left to spend and says so
-    ///      here. Before the ledger this was a pure re-pricing with no bookkeeping
-    ///      while {_executeItems} walked every item unconditionally, so N items each
-    ///      received the FULL delivery — F27/H-1 mechanism 3, the one that survived
-    ///      the recipient and token bindings because neither is a counter.
-    error ForLegReused();
+    ///      • FULL FILL ONLY — the amount is a live `balanceOf` read, so it cannot
+    ///        pro-rate: every slice would fund the FULL remaining balance again. Same
+    ///        rule, and the same reasoning, as {Proportional}'s full-fill requirement —
+    ///        enforced here because only the core knows the fill fraction.
+    ///      • CAP REQUIRED — `data` word 1 absent or zero. MANDATORY, for the reason
+    ///        {Proportional} spells out: a maker's balance is not under their sole
+    ///        control — anyone can raise it by transferring tokens to them — so an
+    ///        uncapped "fund with everything I hold" is a standing offer to lock the
+    ///        maker's entire holding into a position sized for much less. `0` is also
+    ///        what an unset word holds, so the dangerous mode would otherwise be the
+    ///        default.
+    ///      • BELOW FLOOR — the resolved amount is under the maker-signed floor (bits
+    ///        [160:176) of the descriptor, bps of the cap), zero included. Reverting
+    ///        rather than funding less, because the alternative FAILS OPEN: the
+    ///        value-OUT leg would still execute in full, turning "deposit what I hold
+    ///        and borrow against it" into an under-collateralised (or, at zero, bare)
+    ///        borrow. Reachable without malice — a maker's balance can be spent by an
+    ///        earlier fill of one of their OWN orders, and the filler picks the order.
+    ///        (A descriptor naming an address with no code, or a token whose
+    ///        `balanceOf` reverts, lands here too: {SafeTransferLib.balanceOf} is the
+    ///        TOLERANT reader and yields zero, and `bal == 0` fails closed. A LITERAL
+    ///        or LEG funding slice that resolves to zero also lands here, see
+    ///        {_dispatchTake}.)
+    error ForBalanceInvalid();
     /// @dev An item's `module` (or Permit3) has no code. Solc's own existence check on a
     ///      void external call; kept explicit now that {_callWithTail} hand-encodes.
     error ItemTargetHasNoCode();
@@ -229,7 +223,9 @@ abstract contract Base is Signatures {
     ///      path would instead pay it to the SOLVER, because a pool→pool self-transfer
     ///      leaves the balance above the pre-context floor while `outstanding` records
     ///      the obligation as met. Fill these through the single-order path, or fix
-    ///      the recipient. NO ARGUMENTS, deliberately: naming `(order, leg)` the way
+    ///      the recipient. Also raised for a leg addressed to the {EXECUTOR}, which
+    ///      the solver's own `CALL` step can empty in the same plan. NO ARGUMENTS,
+    ///      deliberately: naming `(order, leg)` the way
     ///      the sibling plan errors do measured **+37 bytes** of Settlement against a
     ///      53-byte EIP-170 budget. The lens reports the offending leg off-chain.
     error OutputToSettlement();
@@ -310,6 +306,48 @@ abstract contract Base is Signatures {
         EXECUTOR = new SolverCallbackExecutor();
     }
 
+    /// @dev {Permit3TransferLib.transferFromWithFallback} with the hub read HERE
+    ///      rather than passed in — byte-for-byte the library's semantics (zero
+    ///      no-op, uint160 refusal, raw Permit3 leg, strict-mode-gated direct
+    ///      fallback). Passing `PERMIT3` as an argument made every caller
+    ///      materialise the immutable (a 33-byte PUSH32) at its own call site.
+    function _pullViaPermit3(address token, address from, address to, uint256 amount) internal {
+        if (amount == 0) return;
+        if (amount > type(uint160).max) revert IPermit3.Permit3Denied();
+        IPermit3 hub = PERMIT3;
+        bool ok;
+        /// @solidity memory-safe-assembly
+        assembly {
+            let p := mload(0x40)
+            mstore(p, 0x9fc0d7da) // transferFrom(address,address,address,uint160)
+            mstore(add(p, 0x20), and(from, 0xffffffffffffffffffffffffffffffffffffffff))
+            mstore(add(p, 0x40), and(to, 0xffffffffffffffffffffffffffffffffffffffff))
+            mstore(add(p, 0x60), and(token, 0xffffffffffffffffffffffffffffffffffffffff))
+            mstore(add(p, 0x80), amount)
+            ok := call(gas(), hub, 0, add(p, 0x1c), 0x84, 0x00, 0x00)
+        }
+        if (!ok) {
+            // `hub.isStrict(from, token)`, hand-encoded; a failed read bubbles, a short
+            // one reverts, and ANY non-zero word counts as strict (fails closed).
+            bool strict;
+            /// @solidity memory-safe-assembly
+            assembly {
+                let p := mload(0x40)
+                mstore(p, 0x339ea7a3) // isStrict(address,address)
+                mstore(add(p, 0x20), and(from, 0xffffffffffffffffffffffffffffffffffffffff))
+                mstore(add(p, 0x40), and(token, 0xffffffffffffffffffffffffffffffffffffffff))
+                if iszero(staticcall(gas(), hub, add(p, 0x1c), 0x44, 0x00, 0x20)) {
+                    returndatacopy(p, 0, returndatasize())
+                    revert(p, returndatasize())
+                }
+                if lt(returndatasize(), 0x20) { revert(0, 0) }
+                strict := iszero(iszero(mload(0x00)))
+            }
+            if (strict) revert IPermit3.Permit3Denied();
+            SafeTransferLib.safeTransferFrom(token, from, to, amount);
+        }
+    }
+
     /// @dev A balance READ failed — the call reverted, or returned under 32 bytes.
     ///      Raised only by {_balanceOfChecked}.
     error BalanceReadFailed();
@@ -369,8 +407,8 @@ abstract contract Base is Signatures {
     ///
     ///      ⚠ MAKER CONSTRAINT — a TAKE item's proceeds token MUST appear in
     ///      `order.legsIn`. Proceeds land here (when `item.recipient` is 0), and the
-    ///      only code that pays them back out — `_payInputsToSolver` and
-    ///      `_settleInputsToPool` — iterates `legsIn`. A token that matches no input
+    ///      only code that pays them back out — `_payInputsToSolver`, and on the
+    ///      netted path {Batch._matchReconcileInputs} — iterates `legsIn`. A token that matches no input
     ///      leg is therefore PERMANENTLY STRANDED: Settlement has no sweep and no
     ///      admin, so nothing can ever move it again.
     ///
@@ -644,7 +682,7 @@ abstract contract Base is Signatures {
     ///          `forAmount = min(balanceOf(token, maker), cap)`, bounded BOTH WAYS —
     ///          by that cap above and by a FLOOR below, `floorBps` of the cap, in
     ///          descriptor bits [160:176). Anything under the floor REVERTS
-    ///          ({ForBalanceBelowFloor}) rather than funding a fraction of the
+    ///          ({ForBalanceInvalid}) rather than funding a fraction of the
     ///          position while the value-out leg still draws in full. FULL-FILL ONLY —
     ///          a live balance cannot pro-rate, so every slice would fund the whole
     ///          remaining balance again. This is {Proportional}'s rule, on the
@@ -711,7 +749,7 @@ abstract contract Base is Signatures {
         view
         returns (uint256)
     {
-        if (itemData.length < 32) revert ForLegMissing();
+        if (itemData.length < 32) revert ForLegInvalid();
         uint256 desc;
         /// @solidity memory-safe-assembly
         assembly {
@@ -735,7 +773,7 @@ abstract contract Base is Signatures {
             // forward path `outs` is empty, so a leg reference fails closed here
             // rather than pricing a leg nothing paid.
             uint256[] memory outs = ctx.outs;
-            if (j >= outs.length) revert ForLegMissing();
+            if (j >= outs.length) revert ForLegInvalid();
             // The leg must be one the MAKER receives — or the item's OWN module. The
             // guarantee of this form is that what the solver just delivered is
             // exactly what goes back into the position — the maker's net balance in
@@ -813,8 +851,8 @@ abstract contract Base is Signatures {
                         and(iszero(pre), and(iszero(iszero(legRecipient)), iszero(eq(legRecipient, mkr))))
                     )
             }
-            if (bad) revert ForLegNotMakers();
-            // SPEND IT. One delivery funds ONE item — see {ForLegReused}. `legsOut` is
+            if (bad) revert ForLegInvalid();
+            // SPEND IT. One delivery funds ONE item — see {ForLegInvalid}. `legsOut` is
             // length-prefixed by a `uint8`, so `j < 256` is structural and a single
             // word of bitmask covers every leg; `j` was bounded against `outs.length`
             // above, so the shift cannot wrap.
@@ -824,11 +862,11 @@ abstract contract Base is Signatures {
             // and nothing moved. Debiting the ledger for it burned the index for the
             // rest of the fill: a pre-funded MAKE takes the silent zero-slice `return`
             // one frame up, so the bit was consumed by an item that did nothing, and a
-            // later item naming the same leg got {ForLegReused} instead of the true
+            // later item naming the same leg got {ForLegInvalid} instead of the true
             // cause. There is nothing to double-spend when nothing was delivered.
             if (amt != 0) {
                 uint256 bit = uint256(1) << j;
-                if (ctx.outsUsed & bit != 0) revert ForLegReused();
+                if (ctx.outsUsed & bit != 0) revert ForLegInvalid();
                 ctx.outsUsed |= bit;
             }
             return amt;
@@ -836,7 +874,7 @@ abstract contract Base is Signatures {
         // BALANCE: `min(balanceOf(token, maker), cap)`. The token is the low 160
         // bits of the descriptor; the cap is `data`'s SECOND word, and both are
         // inside `ref = keccak256(data)`, so a filler can move neither.
-        if (!ctx.fullFill) revert ForBalanceNeedsFullFill();
+        if (!ctx.fullFill) revert ForBalanceInvalid();
         // ONE revert site for both halves of "there is no usable cap". The length test
         // must still precede the load — past the slice, `calldataload` reads a
         // NEIGHBOURING item's calldata, which need not be zero — so the guard is
@@ -846,7 +884,7 @@ abstract contract Base is Signatures {
         assembly {
             cap := mul(gt(itemData.length, 63), calldataload(add(itemData.offset, 32)))
         }
-        if (cap == 0) revert ForBalanceNeedsCap();
+        if (cap == 0) revert ForBalanceInvalid();
         uint256 bal = SafeTransferLib.balanceOf(address(uint160(desc)), order.maker);
         if (bal > cap) bal = cap;
         // The FLOOR, in bps of the cap — descriptor bits [160:176), so it rides in
@@ -894,7 +932,7 @@ abstract contract Base is Signatures {
         }
         // The zero test stays: a cap of 0 makes any floor 0, and a zero balance must
         // never fund a levered position.
-        if (bal == 0 || bal < need) revert ForBalanceBelowFloor();
+        if (bal == 0 || bal < need) revert ForBalanceInvalid();
         return bal;
     }
 
@@ -931,7 +969,7 @@ abstract contract Base is Signatures {
             // ⚠ ZERO FUNDING AGAINST A NON-ZERO DRAW IS AN UNCOLLATERALISED SLICE, and
             // the guard was one-sided: {_runItem} rejects a zero value-OUT `slice`
             // ({SettleSliceZero}) and the BALANCE descriptor rejects a low funding leg
-            // ({ForBalanceBelowFloor}, whose note spells out that the alternative
+            // ({ForBalanceInvalid}, whose note spells out that the alternative
             // "turns 'deposit what I hold and borrow against it' into a bare,
             // uncollateralised borrow"). The LEG-REF and LITERAL forms had no such
             // floor, so a BUY leg's cumulative-ceil differencing — which can return 0
@@ -939,7 +977,7 @@ abstract contract Base is Signatures {
             // `forAmount == 0` while `amount` drew in full. Same rule, all three forms;
             // the error is reused rather than added because it already means exactly
             // this and Settlement has no room for a second selector.
-            if (forSlice == 0) revert ForBalanceBelowFloor();
+            if (forSlice == 0) revert ForBalanceInvalid();
             if (forSlice > type(uint160).max) revert AmountOverflow();
         }
         // Slot 3 carries the funding amount for `takeFor` and the receiver for
@@ -985,8 +1023,9 @@ abstract contract Base is Signatures {
         // decorative: a PARTIAL fill would still draw the permit's FULL amount
         // (over-borrowing the maker, who gets the surplus back as tokens but keeps
         // the debt), and the permit could name a different module than the order
-        // advertises. Requiring equality also makes this path implicitly full-fill:
-        // a pro-rata `slice` below `permit.amount` cannot match.
+        // advertises. Equality does NOT make this path full-fill: the filler picks
+        // `fillAmount`, so a `permit.amount` below `item.amount` has fill sizes whose
+        // slice matches exactly (see {Core.fillWithPermitTake}).
         if (permit.module != module || permit.amount != slice) revert PermitTakeMismatch();
         // MARK CONSUMED. `ctx` is a memory struct threaded by reference through
         // `_settleForward` → `_executeItems` → `_runItem`, so clearing here is visible
@@ -1210,6 +1249,14 @@ abstract contract Base is Signatures {
     ///      code-less address REVERT instead of silently succeeding as a no-op.
     ///      Dropping it would turn a malformed maker-signed item into a skipped
     ///      funding step that the rest of the fill happily settles around.
+    ///
+    ///      It covers CODELESS targets only. A callee WITH code whose fallback
+    ///      accepts an unknown selector without reverting (WETH9's `deposit`
+    ///      fallback, a permissive proxy) still takes the call as a silent no-op.
+    ///      The module is maker-signed, so that is a malformed order the maker
+    ///      signed, not a filler-reachable bypass — but a filler relying on an
+    ///      item's side effect (a SETTLE paying it the maker's asset) must vet the
+    ///      module before filling.
     ///
     ///      Reverts bubble RAW, so a module's custom error survives to the filler
     ///      unchanged — same taxonomy guarantee {Core._execute} documents.

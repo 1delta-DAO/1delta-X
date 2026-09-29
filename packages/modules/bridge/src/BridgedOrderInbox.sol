@@ -101,9 +101,18 @@ interface ISettlementApprove {
 ///       This is inherent to every bridge integration; the mitigation is
 ///       operational — register only canonical, verified addresses.
 ///    2. The owner controls that registry, so a compromised owner key is a fund-
-///       loss path. Ownership therefore moves in two steps ({transferOwnership} /
-///       {acceptOwnership}), and {rescue} is bounded by `balance - liability` so it
-///       can never reach funds owed to a live commitment.
+///       loss path: register an attacker contract as a compose source, have it
+///       `sendCompose` a fabricated credit (the LayerZero endpoint relays a compose
+///       from ANY sender), and {activate} an inbox-made order paying the attacker
+///       out of other depositors' funds. ADDING a source is therefore TIMELOCKED
+///       ({COMPOSE_SOURCE_DELAY}, queued by {setComposeSource}, applied by anyone
+///       via {applyComposeSource}), so the addition is public for a full delay
+///       before it can credit anything — the Drift/KelpDAO lesson (re-audit
+///       2026-09-25): one compromised key must not mean "all funds move" at once.
+///       REMOVING a source stays instant, since revocation only ever narrows trust.
+///       Ownership moves in two steps ({transferOwnership} / {acceptOwnership}), and
+///       {rescue} is bounded by `balance - liability` so it can never reach funds
+///       owed to a live commitment.
 ///    3. Settlement and Permit3 are trusted (the standing allowance is to
 ///       Settlement alone, and only for tokens {enableToken} has wired).
 contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
@@ -181,6 +190,19 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///         THIS chain — mapped to the ERC20 they deliver.
     mapping(address => address) public composeSourceToken;
 
+    /// @notice How long a newly registered compose source waits before it can
+    ///         credit anything. See trust assumption 2.
+    uint256 public constant COMPOSE_SOURCE_DELAY = 2 days;
+
+    /// @notice A queued compose-source registration: the token it will deliver and
+    ///         the earliest time {applyComposeSource} may make it live.
+    struct PendingComposeSource {
+        address token;
+        uint64 eta;
+    }
+
+    mapping(address => PendingComposeSource) public pendingComposeSource;
+
     event Credited(bytes32 indexed orderHash, address indexed token, uint256 amount, address beneficiary);
     event Activated(bytes32 indexed orderHash, address indexed token, uint256 anchor, uint64 refundAfter);
     event Settled(bytes32 indexed orderHash, address indexed beneficiary, uint256 spent, uint256 refunded);
@@ -196,6 +218,7 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     event Rescued(address indexed token, address indexed to, uint256 amount);
     event TokenEnabled(address indexed token);
     event ComposeSourceSet(address indexed source, address indexed token);
+    event ComposeSourceQueued(address indexed source, address indexed token, uint64 eta);
     event OwnerSet(address indexed owner);
     event OwnershipTransferStarted(address indexed pendingOwner);
 
@@ -204,6 +227,7 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     error NotSpokePool();
     error NotEndpoint();
     error UntrustedComposeSource();
+    error ComposeSourceNotReady();
     error BadCommitment();
     error WrongChain();
     error TokenNotEnabled();
@@ -263,9 +287,33 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///         drive {lzCompose}; the token is taken from here rather than from
     ///         the message, so a compose payload can never name a token it did not
     ///         actually deliver.
+    ///
+    ///         `token != 0` QUEUES the registration: it goes live only through
+    ///         {applyComposeSource}, {COMPOSE_SOURCE_DELAY} later. Re-mapping a live
+    ///         source to a different token is an addition too and waits the same.
+    ///         `token == 0` REMOVES the source immediately and cancels anything
+    ///         queued for it — narrowing trust needs no delay.
     function setComposeSource(address source, address token) external onlyOwner {
-        composeSourceToken[source] = token;
-        emit ComposeSourceSet(source, token);
+        if (token == address(0)) {
+            delete pendingComposeSource[source];
+            composeSourceToken[source] = address(0);
+            emit ComposeSourceSet(source, address(0));
+            return;
+        }
+        uint64 eta = uint64(block.timestamp + COMPOSE_SOURCE_DELAY);
+        pendingComposeSource[source] = PendingComposeSource(token, eta);
+        emit ComposeSourceQueued(source, token, eta);
+    }
+
+    /// @notice Make a queued compose source live once its delay has passed.
+    ///         Permissionless: the owner already decided, publicly, a full delay
+    ///         ago; applying it is bookkeeping.
+    function applyComposeSource(address source) external {
+        PendingComposeSource memory p = pendingComposeSource[source];
+        if (p.eta == 0 || block.timestamp < p.eta) revert ComposeSourceNotReady();
+        delete pendingComposeSource[source];
+        composeSourceToken[source] = p.token;
+        emit ComposeSourceSet(source, p.token);
     }
 
     /// @notice Step one of a two-step ownership handover. Nothing changes until the

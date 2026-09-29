@@ -5,7 +5,18 @@
 # Read-only access to the SDK's committed encoding vectors, consumed by
 # `packages/core/test/EncodingGolden.t.sol` — the one fixture both the SDK (encoder)
 # and the contracts (interpreter) test against. Read-only, one directory.
-fs_permissions = [{ access = "read", path = "./packages/sdk/test/fixtures" }]
+#
+# Read-only access to build output (`./out`) for `make test-deployed`: under
+# `DEPLOYED_BYTECODE=1` the core test bases deploy Permit3/Settlement from the
+# `core-deploy` (via-IR) ARTIFACT JSON instead of `new` — see
+# packages/core/test/shared/DeployedBytecode.sol. Scoped to `./out` rather than one
+# artifact dir because that dir is overridable (`DEPLOYED_ARTIFACTS`, default
+# `out/test-deployed`, a private copy beside a concurrent build) and foundry matches
+# permissions per whole path component. Unused unless the switch is on.
+fs_permissions = [
+    { access = "read", path = "./packages/sdk/test/fixtures" },
+    { access = "read", path = "./out" },
+]
 src = "packages"
 test = "packages"
 script = "packages"
@@ -262,6 +273,46 @@ evm_version    = "cancun"
 #     nothing is deployed; a MIGRATION afterwards. If the singletons are already live,
 #     revert both this and the periphery copy to 400 and take the error-consolidation
 #     route instead.
+#
+# 2026-09-25 — THE ERROR-CONSOLIDATION ROUTE WAS TAKEN, at runs = 100 (re-audit F30).
+# Two security fixes had to land: the settler-bound `fillWithPermit` witness (+55,
+# −7 once folded into `_permitBatchHead`'s assembly) and the delta-verify named-filler
+# pin (+27; +55 when tried in the shared `OrderGates.exclusivityOverride` instead).
+# Clean builds:
+#
+#     variant                                            Settlement   free
+#     baseline (tree before F30)                            24,554      22
+#     + both fixes                                          24,629     −53   FAIL
+#     + both fixes, runs = 1                                ~24,605    −29   FAIL
+#     + both fixes, six ForLeg*/ForBalance* errors → two    24,570       6   ← here
+#
+# The merge costs diagnosis, not safety: `SettlementLens.validateOrder` still names
+# which funding rule failed. The next byte has nowhere cheap left to come from.
+#
+# 2026-09-29 — IT DID: a measured codegen pass (re-audit F31) found 815 bytes, and
+# the three Mediums it paid for would otherwise have shipped as doc notes. Clean
+# builds, runs = 100:
+#
+#     variant                                                     Settlement   free
+#     F30 tree                                                       24,570       6
+#     + 12 measured optimizations (F31)                              23,755     821
+#     + proportional no-trim in _clampToRemaining                    23,844     732
+#     + soft window with no carrier is hard (gate inlined ×3)        24,119     457
+#     + extend-only nominations, maker-ward bump rounding,
+#       EXECUTOR-addressed leg refused on the netted path            24,273     303   ← here
+#
+# THE TWO LEVERS THAT PAID, for the next person: (1) via-IR emits a SEPARATE inlined
+# copy of a function for a call site that passes a CONSTANT argument (`false`,
+# `new uint256[](0)`, a null array) — `_payInputsToSolver`'s literal `false` alone
+# cost 211 bytes; derive such flags from data instead. (2) Every use of an
+# immutable is a 33-byte PUSH32, so read it inside ONE shared body
+# (`Base._pullViaPermit3`) rather than passing it at every call site. MEASURED
+# WORSE, do not retry: merging the two `batchFill` overloads (+257..+276), routing
+# `fill` through `_fillCallback` (+38/+188), `fillWithPermitTake` through
+# `_fillCore` (+200), a null array at the PostInputs pay site (+236),
+# `_verifySignature(.., uint256 prevFilled)` (+23; the `FillCtx` form is −12), and a
+# raw-assembly carrier walk vs typed accessors (only −12 — the cost was the three
+# inlined call sites, not the decode).
 optimizer_runs = 100
 
 # ── Periphery, validators and shared libs, split out of core 2026-08-24 ──────

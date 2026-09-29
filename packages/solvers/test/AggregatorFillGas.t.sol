@@ -73,6 +73,10 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
     }
 
     function test_gas_direct_seeded() public {
+        // Direct orders need a gated instance (re-audit 2026-09-29).
+        address[] memory ops = new address[](1);
+        ops[0] = address(this);
+        aggSolver = new AggregatorFillSolver(address(settlement), _routers(address(router)), ops, _noSplit(), false, _none());
         _warmWorld();
         tA.mint(address(aggSolver), 1);
         Order memory o = _directOrder(1);
@@ -89,7 +93,7 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         address[] memory prime = new address[](1);
         prime[0] = address(tA);
         AggregatorFillSolver st =
-            new AggregatorFillSolver(address(settlement), _routers(address(router)), _open(), _noSplit(), true, prime);
+            new AggregatorFillSolver(address(settlement), _routers(address(router)), _standingOps(), _noSplit(), true, prime);
         tA.mint(address(st), 1);
         tB.mint(address(st), 1);
         _runTo("standing allowance, seeded     ", st, 1, AMOUNT_OUT, address(st));

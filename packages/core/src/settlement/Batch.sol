@@ -26,7 +26,7 @@ import {Core} from "./Core.sol";
 ///             body could not do, and why mutually-dependent orders previously
 ///             needed a flash loan or solver inventory.
 ///
-///         Reuses `_openFill`, `_executeItem`, {Pricing}, and the `_sweepSurplus`
+///         Reuses `_openFill`, `_executeItemAt`, {Pricing}, and the `_sweepSurplus`
 ///         whole-check verbatim.
 abstract contract Batch is Core {
     using OrderHash for Order;
@@ -108,8 +108,9 @@ abstract contract Batch is Core {
         if (order.deltaVerifyOutputs()) revert DeltaVerifyNotBatchable();
         if (block.timestamp > order.expiry()) revert OrderExpired();
         bytes32 orderHash = order.hash();
-        _verifySignature(orderHash, sig, order.maker);
-        _gateOrder(order, orderHash, solver, takerData, ctx);
+        _gateFillState(order, orderHash, ctx);
+        _verifySignature(orderHash, sig, order.maker, ctx);
+        _gateOrderPost(order, solver, takerData, ctx);
         // `type(uint256).max` = "the whole remaining anchor", the same sentinel
         // `fillUpTo` honours. It exists for a {Proportional} anchor: that resolves
         // from the maker's LIVE balance at the gate above, a proportional fill must
@@ -290,9 +291,15 @@ abstract contract Batch is Core {
     ///  ────────────────────────────────────────────────
     ///  The composition a solver would otherwise express by re-entering `fill` from
     ///  a callback is expressed as a schedule instead. `nonReentrant` still spans
-    ///  the whole call, unweakened — and it is now SUFFICIENT, because every
-    ///  balance-delta window in this file (`PULL`, `ITEM`, `PRESEND`, the final
-    ///  sweep) is measured inside this frame, where nothing else can run.
+    ///  the whole call, unweakened, so no step can re-enter a fill. The windows are
+    ///  NOT sealed — during an `ITEM` the maker's module (and whatever it calls)
+    ///  runs, and a `CALL` runs the solver's code — so the guarantee is ATTRIBUTION,
+    ///  not isolation: whatever lands in an `ITEM` window is credited to that
+    ///  item's order or refunded to its maker ({_creditItemProceeds}), a `PULL`
+    ///  credits exactly its nominal amount, and anything arriving in a `CALL` or
+    ///  `DELIVER` window is credited to no order — it joins the pool, and whatever
+    ///  the context does not consume is swept to the solver above the pre-context
+    ///  floor.
     ///
     ///  Deferring the checks (vs. running them per order)
     ///  ─────────────────────────────────────────────────
@@ -400,14 +407,18 @@ abstract contract Batch is Core {
         }
     }
 
-    /// @dev The three shape constraints the netted match relies on:
+    /// @dev The four shape constraints the netted match relies on:
     ///        • no SETTLE item — it routes the maker's asset to the filler, not the
     ///          pool ({MatchSettleItemUnsupported});
+    ///        • no TAKE_FOR and no PRE-FUNDED MAKE item — both are funded by one of
+    ///          the order's own `legsOut`, a delivery this path schedules
+    ///          independently of the item (same error);
     ///        • no repeated input token — item proceeds are attributed per token
     ///          within a step window, so a duplicate leg would double-count the
     ///          same arrival ({MatchDuplicateInput});
     ///        • at most 255 items, so item bit `k` can never collide with
-    ///          {DELIVERED_BIT} and the Phase-3 completeness mask stays exact.
+    ///          {DELIVERED_BIT} and the Phase-3 completeness mask stays exact
+    ///          (structural now — the packed count is a `uint8`).
     ///      Runs once per order at open. O(items + legsIn²), tiny — and this is the
     ///      deliberate CoW path, never the single-order hot path (where the same
     ///      shapes are handled correctly and the guard would only cost gas).
@@ -424,7 +435,7 @@ abstract contract Batch is Core {
             // `>=`, NOT `==`, and the difference is load-bearing. `op` is a RAW
             // BYTE out of the signed blob ({PackedArrays.itemAt} deliberately does
             // not narrow it), so the guard has to name a RANGE rather than one
-            // value. It rejects three things at once:
+            // value. It rejects four things at once:
             //   • SETTLE (2) — routes to the filler, not the pool;
             //   • TAKE_FOR (3) — its funding leg is usually one of the order's own
             //     `legsOut`, i.e. value the maker has to have RECEIVED before the
@@ -575,9 +586,7 @@ abstract contract Batch is Core {
         // is not merely an optimisation.
         uint256 need = owed > have ? owed - have : 0;
         if (need != 0) {
-            Permit3TransferLib.transferFromWithFallback(
-                PERMIT3, PackedArrays.legInToken(order.legsIn, j), order.maker, address(this), need
-            );
+            _pullViaPermit3(PackedArrays.legInToken(order.legsIn, j), order.maker, address(this), need);
             unchecked {
                 st.credit[i][j] = have + need;
             }
@@ -620,7 +629,12 @@ abstract contract Batch is Core {
                 // the amount away. {SettlementLens.validateOrder} already reports the
                 // shape as malformed for every order; on this path it is exploitable,
                 // so the settler agrees with the lens instead of taking the money.
-                if (to == address(this)) revert OutputToSettlement();
+                //
+                // The EXECUTOR is the same hazard one hop out (re-audit 2026-09-29):
+                // it holds whatever lands on it, and the solver's own `CALL` step runs
+                // from it, so a leg paid there is back in the solver's pocket in the
+                // same transaction.
+                if (to == address(this) || to == address(EXECUTOR)) revert OutputToSettlement();
                 // `to == order.maker` and `to == 0` are the same destination, so the
                 // second test only ever picked between two equal addresses.
                 SafeTransferLib.safeTransfer(token, to == address(0) ? order.maker : to, amt);
@@ -712,8 +726,9 @@ abstract contract Batch is Core {
         _creditItemProceeds(order, st, i, pre);
     }
 
-    /// @dev Attribute everything a TAKE just produced, measured against `pre` (the
-    ///      universe snapshot taken immediately before the item call).
+    /// @dev Attribute everything an item just added to the pool — ANY op, see the
+    ///      note in {_stepItem} — measured against `pre` (the universe snapshot taken
+    ///      immediately before the item call).
     ///
     ///      A proceeds token that matches one of the order's `legsIn` credits that
     ///      leg, exactly as before. Anything ELSE goes straight back to the MAKER.
@@ -738,7 +753,7 @@ abstract contract Batch is Core {
     ///      it has the token universe in hand.
     ///
     ///      COST: this widens the measurement from `2·|legsIn|` to `2·|tokens|`
-    ///      balance reads per TAKE step. Deliberate — `matchSettle` is the CoW path,
+    ///      balance reads per ITEM step. Deliberate — `matchSettle` is the CoW path,
     ///      never the single-order hot path, and it already accepts O(legs²) scans
     ///      here; a correctness hole that pays out to the counterparty is not worth
     ///      a few staticcalls.

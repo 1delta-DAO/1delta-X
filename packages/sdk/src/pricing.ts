@@ -64,7 +64,9 @@ export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n, priorit
     // so a quote here must fail exactly as the fill would.
     const { decayStartTime } = unpackTiming(order.timing);
     if (decayStartTime !== 0 && now < BigInt(decayStartTime)) throw new Error("AuctionNotStarted");
-    const improve = (priorityFee * BPS) / order.priorityScale;
+    // Rounded UP, like the contract's `priorityBump` (re-audit 2026-09-29): the
+    // fractional basis point of improvement is the maker's.
+    const improve = (priorityFee * BPS + order.priorityScale - 1n) / order.priorityScale;
     return improve >= BPS ? 0n : BPS - improve;
   }
   let bps = 0n;
@@ -95,7 +97,12 @@ export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n, priorit
           const b0 = BigInt(c[k]!.bumpBps);
           const b1 = BigInt(c[k + 1]!.bumpBps);
           const span = t1 - t0;
-          bps = b1 >= b0 ? b0 + ((b1 - b0) * (elapsed - t0)) / span : b0 - ((b0 - b1) * (elapsed - t0)) / span;
+          // A falling segment rounds its decrement UP (toward the maker), as the
+          // contract does since re-audit 2026-09-29; a rising one floors.
+          bps =
+            b1 >= b0
+              ? b0 + ((b1 - b0) * (elapsed - t0)) / span
+              : b0 - ((b0 - b1) * (elapsed - t0) + span - 1n) / span;
           break;
         }
       }

@@ -1,5 +1,5 @@
-import { numberToHex, type Address, type Hex } from "viem";
-import { OrderSide, assertOrderNonce, packParams } from "./types";
+import { numberToHex, zeroAddress, type Address, type Hex } from "viem";
+import { DELTA_VERIFY_OUTPUTS_BIT, FILLER_SET_SENTINEL, OrderSide, assertOrderNonce, packParams } from "./types";
 import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types";
 
 /**
@@ -210,6 +210,20 @@ export function packOrder(order: Order): WireOrder {
   }
   if (order.expiry < 0n || order.expiry >> 48n !== 0n) {
     throw new Error(`packOrder: expiry ${order.expiry} exceeds uint48`);
+  }
+  // A delta-verify order is fillable ONLY by its named `exclusiveFiller`, for its
+  // whole life (the settler reverts `NotExclusiveFiller` otherwise): the balance
+  // delta it measures cannot tell this fill's delivery from an inflow the maker paid
+  // for elsewhere, so the maker must name who runs the callback. Zero and the
+  // FILLER_SET sentinel can never equal a caller, so such an order would be signed
+  // and never fill — refuse it here instead (re-audit 2026-09-25).
+  if ((order.timing >> DELTA_VERIFY_OUTPUTS_BIT) & 1n) {
+    const f = order.exclusiveFiller.toLowerCase();
+    if (f === zeroAddress || f === FILLER_SET_SENTINEL) {
+      throw new Error(
+        "packOrder: a delta-verify order (timing bit 104) must name a single exclusiveFiller — only that filler can ever fill it",
+      );
+    }
   }
   return {
     maker: order.maker,

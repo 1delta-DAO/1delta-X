@@ -4,13 +4,13 @@ Three of the last four findings against this codebase were not bugs in a
 function. They were bugs in a **combination** — a state that each half of the
 code handled correctly on its own, reached by a path nobody had put together:
 
-- [F13](reference-audits.md#f13--a-revoked-on-chain-order-approval-was-bypassed-by-any-non-empty-signature)
+- [F13](reference-audits/findings-ledger.md#f13--a-revoked-on-chain-order-approval-was-bypassed-by-any-non-empty-signature)
   — *on-chain approval* × *partially filled* × *a non-empty signature*. Each of the
   three is ordinary. The product was an authorisation bypass.
-- [F15](reference-audits.md#f15--a-duplicate-pull-step-burned-maker-allowance-without-extra-fill-progress)
+- [F15](reference-audits/findings-ledger.md#f15--a-duplicate-pull-step-burned-maker-allowance-without-extra-fill-progress)
   — *duplicate `PULL` step* × *finite allowance*. Either alone is harmless; the
   infinite-allowance sentinel that every test granted was **masking** the pair.
-- [F8](reference-audits.md#f8--a-proportional-anchor-plus-the-pegged-price-module-passed-preflight-and-never-filled)
+- [F8](reference-audits/findings-ledger.md#f8--a-proportional-anchor-plus-the-pegged-price-module-passed-preflight-and-never-filled)
   — *proportional anchor* × *pegged price module*. Two features that had never been
   asked to work together, and did not.
 
@@ -48,7 +48,7 @@ a cell here, and if it is not, this note is missing an axis.
 | --- | --- | --- | --- |
 | **●** | **common** | On the normal path. Happens on most fills. | Nothing — the suite is full of these. A gap here would be visible immediately. |
 | **◐** | **rare** | Legitimate, infrequent. A feature most orders never use, or a state most orders never reach. | **The most expensive gap.** Rare-but-legal is where findings F8 and F15 lived: reachable, unexercised, and nobody notices the regression. |
-| **⊘** | **never** | Structurally unreachable. The mechanism that makes it so must be *named* in the cell. | A test is not the control — the *mechanism* is. But if the mechanism is a convention rather than the compiler, it needs a regression net (cf. [C2](reference-audits.md#c2--hand-rolled-calldata-arithmetic-without-a-bounds-proof)). |
+| **⊘** | **never** | Structurally unreachable. The mechanism that makes it so must be *named* in the cell. | A test is not the control — the *mechanism* is. But if the mechanism is a convention rather than the compiler, it needs a regression net (cf. [C2](reference-audits/failure-classes.md#c2--hand-rolled-calldata-arithmetic-without-a-bounds-proof)). |
 | **✕** | **must-not** | An actor can present it. The settler must refuse. | A security gap. Every ✕ cell is a revert, and every revert needs a test that proves it fires. |
 
 The line between **⊘** and **✕** is the one that matters and the one that is
@@ -232,6 +232,7 @@ always findings.
 | I6 | Window lapsed → open | ● |
 | I7 | Malformed set | ✕ `MalformedFillerSet` |
 | I8 | `overrideBps > 10000` | ✕ `InvalidOverrideBps` |
+| I9 | Soft window, no leg can carry the premium (fixed inputs, outputs only to third parties) | ✕ hard — `NotExclusiveFiller` · `test_thirdPartyAddressedLeg_softWindowIsHard`; one auctioned input keeps it soft · `test_auctionedInput_keepsTheWindowSoft` |
 
 ### J — Token behaviour
 
@@ -273,7 +274,7 @@ it bind?
 withdrawal binds mid-order, and it only binds because F13 forced the sentinel
 escalation. The generalised question — *does this fast path remember **which**
 credential authorised it?* — is the
-[re-audit sweep §1](reference-audits.md#re-audit-sweep--the-generalised-questions-from-f13f15).
+[re-audit sweep §1](reference-audits/reaudit-sweep.md#re-audit-sweep--the-generalised-questions-from-f13f15).
 
 ### M2 — kill switch × fill progress
 
@@ -311,7 +312,7 @@ test rather than by claim.
 | Empty sig / `approveOrder` (A9) | ◐ `OnChainOrderApproval:test_approve_thenFill_emptySig` | ◐ shares | ◐ `test_batchFill_approvedOrder_emptySig` | ◐ `MatchSettleGates:test_gate_emptySig_authorizesViaOnChainApproval` + `..._withoutApproval_reverts`, `..._revokedApproval_reverts` |
 | Fill-once (B5) | ◐ `FillOnceNonce:test_fillOnce_settlesAndConsumesTheNonce` | ◐ `test_fillOnce_fillUpTo_overRequestClampsToTheWholeOrder`, `..._underRequest_reverts` | ◐ `test_fillOnce_batchFill_partialFailsSoftlyAndBurnsNoNonce` (+2) | ◐ `MatchSettleGates:test_gate_fillOnce_partialInAPlan_reverts`, `..._fullFillConsumesTheNonce` |
 | Exclusivity (I2–I5) | ✕ `AuctionAndExclusivity:*` | ✕ `test_fillUpTo_recipient_doesNotBypassExclusivity` | ✕ `SettlementGuards:test_batchFill_exclusivity_threadsFiller` | ✕ `MatchSettleGates:test_gate_hardExclusivity_outsiderReverts` + the two complements |
-| Proportional anchor (G10) | ◐ `ProportionalLeg:*` | ◐ `test_prop_fillUpTo_clampsToResolvedAnchor` | ◐ `test_prop_batchFill_resolvesTheAnchorPerOrder` (+2) | ◐ `MatchSettleGates:test_gate_proportionalAnchor_resolvesInAPlan`, `..._partialInAPlan_reverts` |
+| Proportional anchor (G10) | ◐ `ProportionalLeg:*` | ◐ `type(uint256).max` only · `test_prop_fillUpTo_clampsToResolvedAnchor`; ✕ an oversized quoted size is not trimmed · `test_prop_fillUpTo_shrunkBalance_quotedSize_reverts` | ◐ `test_prop_batchFill_resolvesTheAnchorPerOrder` (+2) | ◐ `MatchSettleGates:test_gate_proportionalAnchor_resolvesInAPlan`, `..._partialInAPlan_reverts` |
 | Delta-verify (J2) | ◐ `DeltaVerifyDelivery:*` | ◐ shares | ◐ shares | ✕ `MatchSettleGates:test_gate_deltaVerifyOrder_isNotBatchable` + `..._sameOrderWithoutTheFlag_matches` |
 | Contract maker (A7) | ◐ `PlainSwap`, `SafeMakerFork`, `SignatureEdgeCases:test_1271_*` | ◐ — untested | ◐ — untested | ◐ — untested (accepted — see R-1) |
 | Reentrancy | ✕ `SettlementGuards:test_reentrancy_into_fill_reverts` | ✕ `..._into_fillUpTo_reverts` | ✕ shares | ✕ `test_reentrancy_viaCallback_reverts` |
@@ -437,8 +438,9 @@ revert, and finding F8 is the cell that was missing.
 | Proportional × uncapped (`end == 0`) | ✕ `ProportionalNeedsCap` | `test_prop_uncappedLeg_reverts` |
 | Proportional × zero balance | ✕ | `test_prop_zeroBalance_reverts` |
 | Proportional × balance grew past the solver's ceiling | ✕ | `test_prop_balanceGrewPastSolverCeiling_reverts` |
-| Proportional × `fillUpTo` clamp | ◐ legal, clamps | `test_prop_fillUpTo_clampsToResolvedAnchor` |
-| Proportional × pegged price module | ◐ **F8** — legal now | see [F8](reference-audits.md#f8--a-proportional-anchor-plus-the-pegged-price-module-passed-preflight-and-never-filled) |
+| Proportional × `fillUpTo` with `type(uint256).max` | ◐ legal — the explicit any-size opt-in, resolves to the whole anchor | `test_prop_fillUpTo_clampsToResolvedAnchor` |
+| Proportional × `fillUpTo` oversized request (balance shrank) | ✕ `OverFill` — never trimmed down | `test_prop_fillUpTo_shrunkBalance_quotedSize_reverts` |
+| Proportional × pegged price module | ◐ **F8** — legal now | see [F8](reference-audits/findings-ledger.md#f8--a-proportional-anchor-plus-the-pegged-price-module-passed-preflight-and-never-filled) |
 | Proportional × typed callback | ◐ | `TypedCallback:test_typed_proportionalAnchorUnderPostInputs` |
 | Proportional × batch paths | ◐ | `ProportionalLeg:test_prop_batchFill_*` (3), `MatchSettleGates:test_gate_proportionalAnchor_*` (2) |
 | `fillModule` × overfill | ✕ cap stays in the core | `FillModule:test_overfillCap_moduleCannotExceedTotal` |
@@ -575,7 +577,7 @@ the one this note's credibility actually rests on: **every cell above names a te
 and those names are hand-written prose.** Rename or delete a test and the table
 goes on claiming the cell is covered. A coverage claim without coverage is exactly
 what Part 5 warns against, and doc-drifting-from-code is the shape of
-[F13](reference-audits.md#f13--a-revoked-on-chain-order-approval-was-bypassed-by-any-non-empty-signature)
+[F13](reference-audits/findings-ledger.md#f13--a-revoked-on-chain-order-approval-was-bypassed-by-any-non-empty-signature)
 itself — there, a comment promised the approval record was "re-checked on every
 fill" long after that stopped being true of every branch.
 
@@ -681,7 +683,8 @@ pair in `MatchSettleGates`.
 
 ### G-6 — proportional anchor in the batch paths · CLOSED
 Five tests. Beyond "it resolves", two are about the shape's real hazard: `batchFill`
-has **no clamp** (that is `fillUpTo`'s job), so a solver quoting against a balance
+has **no clamp** and no any-size sentinel (only `fillUpTo` and `matchSettle` honour
+`type(uint256).max`), so a solver quoting against a balance
 that then grows arrives with a request below the new anchor — a partial fill of an
 order that can only fill whole. It must fail softly and stay fillable, which
 `test_prop_batchFill_staleQuoteAfterBalanceGrows_failsSoftly` asserts;

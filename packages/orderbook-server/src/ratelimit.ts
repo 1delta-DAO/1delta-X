@@ -38,8 +38,21 @@ export interface RateLimitOptions {
   maxBodyBytes: number;
   /** Idle buckets are dropped after this long, so the maps do not grow forever. */
   idleEvictionMs: number;
+  /**
+   * Hard cap on buckets per map. The idle sweep alone let a caller who rotates
+   * keys (spoofed forwarding headers, fresh maker keys) grow the map for a full
+   * `idleEvictionMs`; past this, the least-recently-used bucket is dropped.
+   */
+  maxKeys: number;
   /** Trust `x-forwarded-for` — only ever behind a proxy that sets it. */
   trustProxy: boolean;
+  /**
+   * With `trustProxy`: how many proxies of YOUR OWN sit in front of this process.
+   * The client address is the entry that many places from the RIGHT of
+   * `x-forwarded-for` — the one your outermost proxy appended. Everything left of
+   * it was written by the client and is worth nothing. Default 1.
+   */
+  trustedHops: number;
   /** Injectable clock for tests. */
   now?: () => number;
 }
@@ -51,7 +64,9 @@ export const DEFAULT_RATE_LIMIT: RateLimitOptions = {
   maker: { capacity: 120, refillPerSecond: 1 },
   maxBodyBytes: 64 * 1024,
   idleEvictionMs: 10 * 60_000,
+  maxKeys: 100_000,
   trustProxy: false,
+  trustedHops: 1,
 };
 
 /** What each route spends. Reads are cheap; anything that hits the chain is not. */
@@ -65,6 +80,8 @@ export const ROUTE_COST = {
   cancel: 5,
   /** A `previewFill` staticcall against the lens. */
   quote: 5,
+  /** A WebSocket connect: the connection itself plus a bounded snapshot. */
+  stream: 10,
   free: 0,
 } as const;
 
@@ -79,6 +96,7 @@ class TokenBuckets {
   constructor(
     private readonly bucket: Bucket,
     private readonly now: () => number,
+    private readonly maxKeys: number,
   ) {}
 
   /** Spend `cost`. Returns how long to wait, in seconds, when refused. */
@@ -90,13 +108,24 @@ class TokenBuckets {
     entry.updatedAt = at;
 
     if (entry.tokens < cost) {
-      this.entries.set(key, entry);
+      this.touch(key, entry);
       const shortfall = cost - entry.tokens;
       return { ok: false, retryAfter: Math.max(1, Math.ceil(shortfall / this.bucket.refillPerSecond)) };
     }
     entry.tokens -= cost;
-    this.entries.set(key, entry);
+    this.touch(key, entry);
     return { ok: true };
+  }
+
+  /** Re-insert at the back (most recent), then trim the least recent past `maxKeys`. */
+  private touch(key: string, entry: Entry): void {
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    while (this.entries.size > this.maxKeys) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
   }
 
   /** Drop buckets that have been idle long enough to have fully refilled anyway. */
@@ -115,10 +144,14 @@ class TokenBuckets {
 export interface RateLimiter {
   /** Charge the IP bucket. Replies 429 and returns false when refused. */
   charge(request: FastifyRequest, reply: FastifyReply, cost: number): boolean;
+  /** Charge the IP bucket with no HTTP reply to write (a WebSocket upgrade). */
+  allow(request: FastifyRequest, cost: number): boolean;
   /** Charge the maker bucket, once a write's signer is known. */
   chargeMaker(maker: string, reply: FastifyReply, cost: number): boolean;
   /** Reject an oversized body before anything parses it. */
   checkBody(body: Uint8Array | undefined, reply: FastifyReply): boolean;
+  /** The address this request is billed to (see {@link clientAddress}). */
+  clientKey(request: FastifyRequest): string;
   stats(): { ips: number; makers: number };
   stop(): void;
 }
@@ -126,8 +159,8 @@ export interface RateLimiter {
 export function createRateLimiter(opts?: Partial<RateLimitOptions>): RateLimiter {
   const config: RateLimitOptions = { ...DEFAULT_RATE_LIMIT, ...opts };
   const now = config.now ?? (() => Date.now());
-  const ips = new TokenBuckets(config.ip, now);
-  const makers = new TokenBuckets(config.maker, now);
+  const ips = new TokenBuckets(config.ip, now, config.maxKeys);
+  const makers = new TokenBuckets(config.maker, now, config.maxKeys);
 
   const sweep = setInterval(() => {
     ips.evictIdle(config.idleEvictionMs);
@@ -135,14 +168,7 @@ export function createRateLimiter(opts?: Partial<RateLimitOptions>): RateLimiter
   }, 60_000);
   (sweep as { unref?: () => void }).unref?.();
 
-  const clientKey = (request: FastifyRequest): string => {
-    if (config.trustProxy) {
-      const forwarded = request.headers["x-forwarded-for"];
-      const first = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(",")[0];
-      if (first) return first.trim();
-    }
-    return request.ip;
-  };
+  const clientKey = (request: FastifyRequest): string => clientAddress(request, config);
 
   const refuse = (reply: FastifyReply, retryAfter: number, scope: string): boolean => {
     reply.header("retry-after", String(retryAfter));
@@ -155,6 +181,9 @@ export function createRateLimiter(opts?: Partial<RateLimitOptions>): RateLimiter
       if (cost <= 0) return true;
       const verdict = ips.take(clientKey(request), cost);
       return verdict.ok ? true : refuse(reply, verdict.retryAfter, "ip");
+    },
+    allow(request, cost) {
+      return cost <= 0 || ips.take(clientKey(request), cost).ok;
     },
     chargeMaker(maker, reply, cost) {
       if (cost <= 0) return true;
@@ -172,7 +201,35 @@ export function createRateLimiter(opts?: Partial<RateLimitOptions>): RateLimiter
       }
       return true;
     },
+    clientKey,
     stats: () => ({ ips: ips.size, makers: makers.size }),
     stop: () => clearInterval(sweep),
   };
+}
+
+/**
+ * The address a request is billed to.
+ *
+ * Behind `trustProxy`, it is read from the RIGHT of `x-forwarded-for`: each proxy
+ * APPENDS the address it received from, so the entry `trustedHops` from the end is
+ * the one your outermost proxy wrote — the real peer. The leftmost entry, which
+ * this used to take, is whatever the client sent in its own header: one request
+ * per spoofed value was a fresh, full bucket.
+ */
+export function clientAddress(
+  request: FastifyRequest,
+  opts: Pick<RateLimitOptions, "trustProxy" | "trustedHops">,
+): string {
+  if (opts.trustProxy) {
+    const raw = request.headers["x-forwarded-for"];
+    const hops = (Array.isArray(raw) ? raw.join(",") : raw ?? "")
+      .split(",")
+      .map((h) => h.trim())
+      .filter((h) => h.length > 0);
+    const at = hops.length - Math.max(1, opts.trustedHops);
+    // Fewer entries than proxies: the chain is not what was configured, so fall
+    // back to the socket peer (the nearest proxy) rather than trust any of it.
+    if (at >= 0 && hops[at]) return hops[at]!;
+  }
+  return request.ip;
 }

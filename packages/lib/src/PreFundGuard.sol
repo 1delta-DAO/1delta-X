@@ -157,7 +157,7 @@ library PreFundGuard {
 
     /// @notice The funding TOKEN the maker signed into the descriptor — bits [16:176).
     /// @dev THE THIRD AXIS. {Base._forSlice} binds the referenced leg's INDEX, its
-    ///      RECIPIENT (bit 253) and its single use ({Base.ForLegReused}), and — since
+    ///      RECIPIENT (bit 253) and its single use ({Base.ForLegInvalid}), and — since
     ///      the token field was added — requires `legsOut[j].token` to equal this
     ///      word. That makes the delivery's token maker-signed and core-checked; what
     ///      it cannot do is know which asset a module will SPEND, because that is

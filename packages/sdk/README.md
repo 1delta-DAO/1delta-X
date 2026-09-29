@@ -266,3 +266,36 @@ const legs = ocoGroup([takeProfit, stopLoss, timeOut], OCO_MODULE, groupId);
 
 [docs/oco.md](../../docs/oco.md) explains the trade-off and why the claim is a
 SETTLE item.
+
+## Delegated signers (session keys)
+
+A maker can let another key sign its orders. Gasless, both directions are an
+`OrderSignerPermit` relayed through `setOrderSignerWithSig` — built by two
+builders, because the two must never share a permit `seq`:
+
+```ts
+import {
+  nominateOrderSigner,          // expiry > 0, seq 0..254 (default 0)
+  revokeOrderSignerGasless,     // expiry 0, always seq 255 (ORDER_SIGNER_REVOKE_SEQ)
+  canRevokeOrderSignerGasless,  // is the revocation slot still clear?
+  encodeRevokeOrderSigner,      // direct setOrderSigner(d, 0) — always works, costs gas
+  encodeSetOrderSignerWithSig,
+} from "@1delta-x/sdk";
+
+const add = await nominateOrderSigner(maker, maker.address, sessionKey, expiry, dep);
+relay(encodeSetOrderSignerWithSig(add.permit, add.sig));
+
+const revoke = (await canRevokeOrderSignerGasless(client, maker.address, sessionKey, dep))
+  ? await revokeOrderSignerGasless(maker, maker.address, sessionKey, dep)
+  : null; // gasless route spent: send encodeRevokeOrderSigner(sessionKey) from the maker
+```
+
+The nomination builders **refuse** `expiry = 0n` and `seq = 255`. A revocation at
+a nomination's `seq` either reverts `NonceCancelled` (that nomination was relayed)
+or can be front-run by whoever holds a pending renewal at that `seq`; the reserved
+slot has neither problem. A renewal of a relayed nomination needs a fresh `seq`.
+
+Every revocation burns all of the delegate's permit coordinates, reserved slot
+included. After revoke-then-direct-re-nominate, gasless revocation of that
+delegate is impossible; only the direct call can revoke it again.
+[docs/delegated-signers.md](../../docs/delegated-signers.md) has the full model.

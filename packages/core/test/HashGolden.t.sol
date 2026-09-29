@@ -18,12 +18,13 @@ import {Permit3} from "@core/permit3/Permit3.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {Permit3Hash} from "@core/permit3/libraries/Permit3Hash.sol";
 import {PackedEncode} from "./shared/PackedEncode.sol";
+import {DeployedBytecode} from "./shared/DeployedBytecode.sol";
 
 /// @dev No-fork golden test: pins the EIP-712 struct hash of a canonical order.
 ///      The TypeScript SDK asserts the SAME value, cross-verifying its typed-data
 ///      definitions against the contract byte-for-byte. `hashOrder` is the
 ///      domain-independent hashStruct, so no fork / addresses / chainId needed.
-contract HashGoldenTest is Test {
+contract HashGoldenTest is Test, DeployedBytecode {
     Settlement settlement;
     SettlementLens lens;
 
@@ -40,9 +41,25 @@ contract HashGoldenTest is Test {
     function setUp() public {
         // A real Permit3 only because the constructor requires a hub with code —
         // this suite exercises the domain-independent `hashOrder` and never moves a
-        // token, so the hub is otherwise unused.
-        settlement = new Settlement(address(new Permit3()));
-        lens = new SettlementLens(address(settlement));
+        // token, so the hub is otherwise unused. Gas-neutral switch — see
+        // {DeployedBytecode}: under DEPLOYED_BYTECODE=1 both come from the shipped
+        // via-IR artifacts, and only the Settlement (and the lens) are stored.
+        if (DEPLOYED_BYTECODE) {
+            assembly ("memory-safe") {
+                let plan := or(SHIP_ALL, shl(8, NO_SLOT)) // Permit3 not stored
+                plan := or(plan, or(shl(80, settlement.offset), shl(88, settlement.slot))) // Settlement offset | slot
+                plan := or(plan, or(shl(152, lens.offset), shl(160, lens.slot))) // lens offset | slot
+                mstore(0x00, DEPLOY_PLAN_SELECTOR)
+                mstore(0x04, plan)
+                if iszero(delegatecall(gas(), DEPLOYED_BYTECODE_HELPER, 0x00, 0x24, 0x00, 0x00)) {
+                    returndatacopy(0x00, 0x00, returndatasize())
+                    revert(0x00, returndatasize())
+                }
+            }
+        } else {
+            settlement = new Settlement(address(new Permit3()));
+            lens = new SettlementLens(address(settlement));
+        }
     }
 
     function _canonical() internal pure returns (Order memory o) {
@@ -126,6 +143,27 @@ contract HashGoldenTest is Test {
             OrderHash.PERMIT_TAKE_WITNESS_TYPEHASH,
             keccak256(abi.encodePacked(Permit3Hash.PERMIT_TAKE_WITNESS_STUB, OrderHash.PERMIT_TAKE_WITNESS_TYPESTRING)),
             "take witness typehash drifted from PERMIT_TAKE_WITNESS_TYPESTRING"
+        );
+    }
+
+    /// @dev `Core._permitBatchHead` spells {OrderHash.SETTLEMENT_ORDER_TYPEHASH} as an
+    ///      assembly LITERAL (a keccak constant is not assembly-addressable there,
+    ///      and a local does not fit the stack). This pins the constant to that
+    ///      literal and to its type string, so the three cannot drift apart; the
+    ///      SDK pins the same literal from its side (`eip712.test.ts`).
+    function test_settlementOrderTypeHash_matchesTheAssemblyLiteral() public pure {
+        assertEq(
+            OrderHash.SETTLEMENT_ORDER_TYPEHASH,
+            bytes32(0xfa3f97538e64297a7d633bd4db49a7790146704157439bc4ba83cbf08d9853c0),
+            "SettlementOrder typehash drifted from the literal in Core._permitBatchHead"
+        );
+        assertEq(
+            OrderHash.SETTLEMENT_ORDER_TYPEHASH,
+            keccak256(
+                "SettlementOrder(address settlement,Order order)"
+                "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+            ),
+            "SettlementOrder typehash drifted from its type string"
         );
     }
 }

@@ -4,12 +4,13 @@ pragma solidity ^0.8.28;
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
-import {Order, CallbackMode, FillCtx} from "./Structs.sol";
+import {Order, OrderSide, CallbackMode, FillCtx} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {DutchAuction} from "./DutchAuction.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {Pricing} from "./Pricing.sol";
 import {OrderGates} from "./OrderGates.sol";
+import {Proportional} from "./Proportional.sol";
 import {Base} from "./Base.sol";
 import {SolverCallbackExecutor} from "./SolverCallbackExecutor.sol";
 import {ISettlementCallback} from "../interfaces/ISettlementCallback.sol";
@@ -28,8 +29,9 @@ abstract contract Core is Base {
 
     // ──────────────────── Fill ────────────────────
 
-    /// @notice Fill (up to) `fillAmount` of an order — in `tokenIn[0]` units for a
-    ///         SELL, `tokenOut[0]` units for a BUY. Partial fills allowed.
+    /// @notice Fill EXACTLY `fillAmount` of an order — in `tokenIn[0]` units for a
+    ///         SELL, `tokenOut[0]` units for a BUY. Partial fills allowed; a size past
+    ///         the remaining one reverts {OverFill} (use {fillUpTo} to clamp instead).
     ///         Lending items are executed pro-rata for this fill's slice.
     /// @dev    Thin wrapper over the {takerData} overload with an empty blob, so
     ///         existing 3-arg call sites (solvers, SDK) keep working unchanged.
@@ -69,7 +71,7 @@ abstract contract Core is Base {
         FillCtx memory ctx;
         _gateFillState(order, orderHash, ctx);
         _enter();
-        _verifySignature(orderHash, sig, order.maker);
+        _verifySignature(orderHash, sig, order.maker, ctx);
         outs = _fillCore(
             order, fillAmount, msg.sender, address(0), address(0), "",
             CallbackMode.PreDelivery, takerData, false, ctx
@@ -148,7 +150,7 @@ abstract contract Core is Base {
         FillCtx memory ctx;
         _gateFillState(order, orderHash, ctx);
         _enter();
-        _verifySignature(orderHash, sig, order.maker);
+        _verifySignature(orderHash, sig, order.maker, ctx);
         outs = _fillCore(
             order, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, takerData, false, ctx
         );
@@ -157,7 +159,8 @@ abstract contract Core is Base {
 
 
     /// @notice Single-signature fill: the maker's `sig` is over a Permit3
-    ///         `PermitBatch` bound to this order's hash as a witness, so
+    ///         `PermitBatch` whose witness is `SettlementOrder{settlement: this,
+    ///         order}` ({OrderHash.SETTLEMENT_ORDER_TYPEHASH}), so
     ///         one signature simultaneously authorises the order *and*
     ///         every Permit3 token + taker allowance the fill needs.
     ///         No standing approvals required.
@@ -212,6 +215,9 @@ abstract contract Core is Base {
         // The permit is an external call, so it goes INSIDE the guard — only the
         // read-only gate above may precede it. See {Base._enter}.
         _enter();
+        // The witness names THIS settler, not just the order — {_permitBatchHead}
+        // wraps `orderHash` in {OrderHash.SETTLEMENT_ORDER_TYPEHASH}; see there for
+        // the cross-deployment replay it closes.
         _permitBatch(order.maker, batch, orderHash, sig);
         outs = _fillCore(
             order, fillAmount, msg.sender, address(0), address(0), "",
@@ -353,6 +359,17 @@ abstract contract Core is Base {
             // immutable `PERMIT3`, fixed at construction and dereferenced by every
             // other path in this contract — a codeless one is a broken deployment, not
             // an input, and would fail the fill moments later at the first transfer.
+            // THE WITNESS IS `hashStruct(SettlementOrder{address(this), order})`, not the
+            // bare order hash — {OrderHash.SETTLEMENT_ORDER_TYPEHASH}, spelled as a
+            // literal for the same stack reason as the selector below. Hashed in the
+            // head's own six words before the head is written over them; the tail
+            // starts at `p + 0xc0`, so nothing live is touched. A drifted literal
+            // cannot ship: every witnessed-permit test signs with the Solidity
+            // constant, so a mismatch fails signature recovery on all of them.
+            mstore(p, 0xfa3f97538e64297a7d633bd4db49a7790146704157439bc4ba83cbf08d9853c0)
+            mstore(add(p, 0x20), address())
+            mstore(add(p, 0x40), witness)
+            witness := keccak256(p, 0x60)
             mstore(p, 0x6c837b2e)
             mstore(add(p, 0x20), and(owner, 0xffffffffffffffffffffffffffffffffffffffff))
             mstore(add(p, 0x40), 0xa0) // offset of `batch`, from the head's start
@@ -457,7 +474,7 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         FillCtx memory ctx;
         _gateFillState(order, orderHash, ctx);
-        _verifySignature(orderHash, sig, order.maker);
+        _verifySignature(orderHash, sig, order.maker, ctx);
         outs = _fillCore(
             order, fillAmount, filler, address(0), address(0), "", CallbackMode.PreDelivery, takerData, false, ctx
         );
@@ -575,7 +592,10 @@ abstract contract Core is Base {
     ///  skip module orders or catch the revert itself.
     ///
     ///  Clamping (identity orders only): the executed delta is
-    ///  `min(fillAmount, total - filled)`. A fill-module order's `fillAmount` is a
+    ///  `min(fillAmount, total - filled)` — EXCEPT a {Proportional} anchor, which is
+    ///  never trimmed down: an oversized request reverts {OverFill} unless it is
+    ///  `type(uint256).max`, the explicit "whatever the balance resolves to" opt-in
+    ///  (see {_clampToRemaining}). A fill-module order's `fillAmount` is a
     ///  PROPOSAL in module units, so it passes through unclamped — the module
     ///  already receives `prevFilled` and owns its own clamp (see {IFillModule}).
     ///  A cancelled or fully-filled order still reverts with the classic errors
@@ -589,7 +609,9 @@ abstract contract Core is Base {
     ///         `address(0)` = `msg.sender`. Destination only — exclusivity,
     ///         validators, and output-leg pulls all stay on `msg.sender` — so this
     ///         grants no new authority (it routes money the filler could forward
-    ///         anyway, saving the extra transfer on a route's last hop).
+    ///         anyway, saving the extra transfer on a route's last hop). It covers
+    ///         the INPUT LEGS only: a SETTLE item still pays the maker's asset to
+    ///         `msg.sender` (the filler), not to `recipient`.
     /// @param  minBumpBps The filler's PRICE FLOOR on the resolved shared decay
     ///         bump, in bps of the band; `0` = no floor (the pre-existing
     ///         behaviour). The scalar is exact because every leg price is monotone
@@ -630,9 +652,11 @@ abstract contract Core is Base {
     /// @param  takerData Filler-supplied blob for validators/invariants (and the
     ///         fill proposal for a fill-module order); `""` for plain orders.
     /// @return delta     The anchor-unit progress actually executed (post-clamp).
-    /// @return received  Per-`legsIn` amounts paid to `recipient` — the filler's
-    ///         receipts, exact because they are the very words the payout moved
-    ///         (see {FillCtx.receipts}), not a second derivation of them.
+    /// @return received  Per-`legsIn` amounts paid to `recipient` — the very words
+    ///         the payout moved (see {FillCtx.receipts}), not a second derivation.
+    ///         NOMINAL: the amount owed and sent, not what `recipient` measured. A
+    ///         fee-on-transfer input arrives short, so a caller chaining the next
+    ///         hop on it must measure its own balance delta.
     /// @return paid      Per-`legsOut` amounts the filler delivered.
     function fillUpTo(
         Order calldata order,
@@ -667,7 +691,10 @@ abstract contract Core is Base {
             // Checked AFTER the fill so a pinning order's price module is called
             // ONCE — the revert unwinds everything either way, and the happy path
             // (the only one anyone pays for) is one compare.
-            uint256 bump = ctx.bump != 0 ? ctx.bump - 1 : DutchAuction.bumpBps(order);
+            uint256 bump;
+            unchecked {
+                bump = ctx.bump != 0 ? ctx.bump - 1 : DutchAuction.bumpBps(order); // `- 1` only under `!= 0`
+            }
             if (bump < minBumpBps) revert BumpTooLow();
         }
         unchecked {
@@ -694,45 +721,55 @@ abstract contract Core is Base {
         bytes32 orderHash = order.hash();
         _gateFillState(order, orderHash, ctx);
         _enter();
-        _verifySignature(orderHash, sig, order.maker);
-        return _clampToRemaining(order, orderHash, fillAmount);
+        _verifySignature(orderHash, sig, order.maker, ctx);
+        return _clampToRemaining(order, ctx, fillAmount);
     }
 
     /// @dev The order-progress clamp: cap an identity fill at the order's
-    ///      remaining size. Costs one warm re-SLOAD of `filled` on this path only
-    ///      — {_openFill} and its over-fill cap stay untouched as the universal
-    ///      backstop. Cancelled (`filled == max`) and fully-filled orders take the
-    ///      `prev >= total` branch and fall through unclamped to {_openFill}'s
-    ///      precise reverts. Fill-module orders pass through: `fillAmount` is a
-    ///      module-unit proposal only the module can size (it gets `prevFilled`).
-    function _clampToRemaining(Order calldata order, bytes32 orderHash, uint256 fillAmount)
+    ///      remaining size, read off the `ctx` {OrderState._gateFillState} seeded —
+    ///      no storage read of its own; {_openFill} and its over-fill cap stay
+    ///      untouched as the universal backstop. Cancelled and fully-filled orders
+    ///      never get here: the gate already reverted {OrderCancelled} / {OverFill}.
+    ///      Fill-module orders pass through: `fillAmount` is a module-unit proposal
+    ///      only the module can size (it gets `prevFilled`). A {Proportional} SELL
+    ///      anchor passes an oversized request through too (see the note below).
+    function _clampToRemaining(Order calldata order, FillCtx memory ctx, uint256 fillAmount)
         internal
-        view
+        pure
         returns (uint256)
     {
         if (order.fillModule != address(0)) return fillAmount;
-        // Clamping is ALREADY exactly right for a {Proportional} anchor and needs
-        // no special case: such an order is unfilled (`prev == 0`), so `rem` is the
-        // freshly resolved anchor, and a caller asking for more than the whole thing
-        // is trimmed to precisely the one size a proportional fill accepts.
-        // Asking for LESS stays below it and is rejected downstream as the partial
-        // fill it is.
-        uint256 total = order.fillTotal != 0 ? order.fillTotal : OrderGates.anchorTotal(order);
-        uint256 prev = filled[orderHash];
-        if (prev < total) {
-            unchecked {
-                uint256 rem = total - prev; // prev < total
-                if (fillAmount > rem) return rem;
-            }
+        // `ctx` was seeded by {OrderState._gateFillState} moments earlier, with only
+        // `_enter` and the (view) signature check in between, so these ARE the anchor
+        // and counter the old re-derivation produced — and the gate already reverted
+        // `OverFill`/`OrderCancelled` unless `prevFilled < anchor`, so this cannot wrap.
+        uint256 rem;
+        unchecked {
+            rem = ctx.anchor - ctx.prevFilled;
         }
-        return fillAmount;
+        if (fillAmount <= rem) return fillAmount;
+        // ⚠ NEVER TRIM A {Proportional} FILL DOWN SILENTLY (re-audit 2026-09-29). A
+        // proportional fill is whole, so every OUTPUT pays its full signed amount
+        // however small the resolved anchor came out — `ceil(anchor·tick/anchor) ==
+        // tick`. Trimming a solver's quoted size down to a balance that shrank since
+        // the quote therefore charged the solver the FULL output for whatever was
+        // left: a maker who moved out all but 1 wei front-ran the fill and was paid
+        // in full for dust. Returned unclamped instead, so {_openFill} reverts
+        // `OverFill` exactly as plain `fill` does. `type(uint256).max` stays the
+        // explicit "whatever the balance is" opt-in (the sentinel `matchSettle` also
+        // honours) — a caller who passes it has accepted any size up to the cap.
+        if (fillAmount != type(uint256).max && order.fillTotal == 0 && DutchAuction.side(order) == OrderSide.SELL) {
+            (, uint256 start0,) = PackedArrays.legIn(order.legsIn, 0);
+            if (Proportional.isProportional(start0)) return fillAmount;
+        }
+        return rem;
     }
 
-    /// @dev Also returns the fill's resolved {FillCtx} so a caller can account the
-    ///      settled amounts (e.g. `fillUpTo` recomputes the filler's receipts via
-    ///      {Pricing.inputOwed}) — a free memory-pointer return the classic
-    ///      entrypoints simply discard. `payTo` redirects the input-leg payout
-    ///      (`address(0)` = the filler); see {FillCtx.payTo}.
+    /// @dev `ctx` is the caller's own memory struct, so a caller can read the
+    ///      settled amounts back off it afterwards (`fillUpTo` returns
+    ///      `ctx.receipts`, recorded by the payout when `wantReceipts` is set).
+    ///      `payTo` redirects the input-leg payout (`address(0)` = the filler);
+    ///      see {FillCtx.payTo}.
     function _fillCore(
         Order calldata order,
         uint256 fillAmount,
@@ -947,6 +984,19 @@ abstract contract Core is Base {
     ///      are exploitable, so they are enforced here. Runs only for this mode, so the
     ///      nominal hot path pays nothing.
     function _snapshotOutRecipients(Order calldata order) internal view returns (uint256[] memory before) {
+        // ⚠ ONLY THE NAMED FILLER, FOR THE ORDER'S WHOLE LIFE — no window, no soft
+        // override, no {OrderGates.FILLER_SET} (it can never equal a caller, so such an
+        // order fails closed). The check below measures ANY increase in a recipient's
+        // balance across the filler's callback, and a permissionless filler owns that
+        // callback: it could settle the maker's OTHER intent on another venue paying
+        // the same token (UniswapX, 1inch, a second settler — this contract's guard
+        // sees none of them), and that inflow, which the maker paid for elsewhere,
+        // would pass as this order's delivery. No on-chain test tells the two inflows
+        // apart, so the maker names who may run the callback instead (re-audit
+        // 2026-09-25). `msg.sender` IS the filler here: the one entry that fills for
+        // someone else, {fillSelf}, carries no callback, so a delta-verify order
+        // cannot deliver through it anyway.
+        if (msg.sender != order.exclusiveFiller) revert OrderGates.NotExclusiveFiller();
         uint256 n = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
         uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         before = new uint256[](n);
@@ -1028,7 +1078,8 @@ abstract contract Core is Base {
         // snapshot + the balanceOf re-read in `_payInputsToSolver` would just burn
         // two STATICCALLs per input leg on every plain swap.
         bool hasItems = PackedArrays.countUnchecked(order.items) != 0;
-        uint256[] memory tokenInBefore = hasItems ? _snapshotInputs(order.legsIn) : new uint256[](0);
+        uint256[] memory tokenInBefore; // the zero-length null array — no allocation
+        if (hasItems) tokenInBefore = _snapshotInputs(order.legsIn);
         _executeItems(order, ctx);
         // AUTHORIZATION IS A PRE-CONDITION OF THE MAKER'S INPUT PULL, not a
         // post-condition of the whole fill. On the {Core.fillWithPermitTake} path
@@ -1045,7 +1096,7 @@ abstract contract Core is Base {
         // a bridge-inbox item, an off-chain-consumed event. See
         // `docs/audit-2026-09-leads.md` B-2.
         if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
-        _payInputsToSolver(order, ctx, tokenInBefore, hasItems);
+        _payInputsToSolver(order, ctx, tokenInBefore);
         _closeFill(order, ctx.filler, takerData, ctx.orderHash);
     }
 
@@ -1081,7 +1132,7 @@ abstract contract Core is Base {
         // relying on: it is a latent fail-open the moment the blob is wired through
         // `_fillCore`.
         if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
-        _payInputsToSolver(order, ctx, new uint256[](0), false);
+        _payInputsToSolver(order, ctx, new uint256[](0));
         if (callbackTarget != address(0)) _execute(callbackTarget, callbackData);
         outs = _deliverOutputs(order, ctx, outBefore, direct);
         _closeFill(order, ctx.filler, takerData, ctx.orderHash);
@@ -1112,8 +1163,8 @@ abstract contract Core is Base {
         bool verify = DutchAuction.deltaVerifyOutputs(order);
         for (uint256 j; j < n;) {
             // Amount (incl. the maker-leg soft-exclusivity override) — see
-            // {Pricing.outputAt}. The maker-leg test is recomputed here
-            // only to route the transfer (never a fee leg's comp to a third party).
+            // {Pricing.outputAt}. Routing needs no maker-leg test of its own: the
+            // recipient is simply the leg's `to`, `0` meaning the maker.
             uint256 amt = order.outputAt(ctx, j);
             if (amt != 0) {
                 // One decode for both field reads — see {Pricing.outputAt}.
@@ -1133,7 +1184,7 @@ abstract contract Core is Base {
                     // approval and said so — no Permit3 probe, no strict-mode read.
                     SafeTransferLib.safeTransferFrom(legToken, ctx.filler, recipient, amt);
                 } else {
-                    Permit3TransferLib.transferFromWithFallback(PERMIT3, legToken, ctx.filler, recipient, amt);
+                    _pullViaPermit3(legToken, ctx.filler, recipient, amt);
                 }
             }
             unchecked {
@@ -1165,9 +1216,12 @@ abstract contract Core is Base {
     ///      shortfall is pulled from the maker via Permit3 (falling back to a
     ///      direct ERC20 transferFrom if the maker approved Settlement directly);
     ///      any surplus proceeds are returned to the maker, not stranded.
-    function _payInputsToSolver(Order calldata order, FillCtx memory ctx, uint256[] memory tokenInBefore, bool hasItems)
-        internal
-    {
+    function _payInputsToSolver(Order calldata order, FillCtx memory ctx, uint256[] memory tokenInBefore) internal {
+        // `tokenInBefore` is `_snapshotInputs(legsIn)` — one slot per input leg — when
+        // the order has items, and empty otherwise; an item order with NO input legs
+        // also yields an empty snapshot, and then the loop below never runs. So its
+        // length carries exactly the old `hasItems` flag wherever it is read.
+        bool hasItems = tokenInBefore.length != 0;
         address maker = order.maker;
         // Payment destination — `ctx.filler` on every classic path; `fillUpTo`'s
         // `recipient` when redirected (see {FillCtx.payTo}). Destination only:
@@ -1211,7 +1265,7 @@ abstract contract Core is Base {
             } else {
                 if (proceeds > 0) SafeTransferLib.safeTransfer(tokenIn, payTo, proceeds);
                 unchecked {
-                    Permit3TransferLib.transferFromWithFallback(PERMIT3, tokenIn, maker, payTo, owed - proceeds); // owed > proceeds
+                    _pullViaPermit3(tokenIn, maker, payTo, owed - proceeds); // owed > proceeds
                 }
             }
             unchecked {

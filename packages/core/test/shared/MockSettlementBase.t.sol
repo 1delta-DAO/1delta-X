@@ -2,12 +2,14 @@
 pragma solidity ^0.8.28;
 
 import {PackedEncode} from "../shared/PackedEncode.sol";
+import {DeployedBytecode} from "./DeployedBytecode.sol";
 
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {
     Settlement,
     Order,
@@ -61,7 +63,7 @@ contract MockERC20 {
 ///      nonce/cancellation). Deploys Permit3 + Settlement + three mock tokens and
 ///      provides EIP-712 order builders + signing. Mirrors the hashing in
 ///      {OrderHash} byte-for-byte.
-abstract contract MockSettlementBase is Test {
+abstract contract MockSettlementBase is Test, DeployedBytecode {
     Permit3 permit3;
     Settlement settlement;
     SettlementLens lens;
@@ -76,9 +78,27 @@ abstract contract MockSettlementBase is Test {
     MockERC20 tC; // spare, for multi-input / pair tests
 
     function setUp() public virtual {
-        permit3 = new Permit3();
-        settlement = new Settlement(address(permit3));
-        lens = new SettlementLens(address(settlement));
+        // Gas-neutral switch — see {DeployedBytecode}: under DEPLOYED_BYTECODE=1 the
+        // helper CREATEs the shipped via-IR Permit3/Settlement (and the test-build lens)
+        // AS THIS CONTRACT and stores them into these slots; otherwise the original
+        // lines run, untouched.
+        if (DEPLOYED_BYTECODE) {
+            assembly ("memory-safe") {
+                let plan := or(SHIP_ALL, or(shl(8, permit3.offset), shl(16, permit3.slot))) // Permit3 offset | slot
+                plan := or(plan, or(shl(80, settlement.offset), shl(88, settlement.slot))) // Settlement offset | slot
+                plan := or(plan, or(shl(152, lens.offset), shl(160, lens.slot))) // lens offset | slot
+                mstore(0x00, DEPLOY_PLAN_SELECTOR)
+                mstore(0x04, plan)
+                if iszero(delegatecall(gas(), DEPLOYED_BYTECODE_HELPER, 0x00, 0x24, 0x00, 0x00)) {
+                    returndatacopy(0x00, 0x00, returndatasize())
+                    revert(0x00, returndatasize())
+                }
+            }
+        } else {
+            permit3 = new Permit3();
+            settlement = new Settlement(address(permit3));
+            lens = new SettlementLens(address(settlement));
+        }
 
         tA = new MockERC20("tA");
         tB = new MockERC20("tB");
@@ -240,8 +260,9 @@ abstract contract MockSettlementBase is Test {
     /// @dev Must mirror Permit3's `_PERMIT_BATCH_WITNESS_STUB` + Settlement's
     ///      `OrderHash.WITNESS_TYPESTRING` exactly.
     string constant PERMIT_BATCH_WITNESS_FULL = "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
-        "Order witness)"
+        "SettlementOrder witness)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "SettlementOrder(address settlement,Order order)"
         "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
@@ -281,8 +302,27 @@ abstract contract MockSettlementBase is Test {
         return keccak256(abi.encodePacked(h));
     }
 
+    /// @dev The `fillWithPermit` witness for `orderHash`: the order bound to THIS
+    ///      test's settler — `hashStruct(SettlementOrder{settlement, order})`, what
+    ///      `Core._permitBatchHead` hands Permit3. The signing helpers below take the
+    ///      ORDER hash and wrap it here, so callers never build it by hand.
+    function _settlementWitness(bytes32 orderHash) internal view returns (bytes32) {
+        return keccak256(abi.encode(OrderHash.SETTLEMENT_ORDER_TYPEHASH, address(settlement), orderHash));
+    }
+
     /// @dev Signs the witness-bound permit batch against Permit3's domain with `pk`.
+    ///      `witness` is the ORDER hash; it is bound to this suite's settler here.
     function _signPermitWitnessWith(IPermit3.PermitBatch memory batch, bytes32 witness, uint256 pk)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _signRawPermitWitnessWith(batch, _settlementWitness(witness), pk);
+    }
+
+    /// @dev Signs a permit batch over an ALREADY-FINISHED witness hash — for tests
+    ///      that bind the order to a settler other than this suite's.
+    function _signRawPermitWitnessWith(IPermit3.PermitBatch memory batch, bytes32 boundWitness, uint256 pk)
         internal
         view
         returns (bytes memory)
@@ -295,7 +335,7 @@ abstract contract MockSettlementBase is Test {
                 _hashTakerPermits(batch.takers),
                 batch.nonce,
                 batch.deadline,
-                witness
+                boundWitness
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), hashStruct));

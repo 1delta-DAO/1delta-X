@@ -114,7 +114,7 @@ contract AaveV3PreFundModule is PreFundModuleBase, IMakerModule, IFundingSource 
         (, address pool, address asset) = abi.decode(data, (uint256, address, address));
         // The delivery must have landed HERE, in THIS token — the core binds the
         // funding leg's RECIPIENT (descriptor bit 253) and now CONSUMES it
-        // ({Base.ForLegReused}), but never its TOKEN. Underflows if it did not;
+        // ({Base.ForLegInvalid}), but never its TOKEN. Underflows if it did not;
         // sound because `msg.sender == settlement` pins `forAmount` to the core.
         // ⚠ THE FLOOR IS KEPT, NOT DISCARDED — this half used the weaker
         // `requireDelivered`, which proves the same thing and then throws the number

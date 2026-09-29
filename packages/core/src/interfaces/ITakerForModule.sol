@@ -47,7 +47,7 @@ pragma solidity ^0.8.28;
 ///    • top TWO bits SET → BALANCE-RELATIVE, `min(balanceOf(token, maker), cap)`,
 ///      bounded BOTH ways. The token is the descriptor's low 160 bits, the cap is
 ///      `data`'s SECOND word and is MANDATORY, and bits [160:176) carry a FLOOR in
-///      bps of that cap — below it the fill reverts ({Base.ForBalanceBelowFloor})
+///      bps of that cap — below it the fill reverts ({Base.ForBalanceInvalid})
 ///      rather than funding a fraction of the position while the value-out leg
 ///      draws in full. The cap is there because anyone can RAISE a maker's balance;
 ///      the floor is there because whoever sequences fills can LOWER it — filling
@@ -56,7 +56,7 @@ pragma solidity ^0.8.28;
 ///      the maker cannot know the amount at signing time (accrued interest, an
 ///      in-flight transfer, a wallet sweep). FULL-FILL ONLY: a live balance cannot
 ///      pro-rate, so the core rejects a sliced fill outright
-///      ({Base.ForBalanceNeedsFullFill}).
+///      ({Base.ForBalanceInvalid}).
 ///
 ///  With the balance form the blob is `abi.encode(forDesc, cap, …)` — the cap is
 ///  field 1, so a module's own decode shifts by one word relative to the other two
@@ -230,9 +230,9 @@ interface ITakerForModule {
     /// @param amount     this fill's slice of the value-OUT leg, already gated by
     ///                   the taker allowance.
     /// @param forAmount  the value-IN amount for this fill, computed by the core
-    ///                   from the signed descriptor. MAY be zero on a dust slice
-    ///                   whose funding leg floors out; a module whose protocol
-    ///                   rejects a zero leg should revert rather than half-execute.
+    ///                   from the signed descriptor. NEVER zero from Settlement: the
+    ///                   core reverts {Base.ForBalanceInvalid} on a zero funding
+    ///                   slice rather than dispatching an unfunded draw.
     /// @param receiver   where the value-out proceeds land — Settlement on the
     ///                   classic flow, so they fund the order's input legs.
     /// @param data       the maker-signed blob, descriptor word FIRST.

@@ -303,6 +303,20 @@ contract TriggerValidatorsTest is MockSettlementBase {
         assertTrue(tickFloor.validate(o, solver, d, ""), "within 2% of market: passes");
     }
 
+    /// Re-audit 2026-09-29: an empty leg blob is refused rather than read — the tick
+    /// accessors are unchecked, so an empty `legsOut` read neighbouring signed bytes.
+    function test_tickFloor_emptyLeg_reverts() public {
+        Order memory o = _order(41);
+        bytes memory d = abi.encode(address(feed), uint256(1 hours), uint256(1), uint256(1e8));
+        o.legsOut = hex"00"; // well-formed EMPTY blob: count 0
+        vm.expectRevert(ChainlinkTickFloorValidator.EmptyLeg.selector);
+        tickFloor.validate(o, solver, d, "");
+        o = _order(42);
+        o.legsIn = hex"00";
+        vm.expectRevert(ChainlinkTickFloorValidator.EmptyLeg.selector);
+        tickFloor.validate(o, solver, d, "");
+    }
+
     /// @dev A zero on either side is not a market limit: refused, which
     ///      {OrderGates.gatePasses} folds to a failed fill.
     function test_tickFloor_zeroRatio_reverts() public {

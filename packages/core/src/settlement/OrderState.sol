@@ -147,8 +147,18 @@ abstract contract OrderState is NonceManager {
     ///         single use.
     /// @return orderHash The EIP-712 order hash now authorized (handy for indexing).
     function approveOrder(Order calldata order) external returns (bytes32 orderHash) {
+        return _approveOrder(order);
+    }
+
+    /// @dev The hash of an order the CALLER makes — reverts {NotOrderMaker} otherwise.
+    function _callerOrderHash(Order calldata order) private view returns (bytes32) {
         if (order.maker != msg.sender) revert NotOrderMaker();
-        orderHash = order.hash();
+        return order.hash();
+    }
+
+    /// @dev Shared body of {approveOrder} and {approveOrders}.
+    function _approveOrder(Order calldata order) private returns (bytes32 orderHash) {
+        orderHash = _callerOrderHash(order);
         orderApproved[msg.sender][orderHash] = true;
         emit OrderApproved(msg.sender, orderHash);
     }
@@ -166,12 +176,7 @@ abstract contract OrderState is NonceManager {
         uint256 n = orders.length;
         orderHashes = new bytes32[](n);
         for (uint256 i; i < n;) {
-            Order calldata order = orders[i];
-            if (order.maker != msg.sender) revert NotOrderMaker();
-            bytes32 orderHash = order.hash();
-            orderApproved[msg.sender][orderHash] = true;
-            emit OrderApproved(msg.sender, orderHash);
-            orderHashes[i] = orderHash;
+            orderHashes[i] = _approveOrder(orders[i]);
             unchecked {
                 ++i;
             }
@@ -320,8 +325,7 @@ abstract contract OrderState is NonceManager {
     ///         remaining size becomes unfillable.
     /// @return orderHash The EIP-712 order hash now cancelled (handy for indexing).
     function cancelOrder(Order calldata order) external returns (bytes32 orderHash) {
-        if (order.maker != msg.sender) revert NotOrderMaker();
-        orderHash = order.hash();
+        orderHash = _callerOrderHash(order);
         filled[orderHash] = type(uint256).max;
         emit OrderCancelledByHash(msg.sender, orderHash);
     }
@@ -369,10 +373,11 @@ abstract contract OrderState is NonceManager {
         // more than this codebase accepts for a feature most orders never use. The
         // whole-fill rule is instead enforced where the marker is CONSUMED, by
         // {Pricing.inputOwed}'s `ctx.fullFill` assert, and the solver's size bound
-        // falls out of machinery that already exists: `fillUpTo` clamps to the
-        // remaining size, so asking for less than the resolved anchor — including
-        // because the maker's balance grew past the amount the solver quoted —
-        // arrives here as a partial fill and is rejected.
+        // falls out of machinery that already exists: asking for less than the
+        // resolved anchor — including because the maker's balance grew past the
+        // amount the solver quoted — arrives here as a partial fill and is rejected,
+        // and asking for more reverts `OverFill` (`fillUpTo` does not trim a
+        // proportional request; see {Core._clampToRemaining}).
         // ORDER IS LOAD-BEARING. `anchorTotal` STATICCALLs `balanceOf` on a
         // maker-chosen token for a {Proportional} anchor, and this gate runs BEFORE the
         // reentrancy guard on the hand-armed entries (see {Base._enter}). Resolving the

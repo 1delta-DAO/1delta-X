@@ -217,17 +217,26 @@ contract PositionFunnel is IERC1271 {
     ///  Why this cannot be used to drain the funnel
     ///  ───────────────────────────────────────────
     ///    1. `msg.sender` must be {GRANT_MODULE}, an immutable address.
-    ///    2. That module only runs from `Settlement._executeItem(s)`, which it gates
-    ///       on `msg.sender == SETTLEMENT`.
-    ///    3. Settlement reaches items ONLY after verifying the maker — every entry
-    ///       point (`fill`, `fillUpTo`, `fillSelf`/`batchFill`, `batchSettle`,
-    ///       `matchSettle`) calls `_verifySignature`, and `fillWithPermit` binds the
-    ///       order hash as a Permit3 witness. For a funnel that check is
-    ///       {isValidSignature}, i.e. the owner's key. (`matchSettle` verifies in
-    ///       its contract-owned OPEN phase, before any schedule step runs — its
-    ///       solver-supplied schedule can reorder items but can never reach one
-    ///       whose order was not opened and verified first.)
-    ///    4. `_executeItem` passes `order.maker` as the module's `onBehalfOf`, and
+    ///    2. That module only runs from Settlement's item dispatch
+    ///       (`_executeItems` / `_executeItemAt`), which it gates on
+    ///       `msg.sender == SETTLEMENT`.
+    ///    3. Settlement lets an item's effects stand ONLY once the maker is
+    ///       verified. `fill`, `fillWithCallback`, `fillUpTo`, `fillSelf`/`batchFill`
+    ///       and `matchSettle` call `_verifySignature` before any item; for a funnel
+    ///       that check is {isValidSignature}, i.e. the owner's key. (`matchSettle`
+    ///       verifies in its contract-owned OPEN phase, before any schedule step
+    ///       runs — its solver-supplied schedule can reorder items but can never
+    ///       reach one whose order was not opened and verified first.) The two
+    ///       Permit3-witness entries are reachable for a funnel only if the owner
+    ///       opted Permit3 in ({_isSigConsumer}): `fillWithPermit` verifies its
+    ///       `SettlementOrder{settlement, order}` witness before any item, while
+    ///       `fillWithPermitTake` runs every item signed ahead of the TAKE BEFORE
+    ///       its `PermitTake` is verified — the permit is checked inside the TAKE
+    ///       item's own dispatch. That path is
+    ///       safe only by atomicity: a bad permit reverts the whole fill, and a fill
+    ///       that never consumes it reverts `PermitTakeNotConsumed`, so a grant item
+    ///       that ran first is unwound with it.
+    ///    4. `_runItem` passes `order.maker` as the module's `onBehalfOf`, and
     ///       the module targets THAT address — never one taken from item data. So a
     ///       grant item in an ATTACKER's order can only ever touch the attacker's
     ///       own funnel.
@@ -264,6 +273,12 @@ contract PositionFunnel is IERC1271 {
     {
         if (msg.sender != GRANT_MODULE) revert NotGrantModule();
         if (grantsDisabled) revert GrantsDisabled();
+        // `type(uint160).max` is Permit3's INFINITE sentinel (Permit2 heritage): an
+        // allowance at exactly that value is never decremented. The core's width gate
+        // refuses only amounts ABOVE it, so a maker-signed slice of exactly 2^160 − 1
+        // would arrive here as a real number and leave an uncapped grant instead of a
+        // capped one (re-audit F30). No real pull needs that value; refuse it.
+        if (amount == type(uint160).max) revert AmountOverflow();
 
         // Valid for this block only — `_spend` treats `expiration == 0` as "never
         // expires", so a real timestamp is what bounds it.
@@ -318,11 +333,25 @@ contract PositionFunnel is IERC1271 {
         emit SigConsumerSet(consumer, allowed);
     }
 
-    /// @dev Settlement verifies order signatures, Permit3 verifies permits, and the
-    ///      lens runs the same check for off-chain preflight. Anything else must be
-    ///      opted into.
+    /// @dev Settlement verifies order signatures and the lens runs the same check
+    ///      for off-chain preflight. Anything else must be opted into.
+    ///
+    ///      ⚠ PERMIT3 IS NOT BUILT IN (re-audit 2026-09-25). This funnel answers 1271
+    ///      by recovering the OWNER's key from the raw digest, with no rehash naming
+    ///      the funnel, and no Permit3 message names its owner — the owner is the
+    ///      call argument, not a signed field. So with Permit3 trusted, any permit
+    ///      the owner key signs for its OWN wallet (a `PermitBatch`, a
+    ///      `PermitTransferFrom`, a plain `PermitTake`) also verifies for
+    ///      `owner = funnel`: anyone can relay it and grant the permit's spender the
+    ///      funnel's tokens — the {signature-validation.md} S2 cross-account replay,
+    ///      on a wallet we ship. A Safe is immune because it rehashes with its own
+    ///      address; this funnel does not. Nothing in the funnel flow needs Permit3
+    ///      signatures (orders are verified by Settlement; grants go through
+    ///      {grant}), so the consumer is simply not trusted. An owner who wants
+    ///      `fillWithPermit` for a funnel can opt Permit3 in with {setSigConsumer},
+    ///      and accepts exactly that replay by doing so.
     function _isSigConsumer(address c) internal view returns (bool) {
-        return c == SETTLEMENT || c == address(PERMIT3) || c == LENS || extraSigConsumer[c];
+        return c == SETTLEMENT || c == LENS || extraSigConsumer[c];
     }
 
     /// @inheritdoc IERC1271
@@ -339,9 +368,13 @@ contract PositionFunnel is IERC1271 {
     ///      replayable somewhere real. Restricting the consumer set makes the funnel
     ///      unusable as a roaming signing identity, which it was never meant to be.
     ///
-    ///      Within the allowed set the posture is the ordinary smart-account one,
-    ///      the same a Safe or a 7702 account has: an owner who signs a hostile
-    ///      payload has authorised it.
+    ///      Within the allowed set the posture is the ordinary smart-account one:
+    ///      an owner who signs a hostile payload has authorised it. It is NOT the
+    ///      Safe posture — a Safe rehashes the digest with its own address, this
+    ///      funnel checks the owner's signature on the raw digest — which is safe
+    ///      only because every built-in consumer's digest already binds the maker
+    ///      (Settlement's order names `maker`); see {_isSigConsumer} for the
+    ///      consumer where that fails.
     function isValidSignature(bytes32 hash, bytes memory signature) external view returns (bytes4) {
         if (!_isSigConsumer(msg.sender)) return 0xffffffff;
         address o = owner();

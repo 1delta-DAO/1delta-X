@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
-import { getAddress, recoverTypedDataAddress } from "viem";
+import { getAddress, keccak256, recoverTypedDataAddress, toBytes } from "viem";
 
 import {
   hashOrderStruct,
@@ -13,7 +13,7 @@ import {
   type Deployment,
 } from "../src";
 import { CANONICAL_ORDER, GOLDEN_ORDER_HASH } from "./canonicalOrder";
-import { ORDER_TYPE, ORDER_TYPESTRING, packOrder } from "../src";
+import { ORDER_TYPE, ORDER_TYPESTRING, PERMIT_WITNESS_TYPES, packOrder } from "../src";
 
 const account = privateKeyToAccount("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
 
@@ -63,6 +63,18 @@ describe("encoding is pinned to the contract, not just to itself", () => {
   // behind the contract while both suites stayed green. These assertions pin the
   // SHAPE independently, so a field added, removed or re-typed on one side fails
   // here even if someone updates the golden constant to match themselves.
+  it("the fillWithPermit witness is a SettlementOrder, pinned to the contract's literal typehash", () => {
+    // `Core._permitBatchHead` hashes the witness with this typehash spelled as an
+    // assembly LITERAL (OrderHash.SETTLEMENT_ORDER_TYPEHASH). An SDK that drifts —
+    // e.g. back to a bare `Order` witness — produces signatures no Settlement accepts.
+    const so = PERMIT_WITNESS_TYPES.SettlementOrder.map((f) => `${f.type} ${f.name}`).join(",");
+    expect(so).toBe("address settlement,Order order");
+    expect(PERMIT_WITNESS_TYPES.PermitBatchWitness.at(-1)).toEqual({ name: "witness", type: "SettlementOrder" });
+    expect(keccak256(toBytes(`SettlementOrder(${so})${ORDER_TYPESTRING}`))).toBe(
+      "0xfa3f97538e64297a7d633bd4db49a7790146704157439bc4ba83cbf08d9853c0",
+    );
+  });
+
   it("ORDER_TYPE matches the contract's literal typestring", () => {
     const members = ORDER_TYPE.map((f) => `${f.type} ${f.name}`).join(",");
     expect(`Order(${members})`).toBe(ORDER_TYPESTRING);

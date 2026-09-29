@@ -131,13 +131,13 @@ relocates `_tokenAllowance` would strand allowances mid-migration.
        transferFrom  │    (user, spender, tok)  │
     ────────────────▶│                          │
                      │  takerAllowance          │
-       approveTaker  │    (user, spender, ref)  │
+       approveTaker  │ (user,spender,mod,ref)   │
            take      │                          │
     ────────────────▶│  take(...) ──────┐       │
                      └──────────────────┼───────┘
                                         │
                                         │  1. ref = keccak256(data)
-                                        │  2. _spend (user, msg.sender, ref)
+                                        │  2. _spend (user, msg.sender, module, ref)
                                         │  3. takeOnBehalf(...)
                                         ▼
                      ┌──────────────────────────┐
@@ -262,8 +262,9 @@ permit3.approveTaker(settlement, borrowModule, ref, 1_000e6, uint48(block.timest
 ```
 
 Sign the order and hand it to a solver (or self-solve). (In the single-signature
-flow, the maker instead signs a `TakerPermit{spender: settlement, ref, ...}`
-inside a witness-bound permit batch — see `fillWithPermit`.)
+flow, the maker instead signs a `TakerPermit{spender: settlement, module, ref, ...}`
+inside a witness-bound permit batch — see `fillWithPermit` — or a one-shot
+`PermitTake` consumed by `fillWithPermitTake`, which leaves no allowance behind.)
 
 ### Settlement / solver (per fill)
 
@@ -272,7 +273,7 @@ inside a witness-bound permit batch — see `fillWithPermit`.)
 permit3.take(borrowModule, maker, 1_000e6, receiver, data);
 // internally:
 //   ref = keccak256(data)
-//   _spend(takerAllowance[maker][msg.sender /* settlement */][ref], 1_000e6)
+//   _spend(takerAllowance[maker][msg.sender /* settlement */][borrowModule][ref], 1_000e6)
 //   borrowModule.takeOnBehalf(maker, 1_000e6, receiver, data)
 ```
 
@@ -381,7 +382,7 @@ Two practical tips:
 
 Revocation:
 - `revokeToken(spender, token)` — zero a token allowance.
-- `revokeTaker(spender, ref)` — zero a taker allowance.
+- `revokeTaker(spender, module, ref)` — zero a taker allowance.
 - `lockdown(TokenSpenderPair[])` — atomically zero a batch of token
   allowances on-chain (ported from Permit2's `lockdown`).
 - `lockdownTakers(SpenderRefPair[])` — taker-book analogue (Permit3 extension).
@@ -396,8 +397,8 @@ Revocation:
 
 ## Security properties
 
-- **Taker authority is spender-keyed** (`_takerAllowance[user][msg.sender][ref]`),
-  exactly like the token book. Only the spender the maker approved (Settlement)
+- **Taker authority is spender- and module-keyed**
+  (`_takerAllowance[user][msg.sender][module][ref]`), like the token book. Only the spender the maker approved (Settlement)
   can consume a taker allowance and choose the proceeds `receiver` — a third
   party calling `take` directly has no allowance under its own address and
   reverts. Settlement, in turn, enforces the maker-signed `recipient`. This is
@@ -468,9 +469,10 @@ Added in the 2026-08-17 audit remediation:
 - [x] **`Taken` event** on `take` (S-8).
 - [x] **`permitTake` / `permitTakeWithWitness`** — the taker-book analogue of
       `permitTransferFrom`: a signature authorising ONE module dispatch with no
-      allowance left behind. Shipped as a Permit3 primitive; Settlement wiring is
-      deferred (the generic item loop dispatches every TAKE via a standing
-      allowance, so a pre-step would double-dispatch — see the note in
+      allowance left behind. Wired into Settlement as `Core.fillWithPermitTake`
+      → `Base._takeByPermit` → `permitTakeWithWitnessHash`: the fill's first TAKE
+      item consumes the permit instead of a standing allowance, and the fill
+      reverts `PermitTakeNotConsumed` if none does (see
       [`Core.sol`](../settlement/Core.sol)).
 - [x] **`refFor(data)`** helper; **`ITakerModuleDescribe.describe`** optional
       module surface for rendering a ref in words (U-5).
@@ -483,9 +485,6 @@ Added in the 2026-08-17 audit remediation:
       allowance preflight, which the token-side preview skipped for item orders.
 
 Not yet implemented:
-- [ ] Settlement wiring for `permitTake` (needs the fill item-loop to be
-      permit-aware). An additive fill-path change with its own
-      gas-snapshot/test surface.
 - [ ] Concrete taker modules for chains not yet covered by the `packages/modules`
       tree.
 - [ ] Foundry invariant suite asserting `data` round-trips cleanly through each

@@ -225,7 +225,7 @@ is the same everywhere:
 * **`minBumpBps` protects your price, not your gas.** It reverts the fill when the
   tick moved against you — which still costs you the gas spent reaching the check.
 
-See [reference-audits.md §C9](reference-audits.md#c9--one-side-spends-the-other-sides-gas)
+See [reference-audits.md §C9](reference-audits/failure-classes.md#c9--one-side-spends-the-other-sides-gas)
 for the audit precedent this posture is inherited from.
 
 ## 8. Dynamically-sized orders (`fillModule` with `dynamicSize`)

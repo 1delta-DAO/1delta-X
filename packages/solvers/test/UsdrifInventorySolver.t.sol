@@ -36,6 +36,17 @@ contract RugVenue {
     }
 }
 
+/// @dev A deterministic, well-behaved venue: pulls `amountIn` of `tokenIn` from
+///      the caller and pays `amountOut` of `tokenOut` from its own float to
+///      `recipient`. Lets the route checks be exercised at exact amounts (and
+///      with an operator-chosen recipient or output token).
+contract MockVenue {
+    function swap(address tokenIn, uint256 amountIn, address tokenOut, uint256 amountOut, address recipient) external {
+        IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
+        IERC20(tokenOut).transfer(recipient, amountOut);
+    }
+}
+
 /// @dev End-to-end inventory-solver exit on a Rootstock fork — the one-signature
 /// variant of the USDRIF→USDT0 flow (`packages/modules/redeem/usdrif` implements
 /// the two-phase variant 1 where the USER redeems first):
@@ -61,6 +72,14 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
     uint256 constant INVENTORY = 2_000e6; // solver's USDT0 float
     uint256 constant QAC_MIN = 13_000e18; // RIF floor ~11% under the ~14.6k expected
 
+    /// @dev RIF→USDT0 route floor in raw units, WAD-scaled: $0.06/RIF =
+    ///      0.06e6 USDT0-wei per 1e18 RIF-wei → 6e4 (pool quotes ~0.0655 at the
+    ///      pinned block). Budget covers one ~14.6k-RIF redemption.
+    uint128 constant RIF_USDT0_MIN_RATE = 6e4;
+    uint128 constant RIF_SELL_BUDGET = 20_000e18;
+    /// @dev USDT0→USDRIF fill floor: ≥ 1 USDRIF (18 dec) per USDT0 (6 dec) paid.
+    uint256 constant USDT0_USDRIF_MIN_RATE = 1e30;
+
     UsdrifInventorySolver inv;
     address operator = makeAddr("operator");
 
@@ -77,6 +96,14 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         // deployment must set this before any operator can fill — it is what stops
         // an operator self-signing an order that takes the whole inventory.
         inv.setMaxOutflowPerFill(USDT0, INVENTORY);
+        // Fills are closed until the owner prices a FILL route: pay USDT0, receive
+        // at least 1 USDRIF per USDT0 (raw units, WAD-scaled — see {fillMinRate}).
+        inv.setFillRoute(USDT0, USDRIF, USDT0_USDRIF_MIN_RATE);
+        // `sell` is closed until the owner prices a route: the recycle leg only.
+        inv.setSellRoute(RIF, USDT0, RIF_USDT0_MIN_RATE, RIF_SELL_BUDGET);
+        // Cumulative per-window budgets, shared by fills and `sell` (fail closed).
+        inv.setOutflowLimit(USDT0, INVENTORY);
+        inv.setOutflowLimit(RIF, RIF_SELL_BUDGET);
         vm.label(address(inv), "inventorySolver");
         vm.label(operator, "operator");
         vm.label(SWAP_ROUTER_02, "swapRouter02");
@@ -269,9 +296,11 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         inv.sell(address(venue), RIF, USDT0, 1e18, 0, "");
     }
 
-    /// The output floor is enforced by measured balances, not by trusting the
+    /// The output floors are enforced by measured balances, not by trusting the
     /// venue: a venue that consumes the allowance and delivers nothing reverts
-    /// the whole sale atomically (its transferFrom unwinds too).
+    /// the whole sale atomically (its transferFrom unwinds too) — and since the
+    /// owner's route rate applies regardless, `minOut = 0` no longer means
+    /// "accept any outcome".
     function test_sell_enforcesMinOutByBalanceDelta() public {
         RugVenue venue = new RugVenue();
         inv.setAggregator(address(venue), true);
@@ -279,15 +308,33 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
 
         bytes memory rugData = abi.encodeCall(RugVenue.take, (RIF, address(inv), 1_000e18));
         vm.prank(operator);
-        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.InsufficientOutput.selector, 0, 1));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.RateTooLow.selector, 0, uint256(1_000e18), uint256(RIF_USDT0_MIN_RATE)
+            )
+        );
         inv.sell(address(venue), RIF, USDT0, 1_000e18, 1, rugData);
 
         assertEq(IERC20(RIF).balanceOf(address(inv)), 1_000e18, "revert unwound the venue's pull");
 
-        // Same venue, minOut 0: the operator explicitly accepted any outcome.
+        // Same venue, minOut 0: the route rate still refuses a zero-output sale.
         vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.RateTooLow.selector, 0, uint256(1_000e18), uint256(RIF_USDT0_MIN_RATE)
+            )
+        );
         inv.sell(address(venue), RIF, USDT0, 1_000e18, 0, rugData);
-        assertEq(IERC20(RIF).balanceOf(address(inv)), 0, "minOut 0 lets the sale through");
+        assertEq(IERC20(RIF).balanceOf(address(inv)), 1_000e18, "minOut 0 no longer lets a rug through");
+
+        // The operator's own `minOut` still binds ON TOP of the rate: a fair
+        // 1000 RIF → 65 USDT0 fill clears the $0.06 floor but not a 70 minOut.
+        MockVenue fair = _fairVenue();
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(UsdrifInventorySolver.InsufficientOutput.selector, uint256(65e6), uint256(70e6))
+        );
+        inv.sell(address(fair), RIF, USDT0, 1_000e18, 70e6, _mockSwap(RIF, 1_000e18, USDT0, 65e6, address(inv)));
     }
 
     /// Owner custody: withdraw ERC20 + native, and the raw-call escape hatch.
@@ -344,10 +391,435 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY - USDT0_OUT, "normal fill unaffected");
     }
 
+    // ──────────── Fill routes + window budget (re-audit F30) ────────────
+
+    /// @dev Top the maker up and re-grant Settlement for another fill.
+    function _refundMaker(uint256 amount) internal {
+        deal(USDRIF, maker, amount);
+        vm.prank(maker);
+        permit3.approveToken(address(settlement), USDRIF, uint160(amount), 0);
+    }
+
+    /// THE FINDING. The per-call cap measured only what LEFT; a self-signed order
+    /// paying the cap for a token nobody priced passed. Now a fill must return an
+    /// owner-priced token: RIF has a sell route but no FILL route from USDT0.
+    function test_fill_inventoryForAnUnpricedToken_reverts() public {
+        Order memory rug = _usdrifOrder(90);
+        rug.legsIn = _legsIn1(RIF, 1);
+        deal(RIF, maker, 1);
+        vm.prank(maker);
+        IERC20(RIF).approve(address(permit3), type(uint256).max);
+        bytes memory sig = _sign(rug);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.FillRouteNotAllowed.selector, USDT0, RIF));
+        inv.executeFill(rug, sig, 1);
+        assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY, "inventory untouched");
+    }
+
+    /// The priced token, at a junk price: 1 USDRIF-wei for the full fill.
+    function test_fill_belowTheOwnersRate_reverts() public {
+        Order memory rug = _usdrifOrder(91);
+        rug.legsIn = _legsIn1(USDRIF, 1);
+        bytes memory sig = _sign(rug);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.FillRateTooLow.selector, uint256(1), USDT0_OUT, USDT0_USDRIF_MIN_RATE
+            )
+        );
+        inv.executeFill(rug, sig, 1);
+    }
+
+    /// Two output tokens (or two input tokens) cannot be priced by one route.
+    function test_fill_mixedTokenShape_reverts() public {
+        Order memory o = _usdrifOrder(92);
+        LegOut[] memory outs = new LegOut[](2);
+        outs[0] = LegOut(USDT0, USDT0_OUT, 0, address(0));
+        outs[1] = LegOut(RIF, 1, 0, address(0));
+        o.legsOut = PackedEncode.legsOut(outs);
+        bytes memory sig = _sign(o);
+
+        vm.prank(operator);
+        vm.expectRevert(UsdrifInventorySolver.UnsupportedFillShape.selector);
+        inv.executeFill(o, sig, USDRIF_IN);
+    }
+
+    /// The per-call cap had no memory, so a CONTRACT operator could loop it in one
+    /// transaction. The window budget is cumulative: the second in-tx fill that
+    /// would cross it reverts, and the budget refills only in the next window.
+    function test_fill_loopInOneTxHitsTheWindowBudget() public {
+        inv.setOutflowLimit(USDT0, USDT0_OUT + USDT0_OUT / 2); // room for 1.5 fills
+        LoopOperator looper = new LoopOperator(inv);
+        inv.setOperator(address(looper), true);
+
+        _refundMaker(2 * USDRIF_IN);
+        Order memory a = _usdrifOrder(93);
+        Order memory b = _usdrifOrder(94);
+        bytes memory sigA = _sign(a);
+        bytes memory sigB = _sign(b);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.OutflowWindowExceeded.selector,
+                USDT0,
+                2 * USDT0_OUT,
+                USDT0_OUT + USDT0_OUT / 2
+            )
+        );
+        looper.fillTwice(a, sigA, b, sigB, USDRIF_IN);
+
+        // One fill fits; the second waits for the next window.
+        vm.prank(operator);
+        inv.executeFill(a, sigA, USDRIF_IN);
+        vm.prank(operator);
+        vm.expectRevert();
+        inv.executeFill(b, sigB, USDRIF_IN);
+        vm.warp(block.timestamp + inv.OUTFLOW_WINDOW());
+        vm.prank(operator);
+        inv.executeFill(b, sigB, USDRIF_IN);
+        assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY - 2 * USDT0_OUT, "two windows, two fills");
+    }
+
+    /// Fail closed: with no window budget nothing leaves, whatever the per-call cap.
+    function test_fill_zeroWindowBudget_refusesEverything() public {
+        inv.setOutflowLimit(USDT0, 0);
+        Order memory o = _usdrifOrder(95);
+        bytes memory sig = _sign(o);
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(UsdrifInventorySolver.OutflowWindowExceeded.selector, USDT0, USDT0_OUT, uint256(0))
+        );
+        inv.executeFill(o, sig, USDRIF_IN);
+    }
+
+    /// The limit shares a slot with the usage, so it is 96 bits wide — an oversized
+    /// limit is refused rather than silently capped.
+    function test_outflowLimit_aboveUint96_reverts() public {
+        uint256 tooBig = uint256(type(uint96).max) + 1;
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.OutflowLimitTooLarge.selector, tooBig));
+        inv.setOutflowLimit(USDT0, tooBig);
+        inv.setOutflowLimit(USDT0, type(uint96).max);
+        assertEq(inv.outflowLimit(USDT0), type(uint96).max, "max representable limit accepted");
+    }
+
+    /// Changing the limit mid-window keeps what the window already spent: lowering
+    /// it below the spend blocks the next fill; it is not a reset.
+    function test_outflowLimit_changeMidWindowKeepsTheSpend() public {
+        _refundMaker(2 * USDRIF_IN);
+        Order memory a = _usdrifOrder(96);
+        Order memory b = _usdrifOrder(97);
+        bytes memory sigA = _sign(a);
+        bytes memory sigB = _sign(b);
+
+        vm.prank(operator);
+        inv.executeFill(a, sigA, USDRIF_IN);
+        (, uint96 used,) = inv.outflowBudget(USDT0);
+        assertEq(used, USDT0_OUT, "spend recorded");
+
+        inv.setOutflowLimit(USDT0, USDT0_OUT + 1); // re-set mid-window
+        (, used,) = inv.outflowBudget(USDT0);
+        assertEq(used, USDT0_OUT, "re-setting the limit did not reset the spend");
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.OutflowWindowExceeded.selector, USDT0, 2 * USDT0_OUT, USDT0_OUT + 1
+            )
+        );
+        inv.executeFill(b, sigB, USDRIF_IN);
+    }
+
+    function test_fillRouteAndWindow_ownerOnly() public {
+        vm.startPrank(operator);
+        vm.expectRevert(UsdrifInventorySolver.NotOwner.selector);
+        inv.setFillRoute(USDT0, USDRIF, 1);
+        vm.expectRevert(UsdrifInventorySolver.NotOwner.selector);
+        inv.setOutflowLimit(USDT0, type(uint256).max);
+        vm.stopPrank();
+    }
+
     /// Operators cannot raise their own ceiling.
     function test_operator_cannotRaiseTheCap() public {
         vm.prank(operator);
         vm.expectRevert(UsdrifInventorySolver.NotOwner.selector);
         inv.setMaxOutflowPerFill(USDT0, type(uint256).max);
+    }
+
+    // ──────────────── Sell routes (operator cannot redirect inventory) ────────────────
+
+    function _fairVenue() internal returns (MockVenue venue) {
+        venue = new MockVenue();
+        inv.setAggregator(address(venue), true);
+        deal(USDT0, address(venue), 10_000e6);
+        deal(RIF, address(venue), 100_000e18);
+        deal(USDRIF, address(venue), 10_000e18);
+    }
+
+    function _mockSwap(address tokenIn, uint256 amountIn, address tokenOut, uint256 amountOut, address recipient)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encodeCall(MockVenue.swap, (tokenIn, amountIn, tokenOut, amountOut, recipient));
+    }
+
+    /// The finding's exact drain: through the WHITELISTED SwapRouter02, the
+    /// operator sells the USDT0 inventory with `recipient = operator` and
+    /// declares `tokenOut = RIF, minOut = 0`. The solver's RIF delta is 0 ≥ 0, so
+    /// before routes this shipped the whole float to the operator in one call,
+    /// around {maxOutflowPerFill}. Now: no USDT0→RIF route → refused; and even
+    /// with one priced by the owner, the zero RIF delta fails the rate.
+    function test_sell_drainPoC_reverts() public {
+        bytes memory drain = abi.encodeCall(
+            ISwapRouter02.exactInputSingle,
+            (ISwapRouter02.ExactInputSingleParams({
+                    tokenIn: USDT0,
+                    tokenOut: RIF,
+                    fee: RIF_USDT0_FEE,
+                    recipient: operator,
+                    amountIn: INVENTORY,
+                    amountOutMinimum: 0,
+                    sqrtPriceLimitX96: 0
+                }))
+        );
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.RouteNotAllowed.selector, USDT0, RIF));
+        inv.sell(SWAP_ROUTER_02, USDT0, RIF, type(uint256).max, 0, drain);
+
+        // Owner opens USDT0→RIF (≥ 10 RIF per USDT0: 10e18 * 1e18 / 1e6 = 1e31)
+        // with a 500-USDT0 budget. The full-inventory route now exceeds the
+        // capped allowance, and a budget-sized redirect fails the rate.
+        inv.setSellRoute(USDT0, RIF, 1e31, 500e6);
+
+        vm.prank(operator);
+        vm.expectRevert(); // router's transferFrom: allowance clamped to the 500e6 budget
+        inv.sell(SWAP_ROUTER_02, USDT0, RIF, type(uint256).max, 0, drain);
+
+        bytes memory drainBudget = abi.encodeCall(
+            ISwapRouter02.exactInputSingle,
+            (ISwapRouter02.ExactInputSingleParams({
+                    tokenIn: USDT0,
+                    tokenOut: RIF,
+                    fee: RIF_USDT0_FEE,
+                    recipient: operator,
+                    amountIn: 500e6,
+                    amountOutMinimum: 0,
+                    sqrtPriceLimitX96: 0
+                }))
+        );
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(UsdrifInventorySolver.RateTooLow.selector, 0, uint256(500e6), uint256(1e31))
+        );
+        inv.sell(SWAP_ROUTER_02, USDT0, RIF, type(uint256).max, 0, drainBudget);
+
+        assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY, "inventory untouched");
+        assertEq(IERC20(RIF).balanceOf(operator), 0, "operator received nothing");
+        assertEq(IERC20(USDT0).allowance(address(inv), SWAP_ROUTER_02), 0, "no lingering allowance");
+    }
+
+    /// Junk output: an unrouted `tokenOut` is refused outright; a routed
+    /// `tokenOut` with calldata that actually pays some OTHER token (here
+    /// USDRIF) measures a zero delta and fails the rate.
+    function test_sell_junkTokenOut_reverts() public {
+        MockVenue venue = _fairVenue();
+        deal(RIF, address(inv), 1_000e18);
+
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.RouteNotAllowed.selector, RIF, USDRIF));
+        inv.sell(address(venue), RIF, USDRIF, 1_000e18, 0, _mockSwap(RIF, 1_000e18, USDRIF, 1e18, address(inv)));
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.RateTooLow.selector, 0, uint256(1_000e18), uint256(RIF_USDT0_MIN_RATE)
+            )
+        );
+        inv.sell(address(venue), RIF, USDT0, 1_000e18, 0, _mockSwap(RIF, 1_000e18, USDRIF, 1e18, address(inv)));
+
+        // Output to the operator instead of the solver: same zero delta.
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.RateTooLow.selector, 0, uint256(1_000e18), uint256(RIF_USDT0_MIN_RATE)
+            )
+        );
+        inv.sell(address(venue), RIF, USDT0, 1_000e18, 0, _mockSwap(RIF, 1_000e18, USDT0, 65e6, operator));
+    }
+
+    /// A sale below the owner's floor reverts even with `minOut = 0`; one wei
+    /// of output at the floor passes (the check is `out * 1e18 >= spent * rate`).
+    function test_sell_rateViolation_reverts() public {
+        MockVenue venue = _fairVenue();
+        deal(RIF, address(inv), 2_000e18);
+
+        // 1000 RIF at the $0.06 floor = exactly 60 USDT0; 1 wei less fails.
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.RateTooLow.selector,
+                uint256(60e6 - 1),
+                uint256(1_000e18),
+                uint256(RIF_USDT0_MIN_RATE)
+            )
+        );
+        inv.sell(address(venue), RIF, USDT0, 1_000e18, 0, _mockSwap(RIF, 1_000e18, USDT0, 60e6 - 1, address(inv)));
+
+        vm.prank(operator);
+        uint256 out =
+            inv.sell(address(venue), RIF, USDT0, 1_000e18, 0, _mockSwap(RIF, 1_000e18, USDT0, 60e6, address(inv)));
+        assertEq(out, 60e6, "sale exactly at the floor clears");
+    }
+
+    /// Per-call spend budget: an explicit `amountIn` above it reverts, the
+    /// `max` sentinel clamps the venue's allowance to it (so a route that pulls
+    /// the full balance cannot execute), and a budget-sized sale goes through.
+    function test_sell_spendAboveBudget_reverts() public {
+        inv.setSellRoute(RIF, USDT0, RIF_USDT0_MIN_RATE, 400e18);
+        MockVenue venue = _fairVenue();
+        deal(RIF, address(inv), 1_000e18);
+
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                UsdrifInventorySolver.SellCapExceeded.selector, RIF, uint256(1_000e18), uint256(400e18)
+            )
+        );
+        inv.sell(address(venue), RIF, USDT0, 1_000e18, 0, _mockSwap(RIF, 1_000e18, USDT0, 65e6, address(inv)));
+
+        vm.prank(operator);
+        vm.expectRevert(); // RIF transferFrom: allowance clamped to 400e18
+        inv.sell(address(venue), RIF, USDT0, type(uint256).max, 0, _mockSwap(RIF, 1_000e18, USDT0, 65e6, address(inv)));
+
+        vm.prank(operator);
+        inv.sell(address(venue), RIF, USDT0, type(uint256).max, 0, _mockSwap(RIF, 400e18, USDT0, 26e6, address(inv)));
+        assertEq(IERC20(RIF).balanceOf(address(inv)), 600e18, "exactly the budget left");
+        assertEq(IERC20(RIF).allowance(address(inv), address(venue)), 0, "allowance revoked");
+    }
+
+    /// Happy path on the deterministic venue: in-budget, above-rate sale lands,
+    /// `Sold` reports the MEASURED spend.
+    function test_sell_happyPath_routedSale() public {
+        MockVenue venue = _fairVenue();
+        deal(RIF, address(inv), 1_000e18);
+
+        vm.expectEmit(address(inv));
+        emit UsdrifInventorySolver.Sold(address(venue), RIF, USDT0, 1_000e18, 65e6);
+        vm.prank(operator);
+        uint256 out = inv.sell(
+            address(venue), RIF, USDT0, type(uint256).max, 64e6, _mockSwap(RIF, 1_000e18, USDT0, 65e6, address(inv))
+        );
+
+        assertEq(out, 65e6, "proceeds measured");
+        assertEq(IERC20(RIF).balanceOf(address(inv)), 0, "RIF sold");
+        assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY + 65e6, "USDT0 credited");
+    }
+
+    /// Closing a route (rate 0) re-closes `sell` for that pair; routes are
+    /// owner-only.
+    function test_sellRoute_closeAndAccess() public {
+        vm.prank(operator);
+        vm.expectRevert(UsdrifInventorySolver.NotOwner.selector);
+        inv.setSellRoute(USDT0, RIF, 1, type(uint128).max);
+
+        inv.setSellRoute(RIF, USDT0, 0, RIF_SELL_BUDGET);
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.RouteNotAllowed.selector, RIF, USDT0));
+        inv.sell(SWAP_ROUTER_02, RIF, USDT0, 1, 0, "");
+    }
+
+    /// `setAggregator` refuses every target that would make `sell` an
+    /// arbitrary-call primitive from this identity; the constructor applies the
+    /// same rule; revocation is always allowed; and token/aggregator sets can't
+    /// overlap from the other direction either.
+    function test_setAggregator_refusals() public {
+        address[8] memory forbidden =
+            [address(0), address(inv), address(permit3), address(settlement), MOC_CORE, MOC_QUEUE, USDRIF, USDT0];
+        for (uint256 i; i < forbidden.length; ++i) {
+            vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.ForbiddenAggregator.selector, forbidden[i]));
+            inv.setAggregator(forbidden[i], true);
+            inv.setAggregator(forbidden[i], false); // revocation never refused
+        }
+        // RIF became a known token through its sell route.
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.ForbiddenAggregator.selector, RIF));
+        inv.setAggregator(RIF, true);
+
+        // Other direction: a whitelisted venue can't become a route token or
+        // fill inventory, and a pair must be two distinct tokens.
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.ForbiddenToken.selector, SWAP_ROUTER_02));
+        inv.setSellRoute(RIF, SWAP_ROUTER_02, 1, 1);
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.ForbiddenToken.selector, SWAP_ROUTER_02));
+        inv.setupTokenApproval(SWAP_ROUTER_02);
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.ForbiddenToken.selector, RIF));
+        inv.setSellRoute(RIF, RIF, 1, 1);
+
+        vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.ForbiddenAggregator.selector, address(permit3)));
+        new UsdrifInventorySolver(
+            address(permit3), address(settlement), address(permit3), MOC_CORE, MOC_QUEUE, USDRIF, USDT0
+        );
+    }
+
+    /// Two-step ownership: nomination changes nothing until the nominee
+    /// accepts; only the nominee can accept; the old owner is out afterwards.
+    /// `sell` draws on the SAME window budget as fills, keyed by the token spent.
+    function test_sell_drawsOnTheWindowBudget() public {
+        MockVenue venue = _fairVenue();
+        inv.setOutflowLimit(RIF, 100e18);
+        deal(RIF, address(inv), 1_000e18);
+        bytes memory data =
+            abi.encodeCall(MockVenue.swap, (RIF, 150e18, USDT0, 10e6, address(inv)));
+        vm.prank(operator);
+        vm.expectRevert(
+            abi.encodeWithSelector(UsdrifInventorySolver.OutflowWindowExceeded.selector, RIF, 150e18, uint256(100e18))
+        );
+        inv.sell(address(venue), RIF, USDT0, 150e18, 0, data);
+    }
+
+    function test_ownership_twoStep() public {
+        address nominee = makeAddr("nominee");
+
+        vm.prank(operator);
+        vm.expectRevert(UsdrifInventorySolver.NotOwner.selector);
+        inv.transferOwnership(operator);
+
+        vm.expectEmit(address(inv));
+        emit UsdrifInventorySolver.OwnershipTransferStarted(address(this), nominee);
+        inv.transferOwnership(nominee);
+        assertEq(inv.owner(), address(this), "owner unchanged until accepted");
+        assertEq(inv.pendingOwner(), nominee, "nominee pending");
+
+        vm.prank(operator);
+        vm.expectRevert(UsdrifInventorySolver.NotPendingOwner.selector);
+        inv.acceptOwnership();
+
+        vm.expectEmit(address(inv));
+        emit UsdrifInventorySolver.OwnershipTransferred(address(this), nominee);
+        vm.prank(nominee);
+        inv.acceptOwnership();
+        assertEq(inv.owner(), nominee, "nominee is owner");
+        assertEq(inv.pendingOwner(), address(0), "nomination consumed");
+
+        vm.expectRevert(UsdrifInventorySolver.NotOwner.selector);
+        inv.setOperator(address(this), true);
+    }
+}
+
+/// @dev A contract operator — the shape that let a per-call cap be looped inside
+///      one transaction.
+contract LoopOperator {
+    UsdrifInventorySolver internal immutable inv;
+
+    constructor(UsdrifInventorySolver inv_) {
+        inv = inv_;
+    }
+
+    function fillTwice(Order calldata a, bytes calldata sigA, Order calldata b, bytes calldata sigB, uint256 amt)
+        external
+    {
+        inv.executeFill(a, sigA, amt);
+        inv.executeFill(b, sigB, amt);
     }
 }

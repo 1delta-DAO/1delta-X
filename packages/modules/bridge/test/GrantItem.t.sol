@@ -245,6 +245,20 @@ contract GrantItemTest is BridgeTestBase {
         funnel.grant(maker, address(0), address(tA), type(uint160).max, false, bytes32(0));
     }
 
+    /// @dev Re-audit F30: `2^160 − 1` is Permit3's never-decrementing INFINITE
+    ///      sentinel, and the core's width gate admits exactly that value. Through the
+    ///      real caller (the grant module) it is refused for both grant kinds, and
+    ///      one wei below it still grants — the cap stays a cap.
+    function test_grant_infiniteSentinelIsRefused() public {
+        vm.startPrank(address(grantModule));
+        vm.expectRevert(PositionFunnel.AmountOverflow.selector);
+        funnel.grant(solver, address(0), address(tA), type(uint160).max, false, bytes32(0));
+        vm.expectRevert(PositionFunnel.AmountOverflow.selector);
+        funnel.grant(solver, address(tA), address(0), type(uint160).max, true, keccak256("ref"));
+        funnel.grant(solver, address(0), address(tA), type(uint160).max - 1, false, bytes32(0));
+        vm.stopPrank();
+    }
+
     /// @dev Going through the module directly skips Settlement, and therefore skips
     ///      the maker-signature check that makes the whole thing safe.
     function test_attack_moduleCannotBeCalledDirectly() public {

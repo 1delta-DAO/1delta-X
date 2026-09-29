@@ -20,7 +20,7 @@ matches — so the entire permission model reduces to *what the maker signed*.
 | `curve` | Optional piecewise-linear decay shape — `(timeDelta, bumpBps)` points. Empty means one linear segment. |
 | `params` | One word with the four auction scalars: soft-exclusivity bps, gas-bump bps, gas price reference, priority-fee scale. |
 | `pricingModule` | Optional external price provider. `0x0` = the built-in clock. |
-| `exclusiveFiller` | Hard exclusivity — only that filler until the exclusivity deadline. |
+| `exclusiveFiller` | Exclusivity — only that filler (or a signed set) until the exclusivity deadline, hard or soft; see [soft exclusivity](#pricing-modes) below. On a delta-verify order, the only filler for the order's whole life. |
 | `minFillAnchor` | Anti-dust floor per fill. |
 | `validators[]` / `invariants[]` | AND-composed pre-execution triggers and post-execution invariants. `staticcall` only. |
 | `fillModule` / `fillTotal` | The fill denominator, decoupled from any fungible leg. |
@@ -131,7 +131,7 @@ own signed bounds.
 |---|---|---|
 | Time clock (default) | elapsed seconds since `decayStart` | ordinary dutch decay |
 | Block clock (`timing` bit 102) | elapsed **blocks** | chains whose blocks are faster than a one-second tick |
-| Priority auction (bit 103) | the transaction's priority fee × `params.priorityScale` | chains whose sequencer orders by priority fee |
+| Priority auction (bit 103) | the transaction's priority fee above `baselinePriorityFeeWei`, ÷ `params.priorityScale` (the fee that buys a full bump; the improvement rounds up, to the maker) | chains whose sequencer orders by priority fee |
 | Price module (`pricingModule`) | an `IPriceModule` staticcall | oracle-pegged, fill-progress ladders, cosigner-quoted RFQ |
 
 Shipped price modules: `ChainlinkPeggedPriceModule` (feed + staleness + an
@@ -149,7 +149,10 @@ Two more knobs ride on the same tick: a **gas-indexed bump** (`gasBumpBps` /
 `gasPriceRef`) widens the filler's margin automatically when the network is
 expensive, and **soft exclusivity** requires any filler other than the named one
 to improve the maker's leg by N bps — applied only to legs delivered to the
-maker, so a third-party fee leg is never inflated.
+maker, so a third-party fee leg is never inflated. A soft window with **no leg
+able to carry** that premium — none of a BUY input, an auctioned non-proportional
+SELL input, or a SELL output to the maker (swap-and-send, a fixed input with a
+third-party output) — is **hard**: the outsider reverts `NotExclusiveFiller`.
 
 ### Delta-verify delivery
 

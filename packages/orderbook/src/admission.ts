@@ -16,13 +16,36 @@ import type { Address } from "viem";
 export interface AdmissionPolicy {
   /** Hard cap on live orders. `0` disables. */
   maxOrders: number;
-  /** Cap per maker, so one account cannot own the whole book. `0` disables. */
+  /**
+   * Cap per maker, so one account cannot own the whole book. `0` disables.
+   *
+   * Tight on purpose. Admission proves only that SOME balance backs an order, and a
+   * self-minted token is a balance anyone can have: at 500 per maker, fifty keys
+   * filled a 25k book with junk that stayed "fillable" for its whole TTL and every
+   * honest POST got a 503. A full book now also DISPLACES the largest maker's
+   * orders for a smaller one (see `Book`), and {@link allowedTokens} removes the
+   * junk-token lever entirely where a deployment can name its markets.
+   */
   maxOrdersPerMaker: number;
   /** Structural bounds — each element costs hashing, storage and view gas. */
   maxLegsIn: number;
   maxLegsOut: number;
   maxItems: number;
   maxValidators: number;
+  /** Auction curve points (or filler-set entries). `0` disables. */
+  maxCurvePoints: number;
+  /**
+   * Largest encoded `OrderAnnounce`, in bytes. A real order is well under 2KB; the
+   * body limit (64KB) is sized for cancels and replaces, not for what one order may
+   * make every peer store, relay and hash. `0` disables.
+   */
+  maxOrderBytes: number;
+  /**
+   * When set, every leg token (in and out) must be on this list. The one lever that
+   * closes capacity squatting with self-minted tokens outright — a book serving a
+   * known set of markets (the Rootstock beta) should always set it. Unset: any token.
+   */
+  allowedTokens?: readonly Address[];
   /**
    * Reject orders that expire too soon to be worth verifying. An order with two
    * seconds left costs a full lens call and is dead before a filler sees it.
@@ -54,11 +77,13 @@ export interface AdmissionPolicy {
 
 export const DEFAULT_ADMISSION: AdmissionPolicy = {
   maxOrders: 25_000,
-  maxOrdersPerMaker: 500,
+  maxOrdersPerMaker: 100,
   maxLegsIn: 8,
   maxLegsOut: 8,
   maxItems: 16,
   maxValidators: 8,
+  maxCurvePoints: 32,
+  maxOrderBytes: 16 * 1024,
   minTtlSeconds: 15,
   maxTtlSeconds: 90 * 24 * 3600,
   requireDeltaVerifyOutputs: false,
@@ -73,6 +98,13 @@ export interface AdmissionContext {
   now: number;
   /** True when the book already holds this exact order — a re-announce, not a new one. */
   known?: boolean;
+  /** Encoded announce size, when the caller has it (the wire bytes). Checked against `maxOrderBytes`. */
+  encodedBytes?: number;
+  /**
+   * A full book may still take this maker's order by displacing another's — the
+   * book's eviction policy decides. Without it, a full book is simply full.
+   */
+  canDisplace?: (maker: Address) => boolean;
 }
 
 export interface AdmissionVerdict {
@@ -103,6 +135,18 @@ export function checkAdmission(
   if (order.validators.length + order.invariants.length > policy.maxValidators) {
     return { ok: false, reason: `too many validators (max ${policy.maxValidators})` };
   }
+  if (policy.maxCurvePoints > 0 && order.curve.length > policy.maxCurvePoints) {
+    return { ok: false, reason: `too many curve points (max ${policy.maxCurvePoints})` };
+  }
+  if (policy.maxOrderBytes > 0 && ctx.encodedBytes !== undefined && ctx.encodedBytes > policy.maxOrderBytes) {
+    return { ok: false, reason: `order is ${ctx.encodedBytes} bytes (max ${policy.maxOrderBytes})` };
+  }
+  if (policy.allowedTokens) {
+    const allowed = new Set(policy.allowedTokens.map((t) => t.toLowerCase()));
+    for (const leg of [...order.legsIn, ...order.legsOut]) {
+      if (!allowed.has(leg.token.toLowerCase())) return { ok: false, reason: `token ${leg.token} is not listed on this book` };
+    }
+  }
 
   // `timing` bit 104 — see {@link AdmissionPolicy.requireDeltaVerifyOutputs}.
   if (policy.requireDeltaVerifyOutputs && (order.timing >> 104n) % 2n === 0n) {
@@ -120,7 +164,7 @@ export function checkAdmission(
   // Capacity is checked last and skipped for an order already held: a re-announce
   // of something the book has must not be refused because the book is full.
   if (!ctx.known) {
-    if (policy.maxOrders > 0 && ctx.size >= policy.maxOrders) {
+    if (policy.maxOrders > 0 && ctx.size >= policy.maxOrders && !ctx.canDisplace?.(order.maker)) {
       return { ok: false, reason: "book is at capacity", capacity: true };
     }
     if (policy.maxOrdersPerMaker > 0 && ctx.makerCount(order.maker) >= policy.maxOrdersPerMaker) {

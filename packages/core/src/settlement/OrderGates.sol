@@ -117,8 +117,59 @@ library OrderGates {
             }
             if (excluded) {
                 overrideBps = order.overrideBps();
-                if (overrideBps == 0) revert NotExclusiveFiller();
+                // ⚠ A SOFT window with nothing to charge the premium on is a HARD one
+                // (re-audit 2026-09-29). The override is priced ONLY on the legs
+                // {Pricing} can move toward the maker — an auctioned input, every BUY
+                // input, or a SELL output addressed to the maker — never a fixed input
+                // or a leg paid to a third party. On an order with none (swap-and-send,
+                // deposit-only outputs, a BUY with no input legs, every
+                // `BridgedOrderInbox` order) the outsider used to be admitted at the
+                // exclusive filler's own price, voiding the maker's exclusivity for
+                // nothing. Refused instead, as if the override were 0.
+                if (overrideBps == 0 || !_overrideHasCarrier(order)) revert NotExclusiveFiller();
                 if (overrideBps > DutchAuction.BPS) revert InvalidOverrideBps();
+            }
+        }
+    }
+
+    /// @dev Whether any leg of `order` can carry a soft-exclusivity premium — the
+    ///      exact complement of what {Pricing.inputOwed} / {Pricing.outputAt} leave
+    ///      untouched. Walked only for an OUTSIDER inside the window, so the hot path
+    ///      (the exclusive filler, or no window) never pays for it.
+    function _overrideHasCarrier(Order calldata order) private pure returns (bool has) {
+        bool buy = order.side() == OrderSide.BUY;
+        // Validated first, so the raw walks below stay inside the signed blobs.
+        uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
+        uint256 nOut = buy ? 0 : PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
+        bytes calldata legsIn = order.legsIn;
+        bytes calldata legsOut = order.legsOut;
+        address maker = order.maker;
+        uint256 floor = Proportional.SENTINEL_FLOOR; // not assembly-addressable as a constant
+        // Raw walks over the packed layout ({PackedArrays}: count byte, then LegIn =
+        // token(20) | start(32) | end(32) at stride 84, LegOut = token(20) | start(32) |
+        // end(32) | recipient(20) at stride 104) — the typed accessors inline their
+        // whole decode per call site, which measured +287 bytes for this rare path.
+        /// @solidity memory-safe-assembly
+        assembly {
+            // An input leg carries it: every BUY leg, or an auctioned SELL leg — and
+            // never a proportional marker ({Pricing.inputOwed} returns the anchor).
+            let p := add(legsIn.offset, 1)
+            for { let e := add(p, mul(nIn, 84)) } lt(p, e) { p := add(p, 84) } {
+                if and(or(buy, iszero(iszero(calldataload(add(p, 52))))), iszero(gt(calldataload(add(p, 20)), floor))) {
+                    has := 1
+                    break
+                }
+            }
+            // A SELL output carries it only if addressed to the maker (0 or maker).
+            if iszero(has) {
+                p := add(legsOut.offset, 1)
+                for { let e := add(p, mul(nOut, 104)) } lt(p, e) { p := add(p, 104) } {
+                    let to := shr(96, calldataload(add(p, 84)))
+                    if or(iszero(to), eq(to, maker)) {
+                        has := 1
+                        break
+                    }
+                }
             }
         }
     }

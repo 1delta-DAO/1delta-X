@@ -136,7 +136,7 @@ that can rot.
 
 - **Signature re-verification stops after the first fill.** A non-zero `filled` counter is itself proof that an earlier fill presented valid authorization for that exact hash. +150 gas on a first fill, **−2,860 on every fill after it** (−14,531 across a TWAP schedule). *Cost:* an EIP-1271 maker or a delegate can no longer revoke mid-order — `cancelOrder`, the nonce, the deadline and allowance revocation are the switches that still bind. It also created one real High finding (a revoked on-chain approval reachable through the skip), now fixed.
 - **Fill-once mode** settles against the maker's nonce bitmap instead of a fresh storage slot: **−19,275 gas**, measured. *Cost:* requires a full fill, burns the nonce so siblings sharing it die too, and `remaining()` no longer reports — consumers must read the relevant-state view.
-- **`fillCompact`** takes an EIP-2098 compact signature: exactly 96 fewer calldata bytes, as a distinct name rather than an overload (same arity would make off-chain libraries pick the wrong selector).
+- **EIP-2098 compact signatures** go through plain `fill`: the shared verifier accepts the 64-byte form. A dedicated `fillCompact` was built and removed — it saved only the ABI offset and length words (~64 bytes) and cost a second authorization path to keep in sync forever.
 - **Cancellation is free on the hot path.** `cancelOrder` parks a sentinel in the `filled` slot every fill already reads, so the check is one compare rather than a new SLOAD.
 
 ### Pay-per-use seams

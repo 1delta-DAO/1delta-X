@@ -11,7 +11,17 @@ name: test
 #   • the module shape gate (`tools/check-module-shapes.py`) — the I-invariants'
 #     mechanical enforcement — `make modules-check`;
 #   • the doc-citation gate — every edge-case-matrix / reference-audits cell must
-#     name a test that still exists — `make docs-check`.
+#     name a test that still exists — `make docs-check`;
+#   • the core suite against the DEPLOYED bytecode — `make test-deployed`. Every
+#     other run (gas-check included) tests the legacy `[profile.core]` build, while
+#     Permit3/Settlement ship from `[profile.core-deploy]` (via-IR, runs = 100), so
+#     assembly whose `memory-safe-assembly` promise only via-IR relies on would
+#     otherwise never execute as shipped (audit 2026-09-29, lens F L-1). Its own job:
+#     it must not be skipped when `gas-check` fails on an intended gas move, which is
+#     exactly when the source under it changed. The whole suite on every PR, not a
+#     Permit3-only subset or a nightly: MEASURED, the via-IR artifact build is ~3 s
+#     and the switched run ~10 s; the job's cost is the same ~3 min legacy compile
+#     the gas job already pays, in parallel.
 #
 # `make test-all` / `make test-fork` / `make test-ts` remain manual: fork suites
 # need an RPC, and the TypeScript side needs a node install, both of which are
@@ -43,3 +53,21 @@ jobs:
 
       - name: Doc citation gate
         run: make docs-check
+
+  deployed-bytecode:
+    name: core suite on deployed (via-IR) bytecode
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "1.5.1"
+
+      - name: Core suite against the core-deploy artifacts
+        env:
+          # Same mainnet-fork tests as `gas.yml`; see the note there.
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+        run: make test-deployed

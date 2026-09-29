@@ -251,4 +251,4 @@ or enable strict mode, or say plainly that it did neither. A revoke badge that
 reflects only the hub is wrong for exactly the users who are most exposed.
 
 Audit precedent and the full reasoning:
-[reference-audits.md §C12 and F1](reference-audits.md#c12--revocation-that-does-not-revoke).
+[reference-audits.md §C12 and F1](reference-audits/failure-classes.md#c12--revocation-that-does-not-revoke).

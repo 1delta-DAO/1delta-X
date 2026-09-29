@@ -46,7 +46,7 @@ export function forLeg(index: number): bigint {
 ///
 /// Sets descriptor bit 253 on top of the leg reference. The referenced leg's
 /// `recipient` MUST be the item's own module; the settler enforces it
-/// (`Base.ForLegNotMakers`) and `SettlementLens.validateOrder` flags it before you
+/// (`Base.ForLegInvalid`) and `SettlementLens.validateOrder` flags it before you
 /// sign. The leg is delivered straight to the module, which funds the operation
 /// from its own balance, so the maker needs NO Permit3 token allowance to the
 /// module and NO on-chain ERC20 approval of the received asset — an asset they may
@@ -109,7 +109,7 @@ export function isPreFundDesc(desc: bigint): boolean {
 /// ONLY — the settler rejects a sliced fill.
 ///
 /// `floorBps` is the other half of the bound and rides in descriptor bits
-/// [160:176): the fill reverts (`ForBalanceBelowFloor`) unless the resolved amount
+/// [160:176): the fill reverts (`ForBalanceInvalid`) unless the resolved amount
 /// is at least `floorBps` of the cap. The cap exists because anyone can RAISE a
 /// maker's balance; the floor exists because whoever sequences fills can LOWER it —
 /// filling another of the maker's live orders in the same token shrinks this leg
@@ -237,6 +237,8 @@ export interface Order {
   /// Anti-dust floor per fill, in anchor units (legsIn[0] for SELL, legsOut[0] for BUY).
   minFillAnchor: bigint;
   /// Soft exclusivity: bps a non-exclusive in-window filler must improve the maker by (0 = hard).
+  /// Also hard when no leg can carry the premium — no BUY input, no auctioned non-proportional
+  /// SELL input, no SELL output to the maker: the outsider reverts `NotExclusiveFiller`.
   /// Folded into the wire `params` word by {@link packOrder} — see {@link packParams}.
   exclusivityOverrideBps: bigint;
   /// Optional piecewise decay shape (shared clock); empty = single linear segment.
@@ -323,6 +325,13 @@ export const PRIORITY_AUCTION_BIT = 103n;
 /// fee-on-transfer / rebasing-safe delivery mode. The filler delivers each output
 /// leg out-of-band (its fill callback); the required amount is still the leg's
 /// price, so it composes with every pricing mode.
+///
+/// NAMED SINGLE FILLER ONLY: every fill must come from `exclusiveFiller` itself,
+/// for the order's whole life — no window, no soft override, and zero or
+/// {@link FILLER_SET_SENTINEL} never matches (`packOrder` refuses both). A balance
+/// delta cannot tell this fill's delivery from an inflow the maker paid for
+/// elsewhere, so the maker names who runs the callback. Naming a contract hands
+/// that choice to the contract's own access control.
 export const DELTA_VERIFY_OUTPUTS_BIT = 104n;
 
 /**

@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol";
 import {PackedEncode} from "../shared/PackedEncode.sol";
 import {Order} from "@core/settlement/Settlement.sol";
+import {OrderGates} from "@core/settlement/OrderGates.sol";
 
 /// @notice PoC — soft exclusivity is priced away on a PRE-FUND output leg.
 ///
@@ -55,17 +56,56 @@ contract PreFundLegExclusivityOverrideTest is MockSettlementBase {
         assertEq(paid, (AMOUNT_OUT * (10_000 + OVERRIDE_BPS)) / 10_000, "maker leg should be lifted 1%");
     }
 
-    /// THE BUG. Identical economics, pre-fund spelling of the recipient, and the
-    /// non-exclusive filler pays the EXCLUSIVE price.
+    /// THE BUG, closed (re-audit 2026-09-29). Identical economics, pre-fund spelling
+    /// of the recipient: no leg can carry the premium (fixed input, sole output
+    /// addressed away from the maker), so the outsider used to fill at the EXCLUSIVE
+    /// price. `OrderGates.exclusivityOverride` now treats a soft window with no
+    /// carrier as hard — the outsider is refused, and nothing moves.
     function test_moduleAddressedLeg_losesTheOverride() public {
-        uint256 paid = _fillAsOutsider(_exclusiveOrder(2, module));
-        assertEq(paid, AMOUNT_OUT, "override was silently skipped on the pre-fund leg");
+        Order memory o = _exclusiveOrder(2, module);
+        bytes memory sig = _sign(o);
+        tA.mint(maker, AMOUNT_IN);
+        tB.mint(solver, AMOUNT_OUT * 2);
+        _makerApprove(address(settlement), address(tA), type(uint160).max);
+        _solverApprove(address(settlement), address(tB), type(uint160).max);
 
-        // And the maker is short by exactly the improvement they signed for.
-        assertEq(
-            (AMOUNT_OUT * (10_000 + OVERRIDE_BPS)) / 10_000 - paid,
-            (AMOUNT_OUT * OVERRIDE_BPS) / 10_000,
-            "shortfall == the whole signed override"
-        );
+        vm.prank(solver); // non-exclusive, in-window
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        settlement.fill(o, sig, AMOUNT_IN);
+        assertEq(tB.balanceOf(solver), AMOUNT_OUT * 2, "outsider paid nothing");
+        assertEq(tA.balanceOf(maker), AMOUNT_IN, "maker kept its input");
+    }
+
+    /// The same carrier rule, general shape (swap-and-send): a sole output to a
+    /// THIRD PARTY, fixed input. Also refused in-window; the exclusive filler fills.
+    function test_thirdPartyAddressedLeg_softWindowIsHard() public {
+        Order memory o = _exclusiveOrder(3, address(0xB0B));
+        bytes memory sig = _sign(o);
+        tA.mint(maker, AMOUNT_IN);
+        tB.mint(solver, AMOUNT_OUT);
+        tB.mint(alice, AMOUNT_OUT);
+        _makerApprove(address(settlement), address(tA), type(uint160).max);
+        _solverApprove(address(settlement), address(tB), type(uint160).max);
+
+        vm.prank(solver);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        settlement.fill(o, sig, AMOUNT_IN);
+
+        vm.startPrank(alice);
+        MockERC20(address(tB)).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tB), type(uint160).max, 0);
+        settlement.fill(o, sig, AMOUNT_IN);
+        vm.stopPrank();
+        assertEq(tB.balanceOf(address(0xB0B)), AMOUNT_OUT, "exclusive filler delivers to the recipient");
+    }
+
+    /// An AUCTIONED input carries the premium, so the soft window stays soft even
+    /// when the only output is addressed to a third party.
+    function test_auctionedInput_keepsTheWindowSoft() public {
+        Order memory o = _exclusiveOrder(4, address(0xB0B));
+        o.legsIn = PackedEncode.oneLegIn(address(tA), AMOUNT_IN, AMOUNT_IN * 2); // rising input
+        uint256 paid = _fillAsOutsider(o);
+        assertEq(paid, AMOUNT_OUT, "output unchanged");
+        assertLt(tA.balanceOf(solver), AMOUNT_IN * 2, "outsider charged less input: premium carried");
     }
 }

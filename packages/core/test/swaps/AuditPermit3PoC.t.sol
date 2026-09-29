@@ -58,16 +58,17 @@ contract AuditPermit3PoCTest is MockSettlementBase {
         (IPermit3.PermitBatch memory batch, bytes memory sig) =
             _permitFor(order, AMOUNT_IN, 42, block.timestamp + 1 hours);
 
-        // The griefer copies (batch, sig, orderHash) straight out of the pending
+        // The griefer copies (batch, sig, witness) straight out of the pending
         // fillWithPermit calldata and lands the permit itself — burning nonce 42.
         address griefer = address(0xBADBAD);
         vm.prank(griefer);
         permit3.permitBatchWithWitness(
             maker,
             batch,
-            _hashOrder(order),
-            "Order witness)"
+            _settlementWitness(_hashOrder(order)),
+            "SettlementOrder witness)"
             "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+            "SettlementOrder(address settlement,Order order)"
             "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
             "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)",
             sig

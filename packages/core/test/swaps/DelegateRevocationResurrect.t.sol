@@ -7,6 +7,7 @@ import {Permit3} from "@core/permit3/Permit3.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 import {Signatures} from "@core/settlement/Signatures.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
+import {DeployedBytecode} from "../shared/DeployedBytecode.sol";
 
 /// @notice REGRESSION — {OrderState.setOrderSigner}'s NatSpec told makers that a
 ///         PAST expiry "reads identically to a revocation". It did not: only the
@@ -21,7 +22,7 @@ import {OrderState} from "@core/settlement/OrderState.sol";
 ///         `_setOrderSigner`'s own comment states the property this breaks:
 ///         "Clearing the registry alone is not enough ... A safety property that
 ///         depends on the caller making a second call is not a safety property."
-contract DelegateRevocationResurrectTest is Test {
+contract DelegateRevocationResurrectTest is Test, DeployedBytecode {
     Permit3 permit3;
     Settlement settlement;
 
@@ -35,8 +36,24 @@ contract DelegateRevocationResurrectTest is Test {
         keccak256("OrderSignerPermit(address maker,address signer,uint256 expiry,uint256 nonce,uint256 deadline)");
 
     function setUp() public {
-        permit3 = new Permit3();
-        settlement = new Settlement(address(permit3));
+        // Gas-neutral switch — see {DeployedBytecode}: under DEPLOYED_BYTECODE=1 the
+        // helper CREATEs the shipped via-IR artifacts AS THIS CONTRACT and stores them into
+        // these slots; otherwise the original `new` lines run, untouched.
+        if (DEPLOYED_BYTECODE) {
+            assembly ("memory-safe") {
+                let plan := or(SHIP_BOTH, or(shl(8, permit3.offset), shl(16, permit3.slot))) // Permit3 offset | slot
+                plan := or(plan, or(shl(80, settlement.offset), shl(88, settlement.slot))) // Settlement offset | slot
+                mstore(0x00, DEPLOY_PLAN_SELECTOR)
+                mstore(0x04, plan)
+                if iszero(delegatecall(gas(), DEPLOYED_BYTECODE_HELPER, 0x00, 0x24, 0x00, 0x00)) {
+                    returndatacopy(0x00, 0x00, returndatasize())
+                    revert(0x00, returndatasize())
+                }
+            }
+        } else {
+            permit3 = new Permit3();
+            settlement = new Settlement(address(permit3));
+        }
         vm.warp(1_000_000);
     }
 
@@ -190,5 +207,42 @@ contract DelegateRevocationResurrectTest is Test {
         settlement.setOrderSignerWithSig(maker, delegate, farExpiry, nonce, deadline, permit);
 
         assertEq(settlement.orderSignerExpiry(maker, delegate), 0, "revocation stands");
+    }
+
+    // ───────── A relayed nomination only ever EXTENDS (re-audit 2026-09-29) ─────────
+
+    /// The case F29-7 left open: a SHORTER permit relayed BEFORE its own expiry.
+    /// The maker signs "until T+1h" (never relayed), later nominates the same
+    /// delegate directly "until T+365d"; anyone holding the old permit relays it at
+    /// T+59min. It used to overwrite the live nomination and cut the desk key off
+    /// at T+1h. Now it is refused and the year stands.
+    function test_relayedShorterPermit_cannotCutALiveDelegate() public {
+        uint256 shortExpiry = block.timestamp + 1 hours;
+        uint256 nonce = _pn(delegate, 3);
+        uint256 deadline = block.timestamp + 30 days;
+        bytes memory stale = _signPermit(delegate, shortExpiry, nonce, deadline);
+
+        uint256 year = block.timestamp + 365 days;
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, year);
+
+        vm.warp(block.timestamp + 59 minutes);
+        vm.prank(relayer);
+        vm.expectRevert(Signatures.SignerPermitExpired.selector);
+        settlement.setOrderSignerWithSig(maker, delegate, shortExpiry, nonce, deadline, stale);
+        assertEq(settlement.orderSignerExpiry(maker, delegate), year, "the live nomination stands");
+    }
+
+    /// A LONGER permit still lands: extending is what a relayed nomination is for.
+    function test_relayedLongerPermit_stillExtends() public {
+        vm.prank(maker);
+        settlement.setOrderSigner(delegate, block.timestamp + 1 days);
+
+        uint256 longer = block.timestamp + 30 days;
+        uint256 nonce = _pn(delegate, 4);
+        bytes memory permit = _signPermit(delegate, longer, nonce, block.timestamp + 1 hours);
+        vm.prank(relayer);
+        settlement.setOrderSignerWithSig(maker, delegate, longer, nonce, block.timestamp + 1 hours, permit);
+        assertEq(settlement.orderSignerExpiry(maker, delegate), longer, "extended");
     }
 }

@@ -70,16 +70,27 @@ abstract contract BridgeTestBase is MockSettlementBase {
         acrossOut = new AcrossBridgeOutModule(address(permit3), address(settlement), address(spokePool));
         lzOut = new LzOftBridgeOutModule(address(permit3), address(settlement));
 
-        vm.startPrank(inboxOwner);
+        vm.prank(inboxOwner);
         inbox.enableToken(address(tA));
-        inbox.setComposeSource(address(oft), address(tA));
-        vm.stopPrank();
+        _registerComposeSource(address(oft), address(tA));
 
         vm.label(address(inbox), "inbox");
         vm.label(address(spokePool), "spokePool");
         vm.label(address(oft), "oft");
         vm.label(endUser, "endUser");
         vm.label(beneficiary, "beneficiary");
+    }
+
+    /// @dev Queue a compose source as the owner and make it live. The warp past
+    ///      {BridgedOrderInbox.COMPOSE_SOURCE_DELAY} is undone afterwards, so no
+    ///      test's clock moves just because a source was registered.
+    function _registerComposeSource(address source, address token) internal {
+        uint256 t0 = block.timestamp;
+        vm.prank(inboxOwner);
+        inbox.setComposeSource(source, token);
+        vm.warp(t0 + inbox.COMPOSE_SOURCE_DELAY());
+        inbox.applyComposeSource(source);
+        vm.warp(t0);
     }
 
     // ──────────────────── Destination side ────────────────────

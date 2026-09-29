@@ -125,9 +125,13 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///  ─────────────────────────────────────────────────────────────
 ///  `executeFill` may be restricted to an immutable set of operators, fixed at
 ///  construction exactly like the routers (no owner, no setter; an empty set
-///  means permissionless). None of the three points above depends on it: the
-///  maker is protected by the signed band and the router allowlist whoever
-///  calls. What it changes is WHO Settlement sees as the filler. The exclusivity
+///  means permissionless). For an ordinary (pull-delivery) order none of the three
+///  points above depends on it: the maker is protected by the signed band and the
+///  router allowlist whoever calls. Two things DO require it, and the constructor /
+///  `_plan` enforce both: standing allowances ({StandingNeedsOperators}) and
+///  delta-verify orders ({DirectNeedsOperators}) — in both, the router calldata is
+///  the caller's, and on an open instance that caller is anyone. What it changes
+///  otherwise is WHO Settlement sees as the filler. The exclusivity
 ///  gate compares `order.exclusiveFiller` to `msg.sender` of the fill, which is
 ///  THIS contract — so an order that names this instance as its exclusive filler
 ///  is, on a permissionless instance, exclusive to anyone willing to route
@@ -295,8 +299,21 @@ contract AggregatorFillSolver {
     ///  of its own swap, and its `uniswapV3SwapCallback` runs
     ///  `CallbackValidation.verifyCallback`, which recomputes the pool address and
     ///  rejects any caller that is not that pool. So a stranger cannot make it pull
-    ///  from here; only this contract's own allowlisted, delta-bounded calls can.
+    ///  from here DIRECTLY; only this contract's own calls can.
     ///  Both halves were exercised against the live router, not reasoned about.
+    ///
+    ///  ⚠ BUT "THIS CONTRACT'S OWN CALLS" CARRY THE CALLER'S CALLDATA (re-audit F30,
+    ///  the multicall-router lesson one hop out). `onFill` forwards `plan.data`
+    ///  verbatim, and inside it the router's `msg.sender` IS this contract — so a
+    ///  caller who writes `exactInputSingle(tokenIn = any primed token, recipient =
+    ///  self)`, or `pull` + `sweepToken`, spends the standing approval on a token
+    ///  this fill never touched. `RouteOverspent` bounds only `tokenIn`, and a
+    ///  direct-delivery fill skips the `tokenOut` measurement entirely. The router
+    ///  allowlist pins WHERE the call goes, not WHAT it says. So a standing instance
+    ///  must be {GATED}: the constructor refuses `standing` with no operators
+    ///  ({StandingNeedsOperators}), which makes the approvals spendable only by
+    ///  calldata an operator wrote — operator-tier trust, the same tier that already
+    ///  decides every route.
     ///
     ///  MANY AGGREGATORS DO NOT HAVE THAT PROPERTY — an API that takes a `payer`,
     ///  `from` or permit-forwarding parameter lets any caller name this contract
@@ -396,6 +413,14 @@ contract AggregatorFillSolver {
     ///      prime, and creating a standing approval anyway would silently give the
     ///      instance the very property it was deployed without.
     error NotStandingAllowance();
+    /// @dev A {STANDING_ALLOWANCE} instance with no operator set. See the note on
+    ///      {STANDING_ALLOWANCE}: the route calldata is the CALLER's, so an open
+    ///      standing instance hands every stranger its approvals.
+    error StandingNeedsOperators();
+    /// @dev A delta-verify (direct-delivery) order on an instance with no operator
+    ///      set. See {_plan}: naming this contract as the order's filler hands the
+    ///      delivery check to its access control, so it must have some.
+    error DirectNeedsOperators();
     /// @dev `legsIn[0]` / `legsOut[0]` must exist before their tokens can be read —
     ///      {PackedArraysMem} is an unchecked reader, and a blob declaring zero
     ///      legs with trailing bytes would otherwise name an arbitrary token.
@@ -440,6 +465,7 @@ contract AggregatorFillSolver {
         // silently deploying the per-fill-approval variant under that name is the
         // kind of divergence nobody notices until the gas bill.
         if (!standing && primeTokens.length != 0) revert NotStandingAllowance();
+        if (standing && operators.length == 0) revert StandingNeedsOperators();
         STANDING_ALLOWANCE = standing;
         for (uint256 i; i < primeTokens.length; i++) prime(primeTokens[i]);
     }
@@ -601,6 +627,15 @@ contract AggregatorFillSolver {
         address tokenIn = PackedArraysMem.legInToken(order.legsIn, 0);
         address tokenOut = PackedArraysMem.legOutToken(order.legsOut, 0);
         bool direct = DutchAuction.deltaVerifyOutputs(order);
+        // ⚠ A DIRECT (delta-verify) ORDER NEEDS A GATED INSTANCE (re-audit 2026-09-29).
+        // The core fills such an order only for its named `exclusiveFiller` — THIS
+        // contract — because a balance delta cannot tell the maker's delivery from
+        // another inflow the maker paid for elsewhere, so the maker is trusting whoever
+        // runs the callback. On an open instance that is anyone: through an allowlisted
+        // router that takes a caller-chosen executor (1inch-, 0x-, Odos-style), a
+        // stranger could divert this fill's input and settle the maker's OTHER intent
+        // inside the callback, and the delta would pass. Only operators may drive one.
+        if (direct && !GATED) revert DirectNeedsOperators();
         return FillRoute({
             tokenIn: tokenIn,
             tokenOut: tokenOut,

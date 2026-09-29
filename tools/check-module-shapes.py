@@ -323,7 +323,7 @@ def arg_span(body: str, open_paren: int) -> str:
 # probability 1/8, and the failure is silent at the type level: the settler would
 # size the item from `_forSlice` instead of `item.amount`. It fails closed in
 # practice (a random low-16-bits leg index almost certainly reverts
-# `ForLegMissing`), so the realistic damage is a permanently unfillable order
+# `ForLegInvalid`), so the realistic damage is a permanently unfillable order
 # shape rather than a theft — but "almost certainly" is not an invariant.
 #
 # Anything whose first decoded field is not provably bounded therefore has to be

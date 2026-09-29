@@ -385,7 +385,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegMissing.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -398,7 +398,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegMissing.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -506,7 +506,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceNeedsFullFill.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN / 2);
     }
 
@@ -522,7 +522,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceNeedsCap.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -532,7 +532,7 @@ contract TakeForItemTest is CoreSettlementBase {
     // because whoever sequences fills can LOWER it — and `min(balance, cap)` shrinks
     // SMOOTHLY while the value-OUT leg keeps its full signed size, so a dented wallet
     // funds a fraction of the position and borrows all of it. Stopping at zero (the
-    // {ForBalanceBelowFloor} tests above) closed the boundary and left the whole
+    // {ForBalanceInvalid} tests above) closed the boundary and left the whole
     // neighbourhood of it open.
 
     /// @dev AUDIT FIX. The wallet is not empty — it holds 40% of the cap — and the
@@ -551,7 +551,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -608,7 +608,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -632,7 +632,7 @@ contract TakeForItemTest is CoreSettlementBase {
         deal(WETH, maker, 0.01 ether);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -720,7 +720,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -736,7 +736,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -757,7 +757,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegNotMakers.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -874,7 +874,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegNotMakers.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -904,7 +904,7 @@ contract TakeForItemTest is CoreSettlementBase {
         Order memory bad = _preFundOrder(76, address(preFundTakeFor), data, maker, 0);
         bytes memory sig = _sign(bad);
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegNotMakers.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(bad, sig, USDC_IN);
     }
 
@@ -1011,7 +1011,7 @@ contract TakeForItemTest is CoreSettlementBase {
     }
 
     /// A balance-funded order that is partial-fillable is dead on arrival — the core
-    /// rejects any slice ({Base.ForBalanceNeedsFullFill}). Pin `minFillAnchor`.
+    /// rejects any slice ({Base.ForBalanceInvalid}). Pin `minFillAnchor`.
     function test_lens_flagsBalanceWithoutFullFill() public {
         Order memory o = _lensOrder(35, _data(_forBalanceFloor(WETH, 5_000), 10 ether));
         assertEq(_lensReason(o), "take_for balance leg requires full-fill");
@@ -1101,7 +1101,7 @@ contract TakeForItemTest is CoreSettlementBase {
     /// A leg with `start == 0` prices to 0 on every fill and in every pricing mode,
     /// so the descriptor funds NOTHING while the value-OUT leg still draws in full:
     /// the composite silently degrades to a bare `TAKE`. That is the same fail-open
-    /// shape the core rejects for the BALANCE form ({Base.ForBalanceBelowFloor}).
+    /// shape the core rejects for the BALANCE form ({Base.ForBalanceInvalid}).
     ///
     /// It is NOT rejected here, and that is deliberate rather than an oversight: a
     /// zero BALANCE is a live wallet read the maker cannot see at signing time, so
@@ -1112,7 +1112,7 @@ contract TakeForItemTest is CoreSettlementBase {
     /// A zero funding slice against a non-zero draw is an UNCOLLATERALISED SLICE and
     /// is now refused. This test used to assert the opposite — its old name said it
     /// outright ("fundsNothing_butTheTakeStillDraws") — which is the shape
-    /// {Base.ForBalanceBelowFloor} already rejected for the BALANCE descriptor while
+    /// {Base.ForBalanceInvalid} already rejected for the BALANCE descriptor while
     /// the LEG-REF and LITERAL forms had no equivalent floor.
     function test_zeroOutputLeg_refusesTheBareTake() public {
         bytes memory data = _data(_forLeg(0));
@@ -1121,7 +1121,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
         // Nothing was recorded because nothing was dispatched — the module's log is
         // empty, so indexing it would itself revert.
@@ -1499,7 +1499,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -1517,7 +1517,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -1535,7 +1535,7 @@ contract TakeForItemTest is CoreSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForBalanceBelowFloor.selector);
+        vm.expectRevert(Base.ForBalanceInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 }

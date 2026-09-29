@@ -115,7 +115,7 @@ This site is the overview. The repository carries the authoritative detail:
 | `docs/pricing-modes.md` | Every pricing mode, the clamp argument, measured per-mode gas |
 | `docs/deferred-match-settle.md` | The netted path: step schedule, credit ledger, exactly-once guards |
 | `docs/filler-strategy.md` | The recommended filler shape, and the revert-reason taxonomy |
-| `docs/reference-audits.md` | The C1–C15 failure-class taxonomy and the verdict for each here |
+| `docs/reference-audits/` | The C1–C15 failure-class taxonomy, the F1–F29 findings ledger, and the verdict for each here |
 | `docs/reference-bounties.md` | The bug-bounty and incident corpus, classes B1–B14 |
 | `docs/edge-case-matrix.md` | Ten axes crossed, a verdict per cell, bound to the test that pins it |
 | `docs/module-security-model.md` | What each module may assume, and which automated check enforces it |

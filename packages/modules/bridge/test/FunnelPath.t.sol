@@ -607,6 +607,37 @@ contract FunnelPathTest is BridgeTestBase {
         funnel.setSigConsumer(address(0xDEF1), true);
     }
 
+    /// @dev Re-audit 2026-09-25 (S2 on a wallet we ship). The funnel checks the
+    ///      owner's signature on the RAW digest, and no Permit3 message names its
+    ///      owner, so a permit the owner key signs for its OWN wallet would verify
+    ///      for the funnel too if Permit3 were trusted — anyone could relay it and
+    ///      grant the permit's spender the funnel's tokens. Permit3 is therefore not
+    ///      a built-in consumer: the same owner signature it would present is refused.
+    function test_1271_permit3IsNotABuiltInConsumer() public {
+        factory.deploy(maker, USER_SALT);
+        // Any digest the owner signed under PERMIT3's domain — e.g. a PermitBatch for
+        // the owner's own EOA. Its content is irrelevant to the funnel's answer.
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), keccak256("owner's own permit")));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPk, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        vm.prank(address(permit3));
+        assertEq(funnel.isValidSignature(digest, sig), bytes4(0xffffffff), "Permit3 is not trusted by default");
+
+        // The owner can still opt in — and accepts the replay by doing so.
+        vm.prank(maker);
+        funnel.setSigConsumer(address(permit3), true);
+        vm.prank(address(permit3));
+        assertEq(funnel.isValidSignature(digest, sig), bytes4(0x1626ba7e), "explicit opt-in");
+    }
+
+    /// @dev A zero owner would make every unrecoverable signature valid —
+    ///      `ecrecover` returns 0 on garbage, and 0 would BE the owner.
+    function test_factory_refusesZeroOwner() public {
+        vm.expectRevert(PositionFunnelFactory.ZeroOwner.selector);
+        factory.deploy(address(0), USER_SALT);
+    }
+
     // ──────────────────── Withdrawal as cancellation ────────────────────
 
     /// @dev Pulling the funds is the cancel primitive: no nonce burn, no

@@ -267,7 +267,7 @@ contract PreFundMakeItemTest is CoreSettlementBase {
         Order memory o = _order(5, address(preFundMake), _data(_preFundLeg(0)), address(0), 0);
         bytes memory sig = _sign(o);
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegNotMakers.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -278,7 +278,7 @@ contract PreFundMakeItemTest is CoreSettlementBase {
         Order memory o = _order(6, address(preFundMake), _data(_preFundLeg(7)), address(preFundMake), 0);
         bytes memory sig = _sign(o);
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegMissing.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -296,7 +296,7 @@ contract PreFundMakeItemTest is CoreSettlementBase {
 
         bytes memory sig = _sign(o);
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegReused.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, USDC_IN);
     }
 
@@ -398,7 +398,7 @@ contract PreFundMakeItemTest is CoreSettlementBase {
     /// THE DRIFT THIS CLOSED. The settler accepts a maker-addressed leg only while
     /// the pre-fund bit is CLEAR; with it set the leg must be addressed to the
     /// module. The lens used to apply the loose rule to both, so this order preflighted
-    /// clean and then reverted `ForLegNotMakers` at fill time.
+    /// clean and then reverted `ForLegInvalid` at fill time.
     function test_lens_flagsPreFundDescriptorOverAMakerAddressedLeg() public {
         Order memory o = _order(21, address(preFundMake), _data(_preFundLeg(0)), address(0), 0);
         (bool ok, string memory why) = _lensReason(o);

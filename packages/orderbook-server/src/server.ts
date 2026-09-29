@@ -2,7 +2,6 @@ import {
   Book,
   CancelVerifier,
   ChainWatcher,
-  checkAdmission,
   DEFAULT_ADMISSION,
   decodeOrderAnnounce,
   decodeOrderReplace,
@@ -24,13 +23,24 @@ import {
   type OrderSummary,
   type SortKey,
 } from "@1delta-x/orderbook";
-import { encodeFillUpTo, hashOrderStruct, packOrder, OrderSide, SETTLEMENT_LENS_ABI } from "@1delta-x/sdk";
+import { encodeFillUpTo, hashOrderStruct, packOrder, OrderSide, SETTLEMENT_LENS_ABI, softCancelTypedData } from "@1delta-x/sdk";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
-import { createPublicClient, http, isAddress, type Address, type Hex, type PublicClient } from "viem";
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  createPublicClient,
+  hashTypedData,
+  http,
+  isAddress,
+  isHex,
+  type Address,
+  type Hex,
+  type PublicClient,
+} from "viem";
 import type { WebSocket as WsWebSocket } from "ws";
 
-import { createRateLimiter, ROUTE_COST, type RateLimiter, type RateLimitOptions } from "./ratelimit";
+import { clientAddress, createRateLimiter, ROUTE_COST, type RateLimiter, type RateLimitOptions } from "./ratelimit";
 
 const PROTOBUF_CONTENT_TYPES = ["application/x-protobuf", "application/protobuf", "application/octet-stream"];
 
@@ -40,6 +50,71 @@ const DEFAULT_PAGE = 100;
 
 /** How many evicted orders keep a readable status. */
 const TOMBSTONE_CAPACITY = 5_000;
+
+/** How many order hashes / cancels are remembered as "already billed to the maker". */
+const BILLED_CAPACITY = 100_000;
+
+/**
+ * Bounds on the WebSocket stream. Every connection costs a socket, a snapshot and
+ * a share of every broadcast, and the route used to take any number of them from
+ * anyone — with a full-book snapshot each.
+ */
+export interface StreamLimits {
+  /** Open sockets, all clients together. */
+  maxConnections: number;
+  /** Open sockets per client address. */
+  maxPerIp: number;
+  /**
+   * Browser `Origin`s allowed to connect. Unset: any. A request with no `Origin`
+   * (a non-browser client) is not subject to it — the check exists to stop a
+   * third-party page riding a visitor's browser, which always sends one.
+   */
+  allowedOrigins?: readonly string[];
+  /** A socket whose unsent backlog exceeds this is dropped rather than buffered for. */
+  maxBufferedBytes: number;
+  /** Orders in the connect snapshot — the most recent live ones. Page `/orders` for the rest. */
+  snapshotLimit: number;
+}
+
+export const DEFAULT_STREAM_LIMITS: StreamLimits = {
+  maxConnections: 1_000,
+  maxPerIp: 16,
+  maxBufferedBytes: 1 << 20,
+  snapshotLimit: 1_000,
+};
+
+/** Insertion-ordered set with a hard size: the oldest member goes first. */
+class BoundedSet<K> {
+  private readonly items = new Set<K>();
+  constructor(private readonly capacity: number) {}
+  has(k: K): boolean {
+    return this.items.has(k);
+  }
+  add(k: K): void {
+    this.items.delete(k);
+    this.items.add(k);
+    while (this.items.size > this.capacity) {
+      const oldest = this.items.values().next().value;
+      if (oldest === undefined) break;
+      this.items.delete(oldest);
+    }
+  }
+}
+
+/**
+ * What an RPC failure may tell a client. viem puts the request URL — and with it
+ * any API key in the path — into its error messages, so an error is never echoed;
+ * a revert is reported by its decoded name alone.
+ */
+function publicRpcError(err: unknown): string {
+  if (err instanceof BaseError) {
+    const revert = err.walk((e) => e instanceof ContractFunctionRevertedError);
+    if (revert instanceof ContractFunctionRevertedError) {
+      return `preview reverted: ${revert.data?.errorName ?? revert.reason ?? revert.signature ?? "unknown"}`;
+    }
+  }
+  return "preview failed";
+}
 
 export interface BuildServerOptions {
   config: OrderbookConfig;
@@ -68,6 +143,8 @@ export interface BuildServerOptions {
   rateLimit?: Partial<RateLimitOptions>;
   /** Disable rate limiting entirely. Tests only — never in front of a network. */
   disableRateLimit?: boolean;
+  /** WebSocket connection limits. Defaults to {@link DEFAULT_STREAM_LIMITS}. */
+  stream?: Partial<StreamLimits>;
   /**
    * Index `OrderFilled` logs so `/fills` can answer. Needs a real RPC. Off by
    * default: it opens a subscription and backfills a log range on start.
@@ -117,6 +194,17 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
   const app = Fastify({ logger: opts.logger ?? false });
   const admission: AdmissionPolicy = { ...DEFAULT_ADMISSION, ...opts.admission };
   const limiter: RateLimiter | null = opts.disableRateLimit ? null : createRateLimiter(opts.rateLimit);
+  const streamLimits: StreamLimits = { ...DEFAULT_STREAM_LIMITS, ...opts.stream };
+
+  // Nothing thrown inside a route reaches the client as-is. The default handler
+  // echoed `err.message`, and an RPC error's message carries the RPC URL — API key
+  // included. Client errors Fastify raises itself (413, 415, a bad body) keep their
+  // message; everything else is logged here and answered generically.
+  app.setErrorHandler((err: { statusCode?: number; message?: string }, request, reply) => {
+    const status = typeof err.statusCode === "number" && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
+    if (status >= 500) request.log.error({ err }, "unhandled route error");
+    void reply.code(status).send({ error: status >= 500 ? "internal error" : (err.message ?? "bad request") });
+  });
 
   app.addContentTypeParser(PROTOBUF_CONTENT_TYPES, { parseAs: "buffer" }, (_req, body, done) => done(null, body));
   await app.register(websocket);
@@ -136,7 +224,9 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
           onError: (e: unknown) => app.log.warn({ err: e }, "chain watcher"),
         })
       : undefined);
-  const book = opts.book ?? new Book({ transport, config, verifier, cancelVerifier, ...(watcher ? { watcher } : {}) });
+  const book =
+    opts.book ??
+    new Book({ transport, config, verifier, cancelVerifier, admission, ...(watcher ? { watcher } : {}) });
   book.onError((err: unknown) => app.log.error({ err }, "book revalidate failed"));
 
   const fills =
@@ -146,17 +236,6 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
       : undefined);
 
   const { orders: ordersTopic, cancels: cancelsTopic } = topicsFor(config);
-
-  // ── per-maker order counts, for the admission cap ──────
-  // Derived on demand from the book rather than kept as a second source of
-  // truth: a counter that drifts from the book is worse than an O(n) walk at
-  // the rate writes actually arrive.
-  const makerCount = (maker: Address): number => {
-    const needle = maker.toLowerCase();
-    let n = 0;
-    for (const e of book.list()) if (e.announce.order.maker.toLowerCase() === needle) n++;
-    return n;
-  };
 
   // ── tombstones ────────────────────────────────────────
   // An order leaves the book precisely when it becomes interesting to ask about
@@ -173,10 +252,27 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     }
   });
 
-  const sockets = new Set<WsWebSocket>();
+  const sockets = new Map<WsWebSocket, string>();
+  const socketsPerIp = new Map<string, number>();
+  const dropSocket = (s: WsWebSocket): void => {
+    const ip = sockets.get(s);
+    if (ip === undefined) return;
+    sockets.delete(s);
+    const n = (socketsPerIp.get(ip) ?? 1) - 1;
+    if (n <= 0) socketsPerIp.delete(ip);
+    else socketsPerIp.set(ip, n);
+  };
   const broadcast = (bytes: Uint8Array): void => {
     const buf = Buffer.from(bytes);
-    for (const s of sockets) {
+    for (const s of [...sockets.keys()]) {
+      // Backpressure: a consumer that is not reading must not make this process
+      // buffer every broadcast for it indefinitely. Drop it; it can reconnect and
+      // take a fresh snapshot when it is ready to keep up.
+      if (s.bufferedAmount > streamLimits.maxBufferedBytes) {
+        dropSocket(s);
+        s.terminate();
+        continue;
+      }
       try {
         s.send(buf);
       } catch {
@@ -217,6 +313,21 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
 
   const address = (value: string | undefined): Address | undefined =>
     value && isAddress(value) ? (value as Address) : undefined;
+
+  // A maker is billed once per NEW thing it signed. Anyone holding a maker's
+  // signed order or cancel can re-post it at will, and billing every re-post drained
+  // the maker's bucket from a stranger's IP — locking the maker out of its own
+  // writes. Re-posts still pay the sender's IP budget.
+  const billedOrders = new BoundedSet<Hex>(BILLED_CAPACITY);
+  const billedCancels = new BoundedSet<Hex>(BILLED_CAPACITY);
+  const billOrder = (orderHash: Hex, maker: string, reply: FastifyReply): boolean => {
+    if (billedOrders.has(orderHash)) return true;
+    if (!gateMaker(maker, reply, ROUTE_COST.write)) return false;
+    billedOrders.add(orderHash);
+    return true;
+  };
+
+  const unixNow = (): number => Math.floor(Date.now() / 1000);
 
   /** Translate query parameters into an {@link OrderQuery}. Unknown values are ignored, not guessed. */
   const parseQuery = (raw: Record<string, string | undefined>): OrderQuery | { error: string } => {
@@ -263,6 +374,10 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
       } catch {
         return { error: "expiresAfter is not a unix timestamp" };
       }
+    } else if (raw.includeExpired !== "true") {
+      // An expired order sits in the book until the next sweep. Serving it in that
+      // window hands fillers an order the settler will refuse.
+      q.expiresAfter = BigInt(unixNow() + 1);
     }
     if (raw.sort !== undefined) {
       const allowed: SortKey[] = ["created", "deadline", "fillable", "price"];
@@ -298,17 +413,19 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     // nothing to judge and reject the bulk of abuse, so they go first. The hash
     // is recomputed here rather than trusted from the wire — it decides whether
     // this is a re-announce, which is what exempts it from the capacity cap.
-    const orderHash = hashOrderStruct(announce.order);
-    const verdict = checkAdmission(
-      announce.order,
-      {
-        size: book.size,
-        makerCount,
-        now: Math.floor(Date.now() / 1000),
-        known: book.get(orderHash) !== undefined,
-      },
-      admission,
-    );
+    let orderHash: Hex;
+    try {
+      orderHash = hashOrderStruct(announce.order);
+    } catch {
+      return reply.code(400).send({ error: "unhashable order" });
+    }
+    // A re-post of a live order changes nothing — the book keeps the first-seen
+    // announce — so it is answered here: no lens call, no maker charge.
+    if (book.get(orderHash)) return reply.code(202).send({ orderHash, duplicate: true });
+
+    // The book's own gate (tombstones, then the admission policy with its
+    // displacement rule) — the same one the transport path runs.
+    const verdict = book.precheck(announce.order, orderHash, { encodedBytes: body!.length, policy: admission });
     if (!verdict.ok) {
       return reply.code(verdict.capacity ? 503 : 422).send({ error: verdict.reason ?? "rejected" });
     }
@@ -320,15 +437,28 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     // Layer 1 recovers an EOA signature locally, so for those the charge lands
     // right after it; a deferred signature (contract wallet, delegate) is only
     // proven by the lens, so those are charged on success. Unverified spam costs
-    // only the sender's IP budget either way.
-    const l1 = await verifier.verifyLayer1(announce);
-    if (!l1.ok) return reply.code(422).send({ error: l1.reason ?? "rejected", orderHash: l1.orderHash });
-    if (!l1.deferSig && !gateMaker(announce.order.maker, reply, ROUTE_COST.write)) return reply;
-
-    const res = await verifier.verifyAnnounce(announce);
+    // only the sender's IP budget either way — and so does a replay of an order
+    // the maker was already billed for (see {@link billOrder}).
+    let res;
+    let l1;
+    try {
+      l1 = await verifier.verifyLayer1(announce);
+      if (!l1.ok) return reply.code(422).send({ error: l1.reason ?? "rejected", orderHash: l1.orderHash });
+      if (!l1.deferSig && !billOrder(orderHash, announce.order.maker, reply)) return reply;
+      res = await verifier.verifyAnnounce(announce);
+    } catch (err) {
+      request.log.warn({ err }, "order verification failed");
+      return reply.code(503).send({ error: "verification unavailable, retry later" });
+    }
     if (!res.ok) return reply.code(422).send({ error: res.reason ?? "rejected", orderHash: res.orderHash });
-    if (l1.deferSig && !gateMaker(announce.order.maker, reply, ROUTE_COST.write)) return reply;
-    await transport.publish(ordersTopic, body!); // Book ingests (cache hit) → onAdd → broadcast
+    if (l1.deferSig && !billOrder(orderHash, announce.order.maker, reply)) return reply;
+    // Admitted HERE, synchronously, so the answer is the book's real one: two
+    // concurrent POSTs that both passed the precheck before their lens calls cannot
+    // both land past a cap and both be told 202. `admit` → onAdd → broadcast; the
+    // publish then only relays to other transport subscribers (the book dedupes).
+    const admitted = book.admit(res.orderHash, announce, res.state);
+    if (!admitted.ok) return reply.code(admitted.capacity ? 503 : 422).send({ error: admitted.reason ?? "rejected" });
+    await transport.publish(ordersTopic, body!);
     return reply.code(202).send({ orderHash: res.orderHash });
   });
 
@@ -339,6 +469,10 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     if ("error" in parsed) return reply.code(400).send(parsed);
 
     const result = queryOrders(book.list(), parsed);
+    // Paging metadata rides headers too, so a protobuf consumer (a backfilling
+    // peer) can walk the whole book instead of stopping at the first page.
+    if (result.nextCursor) reply.header("x-next-cursor", result.nextCursor);
+    reply.header("x-total-count", String(result.total));
     if (raw.format === "json" || request.headers.accept?.includes("application/json")) {
       return reply.send({
         orders: result.items.map(summarize),
@@ -385,12 +519,17 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     if (raw.solver && !solver) return reply.code(400).send({ error: "solver is not an address" });
     const limit = raw.limit === undefined ? DEFAULT_PAGE : Number(raw.limit);
     if (!Number.isFinite(limit) || limit <= 0) return reply.code(400).send({ error: "limit must be a positive integer" });
+    let fromBlock: bigint | undefined;
+    if (raw.fromBlock) {
+      if (!/^\d+$/.test(raw.fromBlock)) return reply.code(400).send({ error: "fromBlock must be a block number" });
+      fromBlock = BigInt(raw.fromBlock);
+    }
 
     const result = fills.query({
       ...(maker ? { maker } : {}),
       ...(solver ? { solver } : {}),
       ...(raw.orderHash ? { orderHash: raw.orderHash as Hex } : {}),
-      ...(raw.fromBlock ? { fromBlock: BigInt(raw.fromBlock) } : {}),
+      ...(fromBlock !== undefined ? { fromBlock } : {}),
       limit: Math.min(limit, MAX_PAGE),
       ...(raw.cursor ? { cursor: raw.cursor } : {}),
     });
@@ -425,22 +564,32 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     } catch {
       return reply.code(400).send({ error: "undecodable SoftCancel" });
     }
-    const verdict = await cancelVerifier.verify(cancel);
+    let verdict;
+    try {
+      verdict = await cancelVerifier.verify(cancel);
+    } catch (err) {
+      request.log.warn({ err }, "cancel verification failed");
+      return reply.code(503).send({ error: "verification unavailable, retry later" });
+    }
     if (!verdict.ok) return reply.code(403).send({ error: verdict.reason ?? "rejected" });
     // Charged to the PROVEN signer's maker (see /orders): the cancel verifier has
-    // just established who signed.
-    if (!gateMaker(cancel.cancel.maker, reply, ROUTE_COST.cancel)) return reply;
+    // just established who signed — and only for a cancel not already billed, keyed
+    // by its signed CONTENT so a re-encoded or re-signed copy is the same cancel.
+    const cancelKey = hashTypedData(softCancelTypedData(cancel.cancel, { chainId: config.chainId, settlement: config.settlement, permit3: config.permit3 }) as never);
+    if (!billedCancels.has(cancelKey)) {
+      if (!gateMaker(cancel.cancel.maker, reply, ROUTE_COST.cancel)) return reply;
+      billedCancels.add(cancelKey);
+    }
 
-    // Which of the named hashes this maker actually owns here. A verified
-    // signature proves who signed, never what they may retract — the book
-    // enforces ownership independently on ingest.
-    const known = cancel.cancel.orderHashes.filter(
-      (h: Hex) => book.get(h)?.announce.order.maker.toLowerCase() === verdict.maker!.toLowerCase(),
-    );
+    // Applied to the book HERE, so the 202 means the evictions and tombstones exist
+    // — a re-post racing the transport round-trip used to find the order still
+    // live. A verified signature proves who signed, never what they may retract:
+    // the book evicts only the named orders that name this maker.
+    const evicted = book.applyVerifiedCancel(cancel, verdict);
 
     await transport.publish(cancelsTopic, body!);
     broadcast(encodeStreamMessage({ kind: StreamKind.CANCEL, cancel }));
-    return reply.code(202).send({ evicted: known, requested: cancel.cancel.orderHashes.length });
+    return reply.code(202).send({ evicted, requested: cancel.cancel.orderHashes.length });
   });
 
   app.post("/replaces", async (request, reply) => {
@@ -456,39 +605,74 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     // `known` is EARNED, not assumed: a replacement is exempt from the book-size
     // and per-maker caps only when it really replaces a live order of the same
     // maker. Hard-coding it let a maker name a never-seen predecessor and grow the
-    // book without bound, one signature per order (F29 P4).
+    // book without bound, one signature per order (F29 P4). The book applies the
+    // same rule again inside `ingestReplace`; this copy just rejects before any RPC.
+    let orderHash: Hex;
+    try {
+      orderHash = hashOrderStruct(replace.announce.order);
+    } catch {
+      return reply.code(400).send({ error: "unhashable order" });
+    }
     const predecessor = book.get(replace.replaces);
     const known =
       predecessor !== undefined &&
       predecessor.announce.order.maker.toLowerCase() === replace.announce.order.maker.toLowerCase();
-    const verdict = checkAdmission(
-      replace.announce.order,
-      { size: book.size, makerCount, now: Math.floor(Date.now() / 1000), known },
-      admission,
-    );
+    const verdict = book.precheck(replace.announce.order, orderHash, { known, policy: admission });
     if (!verdict.ok) return reply.code(verdict.capacity ? 503 : 422).send({ error: verdict.reason ?? "rejected" });
 
-    // Maker bucket after proof, as on /orders (F29 P3).
-    const l1 = await verifier.verifyLayer1(replace.announce);
-    if (!l1.ok) return reply.code(422).send({ error: l1.reason ?? "rejected", orderHash: l1.orderHash });
-    if (!l1.deferSig && !gateMaker(replace.announce.order.maker, reply, ROUTE_COST.write)) return reply;
-
-    const res = await book.ingestReplace(replace);
+    // Maker bucket after proof, as on /orders (F29 P3), and once per new order.
+    let res;
+    let l1;
+    try {
+      l1 = await verifier.verifyLayer1(replace.announce);
+      if (!l1.ok) return reply.code(422).send({ error: l1.reason ?? "rejected", orderHash: l1.orderHash });
+      if (!l1.deferSig && !billOrder(orderHash, replace.announce.order.maker, reply)) return reply;
+      res = await book.ingestReplace(replace);
+    } catch (err) {
+      request.log.warn({ err }, "replace verification failed");
+      return reply.code(503).send({ error: "verification unavailable, retry later" });
+    }
     if (!res.ok) return reply.code(422).send({ error: res.reason ?? "rejected" });
-    if (l1.deferSig && !gateMaker(replace.announce.order.maker, reply, ROUTE_COST.write)) return reply;
+    if (l1.deferSig && !billOrder(orderHash, replace.announce.order.maker, reply)) return reply;
 
     broadcast(encodeStreamMessage({ kind: StreamKind.REPLACE, replace }));
     return reply.code(202).send({ orderHash: res.orderHash, replaces: replace.replaces });
   });
 
-  app.get("/stream", { websocket: true }, (socket: WsWebSocket) => {
-    sockets.add(socket);
+  app.get("/stream", { websocket: true }, (socket: WsWebSocket, request: FastifyRequest) => {
+    // Refusals close with a reason rather than 4xx: by the time this runs the
+    // upgrade has happened. 1008 = policy, 1013 = try again later.
+    const origin = request.headers.origin;
+    if (streamLimits.allowedOrigins && origin !== undefined && !streamLimits.allowedOrigins.includes(origin)) {
+      socket.close(1008, "origin not allowed");
+      return;
+    }
+    const ip = limiter ? limiter.clientKey(request) : clientAddress(request, { trustProxy: false, trustedHops: 1 });
+    if (sockets.size >= streamLimits.maxConnections || (socketsPerIp.get(ip) ?? 0) >= streamLimits.maxPerIp) {
+      socket.close(1013, "too many connections");
+      return;
+    }
+    if (limiter && !limiter.allow(request, ROUTE_COST.stream)) {
+      socket.close(1013, "rate limit exceeded");
+      return;
+    }
+    sockets.set(socket, ip);
+    socketsPerIp.set(ip, (socketsPerIp.get(ip) ?? 0) + 1);
+    socket.on("close", () => dropSocket(socket));
+
+    // A bounded snapshot of the most recent LIVE orders, not the whole book: every
+    // connect used to serialise all of it. A client that wants more pages `/orders`.
+    const snapshot = queryOrders(book.list(), {
+      expiresAfter: BigInt(unixNow() + 1),
+      sort: "created",
+      direction: "desc",
+      limit: streamLimits.snapshotLimit,
+    });
     try {
-      socket.send(Buffer.from(encodeStreamMessage({ kind: StreamKind.SNAPSHOT, orders: book.list().map((e) => e.announce) })));
+      socket.send(Buffer.from(encodeStreamMessage({ kind: StreamKind.SNAPSHOT, orders: snapshot.items.map((e) => e.announce) })));
     } catch {
       /* client may already be gone */
     }
-    socket.on("close", () => sockets.delete(socket));
   });
 
   app.get("/quote", async (request, reply) => {
@@ -506,6 +690,9 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     } catch {
       return reply.code(400).send({ error: "fillAmount not an integer" });
     }
+    if (!isAddress(q.filler)) return reply.code(400).send({ error: "filler is not an address" });
+    if (q.recipient !== undefined && !isAddress(q.recipient)) return reply.code(400).send({ error: "recipient is not an address" });
+    if (q.takerData !== undefined && !isHex(q.takerData)) return reply.code(400).send({ error: "takerData is not hex" });
     const takerData = (q.takerData ?? "0x") as Hex;
     if (!clientInst && !config.rpcUrl) return reply.code(503).send({ error: "no RPC configured for quoting" });
 
@@ -520,8 +707,8 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
         args: [packOrder(order), fillAmount, q.filler as Address, takerData],
       })) as [bigint, readonly bigint[], readonly bigint[]];
     } catch (err) {
-      const msg = err instanceof Error ? err.message.split("\n")[0] : "preview reverted";
-      return reply.code(422).send({ error: msg });
+      request.log.warn({ err }, "quote preview failed");
+      return reply.code(422).send({ error: publicRpcError(err) });
     }
 
     const data = encodeFillUpTo({
@@ -553,6 +740,8 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
       lens: config.lens,
       orders: book.size,
       tombstones: tombstones.size,
+      softCancels: book.tombstoneCount,
+      streams: sockets.size,
       admission: { maxOrders: admission.maxOrders, maxOrdersPerMaker: admission.maxOrdersPerMaker },
       rateLimit: limiter ? limiter.stats() : null,
       fills: fills ? fills.coverage : null,

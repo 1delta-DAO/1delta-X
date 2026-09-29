@@ -34,9 +34,21 @@ import {Proportional} from "./Proportional.sol";
 library Pricing {
     using DutchAuction for Order;
 
+    /// @dev `pinned - 1` for a pinned bump; only called under `pinned != 0`.
+    function _unpin(uint256 pinned) private pure returns (uint256) {
+        unchecked {
+            return pinned - 1;
+        }
+    }
+
     /// @dev ceil(a / b), b > 0.
     function ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a == 0 ? 0 : (a - 1) / b + 1;
+        // `a - 1` runs only under `a != 0`, and `(a - 1) / b <= type(uint256).max - 1`
+        // for any `b >= 1`, so neither can wrap. `b == 0` still panics: `unchecked`
+        // does not cover division by zero.
+        unchecked {
+            return a == 0 ? 0 : (a - 1) / b + 1;
+        }
     }
 
     /// @dev MEASURED, do not "optimize" by memoizing the bump on the {FillCtx}. It
@@ -72,7 +84,7 @@ library Pricing {
             // module once in {OrderState._openFill}. Everything else resolves the clock
             // lazily, and ONLY for a leg that actually decays — the measured-cheapest
             // shape for the dominant single-decaying-leg order (see the note above).
-            uint256 bump = ctx.bump != 0 ? ctx.bump - 1 : (legEnd != 0 ? o.bumpBps() : 0);
+            uint256 bump = ctx.bump != 0 ? _unpin(ctx.bump) : (legEnd != 0 ? o.bumpBps() : 0);
             amt = ceilDiv((ctx.newFilled - ctx.prevFilled) * DutchAuction.outTick(legStart, legEnd, bump), ctx.anchor);
             // Soft-exclusivity override lifts ONLY the maker's own SELL legs — never
             // a fee leg to a third party (would leak the comp) — mirroring the input
@@ -142,7 +154,7 @@ library Pricing {
             if (i != 0) revert Proportional.InvalidProportionalLeg();
             owed = ctx.anchor;
         } else if (o.side() == OrderSide.BUY || endIn != 0) {
-            uint256 bump = ctx.bump != 0 ? ctx.bump - 1 : (endIn != 0 ? o.bumpBps() : 0);
+            uint256 bump = ctx.bump != 0 ? _unpin(ctx.bump) : (endIn != 0 ? o.bumpBps() : 0);
             owed = (ctx.newFilled - ctx.prevFilled) * DutchAuction.inTick(startIn, endIn, bump) / ctx.anchor;
             // Soft-exclusivity override: a non-exclusive in-window filler charges
             // LESS input (the auction leg moves toward the maker).

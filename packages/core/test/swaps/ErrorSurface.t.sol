@@ -184,6 +184,10 @@ contract ErrorSurfaceTest is MockSettlementBase {
     ///      EVM. Deploying against `address(0)` — the classic mis-wired script — must
     ///      fail at construction rather than produce a settler that appears to fill
     ///      orders while moving nothing.
+    ///
+    ///      Deliberately plain `new` even under DEPLOYED_BYTECODE=1 (the switch would
+    ///      move this metered body's committed gas); the deployed-initcode twin is
+    ///      {DeployedBytecodeHarnessTest}.
     function test_invalidPermit3_codelessHubRejectedAtConstruction() public {
         vm.expectRevert(Base.InvalidPermit3.selector);
         new Settlement(address(0));

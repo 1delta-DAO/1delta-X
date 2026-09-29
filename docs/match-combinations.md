@@ -131,7 +131,7 @@ schedule**. A filler running the `ITEM` step before the `DELIVER` step resolves 
 same signed descriptor against the maker's *pre-delivery* wallet — funding the
 position with a fraction of the intended collateral while the value-OUT leg still
 draws in full. That is precisely
-[F16](reference-audits.md#f16--a-balance-relative-take_for-funding-leg-failed-open-when-the-wallet-was-empty),
+[F16](reference-audits/findings-ledger.md#f16--a-balance-relative-take_for-funding-leg-failed-open-when-the-wallet-was-empty),
 made filler-controllable, and **`ForBalanceEmpty` does not close it**: that guard
 catches a resolved *zero*, so a maker holding one wei pre-delivery passes it and ends
 up near-totally under-collateralised.
@@ -408,5 +408,5 @@ quietly.
 - [edge-case-matrix.md](edge-case-matrix.md) — the crossed-axes matrix for the
   protocol as a whole. This note is the same method applied to one axis pair
   (*order shape* × *order shape*, under matching) at full depth.
-- [reference-audits.md § C7](reference-audits.md#c7--rounding-direction-and-split-fill-dust)
+- [reference-audits.md § C7](reference-audits/failure-classes.md#c7--rounding-direction-and-split-fill-dust)
   — the external failure class this belongs to.

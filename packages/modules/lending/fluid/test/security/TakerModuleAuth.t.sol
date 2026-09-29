@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {stdError} from "forge-std/StdError.sol";
 
 import {FluidTakerModule, FluidOperateModule} from "../../src/FluidModules.sol";
 
@@ -60,5 +61,23 @@ contract FluidTakerModuleAuthTest is Test {
         vm.prank(attacker);
         vm.expectRevert(FluidOperateModule.OnlyPermit3.selector);
         operateModule.takeOnBehalf(maker, 1 ether, attacker, abi.encode(p));
+    }
+
+    /// @dev Re-audit F30: `mode` is range-checked on the FULL word (enum
+    ///      conversion panic), so `mode = 256` no longer runs Open.
+    function test_operate_modeWordAbove255_reverts() public {
+        FluidOperateModule.OperateData memory p = FluidOperateModule.OperateData({
+            mode: 256 + uint256(FluidOperateModule.Mode.Open),
+            vault: VAULT,
+            factory: FACTORY,
+            fundingToken: TOKEN,
+            nftId: 42,
+            sideAmount: 1_000e6,
+            repayCeiling: 0,
+            totalAmount: 1e18
+        });
+        vm.prank(PERMIT3);
+        vm.expectRevert(stdError.enumConversionError);
+        operateModule.takeOnBehalf(maker, 1e18, attacker, abi.encode(p));
     }
 }

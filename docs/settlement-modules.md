@@ -239,7 +239,7 @@ resolves it in [`Base._forSlice`](../packages/core/src/settlement/Base.sol):
 The amount is **read from a ledger, not re-priced**: `_deliverOutputs` records what
 it actually paid for each leg in `ctx.outs`, and `_forSlice` spends that entry.
 One delivery funds ONE item — a second item naming the same leg reverts
-`ForLegReused`.
+`ForLegInvalid` (the reuse rule).
 
 ### Two seams take this descriptor
 
@@ -303,12 +303,12 @@ amount comes from the other two forms:
   `min(balanceOf(token, maker), cap)` read at item time. For the amount a maker
   cannot know at signing: accrued interest, an in-flight transfer, a wallet sweep.
 
-The **cap is mandatory** (`data` word 1; `0` reverts `ForBalanceNeedsCap`) for the
+The **cap is mandatory** (`data` word 1; `0` reverts `ForBalanceInvalid`) for the
 reason [`Proportional`](../packages/core/src/settlement/Proportional.sol) spells
 out: a maker's balance is not under their sole control — anyone can raise it by
 transferring tokens to them — so an uncapped "fund with everything I hold" is a
 standing offer to lock the maker's whole holding into a position sized for much
-less. And it is **full-fill only** (`ForBalanceNeedsFullFill`): a live balance
+less. And it is **full-fill only** (`ForBalanceInvalid`): a live balance
 cannot pro-rate, so each slice would fund the whole remaining balance again. The
 core enforces both, because the core is the only party that knows the fill fraction.
 
@@ -325,7 +325,7 @@ boundary and leaves the whole neighbourhood of it open.
 So the descriptor carries `floorBps` in bits **[160:176)** — a fraction of the cap,
 not a second absolute amount, because a second amount in the module's own decimals
 is exactly the mis-scaling `TAKE_FOR` exists to remove. `min(balance, cap) <
-cap · floorBps / 10000` reverts `ForBalanceBelowFloor`. It lives in the word the
+cap · floorBps / 10000` reverts `ForBalanceInvalid`. It lives in the word the
 maker already signs, inside `ref = keccak256(data)`, so a filler can neither lower
 it nor strip it (the altered blob is a different taker-allowance bucket).
 
@@ -522,7 +522,7 @@ preview a broken order as fillable.
   one, and that is now **enforced**: `make modules-check`
   ([`tools/check-module-shapes.py`](../tools/check-module-shapes.py)) fails the build
   on any contract declaring both dispatches. It was convention until 2026-08-31 —
-  see [reference-audits.md §F23](reference-audits.md#f23--three-invariants-documented-but-unenforced-all-now-closed).
+  see [reference-audits.md §F23](reference-audits/findings-ledger.md#f23--three-invariants-documented-but-unenforced-all-now-closed).
 
 ## 9. Open / next
 

@@ -40,7 +40,7 @@ of four classes a mechanical sweep had just certified clean. Write-up:
 ### F27 — 2026-09-03 · bundle `.audit-rGnSkx` · 16 files
 
 The pre-fund-module family plus `Base.sol`. Four Criticals, three with executed PoCs.
-Write-up: [audit-2026-09-pre-fund-family.md](./audit-2026-09-pre-fund-family.md).
+Write-up: [audit-2026-09-push-family.md](./audit-2026-09-push-family.md).
 
 - `packages/core/src/settlement/Base.sol`
 - `packages/modules/lending/aave-v2/src/AaveV2PreFundModules.sol`
@@ -116,7 +116,7 @@ cover code written afterwards.** The audit is a snapshot; the codebase is not.
 ## Rule
 
 Before trusting "this has been audited", check this register — and re-derive the
-push/pull census (`docs/audit-2026-09-pre-fund-family.md`, Post-fix assessment) rather
+push/pull census (`docs/audit-2026-09-push-family.md`, Post-fix assessment) rather
 than a filename glob. Contract shape is a property of the contract, not of the
 file it happens to share.
 

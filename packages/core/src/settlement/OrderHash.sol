@@ -43,9 +43,10 @@ library OrderHash {
     bytes32 internal constant ORDER_ROOT_TYPEHASH = keccak256("OrderRoot(bytes32 root)");
 
     /// @notice EIP-712 type string for the witness portion of a `PermitBatchWitness`
-    ///         whose witness is an `Order`. Permit3 prepends its standard stub and
-    ///         concatenates this. Type definitions in alphabetical order (Order,
-    ///         TakerPermit, TokenPermit).
+    ///         whose witness is a {SETTLEMENT_ORDER_TYPEHASH} `SettlementOrder` — the
+    ///         order PLUS the settler it may be filled on. Permit3 prepends its standard
+    ///         stub and concatenates this. Type definitions in alphabetical order
+    ///         (Order, SettlementOrder, TakerPermit, TokenPermit).
     /// @notice The witness type string for a `PermitTake` witness — `Order` ONLY.
     /// @dev EIP-712 `encodeType` appends exactly the transitively-referenced types.
     ///      `PermitTakeWitness` references `Order` and nothing else, so unlike
@@ -56,8 +57,9 @@ library OrderHash {
     string internal constant PERMIT_TAKE_WITNESS_TYPESTRING = "Order witness)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)";
 
-    string internal constant WITNESS_TYPESTRING = "Order witness)"
+    string internal constant WITNESS_TYPESTRING = "SettlementOrder witness)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "SettlementOrder(address settlement,Order order)"
         "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
@@ -93,8 +95,9 @@ library OrderHash {
     ///         for everyone, which one integration test catches.
     bytes32 internal constant PERMIT_BATCH_WITNESS_TYPEHASH = keccak256(
         "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
-        "Order witness)"
+        "SettlementOrder witness)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "SettlementOrder(address settlement,Order order)"
         "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)"
     );
@@ -112,6 +115,26 @@ library OrderHash {
     bytes32 internal constant PERMIT_TAKE_WITNESS_TYPEHASH = keccak256(
         "PermitTakeWitness(address module,bytes32 ref,uint160 amount,address spender,uint256 nonce,uint256 deadline,"
         "Order witness)"
+        "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+    );
+
+    /// @notice EIP-712 type of the `fillWithPermit` witness: an {Order} bound to the
+    ///         ONE settler that may fill it.
+    /// @dev    WHY THE ORDER ALONE WAS NOT ENOUGH (re-audit 2026-09-25). On
+    ///         `fillWithPermit` the permit signature is the order's ONLY authorization
+    ///         — {Signatures._verifySignature} never runs — and that signature is
+    ///         checked under PERMIT3's domain, which names Permit3, not a settler. An
+    ///         `Order` carries no settler field either. So a bare order-hash witness
+    ///         authorized the order on EVERY Settlement wired to the same Permit3, and
+    ///         the spent-nonce skip ({SignedPermits.permitBatchWithWitnessIfNeeded})
+    ///         then let a second settler — a redeploy reusing Permit3, which
+    ///         `Deploy.s.sol` does by design — re-fill an order the first had already
+    ///         filled in full. Naming the settler in the witness is the standard fix
+    ///         (Permit2's own guidance: bind what the app needs into the witness), and
+    ///         keeping it a STRUCT rather than the settler's opaque EIP-712 digest keeps
+    ///         the order human-readable in a wallet's signing prompt.
+    bytes32 internal constant SETTLEMENT_ORDER_TYPEHASH = keccak256(
+        "SettlementOrder(address settlement,Order order)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
     );
 

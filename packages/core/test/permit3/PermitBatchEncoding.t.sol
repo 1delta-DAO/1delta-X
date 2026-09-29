@@ -236,7 +236,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
 
         bytes memory expected = abi.encodeCall(
             IPermit3.permitBatchWithWitnessHashIfNeeded,
-            (maker, batch, _hashOrder(order), OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH, sig)
+            (maker, batch, _settlementWitness(_hashOrder(order)), OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH, sig)
         );
 
         // Etch the recorder over Permit3 so the call lands somewhere that keeps the

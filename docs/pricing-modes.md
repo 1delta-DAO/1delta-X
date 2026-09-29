@@ -77,9 +77,11 @@ The maker signs the band **the other way round**:
 legsOut[j].start = the ambitious price     ← what a large bid buys
 legsOut[j].end   = the GUARANTEED FLOOR    ← what a zero-bid fill clears at
 
-bump = BPS − min(BPS, bid · BPS / params.priorityScale)
+bump = BPS − min(BPS, ceil(bid · BPS / params.priorityScale))
 bid   = tx.gasprice − block.basefee − params.baselinePriorityFeeWei  (clamped at 0)
 ```
+
+The improvement rounds **up** — a fractional basis point is the maker's.
 
 So an unbid fill clears at `end`, every wei of priority fee moves the tick toward
 `start`, and the sequencer's own ordering picks the winner — losers revert on the
@@ -150,7 +152,16 @@ word, not the validator `STATICCALL`s:
 The +55 between the two final rows is the larger calldata, not the validators — they
 never run, so a loser's cost no longer depends on how much policy the order carries.
 A real (cold-slot) losing transaction saves more still: it skips the maker's nonce
-word and the guard slot's cold access, ~2,100 each. `PriorityRaceGasBench.t.sol`
+word and the guard slot's cold access, ~2,100 each.
+
+⚠ **The table does not hold for a FILL-ONCE priority order — the bit 100 + bit 103
+combination recommended above.** A fill-once order never writes `filled`; its fill
+consumes the maker's nonce instead, so the early gate cannot see the loss. A losing
+bidder passes it, arms the guard, verifies the signature and runs the exclusivity
+check before failing on `NonceCancelled` at the nonce gate — measured **~14k gas**
+against the ~5.6k above. That is the price of `PriorityOrderReactor`'s exact
+semantics; a maker who wants the cheap loss keeps partial fills (bounded by
+`minFillAnchor`) instead. `PriorityRaceGasBench.t.sol`
 prints the table and pins the ordering with a validator that reverts if it is ever
 reached; `SettlementGuards.t.sol` pins that every hand-armed entry still rejects
 re-entry and still releases.
@@ -280,6 +291,20 @@ also means the fee is paid **once** rather than once per intermediate hop.
 
 **How to use it, and the rules:**
 
+- **Named filler only — for the order's whole life.** The order must name a single
+  `exclusiveFiller`, and only that address can ever fill it: no exclusivity window,
+  no soft override, and zero or the `FILLER_SET` sentinel make the order unfillable
+  (`NotExclusiveFiller`; the SDK's `packOrder` refuses the shape). The reason is the
+  measurement itself: a balance delta across the filler's callback cannot tell this
+  fill's delivery from ANY other inflow of that token, and a permissionless filler
+  owns the callback — it could settle the maker's other open intent on another venue
+  (UniswapX, 1inch, a second settler) inside it and pass that payment, which the
+  maker funded separately, off as this order's delivery. The maker therefore picks
+  who runs the callback. (Re-audit F30, 2026-09-25.) Naming a **contract** hands
+  the check to that contract's access control — whoever can make it call
+  `fillWithCallback` runs the callback — so the shipped `AggregatorFillSolver`
+  refuses a delta-verify order unless it is gated to an operator set
+  (`DirectNeedsOperators`).
 - **Callback-only.** Nothing in the settler delivers these legs, so the order is
   fillable only through `fillWithCallback`. Plain `fill`/`fillUpTo`/`batchFill`
   reach the check with nothing delivered and revert `DeltaTooLow`; the netted
@@ -287,14 +312,15 @@ also means the fee is paid **once** rather than once per intermediate hop.
   it has no per-order callback to deliver from. Delivery must happen *during* the
   fill — a pre-transfer lands under the snapshot and does not count.
 - **Shape restrictions, enforced on-chain.** No two output legs may share a
-  `(token, recipient)` (`DeltaVerifyDuplicateLeg`), and a maker-bound output token
-  may not also be an input token (`DeltaVerifySameToken`). A per-leg balance delta
+  `(token, recipient)` (`DeltaVerifyDuplicateLeg`), and no output token may also be
+  an input token, whoever the leg pays (`DeltaVerifySameToken`). A per-leg balance delta
   only measures that leg when the leg alone moves the balance; both shapes would
   otherwise let one delivery satisfy two checks, or measure net instead of gross.
   Multiple legs in different tokens, and one token to different recipients (the
   maker leg + a fee leg), are sound and supported.
 - **Prefer plain fee-on-transfer tokens.** The check counts *any* balance increase
-  across the fill, not specifically "sent by the filler". That is exactly right for
+  across the fill, not specifically "sent by the filler" — the same property the
+  named-filler rule above exists for. That is exactly right for
   an ordinary FoT token, but a reflection token that credits holders on every
   transfer — or an upward rebase mid-fill — can move the balance on its own, and a
   filler can lean on that to deliver less. Same trust posture as
@@ -348,6 +374,11 @@ Concretely, in [`Pricing`](../packages/core/src/settlement/Pricing.sol):
 | Auctioned output (SELL) | `ceil(delta · outTick / anchor)` | per-fill, rounds **up** toward the maker |
 | Auctioned input (BUY, or a rising SELL fee leg) | `floor(delta · inTick / anchor)` | per-fill, rounds **down** toward the maker |
 
+The shared **bump** rounds the same way before any leg is sliced: the linear clock,
+a rising curve segment and the gas bump floor their increment, a **falling** curve
+segment rounds its decrement **up**, and the priority improvement rounds **up** —
+every one lands the bump on the maker's side of exact.
+
 Two consequences worth knowing before you are surprised by them:
 
 - **The maker is never the one paying the rounding.** That is deliberate, and it is
@@ -362,7 +393,7 @@ Two consequences worth knowing before you are surprised by them:
 The fixed legs are cumulative precisely so that the exact-in/exact-out guarantees
 survive an arbitrary partial-fill schedule; do not "simplify" them to the per-fill
 form the auctioned legs use. See
-[reference-audits.md §C7](reference-audits.md#c7--rounding-direction-and-split-fill-dust).
+[reference-audits.md §C7](reference-audits/failure-classes.md#c7--rounding-direction-and-split-fill-dust).
 
 ### In a CoW match
 

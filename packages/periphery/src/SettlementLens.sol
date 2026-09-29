@@ -33,6 +33,9 @@ interface ISettlementState {
     ///      accepts exactly the signatures the settler accepts — a lens that is
     ///      STRICTER here silently drops fillable orders from an orderbook.
     function orderSignerExpiry(address maker, address signer) external view returns (uint256);
+    /// @dev The settler's allowance-less callback trampoline. Read ONCE, at
+    ///      construction, so {validateOrder} can flag an output leg addressed to it.
+    function EXECUTOR() external view returns (address);
 }
 
 /// @title SettlementLens
@@ -76,6 +79,16 @@ contract SettlementLens {
     /// @notice Cached from the settlement at deploy — the Permit3 whose maker
     ///         allowances bound how much a plain order can actually fill.
     IPermit3 public immutable PERMIT3;
+    /// @dev Cached from the settlement at deploy — its {SolverCallbackExecutor}.
+    ///      An output leg paid THERE is a maker footgun on both paths
+    ///      ({validateOrder}): the netted path refuses it
+    ///      ({Base.OutputToSettlement}), and on the single path whatever lands on
+    ///      the executor is taken by the next callback solver, whose `CALL` runs
+    ///      from it. Immutable because the settler's own is — the pair is fixed at
+    ///      the settler's construction, so one read is exact forever. Private: the
+    ///      getter measured +80 bytes and the address is already public on the
+    ///      settlement (`EXECUTOR()`).
+    address private immutable EXECUTOR;
 
     /// @notice Lifecycle status for the solver-preflight view. Mirrors 0x's
     ///         `OrderStatus` so an off-chain filler can classify an order from a
@@ -102,8 +115,99 @@ contract SettlementLens {
         Filled, // fully filled
         Cancelled, // per-hash sentinel, nonce bit set, below the rollback floor — or a
         // completed fill-once order (see the ambiguity note above)
-        Expired // past expiry
+        Expired, // past expiry
+        Inconclusive // batch only: the order's own preflight exhausted its gas budget
+        // ({ORDER_STATE_GAS}) or the call could no longer afford to start it
+        // ({ORDER_STATE_ROW_GAS}) — NOT a verdict about the order. Appended last so
+        // every existing value keeps its number; the ABI type stays `uint8`.
     }
+
+    /// @notice Gas each order's preflight may spend inside {getOrderRelevantStates}.
+    /// @dev    The per-order `try` used to forward all available gas. Every external
+    ///         call an order triggers — its tokens' `balanceOf`/`allowance`, a 1271
+    ///         `isValidSignature`, its validators — is maker-chosen code, so one order
+    ///         whose token burns all gas took 63/64 of the CALL's budget with it, and
+    ///         every later order in the batch ran out and read `Invalid`. An orderbook
+    ///         evicting on `Invalid` then dropped a whole chunk of honest orders for one
+    ///         poisoned one. Capping each order keeps the blast radius to that order.
+    ///
+    ///         A real order costs roughly 25–60k here (hash, cold balance/allowance
+    ///         reads, one staticcall per validator); 500k is ~10× the heavy end, room
+    ///         for several nontrivial validators and a Safe-style 1271 check.
+    ///
+    ///         An order that needs more is NOT always reported as "not evaluated" — an
+    ///         earlier version of this note promised "Inconclusive, never Invalid",
+    ///         which holds for only one of the three places the gas can run out:
+    ///
+    ///           • in the order's OWN frame (a token read, the hash, the state walk)
+    ///             → the row reverts having spent the budget and reads
+    ///             {OrderStatus.Inconclusive}: "not evaluated", never `Invalid`, so a
+    ///             caller re-checks it (e.g. through the uncapped single-order
+    ///             {getOrderRelevantState}) instead of discarding it;
+    ///           • inside the SIGNATURE check → it depends. That check is its own
+    ///             inner `try this.checkSignature`, handed 63/64 of what is left; its
+    ///             out-of-gas is SWALLOWED there, and the row carries on with the
+    ///             1/64 slices each call level kept back (~15–25k). If the state reads
+    ///             fit in that, the row comes back `isSignatureValid = false` with a
+    ///             real status (measured: an item order reads `Fillable`); if not, it
+    ///             runs dry in its own frame and reads `Inconclusive` (measured: a
+    ///             plain order, whose funding-cap reads are dearer). So a 1271 wallet
+    ///             that verifies in pure Solidity — e.g. a P256 passkey wallet at
+    ///             ~470k+ on a chain without the RIP-7212 precompile — CAN read here
+    ///             as a bad signature;
+    ///           • inside a VALIDATOR → `validatorsPass = false`, with the status and
+    ///             signature verdicts intact: {OrderGates.gatePasses} reads a failed
+    ///             staticcall as a rejection, exactly as for a rejecting validator.
+    ///
+    ///         So on a batch row, `isSignatureValid == false` and `validatorsPass ==
+    ///         false` each mean "false, OR too expensive to tell under this cap". A
+    ///         caller that evicts on either should confirm through the uncapped
+    ///         {getOrderRelevantState} first, which has no cap of its own.
+    uint256 public constant ORDER_STATE_GAS = 500_000;
+
+    /// @dev Headroom a row needs ON TOP of {ORDER_STATE_GAS} before its capped call
+    ///      starts: the call's own argument encoding (a copy of the order into
+    ///      memory, outside the budget), the call overhead, EIP-150's 1/64 withheld
+    ///      share, and the row's result writes.
+    ///
+    ///      The capped call receives the FULL budget whenever the order's encoding
+    ///      costs under ~40k — every realistic order. That is NOT a guarantee (an
+    ///      earlier version of this note said "always"): an order carrying ~130KB+
+    ///      of blobs spends more than that on memory expansion alone, EIP-150 then
+    ///      forwards less than {ORDER_STATE_GAS}, and the encoding also eats into
+    ///      the per-row reserve kept for later rows ({ORDER_STATE_ROW_GAS}). The
+    ///      CLASSIFICATION survives it — the OOG test in {_cappedState} measures
+    ///      from BEFORE the encoding, so encoding plus a starved call still sums
+    ///      past the budget and reads `Inconclusive`, never `Invalid` — only the
+    ///      budget, and at worst the batch's ability to finish, shrink.
+    uint256 private constant ORDER_STATE_RESERVE = 50_000;
+
+    /// @dev What each row still to be written costs AFTER a capped call has spent
+    ///      its whole budget: the short-circuit `Inconclusive` path (calldata
+    ///      offset checks on `orders[i]`/`sigs[i]`/`takerDatas[i]`, the gas test, four
+    ///      array writes) plus that row's share of ABI-encoding the four return
+    ///      arrays. A row may start its capped call only while
+    ///      `ORDER_STATE_GAS + ORDER_STATE_RESERVE + rowsLeft * ORDER_STATE_ROW_GAS`
+    ///      is left, so however the budgeted row ends, every later row can still be
+    ///      MARKED and the call still RETURNS.
+    ///
+    ///      Without this term the reserve was per-row only, and a batch whose early
+    ///      row burned its budget could not afford to mark the rest: a poison row 0
+    ///      under a 560k call reverted the WHOLE call from n ≥ 35 (and at 575k,
+    ///      n = 60 / 100) — the eviction-of-the-chunk failure the cap exists to stop,
+    ///      moved from the honest rows to the call itself.
+    ///
+    ///      MEASURED 2026-09-29, slope over n = 1 → 51 → 101 short-circuited rows,
+    ///      return encoding included: **1,870 gas/row** under the legacy `periphery`
+    ///      profile, **1,663** under the deployed via-IR settings. 4,000 is ~2×
+    ///      the dearer one. The margin is for memory expansion: every EVALUATED row
+    ///      leaves its call buffer (~1.3KB for a plain order) allocated, so the
+    ///      return encoding at the end pays a higher per-word price the more rows ran
+    ///      before it — still under +100 gas/row at 100 rows. Cost of the margin: a
+    ///      batch of `n` rows needs `n × 4k` more than before to START its first
+    ///      row (400k at n = 100), and near the end of a tight budget the last
+    ///      rows are marked a little earlier than they strictly had to be.
+    uint256 private constant ORDER_STATE_ROW_GAS = 4_000;
 
     /// @dev An empty `sig` with no matching on-chain approval. Mirrors
     ///      {Signatures.OrderNotApproved}; surfaces through `checkSignature` and
@@ -113,6 +217,7 @@ contract SettlementLens {
     constructor(address settlement) {
         SETTLEMENT = ISettlementState(settlement);
         PERMIT3 = ISettlementState(settlement).PERMIT3();
+        EXECUTOR = ISettlementState(settlement).EXECUTOR();
     }
 
     // ──────────────────── Order hash / previews ────────────────────
@@ -171,7 +276,10 @@ contract SettlementLens {
     ///         `basefee` at the call's block.
     /// @param  fillAmount The requested size (anchor units; a proposal for a
     ///         fill-module order). Clamped to remaining for identity orders,
-    ///         resolved through the maker's `fillModule` otherwise.
+    ///         resolved through the maker's `fillModule` otherwise. A {Proportional}
+    ///         order is NOT clamped: a request above its live resolved anchor
+    ///         previews as {OverFill}, exactly as the fill reverts — pass
+    ///         `type(uint256).max` to accept whatever the balance is.
     /// @param  filler     The would-be `msg.sender` of the fill (exclusivity).
     /// @param  takerData  The blob the filler would submit (fill-module proposal);
     ///         `""` for plain orders.
@@ -342,10 +450,25 @@ contract SettlementLens {
         if (prevFilled == type(uint256).max) revert OrderCancelled();
     }
 
+    /// @dev Whether the fill denominator is a {Proportional} anchor: a SELL order,
+    ///      no `fillTotal`, a marker in `legsIn[0].start` — the exact predicate
+    ///      `Core._clampToRemaining` tests. Callers must already know `legsIn` is
+    ///      non-empty (the read is unchecked, as the core's is): {_previewCtx} via
+    ///      {OrderGates.anchorTotal}'s `NoAnchorLeg`, {_orderState} via its own
+    ///      anchor-leg shape gate.
+    function _proportionalAnchor(Order calldata order) private pure returns (bool) {
+        if (order.fillTotal != 0 || order.side() != OrderSide.SELL) return false;
+        (, uint256 start0,) = PackedArrays.legIn(order.legsIn, 0);
+        return Proportional.isProportional(start0);
+    }
+
     /// @dev Mirror of `Core._clampToRemaining` + `OrderState._openFill`'s delta
-    ///      resolution: identity orders clamp to remaining; module orders resolve
-    ///      the proposal through the maker's (view) fill module. Packages the
-    ///      result as the same {FillCtx} the settlement would price with.
+    ///      resolution: identity orders clamp to remaining — EXCEPT an oversized
+    ///      request on a {Proportional} anchor, which passes through unclamped and
+    ///      reverts `OverFill` as the fill does (`type(uint256).max` excepted: it
+    ///      is still trimmed); module orders resolve the proposal through the
+    ///      maker's (view) fill module. Packages the result as the same {FillCtx}
+    ///      the settlement would price with.
     function _previewCtx(Order calldata order, uint256 fillAmount, address filler, bytes calldata takerData)
         private
         view
@@ -358,7 +481,18 @@ contract SettlementLens {
         if (order.fillModule == address(0)) {
             if (prevFilled < total) {
                 uint256 rem = total - prevFilled;
-                if (fillAmount > rem) fillAmount = rem;
+                // ⚠ NEVER TRIM A {Proportional} REQUEST DOWN — mirror of the
+                // re-audit 2026-09-29 rule in `Core._clampToRemaining`. A proportional
+                // fill is whole and pays every output IN FULL whatever the anchor
+                // resolves to, so the settler no longer shrinks a quoted size onto a
+                // balance the maker drained since the quote: an oversized request
+                // reaches {_openFill} unclamped and reverts `OverFill`. A preview that
+                // still trimmed would quote the dust fill as a success — the exact
+                // front-run the core closed. `type(uint256).max` stays the explicit
+                // "whatever the balance is" opt-in and is trimmed, as it is there.
+                if (fillAmount > rem && (fillAmount == type(uint256).max || !_proportionalAnchor(order))) {
+                    fillAmount = rem;
+                }
             }
             delta = fillAmount;
         } else {
@@ -372,6 +506,9 @@ contract SettlementLens {
         // whole or nothing, and a preview that quoted a partial was quoting a fill
         // the settler reverts (F29 finding 8a).
         if (order.useNonceInvalidator() && newFilled != total) revert FillOnceMustBeFull();
+        // Mirror of {Core._snapshotOutRecipients}: a DELTA-VERIFY order fills for its
+        // named `exclusiveFiller` only, for its whole life (re-audit F30).
+        if (order.deltaVerifyOutputs() && filler != order.exclusiveFiller) revert OrderGates.NotExclusiveFiller();
 
         return FillCtx(
             orderHash,
@@ -471,6 +608,16 @@ contract SettlementLens {
     ///         loop). Any order that reverts (malformed, etc.) degrades to
     ///         `Invalid` / 0 / false instead of failing the whole call — the 0x
     ///         "swallows reverts" batch-state behaviour.
+    ///
+    ///         Each order runs under its own {ORDER_STATE_GAS} budget. One that
+    ///         spends all of it in its own frame, and every order the call no longer
+    ///         has gas to start, reports {OrderStatus.Inconclusive} — "not
+    ///         evaluated", which a caller must NOT treat as `Invalid`. (One that runs
+    ///         out inside its signature check or a validator can instead read as a
+    ///         `false` flag — see {ORDER_STATE_GAS}.) A row is started only while the
+    ///         call can still afford to mark every row after it
+    ///         ({ORDER_STATE_ROW_GAS}), so the call does not revert for running
+    ///         short; it returns what it managed and marks the rest.
     /// @param  takerDatas Per-order filler-supplied blobs, aligned 1:1 with
     ///         `orders` (`takerDatas[i]` previews order `i`). Pass empty entries for
     ///         orders that don't consume it. Must be the same length as `orders`.
@@ -495,16 +642,41 @@ contract SettlementLens {
         sigValids = new bool[](n);
         validatorsPass = new bool[](n);
         for (uint256 i; i < n; i++) {
-            try this.getOrderRelevantState(orders[i], sigs[i], filler, takerDatas[i]) returns (
-                OrderStatus s, uint256 f, bool v, bool vp
-            ) {
-                statuses[i] = s;
-                fillableAmounts[i] = f;
-                sigValids[i] = v;
-                validatorsPass[i] = vp;
-            } catch {
-                statuses[i] = OrderStatus.Invalid;
-            }
+            (statuses[i], fillableAmounts[i], sigValids[i], validatorsPass[i]) =
+                _cappedState(orders[i], sigs[i], filler, takerDatas[i], n - i);
+        }
+    }
+
+    /// @dev One batch row under its {ORDER_STATE_GAS} budget. Its own frame purely to
+    ///      keep {getOrderRelevantStates} under the stack limit without via-IR.
+    /// @param rowsLeft This row and every row after it — each must still be
+    ///        affordable as a short-circuit `Inconclusive` once this row's budget is
+    ///        gone ({ORDER_STATE_ROW_GAS}).
+    function _cappedState(
+        Order calldata order,
+        bytes calldata sig,
+        address filler,
+        bytes calldata takerData,
+        uint256 rowsLeft
+    ) private view returns (OrderStatus, uint256, bool, bool) {
+        uint256 before = gasleft();
+        // The call's budget, not the order: say so rather than guess. The reserve
+        // covers THIS row's overhead AND marking every later row — a row that may
+        // burn its whole budget is only started if the call can still return after.
+        if (before < ORDER_STATE_GAS + ORDER_STATE_RESERVE + rowsLeft * ORDER_STATE_ROW_GAS) {
+            return (OrderStatus.Inconclusive, 0, false, false);
+        }
+        try this.getOrderRelevantState{gas: ORDER_STATE_GAS}(order, sig, filler, takerData) returns (
+            OrderStatus s, uint256 f, bool v, bool vp
+        ) {
+            return (s, f, v, vp);
+        } catch {
+            // A revert that consumed the whole budget is an out-of-gas, which says
+            // nothing about the order's validity. A near-budget ordinary revert lands
+            // here too — conservative: it is re-checked, not discarded.
+            return (
+                before - gasleft() >= ORDER_STATE_GAS ? OrderStatus.Inconclusive : OrderStatus.Invalid, 0, false, false
+            );
         }
     }
 
@@ -572,7 +744,17 @@ contract SettlementLens {
         }
         // A FILL-ONCE order is whole or nothing: a capacity below the anchor means
         // it cannot fill at all, not that it can fill partially (F29 finding 8a).
-        if (order.useNonceInvalidator() && fillableAmount != anchor) fillableAmount = 0;
+        //
+        // A {Proportional} order is the same shape of fact for a different reason:
+        // {Pricing.inputOwed} reverts `ProportionalNeedsFullFill` on anything but a
+        // fill from zero progress to the whole resolved anchor. So a funding cap
+        // below that anchor is "cannot fill", not "can fill this much" — reporting
+        // the cap invited a fill sized to it, which is a partial and reverts. The
+        // same `!= anchor` test also zeroes a proportional order with progress
+        // already recorded (`done != 0`), which no fill can ever complete.
+        if ((order.useNonceInvalidator() || _proportionalAnchor(order)) && fillableAmount != anchor) {
+            fillableAmount = 0;
+        }
         status = OrderStatus.Fillable;
     }
 
@@ -676,6 +858,12 @@ contract SettlementLens {
             // signature exists.
             (address ojToken,,, address ojRecip) = PackedArrays.legOut(order.legsOut, j);
             if (ojRecip == address(SETTLEMENT)) return (false, "recipient is settlement (burn)");
+            // The settler's {EXECUTOR} is the same hazard one hop out (re-audit
+            // 2026-09-29), and WORSE on the single path: not burned but TAKEABLE. It
+            // holds whatever lands on it and every callback solver's `CALL` runs from
+            // it, so the next `fillWithCallback` anyone submits can sweep the leg to
+            // itself. The netted path refuses it outright ({Base.OutputToSettlement}).
+            if (ojRecip == EXECUTOR) return (false, "recipient is settlement executor (takeable)");
             for (uint256 k = j + 1; k < nOut; k++) {
                 if (
                     ojToken == PackedArrays.legOutToken(order.legsOut, k)
@@ -833,6 +1021,23 @@ contract SettlementLens {
         if (order.overrideBps() != 0) {
             if (order.exclusiveFiller == address(0)) return (false, "override without exclusiveFiller");
             if (order.overrideBps() > 10_000) return (false, "overrideBps > 10000");
+            // The third override rule — "some leg must be able to CARRY the premium"
+            // ({_overrideHasCarrier}) — is checked LAST, in {_validateTakeForItems}'s
+            // tail, not here: a pre-funded leg under an override is the more specific
+            // defect (outsiders revert there even WITH a carrier), so its reason must
+            // win when both apply.
+        }
+        // ── delta-verify needs ONE named filler ──
+        // The settler fills a bit-104 order for its `exclusiveFiller` only, whatever
+        // the window says ({Core._snapshotOutRecipients}): the balance delta cannot
+        // tell this fill's delivery from the maker's other paid inflow, so the maker
+        // must name who runs the callback. Zero and the filler-set sentinel can never
+        // equal a caller — such an order is signable and dead (re-audit F30).
+        if (
+            order.deltaVerifyOutputs()
+                && (order.exclusiveFiller == address(0) || order.exclusiveFiller == OrderGates.FILLER_SET)
+        ) {
+            return (false, "delta-verify order must name a single exclusiveFiller");
         }
         // ── filler set ({OrderGates.FILLER_SET}) ──
         // A set order carries `curve = [0x00] ‖ filler×N`. The leading COUNT BYTE is
@@ -1169,7 +1374,7 @@ contract SettlementLens {
     ///          zero slice too; it used to be unchecked). Full-fill-only orders
     ///          (`minFillAnchor == anchor`) and fill-module orders are exempt;
     ///        • two funding descriptors naming the SAME output leg →
-    ///          {Base.ForLegReused} (the leg-reference forms only).
+    ///          {Base.ForLegInvalid} (the leg-reference forms only).
     function _validateItemSlices(Order calldata order, uint256 anchor) private pure returns (bool, string memory) {
         uint256 nItems = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
         uint256 cur = PackedArrays.recordsStart();
@@ -1219,6 +1424,10 @@ contract SettlementLens {
     ///      Split into a per-item helper for the same reason {_takerItemAt} is: the
     ///      wide `itemAt` tuple plus the descriptor branches do not fit in one frame
     ///      under the legacy (non-via-IR) codegen this package builds with.
+    ///
+    ///      Its tail also carries {validateOrder}'s LAST rule, the soft-exclusivity
+    ///      carrier check — here rather than in the override section so the more
+    ///      specific pre-fund-under-override reason above wins when both apply.
     function _validateTakeForItems(Order calldata order) private view returns (bool, string memory) {
         uint256 n = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
         uint256 cur = PackedArrays.recordsStart();
@@ -1229,7 +1438,66 @@ contract SettlementLens {
             if (!ok) return (false, why);
             cur = nxt;
         }
+        // ── soft exclusivity with nothing to charge it on ──
+        // {OrderGates.exclusivityOverride} refuses an in-window OUTSIDER with
+        // `NotExclusiveFiller` when no leg can carry the premium (re-audit
+        // 2026-09-29): such a "soft" window is a HARD one, and the override the maker
+        // signed is dead weight. Reported whatever the window's state, like the other
+        // override shape rules — it is a fact about what was signed.
+        if (order.overrideBps() != 0 && !_overrideHasCarrier(order)) {
+            return (false, "override has no carrier leg (outsiders are refused in-window)");
+        }
         return (true, "");
+    }
+
+    /// @dev Whether any leg can carry a soft-exclusivity premium — a copy of
+    ///      `OrderGates._overrideHasCarrier`, which is `private` to that library and
+    ///      so cannot be called from here. {Pricing} moves only three kinds of leg
+    ///      toward the maker: every BUY input, an AUCTIONED (`end != 0`) SELL input,
+    ///      and a SELL output addressed to the maker (`0` or `maker`). A
+    ///      {Proportional} input never carries it, whatever its `end` (there, the
+    ///      cap) — {Pricing.inputOwed} returns the pinned anchor for one, untouched.
+    ///
+    ///      The raw walk is copied rather than rewritten with the typed accessors,
+    ///      for the same reason the library gives: the typed form inlines its whole
+    ///      decode per call site and measured +245 bytes here (2026-09-29), against
+    ///      a lens left with ~530 to spare. Same packed layout ({PackedArrays}: count byte, then
+    ///      LegIn = token(20) | start(32) | end(32) at stride 84, LegOut = token(20) |
+    ///      start(32) | end(32) | recipient(20) at stride 104), same predicate —
+    ///      `test_lens_softExclusivity_noCarrier_refusedAndFlagged` holds the two
+    ///      to agreeing, shape by shape, against the core's own gate.
+    function _overrideHasCarrier(Order calldata order) private pure returns (bool has) {
+        bool buy = order.side() == OrderSide.BUY;
+        // Validated first, so the raw walks below stay inside the signed blobs.
+        uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
+        uint256 nOut = buy ? 0 : PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
+        bytes calldata legsIn = order.legsIn;
+        bytes calldata legsOut = order.legsOut;
+        address maker = order.maker;
+        uint256 floor = Proportional.SENTINEL_FLOOR; // not assembly-addressable as a constant
+        /// @solidity memory-safe-assembly
+        assembly {
+            // An input leg carries it: every BUY leg, or an auctioned SELL leg — and
+            // never a proportional marker.
+            let p := add(legsIn.offset, 1)
+            for { let e := add(p, mul(nIn, 84)) } lt(p, e) { p := add(p, 84) } {
+                if and(or(buy, iszero(iszero(calldataload(add(p, 52))))), iszero(gt(calldataload(add(p, 20)), floor))) {
+                    has := 1
+                    break
+                }
+            }
+            // A SELL output carries it only if addressed to the maker (0 or maker).
+            if iszero(has) {
+                p := add(legsOut.offset, 1)
+                for { let e := add(p, mul(nOut, 104)) } lt(p, e) { p := add(p, 104) } {
+                    let to := shr(96, calldataload(add(p, 84)))
+                    if or(iszero(to), eq(to, maker)) {
+                        has := 1
+                        break
+                    }
+                }
+            }
+        }
     }
 
     /// @dev One item's `TAKE_FOR` checks; a non-composite item passes straight
@@ -1263,7 +1531,7 @@ contract SettlementLens {
             return (true, "", nxt);
         }
         if (desc & (uint256(1) << 254) == 0) {
-            // LEG REFERENCE — mirrors {Base.ForLegMissing} / {Base.ForLegNotMakers}.
+            // LEG REFERENCE — mirrors {Base.ForLegInvalid} (the missing and not-the-maker's rules).
             uint256 j = desc & 0xffff;
             if (j >= PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE)) {
                 return (false, "take_for leg index out of range", nxt);
@@ -1282,7 +1550,7 @@ contract SettlementLens {
             // must be addressed to the item's own module, because the module funds
             // from a balance the delivery has to have landed in. A pre-fund
             // descriptor over a maker-addressed leg therefore reverts
-            // `ForLegNotMakers` at fill time — exactly the class of defect a
+            // `ForLegInvalid` at fill time — exactly the class of defect a
             // preflight exists to catch before a signature exists, and now the
             // dominant one, since every one-sided pre-fund op is this shape.
             //
@@ -1297,7 +1565,7 @@ contract SettlementLens {
                 if (r != module) return (false, "pre-funded leg must be addressed to the item's module", nxt);
                 // {Base._forSlice} refuses the pre-fund form whenever the soft-
                 // exclusivity override is live — any in-window outsider's fill of
-                // this order reverts `ForLegNotMakers` (F29 finding 8e).
+                // this order reverts `ForLegInvalid` (F29 finding 8e).
                 if (order.overrideBps() != 0) {
                     return (false, "pre-funded leg with an exclusivity override (outsiders revert)", nxt);
                 }
@@ -1325,8 +1593,8 @@ contract SettlementLens {
             }
             return (true, "", nxt);
         }
-        // BALANCE — mirrors {Base.ForBalanceNeedsCap} / {Base.ForBalanceNeedsFullFill}.
-        // The live-balance revert ({Base.ForBalanceBelowFloor}) is deliberately NOT
+        // BALANCE — mirrors {Base.ForBalanceInvalid} (the cap and full-fill rules).
+        // The live-balance floor rule of {Base.ForBalanceInvalid} is deliberately NOT
         // mirrored: it is a live wallet read, so it is a fillability fact at the
         // moment of the fill, not a defect in the order the maker is about to sign.
         if (data.length < 64) return (false, "take_for balance leg needs a cap", nxt);

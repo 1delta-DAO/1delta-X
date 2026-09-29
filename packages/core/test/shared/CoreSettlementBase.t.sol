@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
+import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {
     Settlement,
     Order,
@@ -18,6 +19,7 @@ import {
     CurvePoint
 } from "@core/settlement/Settlement.sol";
 import {PackedEncode} from "./PackedEncode.sol";
+import {DeployedBytecode} from "./DeployedBytecode.sol";
 import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 import {SettlementLens} from "@periphery/SettlementLens.sol";
 
@@ -29,7 +31,7 @@ import {LenderRegistry, Chains, Lenders, Tokens} from "../data/LenderRegistry.so
 /// dutch decay, exclusivity, min-fill, validators, invariants, single-signature
 /// permits) inherit this directly. Module integration harnesses extend it and
 /// layer their adapters on top (see the modules-aave-v3 / modules-aave-v4 packages).
-abstract contract CoreSettlementBase is Test, LenderRegistry {
+abstract contract CoreSettlementBase is Test, LenderRegistry, DeployedBytecode {
     Permit3 permit3;
     Settlement settlement;
     SettlementLens lens;
@@ -47,9 +49,27 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         WETH = tokens[Chains.ETHEREUM_MAINNET][Tokens.WETH];
         USDC = tokens[Chains.ETHEREUM_MAINNET][Tokens.USDC];
 
-        permit3 = new Permit3();
-        settlement = new Settlement(address(permit3));
-        lens = new SettlementLens(address(settlement));
+        // Gas-neutral switch — see {DeployedBytecode}: under DEPLOYED_BYTECODE=1 the
+        // helper CREATEs the shipped via-IR Permit3/Settlement (and the test-build lens)
+        // AS THIS CONTRACT and stores them into these slots; otherwise the original
+        // lines run, untouched.
+        if (DEPLOYED_BYTECODE) {
+            assembly ("memory-safe") {
+                let plan := or(SHIP_ALL, or(shl(8, permit3.offset), shl(16, permit3.slot))) // Permit3 offset | slot
+                plan := or(plan, or(shl(80, settlement.offset), shl(88, settlement.slot))) // Settlement offset | slot
+                plan := or(plan, or(shl(152, lens.offset), shl(160, lens.slot))) // lens offset | slot
+                mstore(0x00, DEPLOY_PLAN_SELECTOR)
+                mstore(0x04, plan)
+                if iszero(delegatecall(gas(), DEPLOYED_BYTECODE_HELPER, 0x00, 0x24, 0x00, 0x00)) {
+                    returndatacopy(0x00, 0x00, returndatasize())
+                    revert(0x00, returndatasize())
+                }
+            }
+        } else {
+            permit3 = new Permit3();
+            settlement = new Settlement(address(permit3));
+            lens = new SettlementLens(address(settlement));
+        }
 
         vm.label(maker, "maker");
         vm.label(solver, "solver");
@@ -409,8 +429,9 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
     /// @dev Must mirror Permit3's `_PERMIT_BATCH_WITNESS_STUB` + Settlement's
     ///      `_ORDER_WITNESS_TYPESTRING` exactly.
     string constant PERMIT_BATCH_WITNESS_FULL = "PermitBatchWitness(TokenPermit[] tokens,TakerPermit[] takers,uint256 nonce,uint256 deadline,"
-        "Order witness)"
+        "SettlementOrder witness)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
+        "SettlementOrder(address settlement,Order order)"
         "TakerPermit(address spender,address module,bytes32 ref,uint160 amount,uint48 expiration)"
         "TokenPermit(address spender,address token,uint160 amount,uint48 expiration)";
 
@@ -512,6 +533,14 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
         return keccak256(abi.encodePacked(h));
     }
 
+    /// @dev The `fillWithPermit` witness for `orderHash`: the order bound to THIS
+    ///      test's settler — `hashStruct(SettlementOrder{settlement, order})`, what
+    ///      `Core._permitBatchHead` hands Permit3. The signing helpers below take the
+    ///      ORDER hash and wrap it here, so callers never build it by hand.
+    function _settlementWitness(bytes32 orderHash) internal view returns (bytes32) {
+        return keccak256(abi.encode(OrderHash.SETTLEMENT_ORDER_TYPEHASH, address(settlement), orderHash));
+    }
+
     /// @dev Signs the witness-bound permit batch against Permit3's domain.
     function _signPermitWitness(IPermit3.PermitBatch memory batch, bytes32 witness)
         internal
@@ -526,7 +555,7 @@ abstract contract CoreSettlementBase is Test, LenderRegistry {
                 _hashTakerPermits(batch.takers),
                 batch.nonce,
                 batch.deadline,
-                witness
+                _settlementWitness(witness)
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", permit3.DOMAIN_SEPARATOR(), hashStruct));

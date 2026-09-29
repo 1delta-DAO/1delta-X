@@ -4,6 +4,9 @@ import { SETTLEMENT_ABI } from "./abi";
 import { anchorTotal, currentAmountOutAt, fillAmountsOut, inputOwed } from "./pricing";
 import { OrderSide, type Order } from "./types";
 import { packOrder } from "./packed";
+import { isProportional } from "./proportional";
+
+const MAX_UINT256 = (1n << 256n) - 1n;
 
 /**
  * Aggregator-side fill helpers: convert a router's spend budget into a
@@ -65,7 +68,14 @@ export function fillAmountFromBudget(
  * `overrideBps` is the soft-exclusivity improvement a non-exclusive in-window
  * filler owes (0 outside the window or for the exclusive filler): maker-bound
  * SELL outputs are lifted by it, auctioned inputs discounted — byte-for-byte
- * the {Pricing} rules.
+ * the {Pricing} rules. If NO leg can carry it (fixed inputs, outputs all to third
+ * parties) the contract refuses the outsider (`NotExclusiveFiller`), and so does
+ * this function.
+ *
+ * `proportional` must be `true` for a Proportional ("sell my balance") order whose
+ * marker you resolved before calling: the contract then does NOT trim an oversized
+ * request down to the (shrunk) anchor — it reverts `OverFill` — unless the request
+ * is the `MAX_UINT256` "any size" sentinel (re-audit 2026-09-29).
  */
 export function previewFillLocal(
   order: Order,
@@ -75,15 +85,18 @@ export function previewFillLocal(
   baseFee: bigint = 0n,
   overrideBps: bigint = 0n,
   priorityFee: bigint = 0n,
+  proportional: boolean = false,
 ): { delta: bigint; received: bigint[]; paid: bigint[] } {
   if (order.fillModule !== "0x0000000000000000000000000000000000000000") {
     throw new Error("previewFillLocal: fill-module orders must be quoted via SettlementLens.previewFill");
   }
+  if (overrideBps !== 0n && !overrideHasCarrier(order)) throw new Error("NotExclusiveFiller");
   const total = anchorTotal(order);
   let delta = fillAmount;
   if (prevFilled < total) {
     const rem = total - prevFilled;
-    if (delta > rem) delta = rem;
+    // A proportional request is never trimmed down — see the note above.
+    if (delta > rem && (!proportional || delta === MAX_UINT256)) delta = rem;
   }
   if (delta < order.minFillAnchor) throw new Error("FillTooSmall");
   const newFilled = prevFilled + delta;
@@ -106,6 +119,22 @@ export function previewFillLocal(
     return amt;
   });
   return { delta, received, paid };
+}
+
+/**
+ * Mirror of the contract's `OrderGates._overrideHasCarrier`: can any leg carry a
+ * soft-exclusivity premium? A BUY input, an auctioned non-proportional SELL input,
+ * or a SELL output addressed to the maker (or to zero).
+ */
+export function overrideHasCarrier(order: Order): boolean {
+  const buy = order.side === OrderSide.BUY;
+  if (order.legsIn.some((l) => (buy || l.end !== 0n) && !isProportional(l.start))) return true;
+  if (buy) return false;
+  return order.legsOut.some(
+    (l) =>
+      l.recipient === "0x0000000000000000000000000000000000000000" ||
+      l.recipient.toLowerCase() === order.maker.toLowerCase(),
+  );
 }
 
 /**

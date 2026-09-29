@@ -380,7 +380,9 @@ recipientOut   = [ 0 (maker),   originator  ]      fixed = absolute fee)
 - **Soft exclusivity skips fee legs** — the soft-exclusivity override bump (in `params`)
   (deliver-more) is the maker's queue-jump compensation, so it applies only to
   legs delivered to the maker; a fee leg to a third party is never inflated (an
-  absolute fee stays absolute). `recipientOut[j] == address(this)` burns the leg
+  absolute fee stays absolute). An order with no leg able to carry the bump (fixed
+  inputs, outputs only to third parties) gets a HARD window instead — outsiders
+  revert `NotExclusiveFiller`. `recipientOut[j] == address(this)` burns the leg
   into the anti-donation baseline on the single-order path — a maker self-burn the
   Lens flags — and is REJECTED outright by `matchSettle` (`OutputToSettlement`),
   which cannot burn it and would otherwise sweep it to the solver. See

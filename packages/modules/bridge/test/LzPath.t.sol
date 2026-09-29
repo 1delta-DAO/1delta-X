@@ -47,6 +47,13 @@ contract LzPathTest is BridgeTestBase {
         );
     }
 
+    /// @dev `_spec` with a different fee payer.
+    function _specPaidBy(bytes32 dstOrderHash, address payer) internal view returns (bytes memory) {
+        LzOftBridgeOutModule.LzSpec memory sp = abi.decode(_spec(dstOrderHash), (LzOftBridgeOutModule.LzSpec));
+        sp.feePayer = payer;
+        return abi.encode(sp);
+    }
+
     function _fillSource(bytes32 dstOrderHash) internal onSourceChain {
         Order memory src = _srcOrder(1, PAY, BRIDGE, address(lzOut), _spec(dstOrderHash));
         _wireSourceParties(address(lzOut), PAY, BRIDGE);
@@ -130,8 +137,7 @@ contract LzPathTest is BridgeTestBase {
     }
 
     function test_compose_disabledToken_doesNotRevert() public {
-        vm.prank(inboxOwner);
-        inbox.setComposeSource(address(oft), address(tC)); // registered, but tC is not enabled
+        _registerComposeSource(address(oft), address(tC)); // registered, but tC is not enabled
 
         Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
         tC.mint(address(inbox), DELIVERED);
@@ -151,10 +157,9 @@ contract LzPathTest is BridgeTestBase {
         bytes32 h = _hashOrder(dst);
         _acrossDeliver(DELIVERED, _commitmentFor(h));
 
-        vm.startPrank(inboxOwner);
+        vm.prank(inboxOwner);
         inbox.enableToken(address(tC));
-        inbox.setComposeSource(address(oft), address(tC));
-        vm.stopPrank();
+        _registerComposeSource(address(oft), address(tC));
 
         tC.mint(address(inbox), DELIVERED); // `_wrap` reports the base fixture's amountLD
         lzEndpoint.deliverCompose(address(inbox), address(oft), bytes32(uint256(9)), _wrap(_commitmentFor(h)));
@@ -273,6 +278,71 @@ contract LzPathTest is BridgeTestBase {
         assertEq(lzOut.nativeCredit(solver), 0.5 ether, "solver's credit intact");
     }
 
+    // ──────────────── Fee sponsorship (re-audit 2026-09-25, F30) ────────────────
+
+    /// @dev THE EXPLOIT. `feePayer`, `oft` and `maxNativeFee` are all maker-signed,
+    ///      and `oft` quotes the fee it is then paid. An attacker signs their OWN order
+    ///      naming a victim who topped up (here: the solver, pre-funding fees to price
+    ///      them into its spread) as `feePayer`, with an OFT whose quote is the
+    ///      victim's whole credit — and fills it. Now refused: no sponsorship.
+    function test_fee_cannotChargeAnUnconsentingPayer() public onSourceChain {
+        vm.deal(solver, 1 ether);
+        vm.prank(solver);
+        lzOut.topUpFor{value: 0.5 ether}(solver);
+        oft.setFee(0.5 ether); // the attacker's OFT quotes the victim's entire credit
+
+        Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
+        bytes memory spec = _specPaidBy(_hashOrder(dst), solver);
+        LzOftBridgeOutModule.LzSpec memory sp = abi.decode(spec, (LzOftBridgeOutModule.LzSpec));
+        sp.maxNativeFee = 0.5 ether;
+        Order memory src = _srcOrder(1, PAY, BRIDGE, address(lzOut), abi.encode(sp));
+        _wireSourceParties(address(lzOut), PAY, BRIDGE);
+        bytes memory sig = _sign(src);
+
+        vm.prank(solver);
+        vm.expectRevert(LzOftBridgeOutModule.FeeNotSponsored.selector);
+        settlement.fill(src, sig, PAY);
+        assertEq(lzOut.nativeCredit(solver), 0.5 ether, "victim's credit intact");
+    }
+
+    /// @dev The supported shape: a solver sponsors a maker's fees, and the draw is
+    ///      bounded by — and debited from — the allowance it extended.
+    function test_fee_sponsoredPayerIsChargedWithinAllowance() public onSourceChain {
+        vm.deal(solver, 1 ether);
+        vm.startPrank(solver);
+        lzOut.topUpFor{value: 0.5 ether}(solver);
+        lzOut.approveFeeSponsorship(maker, 0.03 ether);
+        vm.stopPrank();
+
+        Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
+        Order memory src = _srcOrder(1, PAY, BRIDGE, address(lzOut), _specPaidBy(_hashOrder(dst), solver));
+        _wireSourceParties(address(lzOut), PAY, BRIDGE);
+        bytes memory sig = _sign(src);
+
+        vm.prank(solver);
+        settlement.fill(src, sig, PAY);
+        assertEq(lzOut.nativeCredit(solver), 0.5 ether - 0.01 ether, "sponsor paid the quoted fee");
+        assertEq(lzOut.feeAllowance(solver, maker), 0.02 ether, "allowance debited");
+    }
+
+    /// @dev A sponsorship smaller than the quote does not stretch.
+    function test_fee_sponsorshipBelowQuote_reverts() public onSourceChain {
+        vm.deal(solver, 1 ether);
+        vm.startPrank(solver);
+        lzOut.topUpFor{value: 0.5 ether}(solver);
+        lzOut.approveFeeSponsorship(maker, 0.005 ether); // fee quotes 0.01
+        vm.stopPrank();
+
+        Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
+        Order memory src = _srcOrder(1, PAY, BRIDGE, address(lzOut), _specPaidBy(_hashOrder(dst), solver));
+        _wireSourceParties(address(lzOut), PAY, BRIDGE);
+        bytes memory sig = _sign(src);
+
+        vm.prank(solver);
+        vm.expectRevert(LzOftBridgeOutModule.FeeNotSponsored.selector);
+        settlement.fill(src, sig, PAY);
+    }
+
     function test_fee_withdrawUnspent() public {
         vm.deal(maker, 1 ether);
         vm.startPrank(maker);
@@ -291,5 +361,64 @@ contract LzPathTest is BridgeTestBase {
         vm.prank(solver);
         vm.expectRevert(LzOftBridgeOutModule.InsufficientNativeCredit.selector);
         lzOut.withdrawNative(0.3 ether);
+    }
+
+    // ──────────────────── Compose-source timelock (re-audit 2026-09-25) ────────────────────
+
+    /// @dev A compromised owner key registers its own contract as a compose source.
+    ///      Until the delay has passed the registration is inert: a fabricated
+    ///      compose from it is refused like any unregistered sender, so it cannot
+    ///      credit a row against other depositors' funds.
+    function test_composeSource_newSourceIsInertUntilDelay() public {
+        address rogue = makeAddr("rogueSource");
+        vm.prank(inboxOwner);
+        inbox.setComposeSource(rogue, address(tA));
+        assertEq(inbox.composeSourceToken(rogue), address(0), "queued, not live");
+
+        Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
+        bytes memory payload = _wrap(_commitmentFor(_hashOrder(dst)));
+        vm.expectRevert(BridgedOrderInbox.UntrustedComposeSource.selector);
+        lzEndpoint.deliverCompose(address(inbox), rogue, bytes32(uint256(7)), payload);
+
+        vm.expectRevert(BridgedOrderInbox.ComposeSourceNotReady.selector);
+        inbox.applyComposeSource(rogue);
+        vm.warp(block.timestamp + inbox.COMPOSE_SOURCE_DELAY() - 1);
+        vm.expectRevert(BridgedOrderInbox.ComposeSourceNotReady.selector);
+        inbox.applyComposeSource(rogue);
+
+        vm.warp(block.timestamp + 1);
+        inbox.applyComposeSource(rogue);
+        assertEq(inbox.composeSourceToken(rogue), address(tA), "live only after the full delay");
+    }
+
+    /// @dev Re-pointing a LIVE source at another token is an addition of trust and
+    ///      waits too; the old mapping keeps serving until then.
+    function test_composeSource_remapWaitsAndKeepsOldMapping() public {
+        vm.prank(inboxOwner);
+        inbox.setComposeSource(address(oft), address(tC));
+        assertEq(inbox.composeSourceToken(address(oft)), address(tA), "old mapping still live");
+        vm.expectRevert(BridgedOrderInbox.ComposeSourceNotReady.selector);
+        inbox.applyComposeSource(address(oft));
+    }
+
+    /// @dev Removal narrows trust, so it is instant — and it cancels a queued entry,
+    ///      which is how an owner (or a recovered key) aborts a malicious addition.
+    function test_composeSource_removalIsInstantAndCancelsQueue() public {
+        address rogue = makeAddr("rogueSource");
+        vm.startPrank(inboxOwner);
+        inbox.setComposeSource(rogue, address(tA));
+        inbox.setComposeSource(rogue, address(0));
+        inbox.setComposeSource(address(oft), address(0));
+        vm.stopPrank();
+        assertEq(inbox.composeSourceToken(address(oft)), address(0), "removed at once");
+
+        vm.warp(block.timestamp + inbox.COMPOSE_SOURCE_DELAY());
+        vm.expectRevert(BridgedOrderInbox.ComposeSourceNotReady.selector);
+        inbox.applyComposeSource(rogue);
+    }
+
+    function test_composeSource_onlyOwnerQueues() public {
+        vm.expectRevert(BridgedOrderInbox.NotOwner.selector);
+        inbox.setComposeSource(makeAddr("x"), address(tA));
     }
 }

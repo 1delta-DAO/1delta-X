@@ -32,6 +32,9 @@ contract MidnightFlashSolver is BaseFlashSolver {
     bytes32 private constant CALLBACK_SUCCESS = keccak256("morpho.midnight.callbackSuccess");
 
     error OnlyMidnight();
+    /// @dev A Midnight flash loan that some OTHER contract started named this solver
+    ///      as its callback.
+    error ForeignInitiator();
 
     constructor(address _permit3, address _settlement, address _midnight, address _router)
         BaseFlashSolver(_permit3, _settlement, _router)
@@ -64,11 +67,19 @@ contract MidnightFlashSolver is BaseFlashSolver {
     /// @dev Midnight callback. `assets[0]` of `tokens[0]` is here; Midnight pulls
     ///      exactly that back via transferFrom on return (no fee), so we approve
     ///      it and return the success sentinel.
-    function onFlashLoan(address, address[] calldata tokens, uint256[] calldata assets, bytes calldata data)
+    function onFlashLoan(address caller, address[] calldata tokens, uint256[] calldata assets, bytes calldata data)
         external
         returns (bytes32)
     {
         if (msg.sender != address(midnight)) revert OnlyMidnight();
+        // THE INITIATOR, not just the lender (re-audit F30). `midnight.flashLoan`
+        // takes ANY `callback`, and `_flashActive` stays armed for the whole of
+        // `executeFill` — so while a fill is in flight (e.g. inside its Uniswap swap,
+        // where a hostile token in the route gets control and Settlement is no
+        // longer locked) a stranger could start their own Midnight loan naming THIS
+        // solver as callback, and run a nested fill with their payload as filler.
+        // The Aave sibling checks `initiator == this` for the same reason.
+        if (caller != address(this)) revert ForeignInitiator();
         _requireInFlash();
 
         (

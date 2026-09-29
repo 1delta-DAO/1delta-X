@@ -64,7 +64,12 @@ export interface HttpTransportOptions {
   webSocket?: WSFactory;
   /** Inject fetch; defaults to global. */
   fetch?: typeof fetch;
+  /** Upper bound on pages one `queryHistory` walks. Default 200 (100k orders). */
+  maxHistoryPages?: number;
 }
+
+/** Page size `queryHistory` asks for — the server's maximum. */
+const HISTORY_PAGE = 500;
 
 /**
  * A {@link Transport} backed by the centralized demo backend: `publish` → REST
@@ -81,6 +86,7 @@ export class HttpTransport implements Transport {
   private readonly replaces: string;
   private readonly wsFactory: WSFactory;
   private readonly doFetch: typeof fetch;
+  private readonly maxHistoryPages: number;
   private ws: WSLike | undefined;
   private readonly handlers = new Map<string, Set<MessageHandler>>();
 
@@ -97,6 +103,7 @@ export class HttpTransport implements Transport {
     const f = opts.fetch ?? g.fetch;
     if (!f) throw new Error("no fetch available — pass options.fetch");
     this.doFetch = f;
+    this.maxHistoryPages = Math.max(1, opts.maxHistoryPages ?? 200);
   }
 
   async publish(topic: string, payload: Uint8Array): Promise<void> {
@@ -124,12 +131,29 @@ export class HttpTransport implements Transport {
     };
   }
 
-  async queryHistory(topic: string): Promise<Uint8Array[]> {
+  /**
+   * The whole book, PAGED. One unparameterised GET used to return the server's
+   * default page (100) and stop, so a backfilling book silently started with a
+   * fraction of the orders and never learned it. Pages follow the server's
+   * `x-next-cursor` header until it stops, `opts.limit` is reached, or
+   * {@link HttpTransportOptions.maxHistoryPages} runs out.
+   */
+  async queryHistory(topic: string, opts?: { limit?: number }): Promise<Uint8Array[]> {
     if (topic !== this.orders) return [];
-    const res = await this.doFetch(`${this.baseUrl}/orders`, { headers: { accept: "application/x-protobuf" } });
-    if (!res.ok) return [];
-    const list = decodeOrderList(new Uint8Array(await res.arrayBuffer()));
-    return list.map(encodeOrderAnnounce);
+    const out: Uint8Array[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < this.maxHistoryPages; page++) {
+      const want = opts?.limit !== undefined ? Math.min(HISTORY_PAGE, opts.limit - out.length) : HISTORY_PAGE;
+      if (want <= 0) break;
+      const qs = `limit=${want}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const res = await this.doFetch(`${this.baseUrl}/orders?${qs}`, { headers: { accept: "application/x-protobuf" } });
+      if (!res.ok) break;
+      const list = decodeOrderList(new Uint8Array(await res.arrayBuffer()));
+      for (const a of list) out.push(encodeOrderAnnounce(a));
+      cursor = res.headers?.get?.("x-next-cursor") ?? undefined;
+      if (!cursor || list.length === 0) break;
+    }
+    return out;
   }
 
   close(): void {
@@ -166,12 +190,13 @@ export class HttpTransport implements Transport {
     } else if (msg.kind === StreamKind.CANCEL) {
       this.fanout(this.cancels, encodeSoftCancel(msg.cancel));
     } else {
-      // A replace is an add + a retraction; fan it out on BOTH halves' topics so a
-      // subscriber that only cares about one still sees its half — and whole on
-      // the replace topic for {subscribeReplaces}.
+      // A replace goes out WHOLE, on the replace topic only. It used to be split
+      // onto the order and cancel topics too, and a `Book` (which subscribes all
+      // three) then applied the cancel half on its own — evicting the predecessor
+      // even when the replacement failed to verify on this node, the exact
+      // non-atomicity the message exists to prevent. Consumers that want the
+      // halves get them from {OrderbookClient.subscribeOrders} / `subscribeCancels`.
       this.fanout(this.replaces, encodeOrderReplace(msg.replace));
-      this.fanout(this.orders, encodeOrderAnnounce(msg.replace.announce));
-      this.fanout(this.cancels, encodeSoftCancel(msg.replace.cancel));
     }
   }
 
@@ -249,24 +274,36 @@ export class OrderbookClient {
     });
   }
 
+  /** New orders — including the replacement half of every cancel-and-replace. */
   async subscribeOrders(onOrder: (a: OrderAnnounce) => void): Promise<Unsubscribe> {
-    return this.transport.subscribe(this.orders, (b) => {
+    const offOrders = await this.transport.subscribe(this.orders, (b) => {
       try {
         onOrder(decodeOrderAnnounce(b));
       } catch {
         /* skip undecodable frame */
       }
     });
+    const offReplaces = await this.subscribeReplaces((r) => onOrder(r.announce));
+    return () => {
+      offOrders();
+      offReplaces();
+    };
   }
 
+  /** Retractions — including the cancel half of every cancel-and-replace. */
   async subscribeCancels(onCancel: (c: SignedSoftCancel) => void): Promise<Unsubscribe> {
-    return this.transport.subscribe(this.cancels, (b) => {
+    const offCancels = await this.transport.subscribe(this.cancels, (b) => {
       try {
         onCancel(decodeSoftCancel(b));
       } catch {
         /* skip undecodable frame */
       }
     });
+    const offReplaces = await this.subscribeReplaces((r) => onCancel(r.cancel));
+    return () => {
+      offCancels();
+      offReplaces();
+    };
   }
 
   /** One-shot backfill via `transport.queryHistory` (the current book). */

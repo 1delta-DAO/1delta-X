@@ -149,7 +149,17 @@ entrypoint is owner/operator-gated.
     itself — allowed for a principal, unlike a user-side wrapper). The queue
     delivers RIF ~30–90s later; an operator then `sell`s it back to USDT0
     through any owner-whitelisted venue (Uni v3 router, aggregators — opaque
-    calldata, with the output floor enforced by balance delta). This is the
+    calldata) along an owner-configured `setSellRoute(tokenIn, tokenOut,
+    minRateWad, maxAmountIn)` — pair, per-call spend budget and minimum rate are
+    the owner's, enforced by balance delta; `sell` is closed until one is set.
+    Fills are priced the same way: `setFillRoute(spent, received, minRateWad)`
+    — an order must pay out one owner-priced token and bring back one other at
+    no worse than the owner's rate (measured), so a self-signed "inventory for
+    junk" order fails. Both paths also draw on one cumulative per-token budget,
+    `setOutflowLimit(token, limit)` per 1-hour window, so looping calls (a
+    contract operator, one transaction) cannot multiply the per-call caps. All
+    three default to zero and fail closed.
+    Ownership is two-step (`transferOwnership` → `acceptOwnership`). This is the
     one-signature variant of the two-phase flow in
     `packages/modules/redeem/usdrif` (there the user redeems first and the
     order carries the redemption-settled validator, optionally a price band;

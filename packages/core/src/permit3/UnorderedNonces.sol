@@ -112,8 +112,35 @@ abstract contract UnorderedNonces is Permit3Base {
         permitNonceBitmap[owner][wordIndex] = word | mask;
     }
 
-    /// @dev Non-reverting predicate form of {_usePermitNonce}, for the idempotent
-    ///      signed-permit path ({SignedPermits.permitBatchWithWitnessIfNeeded}).
+    /// @dev {_usePermitNonce} that REPORTS a spent nonce instead of reverting —
+    ///      `true` if it was fresh and is now spent, `false` if it was already spent
+    ///      (nothing written). For the idempotent signed-permit path
+    ///      ({SignedPermits.permitBatchWithWitnessIfNeeded}).
+    function _tryUsePermitNonce(address owner, uint256 nonce) internal returns (bool fresh) {
+        // {_isPermitNonceUsed} + {_usePermitNonce} fused: ONE slot derivation and ONE
+        // `SLOAD` instead of two of each (the second read was warm, and its re-check
+        // could never fire).
+        mapping(uint256 => uint256) storage words = permitNonceBitmap[owner];
+        uint256 wordIndex = nonce >> 8;
+        uint256 mask = 1 << (nonce & 0xff);
+        uint256 slot;
+        uint256 word;
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(0x00, wordIndex)
+            mstore(0x20, words.slot)
+            slot := keccak256(0x00, 0x40)
+            word := sload(slot)
+        }
+        if (word & mask != 0) return false;
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, or(word, mask))
+        }
+        return true;
+    }
+
+    /// @dev Non-reverting predicate form of {_usePermitNonce}.
     function _isPermitNonceUsed(address owner, uint256 nonce) internal view returns (bool) {
         return permitNonceBitmap[owner][nonce >> 8] & (1 << (nonce & 0xff)) != 0;
     }

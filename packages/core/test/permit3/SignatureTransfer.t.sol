@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 
 import {Permit3} from "../../src/permit3/Permit3.sol";
+import {DeployedBytecode} from "../shared/DeployedBytecode.sol";
 import {IPermit3} from "../../src/interfaces/IPermit3.sol";
 import {ISignatureTransfer} from "../../src/interfaces/ISignatureTransfer.sol";
 import {SignatureVerification} from "../../src/permit3/SignatureVerification.sol";
@@ -36,7 +37,7 @@ contract MockERC20 {
 ///         allowance behind. The properties that matter are that the spender is
 ///         pinned to `msg.sender`, that the cap is a ceiling and not an amount,
 ///         and that the nonce is shared with the allowance-permit flow.
-contract SignatureTransferTest is Test {
+contract SignatureTransferTest is Test, DeployedBytecode {
     Permit3 permit3;
     MockERC20 token;
 
@@ -60,7 +61,22 @@ contract SignatureTransferTest is Test {
     string constant WITNESS_TYPE_STRING = "bytes32 witness)TokenPermissions(address token,uint256 amount)";
 
     function setUp() public {
-        permit3 = new Permit3();
+        // Gas-neutral switch — see {DeployedBytecode}: under DEPLOYED_BYTECODE=1 the
+        // helper CREATEs the shipped via-IR Permit3 AS THIS CONTRACT and stores it here.
+        if (DEPLOYED_BYTECODE) {
+            assembly ("memory-safe") {
+                let plan := or(SHIP_PERMIT3, or(shl(8, permit3.offset), shl(16, permit3.slot))) // Permit3 offset | slot
+                plan := or(plan, shl(80, NO_SLOT)) // no Settlement
+                mstore(0x00, DEPLOY_PLAN_SELECTOR)
+                mstore(0x04, plan)
+                if iszero(delegatecall(gas(), DEPLOYED_BYTECODE_HELPER, 0x00, 0x24, 0x00, 0x00)) {
+                    returndatacopy(0x00, 0x00, returndatasize())
+                    revert(0x00, returndatasize())
+                }
+            }
+        } else {
+            permit3 = new Permit3();
+        }
         token = new MockERC20();
 
         token.mint(owner, 1_000_000e18);

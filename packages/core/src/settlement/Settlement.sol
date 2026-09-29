@@ -37,7 +37,7 @@ import {
 ///    • {Signatures} — the EIP-712 domain + `_verifySignature` (order
 ///                               AUTHORIZATION — signed or on-chain-approved).
 ///    • {Base}       — execution infra: Permit3 hub + callback executor,
-///                               reentrancy lock, validators, `_executeItem(s)`.
+///                               reentrancy lock, validators, `_executeItems`/`_executeItemAt`.
 ///    • {Core}       — the single-order hot path.
 ///    • {Batch}      — `matchSettle`, the netted deferred-check
 ///                               coincidence-of-wants engine.

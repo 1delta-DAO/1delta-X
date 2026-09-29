@@ -8,8 +8,9 @@ import { assertPermit3Nonce, Permit3MessageKind } from "./permit3nonce";
 
 /**
  * Single-signature `fillWithPermit`: the maker signs a Permit3 `PermitBatch`
- * witnessed by the order, so ONE signature authorizes the order AND every token
- * + taker allowance the fill needs. Signed over the Permit3 domain.
+ * witnessed by the order AND the settler it is signed for (`d.settlement`), so ONE
+ * signature authorizes the order on that Settlement only, plus every token + taker
+ * allowance the fill needs. Signed over the Permit3 domain.
  */
 export function permitWitnessTypedData(batch: PermitBatch, order: Order, d: Deployment) {
   return {
@@ -21,7 +22,7 @@ export function permitWitnessTypedData(batch: PermitBatch, order: Order, d: Depl
       takers: batch.takers,
       nonce: batch.nonce,
       deadline: batch.deadline,
-      witness: packOrder(order),
+      witness: { settlement: d.settlement, order: packOrder(order) },
     } as unknown as Record<string, unknown>,
   };
 }

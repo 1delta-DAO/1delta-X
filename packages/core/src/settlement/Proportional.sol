@@ -85,17 +85,27 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 ///  EVERY plain fill, which this codebase does not spend on a feature most orders
 ///  never use.
 ///
-///  The consequence for callers: plain `fill` must be handed EXACTLY the resolved
-///  anchor, which a solver cannot know if the balance moves between simulation and
-///  inclusion — the very drift this encoding exists to absorb. Use `fillUpTo`
-///  instead. It clamps the request to the order's remaining size, which for an
-///  unfilled proportional order IS the freshly resolved anchor, so passing any
-///  sufficiently large `fillAmount` fills the sweep exactly.
+///  The consequence for callers: a fill must name EXACTLY the resolved anchor, or
+///  opt into "whatever it resolves to" explicitly:
 ///
-///  That same clamp is also the SOLVER's size bound, for free: `fillAmount` is a
-///  ceiling, never raised. If the maker's balance grew past what the solver quoted,
-///  the clamp leaves the request below the anchor and the fill is rejected as the
-///  partial it is — the solver is never silently made to buy more than it priced.
+///    • `fill` / `fillUpTo` with the size the solver QUOTED. If the balance moved
+///      either way since the quote, the fill reverts — up: the request is below
+///      the anchor, a partial ({ProportionalNeedsFullFill}); down: `fillUpTo` does
+///      NOT trim a proportional request to the smaller anchor, so {_openFill}
+///      reverts `OverFill`. The solver is never made to trade a size it did not
+///      price, in either direction.
+///    • `fillUpTo` (or a `matchSettle` open) with `type(uint256).max`: "fill the
+///      whole remaining anchor, whatever it is". Only for a caller that has priced
+///      ANY size up to the cap — see the next section for why a shrunk balance is
+///      the filler's loss, not the maker's.
+///
+///  ⚠ WHY `fillUpTo` DOES NOT TRIM HERE (re-audit 2026-09-29). It used to: the
+///  clamp cut an oversized request down to the live balance, and this note called
+///  that the easy path. But a proportional fill pays every OUTPUT in full whatever
+///  the anchor resolved to, so a trimmed fill charged the solver its full quoted
+///  output for less input — and a maker who moved all but 1 wei out just before
+///  inclusion was paid in full for dust. `Core._clampToRemaining` now refuses the
+///  downward trim on a proportional anchor unless the caller passed the sentinel.
 ///
 ///  ⚠ `end` IS THE MAKER'S CAP, AND YOU ALMOST ALWAYS WANT ONE
 ///  ──────────────────────────────────────────────────────────
@@ -103,9 +113,10 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 ///  and every OUTPUT leg pays its full signed amount — `ceil(anchor · start /
 ///  anchor) == start`, independent of what the anchor resolved to. The maker
 ///  therefore receives the SAME output whether their balance came in at half
-///  the expected size or at triple it. Half is harmless (they sell less and are
-///  paid in full); triple is not (they sell three times as much for the same
-///  money).
+///  the expected size or at triple it. Half is harmless TO THE MAKER (they sell
+///  less and are paid in full) — it is the FILLER who pays for it, which is why a
+///  shrunk anchor fills only on the filler's explicit opt-in (above); triple is not
+///  harmless to the maker (they sell three times as much for the same money).
 ///
 ///  So on a proportional leg `end` is repurposed: not a decay endpoint — a
 ///  balance-relative amount has nothing to ramp toward — but an ABSOLUTE CAP on

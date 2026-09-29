@@ -229,9 +229,13 @@ and expiries. Full design: [docs/delegated-signers.md](docs/delegated-signers.md
    sharing a `(token, recipient)` (one delivery would satisfy both checks —
    `DeltaVerifyDuplicateLeg`) and a maker-bound output token that is also an input
    token (the measurement would be net, not gross — `DeltaVerifySameToken`). The
-   mode is callback-only and refused on the netted path. Its one trust assumption:
-   the check counts any balance increase across the fill, so a reflection/rebasing
-   token can supply part of it — prefer plain fee-on-transfer tokens.
+   mode is callback-only and refused on the netted path, and fillable ONLY by the
+   order's named `exclusiveFiller`: the check counts any balance increase across
+   the fill, so an unnamed filler could route the maker's OTHER paid intent (on
+   another venue, same token) through its callback and pass it off as this
+   delivery (F30). The maker therefore trusts the filler it names to run the
+   callback, and a reflection/rebasing token can still supply part of the delta —
+   prefer plain fee-on-transfer tokens.
 
 ---
 
@@ -493,7 +497,7 @@ coverage is known to be load-bearing rather than incidental.
 | M-5 | Medium | 15 `BalanceMode.Full` branches | `Full` liquidates the user's entire live balance regardless of slice, so a 1-unit fill force-closed the whole position and bricked the rest of the order. | `FullFillGuard.requireFullFillFromData` — maker signs the item total after the mode slot. |
 | M-6 | Medium | `PermitHelper`, `DelegationHelper` (×3) | Nonce-based replays were hard calls, so a mempool front-runner could permanently brick any gasless order for ~50k gas — the signature bytes are inside `ref` and the order hash, so it could not be re-encoded. | Best-effort `try/catch`; the Permit3 pull remains the gate. See [gasless-permit-relay.md](docs/gasless-permit-relay.md). |
 | M-7 | Medium | `ERC4626WithdrawModule` | Three: `asset` was caller-supplied (a free transfer of any token the module held); `pendingWithdrawals[vault][requestId]` was blind-overwritten (permanent share loss on any ERC-7540 `REQUEST_ID_0` vault); and `amount` was used as a slippage **floor**, inverting the Permit3 cap. | `vault.asset()` read on-chain; collision reverts; `amount` is the cap with surplus to the beneficiary; `minAssets` moved into `data`. |
-| M-8 | Medium | `UsdrifInventorySolver` | `executeFill` accepts an arbitrary `(order, sig)` while holding a max Permit3 allowance, so an **operator** — a deliberately lower trust tier than owner — could take 100% of inventory in one self-signed order. | Owner-set `maxOutflowPerFill`, enforced as a measured delta, defaulting to zero (fail closed). Bounds a compromised key rather than eliminating it. |
+| M-8 | Medium | `UsdrifInventorySolver` | `executeFill` accepts an arbitrary `(order, sig)` while holding a max Permit3 allowance, so an **operator** — a deliberately lower trust tier than owner — could take 100% of inventory in one self-signed order. | Owner-set `maxOutflowPerFill`, enforced as a measured delta, defaulting to zero (fail closed). **Superseded (F30, 2026-09-28):** the cap measured only what LEFT, per call — a self-signed order paying the cap for a junk token could be repeated, in one transaction by a contract operator, and `sell` did not consult it at all. The operator is now bounded by owner-set fill and sell ROUTES (what leaves must return as the owner's token at no worse than the owner's rate, measured) plus a cumulative per-token budget per 1-hour window shared by both paths. A compromised operator's worst case is conversions at the owner's floor rates, up to the window budget, until the key is revoked. |
 | L-3 | Low | `packages/solvers` (18 call sites) | Unchecked bool-returning ERC20 calls: **no solver could fill a USDT leg at all** (the approve reverts on the ABI decode), and a `false`-returning token made the flash-repayment transfer a silent no-op. | `SafeTransferLib` throughout; `forceApprove` also clears the USDT approve-race. |
 | L-4 | Low | `Base` (constructor) | A `permit3` address with no code made every transfer a **silent no-op** — orders would "settle" with nothing moving — because `transferFromWithFallback` probes with a low-level call and treats success as done. | `InvalidPermit3` constructor check. |
 | L-5 | Low | `Base`, `NonceManager` | Unchecked `uint160(slice)` downcast on a value path; `exclusivityOverrideBps > 10000` surfaced as an arithmetic panic; `invalidateNonceWord` emitted no event, so bulk cancellation was invisible to indexers. | `AmountOverflow`, `InvalidOverrideBps`, `NonceWordInvalidated`. |
@@ -575,7 +579,7 @@ maker's `start`, where UniswapX L-03 resolved to the filler's `end`).
 | F6 | C3 | Info | Signature malleability accepted, matching Permit2. | **No change** — already covered by [S-7](#signature-malleability-is-inert-on-chain-but-the-orderbook-must-key-on-the-hash-s-7). Verified `@1delta-x/orderbook` keys, sorts and paginates on `orderHash`. |
 
 Three checks worth re-running whenever the relevant code moves are listed under
-[Checked and clean](docs/reference-audits.md#checked-and-clean) — in particular the
+[Checked and clean](docs/reference-audits/checked-and-clean.md#checked-and-clean) — in particular the
 **module-dispatch selector scan** (`makeOnBehalf` / `settle` must never collide with
 anything on Permit3, which is what contains the C1 shape here) and the rule that a
 **SETTLE module must never pull from the filler**.
@@ -698,7 +702,11 @@ Everything else fails closed with a named error.
   module's `requiredPermissions()`: `0x01` for add-collateral, `0x22` for borrow.
   Gearbox rejects any other value.
 - **`UsdrifInventorySolver`** — `setMaxOutflowPerFill(token, cap)` must be set by the
-  owner before any operator can fill; it defaults to zero and fails closed.
+  owner before any operator can fill; it defaults to zero and fails closed. Since
+  F30 the owner must ALSO set `setFillRoute(USDT0, USDRIF, minRateWad)`, a
+  `setSellRoute` per recycle pair, and `setOutflowLimit(token, limit)` for every
+  token that leaves (USDT0, RIF, …) — each defaults to zero and fails closed. Keep
+  the rate floors near market: a stale floor is the loss budget of a stolen key.
 - **Settlement constructor** — now rejects a `permit3` address with no code.
 - **Orderbook indexers** — must additionally watch `NonceWordInvalidated`, or they
   will keep serving orders a maker has bulk-cancelled via `invalidateNonceWord`.

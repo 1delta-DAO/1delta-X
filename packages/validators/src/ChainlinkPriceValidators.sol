@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {Order} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 import {IAggregatorV3} from "@validators/interfaces/IAggregatorV3.sol";
 
 /// @dev Shared, hardened Chainlink read. Reverts the validator (→ fill aborts)
@@ -116,6 +117,10 @@ contract ChainlinkTickFloorValidator is IOrderValidator {
     /// @dev `num == 0` would pass every price; `den == 0` would pass none. Neither is
     ///      a market limit, so neither is accepted.
     error ZeroRatio();
+    /// @dev `legsIn` or `legsOut` holds no leg. The tick reads below are unchecked
+    ///      packed-blob accessors, so on an empty blob they would read whatever
+    ///      maker-signed bytes follow it rather than a leg (re-audit 2026-09-29).
+    error EmptyLeg();
 
     function validate(Order calldata order, address, bytes calldata data, bytes calldata)
         external
@@ -127,6 +132,10 @@ contract ChainlinkTickFloorValidator is IOrderValidator {
         (address feed, uint256 maxStaleness, uint256 num, uint256 den) =
             abi.decode(data, (address, uint256, uint256, uint256));
         if (num == 0 || den == 0) revert ZeroRatio();
+        if (
+            PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE) == 0
+                || PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE) == 0
+        ) revert EmptyLeg();
         // Its own frame: the four decoded words plus the two tick reads push this
         // function past the legacy-codegen stack limit.
         return _tickAtLeast(order, uint256(ChainlinkRead.read(feed, maxStaleness)) * num, den);

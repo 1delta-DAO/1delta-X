@@ -17,10 +17,10 @@ import {SignatureTransfer} from "./SignatureTransfer.sol";
 ///      spender's allowance and calls the token's ERC20 transferFrom.
 ///      Permit2-equivalent. See {AllowanceTransfer}.
 ///
-///    • taker book — keyed (user → spender → bytes32 ref). An approved
+///    • taker book — keyed (user → spender → module → bytes32 ref). An approved
 ///      spender invokes `take(module, user, amount, receiver, data)`;
 ///      Permit3 computes `ref = keccak256(data)`, decrements the user's
-///      allowance on (spender, ref), then invokes the module's
+///      allowance on (spender, module, ref), then invokes the module's
 ///      `takeOnBehalf`. The module performs the protocol-native call.
 ///      See {TakerAllowance}.
 ///
@@ -34,8 +34,9 @@ import {SignatureTransfer} from "./SignatureTransfer.sol";
 ///
 ///    • on-chain — `approveToken` / `approveTaker`
 ///    • signed allowance — {SignedPermits}: `permitBatch`, and
-///      `permitBatchWithWitness` to bind the grant to an order hash so one
-///      signature covers both the allowances and the order consuming them
+///      `permitBatchWithWitness` to bind the grant to a caller-defined witness
+///      (Settlement's is `SettlementOrder{settlement, order}`) so one signature
+///      covers both the allowances and the order consuming them
 ///    • signed one-shot — {SignatureTransfer}: `permitTransferFrom` moves
 ///      tokens once and leaves no allowance behind
 ///

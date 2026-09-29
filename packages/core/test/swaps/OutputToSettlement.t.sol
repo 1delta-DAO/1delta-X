@@ -184,4 +184,17 @@ contract OutputToSettlementTest is CoreSettlementBase {
 
         assertEq(IERC20(USDC).balanceOf(maker), USDC_AMT, "maker paid in full");
     }
+
+    /// Re-audit 2026-09-29: the EXECUTOR is the same hazard one hop out — a leg paid
+    /// to it sits where the solver's own CALL step can take it back in the same
+    /// plan. Refused on the netted path like a self-addressed leg.
+    function test_matchSettle_rejectsExecutorAddressedLeg() public {
+        (Order memory a, Order memory b) = _mirrorPair(3, 4);
+        a.legsOut = PackedEncode.setLegOutRecipient(a.legsOut, 0, address(settlement.EXECUTOR()));
+        MatchPlan memory p = _plan(a, b);
+
+        vm.prank(solver);
+        vm.expectRevert(Base.OutputToSettlement.selector);
+        settlement.matchSettle(p);
+    }
 }

@@ -17,6 +17,7 @@ import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {SettlementLens} from "@periphery/SettlementLens.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {PackedEncode} from "./shared/PackedEncode.sol";
+import {DeployedBytecode} from "./shared/DeployedBytecode.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 
 /// @dev DIFFERENTIAL guard for {OrderHash.hash}, which is hand-rolled assembly —
@@ -28,13 +29,29 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 ///
 ///      This pair is what made it safe to try three different encodings of `hash`
 ///      and know each produced a byte-identical digest.
-contract HashDifferentialTest is Test {
+contract HashDifferentialTest is Test, DeployedBytecode {
     SettlementLens lens;
 
     function setUp() public {
-        Permit3 permit3 = new Permit3();
-        Settlement settlement = new Settlement(address(permit3));
-        lens = new SettlementLens(address(settlement));
+        // Gas-neutral switch — see {DeployedBytecode}. Permit3/Settlement are locals, so
+        // under DEPLOYED_BYTECODE=1 only the lens (over the shipped Settlement) is stored.
+        if (DEPLOYED_BYTECODE) {
+            assembly ("memory-safe") {
+                let plan := or(SHIP_ALL, shl(8, NO_SLOT)) // Permit3 not stored
+                plan := or(plan, shl(80, NO_SLOT)) // Settlement not stored
+                plan := or(plan, or(shl(152, lens.offset), shl(160, lens.slot))) // lens offset | slot
+                mstore(0x00, DEPLOY_PLAN_SELECTOR)
+                mstore(0x04, plan)
+                if iszero(delegatecall(gas(), DEPLOYED_BYTECODE_HELPER, 0x00, 0x24, 0x00, 0x00)) {
+                    returndatacopy(0x00, 0x00, returndatasize())
+                    revert(0x00, returndatasize())
+                }
+            }
+        } else {
+            Permit3 permit3 = new Permit3();
+            Settlement settlement = new Settlement(address(permit3));
+            lens = new SettlementLens(address(settlement));
+        }
     }
 
     // ──────────────────── Reference implementation ────────────────────
@@ -174,7 +191,7 @@ contract HashDifferentialTest is Test {
     }
 }
 
-contract Permit3HashDifferentialTest is Test {
+contract Permit3HashDifferentialTest is Test, DeployedBytecode {
     Permit3 permit3;
 
     uint256 constant OWNER_PK = 0xA11CE;
@@ -191,7 +208,22 @@ contract Permit3HashDifferentialTest is Test {
     );
 
     function setUp() public {
-        permit3 = new Permit3();
+        // Gas-neutral switch — see {DeployedBytecode}: under DEPLOYED_BYTECODE=1 the
+        // helper CREATEs the shipped via-IR Permit3 AS THIS CONTRACT and stores it here.
+        if (DEPLOYED_BYTECODE) {
+            assembly ("memory-safe") {
+                let plan := or(SHIP_PERMIT3, or(shl(8, permit3.offset), shl(16, permit3.slot))) // Permit3 offset | slot
+                plan := or(plan, shl(80, NO_SLOT)) // no Settlement
+                mstore(0x00, DEPLOY_PLAN_SELECTOR)
+                mstore(0x04, plan)
+                if iszero(delegatecall(gas(), DEPLOYED_BYTECODE_HELPER, 0x00, 0x24, 0x00, 0x00)) {
+                    returndatacopy(0x00, 0x00, returndatasize())
+                    revert(0x00, returndatasize())
+                }
+            }
+        } else {
+            permit3 = new Permit3();
+        }
         owner = vm.addr(OWNER_PK);
     }
 

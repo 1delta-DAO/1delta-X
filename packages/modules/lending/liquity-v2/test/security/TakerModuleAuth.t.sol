@@ -40,4 +40,23 @@ contract LiquityV2TakerModuleAuthTest is Test {
         vm.expectRevert(LiquityV2TakerModule.OnlyPermit3.selector);
         taker.takeOnBehalf(maker, 1e18, attacker, _withdrawData());
     }
+
+    /// @dev `data` with its leading op word raised by 256 — the value a bare
+    ///      `uint8(...)` cast read back as the SAME op.
+    function _opPlus256(bytes memory d) internal pure returns (bytes memory) {
+        assembly {
+            mstore(add(d, 0x20), add(mload(add(d, 0x20)), 256))
+        }
+        return d;
+    }
+
+    /// @dev Re-audit F30: an out-of-range op word reverts at dispatch. (It already
+    ///      reverted in every branch's own `uint8` decode; this pins the property to
+    ///      the dispatch so a future branch that skips the re-decode cannot run op
+    ///      `word mod 256`.)
+    function test_opWordAbove255_reverts() public {
+        vm.prank(permit3);
+        vm.expectRevert();
+        taker.takeOnBehalf(maker, 1e18, attacker, _opPlus256(_borrowData()));
+    }
 }

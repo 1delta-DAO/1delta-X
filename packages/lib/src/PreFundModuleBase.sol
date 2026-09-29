@@ -117,7 +117,7 @@ abstract contract PreFundModuleBase {
     ///      binds the referenced leg's RECIPIENT (bit 253) but not its TOKEN, so a
     ///      funded body must still open with {PreFundGuard.requireDelivered} /
     ///      {PreFundGuard.floorOf} on the asset it is about to spend. The leg-reuse axis
-    ///      IS now closed in the core ({Base.ForLegReused}), so the floor is no longer
+    ///      IS now closed in the core ({Base.ForLegInvalid}), so the floor is no longer
     ///      load-bearing for that one — it remains load-bearing for the token.
     function _gatePreFundMake(bytes calldata data) internal view {
         PreFundGuard.requireSettlement(msg.sender, settlement);

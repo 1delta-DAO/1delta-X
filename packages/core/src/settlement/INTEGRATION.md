@@ -115,6 +115,9 @@ reverts `BumpTooLow`.
   A non-zero override bps (in `params`) lets outsiders fill at that many bps of
   price improvement to the maker — priced into `previewFill` automatically.
   Hard exclusivity (`overrideBps == 0`) reverts (and previews as) `NotExclusiveFiller`.
+  So does a soft window where no leg can carry the premium — no BUY input, no
+  auctioned non-proportional SELL input, no SELL output to the maker (e.g. a fixed
+  input with a third-party output).
 * Repeated small fills round per fill (maker-favoring ceil on SELL outputs):
   up to 1 wei per fill vs. one large fill. Don't assume exact linearity.
 * Order-shape filters for aggregator ingestion: `items.length == 0`,

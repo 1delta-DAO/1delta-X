@@ -265,6 +265,7 @@ export default function App() {
         side: ticket.side,
         pay: { address: pay.address, decimals: pay.decimals },
         recv: { address: recv.address, decimals: recv.decimals },
+        solver: deployment?.solver,
         ...spec,
       });
 

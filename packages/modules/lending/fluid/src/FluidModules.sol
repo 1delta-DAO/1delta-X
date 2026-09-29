@@ -347,7 +347,10 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         // `data` and does NOT pro-rate. Reject a sliced fill outright — see {FullFillGuard}.
         FullFillGuard.requireFullFill(amount, p.totalAmount);
 
-        if (Mode(uint8(p.mode)) == Mode.Open) {
+        // `Mode(p.mode)` straight from the uint256 is range-checked (Panic 0x21 on
+        // anything but 0/1); `Mode(uint8(p.mode))` first truncated mod 256, so
+        // `mode = 256` ran Open while off-chain decoders rejected it (re-audit F30).
+        if (Mode(p.mode) == Mode.Open) {
             _open(p, onBehalfOf, receiver, amount);
         } else {
             _close(p, onBehalfOf, receiver, amount);

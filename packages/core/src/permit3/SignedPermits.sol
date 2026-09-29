@@ -15,9 +15,10 @@ import {Permit3Hash} from "./libraries/Permit3Hash.sol";
 ///         authorise everything an order needs in a single signature.
 ///
 ///         `permitBatchWithWitness` binds that grant to an arbitrary caller-defined
-///         witness (in practice, an order hash) — the signature that opens the
+///         witness (in practice Settlement's `SettlementOrder{settlement, order}`,
+///         {OrderHash.SETTLEMENT_ORDER_TYPEHASH}) — the signature that opens the
 ///         allowances is the same signature that authorises the order consuming
-///         them, and it cannot be lifted onto a different order.
+///         them, and it cannot be lifted onto a different order or settler.
 ///
 /// @dev    Sits ABOVE the books and writes them through their internal appliers, so
 ///         neither book carries any signature surface of its own.
@@ -124,8 +125,7 @@ abstract contract SignedPermits is UnorderedNonces, AllowanceTransfer, TakerAllo
         // GRANTS, NOT THE ORDER. The cancellations that bind the order are
         // {OrderState.cancelOrder}, the order-nonce bitmap / `rollbackNonces`, and
         // the expiry. See {UnorderedNonces} and `docs/soft-cancel.md`.
-        if (_isPermitNonceUsed(owner, batch.nonce)) return;
-        _usePermitNonce(owner, batch.nonce);
+        if (!_tryUsePermitNonce(owner, batch.nonce)) return;
         _applyBatch(owner, batch);
         emit PermitBatchApplied(owner, batch.nonce);
     }

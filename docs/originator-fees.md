@@ -79,6 +79,13 @@ on:
 pays; a rising relayer-fee input leg *is* reduced by the override, i.e. the
 queue-jumping relayer gives up part of its fee to the maker.)
 
+The flip side: an order where **no** leg can carry the premium — only fixed
+inputs, and every output addressed to a third party (swap-and-send) — has
+nothing to improve, so its soft window is **hard**: an outsider reverts
+`NotExclusiveFiller` rather than filling at the exclusive filler's price
+(`test_thirdPartyAddressedLeg_softWindowIsHard`). One auctioned input is enough
+to keep it soft (`test_auctionedInput_keepsTheWindowSoft`).
+
 ### What the fee does NOT touch
 
 - **`legsIn`** — the solver's receipts are never skimmed.

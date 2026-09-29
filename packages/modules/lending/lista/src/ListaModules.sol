@@ -141,7 +141,12 @@ contract ListaTakerModule is ITakerModule {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
-        uint8 op = uint8(uint256(bytes32(data[:32])));
+        // Decoded as a real `uint8`, which REVERTS on a word above 255. The bare
+        // `uint8(...)` cast this replaces read it mod 256; every branch below
+        // re-decodes the op as `uint8` and so reverted anyway, but that made the
+        // rejection an accident of each branch's decode rather than a property of
+        // the dispatch (re-audit F30; the sibling Fluid `mode` WAS reachable).
+        uint8 op = abi.decode(data[:32], (uint8));
 
         if (op == uint8(Op.WithdrawCollateral)) {
             (, address moolah, MarketParams memory mp) = abi.decode(data, (uint8, address, MarketParams));

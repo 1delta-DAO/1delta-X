@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
+import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {Base} from "@core/settlement/Base.sol";
 import {Settlement, CallbackMode, Order, Item, LegOut} from "@core/settlement/Settlement.sol";
 import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
@@ -106,9 +107,13 @@ contract DeltaVerifyDeliveryTest is CoreSettlementBase {
         IERC20(USDC).approve(address(pool), type(uint256).max);
     }
 
-    /// @dev Set the delta-verify bit (104) on an already-built order.
-    function _markDeltaVerify(Order memory o) internal pure {
+    /// @dev Set the delta-verify bit (104) on an already-built order, naming the
+    ///      suite's `solver` as the order's exclusive filler — a delta-verify order
+    ///      is fillable by its named filler ONLY (re-audit 2026-09-25; see the
+    ///      regression block at the bottom of this file).
+    function _markDeltaVerify(Order memory o) internal view {
         o.timing |= uint256(1) << 104;
+        o.exclusiveFiller = solver;
     }
 
     function _fund() internal {
@@ -446,5 +451,103 @@ contract DeltaVerifyDeliveryTest is CoreSettlementBase {
         settlement.fillWithCallback(o, sig, FOT_OUT, address(pool), cb, CallbackMode.PostInputs);
 
         assertGe(fot.balanceOf(maker), FOT_OUT, "BUY: fixed output verified net-of-fee");
+    }
+
+    // ─────────── Only the named filler (re-audit 2026-09-25) ───────────
+    //
+    // The delta check measures ANY increase in the maker's balance across the
+    // callback. An unnamed filler owns that callback, and can make the maker's
+    // balance rise with money the maker paid for ELSEWHERE — by settling the maker's
+    // other open intent on another venue that pays the same token. The check cannot
+    // tell that inflow from a delivery, so the settler refuses the filler instead.
+
+    /// @dev The exploit shape. The maker has a second, unrelated intent paying FoT
+    ///      (modelled by the pool paying the maker from its own stock — in the real
+    ///      attack, from the maker's own funds on another venue). A filler the maker
+    ///      did not name routes THAT payment through this order's callback. Were it
+    ///      admitted, the delta would pass and the filler would pocket the maker's
+    ///      input for a delivery the maker funded twice.
+    function test_deltaVerify_unnamedFiller_cannotPassOffAnotherIntentsPayment() public {
+        _fund();
+        Order memory o = _order(maker, 40, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
+        _markDeltaVerify(o);
+        bytes memory sig = _sign(o);
+
+        address mallory = makeAddr("mallory");
+        uint256 grossOut = FOT_OUT * 10_000 / (10_000 - FEE_BPS) + 1;
+        bytes memory cb = abi.encodeCall(DeltaPool.deliverOne, (address(fot), maker, grossOut));
+
+        vm.prank(mallory);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        settlement.fillWithCallback(o, sig, USDC_IN, address(pool), cb, CallbackMode.PostInputs);
+
+        // Same order, same callback shape, through the NAMED filler: fills.
+        cb = abi.encodeCall(DeltaPool.swapToMaker, (solver, USDC, USDC_IN, address(fot), maker, grossOut));
+        vm.prank(solver);
+        settlement.fillWithCallback(o, sig, USDC_IN, address(pool), cb, CallbackMode.PostInputs);
+        assertGe(fot.balanceOf(maker), FOT_OUT, "the named filler still delivers");
+    }
+
+    /// @dev PreDelivery (forward) mode snapshots at a different site; same rule.
+    function test_deltaVerify_unnamedFiller_reverts_preDelivery() public {
+        _fund();
+        Order memory o = _order(maker, 41, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
+        _markDeltaVerify(o);
+        bytes memory sig = _sign(o);
+        bytes memory cb = abi.encodeCall(DeltaPool.deliverOne, (address(fot), maker, 2 * FOT_OUT));
+
+        vm.prank(makeAddr("mallory"));
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        settlement.fillWithCallback(o, sig, USDC_IN, address(pool), cb, CallbackMode.PreDelivery);
+    }
+
+    /// @dev No named filler ⇒ no one can fill. Zero is not "open" for this mode.
+    function test_deltaVerify_noNamedFiller_neverFills() public {
+        _fund();
+        Order memory o = _order(maker, 42, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
+        _markDeltaVerify(o);
+        o.exclusiveFiller = address(0);
+        bytes memory sig = _sign(o);
+        bytes memory cb = abi.encodeCall(DeltaPool.deliverOne, (address(fot), maker, 2 * FOT_OUT));
+
+        vm.prank(solver);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        settlement.fillWithCallback(o, sig, USDC_IN, address(pool), cb, CallbackMode.PostInputs);
+    }
+
+    /// @dev A filler SET cannot name a single callback owner, so it fails closed —
+    ///      even for a member of the set.
+    function test_deltaVerify_fillerSet_failsClosed() public {
+        _fund();
+        Order memory o = _order(maker, 43, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
+        _markDeltaVerify(o);
+        o.exclusiveFiller = OrderGates.FILLER_SET;
+        o.curve = abi.encodePacked(uint8(0), solver);
+        bytes memory sig = _sign(o);
+        bytes memory cb = abi.encodeCall(DeltaPool.deliverOne, (address(fot), maker, 2 * FOT_OUT));
+
+        vm.prank(solver);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        settlement.fillWithCallback(o, sig, USDC_IN, address(pool), cb, CallbackMode.PostInputs);
+    }
+
+    /// @dev The lens mirrors both halves, so the rule is caught before a signature
+    ///      exists (shape) and before a filler spends gas (preview).
+    function test_deltaVerify_lensMirrorsTheNamedFillerRule() public {
+        Order memory o = _order(maker, 44, USDC, address(fot), USDC_IN, FOT_OUT, new Item[](0));
+        _markDeltaVerify(o);
+        (bool ok,) = lens.validateOrder(o);
+        assertTrue(ok, "named filler: well-formed");
+
+        o.exclusiveFiller = address(0);
+        string memory reason;
+        (ok, reason) = lens.validateOrder(o);
+        assertFalse(ok, "no named filler: malformed");
+        assertEq(reason, "delta-verify order must name a single exclusiveFiller");
+
+        o.exclusiveFiller = solver;
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        lens.previewFill(o, USDC_IN, makeAddr("mallory"), "");
+        lens.previewFill(o, USDC_IN, solver, ""); // the named filler previews
     }
 }

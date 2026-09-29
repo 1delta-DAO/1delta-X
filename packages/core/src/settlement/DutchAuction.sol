@@ -163,10 +163,26 @@ library DutchAuction {
     ///         the delivery must happen DURING the fill: the snapshot is taken at fill
     ///         start, so a pre-transfer lands under it and does not count.
     ///
+    ///         ⚠ NAMED FILLER ONLY, for the order's whole life — every fill must come
+    ///         from `msg.sender == order.exclusiveFiller`, else
+    ///         {OrderGates.NotExclusiveFiller} ({Core._snapshotOutRecipients}). No
+    ///         window, no soft override, and `address(0)` or {OrderGates.FILLER_SET}
+    ///         never matches a caller, so such an order fails closed. The check
+    ///         below cannot tell this fill's delivery from the maker's OTHER paid
+    ///         inflow of the same token, and the filler owns the callback, so the
+    ///         maker names who may run it (re-audit F30).
+    ///
+    ///         Naming a CONTRACT hands this check to that contract's own access
+    ///         control: whoever can make it call {Core.fillWithCallback} runs the
+    ///         callback. The shipped `AggregatorFillSolver` therefore refuses a
+    ///         delta-verify order unless it is `GATED` to an operator set
+    ///         (`DirectNeedsOperators`); a permissionless contract filler named here
+    ///         makes the order fillable by anyone who routes through it.
+    ///
     ///         ⚠ SHAPE RESTRICTIONS, enforced on-chain by {Core._snapshotOutRecipients}:
-    ///         no two output legs may share a (token, recipient), and a maker-bound
-    ///         output token may not also be an input token. A per-leg balance delta
-    ///         only measures one leg when that leg alone moves the balance.
+    ///         no two output legs may share a (token, recipient), and no output token
+    ///         may also be an input token, whoever the leg pays. A per-leg balance
+    ///         delta only measures one leg when that leg alone moves the balance.
     ///
     ///         ⚠ REBASING / REFLECTION TOKENS. The check measures ANY balance increase
     ///         on the recipient across the fill, not specifically "sent by the filler".
@@ -335,38 +351,37 @@ library DutchAuction {
         } else {
             // Piecewise-linear curve, timeDeltas relative to decayStartTime.
             uint256 elapsed = _elapsed(order);
-            (uint256 tFirst, uint256 bFirst) = PackedArrays.curvePoint(curve, 0);
+            (uint256 t0, uint256 b0) = PackedArrays.curvePoint(curve, 0);
             (uint256 tLast, uint256 bLast) = PackedArrays.curvePoint(curve, n - 1);
-            if (elapsed <= tFirst) {
-                bps = bFirst;
+            if (elapsed <= t0) {
+                bps = b0;
             } else if (elapsed >= tLast) {
                 bps = bLast;
             } else {
-                // `n - 1` is deliberately left IN the condition. Hoisting it to a
-                // local measured WORSE: this loop almost always matches on its first
-                // iteration (curves are a handful of points), so the extra local
-                // costs more than the re-subtraction it saves. The unchecked
-                // increment is a clean win — `k < n - 1` cannot overflow.
-                for (uint256 k; k < n - 1;) {
-                    (uint256 t1, uint256 b1) = PackedArrays.curvePoint(curve, k + 1);
+                // Walk the segments (k-1, k). The previous iteration's point IS this
+                // segment's left end, so it is carried rather than decoded again.
+                for (uint256 k = 1; k < n;) {
+                    (uint256 t1, uint256 b1) = PackedArrays.curvePoint(curve, k);
                     if (elapsed < t1) {
-                        (uint256 t0, uint256 b0) = PackedArrays.curvePoint(curve, k);
                         // A well-formed curve is strictly increasing in time, and
                         // {SettlementLens.validateOrder} rejects one that is not. But
                         // the lens is off-chain advice, not a gate: a maker can sign a
                         // flat or decreasing pair anyway, and the settler would then
                         // surface a raw Panic(0x11)/Panic(0x12) from the subtraction
-                        // and the divide below. Name it instead. One comparison, and
-                        // only on the iteration that matched — this loop almost always
-                        // matches on its first.
+                        // and the divide below. Name it instead.
                         if (t1 <= t0) revert InvalidAuctionParams();
                         uint256 span = t1 - t0; // > 0 by the check above
                         // Interpolate; the curve may rise or fall between points.
                         bps = b1 >= b0
                             ? b0 + ((b1 - b0) * (elapsed - t0)) / span
-                            : b0 - ((b0 - b1) * (elapsed - t0)) / span;
+                            // A FALLING segment rounds its decrement UP, so the bump
+                            // lands on the maker's side of exact, as the rising branch's
+                            // floored increment already does (re-audit 2026-09-29).
+                            // `elapsed - t0 < span`, so the ceiling is ≤ `b0 - b1`.
+                            : b0 - ((b0 - b1) * (elapsed - t0) + span - 1) / span;
                         break;
                     }
+                    (t0, b0) = (t1, b1);
                     unchecked {
                         ++k;
                     }
@@ -456,7 +471,11 @@ library DutchAuction {
         // clears at the floor, which is exactly the guarantee `end` already is.
         uint256 baseline = baselinePriorityFeeWei(order);
         prio = prio > baseline ? prio - baseline : 0;
-        uint256 improve = (prio * BPS) / scale;
+        // Rounded UP: the improvement is the maker's, so a fractional basis point
+        // goes to them — floored, `3 gwei` scale and a `1 gwei` bid priced 6667 where
+        // the exact bump is 6666.67 (re-audit 2026-09-29). `prio · BPS` cannot
+        // overflow: a priority fee is bounded by a real gas price.
+        uint256 improve = (prio * BPS + scale - 1) / scale;
         // No bid ⇒ BPS ⇒ the maker receives `end`, its guaranteed floor.
         return improve >= BPS ? 0 : BPS - improve;
     }

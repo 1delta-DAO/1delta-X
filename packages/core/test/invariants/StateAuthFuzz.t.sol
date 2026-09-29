@@ -311,6 +311,10 @@ contract StateAuthFuzz is MockSettlementBase {
     ///         keys for the desk that issued it.
     function testFuzz_delegateCannotRedelegate(address target, uint256 expiry, uint256 nonce) public {
         vm.assume(target != address(0));
+        // `delegate` itself holds the maker's OWN direct nomination (set below), so the
+        // assertion would read that legitimate entry, not a re-delegation. The fuzzer's
+        // address dictionary does pick it (seen 2026-09-29).
+        vm.assume(target != delegate);
         // Derived, so the call fails for the REASON UNDER TEST. With a free nonce it
         // would revert `SignerPermitNonceMalformed` and the untyped `expectRevert`
         // below would pass even if re-delegation were wide open.

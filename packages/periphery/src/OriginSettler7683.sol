@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Order} from "@core/settlement/Structs.sol";
+import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
 import {SettlementLens} from "./SettlementLens.sol";
@@ -75,6 +76,10 @@ contract OriginSettler7683 is IOriginSettler {
     error UserMismatch();
     /// @dev The lens passed to the constructor serves a different settlement.
     error LensSettlementMismatch();
+    /// @dev The order is DELTA-VERIFY (`timing` bit 104): fillable only through
+    ///      `Settlement.fillWithCallback` by its named `exclusiveFiller`, never
+    ///      through {DestinationSettler7683} — see {_decode}.
+    error DeltaVerifyNotSupported();
 
     /// @dev The `settlement` argument is not decoration: every quote this contract
     ///      publishes is produced by `lens`, so a lens built against a DIFFERENT
@@ -176,9 +181,20 @@ contract OriginSettler7683 is IOriginSettler {
 
     // ──────────────────── Internals ────────────────────
 
-    function _decode(bytes32 orderDataType, bytes calldata orderData) private pure returns (OrderPayload memory) {
+    /// @dev Also the one place every entry refuses a DELTA-VERIFY order (`timing` bit
+    ///      104 — memory mirror of {DutchAuction.deltaVerifyOutputs}, calldata-only
+    ///      like {_expiry}'s). Such an order delivers its outputs only inside a
+    ///      `fillWithCallback` run by its named `exclusiveFiller`; the fill
+    ///      instruction this adapter publishes points at {DestinationSettler7683},
+    ///      which fills through `fillUpTo` — no callback, so nothing is delivered and
+    ///      the settler reverts {DeltaTooLow} even when the order names the adapter
+    ///      itself. An `Open` for one would be a dead order to every solver that reads
+    ///      it, and a resolve an instruction that cannot execute. Refused here, before
+    ///      any signature or lens work.
+    function _decode(bytes32 orderDataType, bytes calldata orderData) private pure returns (OrderPayload memory p) {
         if (orderDataType != OrderHash.ORDER_TYPEHASH) revert UnsupportedOrderType();
-        return abi.decode(orderData, (OrderPayload));
+        p = abi.decode(orderData, (OrderPayload));
+        if ((p.order.timing >> 104) & 1 == 1) revert DeltaVerifyNotSupported();
     }
 
     /// @dev Refuse to broadcast a dead order. `open`/`openFor` emit the standard
@@ -218,13 +234,7 @@ contract OriginSettler7683 is IOriginSettler {
         view
         returns (ResolvedCrossChainOrder memory r)
     {
-        // A HARD-exclusive order previews as {NotExclusiveFiller} for anyone but the
-        // exclusive filler, which would make even a broadcast (`open`/`openFor`) revert
-        // during the window — the maker cannot open its own order, and a relayer cannot
-        // announce an RFQ winner. Quote the broadcast at the exclusive filler's terms
-        // (the party who WILL fill in the window); outside exclusivity this is just the
-        // caller.
-        address previewFiller = p.order.exclusiveFiller != address(0) ? p.order.exclusiveFiller : msg.sender;
+        address previewFiller = _previewFiller(p.order);
         (, uint256[] memory received, uint256[] memory paid) =
             LENS.previewFill(p.order, p.fillAmount, previewFiller, p.takerData);
 
@@ -256,8 +266,7 @@ contract OriginSettler7683 is IOriginSettler {
                 token: bytes32(uint256(uint160(PackedArraysMem.legInToken(p.order.legsIn, i)))),
                 amount: received[i],
                 // The filler is whoever fills; the standard wants an address, and this
-                // is the filler the quote was priced for (the exclusive filler in an
-                // exclusivity window, else the caller asking).
+                // is the filler the quote was priced for — see {_previewFiller}.
                 recipient: bytes32(uint256(uint160(previewFiller))),
                 chainId: block.chainid
             });
@@ -269,5 +278,47 @@ contract OriginSettler7683 is IOriginSettler {
             destinationSettler: bytes32(uint256(uint160(DESTINATION_SETTLER))),
             originData: abi.encode(p)
         });
+    }
+
+    /// @dev Who a quote is priced for: the party who WILL fill in the exclusivity
+    ///      window. A HARD-exclusive order previews as {NotExclusiveFiller} for anyone
+    ///      else, which would make even a broadcast (`open`/`openFor`) revert during
+    ///      the window — the maker cannot open its own order, and a relayer cannot
+    ///      announce an RFQ winner — and a SOFT one would carry the outsider premium
+    ///      no in-window filler pays. So:
+    ///        • no exclusivity          — the caller asking;
+    ///        • one named filler        — that filler, whoever asks;
+    ///        • a {OrderGates.FILLER_SET} — the caller if it is a member, else the
+    ///          set's FIRST member. For a set of one that is exactly the single-filler
+    ///          rule. It is never the `address(1)` sentinel itself, which is in no set:
+    ///          previewing as it made every resolve/open of a hard set order revert
+    ///          for the whole window, and quoted a soft one with the premium (audit
+    ///          2026-09-29 E-2).
+    ///      Not plain `msg.sender` for a set: `open`'s caller is the maker and
+    ///      `openFor`'s is any relayer, members of the set in general neither, so that
+    ///      would reproduce the revert. A blob too short to hold one entry falls back
+    ///      to the caller — in-window the lens then surfaces
+    ///      {OrderGates.MalformedFillerSet} exactly as the fill would, and past the
+    ///      window nobody is gated.
+    function _previewFiller(Order memory order) private view returns (address filler) {
+        filler = order.exclusiveFiller;
+        if (filler == address(0)) return msg.sender;
+        if (filler != OrderGates.FILLER_SET) return filler;
+        bytes memory set = order.curve;
+        if (set.length < 21) return msg.sender;
+        /// @solidity memory-safe-assembly
+        assembly {
+            // `set` = [length][0x00 count byte][20-byte member]×N: member 0 at +0x21.
+            let ptr := add(set, 0x21)
+            filler := shr(96, mload(ptr))
+            // Walk whole entries only (`ptr + 20 <= end`); the lens owns the shape check.
+            let end := add(add(set, 0x20), mload(set))
+            for {} iszero(gt(add(ptr, 20), end)) { ptr := add(ptr, 20) } {
+                if eq(shr(96, mload(ptr)), caller()) {
+                    filler := caller()
+                    break
+                }
+            }
+        }
     }
 }

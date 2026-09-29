@@ -25,10 +25,20 @@ root   = fold(orderHash, proof)                       // sorted-pair keccak
 digest = EIP-712( OrderRoot(bytes32 root) )           // Settlement's own domain
 ```
 
-…after which **every acceptance rule below it applies unchanged**: the maker's own
-key, a live delegate from `orderSignerExpiry`, or the maker's EIP-1271 wallet. A
-bulk signature therefore grants exactly the authority a single signature would,
-and no more.
+…after which the acceptance rules below it run on that 65-byte body: the maker's
+own key, a live ECDSA delegate from `orderSignerExpiry`, or the maker's EIP-1271
+wallet. A bulk signature therefore grants exactly the authority a single signature
+would, and no more.
+
+Because the body is **fixed at 65 bytes**, not every signer can use it:
+
+- the **contract-delegate envelope** (`address ‖ innerSig`) is never 65 bytes, so
+  a contract delegate cannot sign a root;
+- an **EIP-1271 maker** can bulk-sign only if its wallet's signature is exactly 65
+  bytes (a threshold-1 Safe is; most multisig and passkey payloads are not).
+
+Both are liveness limits, not authorization gaps: such signers still sign orders
+one by one, or use the on-chain `approveOrder` path.
 
 `OrderRoot(bytes32 root)` is hashed in the Settlement EIP-712 domain, so a root is
 deployment- and chain-bound like every other signature here.
@@ -47,13 +57,19 @@ deployment- and chain-bound like every other signature here.
   bitmap, `rollbackNonces`, or the deadline — every one of those still binds each
   leaf individually.
 
-### The one liveness edge
+### The liveness edges
 
-A **delegate envelope** (`address ‖ innerSig`, for contract delegates) whose inner
-signature happened to be ≥ 98 bytes, congruent mod 32, and to end in `0xB0` would
-be re-read as a proof, produce a root the maker never signed, and **revert**. That
-is a liveness edge for one exotic wallet shape, never a bypass — and builders
-control their own envelopes, so it is avoidable off-chain.
+Two non-bulk shapes can match the envelope test, be re-read as a proof, produce a
+root the maker never signed, and **revert** — never a bypass:
+
+- a **delegate envelope** (`address ‖ innerSig`, for contract delegates) whose
+  total length is ≥ 98, `≡ 2 (mod 32)`, and ends in `0xB0`. Builders control their
+  own envelopes, so it is avoidable off-chain;
+- a plain **EIP-1271 maker signature** with the same length and trailing byte. The
+  maker does not choose that — it is whatever the wallet emits. Vanilla Safes are
+  immune (the trailing byte of a static ECDSA part is `v`); wallets with
+  attacker-influenceable trailing bytes are exposed at ~1/256 per matching length,
+  and still have `approveOrder` and `cancelOrder`.
 
 ## Cost
 

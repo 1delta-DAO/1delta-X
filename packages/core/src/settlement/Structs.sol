@@ -282,6 +282,7 @@ struct FillCtx {
     //                       exclusivity, validators, and output pulls all key on
     //                       `filler`, so this grants no new authority (it routes the
     //                       filler's own money, which the filler could forward anyway).
+    //                       Input legs only: a SETTLE item still pays `filler`.
     bool fullFill; //        prevFilled == 0 && newFilled == anchor: the whole order in
     //                       one shot ⇒ every pro-rata slice is the leg's full amount,
     //                       skipping the mul/div.
@@ -320,7 +321,8 @@ struct FillCtx {
     ///      paid.
     uint256[] outs;
     uint256 outsUsed;
-    uint256[] receipts; //    per-`legsIn` amounts actually paid to `payTo`, recorded by
+    uint256[] receipts; //    per-`legsIn` amounts sent to `payTo` (NOMINAL — a fee-on-
+    //                       transfer token delivers less), recorded by
     //                       `_payInputsToSolver` as it pays them. `fillUpTo` returns
     //                       this instead of re-deriving it: a second {Pricing} pass
     //                       measured 795 gas for one fixed leg and 3,583 for a
@@ -349,26 +351,6 @@ struct MatchPlan {
     address profitRecipient; // where the final sweep lands; 0 = msg.sender
 }
 
-/// @notice The `matchSettle` step kinds, packed one per `schedule` word:
-///
-///           bits [ 0,  8)  kind — one of the constants below
-///           bits [ 8, 24)  a    — order index (PULL/DELIVER/ITEM), token index
-///                                 (PRESEND), or call index (CALL)
-///           bits [24, 40)  b    — input-leg index (PULL) or item index (ITEM)
-///
-///         One word per step keeps the decode to two shifts and a mask — the
-///         settler is bytecode-bound, and a denser packing would cost more code
-///         than it saves in calldata.
-///
-///         PULL     — maker → pool for one input leg; draws and credits the NOMINAL
-///                    gap `owed − credit` (a pull moves a known amount — see
-///                    {Batch._stepPull}), so a duplicate costs nothing.
-///         DELIVER  — pool → recipients for every output leg of an order.
-///         ITEM     — execute one MAKE/TAKE item; a TAKE's proceeds are credited to
-///                    the order's input legs, measured around that single call.
-///         PRESEND  — hand the solver a token's currently UNENCUMBERED surplus
-///                    (pooled inflow minus obligations not yet delivered).
-///         CALL     — one solver interaction through the allowance-less EXECUTOR.
 /// @notice How much freedom a maker grants the solver over the ORDER in which their
 ///         `items` execute. Lives in `Order.timing` bits [96:100) — see
 ///         {DutchAuction.itemPolicy} for why there and not in a new field.
@@ -400,7 +382,12 @@ struct MatchPlan {
 ///                   exactly the fixed shape of the single-order path
 ///                   ({Core._settleForward}: deliver → items → pay inputs), so a
 ///                   maker who wants the netted path to behave like a plain `fill`
-///                   signs this and no schedule can behave otherwise.
+///                   signs this. It fixes this order's OWN sequence, not isolation:
+///                   foreign steps (a `CALL`, a `PRESEND`, other orders' steps) may
+///                   still run between its `DELIVER`, its item group and its `PULL`,
+///                   and its invariants run in the deferred flush after all of it.
+///                   That changes intermediate state, not what the maker pays or
+///                   receives.
 ///
 ///                   The two additions each close an ordering that changes VALUE,
 ///                   not just intermediate state:
@@ -433,6 +420,27 @@ library ItemPolicy {
     }
 }
 
+/// @notice The `matchSettle` step kinds, packed one per `schedule` word:
+///
+///           bits [ 0,  8)  kind — one of the constants below
+///           bits [ 8, 24)  a    — order index (PULL/DELIVER/ITEM), token index
+///                                 (PRESEND), or call index (CALL)
+///           bits [24, 40)  b    — input-leg index (PULL) or item index (ITEM)
+///
+///         One word per step keeps the decode to two shifts and a mask — the
+///         settler is bytecode-bound, and a denser packing would cost more code
+///         than it saves in calldata.
+///
+///         PULL     — maker → pool for one input leg; draws and credits the NOMINAL
+///                    gap `owed − credit` (a pull moves a known amount — see
+///                    {Batch._stepPull}), so a duplicate costs nothing.
+///         DELIVER  — pool → recipients for every output leg of an order.
+///         ITEM     — execute one MAKE/TAKE item; whatever it adds to the pool (any
+///                    op, measured around that single call) is credited to the
+///                    order's matching input leg or refunded to its maker.
+///         PRESEND  — hand the solver a token's currently UNENCUMBERED surplus
+///                    (pooled inflow minus obligations not yet delivered).
+///         CALL     — one solver interaction through the allowance-less EXECUTOR.
 library MatchStep {
     uint256 internal constant PULL = 0;
     uint256 internal constant DELIVER = 1;

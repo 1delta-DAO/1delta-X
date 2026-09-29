@@ -70,18 +70,17 @@ contract ProportionalLegTest is CoreSettlementBase {
 
     /// Drift DOWN — the balance shrank after signing. The maker sells what they
     /// actually have and is still paid in full, which is strictly better for them
-    /// than the absolute order (which would simply have failed to fund).
+    /// than the absolute order (which would simply have failed to fund) — and
+    /// strictly WORSE for the solver, so it happens only when the solver opts in with
+    /// the `type(uint256).max` "any size" sentinel (re-audit 2026-09-29).
     function test_prop_balanceBelowCap_sellsBalance_stillPaidInFull() public {
         uint256 bal = 1_500e6;
         _stage(bal);
 
         Order memory order = _propOrder(0, 10_000, 2_000e6); // cap above the balance
         bytes memory sig = _sign(order);
-        // `fillUpTo` is the entry for a proportional order: the solver names a
-        // ceiling and the clamp resolves the actual size. Plain `fill` would need
-        // the exact balance, which is precisely what the solver cannot know.
         vm.prank(solver);
-        (, , uint256[] memory paidLegs) = settlement.fillUpTo(order, sig, 2_000e6, address(0), 0, "");
+        (, , uint256[] memory paidLegs) = settlement.fillUpTo(order, sig, type(uint256).max, address(0), 0, "");
         uint256 paid = paidLegs[0];
 
         assertEq(paid, WETH_OUT, "output does not shrink with the input");
@@ -199,7 +198,43 @@ contract ProportionalLegTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(OrderState.FillTooSmall.selector);
-        settlement.fillUpTo(order, sig, 2_000e6, address(0), 0, "");
+        settlement.fillUpTo(order, sig, type(uint256).max, address(0), 0, "");
+    }
+
+    /// THE FINDING (re-audit 2026-09-29, lens A). A proportional fill pays every
+    /// output in full whatever the anchor resolves to. `fillUpTo` used to trim a
+    /// solver's QUOTED size down to the live balance silently, so a maker who moved
+    /// out all but 1 wei just before inclusion was paid the full output for dust.
+    /// Now an oversized request is not trimmed on a proportional anchor, and the fill
+    /// reverts `OverFill` exactly as plain `fill` does.
+    function test_prop_fillUpTo_shrunkBalance_quotedSize_reverts() public {
+        uint256 quoted = 2_000e6;
+        _stage(quoted);
+        Order memory order = _propOrder(0, 10_000, quoted);
+        bytes memory sig = _sign(order);
+
+        // The maker front-runs the solver's fill: everything but 1 wei leaves.
+        vm.prank(maker);
+        IERC20(USDC).transfer(address(0xdead), quoted - 1);
+
+        uint256 solverWethBefore = IERC20(WETH).balanceOf(solver);
+        vm.prank(solver);
+        vm.expectRevert(OrderState.OverFill.selector);
+        settlement.fillUpTo(order, sig, quoted, address(0), 0, "");
+        assertEq(IERC20(WETH).balanceOf(solver), solverWethBefore, "solver paid nothing for dust");
+    }
+
+    /// A NON-proportional order keeps its ordinary clamp: an oversized request is
+    /// still trimmed to the remaining size.
+    function test_prop_fillUpTo_absoluteOrderStillClamps() public {
+        uint256 amt = 2_000e6;
+        _stage(amt);
+        Order memory order = _propOrder(0, 10_000, amt);
+        order.legsIn = _legsIn1(USDC, amt); // absolute anchor, same size
+        bytes memory sig = _sign(order);
+        vm.prank(solver);
+        (uint256 delta,,) = settlement.fillUpTo(order, sig, amt * 5, address(0), 0, "");
+        assertEq(delta, amt, "absolute order trimmed to its remaining size");
     }
 
     // ──────────────────── Only ever the SELL anchor ────────────────────
@@ -262,9 +297,10 @@ contract ProportionalLegTest is CoreSettlementBase {
 
     // ──────────────────── The aggregator entry ────────────────────
 
-    /// `fillUpTo` clamps to the remaining size, which for an unfilled proportional
-    /// order IS the resolved anchor — so an aggregator asking for "as much as
-    /// possible" gets the whole sweep with no special-casing.
+    /// `fillUpTo` with the `type(uint256).max` sentinel clamps to the remaining
+    /// size, which for an unfilled proportional order IS the resolved anchor — so an
+    /// aggregator asking for "as much as possible" gets the whole sweep. Any OTHER
+    /// oversized request is not trimmed; see the front-run test below.
     function test_prop_fillUpTo_clampsToResolvedAnchor() public {
         uint256 bal = 2_000e6;
         _stage(bal);
@@ -273,7 +309,7 @@ contract ProportionalLegTest is CoreSettlementBase {
         bytes memory sig = _sign(order);
         vm.prank(solver);
         (uint256 delta, uint256[] memory received,) =
-            settlement.fillUpTo(order, sig, type(uint128).max, address(0), 0, "");
+            settlement.fillUpTo(order, sig, type(uint256).max, address(0), 0, "");
 
         assertEq(delta, bal, "clamped to the live balance");
         assertEq(received[0], bal, "receipts report the swept amount");

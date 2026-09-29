@@ -110,7 +110,7 @@ contract PreFundResidueDrainTest is MockSettlementBase {
         _makerApprove(address(settlement), address(junk), type(uint160).max);
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegNotMakers.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, 1);
 
         assertEq(usdc.balanceOf(maker), 0, "attacker received the residue");
@@ -151,7 +151,7 @@ contract PreFundResidueDrainTest is MockSettlementBase {
         assertEq(usdc.balanceOf(address(mod)), residue, "precondition: module holds residue");
 
         vm.prank(solver);
-        vm.expectRevert(Base.ForLegNotMakers.selector);
+        vm.expectRevert(Base.ForLegInvalid.selector);
         settlement.fill(o, sig, 1);
 
         assertEq(usdc.balanceOf(thief), 0, "attacker drained the singleton");

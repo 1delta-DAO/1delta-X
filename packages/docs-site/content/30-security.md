@@ -190,7 +190,8 @@ touched approval now parks the cancellation sentinel.
 Losers of a race revert on the `filled` guard rather than executing badly. Hard
 exclusivity names a filler for a window; soft exclusivity prices the right to
 jump the queue as a bps improvement **to the maker's leg only**, so a
-third-party fee leg is never inflated by it. The priority-auction mode makes the
+third-party fee leg is never inflated by it — and where no leg can carry that
+improvement, the window stays hard. The priority-auction mode makes the
 sequencer's own ordering the auction: every wei of priority fee moves the tick
 toward the maker's ambition, and an unbid fill clears at the maker's guaranteed
 floor. Nothing new is trusted — the floor is the same absolute bound every other

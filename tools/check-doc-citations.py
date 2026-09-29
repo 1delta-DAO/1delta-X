@@ -159,7 +159,10 @@ def main() -> int:
         print("FAIL: found no test functions at all — is the tree intact?")
         return 1
 
-    docs = [Path(a) for a in sys.argv[1:]] or sorted((ROOT / "docs").glob("*.md"))
+    docs = [Path(a) for a in sys.argv[1:]] or (
+        sorted((ROOT / "docs").glob("*.md"))
+        + sorted((ROOT / "docs" / "reference-audits").glob("*.md"))
+    )
     failures = [f for d in docs for f in check(d, tests)]
 
     n_readmes, readme_failures = check_module_readmes()

@@ -30,8 +30,17 @@ import {IOFT} from "../vendor/ILayerZero.sol";
 ///     Setting `feePayer` to the maker is the self-contained default (the user
 ///     covers their own message fee, in native, on the chain they are already
 ///     transacting on). Setting it to a solver works too, and lets the fee be
-///     priced into the auction spread instead — that is an off-chain agreement,
-///     so it needs no code here either way.
+///     priced into the auction spread instead — but ONLY against a
+///     {feeAllowance} that payer granted that maker ({approveFeeSponsorship}).
+///
+///     ⚠ WHY THE CONSENT IS ON-CHAIN (re-audit F30). `feePayer`, `oft` and
+///     `maxNativeFee` are all MAKER-signed, and the fee is quoted by and paid to
+///     `oft`. With no binding between payer and maker, anyone could sign their own
+///     order naming a victim as `feePayer` and their own contract as `oft`, have it
+///     quote the victim's whole credit, and fill it themselves — every top-up in
+///     the ledger was one self-signed order away. Charging someone else's credit
+///     now needs that someone's standing, amount-bounded allowance to this maker,
+///     so a sponsor's worst case is the allowance it chose to extend.
 ///
 ///  2. SPLIT ARRIVAL. Tokens land on the destination in the `lzReceive`
 ///     transaction and the commitment in a LATER `lzCompose` one. That is why
@@ -50,12 +59,21 @@ contract LzOftBridgeOutModule is BridgeOutBase {
     ///         would let any order drain whatever anyone else deposited.
     mapping(address => uint256) public nativeCredit;
 
+    /// @notice `feeAllowance[payer][maker]` — how much of `payer`'s {nativeCredit}
+    ///         orders signed by `maker` may spend on messaging fees. Only consulted
+    ///         when `feePayer != maker`; a maker always pays from their own credit.
+    mapping(address payer => mapping(address maker => uint256)) public feeAllowance;
+
     event ToppedUp(address indexed payer, uint256 amount, uint256 balance);
     event WithdrawnNative(address indexed payer, uint256 amount, uint256 balance);
+    event FeeSponsorshipSet(address indexed payer, address indexed maker, uint256 amount);
 
     error FeeAboveCap();
     error InsufficientNativeCredit();
     error NativeTransferFailed();
+    /// @dev `feePayer` is not the maker and has not sponsored this maker for at
+    ///      least the quoted fee.
+    error FeeNotSponsored();
 
     /// @param oft               Stargate pool or OFT/adapter on THIS chain.
     /// @param inputToken        ERC20 pulled from the maker. Must be `IOFT.token()`.
@@ -106,6 +124,14 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         emit ToppedUp(account, msg.value, nativeCredit[account]);
     }
 
+    /// @notice Let orders signed by `maker` spend up to `amount` of the caller's
+    ///         credit on messaging fees. Keyed by `msg.sender`, so only ever your
+    ///         own credit; set to 0 to revoke. An absolute value, not an increment.
+    function approveFeeSponsorship(address maker, uint256 amount) external {
+        feeAllowance[msg.sender][maker] = amount;
+        emit FeeSponsorshipSet(msg.sender, maker, amount);
+    }
+
     /// @notice Reclaim unspent credit. Keyed by `msg.sender`, so only ever your own.
     function withdrawNative(uint256 amount) external {
         uint256 bal = nativeCredit[msg.sender];
@@ -148,6 +174,15 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         // anything else prices a different message.
         uint256 fee = IOFT(s.oft).quoteSend(sp, false).nativeFee;
         if (fee > s.maxNativeFee) revert FeeAboveCap();
+        // Someone else's credit only with their consent to THIS maker, and only up
+        // to the amount they extended — see the contract note.
+        if (s.feePayer != onBehalfOf) {
+            uint256 allowed = feeAllowance[s.feePayer][onBehalfOf];
+            if (fee > allowed) revert FeeNotSponsored();
+            unchecked {
+                feeAllowance[s.feePayer][onBehalfOf] = allowed - fee;
+            }
+        }
         uint256 credit = nativeCredit[s.feePayer];
         if (fee > credit) revert InsufficientNativeCredit();
         unchecked {

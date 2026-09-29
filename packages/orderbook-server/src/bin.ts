@@ -39,6 +39,7 @@ async function main(): Promise<void> {
     config: env.config,
     admission: env.admission,
     rateLimit: env.rateLimit,
+    stream: env.stream,
     watchChain: env.watchChain,
     indexFills: env.indexFills,
     ...(env.fillsFromBlock !== undefined ? { fillsFromBlock: env.fillsFromBlock } : {}),

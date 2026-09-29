@@ -663,4 +663,19 @@ contract AuctionAndExclusivityTest is MockSettlementBase {
         assertLe(out, SELL_OUT, "never above start");
         assertGe(out, 1e18, "never below end");
     }
+
+    /// Re-audit 2026-09-29: a FALLING curve segment rounds its decrement UP, so the
+    /// bump lands on the maker's side. (0, 10000) → (3, 0) at t = 1: exact 6666.67,
+    /// was floored-decrement 6667, now 6666 — the rising branch already floored.
+    function test_curve_fallingSegment_roundsToTheMaker() public {
+        Order memory order = _plainOrder(1, address(tA), address(tB), SELL_IN, SELL_OUT);
+        order.legsOut = PackedEncode.setLegOutEnd(order.legsOut, 0, 1e18);
+        _setDecayStart(order, uint32(block.timestamp));
+        CurvePoint[] memory c = new CurvePoint[](2);
+        c[0] = CurvePoint({timeDelta: 0, bumpBps: 10_000});
+        c[1] = CurvePoint({timeDelta: 3, bumpBps: 0});
+        order.curve = PackedEncode.curve(c);
+        vm.warp(block.timestamp + 1);
+        assertEq(lens.previewBump(order, solver, ""), 6_666, "falling segment rounds toward the maker");
+    }
 }

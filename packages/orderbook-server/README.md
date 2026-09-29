@@ -31,7 +31,7 @@ to it. Protobuf on the wire throughout; the chain stays the source of truth.
 | GET | `/orders/:hash/status` | — | JSON status, **including recently-evicted orders** |
 | GET | `/fills` | `maker` `solver` `orderHash` `fromBlock` `limit` `cursor` | JSON fills + `coverage` · `501` when indexing is off |
 | GET | `/quote` | `hash` `fillAmount` `filler` `[recipient]` `[takerData]` | JSON preview + ready-to-send `fillUpTo` calldata |
-| GET | `/stream` | WebSocket | `SNAPSHOT` then live `ADD` / `CANCEL` / `REPLACE` |
+| GET | `/stream` | WebSocket | bounded `SNAPSHOT` (most recent live orders) then live `ADD` / `CANCEL` / `REPLACE` |
 | GET | `/health` | — | chain config, book size, limiter and index state |
 
 #### `/orders` filters
@@ -46,10 +46,11 @@ to it. Protobuf on the wire throughout; the chain stays the source of truth.
 | `fillableOnly` | only what the chain says a filler could take right now |
 | `validatorsPass` | additionally require validators to pass for this node's filler |
 | `minFillable` | live fillable amount at or above this |
-| `expiresAfter` | unix seconds — orders that survive at least this long |
+| `expiresAfter` | unix seconds — orders that survive at least this long. Default: now, i.e. expired orders are hidden |
+| `includeExpired` | `true` to also list orders past their deadline that the sweep has not yet evicted |
 | `sort` | `created` (default) · `deadline` · `fillable` · `price` |
 | `direction` | `asc` / `desc` |
-| `limit` · `cursor` | page size (max 500) and the keyset cursor from `nextCursor` |
+| `limit` · `cursor` | page size (max 500) and the keyset cursor from `nextCursor` (also sent as the `x-next-cursor` header, for protobuf consumers) |
 
 An unparseable filter is a `400`, never a silently-ignored parameter — a
 mistyped `maker` that quietly returns the whole book is worse than an error.
@@ -158,14 +159,22 @@ pnpm --filter @1delta-x/orderbook-server start    # tsx src/bin.ts
 | `INDEX_FILLS` | | `true` | index `OrderFilled` so `/fills` can answer |
 | `FILLS_FROM_BLOCK` | | lookback window | block to backfill fills from |
 | `MAX_ORDERS` | | `25000` | hard cap on live orders |
-| `MAX_ORDERS_PER_MAKER` | | `500` | one account cannot own the book |
+| `MAX_ORDERS_PER_MAKER` | | `100` | one account cannot own the book; a full book also displaces the largest maker's furthest-dated order for a smaller maker |
+| `MAX_CURVE_POINTS` | | `32` | |
+| `MAX_ORDER_BYTES` | | `16384` | encoded announce size |
+| `ALLOWED_TOKENS` | | any | comma-separated leg-token allowlist — set it whenever the book serves a known market set |
 | `MIN_TTL_SECONDS` | | `15` | below this an order is not worth an `eth_call` |
 | `MAX_TTL_SECONDS` | | `7776000` (90d) | above this it is squatting, not a quote |
 | `REQUIRE_DELTA_VERIFY` | | `false` | admit only `timing` bit-104 orders, so no fill ever makes its filler approve the settlement |
 | `RATE_LIMIT_IP_CAPACITY` / `_REFILL` | | `120` / `1` | burst / tokens per second |
 | `RATE_LIMIT_MAKER_CAPACITY` / `_REFILL` | | `120` / `1` | per signing account |
 | `MAX_BODY_BYTES` | | `65536` | |
+| `RATE_LIMIT_MAX_KEYS` | | `100000` | buckets per map, least-recently-used dropped past it |
 | `TRUST_PROXY` | | `false` | **only** behind a proxy that sets `x-forwarded-for` — otherwise the header is a free way to reset your own bucket |
+| `TRUSTED_PROXY_HOPS` | | `1` | your proxies in front of the node; the client address is read that many entries from the **right** of `x-forwarded-for` |
+| `WS_MAX_CONNECTIONS` / `WS_MAX_PER_IP` | | `1000` / `16` | stream sockets in total / per client address |
+| `WS_ALLOWED_ORIGINS` | | any | comma-separated browser `Origin`s allowed on `/stream` |
+| `WS_SNAPSHOT_LIMIT` | | `1000` | orders in the connect snapshot; page `/orders` for the rest |
 
 `WATCH_CHAIN` and `INDEX_FILLS` default **on**: on mainnet, a book that only
 learns about cancellations from its own polling sweep serves dead orders to

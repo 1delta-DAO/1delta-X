@@ -78,12 +78,12 @@ Entry points, all sharing that flow:
 
 | Entry point | For |
 |---|---|
-| `fill(order, sig, amount)` | the hot path; an overload takes `takerData` |
-| `fillCompact(order, r, vs, amount)` | EIP-2098 EOA signatures — 96 fewer calldata bytes |
+| `fill(order, sig, amount)` | the hot path; exact size; an overload takes `takerData`; accepts an EIP-2098 64-byte signature |
 | `fillWithCallback(...)` | solver callback at `PreDelivery` (any order) or `PostInputs` (item-free, just-in-time liquidity out of the fill's own proceeds) |
-| `fillWithPermit(...)` | fill with a Permit3 batch bound to the order hash as a witness — no prior on-chain approval |
+| `fillWithPermit(...)` | fill with a Permit3 batch whose witness is `SettlementOrder{settlement, order}` — the order bound to this one settler — so no prior on-chain approval |
+| `fillWithPermitTake(...)` | fill whose TAKE item is funded by a one-shot `PermitTake` (order-hash witness, settler-bound spender) — no taker allowance survives |
 | `batchFill(...)` | several independent single-order fills in one transaction |
-| `fillSelf(...)` | the maker fills its own order (fixed price by construction) |
+| `fillSelf(...)` | `batchFill`'s self-call target (`msg.sender == address(this)` only) |
 | `fillUpTo(...)` | router / aggregator entry: clamps to remaining size, returns `(delta, received, paid)`, takes a `minBumpBps` price floor |
 | `matchSettle(MatchPlan)` | netted N-order settlement (below) |
 

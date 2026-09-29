@@ -156,7 +156,11 @@ function setOrderSignerWithSig(
 
 Signed over an EIP-712 `OrderSignerPermit` type, independent of `Order` — adding
 it leaves the order typehash, and therefore the golden hash, untouched. Anyone may
-relay it; the permit carries its own authorization.
+relay it; the permit carries its own authorization. A relayed nomination can only
+**extend** the stored expiry, never shorten it
+([below](#relayed-nominations-only-extend-re-audit-2026-09-29)), and a gasless
+revocation signs at a reserved `seq`
+([below](#gasless-revocation-has-its-own-seq)).
 
 **No re-delegation.** The permit is verified against `maker` through
 `SignatureVerification.verify` directly, *not* through `_verifySignature`'s
@@ -415,4 +419,37 @@ nomination the maker had made in the meantime. Since F29 a permit with
 `0 < expiry < block.timestamp` reverts `SignerPermitExpired` and changes nothing;
 a gasless revocation is spelled `expiry == 0` explicitly (the SDK's only
 spelling). Pinned by `test_relayedStalePermit_cannotRevokeALiveDelegate`.
+
+## Relayed nominations only extend (re-audit 2026-09-29)
+
+The F29 check covered a permit landing *after* its own `expiry`, not one landing
+*before* it: an unrelayed "until T+1h" permit relayed after the maker had
+nominated the same delegate directly "until T+365d" overwrote the stored expiry
+and cut a live desk key short — and the relayer picks when a permit lands. So a
+relayed nomination whose `expiry` is below the stored `orderSignerExpiry` now
+reverts `SignerPermitExpired` too; the stored value stands. Shortening a delegate
+is the maker's own direct `setOrderSigner`, and ending one is a revocation. Pinned
+by `test_relayedShorterPermit_cannotCutALiveDelegate`, with
+`test_relayedLongerPermit_stillExtends` for the permitted direction.
+
+## Gasless revocation has its own `seq`
+
+A revocation is a permit with `expiry == 0`, and a permit spends its coordinate
+when relayed — so built at a nomination's `seq` it collides with that nomination:
+if the nomination was already relayed the revocation reverts `NonceCancelled`
+every time, and if it is still unrelayed whoever holds it (the delegate, say) can
+relay it first and the revocation reverts instead. The SDK therefore reserves
+`seq` `0xFF` (`ORDER_SIGNER_REVOKE_SEQ`) for revocations:
+
+- `buildOrderSignerRevocation` / `revokeOrderSignerGasless` always sign
+  `expiry = 0` at that `seq`, and take no `seq` option;
+- the nomination builders (`buildOrderSignerPermit`, `nominateOrderSigner`)
+  refuse `expiry == 0` and `seq == 0xFF`, so a nomination can never spend the
+  maker's revocation slot;
+- `canRevokeOrderSignerGasless` reads the reserved coordinate. It is `false` once
+  any revocation has burned the delegate's word (at most one gasless revocation
+  per delegate, ever); fall back to the direct `setOrderSigner(d, 0)`.
+
+The settler knows nothing of the reservation — it accepts any one-byte `seq` — so
+it binds only permits built by the SDK.
 

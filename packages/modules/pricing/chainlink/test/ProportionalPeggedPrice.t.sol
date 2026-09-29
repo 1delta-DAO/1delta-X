@@ -87,7 +87,7 @@ contract ProportionalPeggedPriceTest is MockSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        settlement.fillUpTo(o, sig, type(uint128).max, solver, 0, "");
+        settlement.fillUpTo(o, sig, type(uint256).max, solver, 0, "");
 
         assertEq(tA.balanceOf(maker), 0, "the whole balance was swept");
         assertEq(tB.balanceOf(maker), 1_200e18, "priced at the oracle rate on the RESOLVED anchor");
@@ -106,7 +106,7 @@ contract ProportionalPeggedPriceTest is MockSettlementBase {
         bytes memory sig = _sign(o);
 
         vm.prank(solver);
-        settlement.fillUpTo(o, sig, type(uint128).max, solver, 0, "");
+        settlement.fillUpTo(o, sig, type(uint256).max, solver, 0, "");
 
         assertEq(tA.balanceOf(maker), 200e18, "sold exactly the cap, kept the rest");
         assertEq(tB.balanceOf(maker), 1_500e18, "priced on the capped anchor");
@@ -128,7 +128,7 @@ contract ProportionalPeggedPriceTest is MockSettlementBase {
         uint256 previewed = lens.previewBump(o, solver, "");
         bytes memory sig = _sign(o);
         vm.prank(solver);
-        settlement.fillUpTo(o, sig, type(uint128).max, solver, previewed, ""); // minBumpBps floor
+        settlement.fillUpTo(o, sig, type(uint256).max, solver, previewed, ""); // minBumpBps floor
 
         assertEq(previewed, 8_000, "lens quotes the resolved-anchor bump");
         assertEq(tB.balanceOf(maker), 1_200e18, "and the fill honours it");

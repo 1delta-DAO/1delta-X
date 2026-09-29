@@ -1,11 +1,13 @@
-import type { Hex } from "viem";
+import { hashOrderStruct, type Order } from "@1delta-x/sdk";
+import type { Address, Hex } from "viem";
 
-import { CancelVerifier, evictableHashes } from "./cancels";
+import { checkAdmission, DEFAULT_ADMISSION, type AdmissionPolicy, type AdmissionVerdict } from "./admission";
+import { CancelVerifier, type CancelVerdict } from "./cancels";
 import type { OrderbookConfig } from "./config";
-import { decodeOrderAnnounce, decodeOrderReplace, decodeSoftCancel } from "./proto/codec";
+import { decodeOrderAnnounce, decodeOrderReplace, decodeSoftCancel, encodeOrderAnnounce } from "./proto/codec";
 import { topicsFor } from "./topics";
 import type { Transport, Unsubscribe } from "./transport";
-import type { Layer2Result, Verifier } from "./verify";
+import { OrderStatus, type Layer2Result, type Verifier } from "./verify";
 import { isOcoGroupLeg, type ChainEvent, type ChainWatcher } from "./watcher";
 import type { OrderAnnounce, OrderReplace, SignedSoftCancel } from "./messages";
 
@@ -16,6 +18,18 @@ export interface BookEntry {
   addedAt: number;
   /** Most recent Layer-2 state (fillable amount, status). */
   state?: Layer2Result;
+  /** Consecutive re-checks that could not classify this order even on its own. */
+  inconclusiveStrikes?: number;
+}
+
+/** A soft cancel the book keeps honouring after the eviction it caused. */
+interface SoftCancelTombstone {
+  /** Lower-cased — the only maker whose order this tombstone blocks. */
+  maker: string;
+  /** Unix seconds after which the tombstone may be forgotten. */
+  until: bigint;
+  /** The hash was not live here when the cancel arrived (a cancel-before-order). */
+  pending: boolean;
 }
 
 export type BookListener = (entry: BookEntry) => void;
@@ -59,6 +73,26 @@ export interface BookOptions {
   backfill?: boolean;
   /** Injectable clock (unix seconds) for deterministic tests. */
   now?: () => number;
+  /**
+   * What the book will hold, applied on EVERY admission path — transport ingest,
+   * backfill, replaces and {@link Book.admit} — not only behind the REST route.
+   * Defaults to {@link DEFAULT_ADMISSION}.
+   */
+  admission?: Partial<AdmissionPolicy>;
+  /**
+   * An order the lens could not classify even when asked about it alone is kept
+   * (an `Inconclusive` is not a verdict) — but not forever: after this many
+   * consecutive isolated failures it is evicted. Default 3.
+   */
+  maxInconclusiveStrikes?: number;
+  /** Soft-cancel tombstones held at most. Default 100,000. */
+  maxTombstones?: number;
+  /**
+   * Tombstones for hashes this node had NOT seen (cancel-before-order), per maker.
+   * They are maker-bound, so they cannot pre-empt anyone else's order, but each is
+   * memory a maker can mint with one signature. Default 1,024.
+   */
+  maxPendingTombstonesPerMaker?: number;
 }
 
 /**
@@ -82,9 +116,16 @@ export class Book {
   private readonly dirty = new Set<Hex>();
   private dirtyTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => number;
+  private readonly admission: AdmissionPolicy;
+  /** Live orders per lower-cased maker, maintained on admit/evict — the cap check is O(1). */
+  private readonly makerCounts = new Map<string, number>();
+  /** Soft-cancelled hashes, insertion-ordered so the oldest go first past the cap. */
+  private readonly tombstones = new Map<Hex, SoftCancelTombstone>();
+  private readonly pendingPerMaker = new Map<string, number>();
 
   constructor(private readonly opts: BookOptions) {
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000));
+    this.admission = { ...DEFAULT_ADMISSION, ...opts.admission };
   }
 
   private shouldEvict(entry: BookEntry, state: Layer2Result): boolean {
@@ -141,6 +182,19 @@ export class Book {
   get size(): number {
     return this.entries.size;
   }
+  /** Live orders this maker holds here. O(1). */
+  makerCount(maker: Address | string): number {
+    return this.makerCounts.get(maker.toLowerCase()) ?? 0;
+  }
+  /** True when a verified soft cancel by `order.maker` still covers this hash. */
+  isSoftCancelled(orderHash: Hex, maker: Address | string): boolean {
+    const t = this.tombstones.get(orderHash);
+    return t !== undefined && t.maker === maker.toLowerCase() && t.until > BigInt(this.now());
+  }
+  /** Soft-cancel tombstones held (bounded by `maxTombstones`). */
+  get tombstoneCount(): number {
+    return this.tombstones.size;
+  }
 
   onAdd(cb: BookListener): Unsubscribe {
     this.addListeners.add(cb);
@@ -182,32 +236,146 @@ export class Book {
       return { ok: false, reason: "undecodable OrderAnnounce" };
     }
     try {
-      return await this.ingestAnnounce(announce);
+      return await this.ingestAnnounce(announce, bytes.length);
     } catch {
       // An RPC hiccup during Layer 2 must not crash the ingest loop.
       return { ok: false, reason: "verification error (RPC?)" };
     }
   }
 
-  async ingestAnnounce(announce: OrderAnnounce): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
-    const res = await this.opts.verifier.verifyAnnounce(announce);
-    if (!res.ok) return { ok: false, reason: res.reason, orderHash: res.orderHash };
-    this.admit(res.orderHash, announce, res.state);
-    return { ok: true, orderHash: res.orderHash };
+  /**
+   * The cheap, local gate every admission path runs BEFORE paying for a lens call:
+   * the soft-cancel tombstones, then {@link checkAdmission} (structure, TTL window,
+   * size, token list, capacity — with displacement). The transport path used to
+   * skip all of it, so anything a peer relayed went straight to an `eth_call`.
+   *
+   * @param policy override the book's own policy (the server applies its configured one).
+   */
+  precheck(
+    order: Order,
+    orderHash: Hex,
+    opts?: { encodedBytes?: number; known?: boolean; policy?: AdmissionPolicy },
+  ): AdmissionVerdict {
+    if (this.isSoftCancelled(orderHash, order.maker)) return { ok: false, reason: "order was soft-cancelled by its maker" };
+    const policy = opts?.policy ?? this.admission;
+    return checkAdmission(
+      order,
+      {
+        size: this.entries.size,
+        makerCount: (m) => this.makerCount(m),
+        now: this.now(),
+        known: opts?.known ?? this.entries.has(orderHash),
+        ...(opts?.encodedBytes !== undefined ? { encodedBytes: opts.encodedBytes } : {}),
+        canDisplace: (m) => this.displacementVictim(m, policy) !== undefined,
+      },
+      policy,
+    );
   }
 
-  /** Admit an already-verified announce (server fast-path after its POST-time check). */
-  admit(orderHash: Hex, announce: OrderAnnounce, state?: Layer2Result): void {
+  async ingestAnnounce(
+    announce: OrderAnnounce,
+    encodedBytes?: number,
+  ): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
+    let orderHash: Hex;
+    try {
+      orderHash = hashOrderStruct(announce.order);
+    } catch {
+      return { ok: false, reason: "unhashable order" };
+    }
+    // A re-announce of a live order changes nothing (the first-seen announce is
+    // kept — see {@link admit}), so it costs nothing either: no lens call.
+    if (this.entries.has(orderHash)) return { ok: true, orderHash };
+
+    const size = encodedBytes ?? (this.admission.maxOrderBytes > 0 ? encodeOrderAnnounce(announce).length : undefined);
+    const gate = this.precheck(announce.order, orderHash, size !== undefined ? { encodedBytes: size } : undefined);
+    if (!gate.ok) return { ok: false, reason: gate.reason, orderHash };
+
+    const res = await this.opts.verifier.verifyAnnounce(announce);
+    if (!res.ok) return { ok: false, reason: res.reason, orderHash: res.orderHash };
+    const admitted = this.admit(res.orderHash, announce, res.state);
+    return admitted.ok ? { ok: true, orderHash: res.orderHash } : { ok: false, reason: admitted.reason, orderHash: res.orderHash };
+  }
+
+  /**
+   * Admit an already-verified announce. Synchronous, so the capacity and tombstone
+   * checks here are the authoritative ones — two concurrent ingests that both
+   * passed {@link precheck} before their lens calls cannot both squeeze past a cap.
+   *
+   * A re-announce of a live order keeps the FIRST-SEEN announce and refreshes only
+   * the state. The announce is not wholly signed — `permitBatch` in particular is
+   * relay-supplied — so letting any later announcer overwrite it let a third party
+   * strip or garble what fillers are served.
+   *
+   * @param opts.exempt skip the capacity caps (a replacement taking its live
+   *        predecessor's slot).
+   */
+  admit(
+    orderHash: Hex,
+    announce: OrderAnnounce,
+    state?: Layer2Result,
+    opts?: { exempt?: boolean },
+  ): AdmissionVerdict {
     const existing = this.entries.get(orderHash);
     if (existing) {
-      // Dedup: same order re-announced — refresh state, no duplicate onAdd.
-      existing.announce = announce;
       if (state) existing.state = state;
-      return;
+      return { ok: true };
+    }
+    const maker = announce.order.maker;
+    if (this.isSoftCancelled(orderHash, maker)) {
+      // The order has now been seen: honour the cancel for its whole life.
+      const t = this.tombstones.get(orderHash)!;
+      if (announce.order.expiry > t.until) t.until = announce.order.expiry;
+      return { ok: false, reason: "order was soft-cancelled by its maker" };
+    }
+    if (!opts?.exempt) {
+      const policy = this.admission;
+      if (policy.maxOrdersPerMaker > 0 && this.makerCount(maker) >= policy.maxOrdersPerMaker) {
+        return { ok: false, reason: `maker is at its order limit (${policy.maxOrdersPerMaker})`, capacity: true };
+      }
+      if (policy.maxOrders > 0 && this.entries.size >= policy.maxOrders) {
+        const victim = this.displacementVictim(maker, policy);
+        if (!victim) return { ok: false, reason: "book is at capacity", capacity: true };
+        this.evict(victim);
+      }
     }
     const entry: BookEntry = { orderHash, announce, addedAt: this.now(), ...(state ? { state } : {}) };
     this.entries.set(orderHash, entry);
+    const key = maker.toLowerCase();
+    this.makerCounts.set(key, (this.makerCounts.get(key) ?? 0) + 1);
     this.emit(this.addListeners, entry);
+    return { ok: true };
+  }
+
+  /**
+   * Which order a full book gives up for one from `maker`, if any.
+   *
+   * A hard "full ⇒ 503" made the book's capacity a prize: whoever filled it first
+   * held it for the whole TTL. Now a full book first drops an order it already
+   * knows is not fillable, and otherwise takes a slot from the LARGEST maker —
+   * only while that maker holds more than one order beyond the newcomer, so the
+   * book drifts toward an even split between makers instead of first-come
+   * ownership. Within that maker, the order with the furthest deadline goes: it is
+   * the one squatting longest. O(n) — but only ever run when the book is full.
+   */
+  private displacementVictim(maker: Address | string, policy: AdmissionPolicy): Hex | undefined {
+    if (policy.maxOrders <= 0 || this.entries.size < policy.maxOrders) return undefined;
+    for (const e of this.entries.values()) if (e.state && !e.state.ok && e.state.status !== OrderStatus.Inconclusive) return e.orderHash;
+
+    let top: string | undefined;
+    let topCount = 0;
+    for (const [m, n] of this.makerCounts) {
+      if (n > topCount) {
+        top = m;
+        topCount = n;
+      }
+    }
+    if (top === undefined || topCount <= this.makerCount(maker) + 1) return undefined;
+    let victim: BookEntry | undefined;
+    for (const e of this.entries.values()) {
+      if (e.announce.order.maker.toLowerCase() !== top) continue;
+      if (!victim || e.announce.order.expiry > victim.announce.order.expiry) victim = e;
+    }
+    return victim?.orderHash;
   }
 
   private async ingestCancelBytes(bytes: Uint8Array): Promise<{ ok: boolean; reason?: string; evicted?: Hex[] }> {
@@ -230,29 +398,100 @@ export class Book {
    * TWO independent checks, and both are load-bearing:
    *   • the SIGNATURE says who signed (EOA / delegate / 1271 — see
    *     {@link CancelVerifier}),
-   *   • {@link evictableHashes} says what that signer may retract, by requiring
-   *     each named order to actually name them as maker.
+   *   • each tombstone is bound to that signer as maker, so a live order is evicted
+   *     — and an arriving one refused — only when it actually names them.
    *
    * Without the second, a perfectly valid signature over somebody else's order
-   * hash would evict it. Hashes this node has never seen are skipped rather than
-   * remembered: a cancel is advisory, and pre-empting an order that may never
-   * arrive would hand an attacker a free denial channel against orders the node
-   * has not even verified yet.
+   * hash would evict it.
+   *
+   * The cancel then STICKS. It used to evict and be forgotten, so re-announcing
+   * the order (by anyone — it is still validly signed) simply re-listed it, and a
+   * cancel that arrived before its order was dropped outright. Every named hash
+   * now leaves a maker-bound tombstone: until the order's own deadline for a live
+   * order, until the cancel's expiry for one not seen yet (extended to the order's
+   * deadline if it turns up). Maker-binding is what keeps the cancel-before-order
+   * case from being a denial channel: a tombstone blocks only an order whose maker
+   * signed it.
    */
   async ingestCancel(signed: SignedSoftCancel): Promise<{ ok: boolean; reason?: string; evicted: Hex[] }> {
     const verdict = await this.opts.cancelVerifier.verify(signed);
     if (!verdict.ok) return { ok: false, reason: verdict.reason, evicted: [] };
+    return { ok: true, evicted: this.applyVerifiedCancel(signed, verdict) };
+  }
 
-    const evicted = evictableHashes(signed.cancel, (h) => this.entries.get(h)?.announce.order.maker);
-    for (const h of evicted) this.evict(h);
-    return { ok: true, evicted };
+  /**
+   * The synchronous half of {@link ingestCancel}, for a caller that already holds
+   * the {@link CancelVerifier} verdict (the server, which verifies before billing).
+   * Like {@link admit}, it trusts that verdict — pass only one the verifier
+   * returned for THIS message; a verdict for another maker applies nothing.
+   */
+  applyVerifiedCancel(signed: SignedSoftCancel, verdict: CancelVerdict): Hex[] {
+    if (!verdict.ok || verdict.maker?.toLowerCase() !== signed.cancel.maker.toLowerCase()) return [];
+    const maker = signed.cancel.maker.toLowerCase();
+    const evicted: Hex[] = [];
+    for (const h of signed.cancel.orderHashes) {
+      const entry = this.entries.get(h);
+      if (entry) {
+        if (entry.announce.order.maker.toLowerCase() !== maker) continue; // not theirs to retract
+        this.tombstone(h, maker, entry.announce.order.expiry, false);
+        this.evict(h);
+        evicted.push(h);
+      } else {
+        this.tombstone(h, maker, signed.cancel.expiry, true);
+      }
+    }
+    return evicted;
+  }
+
+  private tombstone(orderHash: Hex, maker: string, until: bigint, pending: boolean): void {
+    const prior = this.tombstones.get(orderHash);
+    if (prior) {
+      // First maker to cancel a hash owns its tombstone; a second maker's cancel
+      // over the same hash (not their order) must not rebind it.
+      if (prior.maker === maker && until > prior.until) prior.until = until;
+      if (prior.maker === maker && !pending && prior.pending) {
+        prior.pending = false;
+        this.bumpPending(maker, -1);
+      }
+      return;
+    }
+    if (pending) {
+      const cap = this.opts.maxPendingTombstonesPerMaker ?? 1_024;
+      if ((this.pendingPerMaker.get(maker) ?? 0) >= cap) return;
+      this.bumpPending(maker, 1);
+    }
+    this.tombstones.set(orderHash, { maker, until, pending });
+    const max = this.opts.maxTombstones ?? 100_000;
+    for (const [h, t] of this.tombstones) {
+      if (this.tombstones.size <= max) break;
+      this.dropTombstone(h, t);
+    }
+  }
+
+  private dropTombstone(orderHash: Hex, t: SoftCancelTombstone): void {
+    this.tombstones.delete(orderHash);
+    if (t.pending) this.bumpPending(t.maker, -1);
+  }
+
+  private bumpPending(maker: string, by: number): void {
+    const n = (this.pendingPerMaker.get(maker) ?? 0) + by;
+    if (n <= 0) this.pendingPerMaker.delete(maker);
+    else this.pendingPerMaker.set(maker, n);
+  }
+
+  /** Forget tombstones whose order (or cancel) can no longer matter. Run by every sweep. */
+  pruneTombstones(): void {
+    const now = BigInt(this.now());
+    for (const [h, t] of this.tombstones) if (t.until <= now) this.dropTombstone(h, t);
   }
 
   /**
    * Cancel-and-replace, applied as one step: the retraction lands ONLY if the
-   * replacement verifies. The ordering is deliberate — admit first, evict second
-   * — so a book never passes through a state where the maker has neither order
-   * live. A failed replacement leaves the predecessor exactly where it was.
+   * replacement verifies, and the replacement lands ONLY if the retraction does.
+   * Both signatures are proven first; then the admit and the eviction happen in the
+   * same synchronous step, so a book never passes through a state where the maker
+   * has neither order live — or, with an unverifiable cancel, both. A failure of
+   * either half leaves the predecessor exactly where it was.
    */
   async ingestReplace(replace: OrderReplace): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
     if (!replace.cancel.cancel.orderHashes.includes(replace.replaces)) {
@@ -262,11 +501,30 @@ export class Book {
       return { ok: false, reason: "replace: cancel and replacement have different makers" };
     }
 
-    const added = await this.ingestAnnounce(replace.announce);
-    if (!added.ok) return added; // predecessor untouched
+    let orderHash: Hex;
+    try {
+      orderHash = hashOrderStruct(replace.announce.order);
+    } catch {
+      return { ok: false, reason: "unhashable order" };
+    }
+    // A replacement only takes its predecessor's slot when it really has one here:
+    // naming a never-seen predecessor must not be a way past the caps (F29 P4).
+    const predecessor = this.entries.get(replace.replaces);
+    const exempt =
+      predecessor !== undefined &&
+      predecessor.announce.order.maker.toLowerCase() === replace.announce.order.maker.toLowerCase();
+    const gate = this.precheck(replace.announce.order, orderHash, { known: exempt || this.entries.has(orderHash) });
+    if (!gate.ok) return { ok: false, reason: gate.reason, orderHash };
 
-    await this.ingestCancel(replace.cancel);
-    return added;
+    const cancelVerdict = await this.opts.cancelVerifier.verify(replace.cancel);
+    if (!cancelVerdict.ok) return { ok: false, reason: `replace: ${cancelVerdict.reason ?? "cancel rejected"}`, orderHash };
+    const res = await this.opts.verifier.verifyAnnounce(replace.announce);
+    if (!res.ok) return { ok: false, reason: res.reason, orderHash: res.orderHash }; // predecessor untouched
+
+    const admitted = this.admit(res.orderHash, replace.announce, res.state, { exempt });
+    if (!admitted.ok) return { ok: false, reason: admitted.reason, orderHash: res.orderHash };
+    this.applyVerifiedCancel(replace.cancel, cancelVerdict);
+    return { ok: true, orderHash: res.orderHash };
   }
 
   async ingestReplaceBytes(bytes: Uint8Array): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
@@ -287,6 +545,13 @@ export class Book {
     const entry = this.entries.get(orderHash);
     if (!entry) return;
     this.entries.delete(orderHash);
+    const key = entry.announce.order.maker.toLowerCase();
+    const n = (this.makerCounts.get(key) ?? 1) - 1;
+    if (n <= 0) this.makerCounts.delete(key);
+    else this.makerCounts.set(key, n);
+    // Whatever retired the order — a chain event above all — the verifier's short
+    // cache must not keep a fresh `ok` verdict that would re-admit a re-announce.
+    this.opts.verifier.invalidate?.(orderHash);
     this.emit(this.removeListeners, entry);
   }
 
@@ -396,6 +661,7 @@ export class Book {
    * still-valid order.
    */
   async revalidate(): Promise<void> {
+    this.pruneTombstones();
     const now = BigInt(this.now());
     for (const entry of [...this.entries.values()]) {
       if (entry.announce.order.expiry <= now) this.evict(entry.orderHash);
@@ -410,9 +676,20 @@ export class Book {
     const states = await this.opts.verifier.refreshStates(
       entries.map((e) => ({ orderHash: e.orderHash, announce: e.announce })),
     );
+    const maxStrikes = this.opts.maxInconclusiveStrikes ?? 3;
     for (const entry of entries) {
       const s = states.get(entry.orderHash);
       if (!s) continue;
+      if (s.status === OrderStatus.Inconclusive) {
+        // Not a verdict — keep the last real state. Only an order that failed ON ITS
+        // OWN counts against itself; one merely not reached this sweep does not.
+        if (s.isolated) {
+          entry.inconclusiveStrikes = (entry.inconclusiveStrikes ?? 0) + 1;
+          if (entry.inconclusiveStrikes >= maxStrikes) this.evict(entry.orderHash);
+        }
+        continue;
+      }
+      entry.inconclusiveStrikes = 0;
       entry.state = s;
       if (this.shouldEvict(entry, s)) this.evict(entry.orderHash);
     }

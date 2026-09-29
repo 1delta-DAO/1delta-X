@@ -113,15 +113,23 @@ export const PERMIT_TAKE_TYPES = { PermitTake: PERMIT_TAKE_TYPE } as const;
 export const ORDER_TYPES = { Order: ORDER_TYPE } as const;
 
 /// Types for the single-signature `fillWithPermit` witness (Permit3 domain).
-/// The `PermitBatchWitness` witness field IS the order — one signature endorses
-/// the whole batch AND the exact order.
+/// The `PermitBatchWitness` witness field is a `SettlementOrder` — the exact order
+/// PLUS the one Settlement that may fill it — so one signature endorses the whole
+/// batch AND the exact order on that settler only. The settler is named because
+/// Permit3's domain does not name it: with a bare `Order` witness, every Settlement
+/// sharing a Permit3 would accept the same signature (contract
+/// `OrderHash.SETTLEMENT_ORDER_TYPEHASH`).
 export const PERMIT_WITNESS_TYPES = {
   PermitBatchWitness: [
     { name: "tokens", type: "TokenPermit[]" },
     { name: "takers", type: "TakerPermit[]" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint256" },
-    { name: "witness", type: "Order" },
+    { name: "witness", type: "SettlementOrder" },
+  ],
+  SettlementOrder: [
+    { name: "settlement", type: "address" },
+    { name: "order", type: "Order" },
   ],
   TokenPermit: TOKEN_PERMIT_TYPE,
   TakerPermit: TAKER_PERMIT_TYPE,

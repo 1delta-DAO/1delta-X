@@ -10,11 +10,19 @@ import { zeroAddress, type Address } from "viem";
  * Nothing is deployed yet, so addresses come from one environment variable and
  * default to unset rather than to a plausible-looking constant.
  *
- *   VITE_DEPLOYMENTS='{"31":{"settlement":"0x…","permit3":"0x…","lens":"0x…"}}'
+ *   VITE_DEPLOYMENTS='{"31":{"settlement":"0x…","permit3":"0x…","lens":"0x…","solver":"0x…"}}'
  */
 export interface DeploymentConfig extends Deployment {
   /** Read-only companion — `getOrderRelevantStates` is the orderbook's Layer 2. */
   lens: Address;
+  /**
+   * The operator-gated `AggregatorFillSolver` this app's orders name as their
+   * `exclusiveFiller`, or the zero address when none is configured. Direct
+   * (delta-verify) delivery is only safe when a trusted filler runs the fill
+   * callback, so the settler fills such an order for its named filler ONLY —
+   * see `buildOrder`, which falls back to plain delivery without one.
+   */
+  solver: Address;
 }
 
 type RawDeployments = Record<string, Partial<Omit<DeploymentConfig, "chainId">>>;
@@ -49,6 +57,7 @@ export function deploymentFor(chainId: number): DeploymentConfig | null {
     settlement: entry.settlement,
     permit3: entry.permit3 ?? zeroAddress,
     lens: entry.lens ?? zeroAddress,
+    solver: entry.solver ?? zeroAddress,
   };
 }
 

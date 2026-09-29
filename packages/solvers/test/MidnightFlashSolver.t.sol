@@ -186,7 +186,18 @@ contract MidnightFlashSolverTest is CoreSettlementBase {
     function test_midnight_strayCallbackFromMidnight_revertsNotInFlash() public {
         vm.prank(address(midnight));
         vm.expectRevert(BaseFlashSolver.NotInFlash.selector);
-        flashSolver.onFlashLoan(address(this), _a1(WETH), _u1(WETH_OUT), "");
+        flashSolver.onFlashLoan(address(flashSolver), _a1(WETH), _u1(WETH_OUT), "");
+    }
+
+    /// @dev Re-audit F30. `midnight.flashLoan` accepts ANY callback, and the in-flash
+    ///      flag stays armed for all of `executeFill` — so during a live fill (inside
+    ///      its swap, where a hostile route token holds control) a stranger's own
+    ///      Midnight loan naming this solver would have passed both gates above. The
+    ///      initiator check refuses it FIRST, whatever the flash state.
+    function test_midnight_foreignInitiator_reverts() public {
+        vm.prank(address(midnight));
+        vm.expectRevert(MidnightFlashSolver.ForeignInitiator.selector);
+        flashSolver.onFlashLoan(address(0xBAD), _a1(WETH), _u1(WETH_OUT), "");
     }
 
     // ══════════════════════ MultiInputUnsupported ══════════════════════

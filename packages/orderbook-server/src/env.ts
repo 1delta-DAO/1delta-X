@@ -2,6 +2,7 @@ import { DEFAULT_ADMISSION, type AdmissionPolicy, type OrderbookConfig } from "@
 import { getAddress, isAddress, type Address } from "viem";
 
 import { DEFAULT_RATE_LIMIT, type RateLimitOptions } from "./ratelimit";
+import { DEFAULT_STREAM_LIMITS, type StreamLimits } from "./server";
 
 export interface ServerEnv {
   config: OrderbookConfig;
@@ -13,6 +14,7 @@ export interface ServerEnv {
   indexFills: boolean;
   fillsFromBlock?: bigint;
   ocoModules?: Address[];
+  stream: Partial<StreamLimits>;
 }
 
 function reqStr(name: string): string {
@@ -45,7 +47,7 @@ function bool(name: string, fallback: boolean): boolean {
 function addrList(name: string): Address[] | undefined {
   const v = process.env[name];
   if (!v) return undefined;
-  return v.split(",").map((raw) => {
+  return v.split(",").filter((raw) => raw.trim() !== "").map((raw) => {
     const trimmed = raw.trim();
     if (!isAddress(trimmed)) throw new Error(`env ${name} contains an invalid address (${trimmed})`);
     return getAddress(trimmed);
@@ -79,9 +81,19 @@ function addrList(name: string): Address[] | undefined {
  *
  * Admission (what the book will hold at all)
  *   MAX_ORDERS            25000
- *   MAX_ORDERS_PER_MAKER  500
+ *   MAX_ORDERS_PER_MAKER  100
  *   MIN_TTL_SECONDS       15
  *   MAX_TTL_SECONDS       7776000 (90d)
+ *   MAX_CURVE_POINTS      32
+ *   MAX_ORDER_BYTES       16384
+ *   ALLOWED_TOKENS        0x…,0x…  only these leg tokens (unset: any) — set it
+ *                                  whenever the book serves a known market set
+ *
+ * Stream (WebSocket /stream)
+ *   WS_MAX_CONNECTIONS    1000
+ *   WS_MAX_PER_IP         16
+ *   WS_ALLOWED_ORIGINS    https://app.example,…  browser Origins allowed (unset: any)
+ *   WS_SNAPSHOT_LIMIT     1000  orders in the connect snapshot
  *
  * Rate limiting (token buckets; writes cost 10, reads 1–2)
  *   RATE_LIMIT_IP_CAPACITY      120
@@ -89,9 +101,12 @@ function addrList(name: string): Address[] | undefined {
  *   RATE_LIMIT_MAKER_CAPACITY   120
  *   RATE_LIMIT_MAKER_REFILL     1
  *   MAX_BODY_BYTES              65536
+ *   RATE_LIMIT_MAX_KEYS         100000 buckets per map (LRU past it)
  *   TRUST_PROXY                 false — set only behind a proxy that sets
  *                                       x-forwarded-for, or the header becomes
  *                                       a free way to reset your own bucket
+ *   TRUSTED_PROXY_HOPS          1     — your proxies in front of the node; the
+ *                                       client is read that far from the RIGHT
  */
 export function loadEnv(): ServerEnv {
   const chainId = Number(reqStr("CHAIN_ID"));
@@ -111,6 +126,7 @@ export function loadEnv(): ServerEnv {
     ...(filler ? { defaultFiller: getAddress(filler) } : {}),
   };
 
+  const allowedTokens = addrList("ALLOWED_TOKENS");
   const admission: AdmissionPolicy = {
     maxOrders: num("MAX_ORDERS", DEFAULT_ADMISSION.maxOrders),
     maxOrdersPerMaker: num("MAX_ORDERS_PER_MAKER", DEFAULT_ADMISSION.maxOrdersPerMaker),
@@ -120,6 +136,9 @@ export function loadEnv(): ServerEnv {
     maxValidators: num("MAX_VALIDATORS", DEFAULT_ADMISSION.maxValidators),
     minTtlSeconds: num("MIN_TTL_SECONDS", DEFAULT_ADMISSION.minTtlSeconds),
     maxTtlSeconds: num("MAX_TTL_SECONDS", DEFAULT_ADMISSION.maxTtlSeconds),
+    maxCurvePoints: num("MAX_CURVE_POINTS", DEFAULT_ADMISSION.maxCurvePoints),
+    maxOrderBytes: num("MAX_ORDER_BYTES", DEFAULT_ADMISSION.maxOrderBytes),
+    ...(allowedTokens ? { allowedTokens } : {}),
     requireDeltaVerifyOutputs: bool("REQUIRE_DELTA_VERIFY", DEFAULT_ADMISSION.requireDeltaVerifyOutputs),
   };
 
@@ -134,7 +153,9 @@ export function loadEnv(): ServerEnv {
     },
     maxBodyBytes: num("MAX_BODY_BYTES", DEFAULT_RATE_LIMIT.maxBodyBytes),
     idleEvictionMs: num("RATE_LIMIT_IDLE_MS", DEFAULT_RATE_LIMIT.idleEvictionMs),
+    maxKeys: num("RATE_LIMIT_MAX_KEYS", DEFAULT_RATE_LIMIT.maxKeys),
     trustProxy: bool("TRUST_PROXY", DEFAULT_RATE_LIMIT.trustProxy),
+    trustedHops: num("TRUSTED_PROXY_HOPS", DEFAULT_RATE_LIMIT.trustedHops),
   };
 
   const fillsFrom = process.env.FILLS_FROM_BLOCK;
@@ -146,6 +167,14 @@ export function loadEnv(): ServerEnv {
     port: num("PORT", 8080),
     admission,
     rateLimit,
+    stream: {
+      maxConnections: num("WS_MAX_CONNECTIONS", DEFAULT_STREAM_LIMITS.maxConnections),
+      maxPerIp: num("WS_MAX_PER_IP", DEFAULT_STREAM_LIMITS.maxPerIp),
+      snapshotLimit: num("WS_SNAPSHOT_LIMIT", DEFAULT_STREAM_LIMITS.snapshotLimit),
+      ...(process.env.WS_ALLOWED_ORIGINS
+        ? { allowedOrigins: process.env.WS_ALLOWED_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean) }
+        : {}),
+    },
     watchChain: bool("WATCH_CHAIN", true),
     indexFills: bool("INDEX_FILLS", true),
     ...(fillsFrom ? { fillsFromBlock: BigInt(fillsFrom) } : {}),

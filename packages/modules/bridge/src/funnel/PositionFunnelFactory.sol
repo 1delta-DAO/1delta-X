@@ -43,6 +43,10 @@ contract PositionFunnelFactory {
     event FunnelDeployed(address indexed funnel, address indexed owner, bytes32 salt);
 
     error DeployFailed();
+    /// @dev A funnel owned by `address(0)` would accept any signature that fails to
+    ///      recover — `ecrecover` returns 0 on garbage, and 0 IS that owner — so
+    ///      `bytes(65)` of zeros would authorise its orders, permits and batches.
+    error ZeroOwner();
 
     constructor(address permit3, address settlement, address lens, address grantModule) {
         IMPLEMENTATION = address(new PositionFunnel(permit3, settlement, lens, grantModule));
@@ -89,6 +93,7 @@ contract PositionFunnelFactory {
     ///         Anyone may deploy anyone's funnel; this grants nothing, because the
     ///         owner is fixed by the init code the address is derived from.
     function deploy(address owner, bytes32 userSalt) public returns (address funnel) {
+        if (owner == address(0)) revert ZeroOwner();
         funnel = funnelFor(owner, userSalt);
         if (funnel.code.length != 0) return funnel;
 

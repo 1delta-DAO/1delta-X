@@ -170,3 +170,23 @@ describe("fill slicing", () => {
     expect(owed).toBe(2_000_000_000_000_000n);
   });
 });
+
+describe("bump rounding matches the contract (re-audit 2026-09-29)", () => {
+  it("priority auction: the fractional improvement rounds toward the maker", () => {
+    // scale 3 gwei, bid 1 gwei → improvement 3333.33 bps: bump 6666, not 6667.
+    const o = order({ timing: 1n << 103n, priorityScale: 3_000_000_000n });
+    expect(bumpBps(o, 0n, 0n, 1_000_000_000n)).toBe(6_666n);
+  });
+
+  it("falling curve segment: the decrement rounds up (bump toward the maker)", () => {
+    // (0, 10000) → (3, 0) at t = 1: exact 6666.67 → 6666.
+    const o = order({
+      timing: packTiming(100, 0, 0),
+      curve: [
+        { timeDelta: 0, bumpBps: 10_000 },
+        { timeDelta: 3, bumpBps: 0 },
+      ],
+    });
+    expect(bumpBps(o, 101n)).toBe(6_666n);
+  });
+});

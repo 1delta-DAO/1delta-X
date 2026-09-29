@@ -94,8 +94,8 @@ band the other way round:
 
 ```
   legsOut[j]: start = the ambitious price, end = the guaranteed floor
-  bump = BPS - min(BPS, priorityFee * BPS / priorityScale)
-  priorityFee = tx.gasprice - block.basefee     (0 if it would underflow)
+  bump = BPS - min(BPS, ceil(priorityFee * BPS / priorityScale))   // improvement rounds up, to the maker
+  priorityFee = tx.gasprice - block.basefee - baselinePriorityFeeWei   (clamped at 0)
 ```
 
 No bid ⇒ `bump == BPS` ⇒ the maker receives `end`, its signed floor — exactly the

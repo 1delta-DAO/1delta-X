@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { zeroAddress } from "viem";
 
 import { CANONICAL_ORDER } from "./canonicalOrder";
 import {
+  FILLER_SET_SENTINEL,
   FILL_ONCE_BIT,
   isFillOnce,
   isPriorityAuction,
@@ -199,6 +201,16 @@ describe("packOrder accepts the mode flags it used to reject", () => {
     expect(
       timingFlags(packOrder({ ...BANDED, timing: withDeltaVerifyOutputs(BANDED.timing) }).timing).deltaVerifyOutputs,
     ).toBe(true);
+  });
+
+  // Re-audit 2026-09-25: the settler fills a delta-verify order ONLY for its named
+  // exclusiveFiller, so an order with none (or the FILLER_SET sentinel) is signable
+  // but never fillable. packOrder refuses to build it.
+  it("refuses a delta-verify order that names no single exclusiveFiller", () => {
+    const dv = { ...BANDED, timing: withDeltaVerifyOutputs(BANDED.timing) };
+    expect(() => packOrder({ ...dv, exclusiveFiller: zeroAddress })).toThrow(/single exclusiveFiller/);
+    expect(() => packOrder({ ...dv, exclusiveFiller: FILLER_SET_SENTINEL })).toThrow(/single exclusiveFiller/);
+    expect(() => packOrder({ ...BANDED, exclusiveFiller: zeroAddress })).not.toThrow();
   });
 
   it("still refuses bit 101 — `side` is packOrder's to write", () => {

@@ -358,4 +358,16 @@ contract PricingModesTest is MockSettlementBase {
         assertEq(tB.balanceOf(maker) - before_, OUT_START, "one bid, one price, the whole size");
         assertTrue(settlement.isNonceCancelled(maker, 22), "and the nonce is the progress record");
     }
+
+    /// Re-audit 2026-09-29: the improvement is the maker's, so its fractional basis
+    /// point rounds TO the maker. Scale 3 gwei, bid 1 gwei → improvement 3333.33 bps:
+    /// the bump must be 6666, not the floored 6667.
+    function test_priorityAuction_fractionalImprovementRoundsToTheMaker() public {
+        Order memory o = _decayingSell(7);
+        o.timing = (uint256(1) << 103) | _expiryBits(block.timestamp + 1 hours);
+        o.params = DutchAuction.packParams(0, 0, 0, 3 gwei, 0);
+        vm.fee(1 gwei);
+        vm.txGasPrice(2 gwei); // 1 gwei of priority
+        assertEq(lens.previewBump(o, solver, ""), 6_666, "bump rounds toward the maker");
+    }
 }

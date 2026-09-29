@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {SignatureVerification} from "../permit3/SignatureVerification.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {OrderState} from "./OrderState.sol";
+import {FillCtx} from "./Structs.sol";
 import {NonceManager} from "./NonceManager.sol";
 
 /// @title Signatures
@@ -135,11 +136,9 @@ abstract contract Signatures is OrderState {
     ///
     ///  With the namespace, a permit can only ever consume a coordinate at or above
     ///  2^255. Order nonces below that — every nonce any builder allocates today —
-    ///  are now unreachable from this function. The residual constraint is one line
-    ///  for order builders and is stated in {NonceManager}: an ORDER must not use a
-    ///  nonce with bit 255 set. It is not enforced on the fill path on purpose,
-    ///  because that would put a compare on the hot path of every order forever to
-    ///  guard a range no allocator picks.
+    ///  are now unreachable from this function. The other half of the rule is stated
+    ///  in {NonceManager}: an ORDER must not use a nonce with bit 255 set, and every
+    ///  fill enforces it ({Base._gateOrderPost} reverts {Base.OrderNonceReserved}).
     ///
     ///  Two consequences of the reservation, both deliberate:
     ///    • pre-emptively killing an unrelayed nomination is still possible with the
@@ -215,7 +214,18 @@ abstract contract Signatures is OrderState {
         // that says "nominate until T" and arrives after T authorises nothing, so it
         // does nothing: reverted under the same selector as a lapsed `deadline`. A
         // gasless revocation is still spelled `expiry == 0` explicitly.
-        if (expiry != 0 && expiry < block.timestamp) revert SignerPermitExpired();
+        //
+        // AND A RELAYED NOMINATION ONLY EVER EXTENDS (re-audit 2026-09-29). The check
+        // above covered a permit landing after its own `expiry`, not one landing
+        // before it: an unrelayed "until T+1h" permit relayed after the maker had
+        // nominated the same delegate directly "until T+365d" overwrote it, cutting a
+        // live desk key short — and the RELAYER picks when a permit lands. So a
+        // permit may not lower the stored expiry either; shortening a delegate is the
+        // maker's own call to {setOrderSigner}, and ending one is a revocation. Same
+        // selector as a lapsed permit: in both cases it is stale.
+        if (expiry != 0 && (expiry < block.timestamp || expiry < orderSignerExpiry[maker][signer])) {
+            revert SignerPermitExpired();
+        }
         _setOrderSigner(maker, signer, expiry);
     }
 
@@ -223,25 +233,29 @@ abstract contract Signatures is OrderState {
     ///      empty-sig on-chain-approval path or a real signature over the domain-
     ///      bound digest; reverts if neither authorizes.
     ///
-    ///      FIRST-FILL ONLY, FOR REAL SIGNATURES. A non-zero `filled[orderHash]` can only have been written
-    ///      by {OrderState._openFill}, which every entry path reaches AFTER this gate
-    ///      — so the counter being non-zero is itself proof that some earlier fill
-    ///      presented valid authorization for this exact hash (and the hash commits to
-    ///      `maker`). Re-deriving the digest and re-running `ecrecover` on every
-    ///      partial fill therefore proves nothing new. Ported from 1inch LOP v4, which
-    ///      gates on `remaining == makingAmount` for the same reason.
+    ///      FIRST-FILL ONLY, FOR REAL SIGNATURES. The skip reads `ctx.prevFilled`,
+    ///      seeded by {OrderState._gateFillState}. The invariant it rests on: EVERY
+    ///      WRITER OF A NON-SENTINEL `filled[orderHash]` HAS AUTHENTICATED THE MAKER FOR
+    ///      THIS HASH (and the hash commits to `maker`). The only such writer is
+    ///      {OrderState._openFill}. Most entries reach it after this gate;
+    ///      {Core.fillWithPermit} after its `SettlementOrder{settlement, order}`
+    ///      Permit3 witness; {Core.fillWithPermitTake} writes it BEFORE its
+    ///      `PermitTake` witness is checked (inside the item dispatch), but a write
+    ///      survives only if that check ran — {Base.PermitTakeNotConsumed} reverts
+    ///      the whole fill otherwise. So every write that PERSISTS was authenticated.
+    ///      {cancelOrder} and {revokeOrderApproval} write only the `type(uint256).max`
+    ///      sentinel, which {_gateFillState} rejects ({OrderCancelled}) before this
+    ///      gate is reached. So a non-zero counter proves some earlier fill presented
+    ///      valid authorization for this exact hash, and re-deriving the digest and
+    ///      re-running `ecrecover` on every partial fill proves nothing new. Ported
+    ///      from 1inch LOP v4, which gates on `remaining == makingAmount` for the same
+    ///      reason.
     ///
-    ///      COST, measured: the added read is NOT free, but it is nearly so —
-    ///      {_openFill} SLOADs the same slot moments later, so this only moves the
-    ///      cold access earlier and leaves that one warm. Net **+150 gas on a first /
-    ///      single fill**, **−2,860 on every fill after it** (−14,531 across a TWAP
-    ///      schedule). A path that reverts BEFORE `_openFill` (a failing validator, a
-    ///      cancelled nonce) pays the ~2,100 cold read for nothing — the +2,374…+4,374
-    ///      seen on revert-path tests. Worth it: fillers simulate before submitting, so
-    ///      reverts are off the real hot path, and any order filled more than once
-    ///      repays the 150 nineteen times over.
-    ///      The cancelled sentinel (`type(uint256).max`) also skips — {_openFill}
-    ///      rejects it a moment later with the precise {OrderCancelled}.
+    ///      COST, measured when this gate still did its own SLOAD of `filled`: net
+    ///      **+150 gas on a first / single fill**, **−2,860 on every fill after it**
+    ///      (−14,531 across a TWAP schedule). The read now lives in
+    ///      {OrderState._gateFillState}, which every path needs anyway, so the skip
+    ///      itself is one memory compare.
     ///
     ///      The skip applies ONLY to the signature branch. The on-chain-approval
     ///      ({approveOrder}) path is re-checked on every fill, because that record is
@@ -257,7 +271,10 @@ abstract contract Signatures is OrderState {
     ///      {rollbackNonces}, the deadline, and revoking the Permit3 allowances that
     ///      fund the fill. A contract maker that needs signature revocation to bind
     ///      mid-order must use {cancelOrder}.
-    function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected) internal view {
+    function _verifySignature(bytes32 orderHash, bytes calldata sig, address expected, FillCtx memory ctx)
+        internal
+        view
+    {
         // Signature-less path: an EMPTY `sig` authorizes against the maker's on-chain
         // {approveOrder} record instead of a signature. No valid signature has zero
         // length (the shared verifier rejects it), so the sentinel can never collide
@@ -274,7 +291,7 @@ abstract contract Signatures is OrderState {
             if (!orderApproved[expected][orderHash]) revert OrderNotApproved();
             return;
         }
-        if (filled[orderHash] != 0) return; // already authorized once — see above
+        if (ctx.prevFilled != 0) return; // already authorized once — see above (seeded by {_gateFillState})
         bytes32 digest;
         bytes calldata sigBody = sig;
         // BULK (Merkle) signature — ONE signature authorizing every order whose hash is
@@ -285,13 +302,21 @@ abstract contract Signatures is OrderState {
         //
         //     sig = innerSig(65) ‖ bytes32[] proof ‖ 0xB0
         //
-        //  This branch only swaps in a DIFFERENT DIGEST and a 65-byte body; every
-        //  acceptance rule below — maker, delegate, contract wallet — then applies
-        //  unchanged. That is deliberate: verifying the root inline with its own copy
-        //  of the signer set measured **+1,343 bytes** of Settlement (2026-08-12,
-        //  against a 404-byte budget), because `tryRecoverSigner` and `verify` are
-        //  library internals the optimizer inlines per site. A bulk signature grants
-        //  exactly the authority a single signature would, no more.
+        //  This branch only swaps in a DIFFERENT DIGEST and a 65-byte body; the
+        //  acceptance rules below then run on that body. That is deliberate:
+        //  verifying the root inline with its own copy of the signer set measured
+        //  **+1,343 bytes** of Settlement (2026-08-12, against a 404-byte budget),
+        //  because `tryRecoverSigner` and `verify` are library internals the
+        //  optimizer inlines per site. A bulk signature grants exactly the authority
+        //  a single signature would, no more.
+        //
+        //  NOT EVERY RULE IS REACHABLE, because the body is FIXED at 65 bytes: the
+        //  maker's own ECDSA key and an ECDSA delegate apply unchanged, but the
+        //  contract-delegate envelope (`address ‖ innerSig`, never 65 bytes) cannot
+        //  be expressed, and a 1271 maker can bulk-sign only if its wallet's
+        //  signature is exactly 65 bytes (a threshold-1 Safe is; most multisig and
+        //  passkey payloads are not). Liveness only — such signers still sign
+        //  orders one by one, or use {approveOrder}.
         //
         //  ⚠ SHAPE, AND WHY IT CANNOT AUTHORIZE ANYTHING IT SHOULDN'T. `length >= 98`,
         //  `(length - 66) % 32 == 0`, trailing `0xB0`. No ECDSA signature (64/65 bytes)
@@ -316,11 +341,29 @@ abstract contract Signatures is OrderState {
         //  internal node off as an order would require finding an order whose EIP-712
         //  struct hash equals a chosen 256-bit node — a second-preimage search.
         uint256 n = sig.length;
-        if (n >= 98 && (n - 66) % 32 == 0 && uint8(sig[n - 1]) == 0xB0) {
-            digest = _hashTypedData(
-                keccak256(abi.encode(OrderHash.ORDER_ROOT_TYPEHASH, _foldProof(orderHash, sig[65:n - 1])))
-            );
-            sigBody = sig[:65];
+        if (n >= 98 && (n - 66) % 32 == 0 && _lastByte(sig) == 0xB0) {
+            bytes32 rootTypeHash = OrderHash.ORDER_ROOT_TYPEHASH;
+            // `n >= 98` was proven above, so `sig[65:n - 1]` and `sig[:65]` are in bounds.
+            bytes calldata proof;
+            /// @solidity memory-safe-assembly
+            assembly {
+                proof.offset := add(sig.offset, 65)
+                proof.length := sub(n, 66)
+            }
+            bytes32 root = _foldProof(orderHash, proof);
+            bytes32 structHash;
+            /// @solidity memory-safe-assembly
+            assembly {
+                // `keccak256(abi.encode(ORDER_ROOT_TYPEHASH, root))` in scratch space.
+                mstore(0x00, rootTypeHash)
+                mstore(0x20, root)
+                structHash := keccak256(0x00, 0x40)
+            }
+            digest = _hashTypedData(structHash);
+            /// @solidity memory-safe-assembly
+            assembly {
+                sigBody.length := 65
+            }
         } else {
             digest = _hashTypedData(orderHash);
         }
@@ -369,10 +412,18 @@ abstract contract Signatures is OrderState {
         //  emit an `innerSig` of 44 or 45 bytes. No real signature scheme produces
         //  one.
         if (!standardLength && sigBody.length > 20 && expected.code.length == 0) {
-            address contractSigner = address(bytes20(sigBody[:20]));
+            // `sigBody.length > 20` is the guard above, so both halves are in bounds.
+            address contractSigner;
+            bytes calldata inner;
+            /// @solidity memory-safe-assembly
+            assembly {
+                contractSigner := shr(96, calldataload(sigBody.offset))
+                inner.offset := add(sigBody.offset, 20)
+                inner.length := sub(sigBody.length, 20)
+            }
             uint256 expiry = orderSignerExpiry[expected][contractSigner];
             if (expiry != 0 && block.timestamp <= expiry) {
-                SignatureVerification.verify(sigBody[20:], digest, contractSigner);
+                SignatureVerification.verify(inner, digest, contractSigner);
                 return;
             }
         }
@@ -386,6 +437,15 @@ abstract contract Signatures is OrderState {
         // landing here. Safe wallets and the rest produce longer payloads, which
         // `tryRecoverSigner` rejects on length alone, so they skip it entirely.
         SignatureVerification.verify(sigBody, digest, expected);
+    }
+
+    /// @dev `uint8(b[b.length - 1])` without the index bounds check — only called once
+    ///      the caller has proven `b.length >= 98`.
+    function _lastByte(bytes calldata b) private pure returns (uint256 r) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            r := byte(0, calldataload(add(b.offset, sub(b.length, 1))))
+        }
     }
 
     /// @dev Fold an inclusion proof into its Merkle root, hashing SORTED pairs (the

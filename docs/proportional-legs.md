@@ -114,7 +114,7 @@ worse.
 X" — and needs no new machinery, since the anti-dust check already runs against
 the resolved delta.
 
-## Fill these through `fillUpTo`
+## Sizing the fill: exact, or `type(uint256).max`
 
 The whole-fill rule is enforced where the marker is *consumed*, in
 `Pricing.inputOwed`. Nothing in `OrderState._openFill` knows the order is
@@ -122,18 +122,28 @@ proportional, and that is a measured choice: threading a flag back to force
 `delta = total` there cost **+253 gas on every plain fill**, which this codebase
 does not spend on a feature most orders never use.
 
-The consequence for callers is that plain `fill` must be handed **exactly** the
-resolved anchor — which a solver cannot know if the balance moves between
-simulation and inclusion, i.e. the very drift this encoding exists to absorb.
+The consequence for callers is that a fill must name **exactly** the resolved
+anchor — which a solver cannot know if the balance moves between simulation and
+inclusion, i.e. the very drift this encoding exists to absorb — or opt into
+"whatever it resolves to" explicitly:
 
-**Use `fillUpTo`.** It clamps the request to the order's remaining size, which for
-an unfilled proportional order *is* the freshly resolved anchor, so any
-sufficiently large `fillAmount` fills the sweep exactly.
+- **`fill` / `fillUpTo` with the quoted size.** If the balance moved either way
+  since the quote, the fill reverts. Up: the request is below the anchor, a partial
+  fill, refused `ProportionalNeedsFullFill`. Down: `fillUpTo` does **not** trim a
+  proportional request to the smaller anchor, so it reverts `OverFill` exactly as
+  plain `fill` does (`test_prop_fillUpTo_shrunkBalance_quotedSize_reverts`). The
+  solver never trades a size it did not price, in either direction.
+- **`fillUpTo` with `type(uint256).max`** — "the whole remaining anchor, whatever
+  it is", which for an unfilled proportional order *is* the freshly resolved anchor
+  (`test_prop_fillUpTo_clampsToResolvedAnchor`). Only for a caller that has priced
+  **any** size up to the cap.
 
-That same clamp is the solver's staleness bound, for free: `fillAmount` is a
-ceiling and the clamp never raises it, so a maker balance that grew past what the
-solver quoted arrives as a partial fill and is refused. The solver is never
-silently made to buy more than it priced.
+Why no trim: a proportional fill is whole, so every output pays its full signed
+amount however small the anchor resolved. `fillUpTo` used to cut an oversized
+request down to the live balance, which charged the solver its full quoted output
+for whatever was left — a maker who moved out all but 1 wei just before inclusion
+was paid in full for dust (re-audit 2026-09-29). A non-proportional order keeps the
+ordinary clamp.
 
 ## On the netted path: name `type(uint256).max`
 
@@ -142,8 +152,8 @@ proportional anchor in a plan was reverted, plan and all, by any stranger's 1-we
 transfer to the maker between plan construction and inclusion (F29 finding 5).
 `Batch._openGated` now honours the same sentinel `fillUpTo` does: `fillAmounts[i]
 = type(uint256).max` means "the whole remaining anchor", resolved at the gate.
-Every other amount is still taken literally. The ceiling semantics above are
-unchanged — the sentinel is the one way to say "whatever it is".
+Every other amount is still taken literally — on both paths the sentinel is the
+one way to say "whatever it is".
 
 ## Consistency: one balance read
 
@@ -238,7 +248,7 @@ quoting, solvers — must call `resolveProportionalOrder` first.
 
 ## Testing
 
-[`ProportionalLeg.t.sol`](../packages/core/test/swaps/ProportionalLeg.t.sol) — 18
+[`ProportionalLeg.t.sol`](../packages/core/test/swaps/ProportionalLeg.t.sol) — 23
 tests covering the sweep, both drift directions, the cap, the sentinel boundary
 (that `SENTINEL_FLOOR` itself is absolute and one above it is 1bp), every
 rejected position, and a fuzz test that ordinary absolute amounts are unaffected.

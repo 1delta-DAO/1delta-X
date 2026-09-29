@@ -142,7 +142,7 @@ contract LiquityV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSour
         // would be a claim on any future balance it holds (F25 / lead A-3).
         // The delivery must have landed HERE, in THIS token — the funding leg's
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
-        // ({Base.ForLegReused}), but its TOKEN is not (F27/H-1). Underflows if
+        // ({Base.ForLegInvalid}), but its TOKEN is not (F27/H-1). Underflows if
         // it did not; sound because `msg.sender == settlement` pins `forAmount`.
         // KEEP THE FLOOR, DO NOT DISCARD IT. `requireDelivered` proves the same delivery
         // and throws the number away; a venue that consumes LESS than instructed then

@@ -2,6 +2,8 @@
 pragma solidity ^0.8.28;
 
 import {Order, Settlement} from "@core/settlement/Settlement.sol";
+import {Base} from "@core/settlement/Base.sol";
+import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {DestinationSettler7683} from "@periphery/DestinationSettler7683.sol";
 import {OriginSettler7683} from "@periphery/OriginSettler7683.sol";
@@ -39,6 +41,14 @@ contract Erc7683Test is MockSettlementBase {
     function _payload(uint256 nonce) internal view returns (OrderPayload memory p, Order memory o) {
         o = _plainOrder(nonce, address(tA), address(tB), IN_AMT, OUT_AMT);
         p = OrderPayload({order: o, signature: _sign(o), fillAmount: IN_AMT, takerData: ""});
+    }
+
+    function _onchain(OrderPayload memory p) internal view returns (OnchainCrossChainOrder memory) {
+        return OnchainCrossChainOrder({
+            fillDeadline: uint32(block.timestamp + 2 hours),
+            orderDataType: OrderHash.ORDER_TYPEHASH,
+            orderData: abi.encode(p)
+        });
     }
 
     function _gasless(OrderPayload memory p) internal view returns (GaslessCrossChainOrder memory g) {
@@ -194,5 +204,120 @@ contract Erc7683Test is MockSettlementBase {
         destination.fill(evilId, originData, "");
         vm.stopPrank();
         assertEq(tB.balanceOf(address(destination)), 500e18, "stranded balance untouched");
+    }
+
+    // ════════════════════ filler-set exclusivity (audit 2026-09-29 E-2) ════════════════════
+
+    address constant MEMBER2 = address(0x50172); // second set member
+    address constant OUTSIDER = address(0x0DD); //  never in the set
+
+    /// @dev A tA→tB order whose exclusivity window names the SET {solver, MEMBER2}
+    ///      (`curve = [0x00] ‖ members`, see {OrderGates.FILLER_SET}); `overrideBps`
+    ///      0 = HARD, else SOFT.
+    function _fillerSetPayload(uint256 nonce, uint16 overrideBps) internal view returns (OrderPayload memory p) {
+        Order memory o = _plainOrder(nonce, address(tA), address(tB), IN_AMT, OUT_AMT);
+        o.exclusiveFiller = OrderGates.FILLER_SET;
+        _setExclusivityEnd(o, block.timestamp + 10 minutes);
+        o.curve = abi.encodePacked(uint8(0), solver, MEMBER2);
+        o.params = overrideBps;
+        p = OrderPayload({order: o, signature: _sign(o), fillAmount: IN_AMT, takerData: ""});
+    }
+
+    /// @dev The PoC'd bug: the adapter previewed a set order as the `address(1)`
+    ///      sentinel, which is in no set, so a HARD set order reverted
+    ///      {NotExclusiveFiller} on every resolve/open for the whole window although
+    ///      both members can fill it. It now previews as a member.
+    function test_hardFillerSet_resolvesAndOpensAsMember() public {
+        OrderPayload memory p = _fillerSetPayload(20, 0);
+        // What the adapter used to ask the lens.
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        lens.previewFill(p.order, IN_AMT, OrderGates.FILLER_SET, "");
+
+        // A non-member resolving gets the FIRST member's quote — the same rule as a
+        // single exclusive filler, where the nominated filler is quoted for anyone.
+        vm.prank(OUTSIDER);
+        ResolvedCrossChainOrder memory r = origin.resolve(_onchain(p));
+        assertEq(r.maxSpent[0].amount, OUT_AMT, "member price");
+        assertEq(r.minReceived[0].amount, IN_AMT, "member receives the whole input");
+        assertEq(address(uint160(uint256(r.minReceived[0].recipient))), solver, "quoted for the first member");
+
+        vm.prank(OUTSIDER);
+        r = origin.resolveFor(_gasless(p), "");
+        assertEq(address(uint160(uint256(r.minReceived[0].recipient))), solver, "resolveFor agrees");
+
+        // Both broadcasts go through: the maker self-opening, and a non-member relayer.
+        vm.recordLogs();
+        vm.prank(maker);
+        origin.open(_onchain(p));
+        vm.prank(OUTSIDER);
+        origin.openFor(_gasless(p), p.signature, "");
+        assertEq(vm.getRecordedLogs().length, 2, "both Opens emitted");
+    }
+
+    /// @dev A caller that IS a set member is quoted as itself (for a set of one this
+    ///      is exactly the single-filler rule), so each member sees its own terms.
+    function test_fillerSet_memberCallerResolvesAsItself() public {
+        OrderPayload memory p = _fillerSetPayload(21, 0);
+        vm.prank(MEMBER2);
+        ResolvedCrossChainOrder memory r = origin.resolve(_onchain(p));
+        assertEq(address(uint160(uint256(r.minReceived[0].recipient))), MEMBER2, "quoted for the calling member");
+        assertEq(r.maxSpent[0].amount, OUT_AMT, "member price");
+    }
+
+    /// @dev A SOFT set order was quoted with the OUTSIDER premium (the sentinel is no
+    ///      member), overstating `maxSpent` by `overrideBps` to every solver reading
+    ///      the broadcast. The member price is what the order actually fills at.
+    function test_softFillerSet_quotesWithoutOutsiderPremium() public {
+        OrderPayload memory p = _fillerSetPayload(22, 100); // 1% soft override
+        (,, uint256[] memory outsiderPaid) = lens.previewFill(p.order, IN_AMT, OUTSIDER, "");
+        assertEq(outsiderPaid[0], OUT_AMT * 10_100 / 10_000, "an outsider does pay the premium");
+
+        vm.prank(OUTSIDER);
+        ResolvedCrossChainOrder memory r = origin.resolve(_onchain(p));
+        assertEq(r.maxSpent[0].amount, OUT_AMT, "resolve: no premium");
+        r = origin.resolveFor(_gasless(p), "");
+        assertEq(r.maxSpent[0].amount, OUT_AMT, "resolveFor: no premium");
+    }
+
+    // ════════════════════ delta-verify orders (audit 2026-09-29 G) ════════════════════
+
+    /// @dev A tA→tB order with `timing` bit 104 set, naming `filler` as the only
+    ///      party allowed to deliver it.
+    function _deltaVerifyPayload(uint256 nonce, address filler) internal view returns (OrderPayload memory p) {
+        Order memory o = _plainOrder(nonce, address(tA), address(tB), IN_AMT, OUT_AMT);
+        o.exclusiveFiller = filler;
+        o.timing |= uint256(1) << 104;
+        p = OrderPayload({order: o, signature: _sign(o), fillAmount: IN_AMT, takerData: ""});
+    }
+
+    /// @dev Why the adapter refuses them: the destination settler fills through
+    ///      `fillUpTo`, which has no callback to deliver in. Even an order that names
+    ///      the adapter itself as its filler cannot be delivered — the pulled output
+    ///      sits in the adapter, the maker's measured delta is zero.
+    function test_destinationFill_cannotDeliverDeltaVerifyOrder() public {
+        OrderPayload memory p = _deltaVerifyPayload(23, address(destination));
+        bytes32 orderId = lens.hashOrder(p.order);
+        vm.startPrank(solver);
+        tB.approve(address(destination), OUT_AMT);
+        vm.expectRevert(Base.DeltaTooLow.selector);
+        destination.fill(orderId, abi.encode(p), "");
+        vm.stopPrank();
+    }
+
+    /// @dev So no entry announces or quotes one: a broadcast would be a dead order to
+    ///      every solver that reads it, and a resolve would point at a fill
+    ///      instruction that cannot execute.
+    function test_deltaVerifyOrder_refusedByEveryEntry() public {
+        OrderPayload memory p = _deltaVerifyPayload(24, solver);
+
+        vm.expectRevert(OriginSettler7683.DeltaVerifyNotSupported.selector);
+        origin.resolve(_onchain(p));
+        vm.expectRevert(OriginSettler7683.DeltaVerifyNotSupported.selector);
+        origin.resolveFor(_gasless(p), "");
+        vm.prank(maker);
+        vm.expectRevert(OriginSettler7683.DeltaVerifyNotSupported.selector);
+        origin.open(_onchain(p));
+        vm.expectRevert(OriginSettler7683.DeltaVerifyNotSupported.selector);
+        origin.openFor(_gasless(p), p.signature, "");
     }
 }

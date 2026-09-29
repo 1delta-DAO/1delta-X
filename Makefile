@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: test test-sdk test-ts build test-all test-fork test-invariant build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: test test-sdk test-ts build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -128,6 +128,47 @@ test-fork:
 # suite keeps its normal profile; run via `make test-core` / `make gas-check`.
 test-invariant:
 	FOUNDRY_PROFILE=core $(FORGE) test --match-path "packages/core/test/invariants/*" -vv
+
+## Run the core suite against the DEPLOYED (via-IR) Permit3 + Settlement bytecode.
+# Production ships both from `[profile.core-deploy]` (via-IR, runs = 100, cancun),
+# but every other target tests the legacy `[profile.core]` build — so hand-written
+# assembly whose `memory-safe-assembly` promise only via-IR relies on is otherwise
+# never run as shipped (audit 2026-09-29, lens F L-1). Compiling the TEST tree via-IR
+# takes 20+ minutes; instead (1) builds just the deployable artifacts via-IR, then
+# (2) runs the legacy-compiled suite with `DEPLOYED_BYTECODE=1`, which makes the
+# shared bases deploy Permit3/Settlement from that artifact JSON instead of `new`
+# (packages/core/test/shared/DeployedBytecode.sol). Tests, helpers and every other
+# contract stay legacy; only the two shipped singletons (and the executor Settlement
+# creates) swap — same addresses as `new`. Gas numbers under the switch are NOT the
+# committed baseline, and the switch leaves the DEFAULT run's gas untouched (verified
+# 0 of 804 non-fuzz tests moved — see the file's header for why that took care).
+#
+# MEASURED 2026-09-29: step (1) ~3 s, step (2) ~10 s of test time on top of the usual
+# [profile.core] compile (~3 min cold, reused warm). Not switched, by design: the
+# `new Settlement` in ErrorSurfaceTest's body (twin: DeployedBytecodeHarnessTest) and
+# DeterministicDeployTest (tests the deploy SCRIPT's own `type(..).creationCode`).
+#
+#   make test-deployed                                      # full core suite
+#   make test-deployed DEPLOYED_TEST_ARGS='--match-path "packages/core/test/permit3/*"'
+#
+# Step (1) builds into its OWN out/cache pair, not `out/core-deploy` + `cache/`:
+#   • a SHARED cache is invalidated by every profile switch — MEASURED: one
+#     core-deploy build (3 s) forces the next [profile.core] build to recompile the
+#     whole test tree (~3 min), i.e. every run of this target would pay it;
+#   • a SEPARATE cache over the SHARED `out/core-deploy` could go stale silently
+#     (foundry checks an artifact exists, not which build wrote it), and `size-check`
+#     rewrites that dir under other settings' caches.
+# Override both to run beside a concurrent `test-deployed` (the dir must stay under
+# `./out`, see fs_permissions); export FOUNDRY_OUT/FOUNDRY_CACHE_PATH to privatise
+# step (2)'s legacy build as well.
+DEPLOYED_ARTIFACTS ?= out/test-deployed
+DEPLOYED_CACHE ?= cache/test-deployed
+DEPLOYED_TEST_ARGS ?=
+test-deployed:
+	FOUNDRY_PROFILE=core-deploy FOUNDRY_OUT=$(DEPLOYED_ARTIFACTS) FOUNDRY_CACHE_PATH=$(DEPLOYED_CACHE) \
+		$(FORGE) build --skip 'packages/core/test/*' --skip '*.s.sol'
+	DEPLOYED_BYTECODE=1 DEPLOYED_ARTIFACTS=$(DEPLOYED_ARTIFACTS) FOUNDRY_PROFILE=core \
+		$(FORGE) test -vv $(DEPLOYED_TEST_ARGS)
 
 ## Run every package's tests one at a time.
 test-all:
@@ -303,6 +344,7 @@ help:
 	@echo "  test-<name>           Shorthand (e.g. make test-modules-aave-v3)"
 	@echo "  build-<name>          Shorthand"
 	@echo "  test-all              All packages sequentially"
+	@echo "  test-deployed         Core suite against the deployed (via-IR) Permit3/Settlement"
 	@echo "  build-all             Compile-check all packages"
 	@echo "  gas                   Regenerate the committed .gas-snapshot baseline"
 	@echo "  gas-check             Fail if any test's gas moved from the baseline"

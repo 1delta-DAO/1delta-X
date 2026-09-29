@@ -46,7 +46,8 @@ function orderFor(maker: Hex, nonce = 1n): Order {
     maker,
     side: OrderSide.SELL,
     nonce,
-    expiry: 4_000_000_000n,
+    // Inside the book's admission TTL window, which the transport path now applies.
+    expiry: BigInt(Math.floor(Date.now() / 1000) + 86_400),
     legsIn: [{ token: "0x1111111111111111111111111111111111111111", start: 1000n, end: 0n }],
     legsOut: [{ token: "0x2222222222222222222222222222222222222222", start: 900n, end: 800n, recipient: zeroAddress }],
     timing: 0n,

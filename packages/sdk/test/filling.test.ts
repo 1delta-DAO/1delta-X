@@ -109,3 +109,26 @@ describe("previewFillLocal", () => {
     expect(() => previewFillLocal(order, 1n, 0n, 0n)).toThrow(/fill-module/);
   });
 });
+
+describe("previewFillLocal mirrors the re-audit 2026-09-29 core rules", () => {
+  const MAX = (1n << 256n) - 1n;
+
+  it("a soft window with no leg to carry the premium refuses the outsider", () => {
+    const o = plainSell();
+    // Fixed input, sole output to a THIRD party: nothing can carry the override.
+    o.legsOut = [{ ...o.legsOut[0]!, end: 0n, recipient: A("0x0000000000000000000000000000000000000b0b") }];
+    expect(() => previewFillLocal(o, 1n * 10n ** 18n, 0n, 0n, 0n, 100n)).toThrow("NotExclusiveFiller");
+    // A maker-addressed output carries it again.
+    o.legsOut = [{ ...o.legsOut[0]!, recipient: ZERO }];
+    expect(() => previewFillLocal(o, 1n * 10n ** 18n, 0n, 0n, 0n, 100n)).not.toThrow();
+  });
+
+  it("a proportional request is not trimmed down unless it is the MAX sentinel", () => {
+    const o = plainSell(); // anchor = legsIn[0].start (the resolved balance)
+    const anchor = o.legsIn[0]!.start;
+    expect(() => previewFillLocal(o, anchor * 2n, 0n, 0n, 0n, 0n, 0n, true)).toThrow("OverFill");
+    expect(previewFillLocal(o, MAX, 0n, 0n, 0n, 0n, 0n, true).delta).toBe(anchor);
+    // An absolute order keeps the ordinary clamp.
+    expect(previewFillLocal(o, anchor * 2n, 0n, 0n, 0n).delta).toBe(anchor);
+  });
+});

@@ -109,10 +109,17 @@ contract RawSwapComparisonTest is UsdrifForkBase {
         super.setUp();
         address[] memory routers = new address[](1);
         routers[0] = SWAP_ROUTER_02;
+        // Gated to this test contract: direct (delta-verify) orders require an
+        // operator set since re-audit 2026-09-29 ({DirectNeedsOperators}).
+        // The maker is listed too: `test_cmp_user_selfServeDex` measures a USER
+        // driving the solver for their own order.
+        address[] memory ops = new address[](2);
+        ops[0] = address(this);
+        ops[1] = maker;
         agg = new AggregatorFillSolver(
             address(settlement),
             routers,
-            new address[](0),
+            ops,
             SurplusPolicy({makerPpm: 0, protocolPpm: 0, protocolRecipient: address(0)}),
             false,
             new address[](0)
@@ -166,7 +173,8 @@ contract RawSwapComparisonTest is UsdrifForkBase {
             legsIn: _legsIn1(USDRIF, AMOUNT_IN),
             legsOut: _legsOut1(USDT0, FLOOR_OUT),
             timing: _expiryBits(block.timestamp + 1 hours) | (direct ? uint256(1) << 104 : 0),
-            exclusiveFiller: address(0),
+            // A delta-verify order is fillable by its named filler only.
+            exclusiveFiller: direct ? address(agg) : address(0),
             minFillAnchor: 0,
             curve: _noCurve(),
             items: PackedEncode.noItems(),
