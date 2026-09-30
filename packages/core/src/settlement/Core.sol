@@ -151,6 +151,21 @@ abstract contract Core is Base {
         _gateFillState(order, orderHash, ctx);
         _enter();
         _verifySignature(orderHash, sig, order.maker, ctx);
+        // `type(uint256).max` = "the whole remaining anchor, whatever it resolved to"
+        // — the sentinel `fillUpTo` and `matchSettle` already honour. It exists for a
+        // {Proportional} anchor, which resolves from the maker's LIVE balance: an
+        // exact size is reverted by any drift before inclusion, a stranger's 1-wei
+        // transfer to the maker included. It is the CALLBACK filler's opt-in because
+        // a callback filler can fund the output FROM the input it actually received
+        // (a routed swap sized by measured delta — {AggregatorFillSolver}), so a
+        // smaller-than-quoted anchor simply fails its own route instead of costing
+        // it. A filler paying the full output from inventory must pass the exact
+        // size — see {Proportional}. `_gateFillState` proved `prevFilled < anchor`.
+        if (fillAmount == type(uint256).max) {
+            unchecked {
+                fillAmount = ctx.anchor - ctx.prevFilled;
+            }
+        }
         outs = _fillCore(
             order, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, takerData, false, ctx
         );

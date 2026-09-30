@@ -77,6 +77,16 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///  leave it {NO_PATCH} for a fixed-input SELL order, where the quoted figure is
 ///  already exact and rewriting buys nothing.
 ///
+///  A {Proportional} ("sell my balance") order: pass `fillAmount =
+///  type(uint256).max` and set `amountInOffset`. `fillWithCallback` then fills the
+///  whole anchor as resolved at inclusion, and the patched route swaps exactly that.
+///  It is safe for THIS contract because it never pays the maker's fixed output
+///  from its own balance: a balance that shrank since the quote swaps less, cannot
+///  cover the output, and the fill reverts (Settlement is approved for no more than
+///  this swap produced); one that grew is a bigger swap, and every {SurplusPolicy}
+///  share and originator carve-out is a fraction of that measured spread. See
+///  docs/proportional-legs.md.
+///
 ///  ⚠ THE OFF-CHAIN QUOTE MUST NAME THIS CONTRACT. Aggregators bake the
 ///  recipient (and often the sender) into the calldata they return. A route
 ///  quoted for the solver's EOA sends the swap output to that EOA, and the fill

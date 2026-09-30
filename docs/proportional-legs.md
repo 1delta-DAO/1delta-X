@@ -133,10 +133,32 @@ inclusion, i.e. the very drift this encoding exists to absorb — or opt into
   proportional request to the smaller anchor, so it reverts `OverFill` exactly as
   plain `fill` does (`test_prop_fillUpTo_shrunkBalance_quotedSize_reverts`). The
   solver never trades a size it did not price, in either direction.
-- **`fillUpTo` with `type(uint256).max`** — "the whole remaining anchor, whatever
-  it is", which for an unfilled proportional order *is* the freshly resolved anchor
-  (`test_prop_fillUpTo_clampsToResolvedAnchor`). Only for a caller that has priced
-  **any** size up to the cap.
+- **`fillUpTo` or `fillWithCallback` with `type(uint256).max`** — "the whole
+  remaining anchor, whatever it is", which for an unfilled proportional order *is*
+  the freshly resolved anchor (`test_prop_fillUpTo_clampsToResolvedAnchor`,
+  `test_prop_fillWithCallback_maxSentinel_fillsResolvedAnchor`). Only for a caller
+  that has priced **any** size up to the cap.
+
+### Who should pass the sentinel
+
+The sentinel moves the shrink risk onto the filler, so it is right for a filler
+whose output is **funded by the input it actually received** and wrong for one that
+pays the output from inventory:
+
+| Filler | Pass | Why |
+| --- | --- | --- |
+| `AggregatorFillSolver` (routed swap, amount patched from the measured input) | `type(uint256).max` | A shrunk balance swaps less and cannot pay the fixed output — the fill reverts, the solver loses only gas (`test_sentinel_shrunkBalance_revertsAndTheSolverLosesNothing`). A grown one is a bigger swap. The 1-wei donation grief stops working (`test_sentinel_oneWeiDonation_noLongerRevertsTheFill`). |
+| Inventory / RFQ filler (pays the output from its own balance) | the exact quoted size | A shrunk balance would be paid the full output — the loss the no-trim rule exists to prevent. |
+
+**Fees still work, and scale with the real size.** An aggregator-routed fill takes
+fees three ways, none of which needs the quoted size: the `SurplusPolicy` shares
+(maker improvement and a protocol fee, as parts-per-million of the measured
+spread), the per-call originator carve-out, and any maker-signed fee leg, which is
+paid out of the same route as the maker's output
+(`test_sentinel_grownBalance_fillsAndFeesScaleWithTheRealSize`,
+`test_sentinel_makerSignedFeeLegIsPaid`). An aggregator's own integrator fee inside
+its calldata is just part of the route's cost. A fee the MAKER did not sign can only
+ever come out of the spread — the maker's output is fixed.
 
 Why no trim: a proportional fill is whole, so every output pays its full signed
 amount however small the anchor resolved. `fillUpTo` used to cut an oversized

@@ -94,10 +94,14 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 ///      NOT trim a proportional request to the smaller anchor, so {_openFill}
 ///      reverts `OverFill`. The solver is never made to trade a size it did not
 ///      price, in either direction.
-///    • `fillUpTo` (or a `matchSettle` open) with `type(uint256).max`: "fill the
-///      whole remaining anchor, whatever it is". Only for a caller that has priced
-///      ANY size up to the cap — see the next section for why a shrunk balance is
-///      the filler's loss, not the maker's.
+///    • `fillUpTo`, `fillWithCallback` or a `matchSettle` open with
+///      `type(uint256).max`: "fill the whole remaining anchor, whatever it is".
+///      Only for a caller that has priced ANY size up to the cap — see the next
+///      section for why a shrunk balance is the filler's loss, not the maker's.
+///      The natural user is a CALLBACK filler that funds the output from the input
+///      it measured arriving (a routed swap, {AggregatorFillSolver}): a shrunk
+///      anchor then fails its own route, and fees taken as a share of the spread
+///      scale with the real size. An inventory filler must pass the exact size.
 ///
 ///  ⚠ WHY `fillUpTo` DOES NOT TRIM HERE (re-audit 2026-09-29). It used to: the
 ///  clamp cut an oversized request down to the live balance, and this note called

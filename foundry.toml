@@ -299,7 +299,8 @@ evm_version    = "cancun"
 #     + proportional no-trim in _clampToRemaining                    23,844     732
 #     + soft window with no carrier is hard (gate inlined ×3)        24,119     457
 #     + extend-only nominations, maker-ward bump rounding,
-#       EXECUTOR-addressed leg refused on the netted path            24,273     303   ← here
+#       EXECUTOR-addressed leg refused on the netted path            24,273     303
+#     + `fillWithCallback` honours the any-size sentinel             24,325     251   ← here
 #
 # THE TWO LEVERS THAT PAID, for the next person: (1) via-IR emits a SEPARATE inlined
 # copy of a function for a call site that passes a CONSTANT argument (`false`,

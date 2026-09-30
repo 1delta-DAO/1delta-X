@@ -1465,6 +1465,21 @@ delta-verify orders no destination fill can deliver:
 tested — the core suite now runs against the shipped artifacts under
 `DEPLOYED_BYTECODE=1`.
 
+**Follow-up — the any-size sentinel on `fillWithCallback`.** With the no-trim
+rule, an exact-size proportional fill is reverted by any balance drift before
+inclusion — a stranger's 1-wei transfer to the maker included. `fillWithCallback`
+now honours the `type(uint256).max` sentinel `fillUpTo` and `matchSettle` already
+did (+52 B, Settlement 24,325). It is the right opt-in for a filler whose output is
+funded by the input it measured, and `AggregatorFillSolver` is one: a shrunk anchor
+fails its own route, a grown one is a bigger swap, and its fees (`SurplusPolicy`
+shares, originator carve-out, maker-signed fee legs) scale with the real spread.
+Pinned by `test_prop_fillWithCallback_maxSentinel_fillsResolvedAnchor`,
+`test_sentinel_shrunkBalance_revertsAndTheSolverLosesNothing`,
+`test_sentinel_oneWeiDonation_noLongerRevertsTheFill`,
+`test_sentinel_grownBalance_fillsAndFeesScaleWithTheRealSize`,
+`test_sentinel_makerSignedFeeLegIsPaid`. An inventory filler must still pass the
+exact size.
+
 **Info — fixed.** Two bump roundings leaned filler-ward by under 1 bp (the priority
 improvement and a falling curve segment's decrement now round up, contract and
 SDK): `test_priorityAuction_fractionalImprovementRoundsToTheMaker`,

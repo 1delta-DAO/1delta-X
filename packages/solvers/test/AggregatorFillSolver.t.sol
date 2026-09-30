@@ -8,6 +8,8 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
 import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {Base} from "@core/settlement/Base.sol";
+import {Proportional} from "@core/settlement/Proportional.sol";
+import {LegOut} from "@core/settlement/Structs.sol";
 import {
     AggregatorFillSolver,
     RoutePlan,
@@ -1472,5 +1474,123 @@ contract AggregatorStandingNeedsOperatorsTest is AggregatorFillSolverTest {
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, stranger));
         st.executeFill(o, sig, AMOUNT_IN, _plan(address(st), AMOUNT_OUT), "");
         assertEq(tA.balanceOf(address(st)), 400e18, "float untouched");
+    }
+}
+
+/// @notice "Sell 100% of my balance" orders through the aggregator solver, with the
+///         `type(uint256).max` any-size sentinel `fillWithCallback` honours since
+///         2026-09-29 — and the fees an aggregator-routed fill takes along the way.
+///
+///  Why the sentinel is SAFE here and not for an inventory filler: a proportional
+///  fill pays the maker's full signed output whatever the anchor resolves to, and
+///  this solver never pays that output out of its own pocket. It swaps exactly the
+///  input it MEASURED arriving (the route's amount patched from the balance delta)
+///  and approves Settlement for no more than that swap produced. A balance that
+///  shrank before inclusion therefore fails its own route — gas, not inventory —
+///  while a balance that grew (up to the maker's cap) is a larger swap and a larger
+///  spread, and every fee below is a share of THAT measured spread.
+contract AggregatorProportionalSentinelTest is AggregatorSurplusSplitTest {
+    uint256 constant CAP = 200e18;
+    uint256 constant ANY = type(uint256).max;
+
+    /// @dev "Sell 100% of my tA, at most CAP, for AMOUNT_OUT tB".
+    function _propOrder(uint256 nonce) internal view returns (Order memory o) {
+        o = _order(nonce);
+        o.legsIn = PackedEncode.setLegInStart(o.legsIn, 0, Proportional.encode(10_000));
+        o.legsIn = PackedEncode.setLegInEnd(o.legsIn, 0, CAP);
+    }
+
+    /// @dev Set the maker's live tA balance (setUp minted 1,000).
+    function _makerHolds(uint256 amount) internal {
+        uint256 bal = tA.balanceOf(maker);
+        vm.prank(maker);
+        tA.transfer(address(0xdead), bal - amount);
+    }
+
+    /// @dev A PATCHED route: `swap(amountIn, recipient)`'s amount is overwritten
+    ///      with what the fill actually delivered (offset 4 = right after the
+    ///      selector), so the route follows the resolved anchor.
+    function _followingPlan(uint256 minOut) internal view returns (RoutePlan memory p) {
+        p = _planFor(AMOUNT_IN, address(splitSolver), minOut, 4);
+    }
+
+    /// The balance GREW after the quote (100 → 150, under the 200 cap). The sentinel
+    /// fills the whole 150; the route swaps 150; the spread is 60, and every fee —
+    /// maker improvement, protocol share, originator carve-out — scales with it.
+    function test_sentinel_grownBalance_fillsAndFeesScaleWithTheRealSize() public {
+        _makerHolds(150e18);
+        Order memory o = _propOrder(60);
+        bytes memory sig = _sign(o);
+        RoutePlan memory plan = _followingPlan(AMOUNT_OUT);
+        plan.originator = ORIGINATOR;
+        plan.originatorPpm = 200_000; // 20% of the spread, carved from the filler's share
+        uint256 makerBefore = tB.balanceOf(maker);
+
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, ANY, plan, "");
+
+        uint256 spread = 150e18 - AMOUNT_OUT; // 60
+        assertEq(tA.balanceOf(maker), 0, "the whole live balance was sold");
+        assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT + spread / 2, "signed output + 50% improvement");
+        assertEq(tB.balanceOf(PROTOCOL), spread / 10, "protocol fee: 10% of the REAL spread");
+        assertEq(tB.balanceOf(ORIGINATOR), spread / 5, "originator: 20% of the REAL spread");
+        assertEq(tB.balanceOf(FILLER), spread * 2 / 10, "filler: 40% - 20%");
+        assertEq(tB.balanceOf(address(splitSolver)), 0, "nothing strands");
+    }
+
+    /// The balance SHRANK below the signed output (a maker front-running the fill,
+    /// or an honest second order draining it). The route swaps what arrived (50),
+    /// which cannot pay 90: the fill reverts and the solver loses nothing — even
+    /// with `minOut = 0`, because Settlement is approved for no more than this
+    /// swap produced. This is what makes the sentinel an ok opt-in for THIS filler.
+    function test_sentinel_shrunkBalance_revertsAndTheSolverLosesNothing() public {
+        tB.mint(address(splitSolver), 500e18); // retained inventory a naive filler would spend
+        _makerHolds(50e18);
+        Order memory o = _propOrder(61);
+        bytes memory sig = _sign(o);
+
+        vm.prank(FILLER);
+        vm.expectRevert();
+        splitSolver.executeFill(o, sig, ANY, _followingPlan(0), "");
+
+        assertEq(tB.balanceOf(address(splitSolver)), 500e18, "the solver's own tB was never touched");
+        assertEq(tA.balanceOf(maker), 50e18, "nothing moved");
+    }
+
+    /// The grief the sentinel removes: a stranger's 1-wei transfer to the maker
+    /// after the quote. An exact-size fill of the quoted balance now reverts (the
+    /// request is below the resolved anchor — a partial a proportional order
+    /// refuses); the sentinel fills the drifted balance.
+    function test_sentinel_oneWeiDonation_noLongerRevertsTheFill() public {
+        _makerHolds(AMOUNT_IN);
+        Order memory o = _propOrder(62);
+        bytes memory sig = _sign(o);
+        tA.mint(maker, 1); // the stranger
+
+        vm.prank(FILLER);
+        vm.expectRevert(Proportional.ProportionalNeedsFullFill.selector);
+        splitSolver.executeFill(o, sig, AMOUNT_IN, _followingPlan(AMOUNT_OUT), "");
+
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, ANY, _followingPlan(AMOUNT_OUT), "");
+        assertEq(tA.balanceOf(maker), 0, "the drifted balance was swept");
+    }
+
+    /// A MAKER-SIGNED fee — an originator fee output leg — is paid out of the same
+    /// route as the maker's output. The sentinel does not change who pays it.
+    function test_sentinel_makerSignedFeeLegIsPaid() public {
+        _makerHolds(150e18);
+        Order memory o = _propOrder(63);
+        LegOut[] memory outs = new LegOut[](2);
+        outs[0] = LegOut({token: address(tB), start: AMOUNT_OUT, end: 0, recipient: address(0)});
+        outs[1] = LegOut({token: address(tB), start: 2e18, end: 0, recipient: address(0xFEE)});
+        o.legsOut = PackedEncode.legsOut(outs);
+        bytes memory sig = _sign(o);
+
+        vm.prank(FILLER);
+        splitSolver.executeFill(o, sig, ANY, _followingPlan(AMOUNT_OUT + 2e18), "");
+
+        assertEq(tB.balanceOf(address(0xFEE)), 2e18, "the signed fee leg is paid in full");
+        assertEq(tB.balanceOf(PROTOCOL), (150e18 - AMOUNT_OUT - 2e18) / 10, "protocol fee on what is left");
     }
 }

@@ -6,7 +6,7 @@ import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
-import {Order, Item, LegIn, OrderSide} from "@core/settlement/Settlement.sol";
+import {Order, CallbackMode, Item, LegIn, OrderSide} from "@core/settlement/Settlement.sol";
 import {Proportional} from "@core/settlement/Proportional.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
@@ -481,5 +481,24 @@ contract ProportionalLegTest is CoreSettlementBase {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", settlement.DOMAIN_SEPARATOR(), _hashOrder(o)));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// `fillWithCallback` honours the same `type(uint256).max` sentinel (2026-09-29):
+    /// the whole remaining anchor, whatever it resolved to. For a callback filler
+    /// that funds the output from the input it measured (a routed swap), so a
+    /// stranger's 1-wei transfer to the maker no longer reverts its exact-size fill.
+    function test_prop_fillWithCallback_maxSentinel_fillsResolvedAnchor() public {
+        uint256 bal = 1_500e6;
+        _stage(bal);
+        Order memory order = _propOrder(0, 10_000, 2_000e6);
+        bytes memory sig = _sign(order);
+        deal(USDC, maker, bal + 1); // the stranger's wei
+
+        vm.prank(solver);
+        uint256[] memory outs =
+            settlement.fillWithCallback(order, sig, type(uint256).max, address(0), "", CallbackMode.PreDelivery);
+        assertEq(outs[0], WETH_OUT, "full output");
+        assertEq(IERC20(USDC).balanceOf(solver), bal + 1, "swept the drifted balance");
+        assertEq(IERC20(USDC).balanceOf(maker), 0, "maker swept");
     }
 }
