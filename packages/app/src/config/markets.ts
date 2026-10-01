@@ -44,6 +44,74 @@ export function primaryPool(market: Market): PoolRef {
   return market.pools[0]!;
 }
 
+/** A token's identity, pinned. */
+export interface PinnedToken {
+  address: `0x${string}`;
+  decimals: number;
+}
+
+/**
+ * Token address and decimals, PINNED per chain under the config symbol.
+ *
+ * These are the values that go into the EIP-712 order a maker signs — the
+ * receive-token address and the scale its floor is written in — so they are
+ * configuration, read once from the pools' own `token0()/token1()/decimals()`
+ * on-chain, and never taken from an indexer response or a token list at
+ * runtime (audit G-TS_SIGN-1). Indexers still supply logos and depth; when one
+ * reports a pool whose tokens disagree with these pins the market is refused
+ * (see `assertPoolTokens`), so a poisoned feed can blank the book but cannot
+ * change what is signed.
+ */
+export const TOKENS: Record<number, Record<string, PinnedToken>> = {
+  1: {
+    ETH: { address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", decimals: 18 },
+    USDC: { address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", decimals: 6 },
+    USDT: { address: "0xdac17f958d2ee523a2206206994597c13d831ec7", decimals: 6 },
+    WBTC: { address: "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", decimals: 8 },
+    LINK: { address: "0x514910771af9ca656af840dff83e8264ecf986ca", decimals: 18 },
+  },
+  56: {
+    WBNB: { address: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", decimals: 18 },
+    USDT: { address: "0x55d398326f99059ff775485246999027b3197955", decimals: 18 },
+    BTCB: { address: "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c", decimals: 18 },
+    ETH: { address: "0x2170ed0880ac9a755fd29b2688956bd959f933f8", decimals: 18 },
+  },
+  30: {
+    WRBTC: { address: "0x542fda317318ebf1d3deaf76e0b632741a7e677d", decimals: 18 },
+    USD0: { address: "0x779ded0c9e1022225f8e0630b35a9b54be713736", decimals: 6 },
+    WETH: { address: "0x2f6f07cdcf3588944bf4c42ac74ff24bf56e7590", decimals: 18 },
+    USDRIF: { address: "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37", decimals: 18 },
+  },
+};
+
+/** The pinned token behind a config symbol on a chain, or `undefined` if none is configured. */
+export function pinnedToken(chainId: number, symbol: string): PinnedToken | undefined {
+  return TOKENS[chainId]?.[symbol];
+}
+
+/**
+ * Throw unless an indexer-reported pool holds exactly the market's pinned pair.
+ * Compared by ADDRESS, never by symbol: symbols are display strings an indexer
+ * is free to report however it likes.
+ */
+export function assertPoolTokens(
+  market: Market,
+  pool: string,
+  token0: string,
+  token1: string,
+): { baseIsToken0: boolean } {
+  const base = pinnedToken(market.chainId, market.base);
+  const quote = pinnedToken(market.chainId, market.quote);
+  if (!base || !quote) throw new Error(`market ${market.id} has no pinned tokens`);
+  const t0 = token0.toLowerCase();
+  const t1 = token1.toLowerCase();
+  if (t0 === base.address && t1 === quote.address) return { baseIsToken0: true };
+  if (t1 === base.address && t0 === quote.address) return { baseIsToken0: false };
+  throw new Error(
+    `pool ${pool} reported ${token0}/${token1}, which is not the pinned ${market.base}/${market.quote} pair — refusing it`,
+  );
+}
+
 export const MARKETS: Market[] = [
   // ── Ethereum ───────────────────────────────────────────
   {

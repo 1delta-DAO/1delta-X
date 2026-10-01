@@ -38,6 +38,9 @@ importers:
       vite:
         specifier: ^6.0.7
         version: 6.4.3(@types/node@26.1.1)(tsx@4.23.1)
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@26.1.1)
 
   packages/auction:
     dependencies:
@@ -56,6 +59,8 @@ importers:
         version: 2.1.9(@types/node@26.1.1)
 
   packages/core: {}
+
+  packages/docs-site: {}
 
   packages/lib: {}
 

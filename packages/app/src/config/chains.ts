@@ -18,6 +18,11 @@ export interface ChainConfig {
    * SushiSwap v3 subgraph. Goldsky-hosted deployments are public; the ones
    * behind The Graph's gateway need an API key, so those carry a `${GRAPH_KEY}`
    * placeholder and stay dark unless `VITE_GRAPH_KEY` is set.
+   *
+   * ⚠ PUBLIC: every `VITE_*` value is inlined into the client bundle, so that
+   * key ships to every visitor. Treat it as public — use a key that is
+   * domain-restricted in The Graph's dashboard and carries a spending cap — and
+   * never reuse a server-side key here (G-TS_SIGN-14).
    */
   sushi?: string;
 }

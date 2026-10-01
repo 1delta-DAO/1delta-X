@@ -1,8 +1,7 @@
 import { sushiEndpoint, type ChainConfig } from "../config/chains";
-import { primaryPool, type Market, type PoolRef } from "../config/markets";
+import { assertPoolTokens, pinnedToken, primaryPool, type Market, type PoolRef } from "../config/markets";
 import { fetchPoolLiquidity, fetchPoolMeta, type PoolMeta, type TokenRef } from "./oku";
 import { fetchSushiPool } from "./sushi";
-import { normSymbol as norm } from "./symbols";
 import { DEX_SOURCE, type Level, type PoolBook, type Venue } from "./types";
 import { buildLadder, type PoolLiquidity } from "./univ3";
 
@@ -91,7 +90,11 @@ export async function fetchMarketMeta(
   const reasons: string[] = [];
   for (const ref of market.pools) {
     try {
-      return await fetchPoolIdentity(ref, chain, signal);
+      const meta = await fetchPoolIdentity(ref, chain, signal);
+      // An indexer that names a different pair is a failed source, not an
+      // answer: fall through to the next pool rather than adopt its tokens.
+      assertPoolTokens(market, meta.pool, meta.token0.address, meta.token1.address);
+      return meta;
     } catch (e) {
       if (signal?.aborted) throw e;
       reasons.push(`${ref.dex} ${ref.address.slice(0, 8)}…: ${e instanceof Error ? e.message : String(e)}`);
@@ -150,10 +153,10 @@ export interface ResolvedMarket {
 /**
  * Work out which token is the base, from the resolving pool's own metadata.
  *
- * Orientation of that pool comes from symbols, because that is all the market
- * config names. Every other pool is then matched by token ADDRESS: the two
- * indexers report different symbols for the same token (`USD0` vs `USD₮0`) and
- * identical addresses.
+ * Orientation comes from the market's PINNED token addresses, not from the
+ * symbols an indexer reports: a pool whose reported tokens are not exactly the
+ * pinned pair is refused outright (G-TS_SIGN-1). The base/quote refs carry the
+ * pinned decimals too, so nothing downstream inherits an indexer's scale.
  */
 export async function resolveMarket(
   market: Market,
@@ -162,23 +165,15 @@ export async function resolveMarket(
   signal?: AbortSignal,
 ): Promise<ResolvedMarket> {
   const primary = meta ?? (await fetchMarketMeta(market, chain, signal));
-
-  const wantBase = norm(market.base);
-  const wantQuote = norm(market.quote);
-  const t0 = norm(primary.token0.symbol);
-  const t1 = norm(primary.token1.symbol);
-  let baseIsToken0: boolean;
-  if (t0 === wantBase && t1 === wantQuote) baseIsToken0 = true;
-  else if (t1 === wantBase && t0 === wantQuote) baseIsToken0 = false;
-  else {
-    throw new Error(
-      `pool ${primary.pool} holds ${primary.token0.symbol}/${primary.token1.symbol}, not ${market.base}/${market.quote}`,
-    );
-  }
+  const { baseIsToken0 } = assertPoolTokens(market, primary.pool, primary.token0.address, primary.token1.address);
+  const base = baseIsToken0 ? primary.token0 : primary.token1;
+  const quote = baseIsToken0 ? primary.token1 : primary.token0;
+  const pinnedBase = pinnedToken(market.chainId, market.base)!;
+  const pinnedQuote = pinnedToken(market.chainId, market.quote)!;
   return {
     meta: primary,
-    base: baseIsToken0 ? primary.token0 : primary.token1,
-    quote: baseIsToken0 ? primary.token1 : primary.token0,
+    base: { ...base, address: pinnedBase.address, decimals: pinnedBase.decimals },
+    quote: { ...quote, address: pinnedQuote.address, decimals: pinnedQuote.decimals },
   };
 }
 

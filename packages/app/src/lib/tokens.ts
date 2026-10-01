@@ -37,7 +37,39 @@ interface TokenList {
 }
 
 const CDN = "https://cdn.jsdelivr.net/gh/1delta-DAO/token-lists@main";
-const CACHE_KEY = "1delta-x.tokens.v1";
+/**
+ * v2: entries carry the time they were saved and age out. The v1 cache never
+ * expired, so one poisoned list response outlived any upstream fix for as long
+ * as the browser kept its storage (G-TS_SIGN-1). Bumping the key also drops
+ * every v1 entry on the next load.
+ */
+const CACHE_KEY = "1delta-x.tokens.v2";
+/** How long a cached list entry is trusted before it is fetched again. */
+export const TOKEN_CACHE_TTL_MS = 3 * 24 * 3600_000;
+
+interface CacheFile {
+  savedAt: number;
+  entries: Record<string, TokenMeta>;
+}
+
+/**
+ * The entries of a persisted cache that are still fresh, or none.
+ *
+ * Exposed for tests. Anything malformed, from the old unversioned format, or
+ * older than {@link TOKEN_CACHE_TTL_MS} reads as empty — the list is then
+ * fetched again, which costs a download and never a wrong logo.
+ */
+export function parseTokenCache(raw: string | null, now: number): Record<string, TokenMeta> {
+  if (!raw) return {};
+  try {
+    const file = JSON.parse(raw) as Partial<CacheFile>;
+    if (typeof file.savedAt !== "number" || !file.entries || typeof file.entries !== "object") return {};
+    if (now - file.savedAt > TOKEN_CACHE_TTL_MS || file.savedAt > now) return {};
+    return file.entries;
+  } catch {
+    return {};
+  }
+}
 
 const resolved = new Map<string, TokenMeta>();
 const listeners = new Set<() => void>();
@@ -64,13 +96,20 @@ function key(chainId: number, address: string): string {
   return `${chainId}:${address.toLowerCase()}`;
 }
 
+/**
+ * When the persisted entries were first fetched this session. Kept fixed while
+ * the tab lives, so re-persisting does not keep refreshing the age of entries
+ * that were hydrated from an older save.
+ */
+let savedAt: number | undefined;
+
 function hydrate(): void {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return;
-    for (const [k, v] of Object.entries(JSON.parse(raw) as Record<string, TokenMeta>)) {
-      resolved.set(k, v);
-    }
+    const entries = Object.entries(parseTokenCache(raw, Date.now()));
+    for (const [k, v] of entries) resolved.set(k, v);
+    // Hydrated entries keep their ORIGINAL age: re-saving them must not reset it.
+    if (entries.length) savedAt = (JSON.parse(raw!) as CacheFile).savedAt;
   } catch {
     // A corrupt cache is not worth a broken app; the lists will repopulate it.
   }
@@ -79,7 +118,8 @@ hydrate();
 
 function persist(): void {
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(Object.fromEntries(resolved)));
+    const file: CacheFile = { savedAt: savedAt ?? (savedAt = Date.now()), entries: Object.fromEntries(resolved) };
+    localStorage.setItem(CACHE_KEY, JSON.stringify(file));
   } catch {
     // Quota or private mode — the in-memory map still serves this session.
   }

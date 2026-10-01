@@ -1,0 +1,77 @@
+import { PERMIT3_ABI } from "@1delta-x/sdk";
+import { erc20Abi, isAddressEqual, parseAbi, type Address } from "viem";
+
+import type { FundingState } from "./funding";
+
+/**
+ * The on-chain reads the sign path depends on, over any `readContract`
+ * surface (a viem PublicClient on the wallet's provider satisfies it).
+ */
+export interface Reader {
+  readContract(args: {
+    address: Address;
+    abi: readonly unknown[];
+    functionName: string;
+    args?: readonly unknown[];
+  }): Promise<unknown>;
+}
+
+const SETTLEMENT_READS = parseAbi([
+  "function PERMIT3() view returns (address)",
+  "function minValidNonce(address) view returns (uint256)",
+]);
+
+/**
+ * Throw unless the configured Settlement really is wired to the configured
+ * Permit3.
+ *
+ * The approval the app asks for names `permit3` from VITE_DEPLOYMENTS; a typo
+ * there would have every user approve an arbitrary address. Settlement's own
+ * immutable `PERMIT3()` is the authority, so the app checks it before it
+ * offers any approval (G-TS_SIGN-14).
+ */
+export async function verifyDeployment(
+  reader: Reader,
+  d: { settlement: Address; permit3: Address },
+): Promise<void> {
+  const wired = (await reader.readContract({
+    address: d.settlement,
+    abi: SETTLEMENT_READS,
+    functionName: "PERMIT3",
+  })) as Address;
+  if (!isAddressEqual(wired, d.permit3)) {
+    throw new Error(`deployment mismatch: Settlement uses Permit3 ${wired}, config names ${d.permit3}`);
+  }
+}
+
+/** The maker's nonce watermark: order nonces below it are dead. */
+export async function readMinValidNonce(reader: Reader, settlement: Address, maker: Address): Promise<bigint> {
+  return (await reader.readContract({
+    address: settlement,
+    abi: SETTLEMENT_READS,
+    functionName: "minValidNonce",
+    args: [maker],
+  })) as bigint;
+}
+
+/** Both funding legs for one (maker, token) — see `lib/funding.ts`. */
+export async function readFundingState(
+  reader: Reader,
+  p: { token: Address; owner: Address; permit3: Address; settlement: Address },
+): Promise<FundingState> {
+  const [erc20Allowance, grant] = await Promise.all([
+    reader.readContract({
+      address: p.token,
+      abi: erc20Abi,
+      functionName: "allowance",
+      args: [p.owner, p.permit3],
+    }) as Promise<bigint>,
+    reader.readContract({
+      address: p.permit3,
+      abi: PERMIT3_ABI,
+      functionName: "tokenAllowance",
+      args: [p.owner, p.settlement, p.token],
+    }) as Promise<readonly [bigint, number]>,
+  ]);
+  return { erc20Allowance, grantAmount: grant[0], grantExpiration: Number(grant[1]) };
+}

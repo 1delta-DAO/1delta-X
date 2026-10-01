@@ -13,6 +13,7 @@ signs.
 ```bash
 pnpm run app                          # http://localhost:5175
 pnpm --filter @1delta-x/app build     # typecheck + static bundle in dist/
+pnpm --filter @1delta-x/app test      # vitest: order encoding, funding plan, mock book, worker headers
 ```
 
 No API key. A wallet is needed to sign; the book renders without one.
@@ -50,11 +51,14 @@ curl -X POST https://<your-domain>/api/oku/rootstock/cush/liveBlock \
 | --- | --- |
 | Uniswap v3 ladder | **Live.** Oku `cush_simulatePoolLiquidity`, polled every 12s |
 | SushiSwap v3 ladder | **Live.** The v3 subgraph, same tick maths, same polling |
-| Token symbols, decimals, icons | **Live.** [1delta-DAO/token-lists](https://github.com/1delta-DAO/token-lists) |
+| Token addresses + decimals (what is signed) | **Pinned.** `config/markets.ts` `TOKENS`, read once from the pools on-chain; an indexer that disagrees is refused |
+| Token icons | **Live.** [1delta-DAO/token-lists](https://github.com/1delta-DAO/token-lists), looked up by pinned address, cached 3 days |
 | Wallet connection, chain switching, balances | **Live.** EIP-6963 + viem, read through the wallet |
 | Ladder merge, fill simulation, resting/crossing split | **Real.** `src/lib/univ3.ts`, `src/lib/ladder.ts` |
-| Order distribution: signing, resting, cancelling, fills | **Mocked in-browser.** `src/backend/mock.ts` |
-| ERC-20 allowances | **Live.** A real `approve`, capped at the exact input of the order being signed |
+| Order signing (EIP-712) | **Real.** Pinned tokens, nonce < 2^255 and above the on-chain `minValidNonce` |
+| Order distribution: resting, soft cancels, fills | **Mocked in-browser.** `src/backend/mock.ts`; every fill is flagged `simulated` and shown as such |
+| Funding: ERC-20 approve to Permit3 + Permit3 grant to Settlement | **Live.** Both legs, each exactly the ticket's input; revocable from the form |
+| On-chain cancel (`Settlement.cancelOrders`) | **Live** when a Settlement is configured |
 | Settlement transactions | **Simulated.** Signing is real; nothing is broadcast to a filler |
 | Pre-audit disclosure | **Live.** Acknowledgement gate, reopenable from the strip |
 | Draw Terms | **Live.** Own page at `/terms.html`, rendered from `TC.md` |
@@ -65,17 +69,72 @@ The Rootstock beta runs on contracts that have not been audited, so the
 interface is built to bound what an unaudited contract can reach rather than to
 assume it is safe.
 
-**Exact-amount allowances.** `approve` is called with the input of the single
-order about to be signed — never `type(uint256).max`, never a rounded-up
-headroom. The spender is Permit3, which is what actually pulls the maker's
-input. Every trade therefore costs one approval, and an order that is signed but
-never filled leaves no standing allowance behind. A TWAP approves one slice at a
-time, because one slice is what each signature commits.
+**Funding: two legs, both exact.** Settlement pulls the maker's input with
+`Permit3.transferFrom`, which spends the maker's Permit3 **book grant to
+Settlement**, and Permit3 then moves the tokens under the maker's **ERC-20
+approval to Permit3** (see `docs/account-onboarding.md`). Both are required:
+with only the ERC-20 approval every order is unfillable — the Permit3 leg
+reverts `InsufficientAllowance` and the direct fallback has no allowance to
+Settlement either (audit A-IMMUT-1). The form therefore sends up to two
+transactions, planned in `lib/funding.ts`:
 
-The amount approved and the amount signed come from the same `plan` value in
-`App.tsx`. Deriving them separately is how an interface ends up approving one
-number and signing another, which under this policy is not cosmetic — it is a
-fill that cannot happen.
+1. `token.approve(Permit3, exactly the ticket's input)`;
+2. `Permit3.approveToken(Settlement, token, exactly the ticket's input, expiry)`,
+   with the expiry just past the order's own (one hour of slack) — never `0`,
+   which in Permit3 means "never expires".
+
+Both are set to *exactly* the ticket, never `type(uint256).max`: a larger
+standing approval or grant left by an earlier ticket is trimmed down before
+"Sign" unlocks. Signing is gated on both legs reading back exact on-chain.
+
+**What "exact" does not mean.** An approval is not consumed by signing, by a
+cancel or by an expiry — only by a fill. It stays until a fill uses it or the
+maker revokes it, and the form offers a one-click **revoke** (ERC-20 approval to
+0 and `Permit3.revokeToken`) whenever anything is left. The book grant does lapse
+on its own shortly after the order expires. Approving a new ticket for the same
+token replaces the previous one's funding. A TWAP funds its whole schedule up
+front (each slice is a separate order, signed when due), so a later slice needs
+no further approval.
+
+The amount funded and the amount signed come from the same `plan` value
+(`lib/plan.ts`), and both are capped at the wallet's raw on-chain balance, so
+"max" never commits more than the wallet holds even when the balance does not
+survive a round-trip through a JS double.
+
+**Deployment check.** Before offering any approval the app reads
+`Settlement.PERMIT3()` and refuses (no approve button, no signing) when it is
+not the `permit3` configured in `VITE_DEPLOYMENTS`. Every address in that
+variable is validated; an entry with a malformed address is treated as not
+deployed.
+
+**What is signed is shown.** The wallet renders the order's legs as an opaque
+`bytes` blob, so the form prints the pinned address of the token you receive.
+Token addresses and decimals are configuration (`TOKENS` in
+`config/markets.ts`), never taken from an indexer or the token list.
+
+**Cancelling.** "Hide" signs an EIP-712 soft cancel: free, instant, and
+*advisory* — books that honour it stop distributing the order, but the order's
+signature stays valid on-chain until expiry, so anyone already holding it can
+still fill it. The row therefore stays, marked "hidden · still fillable", until
+it expires. "Cancel on-chain" sends `Settlement.cancelOrders(nonces)` for every
+signed order behind the row; after it is mined no filler can settle them. With
+no wallet on the order's chain nothing is cancelled — an unsigned eviction
+would only hide the order from its own maker.
+
+**Nothing is simulated as real.** Market orders are signed and then *not*
+broadcast; the receipt says so. A limit ticket is signed as one order for its
+whole size (a short opening auction from the book's price down to the limit),
+so the part that crosses the book now is filled from that signed order rather
+than recorded as a fill no signature backs. TWAP slices fill only once signed.
+Fills produced by the mock are flagged `simulated` and never show a
+transaction hash.
+
+**Security headers.** `public/_worker.js` sets a CSP (`frame-ancestors 'none'`,
+`script-src 'self'`, `connect-src` limited to the feeds the app calls),
+`X-Frame-Options: DENY` and `nosniff` on every asset. A self-hosted
+`VITE_OKU_BASE` on another origin must be added to `connect-src`.
+`VITE_GRAPH_KEY` is inlined into the public bundle: use a domain-restricted,
+capped key.
 
 **The prize draw.** `config/promotion.ts` is the single place the draw is
 described, and `components/Raffle.tsx` is the only place it is mentioned in the
@@ -206,8 +265,10 @@ interface OrderbookApi {
   orders(marketId?): RestingOrder[];
   fills(marketId?): Fill[];
   subscribe(listener): () => void;
-  place(req): Promise<RestingOrder>;
-  cancel(orderHash): Promise<void>;
+  place(req): Promise<RestingOrder>;            // req.signed is required
+  cancel(orderHash, signedCancel): Promise<void>; // soft: marks, never evicts
+  confirmHardCancel(orderHash): void;           // after cancelOrders is mined
+  addSlice(orderHash, signed): void;            // a TWAP slice signed when due
   recordTake(req): void;
   observe(obs): void;
 }
@@ -219,10 +280,12 @@ an in-memory map keyed by order hash, with add/remove listeners. A real client
 implementation of this interface plus EIP-712 signing in `place`. No component
 changes.
 
-The mock is not a simulation of the settlement contract. It holds orders,
-retracts them for free, and advances fills as the *live* pool mid moves through
-resting prices — so what you watch reacts to the real market rather than to a
-timer of its own.
+The mock is not a simulation of the settlement contract. It holds signed
+orders, marks them soft-cancelled on a signed retraction (keeping the row),
+and advances *simulated* fills as the *live* pool mid moves through resting
+prices — so what you watch reacts to the real market rather than to a timer of
+its own. A real client must keep these semantics: a soft cancel is advisory,
+and a fill shown as settled must be a real transaction.
 
 ## Layout
 
@@ -235,7 +298,11 @@ src/
   lib/sushi.ts          SushiSwap v3 subgraph client
   lib/poolbook.ts       every venue → one merged, venue-tagged PoolBook
   lib/ladder.ts         merge, walk, quote, clearing price, depth
-  lib/tokens.ts         1delta token lists, lazily loaded and cached
+  lib/tokens.ts         1delta token lists (icons only), lazily loaded, cached with a TTL
+  lib/order.ts          ticket → EIP-712 order: locale-free wei maths, nonce draw, input cap
+  lib/plan.ts           what one ticket signs and funds
+  lib/funding.ts        the two funding legs (ERC-20 → Permit3, Permit3 grant → Settlement)
+  lib/chain.ts          on-chain reads: PERMIT3() check, minValidNonce, funding state
   backend/api.ts        the order-distribution seam
   backend/mock.ts       in-browser stand-in
   lib/markdown.tsx      the markdown subset TC.md uses, rendered dependency-free

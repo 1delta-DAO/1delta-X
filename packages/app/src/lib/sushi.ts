@@ -110,6 +110,11 @@ export async function fetchSushiPool(
     signal,
   );
   if (!head.pool) throw new Error(`sushi pool ${pool} not indexed`);
+  // The response names the pool it describes; a subgraph answering for some
+  // OTHER pool must not have its tokens attributed to this one (G-TS_SIGN-1).
+  if (head.pool.id.toLowerCase() !== id) {
+    throw new Error(`sushi subgraph answered for ${head.pool.id}, not the requested pool ${pool}`);
+  }
 
   const ticks: RawTick[] = [];
   let after = "-887273";

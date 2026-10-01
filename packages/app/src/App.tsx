@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { buildSoftCancel, signOrder, signSoftCancel } from "@1delta-x/sdk";
-import { formatUnits, zeroAddress } from "viem";
+import { buildSoftCancel, encodeCancelOrders, signOrder, signSoftCancel } from "@1delta-x/sdk";
+import { createPublicClient, createWalletClient, custom, formatUnits, zeroAddress, type Address } from "viem";
 
 import { orderbook } from "./backend/mock";
 import type { SignedOrder } from "./backend/api";
@@ -14,9 +14,9 @@ import { PreAuditGate, PreAuditStrip, useAcknowledgement } from "./components/Pr
 import { RaffleNotice } from "./components/Raffle";
 import { Stats } from "./components/Stats";
 import { TermsLink } from "./components/TermsLink";
-import { chainLabel } from "./config/chains";
+import { chainById, chainLabel } from "./config/chains";
 import { deploymentFor } from "./config/deployments";
-import { symbolsOn } from "./config/markets";
+import { marketById, pinnedToken, symbolsOn } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
 import { useFills, useRestingOrders } from "./hooks/useOrderbook";
 import { usePoolBook } from "./hooks/usePoolBook";
@@ -25,7 +25,11 @@ import { useTicket, type TicketDeps } from "./hooks/useTicket";
 import { useTokenIndex } from "./hooks/useTokenIndex";
 import { fmtAmt, fmtPrice } from "./lib/format";
 import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/ladder";
-import { buildOrder, toWei } from "./lib/order";
+import { readMinValidNonce, type Reader } from "./lib/chain";
+import { hasLeftover, planFunding, type FundingStep } from "./lib/funding";
+import { buildOrder } from "./lib/order";
+import { planTicket, requiredInputWei, type TicketPlan } from "./lib/plan";
+import type { RestingOrder, Side, SliceSpec } from "./lib/types";
 import { useAllowance } from "./wallet/useAllowance";
 import { useBalances } from "./wallet/useBalances";
 import { useSigner } from "./wallet/useSigner";
@@ -36,13 +40,21 @@ const SLIPPAGE_BPS = 50;
 
 const DAY_MS = 24 * 3600_000;
 
-/** How long a market order stays live, and how long its auction runs. */
-const MARKET_TTL_SECONDS = 60;
-
 /** Past this the pool ladder is old enough to say so rather than imply it is live. */
 const STALE_MS = 30_000;
 
 const EMPTY_DEPS: TicketDeps = { bids: [], asks: [], tick: 4, balances: {} };
+
+function stepLabel(step: FundingStep | undefined, amount: string, token: string): string {
+  if (!step) return `Approve ${token}`;
+  return step.kind === "erc20-approve"
+    ? `Approve exactly ${amount} ${token} to Permit3`
+    : `Grant Settlement exactly ${amount} ${token} via Permit3`;
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message.split("\n")[0]! : String(e);
+}
 
 export default function App() {
   const [theme, toggleTheme] = useTheme();
@@ -57,7 +69,7 @@ export default function App() {
   const chainId = ticket.chainId;
 
   const pools = useChainPools(chainId);
-  const tokens = useTokenIndex(chainId, pools.metas);
+  const tokens = useTokenIndex(chainId);
   const pool = usePoolBook(ticket.market, pools.metas[ticket.marketId]);
 
   const onChain = wallet.chainId === chainId;
@@ -76,10 +88,19 @@ export default function App() {
     const out: Record<string, number | undefined> = {};
     for (const symbol of symbolsOn(chainId)) {
       const address = tokens.view(symbol).address;
-      out[symbol] = address ? rawBalances[address.toLowerCase()] : undefined;
+      out[symbol] = address ? rawBalances.human[address.toLowerCase()] : undefined;
     }
     return out;
   }, [chainId, tokens, rawBalances]);
+
+  /** The exact on-chain balance, in wei, of a pinned token — what "max" and every input cap use. */
+  const balanceWei = useCallback(
+    (symbol: string): bigint | undefined => {
+      const address = tokens.view(symbol).address;
+      return address ? rawBalances.raw[address.toLowerCase()] : undefined;
+    },
+    [tokens, rawBalances],
+  );
 
   const resting = useRestingOrders(ticket.marketId);
   const fills = useFills();
@@ -131,65 +152,39 @@ export default function App() {
 
   const payMeta = tokens.view(ticket.payToken);
 
-  /**
-   * What the next signature actually commits.
-   *
-   * The approval and the order are both sized from this one value. Deriving
-   * them separately is how an interface ends up approving one amount and
-   * signing another — which, under an exact-amount allowance policy, is not a
-   * cosmetic mismatch but a fill that cannot happen.
-   */
-  const plan = useMemo(() => {
-    if (!q || !pool.book || ticket.amount <= 0 || q.totalIn <= 0) return null;
-    const price = ticket.limit ?? pool.book.mid;
+  const plan: TicketPlan | null = useMemo(
+    () =>
+      q && pool.book
+        ? planTicket({
+            q,
+            mid: pool.book.mid,
+            mode: ticket.mode,
+            side: ticket.side,
+            amount: ticket.amount,
+            limit: ticket.limit,
+            slices: ticket.slices,
+            everyMin: ticket.everyMin,
+          })
+        : null,
+    [q, pool.book, ticket.amount, ticket.everyMin, ticket.limit, ticket.mode, ticket.side, ticket.slices],
+  );
 
-    // A TWAP signs one slice at a time, so the slice — not the notional — is
-    // what gets committed and what gets approved.
-    if (ticket.mode === "twap") {
-      const amountIn = ticket.amount / ticket.slices;
-      const out = ticket.side === "sell" ? amountIn * price : amountIn / price;
-      return {
-        kind: "twap" as const,
-        price,
-        amountIn,
-        targetOut: out,
-        minOut: out,
-        ttlSeconds: ticket.everyMin * 60 + 60,
-        decaySeconds: 0,
-      };
-    }
-    // Only the part that does not cross now is signed; the rest settles against
-    // the book on screen.
-    if (ticket.mode === "limit" && q.resting && ticket.limit) {
-      const amountIn = ticket.side === "sell" ? q.resting.size : q.resting.size * ticket.limit;
-      const out = ticket.side === "sell" ? q.resting.size * ticket.limit : q.resting.size;
-      return {
-        kind: "resting" as const,
-        price,
-        amountIn,
-        targetOut: out,
-        minOut: out,
-        ttlSeconds: DAY_MS / 1000,
-        decaySeconds: 0,
-      };
-    }
-    // A market order is a short dutch auction: the maker names the price the
-    // book shows now and a floor, and lets fillers compete in between.
-    return {
-      kind: "market" as const,
-      price,
-      amountIn: q.totalIn,
-      targetOut: q.crossedOut,
-      minOut: q.minReceived,
-      ttlSeconds: MARKET_TTL_SECONDS,
-      decaySeconds: MARKET_TTL_SECONDS,
-    };
-  }, [q, pool.book, ticket.amount, ticket.everyMin, ticket.limit, ticket.mode, ticket.side, ticket.slices]);
+  const payWei = balanceWei(ticket.payToken);
 
-  // Permit3 is what pulls the maker's input, so Permit3 is what gets approved.
-  // With nothing deployed nothing can pull, so there is no approval to ask for
-  // and the signature is a demonstration either way.
-  const spender = deployment && deployment.permit3 !== zeroAddress ? deployment.permit3 : null;
+  // PRE-AUDIT POLICY: fund exactly this ticket and nothing more — both legs,
+  // the ERC-20 approval to Permit3 and the Permit3 book grant to Settlement
+  // (A-IMMUT-1), each set to exactly what the ticket signs. Capped at the raw
+  // balance so "max" never commits more than the wallet holds (G-TS_SIGN-7).
+  const requiredWei = useMemo(
+    () => (plan && payMeta.decimals !== undefined ? requiredInputWei(plan, payMeta.decimals, payWei) : 0n),
+    [plan, payMeta.decimals, payWei],
+  );
+
+  // Exact comparison in wei — a float compare of a number with itself could
+  // never see a "max" that rounded above the balance.
+  const overBalance = payWei !== undefined && requiredWei > payWei;
+  const maxAmount =
+    payWei !== undefined && payMeta.decimals !== undefined ? formatUnits(payWei, payMeta.decimals) : undefined;
 
   const allowanceState = useAllowance({
     provider: wallet.provider,
@@ -197,28 +192,32 @@ export default function App() {
     chainId,
     onChain,
     token: payMeta.address ?? null,
-    spender,
+    deployment: deployment ? { permit3: deployment.permit3, settlement: deployment.settlement } : null,
   });
 
-  // PRE-AUDIT POLICY: approve exactly this order and nothing more. An unaudited
-  // contract can then only ever reach the trade the user was looking at when
-  // they approved it, and no allowance outlives an order that never fills.
-  const requiredWei = useMemo(
-    () => (plan && payMeta.decimals !== undefined ? toWei(plan.amountIn, payMeta.decimals) : 0n),
-    [plan, payMeta.decimals],
-  );
+  const nowSec = Math.floor(Date.now() / 1000);
+  const funding = allowanceState.funding;
+  const fundingPlan =
+    funding && plan ? planFunding(funding, requiredWei, plan.fundingTtlSeconds, nowSec) : undefined;
+  const requiredHuman = payMeta.decimals !== undefined ? Number(formatUnits(requiredWei, payMeta.decimals)) : 0;
 
   const allowance: AllowanceView = {
-    spender,
-    required: plan?.amountIn ?? 0,
+    spender: deployment ? deployment.permit3 : null,
+    required: requiredHuman,
     current:
-      allowanceState.allowance !== undefined && payMeta.decimals !== undefined
-        ? Number(formatUnits(allowanceState.allowance, payMeta.decimals))
+      funding !== undefined && payMeta.decimals !== undefined
+        ? Number(formatUnits(funding.erc20Allowance, payMeta.decimals))
         : undefined,
-    covered: requiredWei > 0n && allowanceState.allowance !== undefined && allowanceState.allowance >= requiredWei,
-    approving: allowanceState.approving,
+    covered: fundingPlan?.covered ?? false,
+    trims: fundingPlan?.trims ?? false,
+    nextLabel: stepLabel(fundingPlan?.steps[0], fmtAmt(requiredHuman), ticket.payToken),
+    remaining: fundingPlan?.steps.length ?? 0,
+    leftover: funding !== undefined && hasLeftover(funding, nowSec),
+    mismatch: allowanceState.mismatch,
+    approving: allowanceState.busy,
     error: allowanceState.error,
-    approve: () => void allowanceState.approve(requiredWei),
+    approve: () => plan && void allowanceState.fund(requiredWei, plan.fundingTtlSeconds),
+    revoke: () => void allowanceState.revoke(),
   };
 
   const [signing, setSigning] = useState(false);
@@ -235,44 +234,57 @@ export default function App() {
   }, [ticket.marketId, ticket.side, ticket.mode]);
 
   /**
-   * Build the EIP-712 order this ticket describes and have the wallet sign it.
+   * Build the EIP-712 order for one spec on one market, and have the wallet sign it.
    *
-   * The domain is the deployment's — chain id plus the Settlement address — so
-   * the signature is bound to one deployment and cannot be replayed onto
-   * another. With nothing deployed the zero address stands in: the wallet still
-   * signs, the order still hashes to the value the contract would compute
-   * (`hashOrderStruct` is domain-independent), and the receipt says plainly
-   * that no filler can use it.
+   * Token addresses and decimals come from the PINNED config for that market,
+   * never from an indexer or a token list (G-TS_SIGN-1). The domain is the
+   * deployment's — chain id plus the Settlement address — so the signature is
+   * bound to one deployment. With nothing deployed the zero address stands in:
+   * the wallet still signs, the order still hashes to the value the contract
+   * would compute, and the receipt says plainly that no filler can use it.
    */
   const signDraft = useCallback(
-    async (spec: {
-      amountIn: number;
-      targetOut: number;
-      minOut: number;
-      ttlSeconds: number;
-      decaySeconds: number;
-    }): Promise<SignedOrder> => {
+    async (spec: SliceSpec & { marketId: string; side: Side; orders?: number }): Promise<SignedOrder> => {
       if (!signer || !wallet.address) throw new Error("wallet not connected");
-      const pay = tokens.view(ticket.payToken);
-      const recv = tokens.view(ticket.recvToken);
-      if (!pay.address || !recv.address || pay.decimals === undefined || recv.decimals === undefined) {
-        throw new Error("token metadata still loading");
+      const market = marketById(spec.marketId);
+      const paySymbol = spec.side === "sell" ? market.base : market.quote;
+      const recvSymbol = spec.side === "sell" ? market.quote : market.base;
+      const pay = pinnedToken(market.chainId, paySymbol);
+      const recv = pinnedToken(market.chainId, recvSymbol);
+      if (!pay || !recv) throw new Error(`no pinned token for ${paySymbol}/${recvSymbol}`);
+
+      // After a `rollbackNonces`, a nonce below the maker's watermark is dead
+      // on arrival; read it so the draw lands above (G-TS_SIGN-3).
+      let minValidNonce = 0n;
+      if (deployment && wallet.provider) {
+        const config = chainById(chainId);
+        if (config) {
+          const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) }) as unknown as Reader;
+          minValidNonce = await readMinValidNonce(reader, deployment.settlement, wallet.address);
+        }
       }
+      const raw = balanceWei(paySymbol);
 
       const draft = buildOrder({
         maker: wallet.address,
-        side: ticket.side,
-        pay: { address: pay.address, decimals: pay.decimals },
-        recv: { address: recv.address, decimals: recv.decimals },
+        side: spec.side,
+        pay,
+        recv,
         solver: deployment?.solver,
-        ...spec,
+        amountIn: spec.amountIn,
+        targetOut: spec.targetOut,
+        minOut: spec.minOut,
+        ttlSeconds: spec.ttlSeconds,
+        decaySeconds: spec.decaySeconds,
+        maxIn: raw === undefined ? undefined : raw / BigInt(spec.orders ?? 1),
+        minValidNonce,
       });
 
       const domain = deployment ?? { chainId, settlement: zeroAddress, permit3: zeroAddress };
       const sig = await signOrder(signer, draft.order, domain);
       return { order: draft.order, sig, hash: draft.hash, deployment: domain, deployed: deployment !== null };
     },
-    [chainId, deployment, signer, ticket.payToken, ticket.recvToken, ticket.side, tokens, wallet.address],
+    [balanceWei, chainId, deployment, signer, wallet.address, wallet.provider],
   );
 
   const sign = useCallback(async () => {
@@ -281,101 +293,168 @@ export default function App() {
     try {
       const { marketId, side, payToken, recvToken, amount } = ticket;
       const undeployed = deployment === null ? " · domain not deployed" : "";
+      const spec: SliceSpec = {
+        amountIn: plan.amountIn,
+        targetOut: plan.targetOut,
+        minOut: plan.minOut,
+        ttlSeconds: plan.ttlSeconds,
+        decaySeconds: plan.decaySeconds,
+      };
 
       if (plan.kind === "twap") {
         // A TWAP is N independent orders on a schedule, so only the slice that
-        // is due can be signed now. Signing the whole notional up front would
-        // hand a filler the entire size at the first tick.
-        const signed = await signDraft(plan);
+        // is due can be signed now. Each later slice is signed — by the maker,
+        // from the Open orders row — when it comes due, and only a signed
+        // slice can fill.
+        const signed = await signDraft({ ...spec, marketId, side, orders: plan.orders });
         const order = await orderbook.place({
           marketId,
           side,
           type: "twap",
-          size: side === "sell" ? amount : amount / plan.price,
+          size: plan.restingBase,
           price: plan.price,
           ttlMs: ticket.slices * ticket.everyMin * 60_000 + 60_000,
           slices: { total: ticket.slices, everyMin: ticket.everyMin },
+          sliceSpec: spec,
           signed,
         });
         setReceipt({
           hash: order.id,
           headline: `${fmtAmt(amount)} ${payToken} in ${ticket.slices} slices, ${ticket.everyMin} min apart`,
-          detail: `slice 1 signed at ${fmtPrice(plan.price, tick)} ${ticket.market.quote}/${ticket.market.base} — the rest are signed as they come due`,
-          note: `scheduled · 0 gas${undeployed}`,
+          detail: `slice 1 signed at ${fmtPrice(plan.price, tick)} ${ticket.market.quote}/${ticket.market.base} — sign each later slice from Open orders when it comes due`,
+          note: `slice 1 of ${ticket.slices} signed · simulated book${undeployed}`,
         });
         ticket.clearAmount();
+        allowanceState.refresh();
         return;
       }
 
-      // The crossing part settles now; only the remainder rests. Placing the
-      // whole size as a resting order instead would hide the fill the taker
-      // just got, and quoting it as fully filled would invent one.
-      if (q.crossedBase > 0) {
-        orderbook.recordTake({ marketId, side, size: q.crossedBase, price: q.avg, bySource: q.bySource });
-      }
-
-      const signed = await signDraft(plan);
-      // A resting order is identified by the book's id, a market one by its
-      // own struct hash — so the widened type is the honest one.
+      // Sign FIRST. Nothing is recorded — no fill, no row — until there is a
+      // signature behind it, so a declined or failed signature leaves no
+      // phantom trade in the history (G-TS_SIGN-3, G-TS_SIGN-15).
+      const signed = await signDraft({ ...spec, marketId, side });
       let hash: string = signed.hash;
-      if (plan.kind === "resting" && q.resting && ticket.limit) {
+
+      if (plan.kind === "limit" && q.resting && ticket.limit) {
         const order = await orderbook.place({
           marketId,
           side,
           type: "limit",
-          size: q.resting.size,
+          size: plan.crossedBase + plan.restingBase,
+          filled: plan.crossedBase,
           price: ticket.limit,
           ttlMs: DAY_MS,
           signed,
         });
         hash = order.id;
       }
+      // The crossing part of the SIGNED order, as the simulated book fills it.
+      if (plan.crossedBase > 0) {
+        orderbook.recordTake({ marketId, side, size: plan.crossedBase, price: q.avg, bySource: q.bySource });
+      }
 
       setReceipt({
         hash,
-        headline: `${fmtAmt(q.totalIn)} ${payToken} → at least ${fmtAmt(q.minReceived)} ${recvToken}`,
+        headline: `${fmtAmt(plan.amountIn)} ${payToken} → at least ${fmtAmt(plan.minOut)} ${recvToken}`,
         detail: q.resting
           ? `${restingLabel(q.resting).toLowerCase()} at ${fmtPrice(q.resting.price, tick)}`
           : undefined,
-        note: `${q.resting ? "resting · free to cancel" : "settled · 0 gas"}${undeployed}`,
+        note: `${
+          plan.kind === "limit"
+            ? "signed · resting in the simulated book"
+            : "signed · settlement simulated — nothing was broadcast"
+        }${undeployed}`,
       });
       ticket.clearAmount();
-      // The allowance was sized for exactly this order, so once it is signed
-      // what the chain grants is no longer what the next ticket will need.
       allowanceState.refresh();
     } catch (e) {
       // A rejected signature is a normal outcome, not a crash — say what
       // happened and leave the ticket exactly as it was.
       setReceipt(null);
-      setSignError(e instanceof Error ? e.message : String(e));
+      setSignError(errorText(e));
     } finally {
       setSigning(false);
     }
   }, [allowanceState, deployment, plan, q, signDraft, tick, ticket]);
 
+  const [orderError, setOrderError] = useState<string | null>(null);
+
   /**
-   * Retraction is a signed EIP-712 message, not a transaction: free, instant,
-   * and advisory — it evicts from books that honour it but does not bind a
-   * filler already holding the order. The on-chain cancels are the hard ones.
+   * SOFT cancel: a signed EIP-712 retraction, free and instant, and ADVISORY —
+   * books that honour it stop distributing the order, but the signature stays
+   * valid on-chain until expiry, so anyone already holding it can still fill
+   * it. Without a signer (wallet disconnected or on another chain) nothing is
+   * done: an unsigned eviction would only hide the order from its own maker
+   * (G-TS_SIGN-4). The row stays, marked, until expiry or a hard cancel.
    */
   const cancel = useCallback(
-    async (orderHash: string) => {
-      const order = allOrders.find((o) => o.id === orderHash);
-      const domain = order?.signed?.deployment ?? deployment;
-      if (signer && wallet.address && domain) {
-        try {
-          const message = buildSoftCancel(wallet.address, [orderHash as `0x${string}`]);
-          const sig = await signSoftCancel(signer, message, domain);
-          await orderbook.cancel(orderHash, { cancel: message, sig });
-          return;
-        } catch {
-          // Declining the cancel signature leaves the order where it was.
-          return;
-        }
+    async (o: RestingOrder) => {
+      setOrderError(null);
+      const domain = o.signed?.deployment ?? deployment;
+      if (!signer || !wallet.address || !domain) {
+        setOrderError(`Connect a wallet on ${chainLabel(marketById(o.marketId).chainId)} to sign a cancel`);
+        return;
       }
-      await orderbook.cancel(orderHash);
+      try {
+        const hashes = (o.signedOrders ?? (o.signed ? [o.signed] : [])).map((x) => x.hash);
+        const message = buildSoftCancel(wallet.address, hashes.length ? hashes : [o.id as `0x${string}`]);
+        const sig = await signSoftCancel(signer, message, domain);
+        await orderbook.cancel(o.id, { cancel: message, sig });
+      } catch (e) {
+        // Declining the cancel signature leaves the order where it was.
+        setOrderError(errorText(e));
+      }
     },
-    [allOrders, deployment, signer, wallet.address],
+    [deployment, signer, wallet.address],
+  );
+
+  /**
+   * HARD cancel: `Settlement.cancelOrders(nonces)` for every signed order
+   * behind the row — one transaction, after which no filler can settle them.
+   */
+  const hardCancel = useCallback(
+    async (o: RestingOrder) => {
+      setOrderError(null);
+      const signedOrders = o.signedOrders ?? (o.signed ? [o.signed] : []);
+      const settlement = signedOrders[0]?.deployment.settlement;
+      if (!wallet.provider || !wallet.address || !onChain || !settlement || !signedOrders[0]?.deployed) {
+        setOrderError("On-chain cancel needs a deployed Settlement and a wallet on its chain");
+        return;
+      }
+      const config = chainById(signedOrders[0].deployment.chainId);
+      if (!config) return;
+      try {
+        const client = createWalletClient({ account: wallet.address, chain: config.chain, transport: custom(wallet.provider) });
+        const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) });
+        const hash = await client.sendTransaction({
+          to: settlement as Address,
+          data: encodeCancelOrders(signedOrders.map((x) => x.order.nonce)),
+          chain: config.chain,
+          account: wallet.address,
+        });
+        const receipt = await reader.waitForTransactionReceipt({ hash });
+        if (receipt.status !== "success") throw new Error("cancel transaction reverted");
+        orderbook.confirmHardCancel(o.id);
+      } catch (e) {
+        setOrderError(errorText(e));
+      }
+    },
+    [onChain, wallet.address, wallet.provider],
+  );
+
+  /** Sign a TWAP's next due slice — the same order as slice 1, on a fresh nonce. */
+  const signSlice = useCallback(
+    async (o: RestingOrder) => {
+      setOrderError(null);
+      if (!o.sliceSpec || !o.slices) return;
+      try {
+        const signed = await signDraft({ ...o.sliceSpec, marketId: o.marketId, side: o.side, orders: o.slices.total });
+        orderbook.addSlice(o.id, signed);
+      } catch (e) {
+        setOrderError(errorText(e));
+      }
+    },
+    [signDraft],
   );
 
   const tickOf = useCallback((marketId: string) => ticks[marketId] ?? 4, [ticks]);
@@ -438,6 +517,9 @@ export default function App() {
             receipt={receipt}
             gate={gate}
             allowance={allowance}
+            maxAmount={maxAmount}
+            overBalance={overBalance}
+            recvAddress={tokens.view(ticket.recvToken).address ?? null}
             signError={signError}
             domain={{
               settlement: deployment?.settlement ?? zeroAddress,
@@ -464,7 +546,16 @@ export default function App() {
           />
         </div>
 
-        <Orders orders={allOrders} fills={fills} tickOf={tickOf} tokens={tokens} onCancel={cancel} />
+        <Orders
+          orders={allOrders}
+          fills={fills}
+          tickOf={tickOf}
+          tokens={tokens}
+          onCancel={cancel}
+          onHardCancel={hardCancel}
+          onSignSlice={signSlice}
+          error={orderError}
+        />
       </main>
 
       <footer>
@@ -478,8 +569,9 @@ export default function App() {
           <a href="https://github.com/1delta-DAO/token-lists" target="_blank" rel="noreferrer">
             1delta-DAO/token-lists
           </a>
-          . Order distribution runs against an in-browser mock of the orderbook backend, so signing, resting
-          and cancelling are simulated locally and nothing is broadcast.
+          . Order distribution runs against an in-browser mock of the orderbook backend: signatures are real,
+          but resting, fills and soft cancels are simulated locally, nothing is broadcast, and no fill shown
+          here happened on-chain.
         </p>
         <p>
           <TermsLink>Prize draw Terms &amp; Conditions</TermsLink>

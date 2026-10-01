@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 
-import type { PoolMeta, TokenRef } from "../lib/oku";
-import { normSymbol } from "../lib/symbols";
+import { TOKENS } from "../config/markets";
+import type { TokenMeta } from "../lib/tokens";
 import { useTokenMeta } from "./useTokens";
 
 export interface TokenView {
@@ -19,52 +19,36 @@ export interface TokenIndex {
 }
 
 /**
- * One lookup from "the symbol the market config uses" to everything the UI
- * needs about that token: address (from the pool), decimals and logo (from the
- * 1delta token list, falling back to the pool's own report).
+ * The lookup from "the symbol the market config uses" to everything the UI
+ * needs about that token.
+ *
+ * ADDRESS and DECIMALS come only from the pinned config (`TOKENS`), because
+ * they are what the maker signs: the receive-token address and the scale every
+ * leg amount is written in. Off-chain sources — the indexers that serve depth,
+ * the token list that serves logos — are consulted for the LOGO and nothing
+ * else, and only by the pinned address, never by symbol (G-TS_SIGN-1). A
+ * symbol with no pin has no address, so it cannot be signed for.
+ *
+ * Pure, so the rule is testable without React.
  */
-export function useTokenIndex(chainId: number, metas: Record<string, PoolMeta>): TokenIndex {
-  const refs = useMemo(() => {
-    const seen = new Map<string, TokenRef>();
-    for (const meta of Object.values(metas)) {
-      for (const ref of [meta.token0, meta.token1]) {
-        const k = ref.address.toLowerCase();
-        if (!seen.has(k)) seen.set(k, ref);
-      }
-    }
-    return [...seen.values()];
-  }, [metas]);
+export function buildTokenIndex(chainId: number, listed: ReadonlyArray<TokenMeta | undefined>): TokenIndex {
+  const pinned = Object.entries(TOKENS[chainId] ?? {});
+  const logoOf = new Map<string, string | undefined>();
+  for (const meta of listed) {
+    if (meta) logoOf.set(meta.address.toLowerCase(), meta.logoURI);
+  }
+  return {
+    view(symbol: string): TokenView {
+      const pin = TOKENS[chainId]?.[symbol];
+      if (!pin) return { symbol };
+      return { symbol, address: pin.address, decimals: pin.decimals, logoURI: logoOf.get(pin.address) };
+    },
+    tokens: pinned.map(([, t]) => ({ address: t.address, decimals: t.decimals })),
+  };
+}
 
-  const listed = useTokenMeta(
-    chainId,
-    refs.map((r) => r.address),
-  );
-
-  return useMemo(() => {
-    const views = refs.map((ref, i) => {
-      const meta = listed[i];
-      return {
-        ref,
-        view: {
-          symbol: meta?.symbol ?? ref.symbol,
-          address: ref.address,
-          decimals: meta?.decimals ?? ref.decimals,
-          logoURI: meta?.logoURI,
-        } satisfies TokenView,
-      };
-    });
-
-    return {
-      view(symbol: string): TokenView {
-        const want = normSymbol(symbol);
-        const hit = views.find(
-          (v) => normSymbol(v.ref.symbol) === want || normSymbol(v.view.symbol) === want,
-        );
-        // Before the pools resolve there is nothing to look up, so the config
-        // symbol is the answer and the generated mark stands in for the logo.
-        return hit ? { ...hit.view, symbol } : { symbol };
-      },
-      tokens: views.map((v) => ({ address: v.ref.address, decimals: v.view.decimals ?? v.ref.decimals })),
-    };
-  }, [refs, listed]);
+export function useTokenIndex(chainId: number): TokenIndex {
+  const addresses = useMemo(() => Object.values(TOKENS[chainId] ?? {}).map((t) => t.address), [chainId]);
+  const listed = useTokenMeta(chainId, addresses);
+  return useMemo(() => buildTokenIndex(chainId, listed), [chainId, listed]);
 }
