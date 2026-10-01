@@ -10,6 +10,7 @@ import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 import {IEVC} from "../../src/interfaces/IEulerV2.sol";
 import {EulerV2OperatorModule} from "../../src/EulerV2OperatorModule.sol";
 import {EulerV2ModulesBase} from "../shared/EulerV2ModulesBase.t.sol";
+import {DelegationHelper} from "@lib/DelegationHelper.sol";
 
 /// @dev The slice of the LIVE EVC's surface this test needs beyond the package's
 ///      minimal `IEVC`: the permit entrypoint itself plus the views that prove
@@ -87,15 +88,25 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         );
     }
 
-    /// @dev Sign the EVC `Permit` digest with the maker's pk. `sender = 0` — any
-    ///      filler may land it; `value = 0` — the grants move no ETH.
+    /// @dev Sign the EVC `Permit` digest with the maker's pk. `sender = module` —
+    ///      {DelegationHelper.replayEvcPermit} submits as the module itself, so
+    ///      only a fill of the maker's own order can land it (2026-09-30 audit,
+    ///      L-ED-1); `value = 0` — the grants move no ETH.
     function _signEvcPermit(uint256 ns, uint256 nonce, uint256 deadline, bytes memory evcData)
         internal
         view
         returns (bytes memory)
     {
+        return _signEvcPermitFor(address(operatorModule), ns, nonce, deadline, evcData);
+    }
+
+    function _signEvcPermitFor(address sender, uint256 ns, uint256 nonce, uint256 deadline, bytes memory evcData)
+        internal
+        view
+        returns (bytes memory)
+    {
         bytes32 structHash = keccak256(
-            abi.encode(EVC_PERMIT_TYPEHASH, maker, address(0), ns, nonce, deadline, uint256(0), keccak256(evcData))
+            abi.encode(EVC_PERMIT_TYPEHASH, maker, sender, ns, nonce, deadline, uint256(0), keccak256(evcData))
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _evcDomainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPk, digest);
@@ -158,7 +169,9 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
                 borrowVault: address(EUSDC)
             })
         );
-        return bytes.concat(head, abi.encode(ns, nonce, deadline, evcData, permitSig));
+        DelegationHelper.EvcPermit[] memory permits = new DelegationHelper.EvcPermit[](1);
+        permits[0] = DelegationHelper.EvcPermit(ns, nonce, deadline, evcData, permitSig);
+        return bytes.concat(head, abi.encode(permits));
     }
 
     function _preFundOrder(uint256 nonce, bytes memory data) internal view returns (Order memory o) {
@@ -191,9 +204,10 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
 
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory evcData = _grantBatchData();
-        bytes memory sig = _signEvcPermit(0, 0, deadline, evcData);
+        bytes memory sig = _signEvcPermitFor(address(0), 0, 0, deadline, evcData);
 
-        // sender = 0 in the signed message ⇒ ANY submitter may land it.
+        // sender = 0 in the signed message ⇒ ANY submitter may land it. (Digest
+        // check only — the module never replays an any-sender permit.)
         vm.prank(address(0xD00D));
         IEVCPermitViews(address(EVC)).permit(maker, address(0), 0, 0, deadline, 0, evcData, sig);
 
@@ -258,12 +272,12 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         assertEq(vm.getNonce(maker), 0, "still zero maker transactions: signature-only throughout");
     }
 
-    // ── The best-effort clause under fire: a griefer lifts the permit out of
-    //    pending calldata and lands it FIRST. The in-fill replay's nonce is then
-    //    burned (and `setAccountOperator` would revert as unchanged), the
-    //    try/catch swallows it, and the fill still succeeds on the grants the
-    //    front-runner helpfully installed. ──
-    function test_frontRunLandedPermit_fillStillSucceeds() public {
+    // ── 2026-09-30 audit, L-ED-1 (replaces the old "front-run lands the permit"
+    //    test, which encoded the any-sender behaviour): the published permit is
+    //    bound to the module, so a griefer lifting it from the orderbook can NOT
+    //    land it directly — not while the fill is pending, and not after the maker
+    //    cancels. The fill itself still lands it. ──
+    function test_audit_L_ED_1_liftedPermit_notLandableByThirdParty_fillStillSucceeds() public {
         deal(WETH, solver, COLLATERAL);
         _approveSolverSide(COLLATERAL, WETH);
 
@@ -281,20 +295,27 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         );
         bytes memory sig = _signPermitWitness(batch, _hashOrder(o));
 
-        // The front-run: same bytes, landed directly, by anyone.
-        vm.prank(address(0xBADD));
+        // The lift: same bytes, submitted directly — as the named sender, and as
+        // an any-sender permit. Both are refused by the live EVC.
+        vm.startPrank(address(0xBADD));
+        vm.expectRevert();
+        IEVCPermitViews(address(EVC)).permit(maker, address(operatorModule), 0, 0, deadline, 0, evcData, permitSig);
+        vm.expectRevert();
         IEVCPermitViews(address(EVC)).permit(maker, address(0), 0, 0, deadline, 0, evcData, permitSig);
-        _assertGrants();
-        assertEq(_makerNonce(0), 1, "nonce burned by the front-runner");
+        vm.stopPrank();
+        _assertNoGrants();
+        assertEq(_makerNonce(0), 0, "nothing landed");
 
         uint256 col0 = _wethCollateral(maker);
         uint256 debt0 = _usdcDebt(maker);
 
         vm.prank(solver);
-        settlement.fillWithPermit(o, batch, sig, BORROW, 0, ""); // must NOT brick
+        settlement.fillWithPermit(o, batch, sig, BORROW, 0, "");
 
-        assertApproxEqRel(_wethCollateral(maker) - col0, COLLATERAL, 1e15, "position opened regardless");
-        assertApproxEqRel(_usdcDebt(maker) - debt0, BORROW, 1e15, "debt drawn regardless");
+        _assertGrants();
+        assertEq(_makerNonce(0), 1, "permit landed through the fill");
+        assertApproxEqRel(_wethCollateral(maker) - col0, COLLATERAL, 1e15, "position opened");
+        assertApproxEqRel(_usdcDebt(maker) - debt0, BORROW, 1e15, "debt drawn");
         assertEq(IERC20(WETH).balanceOf(address(operatorModule)), 0, "module drained");
     }
 }
