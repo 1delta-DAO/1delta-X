@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IPriceModule} from "@core/interfaces/IPriceModule.sol";
 import {PackedArrays} from "@core/settlement/PackedArrays.sol";
+import {Proportional} from "@core/settlement/Proportional.sol";
 import {ChainlinkRead} from "@validators/ChainlinkPriceValidators.sol";
 
 /// @title ChainlinkPeggedPriceModule
@@ -18,6 +19,9 @@ import {ChainlinkRead} from "@validators/ChainlinkPriceValidators.sol";
 ///
 ///      fair  = anchor · answer · NUM / DEN · (BPS − SPREAD_BPS) / BPS
 ///      bump  = (start − fair) · BPS / (start − end)          [clamped to 0 … BPS]
+///
+///  (shown for the common SELL with a FIXED input anchor; a SELL whose `legsIn[0]`
+///  rises is solved jointly — see {bump} — and a BUY is the mirror image.)
 ///
 ///  so a fair price above the maker's ambition prices at `start`, one below the floor
 ///  prices at `end` (the core's clamp is the backstop), and anything between lands
@@ -50,6 +54,11 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
     /// @notice Fixed-point scale applied to `anchor · answer` so the product lands in
     ///         the priced leg's token units: `fair = anchor · answer · NUM / DEN`.
     ///         The deployer folds the feed's decimals and both tokens' decimals in.
+    ///         Express a negative decimal exponent as a fraction (`NUM = 1, DEN =
+    ///         1e20`), never as an integer `10**(negative)`: that evaluates to 0,
+    ///         and `NUM == 0` is rejected ({InvalidConfig}) because it would price
+    ///         every SELL at its floor whatever the feed says (audit 2026-09-30
+    ///         PRICE-9, the sibling of the validators' `ZeroRatio` fix).
     uint256 public immutable NUM;
     uint256 public immutable DEN;
     /// @notice Which side carries the priced band: true = the OUTPUT band (a SELL,
@@ -78,7 +87,7 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         bool priceOutput,
         uint256 spreadBps
     ) {
-        if (feed == address(0) || den == 0 || minAnswer <= 0 || maxAnswer < minAnswer || spreadBps > BPS) {
+        if (feed == address(0) || num == 0 || den == 0 || minAnswer <= 0 || maxAnswer < minAnswer || spreadBps > BPS) {
             revert InvalidConfig();
         }
         FEED = feed;
@@ -116,8 +125,11 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         int256 answer = ChainlinkRead.read(FEED, MAX_STALENESS);
         if (answer < MIN_ANSWER || answer > MAX_ANSWER) revert ImplausiblePrice();
 
-        (uint256 anchor, uint256 start, uint256 end) = _band(total, legsIn, legsOut);
+        (uint256 anchor, uint256 rise, uint256 start, uint256 end) = _band(total, legsIn, legsOut);
         uint256 fair = (anchor * uint256(answer) * NUM) / DEN;
+        // A fair amount that truncates to zero (an over-scaled DEN, a dust anchor)
+        // would silently price every SELL at its floor: refuse it instead.
+        if (fair == 0) revert ImplausiblePrice();
 
         if (PRICE_OUTPUT) {
             // OUTPUT band FALLS: `start` (best for the maker, most received) ≥ `end`
@@ -127,8 +139,21 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
             // The maker RECEIVES this leg: its spread lowers what it asks for.
             fair = (fair * (BPS - SPREAD_BPS)) / BPS;
             if (fair >= start) return 0; // oracle better than the maker's ambition
-            if (fair <= end) return BPS; // oracle at or through the floor
-            return ((start - fair) * BPS) / (start - end);
+            // A RISING anchor (`legsIn[0].end > start`) is charged
+            // `inTick(s, e, b) = s + rise·b/BPS` at the SAME pinned bump that lowers
+            // the output, so the peg must hold for both ticks at once:
+            //     outTick(b) = r · inTick(b)
+            //  ⇒  b = (start − r·s) · BPS / ((start − end) + r·rise)
+            // where `r·s` is `fair` and `r·rise` is `fairRise` below. For a fixed
+            // anchor `rise == 0` and this is exactly the plain mapping in the header.
+            // (It used to ignore the rise and price the peg for `s` units while
+            // charging up to `e`: audit 2026-09-30 PRICE-1.v3 / X-ARITH-1.v2.)
+            uint256 fairRise;
+            if (rise != 0) fairRise = (((rise * uint256(answer) * NUM) / DEN) * (BPS - SPREAD_BPS)) / BPS;
+            // The floor beats the peg even at the input's cap → price at `end`.
+            if (fair + fairRise <= end) return BPS;
+            // Floor division lowers the bump, i.e. rounds toward the maker.
+            return ((start - fair) * BPS) / ((start - end) + fairRise);
         } else {
             // INPUT band RISES: `start` (best for the maker, least paid) ≤ `end` (the
             // cap/floor). {DutchAuction.inTick} enforces this orientation, which is the
@@ -142,52 +167,59 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         }
     }
 
-    /// @dev The anchor (the fixed side's leg 0) and the priced band (the auctioned
-    ///      side's leg 0). Which is which is the instance's `PRICE_OUTPUT` setting,
-    ///      cross-checked against the order's signed side in {bump}.
-    /// @dev The band, plus the anchor the fair amount is priced against.
+    /// @dev The priced band (the auctioned side's leg 0), the anchor the fair amount
+    ///      is priced against (the counterpart side's leg 0), and, for a SELL, how far
+    ///      that anchor RISES. Which side is which is the instance's `PRICE_OUTPUT`
+    ///      setting, cross-checked against the order's signed side in {bump}.
     ///
-    ///  ⚠ THE ANCHOR IS `total`, NOT THE RAW LEG, AND THAT IS LOAD-BEARING. This used
-    ///  to re-read `legsIn[0].start` / `legsOut[0].start` out of the packed blob. For
-    ///  an ordinary order the two are the same number — but for a {Proportional}
-    ///  order they are not, and the raw read was a live bug:
+    ///  ⚠ THE ANCHOR IS THE COUNTERPART LEG'S WHOLE-ORDER AMOUNT, NOT `total`. The
+    ///  band `start`/`end` is a whole-order amount and the core scales the band and
+    ///  the counterpart by the same `delta / total`, so the fair amount must be
+    ///  priced against the counterpart leg's whole-order amount:
     ///
-    ///    • `legsIn[0].start` on such an order is a MARKER (`type(uint256).max −
-    ///      (BPS − bps)`, ≈1.15e77), not an amount. `anchor · answer` then overflows
-    ///      for every feed answer ≥ 2, the `staticcall` panics, and
-    ///      {DutchAuction.priceBump} — which has no fallback — reverts
-    ///      `PriceModuleFailed`. So the order was signable, passed
-    ///      `SettlementLens.validateOrder`, and could never be filled by anyone.
-    ///    • The non-overflowing cases were worse than the revert: they priced the
-    ///      SENTINEL rather than the maker's live balance, so the peg this module
-    ///      exists to track was silently ignored.
+    ///    • SELL: `legsIn[0].start`, EXCEPT when it is a {Proportional} marker. The
+    ///      marker (`type(uint256).max − (BPS − bps)`, ≈1.15e77) is not an amount:
+    ///      reading it raw overflowed `anchor · answer` and made the order
+    ///      unfillable (F8). The amount it stands for is the maker's live balance,
+    ///      which the core resolved BEFORE any funds moved and pinned as the fill
+    ///      denominator, i.e. `total`. A marker is only legal with `fillTotal == 0`
+    ///      and no `fillModule` ({Pricing.inputOwed} reverts otherwise), so `total`
+    ///      is exactly that resolved balance whenever the marker branch is taken.
+    ///    • BUY: `legsOut[0].start`. A BUY's outputs are always fixed.
     ///
-    ///  The core already hands us the answer. `total` is the fill denominator
-    ///  {OrderGates.fillDenominator} resolved BEFORE any funds moved — a proportional
-    ///  marker already resolved against the maker's live balance and pinned in
-    ///  `FillCtx.anchor`, so this module now prices against exactly the amount the
-    ///  fill will actually charge. It is the same value the settler and the lens both
-    ///  use, which is what makes preview and fill agree by construction rather than by
-    ///  two implementations happening to match.
+    ///  It used to be `total` unconditionally (the F8 fix), which is right for an
+    ///  ordinary order only because there `total == legsIn[0].start`. On an order
+    ///  with a signed `fillTotal` ({FullFillModule}'s "typically 1", a TWAP in part
+    ///  units, a bps denominator) `total` is a PROGRESS UNIT, not a token amount: the
+    ///  fair amount collapsed to ~0 and every such SELL cleared at its floor, every
+    ///  such BUY at its cap (audit 2026-09-30 PRICE-1 / X-ARITH-1).
     ///
-    ///  For a `fillTotal` order `total` is that signed denominator rather than the leg
-    ///  amount — which is likewise the right anchor, since that IS the unit the fill is
-    ///  denominated in.
-    ///
-    ///  The blob is still validated and still read for the BAND (`start`/`end`), which
-    ///  is genuinely per-leg and has no equivalent in the call's scalars.
+    ///  ⚠ OTHER rising input legs (`legsIn[1..n]`, e.g. a relayer-fee leg in another
+    ///  token) also move with the bump this module returns, so on a pegged SELL such a
+    ///  fee grows with how far the oracle sits below the maker's ambition rather than
+    ///  with time. The oracle cannot price a different token, so that coupling is the
+    ///  maker's signed choice: sign the fee leg FIXED if it is not wanted.
     ///  Cross-reference: `docs/reference-audits.md` §C13, finding F8.
     function _band(uint256 total, bytes calldata legsIn, bytes calldata legsOut)
         private
         view
-        returns (uint256 anchor, uint256 start, uint256 end)
+        returns (uint256 anchor, uint256 rise, uint256 start, uint256 end)
     {
         if (PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE) == 0) revert NoBand();
         if (PackedArrays.validateFixed(legsOut, PackedArrays.LEG_OUT_STRIDE) == 0) revert NoBand();
-        anchor = total;
         if (PRICE_OUTPUT) {
+            (, uint256 s0, uint256 e0) = PackedArrays.legIn(legsIn, 0);
+            if (Proportional.isProportional(s0)) {
+                // `e0` is the proportional CAP here, not a decay endpoint: the core
+                // charges exactly the resolved amount (`total`), never `inTick`.
+                anchor = total;
+            } else {
+                anchor = s0;
+                if (e0 > s0) rise = e0 - s0;
+            }
             (, start, end,) = PackedArrays.legOut(legsOut, 0);
         } else {
+            (, anchor,,) = PackedArrays.legOut(legsOut, 0);
             (, start, end) = PackedArrays.legIn(legsIn, 0);
         }
     }

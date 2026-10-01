@@ -26,6 +26,9 @@ abstract contract UsdrifForkBase is Test {
 
     address internal constant MOC_CORE = 0xA27024Ed70035E46dba712609fc2Afa1c97aA36A;
     address internal constant MOC_QUEUE = 0x47f5014115d3bb29B20b5168Ee75050D6f8c3Bf1;
+    /// @dev LEGACY RIF-bucket price provider. Valid at the pinned block, but MoC has since
+    ///      re-pointed the bucket and this one is frozen with `has = false` (audit
+    ///      2026-09-30 RIF-3) — {MocPriceBandValidator} now reads `getPACtp` instead.
     address internal constant MOC_PRICE_PROVIDER = 0x6a5b2C84E63b5C1330bf4CcCff1Ad6F23116CC14;
     address internal constant MOC_GUARD = 0x0237Ad1f0831b479a344E56646BC48B0885cF46F;
 

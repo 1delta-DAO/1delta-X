@@ -21,10 +21,28 @@ import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
 ///      may deploy an instance naming any cosigner (including itself, or a Safe);
 ///      any filler may present a quote. Nobody is whitelisted.
 ///
-///  The quote binds to the ORDER HASH, this MODULE, the CHAIN, and a DEADLINE, so a
-///  quote cannot be replayed onto another order, another deployment, another chain,
-///  or after it goes stale. `filler == address(0)` in a quote means "any filler";
-///  naming a filler makes the quote exclusive to it.
+///  The quote binds to the ORDER HASH, the order's FILL PROGRESS (`prevFilled`),
+///  this MODULE, the CHAIN, and a DEADLINE, so a quote cannot be replayed onto
+///  another order, another deployment, another chain, after it goes stale — or onto
+///  a LATER fill of the same order. `filler == address(0)` in a quote means "any
+///  filler"; naming a filler makes the quote exclusive to it.
+///
+///  ⚠ PROGRESS BINDING (audit 2026-09-30 PRICE-10, BREAKING typehash). The digest
+///  used to cover only (orderHash, filler, bumpBps, deadline, chain, module), so one
+///  quote repriced EVERY partial fill of the order until its deadline — a round-1
+///  winner could wait for a TWAP part to open and fill it at the round-1
+///  concession, or front-run a round-2 winner. A quote now names the `prevFilled`
+///  it was minted for and is valid for exactly one fill: the one that starts at
+///  that progress. Two things it still does NOT bind, deliberately:
+///    • the fill SIZE — {IPriceModule} is not told it; a quote prices "the next
+///      fill", and an auction that wants to bound it runs on a fill module or an
+///      exclusive filler.
+///    • the SETTLEMENT — the module is reached by a staticcall whose `msg.sender` is
+///      the settler on a fill but the lens on a preview, so it cannot tell the two
+///      apart, and `orderHash` is the domain-free STRUCT hash ({OrderHash.hash}).
+///      Replaying a quote on a second settlement needs the MAKER's signature to be
+///      valid there too (the order signature is domain-bound), and the concession
+///      stays inside the band the maker signed.
 ///
 ///  ⚠ FALLBACK_BPS IS NOT MAKER PROTECTION — CHOOSE IT DELIBERATELY. With empty
 ///  `takerData` this returns `FALLBACK_BPS`, per {IPriceModule}. But `takerData` is
@@ -57,7 +75,7 @@ contract CosignedQuotePriceModule is IPriceModule {
     ///      address and chain id are hashed into the digest directly, which binds the
     ///      same three things (contract, chain, type) with less code.
     bytes32 private constant QUOTE_TYPEHASH =
-        keccak256("PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline)");
+        keccak256("PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline,uint256 prevFilled)");
 
     error QuoteExpired();
     error MalformedQuote();
@@ -70,16 +88,25 @@ contract CosignedQuotePriceModule is IPriceModule {
         FALLBACK_BPS = fallbackBps;
     }
 
-    /// @notice The digest a cosigner signs. Exposed so off-chain quoting code cannot
-    ///         drift from the on-chain check.
-    function quoteDigest(bytes32 orderHash, address filler, uint256 bumpBps, uint256 deadline)
+    /// @notice The digest a cosigner signs for the fill that starts at `prevFilled`.
+    ///         Exposed so off-chain quoting code cannot drift from the on-chain check.
+    function quoteDigest(bytes32 orderHash, address filler, uint256 bumpBps, uint256 deadline, uint256 prevFilled)
         public
         view
         returns (bytes32)
     {
         return keccak256(
-            abi.encode(QUOTE_TYPEHASH, orderHash, filler, bumpBps, deadline, block.chainid, address(this))
+            abi.encode(QUOTE_TYPEHASH, orderHash, filler, bumpBps, deadline, prevFilled, block.chainid, address(this))
         );
+    }
+
+    /// @notice {quoteDigest} for the FIRST fill of an order (`prevFilled == 0`).
+    function quoteDigest(bytes32 orderHash, address filler, uint256 bumpBps, uint256 deadline)
+        public
+        view
+        returns (bytes32)
+    {
+        return quoteDigest(orderHash, filler, bumpBps, deadline, 0);
     }
 
     /// @inheritdoc IPriceModule
@@ -87,7 +114,7 @@ contract CosignedQuotePriceModule is IPriceModule {
         bytes32 orderHash,
         address, /*maker*/
         address filler,
-        uint256, /*prevFilled*/
+        uint256 prevFilled,
         uint256, /*total*/
         uint256, /*orderTiming*/
         bytes calldata, /*legsIn*/
@@ -98,7 +125,7 @@ contract CosignedQuotePriceModule is IPriceModule {
         // The quote work lives in its own frame: `bump`'s eight arguments already fill
         // the stack under legacy codegen, and the verification needs four more live
         // values.
-        return _quote(orderHash, filler, takerData);
+        return _quote(orderHash, filler, prevFilled, takerData);
     }
 
     /// @dev Verify one cosigned quote and return its bump.
@@ -109,17 +136,26 @@ contract CosignedQuotePriceModule is IPriceModule {
     ///      signature a calldata slice and costs the filler fewer bytes:
     ///
     ///          takerData = filler(20) ‖ bumpBps(32) ‖ deadline(32) ‖ sig
-    function _quote(bytes32 orderHash, address filler, bytes calldata takerData) private view returns (uint256) {
+    function _quote(bytes32 orderHash, address filler, uint256 prevFilled, bytes calldata takerData)
+        private
+        view
+        returns (uint256)
+    {
         if (takerData.length < 84) revert MalformedQuote();
         address quotedFiller = address(bytes20(takerData[:20]));
         uint256 bumpBps = uint256(bytes32(takerData[20:52]));
-        uint256 deadline = uint256(bytes32(takerData[52:84]));
-        if (block.timestamp > deadline) revert QuoteExpired();
+        if (block.timestamp > uint256(bytes32(takerData[52:84]))) revert QuoteExpired();
         // A quote may name a filler (exclusive) or address(0) (open). On a PREVIEW the
         // caller's filler is address(0); an exclusive quote then simply fails this
         // check, so previews should be run either unquoted or with the real filler.
         if (quotedFiller != address(0) && quotedFiller != filler) revert QuoteNotForFiller();
-        SignatureVerification.verify(takerData[84:], quoteDigest(orderHash, quotedFiller, bumpBps, deadline), COSIGNER);
+        // `prevFilled` is the core's, never the filler's: a quote minted for another
+        // point of the order's progress simply does not verify (PRICE-10).
+        SignatureVerification.verify(
+            takerData[84:],
+            quoteDigest(orderHash, quotedFiller, bumpBps, uint256(bytes32(takerData[52:84])), prevFilled),
+            COSIGNER
+        );
         // The core clamps, but clamping here too keeps the module's own return value
         // honest for anything reading it directly (a book, a simulation).
         return bumpBps > BPS ? BPS : bumpBps;

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
+import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 /// @title PermissionlessCallModule
 /// @notice Escape-hatch MAKE module: executes ONE arbitrary, maker-signed contract
@@ -57,20 +58,38 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 ///
 ///  The guard against regression is the absence of a Permit3 reference in this file.
 ///  Adding one back re-opens the drain above.
+///
+///  ⚠ POKES THAT PAY `msg.sender` (audit 2026-09-30 MISC-MOD-5)
+///  ───────────────────────────────────────────────────────────
+///  Many `harvest()`/`poke()` entrypoints pay an incentive to their caller (Convex
+///  `earmarkRewards`, keeper bounties). Run through this module, the caller IS this
+///  shared contract, so the bounty used to land here — and anything on this address
+///  is claimable by the next self-signed order that calls `token.transfer(self, …)`.
+///  A maker expecting such a bounty names its token in `CallSpec.bountyToken`: the
+///  module floors its own balance of that token before the call and forwards the
+///  increase to the maker (`onBehalfOf`) in the same item. Pre-existing balance is
+///  never touched. With `bountyToken == address(0)` nothing is forwarded, so only
+///  use that for targets that pay nobody — or pay `tx.origin` / a named recipient. A
+///  NATIVE-ETH bounty cannot land here at all (no `receive`), so such a call reverts.
 contract PermissionlessCallModule is IMakerModule {
     address public immutable SETTLEMENT;
 
     error OnlySettlement();
     error CallFailed(bytes ret);
 
-    /// @param target   contract to invoke.
-    /// @param callData exact calldata for `target`. Part of the maker-signed
-    ///                 `Item.data`, so authorised by construction — but see the
-    ///                 contract note: "authorised by the order's maker" is NOT the
-    ///                 same as "safe", because every address can be a maker.
+    /// @param target      contract to invoke.
+    /// @param callData    exact calldata for `target`. Part of the maker-signed
+    ///                    `Item.data`, so authorised by construction — but see the
+    ///                    contract note: "authorised by the order's maker" is NOT the
+    ///                    same as "safe", because every address can be a maker.
+    /// @param bountyToken ERC-20 the call may pay THIS module as its caller; the
+    ///                    module's balance increase of it is forwarded to the maker.
+    ///                    `address(0)` = the call pays no bounty. (BREAKING: added by
+    ///                    audit 2026-09-30 MISC-MOD-5.)
     struct CallSpec {
         address target;
         bytes callData;
+        address bountyToken;
     }
 
     constructor(address settlement) {
@@ -78,15 +97,22 @@ contract PermissionlessCallModule is IMakerModule {
     }
 
     /// @inheritdoc IMakerModule
-    /// @dev `onBehalfOf` and `amount` are deliberately unused: with no funding leg
-    ///      there is nothing to pull and nothing to size. The item's `amount` still
-    ///      governs WHETHER this runs — `Base._runItem` skips a slice that floors to
-    ///      zero — so a maker can still make the poke proportional to the fill by
-    ///      signing a per-fill amount.
-    function makeOnBehalf(address, uint256, bytes calldata data) external override {
+    /// @dev `amount` is deliberately unused: with no funding leg there is nothing to
+    ///      pull and nothing to size. The item's `amount` still governs WHETHER this
+    ///      runs — `Base._runItem` skips a slice that floors to zero — so a maker can
+    ///      still make the poke proportional to the fill by signing a per-fill
+    ///      amount. `onBehalfOf` (the maker, supplied by Settlement) is only the
+    ///      destination of a forwarded bounty.
+    function makeOnBehalf(address onBehalfOf, uint256, bytes calldata data) external override {
         if (msg.sender != SETTLEMENT) revert OnlySettlement();
         CallSpec memory spec = abi.decode(data, (CallSpec));
+        address bounty = spec.bountyToken;
+        uint256 floor = bounty == address(0) ? 0 : SafeTransferLib.balanceOf(bounty, address(this));
         (bool ok, bytes memory ret) = spec.target.call(spec.callData);
         if (!ok) revert CallFailed(ret);
+        if (bounty != address(0)) {
+            uint256 bal = SafeTransferLib.balanceOf(bounty, address(this));
+            if (bal > floor) SafeTransferLib.safeTransfer(bounty, onBehalfOf, bal - floor);
+        }
     }
 }

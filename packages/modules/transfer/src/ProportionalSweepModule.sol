@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ISettlementModule} from "@core/interfaces/ISettlementModule.sol";
 import {Proportional} from "@core/settlement/Proportional.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
 /// @title ProportionalSweepModule
 /// @notice The MULTI-TOKEN half of {Proportional}: "…and take all my USDT too".
@@ -33,6 +34,37 @@ import {Proportional} from "@core/settlement/Proportional.sol";
 ///  `SETTLE` rather than `MAKE` because only `settle` is FILLER-AWARE: the swept
 ///  tokens must reach whoever fills, and a maker cannot know that address at
 ///  signing time. See {ISettlementModule}.
+///
+///  ⚠ PARTIAL FILLS (audit 2026-09-30 MISC-MOD-1, BREAKING for bps < 100%)
+///  ────────────────────────────────────────────────────────────────────────
+///  The core pro-rates the item's signed `amount` into per-fill slices, and this
+///  module re-reads the maker's LIVE balance on every fill. For a fraction below
+///  100% that compounds: "50% of 1,000 USDT", filled in two halves, swept
+///  500 + 250 = 750; ten 10% fills swept 950 — toward the cap, whatever the bps,
+///  while the filler delivered only the signed outputs. The leg form never had
+///  this, because a proportional `legsIn[0]` is FULL-FILL ONLY in the core
+///  ({Proportional.ProportionalNeedsFullFill}); the item form did not inherit the
+///  rule. So:
+///
+///      data = abi.encode(token, marker)          — bps == 10000 ONLY. Splitting a
+///             100% sweep is harmless: Σ min(Bₖ, sliceₖ) == min(B, cap).
+///      data = abi.encode(token, marker, total)   — any bps; `total` is the item's
+///             signed `amount`, and the slice must equal it ({FullFillGuard}), so
+///             the order is effectively full-fill.
+///
+///  A two-word blob with bps < 10000 reverts {FractionalSweepNeedsTotal}.
+///
+///  ⚠ WHAT THE FILLER IS (NOT) GUARANTEED (audit 2026-09-30 X-DIFF-CORE-2)
+///  ──────────────────────────────────────────────────────────────────────
+///  The sweep is resolved against the maker's balance AT EXECUTION, after every
+///  output leg has been delivered, and a zero result is not an error. The maker
+///  controls that balance: it can move the token out (front-run, or a second order
+///  of its own that sweeps it first) and the fill still succeeds, delivering the
+///  filler only the leg inputs. Unlike the anchor leg (where an exact-size fill
+///  reverts on drift), no maker-signed field can protect the filler against the
+///  maker. Sweep proceeds are therefore worth ZERO to a filler unless it measures
+///  its own received balance after `fill` returns and reverts below its quote —
+///  the general SETTLE-item rule in {ISettlementModule}'s SOLVER CAVEAT.
 ///
 ///  The item's signed `amount` IS the cap, exactly as `end` is the cap on a
 ///  proportional leg — reusing a field the maker already signs rather than
@@ -86,6 +118,10 @@ contract ProportionalSweepModule is ISettlementModule {
     /// @dev The resolved sweep exceeds Permit3's `uint160` book width. Not
     ///      reachable with any real token, but this is a value path.
     error AmountOverflow();
+    /// @dev A sweep of LESS than 100% of the balance was signed with the two-word
+    ///      `data` (no `total`), so it could be split across partial fills and
+    ///      compound toward the cap. Sign `abi.encode(token, marker, total)`.
+    error FractionalSweepNeedsTotal(uint256 bps);
 
     constructor(address settlement, address permit3) {
         SETTLEMENT = settlement;
@@ -98,17 +134,32 @@ contract ProportionalSweepModule is ISettlementModule {
     /// @param filler where the swept tokens land.
     /// @param amount this fill's slice of the signed item amount, used as the
     ///        absolute CAP on the sweep (see the contract note).
-    /// @param data   `abi.encode(address token, uint256 marker)`, where `marker`
-    ///        is {Proportional.encode}(bps).
+    /// @param data   `abi.encode(address token, uint256 marker)` (bps == 10000 only)
+    ///        or `abi.encode(address token, uint256 marker, uint256 total)` (any
+    ///        bps; FULL-FILL ONLY), where `marker` is {Proportional.encode}(bps)
+    ///        and `total` is the item's signed `amount`. See the contract note.
     function settle(address maker, address filler, uint256 amount, bytes calldata data) external override {
         if (msg.sender != SETTLEMENT) revert OnlySettlement();
 
-        (address token, uint256 marker) = abi.decode(data, (address, uint256));
+        (address token, uint256 marker) = abi.decode(data[0:64], (address, uint256));
         if (!Proportional.isProportional(marker)) revert NotAProportionalMarker(marker);
 
+        // A fraction of the balance (bps < 100%) is only meaningful against the
+        // balance as it stood BEFORE the order started: re-applied to what each
+        // partial fill leaves behind it compounds toward the cap (audit 2026-09-30
+        // MISC-MOD-1). So a fractional sweep must be full-fill, which needs the
+        // signed total in `data`; a two-word blob is accepted only for 100%, where
+        // splitting provably sweeps the same `min(balance, cap)` in aggregate.
+        if (data.length >= 96) {
+            FullFillGuard.requireFullFillFromData(data, 64, amount);
+        } else if (Proportional.bps(marker) != Proportional.BPS) {
+            revert FractionalSweepNeedsTotal(Proportional.bps(marker));
+        }
+
         // Same arithmetic, same mandatory-cap rule, same library the settler uses
-        // for `legsIn[0]` — so a sweep leg and a sweep item can never disagree
-        // about what "100% of my balance, capped at N" means.
+        // for `legsIn[0]`. With the full-fill rule above (the leg is full-fill
+        // only too, {Proportional.ProportionalNeedsFullFill}), a sweep item and a
+        // sweep leg agree on what "bps of my balance, capped at N" means.
         uint256 pull = Proportional.resolve(token, maker, marker, amount);
 
         // A maker holding none of this token sweeps nothing. Not an error: it

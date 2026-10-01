@@ -124,7 +124,7 @@ contract NftModulesTest is CoreSettlementBase {
         collection.setApprovalForAll(address(nft721), true);
         _fundSolver(PRICE);
 
-        Order memory o = _saleOrder(1, address(nft721), 1, abi.encode(address(collection), id));
+        Order memory o = _saleOrder(1, address(nft721), 1, abi.encode(address(collection), id, uint256(1)));
         o.minFillAnchor = PRICE; // indivisible lot — full-fill only
         bytes memory sig = _sign(o);
 
@@ -138,7 +138,7 @@ contract NftModulesTest is CoreSettlementBase {
     function test_721_directCall_reverts() public {
         collection.mint(maker, 1);
         vm.expectRevert(NftSettlementModule.OnlySettlement.selector);
-        nft721.settle(maker, solver, 1, abi.encode(address(collection), uint256(1)));
+        nft721.settle(maker, solver, 1, abi.encode(address(collection), uint256(1), uint256(1)));
     }
 
     // ── ERC-1155: divisible, slice-honouring ──

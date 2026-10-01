@@ -6,8 +6,11 @@ that prices along the **volume** axis instead of the clock: the bump interpolate
 ladder.
 
 Because it is measured on `prevFilled` rather than on time, a solver knows the exact
-bump before submitting — no race against a block timestamp. Both directions work:
-`END > START` climbs as the order fills, `END < START` gets better for the filler.
+bump before submitting — no race against a block timestamp. Only the ascending
+direction (`START <= END`, the maker's price worsens as the order fills) is accepted:
+a descending ladder is rejected at construction (`DescendingRange`, audit 2026-09-30
+PRICE-3), because with `prevFilled` sampling a single full fill would clear the whole
+order at `START` — the maker's worst point.
 
 Whatever it answers is still clamped by the core to the maker's signed band.
 

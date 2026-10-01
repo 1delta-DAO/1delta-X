@@ -33,7 +33,8 @@ import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 ///
 ///      validators[] += Validator({target: this, data: abi.encode(groupId)})
 ///      items[]      += Item({op: SETTLE, module: this, amount: <anchor>,
-///                            recipient: 0, data: abi.encode(groupId, nonce)})
+///                            recipient: 0,
+///                            data: abi.encode(groupId, nonce, minClaim)})
 ///
 ///  Both live inside the order's EIP-712 hash, so a solver can neither drop the
 ///  validator (which would let it fill a retired leg) nor drop the item (which
@@ -93,6 +94,28 @@ import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 ///  "validator-only leg reads the gate but never claims it" shape is therefore
 ///  no longer fillable at all; every leg carries both halves or none.
 ///
+///  Why the claim has a MINIMUM SIZE (`minClaim`)
+///  ─────────────────────────────────────────────
+///  A leg that is not behind a trigger (the take-profit of a classic bracket is a
+///  plain limit order) is fillable by anyone at any time, in any size the filler
+///  chooses. Before audit 2026-09-30 (PRICE-2) the FIRST fill of any size claimed
+///  the group, so anyone could fill 1 wei of the untriggered take-profit — paying
+///  one base unit of the output token — and permanently retire the stop-loss. A
+///  liquidator has a motive to do exactly that to a levered position.
+///
+///  The claim item therefore carries a third word, `minClaim`, in the item's own
+///  units (with `amount` = the anchor, that is anchor units — the fill's delta):
+///  the fill that CLAIMS an untouched group must have a slice of at least
+///  `minClaim`, or {settle} reverts {ClaimTooSmall}. The winner's LATER partial
+///  fills are unconstrained (they write nothing). Retiring the siblings now costs a
+///  real trade of `minClaim` at the maker's own price. `minClaim == 0` is refused
+///  by {validate} (the leg fails closed) so the floor is always an explicit
+///  choice: `minClaim = anchor` makes the claim whole-fill-only; a smaller value
+///  keeps the winner's first fill partial at a price the maker accepted. (The
+///  core's `minFillAnchor` would also work, but it floors EVERY fill and strands a
+///  remainder below it; `minClaim` floors only the one fill that retires the
+///  siblings.)
+///
 ///  Cheaper alternative, no contract at all
 ///  ───────────────────────────────────────
 ///  For a WHOLE-FILL bracket, OCO needs no module: sign both legs with the SAME
@@ -104,8 +127,9 @@ import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 ///  more legs than one nonce word can conveniently carry, or when the legs must
 ///  keep independent nonces for off-chain bookkeeping.
 ///
-/// @dev Item data  = `abi.encode(uint256 groupId, uint256 nonce)`, op `SETTLE`,
-///      `amount` = the order's anchor.
+/// @dev Item data  = `abi.encode(uint256 groupId, uint256 nonce, uint256 minClaim)`,
+///      op `SETTLE`, `amount` = the order's anchor, `0 < minClaim <= amount`.
+///      (BREAKING vs. the pre-2026-09-30 two-word blob, which now fails closed.)
 ///      Validator data = `abi.encode(uint256 groupId)`.
 ///      `groupId` is any maker-chosen number (a random 256-bit value keeps two
 ///      of a maker's unrelated brackets from colliding).
@@ -138,6 +162,9 @@ contract OcoGroupModule is ISettlementModule, IOrderValidator {
     /// @dev `nonce == type(uint256).max` cannot be stored as `nonce + 1`.
     ///      Rejected rather than silently wrapping to the "unclaimed" sentinel.
     error NonceNotRepresentable();
+    /// @dev The fill that would CLAIM an untouched group is smaller than the
+    ///      maker-signed `minClaim` — the dust-kill guard (audit 2026-09-30 PRICE-2).
+    error ClaimTooSmall(uint256 slice, uint256 minClaim);
 
     constructor(address settlement_) {
         settlement = settlement_;
@@ -148,22 +175,29 @@ contract OcoGroupModule is ISettlementModule, IOrderValidator {
     /// @notice Claim `groupId` for the order identified by `nonce`, retiring
     ///         every sibling leg of the maker's bracket.
     /// @dev    Moves no value and touches no token, so it needs no approval of
-    ///         any kind — neither the maker's nor the filler's. `amount` is
-    ///         ignored: the claim is not a quantity and must land identically on
-    ///         a 1% fill and a 100% fill. It still has to be signed as the
-    ///         order's anchor so the settlement's pro-rata slice never floors to
-    ///         zero — see the note on the contract.
+    ///         any kind — neither the maker's nor the filler's. `amount` (this
+    ///         fill's pro-rata slice of the signed anchor) is checked ONLY on the
+    ///         fill that claims an untouched group, against `minClaim`; the
+    ///         winner's later slices write nothing and may be any size. It still
+    ///         has to be signed as the order's anchor so the settlement's pro-rata
+    ///         slice never floors to zero — see the note on the contract.
     /// @param  maker  the order maker, threaded by the settlement.
-    /// @param  data   `abi.encode(uint256 groupId, uint256 nonce)`.
-    function settle(address maker, address, uint256, bytes calldata data) external override {
+    /// @param  amount this fill's slice of the item (== the fill's delta when the
+    ///                item amount is the anchor).
+    /// @param  data   `abi.encode(uint256 groupId, uint256 nonce, uint256 minClaim)`.
+    function settle(address maker, address, uint256 amount, bytes calldata data) external override {
         if (msg.sender != settlement) revert NotSettlement();
-        (uint256 groupId, uint256 nonce) = abi.decode(data, (uint256, uint256));
+        (uint256 groupId, uint256 nonce, uint256 minClaim) = abi.decode(data, (uint256, uint256, uint256));
         if (nonce == type(uint256).max) revert NonceNotRepresentable();
 
         uint256 mine = nonce + 1;
         uint256 current = claim[maker][groupId];
         if (current == mine) return; // a later partial fill of the winner — nothing to write
         if (current != 0) revert GroupAlreadyClaimed();
+        // The claiming fill must be a real trade, not dust (PRICE-2). `minClaim == 0`
+        // never reaches here through a validated leg; on an item-only leg it means
+        // "no floor", which is that maker's own unguarded shape.
+        if (amount < minClaim) revert ClaimTooSmall(amount, minClaim);
 
         claim[maker][groupId] = mine;
         emit GroupClaimed(maker, groupId, nonce);
@@ -187,7 +221,7 @@ contract OcoGroupModule is ISettlementModule, IOrderValidator {
         uint256 groupId = abi.decode(data, (uint256));
         // THE BINDING. The claim item's `(groupId, nonce)` must be THIS order's —
         // see the contract note on why two copies of the nonce were exploitable.
-        if (!_claimItemMatches(order, groupId)) return false;
+        if (!_claimItemMatches(order.items, order.nonce, groupId)) return false;
         uint256 current = claim[order.maker][groupId];
         if (current == 0) return true; // nobody went yet
         unchecked {
@@ -199,25 +233,43 @@ contract OcoGroupModule is ISettlementModule, IOrderValidator {
     }
 
     /// @dev Does `order.items` carry a SETTLE record on this module encoding
-    ///      `(groupId, order.nonce)`? Walks the packed blob the same way the settler
-    ///      does ({PackedArrays.validateRecords} then sequential {itemAt}); a
-    ///      malformed blob reverts here exactly as it would in the fill.
-    function _claimItemMatches(Order calldata order, uint256 groupId) private view returns (bool) {
-        bytes calldata items = order.items;
+    ///      `(groupId, order.nonce, minClaim)` with `0 < minClaim <= item amount`?
+    ///      Walks the packed blob the same way the settler does
+    ///      ({PackedArrays.validateRecords} then sequential {itemAt}); a malformed
+    ///      blob reverts here exactly as it would in the fill. A missing floor
+    ///      (`minClaim == 0`, or the legacy two-word blob) fails closed — the
+    ///      dust-kill guard must be an explicit maker choice (PRICE-2). A floor above
+    ///      the item amount could never be met, so it fails closed here rather than
+    ///      on every fill.
+    function _claimItemMatches(bytes calldata items, uint256 orderNonce, uint256 groupId) private view returns (bool) {
+        bytes32 want = keccak256(abi.encode(groupId, orderNonce));
         uint256 n = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < n;) {
-            (uint256 op, address module,,, bytes calldata d, uint256 next) = PackedArrays.itemAt(items, cursor);
-            if (module == address(this) && op == uint256(ItemOp.SETTLE) && d.length == 64) {
-                (uint256 g, uint256 nonce) = abi.decode(d, (uint256, uint256));
-                if (g == groupId && nonce == order.nonce) return true;
-            }
-            cursor = next;
+            bool hit;
+            (hit, cursor) = _isClaimRecord(items, cursor, want);
+            if (hit) return true;
             unchecked {
                 ++i;
             }
         }
         return false;
+    }
+
+    /// @dev Is the item record at `cursor` a SETTLE on this module whose data is
+    ///      exactly `(groupId, orderNonce, minClaim)` (hashed head `want`) with a
+    ///      floor that is set and reachable (`0 < minClaim <= item amount`)?
+    function _isClaimRecord(bytes calldata items, uint256 cursor, bytes32 want)
+        private
+        view
+        returns (bool hit, uint256 next)
+    {
+        (uint256 op, address module, uint256 amount,, bytes calldata d, uint256 nxt) =
+            PackedArrays.itemAt(items, cursor);
+        next = nxt;
+        if (module != address(this) || op != uint256(ItemOp.SETTLE) || d.length != 96) return (false, next);
+        uint256 minClaim = uint256(bytes32(d[64:96]));
+        hit = keccak256(d[0:64]) == want && minClaim != 0 && minClaim <= amount;
     }
 
     // ──────────────────── views ────────────────────

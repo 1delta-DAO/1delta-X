@@ -85,7 +85,7 @@ sequenceDiagram
             ┌─────────────────────────────┼──────────────────────────────┐
             │ 1. run validators (staticcall, AND-composed)                │
             │      RedemptionSettledValidator → op cleared & RIF ≥ minRif  │
-            │      MocPriceBandValidator      → minPrice ≤ peek ≤ maxPrice │
+            │      MocPriceBandValidator      → min ≤ getPACtp ≤ max      │
             └─────────────────────────────┬──────────────────────────────┘
                                           │ (all true, else revert ValidationFailed)
             ┌─────────────────────────────┼──────────────────────────────┐
@@ -120,18 +120,19 @@ flowchart LR
         IOV["IOrderValidator"]
     end
     subgraph moc["MoC on Rootstock (external)"]
-        CORE["RIF core (redeemTP)"]
+        CORE["RIF core (redeemTP · getPACtp)"]
         QUEUE["queue (execute / firstOperId)"]
-        PP["price provider (peek)"]
+        PP["price provider (whitelisted: core only)"]
     end
 
     SETTLE -- "staticcall validate()" --> RSV
     SETTLE -- "staticcall validate()" --> DGV
     RSV -- "reads firstOperId" --> QUEUE
-    DGV -- "reads peek()" --> PP
+    DGV -- "reads getPACtp(tp)" --> CORE
+    CORE -- "reads" --> PP
     RSV -. implements .-> IOV
     DGV -. implements .-> IOV
-    IMOC -. typed view of .-> CORE & QUEUE & PP
+    IMOC -. typed view of .-> CORE & QUEUE
 
     style usdrif fill:#eef,stroke:#88a
     style core fill:#efe,stroke:#8a8
