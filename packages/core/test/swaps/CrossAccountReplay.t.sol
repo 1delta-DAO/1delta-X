@@ -108,7 +108,7 @@ contract CrossAccountReplayTest is MockSettlementBase {
         bytes memory sig = _signPermitWitnessWith(batch, _hashOrder(oA), OWNER_PK);
 
         vm.prank(solver);
-        settlement.fillWithPermit(oA, batch, sig, IN_AMT);
+        settlement.fillWithPermit(oA, batch, sig, IN_AMT, 0, "");
 
         assertEq(tA.balanceOf(address(walletA)), 0, "A's input was pulled");
         assertEq(tB.balanceOf(address(walletA)), OUT_AMT, "A received output");
@@ -133,7 +133,7 @@ contract CrossAccountReplayTest is MockSettlementBase {
         uint256 bBefore = tA.balanceOf(address(walletB));
         vm.prank(solver);
         vm.expectRevert(); // B's 1271 rejects a signature over A's (maker-bound) digest
-        settlement.fillWithPermit(oB, batch, sigForA, IN_AMT);
+        settlement.fillWithPermit(oB, batch, sigForA, IN_AMT, 0, "");
 
         assertEq(tA.balanceOf(address(walletB)), bBefore, "sibling wallet B was NOT drained");
     }
@@ -148,7 +148,7 @@ contract CrossAccountReplayTest is MockSettlementBase {
         bytes memory sigForB = _signPermitWitnessWith(batch, _hashOrder(oB), OWNER_PK);
 
         vm.prank(solver);
-        settlement.fillWithPermit(oB, batch, sigForB, IN_AMT);
+        settlement.fillWithPermit(oB, batch, sigForB, IN_AMT, 0, "");
         assertEq(tA.balanceOf(address(walletB)), 0, "B fills under a permit witnessed to B's own order");
     }
 }

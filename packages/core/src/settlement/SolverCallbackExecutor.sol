@@ -17,10 +17,26 @@ pragma solidity ^0.8.28;
 ///  allowance-less contract removes that authority: the very same call reverts,
 ///  because the executor is not an approved spender for anyone.
 ///
-///  It is stateless and holds no funds or approvals between calls, so it can only
-///  ever act with its own (empty) authority. `execute` is nonetheless pinned to
-///  the deploying Settlement to keep it a dedicated, single-purpose component
-///  rather than a public trampoline.
+///  It is an approved SPENDER for nobody, so it can only ever act with its own
+///  authority. `execute` is pinned to the deploying Settlement, but that does NOT
+///  make it private (audit 2026-09-30 CORE-FILLER-4 / CENSUS-A-4 — this used to say
+///  it "holds no funds or approvals" and is not "a public trampoline"; both were
+///  wrong):
+///    • IT IS A PUBLIC TRAMPOLINE. Anyone can make it call any target with any data:
+///      a `matchSettle` plan with ZERO orders and one CALL step, or a
+///      `fillWithCallback` on a self-signed order. So `msg.sender == EXECUTOR`
+///      authenticates NOTHING. A callback / CALL target that releases funds must also
+///      check a flag its OWN entrypoint armed around its Settlement call (and must
+///      authenticate that entrypoint's caller — arming from a permissionless entry
+///      authorises nothing).
+///    • ANYONE CAN MAKE IT A GRANTOR. Through the trampoline it can be made to
+///      `approve` ERC-20s, grant Permit3 allowances, `approveOrder` or
+///      `setOrderSigner` for itself, and those grants persist. NEVER GRANT THIS
+///      ADDRESS AUTHORITY, and never leave value on it across steps where
+///      third-party code (another maker's ITEM, a maker-chosen token) runs — whatever
+///      lands here belongs to whoever drives it next. Settlement itself refuses an
+///      output leg (netted path) or a TAKE proceeds recipient (every path) that
+///      names it.
 contract SolverCallbackExecutor {
     /// @dev The Settlement that deployed this executor (constructor caller).
     address public immutable SETTLEMENT;

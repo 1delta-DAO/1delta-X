@@ -197,7 +197,7 @@ contract PlainSwapTest is CoreSettlementBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn)[0];
+        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn, 0, "")[0];
 
         assertEq(paid, wethOut, "solver paid exactly wethOut");
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH in wallet");

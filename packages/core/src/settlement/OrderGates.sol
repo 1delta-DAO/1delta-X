@@ -151,21 +151,28 @@ library OrderGates {
         // whole decode per call site, which measured +287 bytes for this rare path.
         /// @solidity memory-safe-assembly
         assembly {
-            // An input leg carries it: every BUY leg, or an auctioned SELL leg — and
-            // never a proportional marker ({Pricing.inputOwed} returns the anchor).
+            // An input leg carries it: a BUY leg with a non-zero `start`, or an
+            // auctioned (`end != 0`) leg — and never a proportional marker
+            // ({Pricing.inputOwed} returns the anchor). AMOUNT-AWARE (audit 2026-09-30
+            // CORE-FILL-1): a zero placeholder leg (`start == end == 0`) owes 0, so the
+            // discount {Pricing.inputOwed} applies to it is a no-op — counting it let an
+            // outsider fill inside the window at the exclusive filler's own price.
             let p := add(legsIn.offset, 1)
             for { let e := add(p, mul(nIn, 84)) } lt(p, e) { p := add(p, 84) } {
-                if and(or(buy, iszero(iszero(calldataload(add(p, 52))))), iszero(gt(calldataload(add(p, 20)), floor))) {
+                let st := calldataload(add(p, 20))
+                if and(iszero(iszero(or(mul(buy, st), calldataload(add(p, 52))))), iszero(gt(st, floor))) {
                     has := 1
                     break
                 }
             }
-            // A SELL output carries it only if addressed to the maker (0 or maker).
+            // A SELL output carries it only if addressed to the maker (0 or maker) AND
+            // non-zero: `start == 0` prices to 0 (`end <= start`), which
+            // {Pricing.outputAt}'s `amt != 0` guard never lifts.
             if iszero(has) {
                 p := add(legsOut.offset, 1)
                 for { let e := add(p, mul(nOut, 104)) } lt(p, e) { p := add(p, 104) } {
                     let to := shr(96, calldataload(add(p, 84)))
-                    if or(iszero(to), eq(to, maker)) {
+                    if and(or(iszero(to), eq(to, maker)), iszero(iszero(calldataload(add(p, 20))))) {
                         has := 1
                         break
                     }

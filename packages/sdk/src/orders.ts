@@ -50,12 +50,26 @@ export function encodeFill(order: Order, sig: Hex, fillAmountIn: bigint): Hex {
   return encodeFunctionData({ abi: SETTLEMENT_ABI, functionName: "fill", args: [packOrder(order) as any, sig, fillAmountIn] });
 }
 
-/** `settlement.fillWithPermit(order, batch, sig, fillAmountIn)` */
-export function encodeFillWithPermit(order: Order, batch: PermitBatch, sig: Hex, fillAmountIn: bigint): Hex {
+/**
+ * `settlement.fillWithPermit(order, batch, sig, fillAmountIn, minBumpBps, takerData)`.
+ *
+ * `minBumpBps` is the filler's price floor (bps of the band; `0n` = none), exactly
+ * `fillUpTo`'s — quote it from `SettlementLens.previewBump`. A permit-witness order's
+ * FIRST fill can only go through this entry, so on a price-module, priority or
+ * non-monotone order a filler that wants its quote to hold should pass it.
+ */
+export function encodeFillWithPermit(
+  order: Order,
+  batch: PermitBatch,
+  sig: Hex,
+  fillAmountIn: bigint,
+  minBumpBps: bigint = 0n,
+  takerData: Hex = "0x",
+): Hex {
   return encodeFunctionData({
     abi: SETTLEMENT_ABI,
     functionName: "fillWithPermit",
-    args: [packOrder(order) as any, batch as any, sig, fillAmountIn],
+    args: [packOrder(order) as any, batch as any, sig, fillAmountIn, minBumpBps, takerData],
   });
 }
 

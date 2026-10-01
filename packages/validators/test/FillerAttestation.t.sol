@@ -330,7 +330,7 @@ contract FillerAttestationTest is MockSettlementBase {
         takerDatas[1] = ""; // open order needs nothing
 
         vm.prank(solver);
-        (, bool[] memory ok) = settlement.batchFill(orders, sigs, amts, false, takerDatas);
+        (, bool[] memory ok) = settlement.batchFill(orders, sigs, amts, false, new uint256[](orders.length), takerDatas);
         assertTrue(ok[0], "gated order settled with its credential");
         assertTrue(ok[1], "open order settled with empty takerData");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT * 2, "both delivered");
@@ -348,7 +348,7 @@ contract FillerAttestationTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(Base.LengthMismatch.selector);
-        settlement.batchFill(orders, sigs, amts, false, takerDatas);
+        settlement.batchFill(orders, sigs, amts, false, new uint256[](orders.length), takerDatas);
     }
 
     // ──────────────────── As a post-execution invariant ────────────────────

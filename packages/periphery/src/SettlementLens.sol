@@ -427,7 +427,8 @@ contract SettlementLens {
             "",
             new uint256[](0), // no delivery ledger in a preview — nothing was delivered
             0,
-            new uint256[](0)
+            new uint256[](0),
+            0 // no filler price floor in a preview
         );
     }
 
@@ -527,7 +528,8 @@ contract SettlementLens {
             "", // no one-shot taker permit in a preview — see {FillCtx.permitTake}
             new uint256[](0), // no delivery ledger in a preview — nothing was delivered
             0,
-            new uint256[](0) // preview prices legs directly; no payout ledger to record
+            new uint256[](0), // preview prices legs directly; no payout ledger to record
+            0 // no filler price floor in a preview
         );
     }
 

@@ -460,6 +460,36 @@ contract MatchSettleGatesTest is MockSettlementBase {
         assertEq(tA.balanceOf(maker), 0, "the whole live balance, wei included, was swept");
     }
 
+    /// @dev Audit 2026-09-30 X-DIFF-CORE-1.v1 — the SHRINK direction. A proportional
+    ///      maker that drains its balance in front of a plan must not be paid full
+    ///      outputs for the remainder by a plan that priced the larger anchor. With the
+    ///      EXACT size the drift is caught (`OverFill`) and nothing moves; the sentinel
+    ///      is the explicit opt-in that hands this risk to the plan (see {Proportional}
+    ///      "Who should pass the sentinel"), which an inventory-fronting plan must not
+    ///      take.
+    function test_audit_X_DIFF_CORE_1_v1_drainedAnchor_exactSizeReverts() public {
+        uint256 excess = tA.balanceOf(maker) - A_IN;
+        vm.prank(maker);
+        tA.transfer(address(0xdead), excess);
+
+        Order memory a = _aliceOrder(1);
+        LegIn[] memory legs = new LegIn[](1);
+        legs[0] = LegIn({token: address(tA), start: Proportional.encode(10_000), end: A_IN});
+        a.legsIn = PackedEncode.legsIn(legs);
+        MatchPlan memory exact = _plan(a, _bobOrder(2), A_IN, B_OUT, false);
+
+        // The maker front-runs the plan, moving a quarter of the anchor away.
+        vm.prank(maker);
+        tA.transfer(address(0xbeef), A_IN / 4);
+
+        uint256 bobBefore = tB.balanceOf(bob);
+        vm.prank(solver);
+        vm.expectRevert(OrderState.OverFill.selector);
+        settlement.matchSettle(exact);
+        assertEq(tB.balanceOf(bob), bobBefore, "nothing settled against the drained anchor");
+        assertEq(tA.balanceOf(maker), A_IN - A_IN / 4, "maker's remainder untouched");
+    }
+
     // ════════════════════ the one deliberate feature exclusion ════════════════════
 
     /// @dev DELTA-VERIFY delivery (timing bit 104) verifies each output against the

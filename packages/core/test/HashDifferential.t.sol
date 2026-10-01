@@ -61,10 +61,13 @@ contract HashDifferentialTest is Test, DeployedBytecode {
     // naive, obviously-correct spelling of that: `abi.encode` the 18 words and hash.
     // If {OrderHash.hash}'s hand-rolled buffer ever disagrees, the assembly is wrong.
     //
-    // NOTE: the old address-padding test is GONE ON PURPOSE. It guarded the typed
-    // encoding, where a 20-byte address sat in a 32-byte ABI word and dirty padding
-    // could reach the digest unless masked. A packed blob stores the raw 20 bytes with
-    // no padding at all, so that class of divergence is now structurally impossible.
+    // NOTE: inside the packed blobs an address is the raw 20 bytes with no padding, so
+    // dirty padding cannot reach the digest there. It CAN in the four head address
+    // words (`maker`, `exclusiveFiller`, `fillModule`, `pricingModule`), which
+    // {OrderHash.hash} copies raw and masks — pinned by
+    // {test_audit_X_ASM_3_dirtyHeadAddressWords_hashClean} below (the earlier claim
+    // here that the class was "structurally impossible" was wrong; audit 2026-09-30
+    // X-ASM-3).
 
     bytes32 constant ORDER_TH = keccak256(
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"
@@ -90,8 +93,11 @@ contract HashDifferentialTest is Test, DeployedBytecode {
     // ──────────────────── Fuzzed order construction ────────────────────
 
     /// @dev Array lengths are drawn 0..3 so EVERY shape — including all-empty, which
-    ///      is the assembly's zero-length edge case — is reachable.
-    function _build(uint256 seed, uint8 lens_) private pure returns (Order memory o) {
+    ///      is the assembly's zero-length edge case — is reachable. Each of the six
+    ///      blobs is sized from its OWN two bits of `lens_` (audit 2026-09-30 X-ASM-3:
+    ///      validators and invariants used to reuse the legsIn/legsOut bits, so shapes
+    ///      like "validators non-empty, legsIn empty" were never generated).
+    function _build(uint256 seed, uint16 lens_) private pure returns (Order memory o) {
         o.maker = address(uint160(uint256(keccak256(abi.encode(seed, "maker")))));
 
         o.nonce = uint256(keccak256(abi.encode(seed, "nonce")));
@@ -149,7 +155,7 @@ contract HashDifferentialTest is Test, DeployedBytecode {
         }
 
         o.items = PackedEncode.items(it);
-        Validator[] memory va = new Validator[](lens_ & 3);
+        Validator[] memory va = new Validator[]((lens_ >> 8) & 3);
         for (uint256 i; i < va.length; i++) {
             va[i] = Validator({
                 target: address(uint160(uint256(keccak256(abi.encode(seed, "vt", i))))), data: _blob(seed, "vdata", i)
@@ -157,7 +163,7 @@ contract HashDifferentialTest is Test, DeployedBytecode {
         }
 
         o.validators = PackedEncode.validators(va);
-        Validator[] memory iv = new Validator[]((lens_ >> 2) & 3);
+        Validator[] memory iv = new Validator[]((lens_ >> 10) & 3);
         for (uint256 i; i < iv.length; i++) {
             iv[i] = Validator({
                 target: address(uint160(uint256(keccak256(abi.encode(seed, "nt", i))))), data: _blob(seed, "ndata", i)
@@ -176,9 +182,31 @@ contract HashDifferentialTest is Test, DeployedBytecode {
 
     // ──────────────────── Tests ────────────────────
 
-    function testFuzz_hashMatchesReference(uint256 seed, uint8 lens_) public view {
+    function testFuzz_hashMatchesReference(uint256 seed, uint16 lens_) public view {
         Order memory o = _build(seed, lens_);
         assertEq(lens.hashOrder(o), _refHash(o), "assembly hash diverged from abi.encode reference");
+    }
+
+    /// @dev Dirty upper 96 bits in each of the four head address words. The hand-rolled
+    ///      hash copies those words raw, so each needs its mask: a call carrying dirty
+    ///      words must either revert or hash exactly as the clean order does — never
+    ///      produce a third digest.
+    function test_audit_X_ASM_3_dirtyHeadAddressWords_hashClean(uint256 seed) public view {
+        Order memory o = _build(seed, uint16(seed));
+        bytes32 clean = _refHash(o);
+        bytes memory cd = abi.encodeCall(SettlementLens.hashOrder, (o));
+        // Head of the tuple: selector, then the Order offset word, then the struct's
+        // static head. Field words (0-based): maker 0, exclusiveFiller 5,
+        // fillModule 12, pricingModule 14.
+        uint256 base = 4 + 32;
+        uint256[4] memory fields = [uint256(0), 5, 12, 14];
+        for (uint256 k; k < 4; ++k) {
+            uint256 at = base + fields[k] * 32;
+            cd[at] = bytes1(uint8(0xde));
+            cd[at + 11] = bytes1(uint8(0xad));
+        }
+        (bool ok, bytes memory ret) = address(lens).staticcall(cd);
+        if (ok) assertEq(abi.decode(ret, (bytes32)), clean, "dirty head words reached the digest");
     }
 
     /// @dev The all-empty shape: every array-member hasher takes its zero-length path

@@ -139,7 +139,7 @@ contract MigrateAaveToMorphoTest is MorphoModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, debt);
+        settlement.fillWithPermit(order, batch, sig, debt, 0, "");
 
         assertEq(IERC20(aaveUsdcDebt).balanceOf(maker), 0, "Aave debt closed");
         assertEq(_collateral(maker), exactWeth, "Morpho collateral opened");

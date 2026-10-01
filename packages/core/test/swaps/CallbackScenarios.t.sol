@@ -33,14 +33,20 @@ interface IEveryEntry {
     function matchSettle(MatchPlan calldata p)
         external
         returns (uint256[][] memory, address[] memory, uint256[] memory);
-    function fillSelf(Order calldata o, bytes calldata sig, uint256 amt, address filler, bytes calldata takerData)
-        external
-        returns (uint256[] memory);
+    function fillSelf(
+        Order calldata o,
+        bytes calldata sig,
+        uint256 amt,
+        address filler,
+        uint256 minBumpBps,
+        bytes calldata takerData
+    ) external returns (uint256[] memory);
     function fillWithPermitTake(
         Order calldata o,
         IPermit3.PermitTake calldata permit,
         bytes calldata sig,
-        uint256 amt
+        uint256 amt,
+        uint256 minBumpBps
     ) external returns (uint256[] memory);
 }
 
@@ -279,7 +285,7 @@ contract CallbackScenariosTest is MockSettlementBase {
     function test_reenter_fillWithPermitTake_blocked() public {
         (Order memory o, bytes memory sig) = _innerOrder();
         IPermit3.PermitTake memory permit;
-        _reenters(abi.encodeCall(IEveryEntry.fillWithPermitTake, (o, permit, sig, AMOUNT_IN)));
+        _reenters(abi.encodeCall(IEveryEntry.fillWithPermitTake, (o, permit, sig, AMOUNT_IN, 0)));
     }
 
     /// @dev `fillSelf` is not guarded — it is gated HARDER, on `msg.sender == this`.
@@ -289,7 +295,7 @@ contract CallbackScenariosTest is MockSettlementBase {
     function test_reenter_fillSelf_rejectedAsOnlySelf() public {
         (Order memory o, bytes memory sig) = _innerOrder();
         _reentersInto(
-            abi.encodeCall(IEveryEntry.fillSelf, (o, sig, AMOUNT_IN, solver, "")),
+            abi.encodeCall(IEveryEntry.fillSelf, (o, sig, AMOUNT_IN, solver, 0, "")),
             CallbackMode.PreDelivery,
             abi.encodeWithSelector(Base.OnlySelf.selector)
         );

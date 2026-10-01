@@ -97,7 +97,7 @@ contract DepositBorrowTest is CompoundV3ModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, borrowOut);
+        settlement.fillWithPermit(order, batch, sig, borrowOut, 0, "");
 
         assertApproxEqAbs(_wethCollateral(maker), collateralIn, 2, "maker collateral up");
         assertApproxEqAbs(_usdcDebt(maker), borrowOut, 2, "maker debt up");

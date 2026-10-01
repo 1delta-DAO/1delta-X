@@ -107,7 +107,7 @@ contract RepayTest is CompoundV3ModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, 1 ether);
+        settlement.fillWithPermit(order, batch, sig, 1 ether, 0, "");
 
         assertEq(_usdcDebt(maker), 0, "debt zeroed");
         assertGt(IERC20(USDC).balanceOf(maker), 0, "dust refunded");

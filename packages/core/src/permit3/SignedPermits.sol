@@ -106,8 +106,19 @@ abstract contract SignedPermits is UnorderedNonces, AllowanceTransfer, TakerAllo
     function _applyBatchIfNeeded(address owner, PermitBatch calldata batch, bytes32 hashStruct, bytes calldata sig)
         private
     {
-        if (block.timestamp > batch.deadline) revert PermitExpired();
         _verifyPermitSig(owner, hashStruct, sig);
+        // THE DEADLINE BINDS THE APPLICATION, NOT THE NO-OP (audit 2026-09-30 P3-4).
+        // Checked here, after the signature and only for a nonce that is still FRESH:
+        // a spent nonce applies nothing either way, so refusing it past `deadline` only
+        // broke the continuation it exists for — the remainder of a partly filled
+        // gasless order, re-presented through `fillWithPermit` with the same stored
+        // calldata, reverted `PermitExpired` while its grants (with their own
+        // `expiration`) and the order itself were still live. An expired signature
+        // can still never WRITE anything.
+        if (block.timestamp > batch.deadline) {
+            if (_isPermitNonceUsed(owner, batch.nonce)) return;
+            revert PermitExpired();
+        }
         // Spent bit ⇒ apply NOTHING and return. The signature above is still proven,
         // so this is not an authorisation bypass — it is the S-1 remediation, without
         // which one front-run permanently bricks a gasless order.
@@ -119,7 +130,7 @@ abstract contract SignedPermits is UnorderedNonces, AllowanceTransfer, TakerAllo
         // authority, never more) — but the caller must not infer that the allowances
         // now exist. {Core.fillWithPermit} proceeds past this either way and succeeds
         // only if a standing allowance, or a direct ERC-20 approval via the
-        // {Permit3TransferLib} fallback, independently funds the fill.
+        // {Base._pullViaPermit3} fallback, independently funds the fill.
         //
         // Consequence a maker must not get wrong: invalidating a nonce KILLS THE
         // GRANTS, NOT THE ORDER. The cancellations that bind the order are

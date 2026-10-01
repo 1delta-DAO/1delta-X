@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeFunctionData } from "viem";
+import { decodeFunctionData, toFunctionSelector } from "viem";
 
 import {
   SETTLEMENT_ABI,
@@ -43,6 +43,24 @@ describe("calldata builders round-trip", () => {
     expect(functionName).toBe("fillWithPermit");
     expect((args as any)[3]).toBe(456n);
     expect((args as any)[1].tokens.length).toBe(1);
+  });
+
+  it("test_audit_PERIPH_1_v3: fillWithPermit carries the filler's price floor and takerData", () => {
+    const batch = permitBatch([tokenPermit(CANONICAL_ORDER.maker, CANONICAL_ORDER.legsIn[0]!.token, 1n, 1)], [], 0n, 9n);
+    const data = encodeFillWithPermit(CANONICAL_ORDER, batch, SIG, 456n, 4_000n, "0xabcd");
+    const { functionName, args } = decodeFunctionData({ abi: SETTLEMENT_ABI, data });
+    expect(functionName).toBe("fillWithPermit");
+    expect((args as any)[4]).toBe(4_000n);
+    expect((args as any)[5]).toBe("0xabcd");
+    // The single on-chain entry since 2026-09-30 — the old 4-arg selector is gone.
+    const sel = toFunctionSelector(
+      "fillWithPermit((address,uint256,bytes,bytes,uint256,address,uint256,uint256,bytes,bytes,bytes,bytes,address,uint256,address),((address,address,uint160,uint48)[],(address,address,bytes32,uint160,uint48)[],uint256,uint256),bytes,uint256,uint256,bytes)",
+    );
+    expect(data.slice(0, 10)).toBe(sel);
+    // Defaults keep the old call shape: no floor, no taker blob.
+    const plain = decodeFunctionData({ abi: SETTLEMENT_ABI, data: encodeFillWithPermit(CANONICAL_ORDER, batch, SIG, 1n) });
+    expect((plain.args as any)[4]).toBe(0n);
+    expect((plain.args as any)[5]).toBe("0x");
   });
 
   it("cancelOrders encodes and decodes", () => {

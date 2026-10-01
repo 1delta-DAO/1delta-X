@@ -22,7 +22,10 @@ import {StateHandler} from "./StateHandler.sol";
 ///  The `swaps/` and `items/` suites prove POSITIVE facts about scenarios someone
 ///  thought of: this cancel works, that delegate is rejected. This suite proves a
 ///  NEGATIVE fact over a scenario space nobody enumerated: across a random walk of
-///  every lifecycle entry point, called by every actor (three makers, two fillers and
+///  the lifecycle entry points (every cancel / approval / delegation write, and the
+///  fill entries `fill`, `fillUpTo`, `fillWithCallback`, `batchFill` and
+///  `matchSettle` — `fillWithPermit` / `fillWithPermitTake` are unit-tested only;
+///  corrected in audit 2026-09-30 CORE-FILL-2), called by every actor (three makers, two fillers and
 ///  an unrelated attacker) in every order, *no write ever lands in a cell its caller
 ///  had no authority over*. {StateHandler} snapshots all 81 watched cells before each
 ///  action and diffs them after, so griefing, front-running and outright theft — all
@@ -58,7 +61,7 @@ contract CoreStateInvariants is MockSettlementBase {
         handler = new StateHandler();
         handler.init(permit3, settlement, tA, tB);
 
-        bytes4[] memory sel = new bytes4[](16);
+        bytes4[] memory sel = new bytes4[](17);
         sel[0] = StateHandler.doFill.selector;
         sel[1] = StateHandler.doFillSigless.selector;
         sel[2] = StateHandler.doFillAsDelegate.selector;
@@ -75,6 +78,9 @@ contract CoreStateInvariants is MockSettlementBase {
         sel[13] = StateHandler.doWarp.selector;
         sel[14] = StateHandler.doMatchSettle.selector;
         sel[15] = StateHandler.doDonate.selector;
+        // The other hand-armed fill entries + the size sentinel on every one of them
+        // (audit 2026-09-30 CORE-FILL-2).
+        sel[16] = StateHandler.doFillVia.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }

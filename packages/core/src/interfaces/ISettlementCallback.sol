@@ -62,10 +62,13 @@ interface ISettlementCallback {
     ///                   mode these have ALREADY been transferred when the callback
     ///                   runs; under a `PreDelivery*` mode they have not, and are a
     ///                   promise conditional on the rest of the fill succeeding. In
-    ///                   both cases the destination is {FillCtx.payTo} — the filler
-    ///                   on every classic path, but `fillUpTo`'s `recipient` when
-    ///                   redirected — so a callback that reads its own balance must
-    ///                   not assume it is the payee.
+    ///                   both cases the destination is {FillCtx.payTo}, which on the
+    ///                   only entry that runs a typed callback (`fillWithCallback`)
+    ///                   is always the filler (`msg.sender`) — `fillUpTo`'s
+    ///                   `recipient` redirect never reaches a callback. A callback
+    ///                   that reads its own balance must still not assume it is the
+    ///                   payee: `callbackTarget` need not be the filler. (Corrected in
+    ///                   audit 2026-09-30 CORE-FILL-3.)
     /// @param pricedOut  what this fill must deliver on each output leg, indexed
     ///                   1:1 with `legsOut` — the very numbers {Pricing} is about
     ///                   to demand.

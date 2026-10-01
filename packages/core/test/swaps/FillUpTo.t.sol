@@ -379,7 +379,7 @@ contract FillUpToTest is MockSettlementBase {
         vm.warp(block.timestamp + 500); // bump = 5000
 
         vm.prank(solver);
-        vm.expectRevert(Base.BumpTooLow.selector);
+        vm.expectRevert(OrderState.BumpTooLow.selector);
         settlement.fillUpTo(order, sig, IN_, address(0), 5_001, "");
     }
 
@@ -391,7 +391,7 @@ contract FillUpToTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(Base.BumpTooLow.selector);
+        vm.expectRevert(OrderState.BumpTooLow.selector);
         settlement.fillUpTo(order, sig, IN_, address(0), 1, "");
     }
 
@@ -423,7 +423,7 @@ contract FillUpToTest is MockSettlementBase {
         bytes memory sig = _sign(order);
 
         vm.prank(solver);
-        vm.expectRevert(Base.BumpTooLow.selector);
+        vm.expectRevert(OrderState.BumpTooLow.selector);
         settlement.fillUpTo(order, sig, IN_ / 2, address(0), 4_001, "");
 
         vm.prank(solver);

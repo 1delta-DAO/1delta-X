@@ -107,9 +107,9 @@ reasoning — or an audit finding — across from Permit2.
    Permit2 does only for signature transfers.
 
 Permit2 pieces with no Permit3 counterpart: `PermitSingle`, `invalidateNonces` /
-`ExcessiveInvalidation`, `SafeCast160`, `Permit2Lib` (the caller-side helper —
-[`Permit3TransferLib`](../utils/Permit3TransferLib.sol) is a different thing: a
-direct-approval fallback, not a DAI-permit shim) and `IDAIPermit`.
+`ExcessiveInvalidation`, `SafeCast160`, `Permit2Lib` (the caller-side helper — Settlement's own
+`Base._pullViaPermit3` is a different thing: a direct-approval fallback, not a
+DAI-permit shim) and `IDAIPermit`.
 
 EIP-712 type strings for signature transfers are **byte-identical** to Permit2's,
 so signing tooling needs no changes; digests still differ because the domain

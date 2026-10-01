@@ -243,7 +243,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         uint256 debt0 = _usdcDebt(maker);
 
         vm.prank(solver);
-        settlement.fillWithPermit(o, batch, sig, BORROW);
+        settlement.fillWithPermit(o, batch, sig, BORROW, 0, "");
 
         // The position, and the grants that made it possible.
         _assertGrants();
@@ -291,7 +291,7 @@ contract EvcPermitSignatureOnlyTest is EulerV2ModulesBase {
         uint256 debt0 = _usdcDebt(maker);
 
         vm.prank(solver);
-        settlement.fillWithPermit(o, batch, sig, BORROW); // must NOT brick
+        settlement.fillWithPermit(o, batch, sig, BORROW, 0, ""); // must NOT brick
 
         assertApproxEqRel(_wethCollateral(maker) - col0, COLLATERAL, 1e15, "position opened regardless");
         assertApproxEqRel(_usdcDebt(maker) - debt0, BORROW, 1e15, "debt drawn regardless");

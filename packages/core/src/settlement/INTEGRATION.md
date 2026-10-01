@@ -19,7 +19,20 @@ IERC20(tokenToPay).approve(SETTLEMENT, type(uint256).max); // plain approve work
 * `fillUpTo` **clamps to the order's remaining size** instead of reverting
   `OverFill` when a competing fill landed first — the race a shared orderbook
   makes routine. A dead order (cancelled / fully filled / expired) still
-  reverts loudly.
+  reverts loudly. Two exceptions: a fill-module order passes through
+  unclamped (the module sizes it, and since 2026-09-30 may never size it
+  ABOVE your request), and a **Proportional** (balance-relative) SELL anchor is
+  never trimmed down — an oversized request reverts `OverFill`, because a
+  proportional fill is whole and trimming to a balance that shrank would charge
+  you the full output for less.
+* `type(uint256).max` as `fillAmount` means "whatever remains" on **every**
+  fill entry (`fill`, `fillUpTo`, `fillWithCallback`, `fillWithPermit`,
+  `batchFill`, `fillWithPermitTake`, `matchSettle`) — resolved once by the core,
+  and a fill module receives the remaining amount, never `max`. On a Proportional
+  order it accepts ANY size up to the cap, so it moves the maker's
+  balance-shrink risk onto whoever pays the outputs: pass it only if you fund
+  the output from the input you measured arriving (a routed swap). An inventory
+  filler must pass the exact size it quoted.
 * `received[i]` — what the filler was paid per `order.legsIn[i]` (exact, even
   for tick-priced BUY receipts; no balance snapshots needed).
 * `paid[j]` — what the filler delivered per `order.legsOut[j]`.
@@ -30,9 +43,13 @@ IERC20(tokenToPay).approve(SETTLEMENT, type(uint256).max); // plain approve work
   off. Pass the bump your quote priced at and the fill reverts `BumpTooLow`
   instead of executing below it. One scalar guards every leg at once, because
   every leg price is monotone in the shared bump. See "Price motion" below for
-  when it matters (price-module orders, the gas bump).
-* The strict entries (`fill`, `batchFill`, …) are unchanged — fill-or-kill
-  semantics with the classic returns.
+  when it matters. **Do pass it** unless the order is all-fixed.
+* The same floor is on `fillWithPermit(order, batch, sig, fillAmount,
+  minBumpBps, takerData)` (the ONLY entry that can perform a permit-witness
+  order's first fill), `fillWithPermitTake(…, fillAmount, minBumpBps)` and the
+  per-order `batchFill(…, revertIfIncomplete, minBumpBps[], takerDatas[])`
+  (a floor miss skips that order). Plain `fill` has none — use `fillUpTo` for a
+  floored single fill. (Before 2026-09-30 only `fillUpTo` had a floor.)
 
 ## Which side is which
 
@@ -55,16 +72,23 @@ The order is written from the **maker's** frame; the filler is the mirror:
 * Converting a spend budget into `fillAmount`: `fillAmountFromBudget` in
   `@1delta-x/sdk` (side-aware), or quote on-chain (below).
 
-**Price motion is almost always in the filler's favor between quote and
-execution**: SELL outputs decay down, BUY inputs rise. A quote at block N
-usually executes no worse at N+k — the main race risk is *size*, which the
-clamp absorbs and your own min-return check prices. Two exceptions can move
-the tick *against* you after the quote, and `minBumpBps` covers both:
+**Price motion is USUALLY in the filler's favor between quote and execution**
+on a plain, monotonically rising clock curve: SELL outputs decay down, BUY
+inputs rise. It is not a rule. These move the tick *against* you after the
+quote, and `minBumpBps` covers all of them (it reads the bump the fill
+actually priced at):
 
 * an order with an **external price module** (`order.pricingModule != 0`) —
-  e.g. oracle-pegged — reprices per block, inside the signed band but in
-  either direction;
-* a **falling basefee** shrinks the gas bump on orders that use one.
+  e.g. oracle-pegged, or maker-controlled code that can answer an `eth_call`
+  differently from the real call — reprices inside the signed band in either
+  direction;
+* a **falling basefee** shrinks the gas bump on orders that use one;
+* a **priority-auction** order: the bid is `tx.gasprice − basefee − baseline`,
+  so a basefee drop before inclusion widens your bid and moves the price
+  maker-ward (legacy / fixed gas price especially);
+* a **descending segment** of the signed `curve` — the piecewise curve may
+  fall, and a falling bump moves every leg maker-ward;
+* a module keyed on the filler or on state the maker can flip.
 
 Quote the bump alongside the amounts (the lens/preview exposes it) and pass it
 as the floor; the fill then executes at your quoted price or better, or
@@ -80,7 +104,8 @@ reverts `BumpTooLow`.
   `previewBump(order, filler, takerData)` for the `minBumpBps` floor — the
   resolved decay bump this quote priced at, accepted verbatim by a fill in the
   same block. (Priority-auction orders derive the bump from your own gas
-  price — quote with the gas price you'll send, or skip the floor there.)
+  price — quote with the gas price you will send, and DO pass the floor: a
+  basefee drop before inclusion moves the bid against you.)
 * **Off-chain:** `previewFillLocal` in `@1delta-x/sdk` mirrors the identical
   math from a timestamp + basefee. For a **priority-auction** order pass the
   `priorityFee` you will bid (the last argument); a zero-bid quote prices at the
@@ -93,9 +118,11 @@ reverts `BumpTooLow`.
 ## Funds handling rules
 
 * **Approvals:** a plain ERC20 approval to the Settlement works — the transfer
-  layer probes Permit3 first and falls back to `transferFrom`
-  (`Permit3TransferLib`). The failed probe costs a few hundred gas per output
-  leg; a filler that wants it gone can instead approve via Permit3
+  layer (`Base._pullViaPermit3`) probes Permit3 first and falls back to
+  `transferFrom`. The failed probe is NOT cheap: a reverting Permit3 call plus a
+  strict-mode read, measured at roughly 8–9k gas per fill (the saving the
+  `*Direct` callback modes exist for — see `CallbackMode`). `fillUpTo` has no
+  direct variant, so a high-volume filler should approve via Permit3 instead
   (token → Permit3, then a Permit3 allowance to the Settlement as spender).
 * **No pre-funding, no deposits, no callbacks required.** Outputs are pulled
   from the filler during the call; inputs are pushed to `recipient` in the
@@ -104,7 +131,21 @@ reverts `BumpTooLow`.
   limit-order venue.
 * **Zero-inventory fills:** `fillWithCallback` with `CallbackMode.PostInputs`
   pays your inputs first, lets a callback convert them, then pulls the
-  outputs — for executor-style fillers (no clamp variant yet; ask if needed).
+  outputs — for executor-style fillers. It has no clamp, but it honours the
+  `type(uint256).max` "whatever remains" sentinel (see the TL;DR) and gives your
+  callback the real amounts (`*Typed` modes) to bound against your quote.
+  ⚠ Two things to get right: (1) the callback runs through the
+  `SolverCallbackExecutor`, which ANYONE can drive (an empty `matchSettle`, any
+  `fillWithCallback`) — `msg.sender == EXECUTOR` authenticates nothing, so a
+  callback that releases funds must also check a flag your own entrypoint armed,
+  and never grant the executor anything; (2) in `PostInputs` the maker's token
+  code runs before AND after your callback, so a hostile or hook-bearing token
+  can sandwich your route inside the transaction — vet tokens and bound the
+  route at the quote, not at break-even.
+* **Permit-witness orders after the permit deadline:** once a gasless order has
+  been partly filled, `fillWithPermit` keeps working with the same stored
+  calldata after `batch.deadline` (the spent permit is a verified no-op) until
+  the order's own expiry.
 
 ## Sharp edges
 

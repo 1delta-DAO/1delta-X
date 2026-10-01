@@ -37,6 +37,22 @@ import {Order} from "../settlement/Structs.sol";
 ///  meaningful (`delta = min(resolved, order.fillTotal - prevFilled)`), and
 ///  simply resolve past the cap where it is not (an indivisible lot) — the
 ///  core's `filled + delta <= fillTotal` check then rejects the fill.
+///
+///  THE PROPOSAL IS A CEILING (audit 2026-09-30 CORE-FILLER-2). The core reverts
+///  `OverFill` when `delta > fillAmount`: a module may accept LESS than the filler
+///  asked (a TWAP rounding down to whole parts) but never more. Before, a maker's
+///  module could read state the maker flips between the filler's simulation and
+///  inclusion and size the fill — and the output legs pulled from the filler's
+///  standing approvals — past what the filler requested. A filler that wants
+///  "whatever the module decides" (e.g. an all-or-nothing `FullFillModule` lot)
+///  passes `type(uint256).max`.
+///
+///  THE SENTINEL. `fillAmount == type(uint256).max` never reaches a module: the
+///  core resolves it to `fillTotal - prevFilled` (the remaining denominator) in
+///  `OrderState._openFill`, the same on EVERY entry (`fill`, `fillUpTo`,
+///  `fillWithCallback`, `fillWithPermit`, `batchFill`, `fillWithPermitTake`,
+///  `matchSettle`; audit 2026-09-30 CORE-FILL-4 — it used to differ per entry). A
+///  module must not give `max` a meaning of its own.
 interface IFillModule {
     /// @param order      the full signed order (the module reads the maker's side)
     /// @param prevFilled cumulative filled so far, in `fillTotal` units

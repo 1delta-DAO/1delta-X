@@ -95,7 +95,7 @@ contract MigrateTest is CompoundV3ModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, 3_000e18);
+        settlement.fillWithPermit(order, batch, sig, 3_000e18, 0, "");
 
         _assertMigration();
     }

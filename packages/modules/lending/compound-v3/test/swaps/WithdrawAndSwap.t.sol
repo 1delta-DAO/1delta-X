@@ -87,7 +87,7 @@ contract WithdrawAndSwapTest is CompoundV3ModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, wethIn);
+        settlement.fillWithPermit(order, batch, sig, wethIn, 0, "");
 
         assertEq(IERC20(WETH).balanceOf(solver), wethIn, "solver received WETH");
         assertEq(IERC20(USDC).balanceOf(maker), usdcOut, "maker received USDC");

@@ -329,6 +329,15 @@ struct FillCtx {
     //                       two-leg order with a rising leg, where recording costs
     //                       ~40. Empty on the netted path, which reconciles inputs
     //                       against its own resolved `owed` ledger.
+    uint256 minBump; //       the FILLER'S price floor on the resolved bump, in bps of the band
+    //                       (0 = none). Set by a floored entry ({Core.fillUpTo},
+    //                       {Core.fillWithPermit}, {Core.fillWithPermitTake}, {Core.batchFill})
+    //                       before {OrderState._openFill}, which checks it the moment the bump
+    //                       is resolved and reverts {OrderState.BumpTooLow}. Until audit
+    //                       2026-09-30 (PERIPH-1.v3) only `fillUpTo` had a floor, so the FIRST
+    //                       fill of a permit-authorised order — which only the permit entries
+    //                       can perform — had none. LAST field so positional literals (the
+    //                       lens) only append a `0`.
 }
 
 /// @notice The `matchSettle` call bundle — one calldata struct so the external ABI
@@ -441,6 +450,13 @@ library ItemPolicy {
 ///         PRESEND  — hand the solver a token's currently UNENCUMBERED surplus
 ///                    (pooled inflow minus obligations not yet delivered).
 ///         CALL     — one solver interaction through the allowance-less EXECUTOR.
+///                    ⚠ The EXECUTOR is a public trampoline (any `matchSettle`,
+///                    even one with zero orders, can drive it), so a CALL target
+///                    that releases funds must not trust `msg.sender == EXECUTOR`
+///                    alone — see {SolverCallbackExecutor}. Other makers' ITEM steps
+///                    and token transfers run code around it in the same tx:
+///                    schedule value-sensitive CALLs before untrusted ITEMs and
+///                    bound their own `minOut` at the quote.
 library MatchStep {
     uint256 internal constant PULL = 0;
     uint256 internal constant DELIVER = 1;

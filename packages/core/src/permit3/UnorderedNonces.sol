@@ -52,7 +52,7 @@ import {Permit3Base} from "./Permit3Base.sol";
 ///  there and {IPermit3}). So {Core.fillWithPermit} proceeds past an invalidated
 ///  nonce: the permit's grants are simply not applied. If a standing Permit3
 ///  allowance — or a direct ERC-20 approval, via the
-///  {Permit3TransferLib} fallback — already funds the fill, it succeeds.
+///  {Base._pullViaPermit3} fallback — already funds the fill, it succeeds.
 ///
 ///  The cancellations that DO bind the order are all on the settler and all run on
 ///  every fill: {OrderState.cancelOrder} (by hash), {NonceManager}'s order-nonce

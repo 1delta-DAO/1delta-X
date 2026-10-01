@@ -92,7 +92,7 @@ contract MigrateTest is AaveModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, 3_000e6);
+        settlement.fillWithPermit(order, batch, sig, 3_000e6, 0, "");
 
         _assertMigration();
     }

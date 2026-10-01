@@ -45,8 +45,12 @@ maker's EIP-712 signature.
 ### Dutch auctions — how they work
 
 The auction applies **only to the conversion** (`tokenIn ↔ tokenOut`),
-not to lending items. Items always execute at their signed `amount`,
-regardless of the current auction tick.
+not to lending items. A plain MAKE/TAKE item executes at its pro-rata share of
+the signed `amount`, regardless of the current auction tick — with two
+exceptions: a **leg-reference** `TAKE_FOR` / pre-fund `MAKE` is sized from the
+output leg actually DELIVERED (`ctx.outs[j]`, i.e. the auction-priced amount),
+and a **BALANCE** funding descriptor from `min(balanceOf(maker), cap)` at
+execution (see `Base._forSlice`).
 
 ```
                     ┌─── conversion (auction-priced) ───┐
@@ -214,7 +218,10 @@ PHASE 2  SCHEDULE  the solver's packed steps, verbatim:            ← the only
                      DELIVER(i) pool → recipients, all output legs    region
                      ITEM(i,k)  one MAKE/TAKE; a TAKE's proceeds are credited
                      PRESEND(t) pool → solver, surplus net of UNDELIVERED obligations
-                     CALL(x)    one interaction (allowance-less EXECUTOR)
+                     CALL(x)    one interaction (allowance-less EXECUTOR —
+                                but a PUBLIC trampoline: authenticate CALL
+                                targets with your own armed flag, never
+                                `msg.sender == EXECUTOR` alone)
 PHASE 3  FLUSH     per order: completeness → credit ≥ owed (surplus → maker)
                    → invariants → whole-check + sweep
 ```
@@ -270,12 +277,18 @@ the filler is:
 | --- | --- | --- | --- | --- |
 | **MAKE** | maker deposits/repays | maker's funding token → protocol | no | 1 CALL |
 | **TAKE** | maker borrows/withdraws | maker's position → `recipient` | no | 1 CALL (via Permit3) |
-| **SETTLE** | solver↔maker exchange | maker's asset → filler, or filler's → maker | **yes** | 1 CALL, pay-per-use |
+| **SETTLE** | solver↔maker exchange | maker's asset → filler (NEVER filler's → maker: a SETTLE module must not pull from the filler) | **yes** | 1 CALL, pay-per-use |
 | **fillModule** | the fill *denominator* (a scalar) | nothing (view) | no | 1 STATICCALL, or 0 |
 
-Trust model is uniform: every module binds `msg.sender == settlement`, so the
-maker's order signature is the sole authority over `(module, amount, data)`, and
-the maker's own approval to the module caps what it can move. `SETTLE`'s
+Trust model: every module is pinned to its protocol caller so the maker's order
+signature is the sole authority over `(module, amount, data)` — MAKE / SETTLE
+modules bind `msg.sender == settlement`, TAKER modules bind `msg.sender ==
+permit3` (Permit3 dispatches them after its allowance gate), and pre-fund
+`TAKE_FOR` modules additionally pin the forwarded `spender == settlement` — and
+the maker's own approval to the module caps what it can move. A filler's assets
+are never a SETTLE module's to move: a purchase (filler's asset → maker) goes on
+the fungible legs plus a maker-side ownership invariant, with the filler
+delivering in its own callback. `SETTLE`'s
 `filler`-awareness lets the maker's asset route to *whoever fills* (e.g. an NFT
 sale to an open solver set, no exclusivity); the maker's *receipt* is guaranteed
 by the mandatory `tokenOut` delivery (run before items) and/or an invariant, not
@@ -342,10 +355,24 @@ is the maker's/solver's responsibility.
 **Scope: simple single-order swaps only.** A plain buy/sell of a FoT/rebasing
 token is **functional** — the receiving party simply nets the post-fee amount
 (`FeeOnTransfer.t.sol`). The **netted mode** (`matchSettle`) relies on
-`balanceOf`-delta pool accounting throughout — the credit ledger measures what
-actually arrived on every `PULL` and every TAKE item — so a FoT/rebasing token
-there trips `LegUnfunded` (the leg that came up short) or the whole-check
-(`BatchNotWhole`) and **reverts safely**. Not supported for such tokens, by design.
+a **nominal** credit for every `PULL` (only TAKE/MAKE item proceeds are measured)
+and an end-state pool floor as its one balance check. A FoT input therefore
+reverts `BatchNotWhole` when the plan has no residual in that token, and
+otherwise SETTLES with the matcher's sweep smaller by the fee (outputs are
+delivered nominally, exactly as on `fill`). Nobody but the matcher loses; a
+matcher that must not absorb such fees checks the returned `swept`. Not
+supported for such tokens, by design. (Earlier text promised a revert in every
+case — corrected in audit 2026-09-30 X-SPEC-6.)
+
+**Double-entry-point tokens** (two ERC-20 addresses over one balance ledger,
+e.g. legacy TUSD) are out of scope on the netted path AND for delta-verify
+outputs: every per-token structure keys on the address, so one arrival is seen
+on both addresses. On `matchSettle` that can credit a maker's leg twice out of
+the matcher's residual (the pool floor still protects every other party); the
+single-order path, which pays legs one at a time re-reading the balance, is
+immune. Matchers must not admit twin addresses into one plan (audit 2026-09-30
+X-TOKENS-2; a balance-fingerprint dedup in core is not worth its EIP-170
+bytes).
 
 ### Fees — two actors, two instruments, no fee subsystem
 
@@ -367,8 +394,13 @@ recipientOut   = [ 0 (maker),   originator  ]      fixed = absolute fee)
 
 - **No fee switch.** No protocol owner, no global toggle, no cap registry —
   the fee is an ordinary maker-signed delivery a solver can neither inject nor
-  redirect. The wallet shows it as a plain amount + recipient in the EIP-712
-  prompt (not an opaque packed word).
+  redirect. ⚠ It is NOT legible in the wallet prompt: `legsOut` is a packed
+  `bytes` blob, which EIP-712 hashes to one word, so a wallet shows the whole
+  leg set — fee legs, amounts, recipients — as hex (as it does items and
+  validators; see FEATURES.md §5). Until an ERC-7730 descriptor or a lens-side
+  decoder exists, signers must verify the DECODED order out of band; the wallet
+  prompt is no defence against a front-end that injects a leg. (This line used
+  to claim the opposite; corrected in audit 2026-09-30 X-SPEC-2.)
 - **bps-of-tick fees**: give the fee leg `start/end` proportional to the main
   leg — both decay by the shared bump, so the realized fee is exactly the bps
   of the delivered tick. **Absolute fees**: a fixed fee leg. **Multiple
@@ -418,7 +450,7 @@ fee leg (`startAmountIn[0]`), so pure deposits should be full-fill-only
 Regular transfer legs (`tokenOut` delivery, `tokenIn` shortfall) try Permit3
 first and **fall back to a plain ERC20 `transferFrom`** when the payer approved
 Settlement directly instead of routing through Permit3 (the Euler EVK
-`SafeERC20Lib` pattern, in `Permit3TransferLib`). Only the payer's own tokens
+`SafeERC20Lib` pattern, in `Base._pullViaPermit3`). Only the payer's own tokens
 move, and only to the leg's fixed recipient, so the fallback grants no new
 authority. A maker/solver holding a **standing direct approval** to Settlement
 therefore opts out of Permit3's per-order allowance cap for that token — the
@@ -509,7 +541,8 @@ their exact desired rate and submits in one tx.
 ### Validators (trigger conditions)
 
 An order may carry an arbitrary `Validator[]` array. Each entry is a
-read-only staticcall: Settlement invokes `target.validate(order, data)`
+read-only staticcall: Settlement invokes
+`target.validate(order, filler, data, takerData)`
 before executing any item and aborts the fill unless the return is
 exactly `true`. Multiple validators are AND-composed; any single
 `false` reverts with `ValidationFailed(i)`.
@@ -571,7 +604,7 @@ protection for the maker against accidental early execution.
 // within tolerance of the live oracle rate
 validators[0] = Validator(chainlinkPriceLte,          abi.encode(feed, 1500e8, 1 hours));
 validators[1] = Validator(timestampValidator,         abi.encode(twoPmUtc, 0));
-validators[2] = Validator(chainlinkTickFloorValidator, abi.encode(feed, 1 hours, scale));
+validators[2] = Validator(chainlinkTickFloorValidator, abi.encode(feed, 1 hours, num, den));
 ```
 
 All must return `true` for the fill to proceed. The user opts into

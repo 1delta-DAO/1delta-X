@@ -4,7 +4,6 @@ pragma solidity ^0.8.28;
 import {Order, ItemOp, ItemPolicy, MatchPlan, MatchStep, FillCtx} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
-import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 import {OrderHash} from "./OrderHash.sol";
 import {Pricing} from "./Pricing.sol";
 import {DutchAuction} from "./DutchAuction.sol";
@@ -111,14 +110,19 @@ abstract contract Batch is Core {
         _gateFillState(order, orderHash, ctx);
         _verifySignature(orderHash, sig, order.maker, ctx);
         _gateOrderPost(order, solver, takerData, ctx);
-        // `type(uint256).max` = "the whole remaining anchor", the same sentinel
-        // `fillUpTo` honours. It exists for a {Proportional} anchor: that resolves
-        // from the maker's LIVE balance at the gate above, a proportional fill must
-        // be whole, and a plan naming the size exactly is reverted — plan and all —
-        // by any stranger's 1-wei transfer to the maker before inclusion (F29
-        // finding 5). Every other amount is still taken literally: a netted plan is
-        // priced on exact sizes and this path does not clamp them.
-        if (fillAmount == type(uint256).max) fillAmount = ctx.anchor - ctx.prevFilled;
+        // `type(uint256).max` = "the whole remaining anchor" is resolved inside
+        // {OrderState._openFill}, the same for every entry. It exists for a
+        // {Proportional} anchor: that resolves from the maker's LIVE balance at the
+        // gate above, a proportional fill must be whole, and a plan naming the size
+        // exactly is reverted — plan and all — by any stranger's 1-wei transfer to
+        // the maker before inclusion (F29 finding 5). ⚠ It moves shrink risk onto the
+        // plan: a schedule that FRONTS a residual from inventory (a fixed-amount CALL)
+        // pays full outputs for whatever the anchor shrank to, and a maker can drain
+        // its own balance in front of the plan. Such a plan must name the exact
+        // anchor it priced (a drained balance then reverts `OverFill`), or bound
+        // `swept` itself — see {Proportional} "Who should pass the sentinel" (audit
+        // 2026-09-30 X-DIFF-CORE-1.v1). Every other amount is taken literally: a
+        // netted plan is priced on exact sizes and this path does not clamp them.
         _openFill(order, fillAmount, solver, takerData, ctx);
     }
 
@@ -537,9 +541,23 @@ abstract contract Batch is Core {
     ///      module genuinely produces an amount the settler cannot predict.
     ///
     ///      Consequence for non-standard tokens: a fee-on-transfer input credits more
-    ///      than arrives, the pool ends short, and the context reverts
-    ///      {BatchNotWhole} rather than {LegUnfunded}. Both revert, and such tokens
-    ///      are already out of scope on the netted path (see the settlement README).
+    ///      than arrives, so {_matchReconcileInputs} (nominal vs nominal) never sees
+    ///      it; the ONLY backstop is the end-state pool floor in {_sweepSurplus}.
+    ///      The context therefore reverts {BatchNotWhole} when the plan has no
+    ///      residual in that token — and SETTLES, with the matcher's sweep smaller
+    ///      by the fee, whenever its residual (spread, or capital a CALL fronted)
+    ///      covers it. Nobody but the matcher is short; outputs are delivered
+    ///      nominally as on `fill`. (This used to promise a revert in every case;
+    ///      corrected in audit 2026-09-30 X-SPEC-6 / X-TOKENS-7.) A matcher that
+    ///      must not absorb such fees compares the returned `swept` to its plan.
+    ///
+    ///      ⚠ DOUBLE-ENTRY-POINT TOKENS (two ERC-20 addresses over one ledger) are
+    ///      out of scope here too (audit 2026-09-30 X-TOKENS-2). Every netted
+    ///      structure keys on the ADDRESS — the universe, the duplicate-input guard,
+    ///      `outstanding`, the item-proceeds attribution — so one arrival is seen on
+    ///      both addresses and can be credited twice. The pool floor still protects
+    ///      everyone but the matcher, whose residual can be redirected to a maker;
+    ///      a matcher must not admit twins into one plan.
     ///
     ///      A duplicate PULL needs no exactly-once guard, but it does need this
     ///      function to pull the SHORTFALL rather than the nominal `owed`.

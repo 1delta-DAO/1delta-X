@@ -82,14 +82,17 @@ contract PaddedSigWallet is IERC1271 {
     }
 }
 
-/// @dev The four-argument `fillWithPermit`, named unambiguously so a test can reach
-///      `abi.encodeCall` for it — the overloaded member on `Settlement` cannot be.
+/// @dev `fillWithPermit` as an interface so a test can reach `abi.encodeCall` for it.
+///      (Since 2026-09-30 it is a single six-argument entry; the 4-arg overload this
+///      used to name is gone.)
 interface IFillWithPermit {
     function fillWithPermit(
         Order calldata order,
         IPermit3.PermitBatch calldata batch,
         bytes calldata sig,
-        uint256 fillAmount
+        uint256 fillAmount,
+        uint256 minBumpBps,
+        bytes calldata takerData
     ) external returns (uint256[] memory);
 }
 
@@ -148,7 +151,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, USDC_IN);
+        settlement.fillWithPermit(order, batch, sig, USDC_IN, 0, "");
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "settled on an empty batch");
     }
@@ -245,7 +248,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
         bytes memory recorderCode = address(new CalldataRecorder()).code;
         vm.etch(address(permit3), recorderCode);
         vm.prank(solver);
-        try settlement.fillWithPermit(order, batch, sig, USDC_IN) {} catch {}
+        try settlement.fillWithPermit(order, batch, sig, USDC_IN, 0, "") {} catch {}
 
         bytes memory actual = CalldataRecorder(address(permit3)).seen();
         // LENGTH FIRST, and it is the assertion `expectCall` could not make: a prefix
@@ -289,7 +292,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, USDC_IN);
+        settlement.fillWithPermit(order, batch, sig, USDC_IN, 0, "");
 
         // The fill itself.
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "maker received the output leg");
@@ -338,7 +341,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
         assertEq(compact.length, 64, "compact signature is 64 bytes");
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, compact, USDC_IN);
+        settlement.fillWithPermit(order, batch, compact, USDC_IN, 0, "");
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "settled on a 64-byte signature");
     }
@@ -361,7 +364,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert();
-        settlement.fillWithPermit(order, batch, sig, USDC_IN);
+        settlement.fillWithPermit(order, batch, sig, USDC_IN, 0, "");
     }
 
     // ──────────────────── The shapes the file opened without ────────────────────
@@ -398,7 +401,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, USDC_IN);
+        settlement.fillWithPermit(order, batch, sig, USDC_IN, 0, "");
 
         assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT, "settled with no token permits at all");
         (uint160 spent,) = permit3.takerAllowance(maker, address(settlement), address(stash), ref);
@@ -434,7 +437,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
         assertEq(sig.length, 100, "a genuinely multi-word signature");
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, USDC_IN);
+        settlement.fillWithPermit(order, batch, sig, USDC_IN, 0, "");
 
         assertEq(IERC20(WETH).balanceOf(address(wallet)), WETH_OUT, "settled on a 100-byte 1271 signature");
     }
@@ -497,7 +500,7 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
         IPermit3.PermitBatch memory batch,
         bytes memory sig
     ) private {
-        bytes memory cd = abi.encodeCall(IFillWithPermit.fillWithPermit, (order, batch, sig, USDC_IN));
+        bytes memory cd = abi.encodeCall(IFillWithPermit.fillWithPermit, (order, batch, sig, USDC_IN, 0, ""));
         bytes memory spliced = _withGapInsideBatch(cd);
         // Without this the test would pass on a splice that did nothing at all.
         assertEq(spliced.length, cd.length + 32, "the layout really is non-canonical");
@@ -547,6 +550,9 @@ contract PermitBatchEncodingTest is CoreSettlementBase {
             // ...and `sig`, whose tail follows the whole batch, a word later too.
             // (`batch`'s own offset is unchanged: the gap is inside it, not before it.)
             mstore(add(out, 0x64), add(mload(add(out, 0x64)), 0x20))
+            // ...and `takerData` (head word 5 of the six-argument entry), whose tail
+            // follows `sig`'s.
+            mstore(add(out, 0xc4), add(mload(add(out, 0xc4)), 0x20))
         }
         // THE ASSERTION THAT MAKES THIS TEST ABLE TO FAIL. The junk has to land inside
         // the byte range a verbatim `calldatacopy(batch.offset, batchLen)` would
