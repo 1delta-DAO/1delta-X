@@ -91,6 +91,14 @@ import {IEulerVault, IEVC} from "./interfaces/IEulerV2.sol";
 //    Op.Open        abi.encode(OpenData{forDesc, forCap, collateralVault,
 //                              borrowVault}) [+ optional EVC-permit tail @128]
 //
+//  EVC SUB-ACCOUNT (optional, maker-signed): plain ops encode word 0 as
+//  `op | subId << 8` (the `uint8(op)` above is then a `uint256`); `Op.Open` puts
+//  `subId` in descriptor bits [236,244). The op then acts on the EVC account
+//  `maker ^ subId` (`subId` 0 = the primary account, every pre-existing blob).
+//  The maker must have made this module an operator of THAT account and enabled
+//  its controller/collateral. Wallet pulls and `Full` sweeps stay on the maker.
+//  See {_plainAccount}.
+//
 contract EulerV2OperatorModule is
     PreFundModuleBase,
     ITakerModule,
@@ -164,9 +172,9 @@ contract EulerV2OperatorModule is
             // `collateralVault`. The merged contract is a NEW address, so no signed
             // order can reach it; this guards a stale off-chain encoder, for one compare.
             if (data.length != 64) revert MalformedData();
-            (, address vault) = abi.decode(data, (uint8, address));
+            (, address vault) = abi.decode(data, (uint256, address));
             IEVC(IEulerVault(vault).EVC())
-                .call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.borrow, (amount, receiver)));
+                .call(vault, _plainAccount(onBehalfOf, data), 0, abi.encodeCall(IEulerVault.borrow, (amount, receiver)));
         } else if (op == uint256(Op.Withdraw)) {
             _withdraw(onBehalfOf, amount, receiver, data);
         } else if (op == uint256(Op.BatchOpen) || op == uint256(Op.BatchClose)) {
@@ -179,17 +187,18 @@ contract EulerV2OperatorModule is
     /// @dev Exact or `Full`. Its own frame: the `Full` branch's locals do not fit
     ///      alongside the dispatcher's.
     function _withdraw(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) private {
-        (, address vault) = abi.decode(data, (uint8, address));
+        (, address vault) = abi.decode(data, (uint256, address));
         // BalanceMode slot at offset 64 (op@0 + vault@32).
         if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
             // `Full` liquidates the user's ENTIRE live balance, so it cannot be
             // pro-rated — a sliced fill would unwind the whole position and brick the
             // rest of the order. Require the slice to be the whole item.
             FullFillGuard.requireFullFillFromData(data, 96, amount);
-            _withdrawFull(vault, onBehalfOf, amount, receiver);
+            _withdrawFull(vault, onBehalfOf, _plainAccount(onBehalfOf, data), amount, receiver);
         } else {
+            address account = _plainAccount(onBehalfOf, data);
             IEVC(IEulerVault(vault).EVC())
-                .call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf)));
+                .call(vault, account, 0, abi.encodeCall(IEulerVault.withdraw, (amount, receiver, account)));
         }
     }
 
@@ -204,12 +213,20 @@ contract EulerV2OperatorModule is
     ///      makes it structurally impossible for a short or fake-venue delivery to be
     ///      topped up out of it. A nominal `safeTransfer(receiver, amount)` would be
     ///      the H-3 drain.
-    function _withdrawFull(address vault, address onBehalfOf, uint256 amount, address receiver) private {
-        address evc = IEulerVault(vault).EVC();
+    ///
+    ///      `account` is the EVC (sub-)account whose position is unwound; the excess
+    ///      goes to `onBehalfOf`, the OWNER's wallet — never to a sub-account
+    ///      address, where an ERC-20 balance is unreachable (the EVC cannot make a
+    ///      sub-account the `msg.sender` of a token transfer).
+    function _withdrawFull(address vault, address onBehalfOf, address account, uint256 amount, address receiver)
+        private
+    {
         address asset = IEulerVault(vault).asset();
         uint256 floor = IERC20(asset).balanceOf(address(this));
-        (, uint256 bal) = _vaultPositionOf(vault, onBehalfOf);
-        IEVC(evc).call(vault, onBehalfOf, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), onBehalfOf)));
+        (, uint256 bal) = _vaultPositionOf(vault, account);
+        IEVC(IEulerVault(vault).EVC()).call(
+            vault, account, 0, abi.encodeCall(IEulerVault.withdraw, (bal, address(this), account))
+        );
         uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
         // The lower bound the venue used to enforce. Before the split rewrite the
         // venue call was sized at `amount`, so a short position reverted inside it;
@@ -244,7 +261,9 @@ contract EulerV2OperatorModule is
         } else {
             fundedVault = p.borrowVault;
             fundedAsset = IEulerVault(fundedVault).asset();
-            uint256 debt = IEulerVault(p.borrowVault).debtOf(onBehalfOf);
+            // EVK `repay` REVERTS `E_RepayTooMuch` above the live debt (it does not
+            // cap), so this clamp is load-bearing, not hygiene.
+            uint256 debt = IEulerVault(p.borrowVault).debtOf(_plainAccount(onBehalfOf, data));
             funded = p.sideAmount < debt ? p.sideAmount : debt;
         }
         if (funded != 0) {
@@ -255,28 +274,9 @@ contract EulerV2OperatorModule is
             SafeTransferLib.forceApprove(fundedAsset, fundedVault, funded);
         }
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
-        // Item 0 is authenticated as THIS MODULE — it is the funder, so the value-in
-        // leg is drawn from here while crediting the user's position. Item 1 is
-        // authenticated as the USER, so the debt (or the collateral withdrawal) and
-        // the single liquidity check land on their account.
-        items[0] = IEVC.BatchItem({
-            targetContract: fundedVault,
-            onBehalfOfAccount: address(this),
-            value: 0,
-            data: open
-                ? abi.encodeCall(IEulerVault.deposit, (funded, onBehalfOf))
-                : abi.encodeCall(IEulerVault.repay, (funded, onBehalfOf))
-        });
-        items[1] = IEVC.BatchItem({
-            targetContract: open ? p.borrowVault : p.collateralVault,
-            onBehalfOfAccount: onBehalfOf,
-            value: 0,
-            data: open
-                ? abi.encodeCall(IEulerVault.borrow, (amount, receiver))
-                : abi.encodeCall(IEulerVault.withdraw, (amount, receiver, onBehalfOf))
-        });
-        IEVC(IEulerVault(p.borrowVault).EVC()).batch(items);
+        IEVC(IEulerVault(p.borrowVault).EVC()).batch(
+            _batchItems(p, _plainAccount(onBehalfOf, data), fundedVault, funded, amount, receiver, open)
+        );
 
         // Clear the scoped grant. The vault is decoded from the order's `data` on a
         // SHARED singleton, so it is attacker-choosable — anyone can author an order
@@ -284,6 +284,39 @@ contract EulerV2OperatorModule is
         // leave a standing third-party claim on any FUTURE balance of this module.
         // {SafeTransferLib.ensureApproval} forbids this shape. F26/2c.
         if (funded != 0) SafeTransferLib.forceApprove(fundedAsset, fundedVault, 0);
+    }
+
+    /// @dev The two batch items of {_batch}. Its own frame (legacy stack limit).
+    ///      Item 0 is authenticated as THIS MODULE — it is the funder, so the value-in
+    ///      leg is drawn from here while crediting the account's position. Item 1 is
+    ///      authenticated as the (sub-)ACCOUNT, so the debt (or the collateral
+    ///      withdrawal) and the single liquidity check land on it.
+    function _batchItems(
+        BatchData memory p,
+        address account,
+        address fundedVault,
+        uint256 funded,
+        uint256 amount,
+        address receiver,
+        bool open
+    ) private view returns (IEVC.BatchItem[] memory items) {
+        items = new IEVC.BatchItem[](2);
+        items[0] = IEVC.BatchItem({
+            targetContract: fundedVault,
+            onBehalfOfAccount: address(this),
+            value: 0,
+            data: open
+                ? abi.encodeCall(IEulerVault.deposit, (funded, account))
+                : abi.encodeCall(IEulerVault.repay, (funded, account))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: open ? p.borrowVault : p.collateralVault,
+            onBehalfOfAccount: account,
+            value: 0,
+            data: open
+                ? abi.encodeCall(IEulerVault.borrow, (amount, receiver))
+                : abi.encodeCall(IEulerVault.withdraw, (amount, receiver, account))
+        });
     }
 
     // ──────────────────── TAKE_FOR: the op rides the descriptor ────────────────────
@@ -350,8 +383,6 @@ contract EulerV2OperatorModule is
         bool preFund = _fundingShape(data);
         uint256 floor;
         address fundedAsset;
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](forAmount == 0 ? 1 : 2);
-        uint256 k;
         if (forAmount != 0) {
             fundedAsset = IEulerVault(p.collateralVault).asset();
             if (preFund) {
@@ -373,20 +404,8 @@ contract EulerV2OperatorModule is
                 permit3.transferFrom(onBehalfOf, address(this), fundedAsset, uint160(forAmount));
             }
             SafeTransferLib.forceApprove(fundedAsset, p.collateralVault, forAmount);
-            items[k++] = IEVC.BatchItem({
-                targetContract: p.collateralVault,
-                onBehalfOfAccount: address(this),
-                value: 0,
-                data: abi.encodeCall(IEulerVault.deposit, (forAmount, onBehalfOf))
-            });
         }
-        items[k] = IEVC.BatchItem({
-            targetContract: p.borrowVault,
-            onBehalfOfAccount: onBehalfOf,
-            value: 0,
-            data: abi.encodeCall(IEulerVault.borrow, (amount, receiver))
-        });
-        IEVC(evc).batch(items);
+        IEVC(evc).batch(_openItems(p, _fundingAccount(onBehalfOf, data), forAmount, amount, receiver));
 
         if (fundedAsset != address(0)) {
             // Clear the scoped grant — see {_batch}. F26/2c.
@@ -397,6 +416,32 @@ contract EulerV2OperatorModule is
             // sized from the pre-call clamp (F27/C-3, M-1).
             if (preFund) PreFundGuard.sweepSurplus(fundedAsset, onBehalfOf, floor);
         }
+    }
+
+    /// @dev The batch items of {_open}: the module-funded deposit (when there is
+    ///      collateral) crediting `account`, then the borrow authenticated AS
+    ///      `account`. Its own frame (legacy stack limit).
+    function _openItems(OpenData memory p, address account, uint256 forAmount, uint256 amount, address receiver)
+        private
+        view
+        returns (IEVC.BatchItem[] memory items)
+    {
+        items = new IEVC.BatchItem[](forAmount == 0 ? 1 : 2);
+        uint256 k;
+        if (forAmount != 0) {
+            items[k++] = IEVC.BatchItem({
+                targetContract: p.collateralVault,
+                onBehalfOfAccount: address(this),
+                value: 0,
+                data: abi.encodeCall(IEulerVault.deposit, (forAmount, account))
+            });
+        }
+        items[k] = IEVC.BatchItem({
+            targetContract: p.borrowVault,
+            onBehalfOfAccount: account,
+            value: 0,
+            data: abi.encodeCall(IEulerVault.borrow, (amount, receiver))
+        });
     }
 
     // ──────────────────── views ────────────────────
@@ -413,8 +458,8 @@ contract EulerV2OperatorModule is
         if (!_isPlainLayout(data)) revert BadOp(_preFundOp(data));
         uint256 op = _plainOp(data);
         if (op != uint256(Op.Withdraw)) revert BadOp(op);
-        (, address vault) = abi.decode(data, (uint8, address));
-        return _vaultPositionOf(vault, user);
+        (, address vault) = abi.decode(data, (uint256, address));
+        return _vaultPositionOf(vault, _plainAccount(user, data));
     }
 
     /// @dev The vault read itself, taking the vault address so the internal `Full`
@@ -443,7 +488,7 @@ contract EulerV2OperatorModule is
         }
         uint256 op = _plainOp(data);
         if (op == uint256(Op.Borrow) || op == uint256(Op.Withdraw)) {
-            (, address vault) = abi.decode(data, (uint8, address));
+            (, address vault) = abi.decode(data, (uint256, address));
             return IEulerVault(vault).asset();
         }
         BatchData memory p = abi.decode(data, (BatchData));
@@ -503,15 +548,64 @@ contract EulerV2OperatorModule is
         }
     }
 
-    /// @dev The plain seam's op: word 0, whole. Length-guarded for the reason
+    /// @dev The plain seam's op: word 0's low byte. Length-guarded for the reason
     ///      {PreFundModuleBase._preFundOp} states — `requirePlainTake` deliberately
     ///      passes a sub-word blob (there is no descriptor to reject), so the length
     ///      test has to live here.
+    ///
+    ///      Word 0 is `op | subId << 8` (see {_plainAccount}); every bit above 16
+    ///      must be zero, so no blob reads as an op it was not signed as — a word
+    ///      with stray high bits is `BadOp(word)` exactly as before.
     function _plainOp(bytes calldata data) private pure returns (uint256 op) {
         if (data.length < 32) revert MalformedData();
+        uint256 w;
         /// @solidity memory-safe-assembly
         assembly {
-            op := calldataload(data.offset)
+            w := calldataload(data.offset)
         }
+        if (w >> 16 != 0) revert BadOp(w);
+        op = w & 0xff;
+    }
+
+    /// @dev The EVC account a plain-seam op acts on: the owner's sub-account
+    ///      `owner ^ subId`, `subId` = word 0 bits [8,16).
+    ///
+    ///      EVC SUB-ACCOUNTS (2026-09-30 audit L-ED-6). The EVC gives every address
+    ///      256 accounts sharing its first 19 bytes, and allows ONE enabled controller
+    ///      per account — so pinned to the primary account, a maker could hold at
+    ///      most one Euler borrow position through this module. `subId` is
+    ///      maker-SIGNED (inside `data`, so inside the order hash and the taker
+    ///      `ref`), and the XOR stays inside the maker's own 256-account group: it
+    ///      can never name another principal's account. The EVC still requires the
+    ///      maker to opt in PER sub-account (`setAccountOperator(owner ^ subId,
+    ///      module, true)` plus that account's controller/collateral), and every
+    ///      wallet-side pull and sweep stays on `owner` — a sub-account address holds
+    ///      no keys and cannot move an ERC-20 it is sent. `subId == 0` (every
+    ///      pre-existing blob) is the primary account, byte-for-byte as before.
+    ///      Callers have already passed {_plainOp}'s length and high-bit checks.
+    function _plainAccount(address owner, bytes calldata data) private pure returns (address) {
+        uint256 w;
+        /// @solidity memory-safe-assembly
+        assembly {
+            w := calldataload(data.offset)
+        }
+        return _subAccount(owner, (w >> 8) & 0xff);
+    }
+
+    /// @dev The `TAKE_FOR` seam's account: `subId` rides descriptor bits [236,244),
+    ///      beside the op at [244,252) — free in every descriptor form the core reads
+    ///      ({Base._forSlice} uses bits 253-255, [0,176)). Same rules as
+    ///      {_plainAccount}.
+    function _fundingAccount(address owner, bytes calldata data) private pure returns (address) {
+        uint256 w;
+        /// @solidity memory-safe-assembly
+        assembly {
+            w := calldataload(data.offset)
+        }
+        return _subAccount(owner, (w >> 236) & 0xff);
+    }
+
+    function _subAccount(address owner, uint256 subId) private pure returns (address) {
+        return address(uint160(owner) ^ uint160(subId));
     }
 }

@@ -45,7 +45,9 @@ interface IEulerVault {
 
     /// @notice Burn `owner`'s shares worth `amount` assets and send the assets to
     ///         `receiver`. Must be authenticated as `owner` (directly or via the
-    ///         EVC operator context). `amount == type(uint256).max` withdraws all.
+    ///         EVC operator context). ⚠ NO max sentinel: EVK `withdraw` converts
+    ///         `amount` with `toAssets()`, which REVERTS above the 112-bit bound — only
+    ///         `redeem` (and `deposit`) treat `type(uint256).max` as "all".
     function withdraw(uint256 amount, address receiver, address owner) external returns (uint256 shares);
 
     /// @notice Burn `shares` from `owner` and send the redeemed assets to
@@ -61,8 +63,11 @@ interface IEulerVault {
     function borrow(uint256 amount, address receiver) external returns (uint256);
 
     /// @notice Pull `amount` of `asset` from the caller and reduce `receiver`'s
-    ///         debt. Caps at the outstanding debt; `amount == type(uint256).max`
-    ///         repays the whole debt. Permissionless on behalf of `receiver`.
+    ///         debt. Permissionless on behalf of `receiver`.
+    /// @dev ⚠ Does NOT cap: a finite `amount` above the outstanding debt REVERTS
+    ///      `E_RepayTooMuch` (BorrowUtils.decreaseBorrow). Only the
+    ///      `type(uint256).max` sentinel resolves to the whole debt. Callers must
+    ///      clamp to {debtOf} first — the module clamps are load-bearing.
     function repay(uint256 amount, address receiver) external returns (uint256);
 
     // ──────────────── Reads ────────────────
