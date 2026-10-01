@@ -22,10 +22,12 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///           minFillAnchor   = part size  ⇒ parts = fillTotal / minFillAnchor
 ///           decayStartTime  = TWAP start (order's own clock: unix, or BLOCK
 ///                             when `timing` bit 102 is set — see {DutchAuction.nowTick})
-///           decayDuration   = total window ⇒ partDuration = decayDuration / parts
+///           decayDuration   = total window (≥ parts ticks), split exactly
 ///
 ///         Behavior:
-///           • Part `k` (1-indexed) opens at `start + (k-1)·partDuration`.
+///           • Part `k` (1-indexed) opens at `start + ceil((k-1)·decayDuration /
+///             parts)` — never before its exact share of the window, whether or not
+///             the window divides evenly. `decayStartTime == 0` (unset) reverts.
 ///           • `resolveFill` releases `partsOpen·partSize − prevFilled` — so a
 ///             fill can never run AHEAD of the schedule, one part per window is
 ///             the steady state, and a solver that skipped windows can CATCH UP
@@ -63,11 +65,17 @@ contract TwapFillModule is IFillModule, IFillModuleDescribe {
         uint256 duration = order.decayDuration();
         // Equal parts only; a dust final part < partSize would trip the core's
         // minFillAnchor floor. total/partSize must divide evenly.
-        if (total == 0 || partSize == 0 || duration == 0 || total % partSize != 0) revert TwapNotConfigured();
+        // `start == 0` is an UNSET schedule, not "started at the epoch": with it every
+        // part reads as long open and the whole order is released on the first fill
+        // (audit 2026-09-30 PRICE-7). The lens flags it; the module now refuses it.
+        if (total == 0 || partSize == 0 || duration == 0 || start == 0 || total % partSize != 0) {
+            revert TwapNotConfigured();
+        }
 
         uint256 parts = total / partSize;
-        uint256 partDuration = duration / parts;
-        if (partDuration == 0) revert TwapNotConfigured();
+        // At least one tick per part — a schedule finer than the clock is not a
+        // schedule.
+        if (duration < parts) revert TwapNotConfigured();
 
         // Parts whose window has opened by now (1-indexed; nothing before start).
         // ⚠ THE ORDER PICKS THE CLOCK, NOT THIS MODULE. `decayStartTime` and
@@ -78,7 +86,13 @@ contract TwapFillModule is IFillModule, IFillModuleDescribe {
         // the first fill — silently voiding the schedule this module exists to keep.
         uint256 nowTick = order.nowTick();
         if (nowTick < start) revert TwapPartUnavailable();
-        uint256 partsOpen = (nowTick - start) / partDuration + 1;
+        // Part k (0-indexed) opens at `start + ceil(k·duration/parts)`, i.e. once
+        // `elapsed·parts >= k·duration`. This used to be `elapsed / (duration/parts)`,
+        // whose FLOORED part duration opened part k `k·(duration mod parts)/parts`
+        // ticks early — up to ~2x compression (199 ticks / 100 parts ⇒ every part
+        // open by tick 99): PRICE-7. Exact proportional release never runs early.
+        uint256 elapsed = nowTick - start;
+        uint256 partsOpen = elapsed >= duration ? parts : (elapsed * parts) / duration + 1;
         if (partsOpen > parts) partsOpen = parts;
 
         uint256 openAmount = partsOpen * partSize; // total unlocked by now (≤ total)

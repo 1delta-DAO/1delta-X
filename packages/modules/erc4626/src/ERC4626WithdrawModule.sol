@@ -122,6 +122,10 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
     ///      (every request shares id 0, tracked per-controller) hit this on the
     ///      SECOND user, so failing closed is mandatory, not defensive.
     error RequestIdCollision(address vault, uint256 requestId);
+    /// @dev The vault call reduced this module's balance of `token` below what it
+    ///      held before the call: the vault consumed stray balance that belongs to
+    ///      no order of this maker (MISC-MOD-3).
+    error ForeignBalanceConsumed(address token, uint256 consumed);
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -150,6 +154,16 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
         // whoever authors the next one-wei order against it. "The module ends
         // EMPTY" is the wrong invariant; "ends where it started" is the right one.
         uint256 shareFloor = SafeTransferLib.balanceOf(shareToken, address(this));
+        // ...and on the VAULT'S OWN token too (audit 2026-09-30 MISC-MOD-3).
+        // `shareToken` is data-named and nothing binds it to what the vault really
+        // consumes: an ERC-4626/7540 vault IS its share ERC-20 and may move the
+        // caller's own shares with an internal `_transfer`/`_burn`, no allowance
+        // needed. A self-order naming a junk `shareToken` would then redeem the
+        // module's STRAY vault shares while the floor watched the junk token. Both
+        // balances must end at or above their floors; any surplus goes to the user.
+        // `SafeTransferLib.balanceOf` reads 0 for a vault that is not a token, which
+        // makes the extra check a no-op there.
+        uint256 vaultShareFloor = vault == shareToken ? 0 : SafeTransferLib.balanceOf(vault, address(this));
 
         // Pull shares from the user via Permit3 token allowance.
         permit3.transferFrom(onBehalfOf, address(this), shareToken, uint160(amount));
@@ -166,10 +180,8 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
         // here alongside a live allowance — which is exactly the balance the old
         // caller-supplied `asset` let someone else walk off with.
         SafeTransferLib.forceApprove(shareToken, vault, 0);
-        uint256 shareBal = SafeTransferLib.balanceOf(shareToken, address(this));
-        if (shareBal > shareFloor) {
-            SafeTransferLib.safeTransfer(shareToken, onBehalfOf, shareBal - shareFloor);
-        }
+        _restoreFloor(shareToken, shareFloor, onBehalfOf);
+        if (vault != shareToken) _restoreFloor(vault, vaultShareFloor, onBehalfOf);
 
         // Record the beneficiary and the earliest valid claim time.
         // The vault's claimRedeem is the authoritative lock enforcer; this
@@ -196,10 +208,13 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
     /// @param amount     Permit3 allowance CAP on assets forwarded to `receiver`;
     ///                   the surplus goes to `onBehalfOf`.
     /// @param receiver   Destination for the claimed assets.
-    /// @param data       `abi.encode(vault, requestId, minAssets)`
-    ///                   • vault     — ITimelockERC4626 vault address
-    ///                   • requestId — ID returned by the vault during Phase 1
-    ///                   • minAssets — maker-signed slippage floor on the claim
+    /// @param data       `abi.encode(vault, requestId, minAssets, totalAmount)`
+    ///                   • vault       — ITimelockERC4626 vault address
+    ///                   • requestId   — ID returned by the vault during Phase 1
+    ///                   • minAssets   — maker-signed slippage floor on the claim
+    ///                   • totalAmount — the item's full signed amount; the slice
+    ///                     must equal it (a three-word blob reverts
+    ///                     `PartialFillUnsupported(amount, 0)`)
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
         if (_locked != 1) revert Reentrancy();
@@ -218,20 +233,7 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
         // Clear before the external call (checks-effects-interactions).
         delete pendingWithdrawals[vault][requestId];
 
-        // Claim from the vault. The vault sends assets to this module;
-        // it will revert if the lock has not elapsed on-chain.
-        // The asset is an intrinsic property of the vault, never caller-supplied.
-        address asset = ITimelockERC4626(vault).asset();
-
-        // ⚠ MEASURE, DO NOT TRUST THE RETURN VALUE. `vault` is maker-signed on a
-        // shared singleton and `Permit3.take` is a permissionless entrypoint, so a
-        // fake vault can report a large claim while transferring nothing — and the
-        // payout below would then come out of this module's own balance. Every other
-        // `received` in the tree is a balance delta against a pre-call floor; this
-        // was the one sized from what the venue said. F27/C-3.
-        uint256 assetFloor = SafeTransferLib.balanceOf(asset, address(this));
-        ITimelockERC4626(vault).claimRedeem(requestId, address(this));
-        uint256 received = SafeTransferLib.balanceOf(asset, address(this)) - assetFloor;
+        (address asset, uint256 received) = _claimMeasured(vault, requestId, onBehalfOf);
 
         if (received < minAssets) revert InsufficientAssets(received, minAssets);
         // I-8: the slice IS the signed total (gated above), so a claim short of it
@@ -253,5 +255,41 @@ contract ERC4626WithdrawModule is IMakerModule, ITakerModule {
         emit WithdrawClaimed(vault, requestId, onBehalfOf, toReceiver, receiver);
 
         _locked = 1;
+    }
+
+    /// @dev Claim `requestId` from `vault` and return the asset and the MEASURED
+    ///      amount received.
+    function _claimMeasured(address vault, uint256 requestId, address beneficiary)
+        private
+        returns (address asset, uint256 received)
+    {
+        // Claim from the vault. The vault sends assets to this module;
+        // it will revert if the lock has not elapsed on-chain.
+        // The asset is an intrinsic property of the vault, never caller-supplied.
+        asset = ITimelockERC4626(vault).asset();
+
+        // ⚠ MEASURE, DO NOT TRUST THE RETURN VALUE. `vault` is maker-signed on a
+        // shared singleton and `Permit3.take` is a permissionless entrypoint, so a
+        // fake vault can report a large claim while transferring nothing — and the
+        // payout would then come out of this module's own balance. Every other
+        // `received` in the tree is a balance delta against a pre-call floor; this
+        // was the one sized from what the venue said. F27/C-3.
+        uint256 assetFloor = SafeTransferLib.balanceOf(asset, address(this));
+        // A vault may hand back unfulfilled SHARES on a partially honoured claim.
+        // Floor its share token here and return any increase to the beneficiary,
+        // rather than leaving it on the singleton as residue (MISC-MOD-3).
+        uint256 vaultShareFloor = SafeTransferLib.balanceOf(vault, address(this));
+        ITimelockERC4626(vault).claimRedeem(requestId, address(this));
+        received = SafeTransferLib.balanceOf(asset, address(this)) - assetFloor;
+        if (vault != asset) _restoreFloor(vault, vaultShareFloor, beneficiary);
+    }
+
+    /// @dev This module's `token` balance must end at or above `floor` (what it held
+    ///      before the venue call) — a drop means the venue consumed balance that was
+    ///      not this order's. Any increase is this order's and goes to `to`.
+    function _restoreFloor(address token, uint256 floor, address to) private {
+        uint256 bal = SafeTransferLib.balanceOf(token, address(this));
+        if (bal < floor) revert ForeignBalanceConsumed(token, floor - bal);
+        if (bal > floor) SafeTransferLib.safeTransfer(token, to, bal - floor);
     }
 }

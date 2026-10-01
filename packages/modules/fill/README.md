@@ -7,7 +7,7 @@ one signed order can express any↔any intents.
 | | |
 |---|---|
 | `FullFillModule` | all-or-nothing. Answers "the entire remaining denominator" whatever the filler asked for, so one fill completes the order and there is no second one. |
-| `TwapFillModule` | a CoW-style TWAP/DCA with **no keeper**. `fillTotal` is cut into equal `minFillAnchor`-sized parts across the decay window; each fill releases only `partsOpen · partSize − prevFilled`, so nothing runs ahead of schedule. Catch-up after a missed part is allowed, and the core caps at `fillTotal`. Equal parts only — `fillTotal % partSize != 0` reverts rather than leaving a dust final part that would trip the core's `minFillAnchor` floor. |
+| `TwapFillModule` | a CoW-style TWAP/DCA with **no keeper**. `fillTotal` is cut into equal `minFillAnchor`-sized parts across the decay window — part k opens at exactly `start + ceil(k·duration/parts)` even when the window does not divide evenly, and an unset `decayStartTime == 0` reverts (audit 2026-09-30 PRICE-7); each fill releases only `partsOpen · partSize − prevFilled`, so nothing runs ahead of schedule. Catch-up after a missed part is allowed, and the core caps at `fillTotal`. Equal parts only — `fillTotal % partSize != 0` reverts rather than leaving a dust final part that would trip the core's `minFillAnchor` floor. |
 
 ```
 make test-modules-fill
