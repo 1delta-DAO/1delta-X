@@ -192,7 +192,7 @@ contract ExactlyPreFundOneSidedTest is Test {
 
     // ──────────────── repay ────────────────
 
-    /// Floating: cap at the LIVE debt (`previewDebt`) and sweep the delivered
+    /// Floating: cap at the LIVE floating debt (`previewRefund(accounts.floatingBorrowShares)`) and sweep the delivered
     /// surplus to the maker — it is theirs, not the singleton's.
     function test_preFundRepay_floating_capsAtDebt_andSweepsSurplus() public {
         _seedDebt(0, DEBT);

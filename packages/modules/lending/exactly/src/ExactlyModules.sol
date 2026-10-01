@@ -83,21 +83,34 @@ contract ExactlyDepositModule is IMakerModule {
 
 // ──────────────────── Exactly repay maker module ────────────────────
 //
-// Closes the user's borrow in `market`. Floating: read the live debt
-// (`previewDebt`) and repay `min(amount, debt)` — SweepToUser never pulls the
-// over-repay buffer. Fixed: repay `amount` face at `maturity`, bounded by the
-// maker-signed `maxAssets`; any unspent buffer is disposed to the user (or
-// recycled). Either way disposal is locked to `onBehalfOf` / the market.
+// Closes the user's borrow in `market`. Floating: read the live FLOATING debt
+// (`previewRefund(accounts(o).floatingBorrowShares)` — NOT `previewDebt`, which
+// adds every fixed position) and repay `min(amount, debt)` — SweepToUser never
+// pulls the over-repay buffer. Fixed: repay `amount` face at `maturity`, bounded
+// by the maker-signed `maxAssets` (scaled with the slice); any unspent buffer is
+// disposed to the user (or recycled). Either way disposal is locked to
+// `onBehalfOf` / the market.
 //
 // `nonReentrant` guards weird-token transfer hooks.
 // Byte map — BRANCH-SCOPED TAIL, read the maturity word first:
 //   floating (`maturity == 0`):
 //     `data = abi.encode(market, asset, 0, maxAssets[, DustAction[, deadline, v, r, s]])`
-//     — base = 128; DustAction@128; permit@160.
+//     — base = 128; DustAction@128; permit@160 (EIP-2612 value = this fill's
+//       `amount`, the most the floating branch ever pulls).
 //   fixed (`maturity != 0`):
-//     `data = abi.encode(market, asset, maturity, maxAssets, DustAction, totalAmount[, deadline, v, r, s])`
+//     `data = abi.encode(market, asset, maturity, maxAssets, DustAction, totalAmount[, value, deadline, v, r, s])`
 //     — base = 128; DustAction@128; totalAmount@160 (MANDATORY: the item's FULL
-//       maker-signed amount, which `_scaledBound` divides by); permit@192.
+//       maker-signed amount, which `_scaledBound` divides by); permit@192 WITH AN
+//       EXPLICIT `value` word (a 160-byte tail).
+//
+//   ⚠ WHY THE FIXED PERMIT CARRIES ITS OWN `value` (BREAKING, 2026-09-30 audit
+//   L-FSE-4). The fixed branch pulls the SCALED `maxAssets` ceiling, not the face:
+//   after maturity Exactly charges a late PENALTY, so a sane `maxAssets` exceeds the
+//   face. The old tail replayed the permit with `value = amount` (the face slice),
+//   so the ERC-2612 allowance it set — and, because 2612 SETS rather than adds, it
+//   also OVERWROTE any larger standing approval — was below the pull, and every
+//   post-maturity gasless fixed repay reverted at Permit3's `transferFrom`. Sign
+//   `value` >= the whole item's `maxAssets` (one permit is spent across slices).
 //
 //   ⚠ The earlier header wrote `permit@160` for BOTH branches while the fixed
 //   branch had read `totalAmount@160` since F26. An encoder following it handed a
@@ -133,7 +146,13 @@ contract ExactlyRepayModule is IMakerModule {
         // at 160 (it needs one — see {_scaledBound}), so its permit tail sits at 192.
         // The floating branch has no total and keeps the permit at 160. Same rule the
         // Comet/Morpho/Lista taker maps already use for their `Full` tails.
-        PermitHelper.replayIfPresent(data, maturity == 0 ? 160 : 192, asset, onBehalfOf, address(permit3), amount);
+        // The fixed tail carries an explicit `value` (see the header, L-FSE-4): that
+        // branch pulls the scaled `maxAssets`, which a face-valued permit cannot cover.
+        if (maturity == 0) {
+            PermitHelper.replayIfPresent(data, 160, asset, onBehalfOf, address(permit3), amount);
+        } else {
+            PermitHelper.replayValueIfPresent(data, 192, asset, onBehalfOf, address(permit3));
+        }
 
         // The balance this module held BEFORE the pull. Everything below disposes of
         // the DELTA over it, never the whole balance: a module address can be sent
@@ -223,13 +242,22 @@ contract ExactlyRepayModule is IMakerModule {
         // The delta THIS call produced, not the module's whole balance — `floor` is
         // what it already held. On the normal path a module is pull-exact and starts
         // empty, so `floor` is 0 and this is behaviour-preserving.
+        //
+        // ⚠ CLEAR THE REPAY GRANT FIRST, UNCONDITIONALLY. It used to sit below the
+        // `bal <= floor` early return, on the premise that "nothing left over" means
+        // "the market spent the whole approval". That holds only for CONSERVING
+        // tokens: with a fee-on-transfer asset the module approves the nominal
+        // `toRepay`/`maxAssets`, receives less, the (order-chosen) market pulls the
+        // delta, the balance returns to `floor` — and the difference stayed granted
+        // to the market. Every sibling clears right after its venue call (F25/A-3;
+        // 2026-09-30 audit X-STATIC-1.v1).
+        SafeTransferLib.forceApprove(asset, market, 0);
         uint256 bal = IERC20(asset).balanceOf(address(this));
         if (bal <= floor) return;
         uint256 residual;
         unchecked {
             residual = bal - floor; // bal > floor
         }
-        SafeTransferLib.forceApprove(asset, market, 0); // clear the repay approval first
         DustHandler.disposeResidual(
             asset,
             residual,
@@ -280,16 +308,22 @@ contract ExactlyRepayModule is IMakerModule {
 //  maker-signed module, and every spend through it is gated by the Permit3 taker
 //  book, so `type(uint256).max` is defensible — but signing the order's actual
 //  SHARE cap is tighter. Beware the units: the order is denominated in ASSETS
-//  while the Market debits the allowance in SHARE units at its own conversion
-//  (`previewWithdraw(assets)` for withdraw / borrowAtMaturity, `previewBorrow`
-//  — floating-borrow shares — for floating borrow), and the shares:assets rate
-//  DRIFTS as interest accrues between signing and fill. Both share prices start
-//  at 1 and rise with accrual, so the share cost of a fixed asset amount falls
-//  over time and `value = the order's total asset amount` is a natural
-//  over-approximation; `convertToShares`/preview at signing plus rounding margin
-//  is tighter but leans on the price never dipping (an extreme bad-debt event
-//  could move it). An under-sized `value` fails CLOSED: the Market reverts on
-//  allowance, killing the fill — never over-spending.
+//  while the Market debits the allowance in DEPOSIT-SHARE units at its own
+//  conversion — `spendAllowance(owner, x)` debits `previewWithdraw(x)` on EVERY
+//  path, with `x = assets` for floating `withdraw` and floating `borrow` (NOT
+//  `previewBorrow`: the borrow shares it mints are a different book),
+//  `x = assetsOwed = assets + fixed-rate fee` for `borrowAtMaturity`, and
+//  `x = assetsDiscounted` for `withdrawAtMaturity` (verified against
+//  exactly/protocol Market.sol). The deposit-share price starts at 1 and rises
+//  with accrual, so the share cost of a fixed asset amount falls over time and
+//  `value = the order's total asset amount` over-approximates for the floating
+//  legs and fixed withdraws. ⚠ NOT for `borrowAtMaturity`: there `x` includes the
+//  fixed-rate FEE, which can outgrow the share-price drift (a young market, a long
+//  or high-rate maturity) — size `value` from `assets + fee`, plus margin.
+//  `convertToShares`/preview at signing plus rounding margin is tighter but leans
+//  on the price never dipping (an extreme bad-debt event could move it). An
+//  under-sized `value` fails CLOSED: the Market reverts on allowance, killing the
+//  fill — never over-spending.
 //
 contract ExactlyTakerModule is ITakerModule, IPositionSource {
     IPermit3 public immutable permit3;
@@ -300,12 +334,14 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
     }
 
     /// @inheritdoc IPositionSource
-    /// @dev `maxWithdraw` — not `convertToAssets(balanceOf)` — is deliberate, and is
-    ///      the same reader the `Full` branch uses. It is already denominated in the
-    ///      vault's ASSET (so it needs no conversion to leg units) and it already
-    ///      accounts for the constraints that would make a larger withdraw revert: a
-    ///      borrow against the position, or vault illiquidity. Sizing off the raw
-    ///      share balance would price a withdraw the venue then refuses.
+    /// @dev The RAW position, `previewRedeem(balanceOf(user))` — the same reader the
+    ///      `Full` branch uses, already in the vault's ASSET units. Deliberately NOT
+    ///      `maxWithdraw`: that is a REACHABILITY figure (clipped by a borrow against
+    ///      the position and by vault cash, which third parties move), and pricing a
+    ///      one-shot exit off it let a fill resolve small instead of reverting
+    ///      (docs/position-sized-fills.md; pinned by
+    ///      `test_positionOf_isRawPosition_notMaxWithdraw`). A position the venue
+    ///      cannot pay out in full makes the `Full` withdraw revert — fail closed.
     ///
     ///      `asset` comes from the VAULT, never from `data`: it is the token the
     ///      withdraw actually pays out, so it is the only honest answer to the
@@ -340,6 +376,9 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
 
     error OnlyPermit3();
     error BadOp(uint8 op);
+    /// @dev A fixed-maturity withdraw asked for more than the fixed deposit holds.
+    ///      The venue would CLAMP rather than revert — see {_withdrawAtMaturity}.
+    error ShortFixedPosition(uint256 amount, uint256 position);
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
@@ -384,7 +423,7 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
                 // loosen a guard that is currently safe, and separately would enable
                 // partial fills on a leg that does not support them today. See the
                 // ⚠ note in {ProratedBound}.
-                IExactlyMarket(market).withdrawAtMaturity(maturity, amount, bound, receiver, onBehalfOf);
+                _withdrawAtMaturity(market, maturity, amount, bound, receiver, onBehalfOf);
             } else if (DustHandler.readBalanceMode(data, 192) == DustHandler.BalanceMode.Full) {
                 // `Full` liquidates the user's ENTIRE live balance, so it cannot be
                 // pro-rated — a sliced fill would unwind the whole position and brick
@@ -397,6 +436,32 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
         } else {
             revert BadOp(op);
         }
+    }
+
+    /// @dev Fixed-maturity withdraw that FAILS CLOSED on a short position.
+    ///
+    ///      ⚠ Exactly's `withdrawAtMaturity` does NOT revert when the fixed deposit is
+    ///      smaller than the request — `_prepareWithdrawAtMaturity` CLAMPS it
+    ///      (`effectiveAssets = min(positionAssets, principal + fee)`, same in v0.1.0)
+    ///      and pays the clamped amount. The proceeds go straight to `receiver`
+    ///      (Settlement on a recipient-0 item), so a short delivery was then billed
+    ///      to the MAKER'S WALLET by {Core._payInputsToSolver} — the F28-4 / I-8
+    ///      harm, at the one Exact branch whose venue does not enforce the amount
+    ///      (2026-09-30 audit L-CV2-1.v1). The bound is the venue's OWN clamp
+    ///      condition, read in the same call, so it cannot misfire on an honest
+    ///      slice. `requireDelivered` would not do: the early-withdraw discount makes
+    ///      `received < amount` legitimately.
+    function _withdrawAtMaturity(
+        address market,
+        uint256 maturity,
+        uint256 amount,
+        uint256 minAssets,
+        address receiver,
+        address onBehalfOf
+    ) private {
+        (uint256 principal, uint256 fee) = IExactlyMarket(market).fixedDepositPositions(maturity, onBehalfOf);
+        if (amount > principal + fee) revert ShortFixedPosition(amount, principal + fee);
+        IExactlyMarket(market).withdrawAtMaturity(maturity, amount, minAssets, receiver, onBehalfOf);
     }
 
     /// @dev Reads the maker-signed `totalAmount@160` and scales an absolute max
@@ -415,8 +480,10 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource {
     ///      DOES take custody between the withdraw and the split, which is why the
     ///      floor, the `min(received, amount)` cap and the `requireDelivered` bound
     ///      below are all load-bearing rather than defence-in-depth. A
-    ///      stray module balance can never become part of the payout. A position
-    ///      smaller than `amount` reverts in the vault — fail closed, no gate.
+    ///      stray module balance can never become part of the payout. The venue
+    ///      withdraws the WHOLE position, so it no longer reverts on a position
+    ///      smaller than `amount` — {FullFillGuard.requireDelivered} below is the
+    ///      gate that fails that case closed.
     function _withdrawFull(address market, address, address onBehalfOf, uint256 amount, address receiver)
         private
     {

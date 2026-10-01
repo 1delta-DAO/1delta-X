@@ -209,12 +209,14 @@ contract SiloTakerModule is ITakerModule, IPositionSource {
     }
 
     /// @inheritdoc IPositionSource
-    /// @dev `maxWithdraw` — not `convertToAssets(balanceOf)` — is deliberate, and is
-    ///      the same reader the `Full` branch uses. It is already denominated in the
-    ///      vault's ASSET (so it needs no conversion to leg units) and it already
-    ///      accounts for the constraints that would make a larger withdraw revert: a
-    ///      borrow against the position, or vault illiquidity. Sizing off the raw
-    ///      share balance would price a withdraw the venue then refuses.
+    /// @dev The RAW position, `previewRedeem(balanceOf(user))` — the same reader the
+    ///      `Full` branch uses, already in the vault's ASSET units. Deliberately NOT
+    ///      `maxWithdraw`: that is a REACHABILITY figure (clipped by a borrow against
+    ///      the position and by vault cash, which third parties move), and pricing a
+    ///      one-shot exit off it let a fill resolve small instead of reverting
+    ///      (docs/position-sized-fills.md; pinned by
+    ///      `test_positionOf_isRawPosition_notMaxWithdraw`). A position the venue
+    ///      cannot pay out in full makes the `Full` withdraw revert — fail closed.
     ///
     ///      `asset` comes from the VAULT, never from `data`: it is the token the
     ///      withdraw actually pays out, so it is the only honest answer to the
@@ -272,16 +274,17 @@ contract SiloTakerModule is ITakerModule, IPositionSource {
         }
     }
 
-    /// @dev Full mode: unwind the user's entire (liquidity-bounded) position with
-    ///      EXACT amounts sent straight to their destinations — the signed `amount`
-    ///      to `receiver`, the remainder back to `onBehalfOf`. ERC-4626 `withdraw`
-    ///      burns the OWNER's shares and pays `receiver` directly, so the module
-    ///      DOES take custody between the withdraw and the split, which is why the
-    ///      floor, the `min(received, amount)` cap and the `requireDelivered` bound
-    ///      below are all load-bearing rather than defence-in-depth. A
-    ///      stray module balance can never become part of the payout. A position
-    ///      smaller than `amount` makes the first call revert in the vault — fail
-    ///      closed, no gate needed.
+    /// @dev Full mode: unwind the user's ENTIRE raw position (`previewRedeem(
+    ///      balanceOf)`, the {positionOf} reader — not liquidity-bounded: an
+    ///      illiquid or borrowed-against position makes the venue withdraw revert)
+    ///      and split it — the signed `amount` to `receiver`, the remainder back to
+    ///      `onBehalfOf`. The venue withdraw pays THIS module, so the module DOES take
+    ///      custody between the withdraw and the split, which is why the floor, the
+    ///      `min(received, amount)` cap and the `requireDelivered` bound below are
+    ///      all load-bearing rather than defence-in-depth. A stray module balance can
+    ///      never become part of the payout. A position smaller than `amount` no
+    ///      longer reverts in the vault (it withdraws the whole position) —
+    ///      {FullFillGuard.requireDelivered} is the gate that fails it closed.
     function _withdrawFull(address silo, address, address onBehalfOf, uint256 amount, address receiver) private {
         // Through {positionOf}, so the number a fill is priced against and the
         // number this branch withdraws are the same function.
