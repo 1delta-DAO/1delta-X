@@ -52,7 +52,9 @@ import {Order} from "@core/settlement/Settlement.sol";
 ///    msg.sender / batch caller). A credential the attester issued to filler A
 ///    therefore produces a digest for A only — if filler B replays A's exact
 ///    `(expiry, sig)`, B's digest differs so the signature no longer validates as
-///    `attester`, and it fails. A credential is non-transferable between fillers.
+///    `attester`, and it fails. A credential is non-transferable between fillers
+///    — BETWEEN ADDRESSES. See "Who the filler is" below for what that means when
+///    the address is a contract.
 ///  • Domain-binding: the EIP-712 domain includes `address(this)` and
 ///    `block.chainid`, so a signature minted for one validator instance (or chain)
 ///    cannot be replayed against another — even with the same attester/filler.
@@ -60,14 +62,38 @@ import {Order} from "@core/settlement/Settlement.sol";
 ///    filler-controlled. The ONLY thing that makes it trustworthy is that we
 ///    recover a maker-chosen `attester` over a domain-bound, filler-bound digest.
 ///    Nothing is read from takerData and trusted without that recovery.
-///  • Composes cleanly: a malformed / non-validating signature — including a
-///    contract attester whose `isValidSignature` reverts — returns `false` (never
-///    reverts), so this gate AND-composes with other validators the way the
-///    settlement expects.
+///  • Composes cleanly: a malformed `takerData` envelope (anything that is not a
+///    well-formed `abi.encode(uint256, bytes)` — e.g. another leaf's packed quote
+///    in a {ConditionTreeValidator} OR) and a malformed / non-validating signature
+///    — including a contract attester whose `isValidSignature` reverts — return
+///    `false`; the gate never reverts on filler-supplied bytes. (It used to revert
+///    in `abi.decode` on a foreign blob, aborting a whole tree with
+///    `ConditionErrored` before a later OR group could pass — audit 2026-09-30
+///    VAL-6.) The single exception is OUT-OF-GAS in a 1271 attester's
+///    `isValidSignature`: that is propagated as out-of-gas (`invalid()`), never
+///    read as `false`, so a filler cannot pick a gas limit that decides the answer
+///    (audit 2026-09-30 VAL-2). Note `NOT(attested)` is meaningless in a tree
+///    regardless: any filler makes this gate `false` by sending empty takerData.
 ///  • Signature malleability is intentionally NOT rejected here (unlike a
 ///    nonce-consuming permit): the credential is a stateless yes/no check, never
 ///    stored or consumed, so a second (malleated) signature over the same digest
 ///    grants nothing the holder of the original didn't already have.
+///
+///  ⚠ Who the filler is (audit 2026-09-30 VAL-5)
+///  ─────────────────────────────────────────────
+///  `filler` is Settlement's IMMEDIATE `msg.sender` (the batch / match caller on
+///  the netted paths) — nothing further up the call chain. When the attested
+///  address is a CONTRACT that fills as itself on behalf of arbitrary callers and
+///  forwards caller-chosen `takerData` — an open (non-GATED) `AggregatorFillSolver`,
+///  `GuardedMatchSolver.settleMatch`, `DestinationSettler7683.fill`, any
+///  permissionless executor — the credential vouches for EVERY caller of that
+///  contract, not for the desk that operates it. And because the credential rides
+///  in public calldata, its first use publishes `(expiry, sig)`: anyone may replay
+///  it through the same contract until `expiry`, on any order naming this attester
+///  and `listId`. Attesters should only vouch for EOAs or for contracts whose fill
+///  entrypoint is access-controlled to the vetted party (an operator-GATED solver),
+///  and keep `expiry` short. The maker's signed amounts still bind either way —
+///  this widens WHO may fill, never at what price.
 ///
 ///  Liveness fallback (Fusion-style open-up)
 ///  ────────────────────────────────────────
@@ -79,7 +105,9 @@ import {Order} from "@core/settlement/Settlement.sol";
 /// @dev  Maker-signed  `data      = abi.encode(address attester, uint256 listId, uint256 openAfter)`.
 ///       Filler-supplied `takerData = abi.encode(uint256 expiry, bytes sig)` — `sig` is
 ///       the attester's EIP-712 signature over `FillerAttestation(filler, listId, expiry)`:
-///       a 64/65-byte ECDSA signature, or an EIP-1271 signature of any length.
+///       a 64/65-byte ECDSA signature, or an EIP-1271 signature of any length. Decoded
+///       with explicit bounds checks ({_decodeCredential}); a malformed envelope reads
+///       as "no credential" (`false`).
 contract FillerAttestationValidator is IOrderValidator {
     // ──────────────────── EIP-712 (mirrors permit3/EIP712.sol) ────────────────────
 
@@ -142,20 +170,52 @@ contract FillerAttestationValidator is IOrderValidator {
         // 1) Open-up fallback: past the window, any filler passes with no credential.
         if (openAfter != 0 && block.timestamp >= openAfter) return true;
 
-        // 2) Otherwise a fresh attester credential is required in takerData.
-        if (takerData.length == 0) return false; // no credential presented
-        (uint256 expiry, bytes memory sig) = abi.decode(takerData, (uint256, bytes));
+        // 2) Otherwise a fresh attester credential is required in takerData. A
+        //    malformed envelope is "no credential", not an error (VAL-6).
+        (bool wellFormed, uint256 expiry, bytes calldata sig) = _decodeCredential(takerData);
+        if (!wellFormed) return false; // no (well-formed) credential presented
         if (block.timestamp > expiry) return false; // credential expired
 
         // 3) Rebuild the digest from the ON-CHAIN filler (the binding that stops a
         //    credential issued to A from being replayed by B) and validate `sig`
         //    against the maker-signed attester. `_isValidAttestation` accepts EOA,
-        //    EIP-1271 contract-wallet, and EIP-7702 attesters and never reverts.
+        //    EIP-1271 contract-wallet, and EIP-7702 attesters and never reverts
+        //    (a 1271 attester running out of gas aside — propagated as out-of-gas).
         return _isValidAttestation(_digest(filler, listId, expiry), sig, attester);
     }
 
+    /// @dev Bounds-checked decode of `takerData = abi.encode(uint256 expiry, bytes sig)`.
+    ///      Accepts exactly what `abi.decode` would (any in-range offset), but returns
+    ///      `wellFormed = false` instead of reverting on an empty, truncated or
+    ///      foreign-format blob — so this gate composes under a tree OR whose other
+    ///      group consumes `takerData` in a different format (audit 2026-09-30 VAL-6).
+    function _decodeCredential(bytes calldata takerData)
+        private
+        pure
+        returns (bool wellFormed, uint256 expiry, bytes calldata sig)
+    {
+        uint256 len = takerData.length;
+        sig = takerData[0:0];
+        if (len < 64) return (false, 0, sig);
+        uint256 offset;
+        assembly {
+            expiry := calldataload(takerData.offset)
+            offset := calldataload(add(takerData.offset, 0x20))
+        }
+        // `offset` and the length word are filler-controlled: compare against the
+        // remaining room rather than adding to them, so nothing can overflow.
+        if (offset > len - 32) return (false, 0, sig);
+        uint256 sigLen;
+        assembly {
+            sigLen := calldataload(add(takerData.offset, offset))
+        }
+        if (sigLen > len - 32 - offset) return (false, 0, sig);
+        sig = takerData[offset + 32:offset + 32 + sigLen];
+        wellFormed = true;
+    }
+
     /// @dev Validate `sig` over `digest` as coming from `attester`, across the full
-    ///      breadth of signer types and WITHOUT ever reverting — a malformed, wrong-
+    ///      breadth of signer types and WITHOUT reverting (out-of-gas aside) — a malformed, wrong-
     ///      length, or non-matching signature (or a contract wallet whose
     ///      `isValidSignature` reverts) simply returns false, so the gate fails
     ///      cleanly under AND-composition rather than blowing up the fill:
@@ -172,7 +232,7 @@ contract FillerAttestationValidator is IOrderValidator {
     ///      now carries bytecode — avoiding the Permit2 failure mode where a code-
     ///      length-first branch misroutes it into the 1271 path. Accepts 65-byte and
     ///      64-byte (EIP-2098 compact) ECDSA signatures; 1271 sigs may be any length.
-    function _isValidAttestation(bytes32 digest, bytes memory sig, address attester) private view returns (bool) {
+    function _isValidAttestation(bytes32 digest, bytes calldata sig, address attester) private view returns (bool) {
         // An attester of address(0) can never be matched — a failed ecrecover also
         // yields address(0), so it must be rejected explicitly.
         if (attester == address(0)) return false;
@@ -184,19 +244,17 @@ contract FillerAttestationValidator is IOrderValidator {
             bytes32 s;
             uint8 v;
             if (len == 65) {
-                /// @solidity memory-safe-assembly
                 assembly {
-                    r := mload(add(sig, 0x20))
-                    s := mload(add(sig, 0x40))
-                    v := byte(0, mload(add(sig, 0x60)))
+                    r := calldataload(sig.offset)
+                    s := calldataload(add(sig.offset, 0x20))
+                    v := byte(0, calldataload(add(sig.offset, 0x40)))
                 }
             } else {
                 // EIP-2098 compact: (r, vs) where vs packs s and yParity.
                 bytes32 vs;
-                /// @solidity memory-safe-assembly
                 assembly {
-                    r := mload(add(sig, 0x20))
-                    vs := mload(add(sig, 0x40))
+                    r := calldataload(sig.offset)
+                    vs := calldataload(add(sig.offset, 0x20))
                 }
                 s = vs & _UPPER_BIT_MASK;
                 v = uint8(uint256(vs >> 255)) + 27;
@@ -210,7 +268,17 @@ contract FillerAttestationValidator is IOrderValidator {
         //    staticcall so a reverting / missing implementation returns false rather
         //    than bubbling up and breaking AND-composition.
         if (attester.code.length == 0) return false;
-        (bool ok, bytes memory ret) = attester.staticcall(abi.encodeCall(IERC1271.isValidSignature, (digest, sig)));
+        bytes memory cd = abi.encodeCall(IERC1271.isValidSignature, (digest, sig));
+        uint256 gasBefore = gasleft();
+        (bool ok, bytes memory ret) = attester.staticcall(cd);
+        // Out-of-gas is not "invalid": the attester got 63/64 of `gasBefore`, and a
+        // failure leaving under 1/63 of it may be a filler-chosen gas limit. Exhaust
+        // our own gas so the caller sees an out-of-gas, never a `false` (VAL-2).
+        if (!ok && gasleft() < gasBefore / 63) {
+            assembly {
+                invalid()
+            }
+        }
         return ok && ret.length >= 32 && abi.decode(ret, (bytes4)) == IERC1271.isValidSignature.selector;
     }
 }

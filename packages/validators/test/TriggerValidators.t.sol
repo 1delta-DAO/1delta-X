@@ -184,9 +184,13 @@ contract TriggerValidatorsTest is MockSettlementBase {
         assertTrue(predicate.validate(o, solver, dTrue, ""), "true predicate");
         box.set(false);
         assertFalse(predicate.validate(o, solver, dTrue, ""), "false predicate");
-        // A REVERTING predicate is swallowed and reads as false — fail-closed.
+        // A REVERTING predicate is an ERROR, not `false` (audit 2026-09-30 VAL-2 —
+        // it used to be swallowed into `false`, which NEGATE in a condition tree
+        // turned into `true`). Still fail-closed at the top level: gatePasses folds
+        // the revert into a failed gate (test_predicate_gatesFill).
         bytes memory dBoom = abi.encode(address(box), abi.encodeCall(BoolBox.boom, ()));
-        assertFalse(predicate.validate(o, solver, dBoom, ""), "reverting predicate fails closed");
+        vm.expectRevert(bytes4(keccak256("PredicateFailed()")));
+        predicate.validate(o, solver, dBoom, "");
     }
 
     function test_predicate_gatesFill() public {
