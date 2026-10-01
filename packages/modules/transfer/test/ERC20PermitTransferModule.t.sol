@@ -130,7 +130,7 @@ contract ERC20PermitTransferModuleTest is Test {
         uint256 deadline = block.timestamp + 1 hours;
         (uint8 v, bytes32 r, bytes32 s) = _permitSig(GROSS, deadline);
 
-        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT, deadline, v, r, s);
+        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT, GROSS, deadline, v, r, s);
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, GROSS, solver, data);
@@ -147,7 +147,7 @@ contract ERC20PermitTransferModuleTest is Test {
         vm.prank(user);
         token.approve(address(permit3), type(uint256).max);
 
-        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT);
+        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT, GROSS);
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, GROSS, solver, data);
@@ -162,7 +162,7 @@ contract ERC20PermitTransferModuleTest is Test {
         vm.prank(user);
         token.approve(address(permit3), type(uint256).max);
 
-        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT);
+        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT, TRANSFER_AMOUNT);
 
         vm.prank(address(permit3));
         module.takeOnBehalf(user, TRANSFER_AMOUNT, solver, data);
@@ -174,7 +174,7 @@ contract ERC20PermitTransferModuleTest is Test {
     // ── Reverts ───────────────────────────────────────────────────────────────
 
     function test_revertsIfNotPermit3() public {
-        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT);
+        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT, GROSS);
         vm.expectRevert(ERC20PermitTransferModule.OnlyPermit3.selector);
         module.takeOnBehalf(user, GROSS, solver, data);
     }
@@ -184,7 +184,7 @@ contract ERC20PermitTransferModuleTest is Test {
         token.approve(address(permit3), type(uint256).max);
 
         // transferAmount > gross
-        bytes memory data = abi.encode(address(token), recipient, GROSS + 1);
+        bytes memory data = abi.encode(address(token), recipient, GROSS + 1, GROSS);
 
         vm.prank(address(permit3));
         vm.expectRevert(
@@ -203,7 +203,7 @@ contract ERC20PermitTransferModuleTest is Test {
         uint256 deadline = block.timestamp - 1; // already expired
         (uint8 v, bytes32 r, bytes32 s) = _permitSig(GROSS, deadline);
 
-        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT, deadline, v, r, s);
+        bytes memory data = abi.encode(address(token), recipient, TRANSFER_AMOUNT, GROSS, deadline, v, r, s);
 
         uint256 userBefore = token.balanceOf(user);
 

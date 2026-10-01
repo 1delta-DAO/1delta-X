@@ -12,6 +12,15 @@ closed, including on the winner's second and later partial fills.
 `claim` stores `nonce + 1`, so zero can mean "unclaimed" while an order with
 `nonce == 0` is still a valid group member.
 
+**Claim floor (BREAKING, audit 2026-09-30 PRICE-2).** The claim item's data is
+`abi.encode(groupId, nonce, minClaim)`. The fill that CLAIMS an untouched group must
+have a slice of at least `minClaim` (item units — anchor units when the item amount
+is the anchor) or it reverts `ClaimTooSmall`; the winner's later partial fills are
+unconstrained. Without it, anyone could fill 1 wei of an untriggered take-profit and
+permanently retire the stop-loss. `minClaim == 0`, a floor above the item amount, and
+the old two-word blob all fail validation (the leg is unfillable), so the floor is
+always an explicit choice: `minClaim = anchor` makes the claim whole-fill only.
+
 The `GroupClaimed` event is the one an indexer wants: it retires N−1 bracket siblings
 from an off-chain book on a single log, with no RPC and no failed fill to prove it —
 see [`packages/orderbook`](../../orderbook/README.md).

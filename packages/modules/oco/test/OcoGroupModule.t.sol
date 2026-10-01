@@ -29,6 +29,9 @@ contract OcoGroupModuleTest is MockSettlementBase {
     uint256 constant AMOUNT_IN = 100e18; // tA the maker gives, per leg (the anchor)
     uint256 constant TP_OUT = 300e18; //    take-profit leg wants more tB
     uint256 constant SL_OUT = 200e18; //    stop-loss leg accepts less
+    /// @dev The claim floor (audit 2026-09-30 PRICE-2): the fill that retires the
+    ///      siblings must be at least 10% of the leg. Every claiming fill below is.
+    uint256 constant MIN_CLAIM = AMOUNT_IN / 10;
 
     /// @dev `timing` bit 100 — {DutchAuction.useNonceInvalidator}.
     uint256 constant FILL_ONCE_BIT = uint256(1) << 100;
@@ -71,7 +74,7 @@ contract OcoGroupModuleTest is MockSettlementBase {
             module: address(oco),
             amount: AMOUNT_IN,
             recipient: address(0),
-            data: abi.encode(groupId, nonce)
+            data: abi.encode(groupId, nonce, MIN_CLAIM)
         });
         return PackedEncode.items(items);
     }
@@ -225,7 +228,7 @@ contract OcoGroupModuleTest is MockSettlementBase {
     function test_oco_directClaimReverts() public {
         vm.expectRevert(OcoGroupModule.NotSettlement.selector);
         vm.prank(solver);
-        oco.settle(maker, solver, AMOUNT_IN, abi.encode(GROUP, TP_NONCE));
+        oco.settle(maker, solver, AMOUNT_IN, abi.encode(GROUP, TP_NONCE, MIN_CLAIM));
     }
 
     /// Dropping either half is not a solver-side option — both are inside the
@@ -312,7 +315,7 @@ contract OcoGroupModuleTest is MockSettlementBase {
             module: address(oco),
             amount: 1, // ← misconfigured: rounds away on any partial fill
             recipient: address(0),
-            data: abi.encode(GROUP, uint256(9))
+            data: abi.encode(GROUP, uint256(9), uint256(1))
         });
         o.items = PackedEncode.items(items);
 

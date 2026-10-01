@@ -61,13 +61,25 @@ contract ProportionalSweepModuleTest is Test {
         return abi.encode(address(usdt), Proportional.encode(bps));
     }
 
+    /// @dev The three-word form a FRACTIONAL sweep must use since audit 2026-09-30
+    ///      MISC-MOD-1: the signed item total, which the slice must equal.
+    function _dataTotal(uint256 bps, uint256 total) internal view returns (bytes memory) {
+        return abi.encode(address(usdt), Proportional.encode(bps), total);
+    }
+
     // ──────────────────── The sweep ────────────────────
 
     function test_sweep_pullsWholeBalanceToFiller() public {
         usdt.mint(maker, 5_000e6);
 
         vm.prank(settlement);
-        module.settle(maker, filler, 10_000e6 /* cap */, _data(10_000));
+        module.settle(
+            maker,
+            filler,
+            10_000e6,
+            /* cap */
+            _data(10_000)
+        );
 
         assertEq(usdt.balanceOf(maker), 0, "maker swept");
         assertEq(usdt.balanceOf(filler), 5_000e6, "filler received the sweep");
@@ -82,7 +94,13 @@ contract ProportionalSweepModuleTest is Test {
         usdt.mint(maker, 9_000e6);
 
         vm.prank(settlement);
-        module.settle(maker, filler, 2_000e6 /* cap */, _data(10_000));
+        module.settle(
+            maker,
+            filler,
+            2_000e6,
+            /* cap */
+            _data(10_000)
+        );
 
         assertEq(usdt.balanceOf(filler), 2_000e6, "clamped to the cap");
         assertEq(usdt.balanceOf(maker), 7_000e6, "maker keeps the excess");
@@ -92,7 +110,7 @@ contract ProportionalSweepModuleTest is Test {
         usdt.mint(maker, 1_000e6);
 
         vm.prank(settlement);
-        module.settle(maker, filler, 1_000e6, _data(2_500)); // 25%
+        module.settle(maker, filler, 1_000e6, _dataTotal(2_500, 1_000e6)); // 25%
 
         assertEq(usdt.balanceOf(filler), 250e6, "swept a quarter");
     }
@@ -148,7 +166,9 @@ contract ProportionalSweepModuleTest is Test {
         usdt.mint(maker, 1_000e6);
 
         vm.prank(settlement);
-        vm.expectRevert(abi.encodeWithSelector(ProportionalSweepModule.NotAProportionalMarker.selector, uint256(10_000)));
+        vm.expectRevert(
+            abi.encodeWithSelector(ProportionalSweepModule.NotAProportionalMarker.selector, uint256(10_000))
+        );
         module.settle(maker, filler, 1_000e6, abi.encode(address(usdt), uint256(10_000)));
     }
 
@@ -169,7 +189,7 @@ contract ProportionalSweepModuleTest is Test {
         usdt.mint(maker, balance);
 
         vm.prank(settlement);
-        module.settle(maker, filler, cap, _data(b));
+        module.settle(maker, filler, cap, b == 10_000 ? _data(b) : _dataTotal(b, cap));
 
         uint256 swept = usdt.balanceOf(filler);
         assertLe(swept, cap, "never above the signed cap");

@@ -14,7 +14,20 @@ Whatever it returns is still **clamped by the core** to the maker's signed
 never past it.
 
 Configuration lives in immutables (feed, staleness, band, `NUM`/`DEN` scale, side,
-spread): one deployed instance per configuration, shared via CREATE2.
+spread): one deployed instance per configuration, shared via CREATE2. `NUM == 0`
+is rejected at construction; express a negative decimal exponent as a fraction
+(`NUM = 1, DEN = 1e20`).
+
+**What the peg is priced against.** The fair amount is computed against the
+counterpart leg's whole-order amount — `legsIn[0].start` for a SELL (the resolved
+live balance when that leg is a `Proportional` marker), `legsOut[0].start` for a
+BUY — never against the fill denominator, so orders with a signed `fillTotal`
+(e.g. `FullFillModule`'s `fillTotal = 1`) price at the peg. A SELL whose
+`legsIn[0]` rises is solved jointly, so the realised rate `outTick/inTick` is the
+peg. Other rising input legs (e.g. a fee leg in another token) move with the
+oracle-derived bump; sign them fixed if that coupling is not wanted. (Audit
+2026-09-30 PRICE-1 / PRICE-1.v3 / PRICE-9; regression tests in
+`test/Audit20260930Pegged.t.sol`.)
 
 ```
 make test-modules-pricing-chainlink
