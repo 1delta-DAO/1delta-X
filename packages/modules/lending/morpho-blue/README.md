@@ -39,7 +39,7 @@ hash, the solver cannot retarget the oracle, IRM or LLTV.
 | Withdraw-collateral auth | pull aToken via Permit3 token allowance | `setAuthorization(module, true)` — **no token pull** |
 | Borrow auth | `variableDebtToken.approveDelegation(module)` | `setAuthorization(module, true)` |
 | Borrow proceeds | land at module, module forwards to `receiver` | Morpho sends straight to `receiver` |
-| Full repay | `repay(amount)` caps at live debt | **must repay by shares** — `repay(assets)` does not cap |
+| Full repay | `repay(amount)` caps at live debt | **must repay by shares** — `repay(assets)` does not cap; the module accrues, reads the live debt and repays by shares only when the signed ceiling covers it (else partially, by assets) |
 
 The big one: **Morpho collateral is not tokenised.** The Aave withdraw module
 pulls the maker's aWETH via a Permit3 token allowance; here there is nothing to
@@ -71,13 +71,18 @@ the maker beforehand — Settlement and the solver can never widen them:
 
 | Contract | Op | Morpho action | `data` |
 |---|---|---|---|
-| [`MorphoBlueSupplyCollateralModule`](src/MorphoBlueModules.sol) | MAKE | pull collateral from maker → `supplyCollateral(onBehalf = maker)` | `abi.encode(MarketParams)` |
-| [`MorphoBlueRepayModule`](src/MorphoBlueModules.sol) | MAKE | pull buffered loan token → `repay(shares = borrowShares)`; sweep dust back to maker | `abi.encode(MarketParams)` |
-| [`MorphoBlueTakerModule`](src/MorphoBlueModules.sol) | TAKE | combined: `op=0` → `borrow(onBehalf = maker, receiver)`; `op=1` → `withdrawCollateral(onBehalf = maker)` → `receiver` (no token pull) | `abi.encode(uint8 op, MarketParams, …)` |
+| [`MorphoBlueSupplyCollateralModule`](src/MorphoBlueModules.sol) | MAKE | pull collateral from maker → `supplyCollateral(onBehalf = maker)` | `abi.encode(MarketParams[, deadline, v, r, s])` |
+| [`MorphoBlueSupplyModule`](src/MorphoBlueModules.sol) | MAKE | pull loan token from maker → `supply(onBehalf = maker)` (the earn/lend leg) | `abi.encode(MarketParams[, deadline, v, r, s])` |
+| [`MorphoBlueRepayModule`](src/MorphoBlueModules.sol) | MAKE | repay `min(amount, liveDebt)`: full close by **shares** when the signed ceiling covers the accrued debt, else a partial repay of exactly `amount` by assets. Default: pull-exact via the repay callback. `Recycle`: custody of `amount`, surplus re-supplied as a lend balance | `abi.encode(MarketParams[, DustAction[, deadline, v, r, s]])` |
+| [`MorphoBlueTakerModule`](src/MorphoBlueModules.sol) | TAKE | combined: `op=0` → `borrow(onBehalf = maker, receiver)`; `op=1` → `withdrawCollateral(onBehalf = maker)` → `receiver` (no token pull); `op=2` → `withdraw` of the supplied **loan** asset (the earn position; Full mode redeems by shares) | `abi.encode(uint8 op, MarketParams, …)` — see the byte map in the contract header |
+| [`MorphoBluePreFundModule`](src/MorphoBluePreFundModules.sol) | MAKE (pre-funded) | supply-collateral / supply / repay funded by the fill's own delivered output leg (leg-reference descriptor, zero receive-side approvals) | `abi.encode(forDesc, morpho, MarketParams)` |
 | [`interfaces/IMorphoBlue.sol`](src/interfaces/IMorphoBlue.sol) | — | minimal Morpho singleton surface + `MarketParamsLib.id` | — |
 
-Constructors take `(permit3, morpho)` — the Morpho singleton address is fixed at
-deploy time, while the specific market is selected per-item via `data`.
+Constructors: `MorphoBlueTakerModule(permit3, morpho)`; the MAKE modules
+(`SupplyCollateral`, `Supply`, `Repay`) take `(permit3, morpho, settlement)`;
+`MorphoBluePreFundModule(permit3, settlement)` (its venue rides in `data`). The
+Morpho singleton is fixed at deploy time for the plain modules, while the specific
+market is selected per-item via `data`.
 
 ## Flows
 
@@ -110,12 +115,16 @@ order: tokenIn = collateral, tokenOut = loanToken   items = [TAKE withdrawCollat
             solver     ──loanToken───▶ maker
 ```
 
-### Repay — pull buffered loan token, repay by shares, refund the dust
+### Repay — repay `min(amount, liveDebt)`, refund the dust
 
-A single MAKE. The maker signs a *buffered* amount to cover interest accrual
-between signing and fill. The module reads the live `borrowShares` and repays by
-shares so the position closes exactly; Morpho pulls only the assets it rounds up
-to, and the module sweeps the remainder back to the maker.
+A single MAKE. To close, the maker signs a *buffered* amount to cover interest
+accrual between signing and fill. The module accrues, reads the live debt
+(rounded up) and, when the ceiling covers it, repays by shares so the position
+closes exactly; Morpho pulls only the assets it rounds up to. A ceiling below the
+live debt is a partial repay of exactly `amount`. In the default mode the
+callback pulls exactly what Morpho charges, so the unused buffer never leaves the
+maker's wallet; in `Recycle` mode the module takes custody of `amount` and
+re-supplies the surplus as a lend balance.
 
 ```
 order: items = [MAKE repay]
@@ -145,9 +154,25 @@ items = [MAKE repay(src), TAKE withdrawCollateral(src)→maker, MAKE supplyColla
 - **Repay refunds to the maker, not `data`.** The over-repay sweep destination is
   the `onBehalfOf` function argument, not an attacker-controllable field of
   `data`. A reentrancy lock guards against weird-token transfer hooks.
-- **Repay-by-shares cannot overshoot.** Repaying by `borrowShares` makes Morpho
-  pull exactly the rounded-up assets — it can never pull more than the buffer,
-  and a stale/zero position is a no-op rather than a revert.
+- **Morpho never draws more than the signed `amount`.** The module accrues and
+  repays by shares only when `amount` covers the live debt rounded up (exactly
+  what a shares repay charges in that block); otherwise it repays exactly
+  `amount` by assets. On the default path the callback additionally caps the
+  pull ({BufferTooSmall}); on the `Recycle` path the approval is scoped to
+  `amount` and cleared. Before 2026-09-30 the `Recycle` path repaid the WHOLE
+  debt by shares under a standing max approval, so a debt above `amount` was
+  drawn from loan token resting on the module (audit L-LIB-1). The module also
+  reverts `FloorBreached` if its balance ever ends below where it started. A
+  zero position is a no-op rather than a revert.
+- **Revoking Morpho authorization while a signed auth tail is live.** The taker
+  module's optional `setAuthorizationWithSig` tail sits in public order data and
+  is replayed best-effort by anyone. Morpho's `setAuthorization(module, false)`
+  does NOT consume the signed nonce, so until the tail's deadline anyone can
+  relay it and restore the module's authorization. The module still acts only
+  through spender-keyed Permit3 taker grants on maker-signed data, so nothing is
+  movable without a live grant — but to make a venue-level revoke stick, cancel
+  the order / `Permit3.lockdownAll`, or burn the nonce by relaying
+  `setAuthorizationWithSig(isAuthorized = false)` at the same nonce.
 - **Single-op modules bound Morpho's coarse auth.** `setAuthorization` is
   position-wide, but each module's code performs only its one action, so the
   authorization a maker grants is legible from the module address alone.
@@ -175,7 +200,8 @@ permit fill:
 |---|---|---|
 | [`leverage/SupplyBorrow`](test/leverage/SupplyBorrow.t.sol) | supply collateral + borrow | `supplyCollateral`; borrow sends straight to `receiver`; `setAuthorization` |
 | [`swaps/WithdrawAndSwap`](test/swaps/WithdrawAndSwap.t.sol) | withdraw collateral + swap | no receipt-token pull — taker gate + `setAuthorization` only |
-| [`closing/Repay`](test/closing/Repay.t.sol) | buffered repay + dust refund | repay-by-**shares** (full close), residual swept to maker |
+| [`closing/Repay`](test/closing/Repay.t.sol) | buffered repay + dust refund | repay-by-**shares** (full close), residual swept to maker / recycled |
+| [`closing/AuditRepayResidue20260930`](test/closing/AuditRepayResidue20260930.t.sol) | repay with a resident module balance | `Recycle` and default paths never draw the module's floor; partial repay below the live debt |
 | [`closing/Migrate`](test/closing/Migrate.t.sol) | Morpho → Aave v3 | cross-protocol: Morpho repay/withdraw + Aave deposit/borrow in one order |
 | [`closing/MigrateAaveToMorpho`](test/closing/MigrateAaveToMorpho.t.sol) | Aave v3 → Morpho | the reverse: Aave repay/withdraw + Morpho supply/borrow in one order |
 | [`security/TakerModuleAuth`](test/security/TakerModuleAuth.t.sol) | direct-call rejection | `OnlyPermit3` on both taker modules — load-bearing under coarse Morpho auth |

@@ -65,6 +65,7 @@ contract MigrateMidnightToBlueTest is MidnightModulesBase {
         // ── Authorizations (one-time, maker) ──
         // [0] Midnight repay: repay module pulls LOAN via Permit3.
         _makerApproveToken(address(repayModule), address(LOAN), bufferedRepay);
+        _makerAuthorize(address(repayModule)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
         // [1] Midnight withdraw-collateral: Permit3 taker cap + Midnight native auth.
         _makerApproveTaker(address(takerModule), keccak256(wcData), collat);
         _makerAuthorize(address(takerModule));

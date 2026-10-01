@@ -15,11 +15,12 @@ import {MidnightModulesBase} from "./shared/MidnightModulesBase.t.sol";
 /// conversion delivered as collateral" / "repay whatever the conversion
 /// delivered", with ZERO receive-side approvals. The converted output leg is
 /// delivered straight to the module (`recipient = module`), the core sizes
-/// `forAmount` to exactly that delivery, and the maker's only grants are the
-/// input-leg approval they had anyway plus a signable taker allowance. The
-/// received asset — the collateral on a supply, the loan token on a repay — is
-/// never approved to anything, anywhere, and neither op needs Midnight's
-/// `setIsAuthorized` (both are permissionless benign inflows).
+/// `forAmount` to exactly that delivery, and the maker's TOKEN grants are just
+/// the input-leg approval they had anyway. The received asset — the collateral on
+/// a supply, the loan token on a repay — is never approved to anything, anywhere.
+/// The maker DOES grant the module Midnight's `setIsAuthorized`: the venue gates
+/// both `supplyCollateral` and `repay` on it (audit 2026-09-30 L-ML-1; this
+/// header used to call them permissionless, which only the old mock was).
 ///
 /// End-to-end over the real Settlement + Permit3 and the mock Midnight
 /// singleton, like every suite in this package. The maker holds NO Permit3 token
@@ -76,6 +77,7 @@ contract MidnightPreFundOneSidedTest is MidnightModulesBase {
         bytes memory data = _preFundSupplyData();
         _makerApproveToken(address(settlement), address(LOAN), loanIn); // the input leg
         _makerApproveTaker(address(preFund), keccak256(data), loanIn);
+        _makerAuthorize(address(preFund)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
         vm.prank(maker);
         COLL.approve(address(permit3), 0); // receive side stripped bare
 
@@ -112,6 +114,7 @@ contract MidnightPreFundOneSidedTest is MidnightModulesBase {
         bytes memory data = _preFundSupplyData();
         _makerApproveToken(address(settlement), address(LOAN), loanIn);
         _makerApproveTaker(address(preFund), keccak256(data), loanIn);
+        _makerAuthorize(address(preFund)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
 
         Item[] memory items = new Item[](1);
         items[0] = _item(ItemOp.MAKE, address(preFund), 0, data);
@@ -145,6 +148,7 @@ contract MidnightPreFundOneSidedTest is MidnightModulesBase {
         bytes memory data = _preFundRepayData();
         _makerApproveToken(address(settlement), address(COLL), collIn); // the input leg
         _makerApproveTaker(address(preFund), keccak256(data), collIn);
+        _makerAuthorize(address(preFund)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
         vm.prank(maker);
         LOAN.approve(address(permit3), 0); // receive side stripped bare
 

@@ -38,21 +38,38 @@ interface IUniV3Router {
 ///
 ///  Trust model. This contract holds no funds between fills and is only ever
 ///  invoked by Midnight (the `onlyMidnight` gate). It acts on `seller`'s position
-///  through `supplyCollateral`, which is a PERMISSIONLESS inflow (anyone may add
-///  collateral to anyone) — so, unlike the value-out modules, it needs NO
-///  `setIsAuthorized` grant. The maker-signed `callbackData` is the only tunable:
-///  it names the collateral index, the swap pool fee, and a slippage floor, all
-///  bound into the offer the maker signed.
+///  through `supplyCollateral`, and ⚠ THAT IS NOT PERMISSIONLESS on the deployed
+///  venue: `morpho-org/midnight` gates `supplyCollateral` on `onBehalf ==
+///  msg.sender || isAuthorized[onBehalf][msg.sender]` ("to prevent activated
+///  collateral poisoning"; verified on the Base singleton 0xAded…A18A, which
+///  reverts `Unauthorized()` 0x82b42900). The borrower MUST therefore call
+///  `midnight.setIsAuthorized(thisCallback, true, borrower)` before resting the
+///  offer — and Midnight treats that grant as FULL position control (withdraw,
+///  borrow-as-taker, re-delegation). This contract never uses it for anything but
+///  the `supplyCollateral` below: `onSell` is Midnight-pinned with `receiver ==
+///  this`, `seller` is supplied by Midnight, and the contract has no `take`,
+///  `setIsAuthorized`, `setConsumed`, `multicall`, ratifier or fallback surface.
+///  (This header used to claim no grant was needed; audit 2026-09-30 L-ML-1.)
+///  The maker-signed `callbackData` is the only tunable: it names the collateral
+///  index, the swap pool fee, and a slippage RATE floor, all bound into the offer
+///  the maker signed.
 ///
-///  ⚠ `minCollateralOut` IS THE REAL SLIPPAGE BOUND — Midnight's solvency check is
-///  NOT a backstop for it. This note used to claim a too-thin floor "simply fails
-///  Midnight's solvency check and reverts the whole fill". That holds only for a
-///  position with no pre-existing headroom: the check is against the WHOLE
-///  position, so a borrower who already has collateral can be sandwiched for the
-///  full headroom while the fill still succeeds. The offer is fillable by ANY
-///  lender, so the sandwicher and the filler need not be the same party. Size the
-///  floor properly; do not rely on the solvency check to catch a loose one.
-///  Corrected in F25 (see `docs/audit-2026-09-leads.md` C).
+///  ⚠ THE FLOOR IS THE REAL SLIPPAGE BOUND — Midnight's solvency check is NOT a
+///  backstop for it. The check is against the WHOLE position, so a borrower who
+///  already has collateral can be sandwiched for the full headroom while the fill
+///  still succeeds. The offer is fillable by ANY lender, so the sandwicher and the
+///  filler need not be the same party. Corrected in F25 (see
+///  `docs/audit-2026-09-leads.md` C).
+///
+///  ⚠ AND IT IS A RATE, NOT AN ABSOLUTE FIGURE (audit 2026-09-30 L-ML-4). Midnight
+///  lets ANY lender take ANY `units` up to the offer's remaining caps, and the
+///  swapped `sellerAssets` scale with them — so an absolute `minCollateralOut`
+///  either reverts every partial take (sized for the whole offer) or protects a
+///  large take only down to a small figure (sized for a small one). The signed
+///  `minRateWad` is collateral-token wei per loan-token wei, 1e18-scaled (decimals
+///  are folded into the rate), and the floor applied to THIS take is
+///  `ceil(sellerAssets · minRateWad / 1e18)` — the same per-fill guarantee at every
+///  take size (the `ProratedBound` rule: sign a rate, never an absolute).
 contract MidnightLoopCallback is ISellCallback {
     IMidnight public immutable midnight;
     IUniV3Router public immutable router;
@@ -69,7 +86,8 @@ contract MidnightLoopCallback is ISellCallback {
     }
 
     /// @inheritdoc ISellCallback
-    /// @dev `data = abi.encode(uint256 collateralIndex, uint24 dexFee, uint256 minCollateralOut)`.
+    /// @dev `data = abi.encode(uint256 collateralIndex, uint24 dexFee, uint256 minRateWad)` —
+    ///      `minRateWad` = minimum collateral wei out per loan-token wei in, 1e18-scaled.
     ///      The borrowed `sellerAssets` (loan token) are already sitting in this
     ///      contract when Midnight calls in — but ONLY when we are the fill's
     ///      `receiver`, which is why the check below exists.
@@ -94,17 +112,17 @@ contract MidnightLoopCallback is ISellCallback {
         // precisely so the assumption above can be asserted rather than assumed.
         if (receiver != address(this)) revert OnlyMidnight();
 
-        (uint256 collateralIndex, uint24 dexFee, uint256 minCollateralOut) =
-            abi.decode(data, (uint256, uint24, uint256));
+        (uint256 collateralIndex, uint24 dexFee, uint256 minRateWad) = abi.decode(data, (uint256, uint24, uint256));
 
         address collateralToken = market.collateralParams[collateralIndex].token;
 
-        // Swap the entire borrowed budget into the collateral asset...
-        uint256 collateralOut = _swap(market.loanToken, collateralToken, sellerAssets, dexFee, minCollateralOut);
+        // Swap the entire borrowed budget into the collateral asset, floored at the
+        // signed RATE scaled to THIS take's size (rounded up — never below the rate).
+        uint256 collateralOut = _swap(market.loanToken, collateralToken, sellerAssets, dexFee, minRateWad);
 
         // ...and supply it into the borrower's position BEFORE Midnight's solvency
-        // check, so the new debt is collateralized within the same fill.
-        // `supplyCollateral` is a benign inflow → no borrower authorization needed.
+        // check, so the new debt is collateralized within the same fill. Requires the
+        // borrower's `setIsAuthorized(this)` grant — see the header (L-ML-1).
         // Scoped approve + clear rather than a standing max grant: Midnight's
         // `take` lets an arbitrary caller nominate the payer via `takerCallback`,
         // so a lingering allowance from this contract to Midnight is pullable by
@@ -119,7 +137,8 @@ contract MidnightLoopCallback is ISellCallback {
 
     /// @dev Isolated in its own frame to keep {onSell} under the stack limit
     ///      without via-IR (matches the package's non-via-IR build).
-    function _swap(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint256 minOut)
+    ///      The floor is `ceil(amountIn · minRateWad / 1e18)` — see the header (L-ML-4).
+    function _swap(address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint256 minRateWad)
         private
         returns (uint256)
     {
@@ -135,7 +154,7 @@ contract MidnightLoopCallback is ISellCallback {
                 recipient: address(this),
                 deadline: block.timestamp,
                 amountIn: amountIn,
-                amountOutMinimum: minOut,
+                amountOutMinimum: (amountIn * minRateWad + 1e18 - 1) / 1e18,
                 sqrtPriceLimitX96: 0
             })
         );
