@@ -139,20 +139,20 @@ contract Audit20260930BridgeBehaviourTest is BridgeTestBase {
         assertEq(impl.isValidSignature(digest, new bytes(64)), bytes4(0xffffffff), "64-byte form too");
     }
 
-    /// End to end: an order whose maker is the implementation must not verify.
-    function test_audit_BRIDGE_B_1_orderMadeByImplementationDoesNotFill() public {
+    /// End to end through the shared verifier: an order whose maker is the
+    /// implementation, "signed" with 65 zero bytes, must not verify — the lens
+    /// runs exactly the check Settlement's `_verifySignature` falls through to.
+    function test_audit_BRIDGE_B_1_orderMadeByImplementationDoesNotVerify() public {
         (PositionFunnelFactory f,) = _factory();
         address impl = f.IMPLEMENTATION();
         Order memory o = _blank(1);
         o.maker = impl;
         o.legsIn = _legsIn1(address(tA), 1);
         o.legsOut = _legsOut1(address(tB), 1);
-        tA.mint(impl, 1);
-        _fundSolverOut(1);
+        bytes32 orderHash = _hashOrder(o);
 
-        vm.prank(solver);
         vm.expectRevert();
-        settlement.fill(o, new bytes(65), 1);
+        lens.checkSignature(orderHash, new bytes(65), impl);
     }
 
     /// A real funnel keeps working: the guard is the implementation / zero owner only.
