@@ -177,8 +177,28 @@ library PreFundGuard {
         return address(uint160(w >> 16));
     }
 
-    /// @notice The balance that was here BEFORE this fill's delivery.
-    /// @dev The underflow IS the check — a funding leg not addressed to this
+    /// @notice The balance that was here BEFORE this fill's delivery — EXACTLY so
+    ///         only for exact-transfer funding tokens, or under the core's
+    ///         delta-verify delivery mode.
+    /// @dev ⚠ `forAmount` IS THE PRICED DELIVERY, NOT THE MEASURED RECEIPT
+    ///      (2026-09-30 audit, L-LIB-9 / L-ED-7). The core records `outs[j] = amt`
+    ///      for a nominal push; it does not measure what landed here. For a
+    ///      fee-on-transfer token (or a stETH-style token that loses 1-2 wei per
+    ///      transfer) the module receives `forAmount - fee`, so this returns
+    ///      `pre - fee`, not `pre`. A caller that then spends the full `forAmount`
+    ///      draws `fee` out of whatever third-party residue of that token sits on
+    ///      the module; with no residue the subtraction underflows and the fill
+    ///      reverts (fail closed — such a token can never be pre-funded). The
+    ///      exposure is bounded by residue, which module-security-model [A2] limits
+    ///      to wei-scale rounding dust and donations, and it is reachable only on
+    ///      venues whose market/vault (and therefore asset) is maker-named and
+    ///      permissionless — Morpho Blue, Silo, Euler v2 (EVK vaults are created
+    ///      permissionlessly and the maker names them in `data`), Morpho Midnight
+    ///      and Teller — or wherever the venue address itself is maker-chosen.
+    ///      Accepted and documented (core stays asset-general; it would need a
+    ///      pre-delivery snapshot the core does not provide to detect it here).
+    ///
+    ///      The underflow IS the check — a funding leg not addressed to this
     ///      module in this token leaves `entry < forAmount` and this reverts. Sound
     ///      only above {requireSettlement}; see the header. Callers spend down to
     ///      this floor and never below it, which is also F19's rule (another
