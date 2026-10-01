@@ -68,7 +68,9 @@ function build() {
     /// Funding descriptors — `Base._forSlice` / `PreFundGuard` / `SettlementLens`.
     descriptors: {
       forLeg_3: hex(forLeg(3)),
-      forLegPreFund_1_WETH: hex(forLegPreFund(1, WETH)),
+      forLegPreFund_1_WETH: hex(forLegPreFund(1, WETH, 0)),
+      // Op in bits [244,252) — `PreFundModuleBase._preFundOp` must read 1 (Repay).
+      forLegPreFund_1_WETH_op1: hex(forLegPreFund(1, WETH, 1)),
       forBalance_WETH_default: hex(forBalance(WETH)),
       forBalance_WETH_8000: hex(forBalance(WETH, 8_000)),
       forBalance_WETH_1: hex(forBalance(WETH, 1)),

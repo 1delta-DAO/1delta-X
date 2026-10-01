@@ -93,17 +93,17 @@ describe("pre-funded funding descriptors", () => {
   // at the module and sign the venue's pre-fund variant") produced `>> 253 == 4`,
   // which the module refuses with `PreFundDescriptorRequired`.
   it("sets bits 255 and 253, leaving 254 clear", () => {
-    expect(forLegPreFund(0, "0x1111111111111111111111111111111111111111" as `0x${string}`) >> 253n).toBe(5n);
-    expect(isPreFundDesc(forLegPreFund(0, "0x1111111111111111111111111111111111111111" as `0x${string}`))).toBe(true);
+    expect(forLegPreFund(0, "0x1111111111111111111111111111111111111111" as `0x${string}`, 0) >> 253n).toBe(5n);
+    expect(isPreFundDesc(forLegPreFund(0, "0x1111111111111111111111111111111111111111" as `0x${string}`, 0))).toBe(true);
   });
 
   it("carries the leg index in the low bits", () => {
-    expect(forLegPreFund(7, "0x1111111111111111111111111111111111111111" as `0x${string}`) & 0xffffn).toBe(7n);
-    expect(forLegPreFund(0xffff, "0x1111111111111111111111111111111111111111" as `0x${string}`) & 0xffffn).toBe(0xffffn);
+    expect(forLegPreFund(7, "0x1111111111111111111111111111111111111111" as `0x${string}`, 0) & 0xffffn).toBe(7n);
+    expect(forLegPreFund(0xffff, "0x1111111111111111111111111111111111111111" as `0x${string}`, 0) & 0xffffn).toBe(0xffffn);
   });
 
   it("is DISTINCT from the pull-shaped forLeg, which the settler treats differently", () => {
-    expect(forLegPreFund(3, "0x1111111111111111111111111111111111111111" as `0x${string}`)).not.toBe(forLeg(3));
+    expect(forLegPreFund(3, "0x1111111111111111111111111111111111111111" as `0x${string}`, 0)).not.toBe(forLeg(3));
     expect(isPreFundDesc(forLeg(3))).toBe(false);
   });
 
@@ -115,9 +115,9 @@ describe("pre-funded funding descriptors", () => {
   });
 
   it("rejects an out-of-range leg index", () => {
-    expect(() => forLegPreFund(-1, "0x1111111111111111111111111111111111111111" as `0x${string}`)).toThrow();
-    expect(() => forLegPreFund(0x10000, "0x1111111111111111111111111111111111111111" as `0x${string}`)).toThrow();
-    expect(() => forLegPreFund(1.5, "0x1111111111111111111111111111111111111111" as `0x${string}`)).toThrow();
+    expect(() => forLegPreFund(-1, "0x1111111111111111111111111111111111111111" as `0x${string}`, 0)).toThrow();
+    expect(() => forLegPreFund(0x10000, "0x1111111111111111111111111111111111111111" as `0x${string}`, 0)).toThrow();
+    expect(() => forLegPreFund(1.5, "0x1111111111111111111111111111111111111111" as `0x${string}`, 0)).toThrow();
   });
 
   // A balance descriptor is bits 255+254 — `>> 253 == 6 or 7`, never 5.

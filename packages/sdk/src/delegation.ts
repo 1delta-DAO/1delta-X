@@ -20,7 +20,8 @@ import type { Deployment } from "./types";
  * which previously lived only in Solidity comments:
  *
  *   1. {@link SIGNER_NONCE_NS} — the reserved half of the nonce bitmap. Order
- *      nonces MUST stay below it; the settler does not enforce that, on purpose.
+ *      nonces MUST stay below it; the settler enforces that on every fill
+ *      (`OrderNonceReserved`), and {@link assertOrderNonce} refuses it at build time.
  *   2. the `OrderSignerPermit` EIP-712 type, for gasless nomination — and, at
  *      its own reserved `seq`, gasless revocation ({@link ORDER_SIGNER_REVOKE_SEQ}).
  *   3. {@link encodeRevokeOrderSigner} — revocation that actually sticks.

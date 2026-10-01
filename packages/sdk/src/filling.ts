@@ -1,8 +1,15 @@
-import { decodeFunctionResult, encodeFunctionData, type Address, type Hex } from "viem";
+import { decodeFunctionResult, encodeFunctionData, zeroAddress, type Address, type Hex } from "viem";
 
 import { SETTLEMENT_ABI } from "./abi";
 import { anchorTotal, currentAmountOutAt, fillAmountsOut, inputOwed } from "./pricing";
-import { OrderSide, type Order } from "./types";
+import {
+  DELTA_VERIFY_OUTPUTS_BIT,
+  FILL_ONCE_BIT_INDEX,
+  FILLER_SET_SENTINEL,
+  OrderSide,
+  unpackTiming,
+  type Order,
+} from "./types";
 import { packOrder } from "./packed";
 import { isProportional } from "./proportional";
 
@@ -14,6 +21,15 @@ const MAX_UINT256 = (1n << 256n) - 1n;
  * encode/decode the `fillUpTo` entrypoint. The on-chain twin of the local quote
  * is `SettlementLens.previewFill` — use that when you'd rather trust an
  * `eth_call` than a clock.
+ *
+ * ⚠ The price of a fill depends on WHO sends it. Inside a soft-exclusivity window
+ * every filler that is not the named `exclusiveFiller` (or a member of the signed
+ * filler SET) pays the maker-signed `exclusivityOverrideBps` premium on every
+ * maker-addressed SELL output — up to 2× at 10,000 bps. Every quote below
+ * therefore takes the address that will be `msg.sender` of the fill
+ * ({@link FillerContext.filler}); there is deliberately no "anonymous" default,
+ * because a router is by construction never the named filler (audit 2026-09-30,
+ * CORE-FILLER-1.v2).
  */
 
 const BPS = 10_000n;
@@ -22,55 +38,150 @@ function ceilDiv(a: bigint, b: bigint): bigint {
   return a === 0n ? 0n : (a - 1n) / b + 1n;
 }
 
+const eqAddr = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/** Who fills, and the block context the fill will be priced in. */
+export interface FillerContext {
+  /** The address that will SEND the fill (`msg.sender` of `fillUpTo` / `fill`). */
+  filler: Address;
+  /** `block.basefee` the fill is expected to land in (drives the gas bump). Default 0. */
+  baseFee?: bigint;
+  /**
+   * The priority-fee BID above the maker's baseline ({@link priorityBid}). REQUIRED
+   * for a priority-auction order (timing bit 103): such an order is priced by the
+   * bid, and the helpers throw `PricingNeedsContext` without one. Ignored otherwise.
+   */
+  priorityFee?: bigint;
+  /**
+   * The signed filler SET of a {@link FILLER_SET_SENTINEL} order — the addresses
+   * packed into its `curve` blob by `packFillerSet`. Required only when such an
+   * order is still inside its window.
+   */
+  fillerSet?: readonly Address[];
+}
+
+/**
+ * Mirror of `OrderGates.exclusivityOverride` (plus the delta-verify gate of
+ * `Core._snapshotOutRecipients`): the soft-exclusivity premium, in bps, that
+ * `filler` pays on this order at `now`.
+ *
+ *   • 0 outside the window, with no `exclusiveFiller`, or for the named filler /
+ *     a member of the signed set;
+ *   • `exclusivityOverrideBps` for an in-window outsider;
+ *   • throws `NotExclusiveFiller` where the settler refuses the outsider — a HARD
+ *     window (override 0), a soft window no leg can carry ({@link overrideHasCarrier}),
+ *     or any filler other than the named one on a delta-verify order (timing bit 104);
+ *   • throws `InvalidOverrideBps` above 10,000 and `MalformedFillerSet` for a set
+ *     order whose set is missing or empty.
+ *
+ * `now` is on the ORDER'S clock — a block number when timing bit 102 is set, else
+ * unix seconds — exactly as for the pricing helpers.
+ */
+export function exclusivityOverrideFor(
+  order: Order,
+  filler: Address,
+  now: bigint,
+  fillerSet?: readonly Address[],
+): bigint {
+  const ex = order.exclusiveFiller;
+  // A delta-verify order fills for its named filler only, for its whole life.
+  if ((order.timing >> DELTA_VERIFY_OUTPUTS_BIT) & 1n && !eqAddr(filler, ex)) {
+    throw new Error("NotExclusiveFiller: a delta-verify order fills only for its named exclusiveFiller");
+  }
+  if (eqAddr(ex, zeroAddress)) return 0n;
+  if (now >= BigInt(unpackTiming(order.timing).exclusivityEndTime)) return 0n;
+  let excluded: boolean;
+  if (eqAddr(ex, FILLER_SET_SENTINEL)) {
+    if (fillerSet === undefined || fillerSet.length === 0) {
+      throw new Error("MalformedFillerSet: pass the order's signed filler set (fillerSet) to quote a set order in its window");
+    }
+    excluded = !fillerSet.some((f) => eqAddr(f, filler));
+  } else {
+    excluded = !eqAddr(filler, ex);
+  }
+  if (!excluded) return 0n;
+  const bps = order.exclusivityOverrideBps;
+  if (bps === 0n || !overrideHasCarrier(order)) throw new Error("NotExclusiveFiller");
+  if (bps > BPS) throw new Error("InvalidOverrideBps");
+  return bps;
+}
+
 /**
  * Convert the filler's spend budget — denominated in the token the filler
- * DELIVERS, i.e. `legsOut[0].token` — into a `fillAmount` in the order's anchor
- * units. Side-aware:
- *   • BUY  — the anchor IS `legsOut[0]`, so the budget already is the fill
- *            amount (exact-input for the filler).
- *   • SELL — the output leg is auction-priced, so the budget converts through
- *            the current tick (exact-output for the filler): the largest
- *            `fillAmount` whose ceil-priced leg-0 delivery stays ≤ budget.
- *            Decay only lowers the price afterwards, so a fill submitted later
- *            never overspends the budget.
+ * DELIVERS, i.e. `legsOut[0].token` — into a `fillAmount` in the order's
+ * DENOMINATOR units: the maker-signed `fillTotal` when set, else the anchor leg
+ * (`legsIn[0]` for SELL, `legsOut[0]` for BUY). Returns the largest `fillAmount`
+ * whose leg-0 delivery, priced exactly as the settler prices it FOR `ctx.filler`
+ * at `now`, stays ≤ `budget`:
+ *   • BUY  — fixed output, cumulative-ceil slices of `legsOut[0].start`. With
+ *            `fillTotal == 0` the budget IS the fill amount; with a `fillTotal` it
+ *            is converted through `fillTotal / legsOut[0].start` (pass `prevFilled`
+ *            for an exact answer on a partially-filled order).
+ *   • SELL — the output leg is auction-priced, so the budget converts through the
+ *            current tick, LIFTED by the soft-exclusivity premium when `ctx.filler`
+ *            is an in-window outsider and leg 0 is maker-addressed.
+ *
+ * ⚠ The answer is exact for a fill priced at `now`/`baseFee`/`priorityFee`. It is
+ * NOT a promise about a fill included later: the price can move filler-ward with
+ * time (decay) but also AGAINST the filler — on a descending curve segment, under a
+ * falling basefee (gas bump), or by an oracle price module. Submit with
+ * `fillUpTo(..., minBumpBps)` quoted from the lens, or simulate with
+ * `SettlementLens.previewFill(order, amount, filler, …)`, and keep the approval you
+ * grant the settlement no larger than the budget.
+ *
  * Pass `remaining` (from the lens) to pre-clamp; `fillUpTo` clamps on-chain
- * regardless, so this only refines the quote. Multi-output orders: the budget
- * covers leg 0 only — check the full basket with {previewFillLocal}.
+ * regardless. A FILL-ONCE order (timing bit 100) is whole-or-nothing: if the budget
+ * cannot cover the whole remainder this returns 0. Multi-output orders: the budget
+ * covers leg 0 only — check the full basket with {@link previewFillLocal}.
+ * Fill-module orders are refused: the module, not the budget, decides the delta.
  */
 export function fillAmountFromBudget(
   order: Order,
   budget: bigint,
   now: bigint,
-  baseFee: bigint = 0n,
-  remaining?: bigint,
-  priorityFee: bigint = 0n,
+  ctx: FillerContext & { remaining?: bigint; prevFilled?: bigint },
 ): bigint {
+  if (!eqAddr(order.fillModule, zeroAddress)) {
+    throw new Error("fillAmountFromBudget: fill-module orders must be quoted via SettlementLens.previewFill");
+  }
+  const total = anchorTotal(order);
+  const prevFilled = ctx.prevFilled ?? 0n;
   let fillAmount: bigint;
   if (order.side === OrderSide.BUY) {
-    fillAmount = budget;
+    // Delivery = ceil(S·(p+d)/T) − ceil(S·p/T) ≤ budget  ⇔  d ≤ ⌊(budget + c)·T/S⌋ − p.
+    const s = order.legsOut[0]!.start;
+    if (s === 0n) return 0n;
+    const c = ceilDiv(s * prevFilled, total);
+    const reach = ((budget + c) * total) / s;
+    fillAmount = reach > prevFilled ? reach - prevFilled : 0n;
   } else {
-    // Pass the priority-fee bid you will actually send: on a priority-auction SELL
-    // the leg-0 tick moves toward `start` as you bid, so a zero-bid quote here would
-    // divide the budget by the floor price and OVERSTATE the fill amount.
-    const out0 = currentAmountOutAt(order, 0, now, baseFee, priorityFee);
-    fillAmount = out0 === 0n ? 0n : (budget * anchorTotal(order)) / out0;
+    const out0 = currentAmountOutAt(order, 0, now, ctx.baseFee ?? 0n, ctx.priorityFee);
+    const ov = exclusivityOverrideFor(order, ctx.filler, now, ctx.fillerSet);
+    const to = order.legsOut[0]!.recipient;
+    const lifted = ov !== 0n && (eqAddr(to, zeroAddress) || eqAddr(to, order.maker));
+    // paid = ceil(ceil(d·t/A)·(B+ov)/B) ≤ budget  ⇔  ceil(d·t/A) ≤ ⌊budget·B/(B+ov)⌋.
+    const effective = lifted ? (budget * BPS) / (BPS + ov) : budget;
+    fillAmount = out0 === 0n ? 0n : (effective * total) / out0;
   }
-  if (remaining !== undefined && fillAmount > remaining) fillAmount = remaining;
+  // `fillUpTo` would trim anything above the remainder anyway.
+  if (prevFilled < total && fillAmount > total - prevFilled) fillAmount = total - prevFilled;
+  if (ctx.remaining !== undefined && fillAmount > ctx.remaining) fillAmount = ctx.remaining;
+  if ((order.timing >> FILL_ONCE_BIT_INDEX) & 1n && prevFilled + fillAmount !== total) return 0n;
   return fillAmount;
 }
 
 /**
- * Local mirror of `Settlement.fillUpTo` / `SettlementLens.previewFill`:
- * clamp the request to the order's remaining size, then price every leg with
- * the contract's exact math. Identity (non-fillModule) orders only — a module
- * order's delta is the module's decision, quote it via the lens.
+ * Local mirror of `Settlement.fillUpTo` / `SettlementLens.previewFill` for the
+ * fill `ctx.filler` would send: clamp the request to the order's remaining size,
+ * then price every leg with the contract's exact math. Identity (non-fillModule)
+ * orders only — a module order's delta is the module's decision, quote it via the
+ * lens.
  *
- * `overrideBps` is the soft-exclusivity improvement a non-exclusive in-window
- * filler owes (0 outside the window or for the exclusive filler): maker-bound
- * SELL outputs are lifted by it, auctioned inputs discounted — byte-for-byte
- * the {Pricing} rules. If NO leg can carry it (fixed inputs, outputs all to third
- * parties) the contract refuses the outsider (`NotExclusiveFiller`), and so does
- * this function.
+ * Reverts where the settler reverts: `ZeroFill`, `FillTooSmall`, `OverFill`,
+ * `FillOnceMustBeFull` (timing bit 100), and the exclusivity gates of
+ * {@link exclusivityOverrideFor}. The soft-exclusivity premium is DERIVED from
+ * `ctx.filler` — maker-bound SELL outputs are lifted by it, auctioned inputs
+ * discounted — byte-for-byte the {Pricing} rules.
  *
  * `proportional` must be `true` for a Proportional ("sell my balance") order whose
  * marker you resolved before calling: the contract then does NOT trim an oversized
@@ -82,25 +193,26 @@ export function previewFillLocal(
   fillAmount: bigint,
   prevFilled: bigint,
   now: bigint,
-  baseFee: bigint = 0n,
-  overrideBps: bigint = 0n,
-  priorityFee: bigint = 0n,
-  proportional: boolean = false,
+  ctx: FillerContext & { proportional?: boolean },
 ): { delta: bigint; received: bigint[]; paid: bigint[] } {
-  if (order.fillModule !== "0x0000000000000000000000000000000000000000") {
+  if (!eqAddr(order.fillModule, zeroAddress)) {
     throw new Error("previewFillLocal: fill-module orders must be quoted via SettlementLens.previewFill");
   }
-  if (overrideBps !== 0n && !overrideHasCarrier(order)) throw new Error("NotExclusiveFiller");
+  if (fillAmount === 0n) throw new Error("ZeroFill");
+  const baseFee = ctx.baseFee ?? 0n;
+  const priorityFee = ctx.priorityFee;
   const total = anchorTotal(order);
   let delta = fillAmount;
   if (prevFilled < total) {
     const rem = total - prevFilled;
     // A proportional request is never trimmed down — see the note above.
-    if (delta > rem && (!proportional || delta === MAX_UINT256)) delta = rem;
+    if (delta > rem && (!ctx.proportional || delta === MAX_UINT256)) delta = rem;
   }
   if (delta < order.minFillAnchor) throw new Error("FillTooSmall");
   const newFilled = prevFilled + delta;
   if (newFilled > total) throw new Error("OverFill");
+  if ((order.timing >> FILL_ONCE_BIT_INDEX) & 1n && newFilled !== total) throw new Error("FillOnceMustBeFull");
+  const overrideBps = exclusivityOverrideFor(order, ctx.filler, now, ctx.fillerSet);
 
   const received = order.legsIn.map((leg, i) => {
     let owed = inputOwed(order, i, prevFilled, newFilled, now, baseFee, priorityFee);
@@ -112,7 +224,7 @@ export function previewFillLocal(
   const paid = fillAmountsOut(order, delta, now, prevFilled, baseFee, priorityFee).map((amt, j) => {
     // Override lifts only the MAKER's SELL legs — never a third-party fee leg.
     const to = order.legsOut[j]!.recipient;
-    const makerLeg = to === "0x0000000000000000000000000000000000000000" || to.toLowerCase() === order.maker.toLowerCase();
+    const makerLeg = eqAddr(to, zeroAddress) || eqAddr(to, order.maker);
     if (amt !== 0n && overrideBps !== 0n && order.side === OrderSide.SELL && makerLeg) {
       return ceilDiv(amt * (BPS + overrideBps), BPS);
     }
@@ -130,19 +242,17 @@ export function overrideHasCarrier(order: Order): boolean {
   const buy = order.side === OrderSide.BUY;
   if (order.legsIn.some((l) => (buy || l.end !== 0n) && !isProportional(l.start))) return true;
   if (buy) return false;
-  return order.legsOut.some(
-    (l) =>
-      l.recipient === "0x0000000000000000000000000000000000000000" ||
-      l.recipient.toLowerCase() === order.maker.toLowerCase(),
-  );
+  return order.legsOut.some((l) => eqAddr(l.recipient, zeroAddress) || eqAddr(l.recipient, order.maker));
 }
 
 /**
  * Encode `Settlement.fillUpTo` calldata. `recipient` zero ⇒ pay the caller.
  * `minBumpBps` is the filler's price floor on the resolved decay bump (0 = off):
  * quote it from `previewFill`/the lens and the fill reverts `BumpTooLow` if the
- * included price lands below the quote — only an oracle price module or a
- * falling basefee (gas bump) can move it there.
+ * included price lands below the quote — which a descending curve segment, a
+ * falling basefee (gas bump) or an oracle price module can each cause. It does
+ * NOT cover the soft-exclusivity premium, which depends on the sender, not the
+ * clock: quote with the address that will send the fill.
  */
 export function encodeFillUpTo(args: {
   order: Order;

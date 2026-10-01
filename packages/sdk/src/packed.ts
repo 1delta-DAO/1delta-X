@@ -193,12 +193,11 @@ export function packOrder(order: Order): WireOrder {
   }
   // The nonce bitmap is ONE space shared by two signed artifacts: orders, and the
   // `OrderSignerPermit` that nominates a delegated signer. The settler keeps them
-  // apart by consuming a permit at `nonce | SIGNER_NONCE_NS` (bit 255), and
-  // deliberately does NOT range-check order nonces — that would tax the hot path of
-  // every fill forever to guard a range no allocator picks. So the guard is here,
-  // which is where the order is actually built. Without it an order signed above
-  // 2^255 collides with a nomination, and relaying that nomination silently cancels
-  // the order. See `NonceManager.SIGNER_NONCE_NS` and `docs/reference-audits.md` §F17.
+  // apart by consuming a permit at `nonce | SIGNER_NONCE_NS` (bit 255), and every
+  // fill reverts `OrderNonceReserved` on an order nonce with bit 255 set
+  // (`Base._gateOrderPost`). This build-time guard catches the mistake earlier —
+  // before a maker signs an order that could never fill. See
+  // `NonceManager.SIGNER_NONCE_NS` and `docs/reference-audits.md` §F17/§F24.
   assertOrderNonce(order.nonce);
   // The two fields this function folds into bit positions must be in range, or
   // the fold writes a NEIGHBOURING flag: `side = 2` would set bit 102 (the BLOCK

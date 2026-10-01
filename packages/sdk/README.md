@@ -88,13 +88,18 @@ const data = encodeFill(order, sig, 2_000_000_000n);
 One signature authorizes the order **and** every Permit3 token/taker allowance:
 
 ```ts
-import { permitBatch, tokenPermit, takerPermit, signPermitWitness, refOf, encodeFillWithPermit } from "@1delta-x/sdk";
+import {
+  permitBatch, tokenPermit, takerPermit, signPermitWitness, refOf, encodeFillWithPermit,
+  permit3Nonce, Permit3MessageKind,
+} from "@1delta-x/sdk";
 
 const batch = permitBatch(
   [tokenPermit(dep.settlement, "0xUSDC", 2_000_000_000n, 1893456000)],
-  [takerPermit(dep.settlement, refOf(order.items[0].data), 1_500_000_000n, 1893456000)],
-  0n,          // permit nonce
-  1893456000n, // permit deadline
+  // (spender, module, ref, amount, expiration) — the taker book is keyed by the
+  // spender AND the module, so a grant cannot be replayed through another module.
+  [takerPermit(dep.settlement, order.items[0].module, refOf(order.items[0].data), 1_500_000_000n, 1893456000)],
+  permit3Nonce(Permit3MessageKind.Batch, 0n), // namespaced permit nonce (asserted at sign + encode time)
+  1893456000n,                                // permit deadline
 );
 
 const sig = await signPermitWitness(maker, batch, order, dep);
@@ -126,9 +131,33 @@ const data = encodeExecuteFillMultiInput({
 import { currentAmountOut, fillAmountsOut } from "@1delta-x/sdk";
 
 const now = BigInt(Math.floor(Date.now() / 1000));
-const prices = currentAmountOut(order, now);            // per-output dutch tick
-const out = fillAmountsOut(order, 1_000_000_000n, now); // delivered amounts (ceil, per leg)
+const prices = currentAmountOut(order, now, baseFee);            // per-output dutch tick
+const out = fillAmountsOut(order, 1_000_000_000n, now, 0n, baseFee); // delivered amounts (ceil, per leg)
 ```
+
+A **priority-auction** order (timing bit 103) is priced by the filler's bid, so
+every pricing helper throws `PricingNeedsContext` unless you pass that bid as
+`priorityFee` (from `priorityBid(effectiveGasPrice, baseFee, baseline)`) — the
+same refusal as the contract's context-free views.
+
+### Sizing a fill from a budget
+
+The price depends on **who sends the fill**: inside a soft-exclusivity window an
+outsider pays the maker-signed override on every maker-addressed SELL output (up
+to 2×). So the fill helpers take the sender:
+
+```ts
+import { fillAmountFromBudget, previewFillLocal, encodeFillUpTo } from "@1delta-x/sdk";
+
+const ctx = { filler: myRouter, baseFee };                 // + priorityFee for priority orders
+const amount = fillAmountFromBudget(order, budget, now, ctx); // fillTotal-aware, override-aware
+const { paid } = previewFillLocal(order, amount, prevFilled, now, ctx);
+```
+
+The result is exact for a fill priced at `now`; a later inclusion can price
+against you (descending curve segment, falling basefee, oracle price module), so
+send `fillUpTo` with `minBumpBps` and keep your approval no larger than the budget.
+The authoritative quote is `SettlementLens.previewFill(order, amount, filler, …)`.
 
 ## Priority auctions
 
@@ -249,6 +278,12 @@ filler that already holds the signed order. Anything that must not fill needs on
 of the on-chain cancels. Full rationale, including why an amend takes a fresh
 nonce: [docs/soft-cancel.md](../../docs/soft-cancel.md).
 
+The nonce rule is enforced: an ordinary replacement must take a fresh nonce
+(`patchOrder` throws on `prev.nonce`), while a **fill-once** order — typically a
+shared-nonce bracket leg — keeps `prev.nonce` so it stays in its bracket (pass
+`nextNonce = prev.nonce`; `{ leaveNonceGroup: true }` opts out). Draw random
+order nonces with `randomOrderNonce()`, which stays below 2^255.
+
 ## Brackets (one-cancels-other)
 
 A group of the maker's own orders of which at most one may fill.
@@ -257,6 +292,8 @@ A group of the maker's own orders of which at most one may fill.
 import { ocoNonceGroup, ocoGroup } from "@1delta-x/sdk";
 
 // Free, zero contracts, WHOLE-FILL ONLY: one shared nonce + the fill-once bit.
+// A shared nonce WITHOUT the bit is not a bracket — both legs fill. Hand-built
+// sets can be checked with assertNonceSiblingsFillOnce(orders).
 const [tp, sl] = ocoNonceGroup([takeProfit, stopLoss], sharedNonce);
 
 // Partial-fill capable, N-way: OcoGroupModule's validator + claim item on each

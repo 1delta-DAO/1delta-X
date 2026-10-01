@@ -1,9 +1,9 @@
 import type { Hex } from "viem";
 
 import { hashOrderStruct, signOrder, type TypedDataSigner } from "./orders";
-import { renonceOcoItems } from "./oco";
+import { isFillOnce, renonceOcoItems } from "./oco";
 import { buildSoftCancel, signSoftCancel, type SoftCancel } from "./softcancel";
-import type { Deployment, Order } from "./types";
+import { assertOrderNonce, type Deployment, type Order } from "./types";
 
 /**
  * Cancel-and-replace — "amend" as one operation.
@@ -18,7 +18,8 @@ import type { Deployment, Order } from "./types";
  *
  * {@link amendOrder} is that gesture. It produces:
  *
- *   • `order` — the replacement, on a FRESH nonce (see below),
+ *   • `order` — the replacement, on a FRESH nonce (a fill-once order keeps its
+ *     nonce — see below),
  *   • `sig`   — the maker's signature over it,
  *   • `cancel` + `cancelSig` — a signed {@link SoftCancel} retracting the
  *     previous hash,
@@ -33,7 +34,24 @@ import type { Deployment, Order } from "./types";
  * its replacement would share a single kill switch, and cancelling the amended
  * order would also invalidate the fills the predecessor is still owed. A fresh
  * nonce keeps the two orders independent on-chain, which is what "replace"
- * means everywhere else.
+ * means everywhere else. So for an ordinary order the fresh nonce is ENFORCED:
+ * {@link patchOrder} throws when the replacement would reuse `prev.nonce`. Two
+ * same-nonce orders also share an `OcoGroupModule` claim slot, so a reused nonce
+ * lets predecessor AND replacement both fill despite the group (audit 2026-09-30,
+ * PRICE-5).
+ *
+ * The one exception: FILL-ONCE orders (timing bit 100)
+ * ───────────────────────────────────────────────────
+ * A fill-once order cannot be partially filled, so the kill-switch argument above
+ * does not apply — and a fill-once order is usually a leg of a zero-contract
+ * {@link ocoNonceGroup} bracket, which is held together by NOTHING BUT the shared
+ * nonce. A replacement on a fresh nonce silently leaves the bracket, and then a
+ * sibling and the replacement can both fill (audit 2026-09-30, G-TS_SIGN-2). So a
+ * fill-once replacement KEEPS `prev.nonce`: it stays in the bracket, and the first
+ * full fill of ANY member — predecessor, replacement or sibling — consumes the
+ * nonce and retires the rest on-chain, with no transaction and no trust in a
+ * book. Pass `nextNonce = prev.nonce`; a different nonce throws unless you opt
+ * out explicitly with `{ leaveNonceGroup: true }`.
  *
  * The consequence is stated plainly: after an amend, the OLD order is retracted
  * only from books that honour the soft cancel. A filler that already holds it
@@ -45,10 +63,12 @@ import type { Deployment, Order } from "./types";
  *
  * Alternatively, sign the pair as an OCO group (`docs/oco.md`) — then the
  * predecessor is retired ON-CHAIN by the replacement's first fill, with no
- * transaction and no trust in any book.
+ * transaction and no trust in any book. For an `OcoGroupModule` leg that needs
+ * the fresh nonce this function enforces (the claim item is re-homed for you);
+ * for a shared-nonce leg it needs the SAME nonce, which is the fill-once rule above.
  */
 export interface AmendResult {
-  /** The replacement order (fresh nonce, patched fields). */
+  /** The replacement order (patched fields; fresh nonce, or `prev.nonce` for a fill-once order). */
   order: Order;
   /** Maker signature over `order`. */
   sig: Hex;
@@ -70,18 +90,55 @@ export interface AmendResult {
  */
 export type OrderPatch = Partial<Omit<Order, "maker" | "nonce">> & { nonce?: bigint };
 
+/** Options for {@link patchOrder} / {@link amendOrder}. */
+export interface AmendOptions {
+  /**
+   * FILL-ONCE predecessors only: move the replacement to the fresh `nextNonce`
+   * anyway, deliberately taking it OUT of any shared-nonce bracket it was in. Both
+   * the replacement and a former sibling can then fill.
+   */
+  leaveNonceGroup?: boolean;
+}
+
 /**
- * Apply `patch` to `prev` on a fresh nonce. Pure — no signing, no clock.
- * Exposed separately so a caller can inspect (or price-preview) the replacement
- * before asking a wallet to sign it.
+ * Apply `patch` to `prev`. Pure — no signing, no clock. Exposed separately so a
+ * caller can inspect (or price-preview) the replacement before asking a wallet to
+ * sign it.
+ *
+ * Nonce rule (see the module header):
+ *   • ordinary order — the replacement MUST take a fresh nonce; `nextNonce` (or
+ *     `patch.nonce`) equal to `prev.nonce` throws;
+ *   • fill-once order — the replacement KEEPS `prev.nonce` so it stays in its
+ *     shared-nonce bracket; a different nonce throws unless
+ *     `opts.leaveNonceGroup` is set.
  *
  * `nextNonce` is required rather than derived: nonce allocation is the caller's
- * book-keeping (a desk numbering sequentially, a UI drawing random 256-bit
- * values), and silently guessing `prev.nonce + 1` would collide the moment two
- * amends race.
+ * book-keeping (a desk numbering sequentially, a UI drawing random values with
+ * {@link randomOrderNonce} — order nonces must stay below 2^255, the settler
+ * reverts `OrderNonceReserved` otherwise), and silently guessing `prev.nonce + 1`
+ * would collide the moment two amends race.
  */
-export function patchOrder(prev: Order, nextNonce: bigint, patch: OrderPatch = {}): Order {
-  const nonce = patch.nonce ?? nextNonce;
+export function patchOrder(prev: Order, nextNonce: bigint, patch: OrderPatch = {}, opts: AmendOptions = {}): Order {
+  const requested = patch.nonce ?? nextNonce;
+  let nonce: bigint;
+  if (isFillOnce(prev) && !opts.leaveNonceGroup) {
+    if (requested !== prev.nonce) {
+      throw new Error(
+        `patchOrder: prev is FILL-ONCE (timing bit 100) — likely a shared-nonce OCO leg — so the replacement keeps ` +
+          `nonce ${prev.nonce} to stay in its bracket. Pass nextNonce = prev.nonce, or { leaveNonceGroup: true } ` +
+          `to deliberately leave the group (siblings and the replacement could then both fill).`,
+      );
+    }
+    nonce = prev.nonce;
+  } else {
+    if (requested === prev.nonce) {
+      throw new Error(
+        `patchOrder: the replacement must carry a FRESH nonce, not prev.nonce ${prev.nonce} — two same-nonce orders ` +
+          `share one OcoGroupModule claim slot and one kill switch, so predecessor and replacement could both fill.`,
+      );
+    }
+    nonce = assertOrderNonce(requested);
+  }
   // An OCO claim item names the order's nonce a second time; carrying the
   // predecessor's copy onto the replacement is exactly the cancel-and-replace
   // shape that revived a soft-cancelled leg (F29 finding 3). Re-home it unless
@@ -104,10 +161,10 @@ export async function amendOrder(
   nextNonce: bigint,
   patch: OrderPatch,
   d: Deployment,
-  opts?: { now?: bigint; ttlSeconds?: bigint },
+  opts?: { now?: bigint; ttlSeconds?: bigint } & AmendOptions,
 ): Promise<AmendResult> {
   const replaces = hashOrderStruct(prev);
-  const order = patchOrder(prev, nextNonce, patch);
+  const order = patchOrder(prev, nextNonce, patch, { leaveNonceGroup: opts?.leaveNonceGroup });
   const orderHash = hashOrderStruct(order);
   if (orderHash === replaces) throw new Error("amendOrder: patch is a no-op (identical order hash)");
 
