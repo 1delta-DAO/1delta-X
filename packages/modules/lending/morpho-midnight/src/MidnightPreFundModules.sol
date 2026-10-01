@@ -13,16 +13,22 @@ import {IMidnight, Market, MidnightIdLib} from "./interfaces/IMidnight.sol";
 //
 // "Supply whatever the conversion delivered as collateral" and "repay whatever
 // the conversion delivered", with ZERO receive-side approvals: the maker signs
-// the converted output leg with `recipient = module` and a `TAKE_FOR` item whose
-// leg-reference descriptor points at it. The core sizes `forAmount` to exactly
-// what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}), auction
-// decay included, and this module supplies/repays it from its own balance. The
-// maker's only grants are the ones they had anyway: the ERC20+Permit3 approval
-// on the asset they are CONVERTING FROM (the input leg), and the taker allowance
-// below. The received asset needs nothing — it never transits the maker's
-// wallet, and Midnight's `supplyCollateral` / `repay` are PERMISSIONLESS on
-// someone else's behalf (benign inflows, no `setIsAuthorized`), so the receive
-// side is empty end to end.
+// the converted output leg with `recipient = module` and a pre-funded `MAKE` item
+// whose leg-reference descriptor points at it. The core sizes `forAmount` to
+// exactly what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}),
+// auction decay included, and this module supplies/repays it from its own
+// balance. The received asset needs no token approval — it never transits the
+// maker's wallet. No Permit3 taker allowance is granted or spent on this seam.
+//
+// ⚠ BUT IT IS NOT GRANT-FREE ON MIDNIGHT. The deployed venue gates BOTH
+// `supplyCollateral` and `repay` on `onBehalf == msg.sender ||
+// isAuthorized[onBehalf][msg.sender]` (verified against `morpho-org/midnight`
+// and the Base singleton 0xAded…A18A, which reverts `Unauthorized()`). So the
+// maker must once call `midnight.setIsAuthorized(thisModule, true, maker)` —
+// a FULL-control grant this module only ever uses for the op the maker signed,
+// behind the `msg.sender == settlement` pin. This header used to call both ops
+// PERMISSIONLESS (audit 2026-09-30 L-ML-1); that was true of the old test mock,
+// never of the venue.
 //
 //  WHICH Midnight ops fit the pre-fund shape — and which don't
 //  ───────────────────────────────────────────────────────
@@ -37,9 +43,8 @@ import {IMidnight, Market, MidnightIdLib} from "./interfaces/IMidnight.sol";
 //      — so "fund the op with whatever was delivered" cannot hold; the leg is
 //      full-fill-only (its `units` cannot pro-rate, {MidnightLendModule}'s
 //      guard) which forfeits the pacing the descriptor exists to provide; and
-//      it needs the maker's `setIsAuthorized` anyway, so the zero-grant receive
-//      side — the shape's other half — is unreachable. Lend stays a pull-funded
-//      MAKE ({MidnightLendModule}).
+//      it is not delivery-sized anyway. Lend stays a pull-funded MAKE
+//      ({MidnightLendModule}).
 //
 //  Why these ride the MAKE seam
 //  ────────────────────────────
@@ -160,23 +165,15 @@ contract MidnightPreFundModule is PreFundModuleBase, IMakerModule, IFundingSourc
         // Cap at the LIVE debt — Midnight reverts on over-repay, and the maker
         // cannot know the exact figure at signing.
         //
-        // ⚠ UNITS vs LOAN TOKENS (F27, Midnight lead). `debt` is denominated in
-        // DEBT UNITS and `forAmount` in loan tokens, so the `min` below compares
-        // two dimensions and `toRepay` then serves as both an approval (tokens)
-        // and a repay argument (units). That rests on "1 unit == 1 loan token at
-        // repayment", which this repo asserts in a comment and confirms with no
-        // on-chain read — Midnight is a ZERO-COUPON, fixed-maturity book, and a
-        // zero-coupon instrument repaid before maturity normally settles BELOW
-        // face. There is no deployed Midnight to fork against, so the equality
-        // stays unverified.
-        //
-        // What that costs is now bounded, which is why this is a note and not a
-        // finding. The sweep below returns everything above the floor rather than
-        // `forAmount - toRepay`, so a discount that makes the pull smaller than
-        // `toRepay` is swept back to the maker instead of stranding on the
-        // singleton (that subtraction — loan tokens minus units — WAS the leak).
-        // If a unit ever costs MORE than a token the scoped approval is short and
-        // the venue reverts. Both directions fail safe; only the cap is imprecise.
+        // UNITS vs LOAN TOKENS (F27, Midnight lead) — now VERIFIED. `debt` is in
+        // debt units and `forAmount` in loan tokens; the `min` below is sound
+        // because the deployed `repay` pulls EXACTLY `units` loan tokens
+        // (`safeTransferFrom(loanToken, payer, this, units)`, `morpho-org/midnight`
+        // `Midnight.sol`, re-read 2026-09-30 against the live Base singleton) — a
+        // unit is retired at face, there is no early-repay discount. The sweep
+        // below still returns everything above the floor rather than
+        // `forAmount - toRepay`, so even a venue change in either direction fails
+        // safe.
         uint256 debtUnits = midnight.debt(MidnightIdLib.toId(market), onBehalfOf);
         uint256 toRepay = forAmount < debtUnits ? forAmount : debtUnits;
         if (toRepay != 0) {

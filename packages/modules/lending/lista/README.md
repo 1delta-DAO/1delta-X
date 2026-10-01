@@ -20,7 +20,7 @@ side of a brokered market runs through a **`LendingBroker`**. Depends on `@core`
 | `ListaSupplyCollateralModule` | MAKE | `abi.encode(moolah, MarketParams[, permit])` |
 | `ListaBrokerModule` (op 0) | MAKE | `abi.encode(uint8(0), broker, loanToken, loanId[, DustAction[, permit]])` — PULL-funded repay |
 | `ListaBrokerModule` (op 0) | MAKE (preFund) | `abi.encode(forDesc, broker, loanToken, loanId)` — same repay, funded from the delivered leg; op rides in descriptor bits [244,252) |
-| `ListaBrokerModule` (op 1) | TAKE | `abi.encode(uint8(1), broker, termId[, moolah, authBlock])` — fixed-term borrow → receiver |
+| `ListaBrokerModule` (op 1) | TAKE | `abi.encode(uint8(1), broker, termId, maxApr, duration, totalAmount[, moolah, authBlock])` — fixed-term borrow → receiver; base 192, moolah@192, auth block@224 |
 | `ListaTakerModule` (op 0) | — | RESERVED. The borrow used to live here; the slot is kept so ops 1/2 keep their wire values, and reverts `BadOp(0)` |
 | `ListaTakerModule` (op 1) | TAKE | `abi.encode(uint8(1), moolah, MarketParams[, BalanceMode])` — withdraw collateral → receiver |
 | `ListaTakerModule` (op 2) | TAKE | `abi.encode(uint8(2), provider, moolah, MarketParams[, BalanceMode])` — withdraw via an ERC20-forwarding provider; venue and auth target split |
@@ -119,11 +119,45 @@ provider shapes, oracle wiring, mutable term menus).
 - Partial repays leaving `0 < remaining < Moolah.minLoan` (~$15) revert
   `broker/fixed-below-min-loan`; term menus are bot-mutable (termIds are NOT
   stable — read `getFixedTerms()` live before encoding a borrow).
+- **`termId` does not pin the price — the borrow blob signs it** (2026-09-30,
+  L-ML-2). The broker BOT can `updateFixedTermAndRate` an EXISTING termId in
+  place (any duration, 0.5%–30% APR), and the broker books the term LIVE at
+  execution. The borrow blob therefore carries a maker-signed `maxApr` (in the
+  broker's `(1 + r) · 1e27` scale; sign `1.3e27` to accept any rate) and the
+  exact `duration`, and the module post-checks the position the broker just
+  pushed (`userFixedPositions(maker)`, last entry): `apr ≤ maxApr`,
+  `end − start == duration`, `principal == amount`, else `TermMismatch`. Both
+  words are mandatory — `0` fails every borrow.
+- **Each borrow slice is its own fixed tranche** (L-ML-6). `broker.borrow`
+  opens a NEW `FixedLoanPosition` per call (own start/end, the APR live at that
+  fill), capped at `maxFixedLoanPositions` (100) per user. Sign `totalAmount`
+  (= the item amount) to make the borrow full-fill only and book exactly one
+  tranche; `0` allows partial fills (or set the order's `minFillAnchor` to the
+  anchor).
+- **A Moolah revoke does not kill a live signed auth tail** (L-ML-9). The
+  optional `setAuthorizationWithSig` tail sits in public order data and anyone
+  may relay it until its deadline; Moolah's `setAuthorization(module, false)`
+  does NOT consume the signed nonce, so it can restore the module's global
+  authorization. The module still only acts through spender-keyed Permit3
+  taker grants on maker-signed data, so nothing moves without a live grant +
+  order — but to make a venue-level revoke stick, cancel the order /
+  `Permit3.lockdownAll`, or burn the nonce by relaying
+  `setAuthorizationWithSig(isAuthorized = false)` at the same nonce. The same
+  holds for every Morpho-shaped auth tail (Morpho Blue modules).
+- **`fundingSource` reports per funding shape** (L-ML-5): the pre-funded repay
+  reports `max` (it is funded by the fill's own delivery); the PULL repay
+  reports `min(balance, Permit3 grant to the module)` — what
+  `permit3.transferFrom` will actually draw.
 
 ## Tests
 
 Fork BNB Chain where Lista/Moolah is deployed (set an RPC endpoint). The
-`security/` auth check runs without a fork.
+`security/` auth check runs without a fork. The default pin (block 113.02M)
+predates the broker's implementation upgrade; `security/Audit20260930Lista`
+re-runs its regressions (BOT reprice / re-duration, one-tranche total,
+per-shape `fundingSource`, op-1 `Full`, partial-fill tranches, cross-principal
+grant isolation) against the CURRENT implementation too
+(`ListaAuditLiveImpl20260930Test`, block 125.15M).
 
 ```
 FOUNDRY_PROFILE=modules-lista forge test --root ../../../..

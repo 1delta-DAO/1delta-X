@@ -56,7 +56,9 @@ interface IMidnight {
     // ── Position lifecycle ──
 
     /// @dev Inflow: pulls `assets` of `market.collateralParams[collateralIndex].token`
-    ///      from `msg.sender` and credits it as collateral to `onBehalf`.
+    ///      from `msg.sender` and credits it as collateral to `onBehalf`. Requires
+    ///      `msg.sender == onBehalf` or `isAuthorized[onBehalf][msg.sender]`
+    ///      (collateral-poisoning guard) — NOT permissionless.
     function supplyCollateral(Market memory market, uint256 collateralIndex, uint256 assets, address onBehalf) external;
 
     /// @dev Outflow: sends `assets` of the indexed collateral from `onBehalf`'s
@@ -71,7 +73,9 @@ interface IMidnight {
     ) external;
 
     /// @dev Inflow: reduces `onBehalf`'s debt by `units`. With `callback == 0`
-    ///      the loan token is pulled from `msg.sender`; over-repay reverts.
+    ///      the loan token is pulled from `msg.sender`; over-repay reverts. Pulls
+    ///      exactly `units` loan tokens (1 unit == 1 token at repayment). Requires
+    ///      `msg.sender == onBehalf` or `isAuthorized[onBehalf][msg.sender]`.
     function repay(Market memory market, uint256 units, address onBehalf, address callback, bytes calldata data)
         external;
 
@@ -105,14 +109,32 @@ interface IMidnight {
         external;
 
     /// @dev Grants/revokes `authorized` the right to manage `onBehalf`'s position.
+    ///      Callable by `onBehalf` OR any address it already authorized — a grant
+    ///      is FULL control, re-delegation included.
     function setIsAuthorized(address authorized, bool newIsAuthorized, address onBehalf) external;
+
+    /// @dev PERMISSIONLESS. Applies `user`'s pending loss-factor slash and accrued
+    ///      continuous fee to their stored credit (what `withdraw` / `take` do
+    ///      first) and returns the UPDATED `(credit, pendingFee, accruedFee)`.
+    ///      Selector 0x545e513a, present on the Base singleton.
+    function updatePosition(Market memory market, address user) external returns (uint128, uint128, uint128);
+
+    /// @dev View twin of {updatePosition} (selector 0xd4de4974); `id` must be
+    ///      `MidnightIdLib.toId(market)`.
+    function updatePositionView(Market memory market, bytes32 id, address user)
+        external
+        view
+        returns (uint128, uint128, uint128);
 
     // ── Position views (keyed by the market `id`) ──
 
     /// @dev Live debt of `user` in market `id`, in debt units.
     function debt(bytes32 id, address user) external view returns (uint128);
 
-    /// @dev Live credit (lend balance) of `user` in market `id`, in credit units.
+    /// @dev STORED credit (lend balance) of `user` in market `id`, in credit units.
+    ///      ⚠ NOT up to date: the pending slash and continuous fee are applied
+    ///      lazily, so `withdraw(credit())` can underflow. Size a full exit from
+    ///      {updatePosition} instead.
     function credit(bytes32 id, address user) external view returns (uint128);
 
     /// @dev `user`'s collateral amount at `index` in market `id`.

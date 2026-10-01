@@ -27,6 +27,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         bytes memory borrowData = _borrowData(borrowUnits, borrowUnits);
 
         _makerApproveToken(address(supplyModule), address(COLL), collateralIn);
+        _makerAuthorize(address(supplyModule)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
         _makerApproveTaker(address(borrowModule), keccak256(borrowData), borrowUnits);
         _makerAuthorize(address(borrowModule));
         _approveSolverColl(collateralIn);
@@ -66,6 +67,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         bytes memory wcData = _withdrawCollateralData(0, 0); // Exact
 
         _makerApproveToken(address(repayModule), address(LOAN), debtUnits);
+        _makerAuthorize(address(repayModule)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
         _makerApproveTaker(address(takerModule), keccak256(wcData), collat);
         _makerAuthorize(address(takerModule));
         _approveSolverLoan(debtUnits);
@@ -103,6 +105,7 @@ contract MidnightFlowsTest is MidnightModulesBase {
         bytes memory wcData = _withdrawCollateralData(1, collForward); // Full
 
         _makerApproveToken(address(repayModule), address(LOAN), debtUnits);
+        _makerAuthorize(address(repayModule)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
         _makerApproveTaker(address(takerModule), keccak256(wcData), collForward);
         _makerAuthorize(address(takerModule));
         _approveSolverLoan(debtUnits);

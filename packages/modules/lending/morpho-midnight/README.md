@@ -45,10 +45,22 @@ cap and full-mode withdrawals can read `debt` / `credit` / `collateral`.
 |---|---|---|---|
 | [`MidnightSupplyCollateralModule`](src/MidnightModules.sol) | MAKE | pull collateral → `supplyCollateral(onBehalf = maker)` | `abi.encode(Market, collateralIndex)` |
 | [`MidnightRepayModule`](src/MidnightModules.sol) | MAKE | read `debt(id, maker)` → pull-exact `repay(min(amount, debt))`, `callback = 0` | `abi.encode(Market)` |
-| [`MidnightLendModule`](src/MidnightModules.sol) | MAKE | pull loan-token budget → `take(offer.buy = false, taker = maker)` (buy credit); sweep unspent to maker | `abi.encode(Offer, ratifierData, units)` |
-| [`MidnightTakerModule`](src/MidnightModules.sol) | TAKE | combined: `op=0` → `withdrawCollateral`; `op=1` → `withdraw` (redeem credit). Exact / Full mode. | `abi.encode(uint8 op, Market, collateralIndex, uint8 balanceMode)` |
-| [`MidnightBorrowModule`](src/MidnightModules.sol) | TAKE | `take(offer.buy = true, taker = maker)` (sell debt units) → forward proceeds to `receiver` | `abi.encode(Offer, ratifierData, units)` |
+| [`MidnightLendModule`](src/MidnightModules.sol) | MAKE | pull loan-token budget → `take(offer.buy = false, taker = maker)` (buy credit); sweep unspent to maker. Full-fill only | `abi.encode(Offer, bytes ratifierData, uint256 units, uint256 totalAmount)` |
+| [`MidnightTakerModule`](src/MidnightModules.sol) | TAKE | combined: `op=0` → `withdrawCollateral`; `op=1` → `withdraw` (redeem credit). Exact / Full mode (Full credit sized from `updatePosition`, not the stale `credit()`) | `abi.encode(uint8 op, Market, uint256 collateralIndex, uint8 balanceMode, uint256 totalAmount)` |
+| [`MidnightBorrowModule`](src/MidnightModules.sol) | TAKE | `take(offer.buy = true, taker = maker)` (sell debt units) → forward proceeds to `receiver`; reverts if the proceeds fall short of `amount`. Full-fill only | `abi.encode(Offer, bytes ratifierData, uint256 units, uint256 totalAmount)` |
+| [`MidnightPreFundModule`](src/MidnightPreFundModules.sol) | MAKE (pre-funded) | supply-collateral / repay funded by the fill's own delivered output leg | `abi.encode(forDesc, Market[, collateralIndex])` |
+| [`MidnightLoopCallback`](src/MidnightLoopCallback.sol) | offer `callback` | borrow-and-loop: swaps a sell offer's proceeds to collateral and supplies it for the borrower | `callbackData = abi.encode(uint256 collateralIndex, uint24 dexFee, uint256 minRateWad)` |
 | [`interfaces/IMidnight.sol`](src/interfaces/IMidnight.sol) | — | structs + minimal Midnight surface + `MidnightIdLib.toId` | — |
+
+> **`totalAmount` is mandatory and the layouts are checked strictly.** The
+> trailing `totalAmount` (the item's full signed amount; `0` for Taker `Exact`) is
+> what {FullFillGuard} compares the fill slice against. Because `Market` / `Offer`
+> are dynamic tuples, solc would decode an OLDER, shorter blob without it and read
+> the first tail word as the total (a market's `chainId`, an offer's inner offset
+> `0x1e0`) — a constant a dust slice can match. The modules therefore pin the
+> dynamic member's head offset to the exact head size (`0xa0` for the Taker,
+> `0x80` for Lend/Borrow) and revert `MalformedData()` otherwise; the Taker also
+> rejects `balanceMode > 1` (`BadBalanceMode`).
 
 MAKE constructors take `(permit3, midnight, settlement)`; TAKE constructors take
 `(permit3, midnight)`. The Midnight singleton is fixed at deploy time; the market
@@ -63,7 +75,7 @@ Settlement and the solver can never widen them:
 |---|---|---|
 | Permit3 **token** allowance (`approveToken(module, token, cap)`) | Permit3 | MAKE legs — how much of *this token* the module may pull (supply, repay, lend budget) |
 | Permit3 **taker** allowance (`approveTaker(settlement, module, ref, cap, expiry)`) | Permit3, TAKE only | how much may be drawn on *this exact item* (`ref = keccak256(data)`); keyed by **spender = Settlement** |
-| Midnight **authorization** (`setIsAuthorized(module, true, maker)`) | Midnight | any leg where the module acts as `taker`/`onBehalf` ≠ `msg.sender` |
+| Midnight **authorization** (`setIsAuthorized(module, true, maker)`) | Midnight | **every** module here — the venue gates `supplyCollateral`, `repay`, `withdraw`, `withdrawCollateral` and `take` on `onBehalf == msg.sender \|\| isAuthorized[onBehalf][msg.sender]` |
 
 > **Midnight's coarse auth.** `setIsAuthorized(module, true, maker)` grants the
 > module full control of the maker's position. The combined `MidnightTakerModule`
@@ -72,10 +84,23 @@ Settlement and the solver can never widen them:
 > legs hash to **different** Permit3 taker refs and each still carries its own
 > per-market, amount-gated allowance.
 >
-> **The lend leg needs auth too.** Because `take` routes the bought credit to
-> `taker = maker` while the module is `msg.sender`, Midnight's authorization gate
-> fires even though `MidnightLendModule` is a value-in MAKE — atypical, but
-> intrinsic to giving the maker (not the module) the credit.
+> **The value-IN legs need auth too.** The deployed venue gates `supplyCollateral`
+> ("to prevent activated collateral poisoning") and `repay` exactly like the
+> value-out ops, and `take` gates any `taker ≠ msg.sender`. So a maker must grant
+> `MidnightSupplyCollateralModule`, `MidnightRepayModule`, `MidnightLendModule`,
+> `MidnightPreFundModule` and — for a borrow-and-loop offer — `MidnightLoopCallback`
+> as well as the taker/borrow modules. Fork-verified on the Base singleton
+> ([`test/fork/MidnightBaseFork`](test/fork/MidnightBaseFork.t.sol): unauthorized
+> `supplyCollateral` / `repay` revert `Unauthorized()` 0x82b42900). These modules
+> were documented as grant-free until the 2026-09-30 audit (L-ML-1); the old test
+> mock skipped the check.
+>
+> **A grant is full control, including re-delegation.** Midnight lets an
+> authorized address call `setIsAuthorized` on the maker's behalf. Every contract
+> here exercises only the one op its code performs, on maker-signed data, behind
+> the Settlement / Permit3 / Midnight caller pins, and none calls
+> `setIsAuthorized`, `setConsumed` or `multicall` — but revoke any grant you no
+> longer use.
 
 ## Flows
 
@@ -92,7 +117,10 @@ order: tokenIn = LOAN, tokenOut = COLL   items = [MAKE supplyCollateral, TAKE bo
 
 The borrow leg's `units` is fixed in the signed data, so a borrow item **must**
 ride a fill-or-kill order (a fixed unit count can't be pro-rata'd across partial
-fills).
+fills). The proceeds are `units · (price − settlementFee)`, and Midnight's
+`feeSetter` may raise the fee at any time: the module reverts (`ShortWithdraw`)
+rather than letting the core bill the gap to the maker's wallet. Sign `totalAmount`
+a little below the quoted proceeds to absorb fee moves; the excess comes back.
 
 ### Deleverage — repay, withdraw collateral
 
@@ -107,7 +135,20 @@ order: tokenIn = COLL, tokenOut = LOAN   items = [MAKE repay, TAKE withdrawColla
 
 `Full` balance mode (a `balanceMode` tuple field) withdraws the maker's ENTIRE
 collateral to the module, forwards the signed slice to `receiver`, and sweeps the
-surplus back to the maker — pair with fill-or-kill.
+surplus back to the maker — pair with fill-or-kill. For credit (`op=1`) the
+position is first brought up to date with the permissionless `updatePosition`
+(loss-factor slash + accrued continuous fee); the raw `credit()` getter is stale.
+
+### Borrow and loop — `MidnightLoopCallback`
+
+A borrower rests a `buy = false` offer with `callback = MidnightLoopCallback` and
+`receiverIfMakerIsSeller = MidnightLoopCallback`; any lender's `take` swaps the
+proceeds to collateral and supplies it before Midnight's solvency check. The
+slippage floor is signed as a **rate** (`minRateWad`, collateral wei per loan wei,
+1e18-scaled) and applied as `ceil(sellerAssets · minRateWad / 1e18)` to each take,
+because Midnight takes are partial and taker-sized — an absolute floor either
+blocks every partial take or under-protects a large one (audit 2026-09-30
+L-ML-4). The borrower must `setIsAuthorized(loopCallback, true, borrower)`.
 
 ### Lend / Redeem
 
@@ -139,11 +180,15 @@ Midnight to pull it back, returning `keccak256("morpho.midnight.callbackSuccess"
 ## Tests
 
 Midnight positions are opened by signed maker offers + ratifiers — impractical to
-seed on a live fork — so, like the composer's Midnight suite, the tests drive a
-faithful [`MidnightMock`](test/shared/MidnightMock.sol) (real selectors, real
-token flows, real `setIsAuthorized` gating, positions keyed by the same
-`MidnightIdLib.toId` the modules compute) with mock ERC20s, over the **real**
-`Settlement` + `Permit3`. No fork.
+seed on a live fork — so, like the composer's Midnight suite, the flow tests drive
+a [`MidnightMock`](test/shared/MidnightMock.sol) with mock ERC20s, over the
+**real** `Settlement` + `Permit3`. The mock reproduces the venue semantics the
+modules depend on: `setIsAuthorized` gating on EVERY position write (supply and
+repay included) with re-delegation, the ratifier gate, `maxUnits`/`maxAssets`
+consumption, `SelfTake` / `UnusedReceiverMustBeZero`, the settlement fee, the
+upstream payer resolution and seller solvency check, and lazy credit updates
+(`credit()` stale until `updatePosition`). Prices stay at par. A Base-fork smoke
+suite pins those facts against the deployed singleton.
 
 ```
 FOUNDRY_PROFILE=modules-morpho-midnight forge test
@@ -153,7 +198,9 @@ FOUNDRY_PROFILE=modules-morpho-midnight forge test
 |---|---|
 | [`MidnightFlows`](test/MidnightFlows.t.sol) | supply+borrow, repay+withdraw (exact & full), lend (+ budget buffer), redeem credit |
 | [`security/ModuleAuth`](test/security/ModuleAuth.t.sol) | `NotSettlement` / `OnlyPermit3` direct-call rejection; `setIsAuthorized` gate is load-bearing |
+| [`security/Audit20260930Midnight`](test/security/Audit20260930Midnight.t.sol) | 2026-09-30 audit regressions: borrow delivery bound under a fee rise, supply/repay grants, Full credit exit after a slash, strict blob heads, `balanceMode` range |
+| [`MidnightLoopCallback`](test/MidnightLoopCallback.t.sol) | borrow-and-loop; rate-scaled slippage floor across partial takes |
+| [`fork/MidnightBaseFork`](test/fork/MidnightBaseFork.t.sol) | **live Base singleton**: supply/repay/withdraw auth gates, re-delegation, `MidnightIdLib.toId` == the venue's `touchMarket` id, `updatePosition` present. Needs a Base RPC (public fallbacks; `BASE_RPC_URL` overrides) |
 
-> A live Base-fork test against the real singleton would additionally prove the
-> `toId` derivation and the offer/ratifier economics, but requires constructing
-> signed maker offers — out of scope for this unit suite.
+> The offer/ratifier economics (ticks, zero-coupon discounting) are still
+> mock-only: exercising them on the fork needs signed maker offers.

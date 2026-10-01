@@ -15,15 +15,24 @@ import {
     MidnightTakerModule,
     MidnightBorrowModule
 } from "../../src/MidnightModules.sol";
-import {MidnightMock, MockERC20} from "./MidnightMock.sol";
+import {MidnightMock, MockERC20, MockRatifier} from "./MidnightMock.sol";
 
 /// @dev Morpho Midnight settlement-module harness. Midnight is a fixed-rate,
 /// fixed-maturity, ORDER-BOOK primitive whose positions are opened by signed
 /// maker offers + ratifiers — impractical to seed on a live fork — so, like the
 /// composer's Midnight suite, this drives a faithful `MidnightMock` (real
-/// selectors, real token flows, real `setIsAuthorized` gating, positions keyed
-/// by the same `MidnightIdLib.toId` the modules compute) with mock ERC20s. No
-/// fork: `setUp` is overridden to deploy Permit3 + Settlement directly.
+/// selectors, real token flows, real `setIsAuthorized` gating on EVERY position
+/// write — supply and repay included — ratifier + offer-cap + settlement-fee
+/// `take` economics, lazy credit updates, positions keyed by the same
+/// `MidnightIdLib.toId` the modules compute) with mock ERC20s. No fork: `setUp` is
+/// overridden to deploy Permit3 + Settlement directly. The live-venue facts the
+/// mock reproduces are pinned against the Base singleton in
+/// `test/fork/MidnightBaseFork.t.sol`.
+///
+/// The offer counterparty `offerMaker` is a funded, collateralized lender/borrower
+/// that has authorized the always-yes {MockRatifier}: on a buy offer it is the
+/// PAYER of the borrow proceeds, on a sell offer it takes the debt, and Midnight
+/// checks its solvency.
 ///
 ///   collateral token = COLL
 ///   loan token       = LOAN
@@ -39,6 +48,7 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
     MidnightBorrowModule borrowModule;
 
     address offerMaker = address(0x0FFE7);
+    MockRatifier ratifier;
 
     function setUp() public virtual override {
         // No fork: deploy the protocol core directly (base setUp forks mainnet).
@@ -47,6 +57,7 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
         COLL = new MockERC20("Collateral", "COLL", 18);
         LOAN = new MockERC20("Loan", "LOAN", 6);
         midnight = new MidnightMock();
+        ratifier = new MockRatifier();
 
         supplyModule = new MidnightSupplyCollateralModule(address(permit3), address(midnight), address(settlement));
         repayModule = new MidnightRepayModule(address(permit3), address(midnight), address(settlement));
@@ -75,6 +86,17 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
         permit3.approveToken(address(settlement), address(COLL), type(uint160).max, 0);
         permit3.approveToken(address(settlement), address(LOAN), type(uint160).max, 0);
         vm.stopPrank();
+
+        // The offer counterparty: authorizes its ratifier (Midnight's
+        // `isAuthorized[maker][ratifier]` gate), funds buy-offer proceeds (it is the
+        // payer when `offer.buy`), and is collateralized for the debt it takes on
+        // when a lender fills its sell offer.
+        vm.prank(offerMaker);
+        midnight.setIsAuthorized(address(ratifier), true, offerMaker);
+        LOAN.mint(offerMaker, 1e30);
+        vm.prank(offerMaker);
+        LOAN.approve(address(midnight), type(uint256).max);
+        _seedCollateral(offerMaker, 1e30);
     }
 
     /// @dev Replicates CoreSettlementBase's core deploy without the fork.
@@ -117,11 +139,13 @@ abstract contract MidnightModulesBase is CoreSettlementBase {
             group: bytes32(0),
             callback: address(0),
             callbackData: "",
-            receiverIfMakerIsSeller: offerMaker,
-            ratifier: address(0),
+            // Midnight: `UnusedReceiverMustBeZero` — only a SELL offer names one.
+            receiverIfMakerIsSeller: buy ? address(0) : offerMaker,
+            ratifier: address(ratifier),
             reduceOnly: false,
+            // Exactly one cap non-zero (`InvalidOfferCaps`).
             maxUnits: type(uint128).max,
-            maxAssets: type(uint128).max,
+            maxAssets: 0,
             continuousFeeCap: 0
         });
     }

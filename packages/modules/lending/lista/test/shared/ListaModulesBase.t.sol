@@ -102,10 +102,17 @@ abstract contract ListaModulesBase is CoreSettlementBase {
     ///      first so lazy state reads at the pinned block don't hit pruned nodes.
     uint256 internal constant BSC_FORK_BLOCK = 113_020_000;
 
+    /// @dev The pinned block. Overridable so a suite can re-run against the
+    ///      CURRENT broker implementation (the default pin predates the 0xf1db…
+    ///      upgrade — BROKERS.md §1).
+    function _forkBlock() internal view virtual override returns (uint256) {
+        return BSC_FORK_BLOCK;
+    }
+
     function _forkBsc() internal {
         try vm.envString("BSC_RPC_URL") returns (string memory v) {
             if (bytes(v).length > 0) {
-                try this.__forkAt(v, BSC_FORK_BLOCK) {
+                try this.__forkAt(v, _forkBlock()) {
                     return;
                 } catch {}
             }
@@ -121,7 +128,7 @@ abstract contract ListaModulesBase is CoreSettlementBase {
             "https://bsc-dataseed.binance.org"
         ];
         for (uint256 i = 0; i < rpcs.length; i++) {
-            try this.__forkAt(rpcs[i], BSC_FORK_BLOCK) {
+            try this.__forkAt(rpcs[i], _forkBlock()) {
                 return;
             } catch {}
         }
@@ -151,9 +158,27 @@ abstract contract ListaModulesBase is CoreSettlementBase {
 
     /// @dev data blob of the fixed-term broker borrow TAKE leg — {ListaBrokerModule}
     ///      op 1. Ops are numbered across both of that contract's seams, so the
-    ///      value differs from the withdraw module's op numbering below.
-    function _borrowData() internal pure returns (bytes memory) {
-        return abi.encode(uint8(ListaBrokerModule.Op.Borrow), BROKER, TERM_7D);
+    ///      value differs from the withdraw module's op numbering below. Signs the
+    ///      LIVE term (its APR as the ceiling, its duration) and no one-tranche
+    ///      total (partial fills allowed).
+    function _borrowData() internal view returns (bytes memory) {
+        return _borrowBlob(BROKER, TERM_7D, 0);
+    }
+
+    /// @dev `(duration, apr)` of `termId` on `broker`'s LIVE menu.
+    function _liveTerm(address broker, uint256 termId) internal view returns (uint256 duration, uint256 apr) {
+        uint256[3][] memory terms = IListaBrokerViews(broker).getFixedTerms();
+        for (uint256 i; i < terms.length; i++) {
+            if (terms[i][0] == termId) return (terms[i][1], terms[i][2]);
+        }
+        revert("term not on the live menu");
+    }
+
+    /// @dev Borrow blob `(op, broker, termId, maxApr, duration, totalAmount)` with
+    ///      the live term's APR as the ceiling and its exact duration.
+    function _borrowBlob(address broker, uint256 termId, uint256 totalAmount) internal view returns (bytes memory) {
+        (uint256 duration, uint256 apr) = _liveTerm(broker, termId);
+        return abi.encode(uint8(ListaBrokerModule.Op.Borrow), broker, termId, apr, duration, totalAmount);
     }
 
     /// @dev data blob of the withdraw-collateral TAKE leg (op 1, Exact mode).

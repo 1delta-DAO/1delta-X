@@ -81,12 +81,12 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
     // ──────────────────── Tailed data blobs ────────────────────
 
     /// @dev {ListaBrokerModule} op-1 borrow data with the optional auth tail: base
-    ///      96, moolah at 96, auth block at 128 (total 288). The auth target is the
-    ///      BROKER module now — it is the contract the broker's on-behalf gate sees.
+    ///      192 (op, broker, termId, maxApr, duration, totalAmount), moolah at 192,
+    ///      auth block at 224 (total 384). The auth target is the BROKER module —
+    ///      it is the contract the broker's on-behalf gate sees.
     function _borrowDataWithAuth(uint256 deadline) internal view returns (bytes memory) {
         return abi.encodePacked(
-            abi.encode(uint8(ListaBrokerModule.Op.Borrow), BROKER, TERM_7D, MOOLAH),
-            _signMoolahAuth(address(brokerModule), deadline)
+            _borrowBlob(BROKER, TERM_7D, 0), abi.encode(MOOLAH), _signMoolahAuth(address(brokerModule), deadline)
         );
     }
 
@@ -219,7 +219,7 @@ contract MoolahAuthWithSigTest is ListaModulesBase {
 
         // Front-runner relays the maker's authorization sig directly.
         (uint256 nonce,, uint8 v, bytes32 r, bytes32 s) = abi.decode(
-            _slice(borrowData, 128, 160), (uint256, uint256, uint8, bytes32, bytes32)
+            _slice(borrowData, 224, 160), (uint256, uint256, uint8, bytes32, bytes32)
         );
         vm.prank(address(0xBAD));
         IMorphoAuth(MOOLAH).setAuthorizationWithSig(

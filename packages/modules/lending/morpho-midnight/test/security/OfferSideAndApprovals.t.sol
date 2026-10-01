@@ -94,6 +94,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
         uint256 amount = 1e18;
         COLL.mint(maker, amount);
         _makerApproveToken(address(supplyModule), address(COLL), amount);
+        _makerAuthorize(address(supplyModule)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
 
         vm.prank(address(settlement));
         supplyModule.makeOnBehalf(maker, amount, _supplyData());
@@ -111,6 +112,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
 
         LOAN.mint(maker, units);
         _makerApproveToken(address(repayModule), address(LOAN), units);
+        _makerAuthorize(address(repayModule)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
 
         vm.prank(address(settlement));
         repayModule.makeOnBehalf(maker, units, _repayData());
@@ -146,6 +148,7 @@ contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
         uint256 amount = 1e18;
         COLL.mint(maker, amount);
         _makerApproveToken(address(supplyModule), address(COLL), amount);
+        _makerAuthorize(address(supplyModule)); // Midnight gates supplyCollateral/repay on isAuthorized (L-ML-1)
 
         vm.prank(address(settlement));
         supplyModule.makeOnBehalf(maker, amount, _supplyData());

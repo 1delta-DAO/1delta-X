@@ -23,7 +23,7 @@ import {IMidnight, Market, Offer, MidnightIdLib} from "./interfaces/IMidnight.so
 //  These adapters expose Midnight to `Settlement` in the same MAKE/TAKE
 //  idiom as the Aave/Morpho/Venus packages:
 //
-//    MAKE (value-in, Permit3 token allowance gate):
+//    MAKE (value-in, Permit3 token allowance gate + Midnight `setIsAuthorized`):
 //      • MidnightSupplyCollateralModule  supplyCollateral(onBehalf = maker)
 //      • MidnightRepayModule             repay(onBehalf = maker)          (cap at debt)
 //      • MidnightLendModule              take(offer.buy=false, taker = maker)  — buy credit units
@@ -39,22 +39,56 @@ import {IMidnight, Market, Offer, MidnightIdLib} from "./interfaces/IMidnight.so
 //  a trailing raw word past). The taker ref is still `keccak256(data)`, so every
 //  field the module decodes is part of the maker-approved bytes.
 //
-//  Authorization. The value-out legs act on the maker's position with the module
-//  as `msg.sender`, so the maker must once call
-//  `midnight.setIsAuthorized(module, true, maker)`. The Permit3 taker allowance
-//  (keyed by `ref = keccak256(data)`) caps the per-fill amount. Midnight's
-//  `take` gates ANY `taker != msg.sender` on that same authorization, so the
-//  lend leg (a MAKE) ALSO requires the maker to authorize `MidnightLendModule` —
-//  unusual for a value-in module, but intrinsic to routing the bought credit to
-//  the maker rather than to the module.
+//  Authorization — EVERY module here needs the maker's Midnight grant. Every
+//  position-writing entrypoint of the deployed venue (`morpho-org/midnight`
+//  `Midnight.sol`; Base singleton 0xAded…A18A) opens with
+//  `require(onBehalf == msg.sender || isAuthorized[onBehalf][msg.sender])` — the
+//  value-IN `supplyCollateral` ("to prevent activated collateral poisoning") and
+//  `repay` included, and `take` gates any `taker != msg.sender` the same way. The
+//  maker must therefore once call `midnight.setIsAuthorized(module, true, maker)`
+//  for EACH module they use: supply-collateral, repay, lend, taker, borrow, the
+//  pre-fund module and the loop callback alike. ⚠ Midnight's grant is FULL
+//  position control (withdraw, borrow-as-taker, `setConsumed`, and re-delegation
+//  via `setIsAuthorized`). These contracts only ever exercise the one op their
+//  code performs, on maker-signed data, behind the Settlement / Permit3 caller
+//  pins; none calls `setIsAuthorized`, `setConsumed` or `multicall`, and none is a
+//  ratifier. (The value-in modules used to be documented as needing no grant —
+//  true of the old test mock, false on the venue; audit 2026-09-30 L-ML-1.) The
+//  Permit3 taker allowance (keyed by `ref = keccak256(data)`) caps the per-fill
+//  amount of the value-out legs.
+//
+//  Strict blob heads. `abi.decode` of a tuple whose first member is DYNAMIC
+//  (`Market`, `Offer`) does not require that member's head offset to point past
+//  the head, so a blob built for an older, shorter layout decodes "successfully"
+//  with the trailing `totalAmount` read out of the first tail word (a market's
+//  `chainId`, an offer's inner offset 0x1e0) — a constant a dust slice can match
+//  ({FullFillGuard}). {MidnightBlob.requireHead} pins the offset to the full head
+//  size first, so a short blob fails closed (audit 2026-09-30 G-BYTE_MAP-1).
 // ════════════════════════════════════════════════════════════════════════════
+
+/// @notice Strict head check for the dynamic-first Midnight blobs (G-BYTE_MAP-1).
+/// @dev    solc's decoder accepts a dynamic member's head offset anywhere at or
+///         after the minimum head, so a blob encoded with FEWER head words than the
+///         decode tuple aliases the missing trailing word onto the first tail word.
+///         Pinning the dynamic member's offset to the exact head size of the
+///         current layout makes any older/shorter layout fail closed.
+library MidnightBlob {
+    error MalformedData();
+
+    /// @param at   byte position of the dynamic member's head word.
+    /// @param head the full head size of the expected tuple, in bytes.
+    function requireHead(bytes calldata data, uint256 at, uint256 head) internal pure {
+        if (data.length < at + 32 || uint256(bytes32(data[at:at + 32])) != head) revert MalformedData();
+    }
+}
 
 // ──────────────────── Midnight supply-collateral maker module ────────────────────
 //
 // Single-op MAKE: pulls the indexed collateral token from the maker via Permit3
-// and supplies it into the market on the maker's behalf. Supply is a benign
-// inflow (it only credits collateral), so no protocol delegation is needed —
-// the Permit3 token allowance is the whole gate.
+// and supplies it into the market on the maker's behalf. ⚠ Midnight gates
+// `supplyCollateral` on `isAuthorized[maker][module]` (collateral-poisoning
+// guard), so the maker must `setIsAuthorized(this, true, maker)` — see the file
+// header. The Permit3 token allowance caps the amount.
 //
 // `data = abi.encode(Market market, uint256 collateralIndex)`.
 //
@@ -117,7 +151,8 @@ contract MidnightSupplyCollateralModule is IMakerModule {
 // Midnight-side `callback` is forced to zero, so Midnight pulls the loan token
 // straight from this module (never a caller-supplied repay callback).
 //
-// Repay is a benign inflow (it only shrinks debt), so no delegation is needed.
+// ⚠ Midnight gates `repay` on `isAuthorized[maker][module]` too, so the maker
+// must `setIsAuthorized(this, true, maker)` — see the file header.
 // `nonReentrant` guards against weird-token transfer hooks.
 // `data = abi.encode(Market market)`.
 //
@@ -206,6 +241,8 @@ contract MidnightLendModule is IMakerModule {
         if (_locked != 1) revert Reentrancy();
         _locked = 2;
 
+        // 4 head words: (Offer, bytes, units, totalAmount) — see {MidnightBlob}.
+        MidnightBlob.requireHead(data, 0, 0x80);
         (Offer memory offer, bytes memory ratifierData, uint256 units, uint256 totalAmount) =
             abi.decode(data, (Offer, bytes, uint256, uint256));
         // This module is the LEND leg: the taker must be the buyer/lender, which
@@ -287,8 +324,13 @@ contract MidnightLendModule is IMakerModule {
 //              it — encode 0. Pair
 //              with a fill-or-kill order (a dynamic full balance can't be
 //              pro-rata'd across partial fills).
-//
-// `data = abi.encode(uint8 op, Market market, uint256 collateralIndex, uint8 balanceMode)`.
+//              Credit (`op = 1`) is sized from `updatePosition`, NOT the raw
+//              `credit()` getter: Midnight's `credit()` is the STORED value, and
+//              `withdraw` first applies the loss-factor slash and the accrued
+//              continuous fee — withdrawing the stale figure underflows the
+//              moment either is non-zero (audit 2026-09-30 L-ML-3).
+//   any other value reverts {BadBalanceMode} (the field is untagged, so 2..255
+//   must not silently mean Exact).
 //
 contract MidnightTakerModule is ITakerModule {
     IPermit3 public immutable permit3;
@@ -306,6 +348,7 @@ contract MidnightTakerModule is ITakerModule {
 
     error OnlyPermit3();
     error BadOp(uint8 op);
+    error BadBalanceMode(uint8 mode);
 
     constructor(address _permit3, address _midnight) {
         permit3 = IPermit3(_permit3);
@@ -315,8 +358,11 @@ contract MidnightTakerModule is ITakerModule {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
+        // 5 head words: (op, Market, collateralIndex, balanceMode, totalAmount).
+        MidnightBlob.requireHead(data, 32, 0xa0);
         (uint8 op, Market memory market, uint256 collateralIndex, uint8 balanceMode, uint256 totalAmount) =
             abi.decode(data, (uint8, Market, uint256, uint8, uint256));
+        if (balanceMode > uint8(BalanceMode.Full)) revert BadBalanceMode(balanceMode);
 
         // `Full` liquidates the maker's ENTIRE live balance, so it cannot be
         // pro-rated: a sliced fill unwinds the whole position and bricks every later
@@ -389,7 +435,11 @@ contract MidnightTakerModule is ITakerModule {
         // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
         address loanToken = market.loanToken;
         uint256 floor = IERC20(loanToken).balanceOf(address(this));
-        uint256 bal = midnight.credit(MidnightIdLib.toId(market), onBehalfOf);
+        // The LIVE credit: `updatePosition` (permissionless) applies the slash and
+        // the accrued continuous fee and returns the updated figure, so the
+        // `withdraw` below — which updates first too — sees exactly this credit.
+        // The raw `credit()` getter is stale and over-sized the call (L-ML-3).
+        (uint256 bal,,) = midnight.updatePosition(market, onBehalfOf);
         midnight.withdraw(market, bal, onBehalfOf, address(this));
         uint256 received = IERC20(loanToken).balanceOf(address(this)) - floor;
         // The lower bound the venue used to enforce. Before the split rewrite the
@@ -416,6 +466,14 @@ contract MidnightTakerModule is ITakerModule {
 // fills). The maker must have authorized this module on Midnight
 // (`setIsAuthorized(module, true, maker)`); `takerCallback` is forced to zero.
 //
+// ⚠ DELIVERY-BOUNDED. `take` is sized by `units`, not by `amount`: the proceeds
+// are `units · (price − settlementFee(ttm))`, and Midnight's `feeSetter` can raise
+// the fee at any time (no timelock; breakpoints need not be monotone). A short
+// delivery used to be forwarded as-is and the core billed the gap to the maker's
+// WALLET (I-8). The leg now reverts unless the proceeds cover the signed
+// `amount` ({FullFillGuard.requireDelivered}; audit 2026-09-30 L-CV2-1.v2) —
+// sound because `requireFullFill` already pinned `amount` to the signed total.
+//
 // `data = abi.encode(Offer offer, bytes ratifierData, uint256 units, uint256 totalAmount)`.
 //
 contract MidnightBorrowModule is ITakerModule {
@@ -433,6 +491,8 @@ contract MidnightBorrowModule is ITakerModule {
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
+        // 4 head words: (Offer, bytes, units, totalAmount) — see {MidnightBlob}.
+        MidnightBlob.requireHead(data, 0, 0x80);
         (Offer memory offer, bytes memory ratifierData, uint256 units, uint256 totalAmount) =
             abi.decode(data, (Offer, bytes, uint256, uint256));
         // The BORROW leg's mirror of the lend-side assertion: the taker must be the
@@ -456,6 +516,9 @@ contract MidnightBorrowModule is ITakerModule {
         // we measure what actually landed; takerCallback = 0.
         midnight.take(offer, ratifierData, units, onBehalfOf, address(this), address(0), "");
         uint256 received = IERC20(loanToken).balanceOf(address(this)) - before;
+        // The lower bound: a venue fee rise between signing and fill must revert the
+        // leg, not bill the maker's wallet for the gap (L-CV2-1.v2).
+        FullFillGuard.requireDelivered(received, amount);
 
         // Deliver the measured proceeds, capped at the signed amount; excess to the
         // maker below. Never exceeds `received`, so an under-delivering venue

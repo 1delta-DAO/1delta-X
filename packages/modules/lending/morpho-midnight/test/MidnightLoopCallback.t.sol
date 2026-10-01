@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {Market, CollateralParams, Offer} from "../src/interfaces/IMidnight.sol";
 import {MidnightLoopCallback, IUniV3Router} from "../src/MidnightLoopCallback.sol";
-import {MidnightMock, MockERC20} from "./shared/MidnightMock.sol";
+import {MidnightMock, MockERC20, MockRatifier} from "./shared/MidnightMock.sol";
 
 interface IERC20Like {
     function transfer(address to, uint256 amount) external returns (bool);
@@ -39,14 +39,18 @@ contract MockSwapRouter {
 ///         `callback = MidnightLoopCallback`; a lender hits it via `take`; the
 ///         onSell callback swaps the borrowed loan token to collateral and supplies
 ///         it into the borrower's own position — BEFORE the mock's solvency check —
-///         building a leveraged position in one fill with no per-fill signature,
-///         no settlement, and no borrower authorization grant.
+///         building a leveraged position in one fill with no per-fill signature
+///         and no settlement. The borrower DOES grant the callback
+///         `setIsAuthorized`: the deployed venue gates `supplyCollateral` on it
+///         (audit 2026-09-30 L-ML-1 — this suite used to pass without the grant
+///         only because the mock skipped the check).
 contract MidnightLoopCallbackTest is Test {
     MidnightMock midnight;
     MockERC20 COLL; // collateral, 18dp
     MockERC20 LOAN; // loan, 18dp (par 1:1 with COLL for legible leverage math)
     MockSwapRouter router;
     MidnightLoopCallback loopCb;
+    MockRatifier ratifier;
 
     address alice = address(0xA11CE); // borrower / offer maker
     address bob = address(0xB0B); //     lender / taker
@@ -60,6 +64,14 @@ contract MidnightLoopCallbackTest is Test {
         LOAN = new MockERC20("Loan", "LOAN", 18);
         router = new MockSwapRouter();
         loopCb = new MidnightLoopCallback(address(midnight), address(router));
+        ratifier = new MockRatifier();
+
+        // Alice's one-time grants: her offer ratifier, and the loop callback, which
+        // calls `supplyCollateral(onBehalf = alice)` — auth-gated on the venue.
+        vm.startPrank(alice);
+        midnight.setIsAuthorized(address(ratifier), true, alice);
+        midnight.setIsAuthorized(address(loopCb), true, alice);
+        vm.stopPrank();
 
         // Par pricing (same decimals) so 1 COLL backs 1 LOAN of value.
         midnight.setPrice(address(COLL), 1e18);
@@ -115,8 +127,8 @@ contract MidnightLoopCallbackTest is Test {
     function test_loop_slippageFloor_reverts() public {
         uint256 borrowUnits = 300e18;
         Offer memory o = _borrowOffer();
-        // Demand 400 COLL out of a 1:1 300 swap → router reverts "slippage".
-        o.callbackData = abi.encode(uint256(0), uint24(500), uint256(400e18));
+        // Demand a 1.5 COLL/LOAN rate out of a 1:1 swap → router reverts "slippage".
+        o.callbackData = abi.encode(uint256(0), uint24(500), uint256(1.5e18));
 
         vm.prank(bob);
         vm.expectRevert(bytes("slippage"));
@@ -137,6 +149,72 @@ contract MidnightLoopCallbackTest is Test {
         );
     }
 
+    // ──────────────────── audit 2026-09-30 ────────────────────
+
+    /// L-ML-1: the deployed venue gates `supplyCollateral` on the borrower's grant,
+    /// so a loop offer whose maker did NOT authorize the callback cannot fill. The
+    /// pre-fix mock let this through, which is how the "no grant needed" claim
+    /// survived in the docs.
+    function test_audit_L_ML_1_loopNeedsCallbackAuthorization() public {
+        vm.prank(alice);
+        midnight.setIsAuthorized(address(loopCb), false, alice);
+
+        vm.prank(bob);
+        vm.expectRevert(MidnightMock.Unauthorized.selector);
+        midnight.take(_borrowOffer(), "", 10e18, bob, address(0), address(0), "");
+    }
+
+    /// L-ML-4: the floor is a RATE scaled to each take. A borrower with headroom
+    /// (so Midnight's whole-position solvency check is no backstop) signs a 0.95
+    /// COLL/LOAN floor; a lender sandwiches the pool to 0.5 and takes the whole
+    /// offer. Under the old absolute reading the signed word (0.95e18 wei) was a
+    /// trivially-met floor and the borrower lost half the borrow to the sandwich.
+    function test_audit_L_ML_4_largeTakeBelowRateReverts() public {
+        _giveAliceHeadroom();
+        router.setRate(1, 2); // sandwiched pool: 0.5 COLL per LOAN
+        Offer memory o = _borrowOffer();
+        o.callbackData = abi.encode(uint256(0), uint24(500), uint256(0.95e18));
+
+        vm.prank(bob);
+        vm.expectRevert(bytes("slippage"));
+        midnight.take(o, "", 300e18, bob, address(0), address(0), "");
+    }
+
+    /// L-ML-4: the same rate floor admits partial takes of any size at a fair
+    /// rate — an absolute floor sized for the whole offer reverted every one.
+    function test_audit_L_ML_4_partialTakesHonourTheRate() public {
+        Offer memory o = _borrowOffer();
+        o.callbackData = abi.encode(uint256(0), uint24(500), uint256(0.95e18));
+        o.maxUnits = 300e18;
+
+        vm.prank(bob);
+        midnight.take(o, "", 10e18, bob, address(0), address(0), "");
+        vm.prank(bob);
+        midnight.take(o, "", 90e18, bob, address(0), address(0), "");
+
+        assertEq(_debtOf(alice), 100e18, "two partial takes");
+        assertEq(_collateralOf(alice), SEED + 100e18, "each take looped at the fair rate");
+    }
+
+    /// L-ML-4: the scaled floor rounds UP, so a take can never clear a floor
+    /// below the signed rate by rounding.
+    function test_audit_L_ML_4_floorRoundsUp() public {
+        _giveAliceHeadroom();
+        // Router pays 1 wei less than the 1:1 rate on every swap.
+        router.setRate(1e18 - 1, 1e18);
+        Offer memory o = _borrowOffer();
+        o.callbackData = abi.encode(uint256(0), uint24(500), uint256(1e18));
+
+        vm.prank(bob);
+        vm.expectRevert(bytes("slippage"));
+        midnight.take(o, "", 3e18, bob, address(0), address(0), "");
+    }
+
+    function _giveAliceHeadroom() internal {
+        COLL.mint(address(this), 10_000e18);
+        midnight.seedCollateral(_market(), alice, 0, 10_000e18);
+    }
+
     // ──────────────────── builders ────────────────────
 
     function _borrowOffer() internal view returns (Offer memory o) {
@@ -149,13 +227,13 @@ contract MidnightLoopCallbackTest is Test {
             tick: 0,
             group: bytes32(0),
             callback: address(loopCb),
-            // collateralIndex, dexFee, minCollateralOut
+            // collateralIndex, dexFee, minRateWad
             callbackData: abi.encode(uint256(0), uint24(500), uint256(0)),
             receiverIfMakerIsSeller: address(loopCb), // proceeds land where the loop runs
-            ratifier: address(0),
+            ratifier: address(ratifier),
             reduceOnly: false,
             maxUnits: type(uint128).max,
-            maxAssets: type(uint128).max,
+            maxAssets: 0, // exactly one cap (Midnight `InvalidOfferCaps`)
             continuousFeeCap: 0
         });
     }
