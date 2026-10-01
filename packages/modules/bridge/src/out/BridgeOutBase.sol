@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
 import {CommitmentCodec} from "../CommitmentCodec.sol";
 
@@ -36,11 +37,22 @@ import {CommitmentCodec} from "../CommitmentCodec.sol";
 ///  ─────────────
 ///  Settlement scales `amount` pro-rata, so a partially-filled source order
 ///  bridges in slices that all name the same destination order hash; the inbox
-///  accumulates them. Derived floors (relay fee, slippage) are computed from the
-///  slice, and because each rounds its deduction DOWN the slices always sum to at
-///  least the whole-order floor — a partially-bridged order can still reach its
-///  destination anchor. Bridge fees are per-message, though, so pinning the
-///  source order to `FullFillModule` is usually the right call.
+///  accumulates them. A proportional deduction (relay fee, slippage) rounds DOWN
+///  per slice, so for THAT term the slices sum to at least the whole-order floor.
+///
+///  That is the whole of the guarantee, and it holds only for slices that are
+///  actually DELIVERED (audit 2026-09-30 PRICE-2.v2 / X-ARITH-2):
+///    • a decimal DOWN-scale (`dstScalingFactor < 0`) floors per slice, so N
+///      slices can sum up to N-1 destination units below the whole-order floor;
+///    • an Across slice whose relay-fee share cannot pay a relayer is never
+///      relayed at all — it refunds to the maker on the origin chain after
+///      `fillDeadline` and never reaches the destination.
+///  Either leaves an inbox commitment below its `legsIn[0].start` anchor
+///  (`Underfunded`), and the filler chooses the slices. So the Across module
+///  REQUIRES a full fill (`totalAmount`, {FullFillGuard}) for every
+///  inbox-committed deposit, and the LayerZero module does so for every
+///  sponsored send (fees are per message). Bridge fees are per-message on every
+///  path, so a maker-signed `totalAmount` is the right call elsewhere too.
 abstract contract BridgeOutBase is IMakerModule {
     IPermit3 public immutable PERMIT3;
     address public immutable SETTLEMENT;
@@ -98,11 +110,19 @@ abstract contract BridgeOutBase is IMakerModule {
         PERMIT3.transferFrom(onBehalfOf, address(this), token, uint160(amount));
     }
 
+    /// @dev Full-fill gate driven by a maker-signed `totalAmount` in the spec.
+    ///      `required` forces it (an absent total then fails closed); otherwise a
+    ///      zero total means "partial slices allowed".
+    function _fullFillGate(uint256 amount, uint256 totalAmount, bool required) internal pure {
+        if (required || totalAmount != 0) FullFillGuard.requireFullFill(amount, totalAmount);
+    }
+
     /// @dev The guaranteed-delivery floor the destination order must be authored
     ///      against: `amount` less a maker-signed proportional allowance for the
     ///      bridge's fee or slippage. The deduction rounds DOWN, so the floor
     ///      rounds up — which is the direction that keeps summed partial bridges
-    ///      at or above the whole-order floor.
+    ///      at or above the whole-order floor for THIS term (see the contract
+    ///      note for the terms it does not cover).
     function _floorAfterBps(uint256 amount, uint256 bps) internal pure returns (uint256) {
         if (bps > MAX_DEDUCTION_BPS) revert DeductionTooHigh();
         return amount - (amount * bps) / BPS;
@@ -130,9 +150,10 @@ abstract contract BridgeOutBase is IMakerModule {
     ///  Rounding down is the safe direction and the deliberate one: the result is
     ///  a floor the bridge must MEET, so rounding up would demand more value than
     ///  the source amount is worth and leave the deposit unfillable. Rounding down
-    ///  costs the maker at most one destination-decimal unit — dust by
+    ///  costs the maker at most one destination-decimal unit PER SLICE — dust by
     ///  construction, since the case only arises when the destination is the
-    ///  coarser denomination.
+    ///  coarser denomination, but enough to leave a whole-order anchor unmet when
+    ///  a filler splits the order; hence the full-fill rule in the contract note.
     ///
     ///  The multiplying branch is CHECKED (no `unchecked`): a maker-signed factor
     ///  and a large amount can overflow, and this figure decides how much value a

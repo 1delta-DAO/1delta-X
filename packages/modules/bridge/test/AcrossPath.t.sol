@@ -7,6 +7,7 @@ import {AcrossBridgeOutModule} from "../src/out/AcrossBridgeOutModule.sol";
 import {BridgedOrderInbox} from "../src/BridgedOrderInbox.sol";
 import {BridgeOutBase} from "../src/out/BridgeOutBase.sol";
 import {MockSpokePool} from "./shared/Mocks.t.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {BridgeTestBase} from "./shared/BridgeTestBase.t.sol";
 
 /// @title AcrossPathTest
@@ -35,7 +36,8 @@ contract AcrossPathTest is BridgeTestBase {
                 exclusivityOffset: 0,
                 dstOrderHash: dstOrderHash,
                 beneficiary: beneficiary,
-                commitmentExpiry: uint32(block.timestamp) + COMMITMENT_EXPIRY_OFFSET
+                commitmentExpiry: uint32(block.timestamp) + COMMITMENT_EXPIRY_OFFSET,
+                totalAmount: BRIDGE
             })
         );
     }
@@ -146,7 +148,8 @@ contract AcrossPathTest is BridgeTestBase {
                 exclusivityOffset: 0,
                 dstOrderHash: _hashOrder(dst),
                 beneficiary: beneficiary,
-                commitmentExpiry: uint32(block.timestamp) + COMMITMENT_EXPIRY_OFFSET
+                commitmentExpiry: uint32(block.timestamp) + COMMITMENT_EXPIRY_OFFSET,
+                totalAmount: BRIDGE
             })
         );
         Order memory src = _srcOrder(1, PAY, BRIDGE, address(acrossOut), spec);
@@ -158,10 +161,14 @@ contract AcrossPathTest is BridgeTestBase {
         settlement.fill(src, sig, PAY);
     }
 
-    /// @dev Partial source fills bridge in slices against one destination hash.
-    ///      Each slice rounds its fee deduction DOWN, so the slices sum to at
-    ///      least the whole-order floor and the destination still activates.
-    function test_partialSourceFills_accumulateToTheFloor() public {
+    /// @dev CHANGED by audit 2026-09-30 (PRICE-2.v2 / X-ARITH-2). This used to
+    ///      assert that two half slices of an inbox-committed deposit accumulate to
+    ///      the floor — true only when EVERY slice is relayed, which the filler (who
+    ///      picks the slices) cannot guarantee: an unprofitable slice is never
+    ///      relayed and a down-scaled one floors per slice. An inbox-committed
+    ///      Across deposit is now full-fill only, so a half slice reverts and the
+    ///      whole order still bridges in one deposit.
+    function test_partialSourceFills_inboxRoute_rejected_fullFillBridges() public {
         Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
         bytes32 dstHash = _hashOrder(dst);
 
@@ -169,13 +176,16 @@ contract AcrossPathTest is BridgeTestBase {
         _wireSourceParties(address(acrossOut), PAY, BRIDGE);
         bytes memory sig = _signSource(src);
 
-        _fillSourceAs(src, sig, PAY / 2);
-        _fillSourceAs(src, sig, PAY / 2);
+        vm.chainId(SRC_CHAIN);
+        vm.prank(solver);
+        vm.expectRevert(abi.encodeWithSelector(FullFillGuard.PartialFillUnsupported.selector, BRIDGE / 2, BRIDGE));
+        settlement.fill(src, sig, PAY / 2);
+        vm.chainId(DST_CHAIN);
 
+        _fillSourceAs(src, sig, PAY);
         spokePool.relay(0);
-        spokePool.relay(1);
 
-        assertEq(_missing(dstHash, DELIVERED), 0, "two slices covered the floor");
+        assertEq(_missing(dstHash, DELIVERED), 0, "one deposit covered the floor");
         inbox.activate(dst, beneficiary);
 
         _fundSolverOut(DST_OUT);

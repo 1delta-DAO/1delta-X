@@ -43,7 +43,8 @@ contract ChainBindingTest is BridgeTestBase {
                 exclusivityOffset: 0,
                 dstOrderHash: bytes32(0),
                 beneficiary: address(0),
-                commitmentExpiry: 0
+                commitmentExpiry: 0,
+                totalAmount: 0
             })
         );
     }
@@ -62,7 +63,8 @@ contract ChainBindingTest is BridgeTestBase {
                 extraOptions: hex"0003",
                 dstOrderHash: bytes32(0),
                 beneficiary: address(0),
-                commitmentExpiry: 0
+                commitmentExpiry: 0,
+                totalAmount: 0
             })
         );
     }

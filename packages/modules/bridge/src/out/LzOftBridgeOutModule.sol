@@ -42,6 +42,28 @@ import {IOFT} from "../vendor/ILayerZero.sol";
 ///     now needs that someone's standing, amount-bounded allowance to this maker,
 ///     so a sponsor's worst case is the allowance it chose to extend.
 ///
+///     ⚠ WHAT THE SPONSORSHIP CAN AND CANNOT BIND (audit 2026-09-30 X-DIFF-REST-3).
+///     A sponsorship is consent per (payer, maker), consumed per MESSAGE:
+///       • a sponsored send must be the WHOLE item (`totalAmount`, {FullFillGuard}),
+///         so a filler cannot split one order into N slices and charge the
+///         sponsor N messaging fees;
+///       • each send is capped by the sponsor's `maxFeePerSend`, and the
+///         allowance moves by {increaseFeeSponsorship} / {decreaseFeeSponsorship}
+///         as well as the absolute {approveFeeSponsorship}, so a re-approval need
+///         not race the maker;
+///       • it CANNOT bind the FILLER: `makeOnBehalf` receives no filler identity
+///         (the {IMakerModule} seam carries none), so any filler of the sponsored
+///         order makes the sponsor pay. A solver that prices the fee into its
+///         own quote must therefore sponsor only orders that name it as HARD
+///         `exclusiveFiller` for their whole life — an off-chain rule the SDK
+///         enforces before it builds a sponsored spec.
+///
+///     ⚠ TOKEN BINDING (audit 2026-09-30 BRIDGE-B-2). `inputToken` MUST be
+///     `IOFT(oft).token()`, and this is now checked on-chain. A native OFT burns
+///     from its CALLER with no allowance, whatever the module pulled, so a spec
+///     naming a junk `inputToken` and a real native OFT burned this module's
+///     RESIDENT OFT balance (strays, mis-sends) to the attacker's destination.
+///
 ///  2. SPLIT ARRIVAL. Tokens land on the destination in the `lzReceive`
 ///     transaction and the commitment in a LATER `lzCompose` one. That is why
 ///     {BridgedOrderInbox.lzCompose} never reverts on business-logic failure —
@@ -64,16 +86,22 @@ contract LzOftBridgeOutModule is BridgeOutBase {
     ///         when `feePayer != maker`; a maker always pays from their own credit.
     mapping(address payer => mapping(address maker => uint256)) public feeAllowance;
 
+    /// @notice `maxFeePerSend[payer][maker]` — the most ONE sponsored message may
+    ///         charge `payer`, whatever the maker's own `maxNativeFee` says.
+    mapping(address payer => mapping(address maker => uint256)) public maxFeePerSend;
+
     event ToppedUp(address indexed payer, uint256 amount, uint256 balance);
     event WithdrawnNative(address indexed payer, uint256 amount, uint256 balance);
-    event FeeSponsorshipSet(address indexed payer, address indexed maker, uint256 amount);
+    event FeeSponsorshipSet(address indexed payer, address indexed maker, uint256 amount, uint256 maxPerSend);
 
     error FeeAboveCap();
     error InsufficientNativeCredit();
     error NativeTransferFailed();
     /// @dev `feePayer` is not the maker and has not sponsored this maker for at
-    ///      least the quoted fee.
+    ///      least the quoted fee, or the fee exceeds the sponsor's per-send cap.
     error FeeNotSponsored();
+    /// @dev `IOFT(oft).token() != inputToken` — see the TOKEN BINDING note.
+    error OftTokenMismatch();
 
     /// @param oft               Stargate pool or OFT/adapter on THIS chain.
     /// @param inputToken        ERC20 pulled from the maker. Must be `IOFT.token()`.
@@ -98,6 +126,13 @@ contract LzOftBridgeOutModule is BridgeOutBase {
     ///                          delivery becomes an orphan at the inbox. Signed by
     ///                          the maker rather than built here so the gas budget
     ///                          is explicit and auditable at signing time.
+    ///                          ⚠ Must NOT carry an lzCompose native VALUE: the
+    ///                          inbox owes no native and reverts a value-bearing
+    ///                          compose (it stays retryable with zero value).
+    /// @param totalAmount       The item's FULL maker-signed amount. Mandatory (and
+    ///                          the slice must equal it) when `feePayer` is not
+    ///                          the maker; optional otherwise, where zero allows
+    ///                          partial slices.
     struct LzSpec {
         address oft;
         address inputToken;
@@ -111,6 +146,7 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         bytes32 dstOrderHash;
         address beneficiary;
         uint32 commitmentExpiry;
+        uint256 totalAmount;
     }
 
     constructor(address permit3, address settlement) BridgeOutBase(permit3, settlement) {}
@@ -125,11 +161,30 @@ contract LzOftBridgeOutModule is BridgeOutBase {
     }
 
     /// @notice Let orders signed by `maker` spend up to `amount` of the caller's
-    ///         credit on messaging fees. Keyed by `msg.sender`, so only ever your
-    ///         own credit; set to 0 to revoke. An absolute value, not an increment.
-    function approveFeeSponsorship(address maker, uint256 amount) external {
+    ///         credit on messaging fees, at most `maxPerSend` per message. Keyed by
+    ///         `msg.sender`, so only ever your own credit; set to 0 to revoke. An
+    ///         absolute value — prefer {increaseFeeSponsorship} /
+    ///         {decreaseFeeSponsorship} to adjust a live one, so a maker cannot
+    ///         spend the old allowance and then the new one.
+    function approveFeeSponsorship(address maker, uint256 amount, uint256 maxPerSend) external {
         feeAllowance[msg.sender][maker] = amount;
-        emit FeeSponsorshipSet(msg.sender, maker, amount);
+        maxFeePerSend[msg.sender][maker] = maxPerSend;
+        emit FeeSponsorshipSet(msg.sender, maker, amount, maxPerSend);
+    }
+
+    /// @notice Raise the caller's sponsorship of `maker` by `amount`.
+    function increaseFeeSponsorship(address maker, uint256 amount) external {
+        uint256 a = feeAllowance[msg.sender][maker] + amount;
+        feeAllowance[msg.sender][maker] = a;
+        emit FeeSponsorshipSet(msg.sender, maker, a, maxFeePerSend[msg.sender][maker]);
+    }
+
+    /// @notice Lower the caller's sponsorship of `maker` by `amount`, flooring at 0.
+    function decreaseFeeSponsorship(address maker, uint256 amount) external {
+        uint256 a = feeAllowance[msg.sender][maker];
+        a = a > amount ? a - amount : 0;
+        feeAllowance[msg.sender][maker] = a;
+        emit FeeSponsorshipSet(msg.sender, maker, a, maxFeePerSend[msg.sender][maker]);
     }
 
     /// @notice Reclaim unspent credit. Keyed by `msg.sender`, so only ever your own.
@@ -154,6 +209,10 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         // on-chain can prove the two agree — that pairing is an off-chain preflight.
         // Zero is the one value that is unambiguously an unpopulated field.
         if (s.dstEid == 0) revert BadDestination();
+        // See the TOKEN BINDING note: the venue must move exactly the token pulled.
+        if (IOFT(s.oft).token() != s.inputToken) revert OftTokenMismatch();
+        // A sponsored send is one message for the whole item — see the contract note.
+        _fullFillGate(amount, s.totalAmount, s.feePayer != onBehalfOf);
 
         // Snapshot before the pull — see {_sweep}: the sweep must return only what
         // THIS fill brought in, never a balance that was already resident.
@@ -178,7 +237,7 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         // to the amount they extended — see the contract note.
         if (s.feePayer != onBehalfOf) {
             uint256 allowed = feeAllowance[s.feePayer][onBehalfOf];
-            if (fee > allowed) revert FeeNotSponsored();
+            if (fee > allowed || fee > maxFeePerSend[s.feePayer][onBehalfOf]) revert FeeNotSponsored();
             unchecked {
                 feeAllowance[s.feePayer][onBehalfOf] = allowed - fee;
             }

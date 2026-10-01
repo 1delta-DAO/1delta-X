@@ -36,6 +36,15 @@ import {PositionFunnel} from "./PositionFunnel.sol";
 ///
 ///  If any of those were violated, funds already sitting at counterfactual
 ///  addresses would become unreachable. Nothing here should ever be "migrated".
+///
+///  ⚠ WRAPPED NATIVE ARRIVES UNWRAPPED (audit 2026-09-30 BRIDGE-B-5). Across
+///  unwraps a `wrappedNativeToken` output and sends NATIVE ETH to a recipient
+///  that has no code. A counterfactual funnel therefore holds ETH, not WETH, and a
+///  WETH-input order against it cannot fill until the ETH is wrapped. Deploy the
+///  funnel (permissionless, {deploy}) BEFORE such a deposit is relayed, or have
+///  the owner's `executeSigned` batch wrap it — see {AcrossBridgeOutModule}. A
+///  WETH address cannot be pinned here: it differs per chain and would change the
+///  init code, i.e. every predicted address.
 contract PositionFunnelFactory {
     /// @notice The clone target. Immutable, so the init code is fixed forever.
     address public immutable IMPLEMENTATION;

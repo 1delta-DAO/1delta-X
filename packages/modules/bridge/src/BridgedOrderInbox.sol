@@ -110,11 +110,47 @@ interface ISettlementApprove {
 ///       before it can credit anything — the Drift/KelpDAO lesson (re-audit
 ///       2026-09-25): one compromised key must not mean "all funds move" at once.
 ///       REMOVING a source stays instant, since revocation only ever narrows trust.
-///       Ownership moves in two steps ({transferOwnership} / {acceptOwnership}), and
-///       {rescue} is bounded by `balance - liability` so it can never reach funds
-///       owed to a live commitment.
+///       Ownership moves in two steps ({transferOwnership} / {acceptOwnership}).
+///
+///       The owner's two recovery paths are bounded so that neither can reach a
+///       delivery that is merely IN FLIGHT (audit 2026-09-30 BRIDGE-A-1). On the
+///       LayerZero path tokens land in `lzReceive` and are credited by a LATER
+///       `lzCompose`; until then they sit outside `liability` — and that window is
+///       not only "the executor has not run yet": a delivery through a source that
+///       is still QUEUED ({setComposeSource}, a whole {COMPOSE_SOURCE_DELAY}) or was
+///       just REMOVED reverts in `lzCompose` and stays in the endpoint's queue,
+///       uncredited, until the source is live again. An unbounded
+///       `balance - liability` sweep took those deliveries, and the later compose
+///       then credited a row nothing backed, paid out of other users' escrow.
+///         • {rescue} releases only what an {Orphaned} event ANNOUNCED — the
+///           `orphaned[token]` ledger — and never more than `balance - liability`.
+///         • Anything else (a donation, an Across deposit with no message, a
+///           `header` orphan whose amount is unknown, positive rebase yield) goes
+///           through {queueStrayRescue} / {executeStrayRescue}: public for a full
+///           {COMPOSE_SOURCE_DELAY}, and re-bounded at execution by
+///           `balance - liability - orphaned`, so every compose that CAN land in
+///           the meantime has landed first.
+///       The residual is a compose that cannot run for longer than that delay — a
+///       source the owner removed and did not re-add. The queued stray rescue is
+///       the public warning for it, the same posture as the source timelock.
 ///    3. Settlement and Permit3 are trusted (the standing allowance is to
 ///       Settlement alone, and only for tokens {enableToken} has wired).
+///    4. ENABLED TOKENS MUST BE EXACT-TRANSFER AND NON-REBASING (audit 2026-09-30
+///       X-TOKENS-1 / BRIDGE-A-6). Credits are the bridge-REPORTED amount (point 1),
+///       and Settlement then pulls a filled order's full `owed` out of the POOLED
+///       balance. A fee-on-transfer token (including one whose fee switch is merely
+///       dormant, like USDT's `basisPointsRate`, or an upgradeable token that later
+///       adds one) or a negatively rebasing token makes `credited > held`, and the
+///       shortfall lands on whichever row of that token fills or settles LAST.
+///       This cannot be measured here: the LayerZero tokens arrive in an earlier
+///       transaction, the Across handler runs after the transfer with no snapshot
+///       to compare against, and a `balance - liability` clamp would under-credit
+///       honest deliveries whenever any fill is filled-but-not-yet-{sync}ed
+///       (Settlement pulls without notifying this contract, so that figure reads
+///       LOW by every unsynced fill). So it is an admission rule on {enableToken}:
+///       the core is asset-general, this pooled escrow is not. A positive rebase
+///       goes the other way — the yield is unattributed and reachable only through
+///       the delayed stray rescue.
 contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     using DutchAuction for Order; // `side` now lives in `timing` bit 101
     IPermit3 public immutable PERMIT3;
@@ -161,7 +197,9 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     mapping(bytes32 => bytes32) public activeRow;
 
     /// @notice token → funds this contract still holds on behalf of live commits.
-    ///         Balance above this is unattributed and is what {rescue} may take.
+    ///         Balance above this is not owed to a row, but it is NOT all loose:
+    ///         it also holds LayerZero deliveries whose compose has not run yet.
+    ///         See {rescue} / {queueStrayRescue} for what each path may take.
     ///         Kept current against fills by {sync}, which {settle} calls and which
     ///         anyone may call directly — without it a filled-but-unsettled order
     ///         would leave the figure permanently overstated and the escape hatch
@@ -171,20 +209,32 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     /// @notice Tokens wired for settlement (ERC20 → Permit3, Permit3 → Settlement).
     mapping(address => bool) public tokenEnabled;
 
-    /// @notice LayerZero compose payloads already consumed, keyed by
-    ///         `keccak256(guid, message)`.
+    /// @notice token → amount ANNOUNCED as orphaned by an {Orphaned} event and not
+    ///         yet rescued. The only balance {rescue} may release — see trust
+    ///         assumption 2.
     ///
-    ///         NOT keyed by GUID alone. The endpoint's `composeQueue` is keyed by
-    ///         (sender, receiver, guid, INDEX), so one send can carry several
-    ///         compose messages under a single GUID — and `lzCompose` is not handed
-    ///         the index. Deduping on the GUID would silently drop every message
-    ///         after the first and orphan its tokens. The base OFT only ever emits
-    ///         index 0, so this is latent rather than live, but it is the exact
-    ///         shape of bug that surfaces when a pool starts batching.
-    ///
-    ///         Defensive in any case: the endpoint clears a compose message once it
-    ///         executes, so a true replay should be unreachable.
-    mapping(bytes32 => bool) public composeConsumed;
+    /// @dev    There is deliberately no compose de-duplication map (audit
+    ///         2026-09-30 BRIDGE-A-3). EndpointV2 overwrites
+    ///         `composeQueue[from][to][guid][index]` with its RECEIVED marker BEFORE
+    ///         calling the composer and `sendCompose` refuses an occupied slot, so a
+    ///         replay is structurally impossible; the only thing a
+    ///         `keccak256(guid, message)` dedupe could ever catch was two DISTINCT
+    ///         compose indices under one GUID with byte-identical payloads — i.e. a
+    ///         batching source legitimately delivering the same amount twice — and
+    ///         it dropped the second one silently, leaving its tokens unattributed.
+    ///         The endpoint is already trusted (it is the only permitted caller).
+    mapping(address => uint256) public orphaned;
+
+    /// @notice A queued {queueStrayRescue}: who receives it, the most it may move,
+    ///         and the earliest time {executeStrayRescue} may run it.
+    struct PendingStrayRescue {
+        address to;
+        uint64 eta;
+        uint256 amount;
+    }
+
+    /// @notice token → the queued stray rescue for it (`eta == 0` = none).
+    mapping(address => PendingStrayRescue) public pendingStrayRescue;
 
     /// @notice Trusted LayerZero compose senders — the Stargate pool or OFT on
     ///         THIS chain — mapped to the ERC20 they deliver.
@@ -209,13 +259,17 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     /// @notice A compose delivery this contract will never accept — malformed,
     ///         wrong-chain, unknown token, or against a settled commitment. Emitted
     ///         INSTEAD of reverting, because the tokens landed in an earlier
-    ///         transaction and a revert would leave them unreachable. Recoverable
-    ///         via {rescue}. Distinct from a compose that simply has not run yet,
-    ///         which needs no recovery at all — see the note on {rescue}.
+    ///         transaction and a revert would leave them unreachable. A non-zero
+    ///         `amount` is added to `orphaned[token]` and is recoverable via
+    ///         {rescue}; a `header` orphan (amount unreadable, 0) only via the
+    ///         delayed stray path. Distinct from a compose that simply has not run
+    ///         yet, which needs no recovery at all — see the note on {rescue}.
     event Orphaned(bytes32 indexed guid, address indexed token, uint256 amount, bytes reason);
     /// @notice {sync} moved `delta` out of `liability` after observing fills.
     event Synced(bytes32 indexed orderHash, uint256 spent, uint256 delta);
     event Rescued(address indexed token, address indexed to, uint256 amount);
+    event StrayRescueQueued(address indexed token, address indexed to, uint256 amount, uint64 eta);
+    event StrayRescueCancelled(address indexed token);
     event TokenEnabled(address indexed token);
     event ComposeSourceSet(address indexed source, address indexed token);
     event ComposeSourceQueued(address indexed source, address indexed token, uint64 eta);
@@ -238,6 +292,12 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     error NotYetRefundable();
     error UnsupportedOrderShape();
     error NothingToRescue();
+    error StrayRescueNotReady();
+    /// @dev {lzCompose} was handed native value. The inbox owes no native
+    ///      liabilities and has no native path, so value would be locked forever;
+    ///      the revert leaves the compose in the endpoint's queue, re-executable
+    ///      with zero value (audit 2026-09-30 BRIDGE-A-4).
+    error NativeValueNotAccepted();
     error Reentrancy();
 
     uint256 private _lock = 1;
@@ -247,7 +307,7 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         _;
     }
 
-    /// @dev Applied to the two functions that move tokens out. Deliberately NOT
+    /// @dev Applied to every function that moves tokens out. Deliberately NOT
     ///      applied to {lzCompose}: a guard there could make it revert, and a
     ///      reverting compose handler is the one failure this contract is built to
     ///      avoid. That path holds no such risk anyway — it makes no external call.
@@ -274,6 +334,12 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///         order's inputs be pulled. Permissionless would be fine (it grants
     ///         nothing an order cannot already claim), but keeping it owned makes
     ///         the supported set explicit and auditable.
+    ///
+    ///         ⚠ ADMISSION RULE: exact-transfer, non-rebasing ERC20s only — see
+    ///         trust assumption 4. A token whose transfer can deliver less than the
+    ///         amount moved (fee-on-transfer, including a dormant fee switch) or
+    ///         whose balances can shrink (negative rebase) breaks the pooled
+    ///         funding invariant for every other row of that token.
     function enableToken(address token) external onlyOwner {
         if (tokenEnabled[token]) return;
         tokenEnabled[token] = true;
@@ -362,19 +428,27 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///
     ///      The authorization checks DO revert — a call that is not from the
     ///      endpoint, or claims an unregistered compose source, delivered nothing
-    ///      to strand.
+    ///      to strand. So does a compose carrying native VALUE: `payable` is the
+    ///      composer interface's, but this contract has no native liabilities and
+    ///      no native exit, so value would be locked forever. The revert is
+    ///      retryable — the message stays queued and anyone can re-execute it with
+    ///      zero value (audit 2026-09-30 BRIDGE-A-4).
+    ///
+    ///      Every orphan whose amount is known is added to `orphaned[token]`, the
+    ///      ledger {rescue} is bounded by. A `header` orphan carries no readable
+    ///      amount; its tokens are recoverable only through the delayed stray path.
     function lzCompose(address _from, bytes32 _guid, bytes calldata _message, address, bytes calldata)
         external
         payable
     {
         if (msg.sender != LZ_ENDPOINT) revert NotEndpoint();
+        if (msg.value != 0) revert NativeValueNotAccepted();
         address token = composeSourceToken[_from];
         if (token == address(0)) revert UntrustedComposeSource();
 
-        // Keyed by (guid, payload), not guid alone — see {composeConsumed}.
-        bytes32 composeKey = keccak256(abi.encodePacked(_guid, _message));
-        if (composeConsumed[composeKey]) return; // defensive; endpoint should prevent replay
-        composeConsumed[composeKey] = true;
+        // No (guid, payload) dedupe — the endpoint makes a replay impossible, and a
+        // dedupe only ever dropped a legitimate identical second compose under one
+        // GUID. See {orphaned}.
 
         if (!OFTComposeMsgCodec.isWellFormed(_message)) {
             emit Orphaned(_guid, token, 0, "header");
@@ -384,20 +458,27 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         (bool ok, CommitmentCodec.Commitment memory c) =
             CommitmentCodec.tryDecode(OFTComposeMsgCodec.composeMsg(_message));
         if (!ok) {
-            emit Orphaned(_guid, token, amount, "payload");
+            _orphan(_guid, token, amount, "payload");
             return;
         }
         if (c.dstChainId != block.chainid) {
-            emit Orphaned(_guid, token, amount, "chain");
+            _orphan(_guid, token, amount, "chain");
             return;
         }
         if (!tokenEnabled[token]) {
-            emit Orphaned(_guid, token, amount, "token");
+            _orphan(_guid, token, amount, "token");
             return;
         }
         // Every well-formed delivery has a row of its own now (the key is the whole
         // commitment), so nothing here can be refused as a mismatch any more.
         _credit(c, token, amount);
+    }
+
+    /// @dev Park an announced, never-acceptable delivery: emit it and make exactly
+    ///      its amount releasable by {rescue}.
+    function _orphan(bytes32 guid, address token, uint256 amount, bytes memory reason) private {
+        orphaned[token] += amount;
+        emit Orphaned(guid, token, amount, reason);
     }
 
     // ──────────────────── Escrow accounting ────────────────────
@@ -433,7 +514,19 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///      says. (F28 briefly took the minimum so a copycat could not park the
     ///      unlock in 2106; the minimum let the same copycat force an early refund
     ///      instead. The deadline path removes the need to choose.)
+    ///
+    ///      That "even then" needs {settleExpired} to reach EVERY row, not only the
+    ///      `legsIn[0].token` one — a row credited in another token can never
+    ///      activate, so before audit 2026-09-30 (BRIDGE-A-2 / X-DIFF-REST-1) its
+    ///      only exit was the inflatable fallback. {settleExpired} now takes the
+    ///      row's token, and opens at once for a row whose order can NEVER
+    ///      activate (other token, unsupported or never-expiring shape).
+    ///
+    ///      A zero-amount credit is ignored outright: it adds nothing to the row,
+    ///      so it must not be able to move the row's clock either (the free
+    ///      variant of the copycat raise).
     function _credit(CommitmentCodec.Commitment memory c, address token, uint256 amount) internal {
+        if (amount == 0) return;
         bytes32 key = commitKey(c.orderHash, c.beneficiary, token);
         Commit storage k = commits[key];
         if (k.token == address(0)) {
@@ -516,15 +609,35 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         return _settle(orderHash, key);
     }
 
-    /// @notice {settle} for a row whose ORDER has expired, whatever the row's bridged
-    ///         fallback expiry says. The order is the pre-image of the hash and its
-    ///         deadline is signed, so this needs no trust in the commitment's
-    ///         `expiry` — which is exactly the field a copycat credit can inflate.
-    ///         Refunds the row keyed by `(hash(order), beneficiary, legsIn[0].token)`.
-    function settleExpired(Order calldata order, address beneficiary) external nonReentrant returns (uint256) {
-        if (DutchAuction.expiry(order) > block.timestamp) revert NotYetRefundable();
+    /// @notice {settle} for a row whose ORDER can no longer — or can never — be
+    ///         filled out of it, whatever the row's bridged fallback expiry says. The
+    ///         order is the pre-image of the hash and everything checked here is
+    ///         signed, so this needs no trust in the commitment's `expiry` — which is
+    ///         exactly the field a copycat credit can inflate.
+    ///
+    ///         Refunds the row `(hash(order), beneficiary, token)` once ANY of:
+    ///           • the order's signed deadline has passed;
+    ///           • `token` is not the order's `legsIn[0].token` — {activate} keys on
+    ///             that token, so such a row can never fund the order;
+    ///           • the order fails {_staticShapeOk} (wrong maker, unsupported shape,
+    ///             never-expiring deadline, malformed legs) — {activate} can never
+    ///             approve it, so no row under its hash is ever spendable.
+    ///         In each case no fill can ever pull from the row, so refunding it to
+    ///         the beneficiary its key names is safe at any time (audit 2026-09-30
+    ///         BRIDGE-A-2 / X-DIFF-REST-1: before, only the `legsIn[0].token` row of
+    ///         an EXPIRING order was reachable, and every other row waited out a
+    ///         copycat-inflatable fallback — up to 2106).
+    function settleExpired(Order calldata order, address beneficiary, address token)
+        external
+        nonReentrant
+        returns (uint256)
+    {
+        // `legInToken` is read only once `_staticShapeOk` has validated the blob.
+        if (
+            _staticShapeOk(order) && DutchAuction.expiry(order) > block.timestamp
+                && token == PackedArrays.legInToken(order.legsIn, 0)
+        ) revert NotYetRefundable();
         bytes32 orderHash = OrderHash.hash(order);
-        address token = PackedArrays.legInToken(order.legsIn, 0);
         return _settle(orderHash, commitKey(orderHash, beneficiary, token));
     }
 
@@ -553,30 +666,81 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         emit Settled(orderHash, k.beneficiary, spent, refunded);
     }
 
-    /// @notice Emergency recovery of UNATTRIBUTED balance — tokens delivered to
-    ///         this contract without a usable commitment. In practice that means
-    ///         a LayerZero delivery whose compose never landed or was orphaned;
-    ///         the Across path cannot produce one, because it reverts instead.
+    /// @notice Refund an ANNOUNCED orphan — a LayerZero delivery whose compose ran
+    ///         and emitted {Orphaned} with a known amount (`payload`, `chain`,
+    ///         `token`). Immediate, because the amount it may move was published
+    ///         by that event and is tracked in `orphaned[token]`.
     ///
-    ///         RECOVERY ORDER. Reach for this LAST. A compose message that the
-    ///         executor never ran is not lost: the endpoint stores it in
-    ///         `composeQueue` whether or not the send budgeted an lzCompose option,
-    ///         and `endpoint.lzCompose` is PERMISSIONLESS — anyone can execute it
-    ///         and pay the gas, after which the delivery credits normally. Rescue
-    ///         is for payloads this contract will never accept (malformed,
-    ///         wrong-chain, unknown token), not for slow ones.
+    ///         Releases `min(amount, orphaned[token], balance - liability)`. NOT
+    ///         `balance - liability`: that figure also contains every delivery
+    ///         whose compose has not run yet — still queued with the executor,
+    ///         through a source that is still in its {COMPOSE_SOURCE_DELAY}, or
+    ///         through one just removed — and each of those credits its row when the
+    ///         compose finally lands. Sweeping one made that credit unbacked and
+    ///         paid it out of other rows (audit 2026-09-30 BRIDGE-A-1).
     ///
-    ///         Bounded by `balance - liability`, so funds owed to a live commit
-    ///         are unreachable from here regardless of owner intent. Call {sync} on
-    ///         any filled-but-unsettled commits first — until then their spent
-    ///         portion still counts as owed and the bound reads low.
-    function rescue(address token, address to) external onlyOwner nonReentrant returns (uint256 amount) {
+    ///         RECOVERY ORDER. A compose the executor never ran is not lost: the
+    ///         endpoint keeps it in `composeQueue` and `endpoint.lzCompose` is
+    ///         permissionless, so the fix for a slow delivery is to execute it, not
+    ///         to rescue it. Balance that no event announced goes through
+    ///         {queueStrayRescue}. Call {sync} on filled-but-unsettled commits first
+    ///         — until then their spent portion still counts as owed.
+    /// @param amount The most to release; `type(uint256).max` for "all that may".
+    function rescue(address token, address to, uint256 amount)
+        external
+        onlyOwner
+        nonReentrant
+        returns (uint256 rescued)
+    {
+        rescued = _min(amount, _min(orphaned[token], _loose(token)));
+        if (rescued == 0) revert NothingToRescue();
+        orphaned[token] -= rescued;
+        SafeTransferLib.safeTransfer(token, to, rescued);
+        emit Rescued(token, to, rescued);
+    }
+
+    /// @notice Queue the recovery of UNANNOUNCED balance — a donation, an Across
+    ///         deposit sent with no message (the SpokePool then never calls the
+    ///         handler), a `header` orphan, positive rebase yield. Public for a full
+    ///         {COMPOSE_SOURCE_DELAY} before {executeStrayRescue} can move anything,
+    ///         the same timelock that guards compose-source additions: a delivery
+    ///         whose compose is merely pending must get the chance to land first.
+    ///         Re-queuing replaces (and restarts) the pending one.
+    function queueStrayRescue(address token, address to, uint256 amount) external onlyOwner {
+        uint64 eta = uint64(block.timestamp + COMPOSE_SOURCE_DELAY);
+        pendingStrayRescue[token] = PendingStrayRescue({to: to, eta: eta, amount: amount});
+        emit StrayRescueQueued(token, to, amount, eta);
+    }
+
+    function cancelStrayRescue(address token) external onlyOwner {
+        delete pendingStrayRescue[token];
+        emit StrayRescueCancelled(token);
+    }
+
+    /// @notice Run a queued stray rescue once its delay has passed. The bound is
+    ///         evaluated NOW, not at queue time: at most the queued amount, and at
+    ///         most `balance - liability - orphaned` — so a compose that landed
+    ///         during the delay is liability by now and out of reach, and announced
+    ///         orphans stay with {rescue}.
+    function executeStrayRescue(address token) external onlyOwner nonReentrant returns (uint256 rescued) {
+        PendingStrayRescue memory p = pendingStrayRescue[token];
+        if (p.eta == 0 || block.timestamp < p.eta) revert StrayRescueNotReady();
+        delete pendingStrayRescue[token];
+        rescued = _min(p.amount, strayBalance(token));
+        if (rescued == 0) revert NothingToRescue();
+        SafeTransferLib.safeTransfer(token, p.to, rescued);
+        emit Rescued(token, p.to, rescued);
+    }
+
+    /// @dev `balance - liability`, floored at zero.
+    function _loose(address token) private view returns (uint256) {
         uint256 bal = SafeTransferLib.balanceOf(token, address(this));
         uint256 owed = liability[token];
-        if (bal <= owed) revert NothingToRescue();
-        amount = bal - owed;
-        SafeTransferLib.safeTransfer(token, to, amount);
-        emit Rescued(token, to, amount);
+        return bal > owed ? bal - owed : 0;
+    }
+
+    function _min(uint256 a, uint256 b) private pure returns (uint256) {
+        return a < b ? a : b;
     }
 
     /// @notice Reconcile `liability` with what fills have already pulled for the
@@ -626,11 +790,20 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         return k.deadline != 0 ? k.deadline : k.expiry;
     }
 
-    /// @notice What {rescue} would currently release; 0 when nothing is loose.
+    /// @notice What {rescue} would currently release: the announced orphans, capped
+    ///         by `balance - liability`. 0 when nothing is releasable.
     function rescuable(address token) external view returns (uint256) {
-        uint256 bal = SafeTransferLib.balanceOf(token, address(this));
-        uint256 owed = liability[token];
-        return bal > owed ? bal - owed : 0;
+        return _min(orphaned[token], _loose(token));
+    }
+
+    /// @notice Balance no commitment and no announced orphan accounts for —
+    ///         `balance - liability - orphaned`, floored at zero. INCLUDES deliveries
+    ///         whose compose has not run yet, which is why it is reachable only
+    ///         through the delayed {queueStrayRescue} path.
+    function strayBalance(address token) public view returns (uint256) {
+        uint256 loose = _loose(token);
+        uint256 o = orphaned[token];
+        return loose > o ? loose - o : 0;
     }
 
     /// @notice Still-missing funding for a destination order, in `legsIn[0]` units.
@@ -666,9 +839,29 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
     ///          contract — `address(0)` means "the maker", which would deliver the
     ///          user's proceeds back into the escrow where only {rescue} could
     ///          reach them.
-    ///        a live deadline — {settle}'s refund gate keys on it.
+    ///        a live, FINITE deadline — {settle}'s refund gate keys on it, and a
+    ///          never-expiring order (`type(uint48).max`) would leave its rows no
+    ///          deadline-based exit at all.
+    ///        the inbox as maker — otherwise `approveOrder` refuses it anyway.
+    ///
+    ///      Leg blobs are bounds-checked with the {PackedArrays} validator rule
+    ///      (audit 2026-09-30 X-ASM-1): the element count must be backed by bytes,
+    ///      or an accessor would read the blob's unhashed ABI padding / the next
+    ///      tail, and one `orderHash` could decode to caller-chosen token, anchor
+    ///      and recipients in different calls.
     function _checkShape(Order calldata order) internal view {
-        if (order.side() != OrderSide.SELL) revert UnsupportedOrderShape();
+        if (!_staticShapeOk(order) || DutchAuction.expiry(order) <= block.timestamp) {
+            revert UnsupportedOrderShape();
+        }
+    }
+
+    /// @dev Every TIME-INDEPENDENT part of the shape {activate} accepts. Returns
+    ///      false instead of reverting so {settleExpired} can use it: an order that
+    ///      fails it can never be approved here, hence no row under its hash is
+    ///      ever spendable and refunding any of them is safe at once.
+    function _staticShapeOk(Order calldata order) internal view returns (bool) {
+        if (order.maker != address(this)) return false;
+        if (order.side() != OrderSide.SELL) return false;
         // A FILL-ONCE order ({DutchAuction.useNonceInvalidator}, `timing` bit 100)
         // records its progress by consuming the maker's NONCE instead of writing
         // `filled[orderHash]`, which stays 0 forever. This inbox's refund accounting
@@ -679,8 +872,8 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         // nonce bitmap is not amount-denominated, so `sync` could not be taught to
         // read it (it can only say filled/not-filled, and `credited` may legitimately
         // exceed the anchor).
-        if (order.useNonceInvalidator()) revert UnsupportedOrderShape();
-        if (PackedArrays.countUnchecked(order.legsIn) != 1) revert UnsupportedOrderShape();
+        if (order.useNonceInvalidator()) return false;
+        if (_validatedCount(order.legsIn, PackedArrays.LEG_IN_STRIDE) != 1) return false;
         // The input leg must be FIXED (`end == 0`). A RISING leg (`end != 0`, the
         // relayer-fee auction) is priced by {Pricing.inputOwed} as
         // `delta * inTick(start, end, bump) / anchor`, which reaches `end` at full
@@ -697,16 +890,29 @@ contract BridgedOrderInbox is IAcrossMessageHandler, ILayerZeroComposer {
         // never applies either (`inTick` returns `start` when `end == 0`), and soft
         // exclusivity only ever REDUCES the input charge — so this one check restores
         // `pulled <= anchor <= credited` completely.
-        if (_legInEnd(order.legsIn, 0) != 0) revert UnsupportedOrderShape();
-        if (PackedArrays.countUnchecked(order.legsOut) == 0) revert UnsupportedOrderShape();
-        if (PackedArrays.countUnchecked(order.items) != 0) revert UnsupportedOrderShape();
-        if (order.fillModule != address(0) || order.fillTotal != 0) revert UnsupportedOrderShape();
-        if (_legInStart(order.legsIn, 0) == 0) revert UnsupportedOrderShape();
-        if (DutchAuction.expiry(order) <= block.timestamp) revert UnsupportedOrderShape();
-        for (uint256 j; j < PackedArrays.countUnchecked(order.legsOut); j++) {
+        if (_legInEnd(order.legsIn, 0) != 0) return false;
+        if (_legInStart(order.legsIn, 0) == 0) return false;
+        uint256 nOut = _validatedCount(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
+        if (nOut == 0) return false; // also the "malformed" sentinel — see below
+        // An empty-test only, which is what `countUnchecked` is for: no element of
+        // `items` is ever read here.
+        if (PackedArrays.countUnchecked(order.items) != 0) return false;
+        if (order.fillModule != address(0) || order.fillTotal != 0) return false;
+        if (DutchAuction.expiry(order) == type(uint48).max) return false;
+        for (uint256 j; j < nOut; j++) {
             address to = _legOutRecipient(order.legsOut, j);
-            if (to == address(0) || to == address(this)) revert UnsupportedOrderShape();
+            if (to == address(0) || to == address(this)) return false;
         }
+        return true;
+    }
+
+    /// @dev {PackedArrays.validateFixed} without the revert: the declared count
+    ///      when the blob holds that many `stride`-byte elements, else 0 (which
+    ///      every caller here treats as "unsupported" — an inbox order needs at
+    ///      least one leg on each side).
+    function _validatedCount(bytes calldata b, uint256 stride) private pure returns (uint256 n) {
+        n = PackedArrays.countUnchecked(b);
+        if (b.length < 1 + n * stride) return 0;
     }
 
     /// @dev `startAmount` of packed input leg `i` — the leg's other fields are unused

@@ -42,7 +42,8 @@ contract LzPathTest is BridgeTestBase {
                 extraOptions: EXTRA_OPTIONS,
                 dstOrderHash: dstOrderHash,
                 beneficiary: beneficiary,
-                commitmentExpiry: uint32(block.timestamp) + COMMITMENT_EXPIRY_OFFSET
+                commitmentExpiry: uint32(block.timestamp) + COMMITMENT_EXPIRY_OFFSET,
+                totalAmount: BRIDGE
             })
         );
     }
@@ -87,7 +88,8 @@ contract LzPathTest is BridgeTestBase {
         // lzReceive: tokens land with NO attribution yet.
         oft.deliverTokens(0, DELIVERED);
         assertEq(inbox.liability(address(tA)), 0, "not yet credited");
-        assertEq(inbox.rescuable(address(tA)), DELIVERED, "loose until the compose lands");
+        assertEq(inbox.rescuable(address(tA)), 0, "in flight: never instantly rescuable (BRIDGE-A-1)");
+        assertEq(inbox.strayBalance(address(tA)), DELIVERED, "unattributed until the compose lands");
 
         // lzCompose: the separate transaction that attributes them.
         oft.deliverCompose(0, DELIVERED);
@@ -133,7 +135,10 @@ contract LzPathTest is BridgeTestBase {
     function test_compose_truncatedHeader_doesNotRevert() public {
         tA.mint(address(inbox), DELIVERED);
         lzEndpoint.deliverCompose(address(inbox), address(oft), bytes32(uint256(1)), hex"0001");
-        assertEq(inbox.rescuable(address(tA)), DELIVERED, "recoverable");
+        // A `header` orphan announces no amount, so it is recoverable only through
+        // the delayed stray path (audit 2026-09-30 BRIDGE-A-1).
+        assertEq(inbox.rescuable(address(tA)), 0, "no announced amount");
+        assertEq(inbox.strayBalance(address(tA)), DELIVERED, "recoverable via the stray path");
     }
 
     function test_compose_disabledToken_doesNotRevert() public {
@@ -173,7 +178,7 @@ contract LzPathTest is BridgeTestBase {
     function test_orphan_isRecoverableByRescue() public {
         _deliverComposeRaw(_wrap(hex"c0ffee"));
         vm.prank(inboxOwner);
-        uint256 got = inbox.rescue(address(tA), inboxOwner);
+        uint256 got = inbox.rescue(address(tA), inboxOwner, type(uint256).max);
         assertEq(got, DELIVERED, "recovered the orphan");
     }
 
@@ -217,17 +222,25 @@ contract LzPathTest is BridgeTestBase {
         assertEq(_missing(_hashOrder(d2), DELIVERED), 0, "second funded");
     }
 
-    function test_compose_duplicateGuid_ignored() public {
+    /// @dev CHANGED by audit 2026-09-30 (BRIDGE-A-3). This used to assert that an
+    ///      identical second compose under one GUID is a silent no-op. EndpointV2
+    ///      already makes a replay of one `(from, to, guid, index)` slot impossible
+    ///      (it marks the slot RECEIVED before calling the composer), so the only
+    ///      thing that dedupe ever caught was a SECOND INDEX with a byte-identical
+    ///      payload — a real delivery whose tokens were then left unattributed with
+    ///      no event. Both deliveries now credit.
+    function test_compose_identicalSecondIndexUnderOneGuid_isCredited() public {
         Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
         bytes32 h = _hashOrder(dst);
         bytes memory payload = _wrap(_commitmentFor(h));
 
-        tA.mint(address(inbox), DELIVERED);
+        tA.mint(address(inbox), 2 * DELIVERED); // two lzReceive legs, same amount
         lzEndpoint.deliverCompose(address(inbox), address(oft), bytes32(uint256(7)), payload);
-        assertEq(inbox.liability(address(tA)), DELIVERED, "credited once");
+        assertEq(inbox.liability(address(tA)), DELIVERED, "first index credited");
 
         lzEndpoint.deliverCompose(address(inbox), address(oft), bytes32(uint256(7)), payload);
-        assertEq(inbox.liability(address(tA)), DELIVERED, "replay is a no-op");
+        assertEq(inbox.liability(address(tA)), 2 * DELIVERED, "second index credited too");
+        assertEq(inbox.strayBalance(address(tA)), 0, "nothing left unattributed");
     }
 
     // ──────────────────── Native fee ledger ────────────────────
@@ -311,7 +324,7 @@ contract LzPathTest is BridgeTestBase {
         vm.deal(solver, 1 ether);
         vm.startPrank(solver);
         lzOut.topUpFor{value: 0.5 ether}(solver);
-        lzOut.approveFeeSponsorship(maker, 0.03 ether);
+        lzOut.approveFeeSponsorship(maker, 0.03 ether, 0.05 ether);
         vm.stopPrank();
 
         Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
@@ -330,7 +343,7 @@ contract LzPathTest is BridgeTestBase {
         vm.deal(solver, 1 ether);
         vm.startPrank(solver);
         lzOut.topUpFor{value: 0.5 ether}(solver);
-        lzOut.approveFeeSponsorship(maker, 0.005 ether); // fee quotes 0.01
+        lzOut.approveFeeSponsorship(maker, 0.005 ether, 0.05 ether); // fee quotes 0.01
         vm.stopPrank();
 
         Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
