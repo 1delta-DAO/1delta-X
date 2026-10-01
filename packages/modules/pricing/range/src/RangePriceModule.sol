@@ -11,11 +11,11 @@ import {IPriceModule} from "@core/interfaces/IPriceModule.sol";
 ///         bump, which means the maker's signed `start`/`end` band still bounds every
 ///         fill absolutely (see {IPriceModule}).
 ///
-///         `bump = START_BPS + (END_BPS - START_BPS) · prevFilled / total`, clamped
-///         to the direction the deployer configured. START_BPS is the bump at 0%
-///         filled and END_BPS the bump at 100%; START < END means the maker's price
-///         gets worse as the order fills (sell into strength, the usual ladder), and
-///         START > END means it improves (accumulate on the way down).
+///         `bump = START_BPS + (END_BPS - START_BPS) · prevFilled / total`, with
+///         `START_BPS <= END_BPS`: START_BPS is the bump at 0% filled and END_BPS the
+///         bump at 100%, so the maker's price gets worse as the order fills (sell
+///         into strength — the usual ladder, and the only direction 1inch's
+///         calculator supports).
 ///
 ///         ONE instance per (start, end) pair, shared by every maker who wants that
 ///         shape — the configuration is immutable and the order commits to it by
@@ -23,9 +23,21 @@ import {IPriceModule} from "@core/interfaces/IPriceModule.sol";
 ///
 /// @dev    Progress is measured on `prevFilled`, the state BEFORE this fill, so a
 ///         single fill is priced at one uniform bump rather than integrated across
-///         the slice it consumes. That is the maker-favourable, filler-predictable
-///         choice: a solver quoting a fill knows the exact bump before submitting,
-///         and a large fill is priced where it STARTED, not where it ended.
+///         the slice it consumes ({IPriceModule} is never told the fill's size). On
+///         an ASCENDING ladder that is the maker-favourable, filler-predictable
+///         choice: a solver quoting a fill knows the exact bump before submitting, a
+///         large fill is priced where it STARTED (the maker's best remaining point),
+///         and splitting can only move later slices toward the prices the maker
+///         signed for them.
+///
+///         ⚠ A DESCENDING ladder (`START_BPS > END_BPS`, "the maker's price improves
+///         as it fills") is REJECTED at construction (audit 2026-09-30 PRICE-3). With
+///         prevFilled sampling it collapses: a fill at progress 0 is priced at
+///         START_BPS — the maker's WORST point — for its whole size, so a rational
+///         filler takes 100% in one fill and the ladder never descends. Pricing it
+///         correctly needs the fill's size (an integral over the slice), which is an
+///         {IPriceModule} ABI change in core. Rejecting it also retires the
+///         descending branch's filler-ward rounding (PRICE-4).
 contract RangePriceModule is IPriceModule {
     uint256 internal constant BPS = 10_000;
 
@@ -33,9 +45,13 @@ contract RangePriceModule is IPriceModule {
     uint256 public immutable END_BPS;
 
     error InvalidRange();
+    /// @dev `START_BPS > END_BPS`: a descending ladder, which prevFilled sampling
+    ///      cannot price (see the contract note).
+    error DescendingRange();
 
     constructor(uint256 startBps, uint256 endBps) {
         if (startBps > BPS || endBps > BPS) revert InvalidRange();
+        if (startBps > endBps) revert DescendingRange();
         START_BPS = startBps;
         END_BPS = endBps;
     }
@@ -57,9 +73,7 @@ contract RangePriceModule is IPriceModule {
         // an unstarted order at its opening bump.
         if (total == 0 || prevFilled == 0) return START_BPS;
         if (prevFilled >= total) return END_BPS;
-        if (END_BPS >= START_BPS) {
-            return START_BPS + ((END_BPS - START_BPS) * prevFilled) / total;
-        }
-        return START_BPS - ((START_BPS - END_BPS) * prevFilled) / total;
+        // Floor division lowers the bump: rounds toward the maker.
+        return START_BPS + ((END_BPS - START_BPS) * prevFilled) / total;
     }
 }

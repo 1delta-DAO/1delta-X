@@ -120,9 +120,11 @@ contract ClockFlooredQuoteTest is MockSettlementBase {
         assertEq(tB.balanceOf(maker) - before_, _outAt(1_000), "the clock, not the floor");
     }
 
-    /// @dev No quote at all ⇒ an ordinary dutch fill. The cosigner is an improver,
-    ///      never a gatekeeper, and its absence costs the maker nothing.
-    function test_noQuote_isPlainDutch() public {
+    /// @dev No quote at all ⇒ NO concession: the maker's `start`. (Changed by audit
+    ///      2026-09-30 PRICE-6: this used to pin "unquoted = the clock", which made a
+    ///      quote strictly worse for the filler than omitting it, so no quote was ever
+    ///      presented. Its absence still costs the maker nothing.)
+    function test_noQuote_getsNoConcession() public {
         _fund(OUT_START);
         Order memory o = _order(4, address(mod));
         bytes memory sig = _sign(o);
@@ -131,15 +133,14 @@ contract ClockFlooredQuoteTest is MockSettlementBase {
         uint256 before_ = tB.balanceOf(maker);
         vm.prank(solver);
         settlement.fill(o, sig, SELL_IN);
-        assertEq(tB.balanceOf(maker) - before_, _outAt(5_000), "the clock midpoint");
+        assertEq(tB.balanceOf(maker) - before_, OUT_START, "unquoted: the maker's ambition");
     }
 
     /// @dev The head-to-head. Same order, same instant, same absent quote:
     ///      {CosignedQuotePriceModule} configured `FALLBACK_BPS = BPS` hands the
     ///      filler the maker's FLOOR with no decay ramp (its documented footgun);
-    ///      this module hands it the clock. The footgun does not exist here because
-    ///      there is no fallback to misconfigure — `min(anything, clock)` is the
-    ///      clock.
+    ///      this module hands it nothing (the maker's `start`). The footgun does not
+    ///      exist here because there is no fallback to misconfigure.
     function test_versusCosigned_unquotedFillIsNotTheFloor() public {
         CosignedQuotePriceModule legacy = new CosignedQuotePriceModule(vm.addr(COSIGNER_PK), 10_000);
 
@@ -161,7 +162,7 @@ contract ClockFlooredQuoteTest is MockSettlementBase {
         before_ = tB.balanceOf(maker);
         vm.prank(solver);
         settlement.fill(b, sigB, SELL_IN);
-        assertEq(tB.balanceOf(maker) - before_, _outAt(5_000), "floored: unquoted clears on the clock");
+        assertEq(tB.balanceOf(maker) - before_, OUT_START, "clock-capped: unquoted concedes nothing");
     }
 
     // ════════════════════════ shape and edge cases ════════════════════════
@@ -262,8 +263,8 @@ contract ClockFlooredQuoteTest is MockSettlementBase {
     // ═══════════════════════════ the invariant ═══════════════════════════
 
     /// @dev THE INVARIANT, fuzzed over the whole window and the whole quote range:
-    ///      an unquoted clock-floored fill pays the maker EXACTLY what the built-in
-    ///      dutch clock would have, and a quoted one pays at least that much. No
+    ///      a quoted clock-floored fill pays the maker at least what the built-in
+    ///      dutch clock would have (an unquoted one pays `start`, more still). No
     ///      cosigner behaviour anywhere in the range can make the maker worse off
     ///      than signing no price module at all.
     function testFuzz_neverWorseThanPlainDutch(uint32 elapsed, uint16 quotedBps) public {

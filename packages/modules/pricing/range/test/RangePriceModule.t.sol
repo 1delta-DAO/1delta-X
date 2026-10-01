@@ -14,7 +14,7 @@ import {MockSettlementBase} from "@coretest/shared/MockSettlementBase.t.sol";
 ///         measured on `prevFilled`, a solver knows the exact bump before submitting.
 ///
 ///  Two halves: the module's own curve, asserted directly on `bump()` (including the
-///  descending branch and the boundary guards, which nothing exercised while this
+///  rejected descending shape and the boundary guards, which nothing exercised while this
 ///  contract lived in core), and one end-to-end fill proving the core clamps and
 ///  applies what it answers.
 contract RangePriceModuleTest is MockSettlementBase {
@@ -36,13 +36,33 @@ contract RangePriceModuleTest is MockSettlementBase {
         assertEq(_bump(m, 100, 100), 10_000, "closes at END");
     }
 
-    /// @dev The descending branch — `END < START`, a ladder that gets BETTER for the
-    ///      filler as it fills. Never covered while this lived in core.
-    function test_descending_interpolatesDownward() public {
-        RangePriceModule m = new RangePriceModule(10_000, 2_000);
-        assertEq(_bump(m, 0, 100), 10_000, "opens at START");
-        assertEq(_bump(m, 50, 100), 6_000, "half way down");
-        assertEq(_bump(m, 100, 100), 2_000, "closes at END");
+    /// @dev Audit 2026-09-30 PRICE-3 / PRICE-4. The descending branch (`END < START`,
+    ///      the maker's price improving as it fills) used to be accepted: a single
+    ///      full fill at progress 0 cleared the whole order at START_BPS, the maker's
+    ///      WORST point, and its decrement rounded filler-ward. It is now refused at
+    ///      construction. (Replaces `test_descending_interpolatesDownward`, which
+    ///      pinned the collapsing behaviour.)
+    function test_audit_PRICE_3_descendingLadder_rejected() public {
+        vm.expectRevert(abi.encodeWithSignature("DescendingRange()"));
+        new RangePriceModule(10_000, 2_000);
+        vm.expectRevert(abi.encodeWithSignature("DescendingRange()"));
+        new RangePriceModule(1, 0);
+    }
+
+    /// @dev PRICE-4: every bump the module can still return rounds toward the maker
+    ///      (at or below the exact interpolation). 1/3 of 0→10000 is 3333.33 → 3333.
+    function test_audit_PRICE_4_bumpRoundsTowardMaker() public {
+        RangePriceModule m = new RangePriceModule(0, 10_000);
+        assertEq(_bump(m, 1, 3), 3_333, "floor of 3333.33");
+        assertEq(_bump(m, 2, 3), 6_666, "floor of 6666.67");
+    }
+
+    /// @dev PRICE-3 end to end: the bump a full fill sees is START_BPS, the maker's
+    ///      best point on an ascending ladder — the only direction still deployable.
+    function test_audit_PRICE_3_fullFill_pricedAtMakersBestPoint() public {
+        RangePriceModule m = new RangePriceModule(2_000, 10_000);
+        assertEq(_bump(m, 0, 100), 2_000, "a one-shot fill pays the maker's best ladder point");
+        assertLe(_bump(m, 0, 100), _bump(m, 99, 100), "later progress never improves on it for the maker");
     }
 
     function test_flatRange_isConstant() public {
