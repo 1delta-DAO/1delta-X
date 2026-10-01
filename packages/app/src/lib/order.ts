@@ -38,34 +38,112 @@ export interface BuildOrderArgs {
    * unset (zero / omitted), it signs plain pull delivery, fillable by anyone.
    */
   solver?: Address;
+  /**
+   * The maker's raw balance of the PAY token, when known. The input leg never
+   * commits more than this (see {@link inputWei}).
+   */
+  maxIn?: bigint;
+  /** The maker's on-chain `minValidNonce`; a drawn nonce lands at or above it. */
+  minValidNonce?: bigint;
   /** Injectable so tests and the golden-hash check can pin them. */
   nonce?: bigint;
   now?: number;
 }
 
 /**
- * A JS number to token wei.
+ * A JS number as a plain decimal string, independent of the browser's locale.
  *
- * `toFixed` flips to exponential notation above 1e21 and `parseUnits` rejects
- * that, so the value is rendered wide first. Precision beyond the token's own
- * decimals is truncated rather than rounded up — rounding up would sign away
- * more input than the user typed.
+ * `Number.prototype.toString` is specified by ECMAScript, not by ICU: it is the
+ * shortest round-trip form, always with `.` as the separator and ASCII digits.
+ * The previous `toLocaleString("fullwide", …)` resolved to the HOST locale
+ * ("fullwide" is not a locale), so a de/fr/es/pt-BR browser rendered `1,5` and
+ * `parseUnits` threw during render, blanking the app (G-TS_SIGN-6). The only
+ * thing `toString` does that `parseUnits` rejects is exponent notation
+ * (`1e+21`, `1e-7`), which is expanded here by moving the decimal point.
  */
-export function toWei(amount: number, decimals: number): bigint {
-  if (!Number.isFinite(amount) || amount <= 0) return 0n;
-  const wide = amount.toLocaleString("fullwide", { useGrouping: false, maximumFractionDigits: 20 });
-  const [whole, fraction = ""] = wide.split(".");
-  const truncated = fraction.slice(0, decimals);
-  return parseUnits(truncated ? `${whole}.${truncated}` : whole, decimals);
+export function decimalString(n: number): string {
+  if (!Number.isFinite(n)) throw new Error(`not a finite number: ${n}`);
+  const s = String(Math.abs(n));
+  const sign = n < 0 ? "-" : "";
+  const m = /^(\d+)(?:\.(\d+))?e([+-]\d+)$/.exec(s);
+  if (!m) return sign + s;
+  const frac = m[2] ?? "";
+  const digits = m[1]! + frac; // JS never renders a leading zero in an exponent mantissa
+  const point = m[1]!.length + Number(m[3]); // position of the decimal point in `digits`
+  if (point >= digits.length) return sign + digits + "0".repeat(point - digits.length);
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
 }
 
-/** A 256-bit unordered nonce. Permit3's nonce book is a bitmap, so any word works. */
-export function randomNonce(): bigint {
+/** Plain non-negative decimal: digits, at most one `.`, nothing else. */
+const DECIMAL = /^(\d*)(?:\.(\d*))?$/;
+
+/**
+ * A human amount — a JS number or, exactly, a decimal string — to token wei.
+ *
+ * Precision beyond the token's own decimals is truncated rather than rounded
+ * up: rounding up would sign away more input than the user typed. A STRING is
+ * converted exactly, which is what an amount read from the chain (a balance,
+ * "max") must use — a balance pushed through a double can come back larger
+ * than it was (G-TS_SIGN-7). Locale-independent either way (G-TS_SIGN-6).
+ */
+export function toWei(amount: number | string, decimals: number): bigint {
+  let text: string;
+  if (typeof amount === "number") {
+    if (!Number.isFinite(amount) || amount <= 0) return 0n;
+    text = decimalString(amount);
+  } else {
+    text = amount.trim();
+  }
+  const m = DECIMAL.exec(text);
+  if (!m || (!m[1] && !m[2])) return 0n;
+  const whole = m[1] || "0";
+  const truncated = (m[2] ?? "").slice(0, decimals);
+  const wei = parseUnits(truncated ? `${whole}.${truncated}` : whole, decimals);
+  return wei > 0n ? wei : 0n;
+}
+
+/**
+ * The wei an input leg commits, never more than `maxIn` when it is known.
+ *
+ * `maxIn` is the maker's raw on-chain balance. A ticket's amount is a JS
+ * number derived from that balance, and for 18-decimal tokens the double
+ * rounds above the true balance about half the time — so "max" signed an
+ * input the wallet does not hold and the order could never fill in full
+ * (G-TS_SIGN-7). Clamping at the source balance makes "max" mean max.
+ */
+export function inputWei(amountIn: number | string, decimals: number, maxIn?: bigint): bigint {
+  const wei = toWei(amountIn, decimals);
+  return maxIn !== undefined && maxIn >= 0n && wei > maxIn ? maxIn : wei;
+}
+
+/** Order nonces must stay below 2^255: bit 255 is reserved for OrderSignerPermit. */
+const ORDER_NONCE_SPACE = 1n << 255n;
+
+/**
+ * A random UNORDERED order nonce: uniform in `[minValid, 2^255)`.
+ *
+ * Bit 255 is reserved for delegated-signer permits (`SIGNER_NONCE_NS`), and the
+ * SDK's `assertOrderNonce` — run inside `hashOrderStruct` — throws for any
+ * nonce that has it set. Drawing a full 256 bits therefore broke half of all
+ * tickets before the wallet prompt (G-TS_SIGN-3). `minValid` is the maker's
+ * on-chain `minValidNonce` watermark: after a `rollbackNonces`, a draw below it
+ * is dead on arrival, so the draw is shifted above it.
+ */
+export function randomOrderNonce(minValid: bigint = 0n): bigint {
+  if (minValid < 0n || minValid >= ORDER_NONCE_SPACE) {
+    throw new Error(`minValidNonce ${minValid} leaves no order nonce below 2^255`);
+  }
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   let out = 0n;
   for (const b of bytes) out = (out << 8n) | BigInt(b);
-  return out;
+  return minValid + (out % (ORDER_NONCE_SPACE - minValid));
+}
+
+/** @deprecated kept for callers of the old name; draws a legal (< 2^255) order nonce. */
+export function randomNonce(): bigint {
+  return randomOrderNonce();
 }
 
 export interface OrderDraft {
@@ -95,7 +173,7 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
 
   if (side === "sell") {
     sdkSide = OrderSide.SELL;
-    legsIn = [{ token: pay.address, start: toWei(amountIn, pay.decimals), end: 0n }];
+    legsIn = [{ token: pay.address, start: inputWei(amountIn, pay.decimals, args.maxIn), end: 0n }];
     legsOut = [
       {
         token: recv.address,
@@ -109,8 +187,8 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     sdkSide = OrderSide.BUY;
     // The maker is guaranteed `minOut` of the base; the quote spend rises toward
     // the ceiling they typed, so an early filler charges less than the maximum.
-    const ceiling = toWei(amountIn, pay.decimals);
-    const floor = decaying ? toWei(amountIn * (minOut / Math.max(targetOut, minOut)), pay.decimals) : ceiling;
+    const ceiling = inputWei(amountIn, pay.decimals, args.maxIn);
+    const floor = decaying ? inputWei(amountIn * (minOut / Math.max(targetOut, minOut)), pay.decimals, ceiling) : ceiling;
     legsIn = [{ token: pay.address, start: floor, end: decaying && floor < ceiling ? ceiling : 0n }];
     legsOut = [
       { token: recv.address, start: toWei(minOut, recv.decimals), end: 0n, recipient: zeroAddress },
@@ -124,7 +202,7 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
   const order: Order = {
     maker,
     side: sdkSide,
-    nonce: args.nonce ?? randomNonce(),
+    nonce: args.nonce ?? randomOrderNonce(args.minValidNonce ?? 0n),
     // Order EXPIRY — always unix seconds, and distinct from a Permit3 deadline,
     // which bounds a signature rather than the order.
     expiry: BigInt(now + ttlSeconds),

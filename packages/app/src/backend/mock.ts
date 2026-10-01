@@ -1,18 +1,21 @@
-import { SOURCES, type Fill, type RestingOrder, type Side } from "../lib/types";
+import { SOURCES, dueSlices, type Fill, type RestingOrder, type Side } from "../lib/types";
 import type {
   MarketObservation,
   OrderbookApi,
   PlaceOrderRequest,
   RecordTakeRequest,
   SignedCancel,
+  SignedOrder,
 } from "./api";
 
 /**
  * In-memory stand-in for order distribution.
  *
  * It is deliberately NOT a simulation of the settlement contract: it holds
- * orders, retracts them for free, and advances fills as the live pool mid moves
- * through resting prices. That is the part of the system the interface reacts
+ * SIGNED orders, marks them soft-cancelled on a signed retraction (keeping the
+ * row, since the signature stays valid on-chain), and advances SIMULATED fills
+ * as the live pool mid moves through resting prices — a TWAP only through the
+ * slices the maker has signed. That is the part of the system the interface reacts
  * to. Signing, verification and on-chain state live behind
  * `@1delta-x/orderbook` and arrive when this class is replaced by a real client
  * of the same `OrderbookApi` interface.
@@ -78,37 +81,59 @@ export class MockOrderbook implements OrderbookApi {
 
   async place(req: PlaceOrderRequest): Promise<RestingOrder> {
     // The wallet round-trip already happened in the caller: an order arrives
-    // here signed, or not at all. The pause only stands in for the unsigned
-    // path, so the button's "waiting" state is never instantaneous.
-    if (!req.signed) await new Promise((r) => setTimeout(r, 300));
+    // here signed, or not at all.
+    if (!req.signed) throw new Error("the book only holds signed orders");
     const now = Date.now();
     const order: RestingOrder = {
-      // Keyed by the contract's own order hash when there is one, so this id is
-      // the same string a filler and the chain would use.
-      id: req.signed?.hash ?? hex(this.rand, 32),
+      // Keyed by the contract's own order hash, so this id is the same string a
+      // filler and the chain would use.
+      id: req.signed.hash,
       marketId: req.marketId,
       side: req.side,
       type: req.type,
       size: req.size,
-      filled: 0,
+      filled: Math.min(req.size, Math.max(0, req.filled ?? 0)),
       price: req.price,
       createdAt: now,
       expiresAt: now + req.ttlMs,
       mine: true,
       signed: req.signed,
-      slices: req.slices ? { done: 0, total: req.slices.total, everyMin: req.slices.everyMin } : undefined,
+      signedOrders: [req.signed],
+      sliceSpec: req.sliceSpec,
+      slices: req.slices
+        ? { done: 0, total: req.slices.total, everyMin: req.slices.everyMin, signed: 1 }
+        : undefined,
     };
     this.restingOrders.push(order);
     this.emit();
     return order;
   }
 
-  async cancel(orderHash: string, signed?: SignedCancel): Promise<void> {
-    // A real book verifies the signature and checks the hash is in `orderHashes`
-    // before evicting. The mock trusts its own tab, but the message is carried
-    // so the call site is already the shape a real client needs.
-    if (signed && !signed.cancel.orderHashes.includes(orderHash as `0x${string}`)) return;
+  async cancel(orderHash: string, signed: SignedCancel): Promise<void> {
+    // A real book verifies the signature before acting. The mock trusts its own
+    // tab, but it still refuses a cancel that does not carry one or does not
+    // name this order — an unsigned eviction is not a cancel of anything.
+    if (!signed || !signed.cancel.orderHashes.includes(orderHash as `0x${string}`)) {
+      throw new Error("a soft cancel must be signed and name the order");
+    }
+    const o = this.restingOrders.find((x) => x.id === orderHash);
+    if (!o) return;
+    // Retracted from distribution, NOT from existence: the order is still
+    // fillable on-chain until it expires, so it stays listed as such.
+    o.cancelled = "soft";
+    this.emit();
+  }
+
+  confirmHardCancel(orderHash: string): void {
     this.restingOrders = this.restingOrders.filter((o) => o.id !== orderHash);
+    this.emit();
+  }
+
+  addSlice(orderHash: string, signed: SignedOrder): void {
+    const o = this.restingOrders.find((x) => x.id === orderHash);
+    if (!o?.slices || o.cancelled || o.slices.signed >= o.slices.total) return;
+    o.signedOrders = [...(o.signedOrders ?? []), signed];
+    o.slices.signed += 1;
     this.emit();
   }
 
@@ -130,6 +155,7 @@ export class MockOrderbook implements OrderbookApi {
         tx: hex(this.rand, 32),
         at: now,
         mine: true,
+        simulated: true,
       });
     }
     this.emit();
@@ -233,11 +259,17 @@ export class MockOrderbook implements OrderbookApi {
       }
 
       let take = 0;
-      if (o.slices) {
-        const due = Math.floor((now - o.createdAt) / (o.slices.everyMin * 60_000)) + 1;
+      if (o.cancelled) {
+        // Retracted from this book: it no longer works here. (On-chain it is
+        // still fillable by anyone holding it — which the row says.)
+      } else if (o.slices) {
+        // Only a SIGNED slice can fill. A due slice the maker has not signed
+        // yet waits for its signature instead of filling on schedule.
+        const due = Math.min(dueSlices(o, now), o.slices.signed);
         if (due > o.slices.done && o.slices.done < o.slices.total) {
-          o.slices.done = Math.min(due, o.slices.total);
-          take = Math.min(remaining, o.size / o.slices.total);
+          const n = due - o.slices.done;
+          o.slices.done = due;
+          take = Math.min(remaining, (o.size / o.slices.total) * n);
         }
       } else {
         const crossed = o.side === "sell" ? obs.mid >= o.price : obs.mid <= o.price;
@@ -261,6 +293,7 @@ export class MockOrderbook implements OrderbookApi {
             tx: hex(this.rand, 32),
             at: now,
             mine: true,
+            simulated: true,
           });
         }
       }

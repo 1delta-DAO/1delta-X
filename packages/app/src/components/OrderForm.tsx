@@ -20,24 +20,36 @@ export interface Gate {
 }
 
 /**
- * The ERC-20 allowance the order needs, and how to grant it.
+ * The funding the order needs, and how to set it up.
  *
- * Pre-audit the grant is the exact input of the order on screen — never an
- * unlimited approval — so the form states the number it is asking for rather
- * than calling it "one time" and hiding the amount.
+ * Two legs (A-IMMUT-1): the ERC-20 approval to Permit3, and the Permit3 book
+ * grant to Settlement — the contract that actually pulls the input. Pre-audit
+ * both are the exact input of the ticket on screen, never unlimited, so the
+ * form states the number it is asking for rather than hiding it.
  */
 export interface AllowanceView {
   /** Permit3. Null when nothing is deployed that could pull, so nothing to approve. */
   spender: string | null;
-  /** Exactly what this order commits, in human units. */
+  /** Exactly what this ticket commits, in human units. */
   required: number;
-  /** What the chain grants today. `undefined` means not read yet, never zero. */
+  /** ERC-20 allowance to Permit3 today. `undefined` means not read yet, never zero. */
   current: number | undefined;
-  /** Whether the standing allowance already covers this order. */
+  /** Whether both legs are set to exactly this ticket. */
   covered: boolean;
+  /** A standing approval or grant exceeds this ticket and the next step trims it. */
+  trims: boolean;
+  /** What the next transaction does. */
+  nextLabel: string;
+  /** Transactions still to send. */
+  remaining: number;
+  /** Something is left approved or granted that a revoke would clear. */
+  leftover: boolean;
+  /** Set when the configured Permit3 is not the one Settlement uses. */
+  mismatch: string | null;
   approving: boolean;
   error: string | null;
   approve: () => void;
+  revoke: () => void;
 }
 
 interface OrderFormProps {
@@ -53,6 +65,12 @@ interface OrderFormProps {
   receipt: Receipt | null;
   gate: Gate | null;
   allowance: AllowanceView;
+  /** The exact wallet balance as a decimal string, for "max". */
+  maxAmount: string | undefined;
+  /** The ticket commits more than the wallet holds, compared in wei. */
+  overBalance: boolean;
+  /** The pinned address of the token you receive — shown, because the wallet only shows the legs as a hex blob. */
+  recvAddress: string | null;
   /** Why the last signature attempt failed — a declined wallet prompt, usually. */
   signError: string | null;
   /** The EIP-712 domain orders are signed into, so it is never a mystery. */
@@ -71,8 +89,25 @@ function cssVar(name: string): string {
 }
 
 export function OrderForm(props: OrderFormProps) {
-  const { ticket, quote, tokens, balances, tick, mid, ready, signing, receipt, gate, allowance, signError, domain, onSign } =
-    props;
+  const {
+    ticket,
+    quote,
+    tokens,
+    balances,
+    tick,
+    mid,
+    ready,
+    signing,
+    receipt,
+    gate,
+    allowance,
+    maxAmount,
+    overBalance,
+    recvAddress,
+    signError,
+    domain,
+    onSign,
+  } = props;
 
   const { amount, payToken, recvToken, mode, side, market, payBalance } = ticket;
 
@@ -81,7 +116,6 @@ export function OrderForm(props: OrderFormProps) {
   const needsApproval = allowance.spender !== null && !allowance.covered;
 
   const resting = quote?.resting ?? null;
-  const overBalance = payBalance !== undefined && amount > payBalance;
   const twapMinutes = ticket.slices * ticket.everyMin;
 
   const bar: Array<{ key: string; pct: number; color: string; label: string }> = [];
@@ -159,8 +193,8 @@ export function OrderForm(props: OrderFormProps) {
               bal <span className="m">{payBalance === undefined ? "—" : fmtAmt(payBalance)}</span>
               <button
                 type="button"
-                disabled={payBalance === undefined || payBalance <= 0}
-                onClick={() => ticket.setAmount(String(payBalance ?? 0))}
+                disabled={maxAmount === undefined || payBalance === undefined || payBalance <= 0}
+                onClick={() => maxAmount !== undefined && ticket.setAmount(maxAmount)}
               >
                 max
               </button>
@@ -223,6 +257,11 @@ export function OrderForm(props: OrderFormProps) {
               label="Token you receive"
             />
           </div>
+          {recvAddress && (
+            <span className="capnote dim" title={recvAddress}>
+              you sign for {recvToken} at <span className="m">{shortHex(recvAddress, 8, 6)}</span>
+            </span>
+          )}
         </div>
 
         {mode !== "market" && (
@@ -237,8 +276,10 @@ export function OrderForm(props: OrderFormProps) {
                       size to book
                     </button>
                   </>
+                ) : mode === "twap" ? (
+                  `per slice · sized to fill ${fmtAmt(ticket.sizedTo)} ${payToken}`
                 ) : (
-                  `sized to fill ${fmtAmt(amount)} ${payToken}`
+                  `sized to fill ${fmtAmt(ticket.sizedTo)} ${payToken}`
                 )}
               </span>
             </div>
@@ -349,23 +390,41 @@ export function OrderForm(props: OrderFormProps) {
                   <button
                     type="button"
                     className={allowance.covered ? "cta ok" : "cta line"}
-                    disabled={allowance.covered || allowance.approving || allowance.required <= 0}
+                    disabled={
+                      allowance.covered || allowance.approving || allowance.required <= 0 || allowance.mismatch !== null
+                    }
                     onClick={allowance.approve}
                   >
-                    {allowance.covered
-                      ? `✓ ${fmtAmt(allowance.required)} ${payToken} approved`
-                      : allowance.approving
-                        ? "Approving…"
-                        : allowance.required > 0
-                          ? `Approve exactly ${fmtAmt(allowance.required)} ${payToken}`
-                          : `Approve ${payToken}`}
+                    {allowance.mismatch
+                      ? "Deployment mismatch — approvals disabled"
+                      : allowance.covered
+                        ? `✓ exactly ${fmtAmt(allowance.required)} ${payToken} funded`
+                        : allowance.approving
+                          ? "Confirm in your wallet…"
+                          : allowance.required > 0
+                            ? `${allowance.trims ? "Reduce: " : ""}${allowance.nextLabel}${
+                                allowance.remaining > 1 ? ` (1 of ${allowance.remaining})` : ""
+                              }`
+                            : `Approve ${payToken}`}
                   </button>
                   <span className="capnote dim">
-                    Pre-audit: the approval covers this order only — no standing allowance is left behind
-                    {allowance.current !== undefined && allowance.current > 0 && !allowance.covered && (
+                    Pre-audit: the approval and the Permit3 grant to Settlement are capped at this order&rsquo;s size
+                    and stay until a fill uses them or you revoke them — the grant also lapses shortly after the
+                    order expires
+                    {allowance.current !== undefined && allowance.current > 0 && (
                       <> · currently approved {fmtAmt(allowance.current)} {payToken}</>
                     )}
+                    {allowance.leftover && (
+                      <>
+                        {" "}
+                        ·{" "}
+                        <button type="button" className="linkbtn" disabled={allowance.approving} onClick={allowance.revoke}>
+                          revoke
+                        </button>
+                      </>
+                    )}
                   </span>
+                  {allowance.mismatch && <div className="signerr">{allowance.mismatch}</div>}
                   {allowance.error && <div className="signerr">{allowance.error}</div>}
                 </>
               )}
@@ -379,7 +438,7 @@ export function OrderForm(props: OrderFormProps) {
             {allowance.spender !== null && !allowance.covered && (
               <>
                 <br />
-                the approval above is the only transaction you send
+                the approval and grant above are the only transactions you send
               </>
             )}
           </div>
@@ -401,7 +460,7 @@ export function OrderForm(props: OrderFormProps) {
         {receipt && (
           <div className="receipt">
             <span className="lbl" style={{ color: "var(--lime)" }}>
-              Order signed · broadcast
+              Order signed · simulated book, nothing broadcast
             </span>
             <div>{receipt.headline}</div>
             {receipt.detail && <div className="k">{receipt.detail}</div>}

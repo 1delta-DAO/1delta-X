@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPublicClient, custom, erc20Abi, formatUnits } from "viem";
 
 import { chainById } from "../config/chains";
@@ -22,9 +22,19 @@ export interface BalanceArgs {
  * per-chain endpoint configuration and of a key nobody wants to manage — and
  * the wallet is already talking to the chain the user is on.
  */
-export function useBalances(args: BalanceArgs): Record<string, number> {
+export interface Balances {
+  /** Human units, for display and the ticket's float maths. */
+  human: Record<string, number>;
+  /**
+   * The exact on-chain value in wei. "max" and every input cap use THIS: a
+   * balance pushed through a double can round above itself (G-TS_SIGN-7).
+   */
+  raw: Record<string, bigint>;
+}
+
+export function useBalances(args: BalanceArgs): Balances {
   const { provider, address, chainId, onChain, tokens } = args;
-  const [balances, setBalances] = useState<Record<string, number>>({});
+  const [balances, setBalances] = useState<Record<string, bigint>>({});
   const key = tokens.map((t) => t.address).join(",");
 
   useEffect(() => {
@@ -46,7 +56,7 @@ export function useBalances(args: BalanceArgs): Record<string, number> {
           .readContract({ address: t.address, abi: erc20Abi, functionName: "balanceOf", args: [address] })
           .then((value) => {
             if (!alive) return;
-            setBalances((prev) => ({ ...prev, [t.address.toLowerCase()]: Number(formatUnits(value, t.decimals)) }));
+            setBalances((prev) => ({ ...prev, [t.address.toLowerCase()]: value }));
           })
           .catch(() => {
             // A balance we cannot read stays unknown, never zero — zero reads as
@@ -71,5 +81,14 @@ export function useBalances(args: BalanceArgs): Record<string, number> {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider, address, chainId, onChain, key]);
 
-  return balances;
+  const decimalsKey = tokens.map((t) => `${t.address.toLowerCase()}:${t.decimals}`).join(",");
+  return useMemo(() => {
+    const human: Record<string, number> = {};
+    for (const t of tokens) {
+      const v = balances[t.address.toLowerCase()];
+      if (v !== undefined) human[t.address.toLowerCase()] = Number(formatUnits(v, t.decimals));
+    }
+    return { human, raw: balances };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [balances, decimalsKey]);
 }

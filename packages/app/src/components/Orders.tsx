@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { marketById } from "../config/markets";
 import { ago, fmtAmt, fmtPrice, shortHex, until } from "../lib/format";
-import { SOURCE_NAME, orderStatus, type Fill, type RestingOrder } from "../lib/types";
+import { SOURCE_NAME, dueSlices, needsSliceSignature, orderStatus, type Fill, type RestingOrder } from "../lib/types";
 import type { TokenIndex } from "../hooks/useTokenIndex";
 import { PairIcon } from "./TokenIcon";
 
@@ -16,8 +16,18 @@ interface OrdersProps {
    * generated mark rather than to a broken image.
    */
   tokens: TokenIndex;
-  onCancel: (orderHash: string) => void;
+  /** Soft cancel: a signed off-chain retraction. Advisory — see `App.cancel`. */
+  onCancel: (order: RestingOrder) => void;
+  /** Hard cancel: `Settlement.cancelOrders` on-chain. The only cancel that binds a filler. */
+  onHardCancel: (order: RestingOrder) => void;
+  /** Sign a TWAP's next due slice. */
+  onSignSlice: (order: RestingOrder) => void;
+  error: string | null;
 }
+
+/** Explains, per row, what a cancel has and has not done. */
+export const SOFT_CANCEL_NOTE =
+  "hidden from the book; still fillable on-chain until expiry by anyone holding the signed order — cancel on-chain to stop that";
 
 function Pair({ marketId, tokens }: { marketId: string; tokens: TokenIndex }) {
   const m = marketById(marketId);
@@ -29,8 +39,14 @@ function Pair({ marketId, tokens }: { marketId: string; tokens: TokenIndex }) {
   );
 }
 
-export function Orders({ orders, fills, tickOf, tokens, onCancel }: OrdersProps) {
+export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, onSignSlice, error }: OrdersProps) {
   const [tab, setTab] = useState<"open" | "fills">("open");
+  // Due TWAP slices appear on a clock, not on a book event.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Only orders this account signed belong under "your activity"; the rest of
   // the book is other makers' resting size and is already visible in the ladder.
@@ -50,11 +66,12 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel }: OrdersProps)
         </div>
         <span className="lbl">
           {tab === "open"
-            ? "signed, not on-chain — cancelling is free"
-            : "every fill settles on-chain and is verifiable"}
+            ? "signed orders · a free cancel only hides one; cancel on-chain to make it unfillable"
+            : "simulated fills — the in-browser book broadcasts nothing"}
         </span>
       </div>
 
+      {error && <div className="signerr">{error}</div>}
       <div className="sx">
         {tab === "open" ? (
           <table className="o">
@@ -114,15 +131,42 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel }: OrdersProps)
                           </div>
                         </td>
                         <td>
-                          <span className="st" data-v={status}>
-                            {status}
+                          <span
+                            className="st"
+                            data-v={status}
+                            title={status === "soft-cancelled" ? SOFT_CANCEL_NOTE : undefined}
+                          >
+                            {status === "soft-cancelled" ? "hidden · still fillable" : status}
                           </span>
                         </td>
                         <td>{until(o.expiresAt)}</td>
                         <td>
-                          <button type="button" className="x" onClick={() => onCancel(o.id)}>
-                            Cancel
-                          </button>
+                          {needsSliceSignature(o, now) && o.slices && (
+                            <button type="button" className="x" onClick={() => onSignSlice(o)}>
+                              Sign slice {o.slices.signed + 1}/{o.slices.total}
+                              {dueSlices(o, now) > o.slices.signed + 1 ? ` (${dueSlices(o, now) - o.slices.signed} due)` : ""}
+                            </button>
+                          )}
+                          {!o.cancelled && (
+                            <button
+                              type="button"
+                              className="x"
+                              title="Signed off-chain retraction: the book stops showing it, but it stays fillable on-chain until expiry"
+                              onClick={() => onCancel(o)}
+                            >
+                              Hide
+                            </button>
+                          )}
+                          {o.signed?.deployed && (
+                            <button
+                              type="button"
+                              className="x"
+                              title="Settlement.cancelOrders — one transaction; afterwards no filler can settle it"
+                              onClick={() => onHardCancel(o)}
+                            >
+                              Cancel on-chain
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -136,7 +180,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel }: OrdersProps)
             {myFills.length === 0 ? (
               <tbody>
                 <tr>
-                  <td className="empty">No fills yet. A market order settles immediately.</td>
+                  <td className="empty">No fills yet. Fills here are simulated by the in-browser book.</td>
                 </tr>
               </tbody>
             ) : (
@@ -176,7 +220,13 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel }: OrdersProps)
                       </td>
                       <td className="dim">{f.filler}</td>
                       <td>
-                        <span className="txl">{shortHex(f.tx, 10, 6)}</span>
+                        {f.simulated ? (
+                          <span className="faint" title="Produced by the in-browser mock — no transaction exists">
+                            simulated
+                          </span>
+                        ) : (
+                          <span className="txl">{shortHex(f.tx, 10, 6)}</span>
+                        )}
                       </td>
                     </tr>
                   ))}

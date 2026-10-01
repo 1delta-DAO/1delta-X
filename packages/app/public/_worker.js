@@ -16,13 +16,54 @@
 const OKU_ORIGIN = "https://omni.icarus.tools";
 const PROXY_PREFIX = "/api/oku/";
 
+/**
+ * Security headers on every page and asset (G-TS_SIGN-14).
+ *
+ * In advanced mode this worker owns routing, so a `_headers` file is NOT
+ * applied — the headers have to be set here. `frame-ancestors 'none'` (plus the
+ * legacy X-Frame-Options) stops a hostile site framing the app to steer clicks
+ * on "Approve" and "Sign order". The CSP allows exactly the origins the app
+ * fetches from: this origin (the Oku proxy), the token-list CDN and the two
+ * subgraph hosts. Token logos come from arbitrary list-supplied hosts, hence
+ * `img-src https:`; React's `style={…}` attributes need `'unsafe-inline'` for
+ * styles only — scripts stay `'self'`. A self-hosted `VITE_OKU_BASE` on another
+ * origin must be added to `connect-src`.
+ */
+export const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: https:",
+  "font-src 'self' data:",
+  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+
+export const SECURITY_HEADERS = {
+  "content-security-policy": CONTENT_SECURITY_POLICY,
+  "x-frame-options": "DENY",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()",
+};
+
+/** A copy of `response` with the security headers set. Asset responses are immutable, hence the copy. */
+export function withSecurityHeaders(response) {
+  const headers = new Headers(response.headers);
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 /** Only Oku's own JSON-RPC shape, so this cannot be used as an open relay. */
 const ALLOWED_PATH = /^[a-z0-9-]+\/cush\/[a-zA-Z0-9_]+$/;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (!url.pathname.startsWith(PROXY_PREFIX)) return serveAsset(request, env);
+    if (!url.pathname.startsWith(PROXY_PREFIX)) return withSecurityHeaders(await serveAsset(request, env));
 
     const path = url.pathname.slice(PROXY_PREFIX.length);
     if (!ALLOWED_PATH.test(path)) return json({ error: "unsupported path" }, 400);
@@ -41,6 +82,7 @@ export default {
           "content-type": upstream.headers.get("content-type") ?? "application/json",
           "access-control-allow-origin": "*",
           "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
         },
       });
     } catch (e) {

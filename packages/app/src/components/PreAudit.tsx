@@ -7,7 +7,7 @@ import { TermsLink } from "./TermsLink";
  * Bump when the disclosure itself changes — everyone acknowledges the new text
  * rather than inheriting consent to a version they never saw.
  */
-const ACK_VERSION = "2026-09-beta-1";
+const ACK_VERSION = "2026-10-beta-2";
 const ACK_KEY = "1delta-x.preaudit";
 
 export function useAcknowledgement() {
@@ -46,8 +46,8 @@ export function PreAuditStrip({ onDetails }: { onDetails: () => void }) {
     <div className="preaudit" role="note">
       <span className="pill pill-orange">Pre-audit beta</span>
       <span>
-        These contracts are <b>unaudited</b>. Approvals are limited to the amount of each order. Trade only what
-        you can afford to lose.
+        These contracts are <b>unaudited</b>. Approvals are capped at the size of each order and stay until used or
+        revoked. Trade only what you can afford to lose.
       </span>
       <button type="button" className="linkbtn" onClick={onDetails}>
         What this means
@@ -113,12 +113,15 @@ export function PreAuditGate({
               the funds you trade or approve.
             </li>
             <li>
-              Token approvals are capped at the exact amount of the order you are signing, so no standing
-              allowance is left behind. This bounds the risk — it does not remove it.
+              Token approvals are capped at the exact amount of the order you are signing. They are{" "}
+              <b>not removed automatically</b>: an approval stays until a fill uses it or you revoke it (the app
+              offers a one-click revoke), including after a cancel, an expiry or a partial fill. This bounds the
+              risk — it does not remove it.
             </li>
             <li>
               Orders are signed messages. A filler can settle any order you have signed that has not expired or
-              been cancelled.
+              been cancelled <b>on-chain</b>. Hiding an order from the book (a free, off-chain cancel) does not
+              stop someone who already holds it.
             </li>
             {/* With no draw running, describing one is not a disclosure —
                 it is an advertisement for something that does not exist. */}
@@ -129,6 +132,10 @@ export function PreAuditGate({
               <TermsLink>Terms &amp; Conditions</TermsLink> exclude U.S. Persons and sanctioned jurisdictions, and USDRIF carries its own transfer restrictions.
             </li>
             )}
+            <li>
+              Order distribution and fills in this beta are <b>simulated in your browser</b>: your signatures are
+              real, but nothing is broadcast and no fill shown here happened on-chain.
+            </li>
             <li>Nothing here is financial, investment, legal or tax advice.</li>
           </ul>
           {review ? (

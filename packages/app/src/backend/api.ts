@@ -1,7 +1,7 @@
 import type { Deployment, Order, SoftCancel } from "@1delta-x/sdk";
 import type { Hex } from "viem";
 
-import type { Fill, RestingOrder, Side, Source } from "../lib/types";
+import type { Fill, RestingOrder, Side, SliceSpec, Source } from "../lib/types";
 
 /**
  * The maker-signed artefact the book actually distributes. `hash` is the SDK's
@@ -33,8 +33,16 @@ export interface PlaceOrderRequest {
   price: number;
   ttlMs: number;
   slices?: { total: number; everyMin: number };
-  /** The signed order this ticket produced. Absent only if signing was skipped. */
-  signed?: SignedOrder;
+  /** For a TWAP: what each later slice signs. */
+  sliceSpec?: SliceSpec;
+  /** BASE amount of this signed order that already crossed the book when it was placed. */
+  filled?: number;
+  /**
+   * The signed order this ticket produced. REQUIRED: the book only ever holds
+   * orders a maker signed, so nothing can be shown as resting — or as filling —
+   * that no signature backs (G-TS_SIGN-15).
+   */
+  signed: SignedOrder;
 }
 
 export interface RecordTakeRequest {
@@ -77,12 +85,20 @@ export interface OrderbookApi {
   /** Sign and broadcast. Resolves once the book has admitted the order. */
   place(req: PlaceOrderRequest): Promise<RestingOrder>;
   /**
-   * Free retraction — the soft cancel, no transaction. The signed message is
-   * what a real book verifies before evicting; passing it keeps this call site
-   * the shape a transport-backed client already needs.
+   * Soft cancel: a SIGNED off-chain retraction, no transaction. It is advisory
+   * — a book that honours it stops distributing the order, but the order's
+   * signature stays valid on-chain until expiry, so anyone already holding it
+   * can still fill it. The signature is therefore required (an unsigned
+   * "cancel" proves nothing to a real book), and the row is kept and marked
+   * `cancelled: "soft"` rather than evicted (G-TS_SIGN-4). Only an on-chain
+   * cancel makes the order unfillable — see `confirmHardCancel`.
    */
-  cancel(orderHash: string, signed?: SignedCancel): Promise<void>;
-  /** Record an order that crossed immediately and never rested. */
+  cancel(orderHash: string, signed: SignedCancel): Promise<void>;
+  /** Drop a row whose orders were cancelled ON-CHAIN (the transaction is mined). */
+  confirmHardCancel(orderHash: string): void;
+  /** Attach a newly signed TWAP slice to its row; only signed slices can fill. */
+  addSlice(orderHash: string, signed: SignedOrder): void;
+  /** Record the part of a SIGNED order that crossed immediately. Mock fills are `simulated`. */
   recordTake(req: RecordTakeRequest): void;
   /** Feed the current market state in; drives expiry and fill progress. */
   observe(obs: MarketObservation): void;

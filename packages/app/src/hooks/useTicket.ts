@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { defaultChain, marketById, marketFor, marketsOn, pairsWith } from "../config/markets";
 import { clearingPrice } from "../lib/ladder";
+import { priceSizingAmount } from "../lib/ticket";
 import type { Level, OrderType, Side } from "../lib/types";
 
 export interface TicketDeps {
@@ -114,9 +115,10 @@ export function useTicket(deps: TicketDeps) {
    * would only ever fill one level of a large order.
    */
   const levels = side === "sell" ? deps.bids : deps.asks;
+  const sizedTo = priceSizingAmount(mode, amount, slices);
   const autoPrice = useMemo(
-    () => (levels.length ? clearingPrice(levels, amount, side) : null),
-    [levels, amount, side],
+    () => (levels.length ? clearingPrice(levels, sizedTo, side) : null),
+    [levels, sizedTo, side],
   );
   const lastAuto = useRef<number | null>(null);
   useEffect(() => {
@@ -157,6 +159,8 @@ export function useTicket(deps: TicketDeps) {
     limit,
     limitStr,
     priceTouched,
+    /** The amount the automatic limit price is sized against — one slice for a TWAP. */
+    sizedTo,
     slices,
     everyMin,
     setChain,

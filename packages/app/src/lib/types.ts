@@ -96,7 +96,33 @@ export interface RestingOrder {
    * signed; the seeded book has none, because nobody signed those.
    */
   signed?: import("../backend/api").SignedOrder;
-  slices?: { done: number; total: number; everyMin: number };
+  /**
+   * A TWAP's schedule. `signed` counts the slices the maker has actually
+   * signed: a slice that is due but unsigned does not exist, so it cannot fill
+   * (G-TS_SIGN-15). Slice 1 is signed with the ticket; each later one is signed
+   * when it comes due.
+   */
+  slices?: { done: number; total: number; everyMin: number; signed: number };
+  /** Every signed order behind this row — one per signed TWAP slice, else just `signed`. */
+  signedOrders?: import("../backend/api").SignedOrder[];
+  /** What each later TWAP slice signs, so it is the same order as slice 1 on a fresh nonce. */
+  sliceSpec?: SliceSpec;
+  /**
+   * `soft`: retracted by a signed off-chain cancel. Books that honour it stop
+   * showing it, but the signature is still valid on-chain until expiry — anyone
+   * already holding it can fill it — so the row stays, labelled, until it expires
+   * or is hard-cancelled on-chain (G-TS_SIGN-4).
+   */
+  cancelled?: "soft";
+}
+
+/** One TWAP slice's order parameters, in human units. */
+export interface SliceSpec {
+  amountIn: number;
+  targetOut: number;
+  minOut: number;
+  ttlSeconds: number;
+  decaySeconds: number;
 }
 
 export interface Fill {
@@ -111,9 +137,28 @@ export interface Fill {
   tx: string;
   at: number;
   mine: boolean;
+  /**
+   * True for every fill the in-browser mock produces: nothing was broadcast and
+   * `tx` is not a transaction hash. The UI must never present one as settled
+   * on-chain (G-TS_SIGN-15).
+   */
+  simulated: boolean;
 }
 
-export function orderStatus(o: RestingOrder): "open" | "partial" | "filling" {
+export function orderStatus(o: RestingOrder): "open" | "partial" | "filling" | "soft-cancelled" {
+  if (o.cancelled === "soft") return "soft-cancelled";
   if (o.slices && o.slices.done > 0) return "filling";
   return o.filled > 0 ? "partial" : "open";
+}
+
+/** How many of a TWAP's slices are due by `now` (slice 1 is due at creation). */
+export function dueSlices(o: RestingOrder, now: number): number {
+  if (!o.slices) return 0;
+  const due = Math.floor((now - o.createdAt) / (o.slices.everyMin * 60_000)) + 1;
+  return Math.max(0, Math.min(o.slices.total, due));
+}
+
+/** Whether a TWAP has a due slice the maker has not signed yet. */
+export function needsSliceSignature(o: RestingOrder, now: number): boolean {
+  return !!o.slices && !o.cancelled && o.slices.signed < dueSlices(o, now) && o.expiresAt > now;
 }

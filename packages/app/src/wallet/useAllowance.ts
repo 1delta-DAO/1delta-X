@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { createPublicClient, createWalletClient, custom, erc20Abi, type Address } from "viem";
 
 import { chainById } from "../config/chains";
+import { readFundingState, verifyDeployment, type Reader } from "../lib/chain";
+import { fundingCalls, planFunding, revokeCalls, type FundingState } from "../lib/funding";
 import type { EIP1193Provider } from "./eip6963";
 
 export interface AllowanceArgs {
@@ -9,26 +11,30 @@ export interface AllowanceArgs {
   owner: Address | null;
   chainId: number;
   onChain: boolean;
-  /** The token the order spends. Null while the market's metadata is loading. */
+  /** The token the order spends. Null while nothing is selected. */
   token: Address | null;
-  /** Permit3 — what actually pulls the maker's input. Null when undeployed. */
-  spender: Address | null;
+  /** The deployment the order is signed into. Null when nothing is deployed. */
+  deployment: { permit3: Address; settlement: Address } | null;
 }
 
 export interface AllowanceState {
-  /** Current allowance in token wei. `undefined` means unknown, never zero. */
-  allowance: bigint | undefined;
-  approving: boolean;
+  /**
+   * Both funding legs as the chain reports them. `undefined` means unknown —
+   * not read yet, or the deployment failed verification — never zero.
+   */
+  funding: FundingState | undefined;
+  /** Set when the configured Permit3 is not the one Settlement uses; nothing is offered then. */
+  mismatch: string | null;
+  busy: boolean;
   error: string | null;
   /**
-   * Set the allowance to exactly `amount`.
-   *
-   * Pre-audit policy: this is called with the input of the single order about to
-   * be signed, never with an unbounded value. Every trade therefore costs one
-   * approval, and the most an unaudited contract can ever pull is the order the
-   * user was looking at when they approved it.
+   * Send whatever `planFunding` says is missing for an order of `amount` wei
+   * living `ttlSeconds`: the exact ERC-20 approval to Permit3 and the exact,
+   * expiring Permit3 book grant to Settlement (A-IMMUT-1).
    */
-  approve: (amount: bigint) => Promise<void>;
+  fund: (amount: bigint, ttlSeconds: number) => Promise<void>;
+  /** Clear both legs — the "no standing allowance" promise, kept by an action rather than a claim. */
+  revoke: () => Promise<void>;
   refresh: () => void;
 }
 
@@ -42,82 +48,114 @@ function message(e: unknown): string {
 }
 
 export function useAllowance(args: AllowanceArgs): AllowanceState {
-  const { provider, owner, chainId, onChain, token, spender } = args;
-  const [allowance, setAllowance] = useState<bigint | undefined>(undefined);
-  const [approving, setApproving] = useState(false);
+  const { provider, owner, chainId, onChain, token } = args;
+  const permit3 = args.deployment?.permit3 ?? null;
+  const settlement = args.deployment?.settlement ?? null;
+  const [funding, setFunding] = useState<FundingState | undefined>(undefined);
+  const [mismatch, setMismatch] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
-    if (!provider || !owner || !token || !spender || !onChain) {
-      setAllowance(undefined);
+    if (!provider || !owner || !token || !permit3 || !settlement || !onChain) {
+      setFunding(undefined);
       return;
     }
     const config = chainById(chainId);
     if (!config) return;
 
     let alive = true;
-    const client = createPublicClient({ chain: config.chain, transport: custom(provider) });
-    void client
-      .readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [owner, spender] })
-      .then((value) => alive && setAllowance(value))
-      .catch(() => alive && setAllowance(undefined));
+    const client = createPublicClient({ chain: config.chain, transport: custom(provider) }) as unknown as Reader;
+    void verifyDeployment(client, { settlement, permit3 })
+      .then(() => {
+        if (alive) setMismatch(null);
+        return readFundingState(client, { token, owner, permit3, settlement });
+      })
+      .then((state) => alive && setFunding(state))
+      .catch((e) => {
+        if (!alive) return;
+        setFunding(undefined);
+        if (message(e).startsWith("deployment mismatch")) setMismatch(message(e));
+      });
     return () => {
       alive = false;
     };
-  }, [provider, owner, token, spender, chainId, onChain, nonce]);
+  }, [provider, owner, token, permit3, settlement, chainId, onChain, nonce]);
 
-  // A pending approval belongs to one token and spender; changing either leaves
-  // its error describing something no longer on screen.
+  // A pending approval belongs to one token and deployment; changing either
+  // leaves its error describing something no longer on screen.
   useEffect(() => {
     setError(null);
-  }, [token, spender, chainId]);
+  }, [token, permit3, settlement, chainId]);
 
-  const approve = useCallback(
-    async (amount: bigint) => {
-      if (!provider || !owner || !token || !spender) return;
+  const send = useCallback(
+    async (build: (state: FundingState) => Array<{ to: Address; data: `0x${string}` }>) => {
+      if (!provider || !owner || !token || !permit3 || !settlement) return;
       const config = chainById(chainId);
       if (!config) return;
 
-      setApproving(true);
+      setBusy(true);
       setError(null);
       const publicClient = createPublicClient({ chain: config.chain, transport: custom(provider) });
       const wallet = createWalletClient({ account: owner, chain: config.chain, transport: custom(provider) });
-
-      const send = (value: bigint) =>
-        wallet.writeContract({ address: token, abi: erc20Abi, functionName: "approve", args: [spender, value] });
+      const reader = publicClient as unknown as Reader;
 
       try {
-        let hash: `0x${string}`;
-        try {
-          hash = await send(amount);
-        } catch (e) {
-          // Some ERC-20s refuse to move a non-zero allowance straight to another
-          // non-zero value. Only reached when a previous order was approved and
-          // never filled, so the reset is not on the common path.
-          const current = await publicClient
-            .readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [owner, spender] })
-            .catch(() => 0n);
-          if (current === 0n) throw e;
-          await publicClient.waitForTransactionReceipt({ hash: await send(0n) });
-          hash = await send(amount);
+        // Re-verified and re-read at click time: the plan is built from what
+        // the chain says NOW, not from a render that may be a block old.
+        await verifyDeployment(reader, { settlement, permit3 });
+        const state = await readFundingState(reader, { token, owner, permit3, settlement });
+        for (const call of build(state)) {
+          let hash: `0x${string}`;
+          try {
+            hash = await wallet.sendTransaction({ to: call.to, data: call.data, chain: config.chain, account: owner });
+          } catch (e) {
+            // Some ERC-20s refuse to move a non-zero allowance straight to
+            // another non-zero value; reset to zero and retry, ERC-20 leg only.
+            if (call.to !== token || state.erc20Allowance === 0n) throw e;
+            const reset = await wallet.writeContract({
+              address: token,
+              abi: erc20Abi,
+              functionName: "approve",
+              args: [permit3, 0n],
+            });
+            await publicClient.waitForTransactionReceipt({ hash: reset });
+            hash = await wallet.sendTransaction({ to: call.to, data: call.data, chain: config.chain, account: owner });
+          }
+          const receipt = await publicClient.waitForTransactionReceipt({ hash });
+          if (receipt.status !== "success") throw new Error("transaction reverted");
         }
-        const receipt = await publicClient.waitForTransactionReceipt({ hash });
-        if (receipt.status !== "success") throw new Error("approval transaction reverted");
-        setAllowance(amount);
       } catch (e) {
         // A declined prompt is an ordinary outcome: report it and leave the
-        // allowance reading whatever the chain actually says.
+        // reading at whatever the chain actually says.
         setError(message(e));
-        refresh();
       } finally {
-        setApproving(false);
+        refresh();
+        setBusy(false);
       }
     },
-    [provider, owner, token, spender, chainId, refresh],
+    [provider, owner, token, permit3, settlement, chainId, refresh],
   );
 
-  return { allowance, approving, error, approve, refresh };
+  const fund = useCallback(
+    (amount: bigint, ttlSeconds: number) =>
+      send((state) =>
+        fundingCalls(planFunding(state, amount, ttlSeconds, Math.floor(Date.now() / 1000)).steps, {
+          token: token!,
+          permit3: permit3!,
+          settlement: settlement!,
+        }),
+      ),
+    [send, token, permit3, settlement],
+  );
+
+  const revoke = useCallback(
+    () => send((state) => revokeCalls(state, { token: token!, permit3: permit3!, settlement: settlement! })),
+    [send, token, permit3, settlement],
+  );
+
+  return { funding, mismatch, busy, error, fund, revoke, refresh };
 }

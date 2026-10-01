@@ -19,7 +19,9 @@ export function mergeLadder(pool: PoolBook, resting: RestingOrder[]): { bids: Le
   const build = (side: Side, poolSide: Level[], descending: boolean): Level[] => {
     const byPrice = new Map<number, Level>();
     for (const o of resting) {
-      if (o.side !== side) continue;
+      // A soft-cancelled order is retracted from the book even though its
+      // signature still lives; showing it as depth would invite fills on it.
+      if (o.side !== side || o.cancelled) continue;
       const left = o.size - o.filled;
       if (left <= EPS) continue;
       const at = byPrice.get(o.price);

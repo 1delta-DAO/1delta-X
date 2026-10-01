@@ -1,5 +1,5 @@
 import type { Deployment } from "@1delta-x/sdk";
-import { zeroAddress, type Address } from "viem";
+import { getAddress, isAddress, zeroAddress, type Address } from "viem";
 
 /**
  * Where UniversalSettlement lives, per chain.
@@ -25,22 +25,54 @@ export interface DeploymentConfig extends Deployment {
   solver: Address;
 }
 
-type RawDeployments = Record<string, Partial<Omit<DeploymentConfig, "chainId">>>;
+type RawDeployments = Record<string, Partial<Record<"settlement" | "permit3" | "lens" | "solver", unknown>>>;
 
-function parse(): RawDeployments {
-  const raw = import.meta.env.VITE_DEPLOYMENTS;
+/**
+ * Parse `VITE_DEPLOYMENTS` into per-chain deployments, VALIDATING every
+ * address (G-TS_SIGN-14).
+ *
+ * An entry is the target of real approvals and the `verifyingContract` of
+ * real signatures, so a malformed one is dropped whole — degraded to "not
+ * deployed", which the UI has an honest state for — rather than half-used.
+ * `settlement` and `permit3` are required and non-zero: a deployment whose
+ * Permit3 is unknown has nothing a maker could correctly approve. Exposed for
+ * tests; the app additionally checks `Settlement.PERMIT3()` on-chain before
+ * offering any approval (`lib/chain.ts`).
+ */
+export function parseDeployments(raw: string | undefined): Record<number, DeploymentConfig> {
   if (!raw) return {};
+  let parsed: RawDeployments;
   try {
-    return JSON.parse(raw) as RawDeployments;
+    parsed = JSON.parse(raw) as RawDeployments;
   } catch {
-    // A malformed override must not take the app down; it degrades to "not
-    // deployed", which the UI already has an honest state for.
+    // A malformed override must not take the app down.
     console.warn("VITE_DEPLOYMENTS is not valid JSON — ignoring");
     return {};
   }
+  const out: Record<number, DeploymentConfig> = {};
+  if (!parsed || typeof parsed !== "object") return out;
+  for (const [key, entry] of Object.entries(parsed)) {
+    const chainId = Number(key);
+    if (!Number.isSafeInteger(chainId) || chainId <= 0 || !entry || typeof entry !== "object") continue;
+    const addr = (v: unknown, required: boolean): Address | null | undefined => {
+      if (v === undefined || v === null || v === "") return required ? null : zeroAddress;
+      if (typeof v !== "string" || !isAddress(v, { strict: false })) return null;
+      return getAddress(v);
+    };
+    const settlement = addr(entry.settlement, true);
+    const permit3 = addr(entry.permit3, true);
+    const lens = addr(entry.lens, false);
+    const solver = addr(entry.solver, false);
+    if (!settlement || !permit3 || !lens || !solver || settlement === zeroAddress || permit3 === zeroAddress) {
+      console.warn(`VITE_DEPLOYMENTS[${key}] has a missing or invalid address — treating chain ${key} as not deployed`);
+      continue;
+    }
+    out[chainId] = { chainId, settlement, permit3, lens, solver };
+  }
+  return out;
 }
 
-const CONFIGURED = parse();
+const CONFIGURED = parseDeployments(import.meta.env.VITE_DEPLOYMENTS);
 
 /**
  * The deployment for a chain, or `null` when none is configured.
@@ -50,15 +82,7 @@ const CONFIGURED = parse();
  * cannot be signed into anything a filler could use.
  */
 export function deploymentFor(chainId: number): DeploymentConfig | null {
-  const entry = CONFIGURED[String(chainId)];
-  if (!entry?.settlement) return null;
-  return {
-    chainId,
-    settlement: entry.settlement,
-    permit3: entry.permit3 ?? zeroAddress,
-    lens: entry.lens ?? zeroAddress,
-    solver: entry.solver ?? zeroAddress,
-  };
+  return CONFIGURED[chainId] ?? null;
 }
 
 /** Every chain an address has been configured for — shown in the domain panel. */

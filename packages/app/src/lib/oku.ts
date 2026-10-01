@@ -91,6 +91,12 @@ export async function fetchPoolMeta(
   );
   const p = res.pools?.[0];
   if (!p) throw new Error(`pool ${pool} not indexed on ${chain}`);
+  // A search result is not an identity proof: `searchPoolsByAddress` may rank
+  // another pool first, and a feed that does so must not get to name this
+  // pool's tokens (G-TS_SIGN-1).
+  if (typeof p.address !== "string" || p.address.toLowerCase() !== pool.toLowerCase()) {
+    throw new Error(`oku answered for pool ${p.address}, not the requested ${pool}`);
+  }
   return {
     pool: p.address as `0x${string}`,
     fee: p.fee,
