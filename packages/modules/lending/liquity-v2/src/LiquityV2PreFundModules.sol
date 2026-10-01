@@ -10,28 +10,36 @@ import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 
 import {LiquityV2TroveAuth} from "./LiquityV2Modules.sol";
-import {ILiquityV2BorrowerOperations, ILiquityV2TroveManager, LatestTroveData} from "./interfaces/ILiquityV2.sol";
+import {
+    ICollateralRegistry,
+    ILiquityV2BorrowerOperations,
+    ILiquityV2TroveManager,
+    LatestTroveData
+} from "./interfaces/ILiquityV2.sol";
 
 // ──────────────── Liquity V2 PRE-FUNDED one-sided modules ────────────────
 //
 // "Add-collateral whatever the conversion delivered" and "repay whatever the
 // conversion delivered", with ZERO receive-side TOKEN approvals: the maker signs
-// the converted output leg with `recipient = module` and a `TAKE_FOR` item whose
-// leg-reference descriptor points at it. The core sizes `forAmount` to exactly
-// what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}), auction
-// decay included, and this module adds/repays it from its own balance. The
-// maker's only token grants are the ones they had anyway: the ERC20+Permit3
-// approval on the asset they are CONVERTING FROM (the input leg), and the taker
-// allowance. The received asset — the branch collateral on an add, BOLD on a
+// the converted output leg with `recipient = module` and a pre-funded `MAKE` item
+// whose leg-reference descriptor points at it. The core sizes `forAmount` to
+// exactly what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}),
+// auction decay included, and this module adds/repays it from its own balance.
+// The maker's only token grant is the one they had anyway: the ERC20+Permit3
+// approval on the asset they are CONVERTING FROM (the input leg). No taker
+// allowance is granted or spent — Settlement dispatches a `MAKE` directly. The
+// received asset — the branch collateral on an add, BOLD on a
 // repay — is never approved to anything and never transits the maker's wallet.
 //
 //  VENUE AUTHORIZATION — per-trove, and often NONE. Liquity's value-in ops are
 //  gated by `_requireSenderIsOwnerOrAddManager`: while a trove has NO add
 //  manager set, `addColl`/`repayBold` are PERMISSIONLESS for anyone, so these
 //  modules need no grant at all; a maker who HAS set an add manager must point
-//  it at the module (`setAddManager(troveId, module)`) — the same per-trove
-//  manager grant the pull-funded {LiquityV2AddCollModule}/{LiquityV2RepayModule}
-//  ride, a venue authorization, not a token approval. What this variant removes
+//  it at the module (`setAddManager(troveId, module)`) — a venue authorization,
+//  not a token approval. The slot holds ONE address, so this merged module is the
+//  one add manager that serves both value-in ops; the pull-funded
+//  {LiquityV2AddCollModule}/{LiquityV2RepayModule} are two contracts and can
+//  share a trove only while the slot is empty. What this variant removes
 //  is the maker's Permit3 TOKEN allowance to the module and the on-chain ERC20
 //  approval of the DELIVERED asset.
 //
@@ -138,6 +146,9 @@ contract LiquityV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSour
         // replaces.
         (address borrowerOps,) =
             LiquityV2TroveAuth.authorizeTrove(collateralRegistry, branchIndex, troveId, onBehalfOf);
+        // Named revert for a mis-named collateral (the venue would otherwise fail
+        // opaquely on its `transferFrom` of the real one) — L-LRG-1.
+        LiquityV2TroveAuth.requireColl(collateralRegistry, branchIndex, collateralToken);
         // Scoped approve + CLEAR: a standing allowance on this shared singleton
         // would be a claim on any future balance it holds (F25 / lead A-3).
         // The delivery must have landed HERE, in THIS token — the funding leg's
@@ -171,7 +182,7 @@ contract LiquityV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSour
         // Requiring the delivery in `boldToken` ties delivery to measurement, NOT
         // measurement to the burn (F27/H-2 was NOT closed by that alone — 2026-09-12
         // audit, finding 6): pin the named token to the registry's BOLD first.
-        LiquityV2TroveAuth.requireBold(collateralRegistry, boldToken);
+        LiquityV2TroveAuth.requireDebtToken(_debtToken(), boldToken);
         // The pre-existing floor — see {PreFundGuard}. A funding leg not addressed to
         // THIS module in THIS token underflows here, so the mis-pairing fails
         // closed; sound because `msg.sender == settlement` pins `forAmount` to the
@@ -185,10 +196,21 @@ contract LiquityV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSour
         if (toRepay != 0) {
             // BOLD needs no ERC20 approval (BorrowerOperations burns it directly);
             // the venue may clamp the burn at entireDebt − MIN_DEBT — see the header.
-            ILiquityV2BorrowerOperations(borrowerOps).repayBold(troveId, toRepay);
+            _repayDebt(borrowerOps, troveId, toRepay);
         }
         // The delivered surplus belongs to the maker, not to this singleton.
         PreFundGuard.sweepSurplus(boldToken, onBehalfOf, floor);
+    }
+
+    /// @dev The deployment's debt token, read from the IMMUTABLE registry. The
+    ///      fork seam — see `FelixModules.sol`.
+    function _debtToken() internal view virtual returns (address) {
+        return ICollateralRegistry(collateralRegistry).boldToken();
+    }
+
+    /// @dev The venue's burn entrypoint. The fork seam — see `FelixModules.sol`.
+    function _repayDebt(address borrowerOps, uint256 troveId, uint256 amount) internal virtual {
+        ILiquityV2BorrowerOperations(borrowerOps).repayBold(troveId, amount);
     }
 
 

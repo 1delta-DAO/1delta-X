@@ -12,12 +12,17 @@ pragma solidity ^0.8.28;
 // Every op takes an `account` and passes the caller-or-delegate check, so an
 // approved module drives the FULL borrower surface for `account`.
 //
-// Fund flow (Prisma/Liquity-V1 lineage): value-in (`addColl`, `repayDebt`,
-// `openTrove` collateral) is pulled from `msg.sender` (the module, which funds it
-// via a Permit3 pull from the maker); value-out (`withdrawColl`, `withdrawDebt`,
-// `openTrove` debt) lands on `account` (the maker) — the ops carry NO receiver.
-// The taker modules therefore Permit3-sweep the proceeds from the maker to the
-// order's `receiver`.
+// Fund flow — ✅ FORK-VALIDATED on the deployed diamond (BSC/Hemi, 0x07Bb…AA4Ec):
+//   • value-in: `addColl` / `openTrove` collateral is pulled from `msg.sender` (the
+//     module); `repayDebt` BURNS satUSD from `msg.sender` with NO allowance.
+//   • value-out (`withdrawColl`, `withdrawDebt`, `openTrove` debt) lands on
+//     `msg.sender` — the MODULE when a delegate drives the op — not on `account`
+//     as the Prisma lineage documents. The ops carry NO receiver.
+// The taker modules settle direction-agnostically ({RiverProceeds.settle}): pay
+// `receiver` from what landed on the module, fall back to a Permit3 sweep from the
+// maker only on a deployment that routes to `account`, revert on under-delivery.
+// `repayDebt` enforces a minimum NET debt: retiring the whole debt reverts (a full
+// close is `closeTrove`).
 interface IRiverXApp {
     function openTrove(
         address troveManager,

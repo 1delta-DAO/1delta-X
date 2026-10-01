@@ -37,11 +37,13 @@ import {
 //  approving the CREDIT MANAGER rather than the facade (the manager runs
 //  `addCollateral`'s `transferFrom`).
 //
-//  ⚠️ STILL UNVALIDATED ON A FORK: the multicall fund-flow. The authorization
-//  model is now covered by unit tests (`test/security/CreditAccountAuth.t.sol`),
-//  but no test has executed these modules against real Gearbox contracts, so the
-//  end-to-end deposit/borrow flow — HF checks, the once-per-block debt-update
-//  rule, quota handling — is still unproven. Fork-test before mainnet use.
+//  ✅ FORK-VALIDATED: the multicall fund-flow runs against the deployed mainnet
+//  wstETH credit suite (v3.1) in `test/fork/CreditFlow.t.sol` — real
+//  `openCreditAccount`, exact-mask bot grants, add-collateral, borrow (minding the
+//  once-per-block debt-update rule), partial repay, over-repay cap and a full close.
+//  The authorization model is unit-tested in `test/security/`. What stays unproven
+//  is quota handling for collateral other than the underlying (the validated suite
+//  needs none) and other credit suites' `debtLimits` — re-check per suite.
 // ════════════════════════════════════════════════════════════════════════════
 
 /// @title GearboxCreditAuth
@@ -219,12 +221,15 @@ contract GearboxPoolWithdrawModule is ITakerModule, IPositionSource {
     /// @dev Single-op module, so there is no op byte to police — the blob is
     ///      `(pool, asset)` and the only thing it can express is this withdraw.
     ///
-    ///      `maxWithdraw` — not `convertToAssets(balanceOf)` — is deliberate: it is
-    ///      already in ASSET units (so it needs no conversion to leg units) and it
-    ///      already accounts for what would make a larger withdraw revert, namely
-    ///      pool illiquidity. `asset` comes from the POOL, never from `data`: it is
-    ///      the token the withdraw actually pays out, so it is the only honest
-    ///      answer to the caller's units check.
+    ///      `previewRedeem(balanceOf(user))` — the RAW position in asset units — not
+    ///      `maxWithdraw`, is deliberate: `maxWithdraw` is a REACHABILITY figure,
+    ///      clipped by pool illiquidity that third parties move, and pricing a
+    ///      one-shot exit off it lets a fill resolve small instead of reverting
+    ///      (2026-09-10 audit, finding 1; see {IGearboxPoolV3.balanceOf}). An
+    ///      illiquid pool therefore makes the `Full` withdraw revert, by design.
+    ///      `asset` comes from the POOL, never from `data`: it is the token the
+    ///      withdraw actually pays out, so it is the only honest answer to the
+    ///      caller's units check.
     function positionOf(address user, bytes calldata data)
         public
         view
@@ -332,9 +337,8 @@ contract GearboxCreditAddCollateralModule is IMakerModule, IGearboxBot {
 // `test/fork/CreditFlow.t.sol`. Approval goes to the CREDIT
 // MANAGER (it runs `addCollateral`'s transferFrom), is reset after, and any
 // unpulled residual returns to the maker — same end-holding-nothing posture as
-// the add-collateral module. Same best-effort caveat as the other credit-account
-// modules: authorization is unit-tested, the multicall fund-flow awaits fork
-// validation.
+// the add-collateral module. Authorization is unit-tested; the multicall fund-flow
+// is fork-validated (see the file header).
 //
 contract GearboxCreditRepayModule is IMakerModule, IGearboxBot {
     IPermit3 public immutable permit3;

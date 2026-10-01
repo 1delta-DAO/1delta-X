@@ -27,18 +27,19 @@ pre-existing balance.
 | Contract | Op | Action | `data` |
 |---|---|---|---|
 | `RiverAddCollModule` | MAKE | pull collateral → `addColl` | `abi.encode(xapp, tm, coll, upper, lower[, permit])` |
-| `RiverRepayModule` | MAKE | read debt → `repayDebt(min(amount,debt))`; sweep residual | `abi.encode(xapp, tm, debtToken, upper, lower)` |
-| `RiverTakerModule` (op 0) | TAKE | `withdrawDebt` → Permit3-sweep satUSD → receiver | `abi.encode(uint8(0), xapp, tm, debtToken, maxFee, upper, lower)` |
-| `RiverTakerModule` (op 1) | TAKE | `withdrawColl` → Permit3-sweep collateral → receiver | `abi.encode(uint8(1), xapp, tm, coll, upper, lower)` |
-| `RiverOpenModule` | TAKE (Level B) | pull collateral + `openTrove` → sweep satUSD → receiver | `abi.encode(OpenData{...})` |
-| `RiverPreFundModule` | MAKE (pre-funded) | ONE contract, two ops selected by descriptor bits [244,252): `Op.AddColl` — `addColl` the core-delivered leg from the module's own balance; `Op.Repay` — `repayDebt(min(forAmount, debt))` from its own balance, surplus swept to the maker. Rides the MAKE seam (Settlement dispatches directly; `forAmount` is core-sized from the descriptor), not `TAKE_FOR` | `abi.encode(forDesc, xapp, troveManager, collateralToken \| debtToken, upperHint, lowerHint)` — descriptor word first, op in its bits |
+| `RiverRepayModule` | MAKE | read debt → `repayDebt(min(amount,debt))` (reverts `FullCloseNotSupported` if that is the whole debt); sweep residual | `abi.encode(xapp, tm, debtToken, upper, lower)` |
+| `RiverTakerModule` (op 0) | TAKE | `withdrawDebt` → settle satUSD (module-held, Permit3 fallback) → receiver | `abi.encode(uint8(0), xapp, tm, debtToken, maxFee, upper, lower)` |
+| `RiverTakerModule` (op 1) | TAKE | `withdrawColl` → settle collateral (module-held, Permit3 fallback) → receiver | `abi.encode(uint8(1), xapp, tm, coll, upper, lower)` |
+| `RiverOpenModule` | TAKE (Level B) | pull collateral + `openTrove` → settle satUSD → receiver | `abi.encode(OpenData{...})` |
+| `RiverPreFundModule` | MAKE (pre-funded) | ONE contract, two ops selected by descriptor bits [244,252): `Op.AddColl` — `addColl` the core-delivered leg from the module's own balance; `Op.Repay` — `repayDebt(forAmount)` from its own balance; a delivery that would retire the whole debt reverts `FullCloseNotSupported`. Rides the MAKE seam (Settlement dispatches directly; `forAmount` is core-sized from the descriptor), not `TAKE_FOR` | `abi.encode(forDesc, xapp, troveManager, collateralToken \| debtToken, upperHint, lowerHint)` — descriptor word first, op in its bits |
 
 The pre-fund modules (`RiverPreFundModules.sol`) are the one-sided "add/repay whatever
 the conversion delivered" shape: the maker routes the signed output leg to the
 module (`recipient = module`), so the DELIVERED asset needs no ERC20 approval and
-no Permit3 token allowance — only the taker allowance and the diamond's
+no Permit3 token allowance, and no taker allowance is granted or spent (Settlement
+dispatches a `MAKE` directly) — only the diamond's
 `setDelegateApproval(module, true)` (a venue authorization the deployed diamond
-enforces on value-in ops too) remain.
+enforces on value-in ops too) remains.
 
 ## Authorization (per leg)
 
@@ -58,13 +59,23 @@ The taker modules enforce `msg.sender == permit3`; the MAKE modules enforce
 
 ## Caveats
 
-- **Fund-flow assumption:** value-in is pulled from `msg.sender` (the module,
-  funded via Permit3); value-out lands on `account` (the maker) and is swept to
-  `receiver`. This follows the Prisma/Liquity-V1 lineage — **validate against the
-  deployed diamond on a fork of the target chain** before mainnet use.
-- Partial repay only; a full close is `closeTrove` (satUSD burned, collateral
-  returned) — wire that as a dedicated flow. Recovery Mode (TCR < 150%) blocks
-  withdrawals/close.
+- **Fund flow (fork-validated on the deployed diamond):** value-in collateral is
+  pulled from `msg.sender` (the module); `repayDebt` burns satUSD from
+  `msg.sender` with no allowance; value-out lands on `msg.sender` (the module) and
+  is forwarded to `receiver` by plain transfer. The Permit3 sweep from the maker
+  in `RiverProceeds.settle` is only the fallback for a deployment that routes
+  value-out to `account` (the Prisma-lineage documentation). A new chain's
+  deployment should still be re-checked on a fork before use.
+- Partial repay only, on BOTH repay modules: a repay that would retire the whole
+  debt violates the diamond's minimum-net-debt rule, so `RiverRepayModule` and
+  `RiverPreFundModule` (`Op.Repay`) revert `FullCloseNotSupported` when the
+  live-debt cap saturates (unlike Liquity v2, River does not clamp). A full close
+  is `closeTrove` (satUSD burned, collateral returned) — wire that as a dedicated
+  flow. Recovery Mode (TCR < 150%) blocks withdrawals/close.
+- **Trust premise:** `xapp` and `troveManager` are maker-supplied. The debt-token
+  pin (`tm.debtToken()`) relies on the diamond rejecting an unregistered
+  TroveManager; `test/fork/RiverVenueFork.t.sol` pins that the deployed diamond
+  does.
 - Interest is protocol-set (currently 0%); a one-off mint fee applies on open /
   every debt increase (`maxFeePercentage` guard).
 
@@ -81,7 +92,13 @@ TroveManager first. The diamond and satUSD share an address across chains but
 **TroveManagers do not map to the same collateral**: `0xb655…` is WETH on Hemi
 and WBTC on BSC, and BSC's WBTC has 8 decimals against BTCB's 18.
 
-The `unit/` and `security/` checks run without a fork.
+`test/fork/RiverVenueFork.t.sol` (same BSC endpoint) pins the venue premises the
+modules rely on: the diamond rejects an unregistered TroveManager ("Collateral not
+enabled") even when it answers the module's `debtToken()` pin, a repay of the
+whole debt reverts inside the diamond, and the pull `RiverRepayModule` works live.
+
+The `unit/` and `security/` checks run without a fork (the unit diamond mocks
+burn satUSD from `msg.sender` with no allowance, as the deployed diamond does).
 
 ```
 FOUNDRY_PROFILE=modules-river forge test --root ../../../..

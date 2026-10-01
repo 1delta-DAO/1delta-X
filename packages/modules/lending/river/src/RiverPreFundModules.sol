@@ -15,13 +15,14 @@ import {IRiverXApp, IRiverTroveManager} from "./interfaces/IRiver.sol";
 //
 // "Add-collateral whatever the conversion delivered" and "repay whatever the
 // conversion delivered", with ZERO receive-side TOKEN approvals: the maker signs
-// the converted output leg with `recipient = module` and a `TAKE_FOR` item whose
-// leg-reference descriptor points at it. The core sizes `forAmount` to exactly
-// what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}), auction
-// decay included, and this module adds/repays it from its own balance. The
-// maker's only token grants are the ones they had anyway: the ERC20+Permit3
-// approval on the asset they are CONVERTING FROM (the input leg), and the taker
-// allowance. The received asset — the collateral on an add, satUSD on a repay —
+// the converted output leg with `recipient = module` and a pre-funded `MAKE` item
+// whose leg-reference descriptor points at it. The core sizes `forAmount` to
+// exactly what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}),
+// auction decay included, and this module adds/repays it from its own balance.
+// The maker's only token grant is the one they had anyway: the ERC20+Permit3
+// approval on the asset they are CONVERTING FROM (the input leg). No taker
+// allowance is granted or spent — Settlement dispatches a `MAKE` directly. The
+// received asset — the collateral on an add, satUSD on a repay —
 // is never approved to anything and never transits the maker's wallet.
 //
 //  ⚠ VENUE AUTHORIZATION KEPT — NOT a token approval. The deployed SatoshiXApp
@@ -90,6 +91,9 @@ contract RiverPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     error BadOp(uint256 op);
     /// @dev The maker-named debt token is not the TroveManager's.
     error DebtTokenMismatch(address named, address actual);
+    /// @dev A repay that would retire the WHOLE trove debt — the venue rejects it
+    ///      (minimum net debt); a full close is `closeTrove`.
+    error FullCloseNotSupported(uint256 entireDebt);
 
 
     constructor(address _permit3, address _settlement) PreFundModuleBase(_permit3, _settlement) {}
@@ -160,10 +164,18 @@ contract RiverPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
         // closed; sound because `msg.sender == settlement` pins `forAmount` to the
         // core (F27/C-1, C-4).
         uint256 floor = PreFundGuard.floorOf(data, debtToken, forAmount);
-        // Cap at the LIVE debt — the maker cannot know accrued interest at
-        // signing, and the diamond rejects repaying more than is owed.
+        // Cap at the LIVE debt — the maker cannot know accrued interest at signing.
+        // ⚠ The cap's saturating case is NOT a success path on River: retiring the
+        // WHOLE debt via `repayDebt` breaks the diamond's minimum-net-debt rule
+        // (`_requireAtLeastMinNetDebt`) and reverts inside the venue — a full close
+        // is `closeTrove`, not wired. Fail closed HERE with the same named error as
+        // the pull sibling {RiverRepayModule}, instead of an opaque venue revert
+        // (2026-09-30 audit, L-LRG-4/L-CENSUS-3; River is a Liquity-v1-style venue,
+        // unlike Liquity v2, which clamps). An over-delivery therefore cannot be
+        // "repay all and sweep the rest" here — size the leg below the debt.
         (uint256 debt,,,) = IRiverTroveManager(tm).getEntireDebtAndColl(onBehalfOf);
         uint256 toRepay = forAmount < debt ? forAmount : debt;
+        if (toRepay != 0 && toRepay == debt) revert FullCloseNotSupported(debt);
         if (toRepay != 0) {
             // Scoped approve + CLEAR — `xapp` is maker-data-choosable on a singleton.
             SafeTransferLib.forceApprove(debtToken, xapp, toRepay);

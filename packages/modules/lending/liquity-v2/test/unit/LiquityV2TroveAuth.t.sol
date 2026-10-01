@@ -30,6 +30,13 @@ contract LqtyRegistry {
     function totalCollaterals() external pure returns (uint256) { return 1; }
     address public boldToken;
     function setBold(address b) external { boldToken = b; }
+    mapping(uint256 => address) internal _coll;
+    function setColl(uint256 i, address c) external { _coll[i] = c; }
+    /// @dev Upstream reverts on an invalid index ("Invalid index").
+    function getToken(uint256 i) external view returns (address) {
+        require(_coll[i] != address(0), "Invalid index");
+        return _coll[i];
+    }
 }
 
 contract LqtyToken {
@@ -126,11 +133,20 @@ contract LqtyBorrowerOperations {
 
     /// @dev troveId => manager => allowed (the `setRemoveManagerWithReceiver` grant)
     mapping(uint256 => mapping(address => bool)) public removeManager;
-    mapping(uint256 => mapping(address => bool)) public addManager;
+    /// @dev ONE add manager per trove, as upstream (`addManagerOf[troveId]`).
+    ///      This mock used to model a set, which let the suite onboard BOTH pull
+    ///      MAKE modules on one trove — impossible on the real venue (L-LRG-3).
+    mapping(uint256 => address) public addManagerOf;
     /// @dev troveId => where value-out proceeds are forced to land
     mapping(uint256 => address) public receiverOf;
 
+    /// @dev Upstream `MIN_DEBT` (mainnet 2000 BOLD). `repayBold` CLAMPS the burn at
+    ///      `entireDebt − MIN_DEBT` rather than reverting (liquity/bold
+    ///      `_adjustTrove`); this mock used to burn unclamped (L-CENSUS-3 / L-LRG-5).
+    uint256 public constant MIN_DEBT = 2_000e18;
+
     error NotManager();
+    error ZeroAdjustment();
 
     constructor(address _tm, address _bold, address _coll) {
         troveManagerAddr = _tm;
@@ -144,20 +160,31 @@ contract LqtyBorrowerOperations {
     }
 
     function setAddManager(uint256 troveId, address manager) external {
-        addManager[troveId][manager] = true;
+        addManagerOf[troveId] = manager;
+    }
+
+    /// @dev Upstream `_requireSenderIsOwnerOrAddManager`: anyone while the slot is
+    ///      empty, else only the named manager (owner/remove-manager paths elided).
+    function _requireAdd(uint256 troveId) internal view {
+        address m = addManagerOf[troveId];
+        if (m != address(0) && m != msg.sender) revert NotManager();
     }
 
     // ── value in ──
     function addColl(uint256 troveId, uint256 amount) external {
-        if (!addManager[troveId][msg.sender]) revert NotManager();
+        _requireAdd(troveId);
         collateral.transferFrom(msg.sender, address(this), amount);
         LqtyTroveManager(troveManagerAddr).setColl(troveId, LqtyTroveManager(troveManagerAddr).coll(troveId) + amount);
     }
 
     function repayBold(uint256 troveId, uint256 amount) external {
-        if (!addManager[troveId][msg.sender]) revert NotManager();
+        _requireAdd(troveId);
+        uint256 debt = LqtyTroveManager(troveManagerAddr).debt(troveId);
+        uint256 maxRepayment = debt > MIN_DEBT ? debt - MIN_DEBT : 0;
+        if (amount > maxRepayment) amount = maxRepayment;
+        if (amount == 0) revert ZeroAdjustment();
         bold.burn(msg.sender, amount); // privileged burn — no allowance, as in real Liquity
-        LqtyTroveManager(troveManagerAddr).setDebt(troveId, LqtyTroveManager(troveManagerAddr).debt(troveId) - amount);
+        LqtyTroveManager(troveManagerAddr).setDebt(troveId, debt - amount);
     }
 
     // ── value out ──
@@ -240,9 +267,11 @@ contract LiquityV2TroveAuthTest is Test {
         collateral.mint(address(bo), 100e18);
 
         // Both users onboard exactly as the docs instruct. This is the precondition
-        // for the attack, not a misconfiguration.
-        bo.setAddManager(MAKER_TROVE, address(addCollModule));
-        bo.setAddManager(MAKER_TROVE, address(repayModule));
+        // for the attack, not a misconfiguration. The add-manager slot is left
+        // EMPTY: Liquity keeps ONE add manager per trove, so naming either pull
+        // MAKE module would lock the other out — value-in is permissionless while
+        // the slot is empty.
+        registry.setColl(BRANCH, address(collateral));
         bo.setRemoveManagerWithReceiver(MAKER_TROVE, address(takerModule), address(takerModule));
         bo.setRemoveManagerWithReceiver(ATTACKER_TROVE, address(takerModule), address(takerModule));
 
@@ -395,16 +424,35 @@ contract LiquityV2TroveAuthTest is Test {
         assertEq(bold.balanceOf(address(repayModule)), 0, "no residue left on the module");
     }
 
-    /// @dev AUDIT REGRESSION. `min(amount, entireDebt)` is copied from siblings where
-    /// saturating at the live debt is the GOOD path. On a trove venue it is not:
-    /// `repayBold` enforces a minimum debt, so the clamp's own success case
-    /// (`toRepay == entireDebt` ⇒ `newDebt == 0`) reverts *inside the venue* — an
-    /// opaque failure for the whole fill. The module now fails closed itself, with a
-    /// name that says what to reach for instead (`closeTrove`, wired separately).
-    ///
-    /// The mock has no min-debt floor, which is precisely why this was invisible to
-    /// the suite before.
-    function test_repay_fullDebt_failsClosedWithANamedError() public {
+    /// @dev 2026-09-30 audit, L-CENSUS-3. REPLACES `test_repay_fullDebt_failsClosedWithANamedError`,
+    /// which asserted a `FullCloseNotSupported` revert built on a false venue premise
+    /// (that `repayBold(entireDebt)` reverts inside Liquity v2). The real venue CLAMPS
+    /// the burn at `entireDebt − MIN_DEBT` — the mock now models that — so an
+    /// over-sized repay fills, the trove lands on MIN_DEBT, and the un-burned BOLD is
+    /// swept back, exactly as on the pre-fund sibling.
+    function test_audit_L_CENSUS_3_repay_atOrAboveEntireDebt_clampsAndSweeps() public {
+        tm.setDebt(MAKER_TROVE, BORROW);
+        uint256 signed = BORROW + 500e18; // "repay down to the minimum", with headroom
+        bold.mint(maker, signed);
+
+        vm.startPrank(maker);
+        bold.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(repayModule), address(bold), uint160(signed), 0);
+        vm.stopPrank();
+
+        vm.prank(settlement);
+        repayModule.makeOnBehalf(maker, signed, abi.encode(BRANCH, MAKER_TROVE, address(bold)));
+
+        uint256 burned = BORROW - bo.MIN_DEBT();
+        assertEq(tm.debt(MAKER_TROVE), bo.MIN_DEBT(), "trove sits exactly on the minimum debt");
+        // Pulled min(signed, entireDebt) = BORROW, burned BORROW − MIN_DEBT, swept the rest.
+        assertEq(bold.balanceOf(maker), signed - burned, "everything not burned is back with the maker");
+        assertEq(bold.balanceOf(address(repayModule)), 0, "no residue on the module");
+    }
+
+    /// @dev The boundary the old guard drew: `entireDebt − 1` filled, `entireDebt`
+    /// reverted. Both now behave identically.
+    function test_audit_L_CENSUS_3_repay_exactlyEntireDebt_fills() public {
         tm.setDebt(MAKER_TROVE, BORROW);
         bold.mint(maker, BORROW);
 
@@ -414,10 +462,10 @@ contract LiquityV2TroveAuthTest is Test {
         vm.stopPrank();
 
         vm.prank(settlement);
-        vm.expectRevert(abi.encodeWithSelector(LiquityV2RepayModule.FullCloseNotSupported.selector, BORROW));
         repayModule.makeOnBehalf(maker, BORROW, abi.encode(BRANCH, MAKER_TROVE, address(bold)));
 
-        assertEq(tm.debt(MAKER_TROVE), BORROW, "nothing moved");
+        assertEq(tm.debt(MAKER_TROVE), bo.MIN_DEBT(), "clamped at the minimum debt");
+        assertEq(bold.balanceOf(maker), bo.MIN_DEBT(), "the un-burnable MIN_DEBT came back");
     }
 
     function test_attacker_cannot_repay_into_victim_trove() public {

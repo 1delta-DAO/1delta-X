@@ -216,8 +216,11 @@ contract RiverRepayModule is IMakerModule {
 // ──────────────────── River combined taker module ────────────────────
 //
 // Fuses borrow (`withdrawDebt`) and collateral-withdraw (`withdrawColl`) behind a
-// leading `op` flag; each op then Permit3-sweeps the CDP proceeds from the maker
-// to `receiver`. Borrow-data and withdraw-data hash to different taker refs, so
+// leading `op` flag; each op then settles exactly `amount` of the CDP proceeds to
+// `receiver` via {RiverProceeds.settle} — on the deployed diamond they land on THIS
+// module (`msg.sender`, fork-validated) and are forwarded by plain transfer; the
+// Permit3 sweep from the maker is only the fallback for an `account`-routing
+// deployment. Under-delivery reverts. Borrow-data and withdraw-data hash to different taker refs, so
 // the maker grants a separate amount-gated allowance per leg; both share the one
 // diamond `setDelegateApproval(module)` grant.
 //

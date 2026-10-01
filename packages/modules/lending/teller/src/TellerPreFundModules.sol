@@ -9,22 +9,28 @@ import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 
-import {ITellerPool, ITellerV2} from "./interfaces/ITeller.sol";
+import {ITellerPool} from "./interfaces/ITeller.sol";
+import {TellerRepayLib} from "./TellerModules.sol";
 
 // ──────────────── Teller V2 PRE-FUNDED one-sided modules ────────────────
 //
 // "Deposit whatever the conversion delivered" and "repay whatever the conversion
 // delivered", with ZERO receive-side approvals: the maker signs the converted
-// output leg with `recipient = module` and a `TAKE_FOR` item whose leg-reference
-// descriptor points at it. The core sizes `forAmount` to exactly what the fill
-// delivered here ({Base._forSlice} → {Pricing.outputAt}), auction decay included,
-// and this module supplies/repays it from its own balance. The maker's only
-// grants are the ones they had anyway: the ERC20+Permit3 approval on the asset
-// they are CONVERTING FROM (the input leg), and the taker allowance below. The
+// output leg with `recipient = module` and a pre-funded `MAKE` item whose
+// leg-reference descriptor points at it. The core sizes `forAmount` to exactly
+// what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}), auction
+// decay included, and this module supplies/repays it from its own balance. The
+// maker's only grant is the one they had anyway: the ERC20+Permit3 approval on
+// the asset they are CONVERTING FROM (the input leg). No taker allowance is
+// granted or spent — Settlement dispatches a `MAKE` directly. The
 // received asset needs nothing — it never transits the maker's wallet, and both
-// Teller ops (`deposit(assets, receiver)`, `repayLoan`/`repayLoanFull`) are
-// PERMISSIONLESS on someone else's behalf, so the receive side is empty end to
-// end. These are pre-fund variants of exactly the two ops {TellerModules} ships —
+// Teller ops (`deposit(assets, receiver)`, `repayLoan`/`repayLoanFull`) act on
+// someone else's behalf with no grant from them, so the receive side is empty end
+// to end. ⚠ `deposit` is Hypernative-firewalled for contract callers: THIS module's
+// address must be registered with the chain's SmartCommitmentForwarder oracle
+// (`oracleRegister`, public; a per-chain deploy step — see the README) or the
+// PoolDeposit op reverts "Account not registered". The repay ops carry no
+// firewall and clamp at the live debt ({TellerRepayLib}). These are pre-fund variants of exactly the two ops {TellerModules} ships —
 // pool supply and loan repay; borrow and pool withdraw stay unwired for the
 // protocol reasons the package README gives.
 //
@@ -131,15 +137,12 @@ contract TellerPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource 
             // Tail decode (bidId @96, full @128) via a calldata slice, as
             // {TellerRepayModule} keeps its frame flat with a single decode.
             (uint256 bidId, bool full) = abi.decode(data[96:], (uint256, bool));
-            // Scoped approve + CLEAR — `tellerV2` is maker-data-choosable on a
-            // shared singleton (F25 / lead A-3).
-            SafeTransferLib.forceApprove(principalToken, tellerV2, forAmount);
-            if (full) {
-                ITellerV2(tellerV2).repayLoanFull(bidId);
-            } else {
-                ITellerV2(tellerV2).repayLoan(bidId, forAmount);
-            }
-            SafeTransferLib.forceApprove(principalToken, tellerV2, 0);
+            // Clamped at the LIVE debt: a delivery at or above the owed amount
+            // closes via `repayLoanFull` (pulls exactly owed), never via
+            // `repayLoan`, which pays the uncapped amount to the lender (L-CMT-1).
+            // Scoped approve + CLEAR inside — `tellerV2` is maker-data-choosable on
+            // a shared singleton (F25 / lead A-3).
+            TellerRepayLib.repay(tellerV2, principalToken, bidId, full, forAmount);
         }
         // Sweep the unused buffer — the DELTA this fill produced, never the floor.
         uint256 bal = IERC20(principalToken).balanceOf(address(this));

@@ -68,13 +68,27 @@ contract MockTellerPool {
     }
 }
 
-/// @dev TellerV2 repay surface: `repayLoanFull` pulls exactly what is owed;
-///      `repayLoan` clamps a final overshooting payment to the outstanding
-///      balance (as the real `_repayLoan` does) — so the module's delta-sweep is
-///      what returns any unused buffer.
+/// @dev TellerV2 repay surface, modelled on the DEPLOYED implementation
+///      (2026-09-30 audit, L-CMT-1 / L-CMT-5): `repayLoanFull` pulls exactly what is
+///      owed; `repayLoan` transfers the WHOLE `amount` to the lender and only marks
+///      the loan paid once it covers the debt — it does NOT clamp an overpayment
+///      (the real `_repayLoan` caps a local copy only, then `_sendOrEscrowFunds`
+///      sends the uncapped `_payment`). This mock used to clamp "as the real
+///      `_repayLoan` does", which hid the module's missing live-debt clamp.
+///      `repayLoan` also reverts below `minDue` (the venue's `PaymentNotMinimum`).
 contract MockTellerV2 {
     MockERC20 public immutable principal;
     mapping(uint256 => uint256) public owed;
+    uint256 public minDue;
+    uint256 public repayLoanCalls;
+    uint256 public repayLoanFullCalls;
+
+    error PaymentNotMinimum(uint256 bidId, uint256 payment, uint256 minimumOwed);
+
+    struct Payment {
+        uint256 principal;
+        uint256 interest;
+    }
 
     constructor(MockERC20 _principal) {
         principal = _principal;
@@ -84,17 +98,28 @@ contract MockTellerV2 {
         owed[bidId] = amount;
     }
 
+    function setMinDue(uint256 m) external {
+        minDue = m;
+    }
+
+    function calculateAmountOwed(uint256 bidId, uint256) external view returns (Payment memory p) {
+        p.principal = owed[bidId];
+    }
+
     function repayLoanFull(uint256 bidId) external {
         uint256 due = owed[bidId];
         owed[bidId] = 0;
+        repayLoanFullCalls++;
         principal.transferFrom(msg.sender, address(this), due);
     }
 
     function repayLoan(uint256 bidId, uint256 amount) external {
+        if (amount < minDue) revert PaymentNotMinimum(bidId, amount, minDue);
         uint256 due = owed[bidId];
-        uint256 pay = amount < due ? amount : due;
-        owed[bidId] = due - pay;
-        principal.transferFrom(msg.sender, address(this), pay);
+        owed[bidId] = amount >= due ? 0 : due - amount;
+        repayLoanCalls++;
+        // UNCAPPED, exactly like the deployed `_sendOrEscrowFunds`.
+        principal.transferFrom(msg.sender, address(this), amount);
     }
 }
 

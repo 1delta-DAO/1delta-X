@@ -3,13 +3,14 @@ pragma solidity ^0.8.28;
 
 // ──────────────────── Minimal Liquity V2 surface ────────────────────
 //
-// Liquity V2 (and forks: Felix, Quill, Nerite, …) — troves are ERC-721 sub-
-// accounts under a per-branch `BorrowerOperations`. `troveId =
-// keccak256(sender, owner, ownerIndex)`.
+// Liquity V2 — troves are ERC-721 sub-accounts under a per-branch
+// `BorrowerOperations`. `troveId = keccak256(sender, owner, ownerIndex)`. Forks
+// are NOT covered by assumption: Felix renamed the BOLD surface (see
+// `FelixModules.sol`); others must be probed before use (package README).
 //
 // Delegation is per-trove and splits by direction — a clean map onto MAKE/TAKE:
-//   • `setAddManager(troveId, module)` — lets the module ADD collateral / REPAY
-//     (the MAKE legs).
+//   • `setAddManager(troveId, module)` — ONE slot per trove; while it is EMPTY
+//     the value-in ops (add collateral / repay) are permissionless.
 //   • `setRemoveManagerWithReceiver(troveId, module, receiver)` — lets the module
 //     WITHDRAW collateral / BORROW (the TAKE legs) with proceeds forced to
 //     `receiver`. The maker sets `receiver = module`, so the value-out lands on
@@ -60,6 +61,13 @@ interface ICollateralRegistry {
     ///         The repay legs pin the maker-named accounting token to this, see
     ///         {LiquityV2TroveAuth.requireBold}.
     function boldToken() external view returns (address);
+    /// @notice The collateral token of branch `_index` (`IERC20Metadata` upstream).
+    ///         Reverts on an invalid index. Verified on Ethereum mainnet
+    ///         (`getToken(0)` = WETH) and on Felix / HyperEVM registry
+    ///         0x9De1e57049c475736289Cb006212F3E1DCe4711B (`getToken(0)` = WHYPE
+    ///         0x5555…5555). The collateral legs pin the maker-named token to this —
+    ///         see {LiquityV2TroveAuth.requireColl}.
+    function getToken(uint256 _index) external view returns (address);
 }
 
 /// @notice Troves are ERC-721s and `troveId` IS the token id, so ownership is a
