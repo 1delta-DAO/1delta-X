@@ -24,6 +24,7 @@ export interface BookEntry {
 
 /** A soft cancel the book keeps honouring after the eviction it caused. */
 interface SoftCancelTombstone {
+  orderHash: Hex;
   /** Lower-cased — the only maker whose order this tombstone blocks. */
   maker: string;
   /** Unix seconds after which the tombstone may be forgotten. */
@@ -85,7 +86,14 @@ export interface BookOptions {
    * consecutive isolated failures it is evicted. Default 3.
    */
   maxInconclusiveStrikes?: number;
-  /** Soft-cancel tombstones held at most. Default 100,000. */
+  /**
+   * Soft-cancel tombstones held at most. Default 100,000. Past it, PENDING
+   * tombstones (cancel-before-order) are dropped first, oldest first; a tombstone
+   * for an order this node actually held goes only once no pending one is left.
+   * Pending ones are free to mint (any key, any hash), real ones are not (each
+   * needed a live order of the canceller's own here), so a flood of the first
+   * kind must never flush the second (audit 2026-09-30 G-TS_FILLER-2).
+   */
   maxTombstones?: number;
   /**
    * Tombstones for hashes this node had NOT seen (cancel-before-order), per maker.
@@ -93,6 +101,13 @@ export interface BookOptions {
    * memory a maker can mint with one signature. Default 1,024.
    */
   maxPendingTombstonesPerMaker?: number;
+  /**
+   * Replay the cancel and replace topics' history on `start()` as well, so a
+   * soft-cancelled or replaced order in Store history does not come back on every
+   * boot (audit 2026-09-30 G-TS_FILLER-3). Default true; only read when `backfill`
+   * is on.
+   */
+  backfillRetractions?: boolean;
 }
 
 /**
@@ -119,8 +134,14 @@ export class Book {
   private readonly admission: AdmissionPolicy;
   /** Live orders per lower-cased maker, maintained on admit/evict — the cap check is O(1). */
   private readonly makerCounts = new Map<string, number>();
-  /** Soft-cancelled hashes, insertion-ordered so the oldest go first past the cap. */
-  private readonly tombstones = new Map<Hex, SoftCancelTombstone>();
+  /**
+   * Soft-cancel tombstones keyed by `(orderHash, maker)`, insertion-ordered so the
+   * oldest go first past the cap. Keyed by the PAIR, not the hash: keyed by hash
+   * alone, whoever wrote a hash first owned it, so a stranger could plant a pending
+   * tombstone on a hash before its order reached this node and the real maker's
+   * later cancel then wrote nothing (audit 2026-09-30 G-TS_FILLER-2).
+   */
+  private readonly tombstones = new Map<string, SoftCancelTombstone>();
   private readonly pendingPerMaker = new Map<string, number>();
 
   constructor(private readonly opts: BookOptions) {
@@ -138,8 +159,22 @@ export class Book {
     const { orders, cancels, replaces } = topicsFor(config);
 
     if (this.opts.backfill !== false && transport.queryHistory) {
+      // RETRACTIONS TOO, AND CANCELS FIRST (audit 2026-09-30 G-TS_FILLER-3).
+      // Tombstones live in memory, so a restarted or newly joining node used to
+      // replay only the order history and re-admit every order its maker had
+      // soft-cancelled or replaced — nothing on-chain changed, so Layer 2 accepts
+      // them. Cancels replay first and leave their (maker-bound) tombstones; the
+      // orders then replay against them; replaces last, since a replace needs its
+      // predecessor admitted to retire it.
+      const retractions = this.opts.backfillRetractions ?? true;
+      if (retractions) {
+        for (const bytes of await transport.queryHistory(cancels)) await this.ingestCancelBytes(bytes);
+      }
       const history = await transport.queryHistory(orders);
       for (const bytes of history) await this.ingestAnnounceBytes(bytes);
+      if (retractions) {
+        for (const bytes of await transport.queryHistory(replaces)) await this.ingestReplaceBytes(bytes);
+      }
     }
 
     this.unsubs.push(await transport.subscribe(orders, (b) => void this.ingestAnnounceBytes(b)));
@@ -188,8 +223,8 @@ export class Book {
   }
   /** True when a verified soft cancel by `order.maker` still covers this hash. */
   isSoftCancelled(orderHash: Hex, maker: Address | string): boolean {
-    const t = this.tombstones.get(orderHash);
-    return t !== undefined && t.maker === maker.toLowerCase() && t.until > BigInt(this.now());
+    const t = this.tombstones.get(tombKey(orderHash, maker));
+    return t !== undefined && t.until > BigInt(this.now());
   }
   /** Soft-cancel tombstones held (bounded by `maxTombstones`). */
   get tombstoneCount(): number {
@@ -306,14 +341,19 @@ export class Book {
    * relay-supplied — so letting any later announcer overwrite it let a third party
    * strip or garble what fillers are served.
    *
-   * @param opts.exempt skip the capacity caps (a replacement taking its live
-   *        predecessor's slot).
+   * @param opts.replaces the hash this announce replaces. The capacity caps are
+   *        skipped ONLY when that predecessor is live here RIGHT NOW and names the
+   *        same maker — derived in this synchronous step, never handed in. The old
+   *        `exempt` flag was computed before the lens call and went stale across
+   *        the await: N concurrent replaces of one predecessor, or one landing after
+   *        the predecessor was evicted, all skipped both caps (audit 2026-09-30
+   *        G-TS_FILLER-4).
    */
   admit(
     orderHash: Hex,
     announce: OrderAnnounce,
     state?: Layer2Result,
-    opts?: { exempt?: boolean },
+    opts?: { replaces?: Hex },
   ): AdmissionVerdict {
     const existing = this.entries.get(orderHash);
     if (existing) {
@@ -323,11 +363,11 @@ export class Book {
     const maker = announce.order.maker;
     if (this.isSoftCancelled(orderHash, maker)) {
       // The order has now been seen: honour the cancel for its whole life.
-      const t = this.tombstones.get(orderHash)!;
+      const t = this.tombstones.get(tombKey(orderHash, maker))!;
       if (announce.order.expiry > t.until) t.until = announce.order.expiry;
       return { ok: false, reason: "order was soft-cancelled by its maker" };
     }
-    if (!opts?.exempt) {
+    if (!this.takesPredecessorSlot(maker, opts?.replaces)) {
       const policy = this.admission;
       if (policy.maxOrdersPerMaker > 0 && this.makerCount(maker) >= policy.maxOrdersPerMaker) {
         return { ok: false, reason: `maker is at its order limit (${policy.maxOrdersPerMaker})`, capacity: true };
@@ -344,6 +384,13 @@ export class Book {
     this.makerCounts.set(key, (this.makerCounts.get(key) ?? 0) + 1);
     this.emit(this.addListeners, entry);
     return { ok: true };
+  }
+
+  /** Is `replaces` live here now, and the same maker's? Read synchronously, at admit. */
+  private takesPredecessorSlot(maker: string, replaces: Hex | undefined): boolean {
+    if (replaces === undefined) return false;
+    const predecessor = this.entries.get(replaces);
+    return predecessor !== undefined && predecessor.announce.order.maker.toLowerCase() === maker.toLowerCase();
   }
 
   /**
@@ -437,19 +484,26 @@ export class Book {
         this.evict(h);
         evicted.push(h);
       } else {
-        this.tombstone(h, maker, signed.cancel.expiry, true);
+        // An unseen hash. If its order ever turns up here it must pass admission,
+        // which bounds its deadline to `maxTtlSeconds` from then — and once it is
+        // seen the tombstone is extended to that deadline (see {admit}). So a
+        // pending tombstone never needs to outlive `maxTtlSeconds`, whatever expiry
+        // the cancel names; it used to live for as long as the cancel said.
+        const ttl = this.admission.maxTtlSeconds;
+        const cap = BigInt(this.now() + ttl);
+        const until = ttl > 0 && signed.cancel.expiry > cap ? cap : signed.cancel.expiry;
+        this.tombstone(h, maker, until, true);
       }
     }
     return evicted;
   }
 
   private tombstone(orderHash: Hex, maker: string, until: bigint, pending: boolean): void {
-    const prior = this.tombstones.get(orderHash);
+    const key = tombKey(orderHash, maker);
+    const prior = this.tombstones.get(key);
     if (prior) {
-      // First maker to cancel a hash owns its tombstone; a second maker's cancel
-      // over the same hash (not their order) must not rebind it.
-      if (prior.maker === maker && until > prior.until) prior.until = until;
-      if (prior.maker === maker && !pending && prior.pending) {
+      if (until > prior.until) prior.until = until;
+      if (!pending && prior.pending) {
         prior.pending = false;
         this.bumpPending(maker, -1);
       }
@@ -460,16 +514,23 @@ export class Book {
       if ((this.pendingPerMaker.get(maker) ?? 0) >= cap) return;
       this.bumpPending(maker, 1);
     }
-    this.tombstones.set(orderHash, { maker, until, pending });
+    this.tombstones.set(key, { orderHash, maker, until, pending });
     const max = this.opts.maxTombstones ?? 100_000;
-    for (const [h, t] of this.tombstones) {
-      if (this.tombstones.size <= max) break;
-      this.dropTombstone(h, t);
+    if (this.tombstones.size <= max) return;
+    // Pending ones go first, oldest first: they cost nothing to mint, so they must
+    // never be a lever on the tombstones of orders that were really here.
+    for (const [k, t] of this.tombstones) {
+      if (this.tombstones.size <= max) return;
+      if (t.pending) this.dropTombstone(k, t);
+    }
+    for (const [k, t] of this.tombstones) {
+      if (this.tombstones.size <= max) return;
+      this.dropTombstone(k, t);
     }
   }
 
-  private dropTombstone(orderHash: Hex, t: SoftCancelTombstone): void {
-    this.tombstones.delete(orderHash);
+  private dropTombstone(key: string, t: SoftCancelTombstone): void {
+    this.tombstones.delete(key);
     if (t.pending) this.bumpPending(t.maker, -1);
   }
 
@@ -482,7 +543,7 @@ export class Book {
   /** Forget tombstones whose order (or cancel) can no longer matter. Run by every sweep. */
   pruneTombstones(): void {
     const now = BigInt(this.now());
-    for (const [h, t] of this.tombstones) if (t.until <= now) this.dropTombstone(h, t);
+    for (const [k, t] of this.tombstones) if (t.until <= now) this.dropTombstone(k, t);
   }
 
   /**
@@ -509,11 +570,10 @@ export class Book {
     }
     // A replacement only takes its predecessor's slot when it really has one here:
     // naming a never-seen predecessor must not be a way past the caps (F29 P4).
-    const predecessor = this.entries.get(replace.replaces);
-    const exempt =
-      predecessor !== undefined &&
-      predecessor.announce.order.maker.toLowerCase() === replace.announce.order.maker.toLowerCase();
-    const gate = this.precheck(replace.announce.order, orderHash, { known: exempt || this.entries.has(orderHash) });
+    // This copy is only the cheap pre-filter in front of the lens call; the
+    // authoritative one is re-derived inside {admit}, after the awaits.
+    const known = this.takesPredecessorSlot(replace.announce.order.maker, replace.replaces);
+    const gate = this.precheck(replace.announce.order, orderHash, { known: known || this.entries.has(orderHash) });
     if (!gate.ok) return { ok: false, reason: gate.reason, orderHash };
 
     const cancelVerdict = await this.opts.cancelVerifier.verify(replace.cancel);
@@ -521,7 +581,7 @@ export class Book {
     const res = await this.opts.verifier.verifyAnnounce(replace.announce);
     if (!res.ok) return { ok: false, reason: res.reason, orderHash: res.orderHash }; // predecessor untouched
 
-    const admitted = this.admit(res.orderHash, replace.announce, res.state, { exempt });
+    const admitted = this.admit(res.orderHash, replace.announce, res.state, { replaces: replace.replaces });
     if (!admitted.ok) return { ok: false, reason: admitted.reason, orderHash: res.orderHash };
     this.applyVerifiedCancel(replace.cancel, cancelVerdict);
     return { ok: true, orderHash: res.orderHash };
@@ -704,4 +764,9 @@ export class Book {
       }
     }
   }
+}
+
+/** `(orderHash, maker)` — a tombstone blocks one maker's order under one hash. */
+function tombKey(orderHash: Hex, maker: Address | string): string {
+  return `${orderHash.toLowerCase()}|${maker.toLowerCase()}`;
 }

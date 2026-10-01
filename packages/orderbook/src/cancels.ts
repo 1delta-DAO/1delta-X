@@ -1,5 +1,5 @@
 import { SETTLEMENT_ABI, softCancelTypedData, type SoftCancel } from "@1delta-x/sdk";
-import { recoverTypedDataAddress, type Address, type Hex, type PublicClient } from "viem";
+import { hashTypedData, recoverAddress, type Address, type Hex, type PublicClient } from "viem";
 
 import { toDeployment, type OrderbookConfig } from "./config";
 import type { SignedSoftCancel } from "./messages";
@@ -29,23 +29,31 @@ export interface CancelVerifierOptions {
 }
 
 /**
- * Verifies maker-signed soft cancels, accepting exactly the signer set the
- * settlement accepts for an ORDER — no more, no less:
+ * Verifies maker-signed soft cancels, accepting the signer set the settlement's
+ * `Signatures._verifySignature` accepts for a SINGLE order signature, branch for
+ * branch (audit 2026-09-30 G-TS_FILLER-9 — this used to say "no more, no less"
+ * while accepting fewer shapes than the settler and more wrappers than it):
  *
- *   1. **EOA maker** — local ECDSA recover, zero RPC. The overwhelmingly common
- *      case, and the one that must stay free: a market maker re-pricing a book
- *      cancels far more often than it signs.
- *   2. **Maker-nominated delegate** — the recovered address is not the maker, so
- *      ask the settlement whether the maker nominated it (`orderSignerExpiry`)
- *      and whether that nomination is still live. A session key that can sign
- *      the maker's orders can obviously retract them; the reverse — a key that
- *      can create but not cancel — would be a strictly worse position for the
- *      maker to be in.
- *   3. **Contract maker (EIP-1271 / EIP-7702)** — the signature does not recover
- *      to anything meaningful, so defer to the chain via `verifyTypedData`,
- *      which viem resolves through the account's `isValidSignature`.
+ *   1. **EOA maker** — local ECDSA recover of a 65-byte OR 64-byte (EIP-2098
+ *      compact) signature, zero RPC. The overwhelmingly common case, and the one
+ *      that must stay free: a market maker re-pricing a book cancels far more
+ *      often than it signs. A 65-byte `v` must be 27/28, as `ecrecover` demands.
+ *   2. **Maker-nominated ECDSA delegate** — the recovered address is not the
+ *      maker, so ask the settlement whether the maker nominated it
+ *      (`orderSignerExpiry`) and whether that nomination is still live.
+ *   3. **Maker-nominated CONTRACT delegate** — a codeless maker whose signature is
+ *      not 64/65 bytes may carry the envelope `delegate(20) ‖ innerSig`; the
+ *      delegate must be live in the registry and `innerSig` must verify for it
+ *      (ECDSA, else its own EIP-1271 `isValidSignature`).
+ *   4. **Contract maker (EIP-1271 / EIP-7702)** — the maker's own
+ *      `isValidSignature(digest, sig)`, called DIRECTLY. Not viem's
+ *      `verifyTypedData`: that also unwraps ERC-6492 (counterfactual deploy) and
+ *      ERC-8010 envelopes, which the settler never accepts.
  *
- * Cases 2 and 3 cost one `eth_call`. Case 1 costs nothing, so the fast path
+ * NOT mirrored: the settler's bulk (Merkle-root) order signature — a soft cancel
+ * is signed over its own `SoftCancel` struct, which has no root form.
+ *
+ * Cases 2–4 cost an `eth_call` or two. Case 1 costs nothing, so the fast path
  * stays fast and only the unusual maker pays.
  *
  * ⚠ A verified cancel proves only WHO signed it. It does not prove the signer
@@ -87,56 +95,86 @@ export class CancelVerifier {
     return { ok: true };
   }
 
-  /** Full verdict: shape, then the three-step signer resolution. */
+  /** Full verdict: shape, then the settler's signer resolution (see the class doc). */
   async verify(signed: SignedSoftCancel): Promise<CancelVerdict> {
     const shape = this.checkShape(signed.cancel);
     if (!shape.ok) return shape;
+    if (!/^0x([0-9a-fA-F]{2})*$/.test(signed.sig)) return { ok: false, reason: "cancel signature is not hex" };
 
-    const typed = softCancelTypedData(signed.cancel, toDeployment(this.config));
+    const digest = hashTypedData(softCancelTypedData(signed.cancel, toDeployment(this.config)) as never);
     const maker = signed.cancel.maker;
+    const ok: CancelVerdict = { ok: true, maker };
 
-    // 1 — EOA maker. A 65-byte sig is the only shape that can recover locally;
-    //     anything else is a contract account and goes straight to the chain.
-    if (signed.sig.length === 132) {
-      let recovered: Address;
+    // 1/2 — ECDSA: the maker itself, else a delegate it nominated.
+    const ecdsa = await recoverEcdsa(digest, signed.sig);
+    if (ecdsa.standardLength && ecdsa.signer) {
+      if (ecdsa.signer.toLowerCase() === maker.toLowerCase()) return ok;
       try {
-        recovered = await recoverTypedDataAddress({ ...typed, signature: signed.sig } as never);
+        if (await this.isLiveDelegate(maker, ecdsa.signer)) return ok;
       } catch {
-        return { ok: false, reason: "cancel signature does not recover" };
+        return { ok: false, reason: "cancel signature check failed (RPC?)" };
       }
-      if (recovered.toLowerCase() === maker.toLowerCase()) return { ok: true, maker };
-
-      // 2 — a delegate the maker nominated on-chain.
-      const delegated = await this.isLiveDelegate(maker, recovered);
-      if (delegated) return { ok: true, maker };
-      // Fall through: a 7702-delegated EOA can produce a 65-byte signature that
-      // recovers to neither the maker nor a delegate, yet still validates through
-      // the account's own `isValidSignature`. Only the chain can say.
     }
 
-    // 3 — contract maker (EIP-1271 / EIP-7702), asked on-chain.
     try {
-      const valid = await this.getClient().verifyTypedData({ ...typed, address: maker, signature: signed.sig } as never);
-      return valid ? { ok: true, maker } : { ok: false, reason: "cancel not signed by the maker" };
+      const makerHasCode = await this.hasCode(maker);
+      // 3 — a contract delegate named in an envelope, for a codeless maker only.
+      const bytes = (signed.sig.length - 2) / 2;
+      if (!ecdsa.standardLength && bytes > 20 && !makerHasCode) {
+        const delegate = `0x${signed.sig.slice(2, 42)}` as Address;
+        const inner = `0x${signed.sig.slice(42)}` as Hex;
+        if (await this.isLiveDelegate(maker, delegate)) {
+          return (await this.verifyFor(delegate, digest, inner)) ? ok : { ok: false, reason: "cancel not signed by the maker" };
+        }
+      }
+      // 4 — the maker's own EIP-1271 (a contract or 7702-delegated account). An EOA
+      //     has none, so a signature that reached here from an EOA maker is final.
+      if (!makerHasCode) return { ok: false, reason: "cancel not signed by the maker" };
+      return (await this.isValid1271(maker, digest, signed.sig)) ? ok : { ok: false, reason: "cancel not signed by the maker" };
     } catch {
       return { ok: false, reason: "cancel signature check failed (RPC?)" };
     }
   }
 
-  private async isLiveDelegate(maker: Address, signer: Address): Promise<boolean> {
+  /** `SignatureVerification.verify` for one claimed signer: ECDSA, else its 1271. */
+  private async verifyFor(signer: Address, digest: Hex, sig: Hex): Promise<boolean> {
+    const ecdsa = await recoverEcdsa(digest, sig);
+    if (ecdsa.standardLength && ecdsa.signer?.toLowerCase() === signer.toLowerCase()) return true;
+    if (!(await this.hasCode(signer))) return false;
+    return this.isValid1271(signer, digest, sig);
+  }
+
+  private async hasCode(account: Address): Promise<boolean> {
+    const code = await this.getClient().getCode({ address: account });
+    return code !== undefined && code !== "0x";
+  }
+
+  /** `isValidSignature(digest, sig) == 0x1626ba7e`; a revert or any other answer is `false`. */
+  private async isValid1271(account: Address, digest: Hex, sig: Hex): Promise<boolean> {
     try {
-      const expiry = (await this.getClient().readContract({
-        address: this.config.settlement,
-        abi: SETTLEMENT_ABI,
-        functionName: "orderSignerExpiry",
-        args: [maker, signer],
-      })) as bigint;
-      // `0` is "not a signer" (an unset mapping), never "never expires" — the
-      // settlement's own convention, mirrored here so the two cannot diverge.
-      return expiry !== 0n && expiry > BigInt(this.now());
+      const magic = (await this.getClient().readContract({
+        address: account,
+        abi: ERC1271_ABI,
+        functionName: "isValidSignature",
+        args: [digest, sig],
+      })) as Hex;
+      return magic.toLowerCase() === ERC1271_MAGIC;
     } catch {
       return false;
     }
+  }
+
+  private async isLiveDelegate(maker: Address, signer: Address): Promise<boolean> {
+    const expiry = (await this.getClient().readContract({
+      address: this.config.settlement,
+      abi: SETTLEMENT_ABI,
+      functionName: "orderSignerExpiry",
+      args: [maker, signer],
+    })) as bigint;
+    // `0` is "not a signer" (an unset mapping), never "never expires" — the
+    // settlement's own convention (`block.timestamp <= expiry`), mirrored here so
+    // the two cannot diverge.
+    return expiry !== 0n && expiry >= BigInt(this.now());
   }
 }
 
@@ -153,4 +191,50 @@ export function evictableHashes(
 ): Hex[] {
   const maker = cancel.maker.toLowerCase();
   return cancel.orderHashes.filter((h) => makerOf(h)?.toLowerCase() === maker);
+}
+
+const ERC1271_MAGIC = "0x1626ba7e";
+const ERC1271_ABI = [
+  {
+    type: "function",
+    name: "isValidSignature",
+    stateMutability: "view",
+    inputs: [
+      { name: "hash", type: "bytes32" },
+      { name: "signature", type: "bytes" },
+    ],
+    outputs: [{ name: "magicValue", type: "bytes4" }],
+  },
+] as const;
+
+const UPPER_BIT_MASK = (1n << 255n) - 1n;
+
+/**
+ * `SignatureVerification.tryRecoverSigner`, off-chain: recover a 65-byte or
+ * 64-byte (EIP-2098) ECDSA signature exactly as the settler's `ecrecover` would.
+ * `standardLength` says whether recovery was attempted at all; `signer` is
+ * `undefined` where `ecrecover` would return `address(0)` (a bad `v`, an
+ * unrecoverable point).
+ */
+export async function recoverEcdsa(digest: Hex, sig: Hex): Promise<{ standardLength: boolean; signer?: Address }> {
+  const bytes = (sig.length - 2) / 2;
+  if (bytes !== 65 && bytes !== 64) return { standardLength: false };
+  const r = `0x${sig.slice(2, 66)}` as Hex;
+  let s: Hex;
+  let v: number;
+  if (bytes === 65) {
+    s = `0x${sig.slice(66, 130)}` as Hex;
+    v = parseInt(sig.slice(130, 132), 16);
+  } else {
+    const vs = BigInt(`0x${sig.slice(66, 130)}`);
+    s = `0x${(vs & UPPER_BIT_MASK).toString(16).padStart(64, "0")}` as Hex;
+    v = Number(vs >> 255n) + 27;
+  }
+  // `ecrecover` accepts only 27/28; viem would also take 0/1 — the settler would not.
+  if (v !== 27 && v !== 28) return { standardLength: true };
+  try {
+    return { standardLength: true, signer: await recoverAddress({ hash: digest, signature: { r, s, v: BigInt(v) } }) };
+  } catch {
+    return { standardLength: true };
+  }
 }

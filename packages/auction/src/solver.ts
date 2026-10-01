@@ -1,6 +1,9 @@
 import {
+  BLOCK_CLOCK_BIT,
+  FILLER_SET_SENTINEL,
   OrderSide,
-  anchorTotal,
+  isProportional,
+  resolveProportional,
   signBid,
   type Order,
   type QuoteBinding,
@@ -8,6 +11,8 @@ import {
   type SignedBid,
 } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
+
+import { withExecutor, type RoundBid } from "./executor";
 
 /**
  * The SOLVER side of the quote channel — the counterpart to {@link Auctioneer}.
@@ -221,33 +226,116 @@ export interface PricedLeg {
   requiredOut: bigint;
 }
 
+export interface PricedLegOptions {
+  /**
+   * The address Settlement will see as the filler — the executor contract when
+   * filling through one, else the EOA. Decides whether a soft-exclusivity
+   * premium applies. Omitted: the order is priced as if this filler were
+   * excluded (the conservative reading).
+   */
+  filler?: Address;
+  /**
+   * Now, on the order's own clock (unix seconds, or the block number for a
+   * block-clocked order). With it, an exclusivity window that has closed adds
+   * nothing; without it an open window is assumed.
+   */
+  now?: bigint;
+  /**
+   * The maker's live balance of `legsIn[0].token`, for a {Proportional} SELL
+   * input. Without it such an order has no knowable input and is not priced.
+   */
+  makerBalance?: bigint;
+}
+
+/** Ceil `x · num / den`. */
+function mulDivUp(x: bigint, num: bigint, den: bigint): bigint {
+  return ceilDiv(x * num, den);
+}
+
+/**
+ * The soft-exclusivity premium `filler` owes on this order, in bps (`0` = none),
+ * or `null` when the window is HARD for it (it cannot fill at all). Mirrors
+ * `OrderGates.exclusivityOverride`.
+ */
+export function exclusivityPremiumBps(order: Order, opts: PricedLegOptions = {}): bigint | null {
+  const ex = order.exclusiveFiller;
+  if (BigInt(ex) === 0n) return 0n;
+  const windowEnd = (order.timing >> 64n) & 0xffffffffn;
+  if (opts.now !== undefined && opts.now >= windowEnd) return 0n;
+  const filler = opts.filler?.toLowerCase();
+  let excluded: boolean;
+  if (ex.toLowerCase() === FILLER_SET_SENTINEL.toLowerCase()) {
+    const set = order.curve as unknown as Hex | readonly unknown[];
+    const hex = typeof set === "string" ? set.slice(2).toLowerCase() : "";
+    excluded = true;
+    if (filler && hex.length >= 42) {
+      for (let p = 2; p + 40 <= hex.length; p += 40) if (`0x${hex.slice(p, p + 40)}` === filler) excluded = false;
+    }
+  } else {
+    excluded = filler !== ex.toLowerCase();
+  }
+  if (!excluded) return 0n;
+  const ov = order.exclusivityOverrideBps;
+  return ov === 0n ? null : ov;
+}
+
 /**
  * The band an order prices on, and the input a solver receives for a full fill.
  *
  * Single-leg orders only — a multi-leg order needs the caller to decide which
  * leg it is quoting, and guessing would silently misprice. Returns `null` for
  * shapes this helper will not price.
+ *
+ * ⚠ A SELL's route is sized by `legsIn[0].start` — what a FULL fill actually
+ * pays the filler (`Pricing.inputOwed`'s fixed branch) — NOT by the fill
+ * denominator. It used to read `anchorTotal(order)`, which is `fillTotal`
+ * whenever that is set: a FullFillModule order (`fillTotal = 1`) was quoted for
+ * 1 wei and never bid on, and a `fillTotal` larger than the input was quoted for
+ * input the fill never pays, so the solver over-bid (audit 2026-09-30 PRICE-1.v1
+ * / X-ARITH-1.v3). A {Proportional} input resolves against `opts.makerBalance`
+ * (`null` without it, never a throw).
+ *
+ * A soft-exclusivity premium the filler would owe is folded into the band
+ * (CORE-FILLER-1.v3's second facet): a non-member pays `+overrideBps` on the
+ * maker's SELL outputs and receives `−overrideBps` on an auctioned input, so a
+ * bid that ignores it is a bid the solver cannot honour. A HARD window for this
+ * filler returns `null`.
  */
-export function pricedLegOf(order: Order): PricedLeg | null {
+export function pricedLegOf(order: Order, opts: PricedLegOptions = {}): PricedLeg | null {
   if (order.legsIn.length !== 1 || order.legsOut.length !== 1) return null;
   const legIn = order.legsIn[0]!;
   const legOut = order.legsOut[0]!;
+  const premium = exclusivityPremiumBps(order, opts);
+  if (premium === null) return null; // hard-excluded: no bid can be honoured
   if (order.side === OrderSide.SELL) {
     if (legOut.end === 0n) return null; // fixed output — nothing decays, no bump to bid
+    let amountIn: bigint;
+    if (isProportional(legIn.start)) {
+      if (opts.makerBalance === undefined || legIn.end === 0n) return null;
+      amountIn = resolveProportional(opts.makerBalance, legIn.start, legIn.end);
+    } else {
+      amountIn = legIn.start;
+    }
+    if (amountIn === 0n) return null;
+    // The premium lifts only the maker's own SELL legs (recipient zero or maker).
+    const toMaker = BigInt(legOut.recipient) === 0n || legOut.recipient.toLowerCase() === order.maker.toLowerCase();
+    const lift = (x: bigint) => (premium !== 0n && toMaker ? mulDivUp(x, BPS + premium, BPS) : x);
     return {
-      band: { start: legOut.start, end: legOut.end, rising: false },
+      band: { start: lift(legOut.start), end: lift(legOut.end), rising: false },
       // A SELL order's band is its OUTPUT leg, so gas is denominated there.
       bandToken: legOut.token,
       tokenIn: legIn.token,
       tokenOut: legOut.token,
-      amountIn: anchorTotal(order),
+      amountIn,
       side: OrderSide.SELL,
       requiredOut: 0n,
     };
   }
   if (legIn.end === 0n) return null;
+  // A BUY input is always auctioned, so a premium lowers what the solver receives.
+  const cut = (x: bigint) => (premium !== 0n ? (x * (BPS - premium)) / BPS : x);
   return {
-    band: { start: legIn.start, end: legIn.end, rising: true },
+    band: { start: cut(legIn.start), end: cut(legIn.end), rising: true },
     // A BUY order's band is its INPUT leg — the side the solver is paid on.
     bandToken: legIn.token,
     tokenIn: legIn.token,
@@ -317,6 +405,18 @@ export interface GasConfig {
 export interface SolverConfig {
   /** Signs bids. Its address IS the filler the bid commits. */
   account: QuoteSigner;
+  /**
+   * The CONTRACT that will execute a won fill (e.g. your own operator-gated
+   * `AggregatorFillSolver`). Settlement sees it as the filler, so the quote must
+   * be bound to it: each bid then carries a signed executor declaration
+   * (`./executor`) and the auctioneer binds the quote to this address instead of
+   * `account`. Also the default route `recipient`, and the identity a
+   * soft-exclusivity check is priced for. Declare only a contract only you can
+   * drive — a quote bound to an open router is an open quote.
+   */
+  executor?: Address;
+  /** Clock for exclusivity windows (order's own clock units). Omitted: windows are assumed open. */
+  now?: () => bigint;
   /** The quote module instance + chain the round is bound to. */
   binding: QuoteBinding;
   /** Price sources, tried in parallel; the best quote wins. */
@@ -332,8 +432,8 @@ export interface SolverConfig {
    *   • an `AggregatorFillSolver` (or any callback solver) → THAT CONTRACT
    *   • an inventory solver filling from its own balance    → the EOA
    *
-   * Defaults to the bidding account, which is right ONLY for the inventory
-   * model. Quoting for the EOA and then executing through a contract sends the
+   * Defaults to `executor` when set, else the bidding account (right ONLY for
+   * the inventory model). Quoting for the EOA and then executing through a contract sends the
    * swap output to the EOA and the fill reverts `InsufficientOutput` — the funds
    * are not lost, but the round is.
    */
@@ -361,7 +461,8 @@ export interface SolverConfig {
 export const NO_PATCH = null;
 
 export interface SolverBid {
-  bid: SignedBid;
+  /** The signed bid, with its executor declaration when one is configured. */
+  bid: RoundBid;
   bumpBps: number;
   /** The route the bid was priced from — execute THIS if the bid wins. */
   quote: RouteQuote;
@@ -406,8 +507,19 @@ export class QuoteSolver {
    * maker's floor. Not bidding is a first-class outcome: winning a round you
    * cannot fill costs the maker the improvement and costs you your reputation.
    */
-  async bidFor(order: Order, round: { orderHash: Hex; closesAt: number }): Promise<SolverBid | null> {
-    const leg = pricedLegOf(order);
+  async bidFor(
+    order: Order,
+    round: { orderHash: Hex; closesAt: number },
+    opts: { makerBalance?: bigint } = {},
+  ): Promise<SolverBid | null> {
+    const executesAs = this.config.executor ?? this.config.account.address;
+    const blockClock = ((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 1n;
+    const now = blockClock ? undefined : this.config.now?.();
+    const leg = pricedLegOf(order, {
+      filler: executesAs,
+      ...(now !== undefined ? { now } : {}),
+      ...(opts.makerBalance !== undefined ? { makerBalance: opts.makerBalance } : {}),
+    });
     if (leg === null) return null;
 
     const quote = await this.bestRoute({
@@ -415,7 +527,7 @@ export class QuoteSolver {
       tokenIn: leg.tokenIn,
       tokenOut: leg.tokenOut,
       amountIn: leg.amountIn,
-      recipient: this.config.recipient ?? this.config.account.address,
+      recipient: this.config.recipient ?? executesAs,
     });
     if (quote === null) return null;
 
@@ -438,7 +550,7 @@ export class QuoteSolver {
     });
     if (bumpBps === null) return null;
 
-    const bid = await signBid(
+    const signed = await signBid(
       this.config.account,
       {
         orderHash: round.orderHash,
@@ -448,6 +560,10 @@ export class QuoteSolver {
       },
       this.config.binding,
     );
+    // Bind a won quote to whatever actually executes (see {@link SolverConfig.executor}).
+    const bid = this.config.executor
+      ? await withExecutor(this.config.account, signed, this.config.executor, this.config.binding)
+      : signed;
     return { bid, bumpBps, quote, gasInBandToken: gas };
   }
 
@@ -471,7 +587,9 @@ export class QuoteSolver {
         routes: this.config.routes,
         chainId: this.config.binding.chainId,
         token: bandToken,
-        ...(this.config.recipient ? { recipient: this.config.recipient } : {}),
+        ...(this.config.recipient ?? this.config.executor
+          ? { recipient: (this.config.recipient ?? this.config.executor)! }
+          : {}),
         ...(cfg.nativeToken ? { nativeToken: cfg.nativeToken } : {}),
       });
       if (resolved === null) return null;

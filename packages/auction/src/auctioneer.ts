@@ -8,7 +8,8 @@ import {
 } from "@1delta-x/sdk";
 import type { Hex } from "viem";
 
-import { AuctionRound, type BidReceipt, type Clock, type RoundConfig, type SettledRound } from "./round";
+import type { RoundBid } from "./executor";
+import { AuctionRound, executorOf, type BidReceipt, type Clock, type RoundConfig, type SettledRound } from "./round";
 
 /**
  * The operator side of the quote channel: hold open rounds, take bids from
@@ -37,6 +38,11 @@ export interface AuctioneerConfig {
    * Bind the quote to the winning filler (default) or mint an OPEN quote any
    * filler may present. Open quotes are simpler to relay but transferable —
    * the winner's improvement can be taken by whoever sees the bytes first.
+   *
+   * "The winning filler" is the EXECUTOR the winning bid declared when it signed
+   * one (`./executor` — e.g. its own operator-gated `AggregatorFillSolver`),
+   * else the winning EOA: the quote must name the address Settlement will see
+   * as the filler, or the module reverts `QuoteNotForFiller`.
    */
   bindToWinner?: boolean;
   now?: Clock;
@@ -75,7 +81,7 @@ export class Auctioneer {
 
   /** Submit a SIGNED bid to an open round. Unknown order ⇒ rejected, not thrown.
    *  Forged and malformed bids are rejected too — see {@link AuctionRound.submit}. */
-  async submit(orderHash: Hex, bid: SignedBid): Promise<BidReceipt> {
+  async submit(orderHash: Hex, bid: SignedBid | RoundBid): Promise<BidReceipt> {
     const round = this.rounds.get(orderHash);
     if (!round) return { accepted: false, reason: "no such round", bids: 0 };
     return round.submit(bid);
@@ -103,7 +109,7 @@ export class Auctioneer {
       this.config.signer,
       {
         orderHash,
-        filler: this.config.bindToWinner === false ? ANY_FILLER : settled.outcome.winner,
+        filler: this.config.bindToWinner === false ? ANY_FILLER : executorOf(settled),
         bumpBps: settled.outcome.bumpBps,
         deadline: BigInt(this.now() + ttl),
       },

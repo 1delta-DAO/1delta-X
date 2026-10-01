@@ -1,4 +1,4 @@
-import { OrderSide, type Order } from "@1delta-x/sdk";
+import { isProportional, OrderSide, proportionalBps, type Order } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
 import type { BookEntry } from "./book";
@@ -16,25 +16,35 @@ import { OrderStatus } from "./verify";
  * one passed in.
  */
 
-/** Anchor leg amounts — what the order gives and what it wants, at `start`. */
-export function anchorAmounts(order: Order): { amountIn: bigint; amountOut: bigint } {
+/**
+ * Anchor leg amounts — what the order gives and what it wants, at `start`.
+ *
+ * `amountIn` is `null` for a {Proportional} SELL input: its `start` is a marker
+ * (~1.15e77), not an amount, and the real figure is the maker's balance at fill
+ * time, which a book cannot know without a chain read (audit 2026-09-30
+ * X-ARITH-1.v5 — it used to be served raw, so such orders priced at ~0).
+ */
+export function anchorAmounts(order: Order): { amountIn: bigint | null; amountOut: bigint } {
+  const start = order.legsIn[0]?.start ?? 0n;
   return {
-    amountIn: order.legsIn[0]?.start ?? 0n,
+    amountIn: isProportional(start) ? null : start,
     amountOut: order.legsOut[0]?.start ?? 0n,
   };
 }
 
 /**
- * Raw price of the anchor pair: output wei per input wei.
+ * Raw price of the anchor pair: output wei per input wei, or `null` when it has
+ * none — a {Proportional} input (no fixed amount) or an empty input leg.
  *
  * Deliberately NOT decimal-adjusted. The book does not know token decimals and
  * has no business fetching them to sort a list; the ratio is monotone within a
  * pair, which is all an ordering needs. Comparing it ACROSS pairs is
- * meaningless, so callers that mix pairs should not sort by price.
+ * meaningless, so callers that mix pairs should not sort by price. Orders with
+ * no price sort LAST in either direction.
  */
-export function orderPrice(order: Order): number {
+export function orderPrice(order: Order): number | null {
   const { amountIn, amountOut } = anchorAmounts(order);
-  if (amountIn === 0n) return 0;
+  if (amountIn === null || amountIn === 0n) return null;
   return Number(amountOut) / Number(amountIn);
 }
 
@@ -138,8 +148,8 @@ function matches(entry: BookEntry, q: OrderQuery): boolean {
   return true;
 }
 
-/** The value an entry sorts on, as a number so one comparator serves all keys. */
-function sortValue(entry: BookEntry, key: SortKey): number {
+/** The value an entry sorts on, as a number so one comparator serves all keys; `null` = none (sorts last). */
+function sortValue(entry: BookEntry, key: SortKey): number | null {
   switch (key) {
     case "deadline":
       return Number(entry.announce.order.expiry);
@@ -157,16 +167,34 @@ function sortValue(entry: BookEntry, key: SortKey): number {
 // Waku node, and `Buffer` exists in neither. The cursor is a pagination token,
 // not a secret, so there is nothing to obscure — and a readable one is far
 // easier to reason about when a page comes back wrong.
-function encodeCursor(value: number, hash: Hex): string {
-  return `${value}~${hash}`;
+function encodeCursor(value: number | null, hash: Hex): string {
+  return `${value === null ? "none" : value}~${hash}`;
 }
 
-function decodeCursor(cursor: string): { value: number; hash: Hex } | undefined {
+function decodeCursor(cursor: string): { value: number | null; hash: Hex } | undefined {
   const at = cursor.indexOf("~");
   if (at < 0) return undefined;
-  const value = Number(cursor.slice(0, at));
+  const raw = cursor.slice(0, at);
+  const value = raw === "none" ? null : Number(raw);
   const hash = cursor.slice(at + 1);
-  return Number.isFinite(value) && hash.startsWith("0x") ? { value, hash: hash as Hex } : undefined;
+  return (value === null || Number.isFinite(value)) && hash.startsWith("0x") ? { value, hash: hash as Hex } : undefined;
+}
+
+/**
+ * Total order on `(value, hash)`: valued rows in `direction`, then value-less rows
+ * (always last, whatever the direction), ties broken by hash.
+ */
+function compareKeys(
+  a: { value: number | null; hash: Hex },
+  b: { value: number | null; hash: Hex },
+  descending: boolean,
+): number {
+  if (a.value !== b.value) {
+    if (a.value === null) return 1;
+    if (b.value === null) return -1;
+    return descending ? b.value - a.value : a.value - b.value;
+  }
+  return a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0;
 }
 
 /**
@@ -184,19 +212,16 @@ export function queryOrders(entries: readonly BookEntry[], q: OrderQuery = {}): 
 
   const matched = entries.filter((e) => matches(e, q));
   const decorated = matched.map((entry) => ({ entry, value: sortValue(entry, key) }));
-  decorated.sort((a, b) => {
-    // Ties break on hash so the order is total, and therefore so is the cursor.
-    if (a.value !== b.value) return descending ? b.value - a.value : a.value - b.value;
-    return a.entry.orderHash < b.entry.orderHash ? -1 : a.entry.orderHash > b.entry.orderHash ? 1 : 0;
-  });
+  // Ties break on hash so the order is total, and therefore so is the cursor.
+  decorated.sort((a, b) =>
+    compareKeys({ value: a.value, hash: a.entry.orderHash }, { value: b.value, hash: b.entry.orderHash }, descending),
+  );
 
   let start = 0;
   if (q.cursor) {
     const after = decodeCursor(q.cursor);
     if (after) {
-      start = decorated.findIndex(({ entry, value }) =>
-        value === after.value ? entry.orderHash > after.hash : descending ? value < after.value : value > after.value,
-      );
+      start = decorated.findIndex(({ entry, value }) => compareKeys({ value, hash: entry.orderHash }, after, descending) > 0);
       if (start < 0) start = decorated.length;
     }
   }
@@ -223,13 +248,28 @@ export interface OrderSummary {
   addedAt: number;
   tokensIn: Address[];
   tokensOut: Address[];
-  amountIn: string;
+  /** Anchor input at `start`; `null` for a {Proportional} input (see `proportionalBps`). */
+  amountIn: string | null;
   amountOut: string;
-  price: number;
+  /** Share of the maker's live balance a {Proportional} input sells, in bps; `null` otherwise. */
+  proportionalBps: number | null;
+  /** Raw output-per-input ratio; `null` when the order has no fixed input amount. */
+  price: number | null;
   status: keyof typeof OrderStatus | "Unknown";
-  /** Live fillable amount in anchor units, capped by balance + allowance. */
+  /**
+   * What a filler can take RIGHT NOW, in anchor units: the unfilled remainder
+   * capped by the maker's live balance + allowance. A CAPACITY, not progress — an
+   * under-funded maker reads low here with nothing filled.
+   */
   fillableAmount: string | null;
-  /** Anchor amount already consumed, derived from the anchor minus what is left. */
+  /**
+   * Anchor amount already filled ON-CHAIN, from the settlement's `filled` counter
+   * when the caller supplies it (the server does from its fill index). Without it,
+   * `"0"` only when the lens's fillable equals the whole anchor (nothing can have
+   * filled), else `null` — it is NOT `anchor − fillableAmount`, which counted a
+   * funding shortfall as fills and read ~1.15e77 on every untouched
+   * {Proportional} order (audit 2026-09-30 X-ARITH-1.v5).
+   */
   filledAmount: string | null;
   isSignatureValid: boolean | null;
   validatorsPass: boolean | null;
@@ -245,15 +285,23 @@ const STATUS_NAME: Record<number, keyof typeof OrderStatus> = {
   [OrderStatus.Expired]: "Expired",
 };
 
-export function summarize(entry: BookEntry): OrderSummary {
+/**
+ * @param progress the settlement's `filled(orderHash)` counter, when known. The
+ *        lens's `fillableAmount` alone cannot tell fills from a funding shortfall.
+ */
+export function summarize(entry: BookEntry, progress?: bigint): OrderSummary {
   const order = entry.announce.order;
   const { amountIn, amountOut } = anchorAmounts(order);
   const state = entry.state;
-  const anchor = order.fillTotal > 0n ? order.fillTotal : order.side === OrderSide.SELL ? amountIn : amountOut;
-  // `filled` is derived, not reported: the lens gives what is LEFT, and the
-  // difference from the anchor is what has gone. It is null without a state
-  // rather than 0 — "we have not checked" and "nothing filled" are different.
-  const filled = state ? (anchor > state.fillableAmount ? anchor - state.fillableAmount : 0n) : null;
+  const in0 = order.legsIn[0]?.start ?? 0n;
+  const proportional = order.side === OrderSide.SELL && order.fillTotal === 0n && isProportional(in0);
+  // The fill denominator, when it is a fixed number (a Proportional anchor is not).
+  const anchor =
+    order.fillTotal > 0n ? order.fillTotal : order.side === OrderSide.SELL ? amountIn : amountOut;
+  const CANCELLED = (1n << 256n) - 1n;
+  let filled: bigint | null = null;
+  if (progress !== undefined && progress !== CANCELLED) filled = progress;
+  else if (state && anchor !== null && !proportional && state.fillableAmount === anchor) filled = 0n;
 
   return {
     orderHash: entry.orderHash,
@@ -264,8 +312,9 @@ export function summarize(entry: BookEntry): OrderSummary {
     addedAt: entry.addedAt,
     tokensIn: tokensIn(order),
     tokensOut: tokensOut(order),
-    amountIn: amountIn.toString(),
+    amountIn: amountIn === null ? null : amountIn.toString(),
     amountOut: amountOut.toString(),
+    proportionalBps: isProportional(in0) ? Number(proportionalBps(in0)) : null,
     price: orderPrice(order),
     status: state ? (STATUS_NAME[state.status] ?? "Unknown") : "Unknown",
     fillableAmount: state ? state.fillableAmount.toString() : null,

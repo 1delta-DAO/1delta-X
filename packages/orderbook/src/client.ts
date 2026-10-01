@@ -1,6 +1,7 @@
 import { buildSoftCancel, signSoftCancel as signSoftCancelTyped, type Deployment, type Order, type SoftCancel, type TypedDataSigner } from "@1delta-x/sdk";
 import type { Hex } from "viem";
 
+import type { CancelVerifier } from "./cancels";
 import type { OrderbookConfig } from "./config";
 import type { OrderAnnounce, OrderReplace, SignedSoftCancel } from "./messages";
 import {
@@ -220,6 +221,14 @@ export interface PublishOrderOpts {
   sigless?: boolean;
 }
 
+/** What {@link OrderbookClient.subscribeOrders} needs to authenticate an announce — a {@link Verifier} fits. */
+export interface AnnounceVerifier {
+  verifyAnnounce(a: OrderAnnounce): Promise<{ ok: boolean }>;
+}
+
+/** What {@link OrderbookClient.subscribeCancels} needs to authenticate a cancel — a {@link CancelVerifier} fits. */
+export type SoftCancelVerifier = Pick<CancelVerifier, "verify">;
+
 /**
  * Thin, ergonomic wrapper over any {@link Transport} + a deployment config. This
  * is the SDK surface a maker dApp or filler instantiates; swapping
@@ -274,32 +283,83 @@ export class OrderbookClient {
     });
   }
 
-  /** New orders — including the replacement half of every cancel-and-replace. */
-  async subscribeOrders(onOrder: (a: OrderAnnounce) => void): Promise<Unsubscribe> {
-    const offOrders = await this.transport.subscribe(this.orders, (b) => {
-      try {
-        onOrder(decodeOrderAnnounce(b));
-      } catch {
-        /* skip undecodable frame */
+  /**
+   * New orders — including the replacement half of every cancel-and-replace.
+   *
+   * ⚠ UNVERIFIED BY DEFAULT (audit 2026-09-30 G-TS_FILLER-10). Without
+   * `opts.verifier` every decodable frame on the topic is handed over as-is: a
+   * relay or any peer can publish an announce with a forged or garbage signature,
+   * an order the chain will refuse, or a `permitBatch` nobody signed. Treat the
+   * raw stream as a hint. Pass a {@link Verifier} (Layer 1 + Layer 2) to receive
+   * only announces that verify — or run a {@link Book}, which does that and more.
+   */
+  async subscribeOrders(onOrder: (a: OrderAnnounce) => void, opts?: { verifier?: AnnounceVerifier }): Promise<Unsubscribe> {
+    const verifier = opts?.verifier;
+    const deliver = (a: OrderAnnounce): void => {
+      if (!verifier) {
+        onOrder(a);
+        return;
       }
+      void verifier.verifyAnnounce(a).then(
+        (r) => {
+          if (r.ok) onOrder(a);
+        },
+        () => undefined, // unverifiable right now is not "verified"
+      );
+    };
+    const offOrders = await this.transport.subscribe(this.orders, (b) => {
+      let a: OrderAnnounce;
+      try {
+        a = decodeOrderAnnounce(b);
+      } catch {
+        return; /* skip undecodable frame */
+      }
+      deliver(a);
     });
-    const offReplaces = await this.subscribeReplaces((r) => onOrder(r.announce));
+    const offReplaces = await this.subscribeReplaces((r) => deliver(r.announce));
     return () => {
       offOrders();
       offReplaces();
     };
   }
 
-  /** Retractions — including the cancel half of every cancel-and-replace. */
-  async subscribeCancels(onCancel: (c: SignedSoftCancel) => void): Promise<Unsubscribe> {
-    const offCancels = await this.transport.subscribe(this.cancels, (b) => {
-      try {
-        onCancel(decodeSoftCancel(b));
-      } catch {
-        /* skip undecodable frame */
+  /**
+   * Retractions — including the cancel half of every cancel-and-replace.
+   *
+   * ⚠ UNVERIFIED BY DEFAULT (audit 2026-09-30 G-TS_FILLER-10). Without
+   * `opts.cancelVerifier` anyone can publish a "cancel" naming any maker and any
+   * order hash, and it is handed over as-is. With it, only cancels whose signature
+   * verifies for `cancel.maker` are delivered — and even then a verified cancel
+   * proves only WHO signed it: retract a hash only when the order you hold under it
+   * names that maker (see {@link evictableHashes}; {@link Book} does both).
+   */
+  async subscribeCancels(
+    onCancel: (c: SignedSoftCancel) => void,
+    opts?: { cancelVerifier?: SoftCancelVerifier },
+  ): Promise<Unsubscribe> {
+    const verifier = opts?.cancelVerifier;
+    const deliver = (c: SignedSoftCancel): void => {
+      if (!verifier) {
+        onCancel(c);
+        return;
       }
+      void verifier.verify(c).then(
+        (v) => {
+          if (v.ok && v.maker?.toLowerCase() === c.cancel.maker.toLowerCase()) onCancel(c);
+        },
+        () => undefined,
+      );
+    };
+    const offCancels = await this.transport.subscribe(this.cancels, (b) => {
+      let c: SignedSoftCancel;
+      try {
+        c = decodeSoftCancel(b);
+      } catch {
+        return; /* skip undecodable frame */
+      }
+      deliver(c);
     });
-    const offReplaces = await this.subscribeReplaces((r) => onCancel(r.cancel));
+    const offReplaces = await this.subscribeReplaces((r) => deliver(r.cancel));
     return () => {
       offCancels();
       offReplaces();

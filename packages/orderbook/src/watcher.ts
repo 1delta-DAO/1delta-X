@@ -78,8 +78,15 @@ export class ChainWatcher {
           address,
           abi: abi as never,
           eventName: eventName as never,
-          onLogs: (logs: readonly { args?: unknown }[]) => {
+          onLogs: (logs: readonly { args?: unknown; removed?: boolean }[]) => {
             for (const log of logs) {
+              // A reorged-out log (`removed: true`) retracts an event the node had
+              // reported; it is not that event happening (again). Acting on it evicted
+              // still-live orders on a cancel that no longer exists on the canonical
+              // chain (audit 2026-09-30 G-TS_FILLER-8). An eviction the original log
+              // already caused is not undone here — it fails closed, and the order can
+              // be re-announced.
+              if (log.removed) continue;
               try {
                 const e = map(log.args as never);
                 if (e) this.emit(e);

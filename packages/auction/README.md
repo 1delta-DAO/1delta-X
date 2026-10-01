@@ -65,6 +65,25 @@ A bid is a **bump**: how much concession you need, `0` = the maker's `start`,
 `second-price` (the default) the winner is charged the *runner-up's* bump, so
 bidding your true break-even is the dominant strategy.
 
+**One standing bid per filler, and a full round keeps the lowest.** A re-bid
+replaces the filler's standing bid only when strictly lower; at `maxBids` a new
+filler gets in only by beating the worst standing bid, which it displaces. (It
+used to keep the *first* `maxBids` bids, with one filler taking a slot per bump —
+two free keys could fill a round early and win at the maker's floor; audit
+2026-09-30 G-TS_FILLER-1.) Only the signed fields of a bid are stored and scored,
+so the selection rule's optional `commitment` tie-break cannot be set by a
+submitter.
+
+**Executor declarations.** A bid can only name an EOA (it must recover to its
+filler), but Settlement sees the *contract* that fills as the filler — an
+`AggregatorFillSolver` fills as itself, and a quote bound to your EOA then
+reverts `QuoteNotForFiller`. Set `QuoteSolver`'s `executor` (or attach one with
+`withExecutor`) and the bid carries a second signature, by the same key, binding
+a won quote to that contract; the auctioneer binds the quote to it and
+`checkRound` re-verifies it. Declare only a contract **only you can drive** (an
+`AggregatorFillSolver` whose operator set is you): a quote bound to an open router
+is an open quote.
+
 ## What bounds a dishonest operator
 
 Not this package — the settlement. A quote can only move the price **inside the
@@ -180,8 +199,17 @@ recipient into the calldata they return, so a route quoted for your EOA sends th
 swap output to your EOA. Filling through a callback solver
 ([`AggregatorFillSolver`](../solvers/src/aggregator/AggregatorFillSolver.sol))
 then reverts `InsufficientOutput` — funds are safe, the round is lost. The
-default is the bidding account, which is correct only for an inventory solver
-filling from its own balance.
+default is `executor` when set, else the bidding account (correct only for an
+inventory solver filling from its own balance).
+
+**What a SELL bid is sized by.** The route is quoted for `legsIn[0].start` — what
+a full fill pays the filler — never for `fillTotal` (a fill-progress unit: an
+all-or-nothing order's `fillTotal = 1` used to be quoted for 1 wei). A
+proportional input needs `bidFor(order, round, { makerBalance })`; without it the
+solver does not bid. A soft-exclusivity premium the executor would owe
+(`exclusivityOverrideBps` on the maker's outputs) is folded into the band, and a
+hard exclusivity window it is outside of is not bid on; pass `now` (order clock)
+in the config to stop pricing a window that has closed.
 
 ### Route sources
 

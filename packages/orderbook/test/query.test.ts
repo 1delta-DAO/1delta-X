@@ -188,12 +188,19 @@ describe("orderPrice and summarize", () => {
     expect(orderPrice(order())).toBe(2);
   });
 
-  it("derives filled from the anchor minus what is left", () => {
-    const s = summarize(entry(order(), { state: state({ fillableAmount: 400n }) }));
-    expect(s.amountIn).toBe("1000");
-    expect(s.filledAmount).toBe("600");
-    expect(s.status).toBe("Fillable");
-    expect(s.fillable).toBe(true);
+  // Changed by audit 2026-09-30 X-ARITH-1.v5: this used to assert filled = anchor −
+  // fillable ("600"), which counts a maker's funding shortfall as fills. Progress
+  // now comes from the on-chain counter when the caller has it, else is unknown.
+  it("reports filled from the on-chain counter, never from anchor minus fillable", () => {
+    const withProgress = summarize(entry(order(), { state: state({ fillableAmount: 400n }) }), 600n);
+    expect(withProgress.amountIn).toBe("1000");
+    expect(withProgress.filledAmount).toBe("600");
+    expect(withProgress.status).toBe("Fillable");
+    expect(withProgress.fillable).toBe(true);
+    const without = summarize(entry(order(), { state: state({ fillableAmount: 400n }) }));
+    expect(without.filledAmount).toBeNull();
+    const untouched = summarize(entry(order(), { state: state({ fillableAmount: 1_000n }) }));
+    expect(untouched.filledAmount).toBe("0");
   });
 
   it("reports unknown rather than zero when nothing has been checked", () => {

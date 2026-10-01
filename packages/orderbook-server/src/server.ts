@@ -23,7 +23,16 @@ import {
   type OrderSummary,
   type SortKey,
 } from "@1delta-x/orderbook";
-import { encodeFillUpTo, hashOrderStruct, packOrder, OrderSide, SETTLEMENT_LENS_ABI, softCancelTypedData } from "@1delta-x/sdk";
+import {
+  encodeFillUpTo,
+  hashOrderStruct,
+  isPriorityAuction,
+  isProportional,
+  packOrder,
+  OrderSide,
+  SETTLEMENT_LENS_ABI,
+  softCancelTypedData,
+} from "@1delta-x/sdk";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import {
@@ -53,6 +62,14 @@ const TOMBSTONE_CAPACITY = 5_000;
 
 /** How many order hashes / cancels are remembered as "already billed to the maker". */
 const BILLED_CAPACITY = 100_000;
+
+/**
+ * Gas limit for a `/quote` preview run AT A GAS PRICE. A node checks the sender
+ * can afford `gas × gasPrice` even on `eth_call`, and its default limit is the
+ * block's (30M+), which no filler holds at a real gas price. A preview is two
+ * view calls; this is ample.
+ */
+const QUOTE_GAS = 5_000_000n;
 
 /**
  * Bounds on the WebSocket stream. Every connection costs a socket, a snapshot and
@@ -243,8 +260,11 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
   // to my order?" into the one question the API cannot answer, so the last known
   // summary is kept for a bounded while after eviction.
   const tombstones = new Map<Hex, OrderSummary & { removedAt: number }>();
+  // Progress comes from the fill index's `filled` counter when this node indexes
+  // fills; the lens's fillable amount is a capacity and cannot stand in for it.
+  const summary = (entry: BookEntry): OrderSummary => summarize(entry, fills?.cumulativeOf(entry.orderHash));
   book.onRemove((entry: BookEntry) => {
-    tombstones.set(entry.orderHash, { ...summarize(entry), removedAt: Math.floor(Date.now() / 1000) });
+    tombstones.set(entry.orderHash, { ...summary(entry), removedAt: Math.floor(Date.now() / 1000) });
     while (tombstones.size > TOMBSTONE_CAPACITY) {
       const oldest = tombstones.keys().next().value;
       if (oldest === undefined) break;
@@ -430,28 +450,28 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
       return reply.code(verdict.capacity ? 503 : 422).send({ error: verdict.reason ?? "rejected" });
     }
 
-    // THE MAKER BUCKET IS CHARGED TO A PROVEN MAKER, NEVER A CLAIMED ONE. Charging
+    // THE MAKER BUCKET IS CHARGED ONLY FOR AN ORDER THE BOOK WOULD TAKE. Charging
     // before verification let any client name a victim in `order.maker`, fail
-    // verification, and still drain that maker's write budget — one IP could lock
-    // one maker out of posting and cancelling for as long as it cared to (F29 P3).
-    // Layer 1 recovers an EOA signature locally, so for those the charge lands
-    // right after it; a deferred signature (contract wallet, delegate) is only
-    // proven by the lens, so those are charged on success. Unverified spam costs
-    // only the sender's IP budget either way — and so does a replay of an order
-    // the maker was already billed for (see {@link billOrder}).
+    // verification, and still drain that maker's write budget (F29 P3). Charging
+    // right after Layer 1 — a PROVEN maker — still let a stranger replay the
+    // maker's own genuine but DEAD orders (filled, cancelled, unfunded, or never
+    // posted here: a filled order's signature is public in its fill calldata) and
+    // bill 10 tokens apiece before Layer 2 rejected them, locking the maker out of
+    // its own posts and soft cancels (audit 2026-09-30 G-TS_FILLER-6). So the
+    // charge lands only once Layer 2 has said the order is live and fillable.
+    // Rejected traffic costs only the sender's IP budget — and so does a replay of
+    // an order the maker was already billed for (see {@link billOrder}).
     let res;
-    let l1;
     try {
-      l1 = await verifier.verifyLayer1(announce);
+      const l1 = await verifier.verifyLayer1(announce);
       if (!l1.ok) return reply.code(422).send({ error: l1.reason ?? "rejected", orderHash: l1.orderHash });
-      if (!l1.deferSig && !billOrder(orderHash, announce.order.maker, reply)) return reply;
       res = await verifier.verifyAnnounce(announce);
     } catch (err) {
       request.log.warn({ err }, "order verification failed");
       return reply.code(503).send({ error: "verification unavailable, retry later" });
     }
     if (!res.ok) return reply.code(422).send({ error: res.reason ?? "rejected", orderHash: res.orderHash });
-    if (l1.deferSig && !billOrder(orderHash, announce.order.maker, reply)) return reply;
+    if (!billOrder(orderHash, announce.order.maker, reply)) return reply;
     // Admitted HERE, synchronously, so the answer is the book's real one: two
     // concurrent POSTs that both passed the precheck before their lens calls cannot
     // both land past a cap and both be told 202. `admit` → onAdd → broadcast; the
@@ -475,7 +495,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     reply.header("x-total-count", String(result.total));
     if (raw.format === "json" || request.headers.accept?.includes("application/json")) {
       return reply.send({
-        orders: result.items.map(summarize),
+        orders: result.items.map(summary),
         total: result.total,
         ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
       });
@@ -497,7 +517,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     if (!gate(request, reply, ROUTE_COST.read)) return reply;
     const { hash } = request.params as { hash: string };
     const entry = book.get(hash as Hex);
-    if (entry) return reply.send({ live: true, ...summarize(entry) });
+    if (entry) return reply.send({ live: true, ...summary(entry) });
 
     const grave = tombstones.get(hash as Hex);
     if (grave) return reply.send({ live: false, ...grave });
@@ -620,20 +640,20 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     const verdict = book.precheck(replace.announce.order, orderHash, { known, policy: admission });
     if (!verdict.ok) return reply.code(verdict.capacity ? 503 : 422).send({ error: verdict.reason ?? "rejected" });
 
-    // Maker bucket after proof, as on /orders (F29 P3), and once per new order.
+    // Maker bucket only for a replace the book took, as on /orders (G-TS_FILLER-6),
+    // and once per new order. The book re-derives the cap exemption itself, after
+    // its awaits (G-TS_FILLER-4); `known` above is only the cheap pre-filter.
     let res;
-    let l1;
     try {
-      l1 = await verifier.verifyLayer1(replace.announce);
+      const l1 = await verifier.verifyLayer1(replace.announce);
       if (!l1.ok) return reply.code(422).send({ error: l1.reason ?? "rejected", orderHash: l1.orderHash });
-      if (!l1.deferSig && !billOrder(orderHash, replace.announce.order.maker, reply)) return reply;
       res = await book.ingestReplace(replace);
     } catch (err) {
       request.log.warn({ err }, "replace verification failed");
       return reply.code(503).send({ error: "verification unavailable, retry later" });
     }
     if (!res.ok) return reply.code(422).send({ error: res.reason ?? "rejected" });
-    if (l1.deferSig && !billOrder(orderHash, replace.announce.order.maker, reply)) return reply;
+    if (!billOrder(orderHash, replace.announce.order.maker, reply)) return reply;
 
     broadcast(encodeStreamMessage({ kind: StreamKind.REPLACE, replace }));
     return reply.code(202).send({ orderHash: res.orderHash, replaces: replace.replaces });
@@ -675,9 +695,39 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     }
   });
 
+  /**
+   * The quote route publishes calldata a filler can send as-is, so that calldata
+   * must BIND what the quote says (audit 2026-09-30 PERIPH-1.v1 / A-FLEX-1.v1 /
+   * CORE-FILLER-1.v1 / X-DIFF-CORE-1.v2 / PERIPH-3.v1). It used to bind neither:
+   *
+   *  • PRICE. The preview was a plain `eth_call` at gas price 0 — for a
+   *    priority-auction order that is the NO-BID bump, the filler's best price —
+   *    and the calldata carried `minBumpBps = 0`, so the real fill re-priced at the
+   *    sender's gas price (or a price module's live answer, or a falling basefee /
+   *    descending curve) with no bound, up to the maker's signed `start`. Now the
+   *    preview runs at the caller's `gasPrice` (REQUIRED for a priority-auction
+   *    order), the route reads `previewBump` under the same call, and that bump is
+   *    the calldata's `minBumpBps`: the fill executes at the quoted price or better
+   *    on every leg, or reverts `BumpTooLow`.
+   *  • SIZE. The raw requested `fillAmount` — the `2^256-1` "any size" sentinel
+   *    included — went into the calldata while the response quoted the resolved
+   *    `delta`. On a {Proportional} order the sentinel skips the settler's no-trim
+   *    rule and executes at whatever the balance is at inclusion, which an
+   *    inventory filler (every direct `fillUpTo` sender is one) must never accept.
+   *    The calldata now carries the resolved `delta` for every identity order, so a
+   *    proportional anchor that moved reverts `OverFill` instead. (A fill-module
+   *    order's `fillAmount` is a module-unit proposal, so it passes through.)
+   */
   app.get("/quote", async (request, reply) => {
     if (!gate(request, reply, ROUTE_COST.quote)) return reply;
-    const q = request.query as { hash?: string; fillAmount?: string; filler?: string; recipient?: string; takerData?: string };
+    const q = request.query as {
+      hash?: string;
+      fillAmount?: string;
+      filler?: string;
+      recipient?: string;
+      takerData?: string;
+      gasPrice?: string;
+    };
     if (!q.hash || !q.fillAmount || !q.filler) {
       return reply.code(400).send({ error: "hash, fillAmount, filler are required" });
     }
@@ -694,9 +744,27 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     if (q.recipient !== undefined && !isAddress(q.recipient)) return reply.code(400).send({ error: "recipient is not an address" });
     if (q.takerData !== undefined && !isHex(q.takerData)) return reply.code(400).send({ error: "takerData is not hex" });
     const takerData = (q.takerData ?? "0x") as Hex;
+    let gasPrice: bigint | undefined;
+    if (q.gasPrice !== undefined) {
+      if (!/^\d+$/.test(q.gasPrice)) return reply.code(400).send({ error: "gasPrice must be a non-negative integer (wei)" });
+      gasPrice = BigInt(q.gasPrice);
+    }
+    // A priority-auction order prices from `tx.gasprice`: without the gas price the
+    // filler will send, the preview is the no-bid quote and the floor would be one
+    // no real transaction can meet. Refuse rather than publish it.
+    if (isPriorityAuction(order) && (gasPrice === undefined || gasPrice === 0n)) {
+      return reply.code(400).send({
+        error: "gasPrice is required for a priority-auction order",
+        hint: "pass the effective gas price (wei) you will send the fill at; the quote and its price floor are computed at it",
+      });
+    }
     if (!clientInst && !config.rpcUrl) return reply.code(503).send({ error: "no RPC configured for quoting" });
 
-    let delta: bigint, received: readonly bigint[], paid: readonly bigint[];
+    // Both previews under ONE call context: the caller's gas price, sent as the
+    // filler, so a gas-price-reading pricing path sees what the fill will see.
+    const callCtx =
+      gasPrice !== undefined ? { account: q.filler as Address, gasPrice, gas: QUOTE_GAS } : {};
+    let delta: bigint, received: readonly bigint[], paid: readonly bigint[], bump: bigint;
     try {
       [delta, received, paid] = (await getClient().readContract({
         address: config.lens as Address,
@@ -705,17 +773,35 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
         // The lens takes the WIRE order (packed blobs), never the authoring struct
         // — see `Verifier.verifyLayer2` (F29 P1).
         args: [packOrder(order), fillAmount, q.filler as Address, takerData],
-      })) as [bigint, readonly bigint[], readonly bigint[]];
+        ...callCtx,
+      } as never)) as [bigint, readonly bigint[], readonly bigint[]];
+      bump = (await getClient().readContract({
+        address: config.lens as Address,
+        abi: SETTLEMENT_LENS_ABI,
+        functionName: "previewBump",
+        args: [packOrder(order), q.filler as Address, takerData],
+        ...callCtx,
+      } as never)) as bigint;
     } catch (err) {
       request.log.warn({ err }, "quote preview failed");
       return reply.code(422).send({ error: publicRpcError(err) });
     }
 
+    // SIZE: an identity order's calldata carries the resolved delta, never the
+    // raw request (see the route note). A Proportional anchor never trims, so
+    // this is what makes a moved balance revert rather than re-size the fill.
+    const identity = BigInt(order.fillModule) === 0n;
+    const proportional =
+      order.side === OrderSide.SELL && order.fillTotal === 0n && isProportional(order.legsIn[0]?.start ?? 0n);
+    const calldataAmount = identity ? delta : fillAmount;
     const data = encodeFillUpTo({
       order,
       sig: entry.announce.sig,
-      fillAmount,
+      fillAmount: calldataAmount,
       recipient: q.recipient as Address | undefined,
+      // PRICE: the quoted bump is the floor. `0` only when nothing decays (the
+      // lens returns 0) — then there is no price motion to bound.
+      minBumpBps: bump,
       takerData,
     });
     return reply.send({
@@ -724,6 +810,11 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
       data,
       value: "0",
       delta: delta.toString(),
+      // What the calldata binds, stated rather than implied.
+      fillAmount: calldataAmount.toString(),
+      minBumpBps: bump.toString(),
+      gasPrice: gasPrice === undefined ? null : gasPrice.toString(),
+      proportional,
       receiving: order.legsIn.map((l, i) => ({ token: l.token, amount: received[i]!.toString() })),
       paying: order.legsOut.map((l, j) => ({ token: l.token, amount: paid[j]!.toString() })),
       filler: q.filler,
