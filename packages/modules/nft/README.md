@@ -7,11 +7,11 @@ been paid by the order's mandatory `legsOut` legs.
 
 | | |
 |---|---|
-| `NftSettlementModule` | ERC-721. INDIVISIBLE — it ignores `slice`, so an order using it must be full-fill only (`minFillAnchor == anchor`). The core's `SettleSliceZero` floor is what stops a dust fill from taking the token for nothing. |
+| `NftSettlementModule` | ERC-721. INDIVISIBLE — `data = abi.encode(collection, tokenId, total)` with `total` = the item's signed `amount`, and the module requires the fill's slice to equal it (`FullFillGuard`), so the token only ever moves on a FULL fill whatever `amount` was signed. (Until audit 2026-09-30 MISC-MOD-2 the slice was ignored and only the core's `SettleSliceZero` — which covers just `amount = 1` — stood between a one-unit fill and the NFT. BREAKING: the old two-word blob reverts.) |
 | `Erc1155SettlementModule` | ERC-1155. DIVISIBLE — `Item.amount` is the quantity for a fully-filled order and each fill moves its exact pro-rata slice, so the item composes with partial fills. |
 
 Both are gated on `msg.sender == settlement` (the maker's order signature is the
-authority) plus the maker's `setApprovalForAll` on the collection. `data =
+authority) plus the maker's `setApprovalForAll` on the collection. 1155 `data =
 abi.encode(collection, id)`.
 
 ```

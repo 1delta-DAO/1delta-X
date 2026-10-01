@@ -57,14 +57,11 @@ contract PermissionlessCallModuleTest is CoreSettlementBase {
 
     function _callItem(uint256 amount, bytes memory callData) internal view returns (Item memory) {
         PermissionlessCallModule.CallSpec memory spec =
-            PermissionlessCallModule.CallSpec({target: address(target), callData: callData});
-        return Item({
-            op: ItemOp.MAKE,
-            module: address(module),
-            amount: amount,
-            recipient: address(0),
-            data: abi.encode(spec)
-        });
+            PermissionlessCallModule.CallSpec({target: address(target), callData: callData, bountyToken: address(0)});
+        return
+            Item({
+                op: ItemOp.MAKE, module: address(module), amount: amount, recipient: address(0), data: abi.encode(spec)
+            });
     }
 
     function _orderWithItem(uint256 nonce, Item memory it) internal view returns (Order memory) {
@@ -125,8 +122,9 @@ contract PermissionlessCallModuleTest is CoreSettlementBase {
     ///      through Settlement as the maker of their own order); it only keeps the
     ///      module a Settlement-dispatched item rather than a public trampoline.
     function test_directCall_revertsOnlySettlement() public {
-        PermissionlessCallModule.CallSpec memory spec =
-            PermissionlessCallModule.CallSpec({target: address(target), callData: abi.encodeCall(Accruer.accrue, ())});
+        PermissionlessCallModule.CallSpec memory spec = PermissionlessCallModule.CallSpec({
+            target: address(target), callData: abi.encodeCall(Accruer.accrue, ()), bountyToken: address(0)
+        });
 
         vm.prank(address(0xBAD));
         vm.expectRevert(PermissionlessCallModule.OnlySettlement.selector);

@@ -6,7 +6,7 @@ items, which act **on the maker's behalf** during a fill.
 | | |
 |---|---|
 | `FeeTransferModule` | the originator fee on an **outputless** order. Fees are normally output legs (`recipientOut`); an order with no output leg has nowhere to put one, so the fee becomes an item that pulls an absolute amount via Permit3 to a named recipient. |
-| `PermissionlessCallModule` | the escape hatch: one arbitrary maker-signed call, from an identity that holds **no authority at all**. |
+| `PermissionlessCallModule` | the escape hatch: one arbitrary maker-signed call, from an identity that holds **no authority at all**. A poke that pays its CALLER a bounty pays this shared module: name the token in `CallSpec.bountyToken` and the increase is forwarded to the maker in the same item (`address(0)` = no bounty; a bounty left here is claimable by anyone's next self-signed order — audit 2026-09-30 MISC-MOD-5, BREAKING `CallSpec` shape). |
 
 > ⚠ `PermissionlessCallModule` is deliberately powerless, and that is the whole design.
 > The 2026-08 audit found that its predecessor `GenericCallModule` held per-user
