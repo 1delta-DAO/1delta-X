@@ -149,7 +149,7 @@ interface IPermit3 {
     ///      amount: the allowance gate does not decrement on zero and so would not
     ///      stop it.
     error ZeroAmount();
-    /// @dev The Permit3 leg of {Permit3TransferLib.transferFromWithFallback}
+    /// @dev The Permit3 leg of a Settlement pull ({Base._pullViaPermit3})
     ///      failed and the payer has {strictMode} enabled, so the direct-approval
     ///      fallback is refused rather than silently consulted.
     error Permit3Denied();
@@ -176,14 +176,24 @@ interface IPermit3 {
         returns (uint160 amount, uint48 expiration);
 
     /// @notice Opt in to STRICT MODE. When enabled for `msg.sender`, the
-    ///         direct-ERC20-approval fallback in
-    ///         {Permit3TransferLib.transferFromWithFallback} is refused for that
-    ///         payer: a fill that cannot be funded through Permit3's own allowance
-    ///         book reverts {Permit3Denied} instead of falling through to a plain
-    ///         `transferFrom`. This makes `revokeToken`/`lockdown`/an expiry an
-    ///         actual kill switch for a payer who also holds a direct approval.
-    ///         Off by default, so it costs nothing on the hot path for anyone who
-    ///         never opts in.
+    ///         direct-ERC20-approval fallback in Settlement's pull
+    ///         ({Base._pullViaPermit3}) is refused for that payer: a fill that cannot
+    ///         be funded through Permit3's own allowance book reverts {Permit3Denied}
+    ///         instead of falling through to a plain `transferFrom`. That makes
+    ///         `revokeToken`/`lockdown`/an expiry bind the ALLOWANCES ALREADY IN THE
+    ///         BOOK for a payer who also holds a direct approval.
+    ///
+    ///         ⚠ NOT A KILL SWITCH FOR SIGNED-BUT-UNAPPLIED BATCHES (audit 2026-09-30
+    ///         CENSUS-A-3). Any `PermitBatch` the payer signed whose nonce is still
+    ///         fresh — a resting `fillWithPermit` order's witness batch included — can
+    ///         be relayed by anyone before its `deadline` (directly, or by
+    ///         `fillWithPermit` itself) and re-WRITES the grants with an unconditional
+    ///         store, strict mode or not. `cancelOrder` on the settler does not touch
+    ///         Permit3's nonce bitmap either. A real kill switch therefore also burns
+    ///         the nonce of every outstanding signed batch ({invalidateUnorderedNonces},
+    ///         or {lockdownAll}'s nonce arrays) — the same rule as Permit2. Off by
+    ///         default, so it costs nothing on the hot path for anyone who never opts
+    ///         in.
     function setStrictMode(bool enabled) external;
 
     /// @notice Whether `user` has opted into strict mode (see {setStrictMode}).
@@ -211,7 +221,7 @@ interface IPermit3 {
     function strictModeToken(address user, address token) external view returns (bool);
 
     /// @notice THE EFFECTIVE strict-mode answer for `(user, token)`: the global flag
-    ///         OR the per-token one. This is what {Permit3TransferLib} consults on an
+    ///         OR the per-token one. This is what Settlement's {Base._pullViaPermit3} consults on an
     ///         already-failed Permit3 leg, so a payer pays for at most one read
     ///         whichever way they opted in.
     function isStrict(address user, address token) external view returns (bool);
@@ -358,6 +368,15 @@ interface IPermit3 {
     ///         nonce spent, skips the grant, and proceeds against the allowances
     ///         the first application left. The verification stays unconditional, so
     ///         the nonce spend and the grant are the ONLY steps skipped.
+    ///
+    ///         `batch.deadline` binds the APPLICATION only: an expired permit whose
+    ///         nonce is still fresh reverts {PermitExpired} and writes nothing, but an
+    ///         expired one whose nonce is already spent is the same verified no-op as
+    ///         before its deadline. So the remainder of a partly filled gasless order
+    ///         keeps filling through `fillWithPermit` with the stored calldata after
+    ///         the permit deadline, up to the order's own expiry and the grants' own
+    ///         `expiration` (audit 2026-09-30 P3-4; it used to revert there and
+    ///         looked dead while still live).
     function permitBatchWithWitnessIfNeeded(
         address owner,
         PermitBatch calldata batch,
@@ -446,7 +465,7 @@ interface IPermit3 {
     ///         {permitBatchWithWitnessIfNeeded} skips an already-spent nonce instead
     ///         of reverting (the S-1 remediation), so a `fillWithPermit` whose grants
     ///         this invalidates still fills IF a standing allowance — or a direct
-    ///         ERC-20 approval, via the {Permit3TransferLib} fallback — covers it.
+    ///         ERC-20 approval, via Settlement's {Base._pullViaPermit3} fallback — covers it.
     ///         To stop the ORDER, use the settler's own cancels (`cancelOrder`,
     ///         `cancelOrders`, `rollbackNonces`) — see {UnorderedNonces} and
     ///         `docs/soft-cancel.md`.

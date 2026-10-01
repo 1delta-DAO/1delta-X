@@ -12,7 +12,7 @@ import {Proportional} from "./Proportional.sol";
 ///         the copies that used to live in `_deliverOutputs`, `_payInputsToSolver`,
 ///         and the batch pull/compute helpers. Arithmetic over the resolved
 ///         `FillCtx`; each function resolves the auction `bump` itself (`view`, via
-///         `bumpBps()`) but ONLY for a decaying leg (`start != end`) — a fixed leg
+///         `bumpBps()`) but ONLY for a decaying leg (`end != 0`) — a fixed leg
 ///         never touches the decay tick, preserving the "no bump on a fixed order"
 ///         gas shape. `bumpBps()` is deterministic within a tx, so resolving it
 ///         per decaying leg is result-identical to the old once-per-side sentinel —
@@ -23,10 +23,12 @@ import {Proportional} from "./Proportional.sol";
 ///             output); SELL legs are auction-priced `ceil(delta · amountOutAt /
 ///             anchor)`, with the soft-exclusivity override applied ONLY to the
 ///             maker's own legs (a fee leg to a third party is untouched).
-///           • inputs — an auctioned leg (`start != end`, and every BUY leg) is
+///           • inputs — an auctioned leg (`end != 0`, and every BUY leg) is
 ///             `floor(delta · amountInAt / anchor)` with the override reducing the
-///             maker's charge; a fixed leg is the cumulative floor slice (exact
-///             input).
+///             maker's charge; a fixed leg (`end == 0`, the fixed sentinel — NOT
+///             `start == end`: a leg with `start == end != 0` takes the auctioned
+///             branch, per-fill floor and override included) is the cumulative floor
+///             slice (exact input).
 ///         The auction `bump` is resolved here per leg — only when the leg
 ///         actually decays, so a fixed leg never touches `bumpBps` (preserving the
 ///         "no bump on a fixed order" gas shape). Callers use it via

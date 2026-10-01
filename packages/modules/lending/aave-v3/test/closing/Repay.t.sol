@@ -109,7 +109,7 @@ contract RepayTest is AaveModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, 1 ether);
+        settlement.fillWithPermit(order, batch, sig, 1 ether, 0, "");
 
         assertEq(
             IERC20(lendingTokens[Chains.ETHEREUM_MAINNET][Lenders.AAVE_V3][USDC].debt).balanceOf(maker),

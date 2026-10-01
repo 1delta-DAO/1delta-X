@@ -130,7 +130,7 @@ abstract contract SignedPermits is UnorderedNonces, AllowanceTransfer, TakerAllo
         // authority, never more) — but the caller must not infer that the allowances
         // now exist. {Core.fillWithPermit} proceeds past this either way and succeeds
         // only if a standing allowance, or a direct ERC-20 approval via the
-        // {Permit3TransferLib} fallback, independently funds the fill.
+        // {Base._pullViaPermit3} fallback, independently funds the fill.
         //
         // Consequence a maker must not get wrong: invalidating a nonce KILLS THE
         // GRANTS, NOT THE ORDER. The cancellations that bind the order are

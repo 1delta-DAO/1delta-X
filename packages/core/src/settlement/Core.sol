@@ -30,7 +30,10 @@ abstract contract Core is Base {
 
     /// @notice Fill EXACTLY `fillAmount` of an order — in `tokenIn[0]` units for a
     ///         SELL, `tokenOut[0]` units for a BUY. Partial fills allowed; a size past
-    ///         the remaining one reverts {OverFill} (use {fillUpTo} to clamp instead).
+    ///         the remaining one reverts {OverFill} (use {fillUpTo} to clamp instead);
+    ///         `type(uint256).max` means "whatever remains" (resolved by
+    ///         {OrderState._openFill}, as on every entry). No price floor here — use
+    ///         {fillUpTo} for a floored single fill.
     ///         Lending items are executed pro-rata for this fill's slice.
     /// @dev    Thin wrapper over the {takerData} overload with an empty blob, so
     ///         existing 3-arg call sites (solvers, SDK) keep working unchanged.
@@ -274,7 +277,7 @@ abstract contract Core is Base {
     ///
     ///      Built above the free-memory pointer without bumping it: the bytes are
     ///      consumed by the CALL and never outlive it, which is what makes the block
-    ///      memory-safe (the same discipline {Permit3TransferLib} uses).
+    ///      memory-safe (the same discipline {Base._pullViaPermit3} uses).
     function _permitBatch(address owner, IPermit3.PermitBatch calldata batch, bytes32 witness, bytes calldata sig)
         private
     {
@@ -552,7 +555,13 @@ abstract contract Core is Base {
     ///
     ///  The maker's authorization is verified INSIDE that dispatch rather than up
     ///  front. That is safe because the whole fill is atomic: a bad signature reverts
-    ///  the `_openFill` counter write and every transfer with it.
+    ///  the `_openFill` counter write, every transfer, and every item that ran
+    ///  before the TAKE (those run UNAUTHENTICATED — a forged `maker = victim` order's
+    ///  MAKE item executes against the victim's grant and is then unwound). The
+    ///  invariant is "every effect of this call reverts unless the permit verifies",
+    ///  and the constraint it imposes: NEVER add a catch or a commit point inside
+    ///  `_executeItems` / `_settleForward`, and never route a `permitTake` blob
+    ///  through `batchFill`'s per-order try/catch (audit 2026-09-30 CORE-SIG-3).
     ///
     ///  `minBumpBps` is the filler's PRICE FLOOR, exactly {fillUpTo}'s (`0` = none,
     ///  reverts {BumpTooLow}). This entry is the only one that can fund a PermitTake
@@ -600,8 +609,12 @@ abstract contract Core is Base {
         ctx.permitTake = blob;
         // The permit MUST have been consumed — it is this fill's only authorization.
         // Asserted inside `_settleForward`, immediately after the items run and
-        // BEFORE the maker's inputs are pulled, so the authorization gates the pull
-        // rather than merely being checked once everything has already moved.
+        // BEFORE the maker's inputs are pulled, so the authorization gates the INPUT
+        // PULL. It does not gate the items: every item placed before the
+        // permit-consuming TAKE (a MAKE pulling through the maker's standing grant, a
+        // SETTLE, a TAKE_FOR) runs against a not-yet-authenticated order, and is
+        // protected ONLY by the whole call reverting when the permit fails to verify
+        // (pinned by `test_audit_CORE_SIG_3_forgedMakeBeforeTake_unwindsCompletely`).
         // See the note there and in {Base._takeByPermit}.
         outs = _settleForward(order, ctx, address(0), "", "", false);
     }
@@ -615,7 +628,9 @@ abstract contract Core is Base {
     ///
     ///  Four things a caller assembling its own calldata wants and a plain {fill}
     ///  does not give it: a size that is CLAMPED rather than reverted, its own payout
-    ///  `recipient`, its own `minBumpBps` price floor, and per-leg receipts back. A DEX
+    ///  `recipient`, its own `minBumpBps` price floor (shared since audit 2026-09-30
+    ///  with {fillWithPermit}, {fillWithPermitTake} and {batchFill}, and checked in
+    ///  {OrderState._openFill}), and per-leg receipts back. A DEX
     ///  aggregator routing one hop is the obvious consumer, but an RFQ desk, a
     ///  smart-order router or any other caller building the fill itself wants exactly
     ///  the same four, so nothing here is specific to aggregation.
@@ -655,11 +670,12 @@ abstract contract Core is Base {
     ///         with it and inputs (what the filler receives) RISE — so "bump ≥ my
     ///         quote's bump" IS "price ≥ my quoted price", across every leg of both
     ///         baskets at once (the Pendle `maxTaking` / 0x taker-amount guard,
-    ///         without a per-leg array). Three movers can shift the tick maker-ward
-    ///         between quote and inclusion, and all three are covered, since the
+    ///         without a per-leg array). Four movers can shift the tick maker-ward
+    ///         between quote and inclusion, and all four are covered, since the
     ///         check reads the very bump the fill priced at (the pinned
     ///         {FillCtx.bump} when one was pinned):
-    ///           • an oracle-pegged {IPriceModule} re-reading its feed;
+    ///           • an {IPriceModule} re-reading its feed — or arbitrary maker code
+    ///             that answers an `eth_call` differently from the real call;
     ///           • a FALLING basefee shrinking the gas bump; and
     ///           • a FALLING basefee widening a PRIORITY bid. The bid is
     ///             `tx.gasprice - block.basefee - baseline`, and only the first term
@@ -1117,11 +1133,14 @@ abstract contract Core is Base {
         // consumed by a TAKE item, and it costs nothing on every other entry, where
         // the blob is never set and this is a length test on an empty `bytes`.
         //
-        // The old placement (after `_settleForward` returned) was safe ONLY because
-        // every item op is atomically revertible — it is void the moment one
-        // acquires an effect that outlives the transaction: a cross-chain message,
-        // a bridge-inbox item, an off-chain-consumed event. See
-        // `docs/audit-2026-09-leads.md` B-2.
+        // What this placement does NOT do (corrected in audit 2026-09-30 CORE-SIG-3 /
+        // CORE-ITEMS-3; the B-2 write-up claimed otherwise): it does not protect
+        // ITEMS. Every item before the permit-consuming TAKE has already run, and in
+        // the EVM no effect — a bridge send, a log — outlives a revert, so there is
+        // no "effect that outlives the transaction" for any placement to guard. What
+        // makes the path safe is atomicity alone: never add a catch / commit point
+        // inside the item loop or this function. What the placement buys is locality:
+        // the maker-wallet pull and the payout run only after authorization.
         if (ctx.permitTake.length != 0) revert PermitTakeNotConsumed();
         _payInputsToSolver(order, ctx, tokenInBefore);
         _closeFill(order, ctx.filler, takerData, ctx.orderHash);
@@ -1133,6 +1152,16 @@ abstract contract Core is Base {
     ///      item flows have deposit→borrow dependencies that assume the forward
     ///      order. Delivery + invariants stay mandatory and reverting, so the
     ///      maker is made whole or the whole tx unwinds.
+    ///
+    ///      ⚠ FILLER-SIDE MEV (audit 2026-09-30 X-TOKENS-5): maker-chosen token code
+    ///      runs on BOTH sides of the callback here — the input pull before it (an
+    ///      ERC-777 `tokensToSend` hook, a hostile `transferFrom`) and the output
+    ///      delivery after it — so a maker can sandwich the filler's routed swap
+    ///      inside one transaction, which private order flow does not prevent. The
+    ///      forward mode runs the callback before any maker-token movement. A
+    ///      zero-inventory filler cannot use the forward mode, so it must vet token /
+    ///      hook code and bound its own route at the quote (tight `minOut` /
+    ///      `amountInMaximum`), not at break-even.
     function _settlePostInputs(
         Order calldata order,
         FillCtx memory ctx,
@@ -1221,11 +1250,12 @@ abstract contract Core is Base {
     }
 
     /// @dev Pay every input leg to the solver for this fill.
-    ///      • Fixed leg (`start == end`, the common SELL input): `owed_i` is the
+    ///      • Fixed leg (`end == 0`, the fixed sentinel — the common SELL input;
+    ///        a leg with `start == end != 0` is AUCTIONED, see {Pricing}): `owed_i` is the
     ///        cumulative floor slice of `startAmountIn[i]`, summing to exactly
     ///        `startAmountIn[i]` at full fill (and to `fillAmount` for i==0) —
     ///        the exact-input guarantee.
-    ///      • Auctioned leg (`start != end`): `owed_i = floor(fillAmount ·
+    ///      • Auctioned leg (`end != 0`): `owed_i = floor(fillAmount ·
     ///        currentAmountIn / anchor)` at the current tick — rising
     ///        `start → end`, gas bump included; the maker is never overcharged
     ///        and the total never exceeds `endAmountIn[i]`. Every BUY conversion

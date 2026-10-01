@@ -369,7 +369,11 @@ abstract contract OrderState is NonceManager {
     ///      Security: the module may only choose the DELTA; the over-fill cap
     ///      (`newFilled <= total`) and the uniform per-leg scaling stay here, so
     ///      a buggy/hostile module can only mis-size the fraction (which scales
-    ///      both sides of the order proportionally), never over-extract.
+    ///      both sides of the order proportionally), never over-extract from the
+    ///      MAKER. The FILLER is protected by a second cap, `delta <= fillAmount`
+    ///      (audit 2026-09-30 CORE-FILLER-2): without it a maker's module could
+    ///      upsize the fill past what the filler requested and pull proportionally
+    ///      more outputs from its standing approvals.
     /// @dev THE FILL-STATE GATE — the cheapest question a fill can ask, asked FIRST.
     ///      Seeds `ctx` with the order hash, the denominator and the progress so far,
     ///      and rejects an order that is cancelled or already complete.

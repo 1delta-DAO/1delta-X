@@ -450,6 +450,13 @@ library ItemPolicy {
 ///         PRESEND  — hand the solver a token's currently UNENCUMBERED surplus
 ///                    (pooled inflow minus obligations not yet delivered).
 ///         CALL     — one solver interaction through the allowance-less EXECUTOR.
+///                    ⚠ The EXECUTOR is a public trampoline (any `matchSettle`,
+///                    even one with zero orders, can drive it), so a CALL target
+///                    that releases funds must not trust `msg.sender == EXECUTOR`
+///                    alone — see {SolverCallbackExecutor}. Other makers' ITEM steps
+///                    and token transfers run code around it in the same tx:
+///                    schedule value-sensitive CALLs before untrusted ITEMs and
+///                    bound their own `minOut` at the quote.
 library MatchStep {
     uint256 internal constant PULL = 0;
     uint256 internal constant DELIVER = 1;

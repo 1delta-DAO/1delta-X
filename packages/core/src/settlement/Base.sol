@@ -73,8 +73,8 @@ abstract contract Base is Signatures {
     ///      different module, or an amount that is not this fill's pro-rata slice.
     error PermitTakeMismatch();
     /// @dev The constructor was given a `permit3` with no code. Load-bearing: every
-    ///      maker/solver token move runs through
-    ///      {Permit3TransferLib.transferFromWithFallback}, which probes Permit3 with
+    ///      maker/solver token move runs through {_pullViaPermit3}, which probes
+    ///      Permit3 with
     ///      a LOW-LEVEL call and treats success as "the transfer happened". A call to
     ///      a codeless address returns success with empty returndata, so a
     ///      misconfigured hub would make every pull and every delivery a SILENT
@@ -207,7 +207,13 @@ abstract contract Base is Signatures {
     error ItemPolicyViolated(uint256 order, uint256 item);
     /// @dev A `matchSettle` order carries a SETTLE item. SETTLE routes the maker's
     ///      asset to the filler, not a pool counterparty — out of scope for the
-    ///      netted flow (a shared-pool SETTLE needs its own design).
+    ///      netted flow (a shared-pool SETTLE needs its own design). Consequence
+    ///      worth knowing (audit 2026-09-30 PRICE-12): every `OcoGroupModule`
+    ///      bracket leg carries a SETTLE claim item, so a bracket leg can be neither
+    ///      CoW-matched here nor filled through a `PostInputs*` callback (which
+    ///      refuses any item) — only through a forward entry, with inventory, flash
+    ///      or credit funding. The item-free shared-nonce fill-once bracket is the
+    ///      matchable alternative.
     error MatchSettleItemUnsupported();
     /// @dev A `matchSettle` order carries an output leg addressed at Settlement
     ///      itself — the maker "self-burn". The single-order path strands such a leg
@@ -300,11 +306,18 @@ abstract contract Base is Signatures {
         EXECUTOR = new SolverCallbackExecutor();
     }
 
-    /// @dev {Permit3TransferLib.transferFromWithFallback} with the hub read HERE
-    ///      rather than passed in — byte-for-byte the library's semantics (zero
-    ///      no-op, uint160 refusal, raw Permit3 leg, strict-mode-gated direct
-    ///      fallback). Passing `PERMIT3` as an argument made every caller
-    ///      materialise the immutable (a 33-byte PUSH32) at its own call site.
+    /// @dev THE pull every Settlement maker/filler transfer runs through (Core
+    ///      `_deliverOutputs` and `_payInputsToSolver`, Batch `_stepPull`): zero
+    ///      no-op, `uint160` refusal (the Permit2 6.1 class — a leg word above 2^160
+    ///      is refused, never routed around the book), the raw Permit3 leg, then the
+    ///      strict-mode-gated (global OR per-token, via `isStrict`) direct-ERC20
+    ///      fallback. It replaced `Permit3TransferLib.transferFromWithFallback` in
+    ///      2770c45; the library then had no production caller and was DELETED in the
+    ///      2026-09-30 remediation (P3-2), its unit tests retargeted here
+    ///      (`test/utils/PullViaPermit3.t.sol`) and Settlement-level fills added for
+    ///      the per-token strict and `uint160` branches. The hub is read HERE rather
+    ///      than passed in: passing `PERMIT3` made every caller materialise the
+    ///      immutable (a 33-byte PUSH32) at its own call site.
     function _pullViaPermit3(address token, address from, address to, uint256 amount) internal {
         if (amount == 0) return;
         if (amount > type(uint160).max) revert IPermit3.Permit3Denied();
@@ -421,8 +434,14 @@ abstract contract Base is Signatures {
     ///      This is not enforceable here: an item's proceeds token is encoded inside
     ///      the module-specific `item.data`, which the core deliberately does not
     ///      decode (that is what keeps the core module-agnostic). Order construction
-    ///      owns it — `validateOrder` in the SDK checks it, and a maker can pin the
-    ///      outcome on-chain with a {MinBalanceInvariant} on the expected token.
+    ///      owns it — `SettlementLens.validateOrder` checks it (the F22 proceeds-asset
+    ///      rule), and that is the primary guard: sign a TAKE `recipient` of the
+    ///      maker, or a proceeds token that is a `legsIn` token. ⚠ A
+    ///      {MinBalanceInvariant} on the expected token does NOT pin it: it checks an
+    ///      ABSOLUTE floor, which any other inflow of that token to the maker (another
+    ///      of its fills, a bridge credit) satisfies while this fill's proceeds still
+    ///      strand. (This used to say the invariant "pins the outcome"; corrected in
+    ///      audit 2026-09-30 VAL-1.v4.)
     ///      Items are a length-prefixed RECORD blob, so this walks it with a cursor
     ///      rather than indexing — the settler only ever runs items in signed order.
     ///      `validateRecords` is the single bounds proof for the whole walk.

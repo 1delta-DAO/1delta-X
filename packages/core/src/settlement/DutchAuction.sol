@@ -107,7 +107,12 @@ library DutchAuction {
     ///         to a block clock for the same reason: on a chain with 250ms blocks a
     ///         one-second timestamp tick is eight blocks of resolution, so a
     ///         timestamp-decayed auction cannot price the interval solvers actually
-    ///         compete over. `uint32` holds any L2 block number for centuries.
+    ///         compete over. ⚠ `uint32` caps the block clock at 2^32 - 1: about 34
+    ///         years of 250 ms blocks (13.6 at 100 ms) from the chain's genesis, not
+    ///         "centuries" as this used to say. Past that height a block-clocked order
+    ///         cannot express its start or its exclusivity end (the window never
+    ///         opens, the decay saturates); a builder must refuse a block clock on such
+    ///         a chain (audit 2026-09-30 CORE-FILL-3).
     function blockClock(Order calldata order) internal pure returns (bool) {
         return (order.timing >> 102) & 1 == 1;
     }

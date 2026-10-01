@@ -541,9 +541,23 @@ abstract contract Batch is Core {
     ///      module genuinely produces an amount the settler cannot predict.
     ///
     ///      Consequence for non-standard tokens: a fee-on-transfer input credits more
-    ///      than arrives, the pool ends short, and the context reverts
-    ///      {BatchNotWhole} rather than {LegUnfunded}. Both revert, and such tokens
-    ///      are already out of scope on the netted path (see the settlement README).
+    ///      than arrives, so {_matchReconcileInputs} (nominal vs nominal) never sees
+    ///      it; the ONLY backstop is the end-state pool floor in {_sweepSurplus}.
+    ///      The context therefore reverts {BatchNotWhole} when the plan has no
+    ///      residual in that token — and SETTLES, with the matcher's sweep smaller
+    ///      by the fee, whenever its residual (spread, or capital a CALL fronted)
+    ///      covers it. Nobody but the matcher is short; outputs are delivered
+    ///      nominally as on `fill`. (This used to promise a revert in every case;
+    ///      corrected in audit 2026-09-30 X-SPEC-6 / X-TOKENS-7.) A matcher that
+    ///      must not absorb such fees compares the returned `swept` to its plan.
+    ///
+    ///      ⚠ DOUBLE-ENTRY-POINT TOKENS (two ERC-20 addresses over one ledger) are
+    ///      out of scope here too (audit 2026-09-30 X-TOKENS-2). Every netted
+    ///      structure keys on the ADDRESS — the universe, the duplicate-input guard,
+    ///      `outstanding`, the item-proceeds attribution — so one arrival is seen on
+    ///      both addresses and can be credited twice. The pool floor still protects
+    ///      everyone but the matcher, whose residual can be redirected to a maker;
+    ///      a matcher must not admit twins into one plan.
     ///
     ///      A duplicate PULL needs no exactly-once guard, but it does need this
     ///      function to pull the SHORTFALL rather than the nominal `owed`.

@@ -78,7 +78,7 @@ contract FillWithPermitTest is AaveModulesBase {
 
         // Fill — single solver call, single maker signature.
         vm.prank(solver);
-        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn)[0];
+        uint256 paid = settlement.fillWithPermit(order, batch, sig, usdcIn, 0, "")[0];
 
         assertEq(paid, wethOut, "solver paid 1 WETH");
         assertEq(IERC20(USDC).balanceOf(maker), 0, "maker USDC pulled");

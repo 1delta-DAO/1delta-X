@@ -17,7 +17,10 @@ pragma solidity ^0.8.28;
 ///  {ITakerForModule}. Nothing the settler compiles may import this.
 ///
 ///  ⚠ AND MOST FILLERS DO NOT NEED IT. The probe-then-bound recipe works on every
-///  module order without knowing which module it is:
+///  module order without knowing which module it is — because the CORE enforces the
+///  bound (audit 2026-09-30 CORE-FILLER-2: `delta > fillAmount` reverts `OverFill`
+///  for every module; before that the bound held only for modules that chose to
+///  honour `fillAmount`, and a maker's module could upsize a fill past the quote):
 ///
 ///      (delta,,) = lens.previewFill(order, order.fillTotal, filler, takerData);
 ///      settlement.fillUpTo(order, sig, delta, ...);   // or fill(order, sig, delta)
@@ -25,7 +28,9 @@ pragma solidity ^0.8.28;
 ///  `order.fillTotal` is a universal probe FOR THE PREVIEW — it can never bind,
 ///  because the core caps every module at `filled + delta <= fillTotal` anyway.
 ///  Re-submitting the returned `delta` is what bounds the filler to the size it
-///  actually quoted.
+///  actually quoted: the module may accept LESS, never more. ⚠ The lens probe calls
+///  `resolveFill` with `msg.sender == lens`, so a hostile module can answer the probe
+///  differently from the real call — the ceiling, not the probe, is the protection.
 ///
 ///  ⚠ THE TWO CALLS TAKE DIFFERENT NUMBERS, AND ON THE NETTED PATH IT MATTERS.
 ///  `fillTotal` belongs in the PROBE; the quoted `delta` belongs in the FILL. In

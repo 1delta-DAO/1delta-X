@@ -138,7 +138,7 @@ contract SwapAndDepositTest is AaveModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, usdcIn);
+        settlement.fillWithPermit(order, batch, sig, usdcIn, 0, "");
 
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received USDC");
         assertApproxEqAbs(IERC20(aWETH).balanceOf(maker), wethOut, 2, "maker got aWETH");

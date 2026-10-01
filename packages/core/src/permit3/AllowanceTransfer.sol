@@ -50,7 +50,7 @@ abstract contract AllowanceTransfer is Permit3Base {
     /// @dev user → spender → token → (amount, expiration, nonce)
     mapping(address => mapping(address => mapping(address => PackedAllowance))) private _tokenAllowance;
 
-    /// @dev user → strict mode. When set, {Permit3TransferLib}'s direct-approval
+    /// @dev user → strict mode. When set, Settlement's ({Base._pullViaPermit3}) direct-approval
     ///      fallback is refused for this payer (see {setStrictMode}). Off by
     ///      default; the flag is read only when the Permit3 leg has already failed,
     ///      so it never touches the hot path for anyone who has not opted in.
@@ -86,7 +86,7 @@ abstract contract AllowanceTransfer is Permit3Base {
     ///         live path. Do not read `take`'s guard as a global "no takes in flight".
     ///
     ///      2. ADDING A GUARD HERE WOULD SILENTLY DEGRADE, NOT REVERT.
-    ///         {Permit3TransferLib.transferFromWithFallback} probes this function with
+    ///         Settlement's {Base._pullViaPermit3} probes this function with
     ///         a LOW-LEVEL call and treats ANY failure — including a `Reentrancy()`
     ///         revert — as "Permit3 has no grant, use the direct ERC20 approval". So a
     ///         guard bolted on here would not stop a re-entrant transfer; it would

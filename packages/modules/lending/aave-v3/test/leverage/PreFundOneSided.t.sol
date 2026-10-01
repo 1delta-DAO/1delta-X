@@ -270,7 +270,7 @@ contract PreFundOneSidedTest is AaveModulesBase {
         uint256 dBefore = IERC20(usdcDebtToken).balanceOf(maker);
 
         vm.prank(solver);
-        settlement.fillWithPermit(o, batch, sig, daiIn);
+        settlement.fillWithPermit(o, batch, sig, daiIn, 0, "");
 
         assertApproxEqAbs(IERC20(aWETH).balanceOf(maker) - aBefore, WETH_OUT, 2, "B became collateral in full");
         assertApproxEqAbs(IERC20(usdcDebtToken).balanceOf(maker) - dBefore, borrow, 2, "A was drawn");

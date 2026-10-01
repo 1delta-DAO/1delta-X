@@ -410,4 +410,93 @@ contract SignatureTransferTest is Test, DeployedBytecode {
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
         permit3.permitTransferFrom(permit, details, owner, sig);
     }
+
+    // ════════════════ Batch WITNESS (audit 2026-09-30 X-ASM-3 / P3-3) ════════════════
+    //
+    // `permitWitnessTransferFrom(PermitBatchTransferFrom, …)` had no test at all: the
+    // assembly `hashPermissionsArray` was pinned only through the non-witness batch, and
+    // the batch witness STUB never. Signed here against a Solidity reference digest.
+
+    string constant BATCH_WITNESS_STUB =
+        "PermitBatchWitnessTransferFrom(TokenPermissions[] permitted,address spender,uint256 nonce,uint256 deadline,";
+
+    function _signBatchWitness(
+        ISignatureTransfer.PermitBatchTransferFrom memory permit,
+        address theSpender,
+        bytes32 witness
+    ) internal view returns (bytes memory) {
+        bytes32[] memory hashes = new bytes32[](permit.permitted.length);
+        for (uint256 i; i < permit.permitted.length; ++i) {
+            hashes[i] = _hashPermitted(permit.permitted[i]);
+        }
+        bytes32 typeHash = keccak256(abi.encodePacked(BATCH_WITNESS_STUB, WITNESS_TYPE_STRING));
+        return _sign(
+            keccak256(
+                abi.encode(
+                    typeHash, keccak256(abi.encodePacked(hashes)), theSpender, permit.nonce, permit.deadline, witness
+                )
+            )
+        );
+    }
+
+    function test_audit_X_ASM_3_permitBatchWitnessTransferFrom() public {
+        ISignatureTransfer.PermitBatchTransferFrom memory permit = _batchPermit(3, 7);
+        bytes32 witness = keccak256("batch order");
+        bytes memory sig = _signBatchWitness(permit, spender, witness);
+
+        ISignatureTransfer.SignatureTransferDetails[] memory details =
+            new ISignatureTransfer.SignatureTransferDetails[](3);
+        details[0] = _details(recipient, 10e18);
+        details[1] = _details(address(0xD00D), 20e18);
+        details[2] = _details(recipient, 30e18);
+
+        vm.prank(spender);
+        permit3.permitWitnessTransferFrom(permit, details, owner, witness, WITNESS_TYPE_STRING, sig);
+        assertEq(token.balanceOf(recipient), 40e18);
+        assertEq(token.balanceOf(address(0xD00D)), 20e18);
+        assertTrue(permit3.isPermitNonceUsed(owner, 7), "one nonce for the whole batch");
+    }
+
+    function test_audit_X_ASM_3_permitBatchWitnessTransferFrom_revert_witnessSwap() public {
+        ISignatureTransfer.PermitBatchTransferFrom memory permit = _batchPermit(2, 8);
+        bytes memory sig = _signBatchWitness(permit, spender, keccak256("order"));
+        ISignatureTransfer.SignatureTransferDetails[] memory details =
+            new ISignatureTransfer.SignatureTransferDetails[](2);
+        details[0] = _details(recipient, 10e18);
+        details[1] = _details(recipient, 20e18);
+
+        vm.prank(spender);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        permit3.permitWitnessTransferFrom(permit, details, owner, keccak256("other"), WITNESS_TYPE_STRING, sig);
+    }
+
+    /// @dev A NON-witness batch signature is not a witness signature for any witness —
+    ///      the type strings differ, so the digests do.
+    function test_audit_P3_3_batchSigRejectedOnWitnessPath() public {
+        ISignatureTransfer.PermitBatchTransferFrom memory permit = _batchPermit(1, 9);
+        bytes memory sig = _signBatch(permit, spender);
+        ISignatureTransfer.SignatureTransferDetails[] memory details =
+            new ISignatureTransfer.SignatureTransferDetails[](1);
+        details[0] = _details(recipient, 10e18);
+        vm.prank(spender);
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        permit3.permitWitnessTransferFrom(permit, details, owner, bytes32(0), WITNESS_TYPE_STRING, sig);
+    }
+
+    /// @dev The deadline is INCLUSIVE: a transfer landing exactly at it is accepted.
+    function test_audit_P3_3_deadlineBoundary_inclusive() public {
+        ISignatureTransfer.PermitTransferFrom memory permit = _permit(100e18, 10);
+        bytes memory sig = _signSingle(permit, spender);
+        vm.warp(permit.deadline);
+        vm.prank(spender);
+        permit3.permitTransferFrom(permit, _details(recipient, 1e18), owner, sig);
+        assertEq(token.balanceOf(recipient), 1e18);
+
+        ISignatureTransfer.PermitTransferFrom memory late = _permit(100e18, 11);
+        bytes memory sig2 = _signSingle(late, spender);
+        vm.warp(late.deadline + 1);
+        vm.prank(spender);
+        vm.expectRevert(abi.encodeWithSelector(ISignatureTransfer.SignatureExpired.selector, late.deadline));
+        permit3.permitTransferFrom(late, _details(recipient, 1e18), owner, sig2);
+    }
 }

@@ -9,7 +9,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
-import {Order, Item, ItemOp, LegIn, LegOut, CallbackMode} from "@core/settlement/Settlement.sol";
+import {Settlement, Order, Item, ItemOp, LegIn, LegOut, CallbackMode, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
 import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {Proportional} from "@core/settlement/Proportional.sol";
@@ -107,6 +107,28 @@ contract AuditDrainingMaker is IMakerModule {
         require(msg.sender == settlement, "only settlement");
         (address token, address sink) = abi.decode(data, (address, address));
         permit3.transferFrom(onBehalfOf, sink, token, uint160(amount));
+    }
+}
+
+/// @dev A fund-releasing CALL target, authenticated two ways: the naive one trusts
+///      `msg.sender == EXECUTOR`; the armed one also requires a flag only its own
+///      entrypoint sets (CORE-FILLER-4).
+contract AuditExecutorTarget {
+    Settlement immutable S;
+    uint256 public armed = 1;
+    uint256 public naiveCalls;
+
+    constructor(Settlement s) {
+        S = s;
+    }
+
+    function naive() external {
+        require(msg.sender == address(S.EXECUTOR()), "not executor");
+        ++naiveCalls;
+    }
+
+    function guarded() external {
+        require(msg.sender == address(S.EXECUTOR()) && armed == 2, "not my plan");
     }
 }
 
@@ -608,5 +630,34 @@ contract Audit20260930CoreTest is MockSettlementBase {
         vm.prank(solver);
         settlement.fillWithCallback(o, sig_o, type(uint256).max, address(0), "", CallbackMode.PreDelivery);
         assertEq(settlement.filled(_hashOrder(o)), IN_, "module got the remainder");
+    }
+
+    // ════════════════ CORE-FILLER-4 — the EXECUTOR authenticates nothing ════════════════
+
+    function _emptyPlanCalling(address target, bytes memory data) internal pure returns (MatchPlan memory p) {
+        p.orders = new Order[](0);
+        p.sigs = new bytes[](0);
+        p.fillAmounts = new uint256[](0);
+        p.takerDatas = new bytes[](0);
+        p.schedule = new uint256[](1);
+        p.schedule[0] = MatchStep.CALL; // CALL target index 0
+        p.callTargets = new address[](1);
+        p.callTargets[0] = target;
+        p.callDatas = new bytes[](1);
+        p.callDatas[0] = data;
+    }
+
+    /// @dev Pins the documented hazard and the documented remedy: ANYONE can make the
+    ///      executor call a target through a ZERO-order plan, so an EXECUTOR-only check
+    ///      is driven by an outsider, while the entrypoint-armed target refuses.
+    function test_audit_CORE_FILLER_4_executorIsAPublicTrampoline_armedTargetRefuses() public {
+        AuditExecutorTarget t = new AuditExecutorTarget(settlement);
+        vm.prank(address(0xA77AC));
+        settlement.matchSettle(_emptyPlanCalling(address(t), abi.encodeCall(AuditExecutorTarget.naive, ())));
+        assertEq(t.naiveCalls(), 1, "an outsider drove the EXECUTOR-only target");
+
+        vm.prank(address(0xA77AC));
+        vm.expectRevert();
+        settlement.matchSettle(_emptyPlanCalling(address(t), abi.encodeCall(AuditExecutorTarget.guarded, ())));
     }
 }

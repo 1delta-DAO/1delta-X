@@ -40,20 +40,18 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 ///
 ///  ⚠ WHERE THIS MAY APPEAR
 ///  ───────────────────────
-///  On ANY `legsIn[i]` of a SELL order, so a single signature can sweep several
-///  tokens at once ("take all my USDC and all my USDT for this much ETH"). NOT on
-///  output legs — the solver delivers those, and an obligation measured against
-///  the PAYER's balance is meaningless on the counterparty's side.
-///
-///  Leg 0 is special only in WHERE it is resolved. It is the anchor, so it is read
-///  in {OrderGates.anchorTotal} before any funds move and pinned in
-///  `FillCtx.anchor`; legs 1..n are read in {Pricing.inputOwed} at the moment they
-///  are charged. Nothing else consumes a non-anchor leg's amount — output pricing
-///  and the fill counter both key off the anchor alone — so a later read is
-///  self-consistent. The one visible consequence is that a maker who also signs an
-///  item crediting themselves that token pays against the post-item balance on the
-///  single-order path and the pre-item balance on the netted {Batch} path. Both
-///  sit under the same mandatory cap, which is what bounds the difference.
+///  ONLY on `legsIn[0]` of a plain SELL order — the anchor — and nowhere else: not
+///  on `legsIn[1..n]` ({Pricing.inputOwed} reverts {InvalidProportionalLeg}; the
+///  multi-token sweep was built, measured at +2,106 bytes of Settlement and removed
+///  — sweep the other tokens with `ProportionalSweepModule`), not on output legs
+///  (the solver delivers those, and an obligation measured against the PAYER's
+///  balance is meaningless on the counterparty's side), not on a BUY, and not on an
+///  order whose denominator is a signed `fillTotal` / a `fillModule`. On the anchor
+///  the leg's `end` is the MANDATORY cap, not a decay endpoint. The anchor is read in
+///  {OrderGates.anchorTotal} before any funds move and pinned in `FillCtx.anchor`.
+///  (This paragraph used to say "ANY `legsIn[i]`", left over from the removed
+///  sweep; corrected in audit 2026-09-30 CORE-FILL-3 / A-FLEX-4 / X-DIFF-CORE-7, and
+///  {DutchAuction.currentAmountIn} now refuses a marker off leg 0 too.)
 ///
 ///  A proportional order is still FULL-FILL ONLY, and that is what makes the whole
 ///  thing sound:
@@ -153,8 +151,7 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 ///  the order price-agnostic. The cap keeps it doing exactly that.
 library Proportional {
     /// @dev A proportional marker appeared somewhere the encoding does not permit
-    ///      one: on a BUY order's output anchor, on an input leg that also carries
-    ///      a decay endpoint (`end != 0`), on `legsIn[1..n]`, or on an order whose
+    ///      one: on a BUY order's output anchor, on `legsIn[1..n]`, or on an order whose
     ///      denominator is a signed `fillTotal` / a `fillModule` rather than the
     ///      leg anchor. See the contract note for why the permitted position is
     ///      exactly `legsIn[0]` of a SELL.
@@ -204,7 +201,9 @@ library Proportional {
     }
 
     /// @notice Resolve a proportional marker against `owner`'s live balance of
-    ///         `token`, capped at `cap` (0 = uncapped).
+    ///         `token`, capped at `cap`. The cap is MANDATORY: `cap == 0` reverts
+    ///         {ProportionalNeedsCap} (this used to say "0 = uncapped"; a genuinely
+    ///         unbounded sweep is `cap = SENTINEL_FLOOR`).
     /// @dev The multiplication is deliberately CHECKED. A balance large enough to
     ///      overflow `balance * bps` is not reachable with any real token, but
     ///      this is a value path that decides how much of a maker's money moves,

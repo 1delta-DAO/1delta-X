@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Base} from "@core/settlement/Base.sol";
+import {OrderState} from "@core/settlement/OrderState.sol";
 import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 
@@ -123,7 +123,7 @@ contract PreviewFillTest is MockSettlementBase {
         assertEq(quoted, 3_000, "clock bump at 30% of the window");
 
         vm.prank(solver);
-        vm.expectRevert(Base.BumpTooLow.selector);
+        vm.expectRevert(OrderState.BumpTooLow.selector);
         settlement.fillUpTo(order, sig, IN_, address(0), quoted + 1, "");
 
         vm.prank(solver);

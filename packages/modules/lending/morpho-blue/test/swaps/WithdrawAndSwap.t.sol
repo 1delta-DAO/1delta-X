@@ -90,7 +90,7 @@ contract WithdrawAndSwapTest is MorphoModulesBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, wstethIn);
+        settlement.fillWithPermit(order, batch, sig, wstethIn, 0, "");
 
         assertEq(IERC20(WSTETH).balanceOf(solver), wstethIn, "solver received wstETH");
         assertEq(IERC20(USDC).balanceOf(maker), usdcOut, "maker received USDC");

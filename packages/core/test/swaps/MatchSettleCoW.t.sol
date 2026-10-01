@@ -36,13 +36,22 @@ contract MockSolver {
     ///      balances it ends up holding would. Forwarding all three arrays instead
     ///      would make this mock ~300 bytes larger for no behavioural gain.
     function run(MatchPlan calldata p) external {
+        armed = 2;
         settlement.matchSettle(p);
+        armed = 1;
     }
 
-    /// @dev Called via the allowance-less EXECUTOR mid-schedule: front the deficit.
+    /// @dev Called via the EXECUTOR mid-schedule: front the deficit. AUTHENTICATED the
+    ///      way a real fund-releasing CALL target must be (audit 2026-09-30
+    ///      CORE-FILLER-4): `msg.sender == EXECUTOR` alone proves nothing — anyone can
+    ///      drive the executor with an empty `matchSettle` — so the target also checks
+    ///      a flag only its own entrypoint arms. Copy this shape, not the bare one.
     function cover(address token, uint256 amount) external {
+        require(msg.sender == address(settlement.EXECUTOR()) && armed == 2, "not my plan");
         IERC20(token).transfer(address(settlement), amount);
     }
+
+    uint256 armed = 1;
 }
 
 /// @dev A mock DEX with output-token stock: pulls `amtIn` of `tokenIn` from the
@@ -72,12 +81,18 @@ contract PresendSolver {
     ///      balances it ends up holding would. Forwarding all three arrays instead
     ///      would make this mock ~300 bytes larger for no behavioural gain.
     function run(MatchPlan calldata p) external {
+        armed = 2;
         settlement.matchSettle(p);
+        armed = 1;
     }
 
+    uint256 armed = 1;
+
     /// @dev The pre-sent `surplusToken` sits in THIS contract; swap it for the
-    ///      `deficitToken` and deposit the deficit into Settlement.
+    ///      `deficitToken` and deposit the deficit into Settlement. Authenticated as
+    ///      in {MockSolver.cover} (executor AND an entrypoint-armed flag).
     function swapAndCover(address surplusToken, uint256 surplusAmt, address deficitToken, uint256 deficitAmt) external {
+        require(msg.sender == address(settlement.EXECUTOR()) && armed == 2, "not my plan");
         IERC20(surplusToken).approve(address(dex), surplusAmt);
         dex.swap(surplusToken, surplusAmt, deficitToken, deficitAmt);
         IERC20(deficitToken).transfer(address(settlement), deficitAmt);

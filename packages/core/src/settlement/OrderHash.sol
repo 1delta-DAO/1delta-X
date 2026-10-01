@@ -132,7 +132,15 @@ library OrderHash {
     ///         filled in full. Naming the settler in the witness is the standard fix
     ///         (Permit2's own guidance: bind what the app needs into the witness), and
     ///         keeping it a STRUCT rather than the settler's opaque EIP-712 digest keeps
-    ///         the order human-readable in a wallet's signing prompt.
+    ///         the settler address and the order's SCALAR fields (maker, nonce,
+    ///         timing, exclusiveFiller, fillModule, fillTotal, pricingModule)
+    ///         visible in a wallet prompt. ⚠ It does NOT make the order legible: the
+    ///         value-bearing members — `legsIn`, `legsOut` (amounts, recipients, fee
+    ///         legs), `items` (modules, venues), `validators`, `invariants`, `curve`
+    ///         — are packed `bytes`, which EIP-712 hashes to one word each, so a wallet
+    ///         renders them as hex. Signers must verify the decoded order out of band
+    ///         (an ERC-7730 descriptor / lens-side decoder is not built). Corrected in
+    ///         audit 2026-09-30 CORE-SIG-4 (the old text said "human-readable").
     bytes32 internal constant SETTLEMENT_ORDER_TYPEHASH = keccak256(
         "SettlementOrder(address settlement,Order order)"
         "Order(address maker,uint256 nonce,bytes legsIn,bytes legsOut,uint256 timing,address exclusiveFiller,uint256 minFillAnchor,uint256 params,bytes curve,bytes items,bytes validators,bytes invariants,address fillModule,uint256 fillTotal,address pricingModule)"

@@ -5,7 +5,7 @@ import {MockSettlementBase, MockERC20} from "../shared/MockSettlementBase.t.sol"
 import {PackedEncode} from "../shared/PackedEncode.sol";
 import {Permit3} from "@core/permit3/Permit3.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
-import {Settlement, Order, Item, ItemOp, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
+import {Settlement, Order, Item, ItemOp, MatchPlan, MatchStep, CallbackMode} from "@core/settlement/Settlement.sol";
 
 /// @dev The "lender" behind the walk's one item-bearing order: a TAKE module that
 ///      hands `produce` of `token` (both fixed in the signed `data`) to `receiver`,
@@ -596,6 +596,88 @@ contract StateHandler is MockSettlementBase {
         try settlement.fill(o, sig, p.amount) returns (uint256[] memory outs) {
             _checkSettledFill(p, outs);
         } catch {}
+        _close(before);
+    }
+
+    /// @dev The OTHER hand-armed fill entries (audit 2026-09-30 CORE-FILL-2): the walk
+    ///      used to drive only `fill` and `matchSettle`, so the gate → guard → verify →
+    ///      clamp/sentinel ordering of `fillUpTo`, `fillWithCallback` and
+    ///      `batchFill`/`fillSelf` rested on unit tests alone. Same probe, same ledger,
+    ///      same allowlist as {doFill}; only the entry and the size spelling vary:
+    ///        entry 0  `fillUpTo`, an OVERSIZED request (clamped to what is left)
+    ///        entry 1  `fillUpTo`, `type(uint256).max`
+    ///        entry 2  `fillWithCallback` (PreDelivery, no callback), `type(uint256).max`
+    ///        entry 3  `fillWithCallback`, the exact size
+    ///        entry 4  `batchFill` of this one order, exact size, per-order floor 0
+    ///        entry 5  `fill`, `type(uint256).max` (resolved by {OrderState._openFill})
+    function doFillVia(uint256 orderSeed, uint256 actorSeed, uint256 amountSeed, uint256 entrySeed) external {
+        FillProbe memory p;
+        p.i = orderSeed % N_ORDERS;
+        p.total = orderTotal(p.i);
+        Order memory o = _mkOrder(p.i);
+        uint256 entry = entrySeed % 6;
+
+        uint256[] memory before = _snap();
+        uint256 request;
+        {
+            uint256 prevFilled = before[_iFilled(p.i)];
+            p.dead = prevFilled == CANCELLED;
+            uint256 remaining = (p.dead || prevFilled >= p.total) ? p.total : p.total - prevFilled;
+            uint256 slice = amountSeed % 2 == 0 ? remaining : (amountSeed % p.total) + 1;
+            // What a SETTLED fill must have executed: every sentinel / clamp spelling
+            // resolves to the remainder; the exact spellings to the slice.
+            if (entry == 0) {
+                request = remaining + (amountSeed % 7) + 1;
+                p.amount = remaining;
+            } else if (entry == 1 || entry == 2 || entry == 5) {
+                request = type(uint256).max;
+                p.amount = remaining;
+            } else {
+                request = slice;
+                p.amount = slice;
+            }
+        }
+        p.nonceDead = settlement.isNonceCancelled(o.maker, o.nonce);
+        address filler = _actor(actorSeed);
+        _ledgerOpen(p.ledger, filler);
+        _expectFill(p.ledger, p.i, p.amount);
+        _allowFillCells(p.i);
+
+        bytes memory sig = _signWith(o, makerPks[_makerIdxOf(o.maker)]);
+        if (entry < 2) {
+            vm.prank(filler);
+            try settlement.fillUpTo(o, sig, request, address(0), 0, "") returns (
+                uint256 delta, uint256[] memory, uint256[] memory paid
+            ) {
+                if (delta != p.amount) _rec(F_FILL, "fillUpTo executed a size off its clamp, order", p.i);
+                _checkSettledFill(p, paid);
+            } catch {}
+        } else if (entry < 4) {
+            vm.prank(filler);
+            try settlement.fillWithCallback(o, sig, request, address(0), "", CallbackMode.PreDelivery) returns (
+                uint256[] memory outs
+            ) {
+                _checkSettledFill(p, outs);
+            } catch {}
+        } else if (entry == 4) {
+            Order[] memory os = new Order[](1);
+            os[0] = o;
+            bytes[] memory ss = new bytes[](1);
+            ss[0] = sig;
+            uint256[] memory as_ = new uint256[](1);
+            as_[0] = request;
+            vm.prank(filler);
+            try settlement.batchFill(os, ss, as_, true, new uint256[](1), new bytes[](1)) returns (
+                uint256[][] memory outs, bool[] memory
+            ) {
+                _checkSettledFill(p, outs[0]);
+            } catch {}
+        } else {
+            vm.prank(filler);
+            try settlement.fill(o, sig, request) returns (uint256[] memory outs) {
+                _checkSettledFill(p, outs);
+            } catch {}
+        }
         _close(before);
     }
 

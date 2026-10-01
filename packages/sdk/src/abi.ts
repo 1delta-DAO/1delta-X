@@ -200,19 +200,10 @@ export const SETTLEMENT_ABI = [
       { name: "batch", type: "tuple", components: permitBatchComponents },
       { name: "sig", type: "bytes" },
       { name: "fillAmountIn", type: "uint256" },
-    ],
-    outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
-  },
-  // fillWithPermit overload with a trailing `takerData` blob (see the fill overload).
-  {
-    type: "function",
-    name: "fillWithPermit",
-    stateMutability: "nonpayable",
-    inputs: [
-      orderArg,
-      { name: "batch", type: "tuple", components: permitBatchComponents },
-      { name: "sig", type: "bytes" },
-      { name: "fillAmountIn", type: "uint256" },
+      // The filler's price floor on the resolved bump (bps of the band; 0 = none),
+      // exactly fillUpTo's. Since 2026-09-30 this is the ONLY fillWithPermit entry:
+      // the 4-arg and (…, takerData) overloads were replaced by it.
+      { name: "minBumpBps", type: "uint256" },
       { name: "takerData", type: "bytes" },
     ],
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
