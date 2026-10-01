@@ -258,10 +258,29 @@ contract AaveV3RepayModule is IMakerModule, IFundingSource {
 // explicitly (as 0 = Exact) when including the permit block so the offsets
 // are unambiguous.
 //
-// Exact: `abi.encode(pool, asset, aToken[, BalanceMode(0)[, deadline, v, r, s]])`
+// Exact: `abi.encode(pool, asset, aToken[, BalanceMode(0)[, deadline, v, r, s[, signedValue]]])`
 //   — BalanceMode at 96, permit block at 128 (EXACT mode only).
-// Full:  `abi.encode(pool, asset, aToken, BalanceMode(1), totalAmount)`
-//   — BalanceMode at 96, `totalAmount` at 128 and MANDATORY.
+// Full:  `abi.encode(pool, asset, aToken, 0xB0DE0001, totalAmount)`
+//   — BalanceMode at 96 as the TAGGED word `DustHandler.encodeMode(Full)` (a bare
+//     `1` reverts `InvalidModeWord`), `totalAmount` at 128 and MANDATORY.
+//
+// ⚠ PRE-v3.5 ROUNDING (Spark and other Aave-v3 forks, Aave v3 itself before v3.5) —
+// 2026-09-30 audit, L-AAVE-1 / G-VENUE_B-3. There an aToken transfer moves
+// `rayDiv(amount, index)` scaled units rounded HALF-UP, and `withdraw` then checks
+// `amount <= rayMul(scaled, index)`. For ~(1 - RAY/index)/2 of all amounts
+// (2.8 % on Spark WETH, 8.7 % on a 1.21-index reserve) the round trip is
+// `amount - 1`, so pulling exactly `amount` and withdrawing `amount` reverted
+// (`NOT_ENOUGH_AVAILABLE_USER_BALANCE`) — a deterministic, venue-side liveness hole.
+// The `Exact` branch therefore MEASURES the aTokens it received; if short, it pulls
+// the minimal top-up (`amount - have + index / 2e27` — enough to move at least one
+// more scaled unit at any index) from the maker, withdraws exactly `amount`, and
+// returns any aToken surplus to the maker. v3.5+ (`rayDivCeil` transfer,
+// `rayMulFloor` balance) never takes the top-up branch. The top-up rides the same
+// aToken allowance, so a maker relying on an EXACT-value aToken permit on a pre-3.5
+// venue should sign `signedValue` with a few wei of headroom.
+//
+// ⚠ ISOLATION MODE (L-AAVE-3): this module only withdraws; see the README for
+// the supply-side isolation-mode caveat that affects the deposit/leverage ops.
 //   — `totalAmount` is the item's full maker-signed amount; {FullFillGuard} asserts
 //     the slice equals it, and FAILS CLOSED when the word is absent
 //     (`PartialFillUnsupported(amount, 0)`). It was previously undeclared here, so
@@ -335,8 +354,7 @@ contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource, I
             // transferFrom on the module's own allowance — the position-access grant
             // lives on the aToken itself, not in Permit3's token book.
             PermitHelper.replayIfPresent(data, 128, aToken, onBehalfOf, address(this), amount);
-            SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), amount);
-            IAaveV3Pool(pool).withdraw(asset, amount, receiver);
+            AaveATokenExactPull.withdrawExact(pool, asset, aToken, onBehalfOf, amount, receiver);
         }
     }
 
@@ -401,3 +419,47 @@ contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource, I
 // The data layout gained a leading op word:
 //   was  `abi.encode(pool, asset, rateMode[, debtToken, deadline, v, r, s])`
 //   now  `abi.encode(uint256(Op.Borrow), pool, asset, rateMode[, ...])`
+
+/// @title AaveATokenExactPull
+/// @notice The `Exact` aToken withdraw, made correct under BOTH aToken rounding
+///         regimes (2026-09-30 audit, L-AAVE-1 / G-VENUE_B-3). See the
+///         {AaveV3WithdrawModule} header for the failure it closes.
+/// @dev Internal library (inlined; no DELEGATECALL). Shared by the v3 withdraw
+///      module only here; the Aave v2 package carries the same body (its pool has
+///      the identical `withdraw` / `getReserveNormalizedIncome` surface).
+library AaveATokenExactPull {
+    /// @dev Pull `amount` aTokens (topping up when the venue's half-up rounding
+    ///      credits `amount - 1`), withdraw exactly `amount` underlying to
+    ///      `receiver`, and return any aToken surplus the top-up left here.
+    function withdrawExact(
+        address pool,
+        address asset,
+        address aToken,
+        address onBehalfOf,
+        uint256 amount,
+        address receiver
+    ) internal {
+        // Pre-pull aToken floor: the module may hold a stray (donated) balance, and
+        // neither the shortfall test nor the surplus return may count it as ours.
+        uint256 aFloor = IERC20(aToken).balanceOf(address(this));
+        SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), amount);
+        uint256 have = IERC20(aToken).balanceOf(address(this)) - aFloor;
+        bool toppedUp;
+        if (have < amount) {
+            // Pre-v3.5 half-up rounding credited `amount - 1`. One more SCALED unit
+            // always suffices (rayMul(q + 1, I) >= amount whenever rayMul(q, I) ==
+            // amount - 1 and I >= RAY), and a transfer of `t` moves at least one
+            // scaled unit once `t > I / (2 * RAY)` — hence `index / 2e27` on top of
+            // the nominal gap (which is 1 wherever I < 2 * RAY).
+            uint256 topUp = amount - have + IAaveV3Pool(pool).getReserveNormalizedIncome(asset) / 2e27;
+            SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), topUp);
+            toppedUp = true;
+        }
+        IAaveV3Pool(pool).withdraw(asset, amount, receiver);
+        if (toppedUp) {
+            // The top-up's unspent scaled units are the maker's, not the module's.
+            uint256 left = IERC20(aToken).balanceOf(address(this));
+            if (left > aFloor) SafeTransferLib.safeTransfer(aToken, onBehalfOf, left - aFloor);
+        }
+    }
+}

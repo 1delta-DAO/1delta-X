@@ -20,7 +20,9 @@ the Aave package handles aTokens.
 `data = abi.encode(cToken, underlying)` for every module. Repay accepts an
 optional trailing `DustHandler.DustAction`; withdraw accepts an optional trailing
 `DustHandler.BalanceMode` (`Full` redeems the whole balance and sweeps the excess
-to the user).
+to the user). `Full` is the **tagged** word `0xB0DE0001`
+(`DustHandler.encodeMode(Full)`) followed by the mandatory `totalAmount`; a bare
+`1` reverts `InvalidModeWord`. The native modules take `abi.encode(cEther[, ...])`.
 
 ### Notes
 
@@ -31,9 +33,17 @@ to the user).
   the user, who holds the collateral receipt.
 - **Withdraw** pulls the user's cTokens first (cTokens are not 1:1 with the
   underlying — the module converts via the accrued exchange rate), then redeems.
+- **Withdraw binds the underlying** to `cToken.underlying()` (`UnderlyingMismatch`
+  otherwise), declares it through `IProceedsAsset`, and requires the measured
+  redeem to cover `amount` in BOTH modes (`ShortWithdraw`): a Compound-v2 fork that
+  charges a redeem fee (Venus core pool with a non-zero `treasuryPercent`) would
+  otherwise have the core bill the gap to the maker's wallet.
 - **Recycle** dust re-mints into the user's position; since the surplus becomes
   the *receipt* token it is handled inline (not via `DustHandler.disposeResidual`),
-  best-effort with a sweep fallback.
+  best-effort with a sweep fallback. The fallback RE-MEASURES the module's balance
+  against its pre-call floor: a maker-chosen cToken can spend the approval and
+  still return an error code, and paying the pre-measured residual then would come
+  out of the module's pre-existing balance (2026-09-30 audit, X-STATIC-1).
 - Compound forks return a `uint` error code (0 == success); each call's code is
   checked and reverts with `CompoundV2Error(code)`.
 

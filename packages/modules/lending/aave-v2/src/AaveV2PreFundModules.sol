@@ -55,8 +55,17 @@ import {IAaveV2Pool} from "./interfaces/IAaveV2.sol";
 //  module funds from its own — a mis-pairing by construction. Both are rejected
 //  up front.
 //
-// `data = abi.encode(forDesc, pool, asset)` — descriptor word FIRST (forDesc@0),
-// the v2 LendingPool @32, the underlying @64; 96 bytes total.
+// Byte map — PER OP (the op rides descriptor bits [244,252)); descriptor word
+// FIRST (forDesc@0), the v2 LendingPool @32, the underlying @64:
+//   Op.Deposit: `abi.encode(forDesc, pool, asset)`                     — 96 bytes.
+//   Op.Repay:   `abi.encode(forDesc, pool, asset, rateMode, debtToken)` — 160 bytes;
+//               rateMode@96, debtToken@128 (read via `data[96:]`). A Repay blob
+//               built from the 96-byte Deposit map reverts in that tail decode.
+//               (Corrected 2026-09-30, G-BYTE_MAP-8: this map used to give only the
+//               96-byte Deposit form for both ops.)
+// The descriptor must be a LEG-REFERENCE pre-fund descriptor carrying the leg's
+// TOKEN in bits [16,176) — a bare `(5 << 253) | j` reverts `ForLegInvalid` in
+// {Base._forSlice}.
 
 
 /// @notice ONE contract for every pre-funded one-sided op on Aave v2.

@@ -9,6 +9,9 @@ interface IAaveV2Pool {
     function borrow(address asset, uint256 amount, uint256 interestRateMode, uint16 referralCode, address onBehalfOf)
         external;
     function repay(address asset, uint256 amount, uint256 rateMode, address onBehalfOf) external returns (uint256);
+    /// @notice The reserve's liquidity index accrued to now (ray) — what an aToken
+    ///         transfer/balance converts scaled units with in this block.
+    function getReserveNormalizedIncome(address asset) external view returns (uint256);
 }
 
 interface IAaveV2CreditDelegation {

@@ -51,4 +51,9 @@ interface ISpokeV4 {
     function setUsingAsCollateral(uint256 reserveId, bool usingAsCollateral, address onBehalfOf) external;
     function getUserSuppliedAssets(uint256 reserveId, address user) external view returns (uint256);
     function getUserTotalDebt(uint256 reserveId, address user) external view returns (uint256);
+    /// @dev Returns the reserve as a STATIC struct whose first word is the
+    ///      `underlying`. Declared without a return type on purpose: only word 0 is
+    ///      read (via a raw staticcall), so the module does not pin the full struct
+    ///      layout, which differs across spoke versions.
+    function getReserve(uint256 reserveId) external view;
 }

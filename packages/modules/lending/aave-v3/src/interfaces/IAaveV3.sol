@@ -11,6 +11,9 @@ interface IAaveV3Pool {
     function repay(address asset, uint256 amount, uint256 interestRateMode, address onBehalfOf)
         external
         returns (uint256);
+    /// @notice The reserve's liquidity index accrued to now (ray) — what an aToken
+    ///         transfer/balance converts scaled units with in this block.
+    function getReserveNormalizedIncome(address asset) external view returns (uint256);
 }
 
 interface IAaveCreditDelegation {

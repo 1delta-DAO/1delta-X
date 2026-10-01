@@ -75,6 +75,37 @@ Because the modules are pool-address-agnostic, the **same** deposit/borrow
 modules drive Aave v3, Spark, or any Aave-v3-fork by passing a different `pool`
 in `data` — which is exactly what the migration flow exploits.
 
+The withdraw module takes an optional trailing `BalanceMode` word (at byte 96):
+`Full` is the **tagged** word `0xB0DE0001` (`DustHandler.encodeMode(Full)`)
+followed by the mandatory `totalAmount`; a bare `1` reverts `InvalidModeWord`.
+
+### Venue-version caveats for forks
+
+- **Pre-v3.5 aToken rounding** (Spark, most Aave-v3 forks, and Aave v3 itself
+  before v3.5). An aToken transfer there moves `rayDiv(amount, index)` scaled
+  units rounded half-up, and `withdraw` checks `amount <= rayMul(scaled, index)`;
+  for ~(1 − RAY/index)/2 of all amounts the round trip is `amount − 1`. The
+  `Exact` withdraw therefore measures the aTokens it received and, when short,
+  pulls the minimal top-up (a few wei, always on the same aToken allowance) before
+  withdrawing exactly `amount`, returning any aToken surplus to the maker. v3.5+
+  never takes that branch. A maker who relies on an EXACT-value aToken permit
+  tail on a pre-3.5 venue should sign `signedValue` with a few wei of headroom.
+- **Isolation mode** (Aave v3.0–v3.6 and forks; removed in v3.7). A first supply
+  of a debt-ceiling (isolated) asset is auto-enabled as collateral only when the
+  SUPPLIER holds `ISOLATED_COLLATERAL_SUPPLIER_ROLE`. These modules supply on the
+  maker's behalf and hold no such role, so a first deposit of an isolated reserve
+  through `AaveV3DepositModule`, `AaveV3PreFundModule` or `AaveV3CreditModule`'s
+  leverage ops lands as a NON-collateral supply. A module cannot fix this:
+  `setUserUseReserveAsCollateral` acts only on `msg.sender` and needs a non-zero
+  balance. Consequences: a plain deposit order leaves supply the maker must
+  enable themselves (exactly as a direct EOA supply would); a leverage order
+  against an isolated reserve reverts at the borrow (no collateral) unless the
+  maker already holds an ENABLED balance of that reserve (then `isFirstSupply` is
+  false and the flag persists) — or, with other collateral enabled, borrows
+  against that other collateral. Order builders should flag reserves with
+  `debtCeiling != 0` on pre-3.7 pools for supply-then-borrow shapes. (2026-09-30
+  audit, L-AAVE-3: documented, not fixable in a module.)
+
 ### One address per grant class
 
 The modules are split by **the standing authorisation a maker has to give them**,

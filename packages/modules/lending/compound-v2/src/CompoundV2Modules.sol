@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
@@ -35,7 +36,17 @@ import {ICErc20} from "./interfaces/ICompoundV2.sol";
 //     to this module through Permit3 (mirrors Aave's aToken approval). The Permit3
 //     taker allowance on `keccak256(data)` caps the per-fill underlying amount.
 //
-//  `data` for every module is `abi.encode(cToken, underlying)`.
+//  `data` for every module STARTS with `abi.encode(cToken, underlying)`; repay
+//  takes an optional trailing `DustHandler.DustAction`, withdraw an optional
+//  trailing `BalanceMode` word (+ the mandatory `totalAmount` under `Full`). The
+//  `Full` word is the TAGGED `DustHandler.encodeMode(BalanceMode.Full)` =
+//  `0xB0DE0001`, never a bare `1` (which reverts `InvalidModeWord`).
+//
+//  The withdraw module BINDS `underlying` to `cToken.underlying()` (2026-09-30
+//  audit, L-CV2-4): proceeds are measured as a balance delta of the token named
+//  in `data`, so a mis-encoded token would read 0, forward 0, strand the real
+//  redeemed underlying here forever, and leave the core to bill the whole input
+//  leg to the maker's wallet.
 //
 //  Compound forks return a `uint` error code (0 == success); every call's code is
 //  checked and reverts with `CompoundV2Error(code)` on failure.
@@ -212,10 +223,23 @@ contract CompoundV2RepayModule is IMakerModule {
                 if (left > floor) SafeTransferLib.safeTransfer(underlying, onBehalfOf, left - floor);
                 return;
             }
-            // Mint reverted / returned an error (paused, deprecated market) — the
-            // underlying was not consumed; fall through to the sweep floor.
+            // Mint reverted or returned an error code (paused, deprecated market).
+            // ⚠ RE-MEASURE, NEVER PAY THE PRE-CALL `residual` (2026-09-30 audit,
+            // X-STATIC-1). A call that did NOT revert but returned a non-zero code
+            // is a THIRD state the shared {DustHandler.disposeResidual} never has
+            // (its fall-through is reached only after a revert, which rolls any pull
+            // back): `cToken` is maker-chosen on this shared singleton, so it can
+            // spend the approval above and THEN report failure. Paying the stale
+            // `residual` here paid it a second time, out of `floor` — the module's
+            // pre-existing balance — which broke F19's "the module ends where it
+            // started". Sweep only what of THIS call's delta is still here.
+            uint256 remaining = IERC20(underlying).balanceOf(address(this));
+            if (remaining > floor) SafeTransferLib.safeTransfer(underlying, onBehalfOf, remaining - floor);
+            return;
         }
 
+        // SweepToUser: nothing external ran since `bal` was read, so `residual` is
+        // still exactly this call's delta.
         SafeTransferLib.safeTransfer(underlying, onBehalfOf, residual);
     }
 }
@@ -237,14 +261,24 @@ contract CompoundV2RepayModule is IMakerModule {
 // the underlying excess back to the user. Fill-or-kill only, and only after debt
 // is cleared — the close-flow withdraw leg.
 //
-// `data = abi.encode(cToken, underlying[, DustHandler.BalanceMode])`.
+// `data = abi.encode(cToken, underlying[, DustHandler.BalanceMode[, totalAmount]])`.
 //
 //   — base = 64; BalanceMode@64; total@96 (MANDATORY under `Full`).
-contract CompoundV2WithdrawModule is ITakerModule {
+//   — `Full` is the tagged word `0xB0DE0001` (`DustHandler.encodeMode(Full)`).
+//
+// BOTH branches require the measured delivery to cover `amount` (I-8). On `Exact`
+// the venue call is sized at this fill's slice, so the bound cannot misfire on a
+// partial fill; it turns a redeem that pays the module LESS than requested (a
+// Compound-v2 fork charging a redeem fee — e.g. a Venus core-pool vToken with a
+// non-zero `treasuryPercent`, G-VENUE_A-2 — or a fee-on-transfer underlying) into
+// a revert instead of a silent wallet pull of the gap by the core.
+contract CompoundV2WithdrawModule is ITakerModule, IProceedsAsset {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
     error CompoundV2Error(uint256 code);
+    /// @dev `data`'s `underlying` is not the cToken's real underlying.
+    error UnderlyingMismatch(address signed, address actual);
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
@@ -254,6 +288,11 @@ contract CompoundV2WithdrawModule is ITakerModule {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         (address cToken, address underlying) = abi.decode(data, (address, address));
+        // Bind the signed token to the venue's (L-CV2-4) — see the file header.
+        {
+            address actual = ICErc20(cToken).underlying();
+            if (actual != underlying) revert UnderlyingMismatch(underlying, actual);
+        }
 
         if (DustHandler.readBalanceMode(data, 64) == DustHandler.BalanceMode.Full) {
             // `Full` liquidates the user's ENTIRE live balance, so it cannot be
@@ -305,15 +344,28 @@ contract CompoundV2WithdrawModule is ITakerModule {
             uint256 err = ICErc20(cToken).redeemUnderlying(amount);
             if (err != 0) revert CompoundV2Error(err);
             uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+            // Fail closed on a short delivery. The old comment here claimed a short
+            // "fails the fill's output check downstream" — FALSE: a withdraw item
+            // funds an INPUT leg, and {Core._payInputsToSolver} bills `owed -
+            // proceeds` to the MAKER'S WALLET. Safe on a slice: `redeemUnderlying`
+            // is sized at `amount`, so an honest venue delivers exactly it.
+            // (2026-09-30 audit, L-CV2-1 / G-VENUE_A-2.)
+            FullFillGuard.requireDelivered(received, amount);
             // Deliver the measured proceeds, capped at the signed amount; any excess
-            // goes to the maker below. Never exceeds `received`, so a short delivery
-            // (a fake/under-delivering venue) can never be topped up from a stray
-            // balance the module holds — it simply delivers less and the fill's
-            // output check fails downstream. Replaces a `received >= amount` gate.
+            // goes to the maker below. Never exceeds `received`, so a stray balance
+            // the module holds is never paid out.
             SafeTransferLib.safeTransfer(underlying, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(underlying, onBehalfOf, received - amount);
             uint256 cBalNow = IERC20(cToken).balanceOf(address(this));
             if (cBalNow > cFloor) SafeTransferLib.safeTransfer(cToken, onBehalfOf, cBalNow - cFloor);
         }
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The UNDERLYING (word 1) — what lands on `receiver`; the cToken is what
+    ///      this module pulls IN to burn. Lets {SettlementLens} run the F22
+    ///      stranded-proceeds preflight on this module (L-CMT-6).
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (, asset) = abi.decode(data, (address, address));
     }
 }

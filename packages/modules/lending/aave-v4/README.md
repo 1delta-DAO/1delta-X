@@ -29,7 +29,33 @@ reserves are keyed by a `reserveId` rather than an asset+pool pair:
 asset)`. `asset` is the underlying ERC20: a maker module pulls it via Permit3, a
 taker module forwards it to `receiver`, and it is part of `keccak256(data)` — the
 taker-allowance ref — so the bytes the maker authorised pin down the exact
-position.
+position. The withdraw module takes an optional trailing `BalanceMode` word:
+`Full` is the **tagged** word `0xB0DE0001` (`DustHandler.encodeMode(Full)`)
+followed by the mandatory `totalAmount`; a bare `1` reverts `InvalidModeWord`.
+
+### Venue semantics the taker modules guard against
+
+- **The spoke clamps withdraws.** `Spoke.withdraw` returns
+  `min(amount, suppliedAssets)` instead of reverting on a short position. Both
+  withdraw modes therefore `requireDelivered(received, amount)` and revert
+  `ShortWithdraw` on a short delivery — otherwise the core would pull the gap from
+  the maker's **wallet** (a withdraw item funds an input leg; no "output check"
+  catches it). `Exact` is sized at the fill's slice, so the bound cannot misfire on
+  a partial fill; to close a whole position use `Full` (an `Exact` withdraw of the
+  entire position can come back 1 wei short from share rounding).
+- **`asset` is bound to the reserve.** Both taker modules check `asset` against
+  `spoke.getReserve(reserveId)`'s underlying and revert `UnderlyingMismatch`, so a
+  mis-encoded blob cannot strand the real proceeds on the module.
+- **`Full` needs a TakerPM grant covering the live position.** `Full` asks the PM
+  for `getUserSuppliedAssets(...)`, not the signed amount, and the PM checks its
+  `approveWithdraw` allowance against the REQUESTED amount. A grant sized to the
+  item (or to the position at signing — it keeps accruing) reverts
+  `InsufficientWithdrawAllowance`. Grant `type(uint256).max` or a padded cap for
+  `Full` orders; it gives no filler more (only this module can spend it, only
+  through the Permit3 taker book, and everything above `amount` returns to the
+  maker).
+- Both taker modules implement `IProceedsAsset`, so `SettlementLens` runs the
+  stranded-proceeds preflight on them.
 
 ## Modules (`src/`)
 
@@ -73,6 +99,8 @@ pnpm --filter @1delta-x/modules-aave-v4 test
 forge test --match-path 'packages/modules-aave-v4/**'
 ```
 
-Coverage: deposit+borrow (leverage), repay with over-repay dust refund, and
-withdraw. A reliable archive RPC is recommended for the pinned block, e.g.
+Coverage: deposit+borrow (leverage), repay with over-repay dust refund and
+Recycle, Exact and `Full` withdraw (including a short position and an item-sized
+TakerPM grant), the reserve binding, the caller gates of all five modules, and
+the pre-fund descriptor gates ([`test/security/Audit20260930AaveV4.t.sol`](test/security/Audit20260930AaveV4.t.sol)). A reliable archive RPC is recommended for the pinned block, e.g.
 `ETH_RPC_URL=https://eth-mainnet.public.blastapi.io`.

@@ -26,9 +26,14 @@ modules** — deposit and repay both `supplyTo`, withdraw and borrow both
 `withdrawFrom`. The distinct addresses give each leg its own Permit3
 module/ref namespace, exactly like the Aave package.
 
-Every module's `data` is `abi.encode(comet, asset)` — no `rateMode` (Comet has a
-single rate) and no receipt token (positions are internal to Comet, read via
-`balanceOf` / `borrowBalanceOf` / `collateralBalanceOf`).
+The maker modules' `data` is `abi.encode(comet, asset)` (plus optional trailing
+fields) — no `rateMode` (Comet has a single rate) and no receipt token (positions
+are internal to Comet, read via `balanceOf` / `borrowBalanceOf` /
+`collateralBalanceOf`). The fused taker module's `data` is **op-prefixed**:
+`abi.encode(uint8 op, comet, asset[, BalanceMode[, totalAmount]][, allow-by-sig])`
+— see the byte map in [`src/CompoundV3Modules.sol`](src/CompoundV3Modules.sol).
+`BalanceMode.Full` is the **tagged** word `0xB0DE0001`
+(`DustHandler.encodeMode(Full)`); a bare `1` reverts `InvalidModeWord`.
 
 ## How a module plugs into a fill
 
@@ -166,6 +171,9 @@ items = [MAKE repay(USDC-Comet), TAKE withdraw(USDC-Comet)→maker, MAKE deposit
   the `onBehalfOf` function argument, not an attacker-controllable field of
   `data`, closing the "redirect the dust" vector without needing a sender gate.
   A reentrancy lock guards against weird-token transfer hooks.
+- **Proceeds are declared.** `CometTakerModule` implements `IProceedsAsset`
+  (`asset`, both ops), so `SettlementLens.validateOrder` runs the F22
+  stranded-proceeds preflight on it instead of silently skipping it.
 - **Post-fill invariants.** Orders can carry `IOrderValidator` invariants that run
   after all items execute; a failing one reverts the whole fill and rolls maker
   state back (`test/limit-orders/Invariants.t.sol`).

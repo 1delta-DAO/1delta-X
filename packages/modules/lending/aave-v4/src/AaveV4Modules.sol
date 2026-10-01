@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -24,6 +25,14 @@ import {IGiverPositionManager, ITakerPositionManager, ISpokeV4} from "./interfac
 // module forwards it to `receiver` (the taker PMs have no receiver parameter, so
 // proceeds land here first). It is also part of `keccak256(data)`, the taker
 // allowance ref, so the bytes the user authorised pin down the exact position.
+//
+// The TAKER modules additionally BIND `asset` to the spoke's reserve underlying
+// (`spoke.getReserve(reserveId)`, word 0) — 2026-09-30 audit, L-CV2-4. Proceeds are
+// measured as a balance delta of the SIGNED `asset`; a mis-encoded one read 0,
+// forwarded 0, stranded the real withdrawn/borrowed underlying on this shared
+// singleton forever and left the core to bill the whole input leg to the maker's
+// wallet. The maker modules fail closed on the same mistake unaided (the PM pulls
+// the real underlying, which the module never approved).
 
 // ──────────────────── Aave v4 deposit maker module ────────────────────
 //
@@ -220,17 +229,38 @@ contract AaveV4RepayModule is IMakerModule {
 // `receiver`, and sweep the accrued excess back to `onBehalfOf`. Fill-or-kill
 // only, and only after debt is cleared.
 //
+// ⚠ `Full` NEEDS A TakerPM GRANT COVERING THE WHOLE LIVE POSITION (L-CV2-3). It
+// asks the PM to withdraw `getUserSuppliedAssets(...)` — not the signed `amount` —
+// and the PM checks `approveWithdraw` allowance >= the REQUESTED amount before the
+// spoke call. A grant sized to the item (or to the position at signing time: it
+// keeps accruing) reverts `InsufficientWithdrawAllowance`. Grant
+// `type(uint256).max` (infinite, not decremented) or a padded cap. The extra grant
+// gives no filler more: only this module can spend it, only through Permit3's
+// taker book, and everything above `amount` goes back to `onBehalfOf`.
+//
+// ⚠ THE VENUE CLAMPS, SO `Exact` CARRIES THE DELIVERY BOUND TOO (L-CV2-1). The v4
+// `Spoke.withdraw` computes `withdrawnAmount = min(amount, suppliedAssets)` and does
+// NOT revert on a short position, and the TakerPM forwards whatever it got. A
+// short position therefore under-delivered silently and {Core._payInputsToSolver}
+// pulled `owed - proceeds` from the MAKER'S WALLET — wallet funds sold under an
+// order signed as a position exit, at a moment the filler picks. Both branches now
+// `requireDelivered`; on `Exact` the PM call is sized at this fill's slice, so an
+// honest position returns exactly `amount` and the bound cannot misfire. (An
+// `Exact` withdraw of the ENTIRE position can come back 1 wei short from the
+// spoke's share rounding — use `Full` to close a position.)
+//
 // Exact: `abi.encode(spoke, positionManager, reserveId, asset[, BalanceMode(0)])`
 //   — BalanceMode at 128.
-// Full:  `abi.encode(spoke, positionManager, reserveId, asset, BalanceMode(1), totalAmount)`
-//   — BalanceMode at 128, `totalAmount` at 160 and MANDATORY.
+// Full:  `abi.encode(spoke, positionManager, reserveId, asset, 0xB0DE0001, totalAmount)`
+//   — BalanceMode at 128 as the TAGGED word `DustHandler.encodeMode(Full)` (a bare
+//     `1` reverts `InvalidModeWord`), `totalAmount` at 160 and MANDATORY.
 //   — `totalAmount` is the item's full maker-signed amount; {FullFillGuard} asserts
 //     the slice equals it and FAILS CLOSED when the word is absent
 //     (`PartialFillUnsupported(amount, 0)`). It was previously undeclared here, so
 //     a maker encoding `Full` from this map signed an order no filler could ever
 //     settle. Declared in F25 (lead A-2).
 //
-contract AaveV4WithdrawModule is ITakerModule {
+contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -244,6 +274,7 @@ contract AaveV4WithdrawModule is ITakerModule {
 
         (address spoke, address positionManager, uint256 reserveId, address asset) =
             abi.decode(data, (address, address, uint256, address));
+        AaveV4ReserveBinding.requireUnderlying(spoke, reserveId, asset);
 
         if (DustHandler.readBalanceMode(data, 128) == DustHandler.BalanceMode.Full) {
             // `Full` liquidates the user's ENTIRE live balance, so it cannot be
@@ -284,17 +315,28 @@ contract AaveV4WithdrawModule is ITakerModule {
             uint256 balBefore = IERC20(asset).balanceOf(address(this));
             ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
             uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+            // The v4 spoke CLAMPS a withdraw to the supplied balance instead of
+            // reverting, so a short position delivers less here — and the core then
+            // bills `owed - proceeds` to the MAKER'S WALLET (no "output check" catches
+            // it: a withdraw item funds an INPUT leg). Fail closed. Sized at this
+            // fill's slice, so it cannot misfire on a partial fill. (2026-09-30
+            // audit, L-CV2-1: the `Exact` sibling of the F28 #4 `Full` fix.)
+            FullFillGuard.requireDelivered(received, amount);
             // Deliver the measured proceeds, capped at the signed amount; any excess
-            // goes to the maker below. Never exceeds `received`, so a short delivery
-            // (a fake/under-delivering venue) can never be topped up from a stray
-            // balance the module holds — it simply delivers less and the fill's
-            // output check fails downstream. Replaces a `received >= amount` gate.
+            // goes to the maker below. Never exceeds `received`, so a stray balance
+            // the module holds is never paid out.
             SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
             // A withdraw that over-delivers (rounding in the user's favour) must
             // not leave the surplus parked in the module for the next fill to
             // sweep — it belongs to the position owner.
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         }
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The underlying `asset` (word 3) — what lands on `receiver` (L-CMT-6).
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (,,, asset) = abi.decode(data, (address, address, uint256, address));
     }
 }
 
@@ -306,7 +348,10 @@ contract AaveV4WithdrawModule is ITakerModule {
 // `approveBorrow(spoke, reserveId, module, cap)` so the PM permits the module to
 // incur debt on their account.
 //
-contract AaveV4BorrowModule is ITakerModule {
+// `data = abi.encode(spoke, positionManager, reserveId, asset)`; `asset` is bound to
+// the spoke's reserve underlying (L-CV2-4, see the file header).
+//
+contract AaveV4BorrowModule is ITakerModule, IProceedsAsset {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -320,6 +365,7 @@ contract AaveV4BorrowModule is ITakerModule {
 
         (address spoke, address positionManager, uint256 reserveId, address asset) =
             abi.decode(data, (address, address, uint256, address));
+        AaveV4ReserveBinding.requireUnderlying(spoke, reserveId, asset);
 
         // Borrow lands the proceeds of `asset` at this module (the caller). Measure
         // the delta rather than assuming the requested `amount` arrived: an
@@ -335,5 +381,30 @@ contract AaveV4BorrowModule is ITakerModule {
         SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
         // Any excess is the user's, not the next fill's.
         if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The underlying `asset` (word 3) — what lands on `receiver` (L-CMT-6).
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (,,, asset) = abi.decode(data, (address, address, uint256, address));
+    }
+}
+
+/// @title AaveV4ReserveBinding
+/// @notice Binds a taker module's signed `asset` to the spoke reserve's underlying
+///         (2026-09-30 audit, L-CV2-4). See the file header.
+/// @dev `Spoke.getReserve(reserveId)` returns a STATIC struct whose word 0 is the
+///      `underlying` (verified on the live Main Spoke; the remaining fields vary by
+///      spoke version and are deliberately not decoded). A spoke that does not answer
+///      — or answers short — fails closed: the module cannot prove which token the
+///      PM will pay in, and the delta measurement depends on it.
+library AaveV4ReserveBinding {
+    error UnderlyingMismatch(address signed, address actual);
+
+    function requireUnderlying(address spoke, uint256 reserveId, address asset) internal view {
+        (bool ok, bytes memory ret) = spoke.staticcall(abi.encodeWithSelector(ISpokeV4.getReserve.selector, reserveId));
+        address actual;
+        if (ok && ret.length >= 32) actual = abi.decode(ret, (address));
+        if (actual != asset) revert UnderlyingMismatch(asset, actual);
     }
 }

@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -201,8 +202,13 @@ contract CompoundV2NativeRepayModule is IMakerModule {
 // forwards WETH to `receiver` — so the value re-enters the ERC20 settlement flow
 // (solver payout or the maker's wallet). `data = abi.encode(cEther[, BalanceMode])`.
 // `data = abi.encode(cEther[, DustHandler.BalanceMode[, total]])` — base = 32; BalanceMode@32;
-// total@64 (MANDATORY under `Full`).
-contract CompoundV2NativeWithdrawModule is ITakerModule {
+// total@64 (MANDATORY under `Full`). `Full` is the tagged word `0xB0DE0001`.
+//
+// BOTH branches require the measured delivery to cover `amount` (I-8): a fork whose
+// native market charges a redeem fee (Venus core-pool vBNB with a non-zero
+// `treasuryPercent`) pays the module less than `redeemUnderlying(amount)` asked for,
+// and the core would otherwise bill the gap to the maker's wallet (G-VENUE_A-2).
+contract CompoundV2NativeWithdrawModule is ITakerModule, IProceedsAsset {
     IPermit3 public immutable permit3;
     IWETH public immutable weth;
 
@@ -276,6 +282,10 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
             // this out of the module's OWN resident WETH — and `_sweepWeth`'s
             // `bal > floor` then declines silently instead of catching the deficit.
             uint256 received = address(this).balance - ethFloor;
+            // Fail closed on a short redeem rather than letting the core bill the gap
+            // to the maker's wallet. Sized at the slice, so it cannot misfire on a
+            // partial fill (2026-09-30 audit, G-VENUE_A-2).
+            FullFillGuard.requireDelivered(received, amount);
             weth.deposit{value: received}();
             SafeTransferLib.safeTransfer(address(weth), receiver, received < amount ? received : amount);
             uint256 cBalNow = IERC20(cEther).balanceOf(address(this));
@@ -291,6 +301,13 @@ contract CompoundV2NativeWithdrawModule is ITakerModule {
     function _sweepWeth(address to, uint256 floor) private {
         uint256 bal = SafeTransferLib.balanceOf(address(weth), address(this));
         if (bal > floor) SafeTransferLib.safeTransfer(address(weth), to, bal - floor);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The redeemed ETH is wrapped before it is forwarded, so the proceeds are
+    ///      always this module's immutable `weth` (L-CMT-6).
+    function proceedsAsset(bytes calldata) external view override returns (address asset) {
+        return address(weth);
     }
 
     receive() external payable {} // ETH from cEther.redeem*

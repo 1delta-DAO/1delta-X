@@ -241,10 +241,13 @@ contract AaveV3CreditModule is
 
         // Measure the borrow's delta (`balBefore` excludes any residue) and deliver
         // that measured amount, capped at `amount` — never a nominal top-up from a
-        // stray balance. A short/fake-pool borrow therefore delivers less and fails
-        // the fill's output check downstream rather than socialising residue (the H-3
-        // River shape). No FoT/rebasing borrow reserves by policy; see
-        // module-security-model.
+        // stray balance, so residue is never socialised (the H-3 River shape).
+        // ⚠ A short delivery is NOT caught downstream (corrected 2026-09-30,
+        // L-CV2-1.v3 / L-CV2-7): the proceeds fund an INPUT leg, and
+        // {Core._payInputsToSolver} bills `owed - proceeds` to the MAKER'S WALLET.
+        // Cap-only is right here because Aave v3 `borrow` is exact-or-revert (it
+        // either transfers `amount` or reverts) and FoT/rebasing borrow reserves are
+        // out of scope by policy; see module-security-model.
         uint256 balBefore = IERC20(borrowAsset).balanceOf(address(this));
         IAaveV3Pool(pool).borrow(borrowAsset, amount, rateMode, 0, onBehalfOf);
         uint256 received = IERC20(borrowAsset).balanceOf(address(this)) - balBefore;

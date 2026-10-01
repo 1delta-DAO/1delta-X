@@ -7,6 +7,8 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
@@ -198,8 +200,22 @@ contract AaveV2RepayModule is IMakerModule {
 //     compares the slice against, and it FAILS CLOSED when absent — so a `Full`
 //     order encoded from a map that omits it is one no filler can ever settle.
 //     (Was undeclared here; the same F25/A-2 drift already corrected on aave-v3.)
+//   — `Full` is the TAGGED word `0xB0DE0001` (`DustHandler.encodeMode(Full)`); a
+//     bare `1` reverts `InvalidModeWord`.
 //
-contract AaveV2WithdrawModule is ITakerModule {
+// ⚠ AAVE V2 ROUNDS aToken TRANSFERS HALF-UP (2026-09-30 audit, L-AAVE-1). A
+// transfer moves `rayDiv(amount, index)` scaled units and `withdraw` then checks
+// `amount <= rayMul(scaled, index)`; for ~(1 - RAY/index)/2 of all amounts (8.7 %
+// at a 1.21 index) that round trip is `amount - 1`, so pulling exactly `amount`
+// and withdrawing `amount` reverted `VL_NOT_ENOUGH_AVAILABLE_USER_BALANCE`. The
+// `Exact` branch measures what it received, tops up the minimal shortfall from the
+// maker when short, withdraws exactly `amount`, and returns any aToken surplus.
+//
+// Implements {IProceedsAsset} (the underlying) and {IPositionSource} (the maker's
+// aToken balance — 1:1 with the underlying), so the lens can preflight it and a
+// {PositionFillModule} can size a v2 exit (L-AAVE-5).
+//
+contract AaveV2WithdrawModule is ITakerModule, IProceedsAsset, IPositionSource {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -241,7 +257,7 @@ contract AaveV2WithdrawModule is ITakerModule {
             // drain. Direct-to-destination needed neither, which is why it was the shape
             // until the split measured cheaper.
             uint256 floor = IERC20(asset).balanceOf(address(this));
-            uint256 bal = IERC20(aToken).balanceOf(onBehalfOf);
+            (, uint256 bal) = positionOf(onBehalfOf, data);
             SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), bal);
             IAaveV2Pool(pool).withdraw(asset, bal, address(this));
             uint256 received = IERC20(asset).balanceOf(address(this)) - floor;
@@ -254,10 +270,32 @@ contract AaveV2WithdrawModule is ITakerModule {
             SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
             if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
         } else {
-            // Direct ERC-20 pull on the module's own allowance (not Permit3).
-            SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), amount);
-            IAaveV2Pool(pool).withdraw(asset, amount, receiver);
+            // Direct ERC-20 pull on the module's own allowance (not Permit3), sized so
+            // the venue's half-up rounding can never leave it 1 wei short (L-AAVE-1).
+            AaveV2ATokenExactPull.withdrawExact(pool, asset, aToken, onBehalfOf, amount, receiver);
         }
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The UNDERLYING (word 1) — what lands on `receiver`.
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (, asset) = abi.decode(data, (address, address));
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev v2 aTokens rebase 1:1 with the underlying, so the aToken balance is
+    ///      already in `asset` units — the raw position, NOT bounded by this
+    ///      module's allowance (a short approval must make the fill revert, not
+    ///      quietly sell a fraction; same rationale as the v3 module).
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        address aToken;
+        (, asset, aToken) = abi.decode(data, (address, address, address));
+        amount = IERC20(aToken).balanceOf(user);
     }
 }
 
@@ -270,7 +308,7 @@ contract AaveV2WithdrawModule is ITakerModule {
 //
 // `data = abi.encode(pool, asset, rateMode)`  (rateMode: 1 = stable, 2 = variable)
 //
-contract AaveV2BorrowModule is ITakerModule {
+contract AaveV2BorrowModule is ITakerModule, IProceedsAsset {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -295,9 +333,55 @@ contract AaveV2BorrowModule is ITakerModule {
         // Deliver the measured proceeds, capped at the signed amount; any excess
         // goes to the maker below. Never exceeds `received`, so a short delivery
         // (a fake/under-delivering venue) can never be topped up from a stray
-        // balance the module holds — it simply delivers less and the fill's
-        // output check fails downstream. Replaces a `received >= amount` gate.
+        // balance the module holds.
+        // ⚠ A short is NOT caught downstream (corrected 2026-09-30, L-CV2-1.v3): the
+        // proceeds fund an INPUT leg and {Core._payInputsToSolver} bills `owed -
+        // proceeds` to the MAKER'S WALLET. Cap-only is right here only because the
+        // Aave v2 `borrow` is exact-or-revert for the reserves this targets.
         SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(asset, onBehalfOf, received - amount);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The borrowed `asset` (word 1) — what lands on `receiver`.
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (, asset) = abi.decode(data, (address, address));
+    }
+}
+
+/// @title AaveV2ATokenExactPull
+/// @notice The `Exact` aToken withdraw, correct under Aave v2's half-up aToken
+///         rounding (2026-09-30 audit, L-AAVE-1). See the {AaveV2WithdrawModule}
+///         header. Internal library (inlined; no DELEGATECALL); the aave-v3 package
+///         carries the same body for pre-v3.5 forks.
+library AaveV2ATokenExactPull {
+    function withdrawExact(
+        address pool,
+        address asset,
+        address aToken,
+        address onBehalfOf,
+        uint256 amount,
+        address receiver
+    ) internal {
+        // Pre-pull aToken floor: a stray (donated) balance is neither counted toward
+        // this pull nor returned to this maker.
+        uint256 aFloor = IERC20(aToken).balanceOf(address(this));
+        SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), amount);
+        uint256 have = IERC20(aToken).balanceOf(address(this)) - aFloor;
+        bool toppedUp;
+        if (have < amount) {
+            // Half-up rounding credited `amount - 1`. One more SCALED unit always
+            // suffices (rayMul(q + 1, I) >= amount whenever rayMul(q, I) == amount - 1
+            // and I >= RAY), and a transfer of `t` moves at least one scaled unit once
+            // `t > I / (2 * RAY)` — hence `index / 2e27` on top of the nominal gap.
+            uint256 topUp = amount - have + IAaveV2Pool(pool).getReserveNormalizedIncome(asset) / 2e27;
+            SafeTransferLib.safeTransferFrom(aToken, onBehalfOf, address(this), topUp);
+            toppedUp = true;
+        }
+        IAaveV2Pool(pool).withdraw(asset, amount, receiver);
+        if (toppedUp) {
+            uint256 left = IERC20(aToken).balanceOf(address(this));
+            if (left > aFloor) SafeTransferLib.safeTransfer(aToken, onBehalfOf, left - aFloor);
+        }
     }
 }
