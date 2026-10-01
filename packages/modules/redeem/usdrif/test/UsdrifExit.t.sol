@@ -191,10 +191,10 @@ contract UsdrifExitTest is UsdrifForkBase {
 
         Validator[] memory validators = new Validator[](2);
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
-        // Absurd band far above the live MoC quote (~6.85e16 USDRIF per RIF at the
+        // Absurd band far above the live MoC quote (getPACtp ~6.57e16 USDRIF per RIF at the
         // pinned block) → out of band.
         validators[1] = Validator({
-            target: address(bandValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e18), uint256(2e18))
+            target: address(bandValidator), data: abi.encode(MOC_CORE, USDRIF, uint256(1e18), uint256(2e18))
         });
 
         Order memory order = _exitOrder(4, rifIn, usdtOut, validators);
@@ -218,7 +218,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
         // Wide band that brackets the live MoC quote.
         validators[1] = Validator({
-            target: address(bandValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e16), uint256(1e18))
+            target: address(bandValidator), data: abi.encode(MOC_CORE, USDRIF, uint256(1e16), uint256(1e18))
         });
 
         Order memory order = _exitOrder(5, rifIn, usdtOut, validators);
@@ -246,7 +246,7 @@ contract UsdrifExitTest is UsdrifForkBase {
         Validator[] memory validators = new Validator[](2);
         validators[0] = Validator({target: address(settledValidator), data: _settledData(opId, rifIn)});
         validators[1] = Validator({
-            target: address(bandValidator), data: abi.encode(MOC_PRICE_PROVIDER, uint256(1e18), uint256(1e16))
+            target: address(bandValidator), data: abi.encode(MOC_CORE, USDRIF, uint256(1e18), uint256(1e16))
         });
 
         Order memory order = _exitOrder(6, rifIn, usdtOut, validators);

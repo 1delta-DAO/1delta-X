@@ -15,7 +15,9 @@ interface IMocRif {
         payable
         returns (uint256 operId);
 
-    /// @notice Live price of pegged token `tp_` in AC (RIF) terms, 1e18-scaled.
+    /// @notice Live price of pegged token `tp_` in AC (RIF) terms, 1e18-scaled — the
+    ///         price `redeemTP` executes at. Public: the core is the whitelisted
+    ///         reader of its own price provider.
     function getPACtp(address tp_) external view returns (uint256);
 }
 
@@ -63,6 +65,11 @@ interface IMocQueue {
 }
 
 /// @notice Classic MoC price-provider surface: `peek()` returns a 1e18-scaled
+///         price packed in bytes32 plus a validity flag. NOT used by any contract in
+///         this package since audit 2026-09-30 RIF-3 (the documented provider is
+///         frozen, the live one is whitelist-gated): {MocPriceBandValidator} reads
+///         {IMocRif.getPACtp}. Kept for the fork tests and off-chain tooling.
+/// @dev    Original note:
 ///         price packed in bytes32 plus a validity flag.
 interface IPriceProvider {
     function peek() external view returns (bytes32 price, bool has);

@@ -41,17 +41,17 @@ own §2), and this package's contribution is the two order validators.
 | Contract | Role |
 |---|---|
 | `RedemptionSettledValidator` | `IOrderValidator` — passes once the maker's MoC op has been executed *and cleared* (`MocQueue.opersInfo(opId).operType == 0`, bounded by `operIdCount()`) **and** the user holds ≥ `minRif` RIF. Clean revert + binds the exact `opId`. `data = abi.encode(mocQueue, opId, user, minRif)`; RIF is an immutable. |
-| `MocPriceBandValidator` | `IOrderValidator` — passes only while a MoC `IPriceProvider.peek()` quote is inside a signed band. `data = abi.encode(priceProvider, minPrice, maxPrice)`. **Optional, and only worth carrying on a RESTING order** — see the note below. For Chainlink-style feeds, compose the core `ChainlinkPriceGte/Lte` instead: they enforce a signed staleness heartbeat, which `peek()` cannot. |
-| `interfaces/IMoc.sol` | Minimal MoC core / queue / price-provider surfaces. |
+| `MocPriceBandValidator` | `IOrderValidator` — passes only while the MoC core's redemption price `IMocRif(core).getPACtp(tp)` is inside a signed band. `data = abi.encode(mocCore, tp, minPrice, maxPrice)` (BREAKING since audit 2026-09-30 RIF-3: it used to read a `peek()` provider named in `data`, and neither the documented provider — now frozen, `has = false` — nor the one MoC migrated to — whitelist-gated — could ever pass). **Optional, and only worth carrying on a RESTING order** — see the note below. For Chainlink-style feeds, compose the core `ChainlinkPriceGte/Lte` instead: they enforce a signed staleness heartbeat, which `getPACtp` cannot. |
+| `interfaces/IMoc.sol` | Minimal MoC core / queue surfaces (plus the classic `IPriceProvider`, kept only so the fork tests can show the legacy provider is dead). |
 
 Both validators are pure read-only triggers; `target` + `data` are in the order's
 EIP‑712 hash, so the solver cannot alter them.
 
 ### What `MocPriceBandValidator` does and does not protect (renamed 2026‑08‑14)
 
-It was `DepegGuardValidator`, which overstated it. The MoC provider quotes the
-pegged token in **asset-collateral terms** — USDRIF per RIF (~7.09e16 live,
-~6.85e16 at the tests' pinned block), the same rate `getPACtp` exposes. Being
+It was `DepegGuardValidator`, which overstated it. `getPACtp` quotes the
+pegged token in **asset-collateral terms** — USDRIF per RIF (~8.04e16 at block
+9,288,323; ~6.57e16 at the exit suite's pinned block) — the price redemptions execute at. Being
 denominated in USDRIF, it **cannot see a USDRIF depeg**: USDRIF 10% down and RIF
 10% up read identically. It bands the collateral price, and nothing else. A real
 depeg guard needs a USDRIF/USD source, and the decision it informs — redeem at
@@ -62,7 +62,7 @@ Within that, only half the band does work. On a sell order `minPrice` is
 near-redundant (the signed output floor already stops fills at a collapsed price —
 solvers just walk away); `maxPrice` is the half that earns its gas, capping the
 free option a resting order hands solvers when the collateral rallies after
-signing. And `peek()` has no `updatedAt`, so a frozen feed reads in-band forever:
+signing. And `getPACtp` has no `updatedAt`, so a frozen feed reads in-band forever:
 this is cover against slow drift, not against a fast move on a stale quote. Bound
 that with a short expiry.
 
@@ -77,7 +77,7 @@ Net: skip it for an order that fills within seconds, carry it on a resting one.
 | USDT0 (6 dec) | `0x779Ded0c9e1022225f8E0630b35a9b54bE713736` |
 | MoC RIF core (proxy) | `0xA27024Ed70035E46dba712609fc2Afa1c97aA36A` |
 | MoC queue (proxy) | `0x47f5014115d3bb29B20b5168Ee75050D6f8c3Bf1` |
-| MoC price provider — `peek()` = **USDRIF per RIF** (~7.09e16), *not* USDRIF/USD | `0x6a5b2C84E63b5C1330bf4CcCff1Ad6F23116CC14` |
+| LEGACY MoC price provider — frozen since ~2026-09-22 (`peek()` returns `has = false`); MoC re-pointed the bucket to `0xaFb1B8C320ACc776c1279bcDB24Ab8F84aB727A4`, which only the core may read. Not used by any contract here any more. | `0x6a5b2C84E63b5C1330bf4CcCff1Ad6F23116CC14` |
 | Multi-collateral guard (executes the queue) | `0x0237Ad1f0831b479a344E56646BC48B0885cF46F` |
 
 - `redeemTP(tp, qTP, qACmin, recipient, vendor)` is **payable**; `msg.value` must
@@ -90,12 +90,12 @@ Net: skip it for an order that fills within seconds, carry it on a resting one.
   past **dequeued** ops, which is enough for off-chain tracking; the on-chain
   validator uses the stricter `opersInfo(opId).operType == 0` (executed *and*
   deleted), since a dequeued op may have errored and refunded.
-- The price provider exposes no AggregatorV3 surface — `latestRoundData()`
-  reverts on mainnet, which is why `MocPriceBandValidator` reads `peek()`.
+- MoC price providers expose no AggregatorV3 surface — `latestRoundData()`
+  reverts on mainnet — and the live one is whitelist-gated, which is why `MocPriceBandValidator` reads the core's public `getPACtp` (audit 2026-09-30 RIF-3).
 
 ## Tests
 
-Forked Rootstock mainnet (chain id 30, pinned block 8_920_000). Set `RSK_RPC_URL`
+Forked Rootstock mainnet (chain id 30, pinned block 8_920_000; `Audit20260930MocBand.t.sol` pins the post-migration block 9_288_000 so the price band is proven against TODAY's MoC wiring). Set `RSK_RPC_URL`
 to use your own archive node; otherwise public RSK RPCs are tried.
 
 ```
