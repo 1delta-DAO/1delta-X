@@ -611,8 +611,13 @@ library DutchAuction {
             // not an auction tick — and on such a leg `e0` is the maker's cap, not a
             // ramp endpoint, so feeding the pair to `inTick` would either revert
             // ({InvalidAuctionParams}, since the marker exceeds any cap) or return
-            // the raw marker. Resolve it the same way the settler does.
+            // the raw marker. Resolve it the same way the settler does — which
+            // includes REFUSING a marker anywhere but `legsIn[0]`
+            // ({Pricing.inputOwed}): this view used to resolve one on every leg, so a
+            // lens consumer was quoted a multi-token sweep every fill reverts
+            // (audit 2026-09-30 X-DIFF-CORE-7).
             if (Proportional.isProportional(s0)) {
+                if (i != 0) revert Proportional.InvalidProportionalLeg();
                 ins[i] = Proportional.resolve(tk, order.maker, s0, e0);
                 unchecked {
                     ++i;

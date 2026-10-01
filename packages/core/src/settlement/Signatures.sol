@@ -222,7 +222,10 @@ abstract contract Signatures is OrderState {
         // live desk key short — and the RELAYER picks when a permit lands. So a
         // permit may not lower the stored expiry either; shortening a delegate is the
         // maker's own call to {setOrderSigner}, and ending one is a revocation. Same
-        // selector as a lapsed permit: in both cases it is stale.
+        // selector as a lapsed permit: in both cases it is stale. Both the shortening
+        // and the revocation burn the delegate's whole permit word
+        // ({OrderState._setOrderSigner}), so no unrelayed LONGER permit can undo a
+        // direct wind-down afterwards (audit 2026-09-30 X-DIFF-CORE-3).
         if (expiry != 0 && (expiry < block.timestamp || expiry < orderSignerExpiry[maker][signer])) {
             revert SignerPermitExpired();
         }

@@ -329,6 +329,15 @@ struct FillCtx {
     //                       two-leg order with a rising leg, where recording costs
     //                       ~40. Empty on the netted path, which reconciles inputs
     //                       against its own resolved `owed` ledger.
+    uint256 minBump; //       the FILLER'S price floor on the resolved bump, in bps of the band
+    //                       (0 = none). Set by a floored entry ({Core.fillUpTo},
+    //                       {Core.fillWithPermit}, {Core.fillWithPermitTake}, {Core.batchFill})
+    //                       before {OrderState._openFill}, which checks it the moment the bump
+    //                       is resolved and reverts {OrderState.BumpTooLow}. Until audit
+    //                       2026-09-30 (PERIPH-1.v3) only `fillUpTo` had a floor, so the FIRST
+    //                       fill of a permit-authorised order — which only the permit entries
+    //                       can perform — had none. LAST field so positional literals (the
+    //                       lens) only append a `0`.
 }
 
 /// @notice The `matchSettle` call bundle — one calldata struct so the external ABI

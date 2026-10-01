@@ -169,7 +169,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        uint256[] memory paid = settlement.fillWithPermit(order, batch, sig, wethIn);
+        uint256[] memory paid = settlement.fillWithPermit(order, batch, sig, wethIn, 0, "");
         assertEq(paid[0], daiOut, "DAI delivered");
         assertEq(IERC20(WETH).balanceOf(solver), wethIn, "solver got WETH");
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver got USDC");
@@ -187,7 +187,7 @@ contract MultiAssetAuthGatesTest is CoreSettlementBase {
         bytes memory sig = _signPermitWitness(batch, _hashOrder(order));
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, 2_000e6);
+        settlement.fillWithPermit(order, batch, sig, 2_000e6, 0, "");
         _assertBasketDelivered();
     }
 

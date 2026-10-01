@@ -699,7 +699,7 @@ contract TakeForItemTest is CoreSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(Base.PermitTakeNotConsumed.selector);
-        settlement.fillWithPermitTake(o, p, hex"deadbeef", USDC_IN);
+        settlement.fillWithPermitTake(o, p, hex"deadbeef", USDC_IN, 0);
     }
 
     /// @dev AUDIT FIX. The balance form when the maker holds NOTHING of the funding

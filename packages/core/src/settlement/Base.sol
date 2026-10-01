@@ -144,14 +144,6 @@ abstract contract Base is Signatures {
     /// @dev An item's `module` (or Permit3) has no code. Solc's own existence check on a
     ///      void external call; kept explicit now that {_callWithTail} hand-encodes.
     error ItemTargetHasNoCode();
-    /// @dev `fillUpTo`'s `minBumpBps` price floor was not met: the fill's resolved
-    ///      shared decay bump came in below what the filler demanded. Every leg
-    ///      price is monotone in the bump (outputs fall with it, inputs rise), so
-    ///      the scalar floor is an exact filler-side price guard against the two
-    ///      movers that can shift the tick maker-ward between quote and inclusion —
-    ///      an oracle-pegged {IPriceModule} and a falling basefee shrinking the gas
-    ///      bump.
-    error BumpTooLow();
     /// @dev A DELTA-VERIFY output leg ({DutchAuction.deltaVerifyOutputs}) did not
     ///      land: the recipient's measured balance increase over the fill was below
     ///      the leg's priced amount ({Pricing.outputAt}). The filler was supposed to
@@ -224,7 +216,9 @@ abstract contract Base is Signatures {
     ///      leaves the balance above the pre-context floor while `outstanding` records
     ///      the obligation as met. Fill these through the single-order path, or fix
     ///      the recipient. Also raised for a leg addressed to the {EXECUTOR}, which
-    ///      the solver's own `CALL` step can empty in the same plan. NO ARGUMENTS,
+    ///      the solver's own `CALL` step can empty in the same plan — and, on EVERY
+    ///      path, for a TAKE / TAKE_FOR item whose signed `recipient` is the
+    ///      {EXECUTOR} ({_runItem}; audit 2026-09-30 CORE-MATCH-4). NO ARGUMENTS,
     ///      deliberately: naming `(order, leg)` the way
     ///      the sibling plan errors do measured **+37 bytes** of Settlement against a
     ///      53-byte EIP-170 budget. The lens reports the offending leg off-chain.
@@ -591,6 +585,14 @@ abstract contract Base is Signatures {
             // for a call that differs in one argument; see {ItemOp} for why the op is
             // nonetheless distinct.
             address to = recipient == address(0) ? address(this) : recipient;
+            // THE EXECUTOR IS NO DESTINATION (audit 2026-09-30 CORE-MATCH-4) — the item
+            // twin of the F31 output-leg rule in {Batch._stepDeliver}. Anything landing
+            // on {EXECUTOR} is takeable by whoever drives it next: the plan's own CALL
+            // step, a `fillWithCallback` callback, anyone's empty `matchSettle`. Proceeds
+            // signed there were credited to no leg, so the maker paid the input from its
+            // wallet while the solver kept the draw. Refused on BOTH paths, here at the
+            // one dispatch every TAKE / TAKE_FOR runs through.
+            if (to == address(EXECUTOR)) revert OutputToSettlement();
             // ONE-SHOT permit path: same dispatch, same proceeds accounting, but the
             // authority is a maker signature consumed here rather than a standing
             // allowance — so nothing is written and nothing survives the fill. The

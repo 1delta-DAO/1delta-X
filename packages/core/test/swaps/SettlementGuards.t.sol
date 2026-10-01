@@ -68,9 +68,14 @@ interface IReenter {
         bytes calldata data,
         CallbackMode mode
     ) external returns (uint256[] memory);
-    function fillWithPermit(Order calldata o, IPermit3.PermitBatch calldata b, bytes calldata sig, uint256 amt)
-        external
-        returns (uint256[] memory);
+    function fillWithPermit(
+        Order calldata o,
+        IPermit3.PermitBatch calldata b,
+        bytes calldata sig,
+        uint256 amt,
+        uint256 minBumpBps,
+        bytes calldata takerData
+    ) external returns (uint256[] memory);
     function fillUpTo(
         Order calldata o,
         bytes calldata sig,
@@ -223,7 +228,7 @@ contract SettlementGuardsTest is MockSettlementBase {
     function test_reentrancy_into_fillWithPermit_reverts() public {
         (Order memory o, bytes memory sig) = _innerOrder();
         IPermit3.PermitBatch memory empty;
-        _reentersWith(abi.encodeCall(IReenter.fillWithPermit, (o, empty, sig, AMOUNT_IN)));
+        _reentersWith(abi.encodeCall(IReenter.fillWithPermit, (o, empty, sig, AMOUNT_IN, 0, "")));
     }
 
     /// @dev The other half of arming by hand: the guard must also be RELEASED. A missed
@@ -331,7 +336,7 @@ contract SettlementGuardsTest is MockSettlementBase {
             _permitFor(order, AMOUNT_IN, 1, block.timestamp + 1 hours);
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker got output");
         assertEq(tA.balanceOf(solver), AMOUNT_IN, "solver got input");
     }
@@ -345,7 +350,7 @@ contract SettlementGuardsTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(IPermit3.PermitExpired.selector);
-        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
     }
 
     function test_fillWithPermit_insufficientAllowance_reverts() public {
@@ -362,7 +367,7 @@ contract SettlementGuardsTest is MockSettlementBase {
         // the fallback's TransferFromFailed and the whole fill unwinds.
         vm.prank(solver);
         vm.expectRevert(SafeTransferLib.TransferFromFailed.selector);
-        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
     }
 
     /// @dev S-1: the idempotent permit path makes `fillWithPermit` partial-fillable
@@ -378,11 +383,11 @@ contract SettlementGuardsTest is MockSettlementBase {
             _permitFor(order, AMOUNT_IN, 7, block.timestamp + 1 hours);
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN / 2);
+        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN / 2, 0, "");
 
         // Same signed batch again — the spent nonce is skipped, not reverted.
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN / 2);
+        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN / 2, 0, "");
 
         assertEq(tA.balanceOf(solver), AMOUNT_IN, "solver received the whole input across two fills");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker received the whole output");
@@ -400,7 +405,7 @@ contract SettlementGuardsTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
-        settlement.fillWithPermit(otherOrder, batch, sig, AMOUNT_IN);
+        settlement.fillWithPermit(otherOrder, batch, sig, AMOUNT_IN, 0, "");
     }
 
     function test_fillWithPermit_wrongSigner_reverts() public {
@@ -414,7 +419,7 @@ contract SettlementGuardsTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
-        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
     }
 
     // ════════════════════ D. Duplicate / zero output legs ════════════════════

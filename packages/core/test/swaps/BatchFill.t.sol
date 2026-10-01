@@ -117,6 +117,6 @@ contract BatchFillTest is MockSettlementBase {
         bytes memory sig = _sign(o);
         vm.prank(solver);
         vm.expectRevert(Base.OnlySelf.selector);
-        settlement.fillSelf(o, sig, AMOUNT_IN, solver, "");
+        settlement.fillSelf(o, sig, AMOUNT_IN, solver, 0, "");
     }
 }

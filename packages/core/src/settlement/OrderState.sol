@@ -107,6 +107,15 @@ abstract contract OrderState is NonceManager {
 
     error ZeroFill();
     error OverFill();
+    /// @dev The filler's `minBumpBps` price floor ({FillCtx.minBump}) was not met: the
+    ///      fill's resolved shared decay bump came in below what the filler demanded.
+    ///      Every leg price is monotone in the bump (outputs fall with it, inputs
+    ///      rise), so the scalar floor is an exact filler-side price guard against
+    ///      every maker-ward mover between quote and inclusion — an oracle-pegged or
+    ///      maker-controlled {IPriceModule}, a falling basefee shrinking the gas bump
+    ///      or widening a priority bid, a descending curve segment. Declared here (it
+    ///      used to live on {Base}) because {_openFill} is now the one check site.
+    error BumpTooLow();
     error FillTooSmall();
     error NonceCancelled();
     /// @dev {approveOrder}/{cancelOrder} called with an order whose `maker` is not
@@ -240,12 +249,29 @@ abstract contract OrderState is NonceManager {
     ///  revoked. Buying re-nomination back would take a per-delegate epoch in the
     ///  permit typehash; it is not worth a storage slot and a breaking permit type
     ///  to make a compromised key reusable.
+    ///
+    ///  ⚠ SHORTENING BURNS IT TOO (audit 2026-09-30 X-DIFF-CORE-3 / CENSUS-A-2). A
+    ///  direct `setOrderSigner(d, shorter)` used to leave every unrelayed LONGER
+    ///  nomination permit live, and the relayed path's extend-only rule let one
+    ///  restore the long expiry — so a maker's wind-down silently failed to bind. A
+    ///  shortening is a partial revocation and gets the same single `SSTORE`, with the
+    ///  same deliberate price (gasless re-extension of that delegate is gone; nominate
+    ///  directly or use a fresh key). Only the DIRECT path can reach it:
+    ///  {Signatures.setOrderSignerWithSig} refuses any non-zero `expiry` below the
+    ///  stored one before calling here. An extension or a first nomination burns
+    ///  nothing — a maker who wants the direct call to supersede an unrelayed
+    ///  nomination it never wanted still burns that coordinate itself
+    ///  ({NonceManager.cancelOrders}, SDK `encodeBurnSignerPermits`).
     function _setOrderSigner(address maker, address signer, uint256 expiry) internal {
         if (signer == address(0)) revert InvalidOrderSigner();
-        orderSignerExpiry[maker][signer] = expiry;
-        // Revocation only. A nomination must NOT burn the word — it is the very
-        // word the permit being relayed right now is spending its own coordinate in.
-        if (expiry == 0) {
+        mapping(address => uint256) storage expiries = orderSignerExpiry[maker];
+        // Read BEFORE the write: "below what is stored" is what makes it a shortening.
+        bool narrows = expiry < expiries[signer];
+        expiries[signer] = expiry;
+        // Revocation or shortening only. A nomination or extension must NOT burn the
+        // word — it is the very word the permit being relayed right now is spending
+        // its own coordinate in.
+        if (expiry == 0 || narrows) {
             nonceBitmap[maker][(SIGNER_NONCE_NS >> 8) | uint256(uint160(signer))] = type(uint256).max;
         }
         emit OrderSignerSet(maker, signer, expiry);
@@ -414,12 +440,40 @@ abstract contract OrderState is NonceManager {
         // Delta: identity (zero overhead — a calldata compare, no call) or a
         // fill-module resolve. The module validates the filler's proposal
         // (`takerData`) against this order and returns the accepted delta.
+        //
+        // `type(uint256).max` = "the whole remaining anchor, whatever it resolved to",
+        // resolved HERE, once, for EVERY entry (audit 2026-09-30 CORE-FILL-4). It used
+        // to be resolved per entry — by `fillWithCallback` and `matchSettle` for every
+        // order, by `fillUpTo` for identity orders only, and by nothing on `fill` /
+        // `fillWithPermit` / `batchFill` / `fillWithPermitTake`, where an identity
+        // order died on a raw `Panic(0x11)` at the add below and a fill module was
+        // handed `max` as its proposal. One meaning everywhere now: a fill module
+        // always receives `total - prevFilled` for it, never `max`. It is the caller's
+        // explicit "any size up to what is left" opt-in, which moves {Proportional}
+        // shrink risk onto whoever pays the outputs — an inventory filler must pass
+        // the exact size (see {Proportional}). `_gateFillState` proved
+        // `prevFilled < total`, so this cannot wrap.
+        if (fillAmount == type(uint256).max) {
+            unchecked {
+                fillAmount = total - prevFilled;
+            }
+        }
         uint256 delta;
         if (order.fillModule == address(0)) {
             delta = fillAmount; // identity — already checked != 0 in _fillCore
         } else {
             delta = IFillModule(order.fillModule).resolveFill(order, prevFilled, fillAmount, takerData);
             if (delta == 0) revert ZeroFill(); // a module can return 0; identity can't
+            // THE FILLER'S SIZE IS A CEILING ON EVERY MODULE (audit 2026-09-30
+            // CORE-FILLER-2). A maker-named module is maker code: it can read state the
+            // maker flips between the filler's simulation and inclusion, or tell a lens
+            // probe from the real call by `msg.sender`, and every output leg scales with
+            // the delta it returns — pulled from the filler's standing approvals. The
+            // over-fill cap below bounds the MAKER's exposure only; this bounds the
+            // filler's. A module may still accept LESS than proposed (a TWAP rounding
+            // down to whole parts); a filler that wants "whatever the module decides"
+            // passes `type(uint256).max`, resolved to the remainder above.
+            if (delta > fillAmount) revert OverFill();
         }
         // Anti-dust floor on the ACTUAL progress (delta), identity + module alike.
         if (delta < order.minFillAnchor) revert FillTooSmall();
@@ -459,6 +513,22 @@ abstract contract OrderState is NonceManager {
         // A clock-priced order gets 0 back and resolves lazily per decaying leg, which
         // is the measured-cheapest shape for the dominant case.
         ctx.bump = DutchAuction.resolveBump(order, ctx.orderHash, total, filler, prevFilled, takerData);
+        // THE FILLER'S PRICE FLOOR ({FillCtx.minBump}), checked the moment the bump this
+        // fill prices at is known and before anything moves: the pinned one when the
+        // order pins (price module / priority auction — so the module is still called
+        // ONCE), else the clock, deterministic within the tx so reading it here is
+        // exact. Every leg price is monotone in the one shared bump (outputs fall,
+        // inputs rise as it grows), so "bump >= my quote's bump" IS "price >= my quoted
+        // price" across both baskets. ONE site for every floored entry; until audit
+        // 2026-09-30 (PERIPH-1.v3) only `fillUpTo` had a floor at all. `0` = none.
+        uint256 floor = ctx.minBump;
+        if (floor != 0) {
+            uint256 bump = ctx.bump;
+            unchecked {
+                bump = bump != 0 ? bump - 1 : DutchAuction.bumpBps(order); // `- 1` only under `!= 0`
+            }
+            if (bump < floor) revert BumpTooLow();
+        }
     }
 
 }

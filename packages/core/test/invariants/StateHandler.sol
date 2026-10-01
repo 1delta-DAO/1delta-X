@@ -1193,8 +1193,14 @@ contract StateHandler is MockSettlementBase {
             _allow(_iSigner(m, k));
             // A REVOCATION also blanks the delegate's whole permit word — the single
             // `SSTORE` that makes revocation final ({OrderState._setOrderSigner}).
-            // That delegate's watched coordinate lives in it; nothing else does.
-            if (expiry == 0) _allow(_iBit(m, 5 + k));
+            // That delegate's watched coordinate lives in it; nothing else does. A
+            // direct SHORTENING burns it too (audit 2026-09-30 X-DIFF-CORE-3), so an
+            // unrelayed longer permit cannot undo the wind-down — and ONLY a
+            // revocation or a shortening may: an extension that burned it would be a
+            // regression this diff still catches.
+            if (expiry == 0 || expiry < settlement.orderSignerExpiry(caller, signers[k])) {
+                _allow(_iBit(m, 5 + k));
+            }
         }
 
         vm.prank(caller);

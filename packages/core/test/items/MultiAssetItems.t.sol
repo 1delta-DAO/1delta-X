@@ -433,7 +433,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
 
         // NO approveTaker anywhere — the signature is the only taker authority.
         vm.prank(solver);
-        settlement.fillWithPermitTake(order, p, psig, usdcIn);
+        settlement.fillWithPermitTake(order, p, psig, usdcIn, 0);
 
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver paid from borrow proceeds");
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH");
@@ -455,13 +455,13 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         });
         bytes memory psig = _signPermitTakeWitness(p, _hashOrder(order));
         vm.prank(solver);
-        settlement.fillWithPermitTake(order, p, psig, usdcIn);
+        settlement.fillWithPermitTake(order, p, psig, usdcIn, 0);
 
         Order memory order2 = _orderItems(1, _a1(USDC), _u1(usdcIn), _a1(WETH), _u1(1 ether), _one(it));
         bytes memory psig2 = _signPermitTakeWitness(p, _hashOrder(order2));
         vm.prank(solver);
         vm.expectRevert(IPermit3.PermitNonceUsed.selector);
-        settlement.fillWithPermitTake(order2, p, psig2, usdcIn);
+        settlement.fillWithPermitTake(order2, p, psig2, usdcIn, 0);
     }
 
     /// @dev SECURITY REGRESSION. On {fillWithPermitTake} the permit's witness IS the
@@ -487,7 +487,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         uint256 before = IERC20(USDC).balanceOf(maker);
         vm.prank(solver);
         vm.expectRevert(Base.PermitTakeNotConsumed.selector);
-        settlement.fillWithPermitTake(order, junk, hex"deadbeef", usdcIn);
+        settlement.fillWithPermitTake(order, junk, hex"deadbeef", usdcIn, 0);
         assertEq(IERC20(USDC).balanceOf(maker), before, "maker untouched");
     }
 
@@ -515,7 +515,7 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         // HALF fill: the item's slice is usdcIn/2 but the permit authorises usdcIn.
         vm.prank(solver);
         vm.expectRevert(Base.PermitTakeMismatch.selector);
-        settlement.fillWithPermitTake(order, p, psig, usdcIn / 2);
+        settlement.fillWithPermitTake(order, p, psig, usdcIn / 2, 0);
 
         // A permit naming a DIFFERENT module than the order's item is rejected too.
         IPermit3.PermitTake memory wrongModule = IPermit3.PermitTake({
@@ -527,6 +527,6 @@ contract MultiAssetItemsTest is CoreSettlementBase {
         bytes memory wrongSig = _signPermitTakeWitness(wrongModule, _hashOrder(order));
         vm.prank(solver);
         vm.expectRevert(Base.PermitTakeMismatch.selector);
-        settlement.fillWithPermitTake(order, wrongModule, wrongSig, usdcIn);
+        settlement.fillWithPermitTake(order, wrongModule, wrongSig, usdcIn, 0);
     }
 }

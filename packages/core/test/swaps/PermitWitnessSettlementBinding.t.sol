@@ -80,13 +80,13 @@ contract PermitWitnessSettlementBindingTest is MockSettlementBase {
         (IPermit3.PermitBatch memory batch, bytes memory sig) = _permitFor(order, 7);
 
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
         assertEq(tA.balanceOf(maker), AMOUNT_IN, "v1 took exactly one input");
         assertTrue(permit3.isPermitNonceUsed(maker, 7), "nonce spent on v1");
 
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
-        s2.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        s2.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
 
         assertEq(tA.balanceOf(maker), AMOUNT_IN, "v2 took nothing");
         assertEq(s2.filled(_hashOrder(order)), 0, "no progress on v2");
@@ -100,7 +100,7 @@ contract PermitWitnessSettlementBindingTest is MockSettlementBase {
 
         vm.prank(solver);
         vm.expectRevert(SignatureVerification.InvalidSigner.selector);
-        s2.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        s2.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
         assertFalse(permit3.isPermitNonceUsed(maker, 8), "nothing consumed");
     }
 
@@ -114,7 +114,7 @@ contract PermitWitnessSettlementBindingTest is MockSettlementBase {
         bytes memory sig = _signRawPermitWitnessWith(batch, witnessForV2, makerPk);
 
         vm.prank(solver);
-        s2.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        s2.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "filled on the settler it was signed for");
     }
 }

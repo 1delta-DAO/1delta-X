@@ -3,7 +3,6 @@ pragma solidity ^0.8.28;
 
 import {IPermit3} from "../interfaces/IPermit3.sol";
 import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
-import {Permit3TransferLib} from "../utils/Permit3TransferLib.sol";
 import {Order, OrderSide, CallbackMode, FillCtx} from "./Structs.sol";
 import {PackedArrays} from "./PackedArrays.sol";
 import {DutchAuction} from "./DutchAuction.sol";
@@ -151,21 +150,8 @@ abstract contract Core is Base {
         _gateFillState(order, orderHash, ctx);
         _enter();
         _verifySignature(orderHash, sig, order.maker, ctx);
-        // `type(uint256).max` = "the whole remaining anchor, whatever it resolved to"
-        // — the sentinel `fillUpTo` and `matchSettle` already honour. It exists for a
-        // {Proportional} anchor, which resolves from the maker's LIVE balance: an
-        // exact size is reverted by any drift before inclusion, a stranger's 1-wei
-        // transfer to the maker included. It is the CALLBACK filler's opt-in because
-        // a callback filler can fund the output FROM the input it actually received
-        // (a routed swap sized by measured delta — {AggregatorFillSolver}), so a
-        // smaller-than-quoted anchor simply fails its own route instead of costing
-        // it. A filler paying the full output from inventory must pass the exact
-        // size — see {Proportional}. `_gateFillState` proved `prevFilled < anchor`.
-        if (fillAmount == type(uint256).max) {
-            unchecked {
-                fillAmount = ctx.anchor - ctx.prevFilled;
-            }
-        }
+        // `type(uint256).max` — "whatever remains" — is resolved by {OrderState._openFill}
+        // for every entry; see the note there and {Proportional} for who should pass it.
         outs = _fillCore(
             order, fillAmount, msg.sender, address(0), callbackTarget, callbackData, mode, takerData, false, ctx
         );
@@ -179,50 +165,57 @@ abstract contract Core is Base {
     ///         one signature simultaneously authorises the order *and*
     ///         every Permit3 token + taker allowance the fill needs.
     ///         No standing approvals required.
-    function fillWithPermit(
-        Order calldata order,
-        IPermit3.PermitBatch calldata batch,
-        bytes calldata sig,
-        uint256 fillAmount
-    ) external returns (uint256[] memory fillAmountsOut) {
-        return _fillWithPermitCore(order, batch, sig, fillAmount, "");
-    }
-
-    /// @notice {fillWithPermit} overload carrying a filler-supplied `takerData`
-    ///         blob into the order's validators and invariants. See {fill}'s
-    ///         takerData overload for the adversarial/validator-verified rule.
+    /// @param  minBumpBps The filler's PRICE FLOOR on the resolved shared bump —
+    ///         exactly {fillUpTo}'s (`0` = none; reverts {BumpTooLow}). A
+    ///         PermitBatchWitness order's FIRST fill can only go through this entry
+    ///         (the maker signed a permit, not an Order, so {fillUpTo} cannot verify
+    ///         it), so without it an EOA filler had no on-chain bound on a maker-ward
+    ///         price move between quote and inclusion (audit 2026-09-30 PERIPH-1.v3).
+    /// @param  takerData Filler-supplied blob for the order's validators and
+    ///         invariants; `""` for none. See {fill}'s takerData overload for the
+    ///         adversarial/validator-verified rule.
+    /// @dev    BREAKING (2026-09-30): ONE entry replaces the former 4-arg and 5-arg
+    ///         `(…, takerData)` overloads. Keeping a second overload next to the
+    ///         six-argument one measured +565 bytes of Settlement under via-IR; the
+    ///         single entry is 170 bytes SMALLER than the old pair, which is what pays
+    ///         for the floor on every permit / batch entry. Callers of the old 4-arg
+    ///         shape pass `0, ""`.
     function fillWithPermit(
         Order calldata order,
         IPermit3.PermitBatch calldata batch,
         bytes calldata sig,
         uint256 fillAmount,
+        uint256 minBumpBps,
         bytes calldata takerData
     ) external returns (uint256[] memory fillAmountsOut) {
-        return _fillWithPermitCore(order, batch, sig, fillAmount, takerData);
+        return _fillWithPermitCore(order, batch, sig, fillAmount, minBumpBps, takerData);
     }
 
-    /// @dev Shared body of both {fillWithPermit} overloads. Extracted because each
-    ///      overload otherwise emits its OWN copy of the permit call's encoder — a
-    ///      `PermitBatch` struct (two dynamic arrays of structs) — which is one of the
-    ///      largest single encoders in the contract. MEASURED: **−200 bytes** of
-    ///      Settlement runtime, with the external ABI unchanged. (The `string`
-    ///      witness type this used to carry is gone too; see
+    /// @dev The body of {fillWithPermit}. Kept out of line: it was extracted when two
+    ///      overloads each emitted their OWN copy of the permit call's encoder (a
+    ///      `PermitBatch` struct — two dynamic arrays of structs — one of the largest
+    ///      single encoders in the contract; measured −200 bytes then), and inlining it
+    ///      back into the single entry is not measured to pay. (The `string` witness
+    ///      type this used to carry is gone too; see
     ///      {OrderHash.PERMIT_BATCH_WITNESS_TYPEHASH} for that −583.)
     ///
     ///      IDEMPOTENT permit on purpose: the signature is still verified every time
     ///      (a bad `sig` reverts), but a nonce already spent — by an earlier partial
     ///      fill, or by a griefer who front-ran the permit straight out of this
-    ///      calldata — is skipped instead of reverting {PermitNonceUsed}. Without
-    ///      that, one cheap front-run permanently bricks the order (the maker signed
-    ///      a PermitBatchWitness, not an Order, so no other entry can rescue it) and
-    ///      partial fills are impossible. See
-    ///      {SignedPermits.permitBatchWithWitnessIfNeeded}.
+    ///      calldata — is skipped instead of reverting {PermitNonceUsed}, and since
+    ///      audit 2026-09-30 (P3-4) it is skipped even after `batch.deadline`, so a
+    ///      partly filled order's remainder stays fillable through this entry with the
+    ///      same stored calldata. Without the skip, one cheap front-run permanently
+    ///      bricks the order (before its first fill the maker's PermitBatchWitness is
+    ///      its only authorisation, so no other entry can rescue it) and partial fills
+    ///      are impossible. See {SignedPermits.permitBatchWithWitnessIfNeeded}.
     function _fillWithPermitCore(
         Order calldata order,
         IPermit3.PermitBatch calldata batch,
         bytes calldata sig,
         uint256 fillAmount,
-        bytes memory takerData
+        uint256 minBumpBps,
+        bytes calldata takerData
     ) private returns (uint256[] memory outs) {
         bytes32 orderHash = order.hash();
         FillCtx memory ctx;
@@ -234,6 +227,7 @@ abstract contract Core is Base {
         // wraps `orderHash` in {OrderHash.SETTLEMENT_ORDER_TYPEHASH}; see there for
         // the cross-deployment replay it closes.
         _permitBatch(order.maker, batch, orderHash, sig);
+        ctx.minBump = minBumpBps; // checked by {OrderState._openFill}
         outs = _fillCore(
             order, fillAmount, msg.sender, address(0), address(0), "",
             CallbackMode.PreDelivery, takerData, false, ctx
@@ -429,7 +423,7 @@ abstract contract Core is Base {
         address filler = msg.sender;
         for (uint256 i; i < n;) {
             // Empty takerData — the no-taker-blob path.
-            try this.fillSelf(orders[i], sigs[i], fillAmounts[i], filler, "") returns (uint256[] memory outs) {
+            try this.fillSelf(orders[i], sigs[i], fillAmounts[i], filler, 0, "") returns (uint256[] memory outs) {
                 fillAmountsOut[i] = outs;
                 success[i] = true;
             } catch {
@@ -441,48 +435,67 @@ abstract contract Core is Base {
         }
     }
 
-    /// @notice {batchFill} overload carrying a per-order filler-supplied `takerData`
-    ///         blob, aligned 1:1 with `orders` (`takerDatas[i]` threads into order
-    ///         `i`'s validators + invariants). See {fill}'s takerData overload for
-    ///         the adversarial/validator-verified rule.
-    /// @dev    Reverts {LengthMismatch} if `takerDatas.length != orders.length`.
-    ///         The loop is inlined (not shared with the 4-arg overload) to stay
-    ///         under the EVM stack limit without via-IR.
+    /// @notice {batchFill} overload carrying, per order, the filler's `minBumpBps`
+    ///         PRICE FLOOR (exactly {fillUpTo}'s; `0` = none — a floor miss reverts
+    ///         {BumpTooLow} inside that order's self-call, so it is SKIPPED like any
+    ///         other failing order unless `revertIfIncomplete`) and a filler-supplied
+    ///         `takerData` blob (`takerDatas[i]` threads into order `i`'s validators +
+    ///         invariants; see {fill}'s takerData overload for the
+    ///         adversarial/validator-verified rule). Both arrays align 1:1 with
+    ///         `orders`.
+    /// @dev    Reverts {LengthMismatch} on a misaligned array. The loop is inlined
+    ///         (not shared with the 4-arg overload) to stay under the EVM stack limit
+    ///         without via-IR. BREAKING (audit 2026-09-30 PERIPH-1.v3): replaces the
+    ///         5-arg `(…, takerDatas)` overload, so a batch of orders gets the same
+    ///         filler-side price bound a single {fillUpTo} has.
     function batchFill(
         Order[] calldata orders,
         bytes[] calldata sigs,
         uint256[] calldata fillAmounts,
         bool revertIfIncomplete,
+        uint256[] calldata minBumpBps,
         bytes[] calldata takerDatas
     ) external nonReentrant returns (uint256[][] memory fillAmountsOut, bool[] memory success) {
         uint256 n = orders.length;
-        if (takerDatas.length != n) revert LengthMismatch();
+        if (takerDatas.length != n || minBumpBps.length != n) revert LengthMismatch();
         fillAmountsOut = new uint256[][](n);
         success = new bool[](n);
-        address filler = msg.sender;
         for (uint256 i; i < n;) {
-            try this.fillSelf(orders[i], sigs[i], fillAmounts[i], filler, takerDatas[i]) returns (
-                uint256[] memory outs
-            ) {
-                fillAmountsOut[i] = outs;
-                success[i] = true;
-            } catch {
-                if (revertIfIncomplete) revert BatchFillIncomplete(i);
-            }
+            // The attempt lives in a helper: next to six calldata arrays the legacy
+            // (non-via-IR) profile has no stack slot left for an inline try/catch.
+            (fillAmountsOut[i], success[i]) =
+                _tryFillSelf(orders[i], sigs[i], fillAmounts[i], minBumpBps[i], takerDatas[i]);
+            if (!success[i] && revertIfIncomplete) revert BatchFillIncomplete(i);
             unchecked {
                 ++i;
             }
         }
     }
 
+    /// @dev One {batchFill} attempt as `msg.sender`: `ok == false` (and empty `outs`)
+    ///      when the self-call reverted.
+    function _tryFillSelf(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        uint256 minBumpBps,
+        bytes calldata takerData
+    ) private returns (uint256[] memory outs, bool ok) {
+        try this.fillSelf(order, sig, fillAmount, msg.sender, minBumpBps, takerData) returns (uint256[] memory o) {
+            return (o, true);
+        } catch {}
+    }
+
     /// @notice Self-call fill target for {batchFill}. Verifies the maker signature
     ///         and runs the fill for an explicit `filler`, carrying this order's
-    ///         `takerData`. `onlySelf` — external callers must use `fill`.
+    ///         price floor and `takerData`. `onlySelf` — external callers must use
+    ///         `fill` / {fillUpTo}.
     function fillSelf(
         Order calldata order,
         bytes calldata sig,
         uint256 fillAmount,
         address filler,
+        uint256 minBumpBps,
         bytes calldata takerData
     ) external returns (uint256[] memory outs) {
         if (msg.sender != address(this)) revert OnlySelf();
@@ -490,6 +503,7 @@ abstract contract Core is Base {
         FillCtx memory ctx;
         _gateFillState(order, orderHash, ctx);
         _verifySignature(orderHash, sig, order.maker, ctx);
+        ctx.minBump = minBumpBps; // checked by {OrderState._openFill}
         outs = _fillCore(
             order, fillAmount, filler, address(0), address(0), "", CallbackMode.PreDelivery, takerData, false, ctx
         );
@@ -539,17 +553,24 @@ abstract contract Core is Base {
     ///  The maker's authorization is verified INSIDE that dispatch rather than up
     ///  front. That is safe because the whole fill is atomic: a bad signature reverts
     ///  the `_openFill` counter write and every transfer with it.
+    ///
+    ///  `minBumpBps` is the filler's PRICE FLOOR, exactly {fillUpTo}'s (`0` = none,
+    ///  reverts {BumpTooLow}). This entry is the only one that can fund a PermitTake
+    ///  order's TAKE, so without it an EOA filler had no bound on a maker-ward price
+    ///  move (audit 2026-09-30 PERIPH-1.v3). BREAKING: a fifth argument.
     function fillWithPermitTake(
         Order calldata order,
         IPermit3.PermitTake calldata permit,
         bytes calldata sig,
-        uint256 fillAmount
+        uint256 fillAmount,
+        uint256 minBumpBps
     ) external nonReentrant returns (uint256[] memory outs) {
         bytes32 orderHash = order.hash();
         if (fillAmount == 0) revert ZeroFill();
         if (block.timestamp > DutchAuction.expiry(order)) revert OrderExpired();
         FillCtx memory ctx;
         _gateOrder(order, orderHash, msg.sender, "", ctx);
+        ctx.minBump = minBumpBps; // checked by {OrderState._openFill}, before any transfer
         _openFill(order, fillAmount, msg.sender, "", ctx);
         // Hand-built, and the reason it is safe is that the PRODUCER and the CONSUMER
         // are the same contract one frame apart: {Base._takeByPermit} reads this back
@@ -687,6 +708,10 @@ abstract contract Core is Base {
         // (non-via-IR) profile has no stack slot left for it. The helper also hoists the
         // clamp out of the `_fillCore` argument list for the same reason.
         fillAmount = _openCustomFill(order, sig, fillAmount, ctx);
+        // The floor is checked by {OrderState._openFill} the moment the bump this fill
+        // prices at is resolved — the pinned one for a price-module / priority order,
+        // so the module is still called once — before anything moves.
+        ctx.minBump = minBumpBps;
         paid = _fillCore(
             order,
             fillAmount,
@@ -699,19 +724,6 @@ abstract contract Core is Base {
             true, // the custom-fill entry is the one caller that returns receipts
             ctx
         );
-        if (minBumpBps != 0) {
-            // The bump the fill actually priced at: the pinned one when the order
-            // pins ({FillCtx.bump} — price module / priority auction), else the
-            // clock, deterministic within the tx so re-reading it here is exact.
-            // Checked AFTER the fill so a pinning order's price module is called
-            // ONCE — the revert unwinds everything either way, and the happy path
-            // (the only one anyone pays for) is one compare.
-            uint256 bump;
-            unchecked {
-                bump = ctx.bump != 0 ? ctx.bump - 1 : DutchAuction.bumpBps(order); // `- 1` only under `!= 0`
-            }
-            if (bump < minBumpBps) revert BumpTooLow();
-        }
         unchecked {
             delta = ctx.newFilled - ctx.prevFilled; // _openFill guarantees newFilled >= prevFilled
         }

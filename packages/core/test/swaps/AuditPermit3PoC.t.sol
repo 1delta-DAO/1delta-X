@@ -80,7 +80,7 @@ contract AuditPermit3PoCTest is MockSettlementBase {
         // spent, skips the (already-applied) grant, and settles against the standing
         // allowance the griefer's call left behind.
         vm.prank(solver);
-        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN);
+        settlement.fillWithPermit(order, batch, sig, AMOUNT_IN, 0, "");
 
         assertEq(tA.balanceOf(solver), AMOUNT_IN, "solver received the input");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker received the output");
