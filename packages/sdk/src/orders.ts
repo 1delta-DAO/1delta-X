@@ -3,6 +3,7 @@ import { encodeFunctionData, hashStruct, hashTypedData, keccak256, type Address,
 
 import { SETTLEMENT_ABI } from "./abi";
 import { ORDER_TYPES, settlementDomain } from "./eip712";
+import { assertPermit3Nonce, Permit3MessageKind } from "./permit3nonce";
 import type { Deployment, Order, PermitBatch } from "./types";
 
 /** Minimal signer surface — a viem `LocalAccount`/`WalletClient` satisfies this. */
@@ -69,8 +70,15 @@ export function encodeFillWithPermit(
   return encodeFunctionData({
     abi: SETTLEMENT_ABI,
     functionName: "fillWithPermit",
-    args: [packOrder(order) as any, batch as any, sig, fillAmountIn, minBumpBps, takerData],
-  });
+    // The nonce kind is asserted at the encoder too, not only in `permitBatch()`.
+    args: [
+      packOrder(order) as any,
+      { ...batch, nonce: assertPermit3Nonce(batch.nonce, Permit3MessageKind.Batch) } as any,
+      sig,
+      fillAmountIn,
+      minBumpBps,
+      takerData,
+    ],  });
 }
 
 // ──────────────────── Cancellation ────────────────────

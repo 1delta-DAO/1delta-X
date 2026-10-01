@@ -13,6 +13,9 @@ import { assertPermit3Nonce, Permit3MessageKind } from "./permit3nonce";
  * allowance the fill needs. Signed over the Permit3 domain.
  */
 export function permitWitnessTypedData(batch: PermitBatch, order: Order, d: Deployment) {
+  // Asserted HERE, not only in the {@link permitBatch} builder: a `PermitBatch`
+  // object literal never passes through the builder (audit 2026-09-30, G-TS_SIGN-12).
+  assertPermit3Nonce(batch.nonce, Permit3MessageKind.Batch);
   return {
     domain: permit3Domain(d.chainId, d.permit3),
     types: PERMIT_WITNESS_TYPES,

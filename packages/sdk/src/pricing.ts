@@ -5,9 +5,18 @@ import { isProportional } from "./proportional";
  * Client-side mirror of the contract's dutch pricing + fill math, for off-chain
  * previews. Reverts on the same malformed inputs the contract rejects.
  *
+ * PRIORITY-AUCTION orders (timing bit 103) are priced by the FILLER'S BID, which
+ * no clock can supply. The contract's context-free views refuse them
+ * (`PricingNeedsContext`), and so does every helper here unless you pass the bid
+ * explicitly as `priorityFee` (compute it with {@link priorityBid}; `0n` is a
+ * legitimate "I bid nothing" and prices the maker's floor). A defaulted zero bid
+ * used to price such an order silently at its floor — the lowest SELL output and
+ * the highest BUY input — while the fill charged the filler's real bid (audit
+ * 2026-09-30, G-TS_FILLER-5).
+ *
  * One side of every order is FIXED and the other is a dutch auction; `side`
  * selects which. Fills are denominated in ANCHOR units — `legsIn[0]` for SELL,
- * `legsOut[0]` for BUY. A leg with `end == 0n` is fixed at `start`; otherwise it
+ * `legsOut[0]` for BUY, or the maker-signed `fillTotal` when set. A leg with `end == 0n` is fixed at `start`; otherwise it
  * auctions (outputs FALL `start >= end`, inputs RISE `start <= end`).
  */
 
@@ -48,7 +57,7 @@ const BPS = 10_000n;
  * order with a `pricingModule` cannot be priced here at all — both are noted
  * below.
  */
-export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n, priorityFee: bigint = 0n): bigint {
+export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n, priorityFee?: bigint): bigint {
   // An EXTERNAL price module cannot be mirrored here: its answer comes from an
   // oracle, the fill progress, or a cosigned quote. Quote such an order through
   // `SettlementLens.previewFill`, which resolves the module the way the fill does.
@@ -58,7 +67,17 @@ export function bumpBps(order: Order, now: bigint, baseFee: bigint = 0n, priorit
   // PRIORITY auction: the bump is BID, not elapsed. No bid ⇒ BPS ⇒ the maker's
   // signed floor; every wei of priority fee moves the tick toward `start`.
   if ((order.timing >> PRIORITY_AUCTION_BIT) & 1n) {
+    // Mirror of `DutchAuction.currentAmountOut/In` reverting `PricingNeedsContext`:
+    // the price IS the filler's bid, so a quote without one is not a quote.
+    if (priorityFee === undefined) {
+      throw new Error(
+        "PricingNeedsContext: a priority-auction order is priced by the filler's bid — pass priorityFee (see priorityBid)",
+      );
+    }
     if (order.priorityScale === 0n) throw new Error("InvalidAuctionParams: priority auction without priorityScale");
+    // Mirror of `priorityBump`: a gas bump cannot run on a priority auction, and the
+    // settler refuses the shape rather than silently dropping the signed field.
+    if (order.gasBumpBps !== 0n) throw new Error("InvalidAuctionParams: priority auction with gasBumpBps");
     // "Not before" gate — the same as the contract's `priorityBump` (and the clock
     // branches below): a future `decayStartTime` means the order is not yet biddable,
     // so a quote here must fail exactly as the fill would.
@@ -141,7 +160,7 @@ export function currentAmountOutAt(
   j: number,
   now: bigint,
   baseFee: bigint = 0n,
-  priorityFee: bigint = 0n,
+  priorityFee?: bigint,
 ): bigint {
   const startOut = order.legsOut[j]!.start;
   const endOut = order.legsOut[j]!.end;
@@ -150,8 +169,9 @@ export function currentAmountOutAt(
   return startOut - ((startOut - endOut) * bumpBps(order, now, baseFee, priorityFee)) / BPS;
 }
 
-/** Current output tick for every leg. Mirrors `previewAmountOut`. */
-export function currentAmountOut(order: Order, now: bigint, baseFee: bigint = 0n, priorityFee: bigint = 0n): bigint[] {
+/** Current output tick for every leg. Mirrors `previewAmountOut` (which refuses a
+ *  priority-auction order outright; here pass the filler's bid as `priorityFee`). */
+export function currentAmountOut(order: Order, now: bigint, baseFee: bigint = 0n, priorityFee?: bigint): bigint[] {
   return order.legsOut.map((_, j) => currentAmountOutAt(order, j, now, baseFee, priorityFee));
 }
 
@@ -161,7 +181,7 @@ export function currentAmountInAt(
   i: number,
   now: bigint,
   baseFee: bigint = 0n,
-  priorityFee: bigint = 0n,
+  priorityFee?: bigint,
 ): bigint {
   const startIn = order.legsIn[i]!.start;
   const endIn = order.legsIn[i]!.end;
@@ -170,9 +190,12 @@ export function currentAmountInAt(
   return startIn + ((endIn - startIn) * bumpBps(order, now, baseFee, priorityFee)) / BPS;
 }
 
-/** Current input tick for every leg. Mirrors `previewAmountIn`. */
-export function currentAmountIn(order: Order, now: bigint): bigint[] {
-  return order.legsIn.map((_, i) => currentAmountInAt(order, i, now));
+/** Current input tick for every leg. Mirrors `previewAmountIn` — including the gas
+ *  bump (pass the block's `baseFee`; the contract reads `block.basefee`) and, for a
+ *  priority auction, the filler's bid as `priorityFee` (the contract view refuses
+ *  such an order outright). */
+export function currentAmountIn(order: Order, now: bigint, baseFee: bigint = 0n, priorityFee?: bigint): bigint[] {
+  return order.legsIn.map((_, i) => currentAmountInAt(order, i, now, baseFee, priorityFee));
 }
 
 /**
@@ -188,7 +211,7 @@ export function fillAmountsOut(
   now: bigint,
   prevFilled: bigint = 0n,
   baseFee: bigint = 0n,
-  priorityFee: bigint = 0n,
+  priorityFee?: bigint,
 ): bigint[] {
   const anchor = anchorTotal(order);
   const newFilled = prevFilled + fillAmount;
@@ -215,7 +238,7 @@ export function inputOwed(
   newFilled: bigint,
   now: bigint,
   baseFee: bigint = 0n,
-  priorityFee: bigint = 0n,
+  priorityFee?: bigint,
 ): bigint {
   const anchor = anchorTotal(order);
   const auctioned = order.side === OrderSide.BUY || order.legsIn[i]!.end !== 0n;

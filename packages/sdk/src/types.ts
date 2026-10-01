@@ -34,11 +34,15 @@ export enum ItemOp {
 /// Pair it with a maker-addressed leg (`recipient` 0 or the maker). It needs BOTH
 /// receive-side grants: a Permit3 token allowance to the module and an on-chain
 /// ERC20 approval of the received asset.
-export function forLeg(index: number): bigint {
+///
+/// `op` (default 0) is the module op in descriptor bits [244,252) — see {@link PreFundOp}.
+/// A composite whose op is not 0 (Euler `Open`, Dolomite `Open`, AaveV3Credit
+/// `Leverage`) must pass it; with 0 those modules revert `BadOp`.
+export function forLeg(index: number, op: number = 0): bigint {
   if (!Number.isInteger(index) || index < 0 || index > 0xffff) {
     throw new Error(`forLeg: leg index out of range: ${index}`);
   }
-  return (1n << 255n) | BigInt(index);
+  return (1n << 255n) | opBits("forLeg", op) | BigInt(index);
 }
 
 /// PRE-FUNDED funding descriptor for output leg `index` — the shape to prefer, and
@@ -55,7 +59,7 @@ export function forLeg(index: number): bigint {
 /// TWO SEAMS TAKE THIS DESCRIPTOR:
 ///
 ///   • `ItemOp.MAKE` — every ONE-SIDED op (deposit-only, repay-only,
-///     supply-collateral-only). Nothing leaves the position, so there is NO taker
+///     supply-collateral-only; WHICH one is the mandatory `op`). Nothing leaves the position, so there is NO taker
 ///     allowance to grant and `item.amount` is UNREAD: the settler sizes the item
 ///     from this descriptor. Sign `amount: 0n`. Settlement dispatches the module
 ///     directly, which is both cheaper (~28k gas: no taker-allowance slot, no
@@ -73,15 +77,63 @@ export function forLeg(index: number): bigint {
 /// `PreFundGuard.floorOf` requires the module's own decoded asset to equal it too.
 /// One signed word, checked on both sides — without it the core proves that N units
 /// of some token arrived while the module spends N units of another.
-export function forLegPreFund(index: number, token: `0x${string}`): bigint {
+///
+/// `op` is MANDATORY and selects the module's operation: every merged
+/// `*PreFundModule` (and the operator/credit modules) dispatches on descriptor bits
+/// [244,252) (`PreFundModuleBase._preFundOp`). There is no safe default — op 0 is
+/// Supply/Deposit on most venues and its data layout is a prefix of Repay's, so a
+/// repay built without the op silently SUPPLIES instead (audit 2026-09-30,
+/// G-BYTE_MAP-2). Use the per-venue numbers in {@link PreFundOp}.
+export function forLegPreFund(index: number, token: `0x${string}`, op: number): bigint {
   if (!Number.isInteger(index) || index < 0 || index > 0xffff) {
     throw new Error(`forLegPreFund: leg index out of range: ${index}`);
   }
   if (!/^0x[0-9a-fA-F]{40}$/.test(token)) {
     throw new Error(`forLegPreFund: funding token must be a 20-byte address: ${token}`);
   }
-  return (5n << 253n) | (BigInt(token) << 16n) | BigInt(index);
+  return (5n << 253n) | opBits("forLegPreFund", op) | (BigInt(token) << 16n) | BigInt(index);
 }
+
+/// Bit offset of the module op inside a funding descriptor — `PreFundModuleBase._preFundOp`
+/// reads `(desc >> 244) & 0xff`. `Base._forSlice` reads only bits 253-255, [0,16) and
+/// [16,176) of a leg reference, and [0,176) of a balance descriptor, so the op shares no bit with
+/// anything the settler interprets.
+export const PRE_FUND_OP_SHIFT = 244n;
+
+function opBits(fn: string, op: number): bigint {
+  if (!Number.isInteger(op) || op < 0 || op > 0xff) throw new Error(`${fn}: module op out of range [0,255]: ${op}`);
+  return BigInt(op) << PRE_FUND_OP_SHIFT;
+}
+
+/// The module op a funding descriptor carries — bits [244,252). Mirrors
+/// `PreFundModuleBase._preFundOp`.
+export function preFundOp(desc: bigint): number {
+  return Number((desc >> PRE_FUND_OP_SHIFT) & 0xffn);
+}
+
+/// Per-venue module ops for the descriptor's bits [244,252) — the Solidity
+/// `enum Op` of each module, in declaration order. Pass to {@link forLegPreFund}
+/// (or the optional `op` of {@link forLeg} / {@link forBalance}).
+export const PreFundOp = {
+  AaveV2: { Deposit: 0, Repay: 1 },
+  AaveV3: { Supply: 0, Repay: 1 },
+  AaveV3Credit: { Borrow: 0, Leverage: 1 },
+  AaveV4: { Deposit: 0, Repay: 1 },
+  CompoundV2: { Deposit: 0, Repay: 1 },
+  CompoundV3: { Deposit: 0, Repay: 1 },
+  Venus: { Deposit: 0, Repay: 1 },
+  Silo: { Deposit: 0, Repay: 1 },
+  Exactly: { Deposit: 0, Repay: 1 },
+  MorphoBlue: { Supply: 0, SupplyCollateral: 1, Repay: 2 },
+  MorphoMidnight: { SupplyCollateral: 0, Repay: 1 },
+  LiquityV2: { AddColl: 0, Repay: 1 },
+  River: { AddColl: 0, Repay: 1 },
+  Teller: { PoolDeposit: 0, Repay: 1 },
+  Lista: { SupplyCollateral: 0 },
+  ListaBroker: { Repay: 0, Borrow: 1 },
+  EulerV2Operator: { Borrow: 0, Withdraw: 1, BatchOpen: 2, BatchClose: 3, Open: 4 },
+  DolomiteOperator: { Borrow: 0, Withdraw: 1, Deposit: 2, Repay: 3, BatchOpen: 4, BatchClose: 5, Open: 6 },
+} as const;
 
 /// The funding token a pre-fund descriptor names — bits [16:176). Mirrors
 /// `PreFundGuard.fundingToken`.
@@ -124,10 +176,12 @@ export function isPreFundDesc(desc: bigint): boolean {
 /// value-OUT leg borrowed in full. For a genuine sweep whose position can take the
 /// variance, sign an explicit low floor (`1` = 0.01% of the cap) — leniency is a
 /// choice now, not something obtained by omission.
-export function forBalance(token: Address, floorBps: number | bigint = 10_000): bigint {
+///
+/// `op` (default 0): the module op in descriptor bits [244,252), as for {@link forLeg}.
+export function forBalance(token: Address, floorBps: number | bigint = 10_000, op: number = 0): bigint {
   const floor = BigInt(floorBps);
   if (floor < 0n || floor > 10_000n) throw new Error(`forBalance: floorBps out of range: ${floorBps}`);
-  return (1n << 255n) | (1n << 254n) | (floor << 160n) | BigInt(token);
+  return (1n << 255n) | (1n << 254n) | opBits("forBalance", op) | (floor << 160n) | BigInt(token);
 }
 
 /// Read the funding FLOOR (bps of the cap) out of a balance descriptor, AS THE
@@ -234,7 +288,8 @@ export interface Order {
   /// Build/read with {@link packTiming} / {@link unpackTiming}.
   timing: bigint;
   exclusiveFiller: Address;
-  /// Anti-dust floor per fill, in anchor units (legsIn[0] for SELL, legsOut[0] for BUY).
+  /// Anti-dust floor per fill, in DENOMINATOR units: `fillTotal` when set, else the anchor
+  /// leg (legsIn[0] for SELL, legsOut[0] for BUY).
   minFillAnchor: bigint;
   /// Soft exclusivity: bps a non-exclusive in-window filler must improve the maker by (0 = hard).
   /// Also hard when no leg can carry the premium — no BUY input, no auctioned non-proportional
@@ -668,9 +723,11 @@ export interface Deployment {
  * (Shared order nonces are not exotic — that is exactly how an OCO bracket is
  * built — which is why the two artifacts needed disjoint halves.)
  *
- * ⚠ The settler does NOT check that an order's nonce has bit 255 clear: that
- * would put a compare on the hot path of every fill forever, to guard a range no
- * allocator picks. Guarding it is the builder's job — {@link assertOrderNonce}.
+ * The settler ENFORCES the split: a fill of an order whose nonce has bit 255 set
+ * reverts `OrderNonceReserved` (`Base._gateOrderPost`, since the 2026-08 F24
+ * remediation). {@link assertOrderNonce} refuses such a nonce earlier, at build
+ * time, so it is never signed in the first place; allocate random nonces with
+ * {@link randomOrderNonce}, which stays below 2^255.
  */
 export const SIGNER_NONCE_NS = 1n << 255n;
 
@@ -694,4 +751,20 @@ export function assertOrderNonce(nonce: bigint): bigint {
     );
   }
   return nonce;
+}
+
+/**
+ * A uniformly random LEGAL order nonce: 255 random bits, so bit 255 is always
+ * clear. Use this instead of drawing a raw 256-bit value, half of which the
+ * settler rejects (`OrderNonceReserved`).
+ */
+export function randomOrderNonce(): bigint {
+  const bytes = new Uint8Array(32);
+  // Web Crypto — global in browsers and Node ≥ 19; typed by hand since the SDK
+  // compiles against ES2022 without DOM or Node lib types.
+  (globalThis as unknown as { crypto: { getRandomValues(a: Uint8Array): Uint8Array } }).crypto.getRandomValues(bytes);
+  bytes[0]! &= 0x7f;
+  let n = 0n;
+  for (const b of bytes) n = (n << 8n) | BigInt(b);
+  return n;
 }

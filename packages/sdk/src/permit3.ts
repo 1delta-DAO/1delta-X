@@ -49,6 +49,8 @@ export function spenderRefPair(spender: Address, module: Address, ref: Hex): Spe
  * (e.g. your settlement/router) as `spender`.
  */
 export function permitTakeTypedData(permit: PermitTake, spender: Address, d: Deployment) {
+  // Asserted at the signing point too, not only in the {@link permitTake} builder.
+  assertPermit3Nonce(permit.nonce, Permit3MessageKind.Take);
   return {
     domain: permit3Domain(d.chainId, d.permit3),
     types: PERMIT_TAKE_TYPES,
@@ -111,9 +113,15 @@ export const encodeSetStrictModeToken = (token: Address, enabled: boolean): Hex 
 
 // Signed grants / one-shot take
 export const encodePermitBatch = (owner: Address, batch: PermitBatch, sig: Hex): Hex =>
-  enc("permitBatch", [owner, batch, sig]);
+  enc("permitBatch", [owner, { ...batch, nonce: assertPermit3Nonce(batch.nonce, Permit3MessageKind.Batch) }, sig]);
 export const encodePermitTake = (permit: PermitTake, owner: Address, receiver: Address, data: Hex, sig: Hex): Hex =>
-  enc("permitTake", [permit, owner, receiver, data, sig]);
+  enc("permitTake", [
+    { ...permit, nonce: assertPermit3Nonce(permit.nonce, Permit3MessageKind.Take) },
+    owner,
+    receiver,
+    data,
+    sig,
+  ]);
 export const encodeInvalidateUnorderedNonces = (wordPos: bigint, mask: bigint): Hex =>
   enc("invalidateUnorderedNonces", [wordPos, mask]);
 
@@ -240,7 +248,8 @@ export interface FundingPosture {
   permit3Expiration: number;
   /** Live direct ERC-20 allowance to `spender` — the fallback surface. */
   directAllowance: bigint;
-  /** Whether the payer has opted into strict mode, which disables the fallback. */
+  /** Whether strict mode disables the fallback for THIS token — the payer's global
+   *  flag OR its per-token flag (`setStrictModeToken`), as Permit3 `isStrict` reads it. */
   strictMode: boolean;
   /**
    * `true` when the token is still spendable through the direct allowance even
@@ -278,11 +287,15 @@ export async function readFundingPosture(
       functionName: "allowance",
       args: [params.owner, params.spender],
     }) as Promise<bigint>,
+    // `isStrict` = global strict mode OR per-token strict mode for THIS token — the
+    // exact predicate every enforcement site asks (`AllowanceTransfer.isStrict`).
+    // Reading only the global flag reported a per-token-hardened payer as exposed
+    // (audit 2026-09-30, G-TS_SIGN-13).
     reader.readContract({
       address: params.permit3,
       abi: PERMIT3_ABI,
-      functionName: "strictMode",
-      args: [params.owner],
+      functionName: "isStrict",
+      args: [params.owner, params.token],
     }) as Promise<boolean>,
   ]);
 

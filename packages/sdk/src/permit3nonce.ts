@@ -89,8 +89,12 @@ export function permit3NonceKind(nonce: bigint): Permit3MessageKind | null {
 }
 
 /**
- * Throw unless `nonce` was allocated for `kind`. Called by the builders, so an
- * un-namespaced or mis-namespaced nonce cannot reach a signature.
+ * Throw unless `nonce` was allocated for `kind`. Called by the builders AND at
+ * every signing / encoding point that takes a message object — the typed-data
+ * builders (`permitWitnessTypedData`, `permitTakeTypedData`, hence the `sign*`
+ * wrappers) and the calldata encoders (`encodeFillWithPermit`, `encodePermitBatch`,
+ * `encodePermitTake`) — so an object literal that bypassed the builder cannot reach
+ * a signature or a transaction with an un-namespaced or mis-namespaced nonce.
  */
 export function assertPermit3Nonce(nonce: bigint, kind: Permit3MessageKind): bigint {
   if (nonce < 0n) throw new Error(`permit3 nonce out of range: ${nonce}`);

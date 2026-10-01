@@ -60,6 +60,33 @@ export function ocoNonceGroup(legs: readonly Order[], sharedNonce: bigint): Orde
   return legs.map((l) => ({ ...l, nonce: sharedNonce, timing: l.timing | FILL_ONCE_BIT }));
 }
 
+/**
+ * Lint a set of orders for the "shared nonce without fill-once" footgun: two
+ * orders of the same maker sharing a nonce are an at-most-one bracket ONLY if
+ * every one of them carries the fill-once bit — a plain fill never consumes the
+ * nonce, so an unflagged sibling still fills after the other has (audit
+ * 2026-09-30, G-TS_SIGN-8). Throws naming the first offending nonce; returns the
+ * input unchanged otherwise. Orders with a unique (maker, nonce) are untouched.
+ */
+export function assertNonceSiblingsFillOnce<T extends Order>(orders: readonly T[]): readonly T[] {
+  const groups = new Map<string, T[]>();
+  for (const o of orders) {
+    const key = `${o.maker.toLowerCase()}:${o.nonce}`;
+    const g = groups.get(key);
+    if (g) g.push(o);
+    else groups.set(key, [o]);
+  }
+  for (const [key, g] of groups) {
+    if (g.length > 1 && g.some((o) => !isFillOnce(o))) {
+      throw new Error(
+        `orders ${key} share a nonce but not all carry the fill-once bit (timing bit 100): ` +
+          `without it every one of them can fill. Build the bracket with ocoNonceGroup.`,
+      );
+    }
+  }
+  return orders;
+}
+
 /** The validator half: reads whether the group is still open. */
 export function ocoGroupValidator(module: Address, groupId: bigint): Validator {
   return { target: module, data: encodeAbiParameters([{ type: "uint256" }], [groupId]) };

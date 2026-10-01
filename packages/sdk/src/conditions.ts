@@ -18,9 +18,15 @@ import type { Validator } from "./types";
  *   leaf  := flags(1) ‖ target(20) ‖ dataLen(2) ‖ data
  *
  * See `docs/condition-trees.md`. Before reaching for this: OR across WHOLE
- * ORDERS is free — sign two orders sharing a nonce, and whichever fills first
- * cancels the other. That covers "limit or stop-loss" with no extra gas and lets
- * each branch carry its own prices.
+ * ORDERS needs no validator — sign the branches with {@link ocoNonceGroup}, which
+ * gives them the SAME nonce AND the fill-once bit (timing bit 100). Only a
+ * fill-once order consumes its nonce when it fills; without the bit a fill records
+ * per-order progress only, the sibling stays fillable, and BOTH branches execute.
+ * With the bit, whichever branch FULLY fills first cancels the others — and each
+ * branch becomes whole-fill only (a partial reverts `FillOnceMustBeFull`). That
+ * covers "limit or stop-loss" with no extra gas and lets each branch carry its own
+ * prices. For partially fillable branches use `OcoGroupModule` ({@link ocoGroup}).
+ * See `docs/oco.md`, and lint a hand-built set with {@link assertNonceSiblingsFillOnce}.
  */
 
 /** Invert this leaf's result. */

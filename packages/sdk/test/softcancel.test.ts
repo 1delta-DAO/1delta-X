@@ -5,6 +5,7 @@ import { recoverTypedDataAddress, verifyTypedData, zeroAddress } from "viem";
 import {
   amendOrder,
   buildSoftCancel,
+  FILL_ONCE_BIT,
   hashOrderStruct,
   patchOrder,
   SOFT_CANCEL_TYPE,
@@ -99,7 +100,11 @@ describe("amendOrder — cancel and replace", () => {
   });
 
   it("rejects a no-op amend rather than churning a nonce for nothing", async () => {
-    await expect(amendOrder(account, order, order.nonce, {}, d)).rejects.toThrow(/no-op/);
+    // An ordinary order can no longer reuse its nonce at all (audit 2026-09-30, PRICE-5),
+    // so the no-op guard is reached by a fill-once order, which keeps its nonce.
+    await expect(amendOrder(account, order, order.nonce, {}, d)).rejects.toThrow(/FRESH nonce/);
+    const once = { ...order, timing: order.timing | FILL_ONCE_BIT };
+    await expect(amendOrder(account, once, once.nonce, {}, d)).rejects.toThrow(/no-op/);
   });
 
   it("carries every unpatched field through verbatim", () => {

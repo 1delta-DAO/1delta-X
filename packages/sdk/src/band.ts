@@ -60,10 +60,18 @@ export interface Band {
   rising?: boolean;
 }
 
+/** Whether `band` is a FIXED leg (`end == 0n`): it prices at `start` whatever the bump. */
+export function isFixedBand(band: Band): boolean {
+  return band.end === 0n;
+}
+
 /** The amount this band prices at `bumpBps`. Mirrors `DutchAuction.outTick`/`inTick`
  *  (floor division; the on-chain delivery path rounds in the maker's favour, so
  *  treat this as advisory rather than as a fill quote). */
 export function amountAtBump(band: Band, bumpBps: number): bigint {
+  // `end == 0` is the FIXED-leg sentinel, not a band down (or up) to zero — the first
+  // branch of `outTick`/`inTick` (audit 2026-09-30, G-TS_SIGN-10).
+  if (isFixedBand(band)) return band.start;
   const b = BigInt(Math.max(0, Math.min(BPS, Math.round(bumpBps))));
   if (band.rising) {
     if (band.start > band.end) throw new Error("rising band with start > end");
@@ -105,7 +113,10 @@ export interface AdviseOptions {
  * What this band is costing, and where `end` could sit instead.
  *
  * Returns `null` for an empty distribution — advice from no observations is worse
- * than none, because it reads as a recommendation.
+ * than none, because it reads as a recommendation — and for a FIXED leg
+ * (`end == 0n`), which has no band to tighten: its amount is `start` at every
+ * bump, and "moving `end`" off the sentinel would turn a fixed amount INTO a band,
+ * widening what the maker signs.
  *
  * ⚠ This is descriptive, not causal. The observed depths were produced UNDER the
  * current band; tightening `end` changes what fillers will do, and the tail you
@@ -114,7 +125,7 @@ export interface AdviseOptions {
  */
 export function adviseBand(band: Band, d: BumpDistribution, opts: AdviseOptions = {}): BandAdvice | null {
   const n = d.sorted.length;
-  if (n === 0) return null;
+  if (n === 0 || isFixedBand(band)) return null;
 
   const coverage = opts.coverage ?? 0.95;
   const coverBump = bumpPercentile(d, coverage);
