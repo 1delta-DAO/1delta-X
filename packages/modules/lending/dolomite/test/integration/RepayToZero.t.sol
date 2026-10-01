@@ -40,7 +40,6 @@ contract DolomiteRepayToZeroTest is DolomiteModulesBase {
     }
 
     function test_dolomite_repay_full_leavesExactlyZeroDebt() public {
-        _neutralizeRiskOverride();
         _openDolomitePosition(COLLATERAL, PRINCIPAL);
 
         // Accrue: the live debt is now strictly above the opening principal.
@@ -67,7 +66,6 @@ contract DolomiteRepayToZeroTest is DolomiteModulesBase {
     ///      the residual is the accrued interest, and the position stays open.
     ///      This is the counterpart the "repay all" callers must avoid.
     function test_dolomite_repay_stalePrincipal_leavesAccruedInterest() public {
-        _neutralizeRiskOverride();
         _openDolomitePosition(COLLATERAL, PRINCIPAL);
 
         _freezeOracles();
@@ -85,7 +83,6 @@ contract DolomiteRepayToZeroTest is DolomiteModulesBase {
     }
 
     function test_dolomite_repay_partial_reducesDebt() public {
-        _neutralizeRiskOverride();
         _openDolomitePosition(COLLATERAL, PRINCIPAL);
 
         uint256 debt = _debtOf(maker);

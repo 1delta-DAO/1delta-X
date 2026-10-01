@@ -90,7 +90,9 @@ import {IExactlyMarket} from "./interfaces/IExactly.sol";
 ///         per-op `data` layouts are unchanged apart from the descriptor bits.
 // Byte maps — Supply: forDesc@0, market@32, asset@64, maturity@96, minAssetsRequired@128 (base = 160).
 //             Repay:  forDesc@0, market@32, asset@64, maturity@96, positionAssets@128 (base = 160);
-//                     totalAmount@160 (fixed branch only, MANDATORY there — see `_scaledFace`).
+//                     totalAmount@160 (fixed branch only, MANDATORY there — see `_scaledFace`):
+//                     the funding leg's SMALLEST full-fill delivery — its amount when
+//                     fixed-priced, its auction `end` when it decays.
 contract ExactlyPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     enum Op {
         Deposit,
@@ -162,27 +164,51 @@ contract ExactlyPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource
         // the core; with a caller-chosen `forAmount` the same subtraction proves
         // nothing (F27/C-1, C-4).
         uint256 floor = PreFundGuard.floorOf(data, asset, forAmount);
-        {
-            // Tail decode (maturity@96, positionAssets@128) via a calldata slice —
-            // the {AaveV3PreFundRepayModule} pattern — to keep this frame flat.
-            (uint256 maturity, uint256 positionAssets) = abi.decode(data[96:], (uint256, uint256));
-            if (maturity == 0) {
-                _repayFloating(market, asset, onBehalfOf, forAmount);
-            } else {
-                // Scoped approve + CLEAR — `market` is maker-data-choosable on a
-                // singleton. `forAmount` is the budget: the market pulls
-                // `actualRepay ≤ forAmount` or reverts (`Disagreement`).
-                SafeTransferLib.forceApprove(asset, market, forAmount);
-                IExactlyMarket(market).repayAtMaturity(
-                    maturity, _scaledFace(data, positionAssets, forAmount), forAmount, onBehalfOf
-                );
-                SafeTransferLib.forceApprove(asset, market, 0);
-            }
+        // maturity@96 via a calldata read — the {AaveV3PreFundRepayModule} pattern —
+        // to keep this frame flat; the fixed branch decodes its own tail.
+        if (uint256(bytes32(data[96:128])) == 0) {
+            _repayFloating(market, asset, onBehalfOf, forAmount);
+        } else {
+            _repayFixed(market, asset, onBehalfOf, forAmount, data);
         }
         // The delivered surplus belongs to the maker, not to this singleton. Sweep
         // exactly this fill's excess (`forAmount − spent`), never the whole
         // balance — a wei of another fill's dust may legitimately sit here.
         PreFundGuard.sweepSurplus(asset, onBehalfOf, floor);
+    }
+
+    /// @dev The fixed-maturity repay of `face`, against the delivered budget.
+    ///
+    ///      ⚠ CLAMPED TO THE LIVE POSITION, AND SKIPPED WHEN IT IS EMPTY. `face` can
+    ///      legitimately exceed what is left (see {_scaledFace}: on an AUCTIONED
+    ///      funding leg an early slice delivers above its fill fraction and presents
+    ///      more face), and Exactly does NOT treat an empty fixed position as a
+    ///      no-op — `FixedLib.scaleProportionally` divides by `principal + fee` and
+    ///      reverts. Before this, the slice that over-retired closed the position and
+    ///      every LATER slice of the same order reverted, leaving the remainder
+    ///      unfillable (2026-09-30 audit L-FSE-2 / X-ARITH-5). Now a later slice finds
+    ///      nothing to retire and its whole delivery is swept to the maker by the
+    ///      caller — the debt they signed to close is already closed.
+    ///
+    ///      Scoped approve + CLEAR — `market` is maker-data-choosable on a singleton.
+    ///      `forAmount` is the budget: the market pulls `actualRepay ≤ forAmount` or
+    ///      reverts (`Disagreement`).
+    function _repayFixed(
+        address market,
+        address asset,
+        address onBehalfOf,
+        uint256 forAmount,
+        bytes calldata data
+    ) private {
+        // Tail decode: maturity@96, positionAssets@128.
+        (uint256 maturity, uint256 face) = abi.decode(data[96:], (uint256, uint256));
+        face = _scaledFace(data, face, forAmount);
+        (uint256 principal, uint256 fee) = IExactlyMarket(market).fixedBorrowPositions(maturity, onBehalfOf);
+        if (face > principal + fee) face = principal + fee;
+        if (face == 0) return;
+        SafeTransferLib.forceApprove(asset, market, forAmount);
+        IExactlyMarket(market).repayAtMaturity(maturity, face, forAmount, onBehalfOf);
+        SafeTransferLib.forceApprove(asset, market, 0);
     }
 
     /// @dev Scale the maker-signed FACE with this fill's slice (F27/H-3).
@@ -197,9 +223,28 @@ contract ExactlyPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource
     ///
     ///      FLOOR, deliberately: slices sum to at most the face, so the tail of a
     ///      rounding-down series leaves a wei unretired rather than over-retiring.
-    ///      Reads the maker-signed total at calldata offset 160 — the funding
-    ///      leg's FULL amount, the denominator `forAmount` is a slice of.
+    ///      Reads the maker-signed total at calldata offset 160.
     ///      BREAKING: this word is new in the blob.
+    ///
+    ///      ⚠ WHAT `total` MUST BE: the funding leg's WORST-CASE (smallest) FULL-FILL
+    ///      DELIVERY — its amount for a fixed-price leg (`end == 0`), its `end` for an
+    ///      AUCTIONED (decaying) leg. The module sees only `forAmount`, the delivery
+    ///      at THIS fill's price, never the fill fraction, so `forAmount / total`
+    ///      mixes price with progress whenever the leg moves (2026-09-30 audit
+    ///      L-FSE-2). Pinning `total` to the floor delivery makes that error
+    ///      one-sided in the maker's favour:
+    ///        • a FULL fill delivers `>= end` at any tick, so it always presents the
+    ///          WHOLE face — signing `total = start` instead retired only
+    ///          `tick / start` of the face on a decayed full fill and left the rest
+    ///          of the fixed debt open with the order consumed;
+    ///        • a PARTIAL slice above the floor presents MORE than its fraction,
+    ///          which Exactly caps at the position and {_repayFixed} clamps, and
+    ///          which the slice's own delivered budget still bounds.
+    ///      Hence `forAmount >= total` returning the whole face is the DEFINED
+    ///      full-fill case, not a mis-encoding fallback, and it is not refused the way
+    ///      {ProratedBound.scale} refuses a slice above its total (X-ARITH-5): the
+    ///      better-than-floor fill of an auctioned leg reaches it legitimately, and
+    ///      `face` is not a ceiling against the maker — the budget is.
     function _scaledFace(bytes calldata data, uint256 face, uint256 forAmount) private pure returns (uint256) {
         if (data.length < 192) revert FaceTotalMissing();
         uint256 total = uint256(bytes32(data[160:192]));

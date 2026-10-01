@@ -86,14 +86,42 @@ interface IExactlyMarket {
     function previewRefund(uint256 shares) external view returns (uint256 assets);
     function maxWithdraw(address owner) external view returns (uint256);
 
-    /// @notice The owner's RAW position in asset units — share balance converted at
-    ///         the current rate, with NO solvency or liquidity clamp.
-    /// @dev This, not {maxWithdraw}, is what {IPositionSource.positionOf} must report:
-    ///      `maxWithdraw` is a REACHABILITY figure (clipped by open debt and by vault
-    ///      cash, both of which third parties move), and pricing a one-shot exit off
-    ///      it lets a fill resolve small instead of reverting.
+    /// @notice The owner's FLOATING deposit SHARE balance (the ERC-4626 receipt) —
+    ///         shares, not assets.
     function balanceOf(address owner) external view returns (uint256 shares);
+
+    /// @notice Assets `shares` redeem for at the current rate.
+    /// @dev `previewRedeem(balanceOf(owner))` is the owner's RAW position in asset
+    ///      units — NO solvency or liquidity clamp — and is what
+    ///      {IPositionSource.positionOf} must report. NOT {maxWithdraw}: that is a
+    ///      REACHABILITY figure (clipped by open debt and by vault cash, both of which
+    ///      third parties move), and pricing a one-shot exit off it lets a fill
+    ///      resolve small instead of reverting.
     function previewRedeem(uint256 shares) external view returns (uint256 assets);
+
+    /// @notice The owner's FIXED DEPOSIT at `maturity`: `principal + fee` is the
+    ///         face `withdrawAtMaturity` can pay out (before any early-withdraw
+    ///         discount). Auto-getter of
+    ///         `mapping(uint256 => mapping(address => FixedLib.Position)) public fixedDepositPositions`.
+    /// @dev ⚠ `withdrawAtMaturity` CLAMPS a request larger than this to it instead
+    ///      of reverting (`_prepareWithdrawAtMaturity`: `effectiveAssets =
+    ///      min(positionAssets, principal + fee)`), so a short fixed position
+    ///      under-delivers SILENTLY. {ExactlyTakerModule} reads this to fail closed.
+    function fixedDepositPositions(uint256 maturity, address owner)
+        external
+        view
+        returns (uint256 principal, uint256 fee);
+
+    /// @notice The borrower's FIXED BORROW at `maturity`: `principal + fee` is the
+    ///         face `repayAtMaturity` can retire. Auto-getter of
+    ///         `mapping(uint256 => mapping(address => FixedLib.Position)) public fixedBorrowPositions`.
+    /// @dev `repayAtMaturity` caps the presented face at this itself, but an EMPTY
+    ///      position (`principal + fee == 0`) REVERTS inside `FixedLib.scaleProportionally`
+    ///      (division by zero) — {ExactlyPreFundModule} reads it to skip instead.
+    function fixedBorrowPositions(uint256 maturity, address borrower)
+        external
+        view
+        returns (uint256 principal, uint256 fee);
 
     // ── EIP-2612 (solmate ERC20 base) ──
     // The deployed Markets expose the full solmate permit triple, verified

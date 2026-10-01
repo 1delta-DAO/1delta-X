@@ -45,8 +45,8 @@ abstract contract FluidModulesBase is CoreSettlementBase {
 
         depositModule = new FluidDepositModule(address(permit3), address(settlement));
         repayModule = new FluidRepayModule(address(permit3), address(settlement));
-        takerModule = new FluidTakerModule(address(permit3));
-        operateModule = new FluidOperateModule(address(permit3));
+        takerModule = new FluidTakerModule(address(permit3), VAULT_FACTORY, WETH);
+        operateModule = new FluidOperateModule(address(permit3), VAULT_FACTORY, WETH);
 
         vm.label(VAULT, "FluidEthUsdcVault");
         vm.label(VAULT_FACTORY, "FluidVaultFactory");

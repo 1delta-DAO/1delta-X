@@ -12,7 +12,9 @@ import {FluidOperateModule, FluidTakerModule} from "../../src/FluidModules.sol";
 ///
 ///   • repay      — value-in, permissionless, Permit3 token allowance only.
 ///   • borrow     — value-out, JIT NFT custody, Permit3 taker allowance.
-///   • withdraw   — value-out, JIT NFT custody, native-ETH collateral to `recv`.
+///   • withdraw   — value-out, JIT NFT custody, native-ETH collateral delivered to
+///                  `recv` as WETH (wrapped in the module — 2026-09-30 audit L-FSE-3;
+///                  raw ETH could never reach Settlement on a recipient-0 item).
 ///   • full close — Level B: repay-ALL (over-pull + residual sweep) + withdraw, one operate.
 ///
 /// (Deposit of native-ETH collateral is out of scope — the ERC20 deposit module needs
@@ -71,11 +73,15 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         permit3.approveTaker(address(settlement), address(takerModule), keccak256(data), uint160(withdrawAmount), 0);
 
         uint256 recvEthBefore = recv.balance;
+        uint256 recvWethBefore = IERC20(WETH).balanceOf(recv);
 
         vm.prank(address(settlement));
         permit3.take(address(takerModule), maker, uint160(withdrawAmount), recv, data);
 
-        assertEq(recv.balance - recvEthBefore, withdrawAmount, "receiver got withdrawn ETH");
+        // Native collateral is delivered WRAPPED (L-FSE-3), never as raw ETH.
+        assertEq(IERC20(WETH).balanceOf(recv) - recvWethBefore, withdrawAmount, "receiver got withdrawn ETH as WETH");
+        assertEq(recv.balance, recvEthBefore, "no raw ETH sent");
+        assertEq(IERC20(WETH).balanceOf(address(takerModule)), 0, "taker module holds no WETH");
         assertEq(_ownerOf(nftId), maker, "position NFT returned to maker");
         assertEq(address(takerModule).balance, 0, "taker module holds no ETH");
     }
@@ -104,14 +110,15 @@ contract FluidLendingIntegrationTest is FluidModulesBase {
         permit3.approveTaker(address(settlement), address(operateModule), keccak256(data), uint160(withdrawCol), 0);
         vm.stopPrank();
 
-        uint256 recvEthBefore = recv.balance;
+        uint256 recvWethBefore = IERC20(WETH).balanceOf(recv);
         uint256 makerUsdcBefore = IERC20(USDC).balanceOf(maker);
 
         // `amount` is the collateral-withdraw leg (value-out); the debt leg repays all.
         vm.prank(address(settlement));
         permit3.take(address(operateModule), maker, uint160(withdrawCol), recv, data);
 
-        assertEq(recv.balance - recvEthBefore, withdrawCol, "receiver got withdrawn collateral");
+        // Native collateral is delivered WRAPPED (L-FSE-3).
+        assertEq(IERC20(WETH).balanceOf(recv) - recvWethBefore, withdrawCol, "receiver got withdrawn collateral as WETH");
 
         uint256 usdcSpent = makerUsdcBefore - IERC20(USDC).balanceOf(maker);
         assertGe(usdcSpent, 1000e6, "spent at least the principal debt");

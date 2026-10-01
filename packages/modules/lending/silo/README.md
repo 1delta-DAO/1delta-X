@@ -20,9 +20,9 @@ address it acts on, pinned in the maker-signed `data`.
 | Contract | Op | Silo action | `data` |
 |---|---|---|---|
 | `SiloDepositModule` | MAKE | pull asset → `silo.deposit(onBehalfOf)` (Collateral) | `abi.encode(silo, asset[, permit])` |
-| `SiloRepayModule` | MAKE | pull buffered amount → `silo.repay`; recycle/sweep dust | `abi.encode(silo, asset[, DustAction[, permit]])` |
+| `SiloRepayModule` | MAKE | pull buffered amount → `silo.repay`; recycle/sweep dust | `abi.encode(silo, asset[, DustAction[, deadline, v, r, s]])` — DustAction@64 (`0` SweepToUser, `1` Recycle), permit@96 |
 | `SiloTakerModule` (op 0) | TAKE | `silo.borrow(amount, receiver, onBehalfOf)` | `abi.encode(uint8(0), silo, asset)` |
-| `SiloTakerModule` (op 1) | TAKE | `silo.withdraw(amount, receiver, onBehalfOf)` | `abi.encode(uint8(1), silo, asset[, BalanceMode])` |
+| `SiloTakerModule` (op 1) | TAKE | `silo.withdraw(amount, receiver, onBehalfOf)` | `abi.encode(uint8(1), silo, asset[, BalanceMode[, total]])` — BalanceMode@96; `total`@128 is **mandatory** when the mode is `Full` (the item's full signed amount; a `Full` blob without it fails closed) |
 
 ## Authorization (per leg)
 
@@ -45,11 +45,15 @@ and the MAKE modules enforce `msg.sender == settlement`.
 - `SiloRepayModule` reads the live debt via `maxRepay(onBehalfOf)` and repays
   `min(amount, debt)`, so an interest-accrual buffer is never over-pulled.
 - `BalanceMode.Full` on withdraw closes the whole position (fill-or-kill; only
-  after debt is cleared) and sweeps the accrued excess back to the maker.
+  after debt is cleared) and sweeps the accrued excess back to the maker. It sizes
+  off the RAW position (`previewRedeem(balanceOf)`, not `maxWithdraw`) and fails
+  closed — the venue reverts on an illiquid/borrowed-against position, and
+  `requireDelivered` reverts a delivery short of the signed amount. `BalanceMode`
+  is a tagged word: encode it with `DustHandler.encodeMode`.
 
 ## Tests
 
-Fork Sonic/Arbitrum where Silo v2 is deployed (set an RPC endpoint). The
+Fork Ethereum mainnet, where the Silo v2 wstETH/WETH market is deployed (public RPCs by default; set an RPC endpoint to override). The
 `security/` auth check runs without a fork.
 
 ```

@@ -215,6 +215,12 @@ contract MockDolomite {
         bal[owner][account] = Bal(sign, value);
     }
 
+    /// @dev The market registry the module binds every signed token to
+    ///      (G-BYTE_MAP-7): this mock lists one token.
+    function getMarketTokenAddress(uint256) external view returns (address) {
+        return token;
+    }
+
     function getAccountWei(AccountInfo calldata a, uint256) external view returns (WeiBalance memory) {
         Bal memory b = bal[a.owner][a.number];
         return WeiBalance(b.sign, b.value);

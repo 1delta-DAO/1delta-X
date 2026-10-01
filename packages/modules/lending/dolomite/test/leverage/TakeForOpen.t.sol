@@ -78,7 +78,6 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
     // ──────────── the guard is simply gone: partial fills work ────────────
 
     function test_partialFills_noGuardNeeded() public {
-        _neutralizeRiskOverride();
         deal(COLL, solver, COLLATERAL * 2); // per-fill-ceil headroom on a SELL leg
         _approveSolverSide(COLLATERAL * 2, COLL);
 
@@ -109,7 +108,6 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
 
     /// The contrast: the same slice on the constant-`sideAmount` operate module.
     function test_oldOperateModule_refusesTheSameSlice() public {
-        _neutralizeRiskOverride();
         deal(COLL, solver, COLLATERAL);
         _approveSolverSide(COLLATERAL, COLL);
 
@@ -144,7 +142,6 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
     /// A full fill opens the same position the operate module would — one dispatch,
     /// one end-of-call solvency check.
     function test_fullFill_opensTheSamePosition() public {
-        _neutralizeRiskOverride();
         deal(COLL, solver, COLLATERAL);
         _approveSolverSide(COLLATERAL, COLL);
 
@@ -169,7 +166,6 @@ contract DolomiteTakeForOpenTest is DolomiteModulesBase {
     // Both runs from an IDENTICAL fork state — see the Euler/Aave notes on why
     // back-to-back measurement without a revert is meaningless here.
     function test_gas_takeFor_vs_operateModule() public {
-        _neutralizeRiskOverride();
         deal(COLL, solver, COLLATERAL);
         _approveSolverSide(COLLATERAL, COLL);
 

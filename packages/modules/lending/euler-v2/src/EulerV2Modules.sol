@@ -36,13 +36,31 @@ import {IEulerVault} from "./interfaces/IEulerV2.sol";
 //  require the same unscoped `setAccountOperator` boolean.
 // ════════════════════════════════════════════════════════════════════════════
 
+/// @dev The maker's EVC sub-account named by an OPTIONAL trailing `subId` word.
+library EulerSubAccount {
+    /// @dev `subId` is not a valid EVC sub-account id (must be < 256).
+    error BadSubAccount(uint256 subId);
+
+    /// @notice `owner ^ subId` for the word at `offset`, or `owner` when absent.
+    ///         The XOR stays inside `owner`'s own 256-account EVC group, so it can
+    ///         never name another principal. 2026-09-30 audit L-ED-6.
+    function account(address owner, bytes calldata data, uint256 offset) internal pure returns (address) {
+        if (data.length < offset + 32) return owner;
+        uint256 subId = uint256(bytes32(data[offset:offset + 32]));
+        if (subId > 0xff) revert BadSubAccount(subId);
+        return address(uint160(owner) ^ uint160(subId));
+    }
+}
+
 // ──────────────────── Euler V2 deposit maker module ────────────────────
 //
 // Single-op module: pulls the vault's `asset()` from the user via Permit3, then
 // supplies it into `vault` crediting shares to the user. Called directly, so the
 // authenticated (funding) account is this module while the shares land on the
 // user. No EVC operator status is needed (value flows *into* the protocol).
-// `data = abi.encode(vault)`.
+// `data = abi.encode(vault[, subId])` — base 32; optional `subId@32` (< 256)
+// credits the maker's EVC SUB-ACCOUNT `maker ^ subId` instead of the primary
+// account (see {EulerV2OperatorModule._plainAccount}); absent ⇒ 0 ⇒ primary.
 //
 contract EulerV2DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -58,11 +76,12 @@ contract EulerV2DepositModule is IMakerModule {
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
         if (msg.sender != settlement) revert NotSettlement();
         address vault = abi.decode(data, (address));
+        address account = EulerSubAccount.account(onBehalfOf, data, 32); // validated before any pull
         address asset = IEulerVault(vault).asset();
 
         permit3.transferFrom(onBehalfOf, address(this), asset, uint160(amount));
         SafeTransferLib.forceApprove(asset, vault, amount);
-        IEulerVault(vault).deposit(amount, onBehalfOf);
+        IEulerVault(vault).deposit(amount, account);
         // Clear the scoped grant: `vault` is decoded from the order's `data` on a
         // SHARED singleton, so it is attacker-choosable — anyone can author an
         // order naming themselves as maker. A target that consumes less than
@@ -76,19 +95,26 @@ contract EulerV2DepositModule is IMakerModule {
 // ──────────────────── Euler V2 repay maker module ────────────────────
 //
 // Closes the user's borrow in `vault`, handling interest-accrual over-repay with
-// a pull-exact strategy: read the live debt, repay `min(amount, debt)`. EVK's
-// `repay` itself caps at the debt, but pulling only what we need keeps the
-// over-repay buffer out of this contract entirely (SweepToUser), removing the
-// "stray dust a caller can redirect" vector at the source. On Recycle the module
-// takes the full signed ceiling, repays the debt, and re-supplies the surplus as
-// a lend balance into the same vault for the user — best-effort, sweep fallback.
+// a pull-exact strategy: read the live debt, repay `min(amount, debt)`. The clamp
+// is LOAD-BEARING: EVK's `repay` does NOT cap at the debt — any finite amount
+// above it reverts `E_RepayTooMuch` (only the `type(uint256).max` sentinel
+// resolves to the full debt) — and `debtOf` is the same `toAssetsUp` figure
+// `repay` checks in the same block, so the clamp is exact. Pulling only what is
+// needed also keeps the over-repay buffer out of this contract entirely
+// (SweepToUser), removing the "stray dust a caller can redirect" vector at the
+// source. On Recycle the module takes the full signed ceiling, repays the debt,
+// and re-supplies the surplus as a lend balance into the same vault for the
+// user — best-effort, sweep fallback.
 //
 // Repay is permissionless on behalf of the user, so no EVC operator status is
 // needed; the module funds the repay as the authenticated account.
 //
 // `nonReentrant` guards weird-token transfer hooks.
-// `data = abi.encode(vault[, DustHandler.DustAction])` — trailing action
-// optional; absent ⇒ SweepToUser.
+// `data = abi.encode(vault[, DustHandler.DustAction[, subId]])` — base 32;
+// DustAction@32 optional (absent ⇒ SweepToUser); `subId@64` optional (< 256):
+// repay (and Recycle into) the maker's EVC SUB-ACCOUNT `maker ^ subId`. The
+// residual is always swept to the maker's own wallet, never to a sub-account
+// address (which cannot move an ERC-20 it holds).
 //
 contract EulerV2RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
@@ -119,8 +145,8 @@ contract EulerV2RepayModule is IMakerModule {
         // happens to be filling. See the floor overload of {DustHandler.disposeResidual}.
         uint256 floor = IERC20(asset).balanceOf(address(this));
 
-        _pullAndRepay(vault, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle);
-        _disposeResidual(vault, asset, onBehalfOf, action, floor);
+        _pullAndRepay(vault, asset, amount, onBehalfOf, action == DustHandler.DustAction.Recycle, data);
+        _disposeResidual(vault, asset, onBehalfOf, action, floor, data);
 
         _locked = 1;
     }
@@ -128,10 +154,19 @@ contract EulerV2RepayModule is IMakerModule {
     /// @dev Pull the funding token and repay. SweepToUser pulls only `toRepay`, so
     ///      the buffer never enters this contract; Recycle pulls the full signed
     ///      ceiling so the surplus can be redirected into the user's position.
-    function _pullAndRepay(address vault, address asset, uint256 amount, address onBehalfOf, bool recycle) private {
+    function _pullAndRepay(
+        address vault,
+        address asset,
+        uint256 amount,
+        address onBehalfOf,
+        bool recycle,
+        bytes calldata data
+    ) private {
+        address account = EulerSubAccount.account(onBehalfOf, data, 64);
         uint256 toRepay;
         {
-            uint256 debt = IEulerVault(vault).debtOf(onBehalfOf);
+            // Load-bearing: EVK `repay` reverts `E_RepayTooMuch` above the debt.
+            uint256 debt = IEulerVault(vault).debtOf(account);
             toRepay = amount < debt ? amount : debt;
         }
         {
@@ -140,7 +175,7 @@ contract EulerV2RepayModule is IMakerModule {
         }
         if (toRepay > 0) {
             SafeTransferLib.forceApprove(asset, vault, toRepay);
-            IEulerVault(vault).repay(toRepay, onBehalfOf);
+            IEulerVault(vault).repay(toRepay, account);
             // Clear the scoped grant: `vault` is decoded from the order's `data` on a
             // SHARED singleton, so it is attacker-choosable — anyone can author an
             // order naming themselves as maker. A target that consumes less than
@@ -158,7 +193,8 @@ contract EulerV2RepayModule is IMakerModule {
         address asset,
         address onBehalfOf,
         DustHandler.DustAction action,
-        uint256 floor
+        uint256 floor,
+        bytes calldata data
     ) private {
         // The delta THIS call produced, not the module's whole balance — `floor` is
         // what it already held. On the normal path a module is pull-exact and starts
@@ -176,7 +212,7 @@ contract EulerV2RepayModule is IMakerModule {
             onBehalfOf,
             action,
             vault,
-            abi.encodeCall(IEulerVault.deposit, (residual, onBehalfOf))
+            abi.encodeCall(IEulerVault.deposit, (residual, EulerSubAccount.account(onBehalfOf, data, 64)))
         );
     }
 }

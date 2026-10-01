@@ -19,7 +19,6 @@ contract DolomiteAtomicOpenTest is DolomiteModulesBase {
     uint256 constant BORROW_OUT = 1_000e6;
 
     function test_atomic_deposit_and_borrow_oneOperate() public {
-        _neutralizeRiskOverride();
         deal(COLL, solver, COLLATERAL_IN);
 
         DolomiteOperatorModule.BatchData memory p = DolomiteOperatorModule.BatchData({
