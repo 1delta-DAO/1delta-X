@@ -245,6 +245,24 @@ contract FluidAuditRegressionsTest is FluidModulesBase {
         assertEq(takeForModule.proceedsAsset(d), USDC, "ETH-USDC vault borrows USDC");
     }
 
+    // ──────────────── L-FSE-6: cross-principal negatives ────────────────
+
+    /// An attacker's OWN taker bucket naming the VICTIM's nftId (real vault, real
+    /// factory): the custody pull is `transferFrom(attacker → module, victimId)`,
+    /// which the real ERC-721 refuses — even though the victim granted the module
+    /// `setApprovalForAll` (the base harness does exactly that).
+    function test_audit_L_FSE_6_attackerOrder_namingVictimNft_reverts() public {
+        uint256 victimId = _openPosition(maker, 1 ether, 1000e6);
+        bytes memory d = abi.encode(uint8(FluidTakerModule.Op.Withdraw), VAULT, VAULT_FACTORY, victimId);
+        vm.startPrank(attacker);
+        permit3.approveTaker(attacker, address(takerModule), keccak256(d), uint160(0.1 ether), 0);
+        vm.expectRevert();
+        permit3.take(address(takerModule), attacker, uint160(0.1 ether), attacker, d);
+        vm.stopPrank();
+        assertEq(_ownerOf(victimId), maker, "victim keeps the position");
+        assertEq(IERC20(WETH).balanceOf(attacker), 0, "attacker got nothing");
+    }
+
     // ──────────────── L-FSE-6: TAKE_FOR spender pin at runtime ────────────────
 
     /// `Permit3.takeFor` is permissionless and `approveTaker` lets a caller name
