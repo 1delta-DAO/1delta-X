@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 
 import {AaveV4WithdrawModule, AaveV4BorrowModule} from "../../src/AaveV4Modules.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 
 /// @dev Minimal ERC20 with the bits the modules touch.
 contract MockToken {
@@ -50,6 +51,20 @@ contract DivergentPositionManager {
     }
 }
 
+/// @dev A spoke that answers `getReserve(reserveId)` with `underlying` in word 0 —
+///      what the taker modules bind the signed `asset` against (L-CV2-4).
+contract MockReserveSpoke {
+    address public immutable underlying;
+
+    constructor(address u) {
+        underlying = u;
+    }
+
+    function getReserve(uint256) external view returns (address, address, uint256) {
+        return (underlying, address(0), 0);
+    }
+}
+
 /// @title AaveV4MeasuredProceedsTest
 /// @notice Regression test for the v4 taker legs forwarding NOMINAL rather than
 ///         MEASURED amounts.
@@ -65,14 +80,19 @@ contract DivergentPositionManager {
 ///  This is the same shape as the H-3 River finding and the M-4 measured-delta
 ///  rule already applied elsewhere. Both legs now forward the MEASURED delta,
 ///  capped at the signed amount — so a short delivery hands the receiver only what
-///  actually arrived and never a wei of the module's stray balance. A genuine short
-///  is caught by Settlement's output check, not a module-level revert (the old
-///  `require(received >= amount)` gate was dropped 2026-09 — see the measured-
-///  delivery posture, module-security-model.md I-8). The property under test is
-///  unchanged: the stray balance is never what pays the order.
+///  actually arrived and never a wei of the module's stray balance.
+///
+///  CORRECTED 2026-09-30 (L-CV2-1). This header used to say a short delivery "is
+///  caught by Settlement's output check". It is not: a withdraw/borrow item funds an
+///  INPUT leg, and {Core._payInputsToSolver} pulls `owed - proceeds` from the
+///  MAKER'S WALLET. The v4 spoke CLAMPS a withdraw to the supplied balance, so the
+///  withdraw module now REVERTS on a short (`ShortWithdraw`) in both modes; the
+///  borrow leg (an exact-or-revert venue call) keeps the cap-only shape, and a short
+///  there is still billed to the wallet rather than caught. The stray-balance
+///  property under test is unchanged either way.
 contract AaveV4MeasuredProceedsTest is Test {
     address constant PERMIT3 = address(0xBEEF);
-    address constant SPOKE = address(0x5904E);
+    address SPOKE;
     uint256 constant RESERVE_ID = 1;
 
     address maker = address(0xA11CE);
@@ -85,6 +105,7 @@ contract AaveV4MeasuredProceedsTest is Test {
 
     function setUp() public {
         token = new MockToken();
+        SPOKE = address(new MockReserveSpoke(address(token)));
         pm = new DivergentPositionManager(token);
         withdrawModule = new AaveV4WithdrawModule(PERMIT3);
         borrowModule = new AaveV4BorrowModule(PERMIT3);
@@ -116,17 +137,21 @@ contract AaveV4MeasuredProceedsTest is Test {
     }
 
     /// The defect it guards: the PM claims 100 but delivers 90. Nominal forwarding
-    /// would hand the receiver 100, taking 10 from the module's stray balance. The
-    /// module now forwards the MEASURED 90, so the stray is never touched; the 10
-    /// short is caught by Settlement's output check, not here.
-    function test_withdraw_underDelivery_deliversMeasured() public {
+    /// would hand the receiver 100, taking 10 from the module's stray balance.
+    ///
+    /// CHANGED 2026-09-30 (L-CV2-1): this test used to assert the short 90 was
+    /// FORWARDED, on the false premise that "Settlement's output check" catches the
+    /// 10 — in reality the core billed it to the maker's wallet. The module now
+    /// reverts on any short `Exact` delivery; the stray is untouched either way.
+    function test_withdraw_underDelivery_reverts() public {
         _seedStray(address(withdrawModule), 50e6);
         pm.set(90e6, 100e6); // delivers 90, reports 100
 
         vm.prank(PERMIT3);
+        vm.expectRevert(abi.encodeWithSelector(FullFillGuard.ShortWithdraw.selector, 90e6, 100e6));
         withdrawModule.takeOnBehalf(maker, 100e6, receiver, _data());
 
-        assertEq(token.balanceOf(receiver), 90e6, "receiver gets only what was delivered");
+        assertEq(token.balanceOf(receiver), 0, "nothing forwarded");
         assertEq(token.balanceOf(address(withdrawModule)), 50e6, "stray balance untouched");
     }
 
@@ -158,7 +183,9 @@ contract AaveV4MeasuredProceedsTest is Test {
     /// The sharper of the two: the old borrow path ignored the return value
     /// entirely and transferred the requested `amount`, paying a short borrow out
     /// of the module's stray balance. It now forwards the MEASURED 90; the stray is
-    /// untouched and the short is Settlement's to catch.
+    /// untouched. (A short borrow is NOT caught downstream — the core bills the gap
+    /// to the maker's wallet; the live v4 borrow is exact-or-revert, so the borrow
+    /// leg keeps the cap-only shape.)
     function test_borrow_underDelivery_deliversMeasured() public {
         _seedStray(address(borrowModule), 50e6);
         pm.set(90e6, 90e6);

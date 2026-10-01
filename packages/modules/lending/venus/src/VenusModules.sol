@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -39,8 +40,15 @@ import {IVToken} from "./interfaces/IVenus.sol";
 //
 //  Maker `data` is `abi.encode(vToken, underlying)`; taker `data` is op-prefixed:
 //  `abi.encode(uint8 op, vToken, underlying[, BalanceMode])`. `underlying` is
-//  pinned into the order/taker ref so the user signs exactly which token moves,
-//  saving a `vToken.underlying()` call.
+//  pinned into the order/taker ref so the user signs exactly which token moves.
+//  ⚠ Signing a token does not make the venue PAY in it: the value-out module
+//  therefore also checks it against `vToken.underlying()` (2026-09-30 audit,
+//  L-CV2-4). Proceeds are measured as a balance delta of the SIGNED token, so a
+//  mis-encoded one read 0, forwarded 0, stranded the real proceeds on this shared
+//  singleton for good (every payout here is delta-measured) and left the core to
+//  bill the whole input leg to the maker's wallet. The maker modules fail closed on
+//  the same mistake without a check (the venue pulls the real underlying, which the
+//  module never approved).
 //
 //  Compound forks return a `uint` error code (0 == success) instead of reverting
 //  on protocol-state rejections, so every behalf-call's code is checked.
@@ -230,8 +238,17 @@ contract VenusRepayModule is IMakerModule {
 //       → Full:  `redeemBehalf(user, balanceOf)` to this module, forward the
 //         signed `amount`, sweep the underlying excess back to the user.
 //
-//     Withdraw: BalanceMode@96; total@128 (MANDATORY under `Full`).
-contract VenusTakerModule is ITakerModule {
+//     Withdraw: BalanceMode@96; total@128 (MANDATORY under `Full`). `Full` is the
+//     TAGGED word `0xB0DE0001` (`DustHandler.encodeMode(Full)`); a bare `1`
+//     reverts `InvalidModeWord`.
+//
+//   BOTH withdraw branches require the measured delivery to cover `amount` (I-8).
+//   The BSC core pool's `redeemFresh` sends `amount * treasuryPercent / 1e18` to the
+//   treasury and only the remainder to the redeemer (this module); with the fee on,
+//   an unguarded `Exact` redeem delivered short and {Core._payInputsToSolver} billed
+//   the fee to the maker's WALLET (G-VENUE_A-2). `Exact` is sized at the slice, so
+//   the bound cannot misfire on a partial fill.
+contract VenusTakerModule is ITakerModule, IProceedsAsset {
     using SafeTransferLib for address;
 
     IPermit3 public immutable permit3;
@@ -244,6 +261,8 @@ contract VenusTakerModule is ITakerModule {
     error OnlyPermit3();
     error VenusError(uint256 code);
     error BadOp(uint8 op);
+    /// @dev `data`'s `underlying` is not the vToken's real underlying (L-CV2-4).
+    error UnderlyingMismatch(address signed, address actual);
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
@@ -255,6 +274,11 @@ contract VenusTakerModule is ITakerModule {
         // op@0, vToken@32, underlying@64 — all static, so a prefix decode is sound
         // even when op-specific trailing fields follow. An out-of-range op reverts.
         (uint8 op, address vToken, address underlying) = abi.decode(data, (uint8, address, address));
+        // Bind the signed token to the venue's — see the file header (L-CV2-4).
+        {
+            address actual = IVToken(vToken).underlying();
+            if (actual != underlying) revert UnderlyingMismatch(underlying, actual);
+        }
 
         if (op == uint8(Op.Borrow)) {
             // Measure what the protocol actually delivered rather than forwarding
@@ -307,6 +331,10 @@ contract VenusTakerModule is ITakerModule {
                 uint256 err = IVToken(vToken).redeemUnderlyingBehalf(onBehalfOf, amount);
                 if (err != 0) revert VenusError(err);
                 uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+                // Fail closed on a short redeem (treasury fee, FoT underlying) rather
+                // than let the core bill the gap to the maker's wallet — see the
+                // contract header (2026-09-30 audit, G-VENUE_A-2).
+                FullFillGuard.requireDelivered(received, amount);
                 // Deliver the measured proceeds, capped at the signed amount; excess to the
                 // maker below. Never exceeds `received`, so an under-delivering vToken
                 // cannot be topped up from a stray module balance.
@@ -316,5 +344,12 @@ contract VenusTakerModule is ITakerModule {
         } else {
             revert BadOp(op);
         }
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The `underlying` (word 2) on both ops — what lands on `receiver`. Lets
+    ///      {SettlementLens} run the F22 stranded-proceeds preflight (L-CMT-6).
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (,, asset) = abi.decode(data, (uint8, address, address));
     }
 }

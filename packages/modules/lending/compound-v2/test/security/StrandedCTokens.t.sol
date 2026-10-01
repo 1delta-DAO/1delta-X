@@ -21,6 +21,8 @@ contract Tok {
 contract CTok is Tok {
     Tok public immutable u;
     constructor(Tok _u) { u = _u; }
+    /// @dev The withdraw module binds `data`'s underlying to this (2026-09-30, L-CV2-4).
+    function underlying() external view returns (address) { return address(u); }
     function exchangeRateCurrent() external pure returns (uint256) { return 1e18; }
     function redeemUnderlying(uint256 amount) external returns (uint256) {
         balanceOf[msg.sender] -= amount;      // burn the caller's cTokens 1:1

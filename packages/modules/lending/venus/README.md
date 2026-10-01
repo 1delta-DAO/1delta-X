@@ -27,7 +27,20 @@ Maker `data = abi.encode(vToken, underlying)`; taker
 pinned into the order / taker ref). Repay accepts an optional trailing
 `DustHandler.DustAction`; withdraw (op 1) accepts an optional trailing
 `DustHandler.BalanceMode` (`Full` redeems the entire balance and sweeps the
-excess to the user).
+excess to the user). `Full` is the **tagged** word `0xB0DE0001`
+(`DustHandler.encodeMode(Full)`) followed by the mandatory `totalAmount`; a bare
+`1` reverts `InvalidModeWord`.
+
+- **Underlying binding.** The taker module checks the signed `underlying`
+  against `vToken.underlying()` and reverts `UnderlyingMismatch` otherwise.
+  Proceeds are measured as a balance delta of the signed token, so a mis-encoded
+  one used to forward nothing, strand the real proceeds on the module and let the
+  core bill the whole input leg to the maker's wallet.
+- **Delivery bound on both withdraw modes.** BSC core-pool `redeemFresh` sends
+  `amount * treasuryPercent / 1e18` to the treasury; with a non-zero fee an
+  `Exact` redeem delivers short. Both withdraw branches `requireDelivered`, so a
+  short redeem reverts (`ShortWithdraw`) instead of the core pulling the gap from
+  the maker's wallet. Size withdraw orders net of any treasury fee.
 
 ### Authorisation model
 

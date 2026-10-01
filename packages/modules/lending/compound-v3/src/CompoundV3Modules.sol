@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -26,8 +27,12 @@ import {IComet} from "./interfaces/ICompoundV3.sol";
 //  both supply, withdraw and borrow both withdraw. The distinct addresses give
 //  each leg its own Permit3 module/ref namespace, exactly like Aave.
 //
-//  `data` for every module is `abi.encode(comet, asset)` — no rateMode (Comet
-//  has a single rate) and no receipt token (positions are internal to Comet).
+//  The MAKER modules' `data` is `abi.encode(comet, asset[, ...])` — no rateMode
+//  (Comet has a single rate) and no receipt token (positions are internal to
+//  Comet). The fused TAKER module's `data` is OP-PREFIXED:
+//  `abi.encode(uint8 op, comet, asset[, ...])` — see its byte map below.
+//  (Corrected 2026-09-30, G-BYTE_MAP-8: this used to say every module's data is
+//  `abi.encode(comet, asset)`, which predates the taker module's op word.)
 // ════════════════════════════════════════════════════════════════════════════
 
 // ──────────────────── Comet deposit maker module ────────────────────
@@ -224,15 +229,16 @@ contract CometRepayModule is IMakerModule {
 //   op = 1 (Withdraw):
 //     Exact: abi.encode(uint8(1), comet, asset[, BalanceMode(0)[, nonce, expiry, v, r, s]])
 //       — BalanceMode@96; allow-by-sig block optional at offset 128.
-//     Full:  abi.encode(uint8(1), comet, asset, BalanceMode(1), totalAmount[, nonce, expiry, v, r, s])
-//       — BalanceMode@96; totalAmount@128 (MANDATORY); allow block at 160.
+//     Full:  abi.encode(uint8(1), comet, asset, 0xB0DE0001, totalAmount[, nonce, expiry, v, r, s])
+//       — BalanceMode@96 as the TAGGED word `DustHandler.encodeMode(Full)` (a bare
+//       `1` reverts `InvalidModeWord`); totalAmount@128 (MANDATORY); allow block at 160.
 //       ⚠ THE TWO MODES PLACE THE ALLOW BLOCK AT DIFFERENT OFFSETS, for the same
 //       reason as the Morpho Blue module: `Full` needs a maker-signed `totalAmount`
 //       ({FullFillGuard}) and it occupies 128, so the allow block moves to 160.
 //       The BalanceMode slot MUST be encoded explicitly (as 0 = Exact) when an
 //       allow block follows, so the block starts at a fixed offset.
 //
-contract CometTakerModule is ITakerModule, IPositionSource {
+contract CometTakerModule is ITakerModule, IPositionSource, IProceedsAsset {
     IPermit3 public immutable permit3;
 
     enum Op {
@@ -343,12 +349,16 @@ contract CometTakerModule is ITakerModule, IPositionSource {
                 DelegationHelper.replayCometAllow(data, 128, comet, onBehalfOf, address(this));
                 // ⚠ ON COMET, AN OVER-SIZED WITHDRAW IS A BORROW, NOT A REVERT. The
                 // interface says it outright: "asset == base -> withdraw a base
-                // supply, or BORROW past it". Comet is the only venue here where a
-                // short position does not fail closed, so the premise every sibling
-                // relies on — and that this module's own header states ("the flag
-                // cannot be flipped to spend a borrow allowance on a withdraw") —
+                // supply, or BORROW past it". So a short position does not fail
+                // closed here, and the premise this module's own header states ("the
+                // flag cannot be flipped to spend a borrow allowance on a withdraw")
                 // has to be enforced explicitly. A `ref` bounds a NUMBER, not a
-                // venue's semantics.
+                // venue's semantics. (Comet is NOT the only such venue — corrected
+                // 2026-09-30, L-CV2-1.v3: the Aave v4 spoke and Exactly's
+                // `withdrawAtMaturity` CLAMP a short withdraw, Dolomite does too,
+                // and a Venus core-pool redeem with a treasury fee delivers short;
+                // each of those `Exact` branches carries its own bound.) Collateral
+                // (non-base) withdraws are exact-or-revert on Comet.
                 if (asset == IComet(comet).baseToken()) {
                     (, uint256 supply) = positionOf(onBehalfOf, data);
                     if (amount > supply) revert WouldBorrow(amount, supply);
@@ -358,5 +368,14 @@ contract CometTakerModule is ITakerModule, IPositionSource {
         } else {
             revert BadOp(op);
         }
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev `asset` (word 2) on both ops — Borrow and Withdraw are the same Comet
+    ///      `withdrawFrom` call and both deliver `asset` to `receiver`. Lets
+    ///      {SettlementLens} run the F22 stranded-proceeds preflight on this module
+    ///      (2026-09-30 audit, L-CMT-6).
+    function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
+        (,, asset) = abi.decode(data, (uint8, address, address));
     }
 }
