@@ -180,6 +180,26 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         });
     }
 
+    /// @dev A well-formed {FillRoute} for the callback-guard tests, which revert
+    ///      before reading it: tA in, tB out, nothing snapshotted.
+    function _anyRoute() internal view returns (FillRoute memory r) {
+        address[] memory toks = new address[](2);
+        (toks[0], toks[1]) = (address(tA), address(tB));
+        r = FillRoute({
+            router: address(router),
+            minOut: 0,
+            maxPay: 0,
+            amountInOffset: NO_PATCH,
+            tokens: toks,
+            before: new uint256[](2),
+            inMask: 1,
+            outMask: 2,
+            outAnchor: 1,
+            direct: false,
+            data: ""
+        });
+    }
+
     // ════════════════════════ the happy path ════════════════════════
 
     /// @dev Zero inventory: the solver starts and ends with nothing, and the maker
@@ -281,18 +301,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
     function test_agg_onFill_rejectsDirectCaller() public {
         vm.expectRevert(AggregatorFillSolver.OnlyExecutor.selector);
         aggSolver.onFill(
-            FillRoute({
-                tokenIn: address(tA),
-                tokenOut: address(tB),
-                router: address(router),
-                minOut: 0,
-                maxPay: 0,
-                amountInOffset: NO_PATCH,
-                inBefore: 0,
-                outBefore: 0,
-                direct: false,
-                data: ""
-            })
+            _anyRoute()
         );
     }
 
@@ -304,41 +313,22 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         vm.prank(address(settlement.EXECUTOR()));
         vm.expectRevert(AggregatorFillSolver.NotArmed.selector);
         aggSolver.onFill(
-            FillRoute({
-                tokenIn: address(tA),
-                tokenOut: address(tB),
-                router: address(router),
-                minOut: 0,
-                maxPay: 0,
-                amountInOffset: NO_PATCH,
-                inBefore: 0,
-                outBefore: 0,
-                direct: false,
-                data: ""
-            })
+            _anyRoute()
         );
     }
 
     /// @dev The arming flag is single-use: it is cleared by the callback, so a
-    ///      second call within the same fill finds it closed.
-    function test_agg_onFill_isNotReusableWithinAFill() public {
+    ///      call AFTER the fill finds it closed. (Renamed in audit 2026-09-30 AGG-8:
+    ///      this used to be called `…WithinAFill` but runs after `executeFill`
+    ///      returns; the within-fill reuse attempts live in
+    ///      `AggregatorAudit20260930Test`.)
+    function test_agg_onFill_isNotReusableAfterTheFill() public {
         Order memory o = _order(7);
         aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
         vm.prank(address(settlement.EXECUTOR()));
         vm.expectRevert(AggregatorFillSolver.NotArmed.selector);
         aggSolver.onFill(
-            FillRoute({
-                tokenIn: address(tA),
-                tokenOut: address(tB),
-                router: address(router),
-                minOut: 0,
-                maxPay: 0,
-                amountInOffset: NO_PATCH,
-                inBefore: 0,
-                outBefore: 0,
-                direct: false,
-                data: ""
-            })
+            _anyRoute()
         );
     }
 
@@ -681,15 +671,22 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
 
     function setUp() public override {
         super.setUp();
+        // A non-zero policy needs an operator set (audit 2026-09-30 AGG-3,
+        // {PolicyNeedsOperators}): the suite's callers are this contract and FILLER.
         splitSolver = new AggregatorFillSolver(
             address(settlement),
             _routers(address(router)),
-            _open(),
+            _splitOps(),
             SurplusPolicy({makerPpm: MAKER_PPM, protocolPpm: PROTOCOL_PPM, protocolRecipient: PROTOCOL}),
             false,
             _none()
         );
         vm.label(address(splitSolver), "splitSolver");
+    }
+
+    function _splitOps() internal view returns (address[] memory ops) {
+        ops = new address[](2);
+        (ops[0], ops[1]) = (address(this), FILLER);
     }
 
     function _splitPlan(address originator, uint32 originatorPpm) internal view returns (RoutePlan memory p) {
@@ -860,9 +857,10 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         new AggregatorFillSolver(
             address(settlement), rs, _open(), SurplusPolicy({makerPpm: 0, protocolPpm: 1, protocolRecipient: address(0)}), false, _none()
         );
-        // The boundary is allowed: 100% away from the filler.
+        // The boundary is allowed: 100% away from the filler (on a gated instance —
+        // a policy needs operators, audit 2026-09-30 AGG-3).
         new AggregatorFillSolver(
-            address(settlement), rs, _open(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_000, protocolRecipient: PROTOCOL}), false, _none()
+            address(settlement), rs, _splitOps(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_000, protocolRecipient: PROTOCOL}), false, _none()
         );
     }
 
@@ -1231,12 +1229,14 @@ contract AggregatorStandingAllowanceTest is AggregatorFillSolverTest {
 ///  output legs by pulling them from the filler — while the filler is this
 ///  contract and the order was signed by the attacker.
 ///
-///  `onFill` approves Settlement for ONE token: `legsOut[0]`, the route's own
-///  product, capped at this fill's proceeds. Every OTHER output leg is delivered
-///  from whatever standing approval already exists. So a leftover approval on any
-///  token this contract has traded before is directly spendable by a self-signed
-///  order that names that token in a later leg — paired with the balance floor
-///  and the retained spread the contract deliberately holds.
+///  `onFill` used to approve Settlement for ONE token: `legsOut[0]`, the route's
+///  own product, capped at this fill's proceeds. Every OTHER output leg was
+///  delivered from whatever standing approval already existed. So a leftover
+///  approval on any token this contract had traded before was directly spendable
+///  by a self-signed order that names that token in a later leg — paired with the
+///  balance floor and the retained spread the contract deliberately holds. Since
+///  audit 2026-09-30 AGG-6 every output token is approved at its own measured
+///  proceeds (overwriting anything stale), and the post-fill clear still runs.
 contract AggregatorStaleApprovalTest is AggregatorFillSolverTest {
     uint256 internal constant EVE_PK = 0xE7E;
     uint256 internal constant STALE = 500e18;
@@ -1275,11 +1275,17 @@ contract AggregatorStaleApprovalTest is AggregatorFillSolverTest {
         o.maker = eve;
         bytes memory sig = _signWith(o, EVE_PK);
 
+        // CHANGED in audit 2026-09-30 AGG-6: `onFill` now approves EVERY output
+        // token at its own measured proceeds of this fill (zero here — the route
+        // produced no tC), which overwrites even a planted stale approval. The
+        // drain this test used to demonstrate (leg 1 paid out of the stale
+        // approval) is now impossible on top of the post-fill clear.
         vm.prank(eve);
+        vm.expectRevert();
         aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
 
-        assertEq(tC.balanceOf(eve), STALE, "the stale approval paid a stranger out of the solver's balance");
-        assertEq(tC.balanceOf(address(aggSolver)), 0, "and the solver was emptied of it");
+        assertEq(tC.balanceOf(eve), 0, "the stale approval paid nobody");
+        assertEq(tC.balanceOf(address(aggSolver)), STALE, "the solver kept its balance");
     }
 
     /// @dev "It holds nothing, so an allowance is worthless" — except the balance
@@ -1292,22 +1298,22 @@ contract AggregatorStaleApprovalTest is AggregatorFillSolverTest {
     ///      SHARED contract for the next caller's stale approval to find. Nobody
     ///      operating this instance can enforce "holds nothing" on anyone else.
     function test_stale_anyCallerCanLeaveValueOnTheSharedContract() public {
+        // CHANGED in audit 2026-09-30 AGG-1: this test used to show a stranger
+        // parking the spread on the shared OPEN contract via retain mode — value no
+        // function could ever move out again. Retain mode now needs an operator set
+        // ({RetainNeedsOperators}), so the stranger's retain request is refused and
+        // nothing is parked.
         assertEq(tB.balanceOf(address(aggSolver)), 0, "starts empty");
         Order memory o = _order(50);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
-        p.profitRecipient = address(aggSolver); // retain — any caller may ask for it
+        p.profitRecipient = address(aggSolver); // retain — refused on an open instance
 
         vm.prank(address(0xD00D));
+        vm.expectRevert(AggregatorFillSolver.RetainNeedsOperators.selector);
         aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
 
-        assertEq(
-            tB.balanceOf(address(aggSolver)),
-            AMOUNT_IN - AMOUNT_OUT,
-            "a stranger's fill parked the spread on the shared contract"
-        );
-        // …and the approval that paid this fill is nonetheless gone, which is the
-        // only reason that balance is not now a standing target.
+        assertEq(tB.balanceOf(address(aggSolver)), 0, "nothing parked on the shared contract");
         assertEq(tB.allowance(address(aggSolver), address(settlement)), 0, "no approval outlived the fill");
     }
 

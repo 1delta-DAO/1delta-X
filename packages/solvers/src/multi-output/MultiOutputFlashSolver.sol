@@ -5,7 +5,7 @@ import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
-import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
+import {BaseFlashSolver, FlashOpts} from "@solvers/base/BaseFlashSolver.sol";
 import {IBalancerVault} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
 
 /// @notice One output leg's flash + buyback plan.
@@ -39,7 +39,9 @@ struct OutputLeg {
 ///            v3, then repay the flashed amount.
 ///    3. `executeFill` sweeps the leftover input / surplus outputs to the caller.
 ///
-///  The input side is single-source: `PackedArraysMem.legInToken(order.legsIn, 0)` funds every buyback.
+///  The input side is single-source: `PackedArraysMem.legInToken(order.legsIn, 0)` funds every buyback,
+///  and a multi-input order is refused ({MultiInputUnsupported}). SETTLE items are
+///  refused too — see {BaseFlashSolver}.
 ///  Holds no funds between fills; callable by anyone.
 contract MultiOutputFlashSolver is BaseFlashSolver {
     IBalancerVault public immutable vault;
@@ -56,8 +58,37 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
     /// @param legs    per-output flash + buyback plan (sorted asc by token)
     function executeFill(Order calldata order, bytes calldata sig, uint256 fillAmountIn, OutputLeg[] calldata legs)
         external
-        initiatesFlash
     {
+        _executeFill(order, sig, fillAmountIn, legs, FlashOpts({recipient: address(0), takerData: ""}));
+    }
+
+    /// @notice {executeFill} with a profit recipient and a `takerData` blob — see
+    ///         {FlashOpts}.
+    function executeFill(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmountIn,
+        OutputLeg[] calldata legs,
+        FlashOpts calldata opts
+    ) external {
+        _executeFill(order, sig, fillAmountIn, legs, opts);
+    }
+
+    function _executeFill(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmountIn,
+        OutputLeg[] calldata legs,
+        FlashOpts memory opts
+    ) private initiatesFlash {
+        // ONE input leg — the buyback currency. Checked HERE, before the flash, and
+        // not left to a shared helper: this solver bypasses `_fillAndSwap`, which is
+        // exactly how the single-input check was missed for it. A second input leg
+        // would be paid to this contract and never swept (audit 2026-09-30 FLASH-1).
+        if (PackedArraysMem.validateLegsIn(order.legsIn) != 1) revert MultiInputUnsupported();
+        _requireNoSettleItems(order);
+        address to = _profitRecipient(opts.recipient);
+
         uint256 n = legs.length;
         address[] memory tokens = new address[](n);
         uint256[] memory amounts = new uint256[](n);
@@ -65,14 +96,18 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
             tokens[i] = legs[i].token;
             amounts[i] = legs[i].flashAmount;
         }
-        bytes memory userData = abi.encode(order, sig, fillAmountIn, legs);
+        bytes memory userData = abi.encode(order, sig, fillAmountIn, legs, opts.takerData);
+        _commitFlash(keccak256(userData));
         vault.flashLoan(address(this), tokens, amounts, userData);
+        // Close the callback gate BEFORE the sweeps below hand control to token code
+        // (audit 2026-09-30 FLASH-2).
+        _providerReturned();
 
         // Sweep the fill's surplus — leftover buyback currency + any output overage
-        // — to the caller so no balance accumulates in this permissionless solver.
-        _sweep(PackedArraysMem.legInToken(order.legsIn, 0), msg.sender);
+        // — out so no balance accumulates in this permissionless solver.
+        _sweep(PackedArraysMem.legInToken(order.legsIn, 0), to);
         for (uint256 i; i < n; i++) {
-            _sweep(tokens[i], msg.sender);
+            _sweep(tokens[i], to);
         }
     }
 
@@ -85,15 +120,22 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
     ) external {
         if (msg.sender != address(vault)) revert OnlyVault();
         _requireInFlash();
+        // Balancer names no initiator: bind the callback to the payload we sent.
+        _consumeFlashCommit(keccak256(userData));
 
-        (Order memory order, bytes memory sig, uint256 fillAmountIn, OutputLeg[] memory legs) =
-            abi.decode(userData, (Order, bytes, uint256, OutputLeg[]));
+        (
+            Order memory order,
+            bytes memory sig,
+            uint256 fillAmountIn,
+            OutputLeg[] memory legs,
+            bytes memory takerData
+        ) = abi.decode(userData, (Order, bytes, uint256, OutputLeg[], bytes));
 
         address tokenIn = PackedArraysMem.legInToken(order.legsIn, 0); // single-source buyback currency
 
         // Delivers every output leg to the maker (from the flashed basket) and
         // pays us `tokenIn`.
-        settlement.fill(order, sig, fillAmountIn);
+        settlement.fill(order, sig, fillAmountIn, takerData);
 
         // Buy each output back from the received input and repay the flash.
         for (uint256 i; i < tokens.length; i++) {

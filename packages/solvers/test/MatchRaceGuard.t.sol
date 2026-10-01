@@ -34,7 +34,7 @@ contract MatchRaceGuardTest is CoreSettlementBase {
         super.setUp();
         vm.label(bob, "bob");
         vm.label(rival, "rival");
-        guarded = new GuardedMatchSolver(address(settlement));
+        guarded = new GuardedMatchSolver(address(settlement), new address[](0));
         vm.label(address(guarded), "guardedSolver");
 
         vm.startPrank(bob);

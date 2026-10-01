@@ -2,12 +2,14 @@
 pragma solidity ^0.8.28;
 
 import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
-import {Settlement, Order} from "@core/settlement/Settlement.sol";
+import {Settlement, Order, CallbackMode} from "@core/settlement/Settlement.sol";
+import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
 /// @notice Minimal MoC surfaces (duplicated from `packages/modules/redeem/usdrif`
 ///         so `core` stays this package's only cross-package dependency).
@@ -27,6 +29,13 @@ interface IMocQueueFees {
     ///      returns the block's minimumGasPrice per RSKIP-412; verified on-fork).
     ///      `OperType.redeemTP == 4`.
     function getExecFee(uint8 operType_) external view returns (uint256);
+
+    /// @dev Id of the oldest op still queued. `MocQueue.execute` advances it
+    ///      whenever it executes (or fails and refunds) anything, whichever entry
+    ///      drove it — the permissionless `MocMultiCollateralGuard.execute()` or
+    ///      `executeLiquidatedBucket()`. The solver brackets every measured window
+    ///      with it (see {UsdrifInventorySolver.QueueMovedDuringMeasurement}).
+    function firstOperId() external view returns (uint256);
 }
 
 /// @title UsdrifInventorySolver
@@ -36,7 +45,7 @@ interface IMocQueueFees {
 ///
 ///  The flash family fills from borrowed capital inside one atomic tx. That is
 ///  impossible here: MoC redemption is queued — the RIF only exists ~30–90s
-///  after `redeemTP`, once the guard-gated executor drains the queue — so the
+///  after `redeemTP`, once someone drains the queue — so the
 ///  repayment capital cannot exist inside the fill transaction. Inventory is
 ///  structurally required, and the round trip is a three-step cycle:
 ///
@@ -47,7 +56,16 @@ interface IMocQueueFees {
 ///                         `recipient == msg.sender` rule — the reason a
 ///                         user-side redeem wrapper is not viable — is a no-op
 ///                         for a principal redeeming its own tokens to itself.
-///    2. settle (async):   MoC's executor delivers RIF to this contract.
+///    2. settle (async):   the queue executes and MoC delivers RIF to this
+///                         contract (or, for a failed op, refunds the USDRIF).
+///                         ⚠ ANYONE can trigger that: `MocQueue.execute` is
+///                         restricted to the multi-collateral guard, but the
+///                         guard's own `execute()` is permissionless
+///                         (`external notPaused nonReentrant`, verified on
+///                         mainnet). Deliveries can therefore land inside ANY
+///                         external call this contract makes — see
+///                         {QueueMovedDuringMeasurement} for why every measured
+///                         window refuses that (audit 2026-09-30 RIF-1/RIF-2).
 ///    3. recycle (atomic): an operator `sell`s the RIF → USDT0 through an
 ///                         owner-whitelisted venue (Uniswap v3 router, an
 ///                         aggregator, …) along an owner-configured route
@@ -60,9 +78,19 @@ interface IMocQueueFees {
 ///  Trust model: unlike `BaseFlashSolver`, this contract HOLDS FUNDS between
 ///  fills (USDT0 inventory, in-flight USDRIF/RIF, an RBTC float for MoC exec
 ///  fees), so every state-changing entrypoint is owner- or operator-gated.
-///  Fill-pricing judgment lives off-chain with the operator; the maker's
-///  protection is the settlement-enforced amountOut floor, exactly as with any
-///  other filler. Redemption ops are tracked off-chain via the
+///  Fill-pricing judgment lives off-chain with the operator, and is ENFORCED
+///  on-chain by the operator's own `maxSpent` bound on every fill (on top of the
+///  owner's {fillMinRate} — the same split `sell` makes between `minOut` and the
+///  route rate; audit 2026-09-30 PERIPH-1.v2); the maker's protection is the
+///  settlement-enforced amountOut floor, exactly as with any other filler.
+///
+///  Supported order shapes: one output token paid out of inventory, one input
+///  token received, NO items (a maker-signed item is the one maker-controlled
+///  hook that runs inside the measured fill — audit 2026-09-30 RIF-2). Both
+///  delivery modes fill: a plain order is pulled from inventory via Permit3, and
+///  a delta-verify order (`timing` bit 104, the mode the app signs) is delivered
+///  by this contract's own callback — such an order must name THIS contract as
+///  its `exclusiveFiller` (audit 2026-09-30 RIF-4). Redemption ops are tracked off-chain via the
 ///  `RedemptionInitiated` event + MoC's FIFO signal (`opId < firstOperId()`);
 ///  a failed op refunds the escrowed USDRIF here, ready to re-initiate.
 contract UsdrifInventorySolver {
@@ -77,6 +105,14 @@ contract UsdrifInventorySolver {
 
     /// @dev Fixed-point unit of `SellRoute.minRateWad`.
     uint256 internal constant WAD = 1e18;
+
+    /// @notice Settlement's allowance-less callback trampoline — the only caller
+    ///         {onSettlementFill} accepts. Read once at construction.
+    address public immutable EXECUTOR;
+
+    /// @dev 1 = idle, 2 = a delta-verify fill this contract started is waiting for
+    ///      its delivery callback. Single-use: the callback clears it.
+    uint256 private _deliveryArmed = 1;
 
     address public owner;
     /// @notice Nominee from {transferOwnership}, pending {acceptOwnership}.
@@ -239,6 +275,25 @@ contract UsdrifInventorySolver {
     error FillRouteNotAllowed(address spent, address received);
     /// @dev A fill realised less than the route's owner-set minimum rate.
     error FillRateTooLow(uint256 received, uint256 spent, uint256 minRateWad);
+    /// @dev A fill paid out more than the operator's own `maxSpent` bound — the
+    ///      price moved maker-ward between the operator's quote and inclusion
+    ///      (priority bump, price module, descending curve).
+    error SpentAboveOperatorBound(uint256 spent, uint256 maxSpent);
+    /// @dev MoC's queue executed DURING a measured window (`sell`'s venue call or a
+    ///      fill). Queue execution pays this contract synchronously — RIF for a
+    ///      successful redemption, the escrowed USDRIF back for a failed one — and
+    ///      is permissionless through `MocMultiCollateralGuard.execute()`. Any party
+    ///      with code execution inside the window (a hook token on the venue path, a
+    ///      maker item) could otherwise land this contract's OWN proceeds inside the
+    ///      balance deltas and have them counted as consideration: a `sell` whose
+    ///      spend nets to zero escapes the rate floor and the window budget, a fill
+    ///      whose `got` is a refund escapes {fillMinRate}. Honest windows never run
+    ///      the queue, so refusing costs no liveness (audit 2026-09-30 RIF-1/RIF-2).
+    error QueueMovedDuringMeasurement();
+    /// @dev {onSettlementFill} called by anyone but the EXECUTOR.
+    error OnlyExecutor();
+    /// @dev {onSettlementFill} outside a delta-verify fill this contract started.
+    error NotArmed();
 
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
@@ -289,6 +344,7 @@ contract UsdrifInventorySolver {
         mocCore = IMocRifCore(_mocCore);
         mocQueue = IMocQueueFees(_mocQueue);
         usdrif = _usdrif;
+        EXECUTOR = address(Settlement(_settlement).EXECUTOR());
         owner = msg.sender;
         emit OwnershipTransferred(address(0), msg.sender);
         isKnownToken[_usdrif] = true;
@@ -301,44 +357,66 @@ contract UsdrifInventorySolver {
 
     // ──────────────────── Fill side (atomic) ────────────────────
 
-    /// @notice Fill a maker order against this contract's inventory. Settlement
-    ///         pulls the output tokens from this contract via Permit3 and
-    ///         delivers the maker's input tokens here.
-    function executeFill(Order calldata order, bytes calldata sig, uint256 fillAmountIn)
+    /// @notice Fill a maker order against this contract's inventory. A plain
+    ///         order has Settlement pull the output tokens from this contract via
+    ///         Permit3; a delta-verify order (`timing` bit 104) is delivered by this
+    ///         contract's own callback ({onSettlementFill}) and must name it as
+    ///         `exclusiveFiller`. Either way the maker's input tokens land here.
+    /// @param maxSpent The OPERATOR's price bound: the most of the output token
+    ///        this fill may move out of inventory (measured). Quote it from the
+    ///        price you evaluated; `type(uint256).max` = no operator bound (the
+    ///        owner's {fillMinRate} still applies). It exists because the strict
+    ///        `fill` carries no price floor, and a maker who controls the order's
+    ///        pricing (priority bump, price module, descending curve) can move the
+    ///        price maker-ward between the quote and inclusion — down to the
+    ///        owner's floor (audit 2026-09-30 PERIPH-1.v2).
+    function executeFill(Order calldata order, bytes calldata sig, uint256 fillAmountIn, uint256 maxSpent)
         external
         onlyOperator
         returns (uint256[] memory paid)
     {
-        paid = _fillCapped(order, sig, fillAmountIn);
+        paid = _fillCapped(order, sig, fillAmountIn, maxSpent);
     }
 
     /// @notice Fill a USDRIF→USDT0 order and, in the same transaction, escrow
     ///         the ENTIRE resulting USDRIF balance into a MoC redemption — the
     ///         solver's long-USDRIF window is zero; only the RIF leg (queue
     ///         execution → `sell`) carries market exposure.
+    /// @param maxSpent See {executeFill}.
     /// @param qACmin Floor on the RIF the redemption may deliver (MoC-enforced;
     ///               the op errors and refunds the USDRIF if the price moves below it).
-    function executeFillAndRedeem(Order calldata order, bytes calldata sig, uint256 fillAmountIn, uint256 qACmin)
-        external
-        onlyOperator
-        returns (uint256[] memory paid, uint256 opId)
-    {
-        paid = _fillCapped(order, sig, fillAmountIn);
+    function executeFillAndRedeem(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmountIn,
+        uint256 maxSpent,
+        uint256 qACmin
+    ) external onlyOperator returns (uint256[] memory paid, uint256 opId) {
+        paid = _fillCapped(order, sig, fillAmountIn, maxSpent);
         opId = _initiateRedemption(IERC20(usdrif).balanceOf(address(this)), qACmin);
     }
 
     /// @dev Run the fill and enforce, on MEASURED balance deltas rather than on
     ///      what the order claims: the pair is an owner-configured fill route, the
     ///      received amount meets its minimum rate against the spent amount, the
-    ///      spend is within {maxOutflowPerFill} for this call and within
-    ///      {OutflowBudget} for the window.
+    ///      spend is within the operator's `maxSpent`, within {maxOutflowPerFill}
+    ///      for this call and within {OutflowBudget} for the window.
     ///
-    ///      The one-token-each-way shape is what makes two balance reads a complete
-    ///      measurement: Settlement pulls from its filler ONLY to deliver `legsOut`,
-    ///      so with every output leg in `spent`, nothing else this contract holds can
-    ///      move; and every input leg pays `received`, so the whole consideration is
-    ///      one delta. Fee legs to third parties in the same token count as spend.
-    function _fillCapped(Order calldata order, bytes calldata sig, uint256 fillAmountIn)
+    ///      The one-token-each-way, item-free shape is what makes two balance reads
+    ///      a complete measurement: Settlement pulls from its filler ONLY to deliver
+    ///      `legsOut` (or this contract's own callback pays them, on a delta-verify
+    ///      order), so with every output leg in `spent`, nothing else this contract
+    ///      holds can move; and every input leg pays `received`, so the whole
+    ///      consideration is one delta. Fee legs to third parties in the same token
+    ///      count as spend.
+    ///
+    ///      ⚠ THE MEASUREMENT MUST BE EXCLUSIVE. A balance delta only measures the
+    ///      fill if nothing else pays this contract during it. Two things could:
+    ///      a maker-signed ITEM (an arbitrary module CALL inside `settlement.fill`)
+    ///      — refused in {_fillPair} — and MoC's queue, which anyone can execute
+    ///      and which pays this contract its own redemption proceeds or refunds —
+    ///      refused by the `firstOperId` bracket below (audit 2026-09-30 RIF-2).
+    function _fillCapped(Order calldata order, bytes calldata sig, uint256 fillAmountIn, uint256 maxSpent)
         private
         returns (uint256[] memory paid)
     {
@@ -348,23 +426,90 @@ contract UsdrifInventorySolver {
 
         uint256 spentBefore = IERC20(spent).balanceOf(address(this));
         uint256 receivedBefore = IERC20(received).balanceOf(address(this));
-
-        paid = settlement.fill(order, sig, fillAmountIn);
+        paid = _settle(order, sig, fillAmountIn, spent);
 
         uint256 spentNow = IERC20(spent).balanceOf(address(this));
         uint256 movedOut = spentBefore > spentNow ? spentBefore - spentNow : 0;
         // Checked: a net DECREASE of the received token is not a fill of this pair.
         uint256 got = IERC20(received).balanceOf(address(this)) - receivedBefore;
 
+        if (movedOut > maxSpent) revert SpentAboveOperatorBound(movedOut, maxSpent);
         uint256 cap = maxOutflowPerFill[spent];
         if (movedOut > cap) revert OutflowCapExceeded(spent, movedOut, cap);
         if (got * WAD < movedOut * rate) revert FillRateTooLow(got, movedOut, rate);
         _spendWindow(spent, movedOut);
     }
 
+    /// @dev The settlement call itself, bracketed by the MoC queue head (see the ⚠
+    ///      on {_fillCapped}). Its own frame for the stack limit.
+    function _settle(Order calldata order, bytes calldata sig, uint256 fillAmountIn, address spent)
+        private
+        returns (uint256[] memory paid)
+    {
+        uint256 queueHead = mocQueue.firstOperId();
+        if (DutchAuction.deltaVerifyOutputs(order)) {
+            // Delivered by {onSettlementFill}: the core verifies each recipient's
+            // balance delta, and only the named exclusive filler (this contract) may
+            // run the callback — see the core's `_snapshotOutRecipients`.
+            _deliveryArmed = 2;
+            paid = settlement.fillWithCallback(
+                order,
+                sig,
+                fillAmountIn,
+                address(this),
+                abi.encode(spent, _legRecipients(order)),
+                CallbackMode.PreDeliveryTyped
+            );
+            // The callback is single-use and clears the flag itself; reset anyway so
+            // a fill that somehow returned without it leaves nothing armed.
+            _deliveryArmed = 1;
+        } else {
+            paid = settlement.fill(order, sig, fillAmountIn);
+        }
+        if (mocQueue.firstOperId() != queueHead) revert QueueMovedDuringMeasurement();
+    }
+
+    /// @notice Delivery callback for a delta-verify fill — pays each output leg its
+    ///         PRICED amount, out of inventory, to the leg's recipient. Not public in
+    ///         effect: only the EXECUTOR may call it, and only while {_fillCapped}
+    ///         has armed it. Everything it moves is then measured by {_fillCapped}
+    ///         exactly as a Permit3 pull would be (same `spent` token, same caps).
+    function onSettlementFill(
+        bytes32,
+        uint256,
+        uint256,
+        uint256,
+        uint256[] calldata,
+        uint256[] calldata pricedOut,
+        bytes calldata userData
+    ) external {
+        if (msg.sender != EXECUTOR) revert OnlyExecutor();
+        if (_deliveryArmed != 2) revert NotArmed();
+        _deliveryArmed = 1;
+        (address token, address[] memory recipients) = abi.decode(userData, (address, address[]));
+        for (uint256 j; j < pricedOut.length; ++j) {
+            if (pricedOut[j] != 0) SafeTransferLib.safeTransfer(token, recipients[j], pricedOut[j]);
+        }
+    }
+
+    /// @dev Each output leg's resolved recipient (`address(0)` = the maker), in leg
+    ///      order — the destinations the core will measure. Called after
+    ///      {_fillPair} validated the blob.
+    function _legRecipients(Order calldata order) private pure returns (address[] memory r) {
+        bytes memory legsOut = order.legsOut;
+        uint256 n = PackedArraysMem.validateLegsOut(legsOut);
+        r = new address[](n);
+        for (uint256 j; j < n; ++j) {
+            address to = PackedArraysMem.legOutRecipient(legsOut, j);
+            r[j] = to == address(0) ? order.maker : to;
+        }
+    }
+
     /// @dev The single token every `legsOut` pays and the single token every
-    ///      `legsIn` pays, which must differ.
+    ///      `legsIn` pays, which must differ — and NO items: a maker-signed item is
+    ///      an arbitrary module call inside the measured fill (audit 2026-09-30 RIF-2).
     function _fillPair(Order calldata order) private pure returns (address spent, address received) {
+        if (PackedArrays.countUnchecked(order.items) != 0) revert UnsupportedFillShape();
         bytes memory legsOut = order.legsOut;
         bytes memory legsIn = order.legsIn;
         uint256 nOut = PackedArraysMem.validateLegsOut(legsOut);
@@ -447,14 +592,7 @@ contract UsdrifInventorySolver {
         }
         uint256 outBefore = IERC20(tokenOut).balanceOf(address(this));
 
-        SafeTransferLib.forceApprove(tokenIn, aggregator, amountIn);
-        (bool ok, bytes memory ret) = aggregator.call{value: msg.value}(data);
-        if (!ok) {
-            assembly {
-                revert(add(ret, 32), mload(ret))
-            }
-        }
-        SafeTransferLib.forceApprove(tokenIn, aggregator, 0);
+        _callVenue(aggregator, tokenIn, amountIn, data);
 
         // Checked subtractions: a net DECREASE of tokenOut or a net INCREASE of
         // tokenIn is not a sale and reverts (panic) rather than passing as 0.
@@ -468,6 +606,30 @@ contract UsdrifInventorySolver {
         // The SAME window budget fills draw on — see {OutflowBudget}.
         _spendWindow(tokenIn, spent);
         emit Sold(aggregator, tokenIn, tokenOut, spent, amountOut);
+    }
+
+    /// @dev `sell`'s venue call: just-in-time allowance, the call, allowance cleared.
+    ///      Its own frame for the stack limit under the legacy profile.
+    ///
+    ///      EXCLUSIVE WINDOW (audit 2026-09-30 RIF-1): `sell`'s deltas assume the venue
+    ///      is the only thing that moves `tokenIn`/`tokenOut` during this call. MoC's
+    ///      queue pays this contract its own RIF (or refunds USDRIF) whenever anyone
+    ///      executes it — permissionlessly, via the guard — so a hook on the venue path
+    ///      could land those proceeds inside the window: on the tokenIn side they net
+    ///      the measured spend to zero (no rate floor, no window charge), on the
+    ///      tokenOut side they pass as sale proceeds. The call is bracketed with the
+    ///      queue head and refused if it moved.
+    function _callVenue(address aggregator, address tokenIn, uint256 amountIn, bytes calldata data) private {
+        uint256 queueHead = mocQueue.firstOperId();
+        SafeTransferLib.forceApprove(tokenIn, aggregator, amountIn);
+        (bool ok, bytes memory ret) = aggregator.call{value: msg.value}(data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+        SafeTransferLib.forceApprove(tokenIn, aggregator, 0);
+        if (mocQueue.firstOperId() != queueHead) revert QueueMovedDuringMeasurement();
     }
 
     function _initiateRedemption(uint256 qTP, uint256 qACmin) internal returns (uint256 opId) {

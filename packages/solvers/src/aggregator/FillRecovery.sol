@@ -64,6 +64,15 @@ library FillRecovery {
     ///      counter reads zero forever and the subtraction below underflows or
     ///      silently prices the wrong fill. Same two alternatives as above.
     error NonceInvalidatorNotRecoverable();
+    /// @dev `fillAmount == type(uint256).max` — the "whatever remains" sentinel
+    ///      every fill entry now resolves. The size the settler resolved it to is
+    ///      not an argument the solver holds, so `filled - fillAmount` would
+    ///      underflow (it used to, with a bare panic — audit 2026-09-30 AGG-7). Pass
+    ///      the RESOLVED size: capture `anchorOf(order)` and `settlement.filled(hash)`
+    ///      before the fill and pass `anchor - filledBefore`; or use a `*Typed`
+    ///      {CallbackMode} (carries `prevFilled`/`newFilled`) or
+    ///      {SettlementLens.previewFillInFlight} with the captured `prevFilled`.
+    error SentinelNotRecoverable();
 
     /// @notice The fill denominator this order will resolve to RIGHT NOW.
     ///         Call it immediately before `fill` to capture a proportional
@@ -85,7 +94,9 @@ library FillRecovery {
     ///         EXACT on those paths for an identity order: they revert {OverFill}
     ///         rather than clamping, so the delta really is `fillAmount` and
     ///         `prevFilled` follows by subtraction. `fillUpTo` clamps — and takes
-    ///         no callback, so it cannot reach here.
+    ///         no callback, so it cannot reach here. NEVER the `type(uint256).max`
+    ///         "whatever remains" sentinel: those entries resolve it themselves and
+    ///         the resolved size is not recoverable from it — {SentinelNotRecoverable}.
     /// @param  postInputs true when recovering from a `PostInputs` callback, i.e.
     ///         the maker's inputs have already moved.
     /// @param  takerData the same blob the solver passed to the fill — a price
@@ -110,7 +121,7 @@ library FillRecovery {
     ///         the maker is unaffected, because Settlement prices the fill from
     ///         its own resolution regardless of what this returns.
     /// @dev    Rejects the two shapes whose delta is not `fillAmount` — see the ⚠
-    ///         on {ctxOf}. The check lives HERE and not only in {ctxOf} because
+    ///         on {ctxOf} — and the any-size sentinel, whose delta is not an argument. The check lives HERE and not only in {ctxOf} because
     ///         this is the entrypoint a proportional-order solver is told to use,
     ///         so routing around {ctxOf} must not route around the guard.
     function ctxOfWithAnchor(
@@ -121,6 +132,7 @@ library FillRecovery {
         bytes memory takerData,
         uint256 anchorHint
     ) internal view returns (FillCtx memory ctx) {
+        if (fillAmount == type(uint256).max) revert SentinelNotRecoverable();
         if (order.fillModule != address(0)) revert FillModuleNotRecoverable();
         if (DutchAuction.useNonceInvalidator(order)) revert NonceInvalidatorNotRecoverable();
 

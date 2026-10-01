@@ -93,10 +93,15 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///  then reverts here with {InsufficientOutput} — the funds are not lost, but the
 ///  round is. Quote with `recipient = address(thisSolver)`.
 ///
-///  Trust model: `executeFill` is callable by anyone (unless {GATED}, and the
-///  gate is never relied on below) — the security boundary is
-///  the maker's signed order plus their Permit3 allowances, exactly as in a plain
-///  `fill`. THREE things make that safe, and all three are load-bearing:
+///  Trust model: `executeFill` is callable by anyone unless {GATED}. For an
+///  ordinary PULL-delivery order on a per-fill-approval instance the security
+///  boundary is the maker's signed order plus their Permit3 allowances, exactly as
+///  in a plain `fill`, and the gate is not needed for it. The gate IS load-bearing
+///  for everything that hands the caller's calldata more than this fill's deltas —
+///  {STANDING_ALLOWANCE}, delta-verify orders, a non-zero {SurplusPolicy} and retain
+///  mode all REQUIRE it (see the operator-set note below; corrected in audit
+///  2026-09-30 AGG-5, this used to read "the gate is never relied on"). THREE things
+///  make the open case safe, and all three are load-bearing:
 ///
 ///    1. THE ROUTER IS ALLOWLISTED AT CONSTRUCTION. `onFill` issues a raw call
 ///       with caller-supplied calldata from THIS contract's identity, and
@@ -115,10 +120,13 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///       would let a self-signed 1-wei order approve, deliver or sweep whatever
 ///       an unrelated fill left parked here.
 ///
-///    3. NO ALLOWANCE SURVIVES THE FILL. The router allowance is zeroed inside
-///       `onFill`; Settlement's is zeroed in `executeFill` after the fill
-///       returns, so a standing approval can never be paired with a later
-///       balance.
+///    3. NO ALLOWANCE SURVIVES THE FILL — on a per-fill-approval instance. The
+///       router allowances are zeroed inside `onFill`; Settlement's are zeroed in
+///       `executeFill` after the fill returns, so a standing approval can never be
+///       paired with a later balance. A {STANDING_ALLOWANCE} instance gives this up
+///       on the INPUT side by construction (the router approvals stay), which is
+///       exactly why such an instance must be {GATED}; Settlement's approvals are
+///       still cleared on every instance.
 ///
 ///  Holding nothing between fills is therefore NOT a security assumption —
 ///  residue is unreachable by the next caller — and the gas-optimal way to run
@@ -129,19 +137,44 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///  — and both writes become non-zero→non-zero (measured: 222.7k → 178.9k
 ///  execution gas on the two-token benchmark). `RoutePlan.profitRecipient ==
 ///  address(this)` (retain mode, {_splitSurplus}) maintains that floor by
-///  itself, since the filler's share of the spread simply stays put.
+///  itself, since the filler's share of the spread simply stays put — and is
+///  therefore only allowed on a {GATED} instance, whose operators can take it out
+///  again with {sweep}. Every amount `executeFill` moves is a delta of the current
+///  fill, so on an open instance a retained balance could never leave; retain mode
+///  is refused there ({RetainNeedsOperators}; audit 2026-09-30 AGG-1).
 ///
-///  OPTIONAL OPERATOR SET — a ring-fence, not a security boundary
-///  ─────────────────────────────────────────────────────────────
+///  OPTIONAL OPERATOR SET — load-bearing for every mode beyond the plain one
+///  ────────────────────────────────────────────────────────────────────────
 ///  `executeFill` may be restricted to an immutable set of operators, fixed at
 ///  construction exactly like the routers (no owner, no setter; an empty set
-///  means permissionless). For an ordinary (pull-delivery) order none of the three
-///  points above depends on it: the maker is protected by the signed band and the
-///  router allowlist whoever calls. Two things DO require it, and the constructor /
-///  `_plan` enforce both: standing allowances ({StandingNeedsOperators}) and
-///  delta-verify orders ({DirectNeedsOperators}) — in both, the router calldata is
-///  the caller's, and on an open instance that caller is anyone. What it changes
-///  otherwise is WHO Settlement sees as the filler. The exclusivity
+///  means permissionless). For an ordinary (pull-delivery) order on a per-fill
+///  instance none of the three points above depends on it: the maker is protected
+///  by the signed band and the router allowlist whoever calls. FOUR things DO
+///  require it, and the constructor / `_plan` enforce each: standing allowances
+///  ({StandingNeedsOperators}), delta-verify orders ({DirectNeedsOperators}), a
+///  non-zero surplus policy ({PolicyNeedsOperators}) and retain mode
+///  ({RetainNeedsOperators}). In all four the router calldata is the caller's, and
+///  on an open instance that caller is anyone.
+///
+///  ⚠ THE TRUST BOUNDARY IS WHOEVER WRITES THE ROUTE, not only the operator key
+///  (audit 2026-09-30 AGG-4). "Operator-tier trust" covers the calldata an operator
+///  SUBMITS — and an off-chain executor that takes `tx.to` / `tx.data` verbatim from
+///  a third-party route API (packages/auction's Sushi and Nordstern sources) puts
+///  that API inside the boundary too. On a per-fill instance a hostile route can
+///  spend only this fill's deltas or the fill reverts; on a STANDING instance it
+///  can spend every primed token. Before submitting on a standing instance, decode
+///  and validate API calldata (allowlisted selectors; tokens and recipients
+///  against the order), or route third-party API quotes through a per-fill
+///  instance.
+///
+///  SUPPORTED SHAPES (audit 2026-09-30 AGG-2 / AGG-6): any number of input and
+///  output legs over at most {MAX_TOKENS} distinct tokens (each measured, approved
+///  and split on its own delta — see {FillRoute}); one router call per fill, no
+///  native value. NOT supported, by the core rather than by this contract: orders
+///  with ITEMS (the core's `PostInputs` mode is item-free —
+///  `ReverseModeRequiresNoItems`), and single-signature PermitBatchWitness orders
+///  (`fillWithPermit` has no callback entry), which only an inventory filler can
+///  serve. What it changes otherwise is WHO Settlement sees as the filler. The exclusivity
 ///  gate compares `order.exclusiveFiller` to `msg.sender` of the fill, which is
 ///  THIS contract — so an order that names this instance as its exclusive filler
 ///  is, on a permissionless instance, exclusive to anyone willing to route
@@ -169,7 +202,9 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///        protocol's shares; `address(0)` = `msg.sender`; the solver contract
 ///        itself = keep it here (retain mode — no transfer, and the balance
 ///        floor that makes the next fill cheaper; see the note on holding
-///        nothing between fills)
+///        nothing between fills). Retain mode is accepted on a {GATED} instance
+///        only, whose operators recover it with {AggregatorFillSolver.sweep}
+///        ({AggregatorFillSolver.RetainNeedsOperators})
 /// @param originator the party that sourced the order (frontend, wallet, API
 ///        integrator) — paid `originatorPpm` of the output surplus. `address(0)`
 ///        with `originatorPpm == 0` = no originator share
@@ -202,9 +237,20 @@ struct RoutePlan {
 ///  settler-side rule can reach it. A split is only ENFORCEABLE where the swap
 ///  itself runs in observable custody — which is precisely what this contract
 ///  is (the same reason 0x Settler can run `POSITIVE_SLIPPAGE`: it IS the
-///  swapper). So the mechanic lives here, applies to every fill routed through
-///  this instance whoever calls it, and a filler that would rather keep 100% of
-///  the spread is free to run its own contract and compete in the auction.
+///  swapper). So the mechanic lives here, and a filler that would rather keep
+///  100% of the spread is free to run its own contract and compete in the auction.
+///
+///  ⚠ IT BINDS THE SPREAD THAT REACHES THIS CONTRACT, i.e. ROUTES THE OPERATORS
+///  WRITE (audit 2026-09-30 AGG-3; this note used to say "applies to every fill
+///  routed through this instance whoever calls it"). The route calldata is the
+///  caller's and opaque here: a multicall recipient split, `pull` + `sweepToken`,
+///  or a caller-chosen executor can send part of the input or output elsewhere so
+///  the spread never lands here and every share reads zero. No on-chain check can
+///  tell that apart from a worse quote. So a non-zero policy is only meaningful
+///  where the callers are trusted to write honest routes — the constructor refuses
+///  one on an open instance ({PolicyNeedsOperators}) — and the originator
+///  carve-out "out of the filler's own remainder" is a rule for those routes, not a
+///  bound on a hostile caller.
 ///
 ///  The split is by construction the ANALOGUE of what non-conversion orders
 ///  already have: on a deposit the relayer earns a rising fee leg and the
@@ -238,18 +284,36 @@ uint256 constant NO_PATCH = type(uint256).max;
 ///         the stack limit at six arguments under the legacy profile this package
 ///         compiles with, and every future field would hit it again; a struct
 ///         costs one memory pointer and makes the shape extensible.
+///
+///         THE TOKEN SET (audit 2026-09-30 AGG-2 / AGG-6). Every DISTINCT token the
+///         order's legs name, input legs first — so `tokens[0]` is always
+///         `legsIn[0]`'s token, the anchor the route swaps. `inMask` / `outMask`
+///         flag which of them an input / output leg pays (a token can be both: a
+///         same-token order, a fee leg in the input token). Each is measured
+///         against its own pre-fill snapshot in `before`, so a second input leg in a
+///         third token is routed (its delta is approved to the router) and its
+///         residue split — it used to be paid here and never looked at again — and
+///         every output token is approved to Settlement at ITS OWN measured
+///         proceeds, so the pull path is no longer limited to one output token.
 struct FillRoute {
-    address tokenIn;
-    address tokenOut;
     address router;
     uint256 minOut;
     uint256 maxPay;
     uint256 amountInOffset;
-    /// @dev `tokenIn`/`tokenOut` balances taken in `executeFill` BEFORE Settlement
-    ///      moved anything. Everything `onFill` spends is measured against these,
-    ///      so the callback can only ever reach this fill's own proceeds.
-    uint256 inBefore;
-    uint256 outBefore;
+    /// @dev The order's distinct leg tokens; `tokens[0]` = `legsIn[0]`'s token.
+    address[] tokens;
+    /// @dev Each token's balance, taken in `executeFill` BEFORE Settlement moved
+    ///      anything. Everything `onFill` spends is measured against these, so the
+    ///      callback can only ever reach this fill's own proceeds. `0` (unread) for
+    ///      an output-only token on the direct path, which never lands here.
+    uint256[] before;
+    /// @dev Bit `k` set = `tokens[k]` is paid to this contract by an input leg.
+    uint256 inMask;
+    /// @dev Bit `k` set = `tokens[k]` is owed by an output leg.
+    uint256 outMask;
+    /// @dev Index in `tokens` of `legsOut[0]`'s token — the one `minOut` and
+    ///      `maxPay` apply to.
+    uint256 outAnchor;
     /// @dev The order carries {DutchAuction.deltaVerifyOutputs}: the route pays
     ///      the maker itself and this contract never approves Settlement.
     bool direct;
@@ -262,8 +326,15 @@ contract AggregatorFillSolver {
     ///      construction: it is an immutable of Settlement and never changes.
     address public immutable EXECUTOR;
 
-    /// @dev 1 = idle, 2 = inside a fill this contract initiated.
+    /// @dev 1 = idle; 2 = inside a fill this contract started, callback armed;
+    ///      3 = inside that fill, callback consumed (the route ran). Held at 3
+    ///      through the surplus split, so neither a reentrant `executeFill` (from a
+    ///      router, or a hook token paid out by the split) nor {sweep} can run
+    ///      mid-fill (audit 2026-09-30 AGG-1 / AGG-8).
     uint256 private _active = 1;
+
+    /// @notice Most distinct leg tokens one order may name — see {FillRoute}.
+    uint256 public constant MAX_TOKENS = 8;
 
     /// @dev The venues `onFill` may call, and the callers `executeFill` admits.
     ///      Both sets are IMMUTABLES rather than mappings: a mapping membership
@@ -393,6 +464,9 @@ contract AggregatorFillSolver {
     /// @notice A token was given standing approvals to this instance's routers.
     event Primed(address indexed token);
 
+    /// @notice An operator took retained value out — see {sweep}.
+    event Swept(address indexed token, address indexed to, uint256 amount);
+
     error OnlyExecutor();
     /// @dev `makerPpm + protocolPpm + originatorPpm` exceeded {PPM}, or a
     ///      non-zero share named `address(0)` as its recipient.
@@ -431,6 +505,17 @@ contract AggregatorFillSolver {
     ///      set. See {_plan}: naming this contract as the order's filler hands the
     ///      delivery check to its access control, so it must have some.
     error DirectNeedsOperators();
+    /// @dev A non-zero {SurplusPolicy} on an instance with no operator set — see the
+    ///      ⚠ on {SurplusPolicy}: an open caller writes the route and can keep the
+    ///      spread from ever reaching the split.
+    error PolicyNeedsOperators();
+    /// @dev `RoutePlan.profitRecipient == address(this)` (retain mode) on an open
+    ///      instance, where nothing could ever move the retained value out again.
+    error RetainNeedsOperators();
+    /// @dev `executeFill` or {sweep} entered while a fill is in flight.
+    error Reentrancy();
+    /// @dev The order names more than {MAX_TOKENS} distinct leg tokens.
+    error TooManyTokens();
     /// @dev `legsIn[0]` / `legsOut[0]` must exist before their tokens can be read —
     ///      {PackedArraysMem} is an unchecked reader, and a blob declaring zero
     ///      legs with trailing bytes would otherwise name an arbitrary token.
@@ -450,6 +535,9 @@ contract AggregatorFillSolver {
     ) {
         if (uint256(policy.makerPpm) + policy.protocolPpm > PPM) revert BadSurplusSplit();
         if (policy.protocolPpm != 0 && policy.protocolRecipient == address(0)) revert BadSurplusSplit();
+        if ((policy.makerPpm != 0 || policy.protocolPpm != 0) && operators.length == 0) {
+            revert PolicyNeedsOperators();
+        }
         MAKER_SURPLUS_PPM = policy.makerPpm;
         PROTOCOL_SURPLUS_PPM = policy.protocolPpm;
         PROTOCOL_RECIPIENT = policy.protocolRecipient;
@@ -516,9 +604,10 @@ contract AggregatorFillSolver {
         bytes calldata takerData
     ) external returns (uint256[] memory fillAmountsOut) {
         if (GATED && !isOperator(msg.sender)) revert NotOperator(msg.sender);
-        // Built BEFORE the fill, because two of its fields are balances that only
-        // mean anything pre-fill — and reused afterwards for the sweep, so the
-        // callback and the sweep can never disagree about what this fill created.
+        if (_active != 1) revert Reentrancy();
+        // Built BEFORE the fill, because its snapshots are balances that only mean
+        // anything pre-fill — and reused afterwards for the sweep, so the callback
+        // and the sweep can never disagree about what this fill created.
         FillRoute memory route = _plan(order, plan);
         _active = 2;
         fillAmountsOut = SETTLEMENT.fillWithCallback(
@@ -526,9 +615,9 @@ contract AggregatorFillSolver {
         );
         // A callback that never ran means the swap never happened, and any
         // delivery that nonetheless succeeded came out of this contract's own
-        // balance. Settlement cannot report that, so we check the flag only
-        // `onFill` could have cleared.
-        if (_active != 1) {
+        // balance. Settlement cannot report that, so we check the state only
+        // `onFill` could have advanced.
+        if (_active != 3) {
             _active = 1;
             revert CallbackDidNotRun();
         }
@@ -541,26 +630,25 @@ contract AggregatorFillSolver {
         // audited" is not an argument for dropping it. The drain uses Settlement
         // behaving exactly as specified: `_deliverOutputs` pays an order's output
         // legs BY PULLING THEM FROM THE FILLER, and the filler here is this
-        // contract, for an order the attacker signed as their own maker.
-        //
-        // `onFill` approves ONE token — `legsOut[0]`, the route's own product,
-        // capped at this fill's proceeds. Every OTHER output leg is delivered out
-        // of whatever standing approval already exists. So an approval left on a
-        // token traded earlier is directly spendable by a later self-signed order
-        // naming that token in leg 1, against the balance floor and the retained
-        // spread this contract deliberately holds between fills. PoC'd in
-        // {AggregatorStaleApprovalTest} — it drains, and with this line it cannot.
-        if (!route.direct) SafeTransferLib.forceApprove(route.tokenOut, address(SETTLEMENT), 0);
+        // contract, for an order the attacker signed as their own maker. An
+        // approval left on a token traded earlier would be directly spendable by a
+        // later self-signed order naming that token in an output leg, against the
+        // balance floor and the retained spread. PoC'd in
+        // {AggregatorStaleApprovalTest} — it drains, and with this loop it cannot.
+        uint256 n = route.tokens.length;
+        if (!route.direct) {
+            for (uint256 k; k < n; ++k) {
+                if (route.outMask & (1 << k) != 0) {
+                    SafeTransferLib.forceApprove(route.tokens[k], address(SETTLEMENT), 0);
+                }
+            }
+        }
 
-        // Split BOTH sides by the same policy. The output surplus is the spread;
-        // the input residue — what the route did not consume — is the SAME spread
-        // in the other denomination. It used to go to the filler alone as "a
-        // quoting artefact", which made the policy optional: the caller supplies
-        // `plan.data`, so an exact-output route (`amountOut = the priced amount`,
-        // `amountInMaximum = the whole input`) moves the entire spread into unspent
-        // input and the maker's and protocol's shares read zero. Splitting the
-        // residue in `tokenIn` units, unpriced, closes that without an oracle: the
-        // residue IS maker input that was never needed (F28, 2026-09-12).
+        // Split EVERY token's increase by the same policy. The output surplus is
+        // the spread; the input residue — what the route did not consume — is the
+        // SAME spread in the other denomination (F28, 2026-09-12); a non-anchor
+        // input leg's token is split the same way rather than stranded (audit
+        // 2026-09-30 AGG-2).
         //
         // ⚠ THE DELTA, NOT THE BALANCE, and this is a security boundary rather
         // than tidiness. `executeFill` is permissionless and `order` is the
@@ -568,10 +656,33 @@ contract AggregatorFillSolver {
         // balance of any token I name" primitive — the same one
         // {BaseFlashSolver._requireCallbackRan} was written to close. Measuring
         // against the pre-fill snapshot means the caller can only ever take what
-        // its own fill produced.
+        // its own fill produced. Output tokens first, then inputs (reverse order).
         address to = plan.profitRecipient == address(0) ? msg.sender : plan.profitRecipient;
-        if (!route.direct) _splitSurplus(route.tokenOut, route.outBefore, order.maker, plan, to);
-        _splitSurplus(route.tokenIn, route.inBefore, order.maker, plan, to);
+        for (uint256 k = n; k != 0;) {
+            unchecked {
+                --k;
+            }
+            // On the direct path an output-only token never lands here.
+            if (route.direct && route.inMask & (1 << k) == 0) continue;
+            _splitSurplus(route.tokens[k], route.before[k], order.maker, plan, to);
+        }
+        _active = 1;
+    }
+
+    /// @notice Take value this contract holds between fills — the retained spread
+    ///         and the balance floor — out. GATED instances only, operators only,
+    ///         never mid-fill. Retain mode exists only where this does (audit
+    ///         2026-09-30 AGG-1): on an open instance every amount the contract moves
+    ///         is a delta of the current fill, so a retained balance could never
+    ///         leave, and retain mode is refused there instead.
+    /// @dev    Safe for the same reason the operator tier already writes every
+    ///         route: nothing held here between fills belongs to anyone else — makers
+    ///         are paid and every share is split inside the fill.
+    function sweep(address token, address to, uint256 amount) external {
+        if (!isOperator(msg.sender)) revert NotOperator(msg.sender);
+        if (_active != 1) revert Reentrancy();
+        SafeTransferLib.safeTransfer(token, to, amount);
+        emit Swept(token, to, amount);
     }
 
     /// @dev Split this fill's INCREASE in `token` — the spread, in whichever
@@ -607,8 +718,9 @@ contract AggregatorFillSolver {
         // approved and never swept by a later caller — and it is what keeps the
         // contract's balance slots NON-ZERO between fills, so the next fill's
         // inbound transfers rewrite a live slot instead of paying to create one
-        // (measured: ~44k execution gas per fill on a two-token route). The
-        // operator sweeps at leisure; see the README on the balance floor.
+        // (measured: ~44k execution gas per fill on a two-token route). Only on a
+        // GATED instance ({RetainNeedsOperators}), whose operators take it out with
+        // {sweep}; see the README on the balance floor.
         if (toFiller != 0 && filler != address(this)) SafeTransferLib.safeTransfer(token, filler, toFiller);
         emit SurplusSplit(token, maker, toMaker, toProtocol, toOriginator, toFiller);
     }
@@ -624,19 +736,22 @@ contract AggregatorFillSolver {
     ///      `legsOut` of `0x00 ‖ <104 bytes>` settles as ZERO output legs (the
     ///      caller owes the maker nothing) while still naming a token here. Reject
     ///      the empty blob and that shape cannot be built.
-    function _plan(Order calldata order, RoutePlan calldata plan) private view returns (FillRoute memory) {
-        if (PackedArraysMem.validateLegsIn(order.legsIn) == 0 || PackedArraysMem.validateLegsOut(order.legsOut) == 0) {
-            revert NoLegs();
-        }
+    function _plan(Order calldata order, RoutePlan calldata plan) private view returns (FillRoute memory r) {
+        bytes memory legsIn = order.legsIn;
+        bytes memory legsOut = order.legsOut;
+        uint256 nIn = PackedArraysMem.validateLegsIn(legsIn);
+        uint256 nOut = PackedArraysMem.validateLegsOut(legsOut);
+        if (nIn == 0 || nOut == 0) revert NoLegs();
         // The originator's share is the caller's to give, but only out of its own
         // remainder: the maker's and the protocol's shares are fixed, so the three
         // together may not exceed the whole. Checked here so a bad plan fails
         // before any token moves.
         if (uint256(plan.originatorPpm) + MAKER_SURPLUS_PPM + PROTOCOL_SURPLUS_PPM > PPM) revert BadSurplusSplit();
         if (plan.originatorPpm != 0 && plan.originator == address(0)) revert BadSurplusSplit();
-        address tokenIn = PackedArraysMem.legInToken(order.legsIn, 0);
-        address tokenOut = PackedArraysMem.legOutToken(order.legsOut, 0);
-        bool direct = DutchAuction.deltaVerifyOutputs(order);
+        // RETAIN MODE NEEDS A WAY OUT (audit 2026-09-30 AGG-1): only {sweep} moves a
+        // retained balance, and only operators may call it.
+        if (plan.profitRecipient == address(this) && !GATED) revert RetainNeedsOperators();
+        r.direct = DutchAuction.deltaVerifyOutputs(order);
         // ⚠ A DIRECT (delta-verify) ORDER NEEDS A GATED INSTANCE (re-audit 2026-09-29).
         // The core fills such an order only for its named `exclusiveFiller` — THIS
         // contract — because a balance delta cannot tell the maker's delivery from
@@ -645,20 +760,49 @@ contract AggregatorFillSolver {
         // router that takes a caller-chosen executor (1inch-, 0x-, Odos-style), a
         // stranger could divert this fill's input and settle the maker's OTHER intent
         // inside the callback, and the delta would pass. Only operators may drive one.
-        if (direct && !GATED) revert DirectNeedsOperators();
-        return FillRoute({
-            tokenIn: tokenIn,
-            tokenOut: tokenOut,
-            router: plan.router,
-            minOut: plan.minOut,
-            maxPay: plan.maxPay,
-            amountInOffset: plan.amountInOffset,
-            inBefore: SafeTransferLib.balanceOf(tokenIn, address(this)),
-            // Nothing lands here on the direct path, so nothing to measure against.
-            outBefore: direct ? 0 : SafeTransferLib.balanceOf(tokenOut, address(this)),
-            direct: direct,
-            data: plan.data
-        });
+        if (r.direct && !GATED) revert DirectNeedsOperators();
+
+        // The distinct token set, inputs first (so tokens[0] is the anchor).
+        address[] memory toks = new address[](MAX_TOKENS);
+        uint256 n;
+        for (uint256 i; i < nIn; ++i) {
+            uint256 k;
+            (k, n) = _slot(toks, n, PackedArraysMem.legInToken(legsIn, i));
+            r.inMask |= 1 << k;
+        }
+        for (uint256 j; j < nOut; ++j) {
+            uint256 k;
+            (k, n) = _slot(toks, n, PackedArraysMem.legOutToken(legsOut, j));
+            r.outMask |= 1 << k;
+            if (j == 0) r.outAnchor = k;
+        }
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(toks, n) // shrink to the n slots actually used
+        }
+        r.tokens = toks;
+        r.before = new uint256[](n);
+        for (uint256 k; k < n; ++k) {
+            // Nothing lands here for an output-only token on the direct path, so
+            // nothing to measure against.
+            if (r.direct && r.inMask & (1 << k) == 0) continue;
+            r.before[k] = SafeTransferLib.balanceOf(toks[k], address(this));
+        }
+        r.router = plan.router;
+        r.minOut = plan.minOut;
+        r.maxPay = plan.maxPay;
+        r.amountInOffset = plan.amountInOffset;
+        r.data = plan.data;
+    }
+
+    /// @dev Index of `t` in the first `n` entries of `toks`, appending it if new.
+    function _slot(address[] memory toks, uint256 n, address t) private pure returns (uint256 k, uint256 newN) {
+        for (k = 0; k < n; ++k) {
+            if (toks[k] == t) return (k, n);
+        }
+        if (n == MAX_TOKENS) revert TooManyTokens();
+        toks[n] = t;
+        return (n, n + 1);
     }
 
     /// @dev The callback payload. Its own frame for the same stack reason.
@@ -698,62 +842,105 @@ contract AggregatorFillSolver {
         if (msg.sender != EXECUTOR) revert OnlyExecutor();
         if (_active != 2) revert NotArmed();
         if (!isAllowedRouter(r.router)) revert RouterNotAllowed(r.router);
-        _active = 1;
+        _active = 3;
 
-        // Swap what THIS FILL delivered. Balance-DELTA rather than an amount
-        // passed in: what the maker paid is Settlement's business and a
-        // fee-on-transfer `tokenIn` would make any figure passed here wrong — but
-        // the raw balance is equally wrong, because it would also hand the router
-        // (and, below, the maker) whatever an earlier fill left parked here.
-        // Under-flowing is the correct failure: it means the input never arrived.
-        uint256 amountIn = SafeTransferLib.balanceOf(r.tokenIn, address(this)) - r.inBefore;
-        // The approval is per-fill unless this instance runs on standing ones, in
-        // which case there is nothing to set and nothing to clear — see
-        // {STANDING_ALLOWANCE} for what that trades away and the router property
-        // that has to hold first.
-        if (!STANDING_ALLOWANCE) SafeTransferLib.forceApprove(r.tokenIn, r.router, amountIn);
+        // Approve (per-fill instances) what THIS FILL delivered of every input
+        // token. Balance-DELTA rather than an amount passed in: what the maker paid
+        // is Settlement's business and a fee-on-transfer `tokenIn` would make any
+        // figure passed here wrong — but the raw balance is equally wrong, because
+        // it would also hand the router (and, below, the maker) whatever an earlier
+        // fill left parked here. Under-flowing is the correct failure: it means the
+        // input never arrived. `tokens[0]` is the anchor whose delta the route's
+        // calldata is patched with.
+        uint256 amountIn = _approveInputs(r.tokens, r.before, r.inMask, r.router, true);
 
         (bool ok, bytes memory ret) = r.router.call(_patched(r.data, r.amountInOffset, amountIn));
         if (!ok) revert RouterCallFailed(ret);
 
         // ⚠ THE PER-FILL APPROVAL WAS ALSO A BOUND, and {STANDING_ALLOWANCE}
-        // removes it. `forceApprove(tokenIn, router, amountIn)` capped the route
-        // at the delta this fill delivered no matter what the calldata said; a
-        // standing approval caps it at this contract's whole balance instead, and
-        // the caller picks `amountInOffset` — so it can decline the patch
-        // ({NO_PATCH}) or aim it at the wrong word and have the router pull the
-        // quoted figure. The balance is then the only thing left, which is the
-        // "reach into residue" primitive the delta discipline exists to remove
-        // (F28). Restored here as a measurement instead of an allowance: the
-        // route may consume what this fill brought and not one wei more. One
-        // `balanceOf` against the ~34k the standing approval saves, and only on
-        // the instances that opted in.
-        if (STANDING_ALLOWANCE && SafeTransferLib.balanceOf(r.tokenIn, address(this)) < r.inBefore) {
-            revert RouteOverspent();
-        }
-
-        // Leave no standing allowance on a router this contract does not control.
-        if (!STANDING_ALLOWANCE) SafeTransferLib.forceApprove(r.tokenIn, r.router, 0);
+        // removes it. `forceApprove(token, router, delta)` capped the route at the
+        // delta this fill delivered no matter what the calldata said; a standing
+        // approval caps it at this contract's whole balance instead, and the caller
+        // picks `amountInOffset` — so it can decline the patch ({NO_PATCH}) or aim
+        // it at the wrong word and have the router pull the quoted figure. The
+        // balance is then the only thing left, which is the "reach into residue"
+        // primitive the delta discipline exists to remove (F28). Restored as a
+        // measurement instead of an allowance, for EVERY input token: the route may
+        // consume what this fill brought and not one wei more. On a per-fill
+        // instance this pass clears the router allowances instead.
+        _approveInputs(r.tokens, r.before, r.inMask, r.router, false);
 
         // Direct delivery: the route paid the maker, the core verifies the delta,
         // and this contract has nothing to measure and nothing to approve.
         if (r.direct) return;
 
-        uint256 out = SafeTransferLib.balanceOf(r.tokenOut, address(this)) - r.outBefore;
-        if (out < r.minOut) revert InsufficientOutput(out, r.minOut);
-
-        // Settlement pulls the maker's output next, through Permit3's
-        // direct-approval fallback. Approve `maxPay` and NOT the whole proceeds:
+        // Settlement pulls every output leg next, through the direct-approval path.
+        // Approve each output token at ITS OWN proceeds of this fill — never the
+        // contract's balance — and, for `legsOut[0]`'s token, at most `maxPay`:
         //   • it CAPS the pull — a fill that would take more reverts here rather
         //     than in the solver's P&L;
         //   • the surplus is never approved, so the spread stays this contract's
         //     and no allowance survives the fill over it.
-        // `0` means "no cap", and the cap it then takes is THIS FILL's proceeds,
-        // never the contract's balance — the maker's signed band is still the hard
-        // bound, so the worst case is the price the solver evaluated when it bid.
-        // A `maxPay` above the proceeds is clamped for the same reason: an
-        // over-stated cap must not reach into residue.
-        uint256 cap = r.maxPay == 0 || r.maxPay > out ? out : r.maxPay;
-        SafeTransferLib.forceApprove(r.tokenOut, address(SETTLEMENT), cap);
+        // `maxPay == 0` means "no cap", and the cap it then takes is THIS FILL's
+        // proceeds — the maker's signed band is still the hard bound, so the worst
+        // case is the price the solver evaluated when it bid. A `maxPay` above the
+        // proceeds is clamped for the same reason: an over-stated cap must not
+        // reach into residue.
+        _approveOutputs(r.tokens, r.before, r.outMask, r.outAnchor, r.minOut, r.maxPay);
+    }
+
+    /// @dev The output pass of {onFill}, over the route's calldata arrays resolved
+    ///      ONCE (re-resolving `r.tokens[k]` through the struct on every access is
+    ///      measurable on the hot path).
+    function _approveOutputs(
+        address[] calldata toks,
+        uint256[] calldata bef,
+        uint256 outMask,
+        uint256 outAnchor,
+        uint256 minOut,
+        uint256 maxPay
+    ) private {
+        uint256 n = toks.length;
+        for (uint256 k; k < n; ++k) {
+            if (outMask & (1 << k) == 0) continue;
+            address t = toks[k];
+            uint256 out = SafeTransferLib.balanceOf(t, address(this)) - bef[k];
+            uint256 cap = out;
+            if (k == outAnchor) {
+                if (out < minOut) revert InsufficientOutput(out, minOut);
+                if (maxPay != 0 && maxPay < out) cap = maxPay;
+            }
+            SafeTransferLib.forceApprove(t, address(SETTLEMENT), cap);
+        }
+    }
+
+    /// @dev The two input passes around the route call. `pre`: approve each input
+    ///      token's delta to the router (per-fill instances) and return the anchor's
+    ///      delta. `!pre`: per-fill instances clear those allowances; standing ones
+    ///      check no input token dropped below its snapshot ({RouteOverspent}).
+    function _approveInputs(
+        address[] calldata toks,
+        uint256[] calldata bef,
+        uint256 inMask,
+        address router,
+        bool pre
+    ) private returns (uint256 amountIn) {
+        uint256 n = toks.length;
+        for (uint256 k; k < n; ++k) {
+            if (inMask & (1 << k) == 0) continue;
+            address t = toks[k];
+            if (pre) {
+                uint256 d = SafeTransferLib.balanceOf(t, address(this)) - bef[k];
+                if (k == 0) amountIn = d;
+                // The approval is per-fill unless this instance runs on standing
+                // ones — see {STANDING_ALLOWANCE} for what that trades away.
+                if (!STANDING_ALLOWANCE) SafeTransferLib.forceApprove(t, router, d);
+            } else if (STANDING_ALLOWANCE) {
+                if (SafeTransferLib.balanceOf(t, address(this)) < bef[k]) revert RouteOverspent();
+            } else {
+                // Leave no standing allowance on a router this contract does not control.
+                SafeTransferLib.forceApprove(t, router, 0);
+            }
+        }
     }
 }

@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
-
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
-import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
+import {BaseFlashSolver, FlashOpts} from "@solvers/base/BaseFlashSolver.sol";
 
 /// @notice Morpho Blue flash-loan surface. `flashLoan` transfers `assets` of
 ///         `token` to the caller, invokes `onMorphoFlashLoan(assets, data)`, then
@@ -40,13 +38,42 @@ contract MorphoFlashSolver is BaseFlashSolver {
         uint256 fillAmountIn,
         uint24 dexFee,
         uint256 minSwapOut
-    ) external initiatesFlash {
-        bytes memory data = abi.encode(flashToken, order, sig, fillAmountIn, dexFee, minSwapOut);
-        morpho.flashLoan(flashToken, flashAmount, data);
+    ) external {
+        _executeFill(flashToken, flashAmount, order, address(0), abi.encode(flashToken, order, sig, fillAmountIn, dexFee, minSwapOut, bytes("")));
+    }
 
-        // Surplus collateral is the fill's profit — sweep it to the caller so no
-        // balance accumulates in this permissionless solver.
-        _sweep(PackedArraysMem.legOutToken(order.legsOut, 0), msg.sender);
+    /// @notice {executeFill} with a profit recipient and a `takerData` blob — see
+    ///         {FlashOpts}.
+    function executeFill(
+        address flashToken,
+        uint256 flashAmount,
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmountIn,
+        uint24 dexFee,
+        uint256 minSwapOut,
+        FlashOpts calldata opts
+    ) external {
+        _executeFill(flashToken, flashAmount, order, opts.recipient, abi.encode(flashToken, order, sig, fillAmountIn, dexFee, minSwapOut, opts.takerData));
+    }
+
+    /// @dev Shared body of both overloads. The provider payload is encoded by the
+    ///      callers so this frame stays inside the legacy profile's stack limit.
+    function _executeFill(
+        address flashToken,
+        uint256 flashAmount,
+        Order calldata order,
+        address recipient,
+        bytes memory payload
+    ) private initiatesFlash {
+        _requireNoSettleItems(order);
+        address to = _profitRecipient(recipient);
+        morpho.flashLoan(flashToken, flashAmount, payload);
+        _providerReturned();
+
+        // Surplus collateral is the fill's profit — sweep it out so no balance
+        // accumulates in this permissionless solver.
+        _sweepProfit(flashToken, order, to);
     }
 
     /// @dev Morpho Blue callback. `assets` of `flashToken` are here; Morpho pulls
@@ -61,10 +88,11 @@ contract MorphoFlashSolver is BaseFlashSolver {
             bytes memory sig,
             uint256 fillAmountIn,
             uint24 dexFee,
-            uint256 minSwapOut
-        ) = abi.decode(data, (address, Order, bytes, uint256, uint24, uint256));
+            uint256 minSwapOut,
+            bytes memory takerData
+        ) = abi.decode(data, (address, Order, bytes, uint256, uint24, uint256, bytes));
 
-        _fillAndSwap(order, sig, fillAmountIn, flashToken, dexFee, minSwapOut);
+        _fillAndSwap(order, sig, fillAmountIn, flashToken, dexFee, minSwapOut, takerData);
 
         _ensureRepayable(flashToken, assets);
         SafeTransferLib.forceApprove(flashToken, address(morpho), assets); // Morpho pulls on return

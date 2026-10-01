@@ -20,10 +20,10 @@ import {Settlement} from "@core/settlement/Settlement.sol";
 ///
 ///  The fix
 ///  ───────
-///  The losing condition is knowable from ONE storage slot per order, and the
-///  solver already knows every order hash off-chain. So check that first, from a
-///  parameter list small enough to be nearly free, and bail before touching the
-///  plan:
+///  For an ordinary order the losing condition is knowable from ONE storage slot,
+///  and the solver already knows every order hash off-chain. So check that first,
+///  from a parameter list small enough to be nearly free, and bail before touching
+///  the plan:
 ///
 ///  ```solidity
 ///  function settleMatch(
@@ -55,6 +55,20 @@ import {Settlement} from "@core/settlement/Settlement.sol";
 ///  A solver running INDEPENDENT single-order fills (not a netted plan) has looser
 ///  requirements and should write its own predicate — this guard is for plans
 ///  whose amounts are jointly balanced.
+///
+///  ⚠ WHAT `filled` CANNOT SEE (audit 2026-09-30 FLASH-5 / CORE-MATCH-5)
+///  ──────────────────────────────────────────────────────────────────
+///  Two ways an order leaves the market never touch its `filled` slot:
+///    • a FILL-ONCE order ({DutchAuction.useNonceInvalidator}, `timing` bit 100 —
+///      the shape OCO brackets use) records its one fill by burning its NONCE, and
+///      `filled[hash]` stays 0 forever; a sibling sharing the nonce dies the same way;
+///    • NONCE cancellation (`cancelOrders`, `invalidateNonceWord`, `rollbackNonces`)
+///      cancels by `(maker, nonce)`; only the per-hash `cancelOrder` writes the
+///      `type(uint256).max` sentinel into `filled`.
+///  For those orders pass the `(maker, nonce)` pair to {_requireNoncesLive} as well
+///  — one or two more `SLOAD`s (`minValidNonce` plus one bitmap word). Without it the
+///  `filled` check passes with `expected = 0` after a competitor already won, and
+///  the loser pays the full approach run the guard exists to avoid.
 abstract contract MatchRaceGuard {
     /// @notice The settler whose `filled` book the guard reads.
     Settlement public immutable SETTLEMENT;
@@ -66,8 +80,14 @@ abstract contract MatchRaceGuard {
     ///      failure, which does — without re-simulating.
     error OrderTaken(uint256 index, uint256 expected, uint256 actual);
 
-    /// @dev `orderHashes` and `expectedFilled` are not the same length.
+    /// @dev `orderHashes` and `expectedFilled` (or `makers` and `nonces`) are not
+    ///      the same length.
     error GuardLengthMismatch();
+
+    /// @dev The nonce of nonce-guarded order `index` is spent or cancelled — a
+    ///      competitor filled the fill-once order (or its OCO sibling), or the maker
+    ///      cancelled by nonce. Same race-loss classification as {OrderTaken}.
+    error NonceTaken(uint256 index, address maker, uint256 nonce);
 
     constructor(address settlement) {
         SETTLEMENT = Settlement(settlement);
@@ -81,14 +101,32 @@ abstract contract MatchRaceGuard {
     ///         whole point.
     /// @param  expectedFilled `filled[orderHashes[i]]` as observed when the plan was
     ///         built. A fresh order is 0; a partially-filled one is its cumulative
-    ///         progress. A cancelled order reads `type(uint256).max`, so passing a
-    ///         stale non-max value also catches cancellation.
+    ///         progress. An order cancelled BY HASH (`cancelOrder`) reads
+    ///         `type(uint256).max`, so passing a stale non-max value also catches
+    ///         that cancellation — but NOT a nonce cancellation, and not a fill-once
+    ///         order's fill: see the ⚠ above and {_requireNoncesLive}.
     function _requireUntouched(bytes32[] calldata orderHashes, uint256[] calldata expectedFilled) internal view {
         uint256 n = orderHashes.length;
         if (expectedFilled.length != n) revert GuardLengthMismatch();
         for (uint256 i; i < n;) {
             uint256 actual = SETTLEMENT.filled(orderHashes[i]);
             if (actual != expectedFilled[i]) revert OrderTaken(i, expectedFilled[i], actual);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice Revert unless every listed `(maker, nonce)` is still live — the
+    ///         guard for FILL-ONCE orders and nonce cancellation, which the `filled`
+    ///         counter cannot see (see the ⚠ on the contract).
+    /// @param  makers the maker of each nonce-guarded order.
+    /// @param  nonces that order's signed `nonce`, aligned with `makers`.
+    function _requireNoncesLive(address[] calldata makers, uint256[] calldata nonces) internal view {
+        uint256 n = makers.length;
+        if (nonces.length != n) revert GuardLengthMismatch();
+        for (uint256 i; i < n;) {
+            if (SETTLEMENT.isNonceCancelled(makers[i], nonces[i])) revert NonceTaken(i, makers[i], nonces[i]);
             unchecked {
                 ++i;
             }

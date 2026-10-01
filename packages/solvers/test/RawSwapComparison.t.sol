@@ -145,10 +145,12 @@ contract RawSwapComparisonTest is UsdrifForkBase {
         );
     }
 
-    /// @dev `profitRecipient` is the solver itself — RETAIN mode, the configuration
-    ///      the README recommends. Paying the spread out to a fresh address would
-    ///      charge this benchmark a 0→non-zero balance write that belongs to the
-    ///      operator's sweep, not to the fill.
+    /// @dev `profitRecipient` is the solver itself — RETAIN mode, which needs a
+    ///      gated instance (this one is) and is taken out with the operators'
+    ///      `sweep`. NOT what the README recommends for production — that is a
+    ///      treasury recipient plus a dust floor (corrected in audit 2026-09-30
+    ///      AGG-5). Used here so the benchmark does not charge the fill a 0→non-zero
+    ///      balance write at a fresh recipient.
     function _plan(address recipient) internal view returns (RoutePlan memory) {
         return RoutePlan({
             router: SWAP_ROUTER_02,
