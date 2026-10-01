@@ -7,6 +7,7 @@ import {PositionFunnelFactory} from "../src/funnel/PositionFunnelFactory.sol";
 import {FunnelGrantModule} from "../src/funnel/FunnelGrantModule.sol";
 import {AcrossBridgeOutModule} from "../src/out/AcrossBridgeOutModule.sol";
 import {LzOftBridgeOutModule} from "../src/out/LzOftBridgeOutModule.sol";
+import {CctpBridgeOutModule} from "../src/out/CctpBridgeOutModule.sol";
 import {BridgedOrderInbox} from "../src/BridgedOrderInbox.sol";
 
 /// @title DeployScript
@@ -23,9 +24,13 @@ import {BridgedOrderInbox} from "../src/BridgedOrderInbox.sol";
 ///  unreachable. That makes this script's determinism a fund-safety property, not
 ///  a convenience:
 ///
-///    • the factory's constructor args (`permit3`, `settlement`, `lens`) are part
-///      of its init code, so those THREE must already be at identical addresses on
-///      every chain or the factory address diverges silently;
+///    • the factory's constructor args (`permit3`, `settlement`, `lens`,
+///      `grantModule`) are part of its init code, so those FOUR must already be at
+///      identical addresses on every chain or the factory address diverges
+///      silently. The grant module is deployed below through CREATE2 with only
+///      `settlement` as a constructor arg, so it lands identically wherever
+///      `settlement` does — but it IS the fourth input, and a different grant
+///      module means a different funnel address on that chain;
 ///    • the salt below must never change;
 ///    • the factory is not upgradeable and has no owner, so there is nothing to
 ///      migrate later even if we wanted to.
@@ -39,8 +44,9 @@ import {BridgedOrderInbox} from "../src/BridgedOrderInbox.sol";
 ///      --rpc-url $RPC --broadcast --verify
 ///
 ///  Required env: PERMIT3, SETTLEMENT, LENS.
-///  Optional env: ACROSS_SPOKE_POOL, LZ_ENDPOINT (zero disables that path),
-///                INBOX_OWNER (omit to skip the shared inbox entirely).
+///  Optional env: ACROSS_SPOKE_POOL, LZ_ENDPOINT, CCTP_TOKEN_MESSENGER_V2 (zero
+///                disables that path), INBOX_OWNER (omit to skip the shared inbox
+///                entirely).
 contract DeployScript is Script {
     /// @dev PLACEHOLDER — the real preimage is chosen at rollout and is not
     ///      committed here (see `docs/deterministic-deployment.md` §1). Once a
@@ -55,6 +61,8 @@ contract DeployScript is Script {
         address spokePool = vm.envOr("ACROSS_SPOKE_POOL", address(0));
         address lzEndpoint = vm.envOr("LZ_ENDPOINT", address(0));
         address inboxOwner = vm.envOr("INBOX_OWNER", address(0));
+        // Circle's CCTP V2 TokenMessenger (V1 is halted 2026-12-01 — see ICctp.sol).
+        address cctpMessenger = vm.envOr("CCTP_TOKEN_MESSENGER_V2", address(0));
 
         vm.startBroadcast();
 
@@ -82,6 +90,12 @@ contract DeployScript is Script {
         // named per-order in the signed spec, not baked in here.
         LzOftBridgeOutModule lzOut = new LzOftBridgeOutModule{salt: SALT}(permit3, settlement);
         console.log("LzOftBridgeOutModule ", address(lzOut));
+
+        // Funnel-only USDC path; no commitment can ride a CCTP burn.
+        if (cctpMessenger != address(0)) {
+            CctpBridgeOutModule cctpOut = new CctpBridgeOutModule{salt: SALT}(permit3, settlement, cctpMessenger);
+            console.log("CctpBridgeOutModule  ", address(cctpOut));
+        }
 
         // The shared, commitment-authorised inbox is OPTIONAL: it only buys
         // bridging to a third party who signs nothing, and it is swap-only. A

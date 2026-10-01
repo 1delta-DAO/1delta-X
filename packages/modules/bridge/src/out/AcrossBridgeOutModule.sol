@@ -9,8 +9,9 @@ import {IAcrossSpokePool} from "../vendor/IAcross.sol";
 
 /// @title AcrossBridgeOutModule
 /// @notice Source-side MAKE module that deposits a fill's proceeds into Across,
-///         addressed to the destination {BridgedOrderInbox} and carrying the
-///         commitment that names the destination order.
+///         addressed either to the destination {BridgedOrderInbox} — carrying the
+///         commitment that names the destination order — or to the user's
+///         {PositionFunnel}, with no message at all.
 ///
 ///  Across is the simplest of the three supported paths:
 ///    • no native messaging fee — the relayer is paid out of the token amount, so
@@ -29,6 +30,29 @@ import {IAcrossSpokePool} from "../vendor/IAcross.sol";
 ///  mode is benign in both directions: too generous and the maker overpays a
 ///  little; too tight and no relayer takes the deposit, which then refunds to the
 ///  maker on this chain after `fillDeadline`.
+///
+///  ⚠ An inbox-committed deposit must be the WHOLE item (audit 2026-09-30
+///  PRICE-2.v2 / X-ARITH-2). A filler picks the slice, and a slice whose relay-fee
+///  share cannot pay a relayer is never relayed — it refunds to the maker here —
+///  while a negative `dstScalingFactor` floors each slice separately. Either
+///  leaves the destination row below its anchor for good. So when `dstOrderHash`
+///  is set, `totalAmount` (the item's full signed amount) is mandatory and the
+///  slice must equal it. A funnel deposit may opt in the same way.
+///
+///  ⚠ WRAPPED NATIVE TO A COUNTERFACTUAL FUNNEL ARRIVES AS ETH (audit 2026-09-30
+///  BRIDGE-B-5). The Across SpokePool unwraps `outputToken == wrappedNativeToken`
+///  and sends NATIVE ETH to a recipient with no code (or a 7702 wallet). A funnel
+///  that is not yet deployed on the destination therefore receives ETH, not WETH,
+///  and its WETH-input destination order is unfillable until the ETH is wrapped.
+///  Nothing on this chain can see the destination's code, and the funnel cannot
+///  pin a WETH address without changing its init code per chain (which would
+///  break counterfactual addressing), so this is an authoring rule: for a WETH
+///  output to a funnel, have the funnel DEPLOYED on the destination before the
+///  deposit is relayed (`PositionFunnelFactory.deploy` is permissionless — the
+///  SDK / solver calls it at order time), or include `WETH.deposit{value}` sized
+///  to `outputAmount` (exact on Across) in the owner's
+///  {PositionFunnel.executeSigned} batch. The ETH is never lost: the owner can
+///  always `withdrawNative` it.
 contract AcrossBridgeOutModule is BridgeOutBase {
     IAcrossSpokePool public immutable SPOKE_POOL;
 
@@ -60,6 +84,10 @@ contract AcrossBridgeOutModule is BridgeOutBase {
     ///                          never fills.
     /// @param commitmentExpiry  Unix time after which the inbox may refund even if
     ///                          no order ever activated.
+    /// @param totalAmount       The item's FULL maker-signed amount. Mandatory (and
+    ///                          the slice must equal it) when `dstOrderHash` is
+    ///                          set; optional for a funnel deposit, where zero
+    ///                          allows partial slices. See the contract note.
     struct AcrossSpec {
         address inputToken;
         address outputToken;
@@ -73,6 +101,7 @@ contract AcrossBridgeOutModule is BridgeOutBase {
         bytes32 dstOrderHash;
         address beneficiary;
         uint32 commitmentExpiry;
+        uint256 totalAmount;
     }
 
     constructor(address permit3, address settlement, address spokePool) BridgeOutBase(permit3, settlement) {
@@ -83,6 +112,7 @@ contract AcrossBridgeOutModule is BridgeOutBase {
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override onlySettlement {
         AcrossSpec memory s = abi.decode(data, (AcrossSpec));
         _checkDestination(s.dstRecipient, s.dstChainId);
+        _fullFillGate(amount, s.totalAmount, s.dstOrderHash != bytes32(0));
 
         // Snapshot before the pull — see {_sweep}: the sweep must return only what
         // THIS fill brought in, never a balance that was already resident.

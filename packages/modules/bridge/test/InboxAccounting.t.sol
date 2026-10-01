@@ -276,15 +276,23 @@ contract InboxAccountingTest is BridgeTestBase {
 
     // ──────────────────── Rescue ────────────────────
 
+    /// @dev CHANGED by audit 2026-09-30 (BRIDGE-A-1): a stray transfer no event
+    ///      announced is no longer instantly rescuable — it could be an in-flight
+    ///      LayerZero delivery whose compose has not run. It goes through the
+    ///      delayed stray path, still bounded by `balance - liability`.
     function test_rescue_onlyUnattributedBalance() public {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
         _acrossDeliver(BRIDGED, _commitmentFor(_hashOrder(o)));
 
         tA.mint(address(inbox), 7e18); // a stray delivery with no commitment
-        assertEq(inbox.rescuable(address(tA)), 7e18, "only the stray amount");
+        assertEq(inbox.rescuable(address(tA)), 0, "nothing announced, nothing instantly rescuable");
+        assertEq(inbox.strayBalance(address(tA)), 7e18, "only the stray amount");
 
         vm.prank(inboxOwner);
-        uint256 got = inbox.rescue(address(tA), inboxOwner);
+        inbox.queueStrayRescue(address(tA), inboxOwner, type(uint256).max);
+        vm.warp(block.timestamp + inbox.COMPOSE_SOURCE_DELAY());
+        vm.prank(inboxOwner);
+        uint256 got = inbox.executeStrayRescue(address(tA));
         assertEq(got, 7e18, "rescued the stray");
         assertEq(tA.balanceOf(address(inbox)), BRIDGED, "commitment untouched");
     }
@@ -295,14 +303,20 @@ contract InboxAccountingTest is BridgeTestBase {
 
         vm.prank(inboxOwner);
         vm.expectRevert(BridgedOrderInbox.NothingToRescue.selector);
-        inbox.rescue(address(tA), inboxOwner);
+        inbox.rescue(address(tA), inboxOwner, type(uint256).max);
     }
 
     function test_rescue_onlyOwner() public {
         tA.mint(address(inbox), 1e18);
         vm.prank(solver);
         vm.expectRevert(BridgedOrderInbox.NotOwner.selector);
-        inbox.rescue(address(tA), solver);
+        inbox.rescue(address(tA), solver, type(uint256).max);
+        vm.prank(solver);
+        vm.expectRevert(BridgedOrderInbox.NotOwner.selector);
+        inbox.queueStrayRescue(address(tA), solver, 1e18);
+        vm.prank(solver);
+        vm.expectRevert(BridgedOrderInbox.NotOwner.selector);
+        inbox.executeStrayRescue(address(tA));
     }
 
     // ──────────────────── sync: keeping the escape hatch usable ────────────────────
@@ -321,15 +335,18 @@ contract InboxAccountingTest is BridgeTestBase {
         vm.prank(solver);
         settlement.fill(o, "", BRIDGED);
 
-        tA.mint(address(inbox), 7e18); // an orphaned delivery needing recovery
-        assertEq(inbox.rescuable(address(tA)), 0, "understated while the fill is unreconciled");
+        tA.mint(address(inbox), 7e18); // a stray delivery needing recovery
+        assertEq(inbox.strayBalance(address(tA)), 0, "understated while the fill is unreconciled");
 
         inbox.sync(h);
         assertEq(inbox.liability(address(tA)), 0, "spent funds no longer counted as owed");
-        assertEq(inbox.rescuable(address(tA)), 7e18, "orphan now recoverable");
+        assertEq(inbox.strayBalance(address(tA)), 7e18, "stray now recoverable");
 
         vm.prank(inboxOwner);
-        assertEq(inbox.rescue(address(tA), inboxOwner), 7e18, "rescued");
+        inbox.queueStrayRescue(address(tA), inboxOwner, type(uint256).max);
+        vm.warp(block.timestamp + inbox.COMPOSE_SOURCE_DELAY());
+        vm.prank(inboxOwner);
+        assertEq(inbox.executeStrayRescue(address(tA)), 7e18, "rescued");
     }
 
     /// @dev sync + settle must release exactly `credited` in total, never twice.
@@ -461,7 +478,10 @@ contract InboxAccountingTest is BridgeTestBase {
         Order memory o = _dstOrder(1, BRIDGED, DELIVERED);
         o.maker = maker;
         _creditedOrder(o);
-        vm.expectRevert(OrderState.NotOrderMaker.selector);
+        // Now refused by the inbox's own shape check (audit 2026-09-30: the maker
+        // is part of `_staticShapeOk`, which `settleExpired` also consults) before
+        // Settlement's `NotOrderMaker` is ever reached.
+        vm.expectRevert(BridgedOrderInbox.UnsupportedOrderShape.selector);
         inbox.activate(o, beneficiary);
     }
 
@@ -665,7 +685,9 @@ contract InboxAccountingTest is BridgeTestBase {
         vm.expectRevert(BridgedOrderInbox.NotYetRefundable.selector);
         _settle(h);
         vm.warp(_expiry(o) + 1);
-        assertEq(inbox.settleExpired(o, beneficiary), BRIDGED + 1, "refunded on the order's deadline, gift included");
+        assertEq(
+            inbox.settleExpired(o, beneficiary, address(tA)), BRIDGED + 1, "refunded on the order's deadline, gift included"
+        );
     }
 
     /// @dev An early copycat `expiry` cannot force an early refund either: max, not min.

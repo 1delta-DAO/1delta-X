@@ -59,7 +59,8 @@ contract DecimalScalingAndCctpTest is BridgeTestBase {
                 exclusivityOffset: 0,
                 dstOrderHash: bytes32(uint256(1)),
                 beneficiary: beneficiary,
-                commitmentExpiry: uint32(block.timestamp) + COMMITMENT_EXPIRY_OFFSET
+                commitmentExpiry: uint32(block.timestamp) + COMMITMENT_EXPIRY_OFFSET,
+                totalAmount: BRIDGE
             })
         );
     }
@@ -139,7 +140,9 @@ contract DecimalScalingAndCctpTest is BridgeTestBase {
                 inputToken: address(tA),
                 dstChainId: DST_CHAIN,
                 dstDomain: DST_DOMAIN,
-                dstRecipient: recipient
+                dstRecipient: recipient,
+                maxFeeBps: 0,
+                minFinalityThreshold: 2000 // Standard transfer: no fee
             })
         );
     }
@@ -187,7 +190,7 @@ contract DecimalScalingAndCctpTest is BridgeTestBase {
         bytes memory sig = _sign(src);
 
         vm.expectEmit(true, true, true, true, address(cctpOut));
-        emit CctpBridgeOutModule.CctpBurn(1, DST_DOMAIN, dstFunnel, address(tA), BRIDGE);
+        emit CctpBridgeOutModule.CctpBurn(DST_DOMAIN, dstFunnel, address(tA), BRIDGE, 0, 2000);
         vm.prank(solver);
         settlement.fill(src, sig, PAY);
     }

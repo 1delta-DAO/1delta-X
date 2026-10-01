@@ -81,7 +81,8 @@ contract FunnelPathTest is BridgeTestBase {
                 exclusivityOffset: 0,
                 dstOrderHash: bytes32(0), // no commitment — the order is owner-signed
                 beneficiary: address(0),
-                commitmentExpiry: 0
+                commitmentExpiry: 0,
+                totalAmount: 0
             })
         );
     }
@@ -100,7 +101,8 @@ contract FunnelPathTest is BridgeTestBase {
                 extraOptions: hex"0003",
                 dstOrderHash: bytes32(0),
                 beneficiary: address(0),
-                commitmentExpiry: 0
+                commitmentExpiry: 0,
+                totalAmount: 0
             })
         );
     }

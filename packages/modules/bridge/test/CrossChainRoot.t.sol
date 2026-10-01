@@ -161,7 +161,8 @@ contract CrossChainRootTest is BridgeTestBase {
                 exclusivityOffset: 0,
                 dstOrderHash: bytes32(0), // no commitment — the funnel path needs none
                 beneficiary: address(0),
-                commitmentExpiry: 0
+                commitmentExpiry: 0,
+                totalAmount: 0
             })
         );
     }

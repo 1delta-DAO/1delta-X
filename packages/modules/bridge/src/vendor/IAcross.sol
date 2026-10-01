@@ -19,7 +19,14 @@ interface IAcrossSpokePool {
     ///                         the calling module — a module-addressed refund
     ///                         would need its own claim path.
     /// @param recipient        Destination-chain receiver. For this package that
-    ///                         is always the {BridgedOrderInbox}.
+    ///                         is the shared {BridgedOrderInbox} (with a
+    ///                         commitment `message`) or the user's
+    ///                         {PositionFunnel} (with an empty `message`).
+    ///                         ⚠ When `outputToken` is the destination's wrapped
+    ///                         native token and `recipient` has no code there (a
+    ///                         counterfactual funnel), the SpokePool UNWRAPS and
+    ///                         sends native ETH instead — see
+    ///                         {AcrossBridgeOutModule}.
     /// @param outputAmount     What the relayer must deliver on the destination.
     ///                         Exact and enforced, so it doubles as the
     ///                         guaranteed-delivery floor the destination order is

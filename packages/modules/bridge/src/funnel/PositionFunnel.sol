@@ -246,9 +246,19 @@ contract PositionFunnel is IERC1271 {
     ///      cannot call anything else;
     ///    • `amount` is the item's pro-rata slice, so a partial fill grants exactly
     ///      the fraction the paired item will pull;
-    ///    • the expiry is THIS BLOCK. The pull happens later in the same
-    ///      transaction, so nothing needs to outlive it, and a leftover from an
-    ///      under-pulling module is dead by the next block rather than dangling.
+    ///    • the expiry is THIS TIMESTAMP SECOND (`block.timestamp`). The pull happens
+    ///      later in the same transaction, so nothing needs to outlive it, and a
+    ///      leftover from an under-pulling module is dead once the clock moves on
+    ///      rather than dangling. On a chain that emits several blocks per second
+    ///      that is a few blocks, not one — harmless, since only this funnel's own
+    ///      (owner-signed) orders can consume the allowance.
+    ///    • a grant to SETTLEMENT never DOWNGRADES a standing {enableToken}
+    ///      allowance (audit 2026-09-30 BRIDGE-B-7). Permit3's `approveToken` is a
+    ///      plain overwrite, so a `legsIn`-covering grant used to replace the
+    ///      infinite, never-expiring allowance with `(slice, now)` and stall every
+    ///      OTHER live order of the funnel on that token until someone re-enabled
+    ///      it. When that allowance is already infinite and unexpiring the grant is
+    ///      redundant and is skipped.
     ///
     ///  The residual is the ordinary one: an owner who signs an order whose grant
     ///  item names a hostile spender has authorised it. That is exactly the trust
@@ -280,8 +290,8 @@ contract PositionFunnel is IERC1271 {
         // capped one (re-audit F30). No real pull needs that value; refuse it.
         if (amount == type(uint160).max) revert AmountOverflow();
 
-        // Valid for this block only — `_spend` treats `expiration == 0` as "never
-        // expires", so a real timestamp is what bounds it.
+        // Valid for this timestamp only — `_spend` treats `expiration == 0` as
+        // "never expires", so a real timestamp is what bounds it.
         uint48 exp = uint48(block.timestamp);
         if (taker) {
             PERMIT3.approveTaker(spender, module, ref, amount, exp);
@@ -290,6 +300,13 @@ contract PositionFunnel is IERC1271 {
             // only case `ensureApproval` is safe for. The caller-supplied `spender`
             // never receives an ERC20 allowance, only a capped, same-block Permit3 one.
             SafeTransferLib.ensureApproval(token, address(PERMIT3), amount);
+            // Do not overwrite a standing {enableToken} allowance with a narrower,
+            // same-second one — see the BRIDGE-B-7 note above. Settlement can pull
+            // the slice against the standing allowance already.
+            if (spender == SETTLEMENT) {
+                (uint160 cur, uint48 curExp) = PERMIT3.tokenAllowance(address(this), SETTLEMENT, token);
+                if (cur == type(uint160).max && curExp == 0) return;
+            }
             PERMIT3.approveToken(spender, token, amount, exp);
         }
     }
@@ -375,9 +392,22 @@ contract PositionFunnel is IERC1271 {
     ///      only because every built-in consumer's digest already binds the maker
     ///      (Settlement's order names `maker`); see {_isSigConsumer} for the
     ///      consumer where that fails.
+    ///
+    ///      ⚠ NEVER ON THE IMPLEMENTATION, NEVER FOR A ZERO OWNER (audit 2026-09-30
+    ///      BRIDGE-B-1). Called on the implementation directly, `owner()` reads the
+    ///      caller's calldata tail — for an ABI-encoded 65-byte signature that is
+    ///      zero padding, so `o == address(0)` — and `_recover` returns
+    ///      `address(0)` for any signature that does not recover (v = 0). The ECDSA
+    ///      branch then matched and the implementation, whose immutables name the
+    ///      real Settlement and lens, authorised any order or delegate nomination
+    ///      with `maker = IMPLEMENTATION`. The factory refuses zero owners
+    ///      (`ZeroOwner`) and {_verifyCrossRoot} refuses `o == 0`; this was the
+    ///      third site of the same rule.
     function isValidSignature(bytes32 hash, bytes memory signature) external view returns (bytes4) {
         if (!_isSigConsumer(msg.sender)) return 0xffffffff;
+        if (address(this) == _SELF) return 0xffffffff;
         address o = owner();
+        if (o == address(0)) return 0xffffffff;
         if (signature.length == 65 || signature.length == 64) {
             if (_recover(hash, signature) == o) return IERC1271.isValidSignature.selector;
         } else if (_isCrossRootEnvelope(signature)) {
