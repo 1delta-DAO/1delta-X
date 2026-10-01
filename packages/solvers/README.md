@@ -22,6 +22,41 @@ the flash in the same transaction. The shared fill → swap → repay machinery
 lives in `base/BaseFlashSolver.sol`; each concrete solver only differs in which
 flash provider it draws inventory from.
 
+**Flash-family shapes and limits** (audit 2026-09-30 FLASH-1/2/3/7, PERIPH-4.v1,
+CENSUS-A-5):
+
+- **No `SETTLE` items.** A SETTLE module pays `ctx.filler` — the solver — in any
+  token it likes, and nothing would forward it, so the receipt would be left for
+  the next caller. Every `executeFill` refuses such an order before the flash
+  (`SettleItemsUnsupported`); MAKE/TAKE/TAKE_FOR items are fine. Sweep / tip
+  orders (`ProportionalSweepModule`) must be filled by an EOA or a contract that
+  forwards arbitrary tokens.
+- Single-input solvers and `MultiOutputFlashSolver` take exactly one input leg
+  (`MultiInputUnsupported`, checked before the flash); the `multi-input/` family
+  swaps every input leg back.
+- The profit is swept in the **asset the flash was repaid in** (plus `legsOut[0]`'s
+  token when it differs), to `msg.sender` or to `FlashOpts.recipient`. Every
+  solver has an `executeFill(…, FlashOpts opts)` overload carrying a profit
+  `recipient` and a `takerData` blob (filler attestations, cosigned quotes,
+  fill-module proposals); the recipient may not be the solver itself or
+  Settlement's EXECUTOR (`BadProfitRecipient`) — drive a solver from a `matchSettle`
+  CALL step or a `fillWithCallback` target only with an explicit recipient.
+  `fillAmountIn = type(uint256).max` fills whatever remains.
+- The repayment swap is single-hop Uniswap v3 `exactInputSingle`; the solver
+  detects `SwapRouter02` (no `deadline`, e.g. Rootstock Oku and most L2s) at
+  construction (`ROUTER02`). An input already in the collateral asset is not swapped.
+- The provider-callback gate is open only while the provider call is in flight:
+  Aave checks `initiator`, Midnight `caller`, Morpho/EVK only call back their own
+  caller, and Balancer — which names no initiator — is bound to the exact payload
+  `executeFill` sent. The gate does NOT stop a caller's own fake provider (an
+  attacker-written "Euler vault"): that callback runs with the solver as filler,
+  which is harmless only because the solver holds nothing — any residue (a
+  donation, a stranded token) is claimable by anyone. Keep the zero-balance rule.
+- These wrappers present THEIR OWN address to every filler gate. Never name a
+  permissionless flash solver (or an open `GuardedMatchSolver`) in
+  `exclusiveFiller`, a `FILLER_SET` or a filler-aware validator / price module —
+  that admits every caller.
+
 The exception is the **`inventory/`** group: fills whose recycle leg cannot
 complete inside the fill transaction (so flash capital is impossible). Those
 solvers are principals — they hold real inventory between fills and every
@@ -51,8 +86,14 @@ entrypoint is owner/operator-gated.
 - **`multi-output/`** — solvers for multi-output orders:
   - `MultiOutputFlashSolver.sol` — **Balancer v2**
 - **`match/`** — `matchSettle` front-ends:
-  - `GuardedMatchSolver.sol` — guard → `matchSettle` → forward the edge to the
-    caller. See [Losing races cheaply](#losing-races-cheaply).
+  - `GuardedMatchSolver.sol` — guard → `matchSettle`, the residual straight to
+    `plan.profitRecipient` (never `0`, the wrapper, Settlement or the EXECUTOR —
+    `ProfitStranded`). See [Losing races cheaply](#losing-races-cheaply). Plans
+    with a `PRESEND` step are refused (`PresendUnsupported`): PRESEND pays the
+    wrapper, which can never move a token again — call `matchSettle` from your own
+    contract (inheriting `MatchRaceGuard`) if you need one. Optional immutable
+    operator set (`constructor(settlement, operators)`, empty = open): only a
+    GATED instance is a filler identity an order may name.
 - **`aggregator/`** — zero-inventory fills against an off-chain DEX-aggregator
   route (`CallbackMode.PostInputs`: take the maker's `tokenIn`, swap it, deliver
   `tokenOut` — no flash loan, no held capital):
@@ -78,15 +119,32 @@ entrypoint is owner/operator-gated.
     the swapper, so it can measure the surplus; Settlement never sees it. See
     docs/originator-fees.md §5.
     **An optional operator set** (constructor, immutable, empty = anyone) gates
-    `executeFill`. It is a ring-fence, not a security boundary — nothing above
-    depends on it — but it is what makes `Order.exclusiveFiller = thisSolver`
-    mean anything: core compares the exclusive filler to the fill's
-    `msg.sender`, which is the solver *contract*, so on an open instance an
-    order exclusive to it is exclusive to anyone willing to route through it.
-    A gated instance (a capped beta, a solver that wants the whole remainder)
-    narrows that to its operators; a new operator means a new instance. Both
-    sets are immutables (≤ 4 entries each), not mappings — a membership test
-    is then a compare rather than a cold SLOAD, −2.1k gas per fill per set.
+    `executeFill`. For a plain pull-delivery fill on a per-fill instance nothing
+    depends on it, but it is **load-bearing** for every mode in which the caller's
+    route calldata gets more than this fill's deltas, and each requires it:
+    standing allowances (`StandingNeedsOperators`), delta-verify orders
+    (`DirectNeedsOperators`), a non-zero surplus policy (`PolicyNeedsOperators` —
+    an open caller can route the spread around the split, so the policy binds only
+    operator-written routes) and retain mode (`RetainNeedsOperators`). It is also
+    what makes `Order.exclusiveFiller = thisSolver` mean anything: core compares
+    the exclusive filler to the fill's `msg.sender`, which is the solver
+    *contract*, so on an open instance an order exclusive to it is exclusive to
+    anyone willing to route through it. A gated instance narrows that to its
+    operators; a new operator means a new instance. Both sets are immutables (≤ 4
+    entries each), not mappings — a membership test is then a compare rather than
+    a cold SLOAD, −2.1k gas per fill per set. ⚠ The trust boundary is whoever
+    WRITES the route: an executor that forwards third-party API calldata
+    (`packages/auction`'s Sushi / Nordstern sources) verbatim puts that API inside
+    it — on a standing instance validate API calldata (selectors, tokens,
+    recipients) or use a per-fill instance for API-sourced routes.
+    **Supported shapes:** any number of input/output legs over ≤ 8 distinct tokens
+    (each token measured, approved and split on its own delta — a second input
+    leg in a third token is routed and split, and the pull path funds every
+    output token at its own proceeds); one router call, no native value. Not
+    supported, by the core: item orders (`PostInputs` is item-free) and
+    single-signature PermitBatchWitness orders (`fillWithPermit` has no callback
+    entry). `executeFill` is non-reentrant and holds its in-fill state through the
+    surplus split.
     Fills start as `CallbackMode.PostInputsDirect`: the contract never holds a
     Permit3 allowance, so bit 2 tells the core to pull its output legs by plain
     `transferFrom` instead of probing Permit3, failing, reading the strict flag
@@ -130,18 +188,25 @@ entrypoint is owner/operator-gated.
     **0** against paying the spread straight out on the direct-delivery path —
     an exact-input route leaves no residue to retain — and ~3k on the pull path.
     So point `profitRecipient` at a treasury and let the contract hold dust only:
-    it is permissionlessly callable and holds the maker's input mid-fill, so
-    every wei parked here is something a future mistake can be paired with. On
-    the direct path it never touches `tokenOut` at all.
+    it holds the maker's input mid-fill, so every wei parked here is something a
+    future mistake can be paired with. On the direct path it never touches
+    `tokenOut` at all. Retain mode is only accepted on a GATED instance, whose
+    operators take retained value out with `sweep(token, to, amount)` (never
+    mid-fill); on an open instance it is refused, since nothing could ever move
+    it out again (audit 2026-09-30 AGG-1).
+    *Gas:* the multi-token generalisation (AGG-2/AGG-6) and the reentrancy state
+    cost ≈ +5k per fill on the two-token benchmark (`AggregatorFillGas.t.sol`:
+    1-wei floor pull path 168.2k → 173.3k, direct 135.5k → 139.8k).
     ⚠ Measuring this: EIP-2200 prices an SSTORE against the slot's value at the
     START OF THE TRANSACTION, so a benchmark that seeds a floor and zeroes it
     inline measures a dirty-slot write and reports the floor as worthless.
   - `FillRecovery.sol` — rebuild the in-flight `FillCtx` from inside a callback
     when the order shape allows it. Refuses proportional-under-`PostInputs`,
     fill-module and fill-once orders, whose delta it cannot recover by
-    subtraction; for those, use a `*Typed` `CallbackMode`
-    (`ISettlementCallback` carries the resolved numbers) or
-    `SettlementLens.previewFillInFlight`.
+    subtraction, and the `type(uint256).max` any-size sentinel
+    (`SentinelNotRecoverable` — pass the resolved size); for those, use a
+    `*Typed` `CallbackMode` (`ISettlementCallback` carries the resolved numbers)
+    or `SettlementLens.previewFillInFlight`.
 - **`inventory/`** — inventory-funded (non-flash) fillers:
   - `UsdrifInventorySolver.sol` — **USDRIF→USDT0 exits on Rootstock**. Fills a
     maker's direct USDRIF→USDT0 order from its own USDT0 inventory and, in the
@@ -159,6 +224,26 @@ entrypoint is owner/operator-gated.
     `setOutflowLimit(token, limit)` per 1-hour window, so looping calls (a
     contract operator, one transaction) cannot multiply the per-call caps. All
     three default to zero and fail closed.
+    Fills take an OPERATOR price bound, `maxSpent` (`executeFill(order, sig,
+    amount, maxSpent)`, `executeFillAndRedeem(order, sig, amount, maxSpent,
+    qACmin)`; `type(uint256).max` = none) on top of the owner's rate — the strict
+    `fill` has no price floor, and a maker who controls the pricing (priority bump,
+    price module, descending curve) could otherwise move the price to the owner's
+    floor between quote and inclusion. Fills refuse item-bearing orders (a maker
+    item is the one maker-controlled hook inside the measured fill). Delta-verify
+    orders (`timing` bit 104 — what the Rootstock app signs) that name this
+    contract as `exclusiveFiller` are filled too: the solver delivers each leg from
+    inventory in its own callback (`fillWithCallback`, typed mode), measured and
+    capped exactly like a pull. An app order that names a DIFFERENT solver is not
+    fillable here (exclusivity), so name this contract for inventory-served
+    markets or sign plain pull delivery.
+    ⚠ MoC's queue can be executed by ANYONE (`MocMultiCollateralGuard.execute()`
+    is permissionless; only `MocQueue.execute` is guard-restricted), and executing
+    it pays this contract its own redemption RIF or a failed op's USDRIF refund
+    synchronously. Every measured window — `sell`'s venue call and each fill — is
+    bracketed with `MocQueue.firstOperId()` and reverts
+    `QueueMovedDuringMeasurement` if the queue moved, so in-window deliveries can
+    never be counted as consideration or net out a spend.
     Ownership is two-step (`transferOwnership` → `acceptOwnership`). This is the
     one-signature variant of the two-phase flow in
     `packages/modules/redeem/usdrif` (there the user redeems first and the
@@ -190,8 +275,8 @@ hashes the first order (keccak over the full struct and every dynamic sub-array)
 reverts `OverFill`. Every one of those steps is wasted, and the waste grows with
 the size of the plan and the cost of the orders' validators.
 
-But the losing condition is knowable from **one storage slot per order**, and the
-solver already knows every order hash off-chain. `MatchRaceGuard` checks that
+For an ordinary order the losing condition is knowable from **one storage slot**,
+and the solver already knows every order hash off-chain. `MatchRaceGuard` checks that
 first, from a parameter list small enough to be nearly free, and bails before the
 plan is ever touched:
 
@@ -233,3 +318,11 @@ cheaper check. `test_partialFillByCompetitor_alsoTripsGuard` pins this.
 The guard reverts `OrderTaken(index, expected, actual)` — typed, so a searcher's
 infrastructure can separate a routine race loss from a genuine failure without
 re-simulating.
+
+**What `filled` cannot see.** A fill-once order (`timing` bit 100 — OCO brackets)
+burns its nonce and never writes `filled`, and nonce cancellation
+(`cancelOrders`, `invalidateNonceWord`, `rollbackNonces`) leaves `filled` at 0;
+only the per-hash `cancelOrder` writes the `type(uint256).max` sentinel. For those
+orders use `settleMatchWithNonces(orderHashes, expectedFilled, makers, nonces,
+plan)`, which also checks `isNonceCancelled(maker, nonce)` (one or two more
+`SLOAD`s) and reverts `NonceTaken(index, maker, nonce)`.

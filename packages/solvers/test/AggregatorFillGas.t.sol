@@ -55,11 +55,20 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         _run("1-wei dust floor, zero surplus  ", aggSolver, 1, AMOUNT_OUT);
     }
 
+    /// @dev Retain mode needs an operator set since audit 2026-09-30 AGG-1
+    ///      ({RetainNeedsOperators}), so the retain benchmarks run on a gated instance.
+    function _gated() internal returns (AggregatorFillSolver g) {
+        address[] memory ops = new address[](1);
+        ops[0] = address(this);
+        g = new AggregatorFillSolver(address(settlement), _routers(address(router)), ops, _noSplit(), false, _none());
+    }
+
     function test_gas_retain_seeded() public {
         _warmWorld();
-        tA.mint(address(aggSolver), 1);
-        tB.mint(address(aggSolver), 1);
-        _runTo("retain, seeded floor (fresh tx) ", aggSolver, 1, AMOUNT_OUT, address(aggSolver));
+        AggregatorFillSolver g = _gated();
+        tA.mint(address(g), 1);
+        tB.mint(address(g), 1);
+        _runTo("retain, seeded floor (fresh tx) ", g, 1, AMOUNT_OUT, address(g));
     }
 
     function test_gas_gated_seeded() public {
@@ -101,9 +110,10 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
 
     function test_gas_retain() public {
         _warmWorld();
-        _runTo("retain: first fill (cold)       ", aggSolver, 1, AMOUNT_OUT, address(aggSolver));
-        _runTo("retain: second fill             ", aggSolver, 2, AMOUNT_OUT, address(aggSolver));
-        _runTo("retain: third fill              ", aggSolver, 3, AMOUNT_OUT, address(aggSolver));
+        AggregatorFillSolver g = _gated();
+        _runTo("retain: first fill (cold)       ", g, 1, AMOUNT_OUT, address(g));
+        _runTo("retain: second fill             ", g, 2, AMOUNT_OUT, address(g));
+        _runTo("retain: third fill              ", g, 3, AMOUNT_OUT, address(g));
     }
 
     function test_gas_second_fill() public {

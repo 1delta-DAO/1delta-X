@@ -71,6 +71,8 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
     uint256 constant USDT0_OUT = 935e6; //   maker's floor: ~6.5% discount clears redeem + DEX costs
     uint256 constant INVENTORY = 2_000e6; // solver's USDT0 float
     uint256 constant QAC_MIN = 13_000e18; // RIF floor ~11% under the ~14.6k expected
+    /// @dev `maxSpent` sentinel: no operator price bound (the owner floor still applies).
+    uint256 constant NO_BOUND = type(uint256).max;
 
     /// @dev RIF→USDT0 route floor in raw units, WAD-scaled: $0.06/RIF =
     ///      0.06e6 USDT0-wei per 1e18 RIF-wei → 6e4 (pool quotes ~0.0655 at the
@@ -173,7 +175,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         bytes memory sig = _sign(order);
 
         vm.prank(operator);
-        uint256 paid = inv.executeFill(order, sig, USDRIF_IN)[0];
+        uint256 paid = inv.executeFill(order, sig, USDRIF_IN, NO_BOUND)[0];
 
         assertEq(paid, USDT0_OUT, "maker paid their USDT0 floor");
         assertEq(IERC20(USDT0).balanceOf(maker), USDT0_OUT, "maker exited to USDT0");
@@ -196,7 +198,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         uint256 rbtcBefore = address(inv).balance;
 
         vm.prank(operator);
-        (uint256[] memory paid, uint256 opId) = inv.executeFillAndRedeem(order, sig, USDRIF_IN, QAC_MIN);
+        (uint256[] memory paid, uint256 opId) = inv.executeFillAndRedeem(order, sig, USDRIF_IN, NO_BOUND, QAC_MIN);
 
         assertEq(paid[0], USDT0_OUT, "maker paid their USDT0 floor");
         assertEq(IERC20(USDRIF).balanceOf(address(inv)), 0, "USDRIF escrowed into MoC in the same tx");
@@ -217,7 +219,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
 
         vm.fee(0.024 gwei);
         vm.prank(operator);
-        (, uint256 opId) = inv.executeFillAndRedeem(order, sig, USDRIF_IN, QAC_MIN);
+        (, uint256 opId) = inv.executeFillAndRedeem(order, sig, USDRIF_IN, NO_BOUND, QAC_MIN);
 
         _executeQueue();
         assertGt(IMocQueue(MOC_QUEUE).firstOperId(), opId, "op settled");
@@ -260,7 +262,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
 
         vm.startPrank(stranger);
         vm.expectRevert(UsdrifInventorySolver.NotOperator.selector);
-        inv.executeFill(order, sig, USDRIF_IN);
+        inv.executeFill(order, sig, USDRIF_IN, NO_BOUND);
         vm.expectRevert(UsdrifInventorySolver.NotOperator.selector);
         inv.initiateRedemption(1e18, 1);
         vm.expectRevert(UsdrifInventorySolver.NotOperator.selector);
@@ -373,7 +375,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
                 UsdrifInventorySolver.OutflowCapExceeded.selector, USDT0, INVENTORY, uint256(1_000e6)
             )
         );
-        inv.executeFill(rug, sig, USDRIF_IN);
+        inv.executeFill(rug, sig, USDRIF_IN, NO_BOUND);
 
         assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY, "inventory untouched");
     }
@@ -386,7 +388,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         bytes memory sig = _sign(order);
 
         vm.prank(operator);
-        inv.executeFill(order, sig, USDRIF_IN);
+        inv.executeFill(order, sig, USDRIF_IN, NO_BOUND);
 
         assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY - USDT0_OUT, "normal fill unaffected");
     }
@@ -413,7 +415,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
 
         vm.prank(operator);
         vm.expectRevert(abi.encodeWithSelector(UsdrifInventorySolver.FillRouteNotAllowed.selector, USDT0, RIF));
-        inv.executeFill(rug, sig, 1);
+        inv.executeFill(rug, sig, 1, NO_BOUND);
         assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY, "inventory untouched");
     }
 
@@ -429,7 +431,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
                 UsdrifInventorySolver.FillRateTooLow.selector, uint256(1), USDT0_OUT, USDT0_USDRIF_MIN_RATE
             )
         );
-        inv.executeFill(rug, sig, 1);
+        inv.executeFill(rug, sig, 1, NO_BOUND);
     }
 
     /// Two output tokens (or two input tokens) cannot be priced by one route.
@@ -443,7 +445,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
 
         vm.prank(operator);
         vm.expectRevert(UsdrifInventorySolver.UnsupportedFillShape.selector);
-        inv.executeFill(o, sig, USDRIF_IN);
+        inv.executeFill(o, sig, USDRIF_IN, NO_BOUND);
     }
 
     /// The per-call cap had no memory, so a CONTRACT operator could loop it in one
@@ -472,13 +474,13 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
 
         // One fill fits; the second waits for the next window.
         vm.prank(operator);
-        inv.executeFill(a, sigA, USDRIF_IN);
+        inv.executeFill(a, sigA, USDRIF_IN, NO_BOUND);
         vm.prank(operator);
         vm.expectRevert();
-        inv.executeFill(b, sigB, USDRIF_IN);
+        inv.executeFill(b, sigB, USDRIF_IN, NO_BOUND);
         vm.warp(block.timestamp + inv.OUTFLOW_WINDOW());
         vm.prank(operator);
-        inv.executeFill(b, sigB, USDRIF_IN);
+        inv.executeFill(b, sigB, USDRIF_IN, NO_BOUND);
         assertEq(IERC20(USDT0).balanceOf(address(inv)), INVENTORY - 2 * USDT0_OUT, "two windows, two fills");
     }
 
@@ -491,7 +493,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         vm.expectRevert(
             abi.encodeWithSelector(UsdrifInventorySolver.OutflowWindowExceeded.selector, USDT0, USDT0_OUT, uint256(0))
         );
-        inv.executeFill(o, sig, USDRIF_IN);
+        inv.executeFill(o, sig, USDRIF_IN, NO_BOUND);
     }
 
     /// The limit shares a slot with the usage, so it is 96 bits wide — an oversized
@@ -514,7 +516,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
         bytes memory sigB = _sign(b);
 
         vm.prank(operator);
-        inv.executeFill(a, sigA, USDRIF_IN);
+        inv.executeFill(a, sigA, USDRIF_IN, NO_BOUND);
         (, uint96 used,) = inv.outflowBudget(USDT0);
         assertEq(used, USDT0_OUT, "spend recorded");
 
@@ -528,7 +530,7 @@ contract UsdrifInventorySolverTest is UsdrifForkBase {
                 UsdrifInventorySolver.OutflowWindowExceeded.selector, USDT0, 2 * USDT0_OUT, USDT0_OUT + 1
             )
         );
-        inv.executeFill(b, sigB, USDRIF_IN);
+        inv.executeFill(b, sigB, USDRIF_IN, NO_BOUND);
     }
 
     function test_fillRouteAndWindow_ownerOnly() public {
@@ -819,7 +821,7 @@ contract LoopOperator {
     function fillTwice(Order calldata a, bytes calldata sigA, Order calldata b, bytes calldata sigB, uint256 amt)
         external
     {
-        inv.executeFill(a, sigA, amt);
-        inv.executeFill(b, sigB, amt);
+        inv.executeFill(a, sigA, amt, type(uint256).max);
+        inv.executeFill(b, sigB, amt, type(uint256).max);
     }
 }

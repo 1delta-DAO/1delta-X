@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
-
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
-import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
+import {BaseFlashSolver, FlashOpts} from "@solvers/base/BaseFlashSolver.sol";
 import {IBalancerVault} from "@solvers/single-input/LimitOrderLeverageSolver.sol";
 
 /// @title MultiInputLeverageSolver
@@ -39,7 +37,7 @@ contract MultiInputLeverageSolver is BaseFlashSolver {
     }
 
     /// @notice Fill a multi-input leverage order with no starting inventory.
-    /// @param flashToken   the collateral asset (equals `PackedArraysMem.legOutToken(order.legsOut, 0)`)
+    /// @param flashSource  the collateral asset (equals `PackedArraysMem.legOutToken(order.legsOut, 0)`)
     /// @param flashAmount  amount to flash-loan — should cover Settlement's pull
     /// @param order        the maker's signed order (may have many `legsIn`)
     /// @param sig          EIP-712 signature
@@ -47,25 +45,59 @@ contract MultiInputLeverageSolver is BaseFlashSolver {
     /// @param dexFees      per-input Uniswap v3 fee tiers (aligned with tokenIn)
     /// @param minSwapOuts  per-input min collateral out (slippage guards)
     function executeFill(
-        address flashToken,
+        address flashSource,
         uint256 flashAmount,
         Order calldata order,
         bytes calldata sig,
         uint256 fillAmountIn,
         uint24[] calldata dexFees,
         uint256[] calldata minSwapOuts
-    ) external initiatesFlash {
+    ) external {
+        _executeFill(flashSource, flashAmount, order, address(0), abi.encode(order, sig, fillAmountIn, dexFees, minSwapOuts, bytes("")));
+    }
+
+    /// @notice {executeFill} with a profit recipient and a `takerData` blob — see
+    ///         {FlashOpts}.
+    function executeFill(
+        address flashSource,
+        uint256 flashAmount,
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmountIn,
+        uint24[] calldata dexFees,
+        uint256[] calldata minSwapOuts,
+        FlashOpts calldata opts
+    ) external {
+        _executeFill(flashSource, flashAmount, order, opts.recipient, abi.encode(order, sig, fillAmountIn, dexFees, minSwapOuts, opts.takerData));
+    }
+
+    /// @dev Shared body of both overloads. The provider payload is encoded by the
+    ///      callers so this frame stays inside the legacy profile's stack limit.
+    function _executeFill(
+        address flashSource,
+        uint256 flashAmount,
+        Order calldata order,
+        address recipient,
+        bytes memory payload
+    ) private initiatesFlash {
+        _requireNoSettleItems(order);
+        address to = _profitRecipient(recipient);
+        _flash(flashSource, flashAmount, payload);
+        _providerReturned();
+
+        // Surplus collateral is the fill's profit — sweep it out so no balance
+        // accumulates in this permissionless solver.
+        _sweepProfit(flashSource, order, to);
+    }
+
+    /// @dev The Balancer call, payload-committed — see {BaseFlashSolver._commitFlash}.
+    function _flash(address flashToken, uint256 flashAmount, bytes memory userData) private {
         address[] memory tokens = new address[](1);
         uint256[] memory amounts = new uint256[](1);
         tokens[0] = flashToken;
         amounts[0] = flashAmount;
-
-        bytes memory userData = abi.encode(order, sig, fillAmountIn, dexFees, minSwapOuts);
+        _commitFlash(keccak256(userData));
         vault.flashLoan(address(this), tokens, amounts, userData);
-
-        // Surplus collateral is the fill's profit — sweep it to the caller so no
-        // balance accumulates in this permissionless solver.
-        _sweep(PackedArraysMem.legOutToken(order.legsOut, 0), msg.sender);
     }
 
     /// @dev Balancer v2 callback.
@@ -77,19 +109,22 @@ contract MultiInputLeverageSolver is BaseFlashSolver {
     ) external {
         if (msg.sender != address(vault)) revert OnlyVault();
         _requireInFlash();
+        // Balancer names no initiator: bind the callback to the payload we sent.
+        _consumeFlashCommit(keccak256(userData));
 
         (
             Order memory order,
             bytes memory sig,
             uint256 fillAmountIn,
             uint24[] memory dexFees,
-            uint256[] memory minSwapOuts
-        ) = abi.decode(userData, (Order, bytes, uint256, uint24[], uint256[]));
+            uint256[] memory minSwapOuts,
+            bytes memory takerData
+        ) = abi.decode(userData, (Order, bytes, uint256, uint24[], uint256[], bytes));
 
         address tokenOut = tokens[0]; // collateral the solver is fronting
         uint256 owed = amounts[0] + feeAmounts[0]; // Balancer v2 mainnet fee: 0
 
-        _fillAndSwapAll(order, sig, fillAmountIn, tokenOut, dexFees, minSwapOuts);
+        _fillAndSwapAll(order, sig, fillAmountIn, tokenOut, dexFees, minSwapOuts, takerData);
 
         _ensureRepayable(tokenOut, owed);
         SafeTransferLib.safeTransfer(tokenOut, address(vault), owed);

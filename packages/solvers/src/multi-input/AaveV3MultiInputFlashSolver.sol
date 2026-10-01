@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
-
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {Order} from "@core/settlement/Settlement.sol";
-import {BaseFlashSolver} from "@solvers/base/BaseFlashSolver.sol";
+import {BaseFlashSolver, FlashOpts} from "@solvers/base/BaseFlashSolver.sol";
 import {IAaveV3Pool} from "@solvers/single-input/AaveV3FlashSolver.sol";
 
 /// @title AaveV3MultiInputFlashSolver
@@ -26,22 +24,51 @@ contract AaveV3MultiInputFlashSolver is BaseFlashSolver {
         pool = IAaveV3Pool(_pool);
     }
 
-    /// @param flashToken  the collateral asset to flash (equals `PackedArraysMem.legOutToken(order.legsOut, 0)`)
+    /// @param flashSource the collateral asset to flash (equals `PackedArraysMem.legOutToken(order.legsOut, 0)`)
     function executeFill(
-        address flashToken,
+        address flashSource,
         uint256 flashAmount,
         Order calldata order,
         bytes calldata sig,
         uint256 fillAmountIn,
         uint24[] calldata dexFees,
         uint256[] calldata minSwapOuts
-    ) external initiatesFlash {
-        bytes memory params = abi.encode(order, sig, fillAmountIn, dexFees, minSwapOuts);
-        pool.flashLoanSimple(address(this), flashToken, flashAmount, params, 0);
+    ) external {
+        _executeFill(flashSource, flashAmount, order, address(0), abi.encode(order, sig, fillAmountIn, dexFees, minSwapOuts, bytes("")));
+    }
 
-        // Surplus collateral is the fill's profit — sweep it to the caller so no
-        // balance accumulates in this permissionless solver.
-        _sweep(PackedArraysMem.legOutToken(order.legsOut, 0), msg.sender);
+    /// @notice {executeFill} with a profit recipient and a `takerData` blob — see
+    ///         {FlashOpts}.
+    function executeFill(
+        address flashSource,
+        uint256 flashAmount,
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmountIn,
+        uint24[] calldata dexFees,
+        uint256[] calldata minSwapOuts,
+        FlashOpts calldata opts
+    ) external {
+        _executeFill(flashSource, flashAmount, order, opts.recipient, abi.encode(order, sig, fillAmountIn, dexFees, minSwapOuts, opts.takerData));
+    }
+
+    /// @dev Shared body of both overloads. The provider payload is encoded by the
+    ///      callers so this frame stays inside the legacy profile's stack limit.
+    function _executeFill(
+        address flashSource,
+        uint256 flashAmount,
+        Order calldata order,
+        address recipient,
+        bytes memory payload
+    ) private initiatesFlash {
+        _requireNoSettleItems(order);
+        address to = _profitRecipient(recipient);
+        pool.flashLoanSimple(address(this), flashSource, flashAmount, payload, 0);
+        _providerReturned();
+
+        // Surplus collateral is the fill's profit — sweep it out so no balance
+        // accumulates in this permissionless solver.
+        _sweepProfit(flashSource, order, to);
     }
 
     function executeOperation(address asset, uint256 amount, uint256 premium, address initiator, bytes calldata params)
@@ -52,15 +79,7 @@ contract AaveV3MultiInputFlashSolver is BaseFlashSolver {
         if (initiator != address(this)) revert BadInitiator();
         _requireInFlash();
 
-        (
-            Order memory order,
-            bytes memory sig,
-            uint256 fillAmountIn,
-            uint24[] memory dexFees,
-            uint256[] memory minSwapOuts
-        ) = abi.decode(params, (Order, bytes, uint256, uint24[], uint256[]));
-
-        _fillAndSwapAll(order, sig, fillAmountIn, asset, dexFees, minSwapOuts);
+        _fillAndSwapAllEncoded(params, asset);
 
         uint256 owed = amount + premium;
         _ensureRepayable(asset, owed);
