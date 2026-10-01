@@ -21,7 +21,8 @@ Gearbox V3 lending adapters for `Settlement`. Depends on `@core`.
 | Contract | Op | Surface | `data` |
 |---|---|---|---|
 | `GearboxPoolDepositModule` | MAKE | pool `deposit` | `abi.encode(pool, asset[, permit])` |
-| `GearboxPoolWithdrawModule` | TAKE | pool `withdraw` (owner allowance) | `abi.encode(pool, asset[, BalanceMode])` |
+| `GearboxPoolWithdrawModule` | TAKE | pool `withdraw` (owner allowance); `Full` withdraws the whole raw position and splits it | `abi.encode(pool, asset[, BalanceMode[, total]])` — `total`@96 (the item's full signed amount) is **mandatory** under `Full` (fails closed without it); `asset` is re-derived from `pool.asset()` |
+| `GearboxPoolPreFundDepositModule` | MAKE (pre-funded) | pool `deposit` of the core-delivered leg from the module's own balance | `abi.encode(forDesc, pool, asset)` |
 | `GearboxCreditAddCollateralModule` | MAKE | `botMulticall([addCollateral])` | `abi.encode(creditAccount, token[, permit])` |
 | `GearboxCreditRepayModule` | MAKE | `botMulticall([addCollateral, decreaseDebt])` | `abi.encode(creditAccount, asset[, permit])` |
 | `GearboxCreditBorrowModule` | TAKE | `botMulticall([increaseDebt, withdrawCollateral→receiver])` | `abi.encode(creditAccount, asset)` |

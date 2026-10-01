@@ -13,12 +13,13 @@ import {IGearboxPoolV3} from "./interfaces/IGearboxV3.sol";
 //
 // "Deposit whatever the conversion delivered" into the passive PoolV3 (ERC-4626)
 // supply side, with ZERO receive-side approvals: the maker signs the converted
-// output leg with `recipient = module` and a `TAKE_FOR` item whose leg-reference
-// descriptor points at it. The core sizes `forAmount` to exactly what the fill
-// delivered here ({Base._forSlice} → {Pricing.outputAt}), auction decay included,
-// and this module supplies it from its own balance. The maker's only grants are
-// the ones they had anyway: the ERC20+Permit3 approval on the asset they are
-// CONVERTING FROM (the input leg), and the taker allowance below. The received
+// output leg with `recipient = module` and a pre-funded `MAKE` item whose
+// leg-reference descriptor points at it. The core sizes `forAmount` to exactly
+// what the fill delivered here ({Base._forSlice} → {Pricing.outputAt}), auction
+// decay included, and this module supplies it from its own balance. The maker's
+// only grant is the one they had anyway: the ERC20+Permit3 approval on the asset
+// they are CONVERTING FROM (the input leg). No taker allowance is granted or spent
+// — Settlement dispatches a `MAKE` directly. The received
 // asset needs nothing — it never transits the maker's wallet, and PoolV3's
 // `deposit(assets, receiver)` is PERMISSIONLESS on someone else's behalf, so the
 // receive side is empty end to end.
@@ -26,11 +27,13 @@ import {IGearboxPoolV3} from "./interfaces/IGearboxV3.sol";
 //  ⚠ POOL SIDE ONLY — the credit-account surface is deliberately SKIPPED.
 //  ─────────────────────────────────────────────────────────────────────
 //  The credit-account modules in {GearboxV3Modules} run through `botMulticall`
-//  under the bot-permission model, which this repo treats as best-effort
-//  (fund-flow "still unvalidated on a fork" per that file's header, the
-//  once-per-block debt-update rule, quota handling). A pre-fund composite whose
-//  funding number is core-enforced deserves a venue op that is not best-effort,
-//  so no pre-funded add-collateral / credit-repay variant ships here. If the
+//  under the bot-permission model. Their fund-flow IS fork-validated
+//  (`test/fork/CreditFlow.t.sol`), but it carries venue rules a core-sized
+//  delivery cannot respect blind — the once-per-block debt-update rule, the
+//  suite's `debtLimits` (minDebt on every non-closing state), quota handling for
+//  non-underlying collateral, and the forced-`Recycle` repay cap. A pre-fund
+//  composite whose funding number is core-enforced deserves a venue op with none
+//  of those edges, so no pre-funded add-collateral / credit-repay variant ships here. If the
 //  credit side ever graduates, mirror {GearboxCreditAddCollateralModule}'s
 //  CA-rooted auth chain ({GearboxCreditAuth.authorize}) verbatim — the borrower
 //  check is what keeps a shared bot singleton from acting on a victim's account.

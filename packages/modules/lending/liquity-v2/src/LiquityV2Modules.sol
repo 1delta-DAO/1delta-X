@@ -7,6 +7,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
 import {ProratedBound} from "@lib/ProratedBound.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
@@ -96,6 +97,8 @@ library LiquityV2TroveAuth {
     error UnknownBranch();
     /// @dev The maker-named BOLD is not the registry's BOLD.
     error BoldTokenMismatch(address named, address actual);
+    /// @dev The maker-named collateral token is not the branch's collateral.
+    error CollTokenMismatch(address named, address actual);
 
     /// @param registry    the IMMUTABLE branch registry, fixed at construction —
     ///                    the trusted root. NEVER take this from `data`.
@@ -138,8 +141,32 @@ library LiquityV2TroveAuth {
     ///      Residue-bounded today, but the same class the rest of the tree closes
     ///      with floors. Reading the token from the trusted root removes the axis.
     function requireBold(address registry, address named) internal view {
-        address actual = ICollateralRegistry(registry).boldToken();
+        requireDebtToken(ICollateralRegistry(registry).boldToken(), named);
+    }
+
+    /// @notice {requireBold} with the trusted debt token already resolved — the
+    ///         seam a fork that renamed the getter (Felix: `feUSDToken()`) plugs
+    ///         into. `actual` MUST come from the immutable registry, never `data`.
+    function requireDebtToken(address actual, address named) internal pure {
         if (named != actual) revert BoldTokenMismatch(named, actual);
+    }
+
+    /// @notice Pin a `data`-named COLLATERAL token to the branch's real one.
+    ///
+    /// @dev The sibling of {requireBold} on the collateral axis (2026-09-30 audit,
+    ///      L-LRG-1). `withdrawColl` carries no token argument: the venue sends the
+    ///      branch's REAL collateral to the trove's receiver (this module), while the
+    ///      taker leg measures and forwards the token decoded from maker-signed
+    ///      `data`. A mis-named token measured 0, forwarded 0, and stranded the real
+    ///      collateral on the shared singleton for good (every outflow here is
+    ///      delta-bounded) — while the core billed the leg to the maker's wallet.
+    ///      On the value-IN legs the pin turns an opaque allowance revert into a
+    ///      named one. `getToken(index)` exists on Liquity v2's CollateralRegistry
+    ///      (mainnet: index 0 = WETH) and on Felix (index 0 = WHYPE), and reverts on
+    ///      an index past `totalCollaterals()`.
+    function requireColl(address registry, uint256 branchIndex, address named) internal view {
+        address actual = ICollateralRegistry(registry).getToken(branchIndex);
+        if (named != actual) revert CollTokenMismatch(named, actual);
     }
 }
 
@@ -147,23 +174,34 @@ library LiquityV2TroveAuth {
 //  Liquity V2 CDP modules
 //
 //  Troves are ERC-721 sub-accounts under a per-branch `BorrowerOperations`. The
-//  per-trove manager delegation maps directly onto MAKE/TAKE:
-//    • the maker grants `setAddManager(troveId, module)` → the module may run the
-//      MAKE legs (addColl / repayBold);
+//  per-trove manager delegation maps onto MAKE/TAKE:
+//    • value-IN (addColl / repayBold) is PERMISSIONLESS while the trove's add-
+//      manager slot is EMPTY. Liquity keeps ONE add manager per trove
+//      (`addManagerOf[troveId]`), and the pull-funded {LiquityV2AddCollModule} and
+//      {LiquityV2RepayModule} are separate contracts — pointing the slot at one
+//      locks the other out. So either leave the slot unset (both pull modules, and
+//      the pre-fund module, work), or point it at the merged
+//      {LiquityV2PreFundModule}, which serves both value-in ops from one address.
 //    • the maker grants `setRemoveManagerWithReceiver(troveId, module, module)` →
 //      the module may run the TAKE legs (withdrawColl / withdrawBold) with the
 //      proceeds routed to the module, which forwards them to the order `receiver`.
+//      The RECEIVER MUST BE THE MODULE: Liquity pays value-out to the stored
+//      receiver, and the 2-argument `setRemoveManager(troveId, module)` sets it to
+//      the OWNER at that moment. The pair survives a TroveNFT transfer (no hook;
+//      wiped only on close/liquidation), so a bought trove may carry a stale one.
 //
-//  The value-out ops carry no receiver; the module MEASURES what actually landed
-//  (robust to a mis-set receiver — reverts cleanly if the grant is missing) and
-//  forwards exactly `amount`, sweeping any excess to the maker. `troveId` and the
-//  branch contracts are maker-signed in `data`.
+//  The value-out ops carry no receiver; the module MEASURES what actually landed,
+//  REVERTS ({FullFillGuard.ShortWithdraw}) when it is less than `amount` — a stale
+//  or mis-set receiver, a missing grant — and forwards exactly `amount`, sweeping
+//  any excess to the maker. `troveId` and the branch index are maker-signed in
+//  `data`; every token is pinned to the immutable registry.
 // ════════════════════════════════════════════════════════════════════════════
 
 // ──────────────────── Liquity V2 add-collateral maker module ────────────────────
 //
-// Pulls collateral via Permit3 and adds it to the user's trove (needs the
-// add-manager grant). `data = abi.encode(branchIndex, troveId, collateralToken[, deadline, v, r, s])`
+// Pulls collateral via Permit3 and adds it to the user's trove (permissionless
+// while the trove's single add-manager slot is empty; otherwise the slot must name
+// THIS module — which then locks {LiquityV2RepayModule} out, see the header). `data = abi.encode(branchIndex, troveId, collateralToken[, deadline, v, r, s])`
 //   — base = 96. BREAKING: the leading word is a branch INDEX resolved through the
 //   immutable {ICollateralRegistry}, not a caller-supplied TroveManager address.
 //   Same slot width, so downstream offsets are unchanged. See {LiquityV2TroveAuth}.
@@ -190,6 +228,10 @@ contract LiquityV2AddCollModule is IMakerModule {
         // victim's pre-approved collateral into a trove of the attacker's choosing.
         // Both the oracle and `borrowerOps` derive from the IMMUTABLE registry.
         (address borrowerOps,) = LiquityV2TroveAuth.authorizeTrove(collateralRegistry, branchIndex, troveId, onBehalfOf);
+        // A mis-named token would fail on the venue's `transferFrom` anyway (the
+        // approval below is on the named token only); the pin makes it a named
+        // revert, before any Permit3 pull (L-LRG-1).
+        LiquityV2TroveAuth.requireColl(collateralRegistry, branchIndex, collateralToken);
 
         PermitHelper.replayIfPresent(data, 96, collateralToken, onBehalfOf, address(permit3), amount);
 
@@ -212,11 +254,18 @@ contract LiquityV2AddCollModule is IMakerModule {
 
 // ──────────────────── Liquity V2 repay maker module ────────────────────
 //
-// Partial repay of the trove's BOLD debt (repay is free — no upfront fee, no
-// approval; BOLD is a privileged burn). Reads the live debt and repays
-// `min(amount, debt)`. BOLD is pulled to the module and burned by
-// BorrowerOperations; any residual is swept back to the maker. A full close is
-// `closeTrove`, wired separately.
+// Repay of the trove's BOLD debt (repay is free — no upfront fee, no approval;
+// BOLD is a privileged burn). Reads the live debt and pulls `min(amount, debt)`;
+// BorrowerOperations burns it, CLAMPING the burn at `entireDebt − MIN_DEBT`
+// (Liquity v2 never zeroes a trove through `repayBold`), and the un-burned
+// residual is swept back to the maker. So an over-sized ("repay down to the
+// minimum") order fills, exactly as on {LiquityV2PreFundModule}; zeroing the debt
+// is `closeTrove`, wired separately. Needs an empty add-manager slot (or the slot
+// naming THIS module — which locks {LiquityV2AddCollModule} out, see the header).
+//
+// The burn path is the `_repayDebt` / `_debtToken` hooks, so a fork that renamed
+// the BOLD surface (Felix: `repayfeUSD`, `feUSDToken()`) reuses this module
+// verbatim — see `FelixModules.sol`.
 //
 // `nonReentrant` guards weird-token transfer hooks.
 // `data = abi.encode(branchIndex, troveId, boldToken)` — base = 96.
@@ -225,10 +274,6 @@ contract LiquityV2AddCollModule is IMakerModule {
 // derive from that trusted root. See {LiquityV2TroveAuth}.)
 //
 contract LiquityV2RepayModule is IMakerModule {
-    /// @dev A repay sized at the WHOLE trove debt. The venue enforces a minimum
-    ///      debt, so zeroing it reverts inside the venue; a full close is
-    ///      `closeTrove`, which this module deliberately does not wire.
-    error FullCloseNotSupported(uint256 entireDebt);
     IPermit3 public immutable permit3;
     address public immutable settlement;
     /// @dev The trusted branch root. Immutable by construction — see {LiquityV2TroveAuth}.
@@ -257,7 +302,7 @@ contract LiquityV2RepayModule is IMakerModule {
             LiquityV2TroveAuth.authorizeTrove(collateralRegistry, branchIndex, troveId, onBehalfOf);
         // The token pulled and swept must be the token the venue BURNS — see
         // {LiquityV2TroveAuth.requireBold}.
-        LiquityV2TroveAuth.requireBold(collateralRegistry, boldToken);
+        LiquityV2TroveAuth.requireDebtToken(_debtToken(), boldToken);
 
         // Balance held BEFORE the pull. Sweeping `balanceOf(this)` outright would pay
         // out anything already stranded at this shared module address, and anyone can
@@ -266,27 +311,38 @@ contract LiquityV2RepayModule is IMakerModule {
         // started", not "ends empty" (F19; {DustHandler.disposeResidual}'s floor).
         uint256 floor = IERC20(boldToken).balanceOf(address(this));
         LatestTroveData memory d = ILiquityV2TroveManager(troveManager).getLatestTroveData(troveId);
-        // ⚠ A FULL CLOSE IS NOT EXPRESSIBLE HERE, AND THE CLAMP MUST SAY SO.
-        // The `min(amount, debt)` shape is copied from siblings where saturating at
-        // the live debt is the GOOD path. On a trove venue it is not: `repayBold`
-        // enforces a MINIMUM DEBT, so the clamp's own success case — `toRepay ==
-        // entireDebt`, i.e. `newDebt == 0` — reverts inside the venue. A maker who
-        // over-sizes a repay therefore gets an opaque venue revert for the whole
-        // fill. Fail closed HERE instead, with a name that says what to do: a full
-        // close is `closeTrove`, wired separately.
+        // Capped at the live debt so the PULL never exceeds what could be owed.
+        // The venue then clamps the BURN at `entireDebt − MIN_DEBT` — it does NOT
+        // revert on `toRepay == entireDebt` (liquity/bold `_adjustTrove`: `if
+        // (debtDecrease > maxRepayment) debtDecrease = maxRepayment`), and the sweep
+        // below returns the un-burned part. A `FullCloseNotSupported` guard used to
+        // sit here on the false premise that the saturating case reverts inside the
+        // venue (templated from River, a Liquity-v1-style venue where it does); it
+        // rejected exactly `amount ≥ entireDebt` while `entireDebt − 1` filled
+        // (2026-09-30 audit, L-CENSUS-3). A zombie trove (`entireDebt ≤ MIN_DEBT`)
+        // reverts inside the venue for every amount, guard or not.
         uint256 toRepay = amount < d.entireDebt ? amount : d.entireDebt;
-        if (toRepay != 0 && toRepay == d.entireDebt) revert FullCloseNotSupported(d.entireDebt);
 
         if (toRepay > 0) {
             permit3.transferFrom(onBehalfOf, address(this), boldToken, uint160(toRepay));
             // BOLD needs no ERC20 approval (BorrowerOperations burns it directly).
-            ILiquityV2BorrowerOperations(borrowerOps).repayBold(troveId, toRepay);
+            _repayDebt(borrowerOps, troveId, toRepay);
         }
 
         uint256 bal = IERC20(boldToken).balanceOf(address(this));
         if (bal > floor) SafeTransferLib.safeTransfer(boldToken, onBehalfOf, bal - floor);
 
         _locked = 1;
+    }
+
+    /// @dev The deployment's debt token, read from the IMMUTABLE registry.
+    function _debtToken() internal view virtual returns (address) {
+        return ICollateralRegistry(collateralRegistry).boldToken();
+    }
+
+    /// @dev The venue's burn entrypoint.
+    function _repayDebt(address borrowerOps, uint256 troveId, uint256 amount) internal virtual {
+        ILiquityV2BorrowerOperations(borrowerOps).repayBold(troveId, amount);
     }
 }
 
@@ -352,13 +408,16 @@ contract LiquityV2TakerModule is ITakerModule {
             // The delta below is measured on `boldToken`; a mis-named token would
             // strand the REAL BOLD the venue minted here — the residue the repay
             // legs' pin exists to keep off this singleton.
-            LiquityV2TroveAuth.requireBold(collateralRegistry, boldToken);
+            LiquityV2TroveAuth.requireDebtToken(_debtToken(), boldToken);
             _withdrawAndForward(boldToken, onBehalfOf, amount, receiver, borrowerOps, troveId, maxUpfrontFee, true);
         } else if (op == uint8(Op.WithdrawColl)) {
             (, uint256 branchIndex, uint256 troveId, address collateralToken) =
                 abi.decode(data, (uint8, uint256, uint256, address));
             (address borrowerOps,) =
                 LiquityV2TroveAuth.authorizeTrove(collateralRegistry, branchIndex, troveId, onBehalfOf);
+            // The same pin on the collateral axis: `withdrawColl` sends the branch's
+            // REAL collateral here whatever `data` names (2026-09-30 audit, L-LRG-1).
+            LiquityV2TroveAuth.requireColl(collateralRegistry, branchIndex, collateralToken);
             _withdrawAndForward(collateralToken, onBehalfOf, amount, receiver, borrowerOps, troveId, 0, false);
         } else {
             revert BadOp(op);
@@ -367,8 +426,11 @@ contract LiquityV2TakerModule is ITakerModule {
 
     /// @dev Run the value-out op (proceeds → this module via the remove-manager
     ///      receiver), then forward exactly `amount` to `receiver` and sweep the
-    ///      excess to the maker. Measuring the delta reverts cleanly if the
-    ///      remove-manager grant is missing (nothing landed).
+    ///      excess to the maker. A missing remove-manager grant reverts inside the
+    ///      venue; a grant whose RECEIVER is not this module (a stale pair that
+    ///      survived a TroveNFT sale, the 2-argument `setRemoveManager`) succeeds at
+    ///      the venue and pays someone else — that is what the delivery bound below
+    ///      catches.
     function _withdrawAndForward(
         address token,
         address onBehalfOf,
@@ -381,17 +443,39 @@ contract LiquityV2TakerModule is ITakerModule {
     ) private {
         uint256 before = IERC20(token).balanceOf(address(this));
         if (isBorrow) {
-            ILiquityV2BorrowerOperations(borrowerOps).withdrawBold(troveId, amount, maxUpfrontFee);
+            _withdrawDebt(borrowerOps, troveId, amount, maxUpfrontFee);
         } else {
             ILiquityV2BorrowerOperations(borrowerOps).withdrawColl(troveId, amount);
         }
         uint256 received = IERC20(token).balanceOf(address(this)) - before;
-        // Deliver the measured proceeds, capped at the signed amount; any excess
-        // goes to the maker below. Never exceeds `received`, so a short delivery
-        // (a fake/under-delivering venue) can never be topped up from a stray
-        // balance the module holds — it simply delivers less and the fill's
-        // output check fails downstream. Replaces a `received >= amount` gate.
+        // FAIL CLOSED ON A SHORT DELIVERY (2026-09-30 audit, G-VENUE_B-1). Liquity
+        // pays value-out to the trove's stored RECEIVER, not to the caller, and that
+        // receiver survives a TroveNFT transfer. With a stale receiver the venue call
+        // succeeds, the proceeds go to a third party, `received == 0` — and a TAKE
+        // funds an INPUT leg, so {Core._payInputsToSolver} would silently bill the
+        // whole leg to the MAKER'S WALLET (the trove debited AND the wallet billed).
+        // There is no "output check downstream" for this side of the ledger. The
+        // bound cannot misfire on a slice: both venue calls are sized at exactly this
+        // fill's `amount`, and Liquity pays exactly `_collWithdrawal`/`_boldAmount`
+        // (the upfront fee is added to debt, not netted from the mint), so a
+        // correctly onboarded trove always delivers `received == amount`.
+        FullFillGuard.requireDelivered(received, amount);
+        // Capped at the signed amount even so: never forward more than this call
+        // produced, so a stray module balance can never top a delivery up (H-3).
         SafeTransferLib.safeTransfer(token, receiver, received < amount ? received : amount);
         if (received > amount) SafeTransferLib.safeTransfer(token, onBehalfOf, received - amount);
+    }
+
+    /// @dev The deployment's debt token, read from the IMMUTABLE registry.
+    function _debtToken() internal view virtual returns (address) {
+        return ICollateralRegistry(collateralRegistry).boldToken();
+    }
+
+    /// @dev The venue's debt-mint entrypoint.
+    function _withdrawDebt(address borrowerOps, uint256 troveId, uint256 amount, uint256 maxUpfrontFee)
+        internal
+        virtual
+    {
+        ILiquityV2BorrowerOperations(borrowerOps).withdrawBold(troveId, amount, maxUpfrontFee);
     }
 }

@@ -35,6 +35,11 @@ contract PreFundToken {
         balanceOf[t] += a;
         return true;
     }
+
+    /// @dev satUSD's privileged burn — the diamond retires debt with NO allowance.
+    function burn(address f, uint256 a) external {
+        balanceOf[f] -= a;
+    }
 }
 
 /// @dev TroveManager stand-in with a settable live debt.
@@ -55,11 +60,17 @@ contract MockPreFundTM {
     }
 }
 
-/// @dev XApp stand-in whose `repayDebt` pulls the burn from the CALLER's scoped
-///      allowance — the real diamond's value-in shape.
+/// @dev XApp stand-in modelled on the DEPLOYED diamond (fork-verified 2026-09-12):
+///      `repayDebt` BURNS the real satUSD from `msg.sender` with NO allowance, and
+///      rejects a repay that would leave net debt below the minimum (retiring the
+///      whole debt reverts). It used to pull via `transferFrom` against the
+///      module's scoped approval and accept a full repay, so the unit suite could
+///      express neither the measured-vs-burned class (F28 #6) nor the min-debt
+///      revert (2026-09-30 audit, L-LRG-5 (7)).
 contract MockPreFundXApp {
     PreFundToken public immutable debtToken;
     MockPreFundTM public immutable tm;
+    uint256 public constant MIN_NET_DEBT = 10e18;
 
     constructor(PreFundToken _debt, MockPreFundTM _tm) {
         debtToken = _debt;
@@ -67,21 +78,21 @@ contract MockPreFundXApp {
     }
 
     function repayDebt(address, address, uint256 amount, address, address) external {
-        debtToken.transferFrom(msg.sender, address(this), amount);
+        require(tm.debt() - amount >= MIN_NET_DEBT, "net debt below minimum");
+        debtToken.burn(msg.sender, amount);
         tm.setDebt(tm.debt() - amount);
     }
 }
 
 /// @title RiverPreFundRepayCapTest
-/// @notice The cap-at-debt + surplus-sweep branch of {RiverPreFundModule},
-///         which the live venue cannot exercise: retiring the ENTIRE debt via
-///         `repayDebt` violates the minimum-net-debt rule (a full close is
-///         `closeTrove`), so the fork suite only covers the partial-repay path.
-///         Against a mock the overshoot is provable: the module repays exactly
-///         the live debt and sweeps the delivered surplus to the maker —
-///         funding the whole flow from its OWN balance, never a pull. The mock
-///         token's `transferFrom` reverts on a missing allowance, and the maker
-///         granted none: the happy path passing IS the no-`transferFrom` proof.
+/// @notice The live-debt cap of {RiverPreFundModule}. Retiring the ENTIRE debt via
+///         `repayDebt` violates the venue's minimum-net-debt rule (a full close is
+///         `closeTrove`), so the cap's saturating case is a named
+///         `FullCloseNotSupported` revert, as on the pull sibling — this suite used
+///         to assert the debt "retired in full", an outcome the live venue
+///         rejects (2026-09-30 audit, L-LRG-4/L-LRG-5). Below the debt the module
+///         funds the repay from its OWN balance, never a pull: the mock token's
+///         `transferFrom` reverts on a missing allowance and the maker granted none.
 contract RiverPreFundRepayCapTest is Test {
     RiverPreFundModule preFund;
     address settlement = address(0x5E77);
@@ -113,19 +124,49 @@ contract RiverPreFundRepayCapTest is Test {
         return abi.encode(_forLeg(0, address(satUSD)), address(xapp), address(tm), address(satUSD), address(0), address(0));
     }
 
-    function test_preFundRepay_capsAtDebt_andSweepsSurplusToMaker() public {
+    /// REPLACES `test_preFundRepay_capsAtDebt_andSweepsSurplusToMaker`, which asserted
+    /// the debt retired to 0 — the outcome the live diamond rejects.
+    function test_audit_L_LRG_4_preFundRepay_overDebt_failsClosedNamed() public {
         tm.setDebt(1_000e18);
-        // The core-delivered leg: 1500 satUSD already sitting on the module.
+        satUSD.mint(address(preFund), 1_500e18);
+
+        vm.prank(address(settlement));
+        vm.expectRevert(abi.encodeWithSelector(RiverPreFundModule.FullCloseNotSupported.selector, 1_000e18));
+        preFund.makeOnBehalf(MAKER, 1_500e18, _data());
+    }
+
+    function test_preFundRepay_belowDebt_repaysFromOwnBalance() public {
+        tm.setDebt(2_000e18);
         satUSD.mint(address(preFund), 1_500e18);
 
         vm.prank(address(settlement));
         preFund.makeOnBehalf(MAKER, 1_500e18, _data());
 
-        assertEq(tm.debt(), 0, "the debt is retired in full");
-        assertEq(satUSD.balanceOf(MAKER), 500e18, "the surplus was swept to the maker");
+        assertEq(tm.debt(), 500e18, "the delivery retired that much debt");
         assertEq(satUSD.balanceOf(address(preFund)), 0, "module drained");
-        assertEq(satUSD.balanceOf(address(xapp)), 1_000e18, "the venue received exactly the debt");
         assertEq(satUSD.allowance(address(preFund), address(xapp)), 0, "scoped approval cleared");
+    }
+
+    /// L-LRG-5 (1)/(7): the debt-token pin, now expressible because the mock burns
+    /// the REAL token from the module with no allowance. A maker naming a worthless
+    /// token is rejected before anything is measured or burned — the module's real
+    /// satUSD residue is untouched.
+    function test_audit_L_LRG_5_preFundRepay_misnamedDebtToken_reverts() public {
+        PreFundToken fake = new PreFundToken();
+        tm.setDebt(2_000e18);
+        satUSD.mint(address(preFund), 50e18); // real residue on the singleton
+        fake.mint(address(preFund), 100e18);
+        bytes memory data = abi.encode(
+            _forLeg(0, address(fake)), address(xapp), address(tm), address(fake), address(0), address(0)
+        );
+
+        vm.prank(address(settlement));
+        vm.expectRevert(
+            abi.encodeWithSelector(RiverPreFundModule.DebtTokenMismatch.selector, address(fake), address(satUSD))
+        );
+        preFund.makeOnBehalf(MAKER, 100e18, data);
+        assertEq(satUSD.balanceOf(address(preFund)), 50e18, "real satUSD residue untouched");
+        assertEq(tm.debt(), 2_000e18, "no debt retired");
     }
 
     function test_preFundRepay_zeroDebt_sweepsEverythingToMaker() public {
@@ -140,14 +181,15 @@ contract RiverPreFundRepayCapTest is Test {
     }
 
     function test_preFundRepay_neverTouchesStrandedDust() public {
-        tm.setDebt(1_000e18);
+        tm.setDebt(2_000e18);
         satUSD.mint(address(preFund), 1_500e18); //  this fill's delivery
         satUSD.mint(address(preFund), 3e18); //     another fill's stranded dust
 
         vm.prank(address(settlement));
         preFund.makeOnBehalf(MAKER, 1_500e18, _data());
 
-        assertEq(satUSD.balanceOf(MAKER), 500e18, "exactly this fill's surplus, not the dust");
+        assertEq(satUSD.balanceOf(MAKER), 0, "the whole delivery was burned; the dust is not swept out");
+        assertEq(tm.debt(), 500e18, "only this fill's delivery was burned");
         assertEq(satUSD.balanceOf(address(preFund)), 3e18, "the module ends where it started");
     }
 

@@ -8,22 +8,63 @@ import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
-import {ITellerPool, ITellerV2} from "./interfaces/ITeller.sol";
+import {ITellerPool, ITellerV2, TellerPayment} from "./interfaces/ITeller.sol";
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Teller V2 modules — value-in only
 //
 //  Teller's borrow (forwarder ERC-2771 attribution + oracle firewall +
 //  attestation) and pool withdraw (per-owner cooldown) cannot be expressed as
-//  atomic on-behalf module ops, so this package ships only the two
-//  permissionless value-in legs: pool supply and loan repay. Both are MAKE
-//  modules (gated by `msg.sender == settlement`); there is no taker module.
+//  atomic on-behalf module ops, so this package ships only the two value-in
+//  legs: pool supply (oracle-firewalled — the module must be registered, see the
+//  deposit module below) and loan repay (permissionless). Both are MAKE modules
+//  (gated by `msg.sender == settlement`); there is no taker module.
 // ════════════════════════════════════════════════════════════════════════════
+
+/// @title TellerRepayLib
+/// @notice The one repay dispatch both Teller repay modules share.
+/// @dev THE LIVE-DEBT CLAMP LIVES HERE, NOT IN THE VENUE (2026-09-30 audit,
+///      L-CMT-1). Both modules used to hand `repayLoan(bidId, X)` the WHOLE amount
+///      they held and rely on TellerV2 to take only what is owed, so the floor sweep
+///      afterwards would return the rest to the maker. The deployed TellerV2 does not
+///      do that: it transfers the uncapped `X` to the lender and marks the loan PAID
+///      (see {ITellerV2.repayLoan}), so the "unused buffer is swept back" promise
+///      paid the maker's surplus to the lender instead. Every sibling clamps at the
+///      live debt before calling its venue (Comet `min(forAmount, borrowBalanceOf)`,
+///      Morpho's full-vs-partial branch); Teller was the N-th sibling that did not.
+///
+///      Routing: `full`, or `amount ≥ owed` → `repayLoanFull`, which pulls EXACTLY
+///      the live owed amount, so the module's delta sweep returns `amount − owed`.
+///      Otherwise → `repayLoan(bidId, amount)`, which can no longer overshoot.
+///      The approval is scoped to `amount` and cleared after: `tellerV2` is
+///      maker-data-choosable on a shared singleton (F25 / lead A-3), and a
+///      `full` close whose `amount` is below the owed figure fails closed on that
+///      allowance rather than reaching for any other balance.
+library TellerRepayLib {
+    function repay(address tellerV2, address token, uint256 bidId, bool full, uint256 amount) internal {
+        SafeTransferLib.forceApprove(token, tellerV2, amount);
+        if (full || amount >= _owed(tellerV2, bidId)) {
+            ITellerV2(tellerV2).repayLoanFull(bidId);
+        } else {
+            ITellerV2(tellerV2).repayLoan(bidId, amount);
+        }
+        SafeTransferLib.forceApprove(token, tellerV2, 0);
+    }
+
+    function _owed(address tellerV2, uint256 bidId) private view returns (uint256) {
+        TellerPayment memory p = ITellerV2(tellerV2).calculateAmountOwed(bidId, block.timestamp);
+        return p.principal + p.interest;
+    }
+}
 
 // ──────────────────── Teller pool deposit maker module ────────────────────
 //
 // Pulls `asset` (the pool's principal token) via Permit3 and supplies it into the
 // V2/V3 ERC-4626 `pool` crediting the user.
+// ⚠ The pool's `deposit` is Hypernative-firewalled (`onlyOracleApprovedAllowEOA`):
+// this module's address must be registered with the chain's SmartCommitmentForwarder
+// oracle (`oracleRegister(module)`, public) and past its threshold, or every deposit
+// reverts "Account not registered". A per-chain deploy step — see the README.
 // `data = abi.encode(pool, asset[, deadline, v, r, s])` — base = 64.
 //
 contract TellerPoolDepositModule is IMakerModule {
@@ -59,9 +100,13 @@ contract TellerPoolDepositModule is IMakerModule {
 // ──────────────────── Teller repay maker module ────────────────────
 //
 // Repays the maker's loan (permissionless on Teller). Pulls the maker-signed
-// `amount` of the principal token and calls `repayLoanFull` (full close) or
-// `repayLoan(bidId, amount)` (partial). Any unspent buffer is swept back to the
-// maker. `full` is a maker-signed flag in `data`.
+// `amount` of the principal token and calls `repayLoanFull` (full close — also
+// whenever `amount` covers the LIVE owed amount) or `repayLoan(bidId, amount)`
+// (a partial strictly below it). Any unspent buffer is swept back to the maker.
+// `full` is a maker-signed flag in `data`: `true` REQUIRES a close (reverts when
+// `amount` is short of the owed figure); `false` repays up to `amount` and closes
+// the loan if `amount` covers it. See {TellerRepayLib} for why the module, not
+// the venue, clamps.
 //
 // `nonReentrant` guards weird-token transfer hooks.
 // `data = abi.encode(tellerV2, principalToken, bidId, full[, deadline, v, r, s])`
@@ -98,17 +143,13 @@ contract TellerRepayModule is IMakerModule {
         uint256 floor = IERC20(principalToken).balanceOf(address(this));
         if (amount > 0) {
             permit3.transferFrom(onBehalfOf, address(this), principalToken, uint160(amount));
-            SafeTransferLib.forceApprove(principalToken, tellerV2, amount);
-            if (full) {
-                ITellerV2(tellerV2).repayLoanFull(bidId);
-            } else {
-                ITellerV2(tellerV2).repayLoan(bidId, amount);
-            }
-            SafeTransferLib.forceApprove(principalToken, tellerV2, 0);
+            // Clamped at the LIVE debt — the venue does not clamp (L-CMT-1).
+            TellerRepayLib.repay(tellerV2, principalToken, bidId, full, amount);
         }
 
-        // Sweep the unused buffer (repayLoanFull pulls only what is owed) — the
-        // DELTA this call produced, never the pre-existing `floor`.
+        // Sweep the unused buffer (`repayLoanFull` pulls only what is owed, and an
+        // `amount` at or above the owed figure is routed there) — the DELTA this
+        // call produced, never the pre-existing `floor`.
         uint256 bal = IERC20(principalToken).balanceOf(address(this));
         if (bal > floor) SafeTransferLib.safeTransfer(principalToken, onBehalfOf, bal - floor);
 
