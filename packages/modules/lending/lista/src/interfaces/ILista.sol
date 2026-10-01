@@ -113,6 +113,12 @@ interface IListaBroker {
     ///         `receiver`. Matches the on-chain `_listaBrokerBorrow` path.
     function borrow(uint256 amount, uint256 termId, address user, address receiver) external;
 
+    /// @notice The user's fixed positions, oldest first; a new borrow is PUSHED
+    ///         (last entry). Each is `FixedLoanPosition {posId, principal, apr,
+    ///         start, end, lastRepaidTime, interestRepaid, principalRepaid}`, with
+    ///         `apr` in the `(1 + r) · 1e27` scale.
+    function userFixedPositions(address user) external view returns (uint256[8][] memory);
+
     /// @notice On-behalf FIXED repay of position `loanId`. The broker
     ///         `transferFrom`s the LITERAL `amount` from msg.sender, consumes up
     ///         to the live debt (interest-first, early-repay penalty included)

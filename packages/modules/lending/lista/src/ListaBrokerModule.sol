@@ -9,6 +9,8 @@ import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {DelegationHelper} from "@lib/DelegationHelper.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
+import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {FundingPreflight} from "@lib/FundingPreflight.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
 import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
@@ -68,18 +70,46 @@ import {IListaBroker} from "./interfaces/ILista.sol";
 //      from its own — {_gatePreFundMake} rejects both.
 //
 //    TAKE (borrow):
-//      `abi.encode(uint8(Op.Borrow), broker, termId
+//      `abi.encode(uint8(Op.Borrow), broker, termId, maxApr, duration, totalAmount
 //                  [, moolah, nonce, deadline, v, r, s])`
-//      — base = 96; optional signature-only Moolah grant with moolah@96 and the
-//      standard 160-byte {DelegationHelper.replayMorphoAuth} block @128 (total
-//      288). The base carries no moolah word because the borrow itself routes
-//      through the broker, so the tail prefixes it. Verified on the deployed BSC
+//      — base = 192; optional signature-only Moolah grant with moolah@192 and the
+//      standard 160-byte {DelegationHelper.replayMorphoAuth} block @224 (total
+//      384). The base carries no moolah word because the borrow itself routes
+//      through the broker, so the tail prefixes it.
+//        `maxApr`     — ceiling on the BOOKED position's APR, in the broker's
+//                       `(1 + r) · 1e27` scale. MANDATORY: 0 fails every borrow.
+//                       Sign `1.3e27` (the contract's MAX_FIXED_TERM_APR) to accept
+//                       any rate.
+//        `duration`   — the term length in seconds the maker signed for; the
+//                       booked position must satisfy `end − start == duration`.
+//                       MANDATORY (a term's duration is always > 0).
+//        `totalAmount`— 0 ⇒ partial fills allowed (each slice opens its OWN fixed
+//                       position, see below); otherwise the slice must equal it
+//                       ({FullFillGuard}) so the order books exactly ONE tranche.
+//      ⚠ WHY maxApr / duration (audit 2026-09-30 L-ML-2). `termId` does NOT pin
+//      the terms: the broker's BOT can `updateFixedTermAndRate` an EXISTING termId
+//      in place (any duration, 0.5%–30% APR) at any time, and `_createFixedPosition`
+//      books the term LIVE at execution. The module therefore checks the position
+//      the broker actually booked (the last `userFixedPositions` entry — the
+//      broker `push`es it) against the maker-signed ceiling, and reverts
+//      {TermMismatch} otherwise. Every other venue-priced borrow in the repo
+//      carries such a maker-signed cost ceiling (Liquity maxUpfrontFee, River
+//      maxFeePercentage, Exactly maxAssets).
+//      ⚠ PER-SLICE TRANCHES (L-ML-6). Each `broker.borrow` opens a NEW fixed
+//      position with its own start/end and the APR live at that slice's fill, and
+//      the broker caps a user at `maxFixedLoanPositions` (100). A maker who wants
+//      one tranche signs `totalAmount` (or an order `minFillAnchor` == anchor). Verified on the deployed BSC
 //      Moolah: `setAuthorizationWithSig` is byte-identical to Morpho Blue's
 //      (typehash, struct, `Signature` tuple, sequential `nonce(address)`,
 //      Morpho's chainId+contract domain scheme — only the domain VIEW is renamed
 //      `domainSeparator()`), so the Morpho helper is reused unchanged. Everything
 //      in the tail is maker-signed via `data`; a wrong moolah address just makes
-//      the best-effort replay a no-op.
+//      the best-effort replay a no-op. ⚠ The tail is PUBLIC (order data) and
+//      relayable by anyone until its deadline, and Moolah's
+//      `setAuthorization(module, false)` does not consume its nonce — so a venue
+//      revoke alone does not stick while such an order is live. Cancel the order
+//      / `Permit3.lockdownAll`, or burn the nonce with a signed
+//      `isAuthorized = false` at the same nonce (audit 2026-09-30 L-ML-9).
 //
 //  Repay semantics (identical on both funding shapes)
 //  ──────────────────────────────────────────────────
@@ -123,6 +153,9 @@ contract ListaBrokerModule is PreFundModuleBase, IMakerModule, IFundingSource, I
     error Reentrancy();
     /// @dev The blob named an op this entrypoint does not serve.
     error BadOp(uint256 op);
+    /// @dev The broker booked a fixed position outside the maker-signed terms
+    ///      (APR above `maxApr`, a different duration, or not this slice).
+    error TermMismatch(uint256 apr, uint256 duration, uint256 principal);
 
     constructor(address _permit3, address _settlement) PreFundModuleBase(_permit3, _settlement) {}
 
@@ -252,16 +285,24 @@ contract ListaBrokerModule is PreFundModuleBase, IMakerModule, IFundingSource, I
     }
 
     /// @inheritdoc IFundingSource
-    /// @dev Funded by the fill's OWN delivery — a wallet/allowance read would
-    ///      preview a self-funding order as short.
-    function fundingSource(address, bytes calldata data)
+    /// @dev PER SHAPE, like every other dual-shape module (AaveV3Credit, Dolomite,
+    ///      EulerV2, Fluid). The pre-funded repay is funded by the fill's OWN
+    ///      delivery — a wallet/allowance read would preview a self-funding order as
+    ///      short — so it reports `max`. The PULL repay draws the maker's wallet
+    ///      through `permit3.transferFrom(maker, this, loanToken, …)`, so it reports
+    ///      exactly that Permit3 book (audit 2026-09-30 L-ML-5: it used to report
+    ///      `max` for both, previewing an unfunded pull repay as fully funded).
+    ///      Word 2 is `loanToken` in both layouts.
+    function fundingSource(address onBehalfOf, bytes calldata data)
         external
-        pure
+        view
         override
         returns (address asset, uint256 available)
     {
         (,, asset,) = abi.decode(data, (uint256, address, address, uint256));
-        available = type(uint256).max;
+        available = _fundingShape(data)
+            ? type(uint256).max
+            : FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
     }
 
     // ──────────────────── TAKE: fixed-term broker borrow ────────────────────
@@ -277,14 +318,33 @@ contract ListaBrokerModule is PreFundModuleBase, IMakerModule, IFundingSource, I
 
         uint256 op = _word0(data);
         if (op != uint256(Op.Borrow)) revert BadOp(op);
-        (, address broker, uint256 termId) = abi.decode(data, (uint256, address, uint256));
+        (, address broker, uint256 termId,,, uint256 totalAmount) =
+            abi.decode(data, (uint256, address, uint256, uint256, uint256, uint256));
+        // Optional one-tranche guard (L-ML-6): 0 ⇒ partial fills allowed.
+        if (totalAmount != 0) FullFillGuard.requireFullFill(amount, totalAmount);
 
         // Optional signature-only Moolah grant (see the header byte map):
-        // maker-signed moolah@96, auth block@128.
-        if (data.length >= 288) {
-            address moolah = abi.decode(data[96:128], (address));
-            DelegationHelper.replayMorphoAuth(data, 128, moolah, onBehalfOf, address(this));
+        // maker-signed moolah@192, auth block@224.
+        if (data.length >= 384) {
+            address moolah = abi.decode(data[192:224], (address));
+            DelegationHelper.replayMorphoAuth(data, 224, moolah, onBehalfOf, address(this));
         }
         IListaBroker(broker).borrow(amount, termId, onBehalfOf, receiver);
+        _checkBookedTerm(broker, onBehalfOf, amount, data);
+    }
+
+    /// @dev Post-check the fixed position the broker just booked — the LAST
+    ///      `userFixedPositions` entry (`_createFixedPosition` pushes it) — against
+    ///      the maker-signed `maxApr` / `duration` (L-ML-2). `principal == amount`
+    ///      proves it is this slice's position. Own frame for the legacy stack.
+    function _checkBookedTerm(address broker, address onBehalfOf, uint256 amount, bytes calldata data) private view {
+        (,,, uint256 maxApr, uint256 duration) = abi.decode(data, (uint256, address, uint256, uint256, uint256));
+        uint256[8][] memory positions = IListaBroker(broker).userFixedPositions(onBehalfOf);
+        // FixedLoanPosition {posId, principal, apr, start, end, …}
+        uint256[8] memory booked = positions[positions.length - 1];
+        uint256 bookedDuration = booked[4] - booked[3];
+        if (booked[2] > maxApr || bookedDuration != duration || booked[1] != amount) {
+            revert TermMismatch(booked[2], bookedDuration, booked[1]);
+        }
     }
 }

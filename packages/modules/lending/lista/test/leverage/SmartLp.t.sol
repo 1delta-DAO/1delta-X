@@ -295,10 +295,9 @@ contract ListaSmartLpTest is ListaModulesBase {
         assertGt(terms.length, 0, "live term menu non-empty");
         uint256 borrowOut = 0.05e18; // WBNB, > minLoan (~0.021)
 
+        bytes memory borrowBlob = _borrowBlob(BROKER_SMART, terms[0][0], 0); // before the prank: it reads the menu
         vm.prank(address(permit3));
-        brokerModule.takeOnBehalf(
-            maker, borrowOut, solver, abi.encode(uint8(ListaBrokerModule.Op.Borrow), BROKER_SMART, terms[0][0])
-        );
+        brokerModule.takeOnBehalf(maker, borrowOut, solver, borrowBlob);
 
         assertEq(IERC20(WBNB).balanceOf(solver), borrowOut, "WBNB debt proceeds delivered ERC20");
         assertGe(IListaBrokerViews(BROKER_SMART).getUserTotalDebt(maker), borrowOut, "broker debt on the maker");

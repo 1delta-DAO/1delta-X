@@ -403,10 +403,9 @@ contract ListaProviderMarketsTest is ListaModulesBase {
         uint256 borrowOut = 0.05e18; // > minLoan (~0.021 WBNB)
 
         uint256 nativeBefore = solver.balance;
+        bytes memory borrowBlob = _borrowBlob(BROKER_SLIS, terms[0][0], 0); // before the prank: it reads the menu
         vm.prank(address(permit3));
-        brokerModule.takeOnBehalf(
-            maker, borrowOut, solver, abi.encode(uint8(ListaBrokerModule.Op.Borrow), BROKER_SLIS, terms[0][0])
-        );
+        brokerModule.takeOnBehalf(maker, borrowOut, solver, borrowBlob);
 
         assertEq(IERC20(WBNB).balanceOf(solver), borrowOut, "on-behalf borrow pays WBNB ERC20");
         assertEq(solver.balance, nativeBefore, "never native");

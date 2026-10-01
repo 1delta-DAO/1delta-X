@@ -231,6 +231,13 @@ removed and replaced by 4 — while the other 19 serve `1/2/3 = 7/14/30d`.
 Always read `getFixedTerms()` live before encoding a fixed borrow; a stale
 termId reverts `TermNotFound`. APR is bounded 0.5%–30% by the contract (many
 menus currently sit AT the 0.5% floor).
+⚠ **Reprice-in-place is a maker-COST hazard, not just a liveness one.**
+`_createFixedPosition` books `term.apr` and `start + term.duration` LIVE at
+execution, so a BOT `updateFixedTermAndRate(term, false)` between signing and
+fill silently changes the price of a signed borrow (observed: termId 1 on
+`0xa94d…613d` moved 3.23% → 3.29% between the §5 roster and 2026-09-30). The
+`ListaBrokerModule` borrow blob therefore signs `maxApr` + `duration` and
+post-checks the booked position (§6.5; audit 2026-09-30 L-ML-2).
 
 **F. Debt bucket on repay.** Fixed (`posId`) vs dynamic (no posId). The SDK's
 `type(uint128).max` sentinel is a calldata convention that must be mapped to
@@ -307,13 +314,16 @@ market once set — cache forever) instead of hardcoding this table.
    `borrow(amount, termId, user, receiver)` exists on every deployed broker,
    gates on `MOOLAH.isAuthorized(user, msg.sender)` (the Moolah
    `setAuthorization` grant), requires `receiver != 0`, and always pays ERC20.
-   That grant is now **signature-only capable**: `ListaBrokerModule` accepts an
-   optional maker-signed auth tail (op 0: `moolah@96`, 160-byte
-   `replayMorphoAuth` block @128; op 1: block @256 in `Exact`, @288 in `Full`
-   — BalanceMode must then be encoded explicitly) and replays
+   That grant is now **signature-only capable**: the borrow
+   (`ListaBrokerModule` op 1: `moolah@192`, 160-byte `replayMorphoAuth` block
+   @224 after the 192-byte base) and the withdraw (`ListaTakerModule` op 1:
+   block @256 in `Exact`, @288 in `Full` — BalanceMode must then be encoded
+   explicitly) accept an optional maker-signed auth tail and replay
    `setAuthorizationWithSig` in-call, so the maker needs no prior on-chain
    Moolah transaction (§3; fork-proven end-to-end by
-   `test/security/MoolahAuthWithSig.t.sol`).
+   `test/security/MoolahAuthWithSig.t.sol`). ⚠ The tail is public and
+   relayable until its deadline, and a plain `setAuthorization(module, false)`
+   does not consume its nonce — see the README (L-ML-9) for the durable revoke.
 2. **`repay(0, …)` reverting `ZeroAmount()` is a SOURCE fact, not a fork
    quirk** — `_pullPayment` transfers the literal amount, then zero-checks.
    `ListaBrokerModule` (the merged broker module, `ListaBrokerModule.sol`)
@@ -342,6 +352,16 @@ market once set — cache forever) instead of hardcoding this table.
    from the floor or promote them to full closes.
 5. **Read `getFixedTerms()` live per broker before encoding a borrow** —
    termIds are bot-mutable and already diverge (the lisUSD trio's `4/2/3`).
+   **And sign the terms you read** (2026-09-30, L-ML-2): the borrow blob is
+   `(1, broker, termId, maxApr, duration, totalAmount[, moolah, authBlock])`;
+   the module post-checks the position the broker pushed
+   (`userFixedPositions(user)` last entry: `apr ≤ maxApr`, `end − start ==
+   duration`, `principal == amount`) and reverts `TermMismatch` otherwise, so a
+   BOT reprice / re-duration between signing and fill fails closed instead of
+   booking a different loan. `totalAmount ≠ 0` makes the borrow full-fill only
+   (one tranche; L-ML-6 — every `borrow` call opens its own position, max 100
+   per user). Fork-proven on BOTH implementation generations
+   (`test/security/Audit20260930Lista.t.sol`).
 6. **The loanId sentinels are our convention, not the broker's**:
    `type(uint128).max` maps to the 2-arg `repay(amount, onBehalf)` (dynamic)
    and `type(uint256).max` to `repayAll(onBehalf)` (full close, item 3);
