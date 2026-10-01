@@ -2,15 +2,17 @@
 pragma solidity ^0.8.28;
 
 import {Order} from "@core/settlement/Structs.sol";
-import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
 import {SettlementLens} from "./SettlementLens.sol";
 import {
+    FillBounds,
     FillInstruction,
+    FillPayload,
     GaslessCrossChainOrder,
     IOriginSettler,
     OnchainCrossChainOrder,
+    Order7683,
     OrderPayload,
     Output,
     ResolvedCrossChainOrder
@@ -40,11 +42,30 @@ interface ISettlementNonce {
 ///    • `open` / `openFor` do not take custody. They VERIFY the order is live and
 ///      authorized and emit the standard `Open` event, which is what a solver network
 ///      actually consumes. An order is fillable before, during and after, by anyone.
-///    • `resolve` / `resolveFor` are exact: `minReceived` / `maxSpent` come from the
-///      same {SettlementLens.previewFill} a filler would quote with, at the current
-///      tick.
+///    • `resolve` / `resolveFor` QUOTE the order at the current tick, for the address
+///      the published instruction fills as — {DESTINATION_SETTLER} — and the quote is
+///      also the BOUND that fill enforces: `maxSpent` / `minReceived` travel in the
+///      instruction's `originData` as a {FillBounds}, and {DestinationSettler7683}
+///      reverts a fill that settles at a worse per-unit price on any leg. So
+///      `maxSpent` is the standard's "cap on filler liabilities" for real, and an
+///      order whose price moves toward the maker between the quote and the fill (a
+///      priority auction priced off the filler's tip, a price module, a curve that
+///      moves back up) reverts rather than charging the solver more (audit 2026-09-30
+///      PERIPH-1). A solver that moves the price itself — a priority bidder — passes
+///      its own bounds in `fillerData`.
 ///    • Because there is no escrow, there is nothing to refund and no
 ///      non-performance to punish. A filler that walks away costs the maker nothing.
+///
+///  ⚠ `openFor` AUTHORISES ONLY THE INNER ORDER (PERIPH-6). ERC-7683 has the user sign
+///  the `GaslessCrossChainOrder`; here the maker's signature is over the 1delta-x
+///  `Order` — the one thing the settlement verifies — and the envelope's deadlines and
+///  the payload's `fillAmount` / `takerData` are the RELAYER's. Anyone may therefore
+///  `Open` a live order with its own deadlines and size. What is bound: the envelope
+///  must name this settler, this chain, the order's maker and the order's own nonce;
+///  a `fillDeadline` already in the past is refused; and the published deadline can
+///  only TIGHTEN the order's own expiry. Nothing an `Open` says can move funds, and
+///  the bounds a solver fills under are the per-unit price, so a 1-wei or oversized
+///  `fillAmount` in somebody's broadcast costs a solver nothing: it can re-size.
 ///
 ///  A solver that requires the standard's escrow ordering can wrap this in one of the
 ///  bridge package's inboxes; that is an opt-in module, never a core requirement.
@@ -59,6 +80,8 @@ contract OriginSettler7683 is IOriginSettler {
     /// @notice The lens used for pricing and liveness (same math as the settler).
     SettlementLens public immutable LENS;
     /// @notice The destination settler solvers should call — see {DestinationSettler7683}.
+    ///         Every quote is priced FOR this address: it is the settlement-level
+    ///         filler of the only instruction this adapter publishes.
     address public immutable DESTINATION_SETTLER;
 
     /// @dev `orderDataType` must be the order typehash: it is what tells a solver the
@@ -66,13 +89,17 @@ contract OriginSettler7683 is IOriginSettler {
     error UnsupportedOrderType();
     /// @dev The envelope names a different origin settler or a different chain.
     error WrongSettler();
-    /// @dev The order cannot be broadcast: its open-envelope deadline or its own
-    ///      expiry has passed, or its nonce was cancelled. `reason` names which.
-    ///      (Per-hash cancellation and full-fill surface from {SettlementLens.previewFill}
-    ///      as their own reverts; maker funding and validators are the filler's to
-    ///      check via {SettlementLens.getOrderRelevantState} before filling.)
+    /// @dev The order cannot be broadcast: its open-envelope deadline, its fill
+    ///      deadline or its own expiry has passed, its nonce was cancelled, or its
+    ///      nonce sits in the settlement's reserved signer-permit half (every fill
+    ///      reverts `OrderNonceReserved`). `reason` names which. (Per-hash
+    ///      cancellation, full-fill and the exclusivity gates surface from
+    ///      {SettlementLens.previewFill} as their own reverts; maker funding and
+    ///      validators are the filler's to check via
+    ///      {SettlementLens.getOrderRelevantState} before filling.)
     error OrderNotFillable(string reason);
-    /// @dev `openFor`'s envelope disagrees with the order it carries.
+    /// @dev `openFor`/`resolveFor`'s envelope disagrees with the order it carries —
+    ///      a different maker, or a different nonce.
     error UserMismatch();
     /// @dev The lens passed to the constructor serves a different settlement.
     error LensSettlementMismatch();
@@ -101,10 +128,8 @@ contract OriginSettler7683 is IOriginSettler {
         external
         override
     {
-        if (order.originSettler != address(this) || order.originChainId != block.chainid) revert WrongSettler();
         if (order.openDeadline != 0 && block.timestamp > order.openDeadline) revert OrderNotFillable("open deadline");
-        OrderPayload memory p = _decode(order.orderDataType, order.orderData);
-        if (p.order.maker != order.user) revert UserMismatch();
+        OrderPayload memory p = _decodeEnvelope(order);
         // Broadcast the signature we actually verify. An override supplied in
         // `signature` REPLACES the payload's own (the standard's sponsor-signature
         // parameter), so the `Open` event and every solver fill carry exactly the
@@ -117,7 +142,7 @@ contract OriginSettler7683 is IOriginSettler {
         // more useful to a relayer than a boolean would be.
         bytes32 orderHash = LENS.hashOrder(p.order);
         LENS.checkSignature(orderHash, p.signature, p.order.maker);
-        _requireLive(p.order);
+        _requireLive(p.order, order.fillDeadline);
         ResolvedCrossChainOrder memory r = _resolve(p, orderHash, order.user, order.openDeadline, order.fillDeadline);
         emit Open(r.orderId, r);
     }
@@ -133,7 +158,7 @@ contract OriginSettler7683 is IOriginSettler {
     ///      never emitted for an order nobody can fill — and this entry used to be the
     ///      hole in it: `maker == msg.sender` proves who is opening, not that the
     ///      embedded credential is one the settler will accept, and the fill DOES
-    ///      require it ({DestinationSettler7683.fill} → `Settlement.fill`). So an
+    ///      require it ({DestinationSettler7683.fill} → `Settlement.fillUpTo`). So an
     ///      `Open` here could advertise an order that reverts at fill time. Bounded to
     ///      wasted solver simulation — the flow is same-chain, atomic and escrow-free,
     ///      so a failed verification unwinds the solver's own pull — but a broadcast
@@ -148,7 +173,7 @@ contract OriginSettler7683 is IOriginSettler {
     function open(OnchainCrossChainOrder calldata order) external override {
         OrderPayload memory p = _decode(order.orderDataType, order.orderData);
         if (p.order.maker != msg.sender) revert UserMismatch();
-        _requireLive(p.order);
+        _requireLive(p.order, order.fillDeadline);
         bytes32 orderHash = LENS.hashOrder(p.order);
         LENS.checkSignature(orderHash, p.signature, p.order.maker);
         ResolvedCrossChainOrder memory r = _resolve(p, orderHash, msg.sender, 0, order.fillDeadline);
@@ -158,13 +183,15 @@ contract OriginSettler7683 is IOriginSettler {
     // ──────────────────── Resolve ────────────────────
 
     /// @inheritdoc IOriginSettler
+    /// @dev Applies {openFor}'s envelope checks, so a resolution is never returned for
+    ///      an envelope `openFor` would refuse (PERIPH-6).
     function resolveFor(GaslessCrossChainOrder calldata order, bytes calldata)
         external
         view
         override
         returns (ResolvedCrossChainOrder memory)
     {
-        OrderPayload memory p = _decode(order.orderDataType, order.orderData);
+        OrderPayload memory p = _decodeEnvelope(order);
         return _resolve(p, LENS.hashOrder(p.order), order.user, order.openDeadline, order.fillDeadline);
     }
 
@@ -181,30 +208,48 @@ contract OriginSettler7683 is IOriginSettler {
 
     // ──────────────────── Internals ────────────────────
 
-    /// @dev Also the one place every entry refuses a DELTA-VERIFY order (`timing` bit
-    ///      104 — memory mirror of {DutchAuction.deltaVerifyOutputs}, calldata-only
-    ///      like {_expiry}'s). Such an order delivers its outputs only inside a
-    ///      `fillWithCallback` run by its named `exclusiveFiller`; the fill
-    ///      instruction this adapter publishes points at {DestinationSettler7683},
-    ///      which fills through `fillUpTo` — no callback, so nothing is delivered and
-    ///      the settler reverts {DeltaTooLow} even when the order names the adapter
-    ///      itself. An `Open` for one would be a dead order to every solver that reads
-    ///      it, and a resolve an instruction that cannot execute. Refused here, before
-    ///      any signature or lens work.
+    /// @dev The gasless envelope's binding to the order it carries: this settler, this
+    ///      chain, the order's maker, and the order's own nonce. The nonce is the one
+    ///      envelope field the standard has the user sign that maps onto a field the
+    ///      maker DID sign here, so it is held to it rather than left free.
+    function _decodeEnvelope(GaslessCrossChainOrder calldata order) private view returns (OrderPayload memory p) {
+        if (order.originSettler != address(this) || order.originChainId != block.chainid) revert WrongSettler();
+        p = _decode(order.orderDataType, order.orderData);
+        if (p.order.maker != order.user || p.order.nonce != order.nonce) revert UserMismatch();
+    }
+
+    /// @dev Also the one place every entry refuses a shape the published instruction
+    ///      cannot execute, before any signature or lens work:
+    ///        • DELTA-VERIFY (`timing` bit 104 — memory mirror of
+    ///          {DutchAuction.deltaVerifyOutputs}, calldata-only like {_expiry}'s).
+    ///          Such an order delivers its outputs only inside a `fillWithCallback` run
+    ///          by its named `exclusiveFiller`; the instruction points at
+    ///          {DestinationSettler7683}, which fills through `fillUpTo` — no callback,
+    ///          so nothing is delivered and the settler reverts {DeltaTooLow} even when
+    ///          the order names the adapter itself.
+    ///        • a `SETTLE` item ({Order7683.SettleItemUnsupported}): it would pay the
+    ///          adapter, in a token neither the adapter nor `minReceived` can name
+    ///          (PERIPH-4).
+    ///      An `Open` for either would be a dead order to every solver that reads it.
     function _decode(bytes32 orderDataType, bytes calldata orderData) private pure returns (OrderPayload memory p) {
         if (orderDataType != OrderHash.ORDER_TYPEHASH) revert UnsupportedOrderType();
         p = abi.decode(orderData, (OrderPayload));
         if ((p.order.timing >> 104) & 1 == 1) revert DeltaVerifyNotSupported();
+        Order7683.requireNoSettleItem(p.order.items);
     }
 
     /// @dev Refuse to broadcast a dead order. `open`/`openFor` emit the standard
     ///      `Open` event that a solver fleet consumes, so an expired or nonce-cancelled
     ///      order here is wasted solver gas and feed spam. Per-hash cancellation and
     ///      full-fill are already caught inside {SettlementLens.previewFill}; this
-    ///      covers the two lifecycle gates it does not: the order expiry and the
-    ///      maker's nonce bitmap.
-    function _requireLive(Order memory order) private view {
+    ///      covers the lifecycle gates it does not: the order expiry, the envelope's
+    ///      fill deadline, the maker's nonce bitmap, and the reserved nonce half
+    ///      (`Base._gateOrderPost` reverts `OrderNonceReserved` on every fill of an
+    ///      order whose nonce has bit 255 set — PERIPH-5).
+    function _requireLive(Order memory order, uint32 fillDeadline) private view {
         if (block.timestamp > _expiry(order)) revert OrderNotFillable("order expired");
+        if (fillDeadline != 0 && fillDeadline <= block.timestamp) revert OrderNotFillable("fill deadline");
+        if (order.nonce >> 255 != 0) revert OrderNotFillable("nonce reserved");
         if (ISettlementNonce(SETTLEMENT).isNonceCancelled(order.maker, order.nonce)) {
             revert OrderNotFillable("nonce cancelled");
         }
@@ -217,26 +262,38 @@ contract OriginSettler7683 is IOriginSettler {
         return uint48(order.timing >> 160);
     }
 
-    /// @dev The standard's view of one of our orders, priced at the CURRENT tick:
+    /// @dev The standard's view of one of our orders, priced at the CURRENT tick FOR
+    ///      {DESTINATION_SETTLER}:
     ///        • `maxSpent`   — what the filler delivers (our output legs);
     ///        • `minReceived`— what the filler collects (our input legs);
     ///        • `orderId`    — the EIP-712 order hash, which is already the protocol's
     ///                         unique, cancellable identifier, so no second id space
     ///                         is invented;
     ///        • `fillInstructions` — one instruction naming this chain and the
-    ///                         destination settler, carrying the payload verbatim.
+    ///                         destination settler, carrying the payload verbatim and
+    ///                         the two amount vectors as its {FillBounds}.
     ///
-    ///      Both amount vectors come from {SettlementLens.previewFill}, i.e. the same
-    ///      arithmetic the fill will run — a resolve that disagreed with the fill is
-    ///      the failure mode this adapter exists to avoid.
+    ///      ⚠ PRICED FOR THE DESTINATION SETTLER, WHOEVER ASKS (PERIPH-2). That
+    ///      adapter is the settlement-level filler of the instruction published here —
+    ///      it calls `fillUpTo` itself — so an exclusivity window naming anyone else
+    ///      makes every fill through it an OUTSIDER's. This used to price for the named
+    ///      filler or a set member, quoting a soft window WITHOUT the premium the
+    ///      instruction then always paid (up to 2× outputs, or zero inputs at
+    ///      `overrideBps = 10_000`) and broadcasting a hard window whose instruction
+    ///      reverted for the whole window. Now a soft window is quoted with its premium
+    ///      and a hard one — or a soft one with no carrier, or a pre-funded leg under a
+    ///      live override — reverts here, exactly as the fill would, so it is never
+    ///      broadcast. The window's own filler fills on the settlement directly.
+    ///
+    ///      `minReceived[i].recipient` is `0`: the standard's "filler", which is
+    ///      whoever calls the instruction — this contract cannot know it.
     function _resolve(OrderPayload memory p, bytes32 orderHash, address user, uint32 openDeadline, uint32 fillDeadline)
         private
         view
         returns (ResolvedCrossChainOrder memory r)
     {
-        address previewFiller = _previewFiller(p.order);
-        (, uint256[] memory received, uint256[] memory paid) =
-            LENS.previewFill(p.order, p.fillAmount, previewFiller, p.takerData);
+        (uint256 delta, uint256[] memory received, uint256[] memory paid) =
+            LENS.previewFill(p.order, p.fillAmount, DESTINATION_SETTLER, p.takerData);
 
         r.user = user;
         r.originChainId = block.chainid;
@@ -265,9 +322,7 @@ contract OriginSettler7683 is IOriginSettler {
             r.minReceived[i] = Output({
                 token: bytes32(uint256(uint160(PackedArraysMem.legInToken(p.order.legsIn, i)))),
                 amount: received[i],
-                // The filler is whoever fills; the standard wants an address, and this
-                // is the filler the quote was priced for — see {_previewFiller}.
-                recipient: bytes32(uint256(uint160(previewFiller))),
+                recipient: bytes32(0), // the filler — whoever calls the instruction
                 chainId: block.chainid
             });
         }
@@ -276,49 +331,9 @@ contract OriginSettler7683 is IOriginSettler {
         r.fillInstructions[0] = FillInstruction({
             destinationChainId: uint64(block.chainid),
             destinationSettler: bytes32(uint256(uint160(DESTINATION_SETTLER))),
-            originData: abi.encode(p)
+            originData: abi.encode(
+                FillPayload({payload: p, bounds: FillBounds({quotedDelta: delta, maxPaid: paid, minReceived: received})})
+            )
         });
-    }
-
-    /// @dev Who a quote is priced for: the party who WILL fill in the exclusivity
-    ///      window. A HARD-exclusive order previews as {NotExclusiveFiller} for anyone
-    ///      else, which would make even a broadcast (`open`/`openFor`) revert during
-    ///      the window — the maker cannot open its own order, and a relayer cannot
-    ///      announce an RFQ winner — and a SOFT one would carry the outsider premium
-    ///      no in-window filler pays. So:
-    ///        • no exclusivity          — the caller asking;
-    ///        • one named filler        — that filler, whoever asks;
-    ///        • a {OrderGates.FILLER_SET} — the caller if it is a member, else the
-    ///          set's FIRST member. For a set of one that is exactly the single-filler
-    ///          rule. It is never the `address(1)` sentinel itself, which is in no set:
-    ///          previewing as it made every resolve/open of a hard set order revert
-    ///          for the whole window, and quoted a soft one with the premium (audit
-    ///          2026-09-29 E-2).
-    ///      Not plain `msg.sender` for a set: `open`'s caller is the maker and
-    ///      `openFor`'s is any relayer, members of the set in general neither, so that
-    ///      would reproduce the revert. A blob too short to hold one entry falls back
-    ///      to the caller — in-window the lens then surfaces
-    ///      {OrderGates.MalformedFillerSet} exactly as the fill would, and past the
-    ///      window nobody is gated.
-    function _previewFiller(Order memory order) private view returns (address filler) {
-        filler = order.exclusiveFiller;
-        if (filler == address(0)) return msg.sender;
-        if (filler != OrderGates.FILLER_SET) return filler;
-        bytes memory set = order.curve;
-        if (set.length < 21) return msg.sender;
-        /// @solidity memory-safe-assembly
-        assembly {
-            // `set` = [length][0x00 count byte][20-byte member]×N: member 0 at +0x21.
-            let ptr := add(set, 0x21)
-            filler := shr(96, mload(ptr))
-            // Walk whole entries only (`ptr + 20 <= end`); the lens owns the shape check.
-            let end := add(add(set, 0x20), mload(set))
-            for {} iszero(gt(add(ptr, 20), end)) { ptr := add(ptr, 20) } {
-                if eq(shr(96, mload(ptr)), caller()) {
-                    filler := caller()
-                    break
-                }
-            }
-        }
     }
 }

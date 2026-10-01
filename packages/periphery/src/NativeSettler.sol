@@ -67,16 +67,39 @@ interface IWETH {
 ///         A balance donated by direct transfer stays put and is NOT recoverable
 ///         (there is no admin) — the same posture Settlement takes toward
 ///         donations, and the safe direction to err in.
+///
+///  INTEGRATION RULES (audit 2026-09-30 PERIPH-9):
+///    • ORDER SHAPE: exactly one input leg, in WETH; ANY number (≥ 1) of output legs,
+///      in any tokens — the SDK's fee-split `[LegOut, LegOut]` and an originator fee
+///      leg included. Each distinct output token is approved to the settlement for
+///      the sum of its legs' signed `start`s (the most a SELL leg can price at) and
+///      floored and swept like `tokenOut` always was. An order the core prices ABOVE
+///      `start` (a soft-exclusivity lift — this contract is an outsider to a window
+///      naming anyone else) runs short of approval and reverts, which is the safe
+///      direction.
+///    • THE ROUTE PULLS FROM THIS CONTRACT, NOT FROM `msg.sender`. `dexTarget` is
+///      invoked by the settlement's callback EXECUTOR (`fillWithCallback`), so a
+///      router that pulls from its caller (SwapRouter02, most aggregators) sees the
+///      executor, which holds nothing. The route must `transferFrom(nativeSettler,
+///      …)` against the WETH approval granted here and pay its output back to this
+///      contract — a thin adapter in front of a standard router. Calling the router
+///      FROM this contract instead was rejected: it would make a funds-holding
+///      contract issue a maker-chosen arbitrary call, the GenericCallModule shape.
+///    • BIND THE ORDER TO THIS CONTRACT. The signed order is a plain order: a maker
+///      that already holds WETH under a standing Permit3 allowance can have it filled
+///      by anyone at the signed minimum, losing the route surplus this contract would
+///      have swept to it (its own call then reverts `OverFill`, without loss). A
+///      native-in order should name this contract as a HARD `exclusiveFiller` for its
+///      whole life; the SDK's native-in builder is the place to set it.
 contract NativeSettler {
     IWETH public immutable weth;
     Settlement public immutable settlement;
 
     error NotMaker();
     error TokenInNotWeth();
-    /// @dev This entry settles exactly one output leg (it scopes a single approval
-    ///      to `legsOut[0]`), so a multi-leg order would under-approve and fail
-    ///      mid-delivery. Rejected up front instead.
-    error SingleOutputLegRequired();
+    /// @dev The order has no output leg — it would hand the maker's native currency
+    ///      to the route for nothing.
+    error OutputLegRequired();
     /// @dev The fill ended with LESS of `token` than this contract held on entry —
     ///      it drew down a pre-existing balance instead of the proceeds the route
     ///      produced. This is the guard that defeats the self-signed-order drain
@@ -89,11 +112,12 @@ contract NativeSettler {
         settlement = Settlement(_settlement);
     }
 
-    /// @param order        maker == msg.sender; single-asset SELL with legsIn[0].token == WETH.
+    /// @param order        maker == msg.sender; one input leg, in WETH; ≥ 1 output legs.
     /// @param sig           the maker's EIP-712 order signature.
     /// @param fillAmount    anchor units (legsIn[0]) to fill.
     /// @param dexTarget     the frontend's route target (invoked in the fill callback).
-    /// @param dexCallData   route calldata; must pull our WETH and return `tokenOut` to us.
+    /// @param dexCallData   route calldata; must pull OUR WETH (`transferFrom(this, …)`)
+    ///                      and return every output token to us — see the contract note.
     function settleFromNative(
         Order calldata order,
         bytes calldata sig,
@@ -104,17 +128,13 @@ contract NativeSettler {
         if (msg.sender != order.maker) revert NotMaker();
         if (PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE) != 1) revert TokenInNotWeth();
         if (PackedArrays.legInToken(order.legsIn, 0) != address(weth)) revert TokenInNotWeth();
-        if (PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE) != 1) {
-            revert SingleOutputLegRequired();
-        }
-
-        (address tokenOut, uint256 outStart,,) = PackedArrays.legOut(order.legsOut, 0);
+        uint256 nOut = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
+        if (nOut == 0) revert OutputLegRequired();
 
         // 0) Floor every touched token at what we hold right now, BEFORE anything
         //    moves, so the fill can only ever spend what it itself produces. Taken
         //    before the wrap, which nets to zero (deposit then transfer out).
-        uint256 outFloor = SafeTransferLib.balanceOf(tokenOut, address(this));
-        uint256 wethFloor = SafeTransferLib.balanceOf(address(weth), address(this));
+        Touched memory tt = _touched(order.legsOut, nOut);
 
         // 1) Wrap native → WETH and give it to the maker so the core can charge it.
         weth.deposit{value: msg.value}();
@@ -124,13 +144,13 @@ contract NativeSettler {
         // hand-off a silent no-op with the fill continuing on regardless.
         SafeTransferLib.safeTransfer(address(weth), order.maker, msg.value);
 
-        // 2) Scope both approvals to the exact maximum this fill can consume — never
+        // 2) Scope every approval to the exact maximum this fill can consume — never
         //    unbounded (see the contract-level security note). The route can spend at
-        //    most the WETH the core pays us, which is `msg.value`. Settlement can pull
-        //    at most `legsOut[0].start`: a SELL output decays DOWN from `start` and a
-        //    BUY output is fixed at it, so `start` is the ceiling on either side.
+        //    most the WETH the core pays us, which is `msg.value`; Settlement at most
+        //    each output token's summed ceiling. (An output leg in WETH itself folds
+        //    into that token's settlement approval.)
         SafeTransferLib.forceApprove(address(weth), dexTarget, msg.value);
-        SafeTransferLib.forceApprove(tokenOut, address(settlement), outStart);
+        _approveSettlement(tt, true);
 
         // 3) Self-settle as the filler.
         outs = settlement.fillWithCallback(order, sig, fillAmount, dexTarget, dexCallData, CallbackMode.PostInputs);
@@ -139,11 +159,49 @@ contract NativeSettler {
         //    produced. A residual approval or a residual balance would be drainable
         //    by the next caller's self-signed order.
         SafeTransferLib.forceApprove(address(weth), dexTarget, 0);
-        SafeTransferLib.forceApprove(tokenOut, address(settlement), 0);
-        _settleResidual(tokenOut, outFloor, order.maker);
-        // Skipped when tokenOut IS weth: the call above already settled that balance
-        // against the same floor, and re-running it would compare against a stale one.
-        if (tokenOut != address(weth)) _settleResidual(address(weth), wethFloor, order.maker);
+        _approveSettlement(tt, false);
+        for (uint256 t; t < tt.n; t++) {
+            _settleResidual(tt.tokens[t], tt.floors[t], order.maker);
+        }
+    }
+
+    /// @dev Every token this call touches, once each: WETH at slot 0, then each
+    ///      DISTINCT output token. `caps[t]` is the sum of that token's legs' signed
+    ///      `start`s — the most Settlement can pull of it (a SELL output decays DOWN
+    ///      from `start`, a BUY output is fixed at it); 0 for WETH unless an output leg
+    ///      is in WETH. `floors[t]` is the on-entry balance.
+    struct Touched {
+        address[] tokens;
+        uint256[] caps;
+        uint256[] floors;
+        uint256 n;
+    }
+
+    function _touched(bytes calldata legsOut, uint256 nOut) private view returns (Touched memory tt) {
+        tt.tokens = new address[](nOut + 1);
+        tt.caps = new uint256[](nOut + 1);
+        tt.floors = new uint256[](nOut + 1);
+        tt.tokens[0] = address(weth);
+        tt.n = 1;
+        for (uint256 j; j < nOut; j++) {
+            (address token, uint256 start,,) = PackedArrays.legOut(legsOut, j);
+            uint256 t;
+            while (t < tt.n && tt.tokens[t] != token) t++;
+            if (t == tt.n) tt.tokens[tt.n++] = token;
+            tt.caps[t] += start;
+        }
+        for (uint256 t; t < tt.n; t++) {
+            tt.floors[t] = SafeTransferLib.balanceOf(tt.tokens[t], address(this));
+        }
+    }
+
+    /// @dev Approve the settlement each output token's cap (`grant`), or reset it to 0.
+    function _approveSettlement(Touched memory tt, bool grant) private {
+        for (uint256 t; t < tt.n; t++) {
+            if (tt.caps[t] != 0) {
+                SafeTransferLib.forceApprove(tt.tokens[t], address(settlement), grant ? tt.caps[t] : 0);
+            }
+        }
     }
 
     /// @dev Enforce `token`'s balance floor and hand everything above it to `to`.

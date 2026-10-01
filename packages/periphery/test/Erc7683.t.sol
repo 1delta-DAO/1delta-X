@@ -8,6 +8,8 @@ import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {DestinationSettler7683} from "@periphery/DestinationSettler7683.sol";
 import {OriginSettler7683} from "@periphery/OriginSettler7683.sol";
 import {
+    FillBounds,
+    FillPayload,
     GaslessCrossChainOrder,
     OnchainCrossChainOrder,
     OrderPayload,
@@ -62,6 +64,29 @@ contract Erc7683Test is MockSettlementBase {
             orderDataType: OrderHash.ORDER_TYPEHASH,
             orderData: abi.encode(p)
         });
+    }
+
+    /// @dev The fill instruction's `originData` exactly as the origin publishes it —
+    ///      the payload plus the bounds it was quoted at.
+    function _published(OrderPayload memory p) internal view returns (bytes memory) {
+        return origin.resolve(_onchain(p)).fillInstructions[0].originData;
+    }
+
+    /// @dev A hand-built `originData` with NO bound (every check switched off) — for
+    ///      orders the origin refuses to quote, to reach the destination's own guards.
+    function _unbounded(OrderPayload memory p, uint256 quotedDelta) internal pure returns (bytes memory) {
+        uint256 nOut = uint8(p.order.legsOut[0]);
+        uint256 nIn = uint8(p.order.legsIn[0]);
+        uint256[] memory maxPaid = new uint256[](nOut);
+        for (uint256 j; j < nOut; j++) {
+            maxPaid[j] = type(uint256).max;
+        }
+        return abi.encode(
+            FillPayload({
+                payload: p,
+                bounds: FillBounds({quotedDelta: quotedDelta, maxPaid: maxPaid, minReceived: new uint256[](nIn)})
+            })
+        );
     }
 
     // ════════════════════ deployment binding ════════════════════
@@ -162,8 +187,9 @@ contract Erc7683Test is MockSettlementBase {
 
         uint256 makerOutBefore = tB.balanceOf(maker);
         uint256 solverInBefore = tA.balanceOf(solver);
+        bytes memory originData = _published(p);
         vm.prank(solver);
-        destination.fill(orderId, abi.encode(p), "");
+        destination.fill(orderId, originData, "");
 
         assertEq(tB.balanceOf(maker) - makerOutBefore, OUT_AMT, "maker received the output");
         assertEq(tA.balanceOf(solver) - solverInBefore, IN_AMT, "solver received the input");
@@ -178,9 +204,10 @@ contract Erc7683Test is MockSettlementBase {
         (OrderPayload memory p,) = _payload(8);
         vm.prank(solver);
         tB.approve(address(destination), OUT_AMT);
+        bytes memory originData = _published(p);
         vm.prank(solver);
         vm.expectRevert(DestinationSettler7683.OrderIdMismatch.selector);
-        destination.fill(keccak256("not this order"), abi.encode(p), "");
+        destination.fill(keccak256("not this order"), originData, "");
     }
 
     /// @dev The floor makes a stranded balance unreachable: an attacker signing its
@@ -197,7 +224,7 @@ contract Erc7683Test is MockSettlementBase {
             OrderPayload({order: evil, signature: _signWith(evil, attackerPk), fillAmount: 1, takerData: ""});
 
         bytes32 evilId = lens.hashOrder(evil);
-        bytes memory originData = abi.encode(p);
+        bytes memory originData = _unbounded(p, 1);
         vm.startPrank(attacker);
         tB.approve(address(destination), 0); // supplies nothing
         vm.expectRevert();
@@ -223,60 +250,70 @@ contract Erc7683Test is MockSettlementBase {
         p = OrderPayload({order: o, signature: _sign(o), fillAmount: IN_AMT, takerData: ""});
     }
 
-    /// @dev The PoC'd bug: the adapter previewed a set order as the `address(1)`
-    ///      sentinel, which is in no set, so a HARD set order reverted
-    ///      {NotExclusiveFiller} on every resolve/open for the whole window although
-    ///      both members can fill it. It now previews as a member.
-    function test_hardFillerSet_resolvesAndOpensAsMember() public {
+    /// @dev SUPERSEDED BY AUDIT 2026-09-30 PERIPH-2. The 2026-09-29 E-2 fix quoted a
+    ///      set order for a MEMBER, on the reasoning that "the member price is what the
+    ///      order actually fills at". Through the published instruction it never is:
+    ///      the settlement-level filler is always {DestinationSettler7683}, which is in
+    ///      no set. So a HARD set order inside its window cannot fill through the
+    ///      instruction at all, and is now refused rather than broadcast — the same
+    ///      verdict the fill would reach. Members fill it on the settlement directly.
+    function test_hardFillerSet_inWindow_refusedNotBroadcast() public {
         OrderPayload memory p = _fillerSetPayload(20, 0);
-        // What the adapter used to ask the lens.
+
+        vm.prank(OUTSIDER);
         vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
-        lens.previewFill(p.order, IN_AMT, OrderGates.FILLER_SET, "");
-
-        // A non-member resolving gets the FIRST member's quote — the same rule as a
-        // single exclusive filler, where the nominated filler is quoted for anyone.
-        vm.prank(OUTSIDER);
-        ResolvedCrossChainOrder memory r = origin.resolve(_onchain(p));
-        assertEq(r.maxSpent[0].amount, OUT_AMT, "member price");
-        assertEq(r.minReceived[0].amount, IN_AMT, "member receives the whole input");
-        assertEq(address(uint160(uint256(r.minReceived[0].recipient))), solver, "quoted for the first member");
-
-        vm.prank(OUTSIDER);
-        r = origin.resolveFor(_gasless(p), "");
-        assertEq(address(uint160(uint256(r.minReceived[0].recipient))), solver, "resolveFor agrees");
-
-        // Both broadcasts go through: the maker self-opening, and a non-member relayer.
-        vm.recordLogs();
+        origin.resolve(_onchain(p));
+        vm.prank(solver); // even a member asking
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        origin.resolveFor(_gasless(p), "");
         vm.prank(maker);
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
         origin.open(_onchain(p));
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
+        origin.openFor(_gasless(p), p.signature, "");
+
+        // Once the window lapses the instruction can execute, and it is broadcast.
+        vm.warp(block.timestamp + 10 minutes);
+        vm.recordLogs();
         vm.prank(OUTSIDER);
         origin.openFor(_gasless(p), p.signature, "");
-        assertEq(vm.getRecordedLogs().length, 2, "both Opens emitted");
+        assertEq(vm.getRecordedLogs().length, 1, "Open emitted after the window");
     }
 
-    /// @dev A caller that IS a set member is quoted as itself (for a set of one this
-    ///      is exactly the single-filler rule), so each member sees its own terms.
-    function test_fillerSet_memberCallerResolvesAsItself() public {
-        OrderPayload memory p = _fillerSetPayload(21, 0);
+    /// @dev Every caller — member or not — gets the same quote: the destination
+    ///      settler's, with the filler slot of `minReceived` left to whoever fills.
+    function test_fillerSet_quoteIsTheInstructionsWhoeverAsks() public {
+        OrderPayload memory p = _fillerSetPayload(21, 100);
         vm.prank(MEMBER2);
-        ResolvedCrossChainOrder memory r = origin.resolve(_onchain(p));
-        assertEq(address(uint160(uint256(r.minReceived[0].recipient))), MEMBER2, "quoted for the calling member");
-        assertEq(r.maxSpent[0].amount, OUT_AMT, "member price");
+        ResolvedCrossChainOrder memory a = origin.resolve(_onchain(p));
+        vm.prank(OUTSIDER);
+        ResolvedCrossChainOrder memory b = origin.resolve(_onchain(p));
+        assertEq(a.maxSpent[0].amount, b.maxSpent[0].amount, "same quote for every caller");
+        assertEq(a.minReceived[0].recipient, bytes32(0), "the filler slot is open");
     }
 
-    /// @dev A SOFT set order was quoted with the OUTSIDER premium (the sentinel is no
-    ///      member), overstating `maxSpent` by `overrideBps` to every solver reading
-    ///      the broadcast. The member price is what the order actually fills at.
-    function test_softFillerSet_quotesWithoutOutsiderPremium() public {
+    /// @dev A SOFT set order is quoted WITH the outsider premium — the price the
+    ///      published instruction actually pays — and a fill through it pays exactly
+    ///      the quoted `maxSpent` (the 2026-09-29 test asserted the premium-free member
+    ///      price, which the instruction could never obtain).
+    function test_softFillerSet_quotesThePremiumTheInstructionPays() public {
         OrderPayload memory p = _fillerSetPayload(22, 100); // 1% soft override
         (,, uint256[] memory outsiderPaid) = lens.previewFill(p.order, IN_AMT, OUTSIDER, "");
         assertEq(outsiderPaid[0], OUT_AMT * 10_100 / 10_000, "an outsider does pay the premium");
 
         vm.prank(OUTSIDER);
         ResolvedCrossChainOrder memory r = origin.resolve(_onchain(p));
-        assertEq(r.maxSpent[0].amount, OUT_AMT, "resolve: no premium");
+        assertEq(r.maxSpent[0].amount, outsiderPaid[0], "resolve: the premium is quoted");
         r = origin.resolveFor(_gasless(p), "");
-        assertEq(r.maxSpent[0].amount, OUT_AMT, "resolveFor: no premium");
+        assertEq(r.maxSpent[0].amount, outsiderPaid[0], "resolveFor: the premium is quoted");
+
+        tB.mint(solver, outsiderPaid[0] - OUT_AMT);
+        uint256 before = tB.balanceOf(solver);
+        vm.startPrank(solver);
+        tB.approve(address(destination), r.maxSpent[0].amount);
+        destination.fill(r.orderId, r.fillInstructions[0].originData, "");
+        vm.stopPrank();
+        assertEq(before - tB.balanceOf(solver), r.maxSpent[0].amount, "paid exactly the quoted maxSpent");
     }
 
     // ════════════════════ delta-verify orders (audit 2026-09-29 G) ════════════════════
@@ -297,10 +334,11 @@ contract Erc7683Test is MockSettlementBase {
     function test_destinationFill_cannotDeliverDeltaVerifyOrder() public {
         OrderPayload memory p = _deltaVerifyPayload(23, address(destination));
         bytes32 orderId = lens.hashOrder(p.order);
+        bytes memory originData = _unbounded(p, IN_AMT);
         vm.startPrank(solver);
         tB.approve(address(destination), OUT_AMT);
         vm.expectRevert(Base.DeltaTooLow.selector);
-        destination.fill(orderId, abi.encode(p), "");
+        destination.fill(orderId, originData, "");
         vm.stopPrank();
     }
 
