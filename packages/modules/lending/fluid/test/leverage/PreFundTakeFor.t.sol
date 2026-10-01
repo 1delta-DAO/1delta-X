@@ -54,8 +54,8 @@ contract FluidPreFundTakeForTest is FluidModulesBase {
         super.setUp();
 
         WSTETH = tokens[Chains.ETHEREUM_MAINNET][Tokens.WSTETH];
-        takeForModule = new FluidTakeForModule(address(permit3), address(settlement));
-        pushModule = new FluidTakeForModule(address(permit3), address(settlement));
+        takeForModule = new FluidTakeForModule(address(permit3), address(settlement), VAULT_FACTORY, WETH);
+        pushModule = new FluidTakeForModule(address(permit3), address(settlement), VAULT_FACTORY, WETH);
 
         vm.label(WSTETH_USDC_VAULT, "FluidWstethUsdcVault");
         vm.label(WSTETH, "wstETH");

@@ -15,7 +15,7 @@ import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 
-import {IFluidVault, IFluidVaultFactory} from "./interfaces/IFluid.sol";
+import {IFluidVault, IFluidVaultFactory, IWrappedNative} from "./interfaces/IFluid.sol";
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Fluid (Vault protocol) modules
@@ -48,17 +48,38 @@ import {IFluidVault, IFluidVaultFactory} from "./interfaces/IFluid.sol";
 //      each op). `setApprovalForAll` survives transfers, so one grant works across
 //      fills.
 //
-//  `data` pins the vault/factory/token addresses (the position owner signs their
-//  own order, so pinning is self-authorising and robust across Fluid's vault
-//  variants; Permit3 token/taker allowances are the real gates).
+//  `data` pins the vault/factory/token addresses the maker signed; Permit3
+//  token/taker allowances are the per-fill gates.
+//
+//  ⚠ THE CUSTODY ROOT IS AN IMMUTABLE, NOT THE BLOB (2026-09-30 audit L-FSE-1).
+//  "The signer pins their own vault, so pinning is self-authorising" holds only
+//  for positions the SIGNER owns. Fluid authorises value-out by
+//  `VAULT_FACTORY.ownerOf(nftId) == msg.sender`, so for an NFT that sits in a
+//  module the MODULE is the authority, whoever signed. With `factory` and `vault`
+//  taken from `data`, a module-resident NFT was claimable by anyone: (a) a no-op
+//  FAKE factory made the custody pull a no-op while the REAL vault operated the
+//  module-owned id; (b) a LYING vault on the `nftId == 0` open path returned a
+//  module-owned id that the REAL factory then transferred out. So every custody
+//  module ({FluidCustodyBase}) now pins the chain's one VaultFactory as an
+//  immutable, requires the signed `factory` word to equal it, and binds the signed
+//  `vault` to it (`factory.getVaultAddress(vault.VAULT_ID()) == vault`). With the
+//  real factory, the pull `transferFrom(onBehalfOf, module, id)` reverts for an id
+//  `onBehalfOf` does not own, and a factory-deployed vault mints honestly.
 //
 //  Amounts use `FluidBase.FLUID_ALL` (`type(uint256).max`) as the "all" sentinel,
 //  mapping to Fluid's `type(int256).min` (withdraw-all collateral / repay-all
 //  debt) — the same primitive the 1delta composer uses for full closes.
 //
-//  Scope: ERC20-token funding legs. Native-token (ETH) supply needs `msg.value`
-//  and is out of scope; native-token *withdraw* still works (it flows straight to
-//  `receiver` via `operate`'s `to_`, the module never touches the token).
+//  Scope: ERC20-token funding legs. Native-token (ETH) supply / payback needs
+//  `msg.value` and is out of scope (it fails closed). Native-token VALUE-OUT
+//  (withdraw from a native-collateral vault, borrow from a native-debt vault) is
+//  delivered WRAPPED: the module routes `operate`'s `to_` to itself, measures the
+//  ETH it received, wraps it and forwards the signed amount of WETH to `receiver`
+//  (2026-09-30 audit L-FSE-3). Raw ETH could not reach the classic recipient-0
+//  flow — Settlement has no `receive()` and core has no native path, so the
+//  native send reverted the whole fill — and the family rule (C10) is that native
+//  assets are wrapped inside modules, as CompoundV2Native / ListaNative do. A
+//  native leg is therefore a WETH leg in the order.
 // ════════════════════════════════════════════════════════════════════════════
 
 /// @dev Shared funding / custody helpers.
@@ -97,15 +118,23 @@ abstract contract FluidBase {
     ///      it started", not "the module ends empty". Destination is still always
     ///      `user`, never a caller-chosen address.
     ///
-    ///      Also clears the vault allowance when the pull was not fully consumed, so
-    ///      no standing grant outlives the call that needed it.
+    ///      Also clears the vault allowance — UNCONDITIONALLY, so no standing grant
+    ///      outlives the call that needed it.
+    ///
+    ///      ⚠ The clear used to sit inside the refund branch, on the premise that
+    ///      "nothing left over" means "the vault spent the whole approval". That
+    ///      holds only for CONSERVING tokens: with a fee-on-transfer token the module
+    ///      approves the nominal amount, receives less, an order-chosen vault pulls
+    ///      the delta, the balance returns to `floor` — and the difference stayed
+    ///      granted to that vault (2026-09-30 audit X-TOKENS-8). Every sibling clears
+    ///      unconditionally (F25/A-3).
     function _returnUnused(address token, address user, address vault, uint256 floor) internal {
+        SafeTransferLib.forceApprove(token, vault, 0);
         uint256 bal = SafeTransferLib.balanceOf(token, address(this));
         if (bal <= floor) return;
         unchecked {
             SafeTransferLib.safeTransfer(token, user, bal - floor); // bal > floor
         }
-        SafeTransferLib.forceApprove(token, vault, 0);
     }
 
     /// @dev A single-op module was handed the "open a fresh position" sentinel.
@@ -116,8 +145,10 @@ abstract contract FluidBase {
     ///      These legs never take NFT custody and have no hand-off step, so the
     ///      freshly minted position (and the collateral just supplied into it)
     ///      would be stranded in the module permanently, owned by a contract with
-    ///      no transfer path. It is not a theft — nobody can reach it either — but
-    ///      the user's funds are gone, which is worse than a revert.
+    ///      no transfer path — the user's funds are gone, which is worse than a
+    ///      revert. (Before the custody modules pinned the VaultFactory, a
+    ///      module-resident NFT was not even "merely lost": anyone could operate it
+    ///      through a custody module — see {FluidCustodyBase}.)
     ///
     ///      Opening a position is `FluidOperateModule`'s Open path, which is built
     ///      for it: it captures the minted `id` from `operate`'s return value and
@@ -136,6 +167,93 @@ abstract contract FluidBase {
     ///      `type(int256).min` max sentinel.
     function _negDelta(uint256 amount) internal pure returns (int256) {
         return amount == FLUID_ALL ? type(int256).min : -_signed(amount);
+    }
+}
+
+/// @dev The JIT-custody modules' shared root: the TRUSTED VaultFactory and the
+///      wrapped-native token, both immutables — never read from order `data`.
+///
+///      Why the factory cannot come from `data` (2026-09-30 audit L-FSE-1): Fluid's
+///      value-out check is `VAULT_FACTORY.ownerOf(nftId) == msg.sender`, so for an
+///      NFT a module ITSELF owns the module is the authority whoever signed. A
+///      blob-supplied factory turned the custody pull into a no-op (fake factory +
+///      real vault drained a module-resident position), and a blob-supplied vault
+///      on the fresh-open path could return a module-owned id that the real
+///      factory then transferred out. {_bindVault} closes both: the signed factory
+///      must BE the pinned one, and the signed vault must be a vault that factory
+///      deployed. With the real factory the custody pull reverts for any id
+///      `onBehalfOf` does not own, and a factory-deployed vault mints honestly.
+///
+///      The native delivery helpers live here too (L-FSE-3): see {_operateOut}.
+abstract contract FluidCustodyBase is FluidBase {
+    /// @notice The chain's Fluid VaultFactory — the only custody root these modules
+    ///         accept.
+    address public immutable vaultFactory;
+    /// @notice The wrapped-native token a native value-out is delivered in (WETH).
+    address public immutable wrappedNative;
+
+    /// @dev Fluid's native-token sentinel in `constantsView`.
+    address internal constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
+    /// @dev The signed `factory` word is not the pinned VaultFactory.
+    error WrongFactory(address signed, address pinned);
+    /// @dev The signed `vault` was not deployed by the pinned VaultFactory.
+    error UnknownVault(address vault);
+    /// @dev A native value-out delivered less ETH than the signed amount.
+    error ShortNativeDelivery(uint256 received, uint256 amount);
+
+    constructor(address _permit3, address _vaultFactory, address _wrappedNative) FluidBase(_permit3) {
+        vaultFactory = _vaultFactory;
+        wrappedNative = _wrappedNative;
+    }
+
+    /// @dev Native value-out lands here (`operate(..., to = this)`), measured as a
+    ///      delta around the venue call — a stray ETH balance is never forwarded.
+    receive() external payable {}
+
+    /// @dev Bind the order-named `factory` and `vault` to the pinned VaultFactory.
+    function _bindVault(address vault, address factory) internal view {
+        if (factory != vaultFactory) revert WrongFactory(factory, vaultFactory);
+        if (IFluidVaultFactory(vaultFactory).getVaultAddress(IFluidVault(vault).VAULT_ID()) != vault) {
+            revert UnknownVault(vault);
+        }
+    }
+
+    /// @dev `operate` with the value-out leg delivered as an ERC-20 to `receiver`.
+    ///
+    ///      The value-out token is the vault's BORROW token when `newDebt > 0` (a
+    ///      borrow), else its SUPPLY token (a withdraw). When that token is NATIVE,
+    ///      Fluid would send raw ETH to `to_` — which reverts against Settlement (no
+    ///      `receive()`, no native path in core), the classic recipient-0 flow. So
+    ///      the ETH is routed HERE, measured as a delta, wrapped, and exactly
+    ///      `amount` of WETH goes to `receiver`; a short delivery reverts rather than
+    ///      letting core bill the gap to the maker's wallet (I-8); any excess (only a
+    ///      mid-call donation could make one) goes back to `onBehalfOf`.
+    function _operateOut(
+        address vault,
+        uint256 nftId,
+        int256 newCol,
+        int256 newDebt,
+        uint256 amount,
+        address receiver,
+        address onBehalfOf
+    ) internal returns (uint256 id) {
+        bool native;
+        if (amount != 0) {
+            (,,,, address supplyToken, address borrowToken) = IFluidVault(vault).constantsView();
+            native = (newDebt > 0 ? borrowToken : supplyToken) == NATIVE;
+        }
+        if (!native) {
+            (id,,) = IFluidVault(vault).operate(nftId, newCol, newDebt, receiver);
+            return id;
+        }
+        uint256 ethBefore = address(this).balance;
+        (id,,) = IFluidVault(vault).operate(nftId, newCol, newDebt, address(this));
+        uint256 received = address(this).balance - ethBefore;
+        if (received < amount) revert ShortNativeDelivery(received, amount);
+        IWrappedNative(wrappedNative).deposit{value: received}();
+        SafeTransferLib.safeTransfer(wrappedNative, receiver, amount);
+        if (received > amount) SafeTransferLib.safeTransfer(wrappedNative, onBehalfOf, received - amount);
     }
 }
 
@@ -238,8 +356,11 @@ contract FluidRepayModule is IMakerModule, FluidBase {
 //
 // Both legs use the same just-in-time NFT custody: pull the position NFT in,
 // `operate`, hand it back. Borrow sends the borrowed debt token to `receiver`;
-// withdraw sends collateral straight to `receiver` (Fluid sends it via `operate`'s
-// `to_`, so the module never holds the token — native-collateral vaults work too).
+// withdraw sends collateral straight to `receiver` (Fluid sends an ERC-20 via
+// `operate`'s `to_`, so the module never holds it). A NATIVE value-out is routed
+// through the module and delivered as WETH — see {FluidCustodyBase._operateOut}.
+// `factory` must be the pinned VaultFactory and `vault` one it deployed
+// ({FluidCustodyBase._bindVault}).
 // The withdrawal is exact; a true "withdraw all" is the `FluidOperateModule` Close
 // path (where the debt leg's repay-all clears the position first).
 //
@@ -258,7 +379,7 @@ contract FluidRepayModule is IMakerModule, FluidBase {
 //
 //   data = abi.encode(uint8 op, address vault, address factory, uint256 nftId).
 //
-contract FluidTakerModule is ITakerModule, FluidBase {
+contract FluidTakerModule is ITakerModule, FluidCustodyBase {
     enum Op {
         Borrow, // 0 — borrow debt to receiver
         Withdraw // 1 — withdraw collateral to receiver
@@ -267,22 +388,24 @@ contract FluidTakerModule is ITakerModule, FluidBase {
     error OnlyPermit3();
     error BadOp(uint8 op);
 
-    constructor(address _permit3) FluidBase(_permit3) {}
+    constructor(address _permit3, address _vaultFactory, address _wrappedNative)
+        FluidCustodyBase(_permit3, _vaultFactory, _wrappedNative)
+    {}
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
 
         (uint8 op, address vault, address factory, uint256 nftId) = abi.decode(data, (uint8, address, address, uint256));
+        if (op > uint8(Op.Withdraw)) revert BadOp(op);
+        _bindVault(vault, factory);
 
-        IFluidVaultFactory(factory).transferFrom(onBehalfOf, address(this), nftId);
+        IFluidVaultFactory(vaultFactory).transferFrom(onBehalfOf, address(this), nftId);
         if (op == uint8(Op.Borrow)) {
-            IFluidVault(vault).operate(nftId, 0, _signed(amount), receiver);
-        } else if (op == uint8(Op.Withdraw)) {
-            IFluidVault(vault).operate(nftId, -_signed(amount), 0, receiver);
+            _operateOut(vault, nftId, 0, _signed(amount), amount, receiver, onBehalfOf);
         } else {
-            revert BadOp(op);
+            _operateOut(vault, nftId, -_signed(amount), 0, amount, receiver, onBehalfOf);
         }
-        IFluidVaultFactory(factory).transferFrom(address(this), onBehalfOf, nftId);
+        IFluidVaultFactory(vaultFactory).transferFrom(address(this), onBehalfOf, nftId);
     }
 }
 
@@ -309,7 +432,7 @@ contract FluidTakerModule is ITakerModule, FluidBase {
 // blast-radius invariant. The user grants `setApprovalForAll` once (not needed for
 // Open-fresh, which has no NFT to pull in).
 //
-contract FluidOperateModule is ITakerModule, FluidBase {
+contract FluidOperateModule is ITakerModule, FluidCustodyBase {
     enum Mode {
         Open, // 0 — supply collateral + borrow
         Close // 1 — payback debt + withdraw collateral
@@ -334,7 +457,9 @@ contract FluidOperateModule is ITakerModule, FluidBase {
 
     error Reentrancy();
 
-    constructor(address _permit3) FluidBase(_permit3) {}
+    constructor(address _permit3, address _vaultFactory, address _wrappedNative)
+        FluidCustodyBase(_permit3, _vaultFactory, _wrappedNative)
+    {}
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
@@ -350,7 +475,11 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         // `Mode(p.mode)` straight from the uint256 is range-checked (Panic 0x21 on
         // anything but 0/1); `Mode(uint8(p.mode))` first truncated mod 256, so
         // `mode = 256` ran Open while off-chain decoders rejected it (re-audit F30).
-        if (Mode(p.mode) == Mode.Open) {
+        Mode mode = Mode(p.mode);
+        // The custody root and the vault are bound BEFORE either path touches an NFT
+        // (L-FSE-1) — see {FluidCustodyBase._bindVault}.
+        _bindVault(p.vault, p.factory);
+        if (mode == Mode.Open) {
             _open(p, onBehalfOf, receiver, amount);
         } else {
             _close(p, onBehalfOf, receiver, amount);
@@ -372,10 +501,12 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         uint256 floor = SafeTransferLib.balanceOf(p.fundingToken, address(this));
         _pullAndApprove(p.fundingToken, p.sideAmount, user, p.vault);
 
-        if (p.nftId != 0) IFluidVaultFactory(p.factory).transferFrom(user, address(this), p.nftId);
-        (uint256 id,,) = IFluidVault(p.vault).operate(p.nftId, _signed(p.sideAmount), _signed(borrowAmount), receiver);
+        if (p.nftId != 0) IFluidVaultFactory(vaultFactory).transferFrom(user, address(this), p.nftId);
+        uint256 id = _operateOut(
+            p.vault, p.nftId, _signed(p.sideAmount), _signed(borrowAmount), borrowAmount, receiver, user
+        );
         uint256 outId = p.nftId != 0 ? p.nftId : id;
-        IFluidVaultFactory(p.factory).transferFrom(address(this), user, outId);
+        IFluidVaultFactory(vaultFactory).transferFrom(address(this), user, outId);
 
         _returnUnused(p.fundingToken, user, p.vault, floor);
     }
@@ -388,9 +519,9 @@ contract FluidOperateModule is ITakerModule, FluidBase {
         uint256 pullAmt = p.sideAmount == FLUID_ALL ? p.repayCeiling : p.sideAmount;
         if (pullAmt > 0) _pullAndApprove(p.fundingToken, pullAmt, user, p.vault);
 
-        IFluidVaultFactory(p.factory).transferFrom(user, address(this), p.nftId);
-        IFluidVault(p.vault).operate(p.nftId, -_signed(colAmount), _negDelta(p.sideAmount), receiver);
-        IFluidVaultFactory(p.factory).transferFrom(address(this), user, p.nftId);
+        IFluidVaultFactory(vaultFactory).transferFrom(user, address(this), p.nftId);
+        _operateOut(p.vault, p.nftId, -_signed(colAmount), _negDelta(p.sideAmount), colAmount, receiver, user);
+        IFluidVaultFactory(vaultFactory).transferFrom(address(this), user, p.nftId);
 
         // Return the over-pulled repay buffer (always the user, never a
         // caller-chosen address) — measured as the delta over what this module held
@@ -435,7 +566,7 @@ contract FluidOperateModule is ITakerModule, FluidBase {
 // it stays on {FluidOperateModule} because its useful mode is repay-ALL, which is a
 // live-debt sentinel plus an over-pull buffer rather than a settler-sized amount.
 //
-contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, FluidBase {
+contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, FluidCustodyBase {
     /// @dev The ONLY spender allowed to reach this module's PRE-FUND funding.
     ///      `Permit3.takeFor` is permissionless (F27/C-1).
     address public immutable settlement;
@@ -455,7 +586,9 @@ contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, 
         uint256 totalAmount; //    the item's full signed amount; fresh-open path only
     }
 
-    constructor(address _permit3, address _settlement) FluidBase(_permit3) {
+    constructor(address _permit3, address _settlement, address _vaultFactory, address _wrappedNative)
+        FluidCustodyBase(_permit3, _vaultFactory, _wrappedNative)
+    {
         settlement = _settlement;
     }
 
@@ -477,6 +610,7 @@ contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, 
         _locked = 2;
 
         OpenData memory p = abi.decode(data, (OpenData));
+        _bindVault(p.vault, p.factory);
 
         // See note 3 in the header: a fresh mint cannot be sliced, whatever the
         // amounts say. An existing position is added to and slices freely.
@@ -510,16 +644,28 @@ contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, 
             }
         }
 
-        // Strict-ownerOf: take custody just-in-time and hand it straight back.
-        if (p.nftId != 0) IFluidVaultFactory(p.factory).transferFrom(onBehalfOf, address(this), p.nftId);
-        (uint256 id,,) = IFluidVault(p.vault).operate(p.nftId, _signed(forAmount), _signed(amount), receiver);
-        IFluidVaultFactory(p.factory).transferFrom(address(this), onBehalfOf, p.nftId != 0 ? p.nftId : id);
+        _custodyOperate(p, onBehalfOf, amount, forAmount, receiver);
 
         // Anything `operate` did not take is returned, and the vault allowance dies
         // with the call — see {FluidBase._returnUnused}.
         _returnUnused(p.collateralToken, onBehalfOf, p.vault, floor);
 
         _locked = 1;
+    }
+
+    /// @dev Strict-ownerOf: take custody just-in-time, `operate`, hand it straight
+    ///      back (the freshly minted id on the `nftId == 0` path). Its own frame —
+    ///      the native-delivery arguments overflow the entrypoint's stack.
+    function _custodyOperate(
+        OpenData memory p,
+        address onBehalfOf,
+        uint256 amount,
+        uint256 forAmount,
+        address receiver
+    ) private {
+        if (p.nftId != 0) IFluidVaultFactory(vaultFactory).transferFrom(onBehalfOf, address(this), p.nftId);
+        uint256 id = _operateOut(p.vault, p.nftId, _signed(forAmount), _signed(amount), amount, receiver, onBehalfOf);
+        IFluidVaultFactory(vaultFactory).transferFrom(address(this), onBehalfOf, p.nftId != 0 ? p.nftId : id);
     }
 
     /// @inheritdoc IFundingSource
@@ -542,11 +688,12 @@ contract FluidTakeForModule is ITakerForModule, IFundingSource, IProceedsAsset, 
     }
 
     /// @inheritdoc IProceedsAsset
-    /// @dev `address(0)` — HONESTLY UNKNOWN. `OpenData` names the vault and the
-    ///      COLLATERAL token but not the debt token; Fluid holds it on the vault
-    ///      (`IFluidVault` exposes it through a constants read this pure view cannot
-    ///      make). Same remedy as Dolomite: sign the borrow token in `OpenData`.
-    function proceedsAsset(bytes calldata) external pure override returns (address) {
-        return address(0);
+    /// @dev The vault's BORROW token, read from the vault itself (`constantsView`)
+    ///      rather than signed — so it cannot disagree with what `operate` pays out.
+    ///      A native-debt vault reports the WRAPPED native token, which is what
+    ///      {FluidCustodyBase._operateOut} delivers.
+    function proceedsAsset(bytes calldata data) external view override returns (address) {
+        (,,,,, address borrowToken) = IFluidVault(abi.decode(data, (OpenData)).vault).constantsView();
+        return borrowToken == NATIVE ? wrappedNative : borrowToken;
     }
 }

@@ -71,6 +71,27 @@ Since `op` / `mode` is part of `data`, borrow-data and withdraw-data hash to
 **different** taker refs — the flag can't be flipped to spend a borrow
 allowance on a withdraw.
 
+**The custody root is pinned, not signed.** For an NFT the module itself owns,
+Fluid's strict-`ownerOf` makes the *module* the authority, whoever signed — so
+the `factory` and `vault` words in `data` cannot be trusted to bind custody. The
+three custody modules (`FluidTakerModule`, `FluidOperateModule`,
+`FluidTakeForModule`) take the chain's VaultFactory as a **constructor
+immutable**, revert `WrongFactory` unless the signed `factory` equals it, and
+revert `UnknownVault` unless `factory.getVaultAddress(vault.VAULT_ID()) ==
+vault`. With the real factory, the custody pull `transferFrom(maker → module)`
+reverts for an id the maker does not own, and a factory-deployed vault mints
+honestly on the fresh-open path — so a position NFT that ever ends up resident
+in a module (a plain `transferFrom` to it) can no longer be operated or
+extracted by anyone (2026-09-30 audit L-FSE-1).
+
+**Native value-out is delivered wrapped.** Withdrawing from a native-collateral
+vault or borrowing from a native-debt vault routes `operate`'s `to_` to the
+module, which measures the ETH, wraps it and sends exactly the signed amount of
+**WETH** to `receiver` (a short delivery reverts). Raw ETH could never reach the
+classic recipient-0 flow — Settlement has no `receive()` — so a native leg is a
+WETH leg in the order. Native *funding* (supply / payback with `msg.value`) is
+out of scope and fails closed.
+
 ## Modules (`src/`)
 
 All in [`FluidModules.sol`](src/FluidModules.sol); minimal protocol surface in
@@ -80,14 +101,19 @@ All in [`FluidModules.sol`](src/FluidModules.sol); minimal protocol surface in
 |---|---|---|---|
 | `FluidDepositModule` | MAKE | pull collateral → `operate(nftId, +amount, 0)` | permissionless; rejects `nftId == 0` |
 | `FluidRepayModule` | MAKE | pull debt token → `operate(nftId, 0, −amount)` | pull-exact; `amount` must be ≤ live debt (Fluid reverts literal over-payback) |
-| `FluidTakerModule` | TAKE | `op=0` borrow / `op=1` withdraw, JIT NFT custody, proceeds → `receiver` | one module address covers both legs of the round-trip under one `setApprovalForAll` |
+| `FluidTakerModule` | TAKE | `op=0` borrow / `op=1` withdraw, JIT NFT custody, proceeds → `receiver` | one module address covers both legs of the round-trip under one `setApprovalForAll`; `data = abi.encode(uint8 op, vault, factory, nftId)` |
 | `FluidOperateModule` | TAKE | fused **Open** (supply `sideAmount` + borrow) / **Close** (repay `sideAmount` + withdraw) in one `operate` | `sideAmount` in `data` doesn't pro-rate ⇒ **full-fill only** (`FullFillGuard`); Close supports repay-all via `FLUID_ALL` + `repayCeiling` over-pull + residual sweep |
 | `FluidTakeForModule` | TAKE_FOR | fused open where the collateral is the core-sized `forAmount` | **partial fills work** on an existing position (one `operate` per slice); `nftId == 0` stays full-fill only — a fresh mint is position *identity*, N slices would mint N positions |
 
+Constructors: `FluidDepositModule` / `FluidRepayModule(permit3, settlement)`;
+`FluidTakerModule` / `FluidOperateModule(permit3, vaultFactory, wrappedNative)`;
+`FluidTakeForModule(permit3, settlement, vaultFactory, wrappedNative)`.
+
 Residual handling is delta-based (`_returnUnused`): a module returns what it
 *gained* over the call to the maker — never its whole balance, and never to a
-caller-chosen address — and the vault allowance is zeroed when a pull wasn't
-fully consumed.
+caller-chosen address — and the vault allowance is zeroed **unconditionally**
+(a fee-on-transfer token can leave the balance at its floor with part of the
+approval unspent).
 
 ## Smart vaults T2 / T3 / T4 — design (NOT yet implemented)
 
@@ -190,7 +216,7 @@ splits in one `operate` under one health check. The T1 rules keep holding:
   collateral and debt legs, so the typed decode dispatches on it explicitly
   (Midnight-style).
 - Native funding legs stay out of scope (need `msg.value`); native value-out
-  still works via `operate`'s `to_`.
+  is wrapped by the module and delivered as WETH (see above).
 
 ### Implementation plan
 
@@ -226,7 +252,8 @@ forge test --match-path 'packages/modules/lending/fluid/**'
 
 | Test | What it proves |
 |---|---|
-| [`integration/FluidLending`](test/integration/FluidLending.t.sol) | pull-exact repay; borrow & withdraw under JIT custody (incl. native collateral out); fused full close (repay-all + withdraw + residual sweep) |
+| [`integration/FluidLending`](test/integration/FluidLending.t.sol) | pull-exact repay; borrow & withdraw under JIT custody (incl. native collateral out, delivered as WETH); fused full close (repay-all + withdraw + residual sweep) |
+| [`audit/AuditRegressions`](test/audit/AuditRegressions.t.sol) | module-resident NFT unreachable via a fake factory or a lying vault (all three custody modules); native withdraw through the real Settlement on a recipient-0 item; TAKE_FOR spender pin at runtime; no vault grant survives a fee-on-transfer pull |
 | [`leverage/Leverage`](test/leverage/Leverage.t.sol) | fused deposit+borrow open through a full settlement fill, incl. the partial-fill rejection |
 | [`leverage/TakeForOpen`](test/leverage/TakeForOpen.t.sol) | TAKE_FOR open: partial fills slice an existing position (one `operate` per slice), fresh-open stays full-fill only, balance-funded no-conversion shape |
 | [`security/TakerModuleAuth`](test/security/TakerModuleAuth.t.sol) | `OnlyPermit3` on every taker module — load-bearing under the factory-wide `setApprovalForAll` |

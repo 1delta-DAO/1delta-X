@@ -52,6 +52,32 @@ interface IFluidVault {
         external
         payable
         returns (uint256 nftId_, int256 newCol_, int256 newDebt_);
+
+    /// @notice This vault's id in its VaultFactory — `factory.getVaultAddress(VAULT_ID())`
+    ///         is the vault's own address for every factory-deployed vault, which is
+    ///         what lets a module bind an order-named vault to the trusted factory.
+    function VAULT_ID() external view returns (uint256);
+
+    /// @notice The leading static fields of the T1 vault's `constantsView()` (the
+    ///         full struct has 13 words; the trailing ones are not read). `supplyToken`
+    ///         / `borrowToken` are `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` for
+    ///         NATIVE ETH.
+    function constantsView()
+        external
+        view
+        returns (
+            address liquidity,
+            address factory,
+            address adminImplementation,
+            address secondaryImplementation,
+            address supplyToken,
+            address borrowToken
+        );
+}
+
+/// @notice The wrapped-native token (WETH) a native value-out is delivered in.
+interface IWrappedNative {
+    function deposit() external payable;
 }
 
 /// @notice The ERC721 surface of Fluid's VaultFactory needed for just-in-time
@@ -59,6 +85,9 @@ interface IFluidVault {
 ///         `setApprovalForAll` survives transfers, so a single user grant keeps
 ///         working across fills.
 interface IFluidVaultFactory {
+    /// @notice The CREATE address of vault `vaultId` — deterministic from the factory
+    ///         and the id, so no contract the factory did not deploy can equal it.
+    function getVaultAddress(uint256 vaultId) external view returns (address vault);
     function ownerOf(uint256 tokenId) external view returns (address owner);
     function transferFrom(address from, address to, uint256 tokenId) external;
     function isApprovedForAll(address owner, address operator) external view returns (bool);

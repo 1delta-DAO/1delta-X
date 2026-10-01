@@ -27,8 +27,8 @@ contract FluidTakerModuleAuthTest is Test {
     FluidOperateModule operateModule;
 
     function setUp() public {
-        takerModule = new FluidTakerModule(PERMIT3);
-        operateModule = new FluidOperateModule(PERMIT3);
+        takerModule = new FluidTakerModule(PERMIT3, FACTORY, address(0x4444));
+        operateModule = new FluidOperateModule(PERMIT3, FACTORY, address(0x4444));
     }
 
     function test_borrow_rejects_non_permit3() public {
