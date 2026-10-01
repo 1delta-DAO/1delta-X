@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
+import {DelegationHelper} from "@lib/DelegationHelper.sol";
 
 import {IEulerVault, IEVC} from "../../src/interfaces/IEulerV2.sol";
 import {EulerV2RepayModule} from "../../src/EulerV2Modules.sol";
@@ -244,7 +245,8 @@ contract EulerPullOpenEvcTailTest is EulerV2ModulesBase {
     uint256 constant COLLATERAL = 1 ether;
     uint256 constant BORROW = 1_500e6;
 
-    bytes32 constant EVC_DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
+    bytes32 constant EVC_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
     bytes32 constant EVC_PERMIT_TYPEHASH = keccak256(
         "Permit(address signer,address sender,uint256 nonceNamespace,uint256 nonce,uint256 deadline,uint256 value,bytes data)"
     );
@@ -260,7 +262,16 @@ contract EulerPullOpenEvcTailTest is EulerV2ModulesBase {
             abi.encode(EVC_DOMAIN_TYPEHASH, keccak256(bytes("Ethereum Vault Connector")), block.chainid, address(EVC))
         );
         bytes32 structHash = keccak256(
-            abi.encode(EVC_PERMIT_TYPEHASH, maker, address(0), uint256(0), uint256(0), deadline, uint256(0), keccak256(evcData))
+            abi.encode(
+                EVC_PERMIT_TYPEHASH,
+                maker,
+                address(operatorModule), // sender = module: only the maker's own fill can land it (L-ED-1)
+                uint256(0),
+                uint256(0),
+                deadline,
+                uint256(0),
+                keccak256(evcData)
+            )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPk, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
         return abi.encodePacked(r, s, v);
@@ -271,8 +282,10 @@ contract EulerPullOpenEvcTailTest is EulerV2ModulesBase {
         items[0] = IEVC.BatchItem(
             address(EVC), address(0), 0, abi.encodeCall(IEVC.setAccountOperator, (maker, address(operatorModule), true))
         );
-        items[1] = IEVC.BatchItem(address(EVC), address(0), 0, abi.encodeCall(IEVC.enableController, (maker, address(EUSDC))));
-        items[2] = IEVC.BatchItem(address(EVC), address(0), 0, abi.encodeCall(IEVC.enableCollateral, (maker, address(EWETH))));
+        items[1] =
+            IEVC.BatchItem(address(EVC), address(0), 0, abi.encodeCall(IEVC.enableController, (maker, address(EUSDC))));
+        items[2] =
+            IEVC.BatchItem(address(EVC), address(0), 0, abi.encodeCall(IEVC.enableCollateral, (maker, address(EWETH))));
         return abi.encodeCall(IEVC.batch, (items));
     }
 
@@ -288,13 +301,13 @@ contract EulerPullOpenEvcTailTest is EulerV2ModulesBase {
             uint256 forDesc = (uint256(1) << 255) | (uint256(EulerV2OperatorModule.Op.Open) << 244);
             bytes memory head = abi.encode(
                 EulerV2OperatorModule.OpenData({
-                    forDesc: forDesc,
-                    forCap: 0,
-                    collateralVault: address(EWETH),
-                    borrowVault: address(EUSDC)
+                    forDesc: forDesc, forCap: 0, collateralVault: address(EWETH), borrowVault: address(EUSDC)
                 })
             );
-            data = bytes.concat(head, abi.encode(uint256(0), uint256(0), deadline, evcData, _signEvcPermit(deadline, evcData)));
+            // The EvcPermit[] tail ({DelegationHelper}, 2026-09-30 audit L-ED-1 ABI).
+            DelegationHelper.EvcPermit[] memory permits = new DelegationHelper.EvcPermit[](1);
+            permits[0] = DelegationHelper.EvcPermit(0, 0, deadline, evcData, _signEvcPermit(deadline, evcData));
+            data = bytes.concat(head, abi.encode(permits));
         }
 
         Item[] memory items = new Item[](1);

@@ -177,8 +177,16 @@ contract ExoticSettlementTest is CoreSettlementBase {
 
     /// @dev The purchase shape must be lens-clean: SELL + empty legsOut + no items
     ///      is legitimate WITH a signed invariant (was: "giveaway" false-reject).
+    ///      Since the 2026-09-30 audit (VAL-1 / G-LENS) the lens also requires the
+    ///      named filler to be HARD-exclusive for the order's whole life — an
+    ///      invariant-only receipt is sound only then; without the window it is
+    ///      flagged, which is the safe answer.
     function test_lens_acceptsInvariantProtectedPurchase() public view {
-        (bool ok, string memory reason) = lens.validateOrder(_purchaseOrder(3, 9));
+        Order memory o = _purchaseOrder(3, 9);
+        (bool ok, string memory reason) = lens.validateOrder(o);
+        assertFalse(ok, "a named filler without a lifelong hard window is flagged");
+        _setExclusivityEnd(o, uint48(o.timing >> 160)); // window covers the order's expiry
+        (ok, reason) = lens.validateOrder(o);
         assertTrue(ok, string.concat("purchase shape should validate: ", reason));
     }
 
