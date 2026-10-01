@@ -305,11 +305,16 @@ contract EncodingGoldenTest is Test {
         Order memory leg = _order(0, 0, nonce);
         leg.items = _ocoItems(address(oco), item);
         Order memory sibling = _order(0, 0, nonce + 1);
-        sibling.items = _ocoItems(address(oco), abi.encode(groupId, nonce + 1));
+        sibling.items = _ocoItems(address(oco), abi.encode(groupId, nonce + 1, _uint(".oco.minClaim")));
 
         assertTrue(oco.validate(leg, address(0), val, ""), "open group admits the leg");
         assertFalse(oco.validate(_order(0, 0, nonce), address(0), val, ""), "a leg without its claim item is refused");
-        oco.settle(maker, address(0), _uint(".oco.itemAmount"), item);
+        // The SDK's third word is the maker-signed claim floor (2026-09-30 PRICE-2):
+        // a claiming fill under it is refused, at it the group is claimed.
+        uint256 minClaim = _uint(".oco.minClaim");
+        vm.expectRevert(abi.encodeWithSelector(OcoGroupModule.ClaimTooSmall.selector, minClaim - 1, minClaim));
+        oco.settle(maker, address(0), minClaim - 1, item);
+        oco.settle(maker, address(0), minClaim, item);
         assertTrue(oco.validate(leg, address(0), val, ""), "the claimant stays fillable");
         assertFalse(oco.validate(sibling, address(0), val, ""), "a sibling is retired");
         assertTrue(oco.isRetiredFor(maker, groupId, nonce + 1));

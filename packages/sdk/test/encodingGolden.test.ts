@@ -118,8 +118,9 @@ function build() {
     },
     /// OCO — `OcoGroupModule.settle` (item blob) and `.validate` (validator blob).
     oco: {
-      itemData: ocoGroupItem(MODULE, 77n, 5n, 1_000n).data,
+      itemData: ocoGroupItem(MODULE, 77n, 5n, 1_000n, 400n).data,
       itemAmount: "1000",
+      minClaim: "400",
       validatorData: ocoGroupValidator(MODULE, 77n).data,
       groupId: "77",
       nonce: "5",

@@ -92,6 +92,9 @@ export function ocoGroupValidator(module: Address, groupId: bigint): Validator {
   return { target: module, data: encodeAbiParameters([{ type: "uint256" }], [groupId]) };
 }
 
+/** `abi.encode(uint256 groupId, uint256 nonce, uint256 minClaim)` — the claim item blob. */
+const OCO_CLAIM = [{ type: "uint256" }, { type: "uint256" }, { type: "uint256" }] as const;
+
 /**
  * The item half: claims the group on this order's first fill.
  *
@@ -102,18 +105,32 @@ export function ocoGroupValidator(module: Address, groupId: bigint): Validator {
  * is non-zero for every admissible fill. The op is SETTLE rather than MAKE
  * precisely because SETTLE *reverts* on a zero slice instead of skipping — a
  * misconfigured bracket then fails loudly rather than quietly opening up.
+ *
+ * `minClaim` is the smallest fill (in anchor units) that may CLAIM an untouched
+ * group — the dust-kill guard (audit 2026-09-30 PRICE-2): without it a 1-wei
+ * fill retires every sibling. The contract requires `0 < minClaim <= anchor`
+ * and refuses the legacy two-word blob. It defaults to `anchor` (the claim must
+ * be a whole fill); pass a smaller value to let a partial fill claim the group.
  */
-export function ocoGroupItem(module: Address, groupId: bigint, nonce: bigint, anchor: bigint): Item {
+export function ocoGroupItem(
+  module: Address,
+  groupId: bigint,
+  nonce: bigint,
+  anchor: bigint,
+  minClaim: bigint = anchor,
+): Item {
   if (anchor === 0n) throw new Error("ocoGroupItem: anchor must be the order's fill denominator, not 0");
   if (nonce === (1n << 256n) - 1n) throw new Error("ocoGroupItem: nonce 2^256-1 is not representable as a claim");
+  if (minClaim === 0n || minClaim > anchor) throw new Error("ocoGroupItem: minClaim must satisfy 0 < minClaim <= anchor");
   return {
     op: ItemOp.SETTLE,
     module,
     amount: anchor,
     recipient: "0x0000000000000000000000000000000000000000",
-    data: encodeAbiParameters([{ type: "uint256" }, { type: "uint256" }], [groupId, nonce]),
+    data: encodeAbiParameters(OCO_CLAIM, [groupId, nonce, minClaim]),
   };
 }
+
 
 /**
  * Re-home every OCO claim item on `items` to `nonce`.
@@ -126,18 +143,18 @@ export function ocoGroupItem(module: Address, groupId: bigint, nonce: bigint, an
  * finding 3). `patchOrder` calls this; call it yourself whenever you re-nonce
  * an order by hand.
  *
- * Detection is structural: a SETTLE item with exactly two words of data whose
- * second word equals `prevNonce`. No module address is needed, and a SETTLE
+ * Detection is structural: a SETTLE item with exactly three words of data
+ * (`groupId, nonce, minClaim`) whose second word equals `prevNonce`. No module address is needed, and a SETTLE
  * item on some other module that happens to match is rewritten too — which is
  * the safe direction, since such an item would otherwise be stale for the same
  * reason.
  */
 export function renonceOcoItems(items: readonly Item[], prevNonce: bigint, nonce: bigint): Item[] {
   return items.map((it) => {
-    if (it.op !== ItemOp.SETTLE || it.data.length !== 2 + 128) return it;
-    const [groupId, itemNonce] = decodeAbiParameters([{ type: "uint256" }, { type: "uint256" }], it.data);
+    if (it.op !== ItemOp.SETTLE || it.data.length !== 2 + 192) return it;
+    const [groupId, itemNonce, minClaim] = decodeAbiParameters(OCO_CLAIM, it.data);
     if (itemNonce !== prevNonce) return it;
-    return { ...it, data: encodeAbiParameters([{ type: "uint256" }, { type: "uint256" }], [groupId, nonce]) };
+    return { ...it, data: encodeAbiParameters(OCO_CLAIM, [groupId, nonce, minClaim]) };
   });
 }
 
@@ -156,11 +173,12 @@ export function anchorOf(order: Order): bigint {
  * together, which is exactly the bracket semantic: *fire when my stop is hit AND
  * my take-profit has not already gone*.
  */
-export function ocoGroupLeg(order: Order, module: Address, groupId: bigint): Order {
+export function ocoGroupLeg(order: Order, module: Address, groupId: bigint, minClaim?: bigint): Order {
+  const anchor = anchorOf(order);
   return {
     ...order,
     validators: [...order.validators, ocoGroupValidator(module, groupId)],
-    items: [...order.items, ocoGroupItem(module, groupId, order.nonce, anchorOf(order))],
+    items: [...order.items, ocoGroupItem(module, groupId, order.nonce, anchor, minClaim ?? anchor)],
   };
 }
 

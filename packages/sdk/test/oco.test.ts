@@ -139,3 +139,30 @@ describe("cancel-and-replace keeps the claim item bound to the new nonce (F29 fi
     expect(replaced.items).toEqual([]);
   });
 });
+
+describe("OCO claim carries a maker-signed minClaim (audit 2026-09-30 PRICE-2 / OCO-SDK)", () => {
+  it("test_audit_OCO_SDK_claimBlobIsThreeWords", () => {
+    const it0 = ocoGroupItem(MODULE, GROUP, 1n, 1_000n, 400n);
+    expect(it0.data.length).toBe(2 + 192);
+    expect(decodeAbiParameters([{ type: "uint256" }, { type: "uint256" }, { type: "uint256" }], it0.data)).toEqual([
+      GROUP,
+      1n,
+      400n,
+    ]);
+    // default: the claim must be a whole fill
+    const whole = ocoGroupItem(MODULE, GROUP, 1n, 1_000n);
+    expect(decodeAbiParameters([{ type: "uint256" }, { type: "uint256" }, { type: "uint256" }], whole.data)[2]).toBe(1_000n);
+  });
+
+  it("test_audit_OCO_SDK_minClaimBounds", () => {
+    expect(() => ocoGroupItem(MODULE, GROUP, 1n, 1_000n, 0n)).toThrow(/minClaim/);
+    expect(() => ocoGroupItem(MODULE, GROUP, 1n, 1_000n, 1_001n)).toThrow(/minClaim/);
+  });
+
+  it("test_audit_OCO_SDK_renoncePreservesMinClaim", () => {
+    const tp = ocoGroupLeg({ ...leg(1n, 900n), fillTotal: 0n }, MODULE, GROUP, 10n);
+    const items = renonceOcoItems(tp.items, 1n, 3n);
+    const claim = items.find((i) => i.module === MODULE)!;
+    expect(claim.data).toBe(ocoGroupItem(MODULE, GROUP, 3n, anchorOf(tp), 10n).data);
+  });
+});

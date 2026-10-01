@@ -1001,13 +1001,16 @@ contract TakeForItemTest is CoreSettlementBase {
         assertEq(_lensReason(o), "");
     }
 
-    /// Above 10000 the floor exceeds the cap, so `min(balance, cap)` can never reach
-    /// it and the order is unfillable by construction.
+    /// Above 10000 bps the core clamps the floor to the whole cap
+    /// ({Base._forSlice}: `floorBps == 0 || floorBps > 10_000` ⇒ 10_000), so such an
+    /// order is exactly as fillable as an unset floor. The lens used to reject it as
+    /// "floor exceeds the cap" — a false negative on a safe order (2026-09-30 audit
+    /// G-LENS_PARITY-4). It must now validate like the unset floor once full-fill.
     function test_lens_flagsFloorAboveCap() public {
-        assertEq(
-            _lensReason(_lensOrder(37, _data(_forBalanceFloor(WETH, 10_001), 10 ether))),
-            "take_for balance floor exceeds the cap"
-        );
+        Order memory o = _lensOrder(37, _data(_forBalanceFloor(WETH, 10_001), 10 ether));
+        assertEq(_lensReason(o), "take_for balance leg requires full-fill", "only the full-fill rule applies");
+        o.minFillAnchor = USDC_IN; // balance legs are full-fill only
+        assertEq(_lensReason(o), "", "a floor above 10_000 bps is the full cap, not a defect");
     }
 
     /// A balance-funded order that is partial-fillable is dead on arrival — the core
@@ -1260,7 +1263,7 @@ contract TakeForItemTest is CoreSettlementBase {
     }
 
     /// A LITERAL descriptor's required amount is the signed total, and a BALANCE
-    /// descriptor's is the live capped balance — the two non-leg forms the wallet-
+    /// descriptor's is min(balance, cap) floored at its funding floor — the two non-leg forms the wallet-
     /// funded shapes use, where there is no output leg to read.
     function test_previewItemFunding_literalAndBalanceForms() public {
         SettlementLens lens = new SettlementLens(address(settlement));
@@ -1272,7 +1275,10 @@ contract TakeForItemTest is CoreSettlementBase {
         deal(WETH, maker, 2 ether);
         SettlementLens.ItemFunding memory bal =
             lens.previewItemFunding(_order(66, address(takeFor), _data(_forBalance(WETH), 5 ether)));
-        assertEq(bal.required[0], 2 ether, "balance form: min(balance, cap)");
+        // Unset floor = the whole cap: below it the fill reverts ForBalanceInvalid, so
+        // the lens reports the FLOOR (5 ether), not the short 2 ether balance —
+        // `available >= required` then fails exactly as the fill does (G-LENS_PARITY-3).
+        assertEq(bal.required[0], 5 ether, "balance form under the floor: the floor itself");
 
         SettlementLens.ItemFunding memory capped =
             lens.previewItemFunding(_order(67, address(takeFor), _data(_forBalance(WETH), 1 ether)));
