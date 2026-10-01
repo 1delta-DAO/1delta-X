@@ -16,15 +16,13 @@ import {DolomiteModulesBase} from "../shared/DolomiteModulesBase.t.sol";
 ///   4. Solver swaps the USDC back to WETH on Uniswap v3.
 ///   5. Solver repays the flash loan; residual WETH is profit.
 ///
-/// The debt leg trips Dolomite's mainnet risk-override category gate, so we
-/// neutralise it (see the harness note) — the full `operate` accounting/solvency
-/// still runs. The mock stays active through the solver's flash callback.
+/// The debt leg runs against the UNMOCKED risk-override setter: the harness signs
+/// a borrow-position sub-account (`ACCOUNT >= 100`, see the harness note).
 contract DolomiteFlashLoanLeverageTest is DolomiteModulesBase {
     function test_leverage_via_flashLoan_dolomite() public {
         uint256 collateralIn = 1 ether;
         uint256 borrowOut = 5_000e6;
 
-        _neutralizeRiskOverride();
 
         // Seed a healthy initial collateral position in the borrow-position account.
         _seedDolomiteCollateral(10 ether);

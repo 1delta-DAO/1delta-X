@@ -109,7 +109,6 @@ contract DolomiteOpOffsetsTest is DolomiteModulesBase {
     ///      produce, because it never pulls the surplus at all. That is the
     ///      observable that proves the action word was read from 160.
     function test_repay_recycle_readsActionAt160_resuppliesSurplus() public {
-        _neutralizeRiskOverride();
         _openDolomitePosition(COLLATERAL, PRINCIPAL);
         _freezeOracles();
 
@@ -134,7 +133,6 @@ contract DolomiteOpOffsetsTest is DolomiteModulesBase {
     /// @dev The control: `SweepToUser` (explicit word 0 at 160) never pulls the
     ///      surplus, so the wallet keeps it and the debt market stays flat.
     function test_repay_sweepToUser_leavesSurplusInWallet() public {
-        _neutralizeRiskOverride();
         _openDolomitePosition(COLLATERAL, PRINCIPAL);
         _freezeOracles();
 
@@ -159,7 +157,6 @@ contract DolomiteOpOffsetsTest is DolomiteModulesBase {
     /// @dev repay `sideAmount` (capped at live debt) + withdraw `amount` collateral in
     ///      ONE `operate`. The first executing test for `Op.BatchClose`.
     function test_batchClose_repaysAndWithdrawsInOneOperate() public {
-        _neutralizeRiskOverride();
         _openDolomitePosition(COLLATERAL, PRINCIPAL);
         _freezeOracles();
 
@@ -213,7 +210,6 @@ contract DolomiteOpOffsetsTest is DolomiteModulesBase {
     ///      liquidation shrank the collateral below the signed `amount`, the close
     ///      must refuse rather than repay-and-borrow.
     function test_batchClose_withdrawPastSupply_revertsWouldBorrow() public {
-        _neutralizeRiskOverride();
         _openDolomitePosition(COLLATERAL, PRINCIPAL);
         _freezeOracles();
 

@@ -99,6 +99,20 @@ import {
 //    Op.Open  (TAKE_FOR)
 //      abi.encode(OpenData{forDesc, forCap, …})                    — op in forDesc
 //
+//  ONE VALUE, TWO PLACES — BOUND (2026-09-30 audit G-BYTE_MAP-7). Every layout
+//  names the venue asset twice: a market id (what `operate` actually moves) and a
+//  token (what this module approves / measures, and what the lens views report).
+//  Nothing used to tie them together, so a blob whose `token` was not
+//  `getMarketTokenAddress(marketId)` passed the F22 proceeds preflight against a
+//  token the fill never delivered. Every entrypoint now reverts
+//  `MarketTokenMismatch` unless each signed token IS its market's token, and the
+//  views report the REGISTRY token — derived, so it cannot disagree.
+//
+//  ACCOUNT NUMBER: debt lives in a borrow-position sub-account. Sign
+//  `accountNumber >= 100` (Dolomite's borrow-position range) for any op that can
+//  carry debt: deployments still running the pre-2025-11 risk-override setter
+//  revert `Invalid account for debt` below it.
+//
 contract DolomiteOperatorModule is
     PreFundModuleBase,
     IMakerModule,
@@ -155,6 +169,8 @@ contract DolomiteOperatorModule is
     error BadOp(uint256 op);
     /// @dev An Exact `Withdraw` larger than the live supply would open debt.
     error WouldBorrow(uint256 amount, uint256 supply);
+    /// @dev A signed token is not the token of the market id signed beside it.
+    error MarketTokenMismatch(uint256 marketId, address signed, address venue);
 
     /// @dev `data` is too short to carry an op word. Rejected rather than defaulted:
     ///      classifying a sub-word blob would read the op out of whatever calldata
@@ -207,6 +223,7 @@ contract DolomiteOperatorModule is
         // permissionless hub in front of this entrypoint.
         PreFundGuard.requireSettlement(msg.sender, settlement);
         uint256 op = _plainOp(data);
+        if (op == uint256(Op.Deposit) || op == uint256(Op.Repay)) _requireSingleToken(data);
         if (op == uint256(Op.Deposit)) {
             _deposit(onBehalfOf, amount, data);
         } else if (op == uint256(Op.Repay)) {
@@ -333,6 +350,7 @@ contract DolomiteOperatorModule is
             // contract is a NEW address, so no already-signed order can reach it; this
             // is a guard against a stale off-chain encoder, and it costs one compare.
             if (data.length != 160) revert MalformedData();
+            _requireSingleToken(data);
             // Borrow IS an exact withdraw on Dolomite: one negative delta to `receiver`.
             (, address dolomite, uint256 marketId,, uint256 accountNumber) = _single(data);
             _operate(dolomite, onBehalfOf, accountNumber, _withdrawAction(marketId, amount, receiver));
@@ -348,6 +366,7 @@ contract DolomiteOperatorModule is
     /// @dev Exact or `Full`. Its own frame: the `Full` branch's locals do not fit
     ///      alongside the dispatcher's.
     function _withdraw(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) private {
+        _requireSingleToken(data);
         (, address dolomite, uint256 marketId, address token, uint256 accountNumber) = _single(data);
         if (DustHandler.readBalanceMode(data, 160) != DustHandler.BalanceMode.Full) {
             // ON DOLOMITE A WITHDRAW PAST THE SUPPLY IS A BORROW. `Withdraw` and
@@ -407,6 +426,8 @@ contract DolomiteOperatorModule is
         // Composite items execute a multi-leg position op whose side leg lives in
         // `data` and does NOT pro-rate. Reject a sliced fill outright.
         FullFillGuard.requireFullFill(amount, p.totalAmount);
+        _requireMarketToken(p.dolomite, p.collMarketId, p.collToken);
+        _requireMarketToken(p.dolomite, p.borrowMarketId, p.borrowToken);
 
         ActionArgs[] memory actions = new ActionArgs[](2);
         address fundedToken; // hoisted so the grant can be cleared after `operate`
@@ -484,6 +505,7 @@ contract DolomiteOperatorModule is
         private
     {
         OpenData memory p = abi.decode(data, (OpenData));
+        _requireMarketToken(p.dolomite, p.collMarketId, p.collToken);
 
         bool preFund = _fundingShape(data);
         uint256 floor;
@@ -527,31 +549,34 @@ contract DolomiteOperatorModule is
     // ──────────────────── views ────────────────────
 
     /// @inheritdoc IProceedsAsset
-    /// @dev The value-OUT token, where the maker actually SIGNED it:
+    /// @dev The value-OUT token, DERIVED from the venue's market registry
+    ///      (`getMarketTokenAddress`) — the token `operate` actually delivers — never
+    ///      the signed `token` field (G-BYTE_MAP-7: the two can disagree in a
+    ///      mis-encoded blob, and the fill now reverts on that, so the registry is the
+    ///      only answer a successful fill can agree with):
     ///
-    ///        Borrow / Withdraw   `token` — signed beside its market id
-    ///        BatchOpen           `borrowToken`
-    ///        BatchClose          `collToken`
+    ///        Borrow / Withdraw   the signed market's token
+    ///        BatchOpen           the BORROW market's token
+    ///        BatchClose          the COLLATERAL market's token
     ///        Deposit / Repay     none — they deliver nothing
-    ///        Open                `address(0)` — HONESTLY UNKNOWN. {OpenData} names
-    ///                            the borrow side by `borrowMarketId` alone, and the
-    ///                            token behind it lives in a live registry this pure
-    ///                            view cannot read and the maker does not sign.
-    ///                            Reporting a guess would be worse than nothing: the
-    ///                            lens would compare a wrong address against the leg
-    ///                            and reject fillable orders. Closing it properly means
-    ///                            signing the borrow TOKEN beside its market id, the
-    ///                            way `collToken` already sits beside `collMarketId`.
-    function proceedsAsset(bytes calldata data) external pure override returns (address) {
-        if (!_isPlainLayout(data)) return address(0);
+    ///        Open                the BORROW market's token (was `address(0)`: the
+    ///                            "pure view cannot read the registry" limit was
+    ///                            self-imposed — the interface allows `view`)
+    function proceedsAsset(bytes calldata data) external view override returns (address) {
+        if (!_isPlainLayout(data)) {
+            OpenData memory o = abi.decode(data, (OpenData));
+            return IDolomiteMargin(o.dolomite).getMarketTokenAddress(o.borrowMarketId);
+        }
         uint256 op = _plainOp(data);
         if (op == uint256(Op.Borrow) || op == uint256(Op.Withdraw)) {
-            (,,, address token,) = _single(data);
-            return token;
+            (, address dolomite, uint256 marketId,,) = _single(data);
+            return IDolomiteMargin(dolomite).getMarketTokenAddress(marketId);
         }
         if (op == uint256(Op.BatchOpen) || op == uint256(Op.BatchClose)) {
             BatchData memory p = abi.decode(data, (BatchData));
-            return op == uint256(Op.BatchOpen) ? p.borrowToken : p.collToken;
+            return IDolomiteMargin(p.dolomite).getMarketTokenAddress(
+                op == uint256(Op.BatchOpen) ? p.borrowMarketId : p.collMarketId
+            );
         }
         return address(0);
     }
@@ -569,7 +594,8 @@ contract DolomiteOperatorModule is
         returns (address asset, uint256 available)
     {
         if (!_isPlainLayout(data)) {
-            asset = abi.decode(data, (OpenData)).collToken;
+            OpenData memory o = abi.decode(data, (OpenData));
+            asset = IDolomiteMargin(o.dolomite).getMarketTokenAddress(o.collMarketId);
             available = _fundingShape(data)
                 ? type(uint256).max
                 : FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
@@ -577,10 +603,13 @@ contract DolomiteOperatorModule is
         }
         uint256 op = _plainOp(data);
         if (op == uint256(Op.Deposit) || op == uint256(Op.Repay)) {
-            (,,, asset,) = _single(data);
+            (, address dolomite, uint256 marketId,,) = _single(data);
+            asset = IDolomiteMargin(dolomite).getMarketTokenAddress(marketId);
         } else if (op == uint256(Op.BatchOpen) || op == uint256(Op.BatchClose)) {
             BatchData memory p = abi.decode(data, (BatchData));
-            asset = op == uint256(Op.BatchOpen) ? p.collToken : p.borrowToken;
+            asset = IDolomiteMargin(p.dolomite).getMarketTokenAddress(
+                op == uint256(Op.BatchOpen) ? p.collMarketId : p.borrowMarketId
+            );
         } else {
             return (address(0), 0);
         }
@@ -651,6 +680,19 @@ contract DolomiteOperatorModule is
     {
         WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(user, accountNumber), marketId);
         return w.sign ? 0 : w.value;
+    }
+
+    /// @dev The signed `token` must BE `marketId`'s token on the signed venue —
+    ///      see the header ("ONE VALUE, TWO PLACES").
+    function _requireMarketToken(address dolomite, uint256 marketId, address token) private view {
+        address venueToken = IDolomiteMargin(dolomite).getMarketTokenAddress(marketId);
+        if (venueToken != token) revert MarketTokenMismatch(marketId, token, venueToken);
+    }
+
+    /// @dev {_requireMarketToken} for the five-field single-op layout.
+    function _requireSingleToken(bytes calldata data) private view {
+        (, address dolomite, uint256 marketId, address token,) = _single(data);
+        _requireMarketToken(dolomite, marketId, token);
     }
 
     // ──────────────────── discriminators ────────────────────

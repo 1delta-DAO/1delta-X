@@ -114,7 +114,6 @@ contract DolomitePreFundTakeForOpenTest is DolomiteModulesBase {
     }
 
     function test_preFundFunded_samePosition_zeroReceiveSideApprovals_andCostsNoMore() public {
-        _neutralizeRiskOverride();
         deal(COLL, solver, COLLATERAL);
         _approveSolverSide(COLLATERAL, COLL);
 

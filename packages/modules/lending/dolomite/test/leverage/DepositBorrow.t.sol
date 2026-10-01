@@ -15,7 +15,6 @@ contract DolomiteDepositBorrowTest is DolomiteModulesBase {
     uint256 constant BORROW_OUT = 1_000e6;
 
     function test_depositX_borrowY_dolomite() public {
-        _neutralizeRiskOverride();
         deal(COLL, solver, COLLATERAL_IN);
 
         _approveDepositBorrowSide(COLLATERAL_IN, BORROW_OUT);

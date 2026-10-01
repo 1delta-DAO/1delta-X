@@ -26,20 +26,28 @@ import {DolomiteOperatorModule} from "../../src/DolomiteOperatorModule.sol";
 /// single `operate` engine.
 ///
 /// Two Dolomite nuances:
-///   • Debt lives in a borrow-position SUB-ACCOUNT (non-zero number), not the main
-///     "Dolomite balance" (account 0, lend-only). The modules carry the account
-///     number in `data`, so the harness signs a non-zero one. (Unlike Aave there is
-///     no explicit "enable collateral" — sub-account balances are collateral
-///     implicitly.) Every module also needs the maker to authorise it as a local
-///     operator — Dolomite has no permissionless value-in path.
+///   • Debt lives in a borrow-position SUB-ACCOUNT, not the main "Dolomite balance"
+///     (account 0, lend-only). The modules carry the account number in `data`, and
+///     the harness signs `ACCOUNT = 100` — Dolomite's borrow-position convention
+///     (`accountNumber >= 100`, see below). (Unlike Aave there is no explicit
+///     "enable collateral" — sub-account balances are collateral implicitly.) Every
+///     module also needs the maker to authorise it as a local operator — Dolomite
+///     has no permissionless value-in path.
 ///   • DolomiteMargin consults an on-chain `AccountRiskOverrideSetter` whenever an
-///     account holds debt. On this mainnet deployment it only returns the default
-///     `(0, 0)` override for positions set up through Dolomite's own borrow-position
-///     machinery and reverts (`Invalid account for debt`) for raw test-built ones —
-///     a DEPLOYMENT POLICY orthogonal to the module's `operate` encoding. The
-///     debt-leg tests neutralise it via `_neutralizeRiskOverride()` so the full
-///     `operate` (accounting, default solvency check, transfers) runs and exercises
-///     the module end-to-end. Value-in / no-debt tests need no such shim.
+///     account holds debt. The implementation live at the fork block (pre
+///     dolomite-margin-modules 9b90836, 2025-11-17) carries
+///     `Require.that(account.number >= 100, "Invalid account for debt")`
+///     (`_DOLOMITE_BALANCE_CUTOFF_ACCOUNT_NUMBER`); for a WETH/USDC pair it then
+///     returns the default `(0, 0)` override. An earlier harness signed account 1,
+///     tripped that require, MISDIAGNOSED it as "the setter rejects raw test-built
+///     debt positions on any sub-account", and mocked the setter away for every
+///     debt test — so no debt op had ever run against the real risk-override path
+///     (2026-09-30 audit L-ED-2). The mock is gone: every debt test now runs
+///     UNMOCKED on account 100, and `test/audit/AccountNumberConvention.t.sol` pins
+///     the convention (account 1 reverts, account 100 settles) against the live
+///     setter. Makers (and any SDK choosing `accountNumber`) MUST sign a number
+///     `>= 100` for any op that can carry debt on a deployment that still has the
+///     cutoff; mainnet upgraded past it after this block, other chains may not have.
 abstract contract DolomiteModulesBase is CoreSettlementBase {
     IDolomiteMargin constant DOLOMITE = IDolomiteMargin(0x003Ca23Fd5F0ca87D01F6eC6CD14A8AE60c2b97D);
 
@@ -48,8 +56,9 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
     uint256 constant COLL_MARKET = 0; // WETH
     uint256 constant DEBT_MARKET = 2; // USDC
     // Debt lives in a borrow-position sub-account, NOT the main "Dolomite balance"
-    // (account number 0), which is lend-only and rejected by the risk override.
-    uint256 constant ACCOUNT = 1;
+    // (account number 0, lend-only). `>= 100` is Dolomite's borrow-position range:
+    // the risk-override setter live at the fork block rejects debt below it.
+    uint256 constant ACCOUNT = 100;
 
     /// @dev ONE address for EVERY Dolomite op. `operate` admits only a local
     ///      operator of the account, and that grant is a bare boolean — unscoped by
@@ -60,28 +69,13 @@ abstract contract DolomiteModulesBase is CoreSettlementBase {
     DolomiteOperatorModule operatorModule;
     LimitOrderLeverageSolver leverageSolver;
 
-    /// @dev DolomiteMargin's account risk-override setter. On mainnet it gates which
-    ///      collateral/debt category combinations may carry debt (an e-mode/isolation
-    ///      DEPLOYMENT POLICY, not module logic) and reverts otherwise. For
-    ///      uncategorised accounts it already returns the "no override" default
-    ///      `(0, 0)`; the debt-leg tests force that default so the standard solvency
-    ///      check applies and we exercise the module's `operate` encoding end-to-end
-    ///      without depending on which exact pairs Dolomite has whitelisted.
+    /// @dev DolomiteMargin's account risk-override setter (EIP-1967 proxy). Read,
+    ///      never mocked — see the contract header.
     address constant RISK_OVERRIDE_SETTER = 0x7BCaF5253C417c84bBD1b7DfE4Ca4F0A4c4cA435;
 
     /// @dev Dolomite mainnet is live well before this block (deployed ~22.7M).
     function _forkBlock() internal view virtual override returns (uint256) {
         return 23_000_000;
-    }
-
-    /// @dev Neutralise the mainnet risk-override category gate (see above). Leaves
-    ///      all real `operate` accounting/solvency/transfers intact.
-    function _neutralizeRiskOverride() internal {
-        vm.mockCall(
-            RISK_OVERRIDE_SETTER,
-            abi.encodeWithSignature("getAccountRiskOverride((address,uint256))"),
-            abi.encode(uint256(0), uint256(0))
-        );
     }
 
     function setUp() public virtual override {
