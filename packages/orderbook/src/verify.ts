@@ -1,4 +1,12 @@
-import { hashOrderStruct, orderTypedData, packOrder, OrderSide, SETTLEMENT_LENS_ABI, type Order } from "@1delta-x/sdk";
+import {
+  hashOrderStruct,
+  orderTypedData,
+  packOrder,
+  permitWitnessTypedData,
+  OrderSide,
+  SETTLEMENT_LENS_ABI,
+  type Order,
+} from "@1delta-x/sdk";
 import { keccak256, recoverTypedDataAddress, type Hex, type PublicClient } from "viem";
 
 import { fillerOf, toDeployment, type OrderbookConfig } from "./config";
@@ -30,7 +38,11 @@ export interface Layer2Result {
   status: OrderStatus;
   /** Live fillable amount in anchor units, capped by the maker's Permit3 allowance + balance. */
   fillableAmount: bigint;
-  /** ECDSA / EIP-1271 / EIP-7702 signature validity, as the lens attests it. */
+  /**
+   * ECDSA / EIP-1271 / EIP-7702 signature validity, as the lens attests it — or,
+   * for a single-signature `fillWithPermit` announce, as Layer 1 proved it locally
+   * against the Permit3 witness digest (the lens only knows order signatures).
+   */
   isSignatureValid: boolean;
   validatorsPass: boolean;
   /**
@@ -84,9 +96,17 @@ interface CacheEntry {
   orderHash: Hex;
 }
 
+/** One row for Layer 2. `permit` = the sig is a Permit3 witness sig Layer 1 already proved. */
+interface Layer2Entry {
+  order: Order;
+  sig: Hex;
+  sigless?: boolean;
+  permit?: boolean;
+}
+
 interface Queued {
   key: Hex;
-  entry: { order: Order; sig: Hex; sigless?: boolean };
+  entry: Layer2Entry;
   resolve: (r: Layer2Result) => void;
   reject: (e: unknown) => void;
 }
@@ -160,8 +180,14 @@ export class Verifier {
     this.maxQueued = Math.max(1, opts?.maxQueued ?? 2_000);
   }
 
-  /** Layer 1 — local, no RPC. `deferSig` means the sig can only be judged by Layer 2. */
-  async verifyLayer1(a: OrderAnnounce): Promise<{ ok: boolean; reason?: string; orderHash: Hex; deferSig: boolean }> {
+  /**
+   * Layer 1 — local, no RPC. `deferSig` means the sig can only be judged by Layer 2.
+   * `permit` means the announce is a single-signature `fillWithPermit` one whose
+   * Permit3 witness signature was proven here.
+   */
+  async verifyLayer1(
+    a: OrderAnnounce,
+  ): Promise<{ ok: boolean; reason?: string; orderHash: Hex; deferSig: boolean; permit?: boolean }> {
     const { order, sig } = a;
     const orderHash = hashOrderStruct(order);
 
@@ -175,6 +201,39 @@ export class Verifier {
 
     // sigless = on-chain approveOrder path; confirmed on-chain, never by recover.
     if (a.sigless) return { ok: true, orderHash, deferSig: true };
+
+    // SINGLE-SIGNATURE `fillWithPermit` (audit 2026-09-30 A-FLEX-2). The maker's
+    // only signature is then Permit3's `PermitBatchWitness` signature over the
+    // batch WITH the order (and this settlement) as witness — not an Order
+    // EIP-712 signature, which is all the rest of this pipeline and the lens know
+    // how to check. Every such announce used to defer here and come back from the
+    // lens as "invalid signature", so the permit path was dead end to end. It is
+    // proven here instead, and only for an ECDSA maker: Permit3 accepts no
+    // delegate, and a 1271 maker cannot be judged off-chain.
+    if (a.permitBatch) {
+      const batch = a.permitBatch;
+      if (sig.length !== 132) {
+        return { ok: false, reason: "permit announce: only a 65-byte ECDSA maker signature is verifiable", orderHash, deferSig: false };
+      }
+      if (batch.deadline <= BigInt(this.now())) return { ok: false, reason: "permit batch expired", orderHash, deferSig: false };
+      const settlement = this.config.settlement.toLowerCase();
+      if (batch.tokens.some((t) => t.spender.toLowerCase() !== settlement)) {
+        return { ok: false, reason: "permit batch grants a spender other than this settlement", orderHash, deferSig: false };
+      }
+      let signer: Hex;
+      try {
+        signer = await recoverTypedDataAddress({
+          ...permitWitnessTypedData(batch, order, toDeployment(this.config)),
+          signature: sig,
+        } as unknown as Parameters<typeof recoverTypedDataAddress>[0]);
+      } catch {
+        return { ok: false, reason: "permit signature does not recover", orderHash, deferSig: false };
+      }
+      if (signer.toLowerCase() !== order.maker.toLowerCase()) {
+        return { ok: false, reason: "permit signature is not the maker's", orderHash, deferSig: false };
+      }
+      return { ok: true, orderHash, deferSig: false, permit: true };
+    }
 
     // 65-byte ECDSA sig (0x + 130 hex): recover here and require the maker. A
     // non-65-byte sig is a contract wallet (EIP-1271) or 7702 account — un-
@@ -229,7 +288,7 @@ export class Verifier {
    * `Inconclusive`. If NO call in the sweep succeeded the RPC is the problem, not
    * the orders, and the last error is thrown instead of a book's worth of verdicts.
    */
-  async verifyLayer2(entries: readonly { order: Order; sig: Hex; sigless?: boolean }[]): Promise<Layer2Result[]> {
+  async verifyLayer2(entries: readonly Layer2Entry[]): Promise<Layer2Result[]> {
     if (entries.length === 0) return [];
     const out: Layer2Result[] = new Array<Layer2Result>(entries.length);
     const budget: SweepBudget = { calls: this.maxRecheckCalls, succeeded: 0, lastError: undefined };
@@ -244,7 +303,7 @@ export class Verifier {
 
   /** Classify `idx`, recursing into smaller calls wherever an answer is not a verdict. */
   private async resolveRows(
-    entries: readonly { order: Order; sig: Hex; sigless?: boolean }[],
+    entries: readonly Layer2Entry[],
     idx: readonly number[],
     out: Layer2Result[],
     budget: SweepBudget,
@@ -306,7 +365,7 @@ export class Verifier {
    * legitimately needs more than the lens's per-order budget is classified here;
    * one that still cannot be is reported `Inconclusive` + `isolated`.
    */
-  private async resolveAlone(e: { order: Order; sig: Hex }, budget: SweepBudget): Promise<Layer2Result> {
+  private async resolveAlone(e: Layer2Entry, budget: SweepBudget): Promise<Layer2Result> {
     if (budget.calls <= 0) return INCONCLUSIVE;
     budget.calls--;
     try {
@@ -317,7 +376,7 @@ export class Verifier {
         args: [packOrder(e.order), e.sig, fillerOf(this.config), "0x"],
       })) as readonly [number, bigint, boolean, boolean];
       budget.succeeded++;
-      return toResult(status, fillableAmount, isSignatureValid, vp);
+      return toResult(status, fillableAmount, isSignatureValid, vp, e.permit);
     } catch (err) {
       budget.lastError = err;
       return { ...INCONCLUSIVE, isolated: true };
@@ -325,7 +384,7 @@ export class Verifier {
   }
 
   /** One `getOrderRelevantStates` call. Throws on any call failure — the caller decides what that means. */
-  private async callLens(entries: readonly { order: Order; sig: Hex; sigless?: boolean }[]): Promise<Layer2Result[]> {
+  private async callLens(entries: readonly Layer2Entry[]): Promise<Layer2Result[]> {
     // PACK FIRST. The lens ABI takes the WIRE order (`bytes legsIn/legsOut/curve/
     // items/…`, `uint256 params`), not the authoring `Order` the book holds. This
     // used to pass the authoring struct straight through; viem's encoder threw on
@@ -348,10 +407,10 @@ export class Verifier {
     const [statuses, fillableAmounts, sigValids, validatorsPass] = result;
     // A short answer is not "the rest are invalid": the missing rows were never
     // evaluated.
-    return entries.map((_e, i): Layer2Result =>
+    return entries.map((e, i): Layer2Result =>
       statuses[i] === undefined
         ? INCONCLUSIVE
-        : toResult(statuses[i]!, fillableAmounts[i] ?? 0n, sigValids[i] ?? false, validatorsPass[i] ?? false),
+        : toResult(statuses[i]!, fillableAmounts[i] ?? 0n, sigValids[i] ?? false, validatorsPass[i] ?? false, e.permit),
     );
   }
 
@@ -359,18 +418,28 @@ export class Verifier {
   async verifyAnnounce(a: OrderAnnounce): Promise<VerifyResult> {
     const l1 = await this.verifyLayer1(a);
     if (!l1.ok) return { ok: false, reason: l1.reason, orderHash: l1.orderHash };
-    const state = await this.layer2Cached(l1.orderHash, a);
+    const state = await this.layer2Cached(l1.orderHash, a, l1.permit === true);
     return { ok: state.ok, reason: state.ok ? undefined : reasonFor(state), orderHash: l1.orderHash, state };
   }
 
   /** Fresh Layer-2 states for orders already in the book (periodic re-check); refreshes the cache. */
   async refreshStates(entries: readonly { orderHash: Hex; announce: OrderAnnounce }[]): Promise<Map<Hex, Layer2Result>> {
-    const states = await this.verifyLayer2(entries.map((e) => ({ order: e.announce.order, sig: e.announce.sig, sigless: e.announce.sigless })));
+    // Book entries were admitted through {verifyAnnounce}, so a `permitBatch` on one
+    // means Layer 1 already proved its witness signature — the stored announce is
+    // first-seen and never overwritten (see `Book.admit`).
+    const states = await this.verifyLayer2(
+      entries.map((e) => ({
+        order: e.announce.order,
+        sig: e.announce.sig,
+        sigless: e.announce.sigless,
+        permit: e.announce.permitBatch !== undefined && !e.announce.sigless,
+      })),
+    );
     const out = new Map<Hex, Layer2Result>();
     entries.forEach((e, i) => {
       const s = states[i];
       if (s) {
-        this.remember(Verifier.cacheKey(e.orderHash, e.announce), e.orderHash, s);
+        this.remember(Verifier.cacheKey(e.orderHash, e.announce, e.announce.permitBatch !== undefined && !e.announce.sigless), e.orderHash, s);
         out.set(e.orderHash, s);
       }
     });
@@ -399,10 +468,13 @@ export class Verifier {
    * `(order, sig)` the lens saw; served for any other `sig` under the same hash it
    * let an unauthenticated re-announce carrying garbage (or `sigless`) inherit the
    * honest announce's verdict, overwrite the served signature and get the order
-   * evicted on the next sweep (F29 P2).
+   * evicted on the next sweep (F29 P2). A permit announce (the sig is a Permit3
+   * witness sig, proven by Layer 1) is its own mode, so its verdict is never served
+   * to the same bytes presented as an order signature, or the reverse.
    */
-  private static cacheKey(orderHash: Hex, a: { sig: Hex; sigless?: boolean }): Hex {
-    return keccak256(`${orderHash}${a.sigless ? "01" : "00"}${keccak256(a.sig).slice(2)}` as Hex);
+  private static cacheKey(orderHash: Hex, a: { sig: Hex; sigless?: boolean }, permit = false): Hex {
+    const mode = a.sigless ? "01" : permit ? "02" : "00";
+    return keccak256(`${orderHash}${mode}${keccak256(a.sig).slice(2)}` as Hex);
   }
 
   /**
@@ -434,8 +506,8 @@ export class Verifier {
     if (keys && keys.size === 0) this.keysByHash.delete(orderHash);
   }
 
-  private async layer2Cached(orderHash: Hex, a: OrderAnnounce): Promise<Layer2Result> {
-    const key = Verifier.cacheKey(orderHash, a);
+  private async layer2Cached(orderHash: Hex, a: OrderAnnounce, permit: boolean): Promise<Layer2Result> {
+    const key = Verifier.cacheKey(orderHash, a, permit);
     const hit = this.cache.get(key);
     if (hit && this.nowMs() - hit.at < this.cacheTtlMs) return hit.res;
     const pending = this.inflight.get(key);
@@ -446,7 +518,7 @@ export class Verifier {
     // and server both read a throw as "verification unavailable", never as a verdict).
     if (this.queue.length >= this.maxQueued) throw new Error("verifier queue full");
     const p = new Promise<Layer2Result>((resolve, reject) => {
-      this.queue.push({ key, entry: { order: a.order, sig: a.sig, sigless: a.sigless }, resolve, reject });
+      this.queue.push({ key, entry: { order: a.order, sig: a.sig, sigless: a.sigless, permit }, resolve, reject });
     });
     this.inflight.set(key, p);
     const done = () => {
@@ -494,7 +566,13 @@ export class Verifier {
   }
 }
 
-function toResult(status: number, fillableAmount: bigint, isSignatureValid: boolean, validatorsPass: boolean): Layer2Result {
+function toResult(
+  status: number,
+  fillableAmount: bigint,
+  isSignatureValid: boolean,
+  validatorsPass: boolean,
+  permit = false,
+): Layer2Result {
   // No sigless special case: the lens reads the settler's own `orderApproved`
   // record for an empty sig, so an on-chain-authorized order is attested here
   // on exactly the terms the settler applies. Previously this branch trusted
@@ -502,6 +580,15 @@ function toResult(status: number, fillableAmount: bigint, isSignatureValid: bool
   // NOTE: requires a lens deployed at or after that change — an older one
   // reports every sigless order invalid.
   const s = status as OrderStatus;
+  if (permit) {
+    // A permit announce: the signature was proven by Layer 1 against the witness
+    // digest (the lens's order-signature check cannot see it), and the maker's
+    // Permit3 allowance is exactly what the permit GRANTS at fill time — so the
+    // lens's allowance-capped `fillableAmount` is legitimately 0 before the fill
+    // and is reported, not gated on. Lifecycle (filled / cancelled / expired /
+    // malformed) still comes from the lens.
+    return { ok: s === OrderStatus.Fillable, status: s, fillableAmount, isSignatureValid: true, validatorsPass };
+  }
   const ok = s === OrderStatus.Fillable && isSignatureValid && fillableAmount > 0n;
   return { ok, status: s, fillableAmount, isSignatureValid, validatorsPass };
 }

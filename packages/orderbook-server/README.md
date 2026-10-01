@@ -30,9 +30,30 @@ to it. Protobuf on the wire throughout; the chain stays the source of truth.
 | GET | `/orders/:hash` | — | protobuf `OrderAnnounce` · `404` |
 | GET | `/orders/:hash/status` | — | JSON status, **including recently-evicted orders** |
 | GET | `/fills` | `maker` `solver` `orderHash` `fromBlock` `limit` `cursor` | JSON fills + `coverage` · `501` when indexing is off |
-| GET | `/quote` | `hash` `fillAmount` `filler` `[recipient]` `[takerData]` | JSON preview + ready-to-send `fillUpTo` calldata |
+| GET | `/quote` | `hash` `fillAmount` `filler` `[recipient]` `[takerData]` `[gasPrice]` (required for a priority-auction order) | JSON preview + ready-to-send `fillUpTo` calldata that BINDS the quote (see below) |
 | GET | `/stream` | WebSocket | bounded `SNAPSHOT` (most recent live orders) then live `ADD` / `CANCEL` / `REPLACE` |
 | GET | `/health` | — | chain config, book size, limiter and index state |
+
+#### What `/quote` calldata binds
+
+The returned `data` is a `fillUpTo` that executes at the quoted price **or better
+on every leg, or reverts** — it used to carry `minBumpBps = 0` and the raw
+requested size (audit 2026-09-30 PERIPH-1.v1):
+
+- **Price.** Both previews (`previewFill`, `previewBump`) run as `filler` at the
+  caller's `gasPrice`, and the quoted bump is the calldata's `minBumpBps`, so a
+  price module re-reading its feed, a falling basefee, or a descending curve
+  reverts `BumpTooLow` instead of moving the price toward the maker's `start`. A
+  priority-auction order prices from `tx.gasprice`, so `gasPrice` is **required**
+  there (`400` without it) — send the fill at that gas price.
+- **Size.** An identity order's calldata carries the resolved `delta`, never the
+  requested `fillAmount` (the `2^256-1` "any size" sentinel included). On a
+  proportional order that means a balance that moved since the quote reverts
+  `OverFill` rather than re-sizing the fill. A fill-module order's `fillAmount` is
+  a module-unit proposal and passes through.
+
+The response states `fillAmount`, `minBumpBps`, `gasPrice` and `proportional`
+explicitly.
 
 #### `/orders` filters
 
@@ -92,10 +113,12 @@ A soft cancel is a maker-signed EIP-712 message, free and instant. Two separate
 questions are answered separately, because conflating them is how a valid
 signature over someone else's order hash becomes an eviction:
 
-- **Who signed it** — `CancelVerifier` accepts exactly the signer set the
-  settlement accepts for an order: the EOA maker (local recover, zero RPC), a
-  maker-nominated delegate (`orderSignerExpiry`), or a contract maker via
-  EIP-1271 / 7702. A signature that is not the named maker's is `403`.
+- **Who signed it** — `CancelVerifier` mirrors the settlement's single-order
+  signer set: the EOA maker (65- or 64-byte ECDSA, local, zero RPC), a
+  maker-nominated ECDSA delegate (`orderSignerExpiry`), a nominated contract
+  delegate in the `delegate ‖ innerSig` envelope (codeless maker), or a contract
+  maker via its own EIP-1271 (7702 included) — and no ERC-6492/8010 wrapper. A
+  signature that is not the named maker's is `403`.
 - **What they may retract** — `evictableHashes` keeps only the hashes whose
   order in this book names that maker. A perfectly valid signature by Mallory
   naming Alice's order is accepted (`202`) and evicts **nothing**; the response
@@ -113,7 +136,10 @@ plus an `eth_call` against a paid RPC endpoint.
 
 Two independent buckets: **by IP** (the ordinary flood, trivially defeated by a
 botnet, which is why it is not the only one) and **by maker** (the expensive
-flood — an account is not free to rotate). Neither replaces an edge proxy; this
+flood — an account is not free to rotate). The maker bucket is charged only for
+an order the book takes (after Layer 2) and once per order/cancel, so nobody can
+drain it by replaying the maker's genuine but dead orders (audit 2026-09-30
+G-TS_FILLER-6). Neither replaces an edge proxy; this
 bounds what one process will spend, it does not stop packets arriving.
 
 ## Fills, and what "no fills" means

@@ -27,24 +27,31 @@ maker/filler ── HttpTransport ──▶ demo backend ── InMemoryTranspor
 | `topics` | `orderTopic`/`cancelTopic` — Waku content topics bound to `chainId`+`settlement`. |
 | `config` | `OrderbookConfig` (+ `lens`), `rootstockTestnetConfig`, `toDeployment`. |
 | `transport` | `Transport` interface + `InMemoryTransport`. |
-| `cancels` | `CancelVerifier` — EIP-712 soft-cancel signatures under the same signer set the settlement accepts for an order (EOA locally, delegate + EIP-1271 via one call); `evictableHashes` for the separate ownership check. See [docs/soft-cancel.md](../../docs/soft-cancel.md). |
+| `cancels` | `CancelVerifier` — EIP-712 soft-cancel signatures under the settlement's single-order signer set (65/64-byte ECDSA locally; ECDSA delegate, `delegate ‖ innerSig` contract-delegate envelope and the maker's own EIP-1271 via the chain; never an ERC-6492/8010 wrapper); `evictableHashes` for the separate ownership check. See [docs/soft-cancel.md](../../docs/soft-cancel.md). |
 | `watcher` | `ChainWatcher` — turns Settlement (and `OcoGroupModule`) logs into normalized `ChainEvent`s. Four of the five evict with **zero RPC**; `GroupClaimed` retires N−1 bracket siblings from one log. |
 | `verify` | `Verifier` — chunked (`batchSize`, default 100) so a growing book cannot walk into the provider's `eth_call` gas cap and revert wholesale — Layer 1 (local recover/deadline/shape) + Layer 2 (one `SettlementLens.getOrderRelevantStates` call) with a TTL cache. |
-| `book` | `Book` — backfill → subscribe → verify → keyed map, with expiry, signed soft-cancel eviction, atomic `ingestReplace` (admit-then-retract), `applyChainEvent` (event-driven eviction, O(changed)), an `evictWhen` policy hook, `onError`, and a periodic sweep as the safety net. |
-| `client` | `HttpTransport` (Transport over the demo backend), `OrderbookClient`, `signSoftCancel`. |
+| `book` | `Book` — backfill (cancels, then orders, then replaces) → subscribe → verify → keyed map, with expiry, signed soft-cancel eviction (tombstones keyed by `(hash, maker)`, pending ones evicted first), atomic `ingestReplace` (admit-then-retract; the cap exemption re-derived at admit), `applyChainEvent` (event-driven eviction, O(changed)), an `evictWhen` policy hook, `onError`, and a periodic sweep as the safety net. |
+| `client` | `HttpTransport` (Transport over the demo backend), `OrderbookClient`, `signSoftCancel`. ⚠ `subscribeOrders` / `subscribeCancels` deliver **unverified** relay input unless given a `verifier` / `cancelVerifier`. |
+| `fills` | `FillIndex` — `OrderFilled` index; live batches processed in order, amounts never negative, reorged-out (`removed`) logs retracted. |
 
 ## Verification pipeline
 
 Every inbound announce runs the gauntlet, cheapest first:
 
 - **Layer 1 (local, zero RPC):** recompute `hashOrderStruct(order)`; require a fill
-  denominator; `deadline > now`; for 65-byte sigs, `recoverTypedDataAddress` must
-  equal the maker. Contract (EIP-1271 / 7702) sigs defer to Layer 2.
+  denominator; `deadline > now`; for 65-byte sigs, `recoverTypedDataAddress` over
+  the order (a non-maker recover defers: it may be a nominated delegate).
+  Contract (EIP-1271 / 7702) sigs defer to Layer 2. An announce carrying a
+  `permitBatch` is a single-signature `fillWithPermit` order: its `sig` is the
+  Permit3 `PermitBatchWitness` signature, proven HERE (65-byte ECDSA maker only,
+  batch unexpired, every token spender = this settlement); Layer 2 then gates it
+  on lifecycle only, since its allowance is what the permit grants at fill time.
 - **Layer 2 (one view call):** `SettlementLens.getOrderRelevantStates` returns
   `status` (nonce/deadline/filled), `fillableAmount` (live Permit3 allowance +
   balance cap), `isSignatureValid` (incl. 1271/7702), and `validatorsPass` for the
   whole batch. Admit iff `status == Fillable && sig valid && fillable > 0`. A
-  TTL cache keyed by `orderHash` keeps a POST-then-ingest round-trip at one call.
+  TTL cache keyed by the announce (`orderHash`, signature mode, signature) keeps a
+  POST-then-ingest round-trip at one call.
 
 The chain is always the tiebreaker: a junk order that slips every filter just
 makes `fill()` revert. The book is a prioritization/spam filter, not a guarantee.

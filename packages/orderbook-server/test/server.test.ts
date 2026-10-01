@@ -212,8 +212,10 @@ describe("orderbook backend", () => {
 
   it("GET /quote previews via the lens and returns fillUpTo calldata", async () => {
     // Stub client: previewFill returns a fixed (delta, received, paid) triple.
+    // (Since audit 2026-09-30 the route also reads `previewBump` for the price floor.)
     const stubClient = {
       readContract: async (args: { functionName: string }) => {
+        if (args.functionName === "previewBump") return 0n;
         expect(args.functionName).toBe("previewFill");
         return [500n, [500n], [450n]];
       },

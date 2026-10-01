@@ -133,8 +133,21 @@ function eq(a: string | undefined, b: string | undefined): boolean {
 export class FillIndex {
   private readonly records: FillRecord[] = [];
   private readonly byHash = new Map<Hex, FillRecord[]>();
-  /** Last known cumulative per order, so a live event can be differenced. */
-  private readonly cumulative = new Map<Hex, bigint>();
+  /** `txHash:logIndex` of every record held — de-duplicates backfill vs live, O(1). */
+  private readonly logKeys = new Set<string>();
+  /**
+   * Last known cumulative per order, WITH the block it was read at, so a live event
+   * can be differenced against the newest reading only — never against one from a
+   * later block that happened to resolve first.
+   */
+  private readonly cumulative = new Map<Hex, { total: bigint; block: bigint }>();
+  /**
+   * Live log batches are processed one after another, in arrival order. They used
+   * to each start an un-awaited task, so two batches for one order could finish
+   * out of order and difference against each other the wrong way round — a
+   * NEGATIVE per-fill amount (audit 2026-09-30 G-TS_FILLER-8).
+   */
+  private liveQueue: Promise<void> = Promise.resolve();
   /** Per-block context both the timestamp and the bump replay need. */
   private readonly blocks = new Map<string, BlockCtx>();
   private readonly maxRecords: number;
@@ -196,8 +209,10 @@ export class FillIndex {
         continue;
       }
       for (const log of logs) {
+        if ((log as { removed?: boolean }).removed) continue; // never a fill
         const args = log.args as { orderHash?: Hex; maker?: Address; solver?: Address };
         if (!args.orderHash || !args.maker || !args.solver) continue;
+        if (this.has(log.transactionHash, log.logIndex)) continue; // already indexed live
         this.push({
           orderHash: args.orderHash,
           maker: args.maker,
@@ -217,7 +232,7 @@ export class FillIndex {
 
     this.scannedFrom = this.scannedFrom === null ? start : start < this.scannedFrom ? start : this.scannedFrom;
     this.scannedTo = this.scannedTo === null || head > this.scannedTo ? head : this.scannedTo;
-    await this.resolveHeadCumulatives();
+    await this.resolveHeadCumulatives(head);
     return found;
   }
 
@@ -231,29 +246,7 @@ export class FillIndex {
       eventName: "OrderFilled",
       onError: (err) => this.opts.onError?.(err),
       onLogs: (logs) => {
-        void (async () => {
-          for (const log of logs) {
-            const args = log.args as { orderHash?: Hex; maker?: Address; solver?: Address };
-            if (!args.orderHash || !args.maker || !args.solver) continue;
-            const record: FillRecord = {
-              orderHash: args.orderHash,
-              maker: args.maker,
-              solver: args.solver,
-              blockNumber: log.blockNumber ?? 0n,
-              txHash: log.transactionHash ?? ("0x" as Hex),
-              logIndex: log.logIndex ?? 0,
-              at: await this.timestampOf(log.blockNumber),
-              cumulative: null,
-              amount: null,
-              realizedBump: null,
-              bumpSource: "unresolved",
-            };
-            await this.resolveAmount(record);
-            await this.resolveBump(record);
-            this.push(record);
-            if (this.scannedTo === null || record.blockNumber > this.scannedTo) this.scannedTo = record.blockNumber;
-          }
-        })().catch((err) => this.opts.onError?.(err));
+        this.liveQueue = this.liveQueue.then(() => this.ingestLive(logs)).catch((err) => this.opts.onError?.(err));
       },
     });
     this.live = true;
@@ -263,6 +256,74 @@ export class FillIndex {
       this.unwatch = undefined;
     };
     return this.unwatch;
+  }
+
+  /** Resolves once every live batch received so far has been indexed. */
+  settled(): Promise<void> {
+    return this.liveQueue;
+  }
+
+  /** One live batch. Run strictly in order — see {@link liveQueue}. */
+  private async ingestLive(logs: readonly unknown[]): Promise<void> {
+    for (const raw of logs) {
+      const log = raw as {
+        args?: unknown;
+        removed?: boolean;
+        blockNumber?: bigint | null;
+        transactionHash?: Hex | null;
+        logIndex?: number | null;
+      };
+      // A REORGED-OUT log (`removed: true`) is the node retracting a fill it had
+      // reported, not a new fill: drop the row it produced, never record another.
+      if (log.removed) {
+        this.retract(log.transactionHash, log.logIndex);
+        continue;
+      }
+      const args = log.args as { orderHash?: Hex; maker?: Address; solver?: Address };
+      if (!args.orderHash || !args.maker || !args.solver) continue;
+      if (this.has(log.transactionHash, log.logIndex)) continue;
+      const record: FillRecord = {
+        orderHash: args.orderHash,
+        maker: args.maker,
+        solver: args.solver,
+        blockNumber: log.blockNumber ?? 0n,
+        txHash: log.transactionHash ?? ("0x" as Hex),
+        logIndex: log.logIndex ?? 0,
+        at: await this.timestampOf(log.blockNumber),
+        cumulative: null,
+        amount: null,
+        realizedBump: null,
+        bumpSource: "unresolved",
+      };
+      await this.resolveAmount(record);
+      await this.resolveBump(record);
+      this.push(record);
+      if (this.scannedTo === null || record.blockNumber > this.scannedTo) this.scannedTo = record.blockNumber;
+    }
+  }
+
+  private has(txHash: Hex | null | undefined, logIndex: number | null | undefined): boolean {
+    if (!txHash || logIndex == null) return false;
+    return this.logKeys.has(`${txHash}:${logIndex}`);
+  }
+
+  /** Drop the row a now-removed log produced, and forget the cumulative it carried. */
+  private retract(txHash: Hex | null | undefined, logIndex: number | null | undefined): void {
+    if (!txHash || logIndex == null || !this.has(txHash, logIndex)) return;
+    const at = this.records.findIndex((r) => r.txHash === txHash && r.logIndex === logIndex);
+    if (at < 0) return;
+    const [gone] = this.records.splice(at, 1);
+    if (!gone) return;
+    this.logKeys.delete(`${gone.txHash}:${gone.logIndex}`);
+    const list = this.byHash.get(gone.orderHash);
+    if (list) {
+      const i = list.indexOf(gone);
+      if (i >= 0) list.splice(i, 1);
+      if (list.length === 0) this.byHash.delete(gone.orderHash);
+    }
+    // The chain's counter no longer includes it; the next row must re-read rather
+    // than difference against a total that was rolled back.
+    this.cumulative.delete(gone.orderHash);
   }
 
   stop(): void {
@@ -306,6 +367,7 @@ export class FillIndex {
 
   private push(record: FillRecord): void {
     this.records.push(record);
+    this.logKeys.add(`${record.txHash}:${record.logIndex}`);
     const forHash = this.byHash.get(record.orderHash);
     if (forHash) forHash.push(record);
     else this.byHash.set(record.orderHash, [record]);
@@ -314,6 +376,7 @@ export class FillIndex {
       const evicted = this.records.shift();
       if (!evicted) break;
       this.dropped++;
+      this.logKeys.delete(`${evicted.txHash}:${evicted.logIndex}`);
       const list = this.byHash.get(evicted.orderHash);
       if (list) {
         const at = list.indexOf(evicted);
@@ -355,16 +418,32 @@ export class FillIndex {
       const previous = this.cumulative.get(record.orderHash);
       record.cumulative = total;
       // Same cumulative as the last row ⇒ a same-block sibling already carried
-      // the delta (or nothing moved); report `null`, never a phantom zero.
-      record.amount = previous === undefined || total === previous ? null : total - previous;
-      this.cumulative.set(record.orderHash, total);
+      // the delta (or nothing moved); report `null`, never a phantom zero. A
+      // reading from a LATER block than this row, or a total that did not grow,
+      // cannot be differenced either: progress only rises, so `total - previous`
+      // there is a negative or misattributed amount, never a fill size.
+      record.amount =
+        previous === undefined || previous.block > record.blockNumber || total <= previous.total
+          ? null
+          : total - previous.total;
+      if (previous === undefined || record.blockNumber >= previous.block) {
+        this.cumulative.set(record.orderHash, { total, block: record.blockNumber });
+      }
     } catch (err) {
       this.opts.onError?.(err);
     }
   }
 
-  /** One `filled()` read per distinct order touched, attached to its newest row. */
-  private async resolveHeadCumulatives(): Promise<void> {
+  /**
+   * One `filled()` read per distinct order touched, attached to its newest row.
+   *
+   * The read is pinned to the head the backfill scanned to, and it only SEEDS the
+   * live differencing state — it never overwrites a reading the live watcher made
+   * since. Backfill runs concurrently with `watch()`, and the HEAD read used to
+   * clobber a live cumulative so the next live row differenced against the wrong
+   * base (audit 2026-09-30 G-TS_FILLER-8).
+   */
+  private async resolveHeadCumulatives(head?: bigint): Promise<void> {
     for (const [hash, rows] of this.byHash) {
       const newest = rows[rows.length - 1];
       if (!newest || newest.cumulative !== null) continue;
@@ -374,13 +453,23 @@ export class FillIndex {
           abi: SETTLEMENT_ABI,
           functionName: "filled",
           args: [hash],
+          ...(head !== undefined ? { blockNumber: head } : {}),
         })) as bigint;
+        const CANCELLED = (1n << 256n) - 1n;
+        if (total === CANCELLED) continue;
         newest.cumulative = total;
-        this.cumulative.set(hash, total);
+        const known = this.cumulative.get(hash);
+        const at = head ?? newest.blockNumber;
+        if (known === undefined || known.block < at) this.cumulative.set(hash, { total, block: at });
       } catch (err) {
         this.opts.onError?.(err);
       }
     }
+  }
+
+  /** Last known cumulative `filled` for an order, or `undefined` if never read. */
+  cumulativeOf(orderHash: Hex): bigint | undefined {
+    return this.cumulative.get(orderHash)?.total;
   }
 
   /**
