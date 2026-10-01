@@ -69,8 +69,6 @@ interface IMocQueue {
 ///         this package since audit 2026-09-30 RIF-3 (the documented provider is
 ///         frozen, the live one is whitelist-gated): {MocPriceBandValidator} reads
 ///         {IMocRif.getPACtp}. Kept for the fork tests and off-chain tooling.
-/// @dev    Original note:
-///         price packed in bytes32 plus a validity flag.
 interface IPriceProvider {
     function peek() external view returns (bytes32 price, bool has);
 }
