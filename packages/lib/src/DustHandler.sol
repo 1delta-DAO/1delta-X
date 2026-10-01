@@ -119,37 +119,27 @@ library DustHandler {
         revert InvalidModeWord(word);
     }
 
-    /// @notice Dispose of a module's `residual` balance of `token`.
-    /// @param token        the residual token
-    /// @param residual     amount held by `address(this)` (read by the caller)
-    /// @param onBehalfOf    the user — sole sweep destination, never caller-chosen
-    /// @param action        SweepToUser or Recycle
-    /// @param recycleTarget contract to re-supply into (pool / PM / comet / morpho)
-    /// @param recycleCall    typed calldata for the re-supply, sized to `residual`
-    function disposeResidual(
-        address token,
-        uint256 residual,
-        address onBehalfOf,
-        DustAction action,
-        address recycleTarget,
-        bytes memory recycleCall
-    ) internal {
-        disposeResidual(token, residual, 0, onBehalfOf, action, recycleTarget, recycleCall);
-    }
-
-    /// @notice {disposeResidual} with an explicit FLOOR — the balance of `token` this
-    ///         module already held when the operation began, which is NOT this
-    ///         operation's residual and must not be paid to `onBehalfOf`.
+    /// @notice Dispose of a module's `residual` balance of `token`, retaining a
+    ///         FLOOR — the balance of `token` this module already held when the
+    ///         operation began, which is NOT this operation's residual and must
+    ///         not be paid to `onBehalfOf`.
     ///
-    ///  ⚠ WHY A FLOOR, AND WHY `0` IS THE WRONG DEFAULT FOR NEW CALLERS.
-    ///  The overload above reads a caller-supplied `residual` that every module in
-    ///  this repo computes as `IERC20(token).balanceOf(address(this))` — the module's
-    ///  WHOLE balance, not the delta this call produced. Modules are pull-exact and
-    ///  should never carry a balance between calls, so the two are normally equal.
-    ///  When they are not, "sweep everything" pays the difference to whoever happens
-    ///  to be filling: anyone can transfer tokens to a module address, and anyone can
-    ///  be the maker of a one-unit order against that module and asset, so a stranded
-    ///  balance is claimable by the next filler rather than merely lost.
+    ///  ⚠ THE FLOOR IS A REQUIRED PARAMETER, AND THERE IS DELIBERATELY NO OVERLOAD
+    ///  WITHOUT IT. A 6-argument form that delegated with `floor = 0` was kept after
+    ///  F19 only so the sibling packages compiled unchanged; once every caller had
+    ///  migrated it was dead code that re-created F19 the moment a new module called
+    ///  it (after a successful recycle it swept `balanceOf(this) - 0`, the module's
+    ///  WHOLE balance). It was deleted (2026-09-30 audit, L-LIB-7 / X-STATIC-4): a
+    ///  helper for the weaker pattern is an invitation to use it — the same reason
+    ///  {PreFundGuard} removed its own `sweepable` / `sweepTo`.
+    ///
+    ///  WHY A FLOOR. Callers compute `residual` as the DELTA this operation produced
+    ///  (`balanceOf(this) - floor`, with `floor` read before the pull), never the
+    ///  module's whole balance. Modules are pull-exact and should never carry a
+    ///  balance between calls, but anyone can transfer tokens to a module address,
+    ///  and anyone can be the maker of a one-unit order against that module and
+    ///  asset, so "sweep everything" would pay a stranded balance to whoever happens
+    ///  to be filling rather than merely lose it.
     ///
     ///  Nothing is being stolen from a live position — the destination is still
     ///  `onBehalfOf`, never a caller-chosen address — but "the module ends empty" is
@@ -160,7 +150,13 @@ library DustHandler {
     ///  re-supply it re-reads the balance, so without the floor it would sweep the
     ///  pre-existing amount even when the caller measured its own residual correctly.
     ///
-    /// @param floor balance of `token` held before this operation; retained, not swept.
+    /// @param token        the residual token
+    /// @param residual     this operation's residual (the delta over `floor`)
+    /// @param floor        balance of `token` held before this operation; retained, not swept
+    /// @param onBehalfOf    the user — sole sweep destination, never caller-chosen
+    /// @param action        SweepToUser or Recycle
+    /// @param recycleTarget contract to re-supply into (pool / PM / comet / morpho)
+    /// @param recycleCall    typed calldata for the re-supply, sized to `residual`
     function disposeResidual(
         address token,
         uint256 residual,

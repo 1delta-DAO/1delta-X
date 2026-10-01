@@ -92,11 +92,26 @@ library FullFillGuard {
     ///      item funds an INPUT leg, and {Core._payInputsToSolver} silently pulls
     ///      `owed - proceeds` out of the MAKER'S WALLET.
     ///
-    ///      Safe to apply only on `Full` legs, which is why it lives beside
-    ///      {requireFullFill}: there `amount == totalAmount` is the maker's signed
-    ///      TOTAL, not a pro-rated slice, so the comparison cannot misfire on a
-    ///      partial fill. Do NOT add it to an `Exact` branch, where `amount` is a
-    ///      slice and a short delivery is the core's business, not the module's.
+    ///      WHERE THE BOUND BELONGS (corrected 2026-09-30, L-CV2-1.v3). On ANY leg
+    ///      whose venue call is sized at `amount` but whose venue can return LESS
+    ///      without reverting. That is every `Full` leg (where `amount ==
+    ///      totalAmount` is the maker's signed total, so the comparison cannot
+    ///      misfire on a partial fill) AND every `Exact` leg on a CLAMPING venue:
+    ///      there the venue call is itself sized at this fill's slice, so the venue
+    ///      returns exactly `amount` whenever the position covers it and less only
+    ///      when the position is short — the bound cannot misfire on a slice either.
+    ///
+    ///      The premise this NatSpec used to state — "do not add it to an `Exact`
+    ///      branch, a short delivery is the core's business" — was FALSE: the
+    ///      core's "business" with a short input-funding delivery is to bill the
+    ///      shortfall to the maker's WALLET (see above), not to reject it. Nor do
+    ///      all venues fail closed on a short `Exact` withdraw: Comet, Dolomite,
+    ///      the Aave v4 spoke (`withdrawnAmount = min(amount, supplied)`) and
+    ///      Exactly's `withdrawAtMaturity` clamp instead of reverting. On those, an
+    ///      `Exact` branch needs this bound (or an equivalent position pre-check
+    ///      that reverts before the venue call). Only on a venue that is genuinely
+    ///      exact-or-revert is the bound redundant on an `Exact` leg — harmless,
+    ///      but not needed.
     function requireDelivered(uint256 received, uint256 amount) internal pure {
         if (received < amount) revert ShortWithdraw(received, amount);
     }

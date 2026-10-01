@@ -83,6 +83,19 @@ import {Order, OrderSide} from "@core/settlement/Structs.sol";
 //  free by being full-fill only. The fill-once timing bit CANNOT substitute — it
 //  requires `delta == fillTotal`, precisely the case this module does not produce.
 //
+//  Venue coverage
+//  ──────────────
+//  Only an item whose module implements {IPositionSource} can size a fill here;
+//  anything else reverts {NoPositionItem} (fail closed). As of 2026-09-30 the
+//  readers are: AaveV3WithdrawModule, CometTakerModule, ExactlyTakerModule,
+//  MorphoBlueTakerModule, GearboxV3, EulerV2OperatorModule and SiloTakerModule.
+//  Compound v2 and Venus are deliberately NOT covered (`balanceOfUnderlying` is
+//  not a view and `exchangeRateStored` is stale — a reader there needs its own
+//  accrual-aware view). Aave v2, Aave v4, Lista, Dolomite, Morpho Midnight and
+//  ERC-4626 have `BalanceMode.Full` withdraws but no reader yet (2026-09-30 audit,
+//  L-LIB-8) — on those a position-sized exit is not available and the maker must
+//  use `Full` mode, which returns accrued interest as raw dust.
+//
 //  Trust model
 //  ───────────
 //  `fillModule` is maker-signed and consensus-critical, and this is a STATICCALL
