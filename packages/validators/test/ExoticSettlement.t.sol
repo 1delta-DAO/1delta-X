@@ -126,6 +126,9 @@ contract ExoticSettlementTest is CoreSettlementBase {
         o = _sellOrder(nonce, maker, USDC, address(0), PRICE, 0, new Item[](0));
         o.legsOut = PackedEncode.legsOut(new LegOut[](0));
         o.minFillAnchor = PRICE; // indivisible purchase — full-fill only
+        // The invariant is the ONLY receipt here, so the order must name its filler
+        // (audit 2026-09-30 VAL-1 / {InvariantReceiptGuard}).
+        o.exclusiveFiller = solver;
         o.invariants = PackedEncode.validators(_invariant1(address(ownerInv), abi.encode(address(nftA), wantId, maker)));
     }
 
@@ -199,6 +202,7 @@ contract ExoticSettlementTest is CoreSettlementBase {
         order.legsOut = PackedEncode.legsOut(new LegOut[](0));
         order.fillTotal = 1; //     pure-NFT denominator (1 lot)
         order.minFillAnchor = 1; // full-fill only
+        order.exclusiveFiller = solver; // invariant-only receipt ⇒ named filler (VAL-1)
         order.invariants = PackedEncode.validators(_invariant1(address(ownerInv), abi.encode(address(nftB), 2, maker)));
         bytes memory sig = _sign(order);
 
@@ -264,6 +268,7 @@ contract ExoticSettlementTest is CoreSettlementBase {
         Order memory order = _sellOrder(21, maker, USDC, address(0), PRICE, 0, new Item[](0));
         order.legsOut = PackedEncode.legsOut(new LegOut[](0));
         order.minFillAnchor = PRICE;
+        order.exclusiveFiller = solver; // invariant-only receipt ⇒ named filler (VAL-1)
         order.invariants = PackedEncode.validators(
             _invariant1(address(balance1155Inv), abi.encode(address(multi), maker, uint256(9), uint256(40)))
         );

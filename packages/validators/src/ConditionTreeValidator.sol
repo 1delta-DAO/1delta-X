@@ -41,6 +41,7 @@ import {Order} from "@core/settlement/Settlement.sol";
 ///
 ///      flags bit 0  NEGATE — invert this leaf
 ///      flags bit 1  TRY    — treat a reverting leaf as `false` instead of aborting
+///                           (never an out-of-gas leaf — see below)
 ///
 ///  The expression is `(l₁ AND l₂ …) OR (l₃ AND l₄ …) OR …`, and every boolean
 ///  formula has such a form — with negated literals available, DNF is complete, so
@@ -87,6 +88,32 @@ import {Order} from "@core/settlement/Settlement.sol";
 ///  ⚠ TRY + NEGATE on the same leaf means "reverted or false" ⇒ true. That is
 ///  coherent but rarely what anyone means; prefer a dedicated leaf that returns a
 ///  clean boolean.
+///
+///  ⚠ THE PROPERTY IS ONLY AS GOOD AS THE LEAF (audit 2026-09-30 VAL-2)
+///  ──────────────────────────────────────────────────────────────────
+///  This contract can only see a failure the leaf REPORTS. A leaf that catches its
+///  own broken dependency and returns `false` (a "laundering" leaf) looks like a
+///  clean `false` here, and NEGATE inverts it into `true`. So before negating a
+///  leaf, check that it reverts on a broken input:
+///
+///    • safe to negate — {ChainlinkPriceGte}/{ChainlinkPriceLte}/
+///      {ChainlinkTickFloorValidator} (revert on stale / incomplete / non-positive /
+///      sequencer-down), {PredicateStaticCall} (reverts {PredicateFailed} on a
+///      reverting, codeless or short-returning target since VAL-2 — it used to
+///      launder), {TimestampValidator}, {FillerWhitelistValidator},
+///      {Erc721OwnerInvariant} (an `ownerOf` revert propagates);
+///    • NOT meaningful to negate — {FillerAttestationValidator}: an unattested
+///      filler can always make it `false` (empty takerData), so `NOT(attested)` is
+///      true for anyone by design, and a reverting 1271 attester also reads `false`;
+///    • third-party leaves (e.g. a MoC price-band validator that returns `false` on
+///      an invalid feed) — audit the failure path before negating.
+///
+///  OUT-OF-GAS is the one failure a FILLER controls (it picks the gas limit, and
+///  every hop forwards 63/64). A leaf failure that leaves this contract under 1/63
+///  of the gas it forwarded is therefore treated as out-of-gas and propagated as
+///  out-of-gas (`invalid()`), even under TRY — never read as `false`. Wrapper leaves
+///  ({PredicateStaticCall}) apply the same rule to their own inner call, so an
+///  out-of-gas deep in the chain surfaces as an out-of-gas here too.
 contract ConditionTreeValidator is IOrderValidator {
     /// @dev Invert this leaf's result.
     uint256 internal constant FLAG_NEGATE = 1;
@@ -227,13 +254,11 @@ contract ConditionTreeValidator is IOrderValidator {
     ///      the last thing over the stack limit. `TRY` is applied before `NEGATE`,
     ///      so NEGATE only ever inverts a CLEAN boolean — the property the whole
     ///      contract note is built around.
-    function _leafValue(
-        Order calldata order,
-        address filler,
-        bytes calldata blob,
-        bytes calldata takerData,
-        uint256 h
-    ) private view returns (bool) {
+    function _leafValue(Order calldata order, address filler, bytes calldata blob, bytes calldata takerData, uint256 h)
+        private
+        view
+        returns (bool)
+    {
         bool ok;
         bool passed;
         {
@@ -246,7 +271,15 @@ contract ConditionTreeValidator is IOrderValidator {
             assembly {
                 // Exactly one word of returndata is copied, into scratch space, so
                 // a hostile leaf cannot bomb this contract's memory.
-                let success := staticcall(gas(), target, add(cd, 0x20), mload(cd), 0x00, 0x20)
+                let g := gas()
+                let success := staticcall(g, target, add(cd, 0x20), mload(cd), 0x00, 0x20)
+                // OUT-OF-GAS IS NEVER AN ANSWER (audit 2026-09-30 VAL-2). The leaf got
+                // 63/64 of `g`; a failure leaving us under 1/63 of it means the leaf (or
+                // something it called) may have run dry — a value the FILLER picks via
+                // its gas limit. TRY must not turn that into `false` (and NEGATE into
+                // `true`), so exhaust our own gas: the caller sees the same out-of-gas
+                // and a nested tree propagates it unchanged.
+                if and(iszero(success), lt(gas(), div(g, 63))) { invalid() }
                 // `ok` and `passed` are kept APART on purpose. {OrderGates.gatePasses}
                 // folds a revert into `false`; here NEGATE and TRY need to tell them
                 // apart — see the contract note.

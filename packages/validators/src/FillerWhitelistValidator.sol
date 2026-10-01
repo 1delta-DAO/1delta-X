@@ -30,6 +30,20 @@ import {Order} from "@core/settlement/Settlement.sol";
 ///    against the curator's CURRENT list (curators can list/delist between
 ///    signing and filling — that live-ness is the point).
 ///
+///  ⚠ The gated identity is an ADDRESS (audit 2026-09-30 VAL-5)
+///  ───────────────────────────────────────────────────────────
+///  `filler` is Settlement's IMMEDIATE `msg.sender` (the batch / match caller on
+///  the netted paths) — nothing further up the call chain. Listing a CONTRACT that
+///  fills as itself on behalf of arbitrary callers — an open (non-GATED)
+///  `AggregatorFillSolver`, the `BaseFlashSolver` family (`executeFill` is
+///  permissionless), `GuardedMatchSolver.settleMatch`,
+///  `DestinationSettler7683.fill`, any permissionless executor — admits EVERY
+///  caller of that contract, vetted or not. A compliance list (KYC, sanctions
+///  screening) is therefore only as strong as the access control of each contract
+///  on it: list EOAs, or contracts whose fill entrypoint is restricted to the
+///  vetted party (an operator-GATED solver instance). The maker's signed amounts
+///  still bind either way — this widens WHO may fill, never at what price.
+///
 ///  Liveness fallback (Fusion-style)
 ///  ────────────────────────────────
 ///  `openAfter == 0` — hard whitelist: only listed fillers, forever.
