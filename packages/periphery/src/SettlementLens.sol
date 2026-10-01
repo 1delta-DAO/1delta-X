@@ -4,12 +4,11 @@ pragma solidity ^0.8.28;
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
-import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
-import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {SignatureVerification} from "@core/permit3/SignatureVerification.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {Order, ItemOp, OrderSide, FillCtx} from "@core/settlement/Structs.sol";
+import {SettlementLensChecks} from "./SettlementLensChecks.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
@@ -64,12 +63,6 @@ contract SettlementLens {
         return lgEnd == 0 ? lgStart : lgEnd;
     }
 
-    /// @dev `recipient` of packed output leg `k` — small helper so the duplicate-leg
-    ///      scan can compare recipients without decoding the whole leg twice.
-    function _legOutRecipient(bytes calldata legs, uint256 k) private pure returns (address r) {
-        (,,, r) = PackedArrays.legOut(legs, k);
-    }
-
     using OrderHash for Order;
     using DutchAuction for Order;
     using Pricing for Order;
@@ -79,16 +72,6 @@ contract SettlementLens {
     /// @notice Cached from the settlement at deploy — the Permit3 whose maker
     ///         allowances bound how much a plain order can actually fill.
     IPermit3 public immutable PERMIT3;
-    /// @dev Cached from the settlement at deploy — its {SolverCallbackExecutor}.
-    ///      An output leg paid THERE is a maker footgun on both paths
-    ///      ({validateOrder}): the netted path refuses it
-    ///      ({Base.OutputToSettlement}), and on the single path whatever lands on
-    ///      the executor is taken by the next callback solver, whose `CALL` runs
-    ///      from it. Immutable because the settler's own is — the pair is fixed at
-    ///      the settler's construction, so one read is exact forever. Private: the
-    ///      getter measured +80 bytes and the address is already public on the
-    ///      settlement (`EXECUTOR()`).
-    address private immutable EXECUTOR;
 
     /// @notice Lifecycle status for the solver-preflight view. Mirrors 0x's
     ///         `OrderStatus` so an off-chain filler can classify an order from a
@@ -110,7 +93,7 @@ contract SettlementLens {
     ///      ordinary counted order reports `Filled` only when its counter actually
     ///      reached the denominator.
     enum OrderStatus {
-        Invalid, // malformed (bad array shape) — can never fill
+        Invalid, // malformed, or a shape every fill reverts on (reserved nonce, see {SettlementLensChecks.deadShape}) — can never fill
         Fillable, // open, at least one unit still fillable
         Filled, // fully filled
         Cancelled, // per-hash sentinel, nonce bit set, below the rollback floor — or a
@@ -217,7 +200,7 @@ contract SettlementLens {
     constructor(address settlement) {
         SETTLEMENT = ISettlementState(settlement);
         PERMIT3 = ISettlementState(settlement).PERMIT3();
-        EXECUTOR = ISettlementState(settlement).EXECUTOR();
+        CHECKS = new SettlementLensChecks(settlement);
     }
 
     // ──────────────────── Order hash / previews ────────────────────
@@ -256,10 +239,21 @@ contract SettlementLens {
     ///         needs a batch-safe, non-reverting answer over a whole book should use
     ///         {getOrderRelevantState}, which returns a status enum and never throws
     ///         for a cancelled order.
+    ///
+    ///         A {Proportional} order that has filled answers 0 (audit 2026-09-30
+    ///         PERIPH-8). Its denominator is the maker's LIVE balance, so after a
+    ///         100% sweep it resolves to 0 while `filled` holds the swept amount, and
+    ///         the subtraction used to panic `0x11`. Any progress at all means it is
+    ///         done: a proportional fill is whole ({Pricing.inputOwed} reverts
+    ///         `ProportionalNeedsFullFill` on anything else), so no second fill can run
+    ///         whatever the balance has become. The same `done >= denominator` guard
+    ///         covers every other order whose denominator could sit below its counter.
     function remaining(Order calldata order) external view returns (uint256) {
         uint256 done = SETTLEMENT.filled(order.hash());
         if (done == type(uint256).max) revert OrderCancelled();
-        return OrderGates.fillDenominator(order) - done;
+        uint256 total = OrderGates.fillDenominator(order);
+        if (done >= total || (done != 0 && _proportionalAnchor(order))) return 0;
+        return total - done;
     }
 
     /// @notice Preview EXACTLY what `Settlement.fillUpTo` would settle right now —
@@ -294,6 +288,15 @@ contract SettlementLens {
         // Split frames (ctx resolve / leg pricing) to stay under the stack limit
         // without via-IR, like the settlement's own settle helpers.
         FillCtx memory ctx = _previewCtx(order, fillAmount, filler, takerData);
+        // The core's SECOND outsider-only refusal (audit 2026-09-30 PERIPH-2.v2): a
+        // PRE-FUNDED leg-reference descriptor run under a live soft override reverts
+        // `ForLegInvalid` in {Base._forSlice}, deep inside item execution, which this
+        // preview never runs. Mirrored here so `previewFill` — and everything quoting
+        // through it, {OriginSettler7683} included — refuses exactly the fills the
+        // settler refuses. {OrderGates.exclusivityOverride} in {_previewCtx} already
+        // mirrors the first (a hard window, or a soft one with no carrier). Here and
+        // not inside {_previewCtx}, whose frame is at the legacy stack limit.
+        if (ctx.overrideBps != 0 && _hasPreFundDescriptor(order)) revert ForLegInvalid();
         unchecked {
             delta = ctx.newFilled - ctx.prevFilled; // resolve guarantees new >= prev
         }
@@ -382,22 +385,66 @@ contract SettlementLens {
         address filler,
         bytes calldata takerData
     ) external view returns (uint256[] memory received, uint256[] memory paid) {
-        return _previewAmounts(order, _inFlightCtx(order, prevFilled, anchor, filler, takerData));
+        FillCtx memory ctx = _inFlightCtx(order, prevFilled, anchor, filler);
+        ctx.bump = DutchAuction.resolveBump(order, ctx.orderHash, ctx.anchor, filler, ctx.prevFilled, takerData);
+        return _previewAmounts(order, ctx);
     }
 
-    /// @dev The in-flight {FillCtx}, rebuilt from a captured `prevFilled` plus the
-    ///      live post-fill counter. Deliberately NOT sharing {_previewCtx}: that
-    ///      one resolves a delta FORWARD from pre-fill state (clamping, fill-module
-    ///      dispatch, the Zero/OverFill gates), whereas this reads a delta that has
-    ///      already been decided. Folding them would make one path's guards fire on
-    ///      the other's inputs.
-    function _inFlightCtx(
+    /// @notice The bump a PRICE-MODULE or PRIORITY-auction fill by `filler` will PIN,
+    ///         plus one — `0` for a clock-priced order, which pins nothing. Capture it
+    ///         alongside {fillState}, in the same transaction and immediately before
+    ///         the fill, and hand it to {previewFillInFlightPinned}.
+    /// @dev    Exact for the fill that follows: {OrderState._openFill} resolves the
+    ///         same {DutchAuction.resolveBump} with the same filler, taker blob,
+    ///         progress, block and gas price, and nothing between this call and that
+    ///         one changes state the module could read.
+    function pinnedBump(Order calldata order, address filler, bytes calldata takerData)
+        external
+        view
+        returns (uint256)
+    {
+        (bytes32 orderHash, uint256 total, uint256 prevFilled) = _resolveState(order);
+        return DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData);
+    }
+
+    /// @notice {previewFillInFlight} at a bump captured BEFORE the fill
+    ///         ({pinnedBump}) instead of one re-resolved from inside the callback.
+    ///
+    ///  ⚠ WHY THIS EXISTS (audit 2026-09-30 CORE-FILLER-5). The settlement resolves a
+    ///  price-module or priority bump ONCE, in {OrderState._openFill}, and pins it for
+    ///  the whole fill. {previewFillInFlight} resolves it AGAIN from inside the
+    ///  callback — and a module that reads state the fill has since moved (a balance a
+    ///  `PostInputs` payment changed, a pool the callback swapped through, an oracle
+    ///  price pushed in the callback) then answers differently from the pin: an
+    ///  under-statement reverts the fill, an over-statement over-sources inventory.
+    ///  {previewFillInFlight} is therefore exact only for CLOCK-priced orders; for a
+    ///  module or priority order use this, or the typed callback's
+    ///  `pricedIn`/`pricedOut`, which carry the settlement's own figures.
+    /// @param  pin  {pinnedBump}'s return value (`bump + 1`, or 0 for a clock order).
+    function previewFillInFlightPinned(
         Order calldata order,
         uint256 prevFilled,
         uint256 anchor,
         address filler,
-        bytes calldata takerData
-    ) private view returns (FillCtx memory) {
+        uint256 pin
+    ) external view returns (uint256[] memory received, uint256[] memory paid) {
+        FillCtx memory ctx = _inFlightCtx(order, prevFilled, anchor, filler);
+        ctx.bump = pin;
+        return _previewAmounts(order, ctx);
+    }
+
+    /// @dev The in-flight {FillCtx}, rebuilt from a captured `prevFilled` plus the
+    ///      live post-fill counter, with the bump left for the caller to set (resolved
+    ///      afresh, or the captured pin). Deliberately NOT sharing {_previewCtx}: that
+    ///      one resolves a delta FORWARD from pre-fill state (clamping, fill-module
+    ///      dispatch, the Zero/OverFill gates), whereas this reads a delta that has
+    ///      already been decided. Folding them would make one path's guards fire on
+    ///      the other's inputs.
+    function _inFlightCtx(Order calldata order, uint256 prevFilled, uint256 anchor, address filler)
+        private
+        view
+        returns (FillCtx memory)
+    {
         bytes32 orderHash = order.hash();
         uint256 total = anchor != 0 ? anchor : OrderGates.fillDenominator(order);
 
@@ -423,7 +470,7 @@ contract SettlementLens {
             filler,
             filler,
             prevFilled == 0 && newFilled == total,
-            DutchAuction.resolveBump(order, orderHash, total, filler, prevFilled, takerData),
+            0, // the bump — set by the caller
             "",
             new uint256[](0), // no delivery ledger in a preview — nothing was delivered
             0,
@@ -476,6 +523,11 @@ contract SettlementLens {
         returns (FillCtx memory)
     {
         if (fillAmount == 0) revert ZeroFill();
+        // Mirror of {Base._gateOrderPost}: the top half of the nonce space is the
+        // delegated-signer permits' ({NonceManager.SIGNER_NONCE_NS}), and every fill
+        // of an order in it reverts (audit 2026-09-30 PERIPH-5 — the F29 8b mirror
+        // had reached {validateOrder} only).
+        if (order.nonce >> 255 != 0) revert OrderNonceReserved();
         (bytes32 orderHash, uint256 total, uint256 prevFilled) = _resolveState(order);
 
         uint256 delta;
@@ -533,6 +585,25 @@ contract SettlementLens {
         );
     }
 
+    /// @dev Whether any item carries a PRE-FUNDED leg-reference descriptor — word 0
+    ///      of its `data` with top bits `101` (`>> 253 == 5`: bit 255 leg/balance
+    ///      form, bit 254 clear = leg reference, bit 253 = pre-fund) on a `MAKE` or a
+    ///      `TAKE_FOR`, the two ops {Base._runItem} sizes through {Base._forSlice}.
+    ///      Any other op's word 0 is module data, never a descriptor.
+    function _hasPreFundDescriptor(Order calldata order) private pure returns (bool) {
+        uint256 n = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
+        uint256 cursor = PackedArrays.recordsStart();
+        for (uint256 i; i < n; i++) {
+            (uint256 op,,,, bytes calldata data, uint256 next) = PackedArrays.itemAt(order.items, cursor);
+            if (
+                (op == uint256(ItemOp.MAKE) || op == uint256(ItemOp.TAKE_FOR)) && data.length >= 32
+                    && uint256(bytes32(data[0:32])) >> 253 == 5
+            ) return true;
+            cursor = next;
+        }
+        return false;
+    }
+
     /// @dev Price every leg for the resolved ctx — the same {Pricing} calls the
     ///      fill's delivery/payout run.
     function _previewAmounts(Order calldata order, FillCtx memory ctx)
@@ -562,6 +633,8 @@ contract SettlementLens {
     error FillTooSmall();
     error OrderCancelled();
     error FillOnceMustBeFull();
+    error OrderNonceReserved();
+    error ForLegInvalid();
 
     // ──────────────────── Solver preflight ────────────────────
 
@@ -713,6 +786,16 @@ contract SettlementLens {
         ) {
             return (OrderStatus.Invalid, 0);
         }
+        // Shapes EVERY fill reverts on, whatever the state — named `Invalid` rather
+        // than read `Fillable`, because an orderbook admits on this view alone:
+        //   • a nonce in the reserved signer-permit half: {Base._gateOrderPost}
+        //     reverts `OrderNonceReserved` (audit 2026-09-30 PERIPH-5);
+        //   • the structural defects {SettlementLensChecks.deadShape} names — a
+        //     misplaced proportional marker, an auction leg moving the wrong way, a
+        //     priority auction without a scale, an unknown item op, a malformed
+        //     items / invariants / validators blob (G-LENS_PARITY-6). A probe that
+        //     reverts is read as dead too: the settlement would revert on it.
+        if (order.nonce >> 255 != 0 || !_shapeLive(order)) return (OrderStatus.Invalid, 0);
         if (block.timestamp > order.expiry()) return (OrderStatus.Expired, 0);
 
         // THE SETTLER TRACKS LIFECYCLE ON TWO AXES, AND THIS FUNCTION MUST NOT
@@ -730,6 +813,12 @@ contract SettlementLens {
         if (done == type(uint256).max) return (OrderStatus.Cancelled, 0);
         if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (OrderStatus.Cancelled, 0);
 
+        // A {Proportional} order with ANY progress is done: its fill is whole
+        // ({Pricing.inputOwed} reverts `ProportionalNeedsFullFill` otherwise), so no
+        // second fill can run. Checked before the denominator, which a 100% sweep has
+        // since resolved to 0 and which would read the executed sweep as `Fillable`
+        // (audit 2026-09-30 PERIPH-8).
+        if (done != 0 && _proportionalAnchor(order)) return (OrderStatus.Filled, 0);
         uint256 anchor = OrderGates.fillDenominator(order);
         // A {Proportional} anchor resolves from the maker's LIVE balance and can be
         // 0 right now; that is "nothing to fill yet", not "filled" (F29 finding 8f).
@@ -737,12 +826,25 @@ contract SettlementLens {
         if (done >= anchor) return (OrderStatus.Filled, 0);
 
         fillableAmount = anchor - done;
+        // THE MINIMUM FILL IS THE THIRD "CANNOT FILL AT ALL" RULE (audit 2026-09-30
+        // G-LENS_PARITY-2), beside the two below. Every fill whose delta is under
+        // `minFillAnchor` reverts `FillTooSmall`, and no fill can execute more than
+        // the remainder (`fill` reverts `OverFill` above it, `fillUpTo` clamps down to
+        // it) — so a tail below the floor is dead for good, and was read `Fillable`.
+        if (fillableAmount < order.minFillAnchor) return (OrderStatus.Fillable, 0);
         // Plain orders: the maker funds tokenIn from their wallet, so cap the
         // fillable amount by their live capacity across every input leg. Skipped
         // for module orders — the fillable is in `fillTotal` units, not leg units.
         if (PackedArrays.countUnchecked(order.items) == 0 && order.fillModule == address(0)) {
-            uint256 cap = _makerFillableCap(order, anchor);
-            if (cap < fillableAmount) fillableAmount = cap;
+            (uint256 cap, bool capExact) = _makerFillableCap(order, anchor);
+            if (cap < fillableAmount) {
+                fillableAmount = cap;
+                // The same floor against the FUNDING cap — but only where that cap is
+                // exact rather than a worst-case lower bound on what the maker can
+                // fund: zeroing a conservative figure would make this view stricter
+                // than the settler.
+                if (capExact && cap < order.minFillAnchor) fillableAmount = 0;
+            }
         }
         // A FILL-ONCE order is whole or nothing: a capacity below the anchor means
         // it cannot fill at all, not that it can fill partially (F29 finding 8a).
@@ -770,23 +872,42 @@ contract SettlementLens {
     ///      not-yet-started auction tick).
     ///
     ///      The direct-allowance leg mirrors
-    ///      {Permit3TransferLib.transferFromWithFallback}: a maker that granted a
+    ///      {Base._pullViaPermit3}: a maker that granted a
     ///      plain ERC20 approval to the settlement (instead of routing through
     ///      Permit3) funds the very same pull via the fallback, so their live
     ///      capacity is the MAX of the two books — reading only Permit3 would
     ///      preview such makers as unfillable.
-    function _makerFillableCap(Order calldata order, uint256 anchor) internal view returns (uint256 cap) {
+    ///
+    ///      ⚠ THE PERMIT3 BOOK IS ONLY HALF OF A PERMIT3 PULL (audit 2026-09-30
+    ///      G-LENS_PARITY-1). Permit3 spends its book entry by calling
+    ///      `token.transferFrom(maker, …)` itself, which needs the maker's plain ERC-20
+    ///      approval TO PERMIT3. A maker who revoked that approval — the standard
+    ///      kill switch for a Permit2-style hub, which leaves the book untouched — or
+    ///      whose book entry came from a relayed signed permit before any token
+    ///      approval, has a book that funds nothing, and every fill reverts. So the
+    ///      Permit3 term is `min(live book, allowance(maker, PERMIT3))`.
+    /// @return cap   the fillable cap, in anchor units.
+    /// @return exact whether `cap` is the true capacity rather than a conservative
+    ///         lower bound on it: true only for a SELL whose inputs are all fixed
+    ///         (`end == 0`) or proportional — a rising leg is costed at its ceiling,
+    ///         and every BUY input can be discounted by a soft-exclusivity override.
+    function _makerFillableCap(Order calldata order, uint256 anchor)
+        internal
+        view
+        returns (uint256 cap, bool exact)
+    {
         cap = type(uint256).max;
+        exact = order.side() == OrderSide.SELL;
         address spender = address(SETTLEMENT);
         uint256 nLegsIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
         for (uint256 i; i < nLegsIn; i++) {
             (address token, uint256 lgStart, uint256 lgEnd) = PackedArrays.legIn(order.legsIn, i);
-            (uint160 allowed, uint48 expiration) = PERMIT3.tokenAllowance(order.maker, spender, token);
-            uint256 capacity = allowed;
-            if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
-            // ...unless the maker set Permit3 STRICT mode for this token, which is
-            // exactly the switch that makes {Permit3TransferLib} refuse the fallback
-            // (F29 finding 8d).
+            if (lgEnd != 0 && !Proportional.isProportional(lgStart)) exact = false;
+            uint256 capacity = _permit3Capacity(order.maker, token);
+            // A direct ERC-20 approval to the settlement funds the fallback pull —
+            // unless the maker set Permit3 STRICT mode for this token, which is
+            // exactly the switch that makes {Base._pullViaPermit3} refuse the
+            // fallback (F29 finding 8d).
             uint256 direct = PERMIT3.isStrict(order.maker, token) ? 0 : _erc20Allowance(token, order.maker, spender);
             if (direct > capacity) capacity = direct; // fallback path funds the same pull
             uint256 bal = SafeTransferLib.balanceOf(token, order.maker);
@@ -819,351 +940,84 @@ contract SettlementLens {
         }
     }
 
-    // ──────────────────── Well-formedness ────────────────────
-    /// @dev The duplicate / self-trade leg checks, split into their own frame purely
-    ///      to keep {validateOrder} under the EVM stack limit without via-IR — the
-    ///      packed decode yields several values per leg where the old typed access
-    ///      read one field at a time. Pure relocation; the rules are unchanged.
-    function _checkLegOverlaps(Order calldata order, uint256 nIn, uint256 nOut)
-        private
-        view
-        returns (bool, string memory)
-    {
-        for (uint256 i; i < nIn; i++) {
-            for (uint256 k = i + 1; k < nIn; k++) {
-                if (PackedArrays.legInToken(order.legsIn, i) == PackedArrays.legInToken(order.legsIn, k)) {
-                    return (false, "duplicate input token");
-                }
-            }
-            // Item-free orders: an input that is also an output is a no-op the
-            // maker did not mean. DELTA-VERIFY orders (timing bit 104): the settler
-            // rejects it for EVERY output leg, items or not
-            // ({Core._snapshotOutRecipients} → `DeltaVerifySameToken`) — F29 8c.
-            if (PackedArrays.countUnchecked(order.items) == 0 || order.deltaVerifyOutputs()) {
-                for (uint256 j; j < nOut; j++) {
-                    if (PackedArrays.legInToken(order.legsIn, i) == PackedArrays.legOutToken(order.legsOut, j)) {
-                        return (false, "input token == output token");
-                    }
-                }
-            }
-        }
-        for (uint256 j; j < nOut; j++) {
-            // A leg addressed to the settlement contract is a footgun on BOTH paths,
-            // in two different ways. On the single-order path it permanently burns
-            // that delivery — it lands in the anti-donation snapshot baseline and is
-            // never swept — which is a maker self-burn, not an exploit. On the netted
-            // path it is REJECTED ({Base.OutputToSettlement}), because there it could
-            // not be burned at all: a pool→pool self-transfer leaves the balance
-            // untouched while the schedule marks the obligation discharged, so the
-            // amount would clear the pre-context floor and reach the SOLVER in the
-            // final sweep. Either way the preflight should catch it before a
-            // signature exists.
-            (address ojToken,,, address ojRecip) = PackedArrays.legOut(order.legsOut, j);
-            if (ojRecip == address(SETTLEMENT)) return (false, "recipient is settlement (burn)");
-            // The settler's {EXECUTOR} is the same hazard one hop out (re-audit
-            // 2026-09-29), and WORSE on the single path: not burned but TAKEABLE. It
-            // holds whatever lands on it and every callback solver's `CALL` runs from
-            // it, so the next `fillWithCallback` anyone submits can sweep the leg to
-            // itself. The netted path refuses it outright ({Base.OutputToSettlement}).
-            if (ojRecip == EXECUTOR) return (false, "recipient is settlement executor (takeable)");
-            for (uint256 k = j + 1; k < nOut; k++) {
-                if (
-                    ojToken == PackedArrays.legOutToken(order.legsOut, k)
-                        && ojRecip == _legOutRecipient(order.legsOut, k)
-                ) {
-                    return (false, "duplicate output token+recipient");
-                }
-            }
-        }
-        return (true, "");
+    /// @dev The Permit3 half of one leg's capacity: the live (unexpired) book entry,
+    ///      capped by the maker's ERC-20 approval to Permit3 that spending it needs.
+    function _permit3Capacity(address maker, address token) private view returns (uint256 capacity) {
+        (uint160 allowed, uint48 expiration) = PERMIT3.tokenAllowance(maker, address(SETTLEMENT), token);
+        capacity = allowed;
+        if (expiration != 0 && expiration < block.timestamp) capacity = 0; // allowance lapsed
+        uint256 approved = _erc20Allowance(token, maker, address(PERMIT3));
+        if (approved < capacity) capacity = approved;
     }
 
-    /// @notice Off-chain / preview check for order well-formedness. Intentionally
-    ///         NOT called during `fill` — fills stay cheap and unopinionated — so
-    ///         call this from a maker UI, relayer, or test before signing or
-    ///         submitting, to catch self-inflicted misparameterizations. Returns
-    ///         the first problem found (`ok == false`), else `(true, "")`.
-    ///
-    /// @dev    Trust model: a malformed order can only ever harm its own maker
-    ///         (all token moves are gated by the maker's signature + Permit3
-    ///         allowances), so these are footgun guards, not protocol invariants.
-    ///         Scope: structural/economic sanity + current fillability. It does
-    ///         NOT judge whether the price is *good*.
-    ///
-    ///         Stranded-tail caveat (not flagged here, as partial-fill-with-floor
-    ///         is a legitimate config): any `0 < minFillAnchor < anchor` lets
-    ///         a solver leave a remainder smaller than `minFillAnchor` that can
-    ///         then never be filled. Only `minFillAnchor ∈ {0, anchor}`
-    ///         guarantees no unfillable tail.
+    /// @dev {SettlementLensChecks.deadShape} as a boolean that never reverts: a probe
+    ///      that reverts is a blob the settlement would revert on too — UNLESS it ran
+    ///      out of gas, which says nothing about the order. EIP-150 leaves this frame
+    ///      1/64 of what it had when the probe starved, so a failure with that little
+    ///      left reads "not proven dead"; the row then runs dry in its own frame and a
+    ///      batch reports it `Inconclusive` ({ORDER_STATE_GAS}), never `Invalid`.
+    function _shapeLive(Order calldata order) private view returns (bool) {
+        uint256 before = gasleft();
+        try CHECKS.deadShape(order) returns (bool dead) {
+            return !dead;
+        } catch {
+            return gasleft() <= before / 32;
+        }
+    }
+
+    // ──────────────────── Well-formedness and item preflights ────────────────────
+    //
+    // ⚠ THESE LIVE IN {CHECKS}, A SECOND READ-ONLY CONTRACT THIS LENS DEPLOYS, AND
+    // ARE FORWARDED BY A PLAIN `STATICCALL` (audit 2026-09-30 remediation). The lens
+    // sat 268 bytes under EIP-170 with a dozen preflight-parity fixes still to land,
+    // each a few dozen to a few hundred bytes. Nothing here is a proxy: {CHECKS} is
+    // immutable, holds no state and no funds, runs in its own context (never a
+    // DELEGATECALL), is created by this constructor so its address is fixed by the
+    // lens's own, and every one of its functions can be called on it directly. The
+    // signatures below are unchanged, so no caller moves.
+
+    /// @notice The {SettlementLensChecks} instance this lens forwards to.
+    SettlementLensChecks public immutable CHECKS;
+
+    /// @notice Off-chain / preview check for order well-formedness — see
+    ///         {SettlementLensChecks.validateOrder}.
     function validateOrder(Order calldata order) external view returns (bool ok, string memory reason) {
-        // A fill-module order is denominated by the maker-signed `fillTotal`, not
-        // a leg, so it may carry empty tokenIn/tokenOut (a pure NFT swap). The
-        // leg-shape economics below still apply to whatever legs it does have.
-        bool moduleFill = order.fillTotal != 0;
-
-        // ── leg shape ──
-        // NOTE: `.length` on a packed member is the BYTE length, not the element
-        // count — the count lives in the blob's prefix. Always go through
-        // {PackedArrays}, which also proves the blob is well formed.
-        uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
-        uint256 nOut = PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
-        // Anchor-leg presence. The fill denominator is the anchor side's leg 0 —
-        // SELL reads `tokenIn[0]`, BUY reads `tokenOut[0]` — unless a maker-signed
-        // `fillTotal` supplies it directly. So a BUY may have EMPTY tokenIn (its
-        // consideration comes from items — e.g. an NFT-sale SETTLE), and a SELL
-        // may have empty tokenOut (a gasless deposit). A fill module with
-        // `fillTotal == 0` still derives its total from the anchor leg, so it
-        // needs that leg too.
-        if (!moduleFill) {
-            if (order.side() == OrderSide.SELL && nIn == 0) {
-                return
-                    (
-                        false,
-                        order.fillModule != address(0) ? "fill module without denominator" : "sell requires tokenIn"
-                    );
-            }
-            if (order.side() == OrderSide.BUY && nOut == 0) {
-                return
-                    (
-                        false,
-                        order.fillModule != address(0) ? "fill module without denominator" : "buy requires tokenOut"
-                    );
-            }
-            // Empty tokenOut on a SELL is the deposit shape (items) or the
-            // invariant-protected PURCHASE shape (the maker pays the input leg
-            // and a signed invariant proves what arrived — e.g. an NFT via
-            // {Erc721OwnerInvariant}, delivered by the filler's callback). With
-            // neither items nor invariants the maker gives tokenIn away for
-            // nothing.
-            if (
-                order.side() == OrderSide.SELL && nOut == 0 && PackedArrays.countUnchecked(order.items) == 0
-                    && PackedArrays.countUnchecked(order.invariants) == 0
-            ) {
-                return (false, "no tokenOut and no items (giveaway)");
-            }
-        }
-
-        // ── structural / economic sanity (time-independent) ──
-        uint256 anchor = OrderGates.fillDenominator(order);
-        if (anchor == 0) return (false, "anchor amount is zero");
-        // Input legs are FIXED (`end == 0`) or RISE to a ceiling (`end ≥ start`) —
-        // a rising leg is the relayer-fee/conversion auction. Same rule both sides.
-        for (uint256 i; i < nIn; i++) {
-            (, uint256 inS, uint256 inE) = PackedArrays.legIn(order.legsIn, i);
-            if (Proportional.isProportional(inS)) {
-                // Mirror the settler's rule EXACTLY — see {Pricing.inputOwed}. A
-                // preflight that is stricter drops fillable orders; one that is
-                // looser passes orders that revert on-chain.
-                if (
-                    i != 0 || order.side() == OrderSide.BUY || order.fillTotal != 0
-                        || order.fillModule != address(0)
-                ) {
-                    return (false, "proportional leg only allowed on legsIn[0] of a plain SELL order");
-                }
-                // The cap is mandatory on-chain, and `0` is what an unset field
-                // holds — so this is the check most likely to catch a real mistake.
-                if (inE == 0) return (false, "proportional leg has no cap (end == 0)");
-                continue;
-            }
-            if (inE != 0 && inE < inS) {
-                return (false, "input end < start (must rise)");
-            }
-        }
-        if (order.side() == OrderSide.SELL) {
-            // Outputs decay DOWN from a positive start (`end ≤ start`), or fixed.
-            for (uint256 j; j < nOut; j++) {
-                (, uint256 oS, uint256 oE,) = PackedArrays.legOut(order.legsOut, j);
-                if (oS == 0) return (false, "output start is zero (giveaway)");
-                if (oE != 0 && oS < oE) {
-                    return (false, "output start < end (must fall)");
-                }
-            }
-        } else {
-            // BUY outputs are FIXED (exact-output); the canonical form is `end == 0`.
-            for (uint256 j; j < nOut; j++) {
-                (, uint256 oS2, uint256 oE2,) = PackedArrays.legOut(order.legsOut, j);
-                if (oS2 == 0) return (false, "output start is zero (giveaway)");
-                if (oE2 != 0) return (false, "buy output must be fixed (end == 0)");
-            }
-        }
-        // Distinct within each array — a duplicate tokenIn shares one proceeds
-        // snapshot (the first leg's payout corrupts the second leg's balance
-        // delta); a duplicate (token, recipient) OUTPUT pair is a
-        // double-delivery footgun (same token to DIFFERENT recipients — e.g. a
-        // maker leg plus a fee leg — is legitimate and common).
-        //
-        // CROSS-overlap (tokenIn[i] == tokenOut[j]) is fine for orders WITH
-        // items — the same-asset exit shape: delivery is solver→maker and runs
-        // BEFORE the proceeds snapshot, so the two legs never share a measured
-        // balance (proven by the same-asset withdraw fork tests). For item-FREE
-        // orders the overlap is a pure self-trade (the maker pays the spread
-        // for nothing) and stays flagged.
-        {
-            (bool okLegs, string memory whyLegs) = _checkLegOverlaps(order, nIn, nOut);
-            if (!okLegs) return (false, whyLegs);
-        }
-        if (order.minFillAnchor > anchor) return (false, "minFillAnchor > anchor (unfillable)");
-        // An INDIVISIBLE SETTLE item (`amount <= 1` — the ERC-721 sentinel, or a
-        // broken zero) cannot slice: a partial fill floors it to 0, which the
-        // core now rejects on-chain ({SettleSliceZero}) — so a partial-fillable
-        // order would simply be unfillable except in one full shot. Require
-        // full-fill unless a fill module fixes the unit. DIVISIBLE settle
-        // quantities (`amount > 1`, e.g. {Erc1155SettlementModule}) compose with
-        // partial fills — each fill transfers its exact pro-rata slice — and are
-        // deliberately allowed through.
-        {
-            (bool okItems, string memory whyItems) = _validateItemSlices(order, anchor);
-            if (!okItems) return (false, whyItems);
-        }
-        if (order.decayDuration() != 0 && order.decayStartTime() == 0) {
-            return (false, "decay set without decayStartTime");
-        }
-
-        // ── soft exclusivity override ──
-        if (order.overrideBps() != 0) {
-            if (order.exclusiveFiller == address(0)) return (false, "override without exclusiveFiller");
-            if (order.overrideBps() > 10_000) return (false, "overrideBps > 10000");
-            // The third override rule — "some leg must be able to CARRY the premium"
-            // ({_overrideHasCarrier}) — is checked LAST, in {_validateTakeForItems}'s
-            // tail, not here: a pre-funded leg under an override is the more specific
-            // defect (outsiders revert there even WITH a carrier), so its reason must
-            // win when both apply.
-        }
-        // ── delta-verify needs ONE named filler ──
-        // The settler fills a bit-104 order for its `exclusiveFiller` only, whatever
-        // the window says ({Core._snapshotOutRecipients}): the balance delta cannot
-        // tell this fill's delivery from the maker's other paid inflow, so the maker
-        // must name who runs the callback. Zero and the filler-set sentinel can never
-        // equal a caller — such an order is signable and dead (re-audit F30).
-        if (
-            order.deltaVerifyOutputs()
-                && (order.exclusiveFiller == address(0) || order.exclusiveFiller == OrderGates.FILLER_SET)
-        ) {
-            return (false, "delta-verify order must name a single exclusiveFiller");
-        }
-        // ── filler set ({OrderGates.FILLER_SET}) ──
-        // A set order carries `curve = [0x00] ‖ filler×N`. The leading COUNT BYTE is
-        // zero, so the curve validation below reads it as "no curve points" and never
-        // looks at the entries — nothing else in this function would ever inspect the
-        // set. Without this check a malformed set is reported VALID here and then
-        // reverts {OrderGates.MalformedFillerSet} on every fill, which is the worst of
-        // both: the maker signed exclusivity and the order is simply dead. Mirror the
-        // settler's shape test exactly so the two cannot drift.
-        //
-        // Deliberately NOT gated on the window still being open, even though the
-        // settler only reaches its copy of this test in-window. A lapsed window makes
-        // a broken set harmless (the gate is skipped and the order fills), so this is
-        // strictly stricter than the fill — but it matches how the two exclusivity
-        // shape rules directly above already behave: `override without
-        // exclusiveFiller` also only bites in-window and is also unconditional. The
-        // shape section reports what the maker SIGNED, so a defect stays reported
-        // once the window lapses instead of quietly ageing out.
-        if (order.exclusiveFiller == OrderGates.FILLER_SET) {
-            uint256 setLen = order.curve.length;
-            if (setLen < 21 || (setLen - 1) % 20 != 0 || order.curve[0] != 0) {
-                return (false, "malformed filler set");
-            }
-        }
-        // ── piecewise auction curve (monotonic time, bounded bump) ──
-        uint256 nCurve = PackedArrays.validateFixed(order.curve, PackedArrays.CURVE_STRIDE);
-        for (uint256 c; c < nCurve; c++) {
-            (uint256 cT, uint256 cB) = PackedArrays.curvePoint(order.curve, c);
-            if (cB > 10_000) return (false, "curve bumpBps > 10000");
-            (uint256 cTPrev,) = c == 0 ? (uint256(0), uint256(0)) : PackedArrays.curvePoint(order.curve, c - 1);
-            if (c != 0 && cT <= cTPrev) {
-                return (false, "curve timeDelta not increasing");
-            }
-        }
-        if (nCurve != 0 && order.decayStartTime() == 0) return (false, "curve set without decayStartTime");
-        // ── gas bump ──
-        if (order.gasBumpBps() != 0) {
-            if (order.gasPriceRef() == 0) return (false, "gasBump without gasPriceRef");
-            if (order.gasBumpBps() > 10_000) return (false, "gasBumpBps > 10000");
-        } else if (order.gasPriceRef() != 0) {
-            // `gasPriceRef` is read by NOTHING but the gas bump. Set without one it is
-            // inert, and the likeliest reason a builder set it is that it meant
-            // {DutchAuction.baselinePriorityFeeWei} — a different field, in bits of its
-            // own precisely so the two can never be confused for each other on-chain.
-            return (false, "gasPriceRef without gasBump");
-        }
-        // ── priority auction (bit 103) ──
-        if (order.priorityAuction()) {
-            if (order.priorityScale() == 0) return (false, "priority auction without priorityScale");
-            // A priority auction prices from the FLOOR up on the pinned bid — the
-            // clock/curve/gas-bump shapes never run, so signing any of them is a
-            // mistake: they silently never apply. `decayStartTime` alone is fine (it
-            // keeps its "not before" meaning).
-            if (order.gasBumpBps() != 0) return (false, "gas bump with priority auction");
-            if (order.decayDuration() != 0) return (false, "decay duration with priority auction");
-            if (nCurve != 0) return (false, "curve with priority auction");
-        }
-        // ── external price module ──
-        if (order.pricingModule != address(0)) {
-            // What a module CAN see decides what is a footgun here. {IPriceModule.bump}
-            // is handed `order.timing` and the two leg blobs — and NOTHING else. So:
-            //
-            //   • `order.curve` and `order.params` are not passed at all. No price
-            //     module can read them, whatever it does, so a signed CURVE or gas
-            //     bump is PROVABLY inert on a module order. Both stay rejected.
-            //
-            //     ⚠ "curve" here means curve POINTS — `nCurve`, not `curve.length`.
-            //     A {OrderGates.FILLER_SET} order stores its filler set in the very
-            //     same `curve` blob behind a zero count byte, and that set is NOT
-            //     inert: {OrderGates.exclusivityOverride} reads it on every fill,
-            //     whatever prices the order. `nCurve` is 0 for such a blob, so the
-            //     test below correctly lets a set + module order through. DO NOT
-            //     "harden" it to `order.curve.length != 0` — that would reject every
-            //     filler-set order that prices off a module. The set's own shape is
-            //     validated in the filler-set branch above.
-            //   • the `timing` word IS passed, so every field packed in it is fair
-            //     game for a module to consume. `decayStartTime` (bits [0:32)) keeps
-            //     its "not before" meaning ({DutchAuction.resolveBump} enforces it),
-            //     and `decayDuration` (bits [32:64)) is NOT inert: a clock-consuming
-            //     module reads it. {ClockFlooredQuoteModule} floors a cosigned quote
-            //     with exactly that window, and REQUIRES a non-zero one — with
-            //     `decayDuration == 0` its ceiling is a constant 0 and its quote
-            //     channel is dead. Rejecting the pair would have declared every
-            //     working quote-auction order invalid while blessing only the
-            //     degenerate one, so it is deliberately NOT rejected.
-            //
-            // The lens cannot tell a clock-consuming module from a clock-ignoring one
-            // without a capability probe, and it has no bytes for one (EIP-170). Given
-            // the choice, a missed advisory on an inert field is much cheaper than a
-            // false REJECT that makes a live feature unusable through any book gating
-            // on this function.
-            //
-            // `priorityAuction` (bit 103) is different from the rest of `timing`: it is
-            // not a field a module reads, it is a COMPETING core pricing mode, and
-            // {DutchAuction.resolveBump} silently prefers the module. Still a conflict.
-            if (order.priorityAuction()) return (false, "price module with priority auction");
-            if (nCurve != 0) return (false, "price module with curve");
-            if (order.gasBumpBps() != 0) return (false, "gas bump with price module");
-        }
-
-        // ── current fillability (time/state-dependent) ──
-        // The top half of the nonce space is reserved for delegated-signer permits
-        // ({NonceManager.SIGNER_NONCE_NS}); {Base._gateOrderPost} reverts
-        // `OrderNonceReserved` on every fill of such an order (F29 finding 8b).
-        if (order.nonce >> 255 != 0) return (false, "nonce in the reserved signer-permit half");
-        if (order.expiry() < block.timestamp) return (false, "order expired");
-        if (SETTLEMENT.isNonceCancelled(order.maker, order.nonce)) return (false, "nonce cancelled");
-        // The per-hash cancellation sentinel, named as itself. `filled == max` is
-        // ≥ any real `anchor`, so before this the next line reported a cancelled
-        // order as "order fully filled" — the same two-axis conflation {_orderState}
-        // carried. Both directions reject, so this only ever changed the REASON
-        // string; it is fixed because a wrong reason is what an integrator reads.
-        uint256 done = SETTLEMENT.filled(order.hash());
-        if (done == type(uint256).max) return (false, "order cancelled");
-        if (done >= anchor) return (false, "order fully filled");
-
-        // TAKE_FOR descriptors, LAST and returned directly. Every check it makes is
-        // a revert at FILL time in {Base._forSlice}, so catching them here is the
-        // difference between a maker learning at build time and holding a signed
-        // order that is simply dead. It is tail-called rather than checked inline
-        // because this function is already at the legacy codegen's stack limit —
-        // binding its two return values to locals here is stack-too-deep.
-        return _validateTakeForItems(order);
+        return CHECKS.validateOrder(order);
     }
+
+    /// @notice Every TAKE / TAKE_FOR item's live Permit3 taker allowance — see
+    ///         {SettlementLensChecks.previewTakerAllowances}.
+    function previewTakerAllowances(Order calldata order) external view returns (TakerAllowances memory) {
+        return CHECKS.previewTakerAllowances(order);
+    }
+
+    /// @notice The funding side of every MAKE / TAKE_FOR item — see
+    ///         {SettlementLensChecks.previewItemFunding}.
+    function previewItemFunding(Order calldata order) external view returns (ItemFunding memory) {
+        return CHECKS.previewItemFunding(order);
+    }
+
+    /// @dev Memory bundle for {previewTakerAllowances}, so a helper carries one
+    ///      pointer instead of four arrays (a stack-limit concession). Declared here,
+    ///      where callers have always named it (`SettlementLens.TakerAllowances`).
+    struct TakerAllowances {
+        address[] modules;
+        bytes32[] refs;
+        uint160[] amounts;
+        uint48[] expirations;
+    }
+
+    /// @dev Memory bundle for {previewItemFunding}, one slot per `MAKE`/`TAKE_FOR`
+    ///      item. `assets[j] == address(0)` means the module did not answer:
+    ///      `required[j]` is still meaningful (the CORE's rule computes it),
+    ///      `available[j]` is not.
+    struct ItemFunding {
+        address[] modules;
+        address[] assets;
+        uint256[] required;
+        uint256[] available;
+    }
+
 
     // ──────────────────── Internal helpers ────────────────────
 
@@ -1309,575 +1163,4 @@ contract SettlementLens {
         }
     }
 
-    // ──────────────────── Taker-allowance preflight (U-3) ────────────────────
-
-    /// @notice For every TAKE item in `order`, the maker's live Permit3 taker
-    ///         allowance that the fill will consume — the taker-book analogue of
-    ///         {getOrderRelevantState}'s token-side capacity, which skips item
-    ///         orders entirely. A solver quoting a leverage/withdraw order can read
-    ///         this instead of hand-deriving `keccak256(item.data)` and querying
-    ///         Permit3 itself. The allowance is keyed `(maker, settlement, module,
-    ///         ref)`, exactly as {Base._runItem}'s `PERMIT3.take` consumes it.
-    /// @return out `TakerAllowances{modules, refs, amounts, expirations}`, one entry
-    ///         per TAKE or TAKE_FOR item in signed order (both consume the same
-    ///         book; a TAKE_FOR's FUNDING leg is a token allowance, reported by the
-    ///         token-side preflight instead). `refs[j] = keccak256(item.data)` (the
-    ///         position key), `amounts[j]` the live allowance (`uint160.max` =
-    ///         infinite), `expirations[j]` its expiry (`0` = never).
-    function previewTakerAllowances(Order calldata order) external view returns (TakerAllowances memory out) {
-        bytes calldata items = order.items;
-        uint256 n = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
-        // First pass: count TAKE items so the arrays are sized exactly.
-        uint256 takes;
-        uint256 cursor = PackedArrays.recordsStart();
-        for (uint256 i; i < n;) {
-            (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
-            // TAKE_FOR passes through the SAME taker-book bucket as TAKE — its
-            // value-out leg is gated by `(maker, settlement, module, keccak256(data))`
-            // exactly as a plain take is — so it must be surfaced here too, or a
-            // composite order preflights as needing no taker allowance at all.
-            if (op == uint256(ItemOp.TAKE) || op == uint256(ItemOp.TAKE_FOR)) ++takes;
-            cursor = next;
-            unchecked {
-                ++i;
-            }
-        }
-
-        out.modules = new address[](takes);
-        out.refs = new bytes32[](takes);
-        out.amounts = new uint160[](takes);
-        out.expirations = new uint48[](takes);
-
-        uint256 k;
-        cursor = PackedArrays.recordsStart();
-        for (uint256 i; i < n;) {
-            // The whole per-item decode+read+write is one helper (fewest params:
-            // `order`, `cursor`, `out`, `k`) so the wide `itemAt` tuple never shares
-            // this frame — otherwise legacy (non-via-IR) codegen goes stack-too-deep.
-            (cursor, k) = _takerItemAt(order, cursor, out, k);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /// @dev The item-slice half of {validateOrder}, in its own frame (that function
-    ///      sits at the legacy codegen's stack limit). Mirrors the three per-item
-    ///      reverts the settler raises before any item runs:
-    ///
-    ///        • an op byte above the enum → {Base.MalformedPackedArray} (F29 8e);
-    ///        • an INDIVISIBLE SETTLE or TAKE_FOR (`amount <= 1`) on a partial-
-    ///          fillable order → every partial slice floors to 0 and the settler
-    ///          reverts {Base.SettleSliceZero}, so the order fills in one shot or
-    ///          not at all. Divisible amounts are deliberately allowed: a dust fill
-    ///          that floors to 0 is refused by the settler for THAT fill only, and
-    ///          a larger fill goes through — that is a filler-side sizing rule, not
-    ///          an unfillable order. TAKE_FOR joins SETTLE here (it reverts on a
-    ///          zero slice too; it used to be unchecked). Full-fill-only orders
-    ///          (`minFillAnchor == anchor`) and fill-module orders are exempt;
-    ///        • two funding descriptors naming the SAME output leg →
-    ///          {Base.ForLegInvalid} (the leg-reference forms only).
-    function _validateItemSlices(Order calldata order, uint256 anchor) private pure returns (bool, string memory) {
-        uint256 nItems = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
-        uint256 cur = PackedArrays.recordsStart();
-        uint256 legsUsed;
-        for (uint256 s; s < nItems; s++) {
-            (bool ok, string memory why, uint256 nxt, uint256 legBit) = _itemSliceAt(order, cur, anchor);
-            if (!ok) return (false, why);
-            if (legBit != 0) {
-                if (legsUsed & legBit != 0) return (false, "two items fund from the same output leg");
-                legsUsed |= legBit;
-            }
-            cur = nxt;
-        }
-        return (true, "");
-    }
-
-    /// @dev One item's slice checks (see {_validateItemSlices}); returns the next
-    ///      cursor and, for a leg-reference funding descriptor, the bit of the leg it
-    ///      spends (0 otherwise). Its own frame: the wide `itemAt` tuple does not fit
-    ///      beside the loop state under legacy codegen.
-    function _itemSliceAt(Order calldata order, uint256 cursor, uint256 anchor)
-        private
-        pure
-        returns (bool, string memory, uint256, uint256)
-    {
-        (uint256 iop,, uint256 iamt,, bytes calldata idata, uint256 nxt) = PackedArrays.itemAt(order.items, cursor);
-        if (iop > uint256(ItemOp.TAKE_FOR)) return (false, "unknown item op", nxt, 0);
-        if (order.fillModule == address(0) && order.minFillAnchor != anchor && iop >= uint256(ItemOp.SETTLE) && iamt <= 1) {
-            return (false, "settle item requires full-fill", nxt, 0);
-        }
-        if (idata.length < 32) return (true, "", nxt, 0);
-        uint256 desc = uint256(bytes32(idata[0:32]));
-        // Leg-reference funding descriptors only: TAKE_FOR's, or a pre-fund MAKE's.
-        if (iop != uint256(ItemOp.TAKE_FOR) && desc >> 253 != 5) return (true, "", nxt, 0);
-        if (desc < (uint256(1) << 255) || desc & (uint256(1) << 254) != 0) return (true, "", nxt, 0);
-        return (true, "", nxt, uint256(1) << (desc & 0xffff));
-    }
-
-    /// @dev The `TAKE_FOR` half of {validateOrder}, in its own frame because that
-    ///      function is already at the legacy codegen's stack limit.
-    ///
-    ///      Mirrors {Base._forSlice} one-for-one — short data, an out-of-range leg,
-    ///      a leg the maker does not receive, a missing/zero balance cap, and the
-    ///      balance form's full-fill requirement — plus one footgun the core cannot
-    ///      judge: a LITERAL funding total of zero, which is a composite item that
-    ///      funds nothing, i.e. a plain `TAKE` wearing the wrong op.
-    ///      Split into a per-item helper for the same reason {_takerItemAt} is: the
-    ///      wide `itemAt` tuple plus the descriptor branches do not fit in one frame
-    ///      under the legacy (non-via-IR) codegen this package builds with.
-    ///
-    ///      Its tail also carries {validateOrder}'s LAST rule, the soft-exclusivity
-    ///      carrier check — here rather than in the override section so the more
-    ///      specific pre-fund-under-override reason above wins when both apply.
-    function _validateTakeForItems(Order calldata order) private view returns (bool, string memory) {
-        uint256 n = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
-        uint256 cur = PackedArrays.recordsStart();
-        for (uint256 i; i < n; i++) {
-            (bool ok, string memory why, uint256 nxt) = _proceedsItemAt(order, cur);
-            if (!ok) return (false, why);
-            (ok, why,) = _takeForItemAt(order, cur);
-            if (!ok) return (false, why);
-            cur = nxt;
-        }
-        // ── soft exclusivity with nothing to charge it on ──
-        // {OrderGates.exclusivityOverride} refuses an in-window OUTSIDER with
-        // `NotExclusiveFiller` when no leg can carry the premium (re-audit
-        // 2026-09-29): such a "soft" window is a HARD one, and the override the maker
-        // signed is dead weight. Reported whatever the window's state, like the other
-        // override shape rules — it is a fact about what was signed.
-        if (order.overrideBps() != 0 && !_overrideHasCarrier(order)) {
-            return (false, "override has no carrier leg (outsiders are refused in-window)");
-        }
-        return (true, "");
-    }
-
-    /// @dev Whether any leg can carry a soft-exclusivity premium — a copy of
-    ///      `OrderGates._overrideHasCarrier`, which is `private` to that library and
-    ///      so cannot be called from here. {Pricing} moves only three kinds of leg
-    ///      toward the maker: every BUY input, an AUCTIONED (`end != 0`) SELL input,
-    ///      and a SELL output addressed to the maker (`0` or `maker`). A
-    ///      {Proportional} input never carries it, whatever its `end` (there, the
-    ///      cap) — {Pricing.inputOwed} returns the pinned anchor for one, untouched.
-    ///
-    ///      The raw walk is copied rather than rewritten with the typed accessors,
-    ///      for the same reason the library gives: the typed form inlines its whole
-    ///      decode per call site and measured +245 bytes here (2026-09-29), against
-    ///      a lens left with ~530 to spare. Same packed layout ({PackedArrays}: count byte, then
-    ///      LegIn = token(20) | start(32) | end(32) at stride 84, LegOut = token(20) |
-    ///      start(32) | end(32) | recipient(20) at stride 104), same predicate —
-    ///      `test_lens_softExclusivity_noCarrier_refusedAndFlagged` holds the two
-    ///      to agreeing, shape by shape, against the core's own gate.
-    function _overrideHasCarrier(Order calldata order) private pure returns (bool has) {
-        bool buy = order.side() == OrderSide.BUY;
-        // Validated first, so the raw walks below stay inside the signed blobs.
-        uint256 nIn = PackedArrays.validateFixed(order.legsIn, PackedArrays.LEG_IN_STRIDE);
-        uint256 nOut = buy ? 0 : PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE);
-        bytes calldata legsIn = order.legsIn;
-        bytes calldata legsOut = order.legsOut;
-        address maker = order.maker;
-        uint256 floor = Proportional.SENTINEL_FLOOR; // not assembly-addressable as a constant
-        /// @solidity memory-safe-assembly
-        assembly {
-            // An input leg carries it: every BUY leg, or an auctioned SELL leg — and
-            // never a proportional marker.
-            let p := add(legsIn.offset, 1)
-            for { let e := add(p, mul(nIn, 84)) } lt(p, e) { p := add(p, 84) } {
-                if and(or(buy, iszero(iszero(calldataload(add(p, 52))))), iszero(gt(calldataload(add(p, 20)), floor))) {
-                    has := 1
-                    break
-                }
-            }
-            // A SELL output carries it only if addressed to the maker (0 or maker).
-            if iszero(has) {
-                p := add(legsOut.offset, 1)
-                for { let e := add(p, mul(nOut, 104)) } lt(p, e) { p := add(p, 104) } {
-                    let to := shr(96, calldataload(add(p, 84)))
-                    if or(iszero(to), eq(to, maker)) {
-                        has := 1
-                        break
-                    }
-                }
-            }
-        }
-    }
-
-    /// @dev One item's `TAKE_FOR` checks; a non-composite item passes straight
-    ///      through. Returns the next cursor so the walk needs no re-scan.
-    function _takeForItemAt(Order calldata order, uint256 cursor)
-        private
-        view
-        returns (bool, string memory, uint256)
-    {
-        (uint256 op, address module,,, bytes calldata data, uint256 nxt) =
-            PackedArrays.itemAt(order.items, cursor);
-        // A PRE-FUNDED `MAKE` carries the very same funding descriptor as a
-        // composite's value-IN side — {Base._runItem} sizes it through the same
-        // {Base._forSlice} — so it needs the same preflight. It is opt-in at word 0,
-        // and the test has to fail SOFT: a plain pull `MAKE` opens with an address
-        // (`>> 253 == 0`) and is none of this function's business, so anything that
-        // is not the pre-fund shape passes straight through rather than being
-        // rejected for a descriptor it never claimed to carry.
-        if (op == uint256(ItemOp.MAKE)) {
-            if (data.length < 32 || uint256(bytes32(data[0:32])) >> 253 != 5) return (true, "", nxt);
-        } else if (op != uint256(ItemOp.TAKE_FOR)) {
-            return (true, "", nxt);
-        }
-        if (data.length < 32) return (false, "take_for missing funding descriptor", nxt);
-
-        uint256 desc = uint256(bytes32(data[0:32]));
-        if (desc < (uint256(1) << 255)) {
-            // LITERAL total. Zero is a composite item that funds nothing — a plain
-            // TAKE wearing the wrong op. The core cannot judge that; the maker can.
-            if (desc == 0) return (false, "take_for funds nothing (zero literal)", nxt);
-            return (true, "", nxt);
-        }
-        if (desc & (uint256(1) << 254) == 0) {
-            // LEG REFERENCE — mirrors {Base.ForLegInvalid} (the missing and not-the-maker's rules).
-            uint256 j = desc & 0xffff;
-            if (j >= PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE)) {
-                return (false, "take_for leg index out of range", nxt);
-            }
-            // The maker's own legs are the classic pull-funded shape; a leg addressed
-            // to the item's OWN module is the pre-funded one (the module supplies the
-            // instructed `forAmount` from its balance — no receive-side approvals).
-            // Whether the signed module actually funds from balance is a semantic the
-            // lens cannot read; the asset cross-check below still applies to both
-            // shapes, and a pull-style module under a module-addressed leg surfaces at
-            // preflight as `available == 0` once the maker holds no funding allowance.
-            address r = _legOutRecipient(order.legsOut, j);
-            // ⚠ THE PRE-FUND BIT MAKES THE RULE STRICT, and the lens used to be
-            // LOOSER here than the settler. {Base._forSlice} accepts a
-            // maker-addressed leg only while bit 253 is CLEAR; with it set the leg
-            // must be addressed to the item's own module, because the module funds
-            // from a balance the delivery has to have landed in. A pre-fund
-            // descriptor over a maker-addressed leg therefore reverts
-            // `ForLegInvalid` at fill time — exactly the class of defect a
-            // preflight exists to catch before a signature exists, and now the
-            // dominant one, since every one-sided pre-fund op is this shape.
-            //
-            // The two shapes are DISJOINT, mirroring {Base._forSlice}'s bijection: the
-            // pull form must NOT name the module either. Admitting it here (this used
-            // to read `&& r != module`) whitelisted the one pairing that pulls a second
-            // copy from the maker's wallet and strands the delivery on a shared
-            // singleton — the residue an unbound funding token then makes claimable.
-            // A preflight that accepts what the settler rejects is worse than no
-            // preflight, so the two must agree exactly.
-            if (desc & (uint256(1) << 253) != 0) {
-                if (r != module) return (false, "pre-funded leg must be addressed to the item's module", nxt);
-                // {Base._forSlice} refuses the pre-fund form whenever the soft-
-                // exclusivity override is live — any in-window outsider's fill of
-                // this order reverts `ForLegInvalid` (F29 finding 8e).
-                if (order.overrideBps() != 0) {
-                    return (false, "pre-funded leg with an exclusivity override (outsiders revert)", nxt);
-                }
-                // Bits [16:176) name the asset the module spends; the settler
-                // requires the leg to be denominated in it.
-                if (PackedArrays.legOutToken(order.legsOut, j) != address(uint160(desc >> 16))) {
-                    return (false, "pre-funded leg token != the descriptor's funding token", nxt);
-                }
-            } else if (r != address(0) && r != order.maker) {
-                return (false, "take_for funds a fee leg (not the maker's)", nxt);
-            }
-            // ── the ASSET half of the de-duplication ──
-            // `TAKE_FOR` removes the duplicated funding AMOUNT; the funding ASSET is
-            // still named inside `data`, in a per-module layout the core deliberately
-            // never decodes. If it is not the leg's token, the leg's amount is applied
-            // in the WRONG DECIMALS — the same silent mis-sizing this op exists to
-            // remove, returning through the one door the descriptor left open. Only
-            // the module can read its own blob, so it is asked
-            // ({IFundingSource.fundingSource}); a module that cannot answer reports
-            // `address(0)` and this degrades to the pre-existing gap rather than to a
-            // false rejection of a fillable order.
-            address asset = _fundingAsset(module, order.maker, data);
-            if (asset != address(0) && asset != PackedArrays.legOutToken(order.legsOut, j)) {
-                return (false, "take_for funds a different asset than the leg it is sized by", nxt);
-            }
-            return (true, "", nxt);
-        }
-        // BALANCE — mirrors {Base.ForBalanceInvalid} (the cap and full-fill rules).
-        // The live-balance floor rule of {Base.ForBalanceInvalid} is deliberately NOT
-        // mirrored: it is a live wallet read, so it is a fillability fact at the
-        // moment of the fill, not a defect in the order the maker is about to sign.
-        if (data.length < 64) return (false, "take_for balance leg needs a cap", nxt);
-        if (uint256(bytes32(data[32:64])) == 0) return (false, "take_for balance cap is zero", nxt);
-        // The FLOOR (descriptor bits [160:176), bps of the cap) is the other half of
-        // the bound. ZERO IS NO LONGER FLAGGED, and that is a change of fact rather
-        // than of policy: the core now resolves an unset floor to 10_000 (fund the
-        // whole cap or do not fill) instead of leaving `bal != 0` as the only bound,
-        // so the encoding this used to call malformed is now the STRICTEST one there
-        // is. Rejecting it would fail a safe order. Leniency has moved to where it
-        // belongs — an explicitly signed low `bps` — and the only remaining defect is
-        // a floor ABOVE the cap, which no balance can ever satisfy.
-        uint256 floorBps = (desc >> 160) & 0xffff;
-        if (floorBps > 10_000) return (false, "take_for balance floor exceeds the cap", nxt);
-        if (order.fillModule == address(0) && order.minFillAnchor != OrderGates.fillDenominator(order)) {
-            return (false, "take_for balance leg requires full-fill", nxt);
-        }
-        // ── the ASSET half, for the BALANCE form ──
-        // The same de-duplication the leg reference gets above, applied to the door
-        // the balance descriptor leaves open. The core sizes `forAmount` from
-        // `balanceOf(address(uint160(desc)), maker)` — a token named by the
-        // DESCRIPTOR — while the module spends an asset named separately inside its
-        // own `data`. Nothing on-chain reconciles the two, so a descriptor reading a
-        // 6-decimal balance while the module funds an 18-decimal asset silently
-        // mis-sizes the funding leg while the value-OUT leg still draws in full: a
-        // 3,000e6 USDC read funding 3e-9 WETH. Both halves are maker-signed, so no
-        // filler can choose either and this is a malformed-order footgun rather than
-        // an attack — which is exactly what a preflight is for. Same degradation
-        // rule as the leg form: a module that cannot answer reports `address(0)` and
-        // this falls back to the pre-existing gap rather than rejecting a fillable
-        // order. See `docs/audit-2026-09-leads.md` B-3.
-        address balAsset = _fundingAsset(module, order.maker, data);
-        if (balAsset != address(0) && balAsset != address(uint160(desc))) {
-            return (false, "take_for balance leg reads a different asset than the module funds", nxt);
-        }
-        return (true, "", nxt);
-    }
-
-    /// @dev Memory bundle for {previewTakerAllowances}, so the helper carries one
-    ///      pointer instead of four arrays (a stack-limit concession).
-    struct TakerAllowances {
-        address[] modules;
-        bytes32[] refs;
-        uint160[] amounts;
-        uint48[] expirations;
-    }
-
-    /// @dev Decode the item at `cursor`; if it is a TAKE, read its
-    ///      `(maker, settlement, module, ref)` taker allowance and write slot `k` of
-    ///      `out`. Returns the next cursor and the advanced `k` (unchanged for a
-    ///      non-TAKE). Takes `order` (not `maker`+`items` separately) to keep the
-    ///      param count — and thus this frame — small.
-    function _takerItemAt(Order calldata order, uint256 cursor, TakerAllowances memory out, uint256 k)
-        private
-        view
-        returns (uint256 next, uint256)
-    {
-        (uint256 op, address module,,, bytes calldata data, uint256 n2) = PackedArrays.itemAt(order.items, cursor);
-        if (op != uint256(ItemOp.TAKE) && op != uint256(ItemOp.TAKE_FOR)) return (n2, k);
-        bytes32 ref = keccak256(data);
-        (uint160 amt, uint48 exp) = PERMIT3.takerAllowance(order.maker, address(SETTLEMENT), module, ref);
-        out.modules[k] = module;
-        out.refs[k] = ref;
-        out.amounts[k] = amt;
-        out.expirations[k] = exp;
-        unchecked {
-            return (n2, k + 1);
-        }
-    }
-
-    // ──────────────── Funding-leg preflight (the TAKE_FOR value-IN side) ────────────────
-
-    /// @dev `module.fundingSource(user, data)` — best-effort staticcall, the same
-    ///      posture {_erc20Allowance} takes. A module that does not implement it, or
-    ///      reverts on this blob, reports `(address(0), 0)` and every caller here
-    ///      reads that as "unknown", never as "broken": these checks are ADDITIONS to
-    ///      a preflight that shipped without them, so a module that cannot answer must
-    ///      leave the caller with the old behaviour rather than a rejection it would
-    ///      not previously have seen.
-    function _fundingSource(address module, address user, bytes calldata data)
-        private
-        view
-        returns (address asset, uint256 available)
-    {
-        (bool ok, bytes memory ret) =
-            module.staticcall(abi.encodeCall(IFundingSource.fundingSource, (user, data)));
-        if (ok && ret.length >= 64) (asset, available) = abi.decode(ret, (address, uint256));
-    }
-
-    /// @dev The PROCEEDS check for one item, and it applies to a plain `TAKE` as much
-    ///      as to a composite one — which is why it is its own pass rather than a
-    ///      branch inside {_takeForItemAt} (that frame is already at the legacy
-    ///      codegen's stack limit, and this check predates `TAKE_FOR` entirely).
-    ///
-    ///      An item's proceeds are credited by MEASUREMENT — {Core._payInputsToSolver}
-    ///      reads the balance delta of `legsIn[i].token` — while the token actually
-    ///      delivered is named only inside `data`, in a layout the core never decodes.
-    ///      Deliver a token no input leg names and the maker pays TWICE: every leg
-    ///      measures zero proceeds, so the whole `owed` is pulled from their wallet,
-    ///      AND the delivered token is credited to nobody and can never leave the
-    ///      settler (`fill` has no sweep, and Settlement grants no ERC-20 approval to
-    ///      anyone — the same invariant that makes the measurement sound).
-    ///
-    ///      Gated on `recipient == 0` because a signed recipient routes the proceeds
-    ///      away from the settler deliberately. See {IProceedsAsset} and
-    ///      `docs/reference-audits.md` §F22.
-    function _proceedsItemAt(Order calldata order, uint256 cursor)
-        private
-        view
-        returns (bool, string memory, uint256)
-    {
-        (uint256 op, address module,, address to, bytes calldata data, uint256 nxt) =
-            PackedArrays.itemAt(order.items, cursor);
-        if (to != address(0)) return (true, "", nxt);
-        if (op != uint256(ItemOp.TAKE) && op != uint256(ItemOp.TAKE_FOR)) return (true, "", nxt);
-        address got = _proceedsAsset(module, data);
-        if (got != address(0) && !_isInputLegToken(order.legsIn, got)) {
-            return (false, "item delivers a token no input leg can consume", nxt);
-        }
-        return (true, "", nxt);
-    }
-
-    /// @dev `module.proceedsAsset(data)` — best-effort, same posture as
-    ///      {_fundingSource}: silence means "unknown", never "broken".
-    function _proceedsAsset(address module, bytes calldata data) private view returns (address a) {
-        (bool ok, bytes memory ret) = module.staticcall(abi.encodeCall(IProceedsAsset.proceedsAsset, (data)));
-        if (ok && ret.length >= 32) a = abi.decode(ret, (address));
-    }
-
-    /// @dev Is `token` one the order's input legs can consume? SOME leg, deliberately
-    ///      not leg 0 — a rising relayer-fee leg in a different token is legitimate,
-    ///      and proceeds credited to any leg are proceeds that leave the settler.
-    function _isInputLegToken(bytes calldata legsIn, address token) private pure returns (bool) {
-        uint256 n = PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE);
-        for (uint256 i; i < n; i++) {
-            if (PackedArrays.legInToken(legsIn, i) == token) return true;
-        }
-        return false;
-    }
-
-    /// @dev The `asset` half alone — {_takeForItemAt} is stack-tight enough that
-    ///      binding the second return value there does not fit.
-    function _fundingAsset(address module, address user, bytes calldata data) private view returns (address a) {
-        (a,) = _fundingSource(module, user, data);
-    }
-
-    /// @dev Memory bundle for {previewItemFunding}, one slot per `TAKE_FOR` item.
-    ///      `assets[j] == address(0)` means the module did not answer: `required[j]`
-    ///      is still meaningful (the CORE computes it), `available[j]` is not.
-    struct ItemFunding {
-        address[] modules;
-        address[] assets;
-        uint256[] required;
-        uint256[] available;
-    }
-
-    /// @notice The FUNDING side of every item that pulls from the maker — `MAKE` and
-    ///         `TAKE_FOR` alike. The half {previewTakerAllowances} does not report and
-    ///         structurally cannot.
-    ///
-    /// @dev    An item that funds anything pulls it with
-    ///         `permit3.transferFrom(maker, MODULE, asset, …)`, so the grant it spends
-    ///         is `(maker, module, asset)`. Neither of the other two preflights reads
-    ///         that book: {_makerFillableCap} walks `legsIn` with the SETTLER as
-    ///         spender, and {previewTakerAllowances} reads the taker book, which gates
-    ///         what LEAVES a position rather than what funds it. The funding asset
-    ///         need not appear in `legsIn` at all.
-    ///
-    ///         `MAKE` is the common case and predates `TAKE_FOR` by a long way — every
-    ///         deposit and every repay on every venue funds itself this way, and until
-    ///         this view nothing previewed any of them (`docs/reference-audits.md`
-    ///         §F21). A `TAKE_FOR` item is the same pull with the amount resolved from
-    ///         a descriptor instead of read off the item head.
-    ///
-    ///         Without this view an order can pass {validateOrder}, pass
-    ///         {previewTakerAllowances}, and revert on EVERY fill for want of a single
-    ///         `approveToken` — the most likely first-integration failure of the op,
-    ///         and the least legible, because the revert surfaces from inside Permit3
-    ///         two calls deep with nothing naming the missing grant.
-    ///
-    ///         `required[j]` is this order's FULL-FILL funding amount, computed the
-    ///         way {Base._forSlice} computes it, so `available[j] >= required[j]` is
-    ///         the condition for the order to fill whole.
-    ///
-    ///         ⚠ `available >= required` IS NOT A GUARANTEE, for two deliberate
-    ///         reasons. A SELL leg is priced per fill with a `ceil`, so N partial
-    ///         fills can pull a few units MORE than the leg total — size the module's
-    ///         token allowance with margin, not to `required` exactly. And this is a
-    ///         live read: the maker can spend the balance or let the grant lapse
-    ///         between here and the fill.
-    function previewItemFunding(Order calldata order) external view returns (ItemFunding memory out) {
-        bytes calldata items = order.items;
-        uint256 n = PackedArrays.validateRecords(items, PackedArrays.ITEM_HEAD);
-
-        uint256 count;
-        uint256 cursor = PackedArrays.recordsStart();
-        for (uint256 i; i < n;) {
-            (uint256 op,,,,, uint256 next) = PackedArrays.itemAt(items, cursor);
-            if (op == uint256(ItemOp.MAKE) || op == uint256(ItemOp.TAKE_FOR)) ++count;
-            cursor = next;
-            unchecked {
-                ++i;
-            }
-        }
-
-        out.modules = new address[](count);
-        out.assets = new address[](count);
-        out.required = new uint256[](count);
-        out.available = new uint256[](count);
-        if (count == 0) return out;
-
-        // Full-fill output tick per leg — what the leg-reference descriptor resolves
-        // to when the whole order fills. Hoisted out of the walk: it is identical for
-        // every item and it is the expensive part.
-        uint256[] memory outs = order.currentAmountOut();
-
-        uint256 k;
-        cursor = PackedArrays.recordsStart();
-        for (uint256 i; i < n;) {
-            // One helper for the whole per-item decode+read+write, for the reason
-            // {_takerItemAt} gives: the wide `itemAt` tuple must not share this frame.
-            (cursor, k) = _fundingItemAt(order, outs, out, cursor, k);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /// @dev One item's funding row. Mirrors {Base._forSlice}'s three descriptor forms
-    ///      at FULL fill; a non-composite item passes straight through.
-    function _fundingItemAt(
-        Order calldata order,
-        uint256[] memory outs,
-        ItemFunding memory out,
-        uint256 cursor,
-        uint256 k
-    ) private view returns (uint256, uint256) {
-        (uint256 op, address module, uint256 amount,, bytes calldata data, uint256 n2) =
-            PackedArrays.itemAt(order.items, cursor);
-        if (op != uint256(ItemOp.MAKE) && op != uint256(ItemOp.TAKE_FOR)) return (n2, k);
-
-        out.modules[k] = module;
-        (out.assets[k], out.available[k]) = _fundingSource(module, order.maker, data);
-        // A MAKE item's funding amount IS the item's own signed amount — there is no
-        // descriptor, because there is nothing to de-duplicate: the number is signed
-        // once, in the item head. `TAKE_FOR` is the case where the amount comes from
-        // elsewhere and has to be resolved.
-        out.required[k] = op == uint256(ItemOp.MAKE) ? amount : _requiredFunding(order, outs, data);
-        unchecked {
-            return (n2, k + 1);
-        }
-    }
-
-    /// @dev The full-fill `forAmount` for one item's descriptor. A malformed one
-    ///      reports `0` rather than reverting — {validateOrder} is where malformed
-    ///      orders are named, and this view must stay callable on a broken order so a
-    ///      UI can show both diagnoses at once.
-    function _requiredFunding(Order calldata order, uint256[] memory outs, bytes calldata data)
-        private
-        view
-        returns (uint256)
-    {
-        if (data.length < 32) return 0;
-        uint256 desc = uint256(bytes32(data[0:32]));
-        if (desc < (uint256(1) << 255)) return desc; // literal total
-        if (desc & (uint256(1) << 254) == 0) {
-            uint256 j = desc & 0xffff;
-            return j < outs.length ? outs[j] : 0; // leg reference
-        }
-        // BALANCE: `min(balanceOf(token, maker), cap)`, exactly as the core reads it.
-        if (data.length < 64) return 0;
-        uint256 cap = uint256(bytes32(data[32:64]));
-        uint256 bal = SafeTransferLib.balanceOf(address(uint160(desc)), order.maker);
-        return bal < cap ? bal : cap;
-    }
-
-    // NOTE ON describe() (U-5): the human-readable per-position string comes from a
-    // module's OPTIONAL {ITakerModuleDescribe.describe}, NOT from a lens method — a
-    // batched `describeTakerAllowances` here measured +237 bytes and put this lens
-    // over EIP-170. It does not need to be on-chain-batched: a frontend already holds
-    // each TAKE item's `data` (it has the order), and {previewTakerAllowances} gives
-    // it the modules, so it reads `module.describe(data)` directly (with its own
-    // graceful fallback). The SDK exposes the ABI for exactly that call.
 }

@@ -5,7 +5,7 @@ import {Settlement} from "@core/settlement/Settlement.sol";
 import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {SettlementLens} from "./SettlementLens.sol";
-import {IDestinationSettler, OrderPayload} from "./Erc7683.sol";
+import {IDestinationSettler, FillBounds, FillerData, FillPayload, Order7683, OrderPayload} from "./Erc7683.sol";
 
 /// @title DestinationSettler7683
 /// @notice The ERC-7683 `fill` entry point: a solver that already speaks the standard
@@ -13,7 +13,7 @@ import {IDestinationSettler, OrderPayload} from "./Erc7683.sol";
 ///         underlying 1delta-x order, with the solver's own tokens, in one call.
 ///
 ///  What it does, in order:
-///    1. decode the payload and CHECK IT IS THE ORDER THE CALLER ASKED FOR
+///    1. decode the {FillPayload} and CHECK IT IS THE ORDER THE CALLER ASKED FOR
 ///       (`orderId == hashOrder(order)`) — the standard's id is our order hash, so a
 ///       mismatch means the caller was handed a different order than it quoted;
 ///    2. record a BALANCE FLOOR for every touched token (input and output), then pull
@@ -21,18 +21,49 @@ import {IDestinationSettler, OrderPayload} from "./Erc7683.sol";
 ///       adapter), sized by {SettlementLens.previewFill} — the same numbers the fill
 ///       will charge;
 ///    3. approve the settlement the AGGREGATE per token, run `fillUpTo`, reset to zero;
-///    4. sweep every touched token's balance above its floor to the caller (or the
+///    4. HOLD THE FILL TO THE CALLER'S BOUNDS ({FillBounds}) — the published
+///       `maxSpent` / `minReceived`, or the caller's own from `fillerData` — against
+///       the `paid` / `received` the settlement itself returns;
+///    5. sweep every touched token's balance above its floor to the caller (or the
 ///       recipient named in `fillerData`). That one sweep returns both leftover output
 ///       funds and the fill's input-leg proceeds, and pays only what actually landed.
+///
+///  ⚠ STEP 4 IS WHAT MAKES `maxSpent` A CAP (audit 2026-09-30 PERIPH-1). This adapter
+///  pulls whatever the IN-TRANSACTION price is, and a maker controls several things
+///  that move that price toward itself between the quote and the fill: a priority
+///  auction prices off `tx.gasprice` (an `eth_call` at gas price 0 quotes the floor, a
+///  real tip clears near `start`), a maker-chosen price module receives the filler
+///  address and may answer this adapter differently from the resolver, and a curve or
+///  a gas bump can move the tick back up. The signed `start` was the only ceiling, and
+///  a solver with a standing approval paid it. Every fill now reverts {BoundExceeded}
+///  unless each leg settled at the bound's price or better.
 ///
 ///  ⚠ WHY `fillUpTo`, NOT the strict `fill`. `p.fillAmount` is published VERBATIM in
 ///  the origin adapter's `Open` event and replayed by every solver. The strict `fill`
 ///  reverts {OverFill} once the order is partially filled through any other entry, so
 ///  the published payload would brick for the remainder of the order. `fillUpTo`
 ///  CLAMPS to remaining, exactly as {SettlementLens.previewFill} does when it sizes
-///  the pulls above — so the approval, the pull and the settled amount stay in
-///  agreement — and every partially-fillable order stays fillable through the
-///  standard for its whole life.
+///  the pulls above, and the bounds are per-unit, so the clamped fill is held to the
+///  quoted PRICE rather than to its size. A {Proportional} order is the exception to
+///  the clamp — the core never trims one down, and the `type(uint256).max` "whatever
+///  the balance is" sentinel is the one size it resolves against the live balance. A
+///  proportional fill pays every output IN FULL whatever the anchor resolves to, so a
+///  maker draining its balance before the fill moves the per-unit price, and step 4
+///  reverts it (PERIPH-3).
+///
+///  ⚠ THE FILLER THE SETTLEMENT SEES IS THIS CONTRACT, never the solver calling it
+///  (PERIPH-7). So:
+///    • an exclusivity window names someone else ⇒ the fill is an OUTSIDER's: a HARD
+///      window reverts `NotExclusiveFiller`, a SOFT one charges the override premium
+///      (the origin quotes it that way);
+///    • a filler-aware gate — a solver whitelist, an attestation validator, a
+///      cosigned quote bound to a filler — sees this permissionless adapter. Naming
+///      the adapter opens the order to every caller; naming the solver makes it
+///      unfillable here;
+///    • a `SETTLE` item would pay the adapter, so such orders are refused
+///      ({Order7683.SettleItemUnsupported}), and the adapter has no ERC-721/1155
+///      receiver hooks;
+///    • the flow is inventory-funded only — there is no callback.
 ///
 ///  ⚠ THIS CONTRACT MUST END EVERY CALL HOLDING NOTHING AND APPROVING NOTHING, and
 ///  that is load-bearing rather than hygiene — the same argument {NativeSettler}
@@ -63,6 +94,13 @@ contract DestinationSettler7683 is IDestinationSettler {
     error BalanceFloorBreached();
     /// @dev The lens passed to the constructor serves a different settlement.
     error LensSettlementMismatch();
+    /// @dev The bounds do not fit the order: `quotedDelta == 0`, or an array whose
+    ///      length is not the order's leg count. Fails closed — a bound that cannot
+    ///      be applied is never read as "no bound".
+    error MalformedBounds();
+    /// @dev Output leg `leg` charged the filler more than the bound's price, or input
+    ///      leg `leg` paid it less (`output` says which side). Nothing was settled.
+    error BoundExceeded(bool output, uint256 leg);
 
     /// @dev The two addresses MUST be a pair: `LENS` sizes the amounts this contract
     ///      pulls from the caller and approves, and `SETTLEMENT` is what then charges
@@ -77,21 +115,24 @@ contract DestinationSettler7683 is IDestinationSettler {
     }
 
     /// @inheritdoc IDestinationSettler
-    /// @param fillerData optional `abi.encode(address recipient)` — where proceeds go.
-    ///                   Empty means the caller. A destination only: authority for the
-    ///                   fill is this contract, and the caller pays for it either way.
+    /// @param originData `abi.encode(FillPayload)` — the published fill instruction's
+    ///                   `originData`, verbatim.
+    /// @param fillerData empty (proceeds to the caller, published bounds), or
+    ///                   `abi.encode(address payTo)`, or `abi.encode(FillerData)` —
+    ///                   see {FillerData}. Authority for the fill is this contract,
+    ///                   and the caller pays for it either way.
     function fill(bytes32 orderId, bytes calldata originData, bytes calldata fillerData) external override {
-        OrderPayload memory p = abi.decode(originData, (OrderPayload));
+        FillPayload memory fp = abi.decode(originData, (FillPayload));
+        OrderPayload memory p = fp.payload;
         if (LENS.hashOrder(p.order) != orderId) revert OrderIdMismatch();
-        address payTo = fillerData.length == 32 ? abi.decode(fillerData, (address)) : msg.sender;
+        Order7683.requireNoSettleItem(p.order.items);
 
-        // Quote with THIS contract as the filler — it is the address Settlement will
-        // pull outputs from and pay inputs to. `previewFill` mirrors the `fillUpTo`
-        // clamp, so `paid[j]` is exactly what the (clamped) fill pulls per output leg.
-        (,, uint256[] memory paid) = LENS.previewFill(p.order, p.fillAmount, address(this), p.takerData);
-
+        (address payTo, uint256 minBumpBps) = _fillerTerms(fillerData, fp);
         uint256 nOut = PackedArraysMem.validateLegsOut(p.order.legsOut);
         uint256 nIn = PackedArraysMem.validateLegsIn(p.order.legsIn);
+        if (fp.bounds.quotedDelta == 0 || fp.bounds.maxPaid.length != nOut || fp.bounds.minReceived.length != nIn) {
+            revert MalformedBounds();
+        }
 
         // The floor is taken over the UNION of every touched token, BEFORE any caller
         // funds arrive — the true on-entry balance. A token that appears on both sides
@@ -105,9 +146,53 @@ contract DestinationSettler7683 is IDestinationSettler {
         (address[] memory tokens, uint256[] memory floors) =
             _touchedFloors(p.order.legsIn, p.order.legsOut, nIn, nOut);
 
-        // Pull each output leg from the caller.
+        _fundAndFill(p, nOut, minBumpBps, fp.bounds);
+
+        // Enforce the floor and sweep everything above it — leftover output funds and
+        // input proceeds alike — to `payTo`. Paying the actual balance delta (not a
+        // preview nominal) is fee-on-transfer safe and cannot draw a stranded balance.
+        for (uint256 t; t < tokens.length; t++) {
+            uint256 bal = tokens[t].balanceOf(address(this));
+            if (bal < floors[t]) revert BalanceFloorBreached();
+            if (bal > floors[t]) tokens[t].safeTransfer(payTo, bal - floors[t]);
+        }
+    }
+
+    /// @dev `payTo` and the price floor from `fillerData`, and — in the long form — the
+    ///      caller's own bounds written over the published ones in `fp`.
+    function _fillerTerms(bytes calldata fillerData, FillPayload memory fp)
+        private
+        view
+        returns (address payTo, uint256 minBumpBps)
+    {
+        if (fillerData.length == 32) {
+            payTo = abi.decode(fillerData, (address));
+        } else if (fillerData.length != 0) {
+            FillerData memory fd = abi.decode(fillerData, (FillerData));
+            payTo = fd.payTo;
+            minBumpBps = fd.minBumpBps;
+            if (fd.bounds.quotedDelta != 0) fp.bounds = fd.bounds;
+        }
+        if (payTo == address(0)) payTo = msg.sender;
+    }
+
+    /// @dev Steps 2–4: pull, approve, `fillUpTo`, reset, then the bound check on what
+    ///      the settlement REPORTS it charged and paid. Its own frame for the legacy
+    ///      (non-via-IR) stack limit.
+    function _fundAndFill(OrderPayload memory p, uint256 nOut, uint256 minBumpBps, FillBounds memory b) private {
+        // Quote with THIS contract as the filler — it is the address Settlement will
+        // pull outputs from and pay inputs to. `previewFill` mirrors the `fillUpTo`
+        // clamp, so `paid[j]` is exactly what the (clamped) fill pulls per output leg.
+        (,, uint256[] memory paid) = LENS.previewFill(p.order, p.fillAmount, address(this), p.takerData);
+
+        // Pull each output leg from the caller. Zero-guarded, like the core's own
+        // `_deliverOutputs`: a leg that prices to 0 (a BUY dust slice, a zero fee leg)
+        // is skipped there, and a token that rejects zero-value transfers must not
+        // make the 7683 path stricter than a direct fill.
         for (uint256 j; j < nOut; j++) {
-            PackedArraysMem.legOutToken(p.order.legsOut, j).safeTransferFrom(msg.sender, address(this), paid[j]);
+            if (paid[j] != 0) {
+                PackedArraysMem.legOutToken(p.order.legsOut, j).safeTransferFrom(msg.sender, address(this), paid[j]);
+            }
         }
         // Approve the settlement the AGGREGATE per token, once. Settlement pulls each
         // output leg with a SEPARATE transferFrom, so a duplicate-token basket (the
@@ -121,9 +206,10 @@ contract DestinationSettler7683 is IDestinationSettler {
         }
 
         // `fillUpTo` with `recipient = address(0)` routes the input-leg proceeds to
-        // this contract (the caller/filler), so the single floor sweep below settles
-        // them. `minBumpBps = 0`: the adapter takes no price floor of its own.
-        SETTLEMENT.fillUpTo(p.order, p.signature, p.fillAmount, address(0), 0, p.takerData);
+        // this contract (the caller/filler), so the single floor sweep settles them.
+        // `minBumpBps` is the caller's own price floor (0 unless it passed one).
+        (uint256 delta, uint256[] memory received, uint256[] memory charged) =
+            SETTLEMENT.fillUpTo(p.order, p.signature, p.fillAmount, address(0), minBumpBps, p.takerData);
 
         // Reset each output-token approval to 0, once.
         for (uint256 j; j < nOut; j++) {
@@ -131,13 +217,27 @@ contract DestinationSettler7683 is IDestinationSettler {
             if (_firstOutIndex(p.order.legsOut, token, nOut) == j) token.forceApprove(address(SETTLEMENT), 0);
         }
 
-        // Enforce the floor and sweep everything above it — leftover output funds and
-        // input proceeds alike — to `payTo`. Paying the actual balance delta (not a
-        // preview nominal) is fee-on-transfer safe and cannot draw a stranded balance.
-        for (uint256 t; t < tokens.length; t++) {
-            uint256 bal = tokens[t].balanceOf(address(this));
-            if (bal < floors[t]) revert BalanceFloorBreached();
-            if (bal > floors[t]) tokens[t].safeTransfer(payTo, bal - floors[t]);
+        _checkBounds(delta, received, charged, b);
+    }
+
+    /// @dev The {FillBounds} rule, on the settlement's OWN return values — the amounts
+    ///      it pulled from this adapter and paid it, not the preview. Cross-multiplied
+    ///      so a clamped fill is judged per unit; an overflowing product reverts, which
+    ///      fails closed. Walked over the BOUNDS' lengths (already checked against the
+    ///      order's leg counts), so a short return array panics rather than skipping
+    ///      a leg.
+    function _checkBounds(uint256 delta, uint256[] memory received, uint256[] memory paid, FillBounds memory b)
+        private
+        pure
+    {
+        uint256 q = b.quotedDelta;
+        for (uint256 j; j < b.maxPaid.length; j++) {
+            uint256 cap = b.maxPaid[j];
+            if (cap != type(uint256).max && paid[j] * q >= cap * delta + q) revert BoundExceeded(true, j);
+        }
+        for (uint256 i; i < b.minReceived.length; i++) {
+            uint256 floor = b.minReceived[i];
+            if (floor != 0 && received[i] * q + q <= floor * delta) revert BoundExceeded(false, i);
         }
     }
 

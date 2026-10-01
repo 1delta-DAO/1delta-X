@@ -190,10 +190,11 @@ contract LensReaudit0929Test is MockSettlementBase {
         settlement.fill(o, sig, IN_);
 
         // The balance regrows past the recorded progress. `anchor - done` is positive,
-        // but no fill can ever start from non-zero progress: fillable must read 0.
+        // but no fill can ever start from non-zero progress: fillable must read 0 —
+        // and since audit 2026-09-30 PERIPH-8 the status says why: the sweep is DONE.
         tA.mint(maker, (IN_ * 3) / 2); // anchor 1.5x, recorded progress 1x
         (st, fillable,,) = lens.getOrderRelevantState(o, sig, solver, "");
-        assertEq(uint256(st), uint256(SettlementLens.OrderStatus.Fillable));
+        assertEq(uint256(st), uint256(SettlementLens.OrderStatus.Filled));
         assertEq(fillable, 0, "progress recorded: never completable");
         vm.prank(solver);
         vm.expectRevert(Proportional.ProportionalNeedsFullFill.selector);
