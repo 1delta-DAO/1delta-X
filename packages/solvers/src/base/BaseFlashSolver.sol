@@ -130,6 +130,27 @@ struct FlashOpts {
 ///  named everyone. A solver that needs an identity runs its own operator-gated
 ///  contract.
 abstract contract BaseFlashSolver {
+    /// @notice First word of a PERMIT-ENVELOPED `sig` (audit 2026-09-30 AGG-6).
+    ///
+    ///  A single-signature order — the maker signed a Permit3 `PermitBatchWitness`
+    ///  binding the order, not an EIP-712 Order — can only take its FIRST fill
+    ///  through `Settlement.fillWithPermit`, which runs no filler callback; so the
+    ///  outputs must be paid from capital the filler already has. A flash loan is
+    ///  exactly that capital, and every solver here already pays the outputs from
+    ///  it, so the only missing piece was the entry: pass
+    ///
+    ///      sig = abi.encode(PERMIT_ENVELOPE, PermitBatch batch, bytes permitSig, uint256 minBumpBps)
+    ///
+    ///  (or build it with {permitEnvelope}) in place of the order signature, and the
+    ///  fill inside the flash goes through `fillWithPermit(order, batch, permitSig,
+    ///  fillAmountIn, minBumpBps, takerData)` instead of `fill`. Nothing else moves:
+    ///  the same flash, swap, repayment and profit sweep, and the maker's permit is
+    ///  verified by the settler exactly as for an EOA filler. A plain order
+    ///  signature (65-byte ECDSA, an EIP-1271 blob, a bulk proof) can never begin
+    ///  with this word by accident — it is a hash nobody signs — and a misrouted
+    ///  blob only fails the fill.
+    bytes32 public constant PERMIT_ENVELOPE = keccak256("1delta.BaseFlashSolver.PermitEnvelope");
+
     IPermit3 public immutable permit3;
     Settlement public immutable settlement;
     IUniV3Router public immutable router;
@@ -336,6 +357,35 @@ abstract contract BaseFlashSolver {
         permit3.approveToken(address(settlement), token, type(uint160).max, 0);
     }
 
+    /// @notice The `sig` that makes this solver fill a PermitBatchWitness order — see
+    ///         {PERMIT_ENVELOPE}. Pure; a convenience for off-chain callers.
+    function permitEnvelope(IPermit3.PermitBatch calldata batch, bytes calldata permitSig, uint256 minBumpBps)
+        external
+        pure
+        returns (bytes memory)
+    {
+        return abi.encode(PERMIT_ENVELOPE, batch, permitSig, minBumpBps);
+    }
+
+    /// @dev The settler call every flash callback makes: `fill` for an ordinary
+    ///      order signature, `fillWithPermit` for a {PERMIT_ENVELOPE}d one.
+    function _settle(Order memory order, bytes memory sig, uint256 fillAmountIn, bytes memory takerData) internal {
+        bytes32 head;
+        if (sig.length >= 32) {
+            /// @solidity memory-safe-assembly
+            assembly {
+                head := mload(add(sig, 0x20))
+            }
+        }
+        if (head == PERMIT_ENVELOPE) {
+            (, IPermit3.PermitBatch memory batch, bytes memory permitSig, uint256 minBumpBps) =
+                abi.decode(sig, (bytes32, IPermit3.PermitBatch, bytes, uint256));
+            settlement.fillWithPermit(order, batch, permitSig, fillAmountIn, minBumpBps, takerData);
+        } else {
+            settlement.fill(order, sig, fillAmountIn, takerData);
+        }
+    }
+
     /// @dev The leverage core: run the maker fill, then swap the borrow proceeds
     ///      (`PackedArraysMem.legInToken(order.legsIn, 0)`) back to `tokenOut` (the flash-loaned collateral) so the
     ///      caller can repay. Leaves all proceeds in `tokenOut` denomination here.
@@ -354,7 +404,7 @@ abstract contract BaseFlashSolver {
         // the multi-input variant).
         if (PackedArraysMem.validateLegsIn(order.legsIn) != 1) revert MultiInputUnsupported();
 
-        settlement.fill(order, sig, fillAmountIn, takerData);
+        _settle(order, sig, fillAmountIn, takerData);
 
         address tokenIn = PackedArraysMem.legInToken(order.legsIn, 0);
         // An input already in the collateral asset needs no swap — and the router
@@ -407,7 +457,7 @@ abstract contract BaseFlashSolver {
         uint256[] memory minSwapOuts,
         bytes memory takerData
     ) internal {
-        settlement.fill(order, sig, fillAmountIn, takerData);
+        _settle(order, sig, fillAmountIn, takerData);
 
         uint256 n = PackedArraysMem.validateLegsIn(order.legsIn);
         for (uint256 i; i < n; i++) {

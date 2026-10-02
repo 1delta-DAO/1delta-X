@@ -3,7 +3,8 @@ pragma solidity ^0.8.28;
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
-import {Settlement, Order, CallbackMode} from "@core/settlement/Settlement.sol";
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
+import {Settlement, Order, CallbackMode, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 
 /// @title AggregatorFillSolver
@@ -170,11 +171,29 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 ///  SUPPORTED SHAPES (audit 2026-09-30 AGG-2 / AGG-6): any number of input and
 ///  output legs over at most {MAX_TOKENS} distinct tokens (each measured, approved
 ///  and split on its own delta — see {FillRoute}); one router call per fill, no
-///  native value. NOT supported, by the core rather than by this contract: orders
-///  with ITEMS (the core's `PostInputs` mode is item-free —
-///  `ReverseModeRequiresNoItems`), and single-signature PermitBatchWitness orders
-///  (`fillWithPermit` has no callback entry), which only an inventory filler can
-///  serve. What it changes otherwise is WHO Settlement sees as the filler. The exclusivity
+///  native value.
+///
+///    • ITEM-FREE orders — {executeFill} (`fillWithCallback`, `PostInputsDirect`).
+///    • ITEM-BEARING orders — {executeItemFill}. The core's `PostInputs` mode is
+///      item-free (`ReverseModeRequiresNoItems`), so this entry drives a ONE-ORDER
+///      `matchSettle` plan instead: items that produce the input (a TAKE —
+///      withdraw, borrow) run first, the maker's remaining input is pulled, the
+///      input is pre-sent here, the route runs as the plan's `CALL` step and pays
+///      Settlement, the outputs are delivered, and items that consume the delivery
+///      (a wallet-funded MAKE — deposit, repay) run last. Zero inventory, zero
+///      flash, zero Settlement bytes. The core still refuses on that path what it
+///      refuses for every netted plan: SETTLE and TAKE_FOR items, PUSH-funded
+///      (pre-funded) MAKE items, and delta-verify orders — those stay with the
+///      flash family (`BaseFlashSolver`, which fills through `fill`) or an
+///      inventory filler.
+///    • Single-signature PermitBatchWitness orders: their FIRST fill has no
+///      callback entry (`fillWithPermit` passes no callback, and `fillWithCallback`
+///      / `matchSettle` verify only an Order signature), so it needs capital up
+///      front — the flash family takes such an order through its permit envelope
+///      ({BaseFlashSolver.PERMIT_ENVELOPE}). Every LATER slice is fillable here:
+///      the settler skips signature verification once `filled != 0`.
+///
+///  What it changes otherwise is WHO Settlement sees as the filler. The exclusivity
 ///  gate compares `order.exclusiveFiller` to `msg.sender` of the fill, which is
 ///  THIS contract — so an order that names this instance as its exclusive filler
 ///  is, on a permissionless instance, exclusive to anyone willing to route
@@ -330,7 +349,9 @@ contract AggregatorFillSolver {
     ///      3 = inside that fill, callback consumed (the route ran). Held at 3
     ///      through the surplus split, so neither a reentrant `executeFill` (from a
     ///      router, or a hook token paid out by the split) nor {sweep} can run
-    ///      mid-fill (audit 2026-09-30 AGG-1 / AGG-8).
+    ///      mid-fill (audit 2026-09-30 AGG-1 / AGG-8). 4 / 5 are the same pair for
+    ///      {executeItemFill} and its {onMatchRoute} step — distinct values, so
+    ///      neither callback can be driven from the other entry's fill.
     uint256 private _active = 1;
 
     /// @notice Most distinct leg tokens one order may name — see {FillRoute}.
@@ -516,6 +537,12 @@ contract AggregatorFillSolver {
     error Reentrancy();
     /// @dev The order names more than {MAX_TOKENS} distinct leg tokens.
     error TooManyTokens();
+    /// @dev {executeItemFill}'s `lateItems` names an item index the order does not have.
+    error BadItemSchedule();
+    /// @dev A delta-verify order on {executeItemFill}: the netted path cannot verify a
+    ///      recipient delta (the core's `DeltaVerifyNotBatchable`), so refuse before
+    ///      anything moves. Fill it through {executeFill}.
+    error DirectNotMatchable();
     /// @dev `legsIn[0]` / `legsOut[0]` must exist before their tokens can be read —
     ///      {PackedArraysMem} is an unchecked reader, and a blob declaring zero
     ///      legs with trailing bytes would otherwise name an arbitrary token.
@@ -671,6 +698,151 @@ contract AggregatorFillSolver {
             _splitSurplus(route.tokens[k], route.before[k], order.maker, plan, to);
         }
         _active = 1;
+    }
+
+    /// @notice Fill an ITEM-BEARING `order` by routing its input through
+    ///         `plan.router` — the zero-inventory counterpart of {executeFill} for the
+    ///         orders the core's item-free `PostInputs` mode refuses (audit 2026-09-30
+    ///         AGG-6).
+    ///
+    ///  The fill is a one-order `matchSettle` plan this function writes itself —
+    ///  the caller chooses only WHERE each item runs, never what the plan does:
+    ///
+    ///    1. ITEM k for every item NOT flagged in `lateItems`, in index order — the
+    ///       ones that PRODUCE the input (a TAKE: withdraw, borrow). Their proceeds
+    ///       are credited to the order's input legs by the core;
+    ///    2. PULL every input leg — the core draws only the shortfall the items left;
+    ///    3. PRESEND every input token — the pool's excess over what it still owes
+    ///       comes HERE (this contract is `matchSettle`'s caller);
+    ///    4. CALL {onMatchRoute} — the route, bounded exactly as {onFill} bounds it,
+    ///       then every output token's proceeds of this fill are PUSHED to
+    ///       Settlement (`legsOut[0]`'s capped at `maxPay`, floored at `minOut`);
+    ///    5. DELIVER the outputs from the pool;
+    ///    6. ITEM k for every item flagged in `lateItems` — the ones that CONSUME the
+    ///       delivery (a wallet-funded MAKE: deposit, repay).
+    ///
+    ///  Settlement then sweeps the pool's surplus — the spread — back HERE (the
+    ///  plan's `profitRecipient`), and it is split by the same {SurplusPolicy} and
+    ///  originator share as {executeFill}, on the same pre-fill deltas.
+    ///
+    ///  Nothing about the maker's protection moves to this contract: the core runs
+    ///  every gate at open, enforces the maker's {ItemPolicy} against the order the
+    ///  steps run in (an ORDERED / ATOMIC / CANONICAL order whose policy the chosen
+    ///  `lateItems` violates reverts `ItemPolicyViolated`), reconciles every input
+    ///  leg, checks completeness and the invariants at the end, and floors every
+    ///  touched token at its pre-plan balance. The plan's shape limits are the
+    ///  core's: no SETTLE / TAKE_FOR / PUSH-funded MAKE item, no delta-verify order,
+    ///  no repeated input token.
+    ///
+    ///  Trust and gating are {executeFill}'s, unchanged: the router allowlist, the
+    ///  delta-only amounts, the arming flag and the operator gate all apply as
+    ///  written there, and no allowance survives the fill — this path never
+    ///  approves Settlement at all (the proceeds are pushed).
+    /// @param lateItems bit `k` set = item `k` runs AFTER delivery (step 6), clear =
+    ///        before the input is pulled (step 1). Bits past the item count revert
+    ///        {BadItemSchedule}.
+    /// @return fillAmountsOut the delivered amount per output leg (`matchSettle`'s
+    ///         `outs[0]`).
+    function executeItemFill(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        RoutePlan calldata plan,
+        bytes calldata takerData,
+        uint256 lateItems
+    ) external returns (uint256[] memory fillAmountsOut) {
+        if (GATED && !isOperator(msg.sender)) revert NotOperator(msg.sender);
+        if (_active != 1) revert Reentrancy();
+        FillRoute memory route = _plan(order, plan);
+        if (route.direct) revert DirectNotMatchable();
+        MatchPlan memory mp = _matchPlan(order, sig, fillAmount, takerData, route, lateItems);
+        _active = 4;
+        (uint256[][] memory outs,,) = SETTLEMENT.matchSettle(mp);
+        // Same reasoning as {executeFill}: a plan whose CALL never reached
+        // {onMatchRoute} delivered out of something other than this fill's route.
+        if (_active != 5) {
+            _active = 1;
+            revert CallbackDidNotRun();
+        }
+        fillAmountsOut = outs[0];
+
+        // Every token's increase over the pre-fill snapshot is this fill's spread —
+        // the pool's sweep landed it here — split exactly as {executeFill} splits.
+        _splitAll(route, order.maker, plan);
+        _active = 1;
+    }
+
+    /// @dev {executeItemFill}'s split pass, in its own frame (legacy-profile stack):
+    ///      every route token, output tokens first, against its pre-fill snapshot.
+    function _splitAll(FillRoute memory route, address maker, RoutePlan calldata plan) private {
+        address to = plan.profitRecipient == address(0) ? msg.sender : plan.profitRecipient;
+        for (uint256 k = route.tokens.length; k != 0;) {
+            unchecked {
+                --k;
+            }
+            _splitSurplus(route.tokens[k], route.before[k], maker, plan, to);
+        }
+    }
+
+    /// @dev The one-order plan {executeItemFill} runs — see the step list there.
+    ///      Token indices are Settlement's universe indices: `matchSettle` derives
+    ///      its universe as the order's input tokens then its output tokens, first
+    ///      occurrence kept — the SAME rule {_plan} builds `route.tokens` by, so a
+    ///      `PRESEND` index here names the same token there.
+    function _matchPlan(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        bytes calldata takerData,
+        FillRoute memory route,
+        uint256 lateItems
+    ) private view returns (MatchPlan memory p) {
+        uint256 nItems = PackedArrays.countUnchecked(order.items);
+        if (lateItems >> nItems != 0) revert BadItemSchedule();
+        p.schedule = _schedule(nItems, PackedArrays.countUnchecked(order.legsIn), route, lateItems);
+        p.orders = new Order[](1);
+        p.orders[0] = order;
+        p.sigs = new bytes[](1);
+        p.sigs[0] = sig;
+        p.fillAmounts = new uint256[](1);
+        p.fillAmounts[0] = fillAmount;
+        p.takerDatas = new bytes[](1);
+        p.takerDatas[0] = takerData;
+        p.callTargets = new address[](1);
+        p.callTargets[0] = address(this);
+        p.callDatas = new bytes[](1);
+        p.callDatas[0] = abi.encodeCall(this.onMatchRoute, (route));
+        // The sweep lands HERE so the spread is split by policy, never paid around it.
+        p.profitRecipient = address(this);
+    }
+
+    /// @dev The step list of {_matchPlan}, in its own frame (legacy-profile stack).
+    function _schedule(uint256 nItems, uint256 nIn, FillRoute memory route, uint256 lateItems)
+        private
+        pure
+        returns (uint256[] memory steps)
+    {
+        uint256 nTok = route.tokens.length;
+        steps = new uint256[](nItems + nIn + nTok + 2);
+        uint256 s;
+        for (uint256 k; k < nItems; ++k) {
+            if (lateItems & (1 << k) == 0) steps[s++] = MatchStep.pack(MatchStep.ITEM, 0, k);
+        }
+        for (uint256 j; j < nIn; ++j) {
+            steps[s++] = MatchStep.pack(MatchStep.PULL, 0, j);
+        }
+        for (uint256 t; t < nTok; ++t) {
+            if (route.inMask & (1 << t) != 0) steps[s++] = MatchStep.pack(MatchStep.PRESEND, t, 0);
+        }
+        steps[s++] = MatchStep.pack(MatchStep.CALL, 0, 0);
+        steps[s++] = MatchStep.pack(MatchStep.DELIVER, 0, 0);
+        for (uint256 k; k < nItems; ++k) {
+            if (lateItems & (1 << k) != 0) steps[s++] = MatchStep.pack(MatchStep.ITEM, 0, k);
+        }
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(steps, s) // only the PRESEND slots were over-allocated
+        }
     }
 
     /// @notice Take value this contract holds between fills — the retained spread
@@ -891,6 +1063,52 @@ contract AggregatorFillSolver {
         // proceeds is clamped for the same reason: an over-stated cap must not
         // reach into residue.
         _approveOutputs(r.tokens, r.before, r.outMask, r.outAnchor, r.minOut, r.maxPay);
+    }
+
+    /// @notice The `CALL` step of an {executeItemFill} plan. Not public in effect:
+    ///         only the EXECUTOR may call it, and only while {executeItemFill} has
+    ///         armed it (a state {onFill} never accepts, and vice versa).
+    /// @dev    The route runs under exactly {onFill}'s bounds — allowlisted router,
+    ///         per-fill input approvals of this fill's deltas (or the
+    ///         {RouteOverspent} measurement on a standing instance). The only
+    ///         difference is delivery: `matchSettle` delivers from the POOL, so
+    ///         every output token's proceeds of this fill are pushed to Settlement
+    ///         instead of approved, and the pool's surplus comes back in the sweep.
+    function onMatchRoute(FillRoute calldata r) external {
+        if (msg.sender != EXECUTOR) revert OnlyExecutor();
+        if (_active != 4) revert NotArmed();
+        if (!isAllowedRouter(r.router)) revert RouterNotAllowed(r.router);
+        _active = 5;
+
+        uint256 amountIn = _approveInputs(r.tokens, r.before, r.inMask, r.router, true);
+        (bool ok, bytes memory ret) = r.router.call(_patched(r.data, r.amountInOffset, amountIn));
+        if (!ok) revert RouterCallFailed(ret);
+        _approveInputs(r.tokens, r.before, r.inMask, r.router, false);
+        _pushOutputs(r.tokens, r.before, r.outMask, r.outAnchor, r.minOut, r.maxPay);
+    }
+
+    /// @dev {_approveOutputs} for the netted path: the same per-token delta, floor
+    ///      and cap, TRANSFERRED to Settlement's pool rather than approved.
+    function _pushOutputs(
+        address[] calldata toks,
+        uint256[] calldata bef,
+        uint256 outMask,
+        uint256 outAnchor,
+        uint256 minOut,
+        uint256 maxPay
+    ) private {
+        uint256 n = toks.length;
+        for (uint256 k; k < n; ++k) {
+            if (outMask & (1 << k) == 0) continue;
+            address t = toks[k];
+            uint256 out = SafeTransferLib.balanceOf(t, address(this)) - bef[k];
+            uint256 cap = out;
+            if (k == outAnchor) {
+                if (out < minOut) revert InsufficientOutput(out, minOut);
+                if (maxPay != 0 && maxPay < out) cap = maxPay;
+            }
+            if (cap != 0) SafeTransferLib.safeTransfer(t, address(SETTLEMENT), cap);
+        }
     }
 
     /// @dev The output pass of {onFill}, over the route's calldata arrays resolved

@@ -42,6 +42,14 @@ CENSUS-A-5):
   Settlement's EXECUTOR (`BadProfitRecipient`) — drive a solver from a `matchSettle`
   CALL step or a `fillWithCallback` target only with an explicit recipient.
   `fillAmountIn = type(uint256).max` fills whatever remains.
+- **PermitBatchWitness (single-signature) orders** (audit 2026-09-30 AGG-6): pass
+  `sig = abi.encode(PERMIT_ENVELOPE, PermitBatch batch, bytes permitSig, uint256
+  minBumpBps)` (or `permitEnvelope(batch, permitSig, minBumpBps)`) instead of an
+  order signature, and the fill inside the flash goes through
+  `Settlement.fillWithPermit` rather than `fill` — the outputs are paid from the
+  flash as always, so such a maker is served with zero inventory. The envelope
+  carries no authority: the settler verifies the maker's permit exactly as for an
+  EOA filler.
 - The repayment swap is single-hop Uniswap v3 `exactInputSingle`; the solver
   detects `SwapRouter02` (no `deadline`, e.g. Rootstock Oku and most L2s) at
   construction (`ROUTER02`). An input already in the collateral asset is not swapped.
@@ -140,10 +148,25 @@ entrypoint is owner/operator-gated.
     **Supported shapes:** any number of input/output legs over ≤ 8 distinct tokens
     (each token measured, approved and split on its own delta — a second input
     leg in a third token is routed and split, and the pull path funds every
-    output token at its own proceeds); one router call, no native value. Not
-    supported, by the core: item orders (`PostInputs` is item-free) and
-    single-signature PermitBatchWitness orders (`fillWithPermit` has no callback
-    entry). `executeFill` is non-reentrant and holds its in-fill state through the
+    output token at its own proceeds); one router call, no native value.
+    **Item orders** go through `executeItemFill(order, sig, fillAmount, plan,
+    takerData, lateItems)` (audit 2026-09-30 AGG-6): the core's `PostInputs` mode
+    is item-free, so it drives a one-order `matchSettle` plan it writes itself —
+    items not flagged in `lateItems` (TAKE: withdraw / borrow) → PULL the
+    shortfall → PRESEND the input here → CALL `onMatchRoute` (same router bounds
+    as `onFill`; the proceeds are PUSHED to the pool, nothing is approved) →
+    DELIVER → items flagged in `lateItems` (wallet-funded MAKE: deposit / repay).
+    The pool's surplus is swept back here and split by the same policy. The core
+    still enforces the maker's `ItemPolicy` against the chosen placement, and
+    refuses what every netted plan refuses (SETTLE / TAKE_FOR / PUSH-funded MAKE
+    items, delta-verify orders, repeated input tokens) — those stay with the
+    flash family or an inventory filler. **Single-signature PermitBatchWitness
+    orders**: the first fill has no callback entry in core (`fillWithPermit`
+    runs none, and adding one costs Settlement bytes at the EIP-170 wall), so it
+    needs up-front capital — the flash family takes it through the permit
+    envelope (below); every later slice is fillable here, since the settler
+    skips signature verification once `filled != 0`. `executeFill` and
+    `executeItemFill` are non-reentrant and hold their in-fill state through the
     surplus split.
     Fills start as `CallbackMode.PostInputsDirect`: the contract never holds a
     Permit3 allowance, so bit 2 tells the core to pull its output legs by plain
