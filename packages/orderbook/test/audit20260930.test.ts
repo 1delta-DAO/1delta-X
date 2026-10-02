@@ -196,6 +196,66 @@ describe("G-TS_FILLER-3 — backfill replays cancels and replaces, not only orde
     expect(book.size).toBe(1);
     await book.stop();
   });
+
+  it("test_audit_G_TS_FILLER_3_restarted_node_does_not_relist_predecessor_of_dead_replacement", async () => {
+    // The usual amend lifecycle: P is amended to R, then R fills. P keeps its own
+    // fresh nonce and stays valid on-chain, so only the replayed retraction keeps
+    // a restarted node from relisting it at the superseded price.
+    const transport = new InMemoryTransport();
+    const prev = orderFor(maker.address, 2n);
+    await transport.publish(orderTopic(config.chainId, config.settlement), encodeOrderAnnounce(announce(prev)));
+    const amended = await amendOrder(maker, prev, 3n, { minFillAnchor: 5n }, config);
+    await transport.publish(
+      replaceTopic(config.chainId, config.settlement),
+      encodeOrderReplace({
+        cancel: { cancel: amended.cancel, sig: amended.cancelSig },
+        announce: { order: amended.order, sig: amended.sig },
+        replaces: amended.replaces,
+      }),
+    );
+    const deadR = hashOrderStruct(amended.order);
+    const verifier = {
+      verifyAnnounce: async (a: OrderAnnounce) => {
+        const h = hashOrderStruct(a.order);
+        return h === deadR ? { ok: false, reason: "order fully filled", orderHash: h } : { ok: true, orderHash: h };
+      },
+      refreshStates: async () => new Map(),
+    } as unknown as Verifier;
+
+    const book = mkBook({ transport, verifier });
+    await book.start();
+    expect(book.get(hashOrderStruct(prev))).toBeUndefined();
+    expect(book.get(deadR)).toBeUndefined();
+    expect(book.size).toBe(0);
+    // And the retraction sticks: a re-announce of P is refused.
+    expect((await book.ingestAnnounce(announce(prev))).ok).toBe(false);
+    expect(book.size).toBe(0);
+    await book.stop();
+  });
+
+  it("test_audit_G_TS_FILLER_3_live_replace_with_dead_replacement_keeps_predecessor", async () => {
+    // The live rule is unchanged: outside replay a replace is atomic, so a dead
+    // replacement leaves its predecessor exactly where it was.
+    const prev = orderFor(maker.address, 2n);
+    const amended = await amendOrder(maker, prev, 3n, { minFillAnchor: 5n }, config);
+    const deadR = hashOrderStruct(amended.order);
+    const verifier = {
+      verifyAnnounce: async (a: OrderAnnounce) => {
+        const h = hashOrderStruct(a.order);
+        return h === deadR ? { ok: false, reason: "order fully filled", orderHash: h } : { ok: true, orderHash: h };
+      },
+      refreshStates: async () => new Map(),
+    } as unknown as Verifier;
+    const book = mkBook({ verifier });
+    expect((await book.ingestAnnounce(announce(prev))).ok).toBe(true);
+    const res = await book.ingestReplace({
+      cancel: { cancel: amended.cancel, sig: amended.cancelSig },
+      announce: { order: amended.order, sig: amended.sig },
+      replaces: amended.replaces,
+    });
+    expect(res.ok).toBe(false);
+    expect(book.get(hashOrderStruct(prev))).toBeDefined();
+  });
 });
 
 // ──────────────────── G-TS_FILLER-4 ────────────────────
