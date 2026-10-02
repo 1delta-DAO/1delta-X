@@ -14,7 +14,9 @@ and fluid module packages on 2026-08-29 — F17 with an executed PoC, F18 review
 **withdrawn** as already covered (kept for the lesson), F19 and F20 confirmed by
 reading. See
 [Re-audit sweep](reaudit-sweep.md#re-audit-sweep--the-generalised-questions-from-f13f15) for the
-generalised questions they imply. Every item below is resolved.
+generalised questions they imply. Every item below is resolved, except where an
+entry says otherwise: **F32** (2026-09-30) is recorded while its remediation is still
+in progress, and it lists its open items.
 
 ### F1 — Revoking Permit3 is not a kill switch on its own
 
@@ -1507,3 +1509,206 @@ had turned three fixes into doc notes; a measured pass over the codegen — not 
 dial — bought them back, and the discipline that made it trustworthy was the same
 one the security work uses: measure the real change, from a wiped build, against
 the bytecode that ships.
+
+### F32 — whole-tree audit: nine goals, 48 lenses (2026-09-30)
+
+**Status: remediation IN PROGRESS** — the one ledger entry that is not fully
+resolved. Fixes are merged on `audit-fixes-2026-09-30`; the docs group, the
+independent verification, the fix-up round and the final gate have not run. The
+write-up, with every partial, accepted and open item and its reason, is
+[audit-2026-09-30-full-tree.md](../audit-2026-09-30-full-tree.md).
+
+Scope: the whole tree at `56d1405` — Permit3, Settlement, solvers, validators,
+every module, the periphery and the off-chain tooling — read against nine stated
+goals by 42 lenses plus 6 gap lenses, each with a critic, then independent triage,
+a refuter, Foundry PoCs in a worktree, variant hunts and two mutation lenses. Run
+by AI agents; not an external audit. 313 candidates → 223 issues: **0 critical,
+1 high, 19 medium (all 20 PoC-reproduced, 27/27 PoCs), 94 low, 109 info.** The
+core had no critical, high or medium; every high and medium sat outside it and
+cost 0 Settlement bytes.
+
+**High — fixed.**
+
+- **`DestinationSettler7683.fill` enforced no filler bound (PERIPH-1).** `resolve`
+  published the current tick as `maxSpent`; a maker-controlled bump (price module,
+  priority fee, decay) then charged a 7683 solver up to `legsOut.start` from its
+  approval. `originData` now carries `FillBounds` that the destination enforces as
+  a per-unit price against `fillUpTo`'s return, and the filler may state its own
+  bounds and `minBumpBps` (**BREAKING** originData). The same bound closes PERIPH-3
+  (the any-size sentinel on a drained Proportional order). Pinned by
+  `test_audit_PERIPH_1_priorityAuction_fillAboveQuote_reverts`,
+  `test_audit_PERIPH_1_simulationAwareModule_reverts`,
+  `test_audit_PERIPH_1_adapterKeyedModule_quotedAtItsRealPrice`,
+  `test_audit_PERIPH_1_fillerDataBoundsAndFloorEnforced`,
+  `test_audit_PERIPH_1_priorityBidder_ownBoundsFill`,
+  `test_audit_PERIPH_3_sentinelFrontRun_reverts`,
+  `test_audit_PERIPH_3_sentinelDonation_stillFills`.
+
+**Medium — fixed.**
+
+- **7683 origin quoted for the wrong filler (PERIPH-2)**; every quote is now for
+  `DESTINATION_SETTLER`, soft windows with the outsider premium, hard windows
+  refused: `test_audit_PERIPH_2_buySoftMaxOverride_quoteIsWhatTheFillPays`,
+  `test_audit_PERIPH_2_sellSoftMaxOverride_chargeNeverExceedsQuote`,
+  `test_audit_PERIPH_2_honestSoft_premiumQuoted`,
+  `test_audit_PERIPH_2_hardWindow_notBroadcast`,
+  `test_hardFillerSet_inWindow_refusedNotBroadcast`,
+  `test_softFillerSet_quotesThePremiumTheInstructionPays`,
+  `test_fillerSet_quoteIsTheInstructionsWhoeverAsks`. **SETTLE receipts stranded in
+  the adapter (PERIPH-4)**; SETTLE items refused:
+  `test_audit_PERIPH_4_settleItem_refusedNothingStranded`.
+- **Off-chain quotes that bound nothing.** orderbook-server `/quote` calldata
+  (PERIPH-1.v1), auction capacity without ranking (G-TS_FILLER-1), and the auction
+  `QuoteSolver` sizing SELL routes by `fillTotal` (PRICE-1.v1). Pinned by vitest
+  only (not indexed by this gate): `packages/orderbook-server/test/audit20260930.test.ts`
+  (test_audit_PERIPH_1_v1_calldata_carries_the_quoted_bump_as_its_floor,
+  test_audit_PERIPH_1_v1_priority_order_needs_a_gas_price_and_quotes_at_it,
+  test_audit_PERIPH_3_v1_proportional_sentinel_is_replaced_by_the_resolved_size) and
+  `packages/auction/test/audit20260930.test.ts`
+  (test_audit_G_TS_FILLER_1_two_keys_cannot_crowd_out_honest_solvers,
+  test_audit_G_TS_FILLER_1_full_round_admits_a_better_bid_by_displacing_the_worst,
+  test_audit_G_TS_FILLER_1_unsigned_commitment_cannot_win_a_tie,
+  test_audit_PRICE_1_v1_fillTotal_does_not_size_the_route,
+  test_audit_PRICE_1_v1_fullfill_order_gets_a_real_bid,
+  test_audit_PRICE_1_v1_proportional_sell_returns_null_or_resolves_never_throws).
+- **`UsdrifInventorySolver` measured windows open to its own MoC deliveries
+  (RIF-1, RIF-2).** `guard.execute()` is permissionless, so queue deliveries and
+  failed-op refunds landing inside `sell()` or a fill offset the measured spend: a
+  stolen operator key was not bounded the way SECURITY.md M-8 says. Venue calls and
+  fills are bracketed by `MocQueue.firstOperId()`; item-bearing orders are refused.
+  Pinned by `test_audit_RIF_1_sellOffsetByInWindowQueueDelivery_reverts`,
+  `test_audit_RIF_1_v1_sellTokenOutInflatedByQueueDelivery_reverts`,
+  `test_audit_RIF_2_v1_sellTokenOutInflatedByFailedOpRefund_reverts`,
+  `test_audit_RIF_1_honestSellWithQueuedOpStillWorks`,
+  `test_audit_RIF_2_itemOrderCannotTriggerQueueRefundInsideFill`,
+  `test_audit_RIF_2_fillRefusedWhenQueueMovesInsideIt`. (SECURITY.md M-8 itself is
+  not yet corrected — open.)
+- **Pegged price module anchored on the fill denominator (PRICE-1, an F8
+  regression)**: `test_audit_PRICE_1_fullFillModuleFillTotal1_clearsAtPeg`,
+  `test_audit_X_ARITH_1_bpsFillTotal_halfFillAtPeg`,
+  `test_audit_PRICE_1_buyLargeFillTotal_paysPegNotCap`. **OCO dust-kill (PRICE-2)**;
+  claim blob gains `minClaim` (**BREAKING**, SDK and golden updated):
+  `test_audit_PRICE_2_dustFillCannotRetireStopLoss`,
+  `test_audit_PRICE_2_claimAtFloor_thenWinnerFillsFreely`,
+  `test_audit_PRICE_2_missingOrUnreachableFloor_failsClosed`. **Split
+  ProportionalSweep fills swept up to the cap (MISC-MOD-1)**:
+  `test_audit_MISC_MOD_1_fractionalSweep_cannotBeSplit`,
+  `test_audit_MISC_MOD_1_fractionalTwoWord_failsClosed`,
+  `test_audit_MISC_MOD_1_fullSweep_splitSweepsMinBalanceCap`.
+- **Invariant-only purchases checked an end state, not a delivery (VAL-1, the F30
+  delta-verify sibling) — fixed_partial.** The shipped invariants require a
+  lifelong named `exclusiveFiller` when the order has no output leg, and the lens
+  and SDK refuse the shape; a generic core rule for third-party invariants is not
+  done. Pinned by `test_audit_VAL_1_erc721_twoBids_oneDelivery_cannotDoubleDip`,
+  `test_audit_VAL_1_erc721_makerBoughtElsewhere_botCannotDrainStaleBid`,
+  `test_audit_VAL_1_erc1155_twoBids_oneDelivery_cannotDoubleDip`,
+  `test_audit_VAL_1_minBalance_floorMetElsewhere_noFreeFill`,
+  `test_audit_VAL_1_namedFiller_canStillPurchase_othersRefused`,
+  `test_audit_VAL_1_guard_onlyOnNoOutputLegShape`.
+- **`BridgedOrderInbox.rescue` swept deliveries whose compose had not run
+  (BRIDGE-A-1)**; an `orphaned` ledger bounds `rescue`, stray balance goes through a
+  delayed path: `test_audit_BRIDGE_A_1_orphanRefundCannotSweepQueuedCompose`,
+  `test_audit_BRIDGE_A_1_compromisedOwnerCannotSelfLoop`,
+  `test_audit_BRIDGE_A_1_sourceRemovalParksButRescueCannotTake`,
+  `test_audit_BRIDGE_A_1_v1_queuedSourceWindow_orphanRefundTakesOnlyOrphan`,
+  `test_audit_BRIDGE_A_1_strayRescueReboundsAtExecution`,
+  `test_audit_BRIDGE_A_1_fork_realEndpointV2_queuedComposeNotRescuable`.
+- **Lending residue drains (F19 siblings).** Morpho Blue Recycle repaid by shares
+  under a max approval (L-LIB-1): `test_audit_L_LIB_1_recycleRepayCannotDrawModuleResidue`,
+  `test_audit_L_LIB_1_ownMarketCannotDrainResidue`,
+  `test_audit_L_LIB_1_recyclePartialRepaysExactlyAmount`,
+  `test_audit_L_LIB_1_recycleFullCloseKeepsFloor`. Compound v2 Recycle paid a
+  stale pre-measured residual (X-STATIC-1):
+  `test_audit_X_STATIC_1_recycleErrorCode_preservesFloor`,
+  `test_audit_X_STATIC_1_partialConsumption_refundsOnlyRemainder`,
+  `test_audit_X_STATIC_1_honestErrorCode_sweepsResidual`.
+- **Venue clamps billed to the maker's wallet.** Aave v4 spoke (L-CV2-1):
+  `test_audit_L_CV2_1_exactWithdraw_shortPosition_reverts`,
+  `test_audit_L_CV2_1_alternativeOrders_secondFillReverts`,
+  `test_audit_L_CV2_1_exactWithdraw_coveredPosition_partialFills`,
+  `test_withdraw_underDelivery_reverts`. Exactly `withdrawAtMaturity` (L-CV2-1.v1):
+  `test_audit_L_CV2_1_v1_shortFixedPosition_settlementFillReverts_walletUntouched`,
+  `test_audit_L_CV2_1_v1_shortFixedPosition_directTake_reverts`,
+  `test_audit_L_CV2_1_v1_fullFixedPosition_fillsFromPosition`,
+  `test_audit_L_CV2_1_v1_partialSlice_withinPosition_succeeds`. Liquity v2 stale
+  remove-manager receiver (G-VENUE_B-1):
+  `test_audit_G_VENUE_B_1_staleReceiver_withdrawColl_failsClosed`,
+  `test_audit_G_VENUE_B_1_staleReceiver_borrow_failsClosed`,
+  `test_audit_G_VENUE_B_1_receiverIsModule_fills`,
+  `test_audit_G_VENUE_B_1_withdrawColl_staleReceiver_reverts`,
+  `test_audit_G_VENUE_B_1_borrow_staleReceiver_reverts`,
+  `test_audit_G_VENUE_B_1_receiverIsModule_partialSlice_settles`. Teller partial
+  repay overpaid the lender on a clamp TellerV2 does not apply (L-CMT-1):
+  `test_audit_L_CMT_1_preFundPartial_overDelivery_sweptToMaker`,
+  `test_audit_L_CMT_1_preFundPartial_exactlyOwed_closes`,
+  `test_audit_L_CMT_1_pullPartial_buffer_sweptToMaker`,
+  `test_audit_L_CMT_1_preFundPartial_belowOwed_staysPartial`,
+  `test_audit_L_CMT_1_preFundFull_belowOwed_failsClosed`,
+  `test_audit_L_CMT_1_venuePremise_repayLoanDoesNotClamp`,
+  `test_audit_L_CMT_1_preFundFull_overDelivery_sweptToMaker`,
+  `test_audit_L_CMT_1_preFundPartial_lateFillBelowVenueMinimum_failsClosed`. Shapes
+  rule 9 now covers Exact branches on clamping venues.
+
+**The core lows — the six the report put in P0, because the core cannot be
+patched after deployment.** Four fixed, Settlement 24,325 → **24,223 / 24,576**
+(collapsing `fillWithPermit`'s overloads into one 6-arg entry paid for the floors):
+the price floor on every entry (PERIPH-1.v3, **BREAKING** ABI) —
+`test_audit_PERIPH_1_v3_fillWithPermit_honoursFloor`,
+`test_audit_PERIPH_1_v3_fillWithPermitTake_honoursFloor`,
+`test_audit_PERIPH_1_v3_batchFill_perOrderFloor`; zero-amount placeholder legs no
+longer carry a soft window (CORE-FILL-1) —
+`test_audit_CORE_FILL_1_buyZeroPlaceholderInput_isHardWindow`,
+`test_audit_CORE_FILL_1_sellZeroMakerOutput_isHardWindow`,
+`test_audit_CORE_FILL_1_nonZeroCarrier_stillSoft`; a fill module may not upsize the
+request (CORE-FILLER-2) — `test_audit_CORE_FILLER_2_moduleCannotUpsizeFillersRequest`;
+a direct shortening `setOrderSigner` burns outstanding nominations (X-DIFF-CORE-3) —
+`test_audit_X_DIFF_CORE_3_staleLongerPermit_cannotUndoShortening`,
+`test_audit_X_DIFF_CORE_3_extensionKeepsGaslessRenewal`. Two accepted with no
+test: double-entry-point tokens on `matchSettle` (X-TOKENS-2; bytes, bounded to the
+matcher's residual) and unapplied signed Permit3 batches surviving
+revoke/lockdown (CENSUS-A-3; Permit2 parity, needs a typehash epoch). Also in
+Permit3: an expired permit whose nonce is spent now continues a partial fill
+(P3-4) — `test_audit_P3_4_hub_spentNoncePastDeadline_isNoOp`,
+`test_audit_P3_4_fillWithPermit_continuesPastPermitDeadline`.
+
+**Selected lows, fixed.** EVC permits are module-bound and replayed independently
+(L-ED-1, L-LIB-3; **BREAKING** tail): `test_audit_L_ED_1_moduleBoundPermit_landsInFill_notByThirdParty`,
+`test_audit_L_LIB_3_operatorAlreadySet_enablesStillLand`. Permit/delegation replays
+no longer shrink a standing grant (L-LIB-4):
+`test_audit_L_LIB_4_permitReplay_doesNotShrinkStandingAllowance`,
+`test_audit_L_LIB_4_delegationReplay_doesNotShrinkStandingDelegation`. Chainlink
+validators honour an optional L2 sequencer feed (PRICE-8, VAL-4):
+`test_audit_PRICE_8_gte_sequencerDown_reverts`,
+`test_audit_VAL_4_lte_stopLoss_postRestart_blocksFill`, and the pegged module
+sibling `test_audit_PRICE_8_sequencerDownReverts`. NEGATE over a laundered or
+forced-out-of-gas leaf (VAL-2): `test_audit_VAL_2_negatedPredicate_revertingTarget_isError`,
+`test_audit_VAL_2_tryNegateLeaf_outOfGas_neverPasses`,
+`test_audit_VAL_2_zeroPriceRevertsNotFalse`. AggregatorFillSolver retain mode,
+stranded non-anchor inputs and SurplusPolicy bypass (AGG-1..3):
+`test_audit_AGG_1_retainRefusedOnOpenInstance`,
+`test_audit_AGG_2_nonAnchorInputLegIsNotStranded`,
+`test_audit_AGG_3_policyNeedsOperators`. Inventory solver operator bound and
+delta-verify delivery (PERIPH-1.v2, RIF-4):
+`test_audit_PERIPH_1_v2_operatorMaxSpentBoundsTheFill`,
+`test_audit_RIF_4_deltaVerifyOrderNamingTheSolverFills`. MocPriceBandValidator
+reads the redemption price (RIF-3): `test_audit_RIF_3_bandAroundGetPACtp_passes`.
+CCTP V2 before the V1 sunset (BRIDGE-B-6): `test_audit_BRIDGE_B_6_cctpV2Burn`. The
+Rootstock beta app blockers (A-IMMUT-1, G-TS_SIGN-1/3/4/5/15) are pinned by app
+vitest suites (`packages/app/test/funding.audit.test.ts` and siblings), outside
+this gate.
+
+**Open, no regression yet** (do not read these as closed): the docs group —
+MISC-MOD-6 (partly done), L-CENSUS-7 (partly done), G-VENUE_B-8 (tests done, doc
+row not), and P3-1, X-SPEC-5/7/8/10/11, CORE-MATCH-6, PRICE-13, PRICE-14,
+G-VENUE_B-7, L-CV2-6, L-ML-7, L-CENSUS-6, L-LIB-6; about 129 doc-update requests the
+fixers filed against `SECURITY.md`, `FEATURES.md` and `docs/`; X-ASM-3 sub-item (d);
+the Teller pool-deposit fork test (L-CMT-4); and L-CENSUS-8 sub-items 3-5
+(undetermined). The F19 table row above still names `maxWithdraw` for
+Silo/Gearbox/Exactly; those readers use `previewRedeem(balanceOf)` (G-VENUE_B-9).
+
+Lesson: "fixed" in a per-component fixer report means fixed **in the paths that
+fixer owned**. Most of the 23 `fixed_partial` issues are partial for that reason alone, and
+129 doc-update requests piled up behind the one group that had not run — including
+the SECURITY.md M-8 claim that RIF-1 had just disproved. A remediation plan sliced
+by ownership needs a closing pass sliced by **claim**: every statement the audit
+falsified, wherever it is written down.

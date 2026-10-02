@@ -299,6 +299,15 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   without I-8's bound (now shapes rule 9), a seventh dangling-approval site, and
   Liquity/River measuring a token the venue does not burn. Ends with the open leads.
 
+- **[audit-2026-09-30-full-tree.md](audit-2026-09-30-full-tree.md)** — the
+  2026-09-30 whole-tree audit (48 agent lenses, triage, refuter, PoCs, variant
+  hunts, mutation; not an external audit) and the state of its remediation. 223
+  issues: 0 critical, 1 high, 19 medium (all PoC'd), 94 low, 109 info; the core
+  held, every high and medium sat in the 7683 adapters, the USDRIF solver, lending,
+  pricing/OCO/validator/transfer modules, the bridge inbox or the off-chain quote
+  tooling. **Remediation is in progress**: read the "Remediation status" section
+  for what is fixed, partial, accepted and still open.
+
 - **[audit-2026-09-leads.md](audit-2026-09-leads.md)** — the open **leads** from the
   F25 twelve-lens re-audit (the findings themselves are closed, in
   `reference-audits.md`). A lead is a place where the code depends on something it

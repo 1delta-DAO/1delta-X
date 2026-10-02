@@ -75,7 +75,7 @@ links across files are written `file.md#anchor` (GitHub slugs).
 | File | What it is | Read it when |
 | --- | --- | --- |
 | [failure-classes.md](failure-classes.md) | `C1…C15` — the fifteen failure classes, each anchored to a published finding or live exploit, with our verdict. | Designing a feature; reviewing a PR ("that's a C4"). |
-| [findings-ledger.md](findings-ledger.md) | `F1…F30` — every internal finding, resolved, with the regression that pins it. | Chasing a bug's history; before an external audit. |
+| [findings-ledger.md](findings-ledger.md) | `F1…F32` — every internal finding with the regression that pins it; all resolved except F32 (remediation in progress, open items listed). | Chasing a bug's history; before an external audit. |
 | [reaudit-sweep.md](reaudit-sweep.md) | The generalised questions distilled from F13–F15. | Sweeping a new surface; re-checking authorisation / refund logic. |
 | [signature-validation.md](signature-validation.md) | `S1…S7` — the published signature corpus vs. our position. | Touching `Signatures`, `SignatureVerification`, or the 1271 path. |
 | [corpus-v4-evk-rfq.md](corpus-v4-evk-rfq.md) | Second corpus — Uniswap v4, Euler EVK, Bebop RFQ. | The modular / venues read. |

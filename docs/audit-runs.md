@@ -89,6 +89,45 @@ periphery lens), `packages/sdk/src/*.ts`, `packages/orderbook/src/*.ts`,
 `packages/orderbook-server/src/*.ts` (bundled for three lenses). Write-up:
 [audit-2026-09-14-bounty-screening.md](./audit-2026-09-14-bounty-screening.md).
 
+### F32 — 2026-09-30 · whole tree, 48 lenses
+
+Run by an agent workflow (174 agents), not the `solidity-auditor` bundle, so there
+is no `.audit-*` bundle; the run's data (`REPORT.md`, `clusters.json`,
+`records.json`, the 48 lens results, the 27 PoCs and the fixer reports) is kept
+locally in `docs/local/audit-2026-09-30/`, which is gitignored. Snapshot: HEAD
+`56d1405`. Write-up: [audit-2026-09-30-full-tree.md](./audit-2026-09-30-full-tree.md);
+ledger entry F32.
+
+Scope as read:
+
+- **Solidity**: all 179 files under `packages/**/src` sit inside at least one lens
+  scope — `packages/core/src/**` (settlement, Permit3, utils), `packages/lib/src`,
+  `packages/solvers/src/**`, `packages/validators/src`, `packages/periphery/src`
+  (the 7683 settlers and `NativeSettler` in full; `SettlementLens` spot-checked by
+  the periphery lens and read for parity by the `G-LENS_PARITY` gap lens), and
+  every `packages/modules/**/src` package: the 17 lending venues with their
+  pre-fund and fused files, bridge (inbox, funnel, Across / LZ / CCTP out
+  modules), pricing (chainlink, quotes, range), OCO, fill, maker, NFT, transfer,
+  ERC-4626, redeem/usdrif.
+- **42 planned lenses** by component and by cross-cutting class (arithmetic,
+  assembly, reentrancy, tokens, spec drift, differential reads of the recent diffs,
+  immutability, efficiency, flexibility, test map/coverage/run, core and periphery
+  mutation), plus **6 gap lenses** from one completeness round: `G-BYTE_MAP`
+  (module data byte maps vs decoders), `G-LENS_PARITY` (lens vs settler),
+  `G-TS_FILLER` (orderbook, orderbook-server, auction, SDK filler path), `G-TS_SIGN`
+  (SDK and app signing path), `G-VENUE_A` / `G-VENUE_B` (module premises vs the real
+  venue).
+- **TypeScript** (~17k lines: `packages/sdk`, `app`, `orderbook`,
+  `orderbook-server`, `auction`): excluded by every planned lens, read by the two
+  `G-TS_*` gap lenses only.
+- **Tests and tooling**: the test tree (coverage, mutation, run lenses), the
+  `Makefile`, `foundry.toml`, `tools/check-module-shapes.py` and CI config;
+  `SECURITY.md`, `FEATURES.md`, `docs/` and package READMEs read for spec drift.
+
+Not read: the 24 vendored venue and bridge interfaces against deployed ABIs, deploy
+scripts beyond the immutability review, the periphery's via-IR shipped bytecode,
+the RSKj gas schedule, and the external protocols themselves.
+
 ## The coverage gap this register exists to make visible
 
 19 files now contain pre-fund contracts. 18 were in the F27 bundle. **`AaveV3FusedModules.sol`
@@ -121,6 +160,11 @@ than a filename glob. Contract shape is a property of the contract, not of the
 file it happens to share.
 
 ## Not covered by any run
+
+As of F32 (2026-09-30): every file under `packages/**/src` sat in at least one lens
+scope; the gaps are the vendored interfaces (never diffed against deployed ABIs),
+`script/`, and code written after `56d1405` — which includes the whole
+`audit-fixes-2026-09-30` remediation branch. The earlier state is kept below.
 
 As of F29 (2026-09-14): the `interfaces/`, `vendor/` and `script/` trees only —
 `SettlementLens.sol` and the TypeScript periphery were read by F29 (and produced

@@ -29,3 +29,6 @@ packages/pitch-deck-vc/
 
 # Local-only strategy documents (GTM, roadmap, partner briefings).
 docs/local/
+
+# Python bytecode
+__pycache__/
