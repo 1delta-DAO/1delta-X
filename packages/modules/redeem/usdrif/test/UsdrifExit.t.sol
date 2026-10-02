@@ -230,11 +230,10 @@ contract UsdrifExitTest is UsdrifForkBase {
         assertEq(IERC20(USDT0).balanceOf(maker), usdtOut, "seller exited to USDT0");
     }
 
-    /// A reversed band (min > max) is unsatisfiable, so the gate simply fails —
-    /// which is why the validator needs no explicit check for it. Pins the reason
-    /// the old `InvalidBand` revert was dropped: {OrderGates.gatePasses} folds ANY
-    /// validator revert into `false`, so a maker could never have observed it —
-    /// the outcome is `ValidationFailed(1)` either way.
+    /// A reversed band (min > max) is unsatisfiable. The validator REVERTS
+    /// `InvalidBand` (restored by audit 2026-09-30 VAL-2, so a `ConditionTree`
+    /// NEGATE leaf fails closed); at the top level {OrderGates.gatePasses} folds the
+    /// revert into `false`, so the fill outcome is `ValidationFailed(1)` either way.
     function test_priceBand_reversedBandBlocks() public {
         uint256 opId = _initiateRedemption();
         _executeQueue();

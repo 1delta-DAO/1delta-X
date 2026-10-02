@@ -8,6 +8,7 @@ import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 import {Proportional} from "@core/settlement/Proportional.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {PreFundGuard} from "@lib/PreFundGuard.sol";
+import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {ConditionTreeValidator} from "@validators/ConditionTreeValidator.sol";
 import {OcoGroupModule} from "@modules/oco/src/OcoGroupModule.sol";
 import {CosignedQuotePriceModule} from "@modules/pricing/quotes/src/CosignedQuotePriceModule.sol";
@@ -32,6 +33,16 @@ contract PreFundGuardProbe {
 
     function requireFundingDescriptor(bytes calldata d) external pure {
         PreFundGuard.requireFundingDescriptor(d);
+    }
+}
+
+/// @dev Exposes {PreFundModuleBase._preFundOp} — the op byte a consolidated
+///      pre-fund module reads from descriptor bits [244:252).
+contract PreFundOpProbe is PreFundModuleBase {
+    constructor() PreFundModuleBase(address(1), address(2)) {}
+
+    function preFundOp(bytes calldata d) external pure returns (uint256) {
+        return _preFundOp(d);
     }
 }
 
@@ -118,11 +129,13 @@ contract EncodingGoldenTest is Test {
 
     PreFundGuardProbe guard;
     OrderProbe probe;
+    PreFundOpProbe opProbe;
 
     function setUp() public {
         json = vm.readFile(FIXTURE);
         guard = new PreFundGuardProbe();
         probe = new OrderProbe();
+        opProbe = new PreFundOpProbe();
     }
 
     // ──────────────────── fixture readers ────────────────────
@@ -165,6 +178,24 @@ contract EncodingGoldenTest is Test {
         guard.requireLegRef(d); // does not revert
         guard.requireFundingDescriptor(d); // bit 255 set
         assertEq(_word(".descriptors.forLegPreFund_1_WETH") & 0xffff, 1, "leg index in the low 16 bits");
+    }
+
+    /// @dev audit 2026-09-30 G-BYTE_MAP-2: the SDK's op-carrying pre-fund descriptor
+    ///      `(5<<253) | op<<244 | token<<16 | j` — the op byte is exactly what
+    ///      {PreFundModuleBase._preFundOp} reads, and the op bits move NEITHER the
+    ///      funding token NOR the leg index of the op-less vector.
+    function test_audit_G_BYTE_MAP_2_forLegPreFundOp_isReadByPreFundModuleBase() public view {
+        uint256 w = _word(".descriptors.forLegPreFund_1_WETH_op1");
+        uint256 w0 = _word(".descriptors.forLegPreFund_1_WETH");
+        assertEq((w >> 244) & 0xff, 1, "op byte at [244:252)");
+        assertEq(opProbe.preFundOp(abi.encode(w)), 1, "PreFundModuleBase._preFundOp reads op 1");
+        assertEq(opProbe.preFundOp(abi.encode(w0)), 0, "the op-less vector reads op 0");
+        bytes memory d = abi.encode(w, address(0));
+        assertEq(guard.fundingToken(d), _addr(".descriptors.token"), "funding token unchanged by the op bits");
+        assertEq(guard.fundingToken(d), guard.fundingToken(abi.encode(w0, address(0))), "same token as op-less");
+        assertEq(w & 0xffff, w0 & 0xffff, "same leg index as op-less");
+        assertEq(w >> 253, 5, "still a pre-fund leg reference");
+        guard.requireLegRef(d);
     }
 
     /// @dev A pre-fund word must NOT be readable as a plain TAKE blob, and the plain
@@ -360,6 +391,21 @@ contract EncodingGoldenTest is Test {
     /// @dev The SDK's 84-byte head + a signature the module's OWN digest accepts:
     ///      proves the head's slicing ([0:20] filler, [20:52] bump, [52:84]
     ///      deadline) and that the module reads the bump the SDK wrote.
+    /// @dev audit 2026-09-30 QUOTE-TOOLING: the SDK's quote type string is the
+    ///      modules' 5-field one (with `prevFilled`), so an SDK-minted quote
+    ///      verifies for exactly one fill of a partially fillable order.
+    function test_audit_QUOTE_TOOLING_sdkTypehashBindsPrevFilled() public view {
+        assertEq(
+            _word(".quote.typehash"),
+            uint256(
+                keccak256(
+                    "PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline,uint256 prevFilled)"
+                )
+            ),
+            "SDK QUOTE_TYPEHASH == module QUOTE_TYPEHASH"
+        );
+    }
+
     function test_quoteTakerDataHead_isSlicedByTheModule() public {
         (address cosigner, uint256 pk) = makeAddrAndKey("cosigner");
         CosignedQuotePriceModule m = new CosignedQuotePriceModule(cosigner, 0);

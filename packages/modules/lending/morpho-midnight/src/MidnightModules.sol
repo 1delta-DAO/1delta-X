@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
@@ -332,7 +333,7 @@ contract MidnightLendModule is IMakerModule {
 //   any other value reverts {BadBalanceMode} (the field is untagged, so 2..255
 //   must not silently mean Exact).
 //
-contract MidnightTakerModule is ITakerModule {
+contract MidnightTakerModule is ITakerModule, IPositionSource {
     IPermit3 public immutable permit3;
     IMidnight public immutable midnight;
 
@@ -353,6 +354,35 @@ contract MidnightTakerModule is ITakerModule {
     constructor(address _permit3, address _midnight) {
         permit3 = IPermit3(_permit3);
         midnight = IMidnight(_midnight);
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev The RAW live position behind either op (audit 2026-09-30 L-LIB-8):
+    ///        • op 0 — `collateral(id, user, index)` of the indexed collateral token
+    ///          (a plain amount that does not accrue);
+    ///        • op 1 — the UPDATED credit from `updatePositionView`, the view twin of
+    ///          the `updatePosition` the `Full` withdraw sizes from (the stored
+    ///          `credit()` is stale — L-ML-3), in loan-token units (credit units
+    ///          redeem 1:1, as `withdraw(market, amount, …)` takes them).
+    ///      Not bounded by the module's Midnight authorization.
+    function positionOf(address user, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        MidnightBlob.requireHead(data, 32, 0xa0);
+        (uint8 op, Market memory market, uint256 collateralIndex,,) =
+            abi.decode(data, (uint8, Market, uint256, uint8, uint256));
+        bytes32 id = MidnightIdLib.toId(market);
+        if (op == uint8(Op.WithdrawCollateral)) {
+            return (market.collateralParams[collateralIndex].token, midnight.collateral(id, user, collateralIndex));
+        }
+        if (op == uint8(Op.Withdraw)) {
+            (uint256 credit,,) = midnight.updatePositionView(market, id, user);
+            return (market.loanToken, credit);
+        }
+        revert BadOp(op);
     }
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {

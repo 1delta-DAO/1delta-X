@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
@@ -45,6 +46,10 @@ import {IGiverPositionManager, ITakerPositionManager, ISpokeV4} from "./interfac
 //
 // `data = abi.encode(spoke, positionManager, reserveId, asset[, deadline, v, r, s])`
 //   — base = 128; permit@128.
+// EIP-2612 permit block @128 (+ signedValue@256): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract AaveV4DepositModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -103,6 +108,10 @@ contract AaveV4DepositModule is IMakerModule {
 //   the permit block (128 bytes) is optional after the dust action slot.
 //
 //   — base = 128; DustAction@128; permit@160.
+// EIP-2612 permit block @160 (+ signedValue@288): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract AaveV4RepayModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -260,7 +269,7 @@ contract AaveV4RepayModule is IMakerModule {
 //     a maker encoding `Full` from this map signed an order no filler could ever
 //     settle. Declared in F25 (lead A-2).
 //
-contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset {
+contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset, IPositionSource {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -285,7 +294,9 @@ contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset {
             // the signed `amount` to the order, sweep the accrued excess to user.
             // Measure the actually-received underlying via a balanceOf snapshot
             // rather than trusting the PM's reported amount.
-            uint256 supplied = ISpokeV4(spoke).getUserSuppliedAssets(reserveId, onBehalfOf);
+            // Through {positionOf} — the number a position-sized fill is priced
+            // against and the number withdrawn are the same function (L-LIB-8).
+            (, uint256 supplied) = positionOf(onBehalfOf, data);
             uint256 balBefore = IERC20(asset).balanceOf(address(this));
             ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, supplied, onBehalfOf);
             uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
@@ -337,6 +348,25 @@ contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset {
     /// @dev The underlying `asset` (word 3) — what lands on `receiver` (L-CMT-6).
     function proceedsAsset(bytes calldata data) external pure override returns (address asset) {
         (,,, asset) = abi.decode(data, (address, address, uint256, address));
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev The spoke's `getUserSuppliedAssets` — the RAW supplied position in
+    ///      `asset` units, accrued by the spoke's own view, NOT bounded by the
+    ///      TakerPM's withdraw approval (a short approval must revert the fill, not
+    ///      quietly sell a fraction). `asset` is bound to the reserve's underlying
+    ///      first, as `takeOnBehalf` does (audit 2026-09-30 L-LIB-8).
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        address spoke;
+        uint256 reserveId;
+        (spoke,, reserveId, asset) = abi.decode(data, (address, address, uint256, address));
+        AaveV4ReserveBinding.requireUnderlying(spoke, reserveId, asset);
+        amount = ISpokeV4(spoke).getUserSuppliedAssets(reserveId, user);
     }
 }
 

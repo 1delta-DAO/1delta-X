@@ -34,6 +34,12 @@ pragma solidity ^0.8.28;
 ///  it is enforced by the order's mandatory `tokenOut` delivery (an NFT *sale*,
 ///  where the maker is paid via an inline fungible leg) and/or a post-execution
 ///  invariant (an NFT *purchase*, where the maker's receipt is non-fungible).
+///  ⚠ An invariant proves an END STATE, not DELIVERY (audit 2026-09-30 VAL-1): if
+///  the maker obtains the asset any other way, any filler can collect the payment
+///  without delivering. An order whose only consideration is an invariant (no
+///  `legsOut`, or SETTLE items only) therefore REQUIRES a single named hard
+///  `exclusiveFiller` for its whole life — the shipped invariants enforce this
+///  themselves (`InvariantReceiptGuard`), and the lens / SDK refuse the shape.
 ///
 ///  ⚠ SOLVER CAVEAT (read before filling a SETTLE order): unlike a MAKE/TAKE
 ///  item — where the filler's receipt is always a real Permit3-gated token move —

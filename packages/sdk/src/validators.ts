@@ -44,12 +44,35 @@ export function tickFloorRatio(p: TickFloorParams): { num: bigint; den: bigint }
   return { num, den };
 }
 
-/** `data` for `ChainlinkTickFloorValidator`: `abi.encode(feed, maxStaleness, num, den)`. */
-export function encodeTickFloorData(feed: Address, maxStaleness: bigint, p: TickFloorParams): Hex {
+/**
+ * The OPTIONAL L2 sequencer check every Chainlink validator accepts as a trailing
+ * `(address uptimeFeed, uint256 gracePeriod)` pair after its head words
+ * (`ChainlinkRead.checkSequencer`, audit 2026-09-30 PRICE-8): the gate reverts
+ * `SequencerDown` while the sequencer is down and `GracePeriodNotOver` within
+ * `gracePeriod` seconds of it coming back up. On an L2, ALWAYS sign it — a stale
+ * pre-outage price otherwise passes. Omit on an L1 / sequencer-less chain.
+ */
+export interface SequencerCheck {
+  uptimeFeed: Address;
+  gracePeriod: bigint;
+}
+
+/** Append the sequencer pair after `head` (already ABI-encoded words). */
+function withSequencer(head: Hex, seq?: SequencerCheck): Hex {
+  if (!seq) return head;
+  const tail = encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [seq.uptimeFeed, seq.gracePeriod]);
+  return (head + tail.slice(2)) as Hex;
+}
+
+/** `data` for `ChainlinkTickFloorValidator`: `abi.encode(feed, maxStaleness, num, den[, uptimeFeed, gracePeriod])`. */
+export function encodeTickFloorData(feed: Address, maxStaleness: bigint, p: TickFloorParams, seq?: SequencerCheck): Hex {
   const { num, den } = tickFloorRatio(p);
-  return encodeAbiParameters(
-    [{ type: "address" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }],
-    [feed, maxStaleness, num, den],
+  return withSequencer(
+    encodeAbiParameters(
+      [{ type: "address" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }],
+      [feed, maxStaleness, num, den],
+    ),
+    seq,
   );
 }
 
@@ -59,6 +82,58 @@ export function tickFloorValidator(
   feed: Address,
   maxStaleness: bigint,
   p: TickFloorParams,
+  seq?: SequencerCheck,
 ): Validator {
-  return { target: validator, data: encodeTickFloorData(feed, maxStaleness, p) };
+  return { target: validator, data: encodeTickFloorData(feed, maxStaleness, p, seq) };
+}
+
+/**
+ * `data` for `ChainlinkPriceGteValidator` / `ChainlinkPriceLteValidator`:
+ * `abi.encode(feed, threshold, maxStaleness[, uptimeFeed, gracePeriod])` — the
+ * three head words, then the optional {@link SequencerCheck}.
+ */
+export function encodeChainlinkThresholdData(
+  feed: Address,
+  threshold: bigint,
+  maxStaleness: bigint,
+  seq?: SequencerCheck,
+): Hex {
+  return withSequencer(
+    encodeAbiParameters([{ type: "address" }, { type: "int256" }, { type: "uint256" }], [feed, threshold, maxStaleness]),
+    seq,
+  );
+}
+
+/** A `Validator` for the Chainlink `price >= threshold` / `price <= threshold` gates. */
+export function chainlinkThresholdValidator(
+  validator: Address,
+  feed: Address,
+  threshold: bigint,
+  maxStaleness: bigint,
+  seq?: SequencerCheck,
+): Validator {
+  return { target: validator, data: encodeChainlinkThresholdData(feed, threshold, maxStaleness, seq) };
+}
+
+/**
+ * Filler gates that name CONTRACTS (audit 2026-09-30 VAL-5). A
+ * `FillerWhitelistValidator` / `FillerAttestationValidator` checks the fill's
+ * `msg.sender`; listing a contract opens the gate to every caller that contract
+ * lets through. That is only sound for an operator-GATED solver (e.g. an
+ * `AggregatorFillSolver` deployed with an operator set). Pass each listed address
+ * and whether it has code (`getCode(addr) !== "0x"`) plus the set of addresses you
+ * KNOW to be operator-gated; returns a warning per ungated contract.
+ */
+export function fillerListingWarnings(
+  listed: readonly { address: Address; hasCode: boolean }[],
+  knownGated: readonly Address[] = [],
+): string[] {
+  const gated = new Set(knownGated.map((a) => a.toLowerCase()));
+  return listed
+    .filter((l) => l.hasCode && !gated.has(l.address.toLowerCase()))
+    .map(
+      (l) =>
+        `${l.address} is a contract that is not known to be operator-gated: listing it admits every caller ` +
+        "it forwards (VAL-5)",
+    );
 }

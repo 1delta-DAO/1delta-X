@@ -44,6 +44,10 @@ import {IExactlyMarket} from "./interfaces/IExactly.sol";
 // `data = abi.encode(market, asset, maturity, minAssetsRequired[, deadline, v, r, s])`
 //   — base = 128 bytes.
 //
+// EIP-2612 permit block @128 (+ signedValue@256): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract ExactlyDepositModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -120,6 +124,10 @@ contract ExactlyDepositModule is IMakerModule {
 //   rule 9b now holds every read offset to this header, and {ProratedBound.scale}
 //   refuses a total smaller than the slice.
 //
+// EIP-2612 permit block @160 (+ signedValue@288): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract ExactlyRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;

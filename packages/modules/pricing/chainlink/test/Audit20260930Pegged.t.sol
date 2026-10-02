@@ -48,8 +48,8 @@ contract Audit20260930PeggedTest is MockSettlementBase {
         super.setUp();
         feed = new AuditPegFeed();
         feed.set(1.5e18, block.timestamp); // 1 tA = 1.5 tB
-        sellMod = new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
-        buyMod = new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, false, 0);
+        sellMod = new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0, address(0), 0);
+        buyMod = new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, false, 0, address(0), 0);
         fullFill = new FullFillModule();
     }
 
@@ -188,11 +188,11 @@ contract Audit20260930PeggedTest is MockSettlementBase {
         uint256 timing = _peggedSell(7).timing;
         // fair(1_000) = 2_500 ≥ start → 0
         ChainlinkPeggedPriceModule rich =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 5, 3e18, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 5, 3e18, true, 0, address(0), 0);
         assertEq(rich.bump(bytes32(0), maker, solver, 0, SELL_IN, timing, legsIn, legsOut, ""), 0);
         // r = 0.4: r·cap = 800 ≤ end (1_000) → BPS
         ChainlinkPeggedPriceModule poor =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 4, 15e18, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 4, 15e18, true, 0, address(0), 0);
         assertEq(poor.bump(bytes32(0), maker, solver, 0, SELL_IN, timing, legsIn, legsOut, ""), 10_000);
     }
 
@@ -201,14 +201,14 @@ contract Audit20260930PeggedTest is MockSettlementBase {
     /// `NUM == 0` is now rejected at construction, like the validators' ZeroRatio.
     function test_audit_PRICE_9_numZero_rejected() public {
         vm.expectRevert(ChainlinkPeggedPriceModule.InvalidConfig.selector);
-        new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 0, 1, true, 0);
+        new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 0, 1, true, 0, address(0), 0);
     }
 
     /// The same silent-floor outcome through an over-scaled DEN (fair truncates to
     /// 0) is refused at pricing time instead of clearing at the floor.
     function test_audit_PRICE_9_fairTruncatesToZero_reverts() public {
         ChainlinkPeggedPriceModule over =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e60, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e60, true, 0, address(0), 0);
         Order memory o = _peggedSell(8);
         vm.expectRevert(ChainlinkPeggedPriceModule.ImplausiblePrice.selector);
         over.bump(bytes32(0), maker, solver, 0, SELL_IN, o.timing, o.legsIn, o.legsOut, "");

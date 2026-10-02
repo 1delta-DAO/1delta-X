@@ -128,7 +128,7 @@ function build() {
     /// Quote takerData head — `CosignedQuotePriceModule._quote` slices [0:20]/[20:52]/[52:84].
     quote: {
       takerDataHead: encodeQuoteTakerData(
-        { orderHash: hex(0n), filler: FILLER, bumpBps: 4_200, deadline: 1_700_000_000n },
+        { orderHash: hex(0n), filler: FILLER, bumpBps: 4_200, deadline: 1_700_000_000n, prevFilled: 0n },
         "0x",
       ),
       filler: FILLER,

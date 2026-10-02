@@ -59,7 +59,7 @@ contract ChainlinkPeggedPriceTest is MockSettlementBase {
         feed.set(1.5e18, block.timestamp); // 1 tA = 1.5 tB
         // fair = anchor · answer / 1e18, no spread, pricing the OUTPUT band.
         ChainlinkPeggedPriceModule mod =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0, address(0), 0);
 
         Order memory o = _decayingSell(8);
         o.pricingModule = address(mod);
@@ -79,7 +79,7 @@ contract ChainlinkPeggedPriceTest is MockSettlementBase {
         PriceFeed feed = new PriceFeed();
         feed.set(50e18, block.timestamp); // fresh, and far outside the sanity band
         ChainlinkPeggedPriceModule mod =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0, address(0), 0);
 
         Order memory o = _decayingSell(9);
         o.pricingModule = address(mod);
@@ -99,7 +99,7 @@ contract ChainlinkPeggedPriceTest is MockSettlementBase {
         vm.warp(block.timestamp + 10 hours);
         feed.set(1.5e18, block.timestamp - 2 hours);
         ChainlinkPeggedPriceModule mod =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0, address(0), 0);
 
         Order memory o = _decayingSell(10);
         _setExpiry(o, block.timestamp + 1 hours);
@@ -117,7 +117,7 @@ contract ChainlinkPeggedPriceTest is MockSettlementBase {
         PriceFeed feed = new PriceFeed();
         feed.set(2.9e18, block.timestamp); // fair = 2_900e18 > start = 2_000e18
         ChainlinkPeggedPriceModule mod =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0, address(0), 0);
 
         Order memory o = _decayingSell(11);
         o.pricingModule = address(mod);
@@ -135,7 +135,7 @@ contract ChainlinkPeggedPriceTest is MockSettlementBase {
         PriceFeed feed = new PriceFeed();
         feed.set(1.25e18, block.timestamp);
         ChainlinkPeggedPriceModule mod =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0, address(0), 0);
         Order memory o = _decayingSell(15);
         o.pricingModule = address(mod);
         bytes memory sig = _sign(o);

@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
@@ -33,6 +34,10 @@ import {
 // Optional EIP-2612 permit replay for gasless collateral deposits.
 // `data = abi.encode(MarketParams[, deadline, v, r, s])` — base = 160 bytes.
 //
+// EIP-2612 permit block @160 (+ signedValue@288): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract MorphoBlueSupplyCollateralModule is IMakerModule {
     IPermit3 public immutable permit3;
     IMorphoBlue public immutable morpho;
@@ -74,6 +79,10 @@ contract MorphoBlueSupplyCollateralModule is IMakerModule {
 // Optional EIP-2612 permit replay for gasless deposits.
 // `data = abi.encode(MarketParams[, deadline, v, r, s])` — base = 160 bytes.
 //
+// EIP-2612 permit block @160 (+ signedValue@288): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract MorphoBlueSupplyModule is IMakerModule {
     IPermit3 public immutable permit3;
     IMorphoBlue public immutable morpho;
@@ -143,6 +152,10 @@ contract MorphoBlueSupplyModule is IMakerModule {
 // dust action optional (absent ⇒ SweepToUser); permit block optional after it.
 //
 //   base = 160; DustAction@160; permit@192.
+// EIP-2612 permit block @192 (+ signedValue@320): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
     using MarketParamsLib for MarketParams;
 
@@ -319,9 +332,12 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 //       — op@0, MarketParams@32 (base = 192); auth block (160B) optional at 192.
 //
 //   op = 1 (WithdrawCollateral):
-//     Exact: abi.encode(uint8(1), MarketParams[, BalanceMode(0)[, nonce, deadline, v, r, s]])
-//       — op@0, MarketParams@32 (base = 192); BalanceMode@192; auth@224.
-//     Full:  abi.encode(uint8(1), MarketParams, BalanceMode(1), totalAmount[, nonce, deadline, v, r, s])
+//     Exact: abi.encode(uint8(1), MarketParams[, uint256(0)[, nonce, deadline, v, r, s]])
+//       — op@0, MarketParams@32 (base = 192); BalanceMode word@192; auth@224.
+//     Full:  abi.encode(uint8(1), MarketParams, uint256(0xB0DE0001), totalAmount[, nonce, deadline, v, r, s])
+//       — the mode word is TAGGED: `Full` = `DustHandler.encodeMode(Full)` =
+//         0xB0DE0001 (SDK `encodeMode(BalanceMode.Full)`); an untagged `1` reverts
+//         `InvalidModeWord`. `Exact` is 0.
 //       — BalanceMode@192; totalAmount@224 (MANDATORY); auth@256.
 //       ⚠ THE TWO MODES PLACE THE AUTH BLOCK AT DIFFERENT OFFSETS. `Full` needs a
 //       maker-signed `totalAmount` ({FullFillGuard}), and it occupies 224 — so the
@@ -336,7 +352,7 @@ contract MorphoBlueRepayModule is IMakerModule, IMorphoRepayCallback {
 //       Full mode redeems by shares, so the accrued-interest excess sweeps back
 //       in-kind.
 //
-contract MorphoBlueTakerModule is ITakerModule, IPositionSource {
+contract MorphoBlueTakerModule is ITakerModule, IPositionSource, IProceedsAsset {
     using MarketParamsLib for MarketParams;
 
     IPermit3 public immutable permit3;
@@ -368,6 +384,18 @@ contract MorphoBlueTakerModule is ITakerModule, IPositionSource {
         (uint256 op, MarketParams memory marketParams) = abi.decode(data, (uint8, MarketParams));
         if (op != uint256(Op.WithdrawCollateral)) revert BadOp(uint8(op));
         return _collateralOf(marketParams, user);
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The token this item delivers (audit 2026-09-30 L-CMT-6), so the lens can
+    ///      check an input leg consumes it: `loanToken` for `Borrow` / `Withdraw`
+    ///      (op 0 / 2), `collateralToken` for `WithdrawCollateral` (op 1). An
+    ///      unknown op reverts {BadOp}, which the lens reads as "unknown".
+    function proceedsAsset(bytes calldata data) external pure override returns (address) {
+        (uint256 op, MarketParams memory marketParams) = abi.decode(data, (uint8, MarketParams));
+        if (op == uint256(Op.WithdrawCollateral)) return marketParams.collateralToken;
+        if (op == uint256(Op.Borrow) || op == uint256(Op.Withdraw)) return marketParams.loanToken;
+        revert BadOp(uint8(op));
     }
 
     /// @dev The ledger read itself, taking `MarketParams` in memory so the internal

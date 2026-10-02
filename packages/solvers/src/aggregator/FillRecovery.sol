@@ -124,6 +124,16 @@ library FillRecovery {
     ///         on {ctxOf} — and the any-size sentinel, whose delta is not an argument. The check lives HERE and not only in {ctxOf} because
     ///         this is the entrypoint a proportional-order solver is told to use,
     ///         so routing around {ctxOf} must not route around the guard.
+    ///
+    ///  ⚠ THE BUMP IS RE-RESOLVED, SO THIS IS EXACT FOR CLOCK-PRICED ORDERS ONLY
+    ///  (audit 2026-09-30 CORE-FILLER-5). The settler resolves a price-module or
+    ///  priority bump ONCE, in {OrderState._openFill}, and pins it. Re-resolving it
+    ///  here from inside the callback asks the module again AFTER the fill has moved
+    ///  state it may read (a balance a `PostInputs` payment changed, a pool the
+    ///  callback swapped through, an oracle pushed in the callback) — and a
+    ///  different answer mis-sizes the solver's approval. For a price-module or
+    ///  priority order capture {pinnedBumpOf} BEFORE the fill and use
+    ///  {ctxOfPinned}.
     function ctxOfWithAnchor(
         Settlement settlement,
         Order calldata order,
@@ -132,6 +142,52 @@ library FillRecovery {
         bytes memory takerData,
         uint256 anchorHint
     ) internal view returns (FillCtx memory ctx) {
+        ctx = _baseCtx(settlement, order, fillAmount, filler, anchorHint);
+        // Re-runs the module / priority resolution the settler pinned — exact only
+        // while nothing the module reads has moved (see the ⚠ above).
+        ctx.bump = DutchAuction.resolveBump(order, ctx.orderHash, ctx.anchor, filler, ctx.prevFilled, takerData);
+    }
+
+    /// @notice The bump a PRICE-MODULE or PRIORITY fill by `filler` will pin, plus
+    ///         one — `0` for a clock-priced order. Capture it IMMEDIATELY BEFORE the
+    ///         fill, in the same transaction (the on-chain twin of
+    ///         {SettlementLens.pinnedBump}): the settler resolves the same
+    ///         {DutchAuction.resolveBump} with the same filler, blob, progress,
+    ///         block and gas price, so the capture is exactly its pin.
+    function pinnedBumpOf(Settlement settlement, Order calldata order, address filler, bytes memory takerData)
+        internal
+        view
+        returns (uint256)
+    {
+        bytes32 orderHash = OrderHash.hash(order);
+        uint256 prevFilled = settlement.filled(orderHash);
+        return DutchAuction.resolveBump(order, orderHash, OrderGates.fillDenominator(order), filler, prevFilled, takerData);
+    }
+
+    /// @notice {ctxOfWithAnchor} priced at a bump captured BEFORE the fill
+    ///         ({pinnedBumpOf}) instead of one re-resolved from inside the callback —
+    ///         exact for price-module and priority orders too (CORE-FILLER-5).
+    /// @param  pin {pinnedBumpOf}'s return value (`bump + 1`, or 0 for a clock order).
+    function ctxOfPinned(
+        Settlement settlement,
+        Order calldata order,
+        uint256 fillAmount,
+        address filler,
+        uint256 anchorHint,
+        uint256 pin
+    ) internal view returns (FillCtx memory ctx) {
+        ctx = _baseCtx(settlement, order, fillAmount, filler, anchorHint);
+        ctx.bump = pin;
+    }
+
+    /// @dev Every {FillCtx} field but the bump, with the shape refusals.
+    function _baseCtx(
+        Settlement settlement,
+        Order calldata order,
+        uint256 fillAmount,
+        address filler,
+        uint256 anchorHint
+    ) private view returns (FillCtx memory ctx) {
         if (fillAmount == type(uint256).max) revert SentinelNotRecoverable();
         if (order.fillModule != address(0)) revert FillModuleNotRecoverable();
         if (DutchAuction.useNonceInvalidator(order)) revert NonceInvalidatorNotRecoverable();
@@ -147,10 +203,6 @@ library FillRecovery {
         ctx.filler = filler;
         ctx.payTo = filler;
         ctx.overrideBps = OrderGates.exclusivityOverride(order, filler);
-        // Re-runs the module / priority resolution the settler pinned. Same
-        // arguments in, same answer out — the module is `view` and its address is
-        // in the order the solver already holds.
-        ctx.bump = DutchAuction.resolveBump(order, ctx.orderHash, ctx.anchor, filler, ctx.prevFilled, takerData);
     }
 
     /// @notice What this fill must deliver on output leg `j` — the number

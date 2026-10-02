@@ -49,7 +49,7 @@ contract ProportionalPeggedPriceTest is MockSettlementBase {
     function _mod() internal returns (ChainlinkPeggedPriceModule) {
         PriceFeed feed = new PriceFeed();
         feed.set(1.5e18, block.timestamp); // 1 tA = 1.5 tB
-        return new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
+        return new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0, address(0), 0);
     }
 
     /// @dev A proportional SELL: sweep 100% of the maker's tA, capped at `CAP`,

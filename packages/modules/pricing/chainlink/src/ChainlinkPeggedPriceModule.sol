@@ -67,6 +67,13 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
     bool public immutable PRICE_OUTPUT;
     /// @notice The maker's edge over the oracle, in bps, applied against them.
     uint256 public immutable SPREAD_BPS;
+    /// @notice Chainlink L2 sequencer-uptime feed (audit 2026-09-30 PRICE-8);
+    ///         `address(0)` disables the check (an L1, or a sequencer-less chain).
+    ///         On an L2 a stale pre-outage price otherwise prices fills.
+    address public immutable SEQUENCER_UPTIME_FEED;
+    /// @notice Seconds after the sequencer comes back up during which fills revert
+    ///         `GracePeriodNotOver` ({ChainlinkRead.checkSequencer}).
+    uint256 public immutable GRACE_PERIOD;
 
     error ImplausiblePrice();
     error NoBand();
@@ -85,7 +92,9 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         uint256 num,
         uint256 den,
         bool priceOutput,
-        uint256 spreadBps
+        uint256 spreadBps,
+        address sequencerUptimeFeed,
+        uint256 gracePeriod
     ) {
         if (feed == address(0) || num == 0 || den == 0 || minAnswer <= 0 || maxAnswer < minAnswer || spreadBps > BPS) {
             revert InvalidConfig();
@@ -98,6 +107,8 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         DEN = den;
         PRICE_OUTPUT = priceOutput;
         SPREAD_BPS = spreadBps;
+        SEQUENCER_UPTIME_FEED = sequencerUptimeFeed;
+        GRACE_PERIOD = gracePeriod;
     }
 
     /// @inheritdoc IPriceModule
@@ -122,7 +133,9 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         bool isBuy = (orderTiming >> 101) & 1 == 1;
         if (PRICE_OUTPUT == isBuy) revert SideMismatch();
 
-        int256 answer = ChainlinkRead.read(FEED, MAX_STALENESS);
+        // Sequencer first: a down (or just-restarted) L2 sequencer leaves the feed's
+        // last answer looking fresh while the market has moved (PRICE-8).
+        int256 answer = ChainlinkRead.readL2(FEED, MAX_STALENESS, SEQUENCER_UPTIME_FEED, GRACE_PERIOD);
         if (answer < MIN_ANSWER || answer > MAX_ANSWER) revert ImplausiblePrice();
 
         (uint256 anchor, uint256 rise, uint256 start, uint256 end) = _band(total, legsIn, legsOut);

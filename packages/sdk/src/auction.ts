@@ -29,7 +29,11 @@ export interface QuoteBid {
   filler: Address;
   /** The concession this filler asks for, in bps of the maker's band. */
   bumpBps: number;
-  /** Optional tie-break key — a commitment hash, for a sealed-bid round. */
+  /**
+   * Optional commitment hash, for a sealed-bid round. ⚠ NOT a tie-break key: no
+   * bid signature covers it, so anyone relaying a bid could rewrite it to win a
+   * tie (audit 2026-09-30 G-TS_FILLER-1). Ties break on the (signed) filler.
+   */
   commitment?: Hex;
 }
 
@@ -55,18 +59,19 @@ function usable(b: QuoteBid): boolean {
 }
 
 /**
- * Deterministic total order over bids: lower bump first, then the commitment
- * hash, then the filler address.
+ * Deterministic total order over bids: lower bump first, then the filler address.
  *
  * The tie-break MUST be total and deterministic or the outcome is not
  * objectively checkable — two honest parties replaying the same committed set
  * have to agree on the winner, and "whichever arrived first" is not a property
- * of the set.
+ * of the set. It must also be SIGNED: the filler is bound into every bid
+ * signature, an unsigned `commitment` is not, so it is not consulted (audit
+ * 2026-09-30 G-TS_FILLER-1 — a rewritten commitment used to steal ties).
  */
 function compareBids(a: QuoteBid, b: QuoteBid): number {
   if (a.bumpBps !== b.bumpBps) return a.bumpBps - b.bumpBps;
-  const ka = (a.commitment ?? a.filler).toLowerCase();
-  const kb = (b.commitment ?? b.filler).toLowerCase();
+  const ka = a.filler.toLowerCase();
+  const kb = b.filler.toLowerCase();
   return ka < kb ? -1 : ka > kb ? 1 : 0;
 }
 

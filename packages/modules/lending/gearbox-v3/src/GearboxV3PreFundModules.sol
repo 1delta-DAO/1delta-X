@@ -76,6 +76,17 @@ import {IGearboxPoolV3} from "./interfaces/IGearboxV3.sol";
 ///      to get it wrong. `tools/check-module-shapes.py` now enforces the shared
 ///      helper, and this contract was the one thing it found.
 contract GearboxPoolPreFundDepositModule is PreFundModuleBase, IMakerModule, IFundingSource {
+    /// @dev One op today. Read and checked like the other 15 pre-fund contracts
+    ///      (audit 2026-09-30 L-CENSUS-8): an unchecked op would let any of the 256
+    ///      descriptor values through as "deposit", and a blob signed for a FUTURE
+    ///      sibling op would replay here.
+    enum Op {
+        Deposit
+    }
+
+    /// @dev The descriptor named an op this module does not implement.
+    error BadOp(uint256 op);
+
     constructor(address _permit3, address _settlement) PreFundModuleBase(_permit3, _settlement) {}
 
     /// @param onBehalfOf the maker — whose pool (dToken) balance receives the supply.
@@ -83,6 +94,8 @@ contract GearboxPoolPreFundDepositModule is PreFundModuleBase, IMakerModule, IFu
     ///                   from this module's own balance.
     function makeOnBehalf(address onBehalfOf, uint256 forAmount, bytes calldata data) external override {
         _gatePreFundMake(data);
+        uint256 op = _preFundOp(data);
+        if (op != uint256(Op.Deposit)) revert BadOp(op);
         // A dust slice can floor the funding leg to zero; skip, as every composite
         // module does — it accumulates exactly across fills.
         if (forAmount == 0) return;

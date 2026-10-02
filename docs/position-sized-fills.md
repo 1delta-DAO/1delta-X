@@ -1,8 +1,9 @@
 # Position-sized fills — selling the accrued interest instead of returning it as dust
 
-**Status:** one venue-agnostic fill module + a `positionOf` read on seven taker
-modules (aave-v3, compound-v3, morpho-blue collateral, silo, euler-v2, exactly,
-gearbox-v3). Zero Settlement bytes.
+**Status:** one venue-agnostic fill module + a `positionOf` read on twelve taker
+modules (aave-v3, aave-v2, aave-v4, compound-v3, morpho-blue collateral, silo,
+euler-v2, exactly, gearbox-v3, lista (+native), dolomite, morpho-midnight). Zero
+Settlement bytes.
 
 ## The problem
 
@@ -170,6 +171,19 @@ side identically.
 | compound-v3 | `baseToken()` split: `balanceOf` for base, `collateralBalanceOf` otherwise | the asset, from `data` |
 | morpho-blue | `position(id, user).collateral` — asset-denominated and exact | `marketParams.collateralToken` |
 | silo, euler-v2, exactly, gearbox-v3 | `previewRedeem(balanceOf(user))` / `convertToAssets(balanceOf(user))` — the RAW position | `vault.asset()`, read from the **vault**, never from `data` |
+| aave-v2 | `aToken.balanceOf(user)` — rebases 1:1 | the underlying, from `data` |
+| aave-v4 | `spoke.getUserSuppliedAssets(reserveId, user)` | the reserve's underlying, bound via `spoke.getReserve` |
+| lista (`ListaTakerModule` ops 1/2, `ListaNativeCollateralTakerModule`) | `Moolah.position(id, user).collateral` on the SINGLETON (op 2 / native read through the provider split) | `marketParams.collateralToken` (the wrapped native for the native module) |
+| dolomite (`Op.Withdraw`) | `getAccountWei(user, accountNumber, marketId)` — positive balance, 0 if in debt | the market token, bound to `data` |
+| morpho-midnight | op 0 `collateral(id, user, index)`; op 1 `updatePositionView` (the UPDATED credit — the stored `credit()` is stale) | the indexed collateral token / `loanToken` |
+
+Added 2026-09-30 (audit L-LIB-8): aave-v2, aave-v4, lista, dolomite and morpho-midnight,
+each with a fork/unit test calling `positionOf` raw and resolving a `PositionFillModule`
+order from it, and each module's `BalanceMode.Full` branch reads the same function.
+**Not covered:** Compound v2 and Venus (`balanceOfUnderlying` is not a view and
+`exchangeRateStored` is stale — a reader needs its own accrual-aware view), and the
+time-locked `ERC4626WithdrawModule` (the generic `ITimelockERC4626` exposes no
+per-request asset view, and its claim is already a whole, indivisible request).
 
 
 ⚠ **NOT `maxWithdraw`, and this was a real bug until 2026-09-10.** `maxWithdraw` is a

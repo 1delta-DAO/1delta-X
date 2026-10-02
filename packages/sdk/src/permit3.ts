@@ -2,9 +2,11 @@ import { encodeFunctionData, keccak256, type Address, type Hex } from "viem";
 
 import { PERMIT3_ABI, TAKER_MODULE_DESCRIBE_ABI } from "./abi";
 import { PERMIT_TAKE_TYPES, permit3Domain } from "./eip712";
-import type { TypedDataSigner } from "./orders";
+import { encodeCancelOrder, type TypedDataSigner } from "./orders";
+import { encodeCometAllowBySig, encodeMorphoSetAuthorizationWithSig } from "./venueAuth";
 import type {
   Deployment,
+  Order,
   PermitBatch,
   PermitTake,
   SpenderRefPair,
@@ -167,6 +169,23 @@ export interface RevokeCall {
  * bundle is sent as separate transactions and a fill lands between them, the
  * fallback is already closed.
  *
+ * ⚠ A SIGNED BUT UNAPPLIED PERMIT IS A THIRD FUNDING PATH (audit 2026-09-30
+ * CENSUS-A-3). Clearing the book does not touch a `PermitBatch` / `PermitTake` the
+ * maker signed and nobody has relayed yet — including the witness batch of every
+ * open gasless (`fillWithPermit`) order. Anyone can relay one until its deadline,
+ * and it re-writes the very grants this bundle zeroes. So `outstandingPermitNonces`
+ * is REQUIRED: the Permit3 nonce of every such message (pass `[]` only after
+ * checking there is none — an orderbook knows them). They are burned in the same
+ * `lockdownAll`.
+ *
+ * ⚠ A PLAIN VENUE REVOKE CAN BE UNDONE (L-CMT-3 / L-ML-9). A `comet.allow(m,false)`
+ * or Morpho/Moolah `setAuthorization(m,false)` in `protocolRevokes` leaves the venue
+ * nonce untouched, so a signed `allowBySig` / `setAuthorizationWithSig` grant in
+ * public order data can re-grant the module until its own deadline. Pass the
+ * nonce-CONSUMING revoke instead as `signedVenueRevokes` (sign it with
+ * `cometAuthorizationTypedData` / `morphoAuthorizationTypedData` at the CURRENT
+ * venue nonce), or rely on `lockdownAll` (the modules only act inside a fill).
+ *
  * @returns the ordered calls to send. Empty if there is nothing to revoke.
  */
 export function buildRevokeAll(params: {
@@ -174,6 +193,12 @@ export function buildRevokeAll(params: {
   tokens?: readonly TokenSpenderPair[];
   takers?: readonly SpenderRefPair[];
   nonces?: readonly { word: bigint; mask: bigint }[];
+  /** REQUIRED: the Permit3 nonce of every signed-but-unapplied `PermitBatch` /
+   *  `PermitTake` (gasless orders' witness batches included). `[]` = none. */
+  outstandingPermitNonces: readonly bigint[];
+  /** Nonce-consuming venue revokes, each SIGNED by the maker at the venue's current
+   *  nonce — see the note above. Sent to the venue; anyone may relay them. */
+  signedVenueRevokes?: readonly SignedVenueRevoke[];
   /** Direct ERC-20 approvals to zero — the fallback funding surface. Each entry is
    *  the `(token, spender)` pair the payer approved, usually spender = settlement. */
   directApprovals?: readonly TokenSpenderPair[];
@@ -182,9 +207,15 @@ export function buildRevokeAll(params: {
   strictMode?: boolean;
   protocolRevokes?: readonly RevokeCall[];
 }): RevokeCall[] {
+  if (!Array.isArray(params.outstandingPermitNonces)) {
+    throw new Error(
+      "buildRevokeAll: outstandingPermitNonces is required — a signed but unapplied PermitBatch/PermitTake " +
+        "re-grants what this bundle revokes (pass [] only if there is none)",
+    );
+  }
   const tokens = params.tokens ?? [];
   const takers = params.takers ?? [];
-  const nonces = params.nonces ?? [];
+  const nonces = mergeNonceMasks([...(params.nonces ?? []), ...params.outstandingPermitNonces.map(permitNonceBit)]);
   const directApprovals = params.directApprovals ?? [];
   const protocolRevokes = params.protocolRevokes ?? [];
 
@@ -211,8 +242,81 @@ export function buildRevokeAll(params: {
       data: encodeFunctionData({ abi: ERC20_APPROVE_ABI, functionName: "approve", args: [spender, 0n] }),
     });
   }
+  for (const r of params.signedVenueRevokes ?? []) {
+    calls.push(
+      r.kind === "comet"
+        ? {
+            to: r.comet,
+            data: encodeCometAllowBySig({
+              owner: r.owner,
+              manager: r.manager,
+              isAllowed: false,
+              nonce: r.nonce,
+              expiry: r.expiry,
+              sig: r.sig,
+            }),
+          }
+        : {
+            to: r.morpho,
+            data: encodeMorphoSetAuthorizationWithSig({
+              authorizer: r.authorizer,
+              authorized: r.authorized,
+              isAuthorized: false,
+              nonce: r.nonce,
+              deadline: r.deadline,
+              sig: r.sig,
+            }),
+          },
+    );
+  }
   calls.push(...protocolRevokes);
   return calls;
+}
+
+/** A maker-signed, nonce-consuming venue revoke (see {@link buildRevokeAll}). */
+export type SignedVenueRevoke =
+  | { kind: "comet"; comet: Address; owner: Address; manager: Address; nonce: bigint; expiry: bigint; sig: Hex }
+  | {
+      kind: "morpho";
+      /** Morpho Blue or Lista Moolah. */
+      morpho: Address;
+      authorizer: Address;
+      authorized: Address;
+      nonce: bigint;
+      deadline: bigint;
+      sig: Hex;
+    };
+
+/** The `(word, mask)` bitmap coordinate of one Permit3 unordered nonce. */
+export function permitNonceBit(nonce: bigint): { word: bigint; mask: bigint } {
+  return { word: nonce >> 8n, mask: 1n << (nonce & 0xffn) };
+}
+
+/** OR together masks that share a word, so each word is invalidated once. */
+function mergeNonceMasks(entries: readonly { word: bigint; mask: bigint }[]): { word: bigint; mask: bigint }[] {
+  const byWord = new Map<bigint, bigint>();
+  for (const { word, mask } of entries) byWord.set(word, (byWord.get(word) ?? 0n) | mask);
+  return [...byWord.entries()].map(([word, mask]) => ({ word, mask }));
+}
+
+/**
+ * Cancel a GASLESS (`fillWithPermit`) order for good: `Settlement.cancelOrder`
+ * kills the order, and `Permit3.invalidateUnorderedNonces` burns its witness
+ * `PermitBatch` nonce — without the second call anyone can still relay the batch
+ * until its deadline and re-write the grants it carries (audit 2026-09-30
+ * CENSUS-A-3). Both calls run from the maker's account.
+ */
+export function buildCancelGaslessOrder(params: {
+  settlement: Address;
+  permit3: Address;
+  order: Order;
+  permitNonce: bigint;
+}): RevokeCall[] {
+  const { word, mask } = permitNonceBit(params.permitNonce);
+  return [
+    { to: params.settlement, data: encodeCancelOrder(params.order) },
+    { to: params.permit3, data: encodeInvalidateUnorderedNonces(word, mask) },
+  ];
 }
 
 const ERC20_APPROVE_ABI = [
@@ -320,8 +424,12 @@ export async function readFundingPosture(
  *
  * Ordering is the point. Strict mode makes the Permit3 book the only path that can
  * move the payer's tokens, so from here on `revokeToken` / `lockdown` / an expiry
- * are real kill switches rather than advisory ones — which is what a user assumes
- * they already are. The flag is read only on an ALREADY-FAILED Permit3 leg, so it
+ * are real kill switches over the allowances ALREADY IN THE BOOK rather than
+ * advisory ones. They are NOT kill switches over a signed `PermitBatch` /
+ * `PermitTake` nobody has relayed yet (a gasless order's witness batch included):
+ * that can still be relayed until its deadline and re-writes the grant. Burn those
+ * nonces too — `invalidateUnorderedNonces`, or `buildRevokeAll`'s
+ * `outstandingPermitNonces` (audit 2026-09-30 CENSUS-A-3). The flag is read only on an ALREADY-FAILED Permit3 leg, so it
  * costs nothing on the fill hot path and nothing at all for a payer whose grants
  * are in order.
  *

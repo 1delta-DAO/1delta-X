@@ -22,7 +22,8 @@ interface IERC721 {
 ///         constraint (the maker no longer has to sign the solver's address as
 ///         the recipient).
 ///
-/// @dev    `data = abi.encode(collection, tokenId, total)`, where `total` is the
+/// @dev    `data = abi.encode(collection, tokenId, total)` — collection at byte 0, tokenId at 32,
+///         total at 64 — where `total` is the
 ///         item's signed `amount`. Gated by `msg.sender == settlement` (so the
 ///         maker's order signature is the authority) + the maker's
 ///         `setApprovalForAll(this)` on the collection (which caps it to the

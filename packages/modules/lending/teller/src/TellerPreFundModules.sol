@@ -74,7 +74,7 @@ import {TellerRepayLib} from "./TellerModules.sol";
 ///         executed as another. Each op keeps its own decode, so the
 ///         per-op `data` layouts are unchanged apart from the descriptor bits.
 // Byte maps — Deposit: forDesc@0, pool@32, asset@64 (base = 96).
-//             Repay:   forDesc@0, pool@32, asset@64, bidId@96, full@128 (base = 160).
+//             Repay:   forDesc@0, tellerV2@32, principalToken@64, bidId@96, full@128 (base = 160).
 contract TellerPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     enum Op {
         PoolDeposit,
@@ -99,8 +99,9 @@ contract TellerPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource 
         if (op == uint256(Op.PoolDeposit)) {
         (, address pool, address asset) = abi.decode(data, (uint256, address, address));
         // Scoped approve + CLEAR: `pool` is decoded from order data on a shared
-        // singleton, so it is attacker-choosable (F25 / lead A-3). `deposit`
-        // consumes exactly `forAmount`, so no sweep is needed.
+        // singleton, so it is attacker-choosable (F25 / lead A-3). `deposit` should
+        // consume exactly `forAmount`; the floor-relative sweep below returns any
+        // part a venue did NOT consume to the maker instead of stranding it.
         // The delivery must have landed HERE, in THIS token — the funding leg's
         // recipient is bound by the core (descriptor bit 253) and CONSUMED
         // ({Base.ForLegInvalid}), but its TOKEN is not (F27/H-1). Underflows if

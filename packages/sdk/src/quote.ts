@@ -20,7 +20,7 @@ import {
  *
  *   digest    = keccak256(abi.encode(
  *                 QUOTE_TYPEHASH, orderHash, filler, bumpBps, deadline,
- *                 chainId, module))
+ *                 prevFilled, chainId, module))
  *   takerData = filler(20) ‖ bumpBps(32) ‖ deadline(32) ‖ sig
  *
  * ⚠ NOT an EIP-712 envelope. The module hashes the chain id and its own address
@@ -39,11 +39,14 @@ import {
 
 const BPS = 10_000;
 
-/** `keccak256("PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline)")` —
+/** `keccak256("PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline,uint256 prevFilled)")` —
  *  the same type string in both modules; the module ADDRESS in the digest is
- *  what keeps two instances (and the two module kinds) apart. */
+ *  what keeps two instances (and the two module kinds) apart. `prevFilled` binds
+ *  a quote to ONE fill of a partially fillable order (audit 2026-09-30 PRICE-10):
+ *  a quote minted for the fill starting at progress `p` does not verify for any
+ *  later fill. BREAKING vs the 4-field type. */
 export const QUOTE_TYPEHASH = keccak256(
-  toHex("PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline)"),
+  toHex("PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline,uint256 prevFilled)"),
 );
 
 /** The open-to-any-filler sentinel. A quote naming a filler is exclusive to it;
@@ -58,6 +61,12 @@ export interface PriceQuote {
   bumpBps: number;
   /** Unix seconds. The module rejects `block.timestamp > deadline`. */
   deadline: bigint;
+  /**
+   * The order's `filled()` progress the quoted fill STARTS at — `0n` for a first
+   * fill. The module binds the digest to the fill's real `prevFilled`, so a quote
+   * minted for a stale progress reverts.
+   */
+  prevFilled: bigint;
 }
 
 /** Which module instance a quote is bound to. Both fields are hashed into the
@@ -72,6 +81,9 @@ function assertQuote(q: PriceQuote): void {
     throw new Error(`bumpBps must be an integer in [0, ${BPS}], got ${q.bumpBps}`);
   }
   if (q.deadline < 0n) throw new Error("deadline must be non-negative");
+  if (typeof q.prevFilled !== "bigint" || q.prevFilled < 0n) {
+    throw new Error("prevFilled must be the order's filled() progress (a non-negative bigint)");
+  }
 }
 
 /**
@@ -90,6 +102,7 @@ export function quoteDigest(quote: PriceQuote, binding: QuoteBinding): Hex {
         { type: "uint256" },
         { type: "uint256" },
         { type: "uint256" },
+        { type: "uint256" },
         { type: "address" },
       ],
       [
@@ -98,6 +111,7 @@ export function quoteDigest(quote: PriceQuote, binding: QuoteBinding): Hex {
         quote.filler,
         BigInt(quote.bumpBps),
         quote.deadline,
+        quote.prevFilled,
         BigInt(binding.chainId),
         binding.module,
       ],
@@ -142,8 +156,9 @@ export async function signQuote(
  * `abi.encode`d, so the module can hand an EIP-1271 cosigner the exact bytes it
  * was given and the signature stays a calldata slice.
  */
-export function encodeQuoteTakerData(quote: PriceQuote, signature: Hex): Hex {
-  assertQuote(quote);
+export function encodeQuoteTakerData(quote: Omit<PriceQuote, "prevFilled"> & { prevFilled?: bigint }, signature: Hex): Hex {
+  // `prevFilled` is signed, not carried: the module reads the fill's own progress.
+  assertQuote({ ...quote, prevFilled: quote.prevFilled ?? 0n });
   return concatHex([
     quote.filler,
     pad(toHex(BigInt(quote.bumpBps)), { size: 32 }),
@@ -155,7 +170,10 @@ export function encodeQuoteTakerData(quote: PriceQuote, signature: Hex): Hex {
 /** Inverse of {@link encodeQuoteTakerData}, for a book or filler inspecting a
  *  blob it did not build. Throws on anything the module would reject as
  *  `MalformedQuote` (under 84 bytes). */
-export function decodeQuoteTakerData(takerData: Hex): { quote: Omit<PriceQuote, "orderHash">; signature: Hex } {
+export function decodeQuoteTakerData(takerData: Hex): {
+  quote: Omit<PriceQuote, "orderHash" | "prevFilled">;
+  signature: Hex;
+} {
   const body = takerData.startsWith("0x") ? takerData.slice(2) : takerData;
   if (body.length < 84 * 2) throw new Error("MalformedQuote: takerData shorter than 84 bytes");
   return {
@@ -206,4 +224,32 @@ export async function verifyQuote(
     return { ok: false, reason: "unverifiable-signer: signature is not standard-length ECDSA" };
   }
   return { ok: true };
+}
+
+/**
+ * Mirror of `ClockFlooredQuoteModule.clockBump`: the single-linear-segment dutch
+ * ceiling over the order's signed `decayStartTime` / `decayDuration`, on the
+ * order's own clock (`now` = block number for a block-clocked order, else unix
+ * seconds). `0` before the start or with no decay window.
+ */
+export function clockBump(orderTiming: bigint, now: bigint): number {
+  const start = orderTiming & 0xffff_ffffn;
+  const dur = (orderTiming >> 32n) & 0xffff_ffffn;
+  if (dur === 0n || now <= start) return 0;
+  const elapsed = now - start;
+  return elapsed >= dur ? BPS : Number((BigInt(BPS) * elapsed) / dur);
+}
+
+/**
+ * The bump a `ClockFlooredQuoteModule` fill actually prices at:
+ * `min(quoteBumpBps, clockBump)` — and `0` with no quote at all (an UNQUOTED fill
+ * gets no concession since audit 2026-09-30 PRICE-6, not the clock). This is the
+ * value to pass as `fillUpTo`'s `minBumpBps` when filling with the quote at
+ * `now` (or pass the solver's own minimum bid, which is lower or equal, to accept
+ * any fill at least that good).
+ */
+export function effectiveQuotedBump(quoteBumpBps: number | null, orderTiming: bigint, now: bigint): number {
+  if (quoteBumpBps === null) return 0;
+  const ceiling = clockBump(orderTiming, now);
+  return quoteBumpBps < ceiling ? quoteBumpBps : ceiling;
 }

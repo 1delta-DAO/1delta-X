@@ -63,7 +63,9 @@ pragma solidity ^0.8.28;
 ///  ignoring a quote it would otherwise have required), or a book will drop the
 ///  order as unpriceable.
 interface IPriceModule {
-    /// @param orderHash  the EIP-712 order hash — what a cosigned quote must bind to
+    /// @param orderHash  the DOMAIN-FREE order struct hash ({OrderHash.hash}, the
+    ///                   `filled` key — NOT the EIP-712 digest with the settlement's
+    ///                   domain separator) — what a cosigned quote must bind to
     /// @param maker      the order's maker
     /// @param filler     who is filling; `address(0)` on a preview — see above
     /// @param prevFilled cumulative filled before this fill, in denominator units

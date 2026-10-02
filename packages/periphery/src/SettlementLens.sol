@@ -273,7 +273,10 @@ contract SettlementLens {
     ///         resolved through the maker's `fillModule` otherwise. A {Proportional}
     ///         order is NOT clamped: a request above its live resolved anchor
     ///         previews as {OverFill}, exactly as the fill reverts — pass
-    ///         `type(uint256).max` to accept whatever the balance is.
+    ///         `type(uint256).max` to accept whatever the balance is. For a
+    ///         fill-module order `type(uint256).max` reaches the module as the
+    ///         remainder, and a module delta above the request previews as
+    ///         {OverFill}, as the settler reverts.
     /// @param  filler     The would-be `msg.sender` of the fill (exclusivity).
     /// @param  takerData  The blob the filler would submit (fill-module proposal);
     ///         `""` for plain orders.
@@ -314,11 +317,16 @@ contract SettlementLens {
     ///         at block N equals a fill at block N. All-fixed orders (nothing
     ///         decays) return 0 — there is no price motion to protect against.
     ///
-    ///         ⚠ PRIORITY-auction orders derive the bump from `tx.gasprice`, so a
-    ///         default `eth_call` (gas price 0) quotes the NO-BID bump — higher
-    ///         than any bid fill's. Either quote with the gas price you will
-    ///         actually send, or skip the floor there: the bump is your own bid,
-    ///         not a race.
+    ///         ⚠ PASS THE FLOOR ON EVERY ORDER WHOSE PRICE CAN MOVE MAKER-WARD
+    ///         between quote and inclusion. Five movers do: a price module (oracle-,
+    ///         state- or filler-keyed — including one keyed on the filler through a
+    ///         wrapper contract); a PRIORITY bid, which a basefee drop (or a legacy
+    ///         gas price) widens; a falling-basefee gas bump; and a descending curve
+    ///         segment. PRIORITY-auction orders derive the bump from `tx.gasprice`,
+    ///         so a default `eth_call` (gas price 0) quotes the NO-BID bump —
+    ///         quote with the gas price you will actually send. Every fill entry
+    ///         takes the floor: `fillUpTo`, `fillWithPermit`, `fillWithPermitTake`
+    ///         and `batchFill` (per order).
     function previewBump(Order calldata order, address filler, bytes calldata takerData)
         external
         view
@@ -549,8 +557,15 @@ contract SettlementLens {
             }
             delta = fillAmount;
         } else {
+            // Mirror of {OrderState._openFill} (audit 2026-09-30 CORE-FILL-4 /
+            // CORE-FILLER-2): `max` is resolved to the remainder BEFORE the module
+            // sees it, and the module's delta may never exceed the request. A
+            // cancelled/complete order already reverted in {_resolveState} or
+            // reverts `OverFill` below, so the subtraction is guarded.
+            if (fillAmount == type(uint256).max && prevFilled < total) fillAmount = total - prevFilled;
             delta = IFillModule(order.fillModule).resolveFill(order, prevFilled, fillAmount, takerData);
             if (delta == 0) revert ZeroFill();
+            if (delta > fillAmount) revert OverFill();
         }
         if (delta < order.minFillAnchor) revert FillTooSmall();
         uint256 newFilled = prevFilled + delta;
@@ -983,6 +998,12 @@ contract SettlementLens {
     ///         {SettlementLensChecks.validateOrder}.
     function validateOrder(Order calldata order) external view returns (bool ok, string memory reason) {
         return CHECKS.validateOrder(order);
+    }
+
+    /// @notice Whether a fill should carry a `minBumpBps` floor (the price can move
+    ///         maker-ward before inclusion) — see {SettlementLensChecks.bumpFloorAdvised}.
+    function bumpFloorAdvised(Order calldata order) external view returns (bool advised, string memory mover) {
+        return CHECKS.bumpFloorAdvised(order);
     }
 
     /// @notice Every TAKE / TAKE_FOR item's live Permit3 taker allowance — see

@@ -60,6 +60,12 @@ export interface RoundConfig {
    * filler displaces the worst one held (see {@link AuctionRound.submit}).
    */
   maxBids?: number;
+  /**
+   * The order's `filled()` progress when the round was opened — what the minted
+   * quote is bound to when the auctioneer has no live reader
+   * ({@link AuctioneerConfig.readFilled}). Default `0n` (a first fill).
+   */
+  prevFilled?: bigint;
 }
 
 export interface BidReceipt {
@@ -147,9 +153,9 @@ export class AuctionRound {
    * Only the two lowest bids decide a Vickrey outcome, so keeping the lowest
    * `maxBids` is outcome-preserving, and no early arrival can crowd anyone out.
    *
-   * Only the SIGNED fields are kept ({@link signedProjection}): the selection
-   * rule's tie-break reads an optional `commitment` no signature covers, which a
-   * submitter could otherwise set to win every tie.
+   * Only the SIGNED fields are kept ({@link signedProjection}): an optional
+   * `commitment` no signature covers must never reach scoring (the SDK rule no
+   * longer reads it, G-TS_FILLER-1; this is defence in depth).
    *
    * An optional executor declaration ({@link RoundBid.executor}) is verified here
    * too — see `./executor`.

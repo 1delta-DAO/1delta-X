@@ -21,7 +21,10 @@ pragma solidity ^0.8.28;
 ///                can't express; the typed legs stay inline (zero dispatch) and
 ///                SETTLE pays one CALL only when used. The maker's RECEIPT is
 ///                guaranteed by the order's mandatory `legsOut` delivery and/or
-///                a post-execution invariant. See {ISettlementModule}.
+///                a post-execution invariant — which proves an END STATE, not
+///                delivery, so an invariant-only receipt requires a single named
+///                hard `exclusiveFiller` for the order's life (audit 2026-09-30
+///                VAL-1). See {ISettlementModule}.
 ///         TAKE_FOR — a TAKE and its funding leg in ONE dispatch (open a levered
 ///                position, close one, swap debt or collateral). Settlement calls
 ///                `permit3.takeFor`, which gates the value-OUT `amount` against the

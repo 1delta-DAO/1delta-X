@@ -26,11 +26,15 @@ import {Order} from "@core/settlement/Settlement.sol";
 ///
 ///  ⚠ WHEN NOT TO REACH FOR THIS
 ///  ────────────────────────────
-///  OR across WHOLE ORDERS is already free, and is usually what you want: sign two
-///  orders sharing a `nonce`, and whichever fills first cancels the other. That
-///  covers "limit **or** stop-loss" — the most common disjunction — for no extra
-///  gas, and lets each branch carry its own prices, items and amounts, which one
-///  order cannot. Reach for this only when the disjunction is over conditions on
+///  OR across WHOLE ORDERS is already free, and is usually what you want: sign the
+///  branches with the SAME `nonce` AND the fill-once bit (`timing` bit 100; SDK
+///  `ocoNonceGroup`). Only a fill-once order consumes its nonce when it fills —
+///  without the bit a fill records per-order progress and BOTH branches can execute.
+///  With it, whichever branch fills first cancels the others, and each branch is
+///  whole-fill only (a partial reverts `FillOnceMustBeFull`); for partially
+///  fillable branches use `OcoGroupModule`. That covers "limit **or** stop-loss" —
+///  the most common disjunction — for no extra gas, and lets each branch carry its
+///  own prices, items and amounts, which one order cannot. Reach for this only when the disjunction is over conditions on
 ///  ONE fill: `(oracle OR timeout) AND whitelisted`.
 ///
 ///  ENCODING — disjunctive normal form (an OR of ANDs)

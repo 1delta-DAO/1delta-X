@@ -13,7 +13,9 @@ signed bids (anyone)  →  AuctionRound  →  selectQuote  →  signQuote  →  
 ## What it is not
 
 Not a venue. It holds no funds, sequences no fills, and cannot stop anyone
-filling the order at its dutch price while a round is open. Losing a round costs
+filling the order while a round is open — though under `ClockFlooredQuoteModule`
+an UNQUOTED fill gets no concession at all (the maker's `start`), so the quote is
+what unlocks any price movement (audit 2026-09-30 PRICE-6). Losing a round costs
 a filler **nothing** — no gas, no locked capital — because a losing bid never
 reaches the chain.
 
@@ -89,8 +91,10 @@ is an open quote.
 Not this package — the settlement. A quote can only move the price **inside the
 band the maker signed**, and under
 [`ClockFlooredQuoteModule`](../modules/pricing/quotes/src/ClockFlooredQuoteModule.sol) no
-further than the **dutch clock**. So a rigged, broken or offline round degrades
-to a plain dutch fill. That is the property that makes it safe to point an order
+further than the **dutch clock**: a quoted fill prices at
+`min(quoteBump, clockBump)`, an unquoted one at `0` (the maker's `start`). So a
+rigged or broken round can never do worse for the maker than plain dutch, and an
+offline one leaves the order at `start` (liveness, not loss). That is the property that makes it safe to point an order
 at a cosigner nobody fully trusts.
 
 On top of that, `checkRound(round, expected)` runs **three** independent checks
@@ -115,9 +119,24 @@ public commitment log and a filler registry, not a bigger receipt. See
 
 Below `minBidders` (default 2 for Vickrey) a round grants **no** concession: a
 ring that shows up alone gets the maker's ambition. Such a round settles with
-`bumpBps: 0` and **no quote is signed** — signing a zero-bump quote would pin the
-price and throw away the decay ramp, whereas signing nothing leaves the order on
-its clock, which is the correct "the auction found nothing" outcome.
+`bumpBps: 0` and **no quote is signed** — a zero-bump quote prices at the maker's
+`start`, which is exactly what an unquoted fill already gets, so it adds nothing.
+
+## Quotes are bound to fill progress
+
+A quote's digest includes the order's `prevFilled` (`PriceQuote(bytes32 orderHash,
+address filler,uint256 bumpBps,uint256 deadline,uint256 prevFilled)`), so it prices
+ONE fill of a partially fillable order. The auctioneer mints each round's quote for
+the order's CURRENT `filled()` — give it a `readFilled` reader (or open the round
+with `prevFilled`).
+
+## Filling a won quote
+
+The fill prices at the EFFECTIVE bump `min(quote, clockBump)` (SDK
+`effectiveQuotedBump`). Pass a `minBumpBps` floor to `fillUpTo`: `QuoteSolver`'s
+`SolverBid.minBumpBps` is the bump the solver's own route needs, so a fill that
+lands below it — the clock has not yet reached the quote — reverts `BumpTooLow`
+instead of filling at a loss.
 
 ## Solving
 

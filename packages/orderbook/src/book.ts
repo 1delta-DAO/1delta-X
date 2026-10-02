@@ -1,4 +1,4 @@
-import { hashOrderStruct, type Order } from "@1delta-x/sdk";
+import { FILL_ONCE_BIT_INDEX, hashOrderStruct, type Order } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
 import { checkAdmission, DEFAULT_ADMISSION, type AdmissionPolicy, type AdmissionVerdict } from "./admission";
@@ -560,6 +560,21 @@ export class Book {
     }
     if (replace.cancel.cancel.maker.toLowerCase() !== replace.announce.order.maker.toLowerCase()) {
       return { ok: false, reason: "replace: cancel and replacement have different makers" };
+    }
+
+    // A replacement must sit on a FRESH nonce unless its predecessor is fill-once
+    // (a shared-nonce bracket leg keeps `prev.nonce` — the SDK `patchOrder` rule).
+    // A non-fill-once replacement reusing the nonce would make one on-chain nonce
+    // cancel retire both, and lets a later fill of one count against the other's
+    // kill switch (audit 2026-09-30 PRICE-5). Checked against the predecessor this
+    // book actually holds; an unknown predecessor is gated by the slot rule below.
+    const prev = this.entries.get(replace.replaces);
+    if (
+      prev !== undefined &&
+      prev.announce.order.nonce === replace.announce.order.nonce &&
+      ((prev.announce.order.timing >> FILL_ONCE_BIT_INDEX) & 1n) !== 1n
+    ) {
+      return { ok: false, reason: "replace: a non-fill-once replacement must carry a fresh nonce" };
     }
 
     let orderHash: Hex;

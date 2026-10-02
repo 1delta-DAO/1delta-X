@@ -15,12 +15,12 @@ import {ICErc20} from "./interfaces/ICompoundV2.sol";
 //
 // "Deposit whatever the conversion delivered" and "repay whatever the conversion
 // delivered", with ZERO receive-side approvals: the maker signs the converted
-// output leg with `recipient = module` and a `TAKE_FOR` item whose leg-reference
+// output leg with `recipient = module` and a pre-funded `MAKE` item whose leg-reference
 // descriptor points at it. The core sizes `forAmount` to exactly what the fill
 // delivered here ({Base._forSlice} → {Pricing.outputAt}), auction decay included,
 // and this module mints/repays it from its own balance. The maker's only grants
 // are the ones they had anyway: the ERC20+Permit3 approval on the asset they are
-// CONVERTING FROM (the input leg), and the taker allowance below. The received
+// CONVERTING FROM (the input leg), and NO taker allowance (Settlement dispatches the `MAKE` directly). The received
 // asset needs nothing — it never transits the maker's wallet, and both venue ops
 // are permissionless value-in (`mint` funded by the caller with the receipt
 // forwarded; `repayBorrowBehalf` is Compound v2's one native on-behalf call).

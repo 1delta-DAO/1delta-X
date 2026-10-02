@@ -225,6 +225,33 @@ contract SettlementLensChecks {
             && (order.priorityScale() == 0 || order.gasBumpBps() != 0);
     }
 
+    /// @notice Whether a fill of `order` should carry a `minBumpBps` price floor —
+    ///         i.e. whether its price can move MAKER-ward between the filler's quote
+    ///         and inclusion (audit 2026-09-30 PERIPH-1.v3/v4). Returns the first
+    ///         mover found, or `(false, "")` for an order whose price only moves
+    ///         filler-ward with time (fixed, or a linear / monotone-rising curve).
+    /// @dev    The movers: a price module (oracle-, state- or filler-keyed); a
+    ///         priority auction (the bid is the gas price, which a basefee drop or
+    ///         a legacy-gas sender widens); a gas bump (falls with the basefee); a
+    ///         descending curve segment. Every fill entry takes the floor —
+    ///         `fillUpTo`, `fillWithPermit`, `fillWithPermitTake`, `batchFill` —
+    ///         so a pinned-bump PERMIT order (whose first fill must go through
+    ///         `fillWithPermit` / `fillWithPermitTake`) is floored the same way:
+    ///         quote {SettlementLens.previewBump} and pass it there.
+    function bumpFloorAdvised(Order calldata order) external pure returns (bool advised, string memory mover) {
+        if (order.pricingModule != address(0)) return (true, "price module");
+        if (order.priorityAuction()) return (true, "priority auction");
+        if (order.gasBumpBps() != 0) return (true, "gas bump");
+        uint256 n = PackedArrays.validateFixed(order.curve, PackedArrays.CURVE_STRIDE);
+        uint256 prev;
+        for (uint256 c; c < n; c++) {
+            (, uint256 b) = PackedArrays.curvePoint(order.curve, c);
+            if (c != 0 && b < prev) return (true, "descending curve segment");
+            prev = b;
+        }
+        return (false, "");
+    }
+
     /// @notice Off-chain / preview check for order well-formedness. Intentionally
     ///         NOT called during `fill` — fills stay cheap and unopinionated — so
     ///         call this from a maker UI, relayer, or test before signing or
@@ -661,8 +688,8 @@ contract SettlementLensChecks {
     /// @dev Whether any leg can carry a soft-exclusivity premium — a copy of
     ///      `OrderGates._overrideHasCarrier`, which is `private` to that library and
     ///      so cannot be called from here. {Pricing} moves only three kinds of leg
-    ///      toward the maker: every BUY input, an AUCTIONED (`end != 0`) SELL input,
-    ///      and a SELL output addressed to the maker (`0` or `maker`). A
+    ///      toward the maker: a BUY input with `start != 0`, an AUCTIONED (`end != 0`)
+    ///      input, and a non-zero SELL output addressed to the maker (`0` or `maker`). A
     ///      {Proportional} input never carries it, whatever its `end` (there, the
     ///      cap) — {Pricing.inputOwed} returns the pinned anchor for one, untouched.
     ///
@@ -687,19 +714,23 @@ contract SettlementLensChecks {
         assembly {
             // An input leg carries it: every BUY leg, or an auctioned SELL leg — and
             // never a proportional marker.
+            // AMOUNT-AWARE, as the core's (audit 2026-09-30 CORE-FILL-1): a BUY leg
+            // carries only with `start != 0`, any leg with `end != 0`.
             let p := add(legsIn.offset, 1)
             for { let e := add(p, mul(nIn, 84)) } lt(p, e) { p := add(p, 84) } {
-                if and(or(buy, iszero(iszero(calldataload(add(p, 52))))), iszero(gt(calldataload(add(p, 20)), floor))) {
+                let st := calldataload(add(p, 20))
+                if and(iszero(iszero(or(mul(buy, st), calldataload(add(p, 52))))), iszero(gt(st, floor))) {
                     has := 1
                     break
                 }
             }
-            // A SELL output carries it only if addressed to the maker (0 or maker).
+            // A SELL output carries it only if addressed to the maker (0 or maker) AND
+            // `start != 0` — a zero output prices to 0 whatever the override.
             if iszero(has) {
                 p := add(legsOut.offset, 1)
                 for { let e := add(p, mul(nOut, 104)) } lt(p, e) { p := add(p, 104) } {
                     let to := shr(96, calldataload(add(p, 84)))
-                    if or(iszero(to), eq(to, maker)) {
+                    if and(or(iszero(to), eq(to, maker)), iszero(iszero(calldataload(add(p, 20))))) {
                         has := 1
                         break
                     }
@@ -895,8 +926,9 @@ contract SettlementLensChecks {
     ///      settler (`fill` has no sweep, and Settlement grants no ERC-20 approval to
     ///      anyone — the same invariant that makes the measurement sound).
     ///
-    ///      Gated on `recipient == 0` because a signed recipient routes the proceeds
-    ///      away from the settler deliberately. See {IProceedsAsset} and
+    ///      Gated on `recipient ∈ {0, SETTLEMENT}` because any other signed
+    ///      recipient routes the proceeds away from the settler deliberately (the
+    ///      EXECUTOR is refused outright). See {IProceedsAsset} and
     ///      `docs/reference-audits.md` §F22.
     function _proceedsItemAt(Order calldata order, uint256 cursor)
         private
@@ -905,7 +937,13 @@ contract SettlementLensChecks {
     {
         (uint256 op, address module,, address to, bytes calldata data, uint256 nxt) =
             PackedArrays.itemAt(order.items, cursor);
-        if (to != address(0)) return (true, "", nxt);
+        // An item paid to the EXECUTOR is taken by the next callback solver (single
+        // path) or the matcher's own CALL (netted path) — audit 2026-09-30
+        // CORE-MATCH-4, the item sibling of the legsOut→EXECUTOR rule. An explicit
+        // `recipient == SETTLEMENT` lands exactly where `0` does, so it gets the
+        // same proceeds-asset check instead of skipping it.
+        if (to == EXECUTOR) return (false, "item recipient is settlement executor (takeable)", nxt);
+        if (to != address(0) && to != address(SETTLEMENT)) return (true, "", nxt);
         if (op != uint256(ItemOp.TAKE) && op != uint256(ItemOp.TAKE_FOR)) return (true, "", nxt);
         address got = _proceedsAsset(module, data);
         if (got != address(0) && !_isInputLegToken(order.legsIn, got)) {

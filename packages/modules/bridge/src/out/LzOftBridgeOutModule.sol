@@ -55,8 +55,9 @@ import {IOFT} from "../vendor/ILayerZero.sol";
 ///         (the {IMakerModule} seam carries none), so any filler of the sponsored
 ///         order makes the sponsor pay. A solver that prices the fee into its
 ///         own quote must therefore sponsor only orders that name it as HARD
-///         `exclusiveFiller` for their whole life — an off-chain rule the SDK
-///         enforces before it builds a sponsored spec.
+///         `exclusiveFiller` for their whole life and that are full-fill only —
+///         an off-chain rule the SDK checks (`assertLzSponsorshipSafe`) before a
+///         sponsor signs up to an order.
 ///
 ///     ⚠ TOKEN BINDING (audit 2026-09-30 BRIDGE-B-2). `inputToken` MUST be
 ///     `IOFT(oft).token()`, and this is now checked on-chain. A native OFT burns

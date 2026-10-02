@@ -145,12 +145,16 @@ contract CometPreFundOneSidedTest is CompoundV3ModulesBase {
     }
 
     // ── The dispatch gate: only Permit3 may enter. ──
-    function test_preFundModules_rejectNonPermit3() public {
+    /// The pre-fund MAKE seam is dispatched by Settlement directly, so the pin is
+    /// `msg.sender == settlement` (renamed from `…rejectNonPermit3`, audit 2026-09-30
+    /// L-CMT-5: the seam never goes through Permit3; the duplicate assertion is gone).
+    function test_preFundModules_rejectNonSettlement() public {
         bytes memory data = abi.encode(_forLeg(0, WETH), COMET, WETH);
         vm.prank(address(0xBAD));
         vm.expectRevert(PreFundGuard.OnlySettlement.selector);
         preFund.makeOnBehalf(maker, 1, data);
-        vm.prank(address(0xBAD));
+        // Permit3 itself is not Settlement either.
+        vm.prank(address(permit3));
         vm.expectRevert(PreFundGuard.OnlySettlement.selector);
         preFund.makeOnBehalf(maker, 1, data);
     }
@@ -162,10 +166,6 @@ contract CometPreFundOneSidedTest is CompoundV3ModulesBase {
         bytes memory balance = abi.encode((uint256(3) << 254) | uint160(WETH), COMET, WETH);
 
         vm.startPrank(address(settlement));
-        vm.expectRevert(PreFundGuard.PreFundDescriptorRequired.selector);
-        preFund.makeOnBehalf(maker, 1, literal);
-        vm.expectRevert(PreFundGuard.PreFundDescriptorRequired.selector);
-        preFund.makeOnBehalf(maker, 1, balance);
         vm.expectRevert(PreFundGuard.PreFundDescriptorRequired.selector);
         preFund.makeOnBehalf(maker, 1, literal);
         vm.expectRevert(PreFundGuard.PreFundDescriptorRequired.selector);

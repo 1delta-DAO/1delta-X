@@ -133,3 +133,57 @@ contract MatchSolverAudit20260930Test is MatchRaceGuardTest {
         guarded.settleMatchWithNonces(_hashes(a, b), _zeros(), new address[](1), new uint256[](0), plan);
     }
 }
+
+/// @title MatchSolverCrossAudit20260930Test
+/// @notice X-DIFF-CORE-1.v1: the `filled` guard cannot see a {Proportional}
+///         anchor drained from the maker's wallet, nor a plan that swept less than
+///         it was priced for. {GuardedMatchSolver.settleMatchChecked} catches both.
+contract MatchSolverCrossAudit20260930Test is MatchRaceGuardTest {
+    function _anchor(uint256 minBal) internal view returns (MatchRaceGuard.AnchorCheck[] memory a) {
+        a = new MatchRaceGuard.AnchorCheck[](1);
+        a[0] = MatchRaceGuard.AnchorCheck({maker: maker, token: WETH, minBalance: minBal});
+    }
+
+    function _floor(uint256 min) internal view returns (MatchRaceGuard.SweptFloor[] memory f) {
+        f = new MatchRaceGuard.SweptFloor[](1);
+        f[0] = MatchRaceGuard.SweptFloor({token: USDC, min: min});
+    }
+
+    function _g(bytes32[] memory h, MatchRaceGuard.AnchorCheck[] memory a, MatchRaceGuard.SweptFloor[] memory f)
+        internal
+        pure
+        returns (GuardedMatchSolver.CheckedGuard memory)
+    {
+        return GuardedMatchSolver.CheckedGuard({orderHashes: h, expectedFilled: _zeros(), anchors: a, minSwept: f});
+    }
+
+    function test_audit_X_DIFF_CORE_1_v1_drainedAnchorRevertsBeforeThePlan() public {
+        (Order memory a, Order memory b) = _orders();
+        MatchPlan memory plan = _plan(a, b, rival);
+        bytes32[] memory hashes = _hashes(a, b);
+        // The maker drains half the anchor after simulation; `filled` is untouched.
+        vm.prank(maker);
+        IERC20(WETH).transfer(address(0xdead), WETH_AMT / 2);
+        assertEq(settlement.filled(hashes[0]), 0, "the filled guard is blind to it");
+
+        vm.prank(rival);
+        vm.expectRevert(
+            abi.encodeWithSelector(MatchRaceGuard.AnchorShrunk.selector, uint256(0), WETH_AMT, WETH_AMT / 2)
+        );
+        guarded.settleMatchChecked(_g(hashes, _anchor(WETH_AMT), _floor(0)), plan);
+        assertEq(IERC20(USDC).balanceOf(rival), 0, "nothing settled");
+    }
+
+    function test_audit_X_DIFF_CORE_1_v1_sweptFloorEnforced() public {
+        (Order memory a, Order memory b) = _orders();
+        MatchPlan memory plan = _plan(a, b, rival);
+        bytes32[] memory hashes = _hashes(a, b);
+        vm.prank(rival);
+        vm.expectRevert(abi.encodeWithSelector(MatchRaceGuard.SweptShort.selector, USDC, EDGE + 1, EDGE));
+        guarded.settleMatchChecked(_g(hashes, _anchor(WETH_AMT), _floor(EDGE + 1)), plan);
+
+        vm.prank(rival);
+        guarded.settleMatchChecked(_g(hashes, _anchor(WETH_AMT), _floor(EDGE)), plan);
+        assertEq(IERC20(USDC).balanceOf(rival), EDGE, "an intact plan settles through the checks");
+    }
+}

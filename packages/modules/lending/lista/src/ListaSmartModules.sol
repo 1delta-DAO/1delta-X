@@ -62,6 +62,10 @@ import {IListaSmartProvider, MarketParams} from "./interfaces/ILista.sol";
 //   — provider@0, coin@32, coinIndex@64, minLpRate@96, MarketParams@128
 //     (base = 288); optional EIP-2612 permit@288.
 //
+// EIP-2612 permit block @288 (+ signedValue@416): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract ListaSmartSupplyCollateralModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;

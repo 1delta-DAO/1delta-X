@@ -15,7 +15,7 @@ import { RaffleNotice } from "./components/Raffle";
 import { Stats } from "./components/Stats";
 import { TermsLink } from "./components/TermsLink";
 import { chainById, chainLabel } from "./config/chains";
-import { deploymentFor } from "./config/deployments";
+import { deploymentFor, solverForMarket } from "./config/deployments";
 import { marketById, pinnedToken, symbolsOn } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
 import { useFills, useRestingOrders } from "./hooks/useOrderbook";
@@ -270,7 +270,7 @@ export default function App() {
         side: spec.side,
         pay,
         recv,
-        solver: deployment?.solver,
+        solver: solverForMarket(deployment, spec.marketId),
         amountIn: spec.amountIn,
         targetOut: spec.targetOut,
         minOut: spec.minOut,

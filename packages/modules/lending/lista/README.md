@@ -13,6 +13,8 @@ side of a brokered market runs through a **`LendingBroker`**. Depends on `@core`
 | debt out (borrow) | `broker.borrow(amount, termId, user, receiver)` | LendingBroker (fixed-term) | Moolah `setAuthorization(module)` |
 | debt in (repay) | `broker.repay(amount, [loanId,] onBehalf)` / `repayAll(onBehalf)` | LendingBroker | Permit3 token allowance |
 
+> `BalanceMode` is one 32-byte word: `0` = `Exact`, `Full` = the TAGGED word `0xB0DE0001` (`DustHandler.encodeMode(Full)`, SDK `encodeMode(BalanceMode.Full)`); an untagged `1` reverts `InvalidModeWord`.
+
 ## Modules (`src/`)
 
 | Contract | Op | `data` |
@@ -142,8 +144,11 @@ provider shapes, oracle wiring, mutable term menus).
   taker grants on maker-signed data, so nothing moves without a live grant +
   order — but to make a venue-level revoke stick, cancel the order /
   `Permit3.lockdownAll`, or burn the nonce by relaying
-  `setAuthorizationWithSig(isAuthorized = false)` at the same nonce. The same
-  holds for every Morpho-shaped auth tail (Morpho Blue modules).
+  `setAuthorizationWithSig(isAuthorized = false)` at the CURRENT nonce (SDK
+  `morphoAuthorizationTypedData` + `buildRevokeAll({ signedVenueRevokes })`).
+  The same holds for every Morpho-shaped auth tail (Morpho Blue modules). Sign
+  in-data authorizations with a deadline no later than the order's (SDK
+  `morphoAuthTail` refuses a later one).
 - **`fundingSource` reports per funding shape** (L-ML-5): the pre-funded repay
   reports `max` (it is funded by the fill's own delivery); the PULL repay
   reports `min(balance, Permit3 grant to the module)` — what

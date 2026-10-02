@@ -32,6 +32,18 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 ///         pull either way. The composite modules call `permit3.transferFrom`
 ///         DIRECTLY, with no fallback, so an ERC-20 approval to the module funds
 ///         nothing and counting it would preview a broken order as fillable.
+///
+///         ⚠ THE PERMIT3 BOOK IS ONLY HALF OF A PERMIT3 PULL (audit 2026-09-30
+///         G-LENS_PARITY-1, mirroring {SettlementLens._permit3Capacity}). Permit3
+///         spends its book entry by calling `token.transferFrom(user, …)` itself,
+///         which needs the user's plain ERC-20 approval TO PERMIT3. A user who
+///         revoked that approval — the standard kill switch for a Permit2-style
+///         hub, which leaves the book untouched — has a book that funds nothing.
+///         So the answer is `min(book, balance, allowance(user, PERMIT3))`, the
+///         last read through a tolerant staticcall (a token without a readable
+///         `allowance` reports 0). A module whose data carries an EIP-2612
+///         {PermitHelper} block CREATES that approval at fill time, so it passes
+///         `approvalAtFill = true` and the term is skipped.
 library FundingPreflight {
     /// @param module the module that will be the SPENDER of the pull — pass
     ///        `address(this)`, not the settler: the grant is `(user, module, token)`.
@@ -40,9 +52,31 @@ library FundingPreflight {
         view
         returns (uint256)
     {
+        return pullable(permit3, module, user, token, false);
+    }
+
+    /// @param approvalAtFill the item's data carries an EIP-2612 permit that grants
+    ///        the user's approval to Permit3 at fill time — do not cap by today's.
+    function pullable(IPermit3 permit3, address module, address user, address token, bool approvalAtFill)
+        internal
+        view
+        returns (uint256 available)
+    {
         (uint160 allowed, uint48 expiration) = permit3.tokenAllowance(user, module, token);
         if (expiration != 0 && expiration < block.timestamp) return 0;
+        available = allowed;
         uint256 bal = SafeTransferLib.balanceOf(token, user);
-        return bal < allowed ? bal : allowed;
+        if (bal < available) available = bal;
+        if (!approvalAtFill) {
+            uint256 approved = _erc20Allowance(token, user, address(permit3));
+            if (approved < available) available = approved;
+        }
+    }
+
+    /// @dev Live `token.allowance(owner, spender)`; a failed or short read is 0.
+    function _erc20Allowance(address token, address owner, address spender) private view returns (uint256 a) {
+        (bool ok, bytes memory ret) =
+            token.staticcall(abi.encodeWithSignature("allowance(address,address)", owner, spender));
+        if (ok && ret.length >= 32) a = abi.decode(ret, (uint256));
     }
 }

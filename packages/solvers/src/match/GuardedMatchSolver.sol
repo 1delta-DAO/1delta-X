@@ -133,6 +133,35 @@ contract GuardedMatchSolver is MatchRaceGuard {
         return _settle(plan);
     }
 
+    /// @notice {settleMatch} with the two checks the `filled` guard cannot make
+    ///         (audit 2026-09-30 X-DIFF-CORE-1.v1): every listed {Proportional}
+    ///         maker still holds its quoted anchor (before the plan is touched),
+    ///         and the settlement swept at least `minSwept` of each listed token
+    ///         (after it returns). Use it for any plan that names the
+    ///         `type(uint256).max` sentinel on a proportional order, and for every
+    ///         plan that fronts a residual from inventory through a CALL step —
+    ///         there a shrunk anchor would otherwise be paid in full.
+    /// @param  g    the race guard plus the two extra checks — bundled for the
+    ///         legacy profile's stack limit.
+    function settleMatchChecked(CheckedGuard calldata g, MatchPlan calldata plan)
+        external
+        returns (uint256[][] memory outs, address[] memory tokens, uint256[] memory swept)
+    {
+        _requireOperator();
+        _requireUntouched(g.orderHashes, g.expectedFilled);
+        _requireAnchors(g.anchors);
+        (outs, tokens, swept) = _settle(plan);
+        _requireSwept(tokens, swept, g.minSwept);
+    }
+
+    /// @notice {settleMatchChecked}'s guard bundle.
+    struct CheckedGuard {
+        bytes32[] orderHashes;
+        uint256[] expectedFilled;
+        AnchorCheck[] anchors;
+        SweptFloor[] minSwept;
+    }
+
     function _requireOperator() private view {
         if (GATED && !isOperator(msg.sender)) revert NotOperator(msg.sender);
     }

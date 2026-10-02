@@ -95,6 +95,10 @@ library RiverProceeds {
 // `data = abi.encode(xapp, troveManager, collateralToken, upperHint, lowerHint[, deadline, v, r, s])`
 //   — base = 160.
 //
+// EIP-2612 permit block @160 (+ signedValue@288): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract RiverAddCollModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -312,7 +316,10 @@ contract RiverTakerModule is ITakerModule {
 // open under one `keccak256(data)` taker ref (amount-gated), plus the collateral
 // Permit3 token allowance and the diamond delegate grant.
 //
-// `data = abi.encode(xapp, tm, collateralToken, debtToken, maxFeePercentage, sideAmount, upperHint, lowerHint)`.
+// `data = abi.encode(OpenData{xapp, tm, collateralToken, debtToken, maxFeePercentage,
+//                            sideAmount, upperHint, lowerHint, totalAmount})` — nine
+// static words; `totalAmount`@256 is the item's full signed amount and MANDATORY
+// (composite opens are full-fill only, {FullFillGuard}).
 //
 contract RiverOpenModule is ITakerModule {
     IPermit3 public immutable permit3;

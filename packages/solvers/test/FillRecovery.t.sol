@@ -8,6 +8,7 @@ import {Proportional} from "@core/settlement/Proportional.sol";
 import {Settlement} from "@core/settlement/Settlement.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FillRecovery} from "@solvers/aggregator/FillRecovery.sol";
+import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 
 import {MockSettlementBase} from "@coretest/shared/MockSettlementBase.t.sol";
 
@@ -314,5 +315,99 @@ contract FillRecoveryUnsupportedShapesTest is MockSettlementBase {
         bytes memory sig = _sign(o);
         vm.expectRevert();
         rs.fillPostInputs(o, sig, 100e18, address(tB));
+    }
+}
+
+/// @dev A price module whose answer the CALLBACK moves — standing in for one that
+///      reads state the fill itself changes (a pool swapped through, a pushed oracle).
+contract MovablePriceModule20260930 {
+    uint256 public bps;
+
+    function set(uint256 b) external {
+        bps = b;
+    }
+
+    function bump(bytes32, address, address, uint256, uint256, uint256, bytes calldata, bytes calldata, bytes calldata)
+        external
+        view
+        returns (uint256)
+    {
+        return bps;
+    }
+}
+
+/// @dev Recovers a price-module fill either by re-resolving (the old path) or from
+///      a bump captured before the fill ({FillRecovery.pinnedBumpOf}).
+contract PinnedRecoveringSolver20260930 {
+    Settlement public immutable SETTLEMENT;
+    address public immutable EXECUTOR;
+    uint256 public recoveredOut;
+    MovablePriceModule20260930 public module;
+    bool public usePin;
+    uint256 public pin;
+
+    constructor(address settlement) {
+        SETTLEMENT = Settlement(payable(settlement));
+        EXECUTOR = address(Settlement(payable(settlement)).EXECUTOR());
+    }
+
+    function fill(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        MovablePriceModule20260930 m,
+        bool pinned
+    ) external {
+        module = m;
+        usePin = pinned;
+        pin = FillRecovery.pinnedBumpOf(SETTLEMENT, order, address(this), "");
+        SETTLEMENT.fillWithCallback(
+            order, sig, fillAmount, address(this), abi.encodeCall(this.onFill, (order, fillAmount)), CallbackMode.PreDelivery
+        );
+    }
+
+    function onFill(Order calldata order, uint256 fillAmount) external {
+        require(msg.sender == EXECUTOR, "only executor");
+        // The callback's own work moves what the module reads.
+        module.set(9_000);
+        FillCtx memory ctx = usePin
+            ? FillRecovery.ctxOfPinned(SETTLEMENT, order, fillAmount, address(this), 0, pin)
+            : FillRecovery.ctxOf(SETTLEMENT, order, fillAmount, address(this), "", false);
+        recoveredOut = FillRecovery.totalOutputOwed(order, ctx);
+        (address tokenOut,,,) = PackedArrays.legOut(order.legsOut, 0);
+        SafeTransferLib.forceApprove(tokenOut, address(SETTLEMENT), recoveredOut);
+    }
+}
+
+/// @title FillRecoveryPinnedTest
+/// @notice audit 2026-09-30 CORE-FILLER-5: a price-module bump re-resolved from
+///         inside the callback differs from the settler's pin once the callback
+///         moved what the module reads. Captured before the fill it is exact.
+contract FillRecoveryPinnedTest is MockSettlementBase {
+    function test_audit_CORE_FILLER_5_pinnedRecoveryExactForPriceModuleOrders() public {
+        MovablePriceModule20260930 module = new MovablePriceModule20260930();
+        PinnedRecoveringSolver20260930 rs = new PinnedRecoveringSolver20260930(address(settlement));
+        tA.mint(maker, 2_000e18);
+        _makerApprove(address(settlement), address(tA), type(uint160).max);
+        tB.mint(address(rs), 10_000e18);
+
+        Order memory o = _plainOrder(1, address(tA), address(tB), 1_000e18, 2_000e18);
+        o.legsOut = PackedEncode.oneLegOut(address(tB), 2_000e18, 1_000e18, address(0));
+        o.pricingModule = address(module);
+        bytes memory sig = _sign(o);
+
+        // Re-resolving reads 9000 after the callback moved it, under-approves, and
+        // the fill reverts — the CORE-FILLER-5 mis-sizing.
+        module.set(1_000);
+        vm.expectRevert();
+        rs.fill(o, sig, 1_000e18, module, false);
+
+        // The pin captured before the fill prices exactly what the settler takes.
+        module.set(1_000);
+        uint256 before = tB.balanceOf(maker);
+        rs.fill(o, sig, 1_000e18, module, true);
+        uint256 delivered = tB.balanceOf(maker) - before;
+        assertEq(delivered, 2_000e18 - (1_000e18 * 1_000) / 10_000, "priced at the pinned 1000 bps");
+        assertEq(rs.recoveredOut(), delivered, "recovery == what Pricing demanded");
     }
 }

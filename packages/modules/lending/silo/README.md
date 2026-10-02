@@ -24,6 +24,8 @@ address it acts on, pinned in the maker-signed `data`.
 | `SiloTakerModule` (op 0) | TAKE | `silo.borrow(amount, receiver, onBehalfOf)` | `abi.encode(uint8(0), silo, asset)` |
 | `SiloTakerModule` (op 1) | TAKE | `silo.withdraw(amount, receiver, onBehalfOf)` | `abi.encode(uint8(1), silo, asset[, BalanceMode[, total]])` — BalanceMode@96; `total`@128 is **mandatory** when the mode is `Full` (the item's full signed amount; a `Full` blob without it fails closed) |
 
+> `BalanceMode` is one 32-byte word: `0` = `Exact`, `Full` = the TAGGED word `0xB0DE0001` (`DustHandler.encodeMode(Full)`, SDK `encodeMode(BalanceMode.Full)`); an untagged `1` reverts `InvalidModeWord`.
+
 ## Authorization (per leg)
 
 | Leg | Protocol grant | Permit3 |

@@ -292,8 +292,9 @@ export interface Order {
   /// leg (legsIn[0] for SELL, legsOut[0] for BUY).
   minFillAnchor: bigint;
   /// Soft exclusivity: bps a non-exclusive in-window filler must improve the maker by (0 = hard).
-  /// Also hard when no leg can carry the premium — no BUY input, no auctioned non-proportional
-  /// SELL input, no SELL output to the maker: the outsider reverts `NotExclusiveFiller`.
+  /// Also hard when no leg can carry the premium — no non-zero BUY input, no auctioned
+  /// non-proportional input, no non-zero SELL output to the maker (zero placeholder legs
+  /// carry nothing): the outsider reverts `NotExclusiveFiller`.
   /// Folded into the wire `params` word by {@link packOrder} — see {@link packParams}.
   exclusivityOverrideBps: bigint;
   /// Optional piecewise decay shape (shared clock); empty = single linear segment.
@@ -754,17 +755,24 @@ export function assertOrderNonce(nonce: bigint): bigint {
 }
 
 /**
- * A uniformly random LEGAL order nonce: 255 random bits, so bit 255 is always
+ * A uniformly random LEGAL order nonce in `[minValid, 2^255)`: bit 255 is always
  * clear. Use this instead of drawing a raw 256-bit value, half of which the
- * settler rejects (`OrderNonceReserved`).
+ * settler rejects (`OrderNonceReserved`). `minValid` is the maker's on-chain
+ * `minValidNonce` watermark (`SETTLEMENT_ABI` `minValidNonce(maker)`): after a
+ * `rollbackNonces`, a draw below it is dead on arrival. Uniform to within
+ * 2^-257: 512 random bits reduced modulo the span (no rejection loop, so a
+ * degenerate RNG cannot hang it).
  */
-export function randomOrderNonce(): bigint {
-  const bytes = new Uint8Array(32);
+export function randomOrderNonce(minValid: bigint = 0n): bigint {
+  if (minValid < 0n || minValid >= SIGNER_NONCE_NS) {
+    throw new Error(`minValidNonce ${minValid} leaves no order nonce below 2^255`);
+  }
+  const span = SIGNER_NONCE_NS - minValid; // ≥ 1
+  const bytes = new Uint8Array(64);
   // Web Crypto — global in browsers and Node ≥ 19; typed by hand since the SDK
   // compiles against ES2022 without DOM or Node lib types.
   (globalThis as unknown as { crypto: { getRandomValues(a: Uint8Array): Uint8Array } }).crypto.getRandomValues(bytes);
-  bytes[0]! &= 0x7f;
   let n = 0n;
   for (const b of bytes) n = (n << 8n) | BigInt(b);
-  return n;
+  return minValid + (n % span);
 }

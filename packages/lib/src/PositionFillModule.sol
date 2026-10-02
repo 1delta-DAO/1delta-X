@@ -86,15 +86,17 @@ import {Order, OrderSide} from "@core/settlement/Structs.sol";
 //  Venue coverage
 //  ──────────────
 //  Only an item whose module implements {IPositionSource} can size a fill here;
-//  anything else reverts {NoPositionItem} (fail closed). As of 2026-09-30 the
-//  readers are: AaveV3WithdrawModule, CometTakerModule, ExactlyTakerModule,
-//  MorphoBlueTakerModule, GearboxV3, EulerV2OperatorModule and SiloTakerModule.
-//  Compound v2 and Venus are deliberately NOT covered (`balanceOfUnderlying` is
-//  not a view and `exchangeRateStored` is stale — a reader there needs its own
-//  accrual-aware view). Aave v2, Aave v4, Lista, Dolomite, Morpho Midnight and
-//  ERC-4626 have `BalanceMode.Full` withdraws but no reader yet (2026-09-30 audit,
-//  L-LIB-8) — on those a position-sized exit is not available and the maker must
-//  use `Full` mode, which returns accrued interest as raw dust.
+//  anything else reverts {NoPositionItem} (fail closed). The readers are:
+//  AaveV3WithdrawModule, AaveV2WithdrawModule, AaveV4WithdrawModule,
+//  CometTakerModule, ExactlyTakerModule, MorphoBlueTakerModule (collateral),
+//  GearboxV3, EulerV2OperatorModule, SiloTakerModule, ListaTakerModule (+
+//  ListaNativeCollateralTakerModule), DolomiteOperatorModule (`Withdraw`) and
+//  MidnightTakerModule (2026-09-30 audit L-LIB-8 added the last five). Compound v2
+//  and Venus are deliberately NOT covered (`balanceOfUnderlying` is not a view and
+//  `exchangeRateStored` is stale — a reader there needs its own accrual-aware
+//  view), nor is the time-locked ERC4626WithdrawModule (no per-request asset view
+//  on the generic interface; its claim is already one whole request). On those a
+//  position-sized exit is not available and the maker uses `Full` mode.
 //
 //  Trust model
 //  ───────────

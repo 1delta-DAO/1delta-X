@@ -22,12 +22,20 @@ const MODULE = "0x00000000000000000000000000000000000000cc" as Address;
 const ORDER_HASH = `0x${"11".repeat(32)}` as Hex;
 
 const binding: QuoteBinding = { module: MODULE, chainId: 31 };
-const quote: PriceQuote = { orderHash: ORDER_HASH, filler: FILLER, bumpBps: 2_500, deadline: 4_000_000_000n };
+const quote: PriceQuote = {
+  orderHash: ORDER_HASH,
+  filler: FILLER,
+  bumpBps: 2_500,
+  deadline: 4_000_000_000n,
+  prevFilled: 0n,
+};
 
 describe("quoteDigest", () => {
   it("uses the modules' type string", () => {
     expect(QUOTE_TYPEHASH).toBe(
-      keccak256(toHex("PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline)")),
+      keccak256(
+        toHex("PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline,uint256 prevFilled)"),
+      ),
     );
   });
 

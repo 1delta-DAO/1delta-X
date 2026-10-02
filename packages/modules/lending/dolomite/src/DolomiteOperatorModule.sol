@@ -8,6 +8,7 @@ import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {PreFundGuard} from "@lib/PreFundGuard.sol";
 import {PreFundModuleBase} from "@lib/PreFundModuleBase.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
@@ -119,7 +120,8 @@ contract DolomiteOperatorModule is
     ITakerModule,
     ITakerForModule,
     IFundingSource,
-    IProceedsAsset
+    IProceedsAsset,
+    IPositionSource
 {
     /// @notice Every op the maker's Dolomite operator grant covers.
     /// @dev `Borrow` and `Withdraw` hold their pre-merge wire values on purpose: the
@@ -373,10 +375,13 @@ contract DolomiteOperatorModule is
             // `Borrow` build the identical negative-delta action; the venue does not
             // distinguish "take out my deposit" from "take out a loan" — if the
             // balance crosses zero and the account stays collateralised, the rest is
-            // DEBT against whatever else the sub-account holds. Every other venue's
-            // Exact withdraw reverts on a short position (aToken transfer, ERC-4626
-            // burn, Morpho underflow); Comet, the one sibling with this semantics,
-            // guards it with `WouldBorrow`. Without the guard a `Withdraw` grant for X
+            // DEBT against whatever else the sub-account holds. Venues differ on a
+            // short position: aToken transfers, ERC-4626 burns and Morpho underflow
+            // REVERT, but several CLAMP to what is there (Comet, Dolomite, the Aave v4
+            // spoke, Exactly `withdrawAtMaturity`) — those Exact branches carry
+            // `FullFillGuard.requireDelivered` or a position pre-check (audit
+            // 2026-09-30 L-CV2-1.v3). Comet, the one sibling whose short withdraw also
+            // turns into a borrow, guards it with `WouldBorrow`. Without the guard a `Withdraw` grant for X
             // was economically a `Borrow` grant for X once the supply dropped below X
             // (partial liquidation is permissionless, the filler picks the timing) —
             // the containment the header promises, broken by the venue rather than
@@ -393,8 +398,9 @@ contract DolomiteOperatorModule is
         // — a sliced fill would unwind the whole position and brick the rest of the
         // order. Require the slice to be the whole item.
         FullFillGuard.requireFullFillFromData(data, 192, amount);
-        WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(onBehalfOf, accountNumber), marketId);
-        uint256 bal = w.sign ? w.value : 0;
+        // Through {positionOf}'s ledger read — the number a position-sized fill is
+        // priced against and the number withdrawn are the same function (L-LIB-8).
+        uint256 bal = _supplyOf(dolomite, onBehalfOf, accountNumber, marketId);
 
         // MEASURE what the withdraw actually delivered and never forward more than
         // that: the module takes custody between the withdraw and the split, so a
@@ -687,6 +693,41 @@ contract DolomiteOperatorModule is
     function _requireMarketToken(address dolomite, uint256 marketId, address token) private view {
         address venueToken = IDolomiteMargin(dolomite).getMarketTokenAddress(marketId);
         if (venueToken != token) revert MarketTokenMismatch(marketId, token, venueToken);
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev `Op.Withdraw` (plain layout) only: the RAW positive Wei balance of the
+    ///      maker's signed sub-account in `marketId` — `getAccountWei`, which applies
+    ///      the market's current index — in the market's token, bound to the signed
+    ///      `token` first. A negative (debt) balance reads 0: nothing to exit. Not
+    ///      bounded by the operator grant. Every other op (a borrow, a deposit, a
+    ///      batch, a pre-fund shape) reverts {BadOp} — it has no position to size
+    ///      (audit 2026-09-30 L-LIB-8).
+    function positionOf(address user, bytes calldata data)
+        external
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        if (!_isPlainLayout(data) || _plainOp(data) != uint256(Op.Withdraw)) revert BadOp(_plainOpOrMax(data));
+        (, address dolomite, uint256 marketId, address token, uint256 accountNumber) = _single(data);
+        _requireMarketToken(dolomite, marketId, token);
+        return (token, _supplyOf(dolomite, user, accountNumber, marketId));
+    }
+
+    /// @dev Positive Wei balance of `(user, accountNumber)` in `marketId`; 0 if in debt.
+    function _supplyOf(address dolomite, address user, uint256 accountNumber, uint256 marketId)
+        private
+        view
+        returns (uint256)
+    {
+        WeiBalance memory w = IDolomiteMargin(dolomite).getAccountWei(AccountInfo(user, accountNumber), marketId);
+        return w.sign ? w.value : 0;
+    }
+
+    /// @dev The op for the {BadOp} report, or `type(uint256).max` for a non-plain blob.
+    function _plainOpOrMax(bytes calldata data) private pure returns (uint256) {
+        return _isPlainLayout(data) ? _plainOp(data) : type(uint256).max;
     }
 
     /// @dev {_requireMarketToken} for the five-field single-op layout.

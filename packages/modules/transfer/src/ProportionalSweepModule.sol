@@ -48,7 +48,8 @@ import {FullFillGuard} from "@lib/FullFillGuard.sol";
 ///
 ///      data = abi.encode(token, marker)          — bps == 10000 ONLY. Splitting a
 ///             100% sweep is harmless: Σ min(Bₖ, sliceₖ) == min(B, cap).
-///      data = abi.encode(token, marker, total)   — any bps; `total` is the item's
+///      data = abi.encode(token, marker, total)   — token at byte 0, marker at 32, total at 64;
+///                                                 any bps; `total` is the item's
 ///             signed `amount`, and the slice must equal it ({FullFillGuard}), so
 ///             the order is effectively full-fill.
 ///

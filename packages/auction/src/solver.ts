@@ -13,6 +13,7 @@ import {
 import type { Address, Hex } from "viem";
 
 import { withExecutor, type RoundBid } from "./executor";
+import { checkApiRoute, type ApiRoute, type RouteGuard } from "./sources/guard";
 
 /**
  * The SOLVER side of the quote channel — the counterpart to {@link Auctioneer}.
@@ -441,6 +442,17 @@ export interface SolverConfig {
   /** Gas costing. Omit only if gas is genuinely free — it never is on a fill. */
   gas?: GasConfig;
   onError?: (source: string, err: unknown) => void;
+  /**
+   * Set when `executor` is a STANDING-allowance `AggregatorFillSolver` (its routers
+   * hold maximal approvals). Third-party API calldata is then decoded and checked
+   * against {@link routeGuard} before it can be bid on; a quote whose route fails is
+   * dropped (audit 2026-09-30 AUCTION-AGG4). A standing executor WITHOUT a guard is
+   * refused at construction — route API calldata through a per-fill
+   * (`standing = false`) instance instead.
+   */
+  executorStanding?: boolean;
+  /** The router/selector allowlist {@link executorStanding} checks routes against. */
+  routeGuard?: RouteGuard;
 }
 
 /**
@@ -464,6 +476,14 @@ export interface SolverBid {
   /** The signed bid, with its executor declaration when one is configured. */
   bid: RoundBid;
   bumpBps: number;
+  /**
+   * The price floor to pass as `fillUpTo`'s `minBumpBps` when filling the won
+   * quote: the bump this solver's route needs. The fill prices at the EFFECTIVE
+   * bump `min(quote, clockBump)` under `ClockFlooredQuoteModule` (SDK
+   * `effectiveQuotedBump`), which can sit BELOW the bid while the clock has not
+   * caught up — the floor makes that fill revert `BumpTooLow` instead of losing.
+   */
+  minBumpBps: bigint;
   /** The route the bid was priced from — execute THIS if the bid wins. */
   quote: RouteQuote;
   /** Gas folded into the bid, in the band's token. `0n` when gas was not costed. */
@@ -479,7 +499,14 @@ export interface SolverBid {
  * touches none of them.
  */
 export class QuoteSolver {
-  constructor(private readonly config: SolverConfig) {}
+  constructor(private readonly config: SolverConfig) {
+    if (config.executorStanding && !config.routeGuard) {
+      throw new Error(
+        "QuoteSolver: a STANDING AggregatorFillSolver executor needs a routeGuard to validate third-party " +
+          "route calldata — or execute API routes through a per-fill (standing = false) instance (AUCTION-AGG4)",
+      );
+    }
+  }
 
   /** Best quote across every source. Dead sources are skipped, not fatal. */
   async bestRoute(req: RouteRequest): Promise<RouteQuote | null> {
@@ -496,9 +523,24 @@ export class QuoteSolver {
     );
     let best: RouteQuote | null = null;
     for (const q of settled) {
-      if (q && (best === null || q.amountOut > best.amountOut)) best = q;
+      if (!q) continue;
+      if (this.config.executorStanding && !this.routeAdmitted(q, req)) continue;
+      if (best === null || q.amountOut > best.amountOut) best = q;
     }
     return best;
+  }
+
+  /** A standing executor's route check: an executable route must pass the guard. */
+  private routeAdmitted(q: RouteQuote, req: RouteRequest): boolean {
+    const r = q.route as Partial<ApiRoute> | undefined;
+    if (r === undefined) return true; // price-only: nothing will be executed from it
+    if (!r.to || !r.data || typeof r.value !== "bigint") {
+      this.config.onError?.(q.source ?? "route", new Error("unrecognised route payload on a standing executor"));
+      return false;
+    }
+    const why = checkApiRoute(r as ApiRoute, req, this.config.routeGuard!);
+    if (why !== null) this.config.onError?.(q.source ?? "route", new Error(`route refused: ${why}`));
+    return why === null;
   }
 
   /**
@@ -564,7 +606,7 @@ export class QuoteSolver {
     const bid = this.config.executor
       ? await withExecutor(this.config.account, signed, this.config.executor, this.config.binding)
       : signed;
-    return { bid, bumpBps, quote, gasInBandToken: gas };
+    return { bid, bumpBps, minBumpBps: BigInt(bumpBps), quote, gasInBandToken: gas };
   }
 
   /**

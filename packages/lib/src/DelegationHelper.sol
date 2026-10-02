@@ -88,8 +88,10 @@ interface IEVCPermit {
 //
 //   • If delegation is present, that intermediate slot MUST be encoded
 //     explicitly (even as 0 / Exact) so the block starts at a fixed offset.
-//   • Example: `abi.encode(comet, asset, uint8(0 /*BalanceMode*/), nonce, expiry, v, r, s)`
-//     gives base=64, BalanceMode@64, delegation@96 = check 96+160=256 bytes total.
+//   • Example (CometTakerModule, op word first): `abi.encode(uint8(op), comet, asset,
+//     uint256(0) /*BalanceMode word*/, nonce, expiry, v, r, s)` gives op@0, comet@32,
+//     asset@64, mode@96, allow block@128 (Exact; 128+160 = 288 bytes total). Under
+//     `Full` the mandatory total occupies 128 and the allow block moves to 160.
 //
 library DelegationHelper {
     // ── Aave V3 variable/stable debt token ────────────────────────────────────

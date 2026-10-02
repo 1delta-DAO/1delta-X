@@ -50,12 +50,20 @@ describe("selectQuote", () => {
     expect(forward.bumpBps).toBe(reverse.bumpBps);
   });
 
-  it("prefers the commitment hash over the address as tie-break when present", () => {
+  // Was "prefers the commitment hash over the address": that encoded G-TS_FILLER-1
+  // (an UNSIGNED commitment steering ties). Ties now break on the signed filler only.
+  it("test_audit_G_TS_FILLER_1_unsignedCommitmentDoesNotMoveATie", () => {
+    const plain = selectQuote([bid(A, 3_000), bid(B, 3_000)])!.winner;
     const withCommit: QuoteBid[] = [
       { filler: A, bumpBps: 3_000, commitment: "0xff" },
       { filler: B, bumpBps: 3_000, commitment: "0x11" },
     ];
-    expect(selectQuote(withCommit)!.winner).toBe(B);
+    const flipped: QuoteBid[] = [
+      { filler: A, bumpBps: 3_000, commitment: "0x11" },
+      { filler: B, bumpBps: 3_000, commitment: "0xff" },
+    ];
+    expect(selectQuote(withCommit)!.winner).toBe(plain);
+    expect(selectQuote(flipped)!.winner).toBe(plain);
   });
 
   it("grants no concession below minBidders — a lone bidder is not an auction", () => {

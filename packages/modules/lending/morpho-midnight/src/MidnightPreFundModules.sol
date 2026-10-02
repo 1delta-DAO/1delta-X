@@ -91,6 +91,12 @@ import {IMidnight, Market, MidnightIdLib} from "./interfaces/IMidnight.sol";
 ///         inside the maker's ORDER signature: an item signed for one op cannot be
 ///         executed as another. Each op keeps its own decode, so the
 ///         per-op `data` layouts are unchanged apart from the descriptor bits.
+// Byte maps (the `Market` struct is DYNAMIC — word 1 is its ABI offset):
+//   Op.SupplyCollateral: abi.encode(forDesc, Market market, uint256 collateralIndex)
+//                        — forDesc@0 (op 0 in bits [244,252)), market offset@32,
+//                          collateralIndex@64, then the encoded Market.
+//   Op.Repay:            abi.encode(forDesc, Market market)
+//                        — forDesc@0 (op 1 in bits [244,252)), market offset@32.
 contract MidnightPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource {
     enum Op {
         SupplyCollateral,

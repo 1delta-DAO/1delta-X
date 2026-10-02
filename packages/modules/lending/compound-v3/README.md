@@ -70,8 +70,20 @@ beforehand — Settlement and the solver can never widen them:
 > still capped by the Permit3 taker allowance, but the Comet-native grant is
 > broad: makers should `allow(module, false)` once they're done, or only grant it
 > to modules they trust. `allow` is a Comet call and cannot ride inside a Permit3
-> signature, so single-signature (`fillWithPermit`) flows still need it set up
-> front (Comet's own `allowBySig` could bundle it; not wired here).
+> signature — but Comet's own `allowBySig` IS wired: `CometTakerModule` replays an
+> optional signed `(nonce, expiry, v, r, s)` block from `data`
+> (`DelegationHelper.replayCometAllow`, three call sites), so a single-signature
+> flow needs no up-front transaction.
+>
+> **A durable revoke must CONSUME the Comet nonce** (audit 2026-09-30 L-CMT-3).
+> A signed `allowBySig(owner, module, true, …)` block sits in public order data
+> and anyone can land it until its `expiry`. A plain `allow(module, false)` leaves
+> `userNonce` untouched, so that published signature can re-grant the module. To
+> retire it, sign and send `allowBySig(owner, module, false, currentNonce, …)` (SDK
+> `cometAuthorizationTypedData` + `buildRevokeAll({ signedVenueRevokes })`), or
+> `Permit3.lockdownAll` the taker grants the module needs to act. Sign every
+> in-data `allowBySig` with an `expiry` no later than the order's deadline (SDK
+> `cometAllowTail` refuses a later one).
 
 ## Modules (`src/`)
 

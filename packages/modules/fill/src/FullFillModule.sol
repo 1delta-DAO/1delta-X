@@ -12,7 +12,15 @@ import {Order} from "@core/settlement/Structs.sol";
 ///         lot, a single RFQ) whose "amount" has no fractional meaning.
 ///
 ///         `resolveFill` returns the whole remaining denominator regardless of
-///         the solver's requested `fillAmount`, so the first fill completes the
+///         the solver's requested `fillAmount`.
+///
+///         ⚠ FILLERS PASS `type(uint256).max` OR THE REMAINDER (`fillTotal -
+///         filled`). Since the 2026-09-30 audit (CORE-FILLER-2) the settlement
+///         refuses any module delta above the filler's request with `OverFill`
+///         — the request is the filler's exposure ceiling — so a smaller request
+///         (the old `fill(o, sig, 1)` idiom) now reverts. `max` is resolved by
+///         the settlement to the remainder before this module sees it. So the
+///         first fill completes the
 ///         order (`prevFilled == 0 ⇒ delta == fillTotal`). A second fill would
 ///         compute `delta == 0` and revert `ZeroFill` in the settlement, so the
 ///         order is single-use by construction. The solver's counterparty side

@@ -1,5 +1,14 @@
 import { numberToHex, zeroAddress, type Address, type Hex } from "viem";
-import { DELTA_VERIFY_OUTPUTS_BIT, FILLER_SET_SENTINEL, OrderSide, assertOrderNonce, packParams } from "./types";
+import {
+  BLOCK_CLOCK_BIT,
+  DELTA_VERIFY_OUTPUTS_BIT,
+  FILLER_SET_SENTINEL,
+  ItemOp,
+  OrderSide,
+  assertOrderNonce,
+  packParams,
+  unpackTiming,
+} from "./types";
 import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types";
 
 /**
@@ -224,6 +233,7 @@ export function packOrder(order: Order): WireOrder {
       );
     }
   }
+  assertInvariantConsideration(order);
   return {
     maker: order.maker,
     nonce: order.nonce,
@@ -247,4 +257,34 @@ export function packOrder(order: Order): WireOrder {
     fillTotal: order.fillTotal,
     pricingModule: order.pricingModule,
   };
+}
+
+/**
+ * Mirror of `SettlementLensChecks._consideration` (audit 2026-09-30 VAL-1.v2):
+ * an order whose ONLY consideration is a post-execution invariant — no output
+ * leg, or `SETTLE` items (which are not consideration) — proves an END STATE,
+ * not delivery. If the maker obtains the asset any other way, ANY filler can
+ * collect the maker's payment without delivering. Such an order is sound only
+ * when a single named HARD `exclusiveFiller` (not 0, not the FILLER_SET
+ * sentinel, no soft override) holds a window covering the order's whole life;
+ * the shipped invariants enforce this on-chain too (`InvariantReceiptGuard`).
+ * Applies to `fillTotal` orders as well. Orders with a non-SETTLE item act on
+ * the maker's own position and are not affected.
+ */
+export function assertInvariantConsideration(order: Order): void {
+  if ((order.invariants ?? []).length === 0) return;
+  const items = order.items ?? [];
+  const settles = items.filter((it) => it.op === ItemOp.SETTLE).length;
+  if (items.length !== settles) return; // a position item is consideration
+  if (order.legsOut.length !== 0 && settles === 0) return;
+  const ex = order.exclusiveFiller.toLowerCase();
+  const blockClock = ((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 1n;
+  const end = BigInt(unpackTiming(order.timing).exclusivityEndTime);
+  const lifelong = end >= (blockClock ? 0xffff_ffffn : order.expiry);
+  if (ex === zeroAddress || ex === FILLER_SET_SENTINEL.toLowerCase() || order.exclusivityOverrideBps !== 0n || !lifelong) {
+    throw new Error(
+      "packOrder: invariant-only consideration needs a single hard exclusiveFiller for the order's life " +
+        "(an invariant proves an end state, not delivery) — audit 2026-09-30 VAL-1",
+    );
+  }
 }

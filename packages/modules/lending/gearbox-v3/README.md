@@ -27,6 +27,8 @@ Gearbox V3 lending adapters for `Settlement`. Depends on `@core`.
 | `GearboxCreditRepayModule` | MAKE | `botMulticall([addCollateral, decreaseDebt])` | `abi.encode(creditAccount, asset[, permit])` |
 | `GearboxCreditBorrowModule` | TAKE | `botMulticall([increaseDebt, withdrawCollateral→receiver])` | `abi.encode(creditAccount, asset)` |
 
+> `BalanceMode` is one 32-byte word: `0` = `Exact`, `Full` = the TAGGED word `0xB0DE0001` (`DustHandler.encodeMode(Full)`, SDK `encodeMode(BalanceMode.Full)`); an untagged `1` reverts `InvalidModeWord`.
+
 The facade is never in `data` — it is DERIVED from `creditAccount` on-chain
 (see `GearboxCreditAuth` in the source; taking it from calldata would reopen
 the authorization/dispatch split the auth chain exists to close).

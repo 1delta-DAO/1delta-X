@@ -136,7 +136,12 @@ type LensRows = readonly [readonly number[], readonly bigint[], readonly boolean
  * - **Layer 2** (one lens `readContract`): {SettlementLens.getOrderRelevantStates}
  *   returns status + live-fillable + signature validity (incl. EIP-1271/7702) +
  *   validators for a whole batch in a single view call — collapsing the design
- *   doc's "batched multicall" into one call. A short-TTL cache keyed by
+ *   doc's "batched multicall" into one call. Since the 2026-09-30 audit the lens
+ *   reports `Invalid` for structurally dead shapes every fill reverts on (a
+ *   reserved nonce, a misplaced proportional marker, a wrong-way auction leg, an
+ *   unknown item op, a malformed blob — `SettlementLensChecks.deadShape`) and
+ *   `Filled` for a completed proportional sweep, so both are evicted here with
+ *   no code of their own. A short-TTL cache keyed by
  *   `orderHash` means a POST-then-ingest round-trip costs one eth_call, not two.
  *
  * The per-maker negative cache + `Transfer`/`Approval` event invalidation from

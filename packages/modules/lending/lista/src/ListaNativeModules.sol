@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DelegationHelper} from "@lib/DelegationHelper.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
@@ -50,6 +51,10 @@ interface IWETH {
 // `data = abi.encode(provider, MarketParams[, deadline, v, r, s])` — base = 192
 // (the same byte map as {ListaSupplyCollateralModule}, venue word first).
 //
+// EIP-2612 permit block @192 (+ signedValue@320): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract ListaNativeSupplyCollateralModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -113,7 +118,7 @@ contract ListaNativeSupplyCollateralModule is IMakerModule {
 //     `Exact` auth@256; `Full` total@256, auth@288 (the op-1/op-2 tail rule:
 //     mode word explicit whenever a tail follows).
 //
-contract ListaNativeCollateralTakerModule is ITakerModule {
+contract ListaNativeCollateralTakerModule is ITakerModule, IPositionSource {
     using MarketParamsLib for MarketParams;
 
     IPermit3 public immutable permit3;
@@ -122,6 +127,21 @@ contract ListaNativeCollateralTakerModule is ITakerModule {
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev The RAW Moolah collateral position in the WRAPPED native token — what
+    ///      this module delivers (it wraps the provider's native payout), so the
+    ///      units match `legsIn[0].token`. The `Full` branch reads the same
+    ///      function (audit 2026-09-30 L-LIB-8).
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        (, address moolah, MarketParams memory mp) = abi.decode(data, (address, address, MarketParams));
+        return (mp.collateralToken, IMoolah(moolah).position(mp.id(), user).collateral);
     }
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
@@ -137,7 +157,7 @@ contract ListaNativeCollateralTakerModule is ITakerModule {
             // (op-1's rule); the maker-signed total pins the slice to the item.
             FullFillGuard.requireFullFillFromData(data, 256, amount);
             DelegationHelper.replayMorphoAuth(data, 288, moolah, onBehalfOf, address(this));
-            burn = IMoolah(moolah).position(mp.id(), onBehalfOf).collateral;
+            (, burn) = positionOf(onBehalfOf, data);
         } else {
             DelegationHelper.replayMorphoAuth(data, 256, moolah, onBehalfOf, address(this));
         }

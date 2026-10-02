@@ -117,7 +117,7 @@ contract PricingGasBenchTest is MockSettlementBase {
         PriceFeedMock feed = new PriceFeedMock();
         feed.set(1.5e18, block.timestamp);
         ChainlinkPeggedPriceModule pegged =
-            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0);
+            new ChainlinkPeggedPriceModule(address(feed), 1 hours, 0.5e18, 3e18, 1, 1e18, true, 0, address(0), 0);
         o = _decayingSell(5);
         o.pricingModule = address(pegged);
         uint256 oracleMod = _measure("price module: oracle-pegged", o, _sign(o), "");

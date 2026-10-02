@@ -44,13 +44,13 @@ function plainSell(): Order {
 }
 
 describe("fillUpTo calldata", () => {
-  it("encodes and decodes with defaults", () => {
-    const data = encodeFillUpTo({ order: CANONICAL_ORDER, sig: SIG, fillAmount: 42n });
+  it("encodes and decodes with an explicit floor", () => {
+    const data = encodeFillUpTo({ order: CANONICAL_ORDER, sig: SIG, fillAmount: 42n, minBumpBps: 0n });
     const { functionName, args } = decodeFunctionData({ abi: SETTLEMENT_ABI, data });
     expect(functionName).toBe("fillUpTo");
     expect((args as any)[2]).toBe(42n);
     expect((args as any)[3]).toBe(ZERO);
-    expect((args as any)[4]).toBe(0n); // minBumpBps defaults to 0 = no price floor
+    expect((args as any)[4]).toBe(0n); // an explicit 0 = no price floor
     expect((args as any)[5]).toBe("0x");
   });
 

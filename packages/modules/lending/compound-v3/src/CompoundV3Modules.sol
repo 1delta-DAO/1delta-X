@@ -45,6 +45,10 @@ import {IComet} from "./interfaces/ICompoundV3.sol";
 // `data = abi.encode(comet, asset[, deadline, v, r, s])`.
 //
 //   — base = 64; permit@64.
+// EIP-2612 permit block @64 (+ signedValue@192): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract CometDepositModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -102,6 +106,10 @@ contract CometDepositModule is IMakerModule {
 // Dust action optional (absent ⇒ SweepToUser); permit block optional after it.
 //
 //   — base = 64; DustAction@64; permit@96.
+// EIP-2612 permit block @96 (+ signedValue@224): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract CometRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;

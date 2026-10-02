@@ -134,6 +134,10 @@ import {IListaBroker} from "./interfaces/ILista.sol";
 //  `msg.sender`-only and out of scope. All broker/term/loan identifiers are
 //  maker-signed in `data`.
 // ════════════════════════════════════════════════════════════════════════════
+// EIP-2612 permit block @160 (+ signedValue@288): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract ListaBrokerModule is PreFundModuleBase, IMakerModule, IFundingSource, ITakerModule {
     /// @dev Ops are numbered ACROSS both seams, not per-seam, and each entrypoint
     ///      asserts its own. That is what keeps the MAKE and TAKE data spaces
@@ -302,7 +306,8 @@ contract ListaBrokerModule is PreFundModuleBase, IMakerModule, IFundingSource, I
         (,, asset,) = abi.decode(data, (uint256, address, address, uint256));
         available = _fundingShape(data)
             ? type(uint256).max
-            : FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+            // A 2612 block at 160 creates the user's approval to Permit3 at fill time.
+            : FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset, data.length >= 160 + 128);
     }
 
     // ──────────────────── TAKE: fixed-term broker borrow ────────────────────

@@ -36,7 +36,13 @@ export const FLAG_NEGATE = 1;
  *
  * The default is deliberately strict: a leaf that reverts is an error, because
  * folding it into `false` would make `NEGATE(brokenOracle)` pass precisely when
- * the feed is broken. Set this only where fallback really is the intent — e.g.
+ * the feed is broken. ⚠ That guarantee holds only for leaves that REVERT on a
+ * broken input (audit 2026-09-30 VAL-2): a leaf that answers a clean `false` on a
+ * bad feed makes `NEGATE(leaf)` true exactly then. Safe to negate: the Chainlink
+ * gates (`ChainlinkPriceGte/Lte`, `ChainlinkTickFloor` — stale / incomplete /
+ * non-positive / sequencer-down all revert) and `MocPriceBandValidator` (reverts
+ * on an invalid or zero price since the VAL-2 fix). An out-of-gas inside a leaf is
+ * propagated as a revert, never folded into `false`. Set this only where fallback really is the intent — e.g.
  * "price ≥ X, or if the feed is down, fall back to the timeout" — so the choice
  * is visible in the signed order.
  */

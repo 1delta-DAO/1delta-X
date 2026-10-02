@@ -89,7 +89,10 @@ import {IEulerVault, IEVC} from "./interfaces/IEulerV2.sol";
 //    Op.BatchOpen   abi.encode(BatchData{op:2, collateralVault, borrowVault,
 //    Op.BatchClose                        sideAmount, totalAmount})   — op is word 0
 //    Op.Open        abi.encode(OpenData{forDesc, forCap, collateralVault,
-//                              borrowVault}) [+ optional EVC-permit tail @128]
+//                              borrowVault}) [+ optional EVC-permit tail @128:
+//                              abi.encode(DelegationHelper.EvcPermit[]{nonceNamespace,
+//                              nonce, deadline, evcData, sig}), each signed with
+//                              sender = THIS module (never address(0))]
 //
 //  EVC SUB-ACCOUNT (optional, maker-signed): plain ops encode word 0 as
 //  `op | subId << 8` (the `uint8(op)` above is then a `uint256`); `Op.Open` puts
@@ -370,9 +373,11 @@ contract EulerV2OperatorModule is
         // OPTIONAL EVC-PERMIT TAIL at 128 — the maker's entire Euler auth surface,
         // signature-only: a permit whose self-call grants this module operator rights
         // and enables the controller / collateral, replayed BEFORE the batch that
-        // needs them. Best-effort (a front-runner landing the lifted permit leaves
-        // exactly the grants the fill wanted — see {DelegationHelper}). No tail ⇒
-        // no-op, so the pre-granted path is untouched.
+        // needs them. Each `EvcPermit` is signed with `sender = address(this)`, so
+        // only this module can land it — a third party who lifts it from public
+        // order data cannot (L-ED-1). Best-effort: a permit already landed by an
+        // earlier fill (nonce consumed) is skipped. No tail ⇒ no-op, so the
+        // pre-granted path is untouched.
         //
         // ⚠ NOW ON BOTH SHAPES. It was on the pre-fund contract only, for no reason
         // beyond which file it was added to: the grants it installs are the EVC

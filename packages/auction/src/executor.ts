@@ -125,10 +125,10 @@ export async function verifyExecutor(bid: RoundBid, binding: QuoteBinding): Prom
 
 /**
  * The signed fields of a bid and nothing else. A submitted object can carry any
- * extra property — notably `commitment`, which the SDK's selection rule uses as
+ * extra property — notably `commitment`, which the SDK's selection rule USED as
  * its tie-break key although no signature covers it, so a submitter could pick a
- * value that wins every tie (audit 2026-09-30 G-TS_FILLER-1). Rounds store and
- * score only this projection.
+ * value that won every tie (audit 2026-09-30 G-TS_FILLER-1; the SDK now breaks
+ * ties on the signed filler only). Rounds store and score only this projection.
  */
 export function signedProjection(bid: RoundBid): RoundBid {
   return {

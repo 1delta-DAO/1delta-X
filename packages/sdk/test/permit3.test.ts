@@ -107,6 +107,7 @@ describe("buildRevokeAll bundles the Permit3 side with protocol-native revokes",
       permit3: DEPLOYMENT.permit3,
       takers: [spenderRefPair(SPENDER, MODULE, refFor("0x01"))],
       nonces: [{ word: 0n, mask: 1n }],
+      outstandingPermitNonces: [],
       protocolRevokes: [protocolRevoke],
     });
     expect(calls).toHaveLength(2);
@@ -116,7 +117,7 @@ describe("buildRevokeAll bundles the Permit3 side with protocol-native revokes",
   });
 
   it("omits the Permit3 call when there is nothing on that side", () => {
-    const calls = buildRevokeAll({ permit3: DEPLOYMENT.permit3, protocolRevokes: [] });
+    const calls = buildRevokeAll({ permit3: DEPLOYMENT.permit3, outstandingPermitNonces: [], protocolRevokes: [] });
     expect(calls).toHaveLength(0);
   });
 });
@@ -133,6 +134,7 @@ describe("buildRevokeAll closes the direct-approval fallback too", () => {
       permit3: DEPLOYMENT.permit3,
       tokens: [tokenSpenderPair(TOKEN, SPENDER)],
       directApprovals: [tokenSpenderPair(TOKEN, SPENDER)],
+      outstandingPermitNonces: [],
     });
     expect(calls).toHaveLength(2);
     expect(decodeFunctionData({ abi: PERMIT3_ABI, data: calls[0]!.data }).functionName).toBe("lockdownAll");
@@ -151,6 +153,7 @@ describe("buildRevokeAll closes the direct-approval fallback too", () => {
       permit3: DEPLOYMENT.permit3,
       tokens: [tokenSpenderPair(TOKEN, SPENDER)],
       directApprovals: [tokenSpenderPair(TOKEN, SPENDER)],
+      outstandingPermitNonces: [],
       strictMode: true,
     });
     expect(calls).toHaveLength(3);

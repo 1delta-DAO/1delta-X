@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
+import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
 import {DelegationHelper} from "@lib/DelegationHelper.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
@@ -47,6 +48,10 @@ import {IMoolah, MarketParams, Position, Id, MarketParamsLib} from "./interfaces
 // NOT the native or SmartLP providers — those take {ListaNativeModules} /
 // {ListaSmartModules}.
 //
+// EIP-2612 permit block @192 (+ signedValue@320): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract ListaSupplyCollateralModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -115,7 +120,7 @@ contract ListaSupplyCollateralModule is IMakerModule {
 //       (and its supply is payable-only): use {ListaNativeModules}. And NOT
 //       for SmartLP providers — different ABI, see {ListaSmartModules}.
 //
-contract ListaTakerModule is ITakerModule {
+contract ListaTakerModule is ITakerModule, IPositionSource {
     using MarketParamsLib for MarketParams;
 
     IPermit3 public immutable permit3;
@@ -136,6 +141,36 @@ contract ListaTakerModule is ITakerModule {
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
+    }
+
+    /// @inheritdoc IPositionSource
+    /// @dev The RAW Moolah collateral position — a plain token amount that does not
+    ///      accrue, read from the Moolah SINGLETON for both op 1 and op 2 (the
+    ///      provider only forwards the withdraw). Not bounded by the module's
+    ///      authorization. The `Full` branch reads the same function (audit
+    ///      2026-09-30 L-LIB-8). Op 0 (moved to the broker) reverts {BadOp}.
+    function positionOf(address user, bytes calldata data)
+        public
+        view
+        override
+        returns (address asset, uint256 amount)
+    {
+        uint8 op = abi.decode(data[:32], (uint8));
+        address moolah;
+        MarketParams memory mp;
+        if (op == uint8(Op.WithdrawCollateral)) {
+            (, moolah, mp) = abi.decode(data, (uint8, address, MarketParams));
+        } else if (op == uint8(Op.ProviderWithdrawCollateral)) {
+            (,, moolah, mp) = abi.decode(data, (uint8, address, address, MarketParams));
+        } else {
+            revert BadOp(op);
+        }
+        return (mp.collateralToken, _collateralOf(moolah, mp, user));
+    }
+
+    /// @dev The ledger read shared by {positionOf} and `Full`.
+    function _collateralOf(address moolah, MarketParams memory mp, address user) private view returns (uint256) {
+        return IMoolah(moolah).position(mp.id(), user).collateral;
     }
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
@@ -211,7 +246,7 @@ contract ListaTakerModule is ITakerModule {
         // of it. A nominal `safeTransfer(receiver, amount)` would be the H-3 drain.
         address collateralToken = mp.collateralToken;
         uint256 floor = IERC20(collateralToken).balanceOf(address(this));
-        uint256 bal = IMoolah(moolah).position(mp.id(), onBehalfOf).collateral;
+        uint256 bal = _collateralOf(moolah, mp, onBehalfOf);
         IMoolah(venue).withdrawCollateral(mp, bal, onBehalfOf, address(this));
         uint256 received = IERC20(collateralToken).balanceOf(address(this)) - floor;
         // The lower bound the venue used to enforce. Before the split rewrite the

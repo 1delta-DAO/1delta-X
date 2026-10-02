@@ -29,6 +29,10 @@ import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 // `data = abi.encode(pool, asset[, deadline, v, r, s])`
 //
 //   — base = 64; permit@64.
+// EIP-2612 permit block @64 (+ signedValue@192): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract AaveV3DepositModule is IMakerModule, IFundingSource {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -74,7 +78,7 @@ contract AaveV3DepositModule is IMakerModule, IFundingSource {
         returns (address asset, uint256 available)
     {
         (, asset) = abi.decode(data, (address, address));
-        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset, data.length >= 64 + 128);
     }
 }
 
@@ -106,6 +110,10 @@ contract AaveV3DepositModule is IMakerModule, IFundingSource {
 //   the permit block (128 bytes) is optional after the dust action slot.
 //
 //   — pool@0, asset@32, rateMode@64, debtToken@96 (base = 128); DustAction@128; permit@160.
+// EIP-2612 permit block @160 (+ signedValue@288): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract AaveV3RepayModule is IMakerModule, IFundingSource {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -158,7 +166,7 @@ contract AaveV3RepayModule is IMakerModule, IFundingSource {
         returns (address asset, uint256 available)
     {
         (, asset) = abi.decode(data, (address, address));
-        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset);
+        available = FundingPreflight.pullable(permit3, address(this), onBehalfOf, asset, data.length >= 160 + 128);
     }
 
     /// @dev Pull the funding token and repay. SweepToUser pulls only what the
@@ -292,6 +300,10 @@ contract AaveV3RepayModule is IMakerModule, IFundingSource {
 //     mutually exclusive branches. (Contrast the Morpho Blue / Comet modules, where
 //     the auth block IS needed in both modes and the offsets had to diverge.)
 //
+// EIP-2612 permit block @128 (+ signedValue@256): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract AaveV3WithdrawModule is ITakerModule, IProceedsAsset, IFundingSource, IPositionSource {
     IPermit3 public immutable permit3;
 

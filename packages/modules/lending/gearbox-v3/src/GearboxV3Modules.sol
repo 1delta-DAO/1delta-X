@@ -119,6 +119,10 @@ library GearboxCreditAuth {
 // Pulls `asset` via Permit3 and supplies it into the ERC-4626 `pool` crediting
 // the user. `data = abi.encode(pool, asset[, deadline, v, r, s])` — base = 64.
 //
+// EIP-2612 permit block @64 (+ signedValue@192): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract GearboxPoolDepositModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -257,6 +261,10 @@ contract GearboxPoolWithdrawModule is ITakerModule, IPositionSource {
 // `addCollateral` is executed by the manager, which runs the `transferFrom` with
 // this module as payer.
 //
+// EIP-2612 permit block @64 (+ signedValue@192): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract GearboxCreditAddCollateralModule is IMakerModule, IGearboxBot {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -340,6 +348,10 @@ contract GearboxCreditAddCollateralModule is IMakerModule, IGearboxBot {
 // the add-collateral module. Authorization is unit-tested; the multicall fund-flow
 // is fork-validated (see the file header).
 //
+// EIP-2612 permit block @64 (+ signedValue@192): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract GearboxCreditRepayModule is IMakerModule, IGearboxBot {
     IPermit3 public immutable permit3;
     address public immutable settlement;

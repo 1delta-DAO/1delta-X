@@ -64,11 +64,22 @@ import {IMocRif} from "./interfaces/IMoc.sol";
 ///
 /// @dev `data = abi.encode(address mocCore, address tp, uint256 minPrice, uint256 maxPrice)`.
 ///
-///      A reversed band (`minPrice > maxPrice`) needs no explicit check: no price
-///      satisfies both bounds, so the comparison already returns false. A reverting
-///      `getPACtp` (the core refusing an invalid upstream price) is folded into
-///      `false` by {OrderGates.gatePasses}, like any validator revert.
+///      ⚠ A BROKEN QUOTE REVERTS, IT IS NEVER A CLEAN `false` (audit 2026-09-30
+///      VAL-2). At the top level the difference is invisible —
+///      {OrderGates.gatePasses} folds a revert into `false` either way — but as a
+///      `ConditionTreeValidator` leaf it is everything: a clean `false` on a broken
+///      feed makes `NOT(band)` TRUE exactly when the feed is broken, whereas a
+///      revert aborts the tree ({ConditionTreeValidator.ConditionErrored}). So a
+///      zero price ({ZeroPrice}), a reversed band ({InvalidBand}) and a reverting
+///      `getPACtp` (the core refusing an invalid upstream price) all REVERT. Only a
+///      healthy price outside the band answers `false` — the one case a negation
+///      may legitimately invert.
 contract MocPriceBandValidator is IOrderValidator {
+    /// @dev The core quoted 0 — misconfigured or uninitialised, never "in band".
+    error ZeroPrice();
+    /// @dev `minPrice > maxPrice`: no price can satisfy it; refused, not `false`.
+    error InvalidBand();
+
     function validate(Order calldata, address, bytes calldata data, bytes calldata)
         external
         view
@@ -77,9 +88,10 @@ contract MocPriceBandValidator is IOrderValidator {
     {
         (address mocCore, address tp, uint256 minPrice, uint256 maxPrice) =
             abi.decode(data, (address, address, uint256, uint256));
+        if (minPrice > maxPrice) revert InvalidBand();
 
         uint256 price = IMocRif(mocCore).getPACtp(tp);
-        if (price == 0) return false; // zero ⇒ misconfigured/uninitialised, never "in band"
+        if (price == 0) revert ZeroPrice();
         return price >= minPrice && price <= maxPrice;
     }
 }

@@ -42,6 +42,10 @@ import {ISilo} from "./interfaces/ISilo.sol";
 // `silo` on the user's behalf. Optional EIP-2612 permit replay for gasless
 // deposits. `data = abi.encode(silo, asset[, deadline, v, r, s])` — base = 64.
 //
+// EIP-2612 permit block @64 (+ signedValue@192): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract SiloDepositModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;
@@ -88,6 +92,10 @@ contract SiloDepositModule is IMakerModule {
 // `data = abi.encode(silo, asset[, DustHandler.DustAction[, deadline, v, r, s]])`.
 //
 //   — base = 64; DustAction@64; permit@96.
+// EIP-2612 permit block @96 (+ signedValue@224): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract SiloRepayModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;

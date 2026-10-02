@@ -139,6 +139,19 @@ contract GearboxPoolPreFundTest is Test {
         preFundDeposit.makeOnBehalf(maker, DELIVERED, data);
     }
 
+    /// audit 2026-09-30 L-CENSUS-8: an op byte in descriptor bits [244,252) the module
+    /// does not implement is refused, like every other pre-fund contract.
+    function test_audit_L_CENSUS_8_unknownPreFundOpRefused() public {
+        token.mint(address(preFundDeposit), DELIVERED);
+        uint256 desc = (uint256(1) << 255) | (uint256(1) << 253) | (uint256(7) << 244)
+            | (uint256(uint160(address(token))) << 16);
+        bytes memory data = abi.encode(desc, address(pool), address(token));
+        vm.prank(settlement);
+        vm.expectRevert(abi.encodeWithSelector(GearboxPoolPreFundDepositModule.BadOp.selector, uint256(7)));
+        preFundDeposit.makeOnBehalf(maker, DELIVERED, data);
+        assertEq(pool.shares(maker), 0, "nothing deposited");
+    }
+
     // ── preflight ──
 
     function test_fundingSource_reportsSelfFunding() public view {

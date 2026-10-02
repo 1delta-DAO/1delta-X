@@ -49,10 +49,23 @@ import {IAaveV3Pool} from "./interfaces/IAaveV3.sol";
 //  grant class cannot force a re-approval in another. Widening this contract past
 //  its grant class would trade four one-time approvals for N re-approval campaigns.
 //
-//  A maker who does not want a standing delegation at all does not need one: every
-//  op here accepts an optional EIP-712 `delegationWithSig` block appended to `data`
-//  ({DelegationHelper.replayAaveDelegation}), which grants per-order and leaves
-//  nothing behind.
+//  A maker who does not want to send a standing `approveDelegation` transaction can
+//  sign instead: every op here accepts an optional EIP-712 `delegationWithSig` block
+//  appended to `data` ({DelegationHelper.replayAaveDelegation}) — 160 bytes
+//  `(debtToken, deadline, v, r, s)`, or 192 with an optional trailing `signedValue`.
+//  What it does and does NOT do (audit 2026-09-30 L-AAVE-2 — this used to claim it
+//  "grants per-order and leaves nothing behind"):
+//    • the signature commits to a VALUE. Without `signedValue` that value is THIS
+//      fill's slice, so it verifies only on a fill whose slice equals what was
+//      signed — in practice one full fill; append `signedValue = item total` to
+//      allow partial fills (the first fill grants the total, later slices find it
+//      sufficient);
+//    • the replay is SKIPPED when a standing delegation already covers the fill;
+//    • it leaves a borrow allowance behind (the signed value minus what was drawn),
+//      and the published signature is any-sender: a CANCELLED order's unconsumed
+//      signature can still be landed by anyone until its deadline. Sign the
+//      deadline no later than the order's, and revoke with `approveDelegation(m, 0)`
+//      after landing it yourself if needed.
 //
 //  THE OP DISCRIMINATOR, AND WHY IT IS SAFE
 //  ────────────────────────────────────────

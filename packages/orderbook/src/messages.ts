@@ -47,9 +47,12 @@ export interface SignedSoftCancel {
  * a relay can neither forge a replacement nor strip the retraction and leave two
  * live orders. A node that fails to verify either half applies NEITHER.
  *
- * The replacement always carries a FRESH nonce (see the SDK's `amendOrder`), so
- * the two orders stay independent on-chain: cancelling the replacement does not
- * retroactively invalidate fills the predecessor already earned.
+ * The replacement carries a FRESH nonce (see the SDK's `amendOrder`), so the two
+ * orders stay independent on-chain: cancelling the replacement does not
+ * retroactively invalidate fills the predecessor already earned. The one
+ * exception is a FILL-ONCE predecessor (timing bit 100, a shared-nonce bracket
+ * leg): its replacement KEEPS `prev.nonce` to stay in the bracket, matching the
+ * SDK `patchOrder` rule. The book refuses any other nonce reuse (PRICE-5).
  */
 export interface OrderReplace {
   /** Retraction of the previous order; its `orderHashes` must contain `replaces`. */

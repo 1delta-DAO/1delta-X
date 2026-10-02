@@ -23,7 +23,7 @@ what the 2026-09 rework fixed:
 |  | value IN only | value OUT only | both |
 | --- | --- | --- | --- |
 | **PULL** (maker's wallet, via `permit3.transferFrom`) | `MAKE` — the plain deposit/repay modules | — | `TAKE_FOR`, maker-addressed leg |
-| **PRE-FUND** (the module's own balance) | `MAKE` + `(5 << 253)` descriptor — the `*PreFundModule` contracts | — | `TAKE_FOR`, module-addressed leg |
+| **PRE-FUND** (the module's own balance) | `MAKE` + `(5 << 253) \| op << 244 \| token << 16 \| j` descriptor (leg `j`, funding token at bits [16,176), op at [244,252)) — the `*PreFundModule` contracts | — | `TAKE_FOR`, module-addressed leg |
 
 The op says which way value moves for the user; the descriptor says where the
 module's funding comes from. A taker allowance is required exactly when value
@@ -87,7 +87,7 @@ Status: ✅ shipped · 🟡 partial (subset of legs) · ⛔ blocked (can't wire)
 | Lender | Pkg | Delegation primitive (module mechanic) | Notes |
 |---|---|---|---|
 | Aave V2 | [`aave-v2`](aave-v2) | `approveDelegation` (borrow) · aToken approve (withdraw) | ✅ |
-| Aave V3 (+ Spark/forks) | [`aave-v3`](aave-v3) | same | ✅ pool-agnostic — forks need no new code |
+| Aave V3 (+ Spark/forks) | [`aave-v3`](aave-v3) | same | ✅ pool-agnostic — pre-3.5 rounding is handled in-module; isolation mode (pre-3.7) is documented in the aave-v3 README |
 | Aave V4 | [`aave-v4`](aave-v4) | hub/spoke position-manager | ✅ separate surface |
 | Compound V2 (+ forks) | [`compound-v2`](compound-v2) | base: cToken approve (withdraw) | ✅ pool-agnostic |
 | Venus | [`venus`](venus) | `updateDelegate` + `enterMarkets` | ✅ Compound-v2 fork w/ borrow delegation |
@@ -106,9 +106,9 @@ Status: ✅ shipped · 🟡 partial (subset of legs) · ⛔ blocked (can't wire)
 | Exactly | [`exactly`](exactly) | ✅ clean | ERC-4626 share allowance (borrow **&** withdraw) | deposit, repay, borrow, withdraw — floating **and** fixed-maturity |
 | Lista DAO | [`lista`](lista) | ✅ clean | Moolah `setAuthorization` (collateral + fixed broker borrow) | supply-collateral, repay, **fixed-term** borrow, withdraw-collateral |
 | River (Satoshi) | [`river`](river) | ✅ CDP | diamond `setDelegateApproval` | addColl, repay, borrow, withdrawColl, open (Level-B) |
-| Liquity V2 (+ forks) | [`liquity-v2`](liquity-v2) | ✅ CDP | per-trove `setAddManager` / `setRemoveManagerWithReceiver` | addColl, repay, borrow, withdrawColl |
+| Liquity V2 + Felix (`Felix*` modules); other forks unprobed | [`liquity-v2`](liquity-v2) | ✅ CDP | empty add-manager slot or the PreFund module; remove-manager receiver = module | addColl, repay, borrow, withdrawColl |
 | Gearbox V3 | [`gearbox-v3`](gearbox-v3) | 🟡 mixed | pool ERC-4626 (clean) · credit-account `setBotPermissions`/`botMulticall` (best-effort) | pool deposit/withdraw · credit add-collateral/borrow |
-| Teller V2 | [`teller`](teller) | 🟡 partial | permissionless value-in only | deposit, repay |
+| Teller V2 | [`teller`](teller) | 🟡 partial | value-in only — repay is permissionless; pool deposit is Hypernative-firewalled (registering the module is a deploy step) | deposit, repay |
 
 ### Blocked / not built
 
@@ -150,7 +150,7 @@ constraints, not gaps:
 | exactly | Permit3 token allowance | one `market.approve(module)` (share allowance, both legs) | native |
 | lista | Permit3 token allowance | Moolah `setAuthorization(module)` | native |
 | river | Permit3 token allowance | `setDelegateApproval(module)` + Permit3 token allowance on the output (sweep) | **Permit3-swept** maker→receiver |
-| liquity-v2 | `setAddManager` + Permit3 token allowance | `setRemoveManagerWithReceiver(troveId, module, module)` | forwarded (module measures & sends) |
+| liquity-v2 | Permit3 token allowance, with the trove's single add-manager slot EMPTY (or pointed at `LiquityV2PreFundModule`) — naming one pull MAKE module locks the other out | `setRemoveManagerWithReceiver(troveId, module, module)` | forwarded (module measures & sends) |
 | gearbox-v3 | Permit3 token allowance (+ `setBotPermissions` for credit) | `pool.approve` (pool) / `setBotPermissions` (credit) | native (pool) / multicall `to=receiver` (credit) |
 | teller | Permit3 token allowance | — (no taker legs) | — |
 

@@ -227,7 +227,7 @@ contract OcoGroupModule is ISettlementModule, IOrderValidator {
         unchecked {
             // `current` is a stored `nonce + 1`, so it is never 0 here and the
             // comparison cannot wrap: an `order.nonce` of max never matches
-            // because {makeOnBehalf} refuses to store it.
+            // because {settle} refuses to store it.
             return current == order.nonce + 1;
         }
     }

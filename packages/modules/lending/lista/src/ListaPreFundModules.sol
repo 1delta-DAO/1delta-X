@@ -14,12 +14,12 @@ import {IMoolah, MarketParams} from "./interfaces/ILista.sol";
 //
 // "Supply-collateral whatever the conversion delivered", with ZERO receive-side
 // approvals: the maker signs the converted output leg with `recipient = module`
-// and a `TAKE_FOR` item whose leg-reference descriptor points at it. The core
+// and a pre-funded `MAKE` item whose leg-reference descriptor points at it. The core
 // sizes `forAmount` to exactly what the fill delivered here ({Base._forSlice} →
 // {Pricing.outputAt}), auction decay included, and this module supplies it from
 // its own balance. The maker's only grants are the ones they had anyway: the
 // ERC20+Permit3 approval on the asset they are CONVERTING FROM (the input leg),
-// and the taker allowance below. The received asset needs nothing — it never
+// and NO taker allowance (Settlement dispatches the `MAKE` directly). The received asset needs nothing — it never
 // transits the maker's wallet, and Moolah's `supplyCollateral(…, onBehalf, …)`
 // is Morpho-shaped and PERMISSIONLESS on someone else's behalf, so unlike the
 // withdraw taker leg this needs no Moolah `setAuthorization` either: the

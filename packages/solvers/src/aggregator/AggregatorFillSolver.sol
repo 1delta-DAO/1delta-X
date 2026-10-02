@@ -587,7 +587,11 @@ contract AggregatorFillSolver {
     ///         package compiles with.
     /// @param  takerData forwarded to the order's validators, invariants and
     ///         price module — carry the cosigned quote here for a
-    ///         `ClockFlooredQuoteModule` order.
+    ///         `ClockFlooredQuoteModule` order. ⚠ The quote must be bound to THIS
+    ///         AggregatorFillSolver instance (its `filler` is the address Settlement
+    ///         sees — this contract, not the EOA calling it), and the instance must
+    ///         be operator-GATED: a quote bound to a permissionless instance is
+    ///         usable by every caller of it (audit 2026-09-30 CORE-FILLER-1.v3).
     /// @dev    The spread is split AFTER the fill returns, because the surplus is
     ///         only knowable once Settlement has taken its share: the maker's and
     ///         the protocol's {SurplusPolicy} shares first, the originator's out

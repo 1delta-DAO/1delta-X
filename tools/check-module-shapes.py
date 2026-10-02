@@ -13,6 +13,15 @@ enforced nowhere — which is the §F23 failure mode this file exists to avoid.
   7. A multi-op module rejects an op it does not implement.
   8. A module never pays out a RAW self-balance — every `balanceOf(address(this))`
      is a floor or a delta.
+  9. A `Full`/whole-item leg that forwards `min(received, amount)` carries the
+     delivered bound, and every Exact branch on a CLAMPING venue does too.
+ 10. A SETTLE module never pulls FROM the filler (X-SPEC-1).
+ 11. A SETTLE module that moves an UNSCALED amount decoded from `data` is
+     whole-fill only (X-ARITH-3).
+ 12. A venue approval is cleared before any early return can skip it
+     (X-STATIC-1.v1).
+ 13. A pre-fund MAKE module's header does not describe the retired TAKE_FOR /
+     taker-allowance shape (L-LRG-4c).
 
 ────────────────────────────────────────────────────────────────────────────────
 (1) A taker grant must be unambiguous about which dispatch it authorises.
@@ -343,7 +352,8 @@ SAFE_FIRST_FIELD = {"address", "uint8", "uint16", "bool"}
 WORD0_EXEMPT = {
     # struct is DYNAMIC (contains a `bytes`/array member), so word 0 is an ABI
     # offset — a small number, never near 2^255.
-    "AcrossBridgeOutModule": "AcrossSpec is dynamic (bytes message) -> word 0 is an offset",
+    # (BRIDGE-B-8: this row used to call AcrossSpec dynamic; it is STATIC.)
+    "AcrossBridgeOutModule": "AcrossSpec is static, first field `address inputToken`",
     "LzOftBridgeOutModule": "LzSpec is dynamic (bytes extraOptions) -> word 0 is an offset",
     "PermissionlessCallModule": "CallSpec is dynamic (bytes callData) -> word 0 is an offset",
     "MidnightSupplyCollateralModule": "Market is dynamic (CollateralParams[]) -> word 0 is an offset",
@@ -359,6 +369,63 @@ WORD0_EXEMPT = {
     "LiquityV2AddCollModule": "word 0 is `branchIndex`, a small collateral-branch ordinal",
     "LiquityV2RepayModule": "word 0 is `branchIndex`, a small collateral-branch ordinal",
 }
+# ── (9) extended: clamp-verified venues and the `requireFullFill` + cap shape ──
+#
+# Rule 9 originally matched only `requireFullFillFromData(` legs. Two shapes escaped:
+#   • a leg gated by the PLAIN `FullFillGuard.requireFullFill(amount, total)` that
+#     forwards `min(received, amount)` — `MidnightBorrowModule` (L-CV2-1.v2);
+#   • the EXACT branch of a venue that CLAMPS a withdraw to the live position
+#     instead of reverting (L-CV2-1 / L-CV2-1.v3): the core bills the shortfall of
+#     an input-funding TAKE to the MAKER'S WALLET, so the module must bound the
+#     delivery (`requireDelivered`) or pre-check the position (`WouldBorrow`).
+# The allow-list names the venues verified to clamp; a module joins it when its
+# venue is found to clamp, and must then carry the bound on its take seam.
+CAP_FORWARD = re.compile(r"\b(\w+)\s*<\s*amount\s*\?\s*\1\s*:\s*amount")
+CLAMPING_VENUE_MODULES = {
+    "AaveV4WithdrawModule": "Aave v4 Spoke.withdraw clamps to supplied assets",
+    "VenusTakerModule": "Venus redeem/borrow measured; treasury fee / FoT short",
+    "CompoundV2WithdrawModule": "Compound v2 redeem measured against FoT / rounding",
+    "CompoundV2NativeWithdrawModule": "Compound v2 cEther redeem measured",
+    "CometTakerModule": "Comet base withdraw past supply is a BORROW (WouldBorrow pre-check)",
+    "DolomiteOperatorModule": "Dolomite withdraw past supply is a BORROW (WouldBorrow pre-check)",
+    "ExactlyTakerModule": "Exactly withdrawAtMaturity clamps",
+}
+DELIVERY_BOUND = re.compile(r"FullFillGuard\.requireDelivered\s*\(|\bWouldBorrow\b")
+
+# ── (10) a SETTLE module never pulls FROM the filler (X-SPEC-1) ───────────────
+#
+# `ISettlementModule.settle(maker, filler, amount, data)` hands the module the
+# filler so it can route the MAKER's asset TO the filler — never as a `from`. A
+# shared module that pulled from the filler under the filler's standing approval
+# would let any maker name an arbitrary asset the filler owns and take it.
+SETTLE_SIG = re.compile(r"\bfunction\s+settle\s*\(\s*address\s+\w*\s*,\s*address\s+(\w+)")
+MEMBER_PULL = re.compile(r"\.\s*(?:safeTransferFrom|transferFrom)\s*\(")
+LIB_PULL = re.compile(r"SafeTransferLib\.safeTransferFrom\s*\(")
+
+# ── (11) an unscaled data amount on SETTLE is whole-fill only (X-ARITH-3) ─────
+#
+# The core pro-rates `amount`; a module that moves a CONSTANT it decoded from `data`
+# moves the whole of it on every slice. That is sound only when the slice is the
+# whole item — `FullFillGuard` — so such a module must call it.
+DATA_DECODE_UINTS = re.compile(r"\(([^()]*)\)\s*=\s*abi\.decode\(\s*data")
+TRANSFER_CALL = re.compile(r"(?:safeTransferFrom|transferFrom|safeTransfer|\.transfer)\s*\(")
+
+# ── (12) an approval clear is not behind an early return (X-STATIC-1.v1) ───────
+#
+# `forceApprove(token, venue, 0)` after an `if (bal <= floor) return;` is skipped
+# exactly when the venue consumed everything — leaving a standing grant to an
+# order-decoded venue on a shared singleton. Clear first, or clear on both paths.
+EARLY_RETURN = re.compile(r"if\s*\([^;{}]*\)\s*return\s*;")
+APPROVE_CLEAR = re.compile(r"forceApprove\s*\([^;]*?,\s*0\s*\)\s*;")
+
+# ── (13) a pre-fund MAKE module does not describe the retired TAKE_FOR shape ───
+#
+# The one-sided pre-fund modules all migrated to PUSH-funded MAKE (no TAKE_FOR item,
+# no taker allowance). A header still describing "a `TAKE_FOR` item whose leg-
+# reference descriptor …" or "the taker allowance" is an encoder spec for a shape
+# the module no longer accepts (L-LRG-4c).
+STALE_PREFUND_HEADER = re.compile(r"TAKE_FOR`\s*item|\band the taker allowance\b", re.IGNORECASE)
+
 # `contract X is A, B {` — the name plus its inheritance list, up to the brace.
 # ⚠ LIBRARIES TOO. This matched `contract` only, so a `library` living beside the
 #   modules — `RiverProceeds`, whose `settle` does a Permit3 pull sized from a
@@ -497,6 +564,10 @@ def main() -> int:
     raw_pay = []
     unbounded_full = []
     header_drift = []
+    filler_pulls = []
+    unscaled_settle = []
+    clear_after_return = []
+    stale_prefund = []
     scanned = 0
     makes = 0
     dual = 0
@@ -518,6 +589,7 @@ def main() -> int:
             "takeForOnBehalf" not in src
             and "takeOnBehalf" not in src
             and "makeOnBehalf" not in src
+            and "function settle(" not in src
         ):
             continue
         for name, inherits, body, header in contract_spans(src):
@@ -660,6 +732,71 @@ def main() -> int:
                 reach = reachable_body(body, entry)
                 if "requireFullFillFromData(" in reach and "FullFillGuard.requireDelivered(" not in reach:
                     unbounded_full.append((path.relative_to(ROOT), name, entry))
+                # 9, extended (L-CV2-1.v2): the plain `requireFullFill(` gate plus the
+                # `min(received, amount)` forward is the same whole-item shape.
+                elif (
+                    "requireFullFill(" in reach
+                    and CAP_FORWARD.search(reach)
+                    and "FullFillGuard.requireDelivered(" not in reach
+                ):
+                    unbounded_full.append((path.relative_to(ROOT), name, entry + " (requireFullFill + min-forward)"))
+            # 9, extended (L-CV2-1): a clamping venue's take seam carries the bound.
+            if name in CLAMPING_VENUE_MODULES and TAKE.search(body):
+                if not DELIVERY_BOUND.search(reachable_body(body, "takeOnBehalf")):
+                    unbounded_full.append(
+                        (path.relative_to(ROOT), name, "takeOnBehalf on a clamping venue: " + CLAMPING_VENUE_MODULES[name])
+                    )
+
+            # ── (10) / (11) SETTLE modules ──
+            sm = SETTLE_SIG.search(body)
+            if sm:
+                filler = sm.group(1)
+                settle_reach = reachable_body(body, "settle")
+                for pm in MEMBER_PULL.finditer(settle_reach):
+                    args = [a.strip() for a in arg_span(settle_reach, pm.end() - 1).split(",")]
+                    if args and args[0] == filler:
+                        filler_pulls.append((path.relative_to(ROOT), name, "member transferFrom from `" + filler + "`"))
+                for pm in LIB_PULL.finditer(settle_reach):
+                    args = [a.strip() for a in arg_span(settle_reach, pm.end() - 1).split(",")]
+                    if len(args) > 1 and args[1] == filler:
+                        filler_pulls.append((path.relative_to(ROOT), name, "SafeTransferLib.safeTransferFrom from `" + filler + "`"))
+                decoded = set()
+                for dm in DATA_DECODE_UINTS.finditer(settle_reach):
+                    for field in dm.group(1).split(","):
+                        toks = field.split()
+                        if len(toks) == 2 and toks[0].startswith("uint"):
+                            decoded.add(toks[1])
+                moves_constant = False
+                for tm in TRANSFER_CALL.finditer(settle_reach):
+                    args = [a.strip() for a in arg_span(settle_reach, tm.end() - 1).split(",")]
+                    # The AMOUNT argument: 4th of an ERC-1155 `safeTransferFrom(from,
+                    # to, id, amount, data)`, else the last (an ERC-721 `tokenId` is
+                    # last too — indivisible, so it rightly needs the guard).
+                    amt = args[3] if len(args) == 5 else (args[-1] if args else "")
+                    if amt in decoded:
+                        moves_constant = True
+                if moves_constant and "FullFillGuard." not in settle_reach:
+                    unscaled_settle.append((path.relative_to(ROOT), name))
+
+            # ── (12) approval clear not behind an early return ──
+            for fname, fbody in all_functions(body).items():
+                for cm in APPROVE_CLEAR.finditer(fbody):
+                    before = fbody[: cm.start()]
+                    # the venue grant this clears: same token/venue opened earlier in the function
+                    if "forceApprove(" not in before:
+                        continue
+                    last_open = before.rfind("forceApprove(")
+                    if EARLY_RETURN.search(before[last_open:]):
+                        clear_after_return.append((path.relative_to(ROOT), name, fname))
+
+            # ── (13) stale pre-fund MAKE header ──
+            if (
+                path.name.endswith("PreFundModules.sol")
+                and MAKE_FN.search(body)
+                and not TAKE_FOR.search(body)
+                and STALE_PREFUND_HEADER.search(header)
+            ):
+                stale_prefund.append((path.relative_to(ROOT), name))
 
             if not (TAKE.search(body) or TAKE_FOR.search(body)):
                 continue
@@ -733,6 +870,55 @@ def main() -> int:
             "without it a position short of the total (partial liquidation, a prior fill)\n"
             "delivers less and `Core._payInputsToSolver` bills the shortfall to the MAKER'S\n"
             "WALLET. Add the bound right after `received` is measured.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if filler_pulls:
+        print(f"{len(filler_pulls)} SETTLE module(s) pull FROM the filler (X-SPEC-1):\n", file=sys.stderr)
+        for rel, name, why in filler_pulls:
+            print(f"  {rel}: contract {name}\n      {why}", file=sys.stderr)
+        print(
+            "\n`settle` receives the filler so the module can route the MAKER's asset TO it.\n"
+            "Pulling from the filler under its standing approval lets any maker sign an order\n"
+            "naming this module and an asset the filler owns, and take it. A purchase belongs\n"
+            "on the fungible legs plus a maker-side invariant.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if unscaled_settle:
+        print(f"{len(unscaled_settle)} SETTLE module(s) move an unscaled data amount without FullFillGuard:\n", file=sys.stderr)
+        for rel, name in unscaled_settle:
+            print(f"  {rel}: contract {name}", file=sys.stderr)
+        print(
+            "\nThe core pro-rates `amount`; a constant decoded from `data` moves whole on every\n"
+            "slice. Gate the item whole-fill with `FullFillGuard` (X-ARITH-3).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if clear_after_return:
+        print(f"{len(clear_after_return)} approval clear(s) sit behind an early return:\n", file=sys.stderr)
+        for rel, name, fname in clear_after_return:
+            print(f"  {rel}: contract {name}.{fname}", file=sys.stderr)
+        print(
+            "\nAn `if (...) return;` between `forceApprove(token, venue, X)` and its\n"
+            "`forceApprove(token, venue, 0)` skips the clear exactly when the venue consumed\n"
+            "everything, leaving a standing grant to an order-decoded venue (X-STATIC-1.v1).\n"
+            "Clear the approval before the early return.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if stale_prefund:
+        print(f"{len(stale_prefund)} pre-fund MAKE module header(s) describe the retired TAKE_FOR shape:\n", file=sys.stderr)
+        for rel, name in stale_prefund:
+            print(f"  {rel}: contract {name}", file=sys.stderr)
+        print(
+            "\nThe one-sided pre-fund modules are PUSH-funded MAKE items: Settlement delivers\n"
+            "the funding leg to the module, which spends it. There is no TAKE_FOR item and no\n"
+            "taker allowance — describe the pre-funded MAKE shape (L-LRG-4c).",
             file=sys.stderr,
         )
         return 1

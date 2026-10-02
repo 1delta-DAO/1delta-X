@@ -106,7 +106,13 @@ survivable with a thin solver set.
 [`ClockFlooredQuoteModule`](../packages/modules/pricing/quotes/src/ClockFlooredQuoteModule.sol)
 the result is `min(quotedBump, clockBump)`, so a hostile or colluding cosigner cannot
 do worse than plain dutch — not merely "no worse than the floor". A broken selection
-rule in `selectQuote` cannot price outside either bound.
+rule in `selectQuote` cannot price outside either bound. An UNQUOTED fill gets `0`
+(the maker's `start`), not the clock (audit 2026-09-30 PRICE-6): the quote is what
+unlocks any concession, so a filler must present one. Quotes bind the fill's
+`prevFilled` (the type string ends `…,uint256 deadline,uint256 prevFilled)`), so the
+auctioneer mints each quote for the order's current `filled()`, and a solver passes
+the effective bump `min(quote, clockBump)` — or its own minimum bid — as `fillUpTo`'s
+`minBumpBps`.
 
 **Thin rounds grant nothing.** `selectQuote`'s `minBidders` (default 2 for
 second-price) returns `bumpBps: 0` rather than a concession when too few distinct

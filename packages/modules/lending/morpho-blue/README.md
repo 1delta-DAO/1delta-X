@@ -46,6 +46,16 @@ pulls the maker's aWETH via a Permit3 token allowance; here there is nothing to
 pull, so `withdrawCollateral` relies purely on Morpho's `setAuthorization` plus
 the Permit3 taker-allowance gate. One fewer approval, one fewer moving part.
 
+> **A durable revoke must CONSUME the Morpho nonce** (audit 2026-09-30 L-CMT-3 /
+> L-ML-9). An optional `setAuthorizationWithSig` block in public order data can be
+> relayed by anyone until its deadline, and a plain `setAuthorization(module,
+> false)` leaves `nonce[authorizer]` untouched — so the published signature can
+> restore the grant. Retire it by signing and sending
+> `setAuthorizationWithSig({isAuthorized: false, nonce: current})` (SDK
+> `morphoAuthorizationTypedData` + `buildRevokeAll({ signedVenueRevokes })`), or
+> `Permit3.lockdownAll` the taker grants. Sign in-data authorizations with a
+> deadline no later than the order's (SDK `morphoAuthTail` refuses a later one).
+
 ## Authorization: two gates per leg
 
 A module only moves a maker's funds if **both** of these are signed/approved by

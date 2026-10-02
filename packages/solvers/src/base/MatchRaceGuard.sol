@@ -50,7 +50,16 @@ import {Settlement} from "@core/settlement/Settlement.sol";
 ///  the pool comes up short and the settlement reverts {BatchNotWhole}, or a
 ///  sliver is swept that the solver's economics did not account for. "Still has
 ///  room" is therefore the wrong question; "is the state I simulated against still
-///  the state on chain" is the right one, and it is also the cheaper check.
+///  the state on chain" is the right one for the `filled` AXIS — and only that
+///  axis: the counter is all this check reads. It does NOT see a {Proportional}
+///  order's anchor, which resolves from the maker's LIVE token balance (audit
+///  2026-09-30 X-DIFF-CORE-1.v1). A maker that drains its balance between the
+///  simulation and inclusion shrinks that anchor with `filled` untouched; under
+///  the `type(uint256).max` sentinel the netted path then settles the shrunk size,
+///  and a plan that fronts a residual from inventory (a CALL step) pays FULL
+///  outputs for it. Guard such plans with {_requireAnchors} (the maker still holds
+///  the quoted anchor) and/or {_requireSwept} (the settlement swept at least what
+///  the plan was priced for), or name the exact resolved anchor instead of `max`.
 ///
 ///  A solver running INDEPENDENT single-order fills (not a netted plan) has looser
 ///  requirements and should write its own predicate — this guard is for plans
@@ -89,8 +98,62 @@ abstract contract MatchRaceGuard {
     ///      cancelled by nonce. Same race-loss classification as {OrderTaken}.
     error NonceTaken(uint256 index, address maker, uint256 nonce);
 
+    /// @notice One {Proportional} order's quoted anchor: `maker` must still hold at
+    ///         least `minBalance` of `token` (the anchor token, `legsIn[0].token`).
+    struct AnchorCheck {
+        address maker;
+        address token;
+        uint256 minBalance;
+    }
+
+    /// @notice A floor on what `matchSettle` sweeps to the plan's recipient in `token`.
+    struct SweptFloor {
+        address token;
+        uint256 min;
+    }
+
+    /// @dev Anchor check `index` failed: the maker's balance shrank below the
+    ///      anchor the plan was priced for (X-DIFF-CORE-1.v1).
+    error AnchorShrunk(uint256 index, uint256 expected, uint256 actual);
+    /// @dev The settlement swept less of `token` than the plan's floor.
+    error SweptShort(address token, uint256 expected, uint256 actual);
+
     constructor(address settlement) {
         SETTLEMENT = Settlement(settlement);
+    }
+
+    /// @notice Revert unless every {Proportional} maker still holds the anchor the
+    ///         plan was priced for. One `balanceOf` per entry, before the plan is
+    ///         touched — a drained anchor is a lost race, not a loss.
+    function _requireAnchors(AnchorCheck[] calldata anchors) internal view {
+        for (uint256 i; i < anchors.length;) {
+            AnchorCheck calldata a = anchors[i];
+            (bool ok, bytes memory ret) =
+                a.token.staticcall(abi.encodeWithSignature("balanceOf(address)", a.maker));
+            uint256 bal = ok && ret.length >= 32 ? abi.decode(ret, (uint256)) : 0;
+            if (bal < a.minBalance) revert AnchorShrunk(i, a.minBalance, bal);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice Revert unless `matchSettle`'s returned sweep meets every floor. A
+    ///         floored token the settlement did not sweep at all reads 0.
+    function _requireSwept(address[] memory tokens, uint256[] memory swept, SweptFloor[] calldata floors)
+        internal
+        pure
+    {
+        for (uint256 f; f < floors.length; f++) {
+            uint256 got;
+            for (uint256 t; t < tokens.length; t++) {
+                if (tokens[t] == floors[f].token) {
+                    got = swept[t];
+                    break;
+                }
+            }
+            if (got < floors[f].min) revert SweptShort(floors[f].token, floors[f].min, got);
+        }
     }
 
     /// @notice Revert unless every listed order's `filled` counter is EXACTLY the

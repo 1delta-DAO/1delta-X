@@ -24,13 +24,15 @@ interface IGearboxPoolV3 {
     function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
     function maxWithdraw(address owner) external view returns (uint256);
 
-    /// @notice The owner's RAW position in asset units — share balance converted at
-    ///         the current rate, with NO solvency or liquidity clamp.
-    /// @dev This, not {maxWithdraw}, is what {IPositionSource.positionOf} must report:
+    /// @notice The owner's share balance (SHARES, not assets).
+    function balanceOf(address owner) external view returns (uint256 shares);
+    /// @notice `shares` converted to asset units at the current rate, with NO
+    ///         solvency or liquidity clamp — `previewRedeem(balanceOf(owner))` is the
+    ///         owner's RAW position in asset units.
+    /// @dev That, not {maxWithdraw}, is what {IPositionSource.positionOf} must report:
     ///      `maxWithdraw` is a REACHABILITY figure (clipped by open debt and by vault
     ///      cash, both of which third parties move), and pricing a one-shot exit off
     ///      it lets a fill resolve small instead of reverting.
-    function balanceOf(address owner) external view returns (uint256 shares);
     function previewRedeem(uint256 shares) external view returns (uint256 assets);
 }
 

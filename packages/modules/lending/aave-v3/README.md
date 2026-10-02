@@ -64,7 +64,8 @@ module, while the Permit3 taker allowance is what actually caps the fill size.
 | Contract | Op | Aave action | `data` |
 |---|---|---|---|
 | [`AaveV3DepositModule`](src/AaveV3Modules.sol) | MAKE | pull asset from maker → `pool.supply(onBehalfOf = maker)` | `abi.encode(pool, asset)` |
-| [`AaveV3RepayModule`](src/AaveV3Modules.sol) | MAKE | pull buffered amount → `pool.repay`; sweep over-repay dust back to maker | `abi.encode(pool, asset, rateMode)` |
+| [`AaveV3RepayModule`](src/AaveV3Modules.sol) | MAKE | pull buffered amount → `pool.repay`; sweep over-repay dust back to maker | `abi.encode(pool, asset, rateMode, debtToken[, DustAction[, permit]])` — debtToken@96 is mandatory (base 128); DustAction@128; permit@160 |
+| [`AaveV3PreFundModule`](src/AaveV3PreFundModules.sol) | MAKE (pre-funded) | supply / repay the core-delivered output leg from the module's own balance | `abi.encode(forDesc, pool, asset[, …])` — `forDesc = (5 << 253) \| op << 244 \| token << 16 \| j`: pre-fund leg reference to output leg `j` (bits [0,16)), the funding token at [16,176), the op (`0` Supply, `1` Repay) at [244,252) |
 | [`AaveV3WithdrawModule`](src/AaveV3Modules.sol) | TAKE | pull maker's aToken → `pool.withdraw` → `receiver` | `abi.encode(pool, asset, aToken)` |
 | [`AaveV3CreditModule`](src/AaveV3CreditModule.sol) | TAKE | `Op.Borrow` — `pool.borrow(onBehalfOf = maker)` → forward to `receiver` | `abi.encode(Op.Borrow, pool, asset, rateMode)` |
 | [`AaveV3CreditModule`](src/AaveV3CreditModule.sol) | TAKE | `Op.Leverage` — supply a ratio-derived collateral, then borrow, in one dispatch | `abi.encode(Op.Leverage, pool, borrowAsset, rateMode, collateralAsset, collateralTotal, borrowTotal)` |
@@ -131,9 +132,22 @@ merge: a merged contract redeploys as a unit, so folding the aToken-spending or
 wallet-allowance ops in here would mean a leverage bugfix forcing every maker to
 re-approve their *collateral* too.
 
-A maker who wants no standing delegation at all needs none: every op accepts an
-optional EIP-712 `delegationWithSig` block appended to `data`, which grants
-per-order and leaves nothing behind.
+A maker who does not want to send an `approveDelegation` transaction can sign
+instead: every op accepts an optional EIP-712 `delegationWithSig` block appended
+to `data` — `(debtToken, deadline, v, r, s)` (160 bytes), or 192 bytes with an
+optional trailing `signedValue`. It is NOT "per-order with nothing left behind"
+(audit 2026-09-30 L-AAVE-2):
+
+- the signature commits to a value; without `signedValue` that is this fill's
+  slice, so it verifies only on a fill whose slice equals it — in practice a full
+  fill. Append `signedValue = item total` to allow partial fills;
+- the replay is skipped when a standing delegation already covers the fill;
+- the unspent allowance remains, and a CANCELLED order's unconsumed signature can
+  still be landed by anyone until its deadline (sign it no later than the order's).
+
+The same optional trailing `signedValue` word applies to every EIP-2612 permit
+block (`PermitHelper.replayIfPresent`): a permit block is `(deadline, v, r, s)` =
+128 bytes, or 160 with `signedValue`.
 
 > Aave **v4** ships as a separate package,
 > [`@1delta-x/modules-aave-v4`](../aave-v4), because v4's Hub/Spoke +

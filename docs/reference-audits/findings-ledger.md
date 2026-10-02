@@ -1459,9 +1459,12 @@ nomination's default seq and always failed; revocations now use the reserved seq
 now reserved per remaining row: `test_lens_poisonRow_largeBatch_returnsNotReverts`.
 `OriginSettler7683` previewed filler-set orders as `address(1)` and broadcast
 delta-verify orders no destination fill can deliver:
-`test_hardFillerSet_resolvesAndOpensAsMember`,
-`test_softFillerSet_quotesWithoutOutsiderPremium`,
-`test_deltaVerifyOrder_refusedByEveryEntry`. The deployed via-IR bytecode was never
+`test_deltaVerifyOrder_refusedByEveryEntry`. (The filler-set pair was revised by
+the 2026-09-30 audit, PERIPH-7: the destination settler fills as ITSELF, never as a
+set member, so an in-window hard set is now refused rather than opened —
+`test_hardFillerSet_inWindow_refusedNotBroadcast` — and a soft set is quoted WITH
+the outsider premium the destination fill actually pays —
+`test_softFillerSet_quotesThePremiumTheInstructionPays`.) The deployed via-IR bytecode was never
 tested — the core suite now runs against the shipped artifacts under
 `DEPLOYED_BYTECODE=1`.
 

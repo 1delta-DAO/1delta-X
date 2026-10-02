@@ -45,6 +45,15 @@ export interface AuctioneerConfig {
    * as the filler, or the module reverts `QuoteNotForFiller`.
    */
   bindToWinner?: boolean;
+  /**
+   * The order's live `Settlement.filled(orderHash)` — the progress the quoted fill
+   * STARTS at. Quotes are bound to it (audit 2026-09-30 PRICE-10 / QUOTE-TOOLING):
+   * the module verifies the digest against the fill's real `prevFilled`, so a quote
+   * minted for a stale progress reverts instead of re-pricing a later fill.
+   * Without a reader, a round's own {RoundConfig.prevFilled} is used, else `0n`
+   * (a first fill).
+   */
+  readFilled?: (orderHash: Hex) => Promise<bigint>;
   now?: Clock;
 }
 
@@ -91,11 +100,11 @@ export class Auctioneer {
    * Settle a round and mint its quote.
    *
    * A round that granted no concession (`bumpBps === 0` from the thin-bidder
-   * guard) settles WITHOUT a quote: signing a zero-bump quote would pin the
-   * price at the maker's ambition and, under the clock-floored module, throw
-   * away the decay ramp the filler was going to need. Signing nothing leaves
-   * the order on its clock, which is the correct "the auction found nothing"
-   * outcome.
+   * guard) settles WITHOUT a quote: a zero-bump quote prices at the maker's
+   * `start`, exactly what an UNQUOTED fill gets under `ClockFlooredQuoteModule`
+   * (no concession without a quote, audit 2026-09-30 PRICE-6) — so it would add
+   * nothing. The quote is minted for the order's CURRENT progress
+   * ({@link AuctioneerConfig.readFilled}).
    */
   async settle(orderHash: Hex): Promise<SettledAuction | undefined> {
     const round = this.rounds.get(orderHash);
@@ -105,6 +114,9 @@ export class Auctioneer {
     if (settled.outcome.bumpBps === 0) return { round: settled };
 
     const ttl = this.config.quoteTtlSeconds ?? 60;
+    const prevFilled = this.config.readFilled
+      ? await this.config.readFilled(orderHash)
+      : (round.config.prevFilled ?? 0n);
     const quote = await signQuote(
       this.config.signer,
       {
@@ -112,6 +124,7 @@ export class Auctioneer {
         filler: this.config.bindToWinner === false ? ANY_FILLER : executorOf(settled),
         bumpBps: settled.outcome.bumpBps,
         deadline: BigInt(this.now() + ttl),
+        prevFilled,
       },
       this.config.binding,
     );

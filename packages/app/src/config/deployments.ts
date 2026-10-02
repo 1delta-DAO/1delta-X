@@ -11,6 +11,11 @@ import { getAddress, isAddress, zeroAddress, type Address } from "viem";
  * default to unset rather than to a plausible-looking constant.
  *
  *   VITE_DEPLOYMENTS='{"31":{"settlement":"0x…","permit3":"0x…","lens":"0x…","solver":"0x…"}}'
+ *
+ * Optionally, `"marketSolvers": {"<marketId>": "0x…"}` names a different
+ * delta-verify `exclusiveFiller` per market — e.g. the `UsdrifInventorySolver`
+ * for the inventory-served `rsk-30-usdrif-usd0` market (audit 2026-09-30
+ * APP-RIF4). Markets without an entry use `solver`. See {@link solverForMarket}.
  */
 export interface DeploymentConfig extends Deployment {
   /** Read-only companion — `getOrderRelevantStates` is the orderbook's Layer 2. */
@@ -23,9 +28,14 @@ export interface DeploymentConfig extends Deployment {
    * see `buildOrder`, which falls back to plain delivery without one.
    */
   solver: Address;
+  /** Per-market overrides of {@link solver} (market id → filler). Empty when none. */
+  marketSolvers: Record<string, Address>;
 }
 
-type RawDeployments = Record<string, Partial<Record<"settlement" | "permit3" | "lens" | "solver", unknown>>>;
+type RawDeployments = Record<
+  string,
+  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers", unknown>>
+>;
 
 /**
  * Parse `VITE_DEPLOYMENTS` into per-chain deployments, VALIDATING every
@@ -67,7 +77,25 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       console.warn(`VITE_DEPLOYMENTS[${key}] has a missing or invalid address — treating chain ${key} as not deployed`);
       continue;
     }
-    out[chainId] = { chainId, settlement, permit3, lens, solver };
+    // Per-market solver overrides: every entry must be a valid non-zero address,
+    // or the whole deployment is dropped (a typo must not silently fall back).
+    const marketSolvers: Record<string, Address> = {};
+    let badMarket = false;
+    if (entry.marketSolvers !== undefined) {
+      if (!entry.marketSolvers || typeof entry.marketSolvers !== "object") badMarket = true;
+      else {
+        for (const [m, v] of Object.entries(entry.marketSolvers as Record<string, unknown>)) {
+          const a = addr(v, true);
+          if (!a || a === zeroAddress) badMarket = true;
+          else marketSolvers[m] = a;
+        }
+      }
+    }
+    if (badMarket) {
+      console.warn(`VITE_DEPLOYMENTS[${key}].marketSolvers has an invalid entry — treating chain ${key} as not deployed`);
+      continue;
+    }
+    out[chainId] = { chainId, settlement, permit3, lens, solver, marketSolvers };
   }
   return out;
 }
@@ -90,4 +118,15 @@ export function configuredChains(): number[] {
   return Object.keys(CONFIGURED)
     .map(Number)
     .filter((id) => Number.isFinite(id) && deploymentFor(id) !== null);
+}
+
+/**
+ * The delta-verify `exclusiveFiller` for orders on `marketId`: the market's
+ * override when configured (e.g. an inventory solver for an inventory-served
+ * market), else the deployment-wide {@link DeploymentConfig.solver}. `undefined`
+ * without a deployment.
+ */
+export function solverForMarket(deployment: DeploymentConfig | null, marketId: string): Address | undefined {
+  if (!deployment) return undefined;
+  return deployment.marketSolvers[marketId] ?? deployment.solver;
 }

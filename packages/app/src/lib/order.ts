@@ -2,6 +2,7 @@ import {
   OrderSide,
   hashOrderStruct,
   packTiming,
+  randomOrderNonce as sdkRandomOrderNonce,
   withDeltaVerifyOutputs,
   type LegIn,
   type LegOut,
@@ -117,9 +118,6 @@ export function inputWei(amountIn: number | string, decimals: number, maxIn?: bi
   return maxIn !== undefined && maxIn >= 0n && wei > maxIn ? maxIn : wei;
 }
 
-/** Order nonces must stay below 2^255: bit 255 is reserved for OrderSignerPermit. */
-const ORDER_NONCE_SPACE = 1n << 255n;
-
 /**
  * A random UNORDERED order nonce: uniform in `[minValid, 2^255)`.
  *
@@ -128,17 +126,11 @@ const ORDER_NONCE_SPACE = 1n << 255n;
  * nonce that has it set. Drawing a full 256 bits therefore broke half of all
  * tickets before the wallet prompt (G-TS_SIGN-3). `minValid` is the maker's
  * on-chain `minValidNonce` watermark: after a `rollbackNonces`, a draw below it
- * is dead on arrival, so the draw is shifted above it.
+ * is dead on arrival, so the draw is shifted above it. Delegates to the SDK's
+ * `randomOrderNonce` (exactly uniform, rejection-sampled).
  */
 export function randomOrderNonce(minValid: bigint = 0n): bigint {
-  if (minValid < 0n || minValid >= ORDER_NONCE_SPACE) {
-    throw new Error(`minValidNonce ${minValid} leaves no order nonce below 2^255`);
-  }
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let out = 0n;
-  for (const b of bytes) out = (out << 8n) | BigInt(b);
-  return minValid + (out % (ORDER_NONCE_SPACE - minValid));
+  return sdkRandomOrderNonce(minValid);
 }
 
 /** @deprecated kept for callers of the old name; draws a legal (< 2^255) order nonce. */

@@ -206,6 +206,10 @@ library LiquityV2TroveAuth {
 //   immutable {ICollateralRegistry}, not a caller-supplied TroveManager address.
 //   Same slot width, so downstream offsets are unchanged. See {LiquityV2TroveAuth}.
 //
+// EIP-2612 permit block @96 (+ signedValue@224): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract LiquityV2AddCollModule is IMakerModule {
     IPermit3 public immutable permit3;
     address public immutable settlement;

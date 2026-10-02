@@ -161,14 +161,14 @@ export async function amendOrder(
   nextNonce: bigint,
   patch: OrderPatch,
   d: Deployment,
-  opts?: { now?: bigint; ttlSeconds?: bigint } & AmendOptions,
+  opts?: { now?: bigint; ttlSeconds?: bigint; headBlock?: bigint } & AmendOptions,
 ): Promise<AmendResult> {
   const replaces = hashOrderStruct(prev);
   const order = patchOrder(prev, nextNonce, patch, { leaveNonceGroup: opts?.leaveNonceGroup });
   const orderHash = hashOrderStruct(order);
   if (orderHash === replaces) throw new Error("amendOrder: patch is a no-op (identical order hash)");
 
-  const sig = await signOrder(signer, order, d);
+  const sig = await signOrder(signer, order, d, { headBlock: opts?.headBlock });
   const cancel = buildSoftCancel(prev.maker, [replaces], opts);
   const cancelSig = await signSoftCancel(signer, cancel, d);
 

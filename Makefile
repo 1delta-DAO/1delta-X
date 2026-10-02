@@ -12,7 +12,6 @@
 FORGE ?= $(shell command -v forge 2>/dev/null || echo $(HOME)/.foundry/bin/forge)
 
 # All packages that have at least one test file.
-# Add modules-erc4626 once that branch is merged to main.
 #
 # ⚠ THREE PACKAGES SPLIT THEIR SUITE ACROSS TWO PROFILES, and the unit-only half is
 # the one named here. `modules-aave-v3` is 6 unit tests; its 56 FORK tests — the
@@ -36,6 +35,7 @@ PACKAGES := \
 	modules-compound-v2 \
 	modules-compound-v3 \
 	modules-dolomite \
+	modules-erc4626 \
 	modules-euler-v2 \
 	modules-fluid \
 	modules-morpho-blue \
@@ -85,14 +85,18 @@ test:
 test-sdk:
 	cd packages/sdk && npx vitest run
 
-## The whole TypeScript side: SDK, orderbook, orderbook-server. BUILDS THE DISTS
-## FIRST — the orderbook and server packages import `@1delta-x/sdk` and
-## `@1delta-x/orderbook` through their compiled `dist/`, so a stale build ran the
-## server suite against months-old code and hid a broken lens call (F29 P1).
+## The whole TypeScript side: SDK, orderbook, orderbook-server, auction, app. BUILDS
+## THE DISTS FIRST — the orderbook, server, auction and app packages import
+## `@1delta-x/sdk` (and the server `@1delta-x/orderbook`) through their compiled
+## `dist/`, so a stale build ran the server suite against months-old code and hid a
+## broken lens call (F29 P1). The auction and app suites were reachable from no make
+## target at all until the 2026-09-30 audit (A-IMMUT-1).
 test-ts:
 	cd packages/sdk && npx tsc -p tsconfig.json && npx vitest run
 	cd packages/orderbook && npx tsc -p tsconfig.json && npx vitest run
 	cd packages/orderbook-server && npx tsc --noEmit -p tsconfig.json && npx vitest run
+	cd packages/auction && npx tsc --noEmit -p tsconfig.json && npx vitest run
+	cd packages/app && npx tsc --noEmit -p tsconfig.json && npx vitest run
 
 ## Compile one package: make build PKG=modules-aave-v3
 build:
@@ -245,6 +249,7 @@ docs-check:
 ## CI gate: fail if any contract implements both taker dispatch shapes.
 modules-check:
 	@python3 tools/check-module-shapes.py
+	@python3 tools/test-module-shapes.py
 
 ## Regenerate the committed gas baseline (.gas-snapshot) for the core package.
 gas:
@@ -275,6 +280,9 @@ gas-diff:
 # `src/validators/*` and `src/dust/*` skips went the same way when those directories
 # left core.
 #
+# `SettlementLensChecks` is CREATEd by the lens constructor (audit 2026-09-30), so it
+# is bound by EIP-170 too and is gated here; so is `NativeSettler`.
+#
 # The lens and the two 7683 settlers now build under `periphery-deploy`, whose
 # compiler settings are pinned byte-identical to `core-deploy` — the lens is a CREATE2
 # singleton in `Deploy.s.sol`, so a settings drift between the two profiles would move
@@ -295,6 +303,8 @@ size-check:
 	}; \
 	check core-deploy Settlement; \
 	check periphery-deploy SettlementLens; \
+	check periphery-deploy SettlementLensChecks; \
+	check periphery-deploy NativeSettler; \
 	check periphery-deploy OriginSettler7683; \
 	check periphery-deploy DestinationSettler7683; \
 	exit $$fail

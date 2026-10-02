@@ -4,7 +4,7 @@ import { encodeFunctionData, hashStruct, hashTypedData, keccak256, type Address,
 import { SETTLEMENT_ABI } from "./abi";
 import { ORDER_TYPES, settlementDomain } from "./eip712";
 import { assertPermit3Nonce, Permit3MessageKind } from "./permit3nonce";
-import type { Deployment, Order, PermitBatch } from "./types";
+import { BLOCK_CLOCK_BIT, type Deployment, type Order, type PermitBatch } from "./types";
 
 /** Minimal signer surface — a viem `LocalAccount`/`WalletClient` satisfies this. */
 export interface TypedDataSigner {
@@ -34,8 +34,53 @@ export function orderDigest(order: Order, d: Deployment): Hex {
   return hashTypedData(orderTypedData(order, d) as any);
 }
 
-/** Sign an order for `fill` (maker → 65-byte signature). */
-export function signOrder(signer: TypedDataSigner, order: Order, d: Deployment): Promise<Hex> {
+/** The block-clock range: a block-clocked order's ticks are `uint32` block numbers. */
+export const BLOCK_CLOCK_LIMIT = (1n << 32n) - 1n;
+/** Default headroom {@link assertBlockClockHeadroom} demands below {@link BLOCK_CLOCK_LIMIT}. */
+export const BLOCK_CLOCK_MIN_HEADROOM = 1_000_000n;
+
+/**
+ * Refuse a BLOCK-clocked order (timing bit 102) on a chain whose head block is at
+ * or near `2^32 - 1` (audit 2026-09-30 CORE-FILL-3). The order's decay start and
+ * exclusivity end are `uint32` block numbers: past that range a block-clocked
+ * order can express neither (`now < exclusivityEndTime` is never true and the
+ * elapsed term saturates the bump), and at 250 ms blocks a chain gets there in
+ * ~34 years from genesis. `headBlock` is the chain's current block number;
+ * `minHeadroom` blocks must remain below the limit. Timestamp-clocked orders pass.
+ */
+export function assertBlockClockHeadroom(
+  order: Order,
+  headBlock: bigint,
+  minHeadroom: bigint = BLOCK_CLOCK_MIN_HEADROOM,
+): void {
+  if (((order.timing >> BLOCK_CLOCK_BIT) & 1n) !== 1n) return;
+  if (headBlock + minHeadroom >= BLOCK_CLOCK_LIMIT) {
+    throw new Error(
+      `block-clocked order refused: head block ${headBlock} is within ${minHeadroom} blocks of the uint32 ` +
+        `block-clock limit ${BLOCK_CLOCK_LIMIT} — sign a timestamp-clocked order instead`,
+    );
+  }
+}
+
+/**
+ * Sign an order for `fill` (maker → 65-byte signature).
+ *
+ * A BLOCK-clocked order (timing bit 102) requires `opts.headBlock` — the chain's
+ * current block number — and is refused near the `uint32` block-clock limit
+ * ({@link assertBlockClockHeadroom}).
+ */
+export async function signOrder(
+  signer: TypedDataSigner,
+  order: Order,
+  d: Deployment,
+  opts?: { headBlock?: bigint },
+): Promise<Hex> {
+  if (((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 1n) {
+    if (opts?.headBlock === undefined) {
+      throw new Error("signOrder: a block-clocked order needs opts.headBlock (the chain head) to check the uint32 clock range");
+    }
+    assertBlockClockHeadroom(order, opts.headBlock);
+  }
   return signer.signTypedData(orderTypedData(order, d));
 }
 

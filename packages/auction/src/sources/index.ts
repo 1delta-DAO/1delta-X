@@ -6,6 +6,7 @@ import { sushiSource } from "./sushi";
 export * from "./http";
 export * from "./sushi";
 export * from "./nordstern";
+export * from "./guard";
 
 /**
  * The DEFAULT quoter: best of Sushi and Nordstern.

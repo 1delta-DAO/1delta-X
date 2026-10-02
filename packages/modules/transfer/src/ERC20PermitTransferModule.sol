@@ -57,6 +57,10 @@ import {FullFillGuard} from "@lib/FullFillGuard.sol";
 //   deadline/v/r/s — optional 128-byte EIP-2612 permit block (absent → standing ERC-20 allowance required)
 //
 // Byte map: token@0, recipient@32, transferAmount@64, totalAmount@96 (base = 128); permit tail @128.
+// EIP-2612 permit block @128 (+ signedValue@256): `(deadline, v, r, s)` = 128 bytes, plus an OPTIONAL
+// trailing `signedValue` word. Without it the signature commits to THIS fill's slice
+// and verifies only on a full fill; sign `signedValue = item total` for partial fills
+// ({PermitHelper}, audit 2026-09-30 L-AAVE-2).
 contract ERC20PermitTransferModule is ITakerModule {
     IPermit3 public immutable permit3;
 

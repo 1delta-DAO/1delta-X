@@ -7,11 +7,14 @@ import {
   FILL_ONCE_BIT_INDEX,
   FILLER_SET_SENTINEL,
   OrderSide,
+  timingFlags,
   unpackTiming,
   type Order,
 } from "./types";
 import { packOrder } from "./packed";
 import { isProportional } from "./proportional";
+import { assertPermit3Nonce, Permit3MessageKind } from "./permit3nonce";
+import type { PermitTake } from "./types";
 
 const MAX_UINT256 = (1n << 256n) - 1n;
 
@@ -121,11 +124,15 @@ export function exclusivityOverrideFor(
  *            current tick, LIFTED by the soft-exclusivity premium when `ctx.filler`
  *            is an in-window outsider and leg 0 is maker-addressed.
  *
- * ⚠ The answer is exact for a fill priced at `now`/`baseFee`/`priorityFee`. It is
- * NOT a promise about a fill included later: the price can move filler-ward with
- * time (decay) but also AGAINST the filler — on a descending curve segment, under a
- * falling basefee (gas bump), or by an oracle price module. Submit with
- * `fillUpTo(..., minBumpBps)` quoted from the lens, or simulate with
+ * ⚠ The answer is exact for a fill priced at `now`/`baseFee`/`priorityFee`. A fill
+ * included LATER never overspends the budget only for an order whose price moves
+ * filler-ward with time alone — a fixed order or a monotone-RISING decay (linear, or
+ * a curve with no descending segment), with NO price module and NO priority auction
+ * (and no gas bump). Otherwise the price can move AGAINST the filler before
+ * inclusion — a price module (oracle-, state- or filler-keyed), a priority bid a
+ * basefee drop widens, a falling-basefee gas bump, a descending curve segment
+ * ({@link needsBumpFloor} names the mover). Submit with `fillUpTo(..., minBumpBps)`
+ * quoted from `SettlementLens.previewBump`, or simulate with
  * `SettlementLens.previewFill(order, amount, filler, …)`, and keep the approval you
  * grant the settlement no larger than the budget.
  *
@@ -235,33 +242,71 @@ export function previewFillLocal(
 
 /**
  * Mirror of the contract's `OrderGates._overrideHasCarrier`: can any leg carry a
- * soft-exclusivity premium? A BUY input, an auctioned non-proportional SELL input,
- * or a SELL output addressed to the maker (or to zero).
+ * soft-exclusivity premium? AMOUNT-AWARE (audit 2026-09-30 CORE-FILL-1): a
+ * non-proportional input with `(BUY && start != 0) || end != 0`, or a SELL output
+ * with `start != 0` addressed to the maker (or to zero). A zero placeholder leg
+ * prices to 0 whatever the override, so it carries nothing.
  */
 export function overrideHasCarrier(order: Order): boolean {
   const buy = order.side === OrderSide.BUY;
-  if (order.legsIn.some((l) => (buy || l.end !== 0n) && !isProportional(l.start))) return true;
+  if (order.legsIn.some((l) => ((buy && l.start !== 0n) || l.end !== 0n) && !isProportional(l.start))) return true;
   if (buy) return false;
-  return order.legsOut.some((l) => eqAddr(l.recipient, zeroAddress) || eqAddr(l.recipient, order.maker));
+  return order.legsOut.some(
+    (l) => l.start !== 0n && (eqAddr(l.recipient, zeroAddress) || eqAddr(l.recipient, order.maker)),
+  );
+}
+
+/**
+ * Mirror of `SettlementLens.bumpFloorAdvised`: whether a fill of `order` should
+ * carry a `minBumpBps` floor because its price can move MAKER-ward between the
+ * quote and inclusion. Returns the first mover found, or `null` for an order whose
+ * price only moves filler-ward with time (fixed, linear, or a monotone-rising
+ * curve). The movers: a price module, a priority auction, a gas bump, and a
+ * descending curve segment. Every fill entry takes the floor (`fillUpTo`,
+ * `fillWithPermit`, `fillWithPermitTake`, per-order `batchFill`), so a pinned-bump
+ * PERMIT order's first fill is floored the same way.
+ */
+export function needsBumpFloor(
+  order: Order,
+): "price module" | "priority auction" | "gas bump" | "descending curve segment" | null {
+  if (!eqAddr(order.pricingModule, zeroAddress)) return "price module";
+  if (timingFlags(order.timing).priorityAuction) return "priority auction";
+  if (order.gasBumpBps !== 0n) return "gas bump";
+  // A FILLER_SET order's `curve` blob is the filler set, not a curve.
+  if (!eqAddr(order.exclusiveFiller, FILLER_SET_SENTINEL)) {
+    const pts = order.curve ?? [];
+    for (let k = 1; k < pts.length; k++) {
+      if (Number(pts[k]!.bumpBps) < Number(pts[k - 1]!.bumpBps)) return "descending curve segment";
+    }
+  }
+  return null;
 }
 
 /**
  * Encode `Settlement.fillUpTo` calldata. `recipient` zero ⇒ pay the caller.
- * `minBumpBps` is the filler's price floor on the resolved decay bump (0 = off):
- * quote it from `previewFill`/the lens and the fill reverts `BumpTooLow` if the
- * included price lands below the quote — which a descending curve segment, a
- * falling basefee (gas bump) or an oracle price module can each cause. It does
- * NOT cover the soft-exclusivity premium, which depends on the sender, not the
- * clock: quote with the address that will send the fill.
+ *
+ * `minBumpBps` is the filler's price floor on the resolved decay bump and is
+ * REQUIRED (audit 2026-09-30 PERIPH-1.v1/v4 — a silent `0` default reproduced
+ * unbounded calldata). Quote it from `SettlementLens.previewBump(order, filler,
+ * takerData)` (with the gas price you will send, for a priority order) and the fill
+ * reverts `BumpTooLow` if the included price lands below the quote. Every maker-ward
+ * mover is covered: a price module (oracle-, state- or filler-keyed), a priority bid
+ * widened by a basefee drop, a falling-basefee gas bump, and a descending curve
+ * segment ({@link needsBumpFloor}). Pass `0n` explicitly only for an order with none
+ * of them. It does NOT cover the soft-exclusivity premium, which depends on the
+ * sender, not the clock: quote with the address that will send the fill.
  */
 export function encodeFillUpTo(args: {
   order: Order;
   sig: Hex;
   fillAmount: bigint;
   recipient?: Address;
-  minBumpBps?: bigint;
+  minBumpBps: bigint;
   takerData?: Hex;
 }): Hex {
+  if (typeof args.minBumpBps !== "bigint") {
+    throw new Error("encodeFillUpTo: minBumpBps is required — quote it from SettlementLens.previewBump (0n = no floor)");
+  }
   return encodeFunctionData({
     abi: SETTLEMENT_ABI,
     functionName: "fillUpTo",
@@ -270,9 +315,70 @@ export function encodeFillUpTo(args: {
       args.sig,
       args.fillAmount,
       args.recipient ?? "0x0000000000000000000000000000000000000000",
-      args.minBumpBps ?? 0n,
+      args.minBumpBps,
       args.takerData ?? "0x",
     ],
+  });
+}
+
+/**
+ * Encode `Settlement.fillWithPermitTake(order, permit, sig, fillAmount, minBumpBps)`
+ * — the fill whose TAKE item is funded by a single-use signed `PermitTake`. The
+ * permit nonce must carry the `Take` kind tag ({@link Permit3MessageKind}).
+ * `minBumpBps` is the price floor, exactly as for {@link encodeFillUpTo}.
+ */
+export function encodeFillWithPermitTake(args: {
+  order: Order;
+  permit: PermitTake;
+  sig: Hex;
+  fillAmount: bigint;
+  minBumpBps: bigint;
+}): Hex {
+  return encodeFunctionData({
+    abi: SETTLEMENT_ABI,
+    functionName: "fillWithPermitTake",
+    args: [
+      packOrder(args.order) as never,
+      { ...args.permit, nonce: assertPermit3Nonce(args.permit.nonce, Permit3MessageKind.Take) } as never,
+      args.sig,
+      args.fillAmount,
+      args.minBumpBps,
+    ],
+  });
+}
+
+/**
+ * Encode `Settlement.batchFill`. With `minBumpBps` / `takerDatas` (each aligned 1:1
+ * with `orders`) this targets the 6-arg overload that floors every order's price;
+ * without either, the legacy 4-arg form with no floor. Throws on a length mismatch
+ * (the contract reverts `LengthMismatch`).
+ */
+export function encodeBatchFill(args: {
+  orders: readonly Order[];
+  sigs: readonly Hex[];
+  fillAmounts: readonly bigint[];
+  revertIfIncomplete?: boolean;
+  minBumpBps?: readonly bigint[];
+  takerDatas?: readonly Hex[];
+}): Hex {
+  const n = args.orders.length;
+  if (args.sigs.length !== n || args.fillAmounts.length !== n) throw new Error("encodeBatchFill: LengthMismatch");
+  const packed = args.orders.map((o) => packOrder(o)) as never;
+  const rev = args.revertIfIncomplete ?? false;
+  if (args.minBumpBps === undefined && args.takerDatas === undefined) {
+    return encodeFunctionData({
+      abi: SETTLEMENT_ABI,
+      functionName: "batchFill",
+      args: [packed, args.sigs, args.fillAmounts, rev],
+    });
+  }
+  const floors = args.minBumpBps ?? new Array<bigint>(n).fill(0n);
+  const blobs = args.takerDatas ?? new Array<Hex>(n).fill("0x");
+  if (floors.length !== n || blobs.length !== n) throw new Error("encodeBatchFill: LengthMismatch");
+  return encodeFunctionData({
+    abi: SETTLEMENT_ABI,
+    functionName: "batchFill",
+    args: [packed, args.sigs, args.fillAmounts, rev, floors, blobs],
   });
 }
 

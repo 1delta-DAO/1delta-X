@@ -208,6 +208,65 @@ export const SETTLEMENT_ABI = [
     ],
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
   },
+  // One-shot signed-take fill: the maker's TAKE item is funded by a single-use
+  // `PermitTake` relayed in the same call. `minBumpBps` is the filler's price floor
+  // (0 = none), exactly fillUpTo's — quote it from `SettlementLens.previewBump`.
+  {
+    type: "function",
+    name: "fillWithPermitTake",
+    stateMutability: "nonpayable",
+    inputs: [
+      orderArg,
+      { name: "permit", type: "tuple", components: permitTakeComponents },
+      { name: "sig", type: "bytes" },
+      { name: "fillAmount", type: "uint256" },
+      { name: "minBumpBps", type: "uint256" },
+    ],
+    outputs: [{ name: "outs", type: "uint256[]" }],
+  },
+  // Many orders, one tx; a failing order is skipped (`success[i] = false`) unless
+  // `revertIfIncomplete`. The 4-arg form carries no floor and no taker blob.
+  {
+    type: "function",
+    name: "batchFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      { ...orderArg, name: "orders", type: "tuple[]" },
+      { name: "sigs", type: "bytes[]" },
+      { name: "fillAmounts", type: "uint256[]" },
+      { name: "revertIfIncomplete", type: "bool" },
+    ],
+    outputs: [
+      { name: "fillAmountsOut", type: "uint256[][]" },
+      { name: "success", type: "bool[]" },
+    ],
+  },
+  // Per-order price floors and taker blobs, both aligned 1:1 with `orders`.
+  {
+    type: "function",
+    name: "batchFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      { ...orderArg, name: "orders", type: "tuple[]" },
+      { name: "sigs", type: "bytes[]" },
+      { name: "fillAmounts", type: "uint256[]" },
+      { name: "revertIfIncomplete", type: "bool" },
+      { name: "minBumpBps", type: "uint256[]" },
+      { name: "takerDatas", type: "bytes[]" },
+    ],
+    outputs: [
+      { name: "fillAmountsOut", type: "uint256[][]" },
+      { name: "success", type: "bool[]" },
+    ],
+  },
+  { type: "function", name: "PERMIT3", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
+  {
+    type: "function",
+    name: "minValidNonce",
+    stateMutability: "view",
+    inputs: [{ name: "maker", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
   // The aggregator entry: clamps to the order's remaining size instead of the
   // OverFill race revert, optionally redirects proceeds, and returns full
   // both-sides accounting — (delta, received per legsIn, paid per legsOut).
@@ -802,6 +861,59 @@ export const SETTLEMENT_LENS_ABI = [
     inputs: [orderArg, { name: "filler", type: "address" }, { name: "takerData", type: "bytes" }],
     outputs: [{ name: "bump", type: "uint256" }],
   },
+  // Whether a fill should carry a `minBumpBps` floor: the order's price can move
+  // MAKER-ward before inclusion (price module, priority auction, gas bump,
+  // descending curve segment). `mover` names the first one found.
+  {
+    type: "function",
+    name: "bumpFloorAdvised",
+    stateMutability: "view",
+    inputs: [orderArg],
+    outputs: [
+      { name: "advised", type: "bool" },
+      { name: "mover", type: "string" },
+    ],
+  },
+  // The bump a price-module / priority fill by `filler` PINS, plus one (0 = clock
+  // order). Capture with `fillState` just before the fill, then price the fill in
+  // flight with `previewFillInFlightPinned`.
+  {
+    type: "function",
+    name: "pinnedBump",
+    stateMutability: "view",
+    inputs: [orderArg, { name: "filler", type: "address" }, { name: "takerData", type: "bytes" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "fillState",
+    stateMutability: "view",
+    inputs: [orderArg],
+    outputs: [
+      { name: "orderHash", type: "bytes32" },
+      { name: "prevFilled", type: "uint256" },
+      { name: "anchor", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
+    name: "previewFillInFlightPinned",
+    stateMutability: "view",
+    inputs: [
+      orderArg,
+      { name: "prevFilled", type: "uint256" },
+      { name: "anchor", type: "uint256" },
+      { name: "filler", type: "address" },
+      { name: "pin", type: "uint256" },
+    ],
+    outputs: [
+      { name: "received", type: "uint256[]" },
+      { name: "paid", type: "uint256[]" },
+    ],
+  },
+  // The {SettlementLensChecks} companion the lens forwards its well-formedness
+  // checks to; callable directly with identical results.
+  { type: "function", name: "CHECKS", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
   {
     type: "function",
     name: "getOrderRelevantStates",
@@ -822,6 +934,11 @@ export const SETTLEMENT_LENS_ABI = [
   },
 ] as const;
 
+const flashOptsComponents = [
+  { name: "recipient", type: "address" },
+  { name: "takerData", type: "bytes" },
+] as const;
+
 /// Single-input flash solvers (LimitOrderLeverageSolver, AaveV3/Euler/Morpho).
 export const FLASH_SOLVER_ABI = [
   {
@@ -836,6 +953,23 @@ export const FLASH_SOLVER_ABI = [
       { name: "fillAmountIn", type: "uint256" },
       { name: "dexFee", type: "uint24" },
       { name: "minSwapOut", type: "uint256" },
+    ],
+    outputs: [],
+  },
+  // {executeFill} with a profit recipient and a `takerData` blob ({FlashOpts}).
+  {
+    type: "function",
+    name: "executeFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "flashSource", type: "address" },
+      { name: "flashAmount", type: "uint256" },
+      orderArg,
+      { name: "sig", type: "bytes" },
+      { name: "fillAmountIn", type: "uint256" },
+      { name: "dexFee", type: "uint24" },
+      { name: "minSwapOut", type: "uint256" },
+      { name: "opts", type: "tuple", components: flashOptsComponents },
     ],
     outputs: [],
   },
@@ -867,6 +1001,22 @@ export const MULTI_INPUT_SOLVER_ABI = [
   },
   {
     type: "function",
+    name: "executeFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "flashSource", type: "address" },
+      { name: "flashAmount", type: "uint256" },
+      orderArg,
+      { name: "sig", type: "bytes" },
+      { name: "fillAmountIn", type: "uint256" },
+      { name: "dexFees", type: "uint24[]" },
+      { name: "minSwapOuts", type: "uint256[]" },
+      { name: "opts", type: "tuple", components: flashOptsComponents },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
     name: "setupTokenApproval",
     stateMutability: "nonpayable",
     inputs: [{ name: "token", type: "address" }],
@@ -885,6 +1035,19 @@ export const MULTI_OUTPUT_SOLVER_ABI = [
       { name: "sig", type: "bytes" },
       { name: "fillAmountIn", type: "uint256" },
       { name: "legs", type: "tuple[]", components: outputLegComponents },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "executeFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      orderArg,
+      { name: "sig", type: "bytes" },
+      { name: "fillAmountIn", type: "uint256" },
+      { name: "legs", type: "tuple[]", components: outputLegComponents },
+      { name: "opts", type: "tuple", components: flashOptsComponents },
     ],
     outputs: [],
   },
