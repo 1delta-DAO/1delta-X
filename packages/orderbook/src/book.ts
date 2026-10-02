@@ -165,7 +165,13 @@ export class Book {
       // soft-cancelled or replaced — nothing on-chain changed, so Layer 2 accepts
       // them. Cancels replay first and leave their (maker-bound) tombstones; the
       // orders then replay against them; replaces last, since a replace needs its
-      // predecessor admitted to retire it.
+      // predecessor admitted to retire it. A replayed replace retires its
+      // predecessor even when the REPLACEMENT no longer admits (filled, expired,
+      // nonce-cancelled since): the usual amend lifecycle is P -> R, then R
+      // fills, while P keeps a fresh nonce and stays valid on-chain — so the
+      // atomic live rule (no retraction without the replacement) would relist P
+      // at its stale price on every restarted node. See {ingestReplace}'s
+      // `backfill` option.
       const retractions = this.opts.backfillRetractions ?? true;
       if (retractions) {
         for (const bytes of await transport.queryHistory(cancels)) await this.ingestCancelBytes(bytes);
@@ -173,7 +179,7 @@ export class Book {
       const history = await transport.queryHistory(orders);
       for (const bytes of history) await this.ingestAnnounceBytes(bytes);
       if (retractions) {
-        for (const bytes of await transport.queryHistory(replaces)) await this.ingestReplaceBytes(bytes);
+        for (const bytes of await transport.queryHistory(replaces)) await this.ingestReplaceBytes(bytes, { backfill: true });
       }
     }
 
@@ -553,8 +559,43 @@ export class Book {
    * same synchronous step, so a book never passes through a state where the maker
    * has neither order live — or, with an unverifiable cancel, both. A failure of
    * either half leaves the predecessor exactly where it was.
+   *
+   * `backfill: true` (history replay in {start}) relaxes ONLY the first half of
+   * that rule: a historical replace whose replacement no longer admits still
+   * applies its cancel half, exactly as the same maker-signed {@link SoftCancel}
+   * would on the cancel topic. The atomicity guarantee is about the LIVE moment
+   * of the swap; at replay the replacement is usually dead because it already
+   * filled or expired, and its predecessor — still valid on-chain with its own
+   * fresh nonce — must not come back at the superseded price (audit 2026-09-30
+   * G-TS_FILLER-3). The cancel signature is still verified and still
+   * maker-bound, so this adds no retraction the maker did not sign.
    */
-  async ingestReplace(replace: OrderReplace): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
+  async ingestReplace(
+    replace: OrderReplace,
+    opts?: { backfill?: boolean },
+  ): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
+    if (opts?.backfill !== true) return this.ingestReplaceAtomic(replace);
+    let res: { ok: boolean; reason?: string; orderHash?: Hex };
+    try {
+      res = await this.ingestReplaceAtomic(replace);
+    } catch {
+      // An RPC failure on the replacement must not resurrect the predecessor either.
+      res = { ok: false, reason: "replace verification error (RPC?)" };
+    }
+    if (res.ok) return res;
+    // Replay: retire the predecessor anyway, if the replace is well-formed and its
+    // cancel half verifies on its own.
+    if (
+      replace.cancel.cancel.orderHashes.includes(replace.replaces) &&
+      replace.cancel.cancel.maker.toLowerCase() === replace.announce.order.maker.toLowerCase()
+    ) {
+      const verdict = await this.opts.cancelVerifier.verify(replace.cancel);
+      if (verdict.ok) this.applyVerifiedCancel(replace.cancel, verdict);
+    }
+    return res;
+  }
+
+  private async ingestReplaceAtomic(replace: OrderReplace): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
     if (!replace.cancel.cancel.orderHashes.includes(replace.replaces)) {
       return { ok: false, reason: "replace: the cancel does not name the replaced order" };
     }
@@ -602,7 +643,10 @@ export class Book {
     return { ok: true, orderHash: res.orderHash };
   }
 
-  async ingestReplaceBytes(bytes: Uint8Array): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
+  async ingestReplaceBytes(
+    bytes: Uint8Array,
+    opts?: { backfill?: boolean },
+  ): Promise<{ ok: boolean; reason?: string; orderHash?: Hex }> {
     let replace: OrderReplace;
     try {
       replace = decodeOrderReplace(bytes);
@@ -610,7 +654,7 @@ export class Book {
       return { ok: false, reason: "undecodable OrderReplace" };
     }
     try {
-      return await this.ingestReplace(replace);
+      return await this.ingestReplace(replace, opts);
     } catch {
       return { ok: false, reason: "replace verification error (RPC?)" };
     }
