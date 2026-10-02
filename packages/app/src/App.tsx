@@ -28,7 +28,7 @@ import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/lad
 import { readMinValidNonce, type Reader } from "./lib/chain";
 import { hasLeftover, planFunding, type FundingStep } from "./lib/funding";
 import { buildOrder } from "./lib/order";
-import { planTicket, requiredInputWei, type TicketPlan } from "./lib/plan";
+import { planTicket, requiredInputWei, sliceCap, type TicketPlan } from "./lib/plan";
 import type { RestingOrder, Side, SliceSpec } from "./lib/types";
 import { useAllowance } from "./wallet/useAllowance";
 import { useBalances } from "./wallet/useBalances";
@@ -244,7 +244,7 @@ export default function App() {
    * would compute, and the receipt says plainly that no filler can use it.
    */
   const signDraft = useCallback(
-    async (spec: SliceSpec & { marketId: string; side: Side; orders?: number }): Promise<SignedOrder> => {
+    async (spec: SliceSpec & { marketId: string; side: Side; orders?: number; signedSlices?: number }): Promise<SignedOrder> => {
       if (!signer || !wallet.address) throw new Error("wallet not connected");
       const market = marketById(spec.marketId);
       const paySymbol = spec.side === "sell" ? market.base : market.quote;
@@ -276,7 +276,10 @@ export default function App() {
         minOut: spec.minOut,
         ttlSeconds: spec.ttlSeconds,
         decaySeconds: spec.decaySeconds,
-        maxIn: raw === undefined ? undefined : raw / BigInt(spec.orders ?? 1),
+        // Split the LIVE balance over the orders still to be signed, not the
+        // ticket's total: slices that already filled have left the wallet.
+        // buildOrder scales the outputs if this cap binds (G-TS_SIGN-7).
+        maxIn: sliceCap(raw, spec.orders ?? 1, spec.signedSlices ?? 0),
         minValidNonce,
       });
 
@@ -448,7 +451,14 @@ export default function App() {
       setOrderError(null);
       if (!o.sliceSpec || !o.slices) return;
       try {
-        const signed = await signDraft({ ...o.sliceSpec, marketId: o.marketId, side: o.side, orders: o.slices.total });
+        const signedSlices = o.signedOrders?.length ?? (o.signed ? 1 : 0);
+        const signed = await signDraft({
+          ...o.sliceSpec,
+          marketId: o.marketId,
+          side: o.side,
+          orders: o.slices.total,
+          signedSlices,
+        });
         orderbook.addSlice(o.id, signed);
       } catch (e) {
         setOrderError(errorText(e));

@@ -40,8 +40,10 @@ export interface BuildOrderArgs {
    */
   solver?: Address;
   /**
-   * The maker's raw balance of the PAY token, when known. The input leg never
-   * commits more than this (see {@link inputWei}).
+   * The most PAY wei this order may commit — the maker's raw balance, or its
+   * share for one TWAP slice. The input leg never commits more than this (see
+   * {@link inputWei}); when it binds, the OUTPUT legs are scaled by the same
+   * ratio so the signed price never gets worse (G-TS_SIGN-7).
    */
   maxIn?: bigint;
   /** The maker's on-chain `minValidNonce`; a drawn nonce lands at or above it. */
@@ -118,6 +120,31 @@ export function inputWei(amountIn: number | string, decimals: number, maxIn?: bi
   return maxIn !== undefined && maxIn >= 0n && wei > maxIn ? maxIn : wei;
 }
 
+export interface InputClamp {
+  /** The wei the ticket asked for. */
+  raw: bigint;
+  /** The wei actually committed: `min(raw, maxIn)`. */
+  capped: bigint;
+  /** True when `maxIn` bound, so the order's outputs must be scaled to match. */
+  clamped: boolean;
+}
+
+/**
+ * {@link inputWei}, plus whether the cap bound. Throws when the cap leaves
+ * nothing to commit: an order with zero input cannot be scaled to the ticket's
+ * price, so it is refused rather than signed.
+ */
+export function clampInput(amountIn: number | string, decimals: number, maxIn?: bigint): InputClamp {
+  const raw = toWei(amountIn, decimals);
+  const capped = inputWei(amountIn, decimals, maxIn);
+  if (raw > 0n && capped === 0n) throw new Error("insufficient balance: nothing left to sign for this order");
+  return { raw, capped, clamped: capped < raw };
+}
+
+function ceilDiv(a: bigint, b: bigint): bigint {
+  return (a + b - 1n) / b;
+}
+
 /**
  * A random UNORDERED order nonce: uniform in `[minValid, 2^255)`.
  *
@@ -142,6 +169,8 @@ export interface OrderDraft {
   order: Order;
   /** Domain-independent struct hash — the contract's `filledAmountIn` key. */
   hash: Hex;
+  /** True when `maxIn` bound and the order was scaled down to it (same price, smaller size). */
+  clamped: boolean;
 }
 
 /**
@@ -158,6 +187,12 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
   const { maker, side, pay, recv, amountIn, targetOut, minOut, ttlSeconds, decaySeconds } = args;
   const now = args.now ?? Math.floor(Date.now() / 1000);
   const decaying = decaySeconds > 0 && targetOut > minOut;
+  const cap = clampInput(amountIn, pay.decimals, args.maxIn);
+  // When the cap binds, every output amount shrinks by the SAME ratio as the
+  // input (rounded UP, so the maker's price is never worse than typed). Only
+  // clamping the input would sign less for the same output — a strictly worse
+  // limit price that, for a later TWAP slice, can never fill (G-TS_SIGN-7).
+  const scaleOut = (out: bigint): bigint => (cap.clamped ? ceilDiv(out * cap.capped, cap.raw) : out);
 
   let legsIn: LegIn[];
   let legsOut: LegOut[];
@@ -165,13 +200,13 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
 
   if (side === "sell") {
     sdkSide = OrderSide.SELL;
-    legsIn = [{ token: pay.address, start: inputWei(amountIn, pay.decimals, args.maxIn), end: 0n }];
+    legsIn = [{ token: pay.address, start: cap.capped, end: 0n }];
     legsOut = [
       {
         token: recv.address,
-        start: toWei(decaying ? targetOut : minOut, recv.decimals),
+        start: scaleOut(toWei(decaying ? targetOut : minOut, recv.decimals)),
         // `end == 0` is the fixed sentinel, not "decays to nothing".
-        end: decaying ? toWei(minOut, recv.decimals) : 0n,
+        end: decaying ? scaleOut(toWei(minOut, recv.decimals)) : 0n,
         recipient: zeroAddress,
       },
     ];
@@ -179,11 +214,13 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     sdkSide = OrderSide.BUY;
     // The maker is guaranteed `minOut` of the base; the quote spend rises toward
     // the ceiling they typed, so an early filler charges less than the maximum.
-    const ceiling = inputWei(amountIn, pay.decimals, args.maxIn);
-    const floor = decaying ? inputWei(amountIn * (minOut / Math.max(targetOut, minOut)), pay.decimals, ceiling) : ceiling;
+    const ceiling = cap.capped;
+    const rawFloor = decaying ? inputWei(amountIn * (minOut / Math.max(targetOut, minOut)), pay.decimals, cap.raw) : cap.raw;
+    // Scaled DOWN (floor division): a smaller spend never worsens a BUY.
+    const floor = cap.clamped ? (rawFloor * cap.capped) / cap.raw : rawFloor;
     legsIn = [{ token: pay.address, start: floor, end: decaying && floor < ceiling ? ceiling : 0n }];
     legsOut = [
-      { token: recv.address, start: toWei(minOut, recv.decimals), end: 0n, recipient: zeroAddress },
+      { token: recv.address, start: scaleOut(toWei(minOut, recv.decimals)), end: 0n, recipient: zeroAddress },
     ];
   }
 
@@ -229,5 +266,5 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     pricingModule: zeroAddress,
   };
 
-  return { order, hash: hashOrderStruct(order) };
+  return { order, hash: hashOrderStruct(order), clamped: cap.clamped };
 }
