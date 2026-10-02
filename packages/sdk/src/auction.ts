@@ -95,10 +95,12 @@ export interface SelectOptions {
  *
  * Returns `null` when there is nothing to sign — no usable bids at all. A
  * thin round that trips `minBidders` returns an outcome with `bumpBps = 0`
- * rather than `null`: the distinction matters to a cosigner, because signing a
- * zero-concession quote and signing nothing are different messages to a filler
- * (the first says "you may fill at the maker's ambition", the second says
- * nothing at all — and under the clock-floored module, that means the clock).
+ * rather than `null`, so the caller can tell "the round ran and granted no
+ * concession" from "there was no round". Neither one moves the price: under
+ * the clock-floored module an UNQUOTED fill prices at the maker's `start`
+ * (bump 0, no concession, NOT the dutch clock), which is exactly what a
+ * zero-bump quote prices at too — so signing nothing is the right response to
+ * both (see the package README, "Thin rounds").
  */
 export function selectQuote(bids: readonly QuoteBid[], opts: SelectOptions = {}): AuctionOutcome | null {
   const rule = opts.rule ?? "second-price";

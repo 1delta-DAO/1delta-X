@@ -228,10 +228,11 @@ export class AuctionRound {
    * Run the selection rule and freeze the round.
    *
    * Returns `undefined` when nothing was biddable — the caller should sign
-   * nothing at all, which under `ClockFlooredQuoteModule` leaves the order
-   * pricing on its dutch clock. That is DIFFERENT from a thin round, which
-   * settles with `bumpBps: 0`: signing "you may fill at the maker's ambition"
-   * and signing nothing are different messages to a filler.
+   * nothing at all, which under `ClockFlooredQuoteModule` leaves the order at
+   * the maker's `start` (an unquoted fill gets bump 0, no concession — NOT the
+   * dutch clock). A thin round instead settles with `bumpBps: 0`, so the
+   * record shows the round ran and granted nothing; it prices identically to
+   * signing nothing (see README, "Thin rounds").
    */
   settle(): SettledRound | undefined {
     if (this.settled) return this.settled;
