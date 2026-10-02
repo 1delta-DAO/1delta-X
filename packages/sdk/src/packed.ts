@@ -268,15 +268,19 @@ export function packOrder(order: Order): WireOrder {
  * when a single named HARD `exclusiveFiller` (not 0, not the FILLER_SET
  * sentinel, no soft override) holds a window covering the order's whole life;
  * the shipped invariants enforce this on-chain too (`InvariantReceiptGuard`).
- * Applies to `fillTotal` orders as well. Orders with a non-SETTLE item act on
- * the maker's own position and are not affected.
+ * Applies to `fillTotal` orders as well. With NO output leg the settler enforces
+ * the named-filler rule itself for ANY invariant (`Base._runInvariants`), so a
+ * position item (MAKE/TAKE/TAKE_FOR) does not lift it there; beside an output
+ * leg a position item still lifts the advisory SETTLE-hand-over case.
  */
 export function assertInvariantConsideration(order: Order): void {
   if ((order.invariants ?? []).length === 0) return;
   const items = order.items ?? [];
   const settles = items.filter((it) => it.op === ItemOp.SETTLE).length;
-  if (items.length !== settles) return; // a position item is consideration
-  if (order.legsOut.length !== 0 && settles === 0) return;
+  const positionItem = items.length !== settles;
+  // With no output leg the CORE refuses every filler but the named one whenever an
+  // invariant is present (`Base._runInvariants`, VAL-1), position items or not.
+  if (order.legsOut.length !== 0 && (settles === 0 || positionItem)) return;
   const ex = order.exclusiveFiller.toLowerCase();
   const blockClock = ((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 1n;
   const end = BigInt(unpackTiming(order.timing).exclusivityEndTime);

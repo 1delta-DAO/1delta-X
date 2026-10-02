@@ -40,6 +40,10 @@ for anything the core cannot express as a fungible leg:
 > invariants refuse any filler other than the order's named `exclusiveFiller`
 > (`ReceiptNeedsNamedFiller`; the F30 delta-verify rule, whole order life). With an
 > output leg they are a floor on top of the leg and stay open to every filler.
+> Settlement enforces the same rule generically for ANY invariant, third-party ones
+> included: with `legsOut` empty and an invariant present, `_runInvariants` reverts
+> `NotExclusiveFiller` for every filler but the named one (the guard here is then
+> defence in depth, and the error a filler sees is the core's).
 > A maker with several live offers for the same asset should also share one
 > fill-once nonce across them, or cancel the stale ones.
 

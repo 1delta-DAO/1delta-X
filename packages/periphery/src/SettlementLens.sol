@@ -577,6 +577,9 @@ contract SettlementLens {
         // Mirror of {Core._snapshotOutRecipients}: a DELTA-VERIFY order fills for its
         // named `exclusiveFiller` only, for its whole life (re-audit F30).
         if (order.deltaVerifyOutputs() && filler != order.exclusiveFiller) revert OrderGates.NotExclusiveFiller();
+        // Mirror of {Base._runInvariants} (audit 2026-09-30 VAL-1): an order whose only
+        // receipt is an invariant (no output leg) fills for its named filler only.
+        if (_receiptNeedsNamedFiller(order, filler)) revert OrderGates.NotExclusiveFiller();
 
         return FillCtx(
             orderHash,
@@ -598,6 +601,13 @@ contract SettlementLens {
             new uint256[](0), // preview prices legs directly; no payout ledger to record
             0 // no filler price floor in a preview
         );
+    }
+
+    /// @dev {Base._runInvariants}' VAL-1 rule: invariants present, no output leg, and
+    ///      `filler` is not the order's named `exclusiveFiller` — the settler reverts.
+    function _receiptNeedsNamedFiller(Order calldata order, address filler) private pure returns (bool) {
+        return filler != order.exclusiveFiller && PackedArrays.countUnchecked(order.invariants) != 0
+            && PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE) == 0;
     }
 
     /// @dev Whether any item carries a PRE-FUNDED leg-reference descriptor — word 0
