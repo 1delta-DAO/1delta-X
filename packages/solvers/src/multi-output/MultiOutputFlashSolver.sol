@@ -135,7 +135,7 @@ contract MultiOutputFlashSolver is BaseFlashSolver {
 
         // Delivers every output leg to the maker (from the flashed basket) and
         // pays us `tokenIn`.
-        settlement.fill(order, sig, fillAmountIn, takerData);
+        _settle(order, sig, fillAmountIn, takerData);
 
         // Buy each output back from the received input and repay the flash.
         for (uint256 i; i < tokens.length; i++) {

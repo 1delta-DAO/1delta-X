@@ -142,6 +142,13 @@ reverts `BumpTooLow`.
   code runs before AND after your callback, so a hostile or hook-bearing token
   can sandwich your route inside the transaction — vet tokens and bound the
   route at the quote, not at break-even.
+  `PostInputs` is item-free. An ITEM-bearing order can still be filled with zero
+  inventory through a one-order `matchSettle` plan (TAKE items → `PULL` →
+  `PRESEND` → your `CALL` → `DELIVER` → MAKE items) — the shape
+  `AggregatorFillSolver.executeItemFill` builds (packages/solvers; audit
+  2026-09-30 AGG-6). A PermitBatchWitness order's FIRST fill has no callback
+  entry at all: it needs up-front capital, e.g. a flash loan around
+  `fillWithPermit` (the flash solvers' `PERMIT_ENVELOPE`).
 * **Permit-witness orders after the permit deadline:** once a gasless order has
   been partly filled, `fillWithPermit` keeps working with the same stored
   calldata after `batch.deadline` (the spent permit is a verified no-op) until
@@ -161,6 +168,7 @@ reverts `BumpTooLow`.
   input with a third-party output).
 * Repeated small fills round per fill (maker-favoring ceil on SELL outputs):
   up to 1 wei per fill vs. one large fill. Don't assume exact linearity.
-* Order-shape filters for aggregator ingestion: `items.length == 0`,
+* Order-shape filters for aggregator ingestion (single-order `PostInputs`
+  path; see "Zero-inventory fills" for the item-capable `matchSettle` shape): `items.length == 0`,
   `fillModule == address(0)`, no validators you can't satisfy, and
   `lens.validateOrder(order)` returns ok.

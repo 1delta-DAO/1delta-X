@@ -1,8 +1,41 @@
-import { encodeFunctionData, type Address, type Hex } from "viem";
+import { encodeAbiParameters, encodeFunctionData, keccak256, toHex, type Address, type Hex } from "viem";
 
-import { FLASH_SOLVER_ABI, MULTI_INPUT_SOLVER_ABI, MULTI_OUTPUT_SOLVER_ABI, orderComponents } from "./abi";
-import type { Order, OutputLeg } from "./types";
+import {
+  FLASH_SOLVER_ABI,
+  MULTI_INPUT_SOLVER_ABI,
+  MULTI_OUTPUT_SOLVER_ABI,
+  orderComponents,
+  permitBatchComponents,
+} from "./abi";
+import type { Order, OutputLeg, PermitBatch } from "./types";
 import { packOrder } from "./packed";
+import { assertPermit3Nonce, Permit3MessageKind } from "./permit3nonce";
+
+/**
+ * `BaseFlashSolver.PERMIT_ENVELOPE` — the first word of a permit-enveloped `sig`
+ * (audit 2026-09-30 AGG-6). `keccak256("1delta.BaseFlashSolver.PermitEnvelope")`.
+ */
+export const FLASH_PERMIT_ENVELOPE: Hex = keccak256(toHex("1delta.BaseFlashSolver.PermitEnvelope"));
+
+/**
+ * The `sig` that makes any flash solver fill a single-signature
+ * (PermitBatchWitness) order: inside the flash the solver calls
+ * `Settlement.fillWithPermit(order, batch, permitSig, fillAmountIn, minBumpBps,
+ * takerData)` instead of `fill`. Pass it wherever the encoders below take `sig`.
+ * `permitSig` is the maker's Permit3 witness signature (the order bound to the
+ * settler), exactly what an EOA filler would pass to `fillWithPermit`.
+ */
+export function encodeFlashPermitEnvelope(batch: PermitBatch, permitSig: Hex, minBumpBps: bigint = 0n): Hex {
+  return encodeAbiParameters(
+    [{ type: "bytes32" }, { type: "tuple", components: permitBatchComponents }, { type: "bytes" }, { type: "uint256" }],
+    [
+      FLASH_PERMIT_ENVELOPE,
+      { ...batch, nonce: assertPermit3Nonce(batch.nonce, Permit3MessageKind.Batch) } as any,
+      permitSig,
+      minBumpBps,
+    ],
+  );
+}
 
 /**
  * The flash solvers' optional `FlashOpts{recipient, takerData}` tail: a profit

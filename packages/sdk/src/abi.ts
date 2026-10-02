@@ -66,7 +66,7 @@ const takerPermitComponents = [
   { name: "expiration", type: "uint48" },
 ] as const;
 
-const permitBatchComponents = [
+export const permitBatchComponents = [
   { name: "tokens", type: "tuple[]", components: tokenPermitComponents },
   { name: "takers", type: "tuple[]", components: takerPermitComponents },
   { name: "nonce", type: "uint256" },

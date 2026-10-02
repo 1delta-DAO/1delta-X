@@ -73,6 +73,18 @@ describe("AUCTION-AGG4 — API calldata is validated before a standing executor 
     expect(checkApiRoute({ to: ROUTER, data: swapData(EXECUTOR), value: 1n }, req, guard)).toMatch(/native value/);
   });
 
+  it("test_audit_AGG_4_guardMatchesWordAlignedOnly", () => {
+    // Pays B in the real recipient word, and smuggles the executor's address in
+    // one byte OFF the word grid (a dynamic `bytes` tail) — a substring test
+    // admitted it.
+    const smuggled = `${SWAP_SEL}${w(TOKEN_IN)}${w(TOKEN_OUT)}${w(1_000n)}${w(B.address)}ab${w(EXECUTOR)}${"00".repeat(31)}` as Hex;
+    expect(checkApiRoute({ to: ROUTER, data: smuggled, value: 0n }, req, guard)).toMatch(/recipient/);
+    // As a real (aligned) word it passes: the guard is a PRESENCE check, and the
+    // selector allowlist (fixed-recipient swap entrypoints only) bounds the rest.
+    const aligned = `${SWAP_SEL}${w(TOKEN_IN)}${w(TOKEN_OUT)}${w(1_000n)}${w(B.address)}${w(EXECUTOR)}` as Hex;
+    expect(checkApiRoute({ to: ROUTER, data: aligned, value: 0n }, req, guard)).toBeNull();
+  });
+
   it("test_audit_AUCTION_AGG4_standingExecutorWithoutGuardIsRefused", () => {
     expect(
       () =>
