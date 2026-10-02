@@ -15,8 +15,7 @@ and fluid module packages on 2026-08-29 — F17 with an executed PoC, F18 review
 reading. See
 [Re-audit sweep](reaudit-sweep.md#re-audit-sweep--the-generalised-questions-from-f13f15) for the
 generalised questions they imply. Every item below is resolved, except where an
-entry says otherwise: **F32** (2026-09-30) is recorded while its remediation is still
-in progress, and it lists its open items.
+entry says otherwise.
 
 ### F1 — Revoking Permit3 is not a kill switch on its own
 
@@ -1558,12 +1557,19 @@ the bytecode that ships.
 
 ### F32 — whole-tree audit: nine goals, 48 lenses (2026-09-30)
 
-**Status: fixes and docs merged; independent verification and the final gate
-pending.** Every code fix, the partials lane and the documentation group are
-merged on `audit-fixes-2026-09-30`; the independent verification of each fix, the
-fix-up round and the final gate (full suite, clean size check, gas baseline) have
-not run. The write-up, with every accepted item and its reason, is
-[audit-2026-09-30-full-tree.md](../audit-2026-09-30-full-tree.md).
+**Status: resolved (2026-10-02, branch `audit-fixes-2026-09-30`).** Of 223
+issues, **216 fixed** and **7 accepted** with a stated reason (X-TOKENS-2,
+CENSUS-A-3, X-TOKENS-1, BRIDGE-B-5, L-LIB-9, PRICE-12, L-AAVE-3); **none open**.
+Every behavioural fix carries a `test_audit_*` regression test that was shown to
+fail on the original source. An independent verifier per group rejected six fixes
+(G-TS_FILLER-3, G-TS_SIGN-7, PRICE-6, X-SPEC-7, L-CV2-6, L-ML-7); the fix-up round
+closed all six (below). Final gate green: `make test-all` 2,970 passed / 0 failed /
+2 skipped over 37 Foundry profiles including the fork ones, `make test-ts` 638 /
+638, `make test-deployed` 924 / 924, `make test-invariant` 26 / 26,
+`modules-check`, `docs-check` and `gas-check` (baseline regenerated) pass; clean
+via-IR `size-check`: **Settlement 24,311 / 24,576**. The nine-goal re-assessment
+against the fixed tree has not been run. The write-up, with every accepted item
+and its reason, is [audit-2026-09-30-full-tree.md](../audit-2026-09-30-full-tree.md).
 
 Scope: the whole tree at `56d1405` — Permit3, Settlement, solvers, validators,
 every module, the periphery and the off-chain tooling — read against nine stated
@@ -1916,6 +1922,28 @@ write-up).
   PRICE-14, G-VENUE_B-7, L-AAVE-4, L-CV2-6, L-ML-7, VAL-5, VAL-1.v4, L-CMT-3, L-ML-9,
   L-CMT-7, G-VENUE_B-9, G-BYTE_MAP-8) and the fixers' doc-update requests: applied to
   `SECURITY.md`, `FEATURES.md`, `docs/` and the package READMEs.
+- **Fix-up round (verifier rejections), all closed.** G-TS_FILLER-3: a replayed
+  replace now retires its predecessor even when the replacement is dead at boot
+  (orderbook vitest test_audit_G_TS_FILLER_3_restarted_node_does_not_relist_predecessor_of_dead_replacement,
+  test_audit_G_TS_FILLER_3_live_replace_with_dead_replacement_keeps_predecessor).
+  G-TS_SIGN-7: TWAP slices are capped by the live balance over the slices still to
+  sign, and a clamped order scales its outputs (app vitest
+  test_audit_G_TS_SIGN_7_sliceKSignedAfterKMinus1FillsKeepsFullSize,
+  test_audit_G_TS_SIGN_7_clampedSellScalesOutputSoPriceNeverWorsens,
+  test_audit_G_TS_SIGN_7_clampedBuyScalesOutputSoPriceNeverWorsens,
+  test_audit_G_TS_SIGN_7_emptyCapRefusesToSign,
+  test_audit_G_TS_SIGN_7_signSliceCapsByRemainingSlices). PRICE-6, X-SPEC-7 and
+  L-ML-7: remaining stale comments and doc sites corrected; X-SPEC-7's optional
+  `BaseFlashSolver.setupTokenApproval` hardening accepted (a per-fill approval
+  would be armed by the permissionless caller; a balance floor contradicts the
+  whole-balance sweep). **L-CV2-6 implemented**: `AaveV4TakerPermit` replays the
+  TakerPM `approveWithdrawWithSig` / `approveBorrowWithSig` grant in-call
+  (**BREAKING** tail: Exact withdraw @160, Full @192, borrow @128), pinned by
+  `test_audit_L_CV2_6_withdrawExact_signedGrantReplayedInCall`,
+  `test_audit_L_CV2_6_withdrawFull_signedMaxGrantReplayedInCall`,
+  `test_audit_L_CV2_6_borrow_signedGrantReplayedInCall`,
+  `test_audit_L_CV2_6_withdraw_frontRunSignatureDoesNotBrickFill`,
+  `test_audit_L_CV2_6_withdraw_standingGrantNotShrunk`.
 - **Accepted:** L-CMT-4 (no Teller pool-deposit fork test: no verified live V2/V3
   pool exists and the Hypernative registration is a deploy step; the functional
   mock test covers the module), plus the accepted items listed above.

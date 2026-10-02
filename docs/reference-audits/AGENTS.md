@@ -12,7 +12,7 @@ designing, auditing, or reviewing, and keep it accurate when you change code.
 | --- | --- | --- |
 | [README.md](README.md) | — | The entry point: the three jobs this corpus serves and the glossary. The same word means different things in 0x / CoW / UniswapX; read the glossary before anything else. |
 | [failure-classes.md](failure-classes.md) | `C1…C15` | What has gone wrong **elsewhere**, as classes. Each is anchored to a published finding or live exploit and carries our verdict ("structurally prevented", "correct", "applies — accepted"). |
-| [findings-ledger.md](findings-ledger.md) | `F1…F32` | What **we** found, each with the regression test that pins it. All resolved except F32, whose fixes and docs are merged and whose independent verification and final gate are pending (listed in the entry). Chronological; later entries build on earlier ones. |
+| [findings-ledger.md](findings-ledger.md) | `F1…F32` | What **we** found, each with the regression test that pins it. All resolved (F32: 216 fixed, 7 accepted with reasons, none open). Chronological; later entries build on earlier ones. |
 | [reaudit-sweep.md](reaudit-sweep.md) | — | The generalised questions distilled from F13–F15 ("authorised once" vs. "authorised by what"; "refunded ⇒ harmless"). Sweep these, not the specific functions. |
 | [signature-validation.md](signature-validation.md) | `S1…S7` | The published signature corpus vs. our position. |
 | [corpus-v4-evk-rfq.md](corpus-v4-evk-rfq.md) | — | Second corpus: Uniswap v4, Euler EVK, Bebop RFQ. |

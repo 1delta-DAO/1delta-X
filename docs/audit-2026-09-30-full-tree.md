@@ -15,13 +15,19 @@ also done by agents. The raw report, cluster and triage data, PoC sources and th
 fixer reports live in `docs/local/audit-2026-09-30/`, which is gitignored. This page
 is the permanent record.
 
-**Status (2026-10-02, branch `audit-fixes-2026-09-30`): fixes and docs merged;
-independent verification and the final gate pending.** Core, lib and twelve
-component groups are fixed and merged; the cross-component pass (`7569f87`), the
-partials lane (`5389bf1`, `55cbfcc`, `7889c02`, `d49cc63`) and the documentation /
-CI group ("docs: 2026-09-30 audit doc leftovers") are committed. The independent
-verification of each fix, the fix-up round and the final gate have not run. See
-[Remediation status](#remediation-status).
+**Status (2026-10-02, branch `audit-fixes-2026-09-30`): remediation complete;
+final gate green.** All 223 issues are either fixed (with a regression test for
+every behavioural fix) or accepted with a stated reason; none is open. Core, lib
+and twelve component groups, the cross-component pass (`7569f87`), the partials
+lane (`5389bf1`, `55cbfcc`, `7889c02`, `d49cc63`), the documentation / CI group
+(`b0d04a0`), an independent verifier per group and a fix-up round for the six
+items it rejected are all merged. Final gate: `make test-all` 2,970 passed / 0
+failed / 2 skipped over 37 Foundry profiles (fork profiles included),
+`make test-ts` 638 / 638, `make test-deployed` 924 / 924, `make test-invariant`
+26 / 26, `modules-check` and `docs-check` pass, gas baseline regenerated and
+`gas-check` passes, and a clean via-IR `size-check` puts **Settlement at 24,311 /
+24,576** (265 bytes free). The one remaining step is the optional re-assessment of
+the nine goals against the fixed tree. See [Remediation status](#remediation-status).
 
 ---
 
@@ -154,9 +160,9 @@ report's remediation plan put in P0/P1 or that change behaviour.
 | Cross-component pass | **Committed** (`7569f87`, "fix: internal audit") | No structured per-item report. See [below](#cross-component-pass-7569f87). |
 | Partials lane (the 23 `fixed_partial` + L-LIB-8) | **Done, merged** (`5389bf1`, `55cbfcc`, `7889c02`, `d49cc63`) | VAL-1 core rule, AGG-6 (`executeItemFill`, flash `PERMIT_ENVELOPE`), AGG-4, X-DIFF-REST-3 closed (sponsorship bound to the filler), L-CENSUS-8 (Teller/Fluid owner binding), X-ASM-3 (d), L-LIB-8 (Aave v2). |
 | Docs group (SECURITY.md, FEATURES.md, docs/, tools, CI) | **Done** ("docs: 2026-09-30 audit doc leftovers") | The 17 docs issues fixed (MISC-MOD-6 Settlement-routed transfer/ERC-4626 flows, L-CENSUS-7 shapes rules 14–16 + comment stripping, docs-check layout offsets, CI matrix); the fixers' doc-update requests applied (skipped ones listed below). |
-| Independent verification of every fix | **Not run** | Fixer statuses below are self-reported. |
-| Fix-up round | **Not run** | |
-| Final gate (full suite, clean size-check, gas baseline) | **Not run** | `.gas-snapshot` not regenerated; the last full-suite figures are the merge-B report's. `7569f87` changed core comments only. |
+| Independent verification of every fix | **Done** | One verifier per group re-read each diff and, for every behavioural issue, restored the original source and confirmed the regression test fails on it. Six items were rejected (below); every other fix was verified. |
+| Fix-up round | **Done, merged** (`54e5a47`, `c070553`, `ec8b1d7`, `47e9738`; merges `94c6215`..`09f6e82`) | All six rejected items fixed; the behavioural ones each gained a regression test shown to fail on the pre-fix source. See [Verification and fix-up](#verification-and-fix-up). |
+| Final gate (full suite, clean size-check, gas baseline) | **Green** (2026-10-02) | `make build-all`; `make test-all` 2,970 passed / 0 failed / 2 skipped, 37 profiles incl. `-fork` (core 922 + 2 skipped, solvers 581, bridge 186, periphery 100, validators 93, …); `make test-ts` sdk 297, orderbook 131, server 53, auction 107, app 50; `make test-deployed` 924 / 924; `make test-invariant` 26 / 26; `make modules-check` and `make docs-check` pass; `make gas` regenerated `.gas-snapshot` (stale since before the remediation) and `make gas-check` passes; `rm -rf out/core-deploy && make size-check`: Settlement 24,311 / 24,576, SettlementLens 16,970, SettlementLensChecks 16,128, NativeSettler 3,759, OriginSettler7683 7,089, DestinationSettler7683 5,358. |
 
 ### Fixer statuses
 
@@ -170,9 +176,11 @@ accepted, 1 cross_component, 17 with no fixer report** = 223.
 `SECURITY.md`, `FEATURES.md`, `docs/` or the docs-site, and filed **129
 doc-update requests** against them instead; apart from the four docs `7569f87`
 touched (`position-sized-fills.md`, `quote-auctions.md`, `findings-ledger.md`,
-`permit2-forked-source.md`) those requests are **unapplied**. They include two of
-the report's P0 doc items: SECURITY.md M-8 must state that `MocMultiCollateralGuard.execute()`
-is permissionless (RIF-1/RIF-2), and the SECURITY.md half of VAL-1.v4.
+`permit2-forked-source.md`) those requests were applied by the docs group
+(`b0d04a0`), including the two P0 doc items: SECURITY.md M-8 now states that
+`MocMultiCollateralGuard.execute()` is permissionless (RIF-1/RIF-2), and the
+SECURITY.md half of VAL-1.v4 is written. These statuses are the fixers' own; the
+final per-issue state after verification is [below](#final-per-issue-state).
 
 ### `fixed_partial` (23)
 
@@ -214,6 +222,18 @@ is permissionless (RIF-1/RIF-2), and the SECURITY.md half of VAL-1.v4.
 | PRICE-12 | info | OCO bracket legs cannot be CoW-matched or PostInputs-filled; the item-free shared-nonce bracket is the matchable form. |
 | L-AAVE-3 | info | Isolated collateral not auto-enabled on Aave v3 < 3.7: needs a venue role the module cannot hold. SDK warning added (`7569f87`). |
 | G-TS_FILLER-5_dup_guard | n/a | Placeholder entry in the SDK fixer report, not an issue. |
+
+Residual sub-items accepted inside otherwise-fixed issues: X-SPEC-7's optional
+hardening of `BaseFlashSolver.setupTokenApproval` (permissionless, leaves a
+standing max Permit3 allowance to Settlement): `executeFill` is permissionless, so
+a per-fill approval would be armed by the attacker's own call, and a balance floor
+contradicts `_sweep`'s whole-balance payout; the zero-balance rule stands and
+SECURITY.md says so. L-CMT-4's Teller pool-deposit fork test, PRICE-10's
+fill-size / settlement-address binding, AGG-6's `AggregatorFillSolver` first
+permit fill (about 565 B of Settlement), CORE-FILLER-1.v3's optional move of
+`executor` into the signed bid, L-ED-5's optional per-seam census rule and
+OPS-USDRIF-MAXSPENT (operator tooling outside this repo) are accepted for the
+reasons given in their rows above.
 
 ### `cross_component` (1)
 
@@ -271,6 +291,33 @@ CORE-FILLER-1.v3's optional move of `executor` into the signed bid payload (the
 and OPS-USDRIF-MAXSPENT (the operator tooling lives outside this repo; the SDK
 encoders now require `maxSpent`).
 
+### Verification and fix-up
+
+The verifiers rejected six fixes; the fix-up round closed each one.
+
+| ID | Rejected because | Fix-up | Pinned by |
+|---|---|---|---|
+| G-TS_FILLER-3 | A replayed `OrderReplace` retired its predecessor only when the replacement re-verified, so a filled or expired replacement let a restarted node relist the stale predecessor. | `Book.start()` replays replaces with `backfill: true`: the maker-verified cancel half is applied (`applyVerifiedCancel`, maker-bound tombstone) even when the replacement fails Layer 2. The live replace path stays atomic. | `packages/orderbook/test/audit20260930.test.ts`: test_audit_G_TS_FILLER_3_restarted_node_does_not_relist_predecessor_of_dead_replacement, test_audit_G_TS_FILLER_3_live_replace_with_dead_replacement_keeps_predecessor |
+| G-TS_SIGN-7 | The new per-slice cap divided the live balance by the TOTAL slice count and clamped only the input, so later TWAP slices signed less input for the same output. | `sliceCap` divides by the slices still to be signed; a clamped order scales every output leg (same price, smaller size); a zero cap refuses to sign. | `packages/app/test/order.audit.test.ts`: test_audit_G_TS_SIGN_7_sliceKSignedAfterKMinus1FillsKeepsFullSize, test_audit_G_TS_SIGN_7_clampedSellScalesOutputSoPriceNeverWorsens, test_audit_G_TS_SIGN_7_clampedBuyScalesOutputSoPriceNeverWorsens, test_audit_G_TS_SIGN_7_emptyCapRefusesToSign, test_audit_G_TS_SIGN_7_signSliceCapsByRemainingSlices |
+| PRICE-6 | On-chain fix correct, but SDK `selectQuote` and auction `settle()` comments still said an unquoted fill prices on the dutch clock. | Both comments now say it prices at the maker's start (no concession). | Doc-only; the on-chain fix stays pinned by `test_audit_PRICE_6_unquotedFill_clearsAtStart`. |
+| X-SPEC-7 | `docs/README.md` still said a self-filling contract "must hold no balance"; the flash-solver approval hardening was neither done nor accepted. | `docs/README.md` and the docs-site security page say "must defend its balance"; the hardening is accepted in SECURITY.md (reason above). | Doc-only. |
+| L-CV2-6 | Docs correct, but the in-call TakerPM signed-grant replay was deferred without an infeasibility reason. | **Implemented**: `AaveV4TakerPermit` replays `approveWithdrawWithSig` / `approveBorrowWithSig` in `AaveV4WithdrawModule` (Exact @160, Full @192) and `AaveV4BorrowModule` (@128), bound to this module and position, best-effort, skipped when the standing allowance covers the fill. EIP-712 domain proven against the live mainnet TakerPM on fork. **BREAKING** for Exact data longer than 160 bytes. | `test_audit_L_CV2_6_withdrawExact_signedGrantReplayedInCall`, `test_audit_L_CV2_6_withdrawFull_signedMaxGrantReplayedInCall`, `test_audit_L_CV2_6_borrow_signedGrantReplayedInCall`, `test_audit_L_CV2_6_withdraw_frontRunSignatureDoesNotBrickFill`, `test_audit_L_CV2_6_withdraw_standingGrantNotShrunk` |
+| L-ML-7 | `MidnightLoopCallback` and one test comment still claimed a lingering allowance to Midnight was "pullable by anyone". | Both now state the D-1 reading: only an `onBuy` callback can be named payer, so the allowance is not pullable today; the scoped approve-and-clear stays as defence in depth. | Comment-only. |
+
+The fix-up commits themselves were not put through a second verifier; their
+regression tests were shown failing on the pre-fix source by the fix-up agents and
+pass in the final gate.
+
+### Final per-issue state
+
+Of the 223 issues: **216 fixed** (175 fixed by the component fixers, the 23
+`fixed_partial` completed by the partials lane and the cross-component pass, the
+17 docs-group issues, and L-LIB-8), **7 accepted** with the reasons in the table
+above, **0 open**. Every behavioural fix has a `test_audit_*` regression test in
+its package's normal test directory; the high and medium ones are listed in
+[High and medium findings](#high-and-medium-findings), the rest in the
+[F32 ledger entry](reference-audits/findings-ledger.md#f32--whole-tree-audit-nine-goals-48-lenses-2026-09-30).
+
 ### Open items
 
 1. ~~Docs group, 17 issues~~ — **done**, see the phase table. MISC-MOD-6
@@ -284,15 +331,12 @@ encoders now require `maxSpent`).
    and the 14 doc-only items.
 2. ~~The 129 doc-update requests~~ — applied against the current code (skipped
    requests are listed in the docs-group report).
-3. **Independent verification** of every fix, including that each regression fails
-   on the original source (today that claim is the fixer's own).
-4. **Fix-up round** for whatever verification rejects.
-5. **Final gate**: `make test-all`, `make test-ts`, `make test-deployed`,
-   `make test-invariant`, a clean `size-check`, `modules-check`, `docs-check`, and a
-   regenerated gas baseline (`make gas`). CI now runs all of these except the gas
+3. ~~Independent verification~~ — **done**; six rejections.
+4. ~~Fix-up round~~ — **done**, see [Verification and fix-up](#verification-and-fix-up).
+5. ~~Final gate~~ — **green** (phase table). CI runs all of it except the gas
    regeneration on every PR.
-6. **Re-assess the nine goals** against the fixed tree; the verdicts above are for
-   `56d1405`.
+6. **Still open, optional: re-assess the nine goals** against the fixed tree; the
+   verdicts above are for `56d1405`.
 
 ### Breaking changes landed
 
@@ -304,7 +348,9 @@ Added by the partials lane: a no-output-leg invariant order needs a named
 (`SponsoredSendNeedsSettle`, `FillerNotSponsor`, new `setSponsorFiller`); Teller
 repay `NotBorrower` and Fluid deposit/repay `NotPositionOwner`; `FluidRepayModule`
 mode word at 96 (tagged `Full`, untagged non-zero reverts `InvalidModeWord`) and
-`totalAmount` at 128.
+`totalAmount` at 128. Added by the fix-up round: the Aave v4 withdraw / borrow
+modules decode a signed TakerPM grant tail (Exact withdraw @160, Full @192,
+borrow @128; bytes there were ignored before).
 Breaking surfaces: Settlement ABI (`fillWithPermit` is one 6-arg entry,
 `fillWithPermitTake` and the `takerDatas` `batchFill` gain `minBumpBps`, `FillCtx`
 gains `minBump`; a fill module may not upsize the request); EVC permit tail and

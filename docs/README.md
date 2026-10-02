@@ -305,8 +305,8 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
   issues: 0 critical, 1 high, 19 medium (all PoC'd), 94 low, 109 info; the core
   held, every high and medium sat in the 7683 adapters, the USDRIF solver, lending,
   pricing/OCO/validator/transfer modules, the bridge inbox or the off-chain quote
-  tooling. **Remediation is in progress**: read the "Remediation status" section
-  for what is fixed, partial, accepted and still open.
+  tooling. **Remediation complete**: 216 fixed, 7 accepted with reasons, none
+  open; the "Remediation status" section has the per-issue state and the final gate.
 
 - **[audit-2026-09-leads.md](audit-2026-09-leads.md)** — the open **leads** from the
   F25 twelve-lens re-audit (the findings themselves are closed, in
