@@ -305,13 +305,15 @@ a side effect of the *filler's* transaction — so one order's batch can shrink 
 raise) the cap another order draws against. Tooling should refuse to shrink a
 live allowance.
 
-**Any contract that fills on its own behalf must hold no balance.** Output legs
-are pulled *from the filler*. A contract that holds a balance, has approved
+**Any contract that fills on its own behalf must defend its balance.** Output
+legs are pulled *from the filler*. A contract that holds a balance, has approved
 Settlement, and exposes a permissionless path making itself the filler of a
-caller-supplied order is fully drainable. Scoping the approval does not fix it —
-the attacker signs an amount equal to the balance. The working defence is a
-**balance floor**: snapshot every touched token on entry and revert if the call
-ends below it.
+caller-supplied order is fully drainable. Scoping a standing approval does not fix
+it — the attacker signs an amount equal to the balance. Three defences work: a
+**balance floor** (snapshot every touched token on entry, revert if the call ends
+below it), **delta-scoped per-fill approvals** cleared after the fill, or
+**operator gating plus owner budgets**. The permissionless flash solvers instead
+hold no balance between fills (accepted posture, X-SPEC-7).
 
 **A TAKE item's proceeds token must appear in `legsIn`.** Proceeds landing on
 Settlement are paid out by code that iterates the input legs; a proceeds token

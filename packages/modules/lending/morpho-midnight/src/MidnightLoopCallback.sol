@@ -123,11 +123,14 @@ contract MidnightLoopCallback is ISellCallback {
         // ...and supply it into the borrower's position BEFORE Midnight's solvency
         // check, so the new debt is collateralized within the same fill. Requires the
         // borrower's `setIsAuthorized(this)` grant — see the header (L-ML-1).
-        // Scoped approve + clear rather than a standing max grant: Midnight's
-        // `take` lets an arbitrary caller nominate the payer via `takerCallback`,
-        // so a lingering allowance from this contract to Midnight is pullable by
-        // anyone. This contract is meant to hold no funds between fills, and the
-        // cleared approval is what keeps that true even if a swap leaves residue.
+        // Scoped approve + clear rather than a standing max grant, as defence in
+        // depth. A lingering allowance is NOT directly pullable today: Midnight
+        // only pulls from a named payer that is the BUY callback, which it invokes
+        // (`onBuy`, must return the success sentinel) before the pull — and this
+        // contract implements only `onSell` (D-1, docs/audit-2026-09-leads.md).
+        // Clearing keeps that from silently depending on the interface staying
+        // so, and keeps this contract holding no grant between fills even if a
+        // swap leaves residue.
         SafeTransferLib.forceApprove(collateralToken, address(midnight), collateralOut);
         midnight.supplyCollateral(market, collateralIndex, collateralOut, seller);
         SafeTransferLib.forceApprove(collateralToken, address(midnight), 0);

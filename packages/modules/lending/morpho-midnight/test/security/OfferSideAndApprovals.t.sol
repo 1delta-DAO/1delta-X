@@ -25,11 +25,13 @@ import {MidnightModulesBase} from "../shared/MidnightModulesBase.t.sol";
 ///
 ///  (2) The modules granted Midnight a standing `type(uint256).max` allowance via
 ///      `ensureApproval`. Midnight being an immutable, trusted singleton is not
-///      enough to make that safe: `take` lets the CALLER nominate the payer
-///      (`takerCallback`, falling back to `msg.sender` only when zero), so any
-///      external account can call `take` designating a module as payer. A standing
-///      allowance is exactly what would let that pull succeed. Approvals are now
-///      scoped to the amount each call funds and cleared afterwards.
+///      on its own a safety argument. (Corrected 2026-09-30, L-ML-7 / D-1: `take` pulls from a
+///      named payer only when that payer is the BUY callback, which Midnight
+///      invokes via `onBuy` — and requires the success sentinel from — before the
+///      pull. No module implements `onBuy`, so no outside caller can designate a
+///      module as payer today; that safety is incidental to the interface, not
+///      structural.) Approvals are therefore scoped to the amount each call funds
+///      and cleared afterwards, as defence in depth.
 contract MidnightOfferSideAndApprovalsTest is MidnightModulesBase {
     // ── (1) offer.buy must match the leg's role ───────────────────────────────
 

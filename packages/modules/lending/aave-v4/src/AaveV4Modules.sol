@@ -231,7 +231,8 @@ contract AaveV4RepayModule is IMakerModule {
 // `keccak256(data)`, then invokes `takeOnBehalf` here. The TakerPositionManager
 // has no receiver parameter, so the withdrawn underlying lands in this contract
 // and is forwarded to `receiver`. The user must have approved the taker PM on
-// the spoke and granted `approveWithdraw(spoke, reserveId, module, cap)`.
+// the spoke and granted `approveWithdraw(spoke, reserveId, module, cap)` — on
+// chain, or as a signed `approveWithdrawWithSig` tail replayed in-call (L-CV2-6).
 //
 // Optional `BalanceMode.Full` (trailing field): withdraw the user's ENTIRE
 // supplied balance (`getUserSuppliedAssets`), forward the signed `amount` to
@@ -258,8 +259,9 @@ contract AaveV4RepayModule is IMakerModule {
 // `Exact` withdraw of the ENTIRE position can come back 1 wei short from the
 // spoke's share rounding — use `Full` to close a position.)
 //
-// Exact: `abi.encode(spoke, positionManager, reserveId, asset[, BalanceMode(0)])`
-//   — BalanceMode at 128.
+// Exact: `abi.encode(spoke, positionManager, reserveId, asset[, BalanceMode(0)[, permit…]])`
+//   — BalanceMode at 128; optional signed TakerPM grant tail at 160 (the mode word
+//     is then MANDATORY, encoded `0`). See {AaveV4TakerPermit} (L-CV2-6).
 // Full:  `abi.encode(spoke, positionManager, reserveId, asset, 0xB0DE0001, totalAmount)`
 //   — BalanceMode at 128 as the TAGGED word `DustHandler.encodeMode(Full)` (a bare
 //     `1` reverts `InvalidModeWord`), `totalAmount` at 160 and MANDATORY.
@@ -268,6 +270,8 @@ contract AaveV4RepayModule is IMakerModule {
 //     (`PartialFillUnsupported(amount, 0)`). It was previously undeclared here, so
 //     a maker encoding `Full` from this map signed an order no filler could ever
 //     settle. Declared in F25 (lead A-2).
+//   — optional signed TakerPM grant tail at 192 ({AaveV4TakerPermit}); sign its
+//     `signedAmount` as `type(uint256).max` or a padded cap (see L-CV2-3 above).
 //
 contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset, IPositionSource {
     IPermit3 public immutable permit3;
@@ -297,6 +301,8 @@ contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset, IPositionSource {
             // Through {positionOf} — the number a position-sized fill is priced
             // against and the number withdrawn are the same function (L-LIB-8).
             (, uint256 supplied) = positionOf(onBehalfOf, data);
+            // Optional signed TakerPM grant, tail after `totalAmount` (L-CV2-6).
+            AaveV4TakerPermit.replayIfPresent(data, 192, false, onBehalfOf, supplied);
             uint256 balBefore = IERC20(asset).balanceOf(address(this));
             ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, supplied, onBehalfOf);
             uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
@@ -323,6 +329,9 @@ contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset, IPositionSource {
             // stray balance. Same rule as the `Full` branch above and the M-4 fix
             // applied to the other packages — forward a measured delta, fail
             // closed below it.
+            // Optional signed TakerPM grant, tail after the (then mandatory) mode
+            // word (L-CV2-6).
+            AaveV4TakerPermit.replayIfPresent(data, 160, false, onBehalfOf, amount);
             uint256 balBefore = IERC20(asset).balanceOf(address(this));
             ITakerPositionManager(positionManager).withdrawOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
             uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
@@ -378,8 +387,11 @@ contract AaveV4WithdrawModule is ITakerModule, IProceedsAsset, IPositionSource {
 // `approveBorrow(spoke, reserveId, module, cap)` so the PM permits the module to
 // incur debt on their account.
 //
-// `data = abi.encode(spoke, positionManager, reserveId, asset)`; `asset` is bound to
-// the spoke's reserve underlying (L-CV2-4, see the file header).
+// `data = abi.encode(spoke, positionManager, reserveId, asset[, permit…])`; `asset`
+// is bound to the spoke's reserve underlying (L-CV2-4, see the file header). The
+// optional tail at 128 is a signed TakerPM `approveBorrowWithSig` grant replayed
+// in-call ({AaveV4TakerPermit}, L-CV2-6), so the `approveBorrow` transaction is
+// not needed.
 //
 contract AaveV4BorrowModule is ITakerModule, IProceedsAsset {
     IPermit3 public immutable permit3;
@@ -403,6 +415,8 @@ contract AaveV4BorrowModule is ITakerModule, IProceedsAsset {
         // partially-filled spoke) would otherwise be topped up from any balance
         // the module happens to hold and paid to the solver, while the user keeps
         // the full debt — the H-3 River shape. Fail closed instead.
+        // Optional signed TakerPM grant, tail at 128 (L-CV2-6).
+        AaveV4TakerPermit.replayIfPresent(data, 128, true, onBehalfOf, amount);
         uint256 balBefore = IERC20(asset).balanceOf(address(this));
         ITakerPositionManager(positionManager).borrowOnBehalfOf(spoke, reserveId, amount, onBehalfOf);
         uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
@@ -436,5 +450,78 @@ library AaveV4ReserveBinding {
         address actual;
         if (ok && ret.length >= 32) actual = abi.decode(ret, (address));
         if (actual != asset) revert UnderlyingMismatch(asset, actual);
+    }
+}
+
+/// @title AaveV4TakerPermit
+/// @notice Optional in-call replay of the TakerPositionManager's signed allowance
+///         grant (`approveWithdrawWithSig` / `approveBorrowWithSig`), so a v4
+///         withdraw/borrow order needs no on-chain `approveWithdraw` /
+///         `approveBorrow` transaction from the maker (2026-09-30 audit, L-CV2-6 —
+///         the v4 analogue of {DelegationHelper}'s Aave v3 / Comet / Morpho replays).
+///
+/// Tail at `off` (the LAST thing in `data`):
+///   `abi.encode(uint256 signedAmount, uint256 nonce, uint256 deadline, bytes signature)`
+/// The maker signs the PM's EIP-712 `WithdrawPermit` / `BorrowPermit` (domain name
+/// `TakerPositionManager`, version `1`, `verifyingContract` = the PM in `data`) over
+/// `(spoke, reserveId, owner = maker, spender = THIS module, signedAmount, nonce,
+/// deadline)`. Every field except the three signed scalars is taken from the
+/// module's own context, so a tail can only ever grant THIS module, on THIS
+/// position, for THIS maker — nothing a filler chooses. `signature` is bytes, so
+/// ERC-1271 makers work (the PM uses SignatureChecker).
+///
+/// ⚠ BEST-EFFORT, like every replay in {DelegationHelper}: the tail is inside
+/// `ref = keccak256(data)` and the order hash, and the PM accepts ANY submitter, so
+/// a hard call would let anyone front-run the published signature and brick the
+/// fill forever. The front-runner lands exactly the grant the fill wanted; the PM's
+/// own allowance check in `withdrawOnBehalfOf` / `borrowOnBehalfOf` stays the gate.
+///
+/// ⚠ SET, NOT RAISE. The PM SETS the allowance to `signedAmount`, so the replay is
+/// SKIPPED when the standing allowance already covers `needed` (it would otherwise
+/// shrink a maker's standing max grant). Sign `signedAmount` = the item total (or
+/// `type(uint256).max` for a `Full` withdraw, which asks for the whole accruing
+/// position) so the first fill's grant also covers every later partial fill.
+///
+/// ⚠ A SKIPPED OR UNFILLED SIGNATURE STAYS LANDABLE until its `deadline` or until
+/// its keyed nonce is consumed — cancelling the order does not consume it. Sign
+/// `deadline` no later than the order's; a durable revoke is `pm.useNonce(key)`
+/// (then `approveWithdraw/approveBorrow(…, module, 0)`).
+library AaveV4TakerPermit {
+    /// @param data  the module's `data`; `(spoke, positionManager, reserveId)` are
+    ///              read from its words 0..2 (the shared v4 base layout).
+    /// @param off   where the tail starts; absent (`data.length <= off`) ⇒ no-op.
+    /// @param borrow `approveBorrowWithSig` when true, else `approveWithdrawWithSig`.
+    /// @param owner the maker (`onBehalfOf`).
+    /// @param needed what the module is about to ask the PM for.
+    function replayIfPresent(bytes calldata data, uint256 off, bool borrow, address owner, uint256 needed) internal {
+        if (data.length <= off) return;
+        ITakerPositionManager.TakerPermit memory p;
+        address pm;
+        (p.spoke, pm, p.reserveId) = abi.decode(data[:96], (address, address, uint256));
+        if (_covers(borrow, pm, p.spoke, p.reserveId, owner, needed)) return;
+        bytes memory signature;
+        (p.amount, p.nonce, p.deadline, signature) = abi.decode(data[off:], (uint256, uint256, uint256, bytes));
+        p.owner = owner;
+        p.spender = address(this);
+        // Best-effort — see the front-run note above.
+        if (borrow) {
+            try ITakerPositionManager(pm).approveBorrowWithSig(p, signature) {} catch {}
+        } else {
+            try ITakerPositionManager(pm).approveWithdrawWithSig(p, signature) {} catch {}
+        }
+    }
+
+    /// @dev Standing allowance `>= needed`, read defensively: a failed or short read
+    ///      answers "no", so the replay is attempted.
+    function _covers(bool borrow, address pm, address spoke, uint256 reserveId, address owner, uint256 needed)
+        private
+        view
+        returns (bool)
+    {
+        bytes memory cd = borrow
+            ? abi.encodeCall(ITakerPositionManager.borrowAllowance, (spoke, reserveId, owner, address(this)))
+            : abi.encodeCall(ITakerPositionManager.withdrawAllowance, (spoke, reserveId, owner, address(this)));
+        (bool ok, bytes memory ret) = pm.staticcall(cd);
+        return ok && ret.length >= 32 && abi.decode(ret, (uint256)) >= needed;
     }
 }

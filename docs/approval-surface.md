@@ -56,7 +56,7 @@ nonce (see [gasless-permit-relay.md](gasless-permit-relay.md) and SECURITY.md).
 |---|---|---|
 | Aave v2 | `approveDelegation` per debt token | on-chain `approveDelegation` only (no `delegationWithSig` on v2 debt tokens) |
 | Aave v3 | `approveDelegation` per debt token | ✅ `delegationWithSig` replayed in-call (`AaveV3CreditModule`) |
-| Aave v4 | spoke-wide `setUserPositionManager` **plus** a per-(spoke, reserveId, spender = module) `TakerPositionManager.approveWithdraw` / `approveBorrow` allowance — the grant that actually scopes what the module may take; `Full` withdraws need `approveWithdraw` ≥ the live position (max or padded) | the TakerPM grants are signable (`approveWithdrawWithSig` / `approveBorrowWithSig`) but **not replayed in-call** by the modules, so v4 has no zero-transaction borrow/withdraw (L-CV2-6 / L-CV2-3) |
+| Aave v4 | spoke-wide `setUserPositionManager` **plus** a per-(spoke, reserveId, spender = module) `TakerPositionManager.approveWithdraw` / `approveBorrow` allowance — the grant that actually scopes what the module may take; `Full` withdraws need `approveWithdraw` ≥ the live position (max or padded) | ✅ the TakerPM grants: `approveWithdrawWithSig` / `approveBorrowWithSig` replayed in-call, best-effort, skipped when the standing allowance already covers the fill (`AaveV4TakerPermit`; tail @160 Exact withdraw, @192 Full withdraw, @128 borrow; fork-proven by `TakerPermitReplayV4.t.sol`, L-CV2-6). The spoke-wide `setUserPositionManager` stays a one-time on-chain step (the Spoke's `setUserPositionManagersWithSig` exists but no module replays it) |
 | Compound v3 | `allow(manager)` | ✅ `allowBySig` replayed in-call |
 | Morpho Blue | `setAuthorization` | ✅ `setAuthorizationWithSig` replayed in-call |
 | Lista (Moolah) | `setAuthorization` | ✅ `setAuthorizationWithSig` replayed in-call (deployed Moolah accepts Morpho's shape verbatim; only the domain VIEW is renamed `domainSeparator()`, an off-chain-signing detail) |
@@ -181,10 +181,17 @@ EIP-2612 block for Aave withdrawals already rides in-module
   `CometTakerModule` (borrow @96, Exact withdraw @128, Full withdraw @160);
   fork-proven by `test_audit_L_CMT_5_realCometAllowBySigLandedInFill`.
 
+- **Aave v4 TakerPM** (`approveWithdrawWithSig` / `approveBorrowWithSig`): wired
+  via `AaveV4TakerPermit.replayIfPresent` in `AaveV4WithdrawModule` (Exact @160
+  with the mode word then mandatory, Full @192) and `AaveV4BorrowModule` (@128);
+  tail `abi.encode(signedAmount, nonce, deadline, bytes signature)`, spender pinned
+  to the module; fork-proven by `TakerPermitReplayV4.t.sol` (L-CV2-6).
+
 The remaining on-chain venue grants (Aave v2 `approveDelegation`, Aave v4
-`setUserPositionManager` and the TakerPM allowances, Venus `updateDelegate`,
-Dolomite `setOperators`, Silo `setReceiveApproval`, Fluid ERC-721, River
-`setDelegateApproval`, Liquity trove managers, Midnight `setIsAuthorized`) are
-on-chain transactions: either the deployed contract has no signature variant (the
-venue's floor, not ours), or, for the Aave v4 TakerPM, the signature variant exists
-but no module replays it yet. Pre-fund modules need no taker allowance at all.
+`setUserPositionManager` (spoke-wide, one-time; signable on the Spoke but not
+replayed), Venus `updateDelegate`, Dolomite `setOperators`, Silo
+`setReceiveApproval`, Fluid ERC-721, River `setDelegateApproval`, Liquity trove
+managers, Midnight `setIsAuthorized`) are on-chain transactions: the deployed
+contract has no signature variant (the venue's floor, not ours), or, for the v4
+`setUserPositionManager`, a one-time spoke-wide grant no module replays. Pre-fund
+modules need no taker allowance at all.
