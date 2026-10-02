@@ -12,8 +12,13 @@ validator like `TimestampValidator` or the Chainlink gates.
 
 ## First: you may not need it
 
-OR across **whole orders** is already free — sign two orders sharing a `nonce`,
-and whichever fills first cancels the other. That covers the most common
+OR across **whole orders** is already free — sign two orders sharing a `nonce`
+**and the fill-once bit** (`timing` bit 100, SDK `ocoNonceGroup`), and whichever
+fills first cancels the other. Without the fill-once bit a partial of one branch
+does NOT burn the shared nonce, so both stay live; with it, each branch is
+whole-fill only. Use `OcoGroupModule` for partially fillable branches (see
+[oco.md](oco.md)); the SDK's `assertNonceSiblingsFillOnce` lints hand-built sets
+(2026-09-30 G-TS_SIGN-8). That covers the most common
 disjunction by far ("limit **or** stop-loss") for no extra gas, and each branch
 can carry its own prices, items and amounts, which one order cannot.
 
@@ -81,7 +86,22 @@ aborts the fill either way. Once `OR` and `NOT` exist it stops being harmless:
 
 So here a leaf that reverts, or returns fewer than 32 bytes, aborts the fill with
 `ConditionErrored` — the same outcome a maker already gets from a reverting
-top-level validator. NEGATE can then only ever invert a clean boolean.
+top-level validator. NEGATE can then only ever invert a clean boolean **returned by
+the leaf** — which is safe only for leaves that REVERT on failure rather than
+answering `false` (corrected 2026-09-30, VAL-2). A leaf that turns its own failure
+into `false` (a broken feed read as "not above X") is laundered past this rule and
+NEGATE flips it. The shipped leaves are safe to negate: the Chainlink gates and
+`MocPriceBandValidator` revert on a bad feed (zero price, reversed band),
+`PredicateStaticCall` now reverts `PredicateFailed` on a reverting, codeless or
+short-returning target, and `TimestampValidator` / `FillerWhitelistValidator`
+answer a clean boolean. A third-party leaf must be vetted for this before it is
+negated.
+
+**Out-of-gas is never `false`, even under TRY.** The filler chooses the gas, so a
+sub-call starved by a 63/64 cut could otherwise be forced to "revert" and read as
+false (and NEGATE then as true). The tree validator, `PredicateStaticCall` and the
+`FillerAttestationValidator` 1271 path detect a starved sub-call and consume all
+remaining gas (`invalid()`), so the out-of-gas propagates instead.
 
 `TRY` is the explicit per-leaf opt-out, for the case where fallback really is the
 intent:
@@ -96,6 +116,10 @@ The choice is visible in the signed order rather than being the silent default.
 
 > `TRY | NEGATE` on one leaf means "reverted **or** false ⇒ true". Coherent, but
 > rarely what anyone means — prefer a leaf that returns a clean boolean.
+
+`FillerAttestationValidator` returns `false` (it no longer reverts) on a foreign or
+malformed `takerData` envelope (2026-09-30 VAL-6), so it composes in OR groups with
+other `takerData`-consuming leaves without needing TRY.
 
 ## Cost
 

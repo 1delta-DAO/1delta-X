@@ -186,19 +186,28 @@ relocates `_tokenAllowance` would strand allowances mid-migration.
 Permit3 never speaks to a lending/staking protocol directly — all
 protocol-specific plumbing lives in taker modules.
 
-### Single-operation modules
+### Modules, ops and the allowance key
 
-Every `ITakerModule` performs exactly one operation. The op is identified
-by the module's address; the position is identified by `keccak256(data)`.
-This has three consequences:
+Modules used to perform exactly one operation each, with the op identified by the
+module's address. Since the 2026-09 grant merges, modules are grouped by the
+standing venue grant they consume, and several (`AaveV3CreditModule`,
+`DolomiteOperatorModule`, `EulerV2OperatorModule`, the Comet / Morpho / Silo / Venus
+/ Exactly / Liquity / Lista / River `*TakerModule`s) multiplex ops behind a leading
+`op` word **inside `data`**. The granularity unit is therefore `(module, ref)` with
+`ref = keccak256(data)`: the op is inside `ref`, so a grant for one op cannot
+dispatch another, and every multi-op module must reject an unknown op
+(`check-module-shapes.py` rule 7). The containment boundary for venues whose own
+grant is one unscoped boolean (`setOperators`, `setAccountOperator`,
+`setAuthorization`, `allow`) is that venue grant, not the module address (audit
+2026-09-30 X-SPEC-4). This has three consequences:
 
 - Approvals are legible: `approveTaker(settlement, AaveV3CreditModule, ref, 1000
   USDC)` is unambiguously a borrow authorisation — the spender is Settlement, and
   the module (`AaveV3CreditModule`) is a signed part of the key.
 - Module code stays tiny — one protocol call, one optional
   `permit3.transferFrom` for ERC20 legs, nothing else.
-- A compromised borrow module cannot be used to withdraw collateral, and
-  vice versa.
+- A taker grant for a borrow cannot be spent on a withdraw (different `data`,
+  different `ref`), even where both ops live in one module.
 
 Adding a new lender or op = adding a new module. Permit3 and the
 interface do not change.
@@ -336,9 +345,10 @@ identifies the position.
 data = abi.encode(MarketParams memory mp)   // (loanToken, collateralToken, oracle, irm, lltv)
 ```
 
-The ref `keccak256(data)` is effectively the namespaced marketId.
-Borrow and withdraw modules have different addresses, so the same
-`data` yields different allowance buckets per op.
+The ref `keccak256(data)` is effectively the namespaced marketId. Borrow and
+withdraw are ops of ONE `MorphoBlueTakerModule`, selected by the leading `op`
+word in `data` (`abi.encode(uint8(op), MarketParams, …)`), so the same market
+yields a different `ref` — a different allowance bucket — per op.
 
 ### Silo (sub-config example)
 

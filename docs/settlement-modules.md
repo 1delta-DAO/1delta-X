@@ -62,7 +62,7 @@ No new `Order` field, no typehash change: `SETTLE` is a new value of the existin
 | --- | --- | --- | --- |
 | **MAKE / TAKE** (items) | the maker's own assets/positions | maker's, capped by maker's approval | no |
 | **Fill module** | the fill *denominator* (a scalar) | nothing (view) | no |
-| **SETTLE** (this) | the solver↔maker *exchange* | maker's (to the filler) or filler's (to the maker) | **yes** |
+| **SETTLE** (this) | the maker→filler side of the *exchange* | the maker's asset, to the filler — **never** the filler's (a SETTLE module must not pull from the filler; shapes rule 10, X-SPEC-1) | **yes** |
 
 ## 4. Safety (today)
 
@@ -70,16 +70,31 @@ No new `Order` field, no typehash change: `SETTLE` is a new value of the existin
 
 - **`msg.sender == settlement`** in the module makes the maker's order signature
   the authority over `(module, amount, data)`.
-- The module can only move what the relevant party **approved it for** — the
-  maker's `setApprovalForAll` (its own NFTs), or the filler's own approval
-  (assets the filler chose to put up by filling). Neither party's other assets
-  are reachable.
+- The module can only move what the MAKER **approved it for** — the maker's
+  `setApprovalForAll` (its own NFTs). It must **never pull from the filler**
+  (2026-09-30 X-SPEC-1): a shared module that pulled from the filler under the
+  filler's standing approval would let any maker sign an order naming that module
+  and an asset the filler owns, and take it. `tools/check-module-shapes.py` rule 10
+  enforces it.
 - **The maker's receipt is guaranteed by the order, not the module.** For an NFT
   *sale*, the maker is paid via an inline `LegOut` — a **mandatory,
   reverting delivery that runs BEFORE items**, so the maker is paid first or the
-  whole fill reverts, and only then does the module hand off the NFT. For an NFT
-  *purchase* (maker's receipt is non-fungible), the maker attaches an ownership
-  **invariant** (`ownerOf(id) == maker`), checked after items.
+  whole fill reverts, and only then does the module hand off the NFT. An NFT
+  *purchase* is NOT a SETTLE item: the payment is an input leg and the maker
+  attaches an ownership **invariant** (`ownerOf(id) == maker`), checked after
+  items — and the filler delivers the NFT itself (e.g. from its callback).
+- ⚠ **An invariant proves an END STATE, not a delivery** (2026-09-30 VAL-1). It
+  cannot tell THIS fill's delivery from a second bid, another venue, or a purchase
+  the maker made elsewhere. So when `legsOut` is empty, only the order's named
+  `exclusiveFiller` may fill, for the order's whole life: enforced in the core for
+  any invariant (`Base._runInvariants`, `NotExclusiveFiller`) and in the shipped
+  invariants (`InvariantReceiptGuard.ReceiptNeedsNamedFiller`). **Vetting is
+  mandatory**: the maker names a filler it trusts to deliver. Prefer a per-fill
+  TRANSITION over an absolute state — ERC-721: owner was not the maker before and
+  is after; ERC-1155: the balance delta is at least the slice — and remember that
+  under `batchFill` several orders' invariants run against one shared end state.
+  Alternative offers for the same asset should share a fill-once nonce, so only one
+  can ever be paid.
 
 Atomicity worked example (from the test): an unpaid solver's `legsOut` delivery
 reverts before the `SETTLE` item runs, so the maker never loses the NFT without
@@ -117,6 +132,18 @@ an NFT SETTLE order MUST be **full-fill** (`minFillAnchor == anchor`, or a
 `FullFillModule`), and the item's `amount` must be a **non-zero sentinel** (`1`)
 or the slice is `0` and the transfer is skipped. `validateOrder` enforces the
 full-fill requirement (`"settle item requires full-fill"`).
+
+Since 2026-09-30 (MISC-MOD-2) the module enforces it on-chain as well:
+`NftSettlementModule` data is `abi.encode(collection, tokenId, total)` and the slice
+must equal `total` (a 1-unit partial fill can no longer take the NFT; the legacy
+two-word blob fails closed).
+
+**The other shipped SETTLE / MAKE data layouts changed in the same remediation**:
+`ProportionalSweepModule` takes `abi.encode(token, marker)` for a 100% sweep and
+`abi.encode(token, marker, total)` (full-fill only) for a fractional one
+(MISC-MOD-1); `OcoGroupModule`'s claim is `abi.encode(groupId, nonce, minClaim)`
+(PRICE-2); and `PermissionlessCallModule.CallSpec` gains `address bountyToken`, so a
+caller bounty is forwarded to the maker (MISC-MOD-5).
 
 ## 5. Kernel report-verify (specified, not yet built)
 
@@ -232,7 +259,7 @@ resolves it in [`Base._forSlice`](../packages/core/src/settlement/Base.sol):
 | descriptor | meaning | `forAmount` |
 | --- | --- | --- |
 | `(1 << 255) \| j` | fund from `legsOut[j]`, delivered to the maker's WALLET (PULL) | the amount `_deliverOutputs` recorded for leg `j` in `ctx.outs`, **consumed** |
-| `(5 << 253) \| j` | fund from `legsOut[j]`, delivered to **the item's own module** (PRE-FUND) | the same, and `legsOut[j].recipient == module` is **enforced** |
+| `(5 << 253) \| op << 244 \| token << 16 \| j` | fund from `legsOut[j]`, delivered to **the item's own module** (PRE-FUND). Leg `j` in bits `[0,16)`, the funding **token** in bits `[16,176)` (mandatory: `Base._forSlice` reverts `ForLegInvalid` unless it equals `legsOut[j].token`), and the **op** in bits `[244,252)` (mandatory on the merged `*PreFundModule`s; SDK `forLegPreFund(j, token, PreFundOp.<Venue>.<Op>)`). A bare `(5 << 253) \| j` reverts `ForLegInvalid` (2026-09-30 G-BYTE_MAP-2 / G-BYTE_MAP-8) | the same, and `legsOut[j].recipient == module` **and** `legsOut[j].token == token` are **enforced** |
 | `(3 << 254) \| floorBps << 160 \| token` | fund with what the maker holds | `min(balanceOf(token, maker), cap)`, cap = `data` word 1, floor = `floorBps` of the cap, **full-fill only** |
 | any smaller value | a literal total (wallet-funded leg, no matching output) | sliced by the same differencing as `item.amount` |
 
@@ -399,7 +426,12 @@ run ONE status/solvency check per call, which is the reason to fuse — but neit
 has a position identity object. An Euler position is just the balances of an EVC
 account; a Dolomite position is the balance set of the maker-signed
 `(owner, accountNumber)` sub-account. Both can be deposited into and borrowed
-against any number of times.
+against any number of times. Dolomite borrow positions use account numbers
+`>= 100` (L-ED-2). **Euler supports EVC sub-accounts** (2026-09-30 L-ED-6): plain
+ops encode word 0 as `op | subId << 8`, `Op.Open` carries the sub-account in
+descriptor bits `[236,244)`, deposit takes `subId` at byte 32 and repay at byte 64
+(`subId = 0` blobs are byte-identical to before). The maker grants operator /
+controller per sub-account; pulls and sweeps stay on the owner wallet.
 
 So on these two venues `FullFillGuard` was **never** protecting a protocol
 constraint. It existed only because a constant `sideAmount` in `data` cannot
@@ -431,7 +463,9 @@ two-item `[MAKE, TAKE]` pair they replace.
 `TAKE_FOR` de-duplicates the funding **amount**. It does not de-duplicate the
 funding **asset**: that is still named inside `data`, in a layout only the module
 knows — an Aave `collateralAsset` field, a Dolomite `collToken` (beside a
-`collMarketId`, so Dolomite names it twice), an Euler vault the asset is *derived
+`collMarketId`, so Dolomite names it twice — since 2026-09-30 the module binds the
+signed token to `getMarketTokenAddress(marketId)` on every entrypoint and reverts
+`MarketTokenMismatch`, G-BYTE_MAP-7), an Euler vault the asset is *derived
 from*. Nothing cross-checked it against the leg, so a blob naming a different asset
 than the leg it is sized by applied that amount in the **wrong decimals** — the same
 silent mis-sizing the op exists to remove, returning through the one door the
@@ -460,7 +494,12 @@ interface IFundingSource {
 - `SettlementLens.previewItemFunding(order)` → `{modules, assets, required,
   available}`, one row per composite item. `required` is the **full-fill** funding
   amount computed the way `Base._forSlice` computes it, so `available >= required` is
-  the condition for the order to fill whole.
+  the condition for the order to fill whole. Since 2026-09-30 it is the DEAREST
+  filler's figure (the outsider lift inside a live soft window; the signed `start`
+  for price-module and priority orders), mirrors the BALANCE floor (below it,
+  `required` is the floor), and sizes pre-fund MAKE items from their descriptor
+  (PERIPH-2.v3, G-LENS_PARITY-3, PRICE-15, G-BYTE_MAP-6). Size module grants to that
+  figure plus ceil headroom.
 
 **`asset` is not necessarily an ERC-20.** It is whatever the module draws from. An
 adapter funding a position with an NFT — a concentrated-liquidity position posted as
@@ -514,20 +553,23 @@ preview a broken order as fillable.
   token allowance to the module wants a few units of headroom. BUY legs and the
   literal form sum exactly. `previewItemFunding` reports `required` at full fill and
   cannot know the slice schedule, so size the grant ABOVE what it returns.
-- **One module, one shape — enforced.** The taker book does not
+- **One grant, one dispatch — enforced.** The taker book does not
   distinguish `take` from `takeFor`: both spend
   `(user, spender, module, keccak256(data))`. A contract implementing both
   `ITakerModule` and `ITakerForModule` would let one `approveTaker` authorise either,
-  with nothing in the grant telling the maker which. Every module shipped implements
-  one, and that is now **enforced**: `make modules-check`
-  ([`tools/check-module-shapes.py`](../tools/check-module-shapes.py)) fails the build
-  on any contract declaring both dispatches. It was convention until 2026-08-31 —
-  see [reference-audits.md §F23](reference-audits/findings-ledger.md#f23--three-invariants-documented-but-unenforced-all-now-closed).
+  with nothing in the grant telling the maker which. Since the grant merges a contract
+  MAY implement both, but only with both data-space guards (`requirePlainTake` in
+  `takeOnBehalf`, `requireLegRef` / `requireFundingDescriptor` in `takeForOnBehalf`),
+  so no `ref` can be valid for both; `make modules-check`
+  ([`tools/check-module-shapes.py`](../tools/check-module-shapes.py) rule 1) fails the
+  build otherwise. It was convention until 2026-08-31 — see
+  [reference-audits.md §F23](reference-audits/findings-ledger.md#f23--three-invariants-documented-but-unenforced-all-now-closed).
 
 ## 9. Open / next
 
 - Build the §5 report-verify for fungible-delivering settle modules.
-- An `NftBuySettlementModule` (filler's NFT → maker) + the ownership-invariant
-  pattern, and the ERC-1155 variant (`safeTransferFrom` with `id`+`amount`).
+- ~~An `NftBuySettlementModule` (filler's NFT → maker)~~ — **withdrawn** (2026-09-30
+  X-SPEC-1): a SETTLE module must never pull from the filler. Purchases are legs plus
+  an ownership invariant, filled by a named `exclusiveFiller` (§4).
 - Consider whether the fill module + a `SETTLE` module should share the same
   `takerData`/`data` channel for a fully module-matched exotic order.

@@ -308,9 +308,10 @@ contract AaveV3CreditModule is
         uint256 floor;
         bool preFund = _fundingShape(data);
         if (preFund) {
-            // PRE-FUND: the delivery must have landed HERE, in THIS token — the core
-            // binds the leg's recipient (bit 253) but not its token (F27/H-1).
-            // Underflows if it did not.
+            // PRE-FUND: the delivery must have landed HERE, in THIS token. The core
+            // binds both the leg's recipient (bit 253) and, since F27's follow-up,
+            // its token (`Base._forSlice` reverts `ForLegInvalid`); the floor still
+            // checks the asset this module actually spends. Underflows if it did not.
             //
             // ⚠ THE FLOOR IS KEPT, NOT DISCARDED. The weaker `requireDelivered` proves
             // the same thing and throws the number away; a venue consuming LESS than

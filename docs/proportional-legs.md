@@ -149,6 +149,11 @@ pays the output from inventory:
 | --- | --- | --- |
 | `AggregatorFillSolver` (routed swap, amount patched from the measured input) | `type(uint256).max` | A shrunk balance swaps less and cannot pay the fixed output — the fill reverts, the solver loses only gas (`test_sentinel_shrunkBalance_revertsAndTheSolverLosesNothing`). A grown one is a bigger swap. The 1-wei donation grief stops working (`test_sentinel_oneWeiDonation_noLongerRevertsTheFill`). |
 | Inventory / RFQ filler (pays the output from its own balance) | the exact quoted size | A shrunk balance would be paid the full output — the loss the no-trim rule exists to prevent. |
+| ERC-7683 solver (through `DestinationSettler7683`) | the sentinel is SAFE | The destination enforces the quoted per-unit price against `fillUpTo`'s return: a drained balance reverts `BoundExceeded`, a donation fills (2026-09-30 PERIPH-3, `test_audit_PERIPH_3_sentinelFrontRun_reverts`, `test_audit_PERIPH_3_sentinelDonation_stillFills`). |
+
+⚠ **Sweep-item proceeds are maker-controllable** (2026-09-30 X-DIFF-CORE-2): a
+`ProportionalSweepModule` item pays the filler whatever the maker's balance is at
+fill time, so price it at zero unless you check what arrived after the fill.
 
 **Fees still work, and scale with the real size.** An aggregator-routed fill takes
 fees three ways, none of which needs the quoted size: the `SurplusPolicy` shares
@@ -177,6 +182,12 @@ transfer to the maker between plan construction and inclusion (F29 finding 5).
 Every other amount is still taken literally — on both paths the sentinel is the
 one way to say "whatever it is".
 
+The inventory caveat above applies here too (2026-09-30 X-DIFF-CORE-1.v1): a plan
+that FRONTS a residual from inventory through a `CALL` step pays the full output for
+a shrunk anchor. Such a plan must pin the exact anchor it quoted, or bound what it
+expects swept — `GuardedMatchSolver.settleMatchChecked` reverts `AnchorShrunk` /
+`SweptShort` (see [filler-strategy.md](filler-strategy.md) §3).
+
 ## Consistency: one balance read
 
 The anchor is resolved **once**, in `OrderGates.anchorTotal` (which is `view`
@@ -187,6 +198,16 @@ That is what makes the output pricing and the maker's payment provably agree. A
 second read would open a window in which an item crediting the maker mid-fill (a
 TAKE with `recipient == maker`) has the solver delivering against one balance and
 the maker paying against a larger one.
+
+## Validators and price modules that read the anchor
+
+A module that reads `legsIn[0].start` raw sees the MARKER, not an amount (F8).
+`ChainlinkPeggedPriceModule` uses the resolved `total` the core passes it.
+`ChainlinkTickFloorValidator` prices a Proportional `legsIn[0]` at its signed
+**cap** (`end`) — sound in both the validator and the invariant position, and
+stricter than the live rate when the balance is below the cap — and reverts
+`UncappedProportional` for an uncapped (`SENTINEL_FLOOR`) or zero cap (2026-09-30
+X-ARITH-1.v1, `test_audit_X_ARITH_1_v1_tickFloor_pricesAtCap_andRefusesUncapped`).
 
 ## Multi-token sweeps
 
@@ -217,8 +238,20 @@ items      = [{ SETTLE, sweepModule, amount: usdtCap, recipient: 0,
 
 The item's signed `amount` **is** the cap, exactly as `end` is on a leg — reusing
 a field the maker already signs rather than inventing a second place to put it.
-It resolves through the same `Proportional.resolve`, so a sweep leg and a sweep
-item can never disagree about what "100% capped at N" means.
+
+⚠ **A FRACTIONAL sweep (bps < 10,000) must use the three-word form
+`abi.encode(token, marker, total)` and is full-fill only** (2026-09-30 MISC-MOD-1,
+**BREAKING**). The bps used to be re-applied to the POST-sweep balance on every
+partial fill, so a split fill swept toward the cap: two half fills of "50% of my
+USDT" took 75%. The two-word form is accepted only for 100%, where a split is
+harmless (Σ min(Bₖ, sliceₖ) = min(B, cap)). So a sweep leg and a sweep item do NOT
+always agree on a split fill — the earlier "can never disagree" claim here was
+wrong; a fractional item is whole-fill precisely so that they do.
+
+⚠ **Who can fill it.** The sweep is paid to `ctx.filler`, so a SETTLE sweep (or tip)
+order must be filled by an EOA or by a contract that forwards arbitrary tokens. The
+flash-solver family refuses SETTLE items (`SettleItemsUnsupported`), and the
+ERC-7683 adapters do not carry them (`SettleItemUnsupported`).
 
 ### Why a standing Permit3 allowance to that shared module is safe
 

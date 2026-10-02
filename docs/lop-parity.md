@@ -137,7 +137,8 @@ nowhere outside it**. The arguments are the packed leg blobs plus flat scalars
 rather than `Order calldata` — a full-order encoder for this call site measured
 ~1,300 bytes. Three modules ship: `ChainlinkPeggedPriceModule` (oracle-pegged, with
 staleness *and* an absolute plausibility band), `RangePriceModule` (the volume axis
-— 1inch `RangeAmountCalculator`), and `CosignedQuotePriceModule` (UniswapX's
+— 1inch `RangeAmountCalculator`; ascending only, like 1inch's — a descending range
+reverts `DescendingRange`, 2026-09-30 PRICE-3), and `CosignedQuotePriceModule` (UniswapX's
 cosigner, minus the trusted party). A module replaces the time bump, so an order
 signs either a curve or a module, not both; `SettlementLens.previewBump` resolves
 it the same way a fill does.
@@ -163,7 +164,13 @@ buys is one wallet prompt for a 50-slice ladder or a quote refresh.
 and Eco all expose 7683 endpoints, so the value is **distribution**: existing solver
 fleets route to us with no bespoke integration. `orderId` is the Settlement order
 hash (already unique, already cancellable) and `minReceived`/`maxSpent` come from
-the same `previewFill` a fill prices with.
+the same `previewFill` a fill prices with. Since 2026-09-30 (PERIPH-1/PERIPH-2)
+`resolve` is a quote for `DestinationSettler7683` — the real Settlement-level
+filler, so a soft window is quoted with the outsider premium and a hard window is
+not broadcast — and it doubles as the ENFORCED bound: `originData` carries
+`FillBounds` that the destination checks per unit against `fillUpTo`'s return
+(`BoundExceeded`). A solver may pass its own `FillerData{payTo, minBumpBps,
+bounds}`, which is how a priority bidder supplies bounds for the bid it makes.
 
 The standard assumes the user's funds are escrowed at `open`; ours are pulled from
 the maker via Permit3 **at fill time**, which is the property that keeps the system

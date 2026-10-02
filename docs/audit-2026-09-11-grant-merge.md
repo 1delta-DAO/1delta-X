@@ -220,6 +220,11 @@ only pass if the byte is read from the right word:
 
 - Fork tests run against pinned mainnet state; venue-side behaviour under conditions those
   blocks do not exhibit (e.g. Dolomite risk-override modes, Euler vault caps) is not exercised.
+  *(2026-09-30 L-ED-2: the Dolomite risk-override path is now exercised unmocked
+  (`test_audit_L_ED_2_account100_carriesDebt_unmocked`). The root cause of the earlier
+  mocked failure was account number 1 vs the pre-9b90836 `accountNumber >= 100`
+  borrow-position cutoff, not "any sub-account": makers and the SDK must use account
+  numbers >= 100 for borrow positions.)*
 - The adversarial pass is one agent's reasoning over source, not a formal proof; every
   "NOT EXPLOITABLE" cites the lines that close it, and those lines are what a second reviewer
   should check.
@@ -622,6 +627,11 @@ account gives the attacker back at most their own funds (`NEW_A:249-254, 277-278
 Same for Euler (`NEW_E:149-172`) and Dolomite (`NEW_D:308-332`).
 
 ### 8.4 [INFO] EVC-permit replay now on the pull shape too (`NEW_E:339-343`)
+
+> **Superseded 2026-09-30 (L-ED-1 / L-LIB-3).** The any-sender (`sender = 0`) permit
+> described here could be landed by anyone straight from the order. Permits are now
+> bound to `sender = EulerV2OperatorModule`, the tail is `abi.encode(EvcPermit[])`,
+> and each permit is replayed independently (BREAKING).
 
 Best-effort `try/catch` (`DelegationHelper.sol:172-178`), any-sender permit, maker-signed,
 nonce-bound. A front-runner landing it leaves exactly the grants the fill wanted. Adding it to the

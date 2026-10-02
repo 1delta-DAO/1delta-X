@@ -17,7 +17,7 @@ import {MockSettlementBase, MockERC20} from "@coretest/shared/MockSettlementBase
 ///         in the same block — the aggregator quote guarantee — including the
 ///         clamp, the auction tick, and the exclusivity gate. Plus the
 ///         `_makerFillableCap` direct-allowance fix: a maker funding fills through
-///         a plain ERC20 approval (the {Permit3TransferLib} fallback) must preview
+///         a plain ERC20 approval (the `Base._pullViaPermit3` fallback) must preview
 ///         as fillable, not zero.
 contract PreviewFillTest is MockSettlementBase {
     uint256 constant IN_ = 1_000e18;

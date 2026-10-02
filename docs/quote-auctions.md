@@ -150,6 +150,25 @@ this library can pick. Until then, read the accountability claim as *the
 published set is genuine and correctly scored*, not *the published set is the
 whole market*.
 
+**Round capacity and scoring (2026-09-30 G-TS_FILLER-1 / CORE-FILLER-1.v3).**
+`AuctionRound` keeps ONE standing bid per filler: a worse or equal re-bid is
+refused, and a full round admits a better bid only by displacing the worst one held
+(keep-lowest), so two sybil keys can no longer crowd honest solvers out. Only SIGNED
+fields are scored — the unsigned `commitment` no longer breaks ties.
+
+**Executor declarations.** A quote is bound to the filler that bid, but the fill is
+landed by whatever contract that filler executes through. A bidder may declare its
+executor with an EIP-712 `BidExecutor(bytes32 orderHash,address filler,address
+executor,uint256 closesAt)` signature; the auctioneer then binds the quote to the
+DECLARED executor (the address Settlement will see as filler), not the bidding EOA.
+The executor must be operator-gated — a permissionless executor would let anyone
+spend the quote.
+
+**Solver sizing.** The reference `QuoteSolver` sizes a SELL route by
+`legsIn[0].start` (not `fillTotal`, PRICE-1.v1), resolves a Proportional anchor from
+the maker's balance or declines (returns null), and prices the soft-exclusivity
+premium when it is an outsider inside a live window.
+
 Together they make a cosigner **accountable with no proving system at all**. A
 zero-knowledge proof of the same statement is only worth its complexity when the
 losing bids must stay secret *permanently* — a real market-maker demand, but not

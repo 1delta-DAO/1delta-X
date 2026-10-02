@@ -432,6 +432,17 @@ is the maker's own direct `setOrderSigner`, and ending one is a revocation. Pinn
 by `test_relayedShorterPermit_cannotCutALiveDelegate`, with
 `test_relayedLongerPermit_stillExtends` for the permitted direction.
 
+**A direct shortening burns the permit word (2026-09-30 X-DIFF-CORE-3).** The rule
+above still left one gap: a maker who SHORTENED a delegate directly could see an
+older, longer, still-unrelayed nomination relayed afterwards and undo the
+shortening. A direct `setOrderSigner` that lowers a stored expiry now also burns
+the delegate's relayed-permit word, so every outstanding unrelayed nomination for
+that delegate dies with it. The price is that gaslessly RE-EXTENDING that delegate
+is gone until the maker nominates again; extending directly is unaffected. An
+unrelayed REVOCATION remains a standing right to revoke (accepted). Pinned by
+`test_audit_X_DIFF_CORE_3_staleLongerPermit_cannotUndoShortening` and
+`test_audit_X_DIFF_CORE_3_extensionKeepsGaslessRenewal`.
+
 ## Gasless revocation has its own `seq`
 
 A revocation is a permit with `expiry == 0`, and a permit spends its coordinate

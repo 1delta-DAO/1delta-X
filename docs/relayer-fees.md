@@ -69,8 +69,9 @@ in-window filler charges the `params` override bps less.
 - **One signature, fully gasless.** `fillWithPermit` covers the deposit pull
   (module allowance) and the fee pull (settlement allowance) in one witness
   batch.
-- **Transparent.** The fee band `[F0, FMAX]` sits in the `LegIn`'s plain
-  `start`/`end` fields of the EIP-712 prompt.
+- **Transparent — off-chain.** The fee band `[F0, FMAX]` is the `LegIn`'s
+  `start`/`end`, but `legsIn` is packed `bytes`, so a wallet prompt shows it as hex;
+  the front end must decode and display it (corrected 2026-09-30, X-SPEC-2).
 
 ## 5. The zero-capital exit
 

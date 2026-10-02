@@ -148,7 +148,7 @@ zero was treated as a valid debt amount.
 
 **Here: the F26 Phase 2 class, in the wild.** The repo closed the same shape with
 `@lib/Narrow160` (the `uint160`-clipped pull vs. unclipped approve) and the G-4 floor
-arithmetic; `Permit3TransferLib` gates `amount <= type(uint160).max` and refuses the rest
+arithmetic; `Base._pullViaPermit3` (formerly `Permit3TransferLib`) gates `amount <= type(uint160).max` and refuses the rest
 rather than casting. Notional is the reminder that a width-cast that *wraps to a benign
 value* (zero) is worse than one that reverts: it fails open and the zero propagates as truth.
 

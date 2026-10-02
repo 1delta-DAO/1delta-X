@@ -83,6 +83,19 @@ pnpm -r test
 Some packages carry mainnet-fork suites that need an archive RPC. Deploy scripts
 must use the via-IR deploy profile — see [Optimization](/optimization/#the-eip-170-wall).
 
+## Lens functions added 2026-09-30
+
+- `SettlementLens.pinnedBump(order, filler, takerData)` — the bump a fill will pin,
+  captured in the same transaction BEFORE the fill; pair it with
+  `previewFillInFlightPinned(order, prevFilled, anchor, filler, pin)` from inside a
+  callback (`previewFillInFlight` is exact only for clock-priced orders).
+- `SettlementLens.CHECKS()` — the `SettlementLensChecks` contract the lens creates in
+  its constructor (the lens was split to fit EIP-170).
+- `SettlementLens.bumpFloorAdvised(order)` — whether a filler should pass a
+  `minBumpBps` floor for this order, and which price mover makes it necessary.
+- New `validateOrder` reasons: a stranded `minFillAnchor` tail, and invariant-only
+  consideration without a lifelong named filler.
+
 ## Limits and known gaps
 
 Stated plainly, so nothing reads as more finished than it is.

@@ -22,7 +22,10 @@ import {Permit3Base} from "./Permit3Base.sol";
 ///         `permitTake` and `permitTransferFrom` revert).
 ///
 ///         ⚠ ENFORCED ONLY OFF-CHAIN, in the SDK's `permit3nonce.ts`
-///         (`assertPermit3Nonce`, reached from `permit.ts` and `permit3.ts`),
+///         (`assertPermit3Nonce`, reached from the `permit.ts` / `permit3.ts`
+///         builders AND the typed-data, sign and encode paths —
+///         `permitWitnessTypedData`, `permitTakeTypedData`, `encodeFillWithPermit`,
+///         `encodePermitBatch`, `encodePermitTake`; audit 2026-09-30 G-TS_SIGN-12),
 ///         which namespaces the message kind into the top byte. NOTHING ON-CHAIN
 ///         ASSERTS IT: neither {SignedPermits.permitBatch} nor
 ///         {SignedPermits._permitTake} inspects the top byte, so a maker signing

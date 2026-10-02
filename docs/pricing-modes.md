@@ -257,10 +257,10 @@ function bump(
 
 | Module | Bump from | Notes |
 |---|---|---|
-| [`ChainlinkPeggedPriceModule`](../packages/modules/pricing/chainlink/src/ChainlinkPeggedPriceModule.sol) | a Chainlink feed | staleness **and** an absolute `[MIN, MAX]` plausibility band — a fresh-but-wrong feed (depeg, decimals misconfiguration) reverts the fill instead of pricing against it. Configured per (feed, staleness, band, scale, side, spread). |
-| [`RangePriceModule`](../packages/modules/pricing/range/src/RangePriceModule.sol) | `prevFilled / total` | the ladder: price varies along the VOLUME axis (1inch `RangeAmountCalculator`). Measured on `prevFilled`, so a solver knows the exact bump before submitting. |
-| [`CosignedQuotePriceModule`](../packages/modules/pricing/quotes/src/CosignedQuotePriceModule.sol) | an EIP-712 quote signed by a named cosigner | UniswapX's cosigner without the trusted party: the cosigner is an immutable of the instance, any maker may deploy one, any filler may present a quote, and the quote can only improve *within* the band. `takerData = filler(20) ‖ bumpBps(32) ‖ deadline(32) ‖ sig`. **`FALLBACK_BPS` is not maker protection** — `takerData` is filler-controlled and a pinned bump replaces the clock, so an unquoted fill clears at `FALLBACK_BPS` immediately with no decay ramp. Use `0` (unquoted → `start`, quote required to improve — the adversarial-safe UniswapX shape) unless you specifically intend `end` to be the price a filler can always take. |
-| [`ClockFlooredQuoteModule`](../packages/modules/pricing/quotes/src/ClockFlooredQuoteModule.sol) | the same quote, **floored by the dutch clock** | `min(quotedBump, clockBump)`, so a quote can only ever *improve* on plain dutch and never undercut it. Removes the `FALLBACK_BPS` footgun structurally — there is no fallback to misconfigure, because `min(anything, clock)` is the clock — and makes the cosigner safe to point at a third party the maker does not fully trust: absent, buggy, compromised and colluding all degrade to an ordinary dutch fill. Reads a **single linear segment** from `timing` (a module never receives `curve`/`params`, both of which are already inert under any `pricingModule`). ⚠ `decayDuration == 0` ⇒ ceiling 0 ⇒ no quote can extract anything; sign a window. |
+| [`ChainlinkPeggedPriceModule`](../packages/modules/pricing/chainlink/src/ChainlinkPeggedPriceModule.sol) | a Chainlink feed | staleness **and** an absolute `[MIN, MAX]` plausibility band — a fresh-but-wrong feed (depeg, decimals misconfiguration) reverts the fill instead of pricing against it. Configured per (feed, staleness, band, scale, side, spread, and an optional L2 sequencer-uptime feed + grace). **The anchor is the counterpart leg's WHOLE-ORDER amount** (SELL: `legsIn[0].start`, or the resolved `total` only for a Proportional marker; BUY: `legsOut[0].start`), not the fill denominator, so a `fillTotal` / `FullFillModule` order prices at the peg (2026-09-30 PRICE-1); a rising `legsIn[0]` is solved jointly (PRICE-1.v3); `NUM == 0` is rejected and a fair price truncating to 0 reverts `ImplausiblePrice` (PRICE-9). |
+| [`RangePriceModule`](../packages/modules/pricing/range/src/RangePriceModule.sol) | `prevFilled / total` | the ladder: price varies along the VOLUME axis (1inch `RangeAmountCalculator`). Measured on `prevFilled`, so a solver knows the exact bump before submitting. **Ascending only**: `START_BPS > END_BPS` reverts `DescendingRange` (2026-09-30 PRICE-3/4 — a descending ladder cleared a single full fill at the maker's worst point). |
+| [`CosignedQuotePriceModule`](../packages/modules/pricing/quotes/src/CosignedQuotePriceModule.sol) | an EIP-712 quote signed by a named cosigner | UniswapX's cosigner without the trusted party: the cosigner is an immutable of the instance, any maker may deploy one, any filler may present a quote, and the quote can only improve *within* the band. `takerData = filler(20) ‖ bumpBps(32) ‖ deadline(32) ‖ sig`. The quote typehash is `PriceQuote(bytes32 orderHash,address filler,uint256 bumpBps,uint256 deadline,uint256 prevFilled)`: a quote is valid only at the fill progress it was signed for (2026-09-30 PRICE-10, **BREAKING**; the fill SIZE and the settlement address cannot be bound — accepted). **`FALLBACK_BPS` is not maker protection** — `takerData` is filler-controlled and a pinned bump replaces the clock, so an unquoted fill clears at `FALLBACK_BPS` immediately with no decay ramp. Use `0` (unquoted → `start`, quote required to improve — the adversarial-safe UniswapX shape) unless you specifically intend `end` to be the price a filler can always take. |
+| [`ClockFlooredQuoteModule`](../packages/modules/pricing/quotes/src/ClockFlooredQuoteModule.sol) | the same quote, **capped by the dutch clock** | A QUOTED fill gets `min(quotedBump, clockBump)`: the quote can never give the filler more than plain dutch would at that moment. An UNQUOTED fill gets `0` — the maker's `start` (2026-09-30 PRICE-6; it used to get the clock, which made presenting no quote the filler's best response). So the winner must present its quote, and the cosigner stays safe to point at a third party the maker does not fully trust: absent or buggy degrades to `start`, and compromised or colluding can do no better than the clock. Quotes are bound to `prevFilled` like `CosignedQuotePriceModule`'s. Reads a **single linear segment** from `timing` (a module never receives `curve`/`params`, both of which are already inert under any `pricingModule`). ⚠ `decayDuration == 0` ⇒ ceiling 0 ⇒ no quote can extract anything; sign a window. |
 
 ---
 
@@ -342,7 +342,18 @@ can change independently of the clock. Two paired views close that:
   fill by that filler would price at right now, resolved exactly as the fill does
   (the pinned path for a module / priority order, the clock otherwise).
 - **`Settlement.fillUpTo(..., minBumpBps, ...)`** takes that value as a floor and
-  reverts `BumpTooLow` if the fill would price worse.
+  reverts `BumpTooLow` if the fill would price worse. The same floor exists on
+  `fillWithPermit`, `fillWithPermitTake` and `batchFill` (2026-09-30 PERIPH-1.v3);
+  plain `fill` has none.
+- **Through ERC-7683** the destination settler enforces per-leg `FillBounds` from
+  the origin quote, and a solver may add its own `FillerData{payTo, minBumpBps,
+  bounds}` (PERIPH-1).
+- **In flight** (a callback or module filler reading the price DURING the fill):
+  `SettlementLens.previewFillInFlight` is exact only for clock-priced orders. For a
+  price-module or priority order, capture `SettlementLens.pinnedBump(order, filler,
+  takerData)` in the same transaction before the fill and use
+  `previewFillInFlightPinned` — or take the typed callback's priced amounts
+  (2026-09-30 CORE-FILLER-5).
 
 ⚠ For a **priority auction** the bump is derived from `tx.gasprice`, so a default
 `eth_call` (gas price 0) quotes the *no-bid* bump — higher than any bid fill's.

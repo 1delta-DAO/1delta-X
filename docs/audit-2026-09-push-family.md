@@ -435,8 +435,12 @@ Now scaled by `forAmount / totalForAmount`, with the total as a new trailing wor
 (**BREAKING** for this module's blob), floored so slices under-retire rather than
 over-retire.
 
-**The Midnight unit-mixing lead — materially closed, not by a fork check.** There
-is no deployed Midnight anywhere in the tree, so the check was never performable;
+**The Midnight unit-mixing lead — materially closed, not by a fork check.** *(Closed
+as VERIFIED 2026-09-30, L-ML-7 / L-CENSUS-6: a Midnight deployment does exist — the
+Base singleton the package README names — and the deployed `repay` pulls exactly
+`units` of the loan token, so "1 unit == 1 loan token" holds and both Midnight repay
+modules are sound as written.)* At the time no deployed Midnight was read, so the
+check was not performed;
 the test double asserts the very equality in question. What actually mattered was
 the strand, and `sweepSurplus` removed it: the leak was `forAmount - toRepay`,
 loan tokens minus debt units. Both directions now fail safe — a discount is swept
@@ -460,7 +464,8 @@ short and reverts. Only the cap stays imprecise. Documented at the site.
 ### Still open
 
 - H-1's **token** and **consumption** axes, module-side only (8 bytes left).
-- Midnight's units-per-loan-token equality, if a deployment ever exists to read.
+- ~~Midnight's units-per-loan-token equality, if a deployment ever exists to read.~~
+  Verified 2026-09-30 against the Base deployment (see above).
 
 ### Verification
 
@@ -535,7 +540,11 @@ the reasoning is not obvious:
 - **`FluidPreFundTakeForModule` appears to leave an approval live.** `_returnUnused`
   returns early when `bal <= floor`. But `allowance == bal - floor` identically —
   the vault's only path out is that approval — so the early return happens exactly
-  when the allowance is already zero.
+  when the allowance is already zero. *(Corrected 2026-09-30, X-STATIC-1.v1: that
+  identity holds only for CONSERVING tokens. With a fee-on-transfer or otherwise
+  non-conserving token the balance can sit at or below the floor while the approval
+  is still live. `ExactlyRepayModule` and Fluid `_returnUnused` now clear the
+  approval unconditionally, and shapes rules 12 and 14 enforce the class.)*
 
 A third scan looked for value movement outside `safeTransfer`/`forceApprove`. One
 result: Fluid's just-in-time NFT custody, which pulls from and returns to
@@ -674,3 +683,44 @@ encoder. Cheap for preFund, not for these.
 
 The middle row is the interesting one: pre-fix the *module's* floor was the only
 thing stopping it, which is exactly the layering A + B was chosen for.
+
+## HEAD census (2026-09-30, audit L-CENSUS-6)
+
+The census above is superseded by the module merges and the PUSH-funded MAKE
+migration. Re-derived at the 2026-09-30 HEAD:
+
+- **Pre-fund MAKE: 16 contracts.** The 15 `*PreFundModule`s (Aave v2/v3/v4, Comet,
+  Compound v2, Exactly, Gearbox pool deposit, Liquity v2, Lista, Midnight, Morpho
+  Blue, River, Silo, Teller, Venus) plus **`ListaBrokerModule`'s pre-fund branch**,
+  which lives in a non-`PreFund` file — the file-glob blind spot this document
+  records twice. All 16 carry **S** (the `msg.sender == settlement` pin), **B**
+  (`requireLegRef`, `>> 253 == 5`) and **F** (`floorOf`, token-bound), via
+  `_gatePreFundMake`.
+- **Pre-fund TAKE_FOR: 4 contracts** — `AaveV3CreditModule`, `DolomiteOperatorModule`,
+  `EulerV2OperatorModule`, `FluidTakeForModule` — each with the spender pin and a
+  token-bound floor.
+- The 34 push contracts of the original census became those 15 one-sided MAKE
+  modules plus 4 composites: `AaveV3FusedModules` / `AaveV3LeverageModule` folded
+  into `AaveV3CreditModule` (with Borrow); the five `DolomiteModules` became
+  `DolomiteOperatorModule`; the Euler Taker/Batch/TakeFor/PushTakeFor contracts
+  became `EulerV2OperatorModule` (`EulerV2Modules.sol` keeps only Deposit/Repay);
+  Lista BrokerRepay moved from `ListaPreFundModule` into `ListaBrokerModule`.
+
+**The "one contract keeps one FUNDING shape" rule above is reversed, soundly.** All
+four TAKE_FOR contracts and `ListaBrokerModule` serve BOTH funding shapes, selected
+by descriptor bit 253 (`PreFundModuleBase._fundingShape`). That is sound because the
+two shapes cannot be confused: a pull blob opens with an address/op (`>> 253 == 0`)
+and a pre-fund blob with a descriptor (`>> 253 == 5`), each entrypoint asserts its
+own half (`requirePlainTake` / `requireLegRef`, shapes rule 1), the pre-fund branch
+takes its floor over the core-sized delivery the core has already bound to the leg
+(recipient AND token, `Base._forSlice`), and the pull branch spends only what it
+pulled from the maker in the same call. The floor is sound in a contract that also
+pulls because every payout is a same-call delta over a pre-call snapshot (I-16),
+not a whole-balance read.
+
+**Sweeps keyed on file names miss contracts.** `tools/check-module-shapes.py` rule 13
+now keys on the pre-fund SHAPE (`_gatePreFundMake` / `PreFundGuard.floorOf`), not
+on `*PreFundModules.sol`, so `ListaBrokerModule` is covered; any future census
+should do the same. The stale "`TAKE_FOR` item whose leg-reference descriptor points
+at it" / "the taker allowance below" headers were rewritten in the module packages
+(L-LRG-4c), and rule 13 keeps them from coming back.

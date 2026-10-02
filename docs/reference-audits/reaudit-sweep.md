@@ -32,7 +32,7 @@ Where to look:
   and state it in terms of *authority consumed*, not tokens moved.
 - anywhere the code says a duplicate/surplus is "returned to the maker" — that phrase
   is about assets, and is not an argument about allowances;
-- `Permit3TransferLib.transferFromWithFallback`: a failed Permit3 leg that falls back
+- `Base._pullViaPermit3` (formerly `Permit3TransferLib.transferFromWithFallback`): a failed Permit3 leg that falls back
   to a direct approval spends the *approval* instead — check which budget each path
   draws down;
 - the `uint160.max` infinite-allowance sentinel is a **masking** condition. Any test

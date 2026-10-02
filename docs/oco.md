@@ -60,6 +60,20 @@ switch**. `cancelOrders([7])` retires the entire bracket in one transaction,
 which is usually exactly what you want — and is a reason not to reuse that nonce
 for anything outside the group.
 
+**Amending a bracket member keeps the nonce** (2026-09-30 G-TS_SIGN-2). The SDK's
+`amendOrder` / `patchOrder` keep `prev.nonce` for a fill-once (shared-nonce) leg, so
+the replacement stays in the bracket and the first full fill of any member still
+retires the rest on-chain; leaving the group needs `{leaveNonceGroup: true}`. For
+hand-built sets, `assertNonceSiblingsFillOnce` is the lint: every order sharing a
+nonce must carry the fill-once bit, or a partial of one would burn the nonce and the
+group would not behave as a bracket (G-TS_SIGN-8, see
+[condition-trees.md](condition-trees.md)).
+
+**Matching.** Shared-nonce brackets are the MATCHABLE form: `OcoGroupModule` legs
+carry a SETTLE item, so they cannot be CoW-matched through `matchSettle` (which
+rejects SETTLE) nor filled through a `PostInputs` callback or
+`AggregatorFillSolver` (PRICE-12, accepted).
+
 ---
 
 ## 2. `OcoGroupModule` — the bracket that survives partial fills
@@ -88,7 +102,7 @@ import { ocoGroup } from "@1delta-x/sdk";
 const legs = ocoGroup([takeProfit, stopLoss, timeOut], OCO_MODULE, groupId);
 // each leg gains:
 //   validators += Validator(OCO_MODULE, abi.encode(groupId))
-//   items      += Item(SETTLE, OCO_MODULE, anchor, 0, abi.encode(groupId, nonce))
+//   items      += Item(SETTLE, OCO_MODULE, anchor, 0, abi.encode(groupId, nonce, minClaim))
 ```
 
 Both are inside the EIP-712 hash, so a solver can neither drop the validator
@@ -128,6 +142,19 @@ including the smallest partial.
 This is a deliberate trade of one wasted CALL argument for a fail-closed posture,
 and it is the right way round for a safety mechanism.
 
+### `minClaim` — the dust-kill floor (2026-09-30 PRICE-2)
+
+The first fill of ANY size claims the group, so before this floor anyone could
+retire a maker's stop-loss by filling **1 wei** of its take-profit sibling: the
+sibling's dust fill claimed the group, the stop-loss died, and the take-profit was
+left essentially unfilled. The claim blob therefore carries a third word,
+`abi.encode(groupId, nonce, minClaim)`: the fill that CLAIMS an untouched group must
+be at least `minClaim` (item units, i.e. anchor units for the SDK's anchor-sized
+item). `minClaim == 0`, a floor above the item amount, or the legacy 2-word blob
+fail validation (fail closed), and `minClaim = anchor` makes the claim whole-fill
+only. Once claimed, the winner fills on freely. The SDK's `ocoGroupItem` /
+`ocoGroupLeg` default `minClaim` to the anchor; pass a smaller floor deliberately.
+
 ### Composition
 
 `ocoGroupLeg` **appends** to `validators`, so a bracket leg keeps its own
@@ -140,6 +167,7 @@ const stopLoss = ocoGroupLeg(
   { ...order, validators: [chainlinkPriceLte(feed, floor)] },
   OCO_MODULE,
   groupId,
+  minClaim, // optional; defaults to the order's anchor (whole-fill claim)
 );
 ```
 
@@ -171,7 +199,11 @@ market or a pair.
 ## What this does not do
 
 - **It does not resize the survivor.** A 30% take-profit leaves a 100% stop-loss
-  dead, not a 70% one.
+  dead, not a 70% one. And only a claim of at least `minClaim` retires the siblings
+  (see above).
+- **It does not pick WHICH order fills.** OCO bounds how many execute; a filler
+  chooses which. It is not a way to retire a stale predecessor — use
+  `cancelOrder(prev)` ([soft-cancel.md](soft-cancel.md#cancel-and-replace)).
 - **It is not a substitute for cancellation.** A retired sibling is unfillable,
   but it still sits in books until they notice. Pair with a
   [soft cancel](soft-cancel.md), or let the `GroupClaimed` event drive eviction.

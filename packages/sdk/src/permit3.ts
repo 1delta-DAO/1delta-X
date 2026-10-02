@@ -155,7 +155,7 @@ export interface RevokeCall {
  * confused deputy. The returned calls all execute from the USER's own account.
  *
  * ⚠ THERE ARE TWO FUNDING SURFACES, AND CLEARING ONE IS NOT REVOKING.
- * `Permit3TransferLib.transferFromWithFallback` tries the Permit3 leg and, when it
+ * Settlement's `Base._pullViaPermit3` (formerly `Permit3TransferLib`) tries the Permit3 leg and, when it
  * fails for ANY reason — missing, capped, expired, or deliberately revoked — falls
  * through to a plain `token.transferFrom`. So for a payer who ALSO granted a direct
  * ERC-20 approval to the settlement, `lockdownAll` alone stops nothing: the fallback

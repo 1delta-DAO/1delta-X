@@ -7,16 +7,19 @@ venue sig replay) costs the maker nothing. An ERC20 `approve` to Permit3 is
 **once per token, forever** — it is shared by every order, venue, and flow that
 ever pays with that token, the same floor Permit2-based systems have.
 
-Everything in the "proven" column is pinned by a fork test that **revokes the
-approvals claimed unnecessary and asserts them zero before filling**.
+Everything in the "proven" column is pinned by a test that **revokes the approvals
+claimed unnecessary and asserts them zero before filling**. Most of those tests run
+on a mainnet (or L2) fork; the rows say so where a venue's proof is mock-only
+(2026-09-30 audit G-VENUE_B-8 / L-ML-7: this column used to call mock-only and
+nonexistent tests "fork-proven").
 
 ## The flow matrix
 
 | Flow | On-chain approvals | Signature-only | Proven |
 |---|---|---|---|
-| Swap & deposit / swap & repay | **1** — pay asset → Permit3 (reused forever) | order + Permit3 allowances + pacing taker grant (one `fillWithPermit` witness batch) | aave-v2/v3/v4, compound-v2/v3, venus, silo, exactly, gearbox, lista, morpho-blue, midnight, teller `PreFundOneSided` tests |
-| Borrow → swap (borrowed asset converted, output pushed to maker) | **0** token approvals; venue borrow authority (see channel table) | taker allowance; delegation is sig-replayed in-call on Aave v2/v3, Comet, Morpho Blue | borrowed asset flows protocol → Settlement → solver; output legs are pushed — no receive-side grant exists to give |
-| Withdraw → swap | **1** — receipt asset (aToken/cToken/share) → Permit3; **0 on Aave v3** (aToken EIP-2612 block replayed in-call) and on operator venues whose grant is signable (Comet `allowBySig`, Morpho `setAuthorizationWithSig`) | Permit3 module allowance + taker allowance | deleverage test (aave-v3) |
+| Swap & deposit / swap & repay | **1** — pay asset → Permit3 (reused forever). **Midnight is the exception**: the venue gates `supplyCollateral` and `repay` on `isAuthorized`, so the maker must also `setIsAuthorized` the pre-fund module (and the supply/repay modules and `MidnightLoopCallback` for those flows) — a grant that is full position control, re-delegation included (L-ML-1) | order + the Permit3 pay-asset allowance (one `fillWithPermit` witness batch). The pre-fund modules ride the MAKE seam: **no taker grant** | fork: aave-v2/v3/v4, compound-v2/v3, venus, silo, exactly, liquity-v2, lista, morpho-blue, river `PreFundOneSided` tests; gearbox pool `test_audit_L_LRG_5_poolPreFundDeposit_live` (`test/fork/AuditPoolLegsFork.t.sol`). Mock only: midnight `MidnightPreFundOneSidedTest` (its auth gate is fork-proven on Base by `test/fork/MidnightBaseFork.t.sol`), teller `test/unit/TellerPreFundModules.t.sol` (the repay clamp is fork-proven by `test/fork/TellerRepayClampFork.t.sol`) |
+| Borrow → swap (borrowed asset converted, output pushed to maker) | **0** token approvals; venue borrow authority (see channel table). Aave **v2** needs an on-chain `approveDelegation` (v2 debt tokens have no `delegationWithSig`) | taker allowance; delegation is sig-replayed in-call on Aave v3, Comet, Morpho Blue, Lista | borrowed asset flows protocol → Settlement → solver; output legs are pushed — no receive-side grant exists to give |
+| Withdraw → swap | **1** — on Aave v2/v3 a **direct aToken ERC-20 approval to the withdraw module** (not to Permit3; `lockdownAll` does not revoke it, the taker-book allowance still gates every pull), **0 on Aave v3** when the aToken EIP-2612 block (spender = the module) is replayed in-call; cToken/share receipts → Permit3; 0 on operator venues whose grant is signable (Comet `allowBySig`, Morpho/Lista `setAuthorizationWithSig`, Exactly share `permit`) | taker allowance | deleverage test (aave-v3); Aave v2 Exact/Full `test_audit_L_AAVE_5_exactWithdraw_live` / `test_audit_L_AAVE_5_fullWithdraw_live` |
 | Loop open with margin (equity X, borrow A, collateral B) | **1** — X → Permit3; plus the venue borrow authority | everything else — the X→A→B test settles with ONE maker signature total | `test_oneSignature_crossAssetOpen_XtoAB_onlyXApproved` |
 | Loop close with refund (withdraw → swap → repay; surplus refunded) | **1** — receipt asset → Permit3 (or 0, per the withdraw row) | taker allowances for withdraw + repay | `test_preFundDeleverage_onlyThePositionAssetIsApproved`; surplus (leftover collateral, or overshoot when swapping all collateral to the debt currency) is **pushed/swept** — the refund leg needs no grant by construction |
 
@@ -28,18 +31,32 @@ This meets the target contract exactly:
 - loop close with refund → only the lender withdrawal authority.
 
 On several venues it is **better** than the target, because the "lender
-authority" itself is a signature: Aave v2/v3 (`delegationWithSig`), Compound v3
-(`allowBySig`), Morpho Blue (`setAuthorizationWithSig`) are replayed in-call
-from the item's own signed data ({DelegationHelper}), and Aave v3 aToken pulls
-can ride an EIP-2612 block — those flows are **zero on-chain transactions**
-end to end (beyond the once-ever pay-asset approve).
+authority" itself is a signature: Aave v3 (`delegationWithSig`), Compound v3
+(`allowBySig`), Morpho Blue and Lista (`setAuthorizationWithSig`) and Euler (EVC
+`permit`) are replayed in-call from the item's own signed data
+({DelegationHelper}), and Aave v3 aToken pulls can ride an EIP-2612 block — those
+flows are **zero on-chain transactions** end to end (beyond the once-ever
+pay-asset approve). Aave **v2** is not among them: its debt tokens have no
+`delegationWithSig`, and `AaveV2BorrowModule` replays nothing (2026-09-30
+G-VENUE_B-7 / L-AAVE-4).
+
+⚠ **A replayed signature SETS a grant, it does not raise it** (2026-09-30 L-LIB-4).
+EIP-2612 `permit` and Aave `delegationWithSig` overwrite the allowance with the
+signed value, so the helpers skip the replay when the standing grant already covers
+the fill; append the optional trailing `signedValue` (the item total) to make a
+permit or delegation usable across partial fills. The boolean grants (Comet
+`allow`, Morpho/Lista authorization, EVC operator) are permanent and unscoped once
+installed. A published venue signature stays landable by anyone until its venue
+deadline, even after the order is cancelled; a plain revoke does not consume its
+nonce (see [gasless-permit-relay.md](gasless-permit-relay.md) and SECURITY.md).
 
 ## Venue authority channels (the value-out grant, and whether it signs)
 
 | Venue | Grant | Signable today |
 |---|---|---|
-| Aave v2 / v3 | `approveDelegation` per debt token | ✅ `delegationWithSig` replayed in-call |
-| Aave v4 | `setUserPositionManager` (position state) | on-chain |
+| Aave v2 | `approveDelegation` per debt token | on-chain `approveDelegation` only (no `delegationWithSig` on v2 debt tokens) |
+| Aave v3 | `approveDelegation` per debt token | ✅ `delegationWithSig` replayed in-call (`AaveV3CreditModule`) |
+| Aave v4 | spoke-wide `setUserPositionManager` **plus** a per-(spoke, reserveId, spender = module) `TakerPositionManager.approveWithdraw` / `approveBorrow` allowance — the grant that actually scopes what the module may take; `Full` withdraws need `approveWithdraw` ≥ the live position (max or padded) | the TakerPM grants are signable (`approveWithdrawWithSig` / `approveBorrowWithSig`) but **not replayed in-call** by the modules, so v4 has no zero-transaction borrow/withdraw (L-CV2-6 / L-CV2-3) |
 | Compound v3 | `allow(manager)` | ✅ `allowBySig` replayed in-call |
 | Morpho Blue | `setAuthorization` | ✅ `setAuthorizationWithSig` replayed in-call |
 | Lista (Moolah) | `setAuthorization` | ✅ `setAuthorizationWithSig` replayed in-call (deployed Moolah accepts Morpho's shape verbatim; only the domain VIEW is renamed `domainSeparator()`, an off-chain-signing detail) |
@@ -48,10 +65,12 @@ end to end (beyond the once-ever pay-asset approve).
 | Venus | `updateDelegate` | on-chain |
 | Silo | `setReceiveApproval` (borrow) / share approve (withdraw) | on-chain |
 | Exactly | `market.approve` share allowance (borrow & withdraw) | ✅ solmate EIP-2612 share `permit` replayed in-call (verified on the live Optimism markets; per-market domain separators, so no cross-market replay) |
+| Morpho Midnight | `setIsAuthorized(module, true, maker)` — **full position control, re-delegation included**, and required for **every** Midnight module (value-in too: `supplyCollateral` and `repay` are auth-gated) | on-chain (L-ML-1 / L-ML-8; `test/fork/MidnightBaseFork.t.sol`) |
 | Fluid | position-NFT approval (just-in-time custody) | on-chain (ERC-721) |
 | River | `setDelegateApproval` — ⚠ gates value-in too | on-chain |
 | Liquity v2 | per-trove `setAddManager` / `setRemoveManagerWithReceiver`; add-coll needs none while no add manager is set | on-chain |
-| Compound v2 / Teller / Gearbox pool | no borrow surface shipped; value-in permissionless | — |
+| Compound v2 / Gearbox pool | no borrow surface shipped; value-in permissionless | — |
+| Teller | no borrow surface shipped. Repay is permissionless (bound to the borrower: `getLoanBorrower(bidId) == maker`). The **pool deposit is Hypernative-firewalled** (`onlyOracleApprovedAllowEOA`): the module must be registered with the SCF oracle as a deploy step, it is not permissionless (L-CMT-7) | — |
 
 ## How many ADDRESSES hold the grant (2026-09-10)
 
@@ -116,21 +135,32 @@ fills lands it atomically by any of three existing routes:
 3. **`matchSettle`**: a `CALL` step through the executor, scheduled before the
    PULL of that input leg.
 
-The permit is idempotent-adjacent in practice (a front-run submission leaves
-exactly the allowance the fill wants — same reasoning as
-{DelegationHelper}'s best-effort replays), so route 1/2 callers should tolerate
-a reverting permit and proceed. The aToken EIP-2612 block for Aave withdrawals
-already rides in-module (`AaveV3WithdrawModule`'s optional permit block).
+A front-run submission leaves exactly the allowance the fill wants (the same
+reasoning as {DelegationHelper}'s best-effort replays), but **only route 1 can
+tolerate it**: a solver multicall can wrap `token.permit` in `try/catch`. Routes 2
+and 3 run the permit as the callback or a `CALL` step, and the executor bubbles
+any failure (`CallbackFailed`), so a front-run permit reverts the whole fill —
+those callers must retry without the permit (2026-09-30 X-SPEC-10). The aToken
+EIP-2612 block for Aave withdrawals already rides in-module
+(`AaveV3WithdrawModule`'s optional permit block; spender = the module).
 
 ## Residual venue-grant wiring — DONE (2026-09-03)
 
-- **Euler**: `DelegationHelper.replayEvcPermit` — a dynamic tail block after
-  `EulerV2OperatorModule`'s 128-byte {OpenData} head carrying one maker-signed EVC
-  `permit` whose self-call batch installs operator + controller + collateral in
-  the fill itself. Domain/typehash validated against the live EVC (note: the
-  EVC domain has NO `version` field); front-run of the lifted permit is
-  tolerated (best-effort replay, pinned by test). A fresh maker key opens a
-  levered Euler position with their transaction nonce still 0.
+- **Euler**: `DelegationHelper.replayEvcPermit` — a dynamic tail after
+  `EulerV2OperatorModule`'s 128-byte {OpenData} head carrying
+  `abi.encode(EvcPermit[])`: maker-signed EVC `permit`s whose self-call batches
+  install operator + controller + collateral in the fill itself, each replayed
+  independently. Since 2026-09-30 (L-ED-1) makers sign **`sender =
+  EulerV2OperatorModule`**, so a lifted permit can no longer be landed directly or
+  front-run at all (the earlier any-sender permit, and the "front-run tolerated"
+  note here, are superseded; so is the any-sender design in
+  [audit-2026-09-11-grant-merge.md](audit-2026-09-11-grant-merge.md) §8.4). Put the
+  long-lived operator grant in its own permit and nonce namespace, apart from the
+  per-order controller/collateral enables. Domain/typehash validated against the
+  live EVC (the EVC domain has NO `version` field). A fresh maker key opens a
+  levered Euler position with their transaction nonce still 0. EVC sub-accounts
+  are supported (L-ED-6): the maker grants operator/controller per sub-account,
+  and pulls and sweeps stay on the owner wallet.
 - **Lista**: the deployed Moolah accepts Morpho's `setAuthorizationWithSig`
   verbatim, so `replayMorphoAuth` is reused unchanged — optional tails on the
   fixed-term borrow and withdraw-collateral ops; front-run tolerance validated
@@ -147,7 +177,14 @@ already rides in-module (`AaveV3WithdrawModule`'s optional permit block).
   not fit). Front-run tolerated; withdraw tails require the `BalanceMode` slot
   to be encoded explicitly so the offset stays unambiguous.
 
-The remaining on-chain venue grants (Aave v4 `setUserPositionManager`, Venus
-`updateDelegate`, Dolomite `setOperators`, Silo `setReceiveApproval`, Fluid
-ERC-721, River `setDelegateApproval`, Liquity trove managers) have no signature
-variant on the deployed contracts — that is the venue's floor, not ours.
+- **Compound v3** (`allowBySig`): wired via `DelegationHelper.replayCometAllow` in
+  `CometTakerModule` (borrow @96, Exact withdraw @128, Full withdraw @160);
+  fork-proven by `test_audit_L_CMT_5_realCometAllowBySigLandedInFill`.
+
+The remaining on-chain venue grants (Aave v2 `approveDelegation`, Aave v4
+`setUserPositionManager` and the TakerPM allowances, Venus `updateDelegate`,
+Dolomite `setOperators`, Silo `setReceiveApproval`, Fluid ERC-721, River
+`setDelegateApproval`, Liquity trove managers, Midnight `setIsAuthorized`) are
+on-chain transactions: either the deployed contract has no signature variant (the
+venue's floor, not ours), or, for the Aave v4 TakerPM, the signature variant exists
+but no module replays it yet. Pre-fund modules need no taker allowance at all.

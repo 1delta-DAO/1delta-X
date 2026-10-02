@@ -318,8 +318,16 @@ Settlement are paid out by code that iterates the input legs; a proceeds token
 matching no input leg is permanently stranded. It cannot be stolen — every payout
 is bounded by a per-fill delta — but there is no sweep and no admin. The core
 cannot enforce this because the proceeds token is inside module-specific `data`
-it deliberately does not decode; order construction owns it, and a
-`MinBalanceInvariant` pins the outcome on-chain.
+it deliberately does not decode; order construction owns it. On `matchSettle` an
+un-attributed proceeds token that is in the plan's token universe is refunded to
+the maker; outside it, it strands as on `fill`. The primary guard is the lens rule:
+the TAKE recipient is the maker, or the proceeds token is in `legsIn`. A
+`MinBalanceInvariant` is an absolute floor and does NOT pin stranded proceeds —
+other inflows can satisfy it.
+
+**An invariant proves an end state, not a delivery.** An order with invariants and
+no output leg is fillable only by its named `exclusiveFiller`, for its whole life —
+enforced in the core for any invariant.
 
 **An uncapped balance-relative leg is an offer on the maker's whole holding** —
 hence the mandatory cap.
@@ -327,7 +335,9 @@ hence the mandatory cap.
 **Wallet legibility is a known cost.** Since the order's arrays became packed
 blobs, EIP-712 hashes each blob as one `keccak256`, so a signer prompt shows
 opaque hex rather than amounts, recipients and module addresses. The mitigation —
-an ERC-7730 descriptor plus a lens-side decoder — is not built.
+an ERC-7730 descriptor plus a lens-side decoder — is not built. Until it is, the
+front end must decode the order and show it out of band; makers should sign only
+from software they trust to do so.
 
 ## The external-corpus crosswalk
 

@@ -87,7 +87,12 @@ after `_executeItems` and BEFORE `_payInputsToSolver`, so the maker's wallet is
 drawn only once their signature has actually been consumed. Free on every other
 entry (a length test on empty `bytes`). This was the item to land before the bridge
 work: the old placement was safe only because every item op is atomically
-revertible, which a cross-chain message is not.
+revertible, which a cross-chain message is not. *(Corrected 2026-09-30, CORE-SIG-3:
+no EVM effect outlives a revert — a bridge message emitted in a reverted transaction
+is reverted with it. Items before the TAKE run unauthenticated under atomic revert;
+the real constraint is that nothing on that path may CATCH the revert or create a
+commit point. Note also that C4 (`fillWithPermitTake`) does not share `_fillCore`;
+see [edge-case-matrix.md](edge-case-matrix.md) axis C.)*
 
 ### B-3. ~~The funding leg's token is never bound~~ — **CLOSED IN THE LENS**
 
@@ -162,6 +167,14 @@ Three consequences:
 3. The buy-side pull happens BEFORE `onSell`, so by the time counterparty code runs
    the module's remaining allowance is the unspent budget — and re-entering to draw
    it still requires `onBuy`.
+
+**Addendum (2026-09-30, L-ML-1).** A re-read of `morpho-org/midnight`
+`supplyCollateral` (L519) and `repay` (L497) shows both are AUTH-gated
+(`onBehalf == msg.sender || isAuthorized[onBehalf][msg.sender]`), confirmed on the
+Base singleton `0xAded…A18A` (an unauthorised call reverts `0x82b42900`). So the
+Midnight swap&deposit/repay flows are NOT grant-free: every Midnight module, the
+pre-fund module and `MidnightLoopCallback` need the maker's `setIsAuthorized`. The
+module docs and the mock were corrected (`test/fork/MidnightBaseFork.t.sol`).
 
 **`MidnightSupplyCollateralModule`'s comment was wrong** and has been corrected. It
 claimed "any external account can call `take` designating THIS module as the payer,
@@ -281,8 +294,9 @@ free and prevents the class; changing the ledger is a real change to a hot path 
 should be justified on its own merits, not smuggled in as a doc fix.
 
 **B-2 is the one to do before the bridge work lands.** `fillWithPermitTake`'s safety
-is atomic-revert, and it is void the moment an item op acquires an effect that
-outlives the transaction. A cross-chain message is precisely that.
+is atomic-revert. *(Corrected 2026-09-30, CORE-SIG-3: it is void only if something
+on the path can catch the revert or commit early; a cross-chain message sent from a
+reverted transaction is reverted too.)*
 
 ## ~~Phase 3 — needs a decision before any code~~ — **DONE**
 

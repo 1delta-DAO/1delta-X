@@ -22,12 +22,12 @@ everything.
 |---|---|
 | `legsIn[]` / `legsOut[]` | Multi-asset baskets on both sides. Each leg is `(token, start, end)`; output legs additionally carry their own `recipient`. `legsIn[0].start` may instead carry a **balance-relative marker** — see below. |
 | `side` (SELL/BUY) | SELL = fixed inputs, decaying outputs, anchored on `legsIn[0].start`. BUY = fixed outputs, rising inputs, anchored on `legsOut[0].start`. |
-| `items[]` | Ordered list of maker-signed module calls: `MAKE`, `TAKE`, `SETTLE`. |
-| `timing` | Three `uint32` clocks packed into one word (decay start, decay duration, exclusivity end), the item-ordering policy in bits `[96:100)`, fill-once (100), side (101), **BLOCK clock (102)** and **PRIORITY auction (103)**. |
+| `items[]` | Ordered list of maker-signed module calls: `MAKE`, `TAKE`, `TAKE_FOR`, `SETTLE`. |
+| `timing` | Three `uint32` clocks packed into one word (decay start, decay duration, **exclusivity end**), the item-ordering policy in bits `[96:100)`, fill-once (100), side (101), **BLOCK clock (102)**, **PRIORITY auction (103)**, **delta-verify delivery (104)**, and the order **expiry** in `[160:208)`. |
 | `curve` | Optional piecewise-linear decay shape (`CurvePoint[]`); empty = single linear segment. |
 | `params` | One word holding the four auction scalars: soft-exclusivity bps, gas-bump bps, gas price reference, and the **priority-fee scale**. |
 | `pricingModule` | Optional **external price provider** (`IPriceModule`) — oracle-pegged, range, or cosigner-quoted pricing. `0x0` = the built-in clock. |
-| `exclusiveFiller` / `params` override bps | Hard exclusivity (only that filler until the deadline) or soft (anyone may jump the queue by improving the maker's leg by N bps). |
+| `exclusiveFiller` / `params` override bps | Hard exclusivity (only that filler until `exclusivityEndTime`) or soft (anyone may jump the queue by improving the maker's leg by N bps). The window is `timing` bits `[64:96)` and **needs an end time: `0` means NO window at all** — the opposite of the expiry sentinel, where an unset `0` kills the order. Two exceptions hold for the order's whole life regardless of the window: delta-verify orders and orders with invariants but no output leg are fillable ONLY by `exclusiveFiller` ([SECURITY.md](SECURITY.md) invariants 11–12). |
 | `minFillAnchor` | Anti-dust floor per fill. |
 | `validators` / `invariants` | AND-composed pre-execution triggers and post-execution invariants (staticcall only). |
 | `fillModule` / `fillTotal` | Fill denominator decoupled from a fungible leg, for indivisible or exotic units. |
@@ -71,10 +71,11 @@ All in [`Core.sol`](packages/core/src/settlement/Core.sol) /
 |---|---|
 | `fill(order, sig, amount)` | The hot path. Overload with `takerData` for orders whose validators/fill module need a filler-supplied blob. |
 | `fillWithCallback(...)` | Solver callback in two positions: `PreDelivery` (works for any order) or `PostInputs` (item-free; just-in-time liquidity out of the fill's own proceeds). |
-| `fillWithPermit(...)` | Fill with a Permit3 batch bound to the order hash as a witness — no prior on-chain approval needed. |
-| `batchFill(...)` | Several independent single-order fills in one transaction. |
-| `fillSelf(...)` | The maker fills its own order (fixed price by construction). |
-| `fillUpTo(...)` | Aggregator/router integration entry. Clamps to remaining size (race-tolerant) and returns full both-sides accounting `(delta, received, paid)`; `recipient` redirects payment only, never authority. `minBumpBps` is the filler's price floor on the resolved decay bump (`0` = off; quote it via `SettlementLens.previewBump`) — one scalar guards every leg because leg prices are monotone in the shared bump; reverts `BumpTooLow` below it. |
+| `fillWithPermit(order, batch, sig, fillAmount, minBumpBps, takerData)` | Fill with a Permit3 batch bound to the order hash as a witness — no prior on-chain approval needed. One 6-argument entry since 2026-09-30. A partial first fill can be continued past `batch.deadline` (a spent permit nonce is a verified no-op). |
+| `fillWithPermitTake(order, permitTake, sig, fillAmount, minBumpBps)` | One-shot signed TAKE transfer as the order's authorization. |
+| `batchFill(...)` | Several independent single-order fills in one transaction; the `takerDatas` overload carries a per-order `minBumpBps` array. |
+| `fillSelf(...)` | The `onlySelf` trampoline `batchFill` calls for each order (it is NOT a maker self-fill entry; external callers use `fill` / `fillUpTo`). |
+| `fillUpTo(...)` | Aggregator/router integration entry. Clamps to remaining size (race-tolerant; **except** a Proportional order, whose request is never trimmed — pass `type(uint256).max` or it reverts `OverFill`) and returns full both-sides accounting `(delta, received, paid)`; `recipient` redirects payment only, never authority. `minBumpBps` is the filler's price floor on the resolved decay bump (`0` = off; quote it via `SettlementLens.previewBump`) — one scalar guards every leg because leg prices are monotone in the shared bump; reverts `BumpTooLow` below it. The same floor exists on `fillWithPermit`, `fillWithPermitTake` and `batchFill`; plain `fill` has none. `type(uint256).max` resolves to the remainder on every entry, and a fill module may not return more than the filler asked for (`OverFill`). |
 | `matchSettle(MatchPlan)` | Netted N-order settlement — see [§6](#6-netted-settlement-matchsettle). |
 
 **Delegated signing**
@@ -112,7 +113,8 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
 |---|---|---|---|---|
 | `MAKE` | maker deposits/repays | maker's funding token → protocol | no | 1 CALL |
 | `TAKE` | maker borrows/withdraws | maker's position → `recipient` | no | 1 CALL via Permit3 |
-| `SETTLE` | generic solver↔maker exchange | maker's asset → filler, or filler's → maker | **yes** | 1 CALL, pay-per-use |
+| `TAKE_FOR` | composite position op funded by a core-sized leg | maker's position → `recipient`, funding sized from a signed `legsOut` reference | no | 1 CALL via Permit3 |
+| `SETTLE` | generic maker → filler exchange | maker's asset → filler (**never** the filler's asset: a SETTLE module must not pull from the filler, shapes rule 10) | **yes** | 1 CALL, pay-per-use |
 | `fillModule` | the fill denominator (a scalar) | nothing (view) | no | 1 STATICCALL, or 0 |
 
 - **`data` is opaque and signed.** Each module decodes its own protocol-specific
@@ -131,13 +133,22 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
 - **Fill modules shipped**: [`FullFillModule`](packages/modules/fill/src/FullFillModule.sol)
   (all-or-nothing) and [`TwapFillModule`](packages/modules/fill/src/TwapFillModule.sol)
   (one signed order releasing on a TWAP schedule).
+- **A purchase is legs plus an ownership invariant, not a SETTLE item.** Buying an
+  NFT is the payment as an input leg and an `Erc721OwnerInvariant` /
+  `Erc1155BalanceInvariant` / `MinBalanceInvariant` checking the result. An
+  invariant proves an END STATE, not a delivery, so such an order with no output
+  leg is fillable only by its named `exclusiveFiller` (enforced in the core since
+  2026-09-30, VAL-1); alternative offers for the same asset should share a
+  fill-once nonce.
 - **Settlement modules shipped**: [`NftSettlementModule`](packages/modules/nft/src/NftSettlementModule.sol)
-  (ERC-721 to whoever fills — an open solver set, no exclusivity),
+  (the maker's ERC-721 to whoever fills — an open solver set; data
+  `(collection, tokenId, total)`, full-fill only),
   [`Erc1155SettlementModule`](packages/modules/nft/src/Erc1155SettlementModule.sol),
   [`OcoGroupModule`](packages/modules/oco/src/OcoGroupModule.sol) (one-cancels-other,
   below).
 - **Escape hatch**: [`PermissionlessCallModule`](packages/modules/maker/src/PermissionlessCallModule.sol)
-  executes one arbitrary maker-signed contract call as a MAKE item.
+  executes one arbitrary maker-signed contract call as a MAKE item; a caller
+  bounty is forwarded to the maker when `CallSpec.bountyToken` names it.
 
 ---
 
@@ -160,9 +171,11 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
   This is the correct setting for self-solving, migrations, and exact rebalances.
 - **Balance-relative sizing.** A SELL anchor may be signed as bps-of-balance
   rather than an absolute amount, resolved once at fill time against the maker's
-  live balance and capped by the leg's `end`. Whole-fill only, and best filled
-  through `fillUpTo`, whose clamp both resolves the size and bounds the solver
-  against a stale quote. See [docs/proportional-legs.md](docs/proportional-legs.md).
+  live balance and capped by the leg's `end`. Whole-fill only. Fill it with
+  `type(uint256).max` (`fillUpTo` or any entry): the sentinel resolves to the live
+  size, and since 2026-09-29 `fillUpTo` never TRIMS a proportional request, so any
+  other amount reverts `OverFill` unless it matches exactly. Bound the price with
+  `minBumpBps`. See [docs/proportional-legs.md](docs/proportional-legs.md).
 - **Block clock** (`timing` bit 102). The decay clocks count BLOCKS instead of
   seconds. UniswapX moved its V3 reactor to a block clock for the same reason: on a
   chain with 250ms blocks, a one-second timestamp tick is eight blocks of
@@ -190,9 +203,9 @@ Three module kinds, one uniform trust rule (`msg.sender == settlement`, or
 
   | Module | Prices from | Parity with |
   |---|---|---|
-  | [`ChainlinkPeggedPriceModule`](packages/modules/pricing/chainlink/src/ChainlinkPeggedPriceModule.sol) | a Chainlink feed, with staleness **and an absolute plausibility band** | oracle-pegged limit orders |
-  | [`RangePriceModule`](packages/modules/pricing/range/src/RangePriceModule.sol) | the fill-progress axis (`prevFilled/total`) | 1inch `RangeAmountCalculator`, ladders |
-  | [`CosignedQuotePriceModule`](packages/modules/pricing/quotes/src/CosignedQuotePriceModule.sol) | an EIP-712 quote signed by a named cosigner, carried in `takerData` | UniswapX's cosigner — without the trusted party |
+  | [`ChainlinkPeggedPriceModule`](packages/modules/pricing/chainlink/src/ChainlinkPeggedPriceModule.sol) | a Chainlink feed, with staleness, **an absolute plausibility band** and an optional L2 sequencer-uptime feed; anchored on the counterpart leg's whole-order amount, so `fillTotal` orders price at the peg | oracle-pegged limit orders |
+  | [`RangePriceModule`](packages/modules/pricing/range/src/RangePriceModule.sol) | the fill-progress axis (`prevFilled/total`), ascending only (`DescendingRange`) | 1inch `RangeAmountCalculator`, ladders |
+  | [`CosignedQuotePriceModule`](packages/modules/pricing/quotes/src/CosignedQuotePriceModule.sol) / [`ClockFlooredQuoteModule`](packages/modules/pricing/quotes/src/ClockFlooredQuoteModule.sol) | an EIP-712 quote signed by a named cosigner, carried in `takerData`, bound to fill progress (`prevFilled`); an unquoted ClockFloored fill clears at `start` | UniswapX's cosigner — without the trusted party |
 
   **A module returns a BUMP, never an amount**, and the core clamps it to
   `[0, 10000]` before mapping it through each leg's own signed `start`/`end`. So a
@@ -239,7 +252,8 @@ output leg names its own recipient, so a fee is one more signed `LegOut`:
 No fee switch, no protocol owner, no cap registry — the fee is a maker-signed
 delivery a solver can neither inject nor redirect.
 
-⚠ It is **not** legible in the wallet prompt, though. Since the legs moved to a
+⚠ It is **not** legible in the wallet prompt, though (see the SECURITY.md caveat
+"Wallets show packed order fields as opaque hex"). Since the legs moved to a
 packed `bytes` encoding, EIP-712 hashes each blob as one `keccak256`, so a signer
 UI shows six opaque hex blobs rather than amounts, recipients and module addresses.
 That is the accepted cost of the packed encoding (six keccaks instead of
@@ -305,18 +319,28 @@ everything. `OR` and `NOT` are available *within* one order through
 
 | Contract | Passes when |
 |---|---|
-| `ChainlinkPriceGte` / `ChainlinkPriceLte` | fresh feed price ≥ / ≤ threshold (rejects `price <= 0`, `answeredInRound < roundId`, and staleness beyond the signed heartbeat) |
-| `ChainlinkTickFloorValidator` | the signed tick is within tolerance of the live oracle rate |
+| `ChainlinkPriceGte` / `ChainlinkPriceLte` | fresh feed price ≥ / ≤ threshold (rejects `price <= 0`, `answeredInRound < roundId`, and staleness beyond the signed heartbeat; an optional trailing `(uptimeFeed, gracePeriod)` pair adds the L2 sequencer check — sign it on every rollup) |
+| `ChainlinkTickFloorValidator` | the signed tick is within tolerance of the live oracle rate (a Proportional `legsIn[0]` is priced at its cap) |
 | `TimestampValidator` | `notBefore ≤ block.timestamp ≤ notAfter` |
 | `PredicateStaticCall` | an arbitrary staticcall returns non-zero |
 | `FillerWhitelistValidator` | the filler is on a curator's list (registry + validator in one) |
-| `FillerAttestationValidator` | the filler presents a valid off-chain attestation bound to the order |
+| `FillerAttestationValidator` | the filler presents a valid off-chain attestation bound to the order (a foreign or malformed `takerData` envelope reads false, so it composes in OR groups) |
 | `ConditionTreeValidator` | a maker-signed boolean expression over other validators holds — `OR` and `NOT` inside one order, in disjunctive normal form ([docs](docs/condition-trees.md)) |
-| `MinBalanceInvariant` | the account ends the fill holding ≥ a floor (aggregator-style min-return / FoT protection) |
+| `MinBalanceInvariant` | the account ends the fill holding ≥ a floor (aggregator-style min-return / FoT protection; an ABSOLUTE floor — it does not prove this fill delivered) |
 | `Erc721OwnerInvariant` / `Erc1155BalanceInvariant` | the maker ends the fill owning the NFT / ≥ N units |
 
-Validators are **filler-aware** (`validate(order, filler, data)`), which is what
-makes whitelist and attestation gating expressible. `staticcall` forbids state
+Invariants prove an end state, not a delivery: with no output leg, only the named
+`exclusiveFiller` may fill (core rule plus `InvariantReceiptGuard` in the shipped
+invariants).
+
+Validators are **filler-aware** (`validate(order, filler, data, takerData)`), which
+is what makes whitelist and attestation gating expressible. ⚠ The filler they see is
+**Settlement's immediate `msg.sender`**. Listing or attesting a permissionless
+filler CONTRACT (an open `AggregatorFillSolver`, the `BaseFlashSolver` family, an
+open `GuardedMatchSolver`, `DestinationSettler7683`) admits every caller of that
+contract, and a used attestation is public and replayable through it until expiry.
+List only EOAs or operator-gated solvers; the SDK's `fillerListingWarnings` helper
+flags the mistake (2026-09-30 VAL-5). `staticcall` forbids state
 mutation, logs, and re-entrancy, so a broken validator can do nothing worse than
 return the wrong boolean. Arbitrary filler-supplied inputs reach validators
 through a single signed `takerData` channel.
@@ -340,7 +364,12 @@ neither touching the core:
   N-way brackets, and AND-composes with each leg's own trigger. The claim is a
   SETTLE item because SETTLE is the one op that **reverts** on a zero pro-rata
   slice instead of skipping it, so a misconfigured bracket fails loudly rather
-  than silently opening up.
+  than silently opening up. The claim blob is `(groupId, nonce, minClaim)`: the
+  claiming fill must be at least `minClaim`, so a 1-wei fill of a sibling can no
+  longer retire a stop-loss (2026-09-30 PRICE-2). OCO bounds HOW MANY of the orders
+  execute, not WHICH: it does not retire a stale predecessor (use `cancelOrder`).
+  Bracket legs cannot be CoW-matched or PostInputs-filled; the shared-nonce bracket
+  is the matchable form.
 
 See [docs/oco.md](docs/oco.md).
 
@@ -353,9 +382,9 @@ See [docs/oco.md](docs/oco.md).
 - **Permit3** ([`packages/core/src/permit3/`](packages/core/src/permit3/README.md))
   extends the Permit2 model with a **second allowance book** for position-pulling
   operations (borrow, withdraw, unstake, claim, vault redeem) that don't fit the
-  ERC20 `transferFrom` shape. Both books are **spender-keyed**: a standing
-  allowance can only be consumed by Settlement, which then enforces the
-  maker-signed recipient. Includes signed allowance grants
+  ERC20 `transferFrom` shape. Both books are **spender-keyed**: the taker book is
+  keyed `(user, spender, module, ref)`, and a maker's standing allowance can only be
+  consumed by Settlement, which then enforces the maker-signed recipient. Includes signed allowance grants
   (`permitBatch(WithWitness)`), one-shot signed transfers, and `revokeToken` /
   `revokeTaker` / `lockdown`.
 - **Uniform module gate.** TAKE modules require `msg.sender == permit3`; MAKE and
@@ -396,7 +425,10 @@ See [docs/oco.md](docs/oco.md).
   TSTORE/TLOAD.
 - **Fee-on-transfer stance is explicit**: simple single-order swaps of FoT tokens
   work (the receiving party nets the post-fee amount); `matchSettle` relies on
-  balance-delta pool accounting and **reverts safely** rather than mis-settling.
+  balance-delta pool accounting and either reverts (`BatchNotWhole`) or absorbs the
+  fee into the MATCHER's own residual — it does not always fail closed, but an
+  honest maker is never short-changed (2026-09-30 X-SPEC-6). Double-entry-point
+  tokens are out of scope for `matchSettle` and delta-verify (X-TOKENS-2).
   A maker wanting a hard floor attaches `MinBalanceInvariant` (absolute, fixed at
   signing) or opts into **delta-verify delivery** (`timing` bit 104), which turns
   the signed output into a true net-of-fee floor measured inside the fill.
@@ -416,15 +448,15 @@ position.
 
 | Lender | Package | Delegation primitive | Status |
 |---|---|---|---|
-| Aave V2 | [`aave-v2`](packages/modules/lending/aave-v2) | `approveDelegation` · aToken approve | ✅ |
+| Aave V2 | [`aave-v2`](packages/modules/lending/aave-v2) | on-chain `approveDelegation` only (no `delegationWithSig` on v2) · aToken approve | ✅ |
 | Aave V3 (+ Spark, Seamless, forks) | [`aave-v3`](packages/modules/lending/aave-v3) | same — pool-agnostic, forks need no new code | ✅ |
-| Aave V4 | [`aave-v4`](packages/modules/lending/aave-v4) | hub/spoke position manager | ✅ |
+| Aave V4 | [`aave-v4`](packages/modules/lending/aave-v4) | spoke `setUserPositionManager` + TakerPM `approveWithdraw`/`approveBorrow` | ✅ |
 | Compound V2 (+ forks) | [`compound-v2`](packages/modules/lending/compound-v2) | cToken approve | ✅ pool-agnostic |
 | Venus | [`venus`](packages/modules/lending/venus) | `updateDelegate` + `enterMarkets` | ✅ |
 | Compound V3 (Comet) | [`compound-v3`](packages/modules/lending/compound-v3) | `allow(manager)` | ✅ |
 | Euler V2 | [`euler-v2`](packages/modules/lending/euler-v2) | EVC `setAccountOperator` | ✅ |
 | Morpho Blue | [`morpho-blue`](packages/modules/lending/morpho-blue) | `setAuthorization` | ✅ |
-| Morpho Midnight | [`morpho-midnight`](packages/modules/lending/morpho-midnight) | `setIsAuthorized` | ✅ order-book |
+| Morpho Midnight | [`morpho-midnight`](packages/modules/lending/morpho-midnight) | `setIsAuthorized` (every module, value-in too; full control incl. re-delegation) | ✅ order-book |
 | Fluid | [`fluid`](packages/modules/lending/fluid) | just-in-time position-NFT custody | ✅ |
 | Dolomite | [`dolomite`](packages/modules/lending/dolomite) | `setOperators` | ✅ |
 | Silo V2 | [`silo`](packages/modules/lending/silo) | `setReceiveApproval` · share allowance | ✅ |
@@ -433,7 +465,7 @@ position.
 | River (Satoshi) | [`river`](packages/modules/lending/river) | diamond `setDelegateApproval` | ✅ CDP |
 | Liquity V2 (+ forks) | [`liquity-v2`](packages/modules/lending/liquity-v2) | per-trove add/remove managers | ✅ CDP |
 | Gearbox V3 | [`gearbox-v3`](packages/modules/lending/gearbox-v3) | pool ERC-4626 · `setBotPermissions` | 🟡 pool solid, credit best-effort |
-| Teller V2 | [`teller`](packages/modules/lending/teller) | permissionless value-in only | 🟡 deposit + repay |
+| Teller V2 | [`teller`](packages/modules/lending/teller) | value-in only; repay bound to the loan's borrower; pool deposit Hypernative-firewalled (register the module) | 🟡 deposit + repay |
 
 Adding a lender is one package implementing the single-op module interfaces —
 no registry, no whitelist, no settlement change, no solver update. A maker just
@@ -443,10 +475,10 @@ references the new module address in the order it signs.
 
 | Package | What it does |
 |---|---|
-| [`modules/erc4626`](packages/modules/erc4626) | Generic ERC-4626 vault withdraw/redeem as a TAKE module. |
-| [`modules/transfer`](packages/modules/transfer) | `ERC20PermitTransferModule` — EIP-2612 permit replayed inside the fill. `ProportionalSweepModule` — SETTLE item sweeping a capped bps of the maker's balance of an extra token to the filler, the multi-token half of balance-relative orders. |
+| [`modules/erc4626`](packages/modules/erc4626) | Time-locked ERC-4626 withdraw in two orders: a MAKE request (Phase 1) and a full-fill TAKE claim (Phase 2, data `(vault, requestId, minAssets, totalAmount)`). |
+| [`modules/transfer`](packages/modules/transfer) | `ERC20PermitTransferModule` — gasless transfer, EIP-2612 permit replayed inside the fill, full-fill only. `ProportionalSweepModule` — SETTLE item sweeping a capped bps of the maker's balance of an extra token to the filler, the multi-token half of balance-relative orders (a fractional bps needs `(token, marker, total)` and is full-fill only). |
 | [`modules/redeem/usdrif`](packages/modules/redeem/usdrif) | USDRIF exit path: `RedemptionSettledValidator` (MoC op executed *and* cleared) + optional `MocPriceBandValidator` (bands the MoC RIF↔USDRIF quote; **not** a peg guard — see that package's README). |
-| [`modules/bridge`](packages/modules/bridge/README.md) | Cross-chain orders over Across, LayerZero OFT and **Circle CCTP** — see [§11](#11-cross-chain). |
+| [`modules/bridge`](packages/modules/bridge/README.md) | Cross-chain orders over Across, LayerZero OFT and **Circle CCTP V2** (V1 is halted 2026-12-01; the floor is `amount - maxFee`) — see [§11](#11-cross-chain). |
 
 ---
 
@@ -470,7 +502,12 @@ references the new module address in the order it signs.
   most of Across's flow arrives that way, so this exists for **distribution**: an
   existing solver fleet resolves and fills our orders through the interface it
   already speaks. `orderId` is the EIP-712 order hash (no second id space);
-  `minReceived`/`maxSpent` come from the same `previewFill` the fill prices with.
+  `minReceived`/`maxSpent` come from the same `previewFill` the fill prices with,
+  priced for `DestinationSettler7683` (the real Settlement-level filler, so soft
+  windows include the outsider premium and hard windows are not broadcast), and are
+  **ENFORCED** per unit by the destination (`FillPayload` bounds, `BoundExceeded`).
+  Solvers may pass `FillerData{payTo, minBumpBps, bounds}`. SETTLE-item and
+  delta-verify orders are not carried.
   **Escrow-free**, which is the one deviation: `open`/`openFor` verify liveness
   (signature, order deadline, nonce) and broadcast rather than take custody, because
   maker funds move only at fill time under the maker's own Permit3 allowances — the
@@ -487,15 +524,28 @@ references the new module address in the order it signs.
   position, with an automatic fall back to sweep when a re-supply would revert
   (supply caps, frozen/paused reserves, isolation mode).
 
-**Reference solvers** ([`packages/solvers`](packages/solvers/README.md)) — hold
-no funds between fills:
+**Reference solvers** ([`packages/solvers`](packages/solvers/README.md)). Each
+defends its balance one of three ways — a balance floor, delta-scoped per-fill
+approvals plus operator gating (`AggregatorFillSolver`), or operator gating plus
+owner budgets (`UsdrifInventorySolver`); the flash family relies on holding nothing
+between fills (exhaustive sweeps, SETTLE items refused). See SECURITY.md:
+
+| Order shape | Zero-inventory filler |
+|---|---|
+| plain legs | `AggregatorFillSolver.executeFill`, every flash solver |
+| item-bearing (TAKE early, wallet-funded MAKE late) | `AggregatorFillSolver.executeItemFill` (one-order `matchSettle` plan; not SETTLE, TAKE_FOR, PUSH-funded MAKE or delta-verify) |
+| PermitBatchWitness, first fill | every flash solver via the permit envelope (SDK `encodeFlashPermitEnvelope`); `AggregatorFillSolver` takes later slices only |
+| SETTLE items | an EOA or a contract that forwards arbitrary tokens — not the flash family |
+
 
 - `BaseFlashSolver` — the shared flash → fill → swap → repay machinery.
 - Single-input leverage solvers, one per flash provider: **Balancer v2, Aave v3,
   Morpho Blue, Euler EVK**, plus a Morpho Midnight variant.
 - Multi-input and multi-output variants for basket orders.
 - `MatchRaceGuard` / `GuardedMatchSolver` — cheap-loss guard for contested
-  `matchSettle` races.
+  `matchSettle` races (`filled` only; `settleMatchWithNonces` adds the nonce
+  guard). Constructor `(settlement, operators)`; PRESEND plans refused. Never name
+  an open instance as `exclusiveFiller`, in a `FILLER_SET` or a filler-keyed gate.
 - `UsdrifInventorySolver` — the principal (inventory-holding) case, for fills
   whose recycle leg cannot complete inside the fill transaction.
 
@@ -536,14 +586,17 @@ source and the position owner:
 | destination orders | swap only — items forbidden | swap **or** leverage |
 | authorised by | bridged commitment → on-chain `approveOrder` | owner signature → EIP-1271 |
 | bridge payload | 64-byte commitment | none (plain transfer) |
-| stray funds | liability accounting + `sync` + owner rescue | owner withdraws |
-| refunds | permissionless `settle` after a deadline | withdraw, any time |
+| stray funds | liability + `sync`; owner rescue of ANNOUNCED orphans only, a timelocked stray rescue for the rest | owner withdraws |
+| refunds | permissionless `settleExpired` after a (finite) deadline | withdraw, any time |
+| cancellation | none (deadline / fallback only) | owner `cancelOrder` via `execute` |
+| tokens | exact-transfer, non-rebasing only (`enableToken`) | any |
 | cost | none | ~60k one-off clone per user per chain |
 
 `FunnelGrantModule` supplies **just-in-time allowances** as items, so a funnel
 can run a leverage order with no standing approvals of any kind. Grants can only
 create a Permit3 allowance (never transfer, never call), are sized to the item's
-pro-rata slice, and expire in the current block.
+pro-rata slice, and expire in the current timestamp second. Inbox-committed
+Across deposits are full-fill only.
 
 ---
 
@@ -556,8 +609,9 @@ bytecodes across all EVM versions, so cross-chain portability reduces to PUSH0 +
 MCOPY and the `evm_version` is a global choice: **`cancun`**, which puts 38 of 43
 surveyed chains in one address family.
 
-Settlement exceeds the EIP-170 legacy limit by ~4.5KB, so the core deploy profile
-compiles via-IR (23,228 bytes); `make size-check` enforces it.
+Settlement exceeds the EIP-170 legacy limit, so the core deploy profile compiles
+via-IR (**24,311 / 24,576** bytes after the 2026-09-30 remediation, measured from a
+clean `out/core-deploy`); `make size-check` enforces it and CI runs it clean.
 
 ---
 
@@ -566,7 +620,8 @@ compiles via-IR (23,228 bytes); `make size-check` enforces it.
 Stated plainly, so nothing here reads as more finished than it is.
 
 - **Fee-on-transfer / rebasing tokens** — supported only for simple single-order
-  swaps. `matchSettle` reverts on them by design. Nominal amounts are reported in
+  swaps. On `matchSettle` they revert `BatchNotWhole` or are absorbed by the
+  matcher's residual. Nominal amounts are reported in
   `filled` and `OrderFilled`, so those figures are pre-fee.
 - **Gearbox credit accounts** — shipped best-effort and unvalidated (bot
   permission bitmask, account resolution, multicall fund flow). The PoolV3
@@ -577,10 +632,15 @@ Stated plainly, so nothing here reads as more finished than it is.
   the fixed-term broker borrow is delegable.
 - **Term Finance** — structurally incompatible (sealed-bid asynchronous
   clearing, no delegation surface, `msg.sender`-scoped repay).
-- **Fork test coverage** — several newer packages (silo, exactly, lista, river,
-  liquity-v2, gearbox-v3, teller) compile and pass their security gates, but the
-  full fork suites await an RPC endpoint in `foundry.toml`. Each package README
-  flags its own unvalidated assumption.
+- **Fork test coverage** — the fork suites read their RPC from environment
+  variables (`ETH_RPC_URL`, `OPTIMISM_RPC_URL`, `BASE_RPC_URL`, `BSC_RPC_URL`,
+  `RSK_RPC_URL`, `HYPEREVM_RPC_URL`) and fall back to public endpoints; CI runs every
+  package, `-fork` profiles included. Some modules are still mock-only against their
+  venue (Midnight pre-fund, Teller pre-fund, the Teller pool deposit: no verified
+  live pool); each package README flags its own unvalidated assumption.
+- **`maxStaleness` does not cover an L2 sequencer outage.** Sign the optional
+  `(uptimeFeed, gracePeriod)` pair on the Chainlink validators on every rollup; the
+  pegged price module takes it as constructor arguments.
 - **Oracle *validators* check freshness, not plausibility** (the *price module*
   does — `ChainlinkPeggedPriceModule` carries a maker-signed `[MIN, MAX]` band, so
   this gap now applies only to the trigger validators). `ChainlinkRead`
@@ -601,10 +661,11 @@ Stated plainly, so nothing here reads as more finished than it is.
   remainder of an order the delegate already part-filled. Same caveat as EIP-1271
   makers. `cancelOrder`, nonce cancellation, the deadline and Permit3 revocation
   all still bind. See [docs/delegated-signers.md](docs/delegated-signers.md).
-- **EIP-170 headroom is ~390 bytes, and it was bought with `optimizer_runs`.** The
-  2026-08 pricing/signing features put Settlement over the cap at
-  `optimizer_runs = 20000`; the deploy profile now compiles at **400**, which
-  restores roughly the margin the contract had before them. That step costs runtime
+- **EIP-170 headroom is 265 bytes (24,311 / 24,576), and it was bought with
+  `optimizer_runs`.** The 2026-08 pricing/signing features put Settlement over the
+  cap at `optimizer_runs = 20000`; the deploy profile now compiles at **100**
+  (lowered from 400), which restores roughly the margin the contract had before
+  them. That step costs runtime
   gas on the deployed contract, and the size below 400 is flat, so there is nothing
   left in that dial. The measured curve and the three restructurings that returned
   ~3.3KB are in [`foundry.toml`](foundry.toml) and
@@ -613,7 +674,8 @@ Stated plainly, so nothing here reads as more finished than it is.
   is inlined ~8× and pays 8× for every byte. Modules and periphery cost nothing here.
 - **The committed gas baseline does not measure the deployed contract.** `make gas`
   runs `[profile.core]` (legacy codegen, `optimizer_runs = 20000`); production
-  deploys `[profile.core-deploy]` (via-IR, 400). The two were always slightly
+  deploys `[profile.core-deploy]` (via-IR, 100); `make test-deployed` runs the core
+  suite against the via-IR artifacts for correctness, not gas. The two were always slightly
   different; since 2026-08 they differ by the optimizer step as well. A via-IR gas
   baseline needs a test profile that skips the ~900KB `LenderRegistry` data
   contract — worth building, not built.
@@ -625,5 +687,8 @@ Stated plainly, so nothing here reads as more finished than it is.
   [docs/](docs/README.md) are current.
 - **Breaking signing-format changes** — the 2026-07 audit changed the encoding
   for Gearbox, Liquity, ERC4626 claims, composite items, and every
-  `BalanceMode.Full` taker leg; two of those fail *silently* if missed. Read
-  SECURITY.md's breaking-change section before touching an encoder.
+  `BalanceMode.Full` taker leg; the 2026-09-30 audit changed the Settlement fill ABI
+  (`fillWithPermit`, `minBumpBps` floors) and many module blobs (OCO, quotes,
+  sweep, transfer, NFT, Lista, Midnight, Liquity, Fluid, Exactly, Euler, bridge
+  specs). The order typehash is unchanged. Read SECURITY.md's breaking-change
+  section before touching an encoder or a filler.

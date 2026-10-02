@@ -90,7 +90,12 @@ Confidence 90 · agents 1/12
 a loan": below zero, the rest is debt against whatever else the sub-account holds.
 Every other venue's Exact withdraw reverts on a short position (aToken transfer,
 ERC-4626 burn, Morpho underflow); Comet — the one sibling with the same semantics
-— guards it with `WouldBorrow`. So a `Withdraw` grant for X was economically a
+— guards it with `WouldBorrow`. *(Corrected 2026-09-30, L-CV2-1 / L-CV2-1.v1 /
+L-CV2-1.v3: that premise is FALSE for the Aave v4 spoke and Exactly
+`withdrawAtMaturity`, which clamp, and Venus with a treasury fee delivers short.
+Those Exact branches now carry `FullFillGuard.requireDelivered` or a position
+pre-check; see the corrected `requireDelivered` NatSpec and
+[audit-2026-09-30-full-tree.md](audit-2026-09-30-full-tree.md).)* So a `Withdraw` grant for X was economically a
 `Borrow` grant for X once the supply dropped below X (partial liquidation is
 permissionless; the filler picks the timing), and the module header's "a grant for
 `Borrow` cannot be spent on a `Withdraw`" containment was broken by the venue
@@ -180,7 +185,8 @@ for the same reason. **BREAKING**: `abi.encode(vault, requestId, minAssets,
 totalAmount)`; a three-word blob reverts `PartialFillUnsupported`.
 `RangePriceModule.bump` samples at `prevFilled` rather than integrating over the
 slice, so a START>END band clears a whole order at the maker's `end` in one fill —
-bounded by the signed floor; left open (a design choice, documented).
+bounded by the signed floor; left open (a design choice, documented). *(Fixed
+2026-09-30, PRICE-3/PRICE-4: descending ranges are rejected, `DescendingRange`.)*
 
 Leads fixed alongside:
 
@@ -214,7 +220,7 @@ Open leads, by convergence:
   bound against a per-fill slice — every partial fill reverts. Documented as
   deliberate in `ProratedBound` (a FLOOR applied unscaled fails closed); left.
   `_scaledFace` (1) uses `forAmount / total` as the fill fraction, which conflates
-  price decay with progress on a decaying funding leg.
+  price decay with progress on a decaying funding leg. *(Fixed 2026-09-30, L-FSE-2.)*
 - **14 pre-fund deposit ops** (3) still discard the floor (`requireDelivered` only,
   no sweep) where `AaveV3PreFundModule._supply` moved to `floorOf` + `sweepSurplus`.
 - **Fee-on-transfer funding token** (2): with residue ≥ fee the floor lets the venue
@@ -223,7 +229,9 @@ Open leads, by convergence:
   since honest fills no longer accrete the residue it needs.
 - Single-lens: PULL/BALANCE funding shapes not token-bound (self-harm only);
   `AggregatorFillSolver` filler identity laundering through the permissionless
-  `executeFill`, non-anchor input legs stranded; `Core.fillUpTo` proportional shrink after quote; `Batch._openGated`
+  `executeFill` *(documented/accepted at the validator layer 2026-09-30, VAL-5:
+  filler-keyed gates see Settlement's immediate `msg.sender`; list only EOAs or
+  operator-gated solvers)*, non-anchor input legs stranded; `Core.fillUpTo` proportional shrink after quote; `Batch._openGated`
   proportional-anchor griefing; `_creditItemProceeds` NatSpec overclaim;
   `BaseFlashSolver` residue claimable; `PositionFunnel.enableToken` permissionless
   unlimited grant; `ChainlinkPeggedPriceModule` anchor units on `fillTotal` orders;
@@ -231,7 +239,12 @@ Open leads, by convergence:
   per-slice ceil; `ProportionalSweepModule` marker compounding; `Pricing.inputOwed`
   fixed-BUY rounding; `NftSettlementModule` non-zero partial slice; negated
   `FLAG_TRY` leaf gas-flippable; `GuardedMatchSolver` PRESEND lands on the wrapper;
-  stranded Fluid NFT drainable via a no-op `factory`.
+  stranded Fluid NFT drainable via a no-op `factory`. *(2026-09-30: the pegged
+  anchor on `fillTotal` (PRICE-1), ProportionalSweep compounding (MISC-MOD-1), the
+  NFT partial slice (MISC-MOD-2), the gas-flippable negated TRY leaf (VAL-2), the
+  GuardedMatchSolver PRESEND (CORE-MATCH-1), `BaseFlashSolver` residue (FLASH-3 /
+  X-SPEC-7), the `_creditItemProceeds` NatSpec (CORE-ITEMS-2), the Fluid NFT via a
+  no-op factory (L-FSE-1) and the non-anchor input legs (AGG-2) are fixed.)*
 
 ## Comparables
 

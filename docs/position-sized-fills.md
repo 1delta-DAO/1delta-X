@@ -237,6 +237,13 @@ Two properties make this a universal recipe rather than a special case:
 - **Re-submitting the returned `delta` *is* the staleness bound.** It costs nothing
   on orders where size is fixed, and on this one it is exactly the protection
   `fillUpTo`'s clamp would have given if module orders went through it.
+- **The core caps the module at YOUR request too** (2026-09-30 CORE-FILLER-2): a
+  fill module returning `delta > fillAmount` now reverts `OverFill` on every entry,
+  so no module can upsize the filler's request. Callers of all-or-nothing modules
+  pass `type(uint256).max` (resolved to the remainder by the core) or the
+  remainder. A module can tell the lens probe from the real call (`msg.sender`
+  differs), so the preview is advice, not a guarantee — the resubmitted `delta` and
+  `minBumpBps` are the guarantees.
 
 Pinned end to end by `test_fillerRecipe_probeWithFillTotal_thenSubmitTheDelta`, which
 asserts the preview's `paid`/`received` match the executed fill exactly.

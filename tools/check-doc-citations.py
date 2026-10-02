@@ -28,6 +28,17 @@ Designs that are documented but deliberately unbuilt, and historical names a
 README keeps on purpose, are listed in `README_NAME_OK` with the reason; the
 README itself must also say so.
 
+Third pass — LAYOUT OFFSETS IN DOCS MATCH THE CODE (audit 2026-09-30 L-CENSUS-4 /
+L-CENSUS-7 / L-LIB-6). Module READMEs and `docs/gasless-permit-relay.md` are the
+encoder spec integrators actually read (the SDK ships few builders), and both had
+drifted from the code by whole words: a README put a `BalanceMode` at 160 where the
+code reads it at 192, and the relay doc put every signature tail one word early. In
+a table row naming a module (first backticked `…Module` / `…Callback`), every `@N`
+offset must be an offset that contract's code reads (`replay*(data, N` /
+`readBalanceMode(data, N` / `data[N:` …) or that its header byte map — itself held
+to the code by shapes rule 9b — names. In the relay doc the rule is stricter: an
+`@N` must be an offset at which that contract replays a signature.
+
 Usage:  python3 tools/check-doc-citations.py [docs/foo.md ...]
 """
 import re
@@ -153,6 +164,74 @@ def check_module_readmes() -> tuple[int, list[str]]:
     return len(readmes), failures
 
 
+_SHAPES = None
+
+
+def _shapes():
+    global _SHAPES
+    if _SHAPES is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("shapes", ROOT / "tools" / "check-module-shapes.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SHAPES = mod
+    return _SHAPES
+
+
+REPLAY_OFFSET = re.compile(r"\breplay\w*\(\s*data\s*,\s*([^,]+),")
+NUM = re.compile(r"(?<![0-9A-Za-z_])(\d{2,3})(?![0-9])")
+
+
+def contract_offsets() -> dict:
+    """{contract: (all offsets the code reads or the header names, replay offsets)}."""
+    shapes = _shapes()
+    out = {}
+    for sol in (ROOT / "packages").rglob("src/**/*.sol"):
+        if "node_modules" in str(sol):
+            continue
+        src = sol.read_text(encoding="utf-8")
+        code = shapes.strip_comments(src)
+        for name, _inh, body, header in shapes.contract_spans(code, src):
+            used = set()
+            for a, b in shapes.DATA_OFFSET_READ.findall(body):
+                used.update(int(x) for x in NUM.findall(a or b))
+            replay = set()
+            for m in REPLAY_OFFSET.finditer(body):
+                replay.update(int(x) for x in NUM.findall(m.group(1)))
+            named = set(int(x) for x in NUM.findall(header))
+            prev = out.get(name, (set(), set()))
+            out[name] = (prev[0] | used | replay | named, prev[1] | replay)
+    return out
+
+
+SUBJECT = re.compile(r"`([A-Z][A-Za-z0-9]+(?:Module|Callback))`")
+AT_OFFSET = re.compile(r"@\s*(\d{2,3})(?![0-9])")
+
+
+def check_layout_offsets() -> list[str]:
+    offsets = contract_offsets()
+    failures = []
+    targets = [(r, False) for r in sorted((ROOT / "packages" / "modules").rglob("README.md"))]
+    targets.append((ROOT / "docs" / "gasless-permit-relay.md", True))
+    for doc, replay_only in targets:
+        if not doc.exists():
+            continue
+        for ln, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.lstrip().startswith("|"):
+                continue
+            m = SUBJECT.search(line)
+            if not m or m.group(1) not in offsets:
+                continue
+            allowed, replay = offsets[m.group(1)]
+            pool = replay if replay_only else allowed
+            for n in (int(x) for x in AT_OFFSET.findall(line)):
+                if n not in pool:
+                    kind = "replays no signature at" if replay_only else "neither reads nor documents"
+                    failures.append(f"{doc.relative_to(ROOT)}:{ln}: `{m.group(1)}` {kind} offset {n}")
+    return failures
+
+
 def main() -> int:
     tests = existing_tests()
     if not tests:
@@ -166,6 +245,7 @@ def main() -> int:
     failures = [f for d in docs for f in check(d, tests)]
 
     n_readmes, readme_failures = check_module_readmes()
+    layout_failures = check_layout_offsets()
 
     print(f"{len(tests)} test functions in tree; checked {len(docs)} docs, {n_readmes} module READMEs")
     if failures:
@@ -180,9 +260,15 @@ def main() -> int:
               "table, and check whether the SEAM it documents moved too), or it documents an\n"
               "unbuilt design or a deliberately-kept historical name: say so in the README\n"
               "and add the name to README_NAME_OK with the reason.")
-    if failures or readme_failures:
+    if layout_failures:
+        print(f"\n{len(layout_failures)} documented layout offset(s) do not match the code:\n")
+        for f in layout_failures:
+            print("  " + f)
+        print("\nThe README / relay-doc row is an encoder spec. Re-derive the offset from the\n"
+              "contract (its header byte map is held to the code by shapes rule 9b).")
+    if failures or readme_failures or layout_failures:
         return 1
-    print("all doc-to-test citations resolve; all module README contract names exist")
+    print("all doc-to-test citations resolve; all module README contract names exist; documented layout offsets match the code")
     return 0
 
 

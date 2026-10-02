@@ -83,9 +83,20 @@ Both are load-bearing, and conflating them is the bug:
   order it holds names *this* maker. Without this, a perfectly valid signature
   over somebody else's order hash would evict it.
 
-Hashes the node has never seen are skipped rather than remembered. Pre-empting an
-order that may never arrive would hand an attacker a free denial channel against
-orders the node has not even verified.
+Hashes the node has never seen leave a **maker-bound pending tombstone**, keyed by
+`(hash, maker)` (2026-09-30 G-TS_FILLER-2): when the order arrives later, it is
+dropped only if its maker is the one who signed the cancel, so a squatter cannot
+pre-empt somebody else's order. Pending tombstones are capped per maker (1024),
+live no longer than the admission `maxTtlSeconds`, and are evicted before real
+tombstones once the book passes `maxTombstones`, so a flood of cancels for unseen
+hashes cannot flush a real one. Store backfill replays **cancels, then orders,
+then replaces**, so a restarted node does not relist a cancelled or replaced order
+(G-TS_FILLER-3; see [waku-orderbook.md](waku-orderbook.md)).
+
+`CancelVerifier` accepts: a 65- or 64-byte (EIP-2098) ECDSA signature from the
+maker or an ECDSA delegate, a contract-delegate envelope, and a direct EIP-1271
+signature from a contract maker. It does **not** accept ERC-6492 / ERC-8010
+wrapped signatures or a bulk (Merkle) root.
 
 ### What it does not do
 
@@ -94,6 +105,12 @@ chooses to submit it**, and no off-chain message can. It stops the order being
 *served*. That is enough for the hundreds of routine retractions and not enough
 for the one that matters — for which the on-chain cancels above are the answer,
 and the reason all five primitives exist rather than one.
+
+**Frontend guidance** (2026-09-30 G-TS_SIGN-4). A UI must require the maker's
+signature for a soft cancel and must never evict an order locally on an unsigned
+"cancel" click. After a soft cancel it should keep the order listed as **hidden but
+still fillable until expiry**, and offer the on-chain cancel (`cancelOrders` /
+`cancelOrder`) right next to it.
 
 ```ts
 import { softCancelOrders } from "@1delta-x/sdk";
@@ -121,19 +138,29 @@ only if it verified, so the book never passes through a state where the maker ha
 neither order live. A failed replacement leaves the predecessor exactly where it
 was.
 
-**The replacement always carries a fresh nonce.** Reusing the predecessor's is
-tempting — one on-chain cancel would then retire both — and it is wrong: nonce
-cancellation is retroactive and total, so cancelling the amended order would also
-invalidate fills the partially-filled predecessor is still owed. A fresh nonce
-keeps them independent, which is what "replace" means everywhere else.
+**An ordinary replacement carries a fresh nonce, and the SDK enforces it**
+(`patchOrder` / `amendOrder` throw on a same-nonce replacement, 2026-09-30 PRICE-5).
+Reusing the predecessor's is tempting — one on-chain cancel would then retire both —
+and it is wrong: nonce cancellation is retroactive and total, so cancelling the
+amended order would also invalidate fills the partially-filled predecessor is still
+owed. A fresh nonce keeps them independent, which is what "replace" means everywhere
+else.
+
+**A fill-once (shared-nonce) replacement KEEPS the predecessor's nonce**
+(G-TS_SIGN-2): that is what keeps it in the bracket, so the first full fill of any
+member retires the rest on-chain. Leaving the group needs `{leaveNonceGroup: true}`.
 
 The consequence is stated rather than hidden: after an amend, the old order is
 retracted only from books that honour the soft cancel. When that is not
 acceptable — a real re-price in a fast market — pair the amend with an on-chain
 `encodeCancelOrder(prev)`, which retires exactly that one order and leaves any
-nonce siblings alone. Or sign the pair as an [OCO group](oco.md), and the
-predecessor is retired **on-chain** by the replacement's first fill, with no
-transaction and no trust in any book.
+nonce siblings alone.
+
+**An [OCO group](oco.md) is NOT a substitute here** (corrected 2026-09-30,
+PRICE-13). OCO bounds HOW MANY of the orders execute, not WHICH: a filler holding
+the stale predecessor — exactly what a re-price in a fast market makes profitable —
+fills it first, and the group then retires the REPLACEMENT. When the predecessor
+must not fill, use `cancelOrder(prev)`.
 
 ⚠ An OCO leg's claim item names the order's nonce a second time, and the
 contract binds the two (`OcoGroupModule.validate` fails unless the item encodes

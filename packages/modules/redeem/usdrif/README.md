@@ -86,7 +86,9 @@ Net: skip it for an order that fills within seconds, carry it on a resting one.
   minimumGasPrice per RSKIP-412 — the fee does NOT track `tx.gasprice`, so pin
   it with `vm.fee` in fork tests). `recipient` must equal `msg.sender`.
 - Operations execute FIFO via `MocQueue.execute(...)`, which is restricted to the
-  multi-collateral guard — the fork tests impersonate it. `firstOperId` advances
+  multi-collateral guard — the fork tests impersonate it. The guard's own
+  `execute()` is **permissionless**, so anyone can drain the queue, inside any
+  external call (2026-09-30 RIF-1/RIF-2; see SECURITY.md M-8). `firstOperId` advances
   past **dequeued** ops, which is enough for off-chain tracking; the on-chain
   validator uses the stricter `opersInfo(opId).operType == 0` (executed *and*
   deleted), since a dequeued op may have errored and refunded.

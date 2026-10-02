@@ -22,7 +22,10 @@ in progress, and it lists its open items.
 
 **Class C12 · Medium · by design, mitigated off-chain**
 
-`Permit3TransferLib.transferFromWithFallback` attempts the Permit3 leg with a
+`Permit3TransferLib.transferFromWithFallback` (since 2770c45 `Base._pullViaPermit3`;
+the library was deleted on 2026-09-30, P3-2, and its 6.1 `uint160` guard is pinned by
+`test_audit_P3_2_amountExceedsUint160_reverts` and
+`test_audit_P3_2_legAboveUint160_refusedOnFill`) attempts the Permit3 leg with a
 low-level call and, on **any** failure, falls through to a direct
 `token.transferFrom`. Because the failure is not discriminated, the direct
 allowance is consulted when the Permit3 grant is missing, too small, expired, *or
@@ -199,6 +202,14 @@ ignored it. It now uses it, so "sell 100% of my stETH at the Chainlink rate" wor
 and preview and fill agree by construction rather than by two implementations
 happening to match. Only this one module read legs raw; the other three pricing
 modules were checked and do not.
+
+*(2026-09-30: two follow-ups. The fix itself regressed — anchoring on the fill
+DENOMINATOR made every `fillTotal` order clear at the maker's floor (PRICE-1, now
+anchored on the counterpart leg's whole-order amount). And a VALIDATOR sibling read
+the same marker raw: `ChainlinkTickFloorValidator` reverted on every Proportional
+order; it now prices a Proportional `legsIn[0]` at its signed cap and refuses an
+uncapped or zero cap, `UncappedProportional` (X-ARITH-1.v1,
+`test_audit_X_ARITH_1_v1_tickFloor_pricesAtCap_andRefusesUncapped`).)*
 `packages/modules/pricing/chainlink/test/ProportionalPeggedPrice.t.sol`, 5 tests.
 
 ### F9 — The lens conflated the settler's two lifecycle axes
@@ -410,6 +421,9 @@ are now unreachable from that function. Costs **7 bytes** of Settlement, against
 The residual constraint is stated on `NonceManager.SIGNER_NONCE_NS`: an order must
 not use a nonce with bit 255 set. Deliberately **not** enforced on the fill path — a
 range check there taxes every fill forever to guard a range no allocator picks.
+*(Superseded: since F24 the core does revert `OrderNonceReserved` for such an order,
+and the SDK allocates with `randomOrderNonce()`, which can never set bit 255 —
+2026-09-30 G-TS_SIGN-11.)*
 
 Pinned by `test_signerPermit_cannotCancelALiveOrder` plus the two disjointness tests
 either side of it.
@@ -467,9 +481,10 @@ all where Close has always had one, so a short pull stranded the difference
 permanently along with a live vault allowance over it.
 
 **Fixed** by measuring a delta over a `floor` snapshotted before the pull:
-`DustHandler.disposeResidual` gains a floor-aware overload (the old signature is
-retained and delegates with `floor = 0`, so the ten sibling packages compile
-unchanged), Fluid gains `FluidBase._returnUnused`, and Open/`takeFor` gain the
+`DustHandler.disposeResidual` gains a floor-aware overload (the old signature was
+retained and delegated with `floor = 0`, so the ten sibling packages compiled
+unchanged; that zero-floor overload was DELETED on 2026-09-30, L-LIB-7 / X-STATIC-4 —
+the floor is now a required parameter, `test_audit_L_LIB_7_recycleSweepsOnlyAboveFloor`), Fluid gains `FluidBase._returnUnused`, and Open/`takeFor` gain the
 sweep they lacked. The invariant enforced is now "the module ends where it
 started", not "the module ends empty".
 
@@ -489,7 +504,11 @@ to the MODULE's receipt balance or the USER's position:
 | shape | packages | verdict |
 |---|---|---|
 | `withdraw(asset, type(uint256).max, address(this))` after pulling the user's receipt tokens | **aave-v2, aave-v3** | **defective** — donated receipts inflate `received` and are swept to `onBehalfOf` |
-| withdraw scoped to the user (`supplied`, `vBal`, `maxWithdraw(onBehalfOf)`, `collateralBalanceOf(onBehalfOf)`, `getAccountWei(onBehalfOf)`, `redeem(cBal)`) | aave-v4, compound-v2, compound-v3, venus, euler-v2, silo, morpho-blue, exactly, dolomite, lista, gearbox-v3, midnight | clean |
+| withdraw scoped to the user (`supplied`, `vBal`, `previewRedeem(balanceOf(onBehalfOf))`, `collateralBalanceOf(onBehalfOf)`, `getAccountWei(onBehalfOf)`, `redeem(cBal)`) | aave-v4, compound-v2, compound-v3, venus, euler-v2, silo, morpho-blue, exactly, dolomite, lista, gearbox-v3, midnight | clean |
+
+*(2026-09-30 G-VENUE_B-9: this row used to say `maxWithdraw(onBehalfOf)` for
+Silo/Gearbox/Exactly. Their `positionOf` is `previewRedeem(balanceOf(user))`, the
+RAW position; `maxWithdraw` is a reachability figure capped by liquidity.)*
 
 Both defective sites now subtract the module's pre-existing receipt balance before
 the sweep, saturating so a rounding wei cannot underflow-panic — the `require` stays
@@ -917,9 +936,14 @@ only after `_settleForward` returned, i.e. after `_openFill` had written state,
 items had dispatched to maker-supplied modules, and `_payInputsToSolver` had drawn
 the maker's wallet. Four lenses attacked that and found no live exploit: the
 deferred check plus atomic revert closes every path. It is nonetheless safe only
-BECAUSE every item op is atomically revertible, and that stops being true the
-moment one acquires an effect outliving the transaction — a cross-chain message, a
-bridge-inbox item, an off-chain-consumed event. The assertion now sits immediately
+BECAUSE every item op is atomically revertible. *(Corrected 2026-09-30, CORE-SIG-3:
+the earlier wording said this "stops being true the moment one acquires an effect
+outliving the transaction — a cross-chain message, a bridge-inbox item, an
+off-chain-consumed event". No EVM effect outlives a revert — a bridge message or
+event emitted in a reverted transaction is reverted with it. Items before the TAKE
+do run unauthenticated, under atomic revert; the real constraint is that nothing on
+that path may CATCH the revert or create a commit point (a `try/catch` around the
+fill, a nested call that settles before the outer check).)* The assertion now sits immediately
 after `_executeItems` and BEFORE the input pull, so authorization gates the pull
 rather than being audited once the money has moved. Zero cost elsewhere: on every
 other entry the blob is never set and this is a length test on empty `bytes`.
@@ -953,7 +977,7 @@ comment was load-bearing for someone:
 | `Structs.sol` | `params` bits `[160:256)` free | `baselinePriorityFeeWei` occupies `[160:208)` — and this map is where a new field gets placed from |
 | `OrderGates.anchorTotal` | `0` "leaves the leg uncapped" | `Proportional.resolve` reverts `ProportionalNeedsCap`; a `0` makes every fill revert |
 | `Core.fillUpTo` | "time moves the bump filler-ward" | true only on a rising curve; a descending segment is a fourth maker-ward mover, and the advice steered fillers into skipping the floor that protects them |
-| `MidnightLoopCallback` | a thin `minCollateralOut` "simply fails Midnight's solvency check" | the check is against the WHOLE position, so a borrower with headroom can be sandwiched for it while the fill succeeds |
+| `MidnightLoopCallback` | a thin `minCollateralOut` "simply fails Midnight's solvency check" | the check is against the WHOLE position, so a borrower with headroom can be sandwiched for it while the fill succeeds. *(2026-09-30 L-ML-4: callback word 3 is now `minRateWad`, a per-take RATE, so the floor scales with each take — `test_audit_L_ML_4_partialTakesHonourTheRate`.)* |
 | Aave v3 / v4 withdraw byte maps | no `totalAmount` field | `FullFillGuard` requires one and fails closed without it — a maker encoding `Full` from those maps signed an unfillable order |
 
 The last row is the one with a live consequence: the maps are what an integrator
@@ -1018,7 +1042,10 @@ immutable: the attack never touches Settlement.
 **The contrast that makes the diagnosis precise.** `GearboxCreditAuth` survives the
 identical attack — not because it is careful, but because its caller-supplied
 `creditAccount` is *also* the dispatch parameter, so the real facade re-validates
-it. Fluid survives because the real vault consults its own immutable factory.
+it. Fluid survives because the real vault consults its own immutable factory —
+*which held only for NFTs the module did not already own: a module-resident NFT was
+claimable through a fake factory until the custody modules pinned the VaultFactory
+(2026-09-30 L-FSE-1, `test_audit_L_FSE_1_fakeFactory_cannotDrainResidentPosition`)*.
 Liquity was the one place where the oracle and the dispatch target could decouple.
 **Where those two can decouple, a caller-supplied root is never sufficient.**
 
@@ -1042,7 +1069,7 @@ constant in `data` is an AMOUNT; nobody applied the same reasoning when it is a
 | --- | --- | --- |
 | `ExactlyTakerModule` (`borrowAtMaturity`) | `maxAssets` | max — **fails OPEN** |
 | `LiquityV2TakerModule` (`withdrawBold`) | `maxUpfrontFee` | max — **fails OPEN** |
-| `ExactlyTakerModule` (`withdrawAtMaturity`), `ExactlyDepositModule` | `minAssetsRequired` | min — fails CLOSED |
+| `ExactlyTakerModule` (`withdrawAtMaturity`), `ExactlyDepositModule` | `minAssetsRequired` | min — fails CLOSED *(2026-09-30 L-CV2-1.v1: the venue also CLAMPS a request above principal + fee, so a short fixed position used to bill the maker's wallet; the module now pre-checks `fixedDepositPositions` and reverts `ShortFixedPosition`)* |
 
 Quantified by the regression test against the pre-fix code: a maker signing
 "borrow 10,000, never owe more than 11,000" filled in 7 slices had **7× their
@@ -1088,6 +1115,11 @@ emergency — and why it ran after the Critical and the maker-harm class.
 | unfloored whole-balance sweeps | 5 | compound-v2 (cToken exact + 3 native), river |
 | value-out forwarding a nominal amount | 3 | venus (×2), compound-v2 |
 | approvals to a `data`-decoded spender, never cleared | 9 | venus ×2, lista, euler ×4, dolomite ×3, fluid ×2 |
+
+*(2026-09-30 X-STATIC-1.v1: a later census of this class claimed 0 remaining; there
+were 2 — `ExactlyRepayModule` and Fluid `_returnUnused` cleared only when
+`bal > floor`, which on a non-conserving token skipped the clear. Both now clear
+unconditionally, and shapes rules 12 and 14 enforce the class.)*
 | `uint160`-clipped pull vs unclipped approve | 5 | exactly, euler, dolomite, river, fluid |
 
 Final census across all 18 packages: **0 remaining in every class.**
@@ -1188,9 +1220,13 @@ comparison tests built on byte-identical data and now build two blobs with two
 taker grants.
 
 H-3 scales Exactly's fixed-branch face with the slice (new trailing word,
-BREAKING). The Midnight lead closed without its fork check — there is no deployed
-Midnight to read, and `sweepSurplus` had already removed the strand that made the
-unit mixing matter.
+BREAKING). The Midnight lead closed without its fork check — at the time no deployed
+Midnight was read, and `sweepSurplus` had already removed the strand that made the
+unit mixing matter. *(Corrected 2026-09-30, L-ML-7: the Base singleton exists,
+`MidnightIdLib.toId` is fork-verified against `touchMarket`, and `repay` pulls
+exactly `units` tokens, so "1 unit == 1 loan token" is verified —
+`test_audit_L_ML_8_fork_toIdMatchesVenueAndUpdatePositionExists`. The
+`MidnightLoopCallback` floor is now a per-take rate, `minRateWad`, L-ML-4.)*
 
 Coverage is now tracked separately in [audit-runs.md](../audit-runs.md), written
 when the runs' bundle directories were cleaned up. It records what each round
@@ -1352,7 +1388,11 @@ share round-trip property is not yet expressible in core (no share-venue mock).
   `oft` took the victim's whole credit. Charging a payer other than the maker now
   needs that payer's amount-bounded `feeAllowance` to that maker
   (`approveFeeSponsorship`), debited per fill — the solver-sponsored fee the module
-  advertises survives, as a consented, capped grant. Pinned by
+  advertises survives, as a consented, capped grant. *(2026-09-30 X-DIFF-REST-3:
+  now `approveFeeSponsorship(maker, amount, maxPerSend)` plus increase/decrease,
+  sponsored sends are whole-item only (`LzSpec.totalAmount`), and a sponsored send
+  must be a SETTLE item filled by the `feePayer` or a `setSponsorFiller` agent —
+  see F32.)* Pinned by
   `test_fee_cannotChargeAnUnconsentingPayer`, `test_fee_sponsoredPayerIsChargedWithinAllowance`,
   `test_fee_sponsorshipBelowQuote_reverts`.
 - **`AggregatorFillSolver` standing allowances were the caller's to spend (HIGH on
@@ -1390,7 +1430,9 @@ share round-trip property is not yet expressible in core (no share-venue mock).
 the aToken from item data — a self-granted taker can burn aTokens held by the module
 itself, which holds only dust; the OCO claim is keyed `(maker, groupId, nonce)`
 because the claim item lives inside the order it would have to hash, and only a
-maker signing two same-nonce legs trips it (the SDK refuses that); the funnel's
+maker signing two same-nonce legs trips it (the SDK refuses that — and since
+2026-09-30, PRICE-5, `patchOrder` / `amendOrder` actually enforce it; before, only
+`ocoGroup` checked distinct nonces); the funnel's
 permissionless `enableToken` can re-arm a revoked allowance, but revocation was never
 the funnel's cancel primitive (`withdraw`, or `cancelOrder` via `execute`, are).
 
@@ -1434,7 +1476,11 @@ inside one shared `_pullViaPermit3`). Rejected-as-worse measurements are listed 
   `fill`) unless it is the `type(uint256).max` any-size opt-in; +89 B. Pinned by
   `test_prop_fillUpTo_shrunkBalance_quotedSize_reverts`,
   `test_prop_fillUpTo_absoluteOrderStillClamps`,
-  `test_lens_previewFill_proportionalOversized_revertsOverFill`.
+  `test_lens_previewFill_proportionalOversized_revertsOverFill`. *(Follow-up 2026-09-30,
+  CORE-FILL-2 / CORE-FILL-4: the any-size sentinel moved into
+  `OrderState._openFill`, so `type(uint256).max` resolves to the remainder
+  uniformly on EVERY entry — `fill`, `fillWithPermit`, `batchFill`,
+  `fillWithPermitTake` included — and a fill module never receives max.)*
 - **Soft exclusivity was a no-op on orders whose legs cannot carry the premium.**
   The override lifts only maker-addressed SELL outputs and auctioned inputs, so on
   a swap-and-send, a deposit-only order, a BUY with no inputs, and every
@@ -1512,10 +1558,11 @@ the bytecode that ships.
 
 ### F32 — whole-tree audit: nine goals, 48 lenses (2026-09-30)
 
-**Status: remediation IN PROGRESS** — the one ledger entry that is not fully
-resolved. Fixes are merged on `audit-fixes-2026-09-30`; the docs group, the
-independent verification, the fix-up round and the final gate have not run. The
-write-up, with every partial, accepted and open item and its reason, is
+**Status: fixes and docs merged; independent verification and the final gate
+pending.** Every code fix, the partials lane and the documentation group are
+merged on `audit-fixes-2026-09-30`; the independent verification of each fix, the
+fix-up round and the final gate (full suite, clean size check, gas baseline) have
+not run. The write-up, with every accepted item and its reason, is
 [audit-2026-09-30-full-tree.md](../audit-2026-09-30-full-tree.md).
 
 Scope: the whole tree at `56d1405` — Permit3, Settlement, solvers, validators,
@@ -1581,8 +1628,9 @@ cost 0 Settlement bytes.
   `test_audit_RIF_2_v1_sellTokenOutInflatedByFailedOpRefund_reverts`,
   `test_audit_RIF_1_honestSellWithQueuedOpStillWorks`,
   `test_audit_RIF_2_itemOrderCannotTriggerQueueRefundInsideFill`,
-  `test_audit_RIF_2_fillRefusedWhenQueueMovesInsideIt`. (SECURITY.md M-8 itself is
-  not yet corrected — open.)
+  `test_audit_RIF_2_fillRefusedWhenQueueMovesInsideIt`. SECURITY.md M-8 now states
+  that `MocMultiCollateralGuard.execute()` is permissionless and how the bracket
+  restores the containment.
 - **Pegged price module anchored on the fill denominator (PRICE-1, an F8
   regression)**: `test_audit_PRICE_1_fullFillModuleFillTotal1_clearsAtPeg`,
   `test_audit_X_ARITH_1_bpsFillTotal_halfFillAtPeg`,
@@ -1596,10 +1644,22 @@ cost 0 Settlement bytes.
   `test_audit_MISC_MOD_1_fractionalTwoWord_failsClosed`,
   `test_audit_MISC_MOD_1_fullSweep_splitSweepsMinBalanceCap`.
 - **Invariant-only purchases checked an end state, not a delivery (VAL-1, the F30
-  delta-verify sibling) — fixed_partial.** The shipped invariants require a
-  lifelong named `exclusiveFiller` when the order has no output leg, and the lens
-  and SDK refuse the shape; a generic core rule for third-party invariants is not
-  done. Pinned by `test_audit_VAL_1_erc721_twoBids_oneDelivery_cannotDoubleDip`,
+  delta-verify sibling) — fixed.** Settlement enforces the rule on-chain for ANY
+  invariant (`Base._runInvariants`, +88 B): an order with invariants and an empty
+  `legsOut` is fillable only by its named `exclusiveFiller`, for its whole life;
+  position items do not lift it and `FILLER_SET` / an open order fails closed
+  (`NotExclusiveFiller`). **BREAKING behaviour**: a no-output-leg invariant order
+  with MAKE/TAKE items now needs a named `exclusiveFiller` (typehash and golden
+  hashes unchanged). The shipped invariants also enforce it via
+  `InvariantReceiptGuard` (defence in depth), and the lens and SDK refuse the
+  shape. Core: `test_audit_VAL_1_core_thirdPartyInvariant_openOrder_noFreePayout`,
+  `test_audit_VAL_1_core_namedFiller_only_forWholeLife`,
+  `test_audit_VAL_1_core_fillerSetSentinel_failsClosed`,
+  `test_audit_VAL_1_core_batchFill_refusesOpenFiller`,
+  `test_audit_VAL_1_core_outputLegOrder_openFillerUnaffected`; lens:
+  `test_audit_VAL_1_lens_positionItemDoesNotLiftReceiptRule`,
+  `test_audit_VAL_1_lens_previewRefusesUnnamedFiller`. Validators:
+  `test_audit_VAL_1_erc721_twoBids_oneDelivery_cannotDoubleDip`,
   `test_audit_VAL_1_erc721_makerBoughtElsewhere_botCannotDrainStaleBid`,
   `test_audit_VAL_1_erc1155_twoBids_oneDelivery_cannotDoubleDip`,
   `test_audit_VAL_1_minBalance_floorMetElsewhere_noFreeFill`,
@@ -1650,8 +1710,12 @@ cost 0 Settlement bytes.
   rule 9 now covers Exact branches on clamping venues.
 
 **The core lows — the six the report put in P0, because the core cannot be
-patched after deployment.** Four fixed, Settlement 24,325 → **24,223 / 24,576**
-(collapsing `fillWithPermit`'s overloads into one 6-arg entry paid for the floors):
+patched after deployment.** Four fixed, Settlement 24,325 → 24,223 / 24,576
+(collapsing `fillWithPermit`'s overloads into one 6-arg entry paid for the floors;
+sentinel unification −72, single `fillWithPermit` about −170 net of the floors,
+carrier +11, EXECUTOR guard +29, shortening burn +27, module ceiling +9; two
+`fillWithPermit` overloads around the 6-arg body measured +565 B under via-IR), then
+**24,311 / 24,576** after the VAL-1 core rule (+88 B), clean via-IR build:
 the price floor on every entry (PERIPH-1.v3, **BREAKING** ABI) —
 `test_audit_PERIPH_1_v3_fillWithPermit_honoursFloor`,
 `test_audit_PERIPH_1_v3_fillWithPermitTake_honoursFloor`,
@@ -1697,14 +1761,164 @@ Rootstock beta app blockers (A-IMMUT-1, G-TS_SIGN-1/3/4/5/15) are pinned by app
 vitest suites (`packages/app/test/funding.audit.test.ts` and siblings), outside
 this gate.
 
-**Open, no regression yet** (do not read these as closed): the docs group —
-MISC-MOD-6 (partly done), L-CENSUS-7 (partly done), G-VENUE_B-8 (tests done, doc
-row not), and P3-1, X-SPEC-5/7/8/10/11, CORE-MATCH-6, PRICE-13, PRICE-14,
-G-VENUE_B-7, L-CV2-6, L-ML-7, L-CENSUS-6, L-LIB-6; about 129 doc-update requests the
-fixers filed against `SECURITY.md`, `FEATURES.md` and `docs/`; X-ASM-3 sub-item (d);
-the Teller pool-deposit fork test (L-CMT-4); and L-CENSUS-8 sub-items 3-5
-(undetermined). The F19 table row above still names `maxWithdraw` for
-Silo/Gearbox/Exactly; those readers use `previewRedeem(balanceOf)` (G-VENUE_B-9).
+**Per-group entries** (lows and infos that change behaviour; full lists in the
+write-up).
+
+- *Lending.* Exact withdraws on clamping or fee-charging venues bound the delivery:
+  Venus treasury fee and Compound v2 redeem fee (G-VENUE_A-2,
+  `test_audit_G_VENUE_A_2_exactWithdraw_treasuryFee_reverts`); Venus, Compound v2 and
+  Aave v4 takers bind the signed underlying (L-CV2-4,
+  `test_audit_L_CV2_4_withdraw_underlyingMismatch_reverts`); Aave v2/v3 Exact
+  withdraws tolerate the aToken rounding window (L-AAVE-1,
+  `test_audit_L_AAVE_1_exactWithdraw_roundingWindowAmount_fills`); `IProceedsAsset`
+  on Comet, Venus, Compound v2 and Aave v2/v4 (L-CMT-6,
+  `test_audit_L_CMT_6_comet_declaresProceedsAsset`). L-AAVE-3 accepted
+  (isolated-collateral auto-enable on Aave v3 < 3.7 needs a venue role; documented).
+  Liquity v2: the collateral token is pinned to the registry branch (L-LRG-1,
+  `test_audit_L_LRG_1_withdrawColl_misnamedToken_reverts`), the pull repay lets the
+  venue clamp and the River pre-fund names `FullCloseNotSupported` (L-CENSUS-3,
+  `test_audit_L_CENSUS_3_pullRepay_overSized_clampsAtMinDebt`), Felix seam modules
+  (G-VENUE_B-2, `test_audit_G_VENUE_B_2_felixRepay_burnsFeUSD`). Teller repay routes
+  `amount >= owed` to `repayLoanFull` because the deployed `repayLoan` transfers the
+  uncapped amount (L-CMT-1, above). Lista broker borrow signs `maxApr` + `duration`
+  and post-checks the booked position (L-ML-2, `test_audit_L_ML_2_botRepriceAfterSigningReverts`);
+  the Midnight modules need `setIsAuthorized` everywhere (L-ML-1,
+  `test_audit_L_ML_1_supplyCollateralWithoutGrantReverts`) and the loop callback's
+  floor is a per-take rate (L-ML-4, `test_audit_L_ML_4_largeTakeBelowRateReverts`).
+  Fluid custody modules pin the VaultFactory (L-FSE-1) and deliver native value-out
+  as WETH (L-FSE-3, `test_audit_L_FSE_3_nativeWithdraw_recipientZero_settlesAsWeth`);
+  Exactly's fixed-repay permit tail carries an explicit value (L-FSE-4, **BREAKING**,
+  distinct from the F29 B2 partial-fill lead,
+  `test_audit_L_FSE_4_gaslessFixedRepay_postMaturity_settles`) and `totalAmount` is
+  the leg's smallest full-fill delivery (L-FSE-2,
+  `test_audit_L_FSE_2_auctionedLeg_overRetiringSlice_doesNotBrickTheRest`); Dolomite
+  binds the signed token to `getMarketTokenAddress(marketId)` (G-BYTE_MAP-7,
+  `test_audit_G_BYTE_MAP_7_borrow_signedTokenNotMarketToken_reverts`) and the
+  risk-override path runs unmocked (L-ED-2, `test_audit_L_ED_2_account100_carriesDebt_unmocked`);
+  Euler sub-accounts (L-ED-6, `test_audit_L_ED_6_subAccount_leverageOpen_isolatedFromPrimary`).
+  The meta-pattern again: a mock encoded a false venue premise (Teller clamp,
+  Liquity no-clamp, River pull-vs-burn, Midnight auth-free supply).
+- *Bridge.* `settleExpired(order, beneficiary, token)` (**BREAKING**), immediate
+  refund for a row that can never fund its order, zero-amount credits ignored,
+  finite deadline required — superseding the F29 #4 claim that `settleExpired`
+  defuses the 2106 lock for every row (BRIDGE-A-2,
+  `test_audit_BRIDGE_A_2_otherTokenRow_copycatCannotLock`); OFT burn of module
+  balance (BRIDGE-B-2, `test_audit_BRIDGE_B_2_junkInputTokenCannotBurnResidentOft`);
+  CCTP V2 (BRIDGE-B-6). X-TOKENS-1 and BRIDGE-B-5 accepted.
+- *Modules.* PRICE-1.v3 rising anchor solved jointly
+  (`test_audit_PRICE_1_v3_risingAnchor_clearsAtPeg`), PRICE-9 `NUM == 0`
+  (`test_audit_PRICE_9_numZero_rejected`), PRICE-3/4 descending range rejected
+  (`test_audit_PRICE_3_descendingLadder_rejected`), PRICE-6 unquoted ClockFloored
+  fill clears at start (`test_audit_PRICE_6_unquotedFill_clearsAtStart`), PRICE-10
+  quotes bound to `prevFilled` (**BREAKING** typehash; fill size and settlement
+  address accepted as unbindable), PRICE-7 TWAP compression
+  (`test_audit_PRICE_7_unevenWindow_neverReleasesEarly`), MISC-MOD-2 NFT partial
+  slice (`test_audit_MISC_MOD_2_oneUnitFill_cannotTakeTheNft`), MISC-MOD-3 4626
+  foreign shares, MISC-MOD-5 poke bounty (`test_audit_MISC_MOD_5_pokeBounty_forwardedToMaker`),
+  RIF-3/VAL-3 MoC band reads `getPACtp`. The 2026-09-12 open leads (pegged anchor on
+  `fillTotal`, ProportionalSweep compounding, NFT non-zero partial slice, range
+  descending) are closed.
+- *Solvers.* Flash family: SETTLE refusal, callback gate closed after the provider
+  returns, Balancer payload commitment, sweep in the flash asset, `FlashOpts`
+  (`test_audit_FLASH_3_surplusSweptInTheFlashAsset`,
+  `test_audit_FLASH_2_foreignBalancerFlashDuringSweepIsRefused`);
+  `GuardedMatchSolver` refuses PRESEND plans and Settlement/EXECUTOR recipients, has
+  an operator set and a nonce guard (`test_audit_CORE_MATCH_1_presendPlansAreRefused`,
+  `test_audit_FLASH_5_nonceCancellationIsCaughtCheaply`); `AggregatorFillSolver`
+  token-set routes, `PolicyNeedsOperators`, `RetainNeedsOperators` with `sweep`,
+  reentrancy state (about +5k gas per fill; `test_audit_AGG_8_hookTokenCannotReenterDuringTheSplit`);
+  `FillRecovery` refuses the sentinel (`test_audit_AGG_7_fillRecoveryRefusesTheSentinel`).
+  On-chain `SurplusPolicy` enforcement against opaque calldata is accepted as
+  infeasible.
+- *Periphery.* PERIPH-1..9, PERIPH-2.v2/.v3, VAL-1.v2 (lens half), G-LENS_PARITY-1..6,
+  G-BYTE_MAP-6, X-TOKENS-9, CORE-FILLER-5, PRICE-15 (e.g.
+  `test_audit_PERIPH_5_reservedNonce_invalidAndUnquotable`,
+  `test_audit_G_LENS_PARITY_6_deadShapesReadInvalid`,
+  `test_audit_CORE_FILLER_5_pinnedPreviewMatchesTheFill`). The F31 E-2 rule ("quote a
+  set order for a member") is SUPERSEDED by PERIPH-2: every quote is for the
+  destination settler. The lens split into `SettlementLensChecks` to fit EIP-170.
+- *Off-chain.* SDK (CORE-FILLER-1.v2, PRICE-1.v2, PRICE-5, G-TS_SIGN-2/8/10..13,
+  G-BYTE_MAP-2), orderbook and server (maker bucket billed after Layer 2,
+  superseding the F29 P3 "charge right after Layer 1" design; tombstones keyed by
+  `(hash, maker)`; replace exemption derived internally; permit-announce
+  verification; fill-index ordering and reorgs; `/quote` binding), auction
+  (CORE-FILLER-1.v3 executor declarations) and the Rootstock beta app (A-IMMUT-1,
+  G-TS_SIGN-1/3/4/5/6/7/9/14/15) — pinned by vitest suites
+  (`packages/app/test/*.audit.test.ts`, `packages/sdk/test/audit-2026-09-30-cross.test.ts`,
+  `packages/orderbook*/test/audit20260930.test.ts`), outside this Solidity gate.
+
+**Completed after the first merge** (the partials lane and the documentation group).
+
+- **AGG-6 — fixed.** Item-bearing orders are fillable zero-inventory by
+  `AggregatorFillSolver.executeItemFill` (a one-order `matchSettle` plan driven
+  through `onMatchRoute`: TAKE early, wallet-funded MAKE late; not SETTLE, TAKE_FOR,
+  PUSH-funded MAKE or delta-verify), with the same router allowlist, delta-only
+  amounts and operator gating as `executeFill`, and it never approves Settlement.
+  PermitBatchWitness first fills are fillable by every flash solver through
+  `BaseFlashSolver.PERMIT_ENVELOPE` (`fillWithPermit` inside the flash; SDK
+  `encodeFlashPermitEnvelope`). Pinned by `AggregatorItemFill.t.sol`
+  (`test_audit_AGG_6_itemOrderFillsZeroInventory`,
+  `test_audit_AGG_6_itemFillCannotReachResidue`, `test_audit_AGG_6_onMatchRouteIsGated`),
+  `FlashPermitEnvelope.t.sol` (`test_audit_AGG_6_flashSolversFillPermitWitnessOrders`,
+  `test_audit_AGG_6_permitEnvelopeSignedByStrangerReverts`) and the SDK
+  `flashPermitEnvelope.test.ts`. Residual: `AggregatorFillSolver` cannot take a
+  permit order's FIRST fill — a `fillWithPermit` callback overload would cost about
+  565 B of Settlement.
+- **AGG-4 — fixed.** The code-side guard landed in `7569f87` (auction-side calldata
+  guard); the word-aligned matching hardening is in
+  `packages/auction/src/sources/guard.ts` (vitest
+  test_audit_AGG_4_guardMatchesWordAlignedOnly). Stated limit: a presence check,
+  bounded by the selector allowlist.
+- **X-DIFF-REST-3 — closed.** LZ fee sponsorship is bound to the filler on-chain: a
+  sponsored spec must be a SETTLE item (`ISettlementModule.settle` receives the
+  filler), and the filler must equal `feePayer` or be named via `setSponsorFiller`;
+  a sponsored MAKE item reverts `SponsoredSendNeedsSettle` (**BREAKING**).
+  `test_audit_X_DIFF_REST_3_strangerCannotSpendSponsorship`,
+  `test_audit_X_DIFF_REST_3_sponsoredSpecOnMakeSeamRefused`,
+  `test_audit_X_DIFF_REST_3_sponsorNamedAgentMayFill`.
+- **L-CENSUS-8 — fixed.** Teller repay binds `getLoanBorrower(bidId) == maker`
+  (`NotBorrower`), Fluid deposit/repay bind the factory `ownerOf(nftId) == maker`
+  (`NotPositionOwner`), `FluidRepayModule` gains a tagged `Full` live-debt clamp
+  (full-fill only), `FluidTakerModule` a `_locked` guard:
+  `test_audit_L_CENSUS_8_pullRepayRefusesStrangersLoan`,
+  `test_audit_L_CENSUS_8_depositRefusesStrangersPosition`,
+  `test_audit_L_CENSUS_8_fullRepayClampsAtLiveDebt`,
+  `test_audit_L_CENSUS_8_takerModuleRefusesReentry`.
+- **X-ASM-3 sub-item (d) — done.** `Audit20260930PermitTakeDirty.t.sol` fuzzes dirty
+  high bits in the raw-copied `PermitTake` words; the fill settles exactly like the
+  clean permit (`testFuzz_audit_X_ASM_3_permitTake_dirtyHighBits_settleClean`).
+- **L-LIB-8 — fixed.** `AaveV2WithdrawModule`, `AaveV4WithdrawModule`,
+  `ListaTakerModule` (+ native), `DolomiteOperatorModule` and `MidnightTakerModule`
+  implement `IPositionSource` (`test_audit_L_LIB_8_aaveV2PositionOfAndPositionSizedFill`);
+  Compound v2 / Venus are excluded (no accrual-aware view), `ERC4626WithdrawModule`
+  too (a time-locked whole-request claim).
+- **MISC-MOD-6 — fixed.** `modules-erc4626` is in `PACKAGES`, and Settlement-routed
+  flows through a real Permit3 now exist: `PermitTransferSettlementFlowTest`
+  (`test_audit_MISC_MOD_6_transferFlow_risingFeeLeg_coreBillsTheRise`) and
+  `Erc4626SettlementFlowTest` (`test_audit_MISC_MOD_6_erc4626_phase1ThenPhase2_fullFlow`);
+  the ProportionalSweep two-slice fill is `test_audit_MISC_MOD_1_fullSweep_splitSweepsMinBalanceCap`.
+- **L-CENSUS-7 / L-CENSUS-6 / L-LIB-6 — fixed.** `check-module-shapes.py` strips
+  comments before matching and gains rules 14 (non-zero approvals cleared on the
+  entrypoint's path), 15 (`ensureApproval` only toward allow-listed pinned
+  spenders) and 16 (a TAKE-measured token is bound to the venue); rule 13 keys on
+  the pre-fund shape, not file names. `make docs-check` now holds `@N` layout offsets
+  in module READMEs and in `gasless-permit-relay.md` (rewritten) to the code.
+- **G-VENUE_B-8 — fixed.** Gearbox pool deposit (pull + pre-fund) and Silo repay
+  (SweepToUser + Recycle) run on forks
+  (`test_audit_L_LRG_5_poolPreFundDeposit_live`,
+  `test_audit_L_FSE_6_siloRepay_recycle_resuppliesSurplus`), as do the Aave v2
+  Exact/Full withdraws (`test_audit_L_AAVE_5_fullWithdraw_live`);
+  `approval-surface.md`'s "proven" column now says which rows are mock-only.
+- **CI** gates every foundry package (matrix from `make print-packages`, including
+  the `-fork` profiles and `modules-erc4626`), `make test-ts`, a clean via-IR
+  `make size-check`, `make docs-check` and `make modules-check`.
+- **Docs group** (P3-1, X-SPEC-4/5/7/8/10/11, X-REENT-1, CORE-MATCH-6, PRICE-13,
+  PRICE-14, G-VENUE_B-7, L-AAVE-4, L-CV2-6, L-ML-7, VAL-5, VAL-1.v4, L-CMT-3, L-ML-9,
+  L-CMT-7, G-VENUE_B-9, G-BYTE_MAP-8) and the fixers' doc-update requests: applied to
+  `SECURITY.md`, `FEATURES.md`, `docs/` and the package READMEs.
+- **Accepted:** L-CMT-4 (no Teller pool-deposit fork test: no verified live V2/V3
+  pool exists and the Hypernative registration is a deploy step; the functional
+  mock test covers the module), plus the accepted items listed above.
 
 Lesson: "fixed" in a per-component fixer report means fixed **in the paths that
 fixer owned**. Most of the 23 `fixed_partial` issues are partial for that reason alone, and

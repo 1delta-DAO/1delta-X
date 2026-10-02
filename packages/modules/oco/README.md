@@ -21,6 +21,11 @@ permanently retire the stop-loss. `minClaim == 0`, a floor above the item amount
 the old two-word blob all fail validation (the leg is unfillable), so the floor is
 always an explicit choice: `minClaim = anchor` makes the claim whole-fill only.
 
+**Not matchable.** A bracket leg carries a SETTLE item, so it cannot be CoW-matched
+through `matchSettle` (which rejects SETTLE), filled through a `PostInputs` callback,
+or filled by `AggregatorFillSolver`. The fill-once shared-nonce bracket
+(`ocoNonceGroup`) is the matchable alternative (2026-09-30 PRICE-12, accepted).
+
 The `GroupClaimed` event is the one an indexer wants: it retires N−1 bracket siblings
 from an off-chain book on a single log, with no RPC and no failed fill to prove it —
 see [`packages/orderbook`](../../orderbook/README.md).

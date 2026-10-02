@@ -30,8 +30,8 @@ implementations are both unavailable:
 * **Solver inventory.** The fallback today: the solver fronts the transient peak.
   That is exactly the capital requirement CoW netting exists to remove.
 
-`batchSettleItems` ([Batch.sol:485](../packages/core/src/settlement/Batch.sol#L485))
-gets close — a shared pool, no solver capital — but its execution unit is the
+`batchSettleItems` (since deleted together with `batchSettle`; `matchSettle`
+replaced both — this section records why) got close — a shared pool, no solver capital — but its execution unit is the
 **whole order**. [`_execOrderNetted`](../packages/core/src/settlement/Batch.sol#L642)
 runs a fixed body:
 
@@ -70,8 +70,17 @@ functions — never crossing a call boundary, never touching a storage slot.
 **This is the answer to "callbacks are unsafe for re-entering the order": we do
 not re-enter.** The interleaving that a re-entrant callback would express becomes
 a *step schedule* executed inside a single frame. `nonReentrant` stays exactly as
-it is — the strongest possible statement — and the composition it used to forbid
-is now expressible without it.
+it is, and the composition it used to forbid is now expressible without it.
+
+⚠ **Corrected 2026-09-30 (CORE-MATCH-6): the windows between steps are NOT
+sealed.** `CALL` steps run solver code through the executor, and ITEM steps and
+maker tokens run module and token code, between steps. What the engine guarantees
+is **attribution, not isolation**: every credit is a balance delta measured around
+the one step that produced it, every step is bounds-checked and exactly-once, and
+the flush reconciles each order against its own signed amounts, so code that runs
+in a window can move value only on its own account (see `Batch.sol`'s note on the
+windows). `nonReentrant` stops re-entry into Settlement; it is not what makes the
+windows safe.
 
 The cost is a real limitation, stated once here and not softened: **the plan must
 be computable off-chain.** Anything that needs on-chain discovery (an amount only
@@ -189,7 +198,7 @@ uint256 owed = st.owed[i][j];                             // resolved at open �
 uint256 have = st.credit[i][j];                           // covered by an earlier PULL or ITEM
 uint256 need = owed > have ? owed - have : 0;             // draw only what is still missing
 if (need != 0) {
-    Permit3TransferLib.transferFromWithFallback(PERMIT3, token, order.maker, address(this), need);
+    _pullViaPermit3(token, order.maker, address(this), need);  // was Permit3TransferLib (deleted, P3-2)
     st.credit[i][j] = have + need;
 }
 ```
@@ -205,7 +214,7 @@ delivery — a chained match — can now be pulled after that delivery.
 ### 5.2 `DELIVER(i)`
 
 ```solidity
-uint256 bit = 1 << 128;
+uint256 bit = 1 << 255;                                   // DELIVERED_BIT (Batch.sol)
 if (ctx.done[i] & bit != 0) revert PlanBadStep(s);        // load-bearing: a second
 ctx.done[i] |= bit;                                       // delivery drains the pool
 _batchDeliverStored(order, ctx.outs[i]);                  // reused verbatim
@@ -277,7 +286,7 @@ Contract-owned, over every order, no solver input:
 ```solidity
 for (uint256 i; i < n; ++i) {
     // 1. completeness — every unit the plan was obliged to run, ran exactly once
-    uint256 full = (1 << order.items.length) - 1 | (1 << 128);
+    uint256 full = (1 << order.items.length) - 1 | (1 << 255);
     if (ctx.done[i] != full) revert PlanIncomplete(i);
 
     // 2. input reconciliation — ONE rule, pulled and item-funded legs alike
@@ -386,7 +395,7 @@ ones whose mechanism changes.
 | S3 | items act only under maker authority | `_executeItem` body unchanged; `filled` written in Phase 1 before any external call |
 | S4 | pool wholeness | `balanceOf(T) ≥ before[T]` ∀T, unchanged end-state check |
 | S5 | bounded solver payout | pre-send bounded by `balance − before − outstanding`; sweep by `balance − before`; `before[T]` unreachable |
-| S6 | no re-entrancy | `nonReentrant` unchanged and now *sufficient*, because the context never leaves the frame |
+| S6 | no re-entrancy into Settlement; attribution in the windows | `nonReentrant` unchanged. It is NOT sufficient on its own: `CALL` steps, item modules and tokens run external code between steps, so the guarantee is per-step delta ATTRIBUTION plus exactly-once steps and the Phase 3 reconciliation, not isolation (corrected 2026-09-30, CORE-MATCH-6) |
 | S7 | scheduling is liveness-only | S1/S4/S8 are order-independent → any schedule yields a correct settlement or a revert |
 | S8 | **exactly-once execution** | set-and-check bits on DELIVER and ITEM. Double-delivery drains the pool; a double item is a second borrow against the maker. Both must fail *at the step*, not at the end — a mask compared only in Phase 3 would still read "complete" after two executions |
 | S9 | no stranded value | `outstanding` reaching 0 is implied by S1; the sweep floors every touched token at `before[T]` |
@@ -397,10 +406,14 @@ the guards must be *set-and-check at execution time*, never a completeness compa
 in Phase 3 alone.
 
 Retained guards from the item path: SETTLE items rejected
-(`BatchItemsSettleUnsupported` — it routes to the filler, not the pool), duplicate
-input tokens rejected (`BatchItemsDuplicateInput` — item proceeds are still
-attributed per token within a step window), and the documented constraint that a
-TAKE's proceeds token must be an input leg.
+(`MatchSettleItemUnsupported` — it routes to the filler, not the pool), duplicate
+input tokens rejected (`MatchDuplicateInput` — item proceeds are still attributed
+per token within a step window). A TAKE's proceeds token that is not an input leg of
+its order is no longer simply stranded here: `_creditItemProceeds` refunds an
+un-attributed gain to the maker as the item runs **when the token is in the plan's
+universe** (the union of every order's leg tokens); a token outside the universe
+strands exactly as on `fill` (see SECURITY.md, "A TAKE item's proceeds token must
+appear in `order.legsIn`").
 
 No `Order` field changes → **the golden order hash is untouched** and existing
 signed orders are matchable as-is.
@@ -683,8 +696,15 @@ Checked rather than assumed:
   per-call modifier and the engine calls it sequentially, never nested.
 * **`SolverCallbackExecutor` is stateless and pinned to its Settlement**, so
   multiple `CALL` steps are safe — it holds no funds or approvals between calls.
-* **Fill modules** already resolve during the all-orders-first open phase in
-  `batchSettleItems`; Phase 1 preserves that exactly.
+  ⚠ It is also a **public trampoline** (2026-09-30 CORE-FILLER-4): anyone can run an
+  empty `matchSettle` and make it call any target, so it can never be a grantor.
+  `CALL` and callback targets must check a flag their own entrypoint armed and
+  authenticate the caller, must never grant the executor authority, and must never
+  stage value on it; a TAKE/TAKE_FOR item addressed to the executor reverts
+  `OutputToSettlement`. Untrusted item modules and tokens run code around `CALL`
+  steps.
+* **Fill modules** resolved during the all-orders-first open phase in the (since
+  deleted) `batchSettleItems`; Phase 1 preserves that exactly.
 * **Storage layout is unchanged** — the context is memory-only, so no new slots,
   and `NonceManager`/`OrderState` are untouched.
 * **Golden order hash unchanged** — no `Order` field moves.

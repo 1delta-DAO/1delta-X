@@ -121,6 +121,14 @@ That asymmetry is deliberate, load-bearing, and the direct subject of matrix
 | C7 | `fillUpTo` | `Core.sol` | ● |
 | C8 | `matchSettle` | `Batch.sol` (own gate sequence: `_openGated`) | ◐ |
 
+⚠ **C4 does not share `_fillCore` either** (2026-09-30 CORE-SIG-3): `fillWithPermitTake`
+verifies no order signature up front — the `PermitTake` blob IS the authorization,
+asserted after `_executeItems` and before the input pull — so items before the TAKE
+run unauthenticated under atomic revert. That is sound only because nothing on the
+path may CATCH the revert or create a commit point; there is no separate gate
+column for C4 in M3 because its lifecycle gates are the `_openFill` ones C1 runs,
+plus the permit-consumed check.
+
 C1–C7 share `_fillCore`. **C8 does not** — `_openGated` is a second, parallel
 implementation of the same gate sequence. That is the single most important
 structural fact in this document, and the reason [M3](#m3--entry-point--lifecycle-gate)
@@ -158,7 +166,7 @@ Every way a maker (or the world) takes authority back.
 | E5 | `revokeOrderApproval(hash)` | `orderApproved` + sentinel escalation when touched |
 | E6 | `setOrderSigner(d, 0)` / expiry lapse | `orderSignerExpiry` |
 | E7 | Order expiry | `timing[160:208)` |
-| E8 | Permit3 allowance revoke / `lockdownAll` / nonce invalidation | funding fails |
+| E8 | Permit3 allowance revoke / `lockdownAll` / nonce invalidation | funding fails — but only for grants ALREADY in the book: an unapplied signed permit batch still installs fresh allowances unless its nonce is burned too (2026-09-30 CENSUS-A-3, accepted; SDK `buildRevokeAll` requires and burns outstanding nonces) |
 | E9 | An EIP-1271 wallet starting to return `false` | *not a settler primitive* |
 
 E6 and E9 are the two that **do not bind mid-order**, by the A-axis skip. That is
@@ -287,7 +295,7 @@ credential authorised it?* — is the
 | E5 `revokeOrderApproval` | ✕ binds · `OnChainOrderApproval:test_revokeOrderApproval_blocksFill` | ✕ binds · `test_revokeOrderApproval_blocksRemainderAfterPartialFill` + F13 pin |
 | E6 `setOrderSigner(d,0)` | ✕ binds · `DelegatedOrderSigner:test_revocation_bindsOnAnUnfilledOrder` | ◐ **does not bind** · `test_revocation_doesNotBindAfterAPartialFill`, `test_expiry_doesNotLapseMidOrderOnceTouched` |
 | E7 expiry | ✕ binds · `MultiAssetAuthGates:test_multiOut_expired` | ✕ binds (checked per fill in `_fillCore`) |
-| E8 Permit3 revoke | ✕ funding fails · `OrderRelevantState:test_state_underfunded_byAllowance` | ✕ same |
+| E8 Permit3 revoke | ✕ funding fails · `OrderRelevantState:test_state_underfunded_byAllowance` (an unapplied signed batch re-funds it unless its nonce is burned — CENSUS-A-3) | ✕ same |
 | E9 1271 → `false` | ✕ binds · `SignatureEdgeCases:test_1271_*` | ◐ **does not bind** · `test_1271_revokedMidOrder_doesNotBindOnTheRemainder` |
 
 **Reading:** a maker holding a part-filled order has exactly seven working kill
@@ -448,6 +456,13 @@ revert, and finding F8 is the cell that was missing.
 | `fillModule` × `minFillAnchor` | ✕ applies to the *delta* | `test_minFillAnchor_appliesToDelta` |
 | `fillModule` × uniform scaling | ◐ one fraction, all legs | `test_singleFraction_scalesAllLegsUniformly` |
 | `fillModule` × `fillUpTo` | ◐ proposal not clamped by the core | `test_fillUpTo_moduleOrder_proposalNotClamped` |
+| `fillModule` × delta above the filler's request | ✕ `OverFill` (2026-09-30 CORE-FILLER-2) | `test_audit_CORE_FILLER_2_moduleCannotUpsizeFillersRequest` |
+| Pegged price module × `fillTotal` / `FullFillModule` | ◐ priced at the peg (anchor = the counterpart leg's whole-order amount, PRICE-1) | `test_audit_PRICE_1_fullFillModuleFillTotal1_clearsAtPeg` |
+| Pegged price module × rising `legsIn[0]` | ◐ solved jointly (PRICE-1.v3) | `test_audit_PRICE_1_v3_risingAnchor_clearsAtPeg` |
+| `RangePriceModule` × descending ladder | ✕ `DescendingRange` (PRICE-3) | `test_audit_PRICE_3_descendingLadder_rejected` |
+| OCO claim × dust fill | ✕ below `minClaim` (PRICE-2) | `test_audit_PRICE_2_dustFillCannotRetireStopLoss` |
+| `ProportionalSweepModule` fractional item × partial fill | ✕ `PartialFillUnsupported` — fractional is full-fill only (MISC-MOD-1) | `test_audit_MISC_MOD_1_fractionalSweep_cannotBeSplit` |
+| Proportional × `ChainlinkTickFloorValidator` | ◐ priced at the signed cap (sound as validator or invariant; stricter than the live rate when the balance is below the cap); uncapped or zero cap ✕ `UncappedProportional` (X-ARITH-1.v1) | `test_audit_X_ARITH_1_v1_tickFloor_proportionalOrder_fills`, `test_audit_X_ARITH_1_v1_tickFloor_pricesAtCap_andRefusesUncapped` |
 | Empty legs × no `fillTotal` | ✕ `NoAnchorLeg` | `ErrorSurface:test_noAnchorLeg_sellWithNoInputLegs_reverts`, `..._buyWithNoOutputLegs_reverts`, `..._signedFillTotalNeedsNoLegs` |
 
 ### M10 — token behaviour × delivery mode
@@ -683,8 +698,10 @@ pair in `MatchSettleGates`.
 
 ### G-6 — proportional anchor in the batch paths · CLOSED
 Five tests. Beyond "it resolves", two are about the shape's real hazard: `batchFill`
-has **no clamp** and no any-size sentinel (only `fillUpTo` and `matchSettle` honour
-`type(uint256).max`), so a solver quoting against a balance
+has **no clamp** (and, until 2026-09-30, no any-size sentinel: since CORE-FILL-2 /
+CORE-FILL-4 `type(uint256).max` resolves to the remainder uniformly on every entry,
+in `OrderState._openFill`, and a module never sees max), so a solver quoting
+against a balance
 that then grows arrives with a request below the new anchor — a partial fill of an
 order that can only fill whole. It must fail softly and stay fillable, which
 `test_prop_batchFill_staleQuoteAfterBalanceGrows_failsSoftly` asserts;

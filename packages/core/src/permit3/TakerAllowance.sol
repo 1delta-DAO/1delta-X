@@ -9,13 +9,17 @@ import {Allowance} from "./libraries/Allowance.sol";
 
 /// @title TakerAllowance
 /// @notice Permit3's TAKER BOOK — the half that has no Permit2 analogue. Keyed
-///         (user → spender → bytes32 ref), it gates position-pulling operations
-///         (borrow, withdraw, unstake, claim, …) that do not fit the ERC20
-///         `transferFrom` shape.
+///         (user → spender → module → bytes32 ref), it gates position-pulling
+///         operations (borrow, withdraw, unstake, claim, …) that do not fit the
+///         ERC20 `transferFrom` shape.
 ///
 ///         A spender calls `take(module, user, amount, receiver, data)`; Permit3
-///         computes `ref = keccak256(data)`, decrements the (user, spender, ref)
-///         allowance, then invokes the module's `takeOnBehalf`. The module
+///         computes `ref = keccak256(data)`, decrements the (user, spender, module,
+///         ref) allowance, then invokes the module's `takeOnBehalf`. `take` /
+///         `takeFor` are permissionless for SELF-grants (any caller may approve
+///         itself as spender), so `msg.sender == permit3` in a module authorises
+///         nothing by itself: `onBehalfOf` is always the grantor (audit 2026-09-30
+///         P3-1). The module
 ///         performs the protocol-native call. Permit3 itself knows nothing about
 ///         lending/staking/vault protocols — that heterogeneity stays in modules.
 ///

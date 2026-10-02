@@ -28,7 +28,7 @@ import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 ///
 ///         Deliberately NO direct-ERC20 fallback term. {SettlementLens} takes the
 ///         max of the Permit3 book and a plain approval to the settler, because
-///         {Permit3TransferLib.transferFromWithFallback} genuinely funds the same
+///         Settlement's `Base._pullViaPermit3` fallback genuinely funds the same
 ///         pull either way. The composite modules call `permit3.transferFrom`
 ///         DIRECTLY, with no fallback, so an ERC-20 approval to the module funds
 ///         nothing and counting it would preview a broken order as fillable.

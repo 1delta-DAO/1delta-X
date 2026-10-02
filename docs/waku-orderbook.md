@@ -60,6 +60,12 @@ gossip mesh for seconds, not forever. The "orderbook" is therefore
 pipeline below. There is no canonical book object and no consensus needed — it
 is eventually-consistent, and the chain is the tiebreaker.
 
+**Backfill must replay the cancel and replace topics too, cancels first** (2026-09-30
+G-TS_FILLER-3): a node that restored only the order topic would relist orders that
+were soft-cancelled or replaced while it was down. The `Book` now replays cancels,
+then orders, then replaces, and an unseen hash in a cancel leaves a maker-bound
+pending tombstone (see [soft-cancel.md](soft-cancel.md)).
+
 ---
 
 ## Content topics and message types

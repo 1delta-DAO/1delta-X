@@ -9,7 +9,16 @@
 > different entry point — see
 > [INTEGRATION.md](../packages/core/src/settlement/INTEGRATION.md) and use
 > `fillUpTo`, which clamps to the remaining size instead of reverting and takes
-> a `minBumpBps` price floor (quoted via `SettlementLens.previewBump`).
+> a `minBumpBps` price floor (quoted via `SettlementLens.previewBump`). Since
+> 2026-09-30 the same floor exists on `fillWithPermit` (one 6-argument entry),
+> `fillWithPermitTake` (5th argument) and `batchFill` (a per-order array); plain
+> `fill` has none, so use `fillUpTo` when you need the floor (PERIPH-1.v3).
+>
+> `GuardedMatchSolver`'s constructor is `(settlement, address[] operators)`. An
+> **open** instance (empty operator set) is permissionless: never name it — or any
+> open flash solver — as `exclusiveFiller`, in a `FILLER_SET`, or in a filler-aware
+> validator or price module, because those gate Settlement's immediate `msg.sender`
+> and would then admit every caller of the contract. Use a GATED instance.
 
 ## The shape
 
@@ -48,11 +57,12 @@ A profitable match is visible to every solver at once, so several land a
 transaction for it in the same block. One wins; the rest revert — and reverting is
 not free.
 
-Nothing tells `matchSettle` the race is over until the end of its approach. It
-derives the token universe, takes a `balanceOf` snapshot per token, hashes the
-first order (keccak over the full struct *and* every dynamic sub-array),
-`ecrecover`s its signature, runs its validators — and *only then* reads `filled`
-and reverts `OverFill`. Every one of those steps is wasted work.
+Nothing tells `matchSettle` the race is over until well into its approach. It
+derives the token universe, takes a `balanceOf` snapshot per token and hashes the
+first order (keccak over the full struct *and* every dynamic sub-array) before
+`_openGated` reads `filled` — which it does BEFORE `ecrecover` and the validators
+(corrected 2026-09-30, X-SPEC-8) — and reverts `OverFill`. The work up to that read
+is wasted.
 
 The losing condition, though, is knowable from **one storage slot per order**, and
 you already know every order hash off-chain. So read that first.
@@ -118,6 +128,21 @@ balanced plan) has looser requirements and should write its own predicate —
 "remaining ≥ my size" is fine there, because nothing else depends on the exact
 amount.
 
+**What `filled` cannot see.** A fill-once order burns its NONCE and never writes
+`filled`, and `cancelOrders` / `invalidateNonceWord` / `rollbackNonces` cancel by
+nonce. For those orders the `filled` guard reads "untouched" forever; use
+`settleMatchWithNonces(orderHashes, expectedFilled, nonceMakers, nonces, plan)`,
+which also checks each listed `(maker, nonce)` and reverts `NonceTaken` cheaply.
+The `MatchRaceGuard` rationale above is about `filled` only.
+
+**A shrinking proportional anchor or a fronted residual needs more.** A plan that
+names the `type(uint256).max` sentinel on a Proportional order, or that fronts a
+residual from inventory through a `CALL` step, must also pin the exact anchor it
+quoted and the minimum it expects swept: `settleMatchChecked` reverts
+`AnchorShrunk` / `SweptShort` (2026-09-30 X-DIFF-CORE-1.v1). The
+"who should pass the sentinel" caveat in
+[proportional-legs.md](proportional-legs.md) applies on the netted path too.
+
 ## 4. Classify failures without re-simulating
 
 Every revert reason falls into one of three buckets, and only one of them is worth
@@ -155,7 +180,7 @@ an alert.
 | `TransferFailed` / `TransferFromFailed` | the maker is under-funded, or the token is fee-on-transfer (not supported on the netted path) |
 | `InvalidSigner` / `InvalidSignatureLength` / `InvalidContractSignature` / `OrderNotApproved` | the order's authorization does not hold |
 | `ItemTargetHasNoCode()` | a MAKE or SETTLE item names a module with no code at that address — a malformed maker-signed item, so it will never fill on any path and no retry helps. Blacklist the order. (The check is explicit rather than solc's, because `Base._callWithTail` hand-encodes the item calls; without it the funding step would silently no-op and the fill would settle around the hole) |
-| `MalformedPackedArray()` | a packed blob is internally inconsistent — a declared length running past the end, or an `Item.op` outside `{MAKE, TAKE, SETTLE}`. Same verdict: never fillable, blacklist |
+| `MalformedPackedArray()` | a packed blob is internally inconsistent — a declared length running past the end, or an `Item.op` outside `{MAKE, TAKE, TAKE_FOR, SETTLE}`. Same verdict: never fillable, blacklist |
 
 The point of the typed `OrderTaken` is that bucket one costs you a cheap revert and
 needs no investigation — you can tell it apart from bucket two at the log level,
@@ -173,9 +198,10 @@ without re-running anything.
 * **It is not a privilege.** `GuardedMatchSolver` holds no funds between calls, has
   no owner, grants no approvals, and is never a Permit3 spender. It is a calldata
   shape. The security boundary is exactly what it is when you call `matchSettle`
-  directly: the makers' signed orders and their own Permit3 allowances.
-  *Corollary:* tokens donated to it are swept by whoever calls next — do not park
-  inventory there.
+  directly: the makers' signed orders and their own Permit3 allowances. It refuses
+  `PRESEND` plans (`PresendUnsupported`) and a profit recipient that is itself,
+  Settlement or the EXECUTOR, so no settlement proceeds can arrive on it; it has no
+  sweep, so a token donated to it is locked — do not send it anything.
 
 ## 6. If your plan needs external liquidity
 
@@ -184,12 +210,32 @@ schedulable:
 
 * **`PRESEND(token)` then `CALL(x)`** — the settler hands you the token's
   unencumbered surplus, you convert it and deposit the deficit. Zero capital: you
-  never front anything. See `test_imbalanced_zeroCapital_presend`.
+  never front anything. See `test_imbalanced_zeroCapital_presend`. (Not through
+  `GuardedMatchSolver`, which refuses PRESEND plans; call `matchSettle` from your
+  own contract.)
 * **`CALL(x)` alone** — you front the residual from inventory and keep the surplus
-  at the final sweep. Simpler, needs capital.
+  at the final sweep. Simpler, needs capital — and pin the anchor and the swept
+  floor (`settleMatchChecked`, §3), or a shrunk anchor is paid in full.
 
-Point the `CALL` step at whatever contract you like; `GuardedMatchSolver`
-deliberately exposes no callback surface, so there is nothing to authenticate.
+Point the `CALL` step at whatever contract you like, but **treat the EXECUTOR as
+anyone** (2026-09-30 CORE-FILLER-4): `SolverCallbackExecutor` is a public
+trampoline — an empty `matchSettle` makes it call any target for anyone — so a
+`CALL` or callback target must check a flag its own entrypoint armed and
+authenticate the caller, must never grant the EXECUTOR authority, and must never
+stage value on it. Untrusted item modules and maker tokens run code around `CALL`
+steps. `GuardedMatchSolver` deliberately exposes no callback surface.
+
+**Single-order callbacks (`PostInputs`).** The maker's token code runs before AND
+after your callback (the input pull, the output delivery), so a hook token can
+observe and react to your conversion. Vet tokens and hooks, and bound `minOut` /
+`amountInMaximum` at the quote, not at execution (2026-09-30 X-TOKENS-5).
+OCO bracket legs carry a SETTLE item and cannot be CoW-matched or `PostInputs`
+filled; the shared-nonce bracket is the matchable form (PRICE-12).
+
+**Permit-witness orders.** After a partial first fill, `fillWithPermit` keeps
+working past `batch.deadline`, because a spent permit nonce is a verified no-op
+(2026-09-30 P3-4): the C11 "no other entry can rescue it" holds only before the
+first fill.
 
 ## 7. Every maker-supplied target is gas-unbounded
 
@@ -201,11 +247,17 @@ with your gas**, and none of them carries a gas cap:
 | `validators` | `STATICCALL`, return capped at one word | burn gas, revert |
 | `invariants` | `STATICCALL`, return capped at one word | burn gas, revert — *after* the fill's transfers |
 | `pricingModule` | `STATICCALL`, return capped at one word | burn gas, revert |
-| `fillModule` | `STATICCALL` (the interface is `view`) | burn gas, revert, mis-size the delta *within* the core's cap |
+| `fillModule` | `STATICCALL` (the interface is `view`) | burn gas, revert, size the delta at or below YOUR `fillAmount` (above it reverts `OverFill`, CORE-FILLER-2) |
 | `items[].module` | ordinary `CALL` | burn gas, revert, and make arbitrary state changes **under the maker's own Permit3 authority** |
 
 The four static surfaces cannot move funds and cannot bomb your memory — the return
-is read into scratch and capped at 32 bytes — so their damage ceiling is burnt gas.
+is read into scratch and capped at 32 bytes — so they cannot take your assets. They
+CAN make you pay: burnt gas, a reverted fill, and — for a price module or fill
+module — a price or size anywhere inside what the maker signed and you requested.
+They can also tell a lens simulation from the real call (`msg.sender` differs:
+`SettlementLens` vs Settlement), so a preview is not proof of the fill's outcome;
+bound the outcome with `minBumpBps` and your `fillAmount` (2026-09-30
+CORE-FILLER-2).
 Item modules are real calls, but they act with the *maker's* authority: a module can
 only touch what that maker approved it for, never your inventory and never another
 maker's funds. `fillModule` chooses only the fill fraction; the denominator, the

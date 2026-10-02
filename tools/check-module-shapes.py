@@ -22,6 +22,18 @@ enforced nowhere — which is the §F23 failure mode this file exists to avoid.
      (X-STATIC-1.v1).
  13. A pre-fund MAKE module's header does not describe the retired TAKE_FOR /
      taker-allowance shape (L-LRG-4c).
+ 14. Every non-zero `forceApprove(token, spender, X)` in a module is matched by a
+     `forceApprove(…, spender, 0)` clear on the same entrypoint's reachable path
+     (L-CENSUS-7a).
+ 15. `SafeTransferLib.ensureApproval` (a STANDING max approval) appears only where
+     the spender is a pinned immutable named in an allow-list (L-CENSUS-7a).
+ 16. A token whose balance a TAKE seam measures is derived from the venue, checked
+     against it, pinned, or keys the venue call itself (L-CENSUS-7b).
+
+All rules run over COMMENT-STRIPPED source (L-CENSUS-7): a pin, guard or clear that
+exists only in a comment (`// if (msg.sender != settlement) revert …`) used to
+satisfy the regexes. Headers — rule 9b's byte map, rule 13 — are still read from
+the original text, because that is where they live.
 
 ────────────────────────────────────────────────────────────────────────────────
 (1) A taker grant must be unambiguous about which dispatch it authorises.
@@ -352,14 +364,14 @@ SAFE_FIRST_FIELD = {"address", "uint8", "uint16", "bool"}
 WORD0_EXEMPT = {
     # struct is DYNAMIC (contains a `bytes`/array member), so word 0 is an ABI
     # offset — a small number, never near 2^255.
-    # (BRIDGE-B-8: this row used to call AcrossSpec dynamic; it is STATIC.)
-    "AcrossBridgeOutModule": "AcrossSpec is static, first field `address inputToken`",
     "LzOftBridgeOutModule": "LzSpec is dynamic (bytes extraOptions) -> word 0 is an offset",
     "PermissionlessCallModule": "CallSpec is dynamic (bytes callData) -> word 0 is an offset",
     "MidnightSupplyCollateralModule": "Market is dynamic (CollateralParams[]) -> word 0 is an offset",
     "MidnightRepayModule": "Market is dynamic (CollateralParams[]) -> word 0 is an offset",
     "MidnightLendModule": "Offer embeds the dynamic Market -> word 0 is an offset",
     # struct is STATIC, and its first field is an address.
+    # (BRIDGE-B-8: the Across row used to sit above, calling AcrossSpec dynamic.)
+    "AcrossBridgeOutModule": "AcrossSpec is static, first field `address inputToken`",
     "CctpBridgeOutModule": "CctpSpec is static, first field `address inputToken`",
     "FunnelGrantModule": "GrantSpec is static, first field `address spender`",
     "MorphoBlueSupplyCollateralModule": "MarketParams is static, first field `address loanToken`",
@@ -425,6 +437,148 @@ APPROVE_CLEAR = re.compile(r"forceApprove\s*\([^;]*?,\s*0\s*\)\s*;")
 # reference descriptor …" or "the taker allowance" is an encoder spec for a shape
 # the module no longer accepts (L-LRG-4c).
 STALE_PREFUND_HEADER = re.compile(r"TAKE_FOR`\s*item|\band the taker allowance\b", re.IGNORECASE)
+
+# ── (14) a non-zero venue approval is cleared on the same path (L-CENSUS-7a) ────
+#
+# A module singleton that leaves `forceApprove(token, venue, X)` standing hands the
+# venue (often ORDER-DECODED) a claim on whatever `token` the module holds next —
+# the MorphoBlueRepay standing-approval / venue-resolved-pull class (L-LIB-1). Every
+# non-zero approval must be matched by a `forceApprove(…, sameSpender, 0)` on the
+# reachable path of the same entrypoint. Spenders compare by their last identifier
+# (`p.vault` ~ `vault`, `address(morpho)` ~ `morpho`) because the clear often sits in
+# a helper that receives the venue under a parameter name. Rows below are approvals
+# a venue provably consumes in full in the same call; each carries its reason.
+APPROVE_CALL = re.compile(r"\bforceApprove\s*\(")
+APPROVE_EXEMPT = {
+    ("MorphoBlueRepayModule", "morpho"): "onMorphoRepay: Morpho pulls exactly `assets` right after the callback returns; `morpho` is immutable",
+    ("MidnightLoopCallback", "router"): "_swap: exact-input swap pulls exactly `amountIn`; router is immutable",
+    ("BridgedOrderInbox", "PERMIT3"): "enableToken: deliberate standing approval to the pinned Permit3 (owner-only)",
+    ("PositionFunnel", "PERMIT3"): "enableToken: deliberate standing approval to the pinned Permit3 (owner-only)",
+}
+
+# ── (15) ensureApproval only toward an allow-listed pinned spender ─────────────
+#
+# `SafeTransferLib.ensureApproval` sets a STANDING `type(uint256).max` approval. Its
+# own NatSpec says it is safe only for a TRUSTED, PINNED spender; this makes that a
+# rule. (contract, spender) rows, each with the reason the spender is pinned and can
+# pull only from its own caller.
+ENSURE_CALL = re.compile(r"\bensureApproval\s*\(")
+ENSURE_APPROVAL_OK = {
+    ("MorphoBlueSupplyCollateralModule", "morpho"): "immutable Morpho singleton; Morpho only ever pulls from msg.sender",
+    ("MorphoBlueSupplyModule", "morpho"): "immutable Morpho singleton; Morpho only ever pulls from msg.sender",
+    ("PositionFunnel", "PERMIT3"): "immutable Permit3; pulls only for a spender the funnel itself granted",
+}
+
+# ── (16) a TAKE-measured token is bound to the venue (L-CENSUS-7b) ─────────────
+#
+# A take seam that measures `balanceOf(address(this))` of a token NAMED IN `data`
+# and the venue pays out a different one measures 0, forwards 0, strands the real
+# proceeds on the singleton and lets the core bill the maker's wallet (L-CV2-4,
+# G-BYTE_MAP-7, L-LRG-1). The measured token must be (a) assigned from a venue call,
+# (b) compared against one with a revert, (c) an immutable, (d) an argument of the
+# venue call that moves it (the venue keys the transfer by that token), or (e) the
+# venue itself (`ICToken(cToken).redeem…`). Otherwise it needs a row below.
+SELF_BAL_TOKEN = re.compile(
+    r"IERC20\(\s*([\w.\[\]]+)\s*\)\.balanceOf\(\s*address\(this\)\s*\)"
+    r"|SafeTransferLib\.balanceOf\(\s*([\w.\[\]]+)\s*,\s*address\(this\)\s*\)"
+)
+NON_VENUE_CALLS = {
+    "balanceOf", "transfer", "safeTransfer", "safeTransferFrom", "transferFrom", "forceApprove",
+    "approve", "allowance", "ensureApproval", "floorOf", "requireDelivered", "requireFullFill",
+    "requireFullFillFromData", "snapshot", "settle", "_sweep", "_disposeResidual", "disposeResidual",
+    "_returnUnused", "_restoreFloor", "_pullAndApprove", "abi", "encode", "decode",
+}
+MEASURED_TOKEN_EXEMPT = {
+    ("MorphoBlueTakerModule", "loanToken"): "MarketParams field: Morpho keys the market by id = keccak256(params), so the token is the market's",
+    ("MorphoBlueTakerModule", "collateralToken"): "MarketParams field: bound by the market id",
+    ("ListaTakerModule", "collateralToken"): "Moolah MarketParams field: bound by the market id",
+    ("MidnightTakerModule", "loanToken"): "Midnight market params: bound by MidnightIdLib.toId",
+    ("MidnightTakerModule", "collateralToken"): "Midnight market params: bound by MidnightIdLib.toId",
+    ("MidnightBorrowModule", "loanToken"): "Midnight market params: bound by MidnightIdLib.toId",
+    ("LiquityV2TakerModule", "token"): "helper parameter; every caller passes a token checked by LiquityV2TroveAuth.requireColl or the immutable BOLD",
+    ("FluidOperateModule", "p.fundingToken"): "value-IN floor only (returns the unused pull); a wrong token reverts in the vault",
+    ("RiverOpenModule", "p.collateralToken"): "value-IN floor only; value-out is measured on the maker by RiverProceeds",
+    ("FluidTakeForModule", "p.collateralToken"): "value-IN floor only (returns the unused funding); floorOf binds the pre-fund token to the descriptor",
+    ("ERC4626WithdrawModule", "token"): "_restoreFloor parameter; callers pass vault.asset() and the vault share itself",
+}
+
+
+def _last_ident(expr: str) -> str:
+    ids = re.findall(r"[A-Za-z_]\w*", expr.replace("address(", " ").replace("IERC20(", " "))
+    return ids[-1] if ids else expr.strip()
+
+
+def _closure(fns: dict, entry: str) -> list:
+    """`entry` plus every function in `fns` it reaches by name (see {reachable_body})."""
+    if entry not in fns:
+        return []
+    order, seen, i = [entry], {entry}, 0
+    while i < len(order):
+        cur = fns.get(order[i], "")
+        i += 1
+        for n in fns:
+            if n not in seen and re.search(r"\b" + re.escape(n) + r"\s*\(", cur):
+                seen.add(n)
+                order.append(n)
+    return order
+
+
+def strip_comments(src: str) -> str:
+    """`src` with every `//` and `/* */` comment blanked to spaces, newlines and
+    string literals kept, so offsets into the result are offsets into `src`."""
+    out = list(src)
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c in "\"'":
+            i += 1
+            while i < n and src[i] != c and src[i] != "\n":
+                i += 2 if src[i] == "\\" else 1
+            i += 1
+            continue
+        if src.startswith("//", i):
+            while i < n and src[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        if src.startswith("/*", i):
+            while i < n and not src.startswith("*/", i):
+                if src[i] != "\n":
+                    out[i] = " "
+                i += 1
+            if i < n:
+                out[i] = out[i + 1] = " "
+                i += 2
+            continue
+        i += 1
+    return "".join(out)
+
+
+def token_bound(var: str, reach: str, body: str) -> bool:
+    v = re.escape(var)
+    for m in re.finditer(r"(?<![\w.])" + v + r"\s*=\s*([^;=][^;]*);", reach):
+        e = m.group(1)
+        if "(" in e and "abi.decode" not in e and "data[" not in e:
+            return True
+    # tuple assignment from a call: `(asset, max) = positionOf(...)`
+    for m in re.finditer(r"\(([^()]*)\)\s*=\s*([^;]*);", reach):
+        if re.search(r"(?<![\w.])" + v + r"(?![\w])", m.group(1)) and "abi.decode" not in m.group(2) and "(" in m.group(2):
+            return True
+    if re.search(r"(?<![\w.])" + v + r"\s*!=|!=\s*" + v + r"(?![\w])", reach):
+        return True
+    if re.search(r"\bimmutable\s+" + re.escape(var.split(".")[-1]) + r"\b", body):
+        return True
+    if re.search(r"\w+\(\s*" + v + r"\s*\)\.\s*(\w+)\s*\(", reach):
+        for m in re.finditer(r"\w+\(\s*" + v + r"\s*\)\.\s*(\w+)\s*\(", reach):
+            if m.group(1) not in NON_VENUE_CALLS:
+                return True
+    for m in re.finditer(r"\.\s*(\w+)\s*\(", reach):
+        if m.group(1) in NON_VENUE_CALLS:
+            continue
+        if re.search(r"(?<![\w.])" + v + r"(?![\w])", arg_span(reach, m.end() - 1)):
+            return True
+    return False
+
 
 # `contract X is A, B {` — the name plus its inheritance list, up to the brace.
 # ⚠ LIBRARIES TOO. This matched `contract` only, so a `library` living beside the
@@ -538,8 +692,10 @@ def header_of(src: str, contract_start: int) -> str:
     return "\n".join(reversed(out))
 
 
-def contract_spans(src: str):
-    """(name, inherits, body, header) for each contract, sliced by brace depth."""
+def contract_spans(src: str, orig: str | None = None):
+    """(name, inherits, body, header) for each contract, sliced by brace depth.
+    `src` may be comment-stripped; the header is then read from `orig`."""
+    orig = src if orig is None else orig
     for m in CONTRACT.finditer(src):
         start = m.end() - 1
         depth = 0
@@ -549,7 +705,7 @@ def contract_spans(src: str):
             elif src[i] == "}":
                 depth -= 1
                 if depth == 0:
-                    yield m.group(1), m.group(2) or "", src[start : i + 1], header_of(src, m.start())
+                    yield m.group(1), m.group(2) or "", src[start : i + 1], header_of(orig, m.start())
                     break
 
 
@@ -568,6 +724,9 @@ def main() -> int:
     unscaled_settle = []
     clear_after_return = []
     stale_prefund = []
+    uncleared_approvals = []
+    standing_approvals = []
+    unbound_tokens = []
     scanned = 0
     makes = 0
     dual = 0
@@ -592,7 +751,17 @@ def main() -> int:
             and "function settle(" not in src
         ):
             continue
-        for name, inherits, body, header in contract_spans(src):
+        rel_posix = path.relative_to(ROOT).as_posix()
+        module_scope = "/modules/" in rel_posix or rel_posix.startswith("packages/lib/")
+        # Comment-stripped code for every rule; headers still come from `src`.
+        code = strip_comments(src)
+        # Every function declared in the FILE, so rule 14 can follow a call into an
+        # inherited helper (`FluidBase._returnUnused`) that lives in a base contract.
+        file_fns = {}
+        for _n, _i, _b, _h in contract_spans(code, src):
+            for k, v in all_functions(_b).items():
+                file_fns.setdefault(k, v)
+        for name, inherits, body, header in contract_spans(code, src):
             # ── (7) a multi-op module rejects an op it does not implement ──
             if OP_DISPATCH.search(body) and not OP_REJECT.search(body):
                 bad_ops.append((path.relative_to(ROOT), name))
@@ -789,9 +958,80 @@ def main() -> int:
                     if EARLY_RETURN.search(before[last_open:]):
                         clear_after_return.append((path.relative_to(ROOT), name, fname))
 
+            # ── (14) every non-zero approval is cleared on the entrypoint's path ──
+            # ── (15) ensureApproval only toward an allow-listed pinned spender ──
+            if module_scope:
+                own = all_functions(body)
+                # The contract's own functions first, then helpers declared elsewhere
+                # in the file (inherited bases).
+                fns = dict(file_fns)
+                fns.update(own)
+                for fname, fbody in own.items():
+                    sig = fbody[: fbody.find("{")] if "{" in fbody else fbody
+                    if not re.search(r"\b(?:external|public)\b", sig):
+                        continue
+                    closure = _closure(fns, fname)
+                    reach = "\n".join(fns[n] for n in closure)
+                    clears = set()
+                    opens = []
+                    for g in closure:
+                        gbody = fns[g]
+                        gsig = gbody[: gbody.find("{")] if "{" in gbody else gbody
+                        params = [x.split()[-1] for x in gsig[gsig.find("(") + 1 : gsig.find(")")].split(",") if x.split()]
+                        for am in APPROVE_CALL.finditer(gbody):
+                            if gbody[: am.start()].rstrip().endswith("function"):
+                                continue
+                            args = [a.strip() for a in arg_span(gbody, am.end() - 1).split(",")]
+                            if len(args) != 3:
+                                continue
+                            spender = _last_ident(args[1])
+                            if args[2] != "0":
+                                opens.append(spender)
+                                continue
+                            clears.add(spender)
+                            # A clear inside a helper that received the venue as a
+                            # parameter clears whatever each call site passed there.
+                            if spender in params:
+                                idx = params.index(spender)
+                                for cm in re.finditer(r"\b" + re.escape(g) + r"\s*\(", reach):
+                                    cargs = [a.strip() for a in arg_span(reach, cm.end() - 1).split(",")]
+                                    if len(cargs) > idx:
+                                        clears.add(_last_ident(cargs[idx]))
+                    for spender in opens:
+                        if spender not in clears and (name, spender) not in APPROVE_EXEMPT:
+                            row = (path.relative_to(ROOT), name, fname, spender)
+                            if row not in uncleared_approvals:
+                                uncleared_approvals.append(row)
+                    for em in ENSURE_CALL.finditer(reach):
+                        if reach[: em.start()].rstrip().endswith("function"):
+                            continue
+                        args = [a.strip() for a in arg_span(reach, em.end() - 1).split(",")]
+                        spender = _last_ident(args[1]) if len(args) == 3 else "?"
+                        if (name, spender) not in ENSURE_APPROVAL_OK:
+                            row = (path.relative_to(ROOT), name, fname, spender)
+                            if row not in standing_approvals:
+                                standing_approvals.append(row)
+
+            # ── (16) a TAKE-measured token is bound to the venue ──
+            if module_scope:
+                for entry in ("takeOnBehalf", "takeForOnBehalf"):
+                    reach = reachable_body(body, entry)
+                    if not reach:
+                        continue
+                    for a, b in SELF_BAL_TOKEN.findall(reach):
+                        var = a or b
+                        if (name, var) in MEASURED_TOKEN_EXEMPT or token_bound(var, reach, body):
+                            continue
+                        row = (path.relative_to(ROOT), name, entry, var)
+                        if row not in unbound_tokens:
+                            unbound_tokens.append(row)
+
             # ── (13) stale pre-fund MAKE header ──
+            # Keyed on the pre-fund SHAPE, not the file name (L-CENSUS-6): a
+            # `*PreFundModules.sol` glob missed ListaBrokerModule's pre-fund branch,
+            # which lives in a non-PreFund file.
             if (
-                path.name.endswith("PreFundModules.sol")
+                ("_gatePreFundMake(" in body or "PreFundGuard.floorOf(" in body)
                 and MAKE_FN.search(body)
                 and not TAKE_FOR.search(body)
                 and STALE_PREFUND_HEADER.search(header)
@@ -919,6 +1159,46 @@ def main() -> int:
             "\nThe one-sided pre-fund modules are PUSH-funded MAKE items: Settlement delivers\n"
             "the funding leg to the module, which spends it. There is no TAKE_FOR item and no\n"
             "taker allowance — describe the pre-funded MAKE shape (L-LRG-4c).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if uncleared_approvals:
+        print(f"{len(uncleared_approvals)} non-zero approval(s) are never cleared on the entrypoint's path:\n", file=sys.stderr)
+        for rel, name, fname, spender in uncleared_approvals:
+            print(f"  {rel}: contract {name}.{fname} -> spender `{spender}`", file=sys.stderr)
+        print(
+            "\nA module singleton must not leave a venue approval standing: the next caller's\n"
+            "venue (often order-decoded) inherits a claim on whatever the module holds\n"
+            "(L-LIB-1 / L-CENSUS-7). Add `forceApprove(token, spender, 0)` after the venue\n"
+            "call on every path, or add (contract, spender) to APPROVE_EXEMPT with the reason\n"
+            "the venue provably consumes the whole approval in the same call.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if standing_approvals:
+        print(f"{len(standing_approvals)} `ensureApproval` (standing max approval) site(s) outside the allow-list:\n", file=sys.stderr)
+        for rel, name, fname, spender in standing_approvals:
+            print(f"  {rel}: contract {name}.{fname} -> spender `{spender}`", file=sys.stderr)
+        print(
+            "\n`ensureApproval` leaves `type(uint256).max` standing. It is safe only toward a\n"
+            "pinned immutable that can pull solely from its own caller. Use a scoped\n"
+            "`forceApprove(…, amount)` + clear, or add (contract, spender) to\n"
+            "ENSURE_APPROVAL_OK with that reason.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if unbound_tokens:
+        print(f"{len(unbound_tokens)} TAKE-measured token(s) are not bound to the venue:\n", file=sys.stderr)
+        for rel, name, entry, var in unbound_tokens:
+            print(f"  {rel}: contract {name}.{entry} measures `{var}`", file=sys.stderr)
+        print(
+            "\nA take seam that measures a `data`-named token the venue does not pay out\n"
+            "measures 0 and strands the real proceeds (L-CV2-4 / G-BYTE_MAP-7). Derive the\n"
+            "token from the venue, compare it with a revert, or add (contract, var) to\n"
+            "MEASURED_TOKEN_EXEMPT with the reason it is bound.",
             file=sys.stderr,
         )
         return 1

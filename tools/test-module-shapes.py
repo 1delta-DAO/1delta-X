@@ -152,6 +152,129 @@ contract AaveV4WithdrawModule {
     "clamping venue",
 )
 
+# L-CENSUS-7 — comments are stripped before matching: a pin that exists only in a
+# comment no longer satisfies rule 2.
+case(
+    "L-CENSUS-7 commented-out pin fires",
+    {"packages/modules/m/src/Bad.sol": """
+contract BadMaker {
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external {
+        // if (msg.sender != settlement) revert NotSettlement();
+        (address venue) = abi.decode(data, (address));
+    }
+}"""},
+    True,
+    "do NOT pin their dispatcher",
+)
+case(
+    "L-CENSUS-7 real pin passes",
+    {"packages/modules/m/src/Ok.sol": """
+contract OkMaker {
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external {
+        if (msg.sender != settlement) revert NotSettlement();
+        (address venue) = abi.decode(data, (address));
+    }
+}"""},
+    False,
+)
+
+# (14) L-CENSUS-7a — a non-zero approval never cleared on the entrypoint's path.
+case(
+    "L-CENSUS-7a uncleared approval fires",
+    {"packages/modules/m/src/Bad.sol": """
+contract BadApprove {
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external {
+        if (msg.sender != settlement) revert NotSettlement();
+        (address venue, address t) = abi.decode(data, (address, address));
+        SafeTransferLib.forceApprove(t, venue, amount);
+        IVenue(venue).supply(t, amount, onBehalfOf);
+    }
+}"""},
+    True,
+    "never cleared",
+)
+case(
+    "L-CENSUS-7a clear in a reached helper passes",
+    {"packages/modules/m/src/Ok.sol": """
+contract OkApprove {
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external {
+        if (msg.sender != settlement) revert NotSettlement();
+        (address venue, address t) = abi.decode(data, (address, address));
+        SafeTransferLib.forceApprove(t, venue, amount);
+        IVenue(venue).supply(t, amount, onBehalfOf);
+        _clear(t, venue);
+    }
+    function _clear(address token, address v) private {
+        SafeTransferLib.forceApprove(token, v, 0);
+    }
+}"""},
+    False,
+)
+
+# (15) L-CENSUS-7a — a standing ensureApproval toward an order-decoded spender.
+case(
+    "L-CENSUS-7a ensureApproval to a decoded spender fires",
+    {"packages/modules/m/src/Bad.sol": """
+contract BadEnsure {
+    function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external {
+        if (msg.sender != settlement) revert NotSettlement();
+        (address venue, address t) = abi.decode(data, (address, address));
+        SafeTransferLib.ensureApproval(t, venue, amount);
+        IVenue(venue).supply(t, amount, onBehalfOf);
+    }
+}"""},
+    True,
+    "outside the allow-list",
+)
+
+# (16) L-CENSUS-7b — a TAKE-measured token taken from data and never bound.
+case(
+    "L-CENSUS-7b unbound measured token fires",
+    {"packages/modules/m/src/Bad.sol": """
+contract BadMeasure {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+        (address vault, address token) = abi.decode(data, (address, address));
+        uint256 floor = IERC20(token).balanceOf(address(this));
+        IVault(vault).redeemFor(amount, onBehalfOf);
+        uint256 received = IERC20(token).balanceOf(address(this)) - floor;
+        SafeTransferLib.safeTransfer(token, receiver, received);
+    }
+}"""},
+    True,
+    "not bound to the venue",
+)
+case(
+    "L-CENSUS-7b venue-derived token passes",
+    {"packages/modules/m/src/Ok.sol": """
+contract OkMeasure {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+        (address vault) = abi.decode(data, (address));
+        address token = IVault(vault).asset();
+        uint256 floor = IERC20(token).balanceOf(address(this));
+        IVault(vault).redeemFor(amount, onBehalfOf);
+        uint256 received = IERC20(token).balanceOf(address(this)) - floor;
+        SafeTransferLib.safeTransfer(token, receiver, received);
+    }
+}"""},
+    False,
+)
+
+# (13) L-CENSUS-6 — keyed on the pre-fund shape, not the file name.
+case(
+    "L-CENSUS-6 stale pre-fund header outside a *PreFundModules.sol file fires",
+    {"packages/m/src/XBrokerModule.sol": """
+// the maker signs a `TAKE_FOR` item whose leg-reference descriptor points here.
+contract XBrokerModule {
+    function makeOnBehalf(address onBehalfOf, uint256 forAmount, bytes calldata data) external {
+        _gatePreFundMake(data);
+    }
+}"""},
+    True,
+    "retired TAKE_FOR shape",
+)
+
 
 def main() -> int:
     bad = 0

@@ -1,39 +1,48 @@
 name: test
 
-# Test + gate workflow — the checks `gas.yml` does not cover.
+# Test + gate workflow. `gas.yml` runs `make gas-check` (the core unit suite against
+# the committed gas baseline); everything else is gated here:
 #
-# `gas.yml` runs `make gas-check`, which re-runs every CORE unit test as a gas
-# side effect (a failing test fails the snapshot compare). That leaves these
-# unwired:
+#   • gates            — the STATEFUL INVARIANT suite under `[profile.core.invariant]`
+#                        (`make test-invariant`), the module shape gate plus the
+#                        profile-coverage check (`make modules-check`), and the doc
+#                        gate (`make docs-check`: cited tests exist, module READMEs
+#                        name real contracts, documented layout offsets match code).
+#   • size             — a CLEAN via-IR `make size-check` (Settlement must stay
+#                        <= 24,576 bytes). Clean on purpose: a warm `out/core-deploy`
+#                        has read ~110 B low before (see the size-check notes).
+#   • deployed-bytecode — the core suite against the shipped via-IR Permit3 /
+#                        Settlement bytecode (`make test-deployed`, audit 2026-09-29
+#                        lens F L-1).
+#   • packages         — EVERY foundry package, one matrix leg each, including the
+#                        `-fork` profiles and `modules-erc4626`. The matrix is built
+#                        from `make print-packages` (the Makefile's ALL_PACKAGES), so
+#                        there is no second list to drift; `tools/check-ci-packages.py`
+#                        (in `modules-check`) fails if a foundry profile is missing
+#                        from ALL_PACKAGES. Before the 2026-09-30 audit CI gated only
+#                        the core (goal 8 verdict), and `modules-erc4626` ran nowhere.
+#   • ts               — the TypeScript side (`make test-ts`: sdk, orderbook,
+#                        orderbook-server, auction, app), including the shared golden
+#                        encoding fixtures.
 #
-#   • the STATEFUL INVARIANT suite, which must run under `[profile.core.invariant]`
-#     (`fail_on_revert = false` — see foundry.toml) — `make test-invariant`;
-#   • the module shape gate (`tools/check-module-shapes.py`) — the I-invariants'
-#     mechanical enforcement — `make modules-check`;
-#   • the doc-citation gate — every edge-case-matrix / reference-audits cell must
-#     name a test that still exists — `make docs-check`;
-#   • the core suite against the DEPLOYED bytecode — `make test-deployed`. Every
-#     other run (gas-check included) tests the legacy `[profile.core]` build, while
-#     Permit3/Settlement ship from `[profile.core-deploy]` (via-IR, runs = 100), so
-#     assembly whose `memory-safe-assembly` promise only via-IR relies on would
-#     otherwise never execute as shipped (audit 2026-09-29, lens F L-1). Its own job:
-#     it must not be skipped when `gas-check` fails on an intended gas move, which is
-#     exactly when the source under it changed. The whole suite on every PR, not a
-#     Permit3-only subset or a nightly: MEASURED, the via-IR artifact build is ~3 s
-#     and the switched run ~10 s; the job's cost is the same ~3 min legacy compile
-#     the gas job already pays, in parallel.
-#
-# `make test-all` / `make test-fork` / `make test-ts` remain manual: fork suites
-# need an RPC, and the TypeScript side needs a node install, both of which are
-# deliberately kept out of this fast gate.
+# Fork tests read their RPC from the secrets below; without one, each fork base
+# falls back to its baked-in public endpoints (works, but can be rate-limited).
 
 on:
   pull_request:
   push:
     branches: [main]
 
+env:
+  ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+  OPTIMISM_RPC_URL: ${{ secrets.OPTIMISM_RPC_URL }}
+  BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+  BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
+  RSK_RPC_URL: ${{ secrets.RSK_RPC_URL }}
+  HYPEREVM_RPC_URL: ${{ secrets.HYPEREVM_RPC_URL }}
+
 jobs:
-  test:
+  gates:
     name: invariant + gates
     runs-on: ubuntu-latest
     steps:
@@ -48,11 +57,28 @@ jobs:
       - name: Stateful invariant suite
         run: make test-invariant
 
-      - name: Module shape gate
+      - name: Module shape gate (+ every foundry profile is gated)
         run: make modules-check
 
-      - name: Doc citation gate
+      - name: Doc citation and layout gate
         run: make docs-check
+
+  size:
+    name: clean via-IR size check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "1.5.1"
+
+      - name: Size check from a clean deploy build
+        run: |
+          rm -rf out/core-deploy out/periphery-deploy
+          make size-check
 
   deployed-bytecode:
     name: core suite on deployed (via-IR) bytecode
@@ -67,7 +93,61 @@ jobs:
           version: "1.5.1"
 
       - name: Core suite against the core-deploy artifacts
-        env:
-          # Same mainnet-fork tests as `gas.yml`; see the note there.
-          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
         run: make test-deployed
+
+  matrix:
+    name: package list
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read ALL_PACKAGES from the Makefile
+        id: list
+        run: echo "packages=$(make -s print-packages)" >> "$GITHUB_OUTPUT"
+
+  packages:
+    name: forge test (${{ matrix.package }})
+    needs: matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.matrix.outputs.packages) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "1.5.1"
+
+      - name: Test ${{ matrix.package }}
+        run: make test-${{ matrix.package }}
+
+  ts:
+    name: TypeScript packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: SDK, orderbook, orderbook-server, auction, app
+        run: make test-ts

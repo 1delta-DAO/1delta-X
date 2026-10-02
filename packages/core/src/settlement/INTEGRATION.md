@@ -8,8 +8,9 @@ the shape the orderbook serves to aggregators by default.
 ## TL;DR adapter
 
 ```solidity
-// once per token the router will deliver:
-IERC20(tokenToPay).approve(SETTLEMENT, type(uint256).max); // plain approve works
+// once per token the router will deliver — prefer an approval no larger than the
+// budget you route through this venue (a standing max is a standing exposure):
+IERC20(tokenToPay).approve(SETTLEMENT, budget); // plain approve works
 
 // per fill:
 (uint256 delta, uint256[] memory received, uint256[] memory paid) =
@@ -60,8 +61,11 @@ The order is written from the **maker's** frame; the filler is the mirror:
 | `legsIn` | gives | **receives** (`received[]`) |
 | `legsOut` | receives | **delivers** (`paid[]`, approve for these) |
 
-`fillAmount` is denominated in the **anchor**: `legsIn[0]` for a SELL,
-`legsOut[0]` for a BUY. Consequences for a router:
+`fillAmount` is denominated in the order's **DENOMINATOR**: `fillTotal` when the
+order sets one (a fill-module order — e.g. `FullFillModule`, `TwapFillModule`),
+else the anchor — `legsIn[0]` for a SELL, `legsOut[0]` for a BUY. The two
+statements below hold only when `fillTotal == 0` (2026-09-30 PRICE-1.v2).
+Consequences for a router:
 
 * **BUY order → exact-input for you.** `fillAmount` = what you deliver on
   `legsOut[0]`. Your receipt rises with the auction tick — read it from
@@ -69,8 +73,12 @@ The order is written from the **maker's** frame; the filler is the mirror:
 * **SELL order → exact-output for you.** `fillAmount` = what you receive on the
   anchor leg (so `received[0] == delta` exactly for the fixed leg). What you
   pay decays with the tick — the returned `paid` is authoritative.
-* Converting a spend budget into `fillAmount`: `fillAmountFromBudget` in
-  `@1delta-x/sdk` (side-aware), or quote on-chain (below).
+* Converting a spend budget into `fillAmount`: `fillAmountFromBudget(order,
+  budget, now, { filler, baseFee?, priorityFee?, remaining? / prevFilled? })` in
+  `@1delta-x/sdk` (side-aware; the `FillerContext` object replaced the positional
+  arguments on 2026-09-30, and the soft-exclusivity override is now derived from
+  `filler`, so an outsider inside a soft window pays the override), or quote
+  on-chain (below).
 
 **Price motion is USUALLY in the filler's favor between quote and execution**
 on a plain, monotonically rising clock curve: SELL outputs decay down, BUY
@@ -88,7 +96,13 @@ actually priced at):
   maker-ward (legacy / fixed gas price especially);
 * a **descending segment** of the signed `curve` — the piecewise curve may
   fall, and a falling bump moves every leg maker-ward;
-* a module keyed on the filler or on state the maker can flip.
+* a module keyed on the filler or on state the maker can flip;
+* the **soft-exclusivity lift**: an outsider inside a live soft window pays the
+  override bps on the maker's legs. It is identity-dependent (it depends on who
+  sends the fill, not on the bump) and is **not** covered by `minBumpBps` — quote
+  as the address that will actually fill;
+* a **priority-bid quote**: on a priority order your own bid IS the price, so a
+  quote made at one gas price does not hold at another.
 
 Quote the bump alongside the amounts (the lens/preview exposes it) and pass it
 as the floor; the fill then executes at your quoted price or better, or
@@ -106,14 +120,21 @@ reverts `BumpTooLow`.
   same block. (Priority-auction orders derive the bump from your own gas
   price — quote with the gas price you will send, and DO pass the floor: a
   basefee drop before inclusion moves the bid against you.)
-* **Off-chain:** `previewFillLocal` in `@1delta-x/sdk` mirrors the identical
-  math from a timestamp + basefee. For a **priority-auction** order pass the
-  `priorityFee` you will bid (the last argument); a zero-bid quote prices at the
-  floor and would misstate both the delivery and a budget-derived `fillAmount`. A
+* **Off-chain:** `previewFillLocal(order, fillAmount, prevFilled, now, { filler,
+  baseFee?, priorityFee?, … })` in `@1delta-x/sdk` mirrors the identical math,
+  including the soft-exclusivity override for `filler`. For a
+  **priority-auction** order pass the `priorityFee` you will bid — the SDK throws
+  `PricingNeedsContext` without it, because a zero-bid quote prices at the floor
+  and would misstate both the delivery and a budget-derived `fillAmount`. A
   `pricingModule` order can't be mirrored locally — quote it via
   `SettlementLens.previewFill`.
-* **HTTP:** the orderbook server's `GET /quote?hash=…&fillAmount=…&filler=…`
-  returns the previewed amounts plus ready-to-send `fillUpTo` calldata.
+* **HTTP:** the orderbook server's `GET /quote?hash=…&fillAmount=…&filler=…[&gasPrice=…]`
+  returns the previewed amounts plus ready-to-send `fillUpTo` calldata whose
+  `minBumpBps` is the previewed bump and whose `fillAmount` is the resolved delta
+  (never the sentinel). `gasPrice` is REQUIRED for priority-auction orders (400
+  without it) and is the gas price the quote assumes (2026-09-30 PERIPH-1.v1).
+  `fillUpTo` does not trim a Proportional request, so a Proportional quote is valid
+  only at exactly that size.
 
 ## Funds handling rules
 

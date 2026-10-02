@@ -84,7 +84,7 @@ Entry points, all sharing that flow:
 | `fillWithPermitTake(...)` | fill whose TAKE item is funded by a one-shot `PermitTake` (order-hash witness, settler-bound spender) — no taker allowance survives |
 | `batchFill(...)` | several independent single-order fills in one transaction |
 | `fillSelf(...)` | `batchFill`'s self-call target (`msg.sender == address(this)` only) |
-| `fillUpTo(...)` | router / aggregator entry: clamps to remaining size, returns `(delta, received, paid)`, takes a `minBumpBps` price floor |
+| `fillUpTo(...)` | router / aggregator entry: clamps to remaining size (except a Proportional request, which is never trimmed — pass `type(uint256).max` — and a fill-module order, which the module sizes at or below your request), returns `(delta, received, paid)`, takes a `minBumpBps` price floor |
 | `matchSettle(MatchPlan)` | netted N-order settlement (below) |
 
 ## Netted settlement — `matchSettle`
@@ -188,8 +188,8 @@ slice, and expires in the current block.
 ## Periphery
 
 - **`SettlementLens`** — exact fill preview (`previewFill`, same math as the contract), `previewBump` for a filler's price floor, `getOrderRelevantStates` (one call returning everything an off-chain book needs to decide whether an order is live and funded), signature check, and `validateOrder` with a human-readable reason.
-- **`NativeSettler` + `NativeForwarderFactory`** — native ETH handled entirely at the edge, so the core and Permit3 stay ERC20-only while a maker can still pay native into a WETH-denominated order in one transaction.
-- **ERC-7683 adapters** — `OriginSettler7683` / `DestinationSettler7683`, for distribution: existing solver fleets resolve and fill these orders through an interface they already speak. `orderId` is the EIP-712 order hash, and the adapters are **escrow-free** — `open`/`openFor` verify liveness and broadcast rather than take custody, because maker funds move only at fill time under the maker's own allowances.
+- **`NativeSettler` + `NativeForwarderFactory`** — native ETH handled entirely at the edge, so the core and Permit3 stay ERC20-only while a maker can still pay native into a WETH-denominated order in one transaction. One WETH input leg and any number of output legs (fee splits, originator fee legs); name `NativeSettler` as the hard `exclusiveFiller` when the order is meant only for it.
+- **ERC-7683 adapters** — `OriginSettler7683` / `DestinationSettler7683`, for distribution: existing solver fleets resolve and fill these orders through an interface they already speak. `orderId` is the EIP-712 order hash, and the adapters are **escrow-free** — `open`/`openFor` verify liveness and broadcast rather than take custody, because maker funds move only at fill time under the maker's own allowances. Quotes are priced for the destination settler (soft windows include the outsider premium; hard windows, SETTLE items and delta-verify orders are not broadcast), and the destination ENFORCES the quoted per-unit bounds against `fillUpTo`'s return (`BoundExceeded`); solvers may pass their own `FillerData{payTo, minBumpBps, bounds}`.
 - **`DustHandler`** — residual disposal for MAKE modules: sweep to the user, or best-effort recycle back into the position with an automatic fall back to sweep when a re-supply would revert (supply caps, frozen reserves, isolation mode).
 
 ## Reference solvers

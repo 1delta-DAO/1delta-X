@@ -300,7 +300,21 @@ evm_version    = "cancun"
 #     + soft window with no carrier is hard (gate inlined ×3)        24,119     457
 #     + extend-only nominations, maker-ward bump rounding,
 #       EXECUTOR-addressed leg refused on the netted path            24,273     303
-#     + `fillWithCallback` honours the any-size sentinel             24,325     251   ← here
+#     + `fillWithCallback` honours the any-size sentinel             24,325     251
+#
+# 2026-09-30 — the whole-tree audit remediation (F32), clean via-IR builds:
+#
+#     variant                                                     Settlement   free
+#     audited HEAD (56d1405)                                         24,325     251
+#     + sentinel unified in `_openFill` (−72), one 6-arg
+#       `fillWithPermit` (≈ −170 net of the new `minBumpBps`
+#       floors), zero-amount carrier (+11), EXECUTOR guard (+29),
+#       shortening burn (+27), module ceiling `OverFill` (+9)         24,223     353
+#     + VAL-1 core rule in `_runInvariants`                           24,311     265   ← here
+#
+# MEASURED WORSE: keeping two `fillWithPermit` overloads around the 6-arg body costs
+# +565 B under via-IR. The lens was split into `SettlementLens` + `SettlementLensChecks`
+# to fit (the lens alone had reached 24,308 / 24,576); both halves are size-gated.
 #
 # THE TWO LEVERS THAT PAID, for the next person: (1) via-IR emits a SEPARATE inlined
 # copy of a function for a call site that passes a CONSTANT argument (`false`,
@@ -332,7 +346,8 @@ optimizer_runs = 100
 #                 import them and `packages/core/src` imports none of them.
 #
 # Core keeps only what `settlement/` actually reaches for: `interfaces/`, `permit3/`,
-# and the two libs in `utils/` (SafeTransferLib, Permit3TransferLib).
+# and `utils/SafeTransferLib` (`Permit3TransferLib` was deleted 2026-09-30, P3-2;
+# Settlement pulls through `Base._pullViaPermit3`).
 
 [profile.periphery]
 src    = "packages/periphery/src"

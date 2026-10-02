@@ -130,9 +130,12 @@ watchtower and no generated sub-orders**: one signed order is released in N equa
 time-sliced parts, the schedule riding existing signed fields (`fillTotal` =
 total, `minFillAnchor` = part size, and the `timing` word's packed decay clock
 = window).
-`resolveFill` admits only the parts whose window has opened, so a fill can't run
-ahead of schedule, one part per window is steady state, a skipped-window solver
-can catch up, and the core's cap bounds total at `fillTotal`. Pricing stays
+`resolveFill` admits only the parts whose window has opened — part `k` (0-indexed)
+opens at `start + ceil(k·duration/parts)`, with no floored part duration, so an
+uneven window never releases a part early (2026-09-30 PRICE-7); an unset
+`decayStartTime == 0` reverts — so a fill can't run ahead of schedule, one part per
+window is steady state, a skipped-window solver can catch up, and the core's cap
+bounds total at `fillTotal`. Pricing stays
 orthogonal (fixed limit per part today; a market-tracking limit layers on with an
 oracle validator over the `takerData` seam — the same split maps DCA, iceberg,
 stop-loss, and oracle-limit orders). Zero-inventory still works per window (the
@@ -181,10 +184,14 @@ two zero words); everything heavier is pay-per-use and opt-in.
 - **`minFillAnchor` re-denominates.** It becomes "minimum `delta` per fill" in the
   module's unit. For an indivisible order set `minFillAnchor == fillTotal` to
   force full-fill; the existing stranded-tail caveat carries over unchanged.
-- **The auction is orthogonal.** Dutch decay (`amountOutAt`/`amountInAt`, gas
-  bump, curve) prices each leg; the fill module only sets the fraction that
-  scales it. They compose without interaction — an NFT order can still carry a
-  decaying fungible boot leg.
+- **The auction is orthogonal — except for the clock.** Dutch decay
+  (`amountOutAt`/`amountInAt`, gas bump, curve) prices each leg; the fill module
+  only sets the fraction that scales it, and an NFT order can still carry a decaying
+  fungible boot leg. ⚠ `TwapFillModule` reads `decayStartTime` / `decayDuration`,
+  which are ALSO the dutch clock: a TWAP that signs a decaying band shares its clock
+  with the schedule, so the band decays over the whole TWAP window and catch-up
+  lets the remaining parts clear near `end` (corrected 2026-09-30, PRICE-14). Sign
+  a fixed band (or a band meant to decay over the whole window) for a TWAP.
 - **Lens.** `validateOrder` learns the module-anchored shapes: when `fillModule`
   is set it should not require a fungible anchor leg, and it should surface
   `fillTotal == 0 && fillModule != 0` (module without a denominator) and the

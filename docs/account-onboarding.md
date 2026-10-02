@@ -20,6 +20,14 @@ different kinds of thing:
 | `token.approve(PERMIT3, max)` | the ERC20's own allowance — what lets Permit3 call `transferFrom` at all | **only via EIP-2612** |
 | `PERMIT3.approveToken(spender, token, …)` | Permit3's book — what decides *who* may spend it | **yes**, always |
 
+Both legs are needed, and a UI must perform both: the reference app
+(`packages/app`) does the ERC-20 approve to Permit3 AND an exact, expiring
+`Permit3.approveToken` to Settlement, and checks `Settlement.PERMIT3()` before it
+does (2026-09-30 A-IMMUT-1 — it used to do only leg 1, so no order it produced could
+fill). `SettlementLens` likewise reads BOTH: a Permit3 book entry with no ERC-20
+approval behind it reads fillable 0, unless a direct approval to Settlement funds
+the fallback (G-LENS_PARITY-1, `FundingPreflight.pullable`).
+
 Permit3 moves tokens with `SafeTransferLib.safeTransferFrom(token, from, to, amount)`
 ([`AllowanceTransfer.sol:160`](../packages/core/src/permit3/AllowanceTransfer.sol#L160)),
 so the first leg is not optional and not something Permit3 can grant itself.
@@ -184,10 +192,11 @@ is Route 1, and which is already finished.
 
 Everything above assumes the maker funds through Permit3. Some do not: a maker can
 skip the hub entirely and grant a **direct ERC-20 approval to the Settlement**, and
-`Permit3TransferLib.transferFromWithFallback` will happily use it —
-[`Permit3TransferLib.sol`](../packages/core/src/utils/Permit3TransferLib.sol) tries
-the Permit3 leg with a low-level call and falls through to a plain `transferFrom`
-when it fails.
+Settlement's pull will happily use it —
+[`Base._pullViaPermit3`](../packages/core/src/settlement/Base.sol) (it replaced
+`Permit3TransferLib`, deleted 2026-09-30, P3-2) tries the Permit3 leg with a
+low-level call and falls through to a plain `transferFrom` when it fails, unless
+the payer is in strict mode.
 
 That fallback is deliberate and useful. It is also, unqualified, a footgun, because
 the fall-through does not discriminate *why* the Permit3 leg failed:
@@ -240,8 +249,19 @@ const calls = buildRevokeAll({
   tokens: [tokenSpenderPair(token, settlement)],
   directApprovals: [tokenSpenderPair(token, settlement)], // approve(settlement, 0)
   strictMode: true,                                       // emitted FIRST
+  outstandingPermitNonces: [...unappliedPermitNonces],    // REQUIRED ([] = none)
+  signedVenueRevokes,                                     // optional, see below
 });
 ```
+
+`outstandingPermitNonces` is **required** (2026-09-30 CENSUS-A-3): revoking the
+book binds only grants already in it, so a signed-but-unapplied `PermitBatch` /
+`PermitTake` (every gasless order's witness batch) would re-install what the bundle
+revokes; the bundle burns those nonces. Pass `[]` only if there is none. A venue
+grant installed by a signature in an order (Comet `allowBySig`, Morpho/Lista
+`setAuthorizationWithSig`) survives a plain on-venue revoke; pass the
+nonce-consuming revoke, signed at the venue's current nonce, as
+`signedVenueRevokes` (L-CMT-3 / L-ML-9; see SECURITY.md).
 
 `strictMode` is emitted first on purpose: if the bundle is sent as separate
 transactions, a fill landing between them cannot use the fallback.

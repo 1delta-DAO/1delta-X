@@ -426,10 +426,12 @@ abstract contract Base is Signatures {
     ///
     ///      ⚠ That floor is the PRE-BATCH balance, so it does NOT by itself cover
     ///      proceeds arriving DURING a `matchSettle` context. {Batch} closes the gap
-    ///      on its own side by refunding any un-attributed item proceeds to the maker
-    ///      as the item runs (see {Batch._creditItemProceeds}) — so on the netted
-    ///      path such proceeds are returned rather than lost. Only THIS path, where
-    ///      the token universe is not known, still strands them.
+    ///      on its own side by refunding un-attributed item proceeds to the maker as
+    ///      the item runs (see {Batch._creditItemProceeds}) — but ONLY for tokens in
+    ///      the plan's universe (the union of the plan's leg tokens): a proceeds
+    ///      token that appears in no order's legs is neither measured, refunded nor
+    ///      swept, and strands exactly as on this path (audit 2026-09-30
+    ///      CORE-ITEMS-2 / X-SPEC-11).
     ///
     ///      This is not enforceable here: an item's proceeds token is encoded inside
     ///      the module-specific `item.data`, which the core deliberately does not

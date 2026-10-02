@@ -15,7 +15,10 @@ discipline is FoT-correct as a side effect, and dropping it measured a net
 saving of ~0 — see the note on custody.)
 
 Most of these contracts are permissionless fillers: anyone may run one to fill
-an order. They hold no funds between fills — each fill sources its collateral
+an order. The flash solvers hold no funds between fills (their safety rests on
+exhaustive sweeps; `AggregatorFillSolver` instead uses delta-scoped per-fill
+approvals and operator gating, `UsdrifInventorySolver` operator gating and owner
+budgets — see SECURITY.md, "Any contract that fills on its own behalf") — each fill sources its collateral
 inventory from a flash-loan provider, routes it through Settlement to satisfy
 the order, swaps the borrow proceeds back to the collateral asset, and repays
 the flash in the same transaction. The shared fill → swap → repay machinery
@@ -291,11 +294,11 @@ A profitable match is visible to every solver at once, so several land a
 transaction for it in the same block. One wins; the rest revert — and reverting
 is not free.
 
-An unguarded loser learns the race is over only at the very end of the approach:
-`matchSettle` derives the token universe, takes a `balanceOf` snapshot per token,
-hashes the first order (keccak over the full struct and every dynamic sub-array),
-`ecrecover`s its signature, runs its validators, and *then* reads `filled` and
-reverts `OverFill`. Every one of those steps is wasted, and the waste grows with
+An unguarded loser learns the race is over only well into the approach:
+`matchSettle` derives the token universe, takes a `balanceOf` snapshot per token
+and hashes the first order (keccak over the full struct and every dynamic
+sub-array) before `_openGated` reads `filled` — which it does BEFORE `ecrecover`
+and the validators (corrected 2026-09-30, X-SPEC-8) — and reverts `OverFill`. Every one of those steps is wasted, and the waste grows with
 the size of the plan and the cost of the orders' validators.
 
 For an ordinary order the losing condition is knowable from **one storage slot**,

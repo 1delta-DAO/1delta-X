@@ -67,7 +67,7 @@ sequenceDiagram
     rect rgb(255,245,235)
     note over Solver,P3: PHASE 2 — solver fills the order
     Solver->>Settle: fill(order, sig, amount)
-    Settle->>V: staticcall validate(order, data)
+    Settle->>V: staticcall validate(order, filler, data, takerData)
     V-->>Settle: settled? (opersInfo(opId).operType == 0 AND RIF ≥ minRif) ; price in band?
     Settle->>P3: transferFrom(solver → user, USDT0)
     Settle->>P3: transferFrom(user → solver, RIF)
@@ -159,8 +159,12 @@ interfaces for them.
 ```
 
 - An op is executable once `block.number ≥ queuedBlk + minOperWaitingBlk (=1)`.
-- `execute(...)` is restricted to the multi-collateral guard; the fork tests
-  impersonate it. Ops execute strictly FIFO, so `opId < firstOperId()` proves the
+- `MocQueue.execute(...)` is restricted to the multi-collateral guard; the fork
+  tests impersonate it. ⚠ The GUARD's own `execute()` is **permissionless**
+  (`MocMultiCollateralGuard.execute()`), so ANYONE can drain the queue at any time —
+  including inside another contract's call. That is why `UsdrifInventorySolver`
+  brackets every measured window with `MocQueue.firstOperId()` and reverts
+  `QueueMovedDuringMeasurement` (2026-09-30 RIF-1 / RIF-2; SECURITY.md M-8). Ops execute strictly FIFO, so `opId < firstOperId()` proves the
   op was **dequeued** — good enough for off-chain tracking, but a dequeued op may
   have errored and refunded, so the validator uses the stricter
   **`opersInfo(opId).operType == 0`** (executed and deleted) plus the RIF floor.

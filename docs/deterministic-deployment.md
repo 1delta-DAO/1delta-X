@@ -101,7 +101,8 @@ propagates down the chain: every argument must itself already be deterministic.
 | `Permit3` | none — [`EIP712`](../packages/core/src/permit3/EIP712.sol) takes nothing; `block.chainid` is only *read* into an immutable | ✅ root of the chain |
 | `Settlement` | `(permit3)` — [Settlement.sol:48](../packages/core/src/settlement/Settlement.sol#L48) | ✅ if Permit3 matches |
 | `SolverCallbackExecutor` | none; deployed by Settlement's constructor via plain CREATE — [Base.sol:139](../packages/core/src/settlement/Base.sol#L139) | ✅ nonce-1 child of a deterministic parent |
-| `SettlementLens` | `(settlement)` | ✅ |
+| `SettlementLens` | `(settlement)`; CREATEs `SettlementLensChecks` in its constructor (exposed as `CHECKS()`), so the lens init code INCLUDES the checks' creation code | ✅ — but the lens address family CHANGED with the 2026-09-30 remediation (the split), and any earlier prediction must be regenerated |
+| `SettlementLensChecks` | none; nonce-1 child of the lens via plain CREATE | ✅ follows the lens |
 | `FunnelGrantModule` | `(settlement)` | ✅ |
 | `PositionFunnelFactory` | `(permit3, settlement, lens, grantModule)`; deploys `IMPLEMENTATION` in-constructor | ✅ — **this is the fund-safety-critical one** |
 | `LzOftBridgeOutModule` | `(permit3, settlement)` | ✅ |
@@ -118,6 +119,10 @@ Note that Permit3 caching its domain separator is *not* a determinism problem:
 the chain id is read at construction into an immutable, which changes the
 runtime code's immutable slot but not the init code, and the address derives
 from init code alone.
+
+Both lens halves are bound by EIP-170 and are measured by `make size-check`
+(`periphery-deploy` profile, compiler settings pinned byte-identical to
+`core-deploy`). So are `NativeSettler` and the two ERC-7683 settlers.
 
 ## 3. Bytecode identity: only three families exist
 

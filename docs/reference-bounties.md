@@ -87,8 +87,9 @@ the conversion is one expression, documented. **Where the class still bites us:*
 F28's own finding 2 was exactly a B2 — `NativeUnwrapModule` compared a pro-rated
 signed constant against an auction-priced delivery of the same token (same unit,
 different *denominator*). The `ExactlyPreFundModule._scaledFace` lead (delivered
-amount over signed total used as a fill fraction) is the same shape and is still
-open. **Rule:** every `min(a, b)`, `a < b` or `a * x / y` between two quantities
+amount over signed total used as a fill fraction) was the same shape; it is fixed
+(2026-09-30 L-FSE-2: `totalAmount` is the leg's smallest full-fill delivery, and
+`_repayFixed` clamps the face to the live fixed position and skips when it is empty). **Rule:** every `min(a, b)`, `a < b` or `a * x / y` between two quantities
 names both units in a comment; `docs/edge-case-matrix.md` gets a row per new one.
 
 ### B3 — Storage written at one offset and read at another
@@ -184,7 +185,13 @@ decoded asset against the same word); `TAKE_FOR` sizes the funding leg from the
 signed `legsOut` reference so the amount exists once. F28 closed two more: the
 Liquity/River repay legs measured a `data`-named token while the venue burned the
 real one (now pinned to `registry.boldToken()` / `tm.debtToken()`), and the
-Dolomite `Withdraw`/`Borrow` ops built the same venue action from two refs. **Still
+Dolomite `Withdraw`/`Borrow` ops built the same venue action from two refs.
+2026-09-30 closed three more: Dolomite now binds the signed token to
+`getMarketTokenAddress(marketId)` on every entrypoint and its views report the
+registry token (G-BYTE_MAP-7, `MarketTokenMismatch`); the Venus, Compound v2 and
+Aave v4 taker modules bind the signed underlying to the venue (`vToken/cToken.underlying()`,
+`spoke.getReserve` word 0; `UnderlyingMismatch`, L-CV2-4); and shapes rule 16 now
+requires every TAKE-measured token to be bound to the venue. **Still
 open:** the PULL and BALANCE funding shapes carry the token in `data` and in the
 leg without a cross-check (self-harm only; F28 lead). **Rule:** if a quantity or
 address appears in the order *and* in a module blob, one of them is derived from
@@ -264,7 +271,10 @@ hub (Permit3) and grant it per-`(spender, module, keccak(data))`; `lockdownAll`,
 `lockdown` and `lockdownTakers` exist for the maker's side
 ([SignedPermits.sol:134](../packages/core/src/permit3/SignedPermits.sol#L134)).
 Module singletons hold no standing approvals to venues (every `forceApprove` is
-scoped and cleared — A-3, seventh site closed in F28). What we cannot close in
+scoped and cleared — A-3, seventh site closed in F28). *That sentence was not true of
+`MorphoBlueRepayModule` until 2026-09-30: its Recycle path left an
+`ensureApproval(max)` to Morpho (L-LIB-1). It is now true, and shapes rules 14/15
+enforce it.* What we cannot close in
 code: a *redeployed* Settlement or module is a new spender, and the old one keeps
 whatever grants it had until makers revoke. **Rule:** a deployment migration
 ships with a lens/SDK `lockdown` prompt for the superseded spender, and the
@@ -332,7 +342,10 @@ the SDK is the thing that names `settlement`. `PositionFunnel.enableToken`
 granting `uint160.max` to Settlement permissionlessly (F28 lead) is the same
 class one layer down — safe only because every Settlement pull is signature- or
 fill-gated. **Rule:** the SDK's approval targets are constants imported from the
-deployment manifest, never derived; the funnel grant stays scoped.
+deployment manifest, never derived; the funnel grant stays scoped. The rule extends
+to the **token addresses and decimals** written into a signed order: they must come
+from pinned config, never from an indexer or a token list (2026-09-30 G-TS_SIGN-1 —
+the beta app built orders from unauthenticated token metadata).
 
 ### B14 — Under-priced or gas-bounded findings are still findings
 
@@ -347,7 +360,9 @@ downgrade: a manual force-through existed).
 
 **Verdict — OUR TRIAGE MATCHES.** The F28 report demoted two raw findings for the
 same reasons (ERC4626 dust-fill unwind: grief, no profit; RangePriceModule:
-bounded by the signed floor) and **fixed both anyway** — a class that lives only
+bounded by the signed floor) and acted on both. *(Corrected 2026-09-30: the
+RangePriceModule descending case was in fact left open then; it is fixed now by
+rejecting descending ranges, PRICE-3/PRICE-4, `DescendingRange`.)* — a class that lives only
 in a "not profitable today" note is the next sibling-miss. The global
 `_locked` flag is not hash-keyed, so the 1inch collision has no analogue; the
 `Batch._openGated` proportional-anchor grief (a 1-wei transfer reverts a whole
@@ -423,7 +438,7 @@ web search were checked on the date given and nothing per-finding was published.
 | BB-3 | 2026-09-14 | B6 | Liquity/River repay tokens pinned to the venue root; Dolomite Exact withdraw guarded (F28 findings 3, 6) |
 | BB-4 | 2026-09-14 | B7 | *No change* — bounds already present; recorded as the check to keep |
 | BB-5 | 2026-09-14 | B14 | ERC4626 dust-fill unwind and the five Full-mode bounds fixed although "not profitable today" |
-| BB-6 | open | B2 | `ExactlyPreFundModule._scaledFace` delivered/total as fill fraction (numbers in the F29 write-up) |
+| BB-6 | 2026-09-30 | B2 | `ExactlyPreFundModule._scaledFace` delivered/total as fill fraction — fixed (L-FSE-2, `test_audit_L_FSE_2_auctionedLeg_overRetiringSlice_doesNotBrickTheRest`) |
 | BB-7 | open | B6 | PULL/BALANCE funding shapes: token in `data` vs leg not cross-checked (self-harm) |
 | BB-8 | 2026-09-14 | B4, B3 | **Cross-language encoding vectors.** `packages/sdk/test/fixtures/encoding-vectors.json` is written by `encodingGolden.test.ts` (the SDK must reproduce it byte-for-byte) and read by `packages/core/test/EncodingGolden.t.sol`, which runs every vector through the real interpreter: `PreFundGuard` for the three descriptor shapes, `Proportional`, the `DutchAuction` accessors for `timing`/`params`, a deployed `ConditionTreeValidator`, `OcoGroupModule`, `CosignedQuotePriceModule`. One fixture, two consumers; a one-bit drift fails both sides (verified). What it does NOT cover: the SDK ships no module-`data` builders, so those blobs have no encoder to pin — the per-module byte maps + `check-module-shapes.py` remain the control there |
 | BB-9 | 2026-09-14 (netted path) | B14 | proportional-anchor 1-wei donation grief — netted path now honours the `type(uint256).max` sentinel; plain entries stay ceiling-semantics by documented design (`fillUpTo` is the route) |

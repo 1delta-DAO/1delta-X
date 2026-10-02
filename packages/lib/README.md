@@ -27,7 +27,7 @@ See the `DelegationHelper` header.
 make test-lib
 ```
 
-> Split out of core on 2026-08-24. `SafeTransferLib` and `Permit3TransferLib` did NOT
-> come with them — `core/src/settlement` imports those two directly, so they are core
+> Split out of core on 2026-08-24. `SafeTransferLib` and `Permit3TransferLib` (the latter
+> since deleted, 2026-09-30 P3-2) did NOT come with them — `core/src/settlement` imports those two directly, so they are core
 > internals and stayed behind. That split is the whole point: `utils/` had been two
 > different things wearing one name.

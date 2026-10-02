@@ -68,7 +68,16 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: test test-sdk test-ts build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: print-packages test test-sdk test-ts build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+
+# ── CI matrix source ──────────────────────────────────────────────────────────
+
+## Print ALL_PACKAGES as a JSON array. `.github/workflows/test.yml` builds its
+## per-package matrix from this, so a package added here is gated in CI with no
+## second list to keep in sync (audit 2026-09-30 MISC-MOD-6: `modules-erc4626` sat
+## in no target, and CI gated only the core).
+print-packages:
+	@printf '['; sep=''; for p in $(ALL_PACKAGES); do printf '%s"%s"' "$$sep" "$$p"; sep=','; done; printf ']\n'
 
 # ── Single package ────────────────────────────────────────────────────────────
 
@@ -250,6 +259,7 @@ docs-check:
 modules-check:
 	@python3 tools/check-module-shapes.py
 	@python3 tools/test-module-shapes.py
+	@python3 tools/check-ci-packages.py
 
 ## Regenerate the committed gas baseline (.gas-snapshot) for the core package.
 gas:

@@ -127,8 +127,12 @@ scaling stay in the core.
 
 Both are `view`, so both compile to `STATICCALL`, and the return is read into
 scratch capped at one word so a hostile module cannot bomb caller memory. The filler
-gets the matching guard from the other side: `fillUpTo`'s `minBumpBps` is an *exact*
-price floor, because every leg price is monotone in the one shared bump.
+gets the matching guard from the other side: `minBumpBps` is an *exact* price
+floor, because every leg price is monotone in the one shared bump. Since 2026-09-30
+(PERIPH-1.v3) it exists on `fillUpTo`, `fillWithPermit` (one 6-argument entry),
+`fillWithPermitTake` and `batchFill` (per order); plain `fill` has none — use
+`fillUpTo`. A fill module's delta is also capped by the filler's own `fillAmount`
+(`OverFill`, CORE-FILLER-2).
 
 See [pricing-modes.md](../pricing-modes.md) for the full argument.
 
@@ -230,8 +234,12 @@ cap and, in the worst ordering, no opportunity to unwind.
 **Here: applies — accepted class, industry-wide.** The maker chooses
 `pricingModule`, `fillModule`, validators, invariants and every item module, and the
 filler pays for all of them with no gas cap. Four of the five are `STATICCALL` with
-a one-word return cap, so the damage ceiling is burnt gas; item modules are ordinary
-calls under the maker's own Permit3 authority. Fillers must simulate — see
+a one-word return cap, so they cannot move the filler's assets; their damage is
+burnt gas, a reverted fill, or a price/size anywhere inside what the maker signed and
+the filler requested (a fill module can no longer return more than the filler's
+`fillAmount`, CORE-FILLER-2; a module can tell the lens probe from the real call by
+`msg.sender`, so a preview is advice). Item modules are ordinary calls under the
+maker's own Permit3 authority. Fillers must simulate — see
 [filler-strategy.md](../filler-strategy.md#7-every-maker-supplied-target-is-gas-unbounded).
 
 ### C10 — Hard-coded gas stipends on value transfer
@@ -246,7 +254,10 @@ upgrades and does not hold across chains.
 **Here: not applicable to the core.** No native-value path exists in the settlement
 core — no `payable` entry point, and `SafeTransferLib` carries no ETH transfer at
 all. Native assets are wrapped inside modules, which is where this check belongs
-instead: **any module that forwards native value must not cap the gas.**
+instead: **any module that forwards native value must not cap the gas.** Modules that
+unwrap deliver WETH rather than raw ETH wherever the recipient is not the maker:
+`CompoundV2Native*`, `ListaNative*` and, since 2026-09-30 (L-FSE-3), the Fluid
+custody modules (`FluidCustodyBase._operateOut`) — a native Fluid leg is a WETH leg.
 
 ### C11 — The permit as a liveness bomb
 
@@ -262,7 +273,10 @@ costless front-run permanently bricks the order.
 nonce already spent — by an earlier partial fill, or by a griefer front-running the
 permit out of this very calldata — is **skipped** rather than reverting. Without
 that, one cheap front-run would permanently brick an order whose maker signed a
-`PermitBatchWitness` and therefore has no other entry to rescue it.
+`PermitBatchWitness` and therefore has no other entry to rescue it. ("No other
+entry" holds only before the first fill: after a partial first fill, a spent nonce
+is a verified no-op even past `batch.deadline`, so `fillWithPermit` keeps working —
+2026-09-30 P3-4.)
 
 ### C12 — Revocation that does not revoke
 
@@ -274,7 +288,7 @@ that, one cheap front-run would permanently brick an order whose maker signed a
 standing — and the user is told they revoked.
 
 **Here: applies, and it was the highest-ranked item in this review.**
-`Permit3TransferLib.transferFromWithFallback` falls through to a direct
+`Base._pullViaPermit3` (formerly `Permit3TransferLib.transferFromWithFallback`, deleted 2026-09-30) falls through to a direct
 `transferFrom` whenever the Permit3 leg fails for **any** reason, including because
 the payer revoked, capped or expired it. See [F1](findings-ledger.md#f1--revoking-permit3-is-not-a-kill-switch-on-its-own)
 for what changed.
@@ -309,6 +323,17 @@ that has already written the incident down. All three are fixed — see
 [F9](findings-ledger.md#f9--the-lens-conflated-the-settlers-two-lifecycle-axes) and
 [F10](findings-ledger.md#f10--remaining-panicked-for-a-cancelled-order).
 
+The 2026-09-30 audit found six more (G-LENS_PARITY-1..6, PERIPH-5, G-BYTE_MAP-6,
+PRICE-15), all fixed, and the lens now mirrors: the reserved bit-255 order nonce in
+preview and state; pre-fund + soft-override `ForLegInvalid` in `previewFill`; the
+`minFillAnchor` tail (a stranded remainder reads 0 and is named); the ERC-20
+approval to Permit3 behind a Permit3 book entry (`FundingPreflight.pullable`);
+structurally dead shapes (Invalid); the BALANCE floor; `floorBps > 10000` accepted as
+the settler does; the resolved-recipient duplicate rule (`0` and the maker are the
+same recipient); and MAKE-only pre-fund classification for item funding. Pinned by
+`test_audit_G_LENS_PARITY_6_deadShapesReadInvalid`,
+`test_audit_PERIPH_5_reservedNonce_invalidAndUnquotable` and siblings.
+
 ### C14 — Assumptions about how tokens behave
 
 > **UniswapX N-06:** the sample executor used bare `approve()`, which fails silently
@@ -317,8 +342,12 @@ that has already written the incident down. All three are fixed — see
 > the audit called an unintentional loss-of-funds path.
 
 **Here: scoped, with a real answer on the output side.** Fee-on-transfer and
-rebasing *inputs* are out of scope on the netted path and fail closed
-(`BatchNotWhole` / `LegUnfunded`) rather than mis-settling. For *outputs*,
+rebasing *inputs* are out of scope on the netted path: they revert (`BatchNotWhole` /
+`LegUnfunded`) or the fee is absorbed by the MATCHER's own residual — it does not
+always fail closed, but an honest maker is never short-changed (2026-09-30
+X-SPEC-6). **Double-entry-point tokens** are out of scope for `matchSettle` and
+delta-verify too (X-TOKENS-2, accepted: a dedup costs EIP-170 bytes and the loss is
+bounded to the matcher's residual). For *outputs*,
 `deltaVerifyOutputs` (timing bit 104) requires a measured recipient balance
 increase, and its two soundness preconditions — no duplicate `(token, recipient)`
 leg, no maker-bound output token that is also an input token — are enforced

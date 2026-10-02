@@ -15,11 +15,13 @@ also done by agents. The raw report, cluster and triage data, PoC sources and th
 fixer reports live in `docs/local/audit-2026-09-30/`, which is gitignored. This page
 is the permanent record.
 
-**Status at the time of writing (2026-10-02, branch `audit-fixes-2026-09-30`,
-`7569f87`): remediation is IN PROGRESS.** Core, lib and twelve component groups are
-fixed and merged; the cross-component pass is committed; the documentation group,
-the independent verification of the fixes, the fix-up round and the final gate
-have not run. See [Remediation status](#remediation-status).
+**Status (2026-10-02, branch `audit-fixes-2026-09-30`): fixes and docs merged;
+independent verification and the final gate pending.** Core, lib and twelve
+component groups are fixed and merged; the cross-component pass (`7569f87`), the
+partials lane (`5389bf1`, `55cbfcc`, `7889c02`, `d49cc63`) and the documentation /
+CI group ("docs: 2026-09-30 audit doc leftovers") are committed. The independent
+verification of each fix, the fix-up round and the final gate have not run. See
+[Remediation status](#remediation-status).
 
 ---
 
@@ -84,7 +86,7 @@ remediation; that is part of the verification phase that has not run.
 
 All twenty were reproduced by a PoC; all twenty have a fix merged on
 `audit-fixes-2026-09-30`, each with a regression test the fixer reports as failing
-on the original source. VAL-1 is `fixed_partial` (see the row). Solidity test names
+on the original source. Solidity test names
 below are checked by `make docs-check`; TypeScript (vitest) names are written
 without backticks because the gate only indexes Solidity, and were confirmed by
 grep.
@@ -102,7 +104,7 @@ grep.
 | RIF-2 | `UsdrifInventorySolver._fillCapped` | A maker-signed item could trigger a MoC failed-op refund inside the measured fill. | Hourly USDT0 budget spent for ~0. | Item-bearing orders refused; fill bracketed by the queue head. | `test_audit_RIF_2_itemOrderCannotTriggerQueueRefundInsideFill`, `test_audit_RIF_2_fillRefusedWhenQueueMovesInsideIt` |
 | PRICE-1 | `ChainlinkPeggedPriceModule` | Fair price computed against the fill denominator. | Every `fillTotal` order (e.g. `FullFillModule`, `fillTotal = 1`) cleared at the maker's floor. | Anchors on the counterpart leg's whole-order amount. Needs redeployment. | `test_audit_PRICE_1_fullFillModuleFillTotal1_clearsAtPeg`, `test_audit_X_ARITH_1_bpsFillTotal_halfFillAtPeg`, `test_audit_PRICE_1_buyLargeFillTotal_paysPegNotCap` |
 | PRICE-2 | `OcoGroupModule` | The first fill of any size claims the group. | Anyone retired a stop-loss by filling 1 wei of a sibling. | Claim blob `(groupId, nonce, minClaim)`; claims below `minClaim` revert; missing floor fails closed. **BREAKING** (SDK and golden updated). | `test_audit_PRICE_2_dustFillCannotRetireStopLoss`, `test_audit_PRICE_2_missingOrUnreachableFloor_failsClosed` |
-| VAL-1 (partial) | ownership invariants | Invariants prove an end state, not a delivery (F30's delta-verify sibling). | A filler collected a purchase payment without delivering. | `InvariantReceiptGuard`: no-output-leg orders need a lifelong named `exclusiveFiller`; lens and SDK refuse the shape. Not done: a generic core rule for third-party invariants (optional, core bytes). | `test_audit_VAL_1_erc721_twoBids_oneDelivery_cannotDoubleDip`, `test_audit_VAL_1_minBalance_floorMetElsewhere_noFreeFill`, `test_audit_VAL_1_namedFiller_canStillPurchase_othersRefused` |
+| VAL-1 | ownership invariants | Invariants prove an end state, not a delivery (F30's delta-verify sibling). | A filler collected a purchase payment without delivering. | Core rule for ANY invariant (`Base._runInvariants`, +88 B): an order with invariants and an empty `legsOut` is fillable only by its named `exclusiveFiller`, for its whole life (`NotExclusiveFiller`; position items do not lift it). `InvariantReceiptGuard` in the shipped invariants (defence in depth); lens and SDK refuse the shape. **BREAKING behaviour.** | `test_audit_VAL_1_core_thirdPartyInvariant_openOrder_noFreePayout`, `test_audit_VAL_1_core_namedFiller_only_forWholeLife`, `test_audit_VAL_1_erc721_twoBids_oneDelivery_cannotDoubleDip`, `test_audit_VAL_1_minBalance_floorMetElsewhere_noFreeFill` |
 | MISC-MOD-1 | `ProportionalSweepModule` | bps re-applied to the post-sweep balance on every partial fill. | A split fill swept up to the cap. | Fractional bps needs the 3-word blob and is full-fill only. **BREAKING** for bps < 100%. | `test_audit_MISC_MOD_1_fractionalSweep_cannotBeSplit`, `test_audit_MISC_MOD_1_fractionalTwoWord_failsClosed` |
 | BRIDGE-A-1 | `BridgedOrderInbox.rescue` | `rescue()` could not tell an uncredited LZ compose from stray balance; sources removable instantly. | A later compose was paid from other users' escrow. | `orphaned[token]` ledger bounds `rescue`; unannounced balance only via a delayed stray rescue. | `test_audit_BRIDGE_A_1_orphanRefundCannotSweepQueuedCompose`, `test_audit_BRIDGE_A_1_sourceRemovalParksButRescueCannotTake`, `test_audit_BRIDGE_A_1_fork_realEndpointV2_queuedComposeNotRescuable` |
 | L-LIB-1 | `MorphoBlueRepayModule` | Recycle repaid by shares under a standing max approval. | Any maker retired own debt from module residue. | Shares only when `amount >= liveDebt`; exact scoped approvals; `FloorBreached`. | `test_audit_L_LIB_1_recycleRepayCannotDrawModuleResidue`, `test_audit_L_LIB_1_ownMarketCannotDrainResidue` |
@@ -135,8 +137,8 @@ report's remediation plan put in P0/P1 or that change behaviour.
 | App (Rootstock beta) | 9 | 1 | The beta blockers: **A-IMMUT-1** (no Permit3 book grant, so no order could fill), G-TS_SIGN-1 (unauthenticated token metadata), G-TS_SIGN-3 (bit-255 nonces), G-TS_SIGN-4/-5 (false cancel / allowance statements), G-TS_SIGN-15 (simulated fills shown as settled during the raffle). |
 | Orderbook and server | 5 | 4 | A-FLEX-2 (permitBatch path dead end-to-end), G-TS_FILLER-2/3/4/6 (soft cancels that do not stick, rate-limit drain). |
 | Auction | 1 | 0 | CORE-FILLER-1.v3 (quotes bound to the bidding EOA, not the executor). |
-| Docs | 0 | 15 | SECURITY.md, FEATURES.md, approval-surface, module-security-model, gasless-permit-relay drift (all in the open docs group). |
-| Tools / Makefile | 1 | 1 | MISC-MOD-6 (`modules-erc4626` in no make target), L-CENSUS-7 (no shapes rule for the lending-low classes). |
+| Docs | 0 | 15 | SECURITY.md, FEATURES.md, approval-surface, module-security-model, gasless-permit-relay drift (fixed in the docs group). |
+| Tools / Makefile | 1 | 1 | MISC-MOD-6 (`modules-erc4626` in no make target; fixed, plus a CI matrix over every package), L-CENSUS-7 (no shapes rule for the lending-low classes; rules 14-16 added). |
 | **Total** | **94** | **109** | |
 
 ---
@@ -147,10 +149,11 @@ report's remediation plan put in P0/P1 or that change behaviour.
 
 | Phase | State | Evidence |
 |---|---|---|
-| A: core + lib fixes | **Done, merged** (`7e35e9c`, `fc0baa3`, integration `3e90bd7`) | core 912 passed / 2 skipped, `test-deployed` 914/914, invariants 26/26, lib 47/47; clean `size-check`: **Settlement 24,223 / 24,576** (was 24,325 at the audited HEAD; collapsing `fillWithPermit` to one entry paid for the new floors). |
+| A: core + lib fixes | **Done, merged** (`7e35e9c`, `fc0baa3`, integration `3e90bd7`) | core 912 passed / 2 skipped, `test-deployed` 914/914, invariants 26/26, lib 47/47; clean `size-check`: Settlement 24,223 / 24,576 (was 24,325 at the audited HEAD; collapsing `fillWithPermit` to one entry paid for the new floors), then **24,311 / 24,576** after the VAL-1 core rule (+88 B). |
 | B: 12 component groups (sdk, app, validators, offchain, lend1-4, bridge, modules, solvers, periphery) | **Done, merged** (`a90ea18`..`3034d23`, integration `1949cc2`, `f1287da`) | Merge report: every profile in `ALL_PACKAGES` green, `modules-erc4626` 16/16, `test-ts` (sdk 268, orderbook 127, server 53, auction 101, app 42), `test-deployed` 914/914, `size-check` and `modules-check` pass. |
 | Cross-component pass | **Committed** (`7569f87`, "fix: internal audit") | No structured per-item report. See [below](#cross-component-pass-7569f87). |
-| Docs group (SECURITY.md, FEATURES.md, docs/, tools, CI) | **Not run** | 17 issues have no fixer report; see [open items](#open-items). |
+| Partials lane (the 23 `fixed_partial` + L-LIB-8) | **Done, merged** (`5389bf1`, `55cbfcc`, `7889c02`, `d49cc63`) | VAL-1 core rule, AGG-6 (`executeItemFill`, flash `PERMIT_ENVELOPE`), AGG-4, X-DIFF-REST-3 closed (sponsorship bound to the filler), L-CENSUS-8 (Teller/Fluid owner binding), X-ASM-3 (d), L-LIB-8 (Aave v2). |
+| Docs group (SECURITY.md, FEATURES.md, docs/, tools, CI) | **Done** ("docs: 2026-09-30 audit doc leftovers") | The 17 docs issues fixed (MISC-MOD-6 Settlement-routed transfer/ERC-4626 flows, L-CENSUS-7 shapes rules 14–16 + comment stripping, docs-check layout offsets, CI matrix); the fixers' doc-update requests applied (skipped ones listed below). |
 | Independent verification of every fix | **Not run** | Fixer statuses below are self-reported. |
 | Fix-up round | **Not run** | |
 | Final gate (full suite, clean size-check, gas baseline) | **Not run** | `.gas-snapshot` not regenerated; the last full-suite figures are the merge-B report's. `7569f87` changed core comments only. |
@@ -175,29 +178,29 @@ is permissionless (RIF-1/RIF-2), and the SECURITY.md half of VAL-1.v4.
 
 | ID | Sev | Done | Remaining, and why |
 |---|---|---|---|
-| VAL-1 | med | On-chain guard in the three shipped invariants; lens (merge B) and SDK (`7569f87`) refuse the shape. | A generic core rule for third-party invariants: optional, costs core bytes. |
+| VAL-1 | med | On-chain guard in the three shipped invariants; lens (merge B) and SDK (`7569f87`) refuse the shape. | **Now fixed** (`7889c02`): the generic core rule landed (+88 B, Settlement 24,311 / 24,576). |
 | PRICE-8 | low | `ChainlinkRead.checkSequencer`, optional uptime pair on the Chainlink validators. | Pegged-module sibling and SDK encoders were cross-component; both landed in `7569f87`. |
 | VAL-2 | low | Predicate and tree leaves revert or propagate out-of-gas instead of reading false. | `MocPriceBandValidator` sibling and SDK doc were cross-component; landed in `7569f87`. |
-| X-DIFF-REST-3 | low | LZ sponsored sends are whole-item only, per-send cap, increase/decrease API (**BREAKING** 3-arg approve). | Any filler can still spend a sponsorship: `IMakerModule` carries no filler identity. Closing it needs a core interface change (not proposed). SDK guard (sponsor must be the lifelong hard filler) landed in `7569f87`. |
-| G-LENS_PARITY-1 | low | Lens funding cap reads the ERC-20 approval to Permit3. | `FundingPreflight.pullable` landed in `7569f87`. |
-| L-CMT-3 | low | NatSpec: cancel/expiry/revoke do not consume a venue nonce; durable revokes named. | Venues offer no sender binding, so no contract fix. SDK nonce-burning revokes landed in `7569f87`; SECURITY.md text open. |
+| X-DIFF-REST-3 | low | LZ sponsored sends are whole-item only, per-send cap, increase/decrease API (**BREAKING** 3-arg approve). | **Now CLOSED** (`55cbfcc`): a sponsored spec must be a SETTLE item (`ISettlementModule.settle` receives the filler), and the filler must be `feePayer` or a `setSponsorFiller` agent; a sponsored MAKE item reverts `SponsoredSendNeedsSettle` (**BREAKING**). No core interface change was needed. |
+| G-LENS_PARITY-1 | low | Lens funding cap reads the ERC-20 approval to Permit3. | `FundingPreflight.pullable` landed in `7569f87`. The Lista test `test_audit_L_ML_5_pullRepayReportsPermit3Book` was adjusted for it: a Permit3 book entry without an ERC-20 approval to Permit3 now reports 0. |
+| L-CMT-3 | low | NatSpec: cancel/expiry/revoke do not consume a venue nonce; durable revokes named. | Venues offer no sender binding, so no contract fix. SDK nonce-burning revokes landed in `7569f87`; SECURITY.md text now written. |
 | L-CENSUS-4 | low | Exactly and Silo README layouts rewritten. | aave-v3 / liquity-v2 README rows were cross-component; both READMEs changed later (`7569f87`, `de8df99`), not verified. |
 | L-CV2-1.v3 | info | `FullFillGuard.requireDelivered` NatSpec corrected. | Comment sites in Comet/Dolomite/AaveV2/AaveV3Credit and shapes rule 9: landed in `7569f87`. |
-| X-ASM-3 | info | Seed-sized blobs, dirty-address fuzz, batch-witness reference digest. | Sub-item (d), dirty high bits in the raw-copied PermitTake words: not added (bits are cleaned at the compare and by the ABI-encoded call). |
-| VAL-5 | info | NatSpec/README: the gated identity is Settlement's immediate `msg.sender`. | SDK warning landed in `7569f87`; FEATURES.md text open. |
-| L-CMT-4 | info | Teller Hypernative firewall registration documented. | No pool-deposit fork test: no verified live V2/V3 pool address was available. |
-| L-CMT-5 | info | Teller mock corrected, unit and mainnet-fork tests. | Comet/Morpho signature fork tests and Morpho negatives landed in `7569f87`; approval-surface.md citation open. |
+| X-ASM-3 | info | Seed-sized blobs, dirty-address fuzz, batch-witness reference digest. | Sub-item (d) **now done** (`7889c02`): `Audit20260930PermitTakeDirty.t.sol` fuzzes dirty high bits in the raw-copied PermitTake words, and the fill settles exactly like the clean permit. |
+| VAL-5 | info | NatSpec/README: the gated identity is Settlement's immediate `msg.sender`. | SDK warning landed in `7569f87`; FEATURES.md text now written. |
+| L-CMT-4 | info | Teller Hypernative firewall registration documented. | **Accepted**: no pool-deposit fork test is added because no verified live V2/V3 pool is available and Hypernative registration is a deploy step; the functional mock test covers the module. |
+| L-CMT-5 | info | Teller mock corrected, unit and mainnet-fork tests. | Comet/Morpho signature fork tests and Morpho negatives landed in `7569f87`; approval-surface.md citation fixed. |
 | PRICE-10 | info | Quote typehash binds `prevFilled` (**BREAKING**). | Fill size and settlement address cannot be bound (no size in `IPriceModule`; staticcall sender differs between fill and preview): accepted. |
 | G-BYTE_MAP-4 | info | `Full` documented as the tagged `0xB0DE0001` in owned headers. | MorphoBlue header, silo/lista/gearbox READMEs and SDK `encodeMode` landed in `7569f87`. |
-| G-BYTE_MAP-8 | info | AaveV2 pre-fund and Comet byte maps. | River, Midnight pre-fund, DelegationHelper maps landed in `7569f87`; `docs/settlement-modules.md` descriptor text open. |
-| L-ML-9 | info | Durable Moolah/Morpho revokes documented. | SDK nonce burn landed in `7569f87`; SECURITY.md kill-switch text open. |
-| L-CMT-7 | info | Morpho Blue doc drift fixed. | Comet/Teller headers landed in `7569f87`; approval-surface.md open. |
-| L-CENSUS-8 | info | Midnight strict `balanceMode`; pull MorphoBlue partial repay. | Gearbox pre-fund `BadOp` landed in `7569f87`. Teller/Fluid owner binding, Fluid repay clamp, Fluid `_locked` (all optional): **not determined**. |
-| AGG-4 | info | Route source placed inside the standing trust boundary. | Auction-side calldata guard landed in `7569f87`. |
-| AGG-6 | info | Pull path funds every output token. | Item orders (core PostInputs is item-free) and zero-inventory permit-witness fills (no callback entry; core bytes): accepted as infeasible. |
+| G-BYTE_MAP-8 | info | AaveV2 pre-fund and Comet byte maps. | River, Midnight pre-fund, DelegationHelper maps landed in `7569f87`; `docs/settlement-modules.md` descriptor text fixed: `(5 << 253) \| op << 244 \| token << 16 \| j`. |
+| L-ML-9 | info | Durable Moolah/Morpho revokes documented. | SDK nonce burn landed in `7569f87`; SECURITY.md kill-switch text written. |
+| L-CMT-7 | info | Morpho Blue doc drift fixed. | Comet/Teller headers landed in `7569f87`; approval-surface.md fixed (Teller deposit firewalled, Comet `allowBySig` wired, pre-fund needs no taker allowance). |
+| L-CENSUS-8 | info | Midnight strict `balanceMode`; pull MorphoBlue partial repay. | Gearbox pre-fund `BadOp` landed in `7569f87`. **Now fixed** (`55cbfcc`): Teller repay binds `getLoanBorrower == maker` (`NotBorrower`), Fluid deposit/repay bind the factory `ownerOf == maker` (`NotPositionOwner`), `FluidRepayModule` tagged `Full` live-debt clamp (full-fill only), `FluidTakerModule` `_locked`. |
+| AGG-4 | info | Route source placed inside the standing trust boundary. | Auction-side calldata guard landed in `7569f87`; word-aligned matching in `packages/auction/src/sources/guard.ts` (`5389bf1`). **Fixed**; stated limit: a presence check, bounded by the selector allowlist. |
+| AGG-6 | info | Pull path funds every output token. | **Now fixed** (`5389bf1`): item orders via `AggregatorFillSolver.executeItemFill` / `onMatchRoute`; zero-inventory permit-witness first fills via every flash solver's `PERMIT_ENVELOPE`. Residual: `AggregatorFillSolver` cannot take a permit order's FIRST fill (a `fillWithPermit` callback overload would cost about 565 B of Settlement). Bytecode changed for `AggregatorFillSolver` and every flash solver: regenerate any pre-audit beta deployment record or address prediction. |
 | PERIPH-9 | info | NativeSettler accepts fee-split and multi-output legs. | Binding the order to NativeSettler is a maker/SDK choice; SDK `nativeInOrder` landed in `7569f87`. |
 | CORE-FILLER-5 | info | Lens `pinnedBump` / `previewFillInFlightPinned`. | `FillRecovery` landed in `7569f87`. |
-| G-VENUE_B-9 | info | Silo/Exactly/Fluid NatSpec corrected. | Gearbox NatSpec landed in `7569f87`; the F19 ledger row and `module-security-model.md` I-10 still say `maxWithdraw`. |
+| G-VENUE_B-9 | info | Silo/Exactly/Fluid NatSpec corrected. | Gearbox NatSpec landed in `7569f87`; the F19 ledger row and `module-security-model.md` I-10 now say `previewRedeem(balanceOf(user))` (the RAW position, not `maxWithdraw`). |
 
 ### `accepted` (7, plus one placeholder)
 
@@ -215,7 +218,8 @@ is permissionless (RIF-1/RIF-2), and the SECURITY.md half of VAL-1.v4.
 ### `cross_component` (1)
 
 L-LIB-8 (info), `positionOf` missing on venues with `Full` withdraws: landed in
-`7569f87` for Aave v4, Lista (+native), Dolomite and Midnight, pinned by
+`7569f87` for Aave v4, Lista (+native), Dolomite and Midnight, and in `7889c02` for
+Aave v2 (`test_audit_L_LIB_8_aaveV2PositionOfAndPositionSizedFill`), pinned by
 `test_audit_L_LIB_8_aaveV4PositionOfAndPositionSizedFill`,
 `test_audit_L_LIB_8_dolomitePositionOfAndPositionSizedFill`,
 `test_audit_L_LIB_8_listaTakerPositionOfAndPositionSizedFill`,
@@ -258,39 +262,49 @@ below is from the diff and its new tests, **not verified item by item**:
   runs auction and app; `size-check` gates `SettlementLensChecks` and
   `NativeSettler`; `modules-erc4626` added to `PACKAGES`.
 
-Requests with **no evidence** in the tree: VAL-1's optional core rule and
-X-DIFF-REST-3's core filler exposure (both deliberately not done, core bytes /
-interface), CORE-FILLER-1.v3's optional move of `executor` into the signed bid
-payload, L-ED-5's optional per-seam test census rule, L-CENSUS-8 sub-items 3-5,
-OPS-USDRIF-MAXSPENT (the operator tooling lives outside this repo; the SDK
-encoders now require `maxSpent`), and the doc halves of G-VENUE_B-9.
+Requests with **no evidence** in the tree at `7569f87` were later closed or
+accepted: VAL-1's core rule (landed, `7889c02`), X-DIFF-REST-3 (closed without a core
+interface change, `55cbfcc`), L-CENSUS-8 sub-items 3-5 (landed, `55cbfcc`) and the
+doc halves of G-VENUE_B-9 (docs group). Still not done, by choice:
+CORE-FILLER-1.v3's optional move of `executor` into the signed bid payload (the
+`BidExecutor` declaration covers it), L-ED-5's optional per-seam test census rule,
+and OPS-USDRIF-MAXSPENT (the operator tooling lives outside this repo; the SDK
+encoders now require `maxSpent`).
 
 ### Open items
 
-1. **Docs group, 17 issues with no fixer report.** Checked against `7569f87`:
-
-   | ID | Sev | State |
-   |---|---|---|
-   | MISC-MOD-6 | low | Partly done: `modules-erc4626` is in `PACKAGES` (`7569f87`); ProportionalSweep now has Settlement-routed tests (MISC-MOD-1). Still missing: a Settlement-routed ERC20PermitTransfer fill with a decaying fee leg, and an ERC-4626 Phase 1 → Phase 2 flow through a real Permit3. |
-   | L-CENSUS-7 | info | Partly done: shapes rules 9-ext, 10-13 (rule 12 is the approval-clear-behind-early-return rule). Still missing: comment stripping, an `ensureApproval` allowlist, a delta-measured-token-is-pinned rule, a README layout check. |
-   | G-VENUE_B-8 | info | Tests largely done through other items (Gearbox pool legs fork test, L-LRG-5; Silo repay fork test, L-FSE-6). The approval-surface.md "fork-proven" row is uncorrected. |
-   | P3-1, X-SPEC-5, X-SPEC-7, X-SPEC-8, X-SPEC-10, X-SPEC-11, CORE-MATCH-6, PRICE-13, PRICE-14, G-VENUE_B-7, L-CV2-6, L-ML-7, L-CENSUS-6, L-LIB-6 | info | **Open.** None of `SECURITY.md`, `FEATURES.md`, `approval-surface.md`, `module-security-model.md`, `soft-cancel.md`, `fill-modules.md`, `deferred-match-settle.md`, `gasless-permit-relay.md` or `audit-2026-09-push-family.md` changed on this branch. |
-
-2. **The 129 doc-update requests** from the fixers (see above), including SECURITY.md
-   M-8 and the false "every other venue's Exact withdraw reverts on a short
-   position" sentence in [audit-2026-09-12-full-tree.md](audit-2026-09-12-full-tree.md).
+1. ~~Docs group, 17 issues~~ — **done**, see the phase table. MISC-MOD-6
+   (`PermitTransferSettlementFlowTest`, `Erc4626SettlementFlowTest`), L-CENSUS-7
+   (shapes rules 14–16, comment stripping, rule 13 keyed on shape; self-tests in
+   `tools/test-module-shapes.py`), L-CENSUS-6 (HEAD census in
+   [audit-2026-09-push-family.md](audit-2026-09-push-family.md)), L-LIB-6
+   ([gasless-permit-relay.md](gasless-permit-relay.md) rewritten; `docs-check` now
+   holds its `@N` offsets and the module READMEs' to the code), G-VENUE_B-8 (fork
+   tests via L-LRG-5 / L-FSE-6 / L-AAVE-5, approval-surface "proven" row corrected),
+   and the 14 doc-only items.
+2. ~~The 129 doc-update requests~~ — applied against the current code (skipped
+   requests are listed in the docs-group report).
 3. **Independent verification** of every fix, including that each regression fails
    on the original source (today that claim is the fixer's own).
 4. **Fix-up round** for whatever verification rejects.
 5. **Final gate**: `make test-all`, `make test-ts`, `make test-deployed`,
    `make test-invariant`, a clean `size-check`, `modules-check`, `docs-check`, and a
-   regenerated gas baseline (`make gas`).
+   regenerated gas baseline (`make gas`). CI now runs all of these except the gas
+   regeneration on every PR.
 6. **Re-assess the nine goals** against the fixed tree; the verdicts above are for
    `56d1405`.
 
 ### Breaking changes landed
 
 Order typehash and order wire format are unchanged; the golden order hash stands.
+The full list, per surface, is SECURITY.md's
+[2026-09-30 breaking-change section](../SECURITY.md#2026-09-30--whole-tree-audit-remediation).
+Added by the partials lane: a no-output-leg invariant order needs a named
+`exclusiveFiller` (VAL-1 core rule); a sponsored LZ send must be a SETTLE item
+(`SponsoredSendNeedsSettle`, `FillerNotSponsor`, new `setSponsorFiller`); Teller
+repay `NotBorrower` and Fluid deposit/repay `NotPositionOwner`; `FluidRepayModule`
+mode word at 96 (tagged `Full`, untagged non-zero reverts `InvalidModeWord`) and
+`totalAmount` at 128.
 Breaking surfaces: Settlement ABI (`fillWithPermit` is one 6-arg entry,
 `fillWithPermitTake` and the `takerDatas` `batchFill` gain `minBumpBps`, `FillCtx`
 gains `minBump`; a fill module may not upsize the request); EVC permit tail and

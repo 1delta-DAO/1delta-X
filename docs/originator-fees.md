@@ -7,8 +7,11 @@ withdrawal".
 
 There is **no fee subsystem**: no global fee switch, no protocol fee registry,
 no packed fee word, and no governance surface. A fee is an **ordinary output
-leg** addressed to the originator — maker-signed, per-order, and rendered by
-wallets as a plain amount + recipient in the EIP-712 prompt.
+leg** addressed to the originator — maker-signed and per-order. It is NOT rendered as a
+plain amount + recipient in the EIP-712 prompt: `legsIn` / `legsOut` are packed
+`bytes`, so a wallet shows them as hex (corrected 2026-09-30, X-SPEC-2; see
+FEATURES.md §5 and the SECURITY.md wallet-legibility caveat). The front end must
+decode and show the fee out of band.
 
 ---
 
@@ -207,8 +210,12 @@ That place exists:
 *is* the swapper (`PostInputs` mode: take `tokenIn`, route it, deliver
 `tokenOut`), so it measures the surplus as a balance delta and splits it — the
 same reason 0x Settler can run its `POSITIVE_SLIPPAGE` action. The split is a
-constructor `SurplusPolicy`, immutable like the router allowlist, and applies
-to every fill routed through that instance whoever calls it:
+constructor `SurplusPolicy`, immutable like the router allowlist. It binds only
+the spread that actually reaches the contract — i.e. routes written by operators:
+a caller who writes its own route can deliver exactly the signed amount and keep the
+spread elsewhere, and on-chain enforcement against opaque route calldata is
+infeasible (accepted). The constructor therefore refuses a non-zero policy on an
+OPEN instance (`PolicyNeedsOperators`, 2026-09-30 AGG-3):
 
 | Share | Set by | Goes to |
 | --- | --- | --- |

@@ -192,7 +192,7 @@ Leads closed alongside: `Verifier` defers delegate-signed orders to Layer 2 inst
 - **B12** `ERC4626WithdrawModule` — a `REQUEST_ID_0` (ERC-7540) vault lets the first requester hold id 0 and block every other maker's Phase 1.
 - **B8** `PositionFunnelFactory.deploy(owner = 0)` — a zero-owner funnel's 65-byte `isValidSignature` branch accepts any signature (bare `ecrecover` → 0); no victim today.
 - **B14** `Signatures._verifySignature` — bulk-root branch selected by shape (`(n−66) % 32 == 0 && sig[n−1] == 0xB0`); a native 1271 blob of that shape is misread (≈1/256 per matching length).
-- **B2** `ExactlyPreFundModule._scaledFace` — delivered/total as fill fraction; numbers: full fill at bump 10000 retires 95% of the face, or presents the whole face on a 96% partial (BB-6).
+- **B2** `ExactlyPreFundModule._scaledFace` — delivered/total as fill fraction; numbers: full fill at bump 10000 retires 95% of the face, or presents the whole face on a 96% partial (BB-6). *Fixed 2026-09-30 (L-FSE-2).*
 - **B2** `MidnightRepayModule` — units vs tokens with no residual sweep (its pre-fund twin sweeps).
 - **B1** `packOrder` — `BigInt.asUintN(48, expiry)` wraps silently where every sibling throws.
 - **B2** `PermitHelper`/`DelegationHelper` callers — replayed permit `value = slice`; on any partial fill the gasless path silently degrades to "needs a standing grant" (Exactly alone has `replayValueIfPresent`).

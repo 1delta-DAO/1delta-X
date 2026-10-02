@@ -41,17 +41,23 @@ maker's receive side needs **nothing**: no Permit3 token allowance to the module
 and no on-chain ERC20 approval of a token they may never have held. It is also
 one ERC20 transfer cheaper per fill (measured −28.6k gas on Aave v3).
 
-The **pull-funded** variants (`…TakeFor…` with a maker-addressed leg, and the
-plain MAKE deposit/repay modules) remain for exactly one family: the **plain
+The **pull-funded** variants (the composite TAKE_FOR modules — `AaveV3CreditModule`,
+`DolomiteOperatorModule`, `EulerV2OperatorModule`, `FluidTakeForModule` — with a
+maker-addressed leg, and the plain MAKE deposit/repay modules) remain for exactly one
+family: the **plain
 deposit / repay / deposit+borrow funded from the maker's own wallet** — no loop,
 no conversion — where there is no delivered leg to push and the wallet is the
 funding source by definition (the literal and balance descriptor forms).
 
-One-sided pre-fund modules ("deposit/repay whatever the conversion delivered") ride
-the same seam with a vestigial take side — see the *Pull-funded vs PRE-FUNDED*
-section of [`ITakerForModule.sol`](../../core/src/interfaces/ITakerForModule.sol)
-for the convention and the soundness argument, and `aave-v3`'s
-`AaveV3PreFundModules.sol` for the reference implementations. For venues with
+One-sided pre-fund modules ("deposit/repay whatever the conversion delivered") are
+**PUSH-funded MAKE items**: Settlement delivers the funding leg to the module and
+calls `makeOnBehalf`; there is no TAKE_FOR item and no taker allowance (the earlier
+"vestigial take side" is gone). The 16 pre-fund MAKE sites are the 15
+`*PreFundModule` contracts plus `ListaBrokerModule`'s pre-fund branch; all of them
+pin `msg.sender`, require the descriptor (bit 253) and take a token-bound floor via
+`_gatePreFundMake`. See [docs/audit-2026-09-push-family.md](../../../docs/audit-2026-09-push-family.md#head-census-2026-09-30-audit-l-census-6)
+for the census and the dual-funding-shape soundness argument, and `aave-v3`'s
+`AaveV3PreFundModules.sol` for the reference implementation. For venues with
 transferable receipt tokens (aTokens, cTokens, ERC-4626 shares), plain
 swap-and-deposit needs no module at all: sign the receipt token as the output
 leg.

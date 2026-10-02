@@ -76,8 +76,8 @@ re-presents the full ceiling against a 1/N borrow.
 | --- | --- | --- |
 | `ExactlyTakerModule.takeOnBehalf` (`borrowAtMaturity`) | `maxAssets` | **max → fails OPEN** |
 | `LiquityV2TakerModule._withdrawAndForward` (`withdrawBold`) | `maxUpfrontFee` | **max → fails OPEN** |
-| `ExactlyTakerModule` (`withdrawAtMaturity`), `ExactlyDepositModule` (`depositAtMaturity`) | `minAssetsRequired` | min → fails CLOSED (liveness only) |
-| `ListaTakerModule` (`broker.borrow`) | *none at all* | unbounded — verify whether `termId` pins the rate |
+| `ExactlyTakerModule` (`withdrawAtMaturity`), `ExactlyDepositModule` (`depositAtMaturity`) | `minAssetsRequired` | min → fails CLOSED (liveness only). *2026-09-30 L-CV2-1.v1: the venue also CLAMPS a request above principal + fee; `ExactlyTakerModule` now pre-checks the fixed position (`ShortFixedPosition`).* |
+| `ListaTakerModule` (`broker.borrow`) | *none at all* | unbounded — verify whether `termId` pins the rate. *CLOSED 2026-09-30 (L-ML-2): `termId` does NOT pin the rate. The borrow (now `ListaBrokerModule` op 1) signs `maxApr` + `duration` (+ optional `totalAmount`) and post-checks the booked position (`TermMismatch`), fork-proven on both implementation generations.* |
 
 **Only the max-ceilings are exploitable.** A min-floor applied to a slice is
 *stricter* than intended, so it reverts. Do not "fix" those two by scaling — that
@@ -126,7 +126,9 @@ the honest resolution is a floor **plus** an explicit rescue path, not a sweep.
 Each has a sibling branch in the *same function* that measures correctly. Copy it:
 snapshot, `require(received >= amount)`, forward.
 
-Additionally assert `underlying == IVToken(vToken).underlying()` (and the cToken
+*(Done 2026-09-30, L-CV2-4: Venus, Compound v2 and Aave v4 taker modules bind the
+signed underlying and revert `UnderlyingMismatch`.)* Additionally assert
+`underlying == IVToken(vToken).underlying()` (and the cToken
 equivalent). The headers currently decline that call to save gas; it is what
 decouples the cost of the attack from the size of the prize.
 

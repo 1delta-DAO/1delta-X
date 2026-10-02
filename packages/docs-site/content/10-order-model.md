@@ -15,7 +15,7 @@ matches — so the entire permission model reduces to *what the maker signed*.
 |---|---|
 | `legsIn[]` / `legsOut[]` | Multi-asset baskets on both sides. A leg is `(token, start, end)`; output legs additionally carry their own `recipient`. |
 | `side` (SELL / BUY) | SELL = fixed inputs, decaying outputs, anchored on `legsIn[0]`. BUY = fixed outputs, rising inputs, anchored on `legsOut[0]`. Lives in `timing` bit 101. |
-| `items[]` | Ordered maker-signed module calls: `MAKE`, `TAKE`, `SETTLE`. |
+| `items[]` | Ordered maker-signed module calls: `MAKE`, `TAKE`, `TAKE_FOR`, `SETTLE`. |
 | `timing` | Three `uint32` clocks in one word (decay start, decay duration, exclusivity end) plus the item-ordering policy and the mode bits: fill-once (100), side (101), block clock (102), priority auction (103), delta-verify delivery (104). |
 | `curve` | Optional piecewise-linear decay shape — `(timeDelta, bumpBps)` points. Empty means one linear segment. |
 | `params` | One word with the four auction scalars: soft-exclusivity bps, gas-bump bps, gas price reference, priority-fee scale. |
@@ -73,7 +73,8 @@ Three ops, one uniform trust rule.
 |---|---|---|---|---|
 | `MAKE` | maker deposits / repays | maker's funding token → protocol | no | 1 CALL |
 | `TAKE` | maker borrows / withdraws | maker's position → `recipient` | no | 1 CALL via Permit3 |
-| `SETTLE` | generic solver ↔ maker exchange | maker's asset → filler, or filler's → maker | **yes** | 1 CALL, pay-per-use |
+| `TAKE_FOR` | composite position op funded by a core-sized leg | maker's position → `recipient` | no | 1 CALL via Permit3 |
+| `SETTLE` | the maker → filler side of an exchange | maker's asset → filler (**never** the filler's asset: a SETTLE module must not pull from the filler) | **yes** | 1 CALL, pay-per-use |
 | `fillModule` | the fill denominator (a scalar) | nothing (view) | no | 1 STATICCALL, or 0 |
 
 **`data` is opaque and signed.** Each module decodes its own protocol-specific
@@ -108,11 +109,19 @@ boolean.
 | `FillerWhitelistValidator` | the filler is on a curator's list |
 | `FillerAttestationValidator` | the filler presents a valid off-chain attestation bound to the order |
 | `ConditionTreeValidator` | a maker-signed boolean expression over other validators holds — `OR` and `NOT` in disjunctive normal form |
-| `MinBalanceInvariant` | the account ends the fill holding ≥ a floor |
+| `MinBalanceInvariant` | the account ends the fill holding ≥ a floor (an absolute floor — not proof that this fill delivered) |
 | `Erc721OwnerInvariant` / `Erc1155BalanceInvariant` | the maker ends the fill owning the NFT / ≥ N units |
 
+**An invariant proves an END STATE, not a delivery.** A purchase (payment as an
+input leg, the NFT checked by an invariant) with no output leg is therefore fillable
+only by the order's named `exclusiveFiller`, for its whole life — the core enforces
+this for any invariant, and the shipped invariants enforce it again. Vet the filler
+you name; give alternative offers for the same asset a shared fill-once nonce.
+
 Validators are **filler-aware** — they receive the fill's `msg.sender` — which is
-what makes per-order solver whitelists and attestation gating expressible. They
+what makes per-order solver whitelists and attestation gating expressible. That
+address is Settlement's IMMEDIATE caller: listing a permissionless filler contract
+admits everyone who calls it, so list only EOAs or operator-gated solvers. They
 also receive a filler-supplied `takerData` blob, which is **unsigned and
 adversarial**: a validator must independently verify anything it reads from it.
 
@@ -177,7 +186,9 @@ Two properties follow and both are enforced:
 - **`end` is a mandatory cap.** A maker's balance is not under their sole control (anyone may raise it by sending tokens), so an uncapped sweep would be a standing offer to buy the maker's entire holding at a small order's price. `end == 0` on a marker leg reverts `ProportionalNeedsCap` — the dangerous mode must not be what an unset field means.
 
 Multi-token sweeps are a module (`ProportionalSweepModule`), not a leg — see
-[Optimization](/optimization/#what-the-byte-budget-refused) for why.
+[Optimization](/optimization/#what-the-byte-budget-refused) for why. Its item data
+is `abi.encode(token, marker)` for 100% of the balance; a fractional sweep needs
+`abi.encode(token, marker, total)` and is full-fill only.
 
 ## Who may authorize an order
 
@@ -215,4 +226,6 @@ verified under the same signer set an order is.
 **Brackets and one-cancels-other** are expressible two ways, neither touching the
 core: a **shared nonce** with the fill-once bit (free, whole-fill only), or
 `OcoGroupModule` — a validator that *reads* a group claim plus a `SETTLE` item
-that *writes* it, which works because validators run before items.
+that *writes* it, which works because validators run before items. The claim item
+is `abi.encode(groupId, nonce, minClaim)`: only a fill of at least `minClaim` can
+claim the group, so a dust fill of one leg cannot retire its sibling stop-loss.

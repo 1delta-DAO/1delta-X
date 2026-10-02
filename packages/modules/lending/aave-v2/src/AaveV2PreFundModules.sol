@@ -140,9 +140,11 @@ contract AaveV2PreFundModule is PreFundModuleBase, IMakerModule, IFundingSource 
             // Tail decode (rateMode @96, debtToken @128) via a calldata slice, as
             // {AaveV2RepayModule._pullAndRepay} does, to keep this frame flat.
             (uint256 rateMode, address debtToken) = abi.decode(data[96:], (uint256, address));
-            // Cap at the LIVE debt — Aave v2 reverts on repaying more than is owed
-            // with a specific amount, and the maker cannot know accrued interest at
-            // signing.
+            // Cap at the LIVE debt. Aave v2 itself caps `paybackAmount = min(amount,
+            // debt)` and reverts only on a ZERO debt (NO_DEBT_OF_SELECTED_TYPE); the
+            // explicit cap is what keeps a fully-repaid position from reverting, and
+            // keeps the uncapped remainder on this module for the sweep (corrected
+            // 2026-09-30, L-AAVE-4).
             uint256 debt = IERC20(debtToken).balanceOf(onBehalfOf);
             toRepay = forAmount < debt ? forAmount : debt;
             if (toRepay != 0) {

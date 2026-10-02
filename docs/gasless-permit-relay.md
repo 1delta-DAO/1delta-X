@@ -1,281 +1,255 @@
 # Gasless Permit Relay
 
-Makers and takers can attach EIP-712 signatures to their module `data` payloads so that
-on-chain approvals are not required beforehand. The signature is replayed atomically
-inside the module call — if it is absent the module falls back to a standing approval.
+Makers can attach a signature to a module's `data` blob so that an on-chain approval
+is not needed beforehand. The signature is replayed inside the module call, best
+effort; if it is absent (or the replay fails) the module falls back to whatever
+standing approval exists, and the Permit3 pull or venue call that follows is the
+real gate.
 
-There are three distinct signature mechanisms, each appended as an optional trailing block
-to the relevant module's ABI-encoded `data`.
-
----
-
-## 1. EIP-2612 Token Permit — maker modules (deposit / repay)
-
-**Library:** `PermitHelper.replayIfPresent`  
-**Applies to:** `AaveV2DepositModule`, `AaveV2RepayModule`, `AaveV3WithdrawModule` (exact mode only), any maker module that calls `PermitHelper`.
-
-### When to use
-
-The maker holds an ERC-20 token that implements EIP-2612 (`permit(owner, spender, value, deadline, v, r, s)`).
-Instead of pre-approving Permit3, the maker signs a permit for the exact `amount` and appends
-the 128-byte block to `data`.
-
-### Byte layout (appended after the module's base data)
-
-```
-base_data           ← module-specific ABI encoding (variable length)
-[optional 128 bytes]
-  deadline  uint256  (32 bytes)
-  v         uint8    (32 bytes, padded)
-  r         bytes32  (32 bytes)
-  s         bytes32  (32 bytes)
-```
-
-If `data.length < base_len + 128` the helper is a no-op; the module falls back to a
-standing ERC-20 approval to Permit3.
-
-### The replay is BEST-EFFORT — and must stay that way
-
-`PermitHelper` wraps the `permit` call in `try/catch` and ignores any revert. This is
-load-bearing, not defensive coding.
-
-ERC-2612 `permit` burns a per-owner nonce and reverts once it is spent. The signature
-bytes live **inside the module's `data`**, which is part of the order hash *and* of
-`ref = keccak256(data)` for a TAKE item — so they are frozen into the maker's
-authorization and cannot be re-encoded without invalidating both.
-
-If the replay reverted on an already-used nonce, anyone could permanently kill a gasless
-order for the price of one cheap transaction: read the pending calldata from the mempool,
-pull out `(deadline, v, r, s)`, and submit `token.permit(...)` directly. The victim's fill
-would then revert forever, and re-encoding without the permit block would change `ref` and
-the order hash — so the whole signed artifact would have to be rebuilt, repeatably, by an
-attacker paying almost nothing.
-
-Swallowing the revert is the correct outcome, not a compromise: the front-runner leaves the
-chain in exactly the state the fill wanted (`allowance(owner, permit3) >= amount`). The
-permit's **effect** is what matters, not who landed it. The real gate is the
-`permit3.transferFrom` that follows, which still reverts if the allowance genuinely is not
-there.
-
-The same reasoning applies to all three delegation helpers in §2–§3 — they are equally
-nonce-based and equally front-runnable, and all three are `try/catch` for the same reason.
-
-**Consequence for integrators:** an expired or already-consumed permit no longer surfaces
-its own revert. A failing gasless fill reports the *pull* failing, not the permit. Regression
-coverage: `packages/core/test/utils/PermitReplayGriefing.t.sol`.
-
-### Example — AaveV2 deposit with permit
-
-```solidity
-bytes memory data = abi.encode(
-    address(pool),          // Aave V2 pool
-    address(asset),         // underlying token
-    uint16(0),              // referral code
-    // --- optional permit block ---
-    deadline,               // uint256
-    v,                      // uint8
-    r,                      // bytes32
-    s                       // bytes32
-);
-```
-
-> **AaveV3 withdraw (exact mode only):** aToken rebases continuously; its balance cannot
-> be known at signing time if using "full balance" mode. Append the permit block only when
-> the withdrawal amount is a fixed exact value. The BalanceMode slot (word at offset 96)
-> must be encoded explicitly as `uint8(0)` (Exact) so the delegation block starts at a
-> predictable offset.
+There are four mechanisms, each an optional trailing block appended to the module's
+ABI-encoded `data`. **The offset of the block is per module and per op, and it is
+NOT always the base length**: a module with an op word, a `DustAction`/`BalanceMode`
+word or a mandatory `totalAmount` places the block after those. The offset table at
+the end of this page is checked against the code by `make docs-check` (every `@N`
+in a row must be an offset at which that contract replays a signature), and the
+per-module byte maps live in each module's header comment, which shapes rule 9b
+holds to the code. When this page and a module header disagree, the header wins.
 
 ---
 
-## 2. Credit Delegation Signature — taker modules (borrow)
+## 1. EIP-2612 token permit (`PermitHelper`)
 
-**Library:** `DelegationHelper.replayAaveDelegation`  
-**Applies to:** `AaveV3CreditModule` (both ops, and both of its seams)
-
-### When to use
-
-The maker wants to borrow from Aave V3 on behalf of the module without calling
-`debtToken.approveDelegation(module, amount)` first.
-The maker signs the `delegationWithSig` payload off-chain and appends the 160-byte block.
+**Library:** `PermitHelper.replayIfPresent` (and `replayValueIfPresent`, below).
+**Used by:** the pull-shaped MAKE modules (deposit, repay, add-collateral) of most
+venues, `ERC20PermitTransferModule`, and `AaveV3WithdrawModule` (aToken permit).
 
 ### Byte layout
 
 ```
-base_data           ← abi.encode(pool, asset, rateMode)  — 96 bytes
+base_data                 module-specific encoding (see the table)
+[optional 128 or 160 bytes]
+  deadline     uint256
+  v            uint8   (ABI-padded)
+  r            bytes32
+  s            bytes32
+  [signedValue uint256]   optional trailing word (2026-09-30, L-AAVE-2)
+```
+
+If `data.length < offset + 128` the helper is a no-op.
+
+**`signedValue`.** An EIP-2612 signature commits to `value`. Without the trailing
+word the replay uses `amount`, i.e. THIS fill's pro-rated slice, so the signature
+verifies only on a fill whose slice equals what the maker signed: in practice one
+full fill. A maker who wants partial fills signs `value = item total` and appends it
+as `signedValue`; the first fill lands an allowance for the total and every later
+slice finds it sufficient and skips the replay.
+
+**`replayValueIfPresent`** (the Exactly fixed-maturity repay and the Exactly share
+permits) reads an EXPLICIT value first: `abi.encode(value, deadline, v, r, s)`, 160
+bytes.
+
+**The spender** is `Permit3` for a pull module. `AaveV3WithdrawModule` is the
+exception: its permit is an **aToken** permit to the **module itself** (the module
+pulls the aToken directly), not to Permit3.
+
+### The replay is BEST-EFFORT, and must stay that way
+
+`PermitHelper` wraps the `permit` call in `try/catch` and ignores any revert. ERC-2612
+`permit` burns a per-owner nonce and reverts once it is spent. The signature bytes
+live **inside the module's `data`**, which is part of the order hash and, for a TAKE
+item, of `ref = keccak256(data)`, so they cannot be re-encoded without invalidating
+both. If the replay reverted on a used nonce, anyone could kill a gasless order for
+the price of one transaction: lift `(deadline, v, r, s)` from the mempool and submit
+`token.permit(...)` directly.
+
+Swallowing the revert is correct **for the pending fill**: the front-runner leaves
+the allowance the fill wanted, and the `permit3.transferFrom` that follows still
+reverts if the allowance is genuinely missing. Regression coverage:
+`packages/core/test/utils/PermitReplayGriefing.t.sol`.
+
+### What best-effort does NOT cover (2026-09-30, L-LIB-4 / L-CMT-3)
+
+- **A permit SETS the allowance, it does not raise it.** Replayed over a maker's
+  standing `approve(permit3, max)` it would shrink that grant to this fill's value
+  and silently break the maker's other resting orders in the token. The helpers
+  therefore **skip the replay when the standing allowance already covers the fill**.
+- **The signature is public and any-sender.** A third party can land it directly at
+  any time before its deadline, including after the maker cancelled the order, and
+  so reset a standing allowance to the signed value. No value moves (Permit3's books
+  still gate every pull), but the maker must re-approve.
+- **Advice:** do not append a permit when a sufficient standing grant already exists,
+  and sign the permit `deadline` no later than the order deadline.
+
+**Consequence for integrators:** an expired or consumed permit does not surface its
+own revert; a failing gasless fill reports the *pull* failing.
+
+### Example: Aave v2 deposit with a permit
+
+```solidity
+bytes memory data = abi.encode(
+    address(pool),   // Aave v2 pool       @0
+    address(asset),  // underlying         @32   (base = 64)
+    deadline, v, r, s // permit block      @64
+    // , signedValue  // optional, for partial fills
+);
+```
+
+---
+
+## 2. Aave credit delegation (`delegationWithSig`)
+
+**Library:** `DelegationHelper.replayAaveDelegation`
+**Used by:** `AaveV3CreditModule` (both ops, both seams). Aave **v2 has no
+`delegationWithSig`**: Aave v2 borrows need an on-chain `approveDelegation`.
+
+```
+[optional 160 or 192 bytes]
+  debtToken    address
+  deadline     uint256
+  v, r, s
+  [signedValue uint256]   optional trailing word, same rule as §1
+```
+
+`delegationWithSig` SETS the borrow allowance to the signed value, so the replay is
+skipped when the standing `borrowAllowance` already covers the fill (L-LIB-4). With
+`signedValue` appended the delegation is no longer full-fill-only.
+
+---
+
+## 3. Comet `allowBySig`
+
+**Library:** `DelegationHelper.replayCometAllow`
+**Used by:** `CometTakerModule` (op 0 Borrow, op 1 Withdraw). The old
+`CometBorrowModule` / `CometWithdrawModule` were merged into it.
+
+```
 [optional 160 bytes]
-  debtToken  address  (32 bytes, padded)
-  deadline   uint256  (32 bytes)
-  v          uint8    (32 bytes, padded)
-  r          bytes32  (32 bytes)
-  s          bytes32  (32 bytes)
+  nonce, expiry, v, r, s
 ```
 
-If `data.length < 96 + 160` the delegation step is skipped (standing `approveDelegation` assumed).
+Byte map (op word first): `abi.encode(uint8(op), comet, asset, …)`, base 96.
 
-### Example
+- Borrow: allow block at 96.
+- Withdraw `Exact`: `BalanceMode` word at 96 (encode it explicitly when a tail
+  follows), allow block at 128.
+- Withdraw `Full`: the tagged mode word `0xB0DE0001` at 96, the mandatory
+  `totalAmount` at 128, allow block at 160.
 
-```solidity
-bytes memory data = abi.encode(
-    address(pool), address(asset), uint256(2),   // base (96 bytes)
-    // --- optional delegation block ---
-    address(variableDebtToken),
-    deadline,
-    v, r, s
-);
-```
+The replay runs even when the module is already allowed: landing the signature
+consumes Comet's `userNonce`, which retires it.
 
 ---
 
-## 3. Comet `allowBySig` — taker modules (Compound V3 borrow / withdraw)
+## 4. Morpho Blue / Lista Moolah `setAuthorizationWithSig`
 
-**Library:** `DelegationHelper.replayCometAllow`  
-**Applies to:** `CometBorrowModule`, `CometWithdrawModule`
-
-### When to use
-
-The maker authorises the module as a `manager` on Comet so it can call `withdrawFrom`
-without a prior on-chain `allow(module, true)`.
-
-### Byte layout — borrow
+**Library:** `DelegationHelper.replayMorphoAuth`
+**Used by:** `MorphoBlueTakerModule` (op 0 Borrow, op 1 WithdrawCollateral, op 2
+Withdraw), `ListaTakerModule`, `ListaNativeCollateralTakerModule`,
+`ListaSmartTakerModule` and `ListaBrokerModule` (op 1 Borrow). The old
+`MorphoBlueBorrowModule` / `MorphoBlueWithdrawCollateralModule` were merged into
+`MorphoBlueTakerModule`.
 
 ```
-base_data           ← abi.encode(comet, asset)  — 64 bytes
 [optional 160 bytes]
-  nonce    uint256  (32 bytes)
-  expiry   uint256  (32 bytes)
-  v        uint8    (32 bytes, padded)
-  r        bytes32  (32 bytes)
-  s        bytes32  (32 bytes)
+  nonce, deadline, v, r, s
 ```
 
-### Byte layout — withdraw (BalanceMode slot is required when sig present)
+Morpho byte map: `abi.encode(uint8(op), MarketParams, …)`, base 192. Borrow: auth at
+192. Withdraw `Exact`: mode word at 192, auth at 224. Withdraw `Full`: tagged mode at
+192, `totalAmount` at 224, auth at 256. The Lista modules carry a leading `moolah`
+(and for op 2 a `provider`) address, which shifts every offset by one or two words.
 
-```
-base_data           ← abi.encode(comet, asset, BalanceMode)  — 96 bytes
-[optional 160 bytes — same fields as above]
-```
-
-The explicit `BalanceMode` word (even if `uint8(0)` = Exact) must be present so the
-delegation block starts at a known offset (96 bytes from the start).
-
-### Example — borrow
-
-```solidity
-bytes memory data = abi.encode(
-    address(comet), address(asset),              // base (64 bytes)
-    nonce, expiry, v, r, s                       // delegation block
-);
-```
+Morpho authorization is coarse (all markets) and permanent once installed; the
+Permit3 taker allowance caps the per-fill amount.
 
 ---
 
-## 4. Morpho Blue `setAuthorizationWithSig` — taker modules
+## 5. EVC `permit` (Euler v2)
 
-**Library:** `DelegationHelper.replayMorphoAuth`  
-**Applies to:** `MorphoBlueBorrowModule`, `MorphoBlueWithdrawCollateralModule`
+**Library:** `DelegationHelper.replayEvcPermit`
+**Used by:** `EulerV2OperatorModule` (`Op.Open`), tail at 128.
 
-### When to use
-
-The maker grants the module authorization on Morpho Blue (required before
-`borrow` or `withdrawCollateral` can be called on the maker's behalf) without
-executing a prior `setAuthorization(module, true)` transaction.
-
-### Byte layout — borrow
-
-```
-base_data           ← abi.encode(MarketParams)  — 160 bytes (5 × 32)
-[optional 160 bytes]
-  nonce     uint256  (32 bytes)
-  deadline  uint256  (32 bytes)
-  v         uint8    (32 bytes, padded)
-  r         bytes32  (32 bytes)
-  s         bytes32  (32 bytes)
-```
-
-### Byte layout — withdraw collateral (BalanceMode slot required when sig present)
-
-```
-base_data           ← abi.encode(MarketParams, BalanceMode)  — 192 bytes
-[optional 160 bytes — same fields as above]
-```
-
-### Example — borrow
-
-```solidity
-bytes memory data = abi.encode(
-    marketParams,                                // MarketParams (160 bytes)
-    nonce, deadline, v, r, s                     // auth sig
-);
-```
+The tail is DYNAMIC: `abi.encode(DelegationHelper.EvcPermit[])` with
+`EvcPermit = (nonceNamespace, nonce, deadline, evcData, sig)`; each permit is
+replayed independently. **The maker signs `sender = EulerV2OperatorModule`**
+(2026-09-30, L-ED-1): the replay submits with `sender = address(this)`, so only a
+live fill of the maker's own order can land it, and a lifted permit cannot be landed
+directly. Put the long-lived operator grant in its own permit and nonce namespace,
+apart from per-order controller/collateral enables. BREAKING vs. the earlier single
+`(ns, nonce, deadline, evcData, sig)` tail signed with `sender = 0`.
 
 ---
 
-## 5. ERC20PermitTransferModule — standalone gasless transfer
+## 6. `ERC20PermitTransferModule`: a gasless transfer
 
-This module is not a lending adapter. It lets a maker transfer any EIP-2612 token to an
-arbitrary recipient through Permit3 in a fully gasless, atomic, single-signature flow.
-
-### Order shape
-
-```
-legsIn   = [ LegIn{ token: the ERC-20 being transferred, … } ]
-legsOut  = [] (no output) or one LegOut in the same token (no swap, fee taken as spread)
-items    = [] (no lending operations)
-```
-
-### data encoding
+A TAKE module that moves an ERC-20 from the maker to a recipient, funded by a Permit3
+taker grant, with the solver paid by the spread.
 
 ```solidity
 bytes memory data = abi.encode(
-    address(recipient),     // where proceeds land
-    // --- optional EIP-2612 permit block ---
-    deadline,               // uint256
-    v,                      // uint8
-    r,                      // bytes32
-    s                       // bytes32
+    address(token),     // @0
+    address(recipient), // @32
+    transferAmount,     // @64  reaches the recipient
+    totalAmount,        // @96  the item's full signed amount (fee + transfer)
+    deadline, v, r, s   // optional permit block @128 (+ signedValue)
 );
 ```
 
-Without the permit block the module relies on a standing Permit3 allowance.
-
-### Fee model
-
-The solver earns the spread: `amountIn − amountOut`. For a zero-fee transfer
-give the output `LegOut` a fixed amount equal to the input (`start == amountIn`,
-`end == 0`).
+Order shape: an outputless order, `legsIn[0]` = the solver's fee (it may RISE over
+time to attract a solver; the rise above the module's spread is pulled from the
+maker's Settlement token grant), one TAKE item of `fee + transferAmount`. **Full-fill
+only** (2026-09-30, L-LIB-2): the slice must equal `totalAmount`. BREAKING: the permit
+tail moved from byte 96 to byte 128. End-to-end coverage:
+`PermitTransferSettlementFlowTest`
+(`test_audit_MISC_MOD_6_transferFlow_risingFeeLeg_coreBillsTheRise`).
 
 ---
 
-## Offset rule summary
+## Offset table
 
-| Module | Base length | Sig block offset |
+Every `@N` below is checked by `make docs-check` against the contract's replay calls.
+
+| Contract (op / branch) | Mechanism | Signature offset |
 |---|---|---|
-| AaveV2 deposit / repay | 96 bytes | 96 |
-| AaveV3 withdraw (exact, permit) | 128 bytes (inc. BalanceMode) | 128 |
-| AaveV3 borrow (delegation) | 96 bytes | 96 |
-| Compound V3 borrow (allowBySig) | 64 bytes | 64 |
-| Compound V3 withdraw (allowBySig) | 96 bytes (inc. BalanceMode) | 96 |
-| Morpho Blue borrow (authSig) | 160 bytes (5-word MarketParams) | 160 |
-| Morpho Blue withdraw collateral | 192 bytes (inc. BalanceMode) | 192 |
-| ERC20PermitTransferModule | 32 bytes (recipient) | 32 |
+| `AaveV2DepositModule` | EIP-2612 to Permit3 | permit @64 |
+| `AaveV2RepayModule` | EIP-2612 to Permit3 | permit @160 (after `debtToken` at 96 and `DustAction` at 128) |
+| `AaveV3DepositModule` | EIP-2612 to Permit3 | permit @64 |
+| `AaveV3RepayModule` | EIP-2612 to Permit3 | permit @160 |
+| `AaveV3WithdrawModule` (Exact) | aToken EIP-2612 to the module | permit @128 (mode word explicit) |
+| `AaveV3CreditModule` (Borrow) | `delegationWithSig` | delegation @128 |
+| `AaveV3CreditModule` (Leverage, plain TAKE) | `delegationWithSig` | delegation @224 |
+| `AaveV3CreditModule` (Leverage, pre-funded) | `delegationWithSig` | delegation @192 |
+| `AaveV4DepositModule` | EIP-2612 to Permit3 | permit @128 |
+| `AaveV4RepayModule` | EIP-2612 to Permit3 | permit @160 |
+| `CometDepositModule` | EIP-2612 to Permit3 | permit @64 |
+| `CometRepayModule` | EIP-2612 to Permit3 | permit @96 |
+| `CometTakerModule` (Borrow) | `allowBySig` | allow @96 |
+| `CometTakerModule` (Withdraw, Exact) | `allowBySig` | allow @128 |
+| `CometTakerModule` (Withdraw, Full) | `allowBySig` | allow @160 |
+| `MorphoBlueSupplyModule` / supply-collateral | EIP-2612 to Permit3 | permit @160 |
+| `MorphoBlueRepayModule` | EIP-2612 to Permit3 | permit @192 |
+| `MorphoBlueTakerModule` (Borrow) | `setAuthorizationWithSig` | auth @192 |
+| `MorphoBlueTakerModule` (Withdraw*, Exact) | `setAuthorizationWithSig` | auth @224 |
+| `MorphoBlueTakerModule` (Withdraw*, Full) | `setAuthorizationWithSig` | auth @256 |
+| `ListaTakerModule` (op 1, Exact / Full) | Moolah `setAuthorizationWithSig` | auth @256 / @288 |
+| `ListaTakerModule` (op 2 provider, Exact / Full) | Moolah `setAuthorizationWithSig` | auth @288 / @320 |
+| `ListaBrokerModule` (op 1 Borrow) | Moolah `setAuthorizationWithSig` | auth @224 (`moolah` word at 192) |
+| `ListaBrokerModule` (op 0 Repay, pull) | EIP-2612 to Permit3 | permit @160 |
+| `EulerV2OperatorModule` (Open) | EVC `permit[]`, sender = module | tail @128 |
+| `ExactlyDepositModule` | EIP-2612 to Permit3 | permit @128 |
+| `ExactlyRepayModule` (floating / fixed) | EIP-2612 (fixed: explicit value) | permit @160 / @192 |
+| `ExactlyTakerModule` (Borrow / Withdraw) | share permit, explicit value | permit @192 / @224 |
+| `SiloDepositModule` | EIP-2612 to Permit3 | permit @64 |
+| `SiloRepayModule` | EIP-2612 to Permit3 | permit @96 |
+| `GearboxPoolDepositModule` | EIP-2612 to Permit3 | permit @64 |
+| `LiquityV2AddCollModule` | EIP-2612 to Permit3 | permit @96 |
+| `RiverAddCollModule` | EIP-2612 to Permit3 | permit @160 |
+| `TellerRepayModule` | EIP-2612 to Permit3 | permit @128 |
+| `ERC20PermitTransferModule` | EIP-2612 to Permit3 | permit @128 |
 
-All sig blocks are 128 bytes (EIP-2612) or 160 bytes (delegation / auth) and are
-**no-ops** when absent — the module falls back to whatever standing approval already
-exists on-chain.
-
-> ⚠️ **`BalanceMode.Full` now carries one more trailing word.** Every `Full` taker leg
-> appends the item's full maker-signed amount immediately after the mode slot, and the
-> module requires this fill's slice to equal it. `Full` liquidates the user's entire live
-> protocol balance, so it cannot be pro-rated — a sliced fill would unwind the whole
-> position and brick the rest of the order. The guard fails **closed**: a `Full` payload
-> without the trailing total reverts `PartialFillUnsupported`.
->
-> For any row above whose base length is marked "inc. BalanceMode", the sig block offset is
-> unchanged, but a `Full` payload is 32 bytes longer overall:
->
-> ```
-> base_data | BalanceMode (32) | itemTotal (32) | [optional sig block]
-> ```
->
-> See `FullFillGuard.requireFullFillFromData` and the per-module offsets in
-> `packages/modules/lending/*/src/*.sol`.
+All blocks are no-ops when absent. A `BalanceMode.Full` taker leg carries the tagged
+mode word `0xB0DE0001` (`DustHandler.encodeMode(Full)`; a bare `1` reverts
+`InvalidModeWord`) followed by the item's full signed amount, and the module requires
+this fill's slice to equal it (`FullFillGuard.requireFullFillFromData`, fails closed
+with `PartialFillUnsupported`). On a module whose `Full` branch moves the signature
+tail (Comet, Morpho, Lista), the tail sits after that total, as the rows show.

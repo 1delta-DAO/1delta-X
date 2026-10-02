@@ -94,6 +94,13 @@ Things worth re-checking whenever the relevant code moves.
   Anything that widens who may run a bit-104 callback — a filler set, a soft
   override, an exclusivity window — reopens "a balance delta cannot tell this fill's
   delivery from the maker's other paid inflow". `Core._snapshotOutRecipients`.
+- **An invariant-only purchase (empty `legsOut`) is fillable only by its named
+  `exclusiveFiller`** (2026-09-30 VAL-1, the sibling of the delta-verify rule above).
+  An invariant proves an end state, not a delivery. Enforced on-chain for ANY
+  invariant in `Base._runInvariants` (`OrderGates.NotExclusiveFiller`), and again in
+  `Erc721OwnerInvariant`, `Erc1155BalanceInvariant` and `MinBalanceInvariant` via
+  `InvariantReceiptGuard` (`ReceiptNeedsNamedFiller`); the lens and SDK refuse the
+  shape. Re-check whenever a new invariant or a new output-less order shape ships.
 - **A witness permit must name the settler that consumes it** (F30). If another
   witnessed entrypoint is added, its witness needs `address(this)` in it; Permit3's
   domain does not provide it. `Core._permitBatchHead`.

@@ -534,7 +534,9 @@ for executing the 4-item migration atomically.
 startAmountOut == endAmountOut   (always fixed price)
 ```
 
-The maker signs and fills. No dutch decay — decay only benefits
+The maker signs and fills it itself with an ordinary `fill` / `fillUpTo` from its
+own address. (This is NOT what `fillSelf` is: `fillSelf` is the `onlySelf`
+trampoline `batchFill` calls per order — audit 2026-09-30 X-SPEC-8.) No dutch decay — decay only benefits
 solvers competing with each other. For self-solving, the user sets
 their exact desired rate and submits in one tx.
 
