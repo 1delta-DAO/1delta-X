@@ -8,6 +8,7 @@ import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {IPositionSource} from "@core/interfaces/IPositionSource.sol";
 import {DustHandler} from "@lib/DustHandler.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {PositionFillModule} from "@lib/PositionFillModule.sol";
 
 import {CoreSettlementBase} from "@coretest/shared/CoreSettlementBase.t.sol";
 import {Chains, Lenders} from "@coretest/data/LenderRegistry.sol";
@@ -228,5 +229,28 @@ contract Audit20260930AaveV2ForkTest is CoreSettlementBase {
         );
         assertTrue(ok && ret.length == 32, "borrow answers proceedsAsset");
         assertEq(abi.decode(ret, (address)), USDC);
+    }
+
+    // ── L-LIB-8: a position-sized exit resolves against the live v2 position ──
+
+    /// The v2 reader, driven through {PositionFillModule}: an exit capped above the
+    /// live aToken balance is sized to that balance (accrued interest included) —
+    /// the same number the `Full` branch withdraws.
+    function test_audit_L_LIB_8_aaveV2PositionOfAndPositionSizedFill() public {
+        _seedAWeth(2 ether);
+        vm.warp(block.timestamp + 30 days); // accrue: the position is no longer the deposit
+        bytes memory data =
+            abi.encode(POOL, WETH, aWETH, DustHandler.encodeMode(DustHandler.BalanceMode.Full), uint256(3 ether));
+        (, uint256 live) = withdrawModule.positionOf(maker, data);
+        assertEq(live, IERC20(aWETH).balanceOf(maker), "raw live aToken position");
+        assertGt(live, 2 ether, "interest accrued");
+
+        PositionFillModule pfm = new PositionFillModule();
+        Item[] memory items = new Item[](1);
+        items[0] = Item(ItemOp.TAKE, address(withdrawModule), 3 ether, address(0), data);
+        Order memory o = _order(maker, 9, WETH, USDC, 3 ether, 6_000e6, items);
+        o.fillModule = address(pfm);
+        o.fillTotal = 3 ether;
+        assertEq(pfm.resolveFill(o, 0, type(uint256).max, ""), live, "fill sized from the live position");
     }
 }

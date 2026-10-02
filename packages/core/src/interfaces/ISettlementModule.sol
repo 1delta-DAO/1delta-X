@@ -38,8 +38,11 @@ pragma solidity ^0.8.28;
 ///  the maker obtains the asset any other way, any filler can collect the payment
 ///  without delivering. An order whose only consideration is an invariant (no
 ///  `legsOut`, or SETTLE items only) therefore REQUIRES a single named hard
-///  `exclusiveFiller` for its whole life — the shipped invariants enforce this
-///  themselves (`InvariantReceiptGuard`), and the lens / SDK refuse the shape.
+///  `exclusiveFiller` for its whole life. With no `legsOut` the CORE enforces it for
+///  every invariant, third-party ones included (`Base._runInvariants` reverts
+///  `NotExclusiveFiller` for any other filler, items or not); the shipped
+///  invariants also enforce it themselves (`InvariantReceiptGuard`), and the lens /
+///  SDK refuse the shape. A SETTLE hand-over beside an output leg is advisory only.
 ///
 ///  ⚠ SOLVER CAVEAT (read before filling a SETTLE order): unlike a MAKE/TAKE
 ///  item — where the filler's receipt is always a real Permit3-gated token move —

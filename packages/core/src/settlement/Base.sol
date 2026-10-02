@@ -1246,6 +1246,24 @@ abstract contract Base is Signatures {
     function _runInvariants(Order calldata order, address filler, bytes memory takerData) internal view {
         bytes calldata vs = order.invariants;
         uint256 len = PackedArrays.validateRecords(vs, PackedArrays.VALIDATOR_HEAD);
+        // ⚠ AN INVARIANT PROVES AN END STATE, NOT A DELIVERY (audit 2026-09-30 VAL-1).
+        // With no output leg, nothing but the invariant binds the filler, and a
+        // stateless post-check ("the maker owns NFT #7", "balance ≥ X") cannot tell
+        // THIS fill's delivery from any other inflow — a second bid, another venue, a
+        // purchase the maker made elsewhere. An open filler would then collect the
+        // maker's payment for nothing. So the F30 delta-verify rule applies to the
+        // receipt shape generically, for third-party invariants too: ONLY the named
+        // `exclusiveFiller`, for the order's whole life (no window, no soft override;
+        // an open order or {OrderGates.FILLER_SET} can never match a caller and fails
+        // closed). Items do not lift it — no item op moves value filler→maker without
+        // an output leg (pre-funded MAKE references one). An order with an output leg
+        // is untouched: the leg is the receipt, the invariant an extra floor. The
+        // shipped invariants also enforce this themselves ({InvariantReceiptGuard}).
+        if (len != 0 && filler != order.exclusiveFiller) {
+            if (PackedArrays.validateFixed(order.legsOut, PackedArrays.LEG_OUT_STRIDE) == 0) {
+                revert OrderGates.NotExclusiveFiller();
+            }
+        }
         uint256 cursor = PackedArrays.recordsStart();
         for (uint256 i; i < len;) {
             (address target, bytes calldata data, uint256 next) = PackedArrays.validatorAt(vs, cursor);

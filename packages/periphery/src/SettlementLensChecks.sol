@@ -142,8 +142,12 @@ contract SettlementLensChecks {
     ///         maker's payment, or its `SETTLE`d asset, without delivering. Sound only
     ///         when the one party able to fill is the one trusted to deliver: a single
     ///         named HARD `exclusiveFiller` whose window covers the order's whole life.
-    ///         Orders whose consideration is a leg or a position item keep their
-    ///         invariants as extra safety and are not flagged.
+    ///         With no output leg this is also a SETTLER rule since the VAL-1 core
+    ///         fix ({Base._runInvariants} reverts `NotExclusiveFiller` for any
+    ///         other filler, position items or not), so it is flagged whatever the
+    ///         items are. Orders with an output leg keep their invariants as extra
+    ///         safety and are not flagged unless a `SETTLE` hand-over with no
+    ///         position item rests on the invariant.
     function _consideration(Order calldata order, uint256 nOut) private pure returns (bool, string memory) {
         uint256 nItems = PackedArrays.validateRecords(order.items, PackedArrays.ITEM_HEAD);
         uint256 cur = PackedArrays.recordsStart();
@@ -154,10 +158,14 @@ contract SettlementLensChecks {
             cur = nxt;
         }
         // Items other than SETTLE act on the maker's own position.
-        if (nItems != settles) return (true, "");
+        bool positionItem = nItems != settles;
         bool invariants = PackedArrays.countUnchecked(order.invariants) != 0;
-        if (nOut == 0 && !invariants) return (false, "no tokenOut and no items (giveaway)");
-        if (invariants && (nOut == 0 || settles != 0) && !_exclusiveForLife(order)) {
+        if (nOut == 0 && !invariants && !positionItem) return (false, "no tokenOut and no items (giveaway)");
+        // With NO output leg the core itself refuses every filler but the named one
+        // whenever an invariant is present, position items or not ({Base._runInvariants},
+        // VAL-1) — so that case is flagged whatever the items are. A `SETTLE` hand-over
+        // beside an output leg stays advisory here and is lifted by a position item.
+        if (invariants && (nOut == 0 || (settles != 0 && !positionItem)) && !_exclusiveForLife(order)) {
             return (false, "invariant-only consideration needs a single hard exclusiveFiller for the order's life");
         }
         return (true, "");

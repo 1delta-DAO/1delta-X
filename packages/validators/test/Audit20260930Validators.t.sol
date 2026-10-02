@@ -6,6 +6,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, LegOut, Validator, CallbackMode, Settlement} from "@core/settlement/Settlement.sol";
 import {Base} from "@core/settlement/Base.sol";
+import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {Proportional} from "@core/settlement/Proportional.sol";
 import {IOrderValidator} from "@core/interfaces/IOrderValidator.sol";
 import {IERC1271} from "@core/interfaces/IERC1271.sol";
@@ -150,8 +151,12 @@ contract Audit20260930_VAL1_Test is CoreSettlementBase {
         o.invariants = PackedEncode.validators(_inv(invTarget, invData));
     }
 
-    function _expectInvariantFailed() internal {
-        vm.expectRevert(abi.encodeWithSelector(Base.InvariantFailed.selector, uint256(0)));
+    /// @dev The settler now refuses an unnamed filler on a no-output-leg invariant
+    ///      order itself ({Base._runInvariants}, VAL-1 core rule) before the
+    ///      invariant's own {InvariantReceiptGuard} runs; the guard stays as defence
+    ///      in depth and is unit-tested directly below.
+    function _expectReceiptRefused() internal {
+        vm.expectRevert(OrderGates.NotExclusiveFiller.selector);
     }
 
     /// PoC 1: two live bids, one delivery — the attacker can no longer be paid twice.
@@ -167,7 +172,7 @@ contract Audit20260930_VAL1_Test is CoreSettlementBase {
         bytes memory sig2 = _sign(o2);
 
         vm.prank(address(0xBAD));
-        _expectInvariantFailed();
+        _expectReceiptRefused();
         attacker.run(
             o2, sig2, PRICE2, abi.encodeCall(Audit0930DeliveryArm.deliver721, (nft, ID, maker)), o1, sig1, PRICE1
         );
@@ -194,7 +199,7 @@ contract Audit20260930_VAL1_Test is CoreSettlementBase {
 
         address bot = address(0xB07);
         vm.prank(bot);
-        _expectInvariantFailed();
+        _expectReceiptRefused();
         settlement.fill(o1, sig1, PRICE1);
 
         assertEq(IERC20(USDC).balanceOf(bot), 0, "bot took nothing");
@@ -217,7 +222,7 @@ contract Audit20260930_VAL1_Test is CoreSettlementBase {
         bytes memory sig2 = _sign(o2);
 
         vm.prank(address(0xBAD));
-        _expectInvariantFailed();
+        _expectReceiptRefused();
         attacker.run(
             o2,
             sig2,
@@ -240,7 +245,7 @@ contract Audit20260930_VAL1_Test is CoreSettlementBase {
 
         address bot = address(0xB07);
         vm.prank(bot);
-        _expectInvariantFailed();
+        _expectReceiptRefused();
         settlement.fill(o1, sig1, PRICE1);
         assertEq(IERC20(USDC).balanceOf(maker), PRICE1, "maker keeps 10,000 USDC");
     }
@@ -259,7 +264,7 @@ contract Audit20260930_VAL1_Test is CoreSettlementBase {
         bytes memory deliver = abi.encodeCall(Audit0930DeliveryArm.deliver721, (nft, ID, maker));
 
         vm.prank(address(0xF00));
-        _expectInvariantFailed();
+        _expectReceiptRefused();
         settlement.fillWithCallback(o, sig, PRICE1, address(arm), deliver, CallbackMode.PostInputs);
 
         vm.prank(solver);

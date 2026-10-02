@@ -249,9 +249,28 @@ describe("VAL-1.v2 — packOrder mirrors the lens consideration rule", () => {
     ).toThrow();
     expect(() => packOrder({ ...open, exclusiveFiller: ex, timing: packTiming(0, 0, life - 1) })).toThrow();
     expect(() => packOrder({ ...open, exclusiveFiller: ex, timing: packTiming(0, 0, life) })).not.toThrow();
-    // A position item is consideration: unaffected.
+    // Beside an output leg, a position item lifts the SETTLE-hand-over case.
     expect(() =>
-      packOrder({ ...open, items: [{ op: ItemOp.MAKE, module: T1, amount: 1n, recipient: zeroAddress, data: "0x" }] }),
+      packOrder({
+        ...settle,
+        items: [
+          { op: ItemOp.SETTLE, module: T1, amount: 1n, recipient: zeroAddress, data: "0x" },
+          { op: ItemOp.MAKE, module: T1, amount: 1n, recipient: zeroAddress, data: "0x" },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  // The core rule (Base._runInvariants): with NO output leg the settler refuses every
+  // filler but the named one whenever an invariant is present — a position item does
+  // not lift it, so packOrder must not admit that shape either.
+  it("test_audit_VAL_1_core_positionItemDoesNotLiftNoOutputRule", () => {
+    const make = [{ op: ItemOp.MAKE, module: T1, amount: 1n, recipient: zeroAddress, data: "0x" as Hex }];
+    const open = plain({ legsOut: [], invariants: inv, items: make });
+    expect(() => packOrder(open)).toThrow(/invariant-only consideration/);
+    const ex = A("0x000000000000000000000000000000000000beef");
+    expect(() =>
+      packOrder({ ...open, exclusiveFiller: ex, timing: packTiming(0, 0, Number(open.expiry)) }),
     ).not.toThrow();
   });
 });
