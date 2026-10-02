@@ -129,3 +129,18 @@ export function perOrderCap(plan: TicketPlan, balanceWei: bigint | undefined): b
 export function requiredInputWei(plan: TicketPlan, decimals: number, balanceWei: bigint | undefined): bigint {
   return inputWei(plan.amountIn, decimals, perOrderCap(plan, balanceWei)) * BigInt(plan.orders);
 }
+
+/**
+ * The input cap for the NEXT TWAP slice the maker signs: the LIVE balance split
+ * across the slices still to be signed, never across the total.
+ *
+ * Slices that already filled have left the wallet, so dividing what is left by
+ * the original slice count shrank every later slice below its size (slice 2 of
+ * N got (B - s)/N < s) and, with only the input clamped, signed less input for
+ * the same output: a worse price that cannot fill (G-TS_SIGN-7).
+ */
+export function sliceCap(balanceWei: bigint | undefined, totalSlices: number, signedSlices: number): bigint | undefined {
+  if (balanceWei === undefined) return undefined;
+  const remaining = Math.max(1, totalSlices - signedSlices);
+  return balanceWei / BigInt(remaining);
+}

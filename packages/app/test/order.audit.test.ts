@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 import { buildOrder, decimalString, inputWei, randomNonce, randomOrderNonce, toWei } from "../src/lib/order";
 import { clearingPrice } from "../src/lib/ladder";
+import { sliceCap } from "../src/lib/plan";
 import { priceSizingAmount } from "../src/lib/ticket";
 import type { Level } from "../src/lib/types";
 
@@ -173,6 +174,82 @@ describe("G-TS_SIGN-9 — TWAP default limit is sized per slice", () => {
     const hook = src("src/hooks/useTicket.ts");
     expect(hook).toContain("priceSizingAmount(mode, amount, slices)");
     expect(hook).toContain("clearingPrice(levels, sizedTo, side)");
+  });
+});
+
+describe("G-TS_SIGN-7 (fix-up) — later TWAP slices keep size and price at max", () => {
+  // A 'max' TWAP: amount == balance B, N slices of s = B / N each.
+  const N = 4;
+  const s = 25n * 10n ** 18n; // 25 USDRIF per slice
+  const B = s * BigInt(N);
+  const priceOut = 24_750_000n; // 24.75 USD0 per 25 USDRIF slice
+  const slice = { ...sellArgs, amountIn: 25, targetOut: 24.75, minOut: 24.75 };
+
+  it("test_audit_G_TS_SIGN_7_sliceKSignedAfterKMinus1FillsKeepsFullSize", () => {
+    for (let k = 2; k <= N; k++) {
+      // k-1 slices filled → live balance B - (k-1)s; k-1 slices already signed.
+      const live = B - BigInt(k - 1) * s;
+      const cap = sliceCap(live, N, k - 1);
+      const draft = buildOrder({ ...slice, maxIn: cap });
+      expect(draft.order.legsIn[0]!.start).toBe(s);
+      expect(draft.order.legsOut[0]!.start).toBe(priceOut);
+      expect(draft.clamped).toBe(false);
+    }
+  });
+
+  it("test_audit_G_TS_SIGN_7_clampedSellScalesOutputSoPriceNeverWorsens", () => {
+    // Even when the cap binds (a slice signed against a short wallet), the
+    // order is a smaller order at the SAME price, never less input for the same output.
+    const cap = (s * 3n) / 4n;
+    const draft = buildOrder({ ...slice, maxIn: cap });
+    const inW = draft.order.legsIn[0]!.start;
+    const outW = draft.order.legsOut[0]!.start;
+    expect(inW).toBe(cap);
+    expect(draft.clamped).toBe(true);
+    // out/in >= priceOut/s  <=>  out * s >= priceOut * in
+    expect(outW * s >= priceOut * inW).toBe(true);
+    expect(outW).toBe((priceOut * 3n) / 4n);
+  });
+
+  it("test_audit_G_TS_SIGN_7_clampedBuyScalesOutputSoPriceNeverWorsens", () => {
+    const ceilWei = 100_000_000n; // 100 USD0
+    const outWei = 99n * 10n ** 18n;
+    const cap = 60_000_000n;
+    const draft = buildOrder({
+      ...sellArgs,
+      side: "buy",
+      pay: USD0,
+      recv: USDRIF,
+      amountIn: 100,
+      targetOut: 100,
+      minOut: 99,
+      decaySeconds: 60,
+      maxIn: cap,
+    });
+    const leg = draft.order.legsIn[0]!;
+    const got = draft.order.legsOut[0]!.start;
+    expect(leg.end === 0n ? leg.start : leg.end).toBe(cap);
+    expect(leg.start <= cap).toBe(true);
+    // the maker's worst spend per unit received is no worse than typed...
+    expect(cap * outWei <= ceilWei * got).toBe(true);
+    // ...and the order is the SAME price at a smaller size: asking the full 99
+    // for a 60% spend would be a price no filler can meet.
+    expect(got).toBe((outWei * cap + ceilWei - 1n) / ceilWei);
+    expect(draft.clamped).toBe(true);
+  });
+
+  it("test_audit_G_TS_SIGN_7_emptyCapRefusesToSign", () => {
+    expect(() => buildOrder({ ...slice, maxIn: 0n })).toThrow(/insufficient balance/);
+  });
+
+  it("test_audit_G_TS_SIGN_7_signSliceCapsByRemainingSlices", () => {
+    expect(sliceCap(undefined, 4, 1)).toBeUndefined();
+    expect(sliceCap(300n, 4, 1)).toBe(100n);
+    expect(sliceCap(100n, 4, 9)).toBe(100n); // never divides by < 1
+    const app = src("src/App.tsx");
+    expect(app).toContain("maxIn: sliceCap(raw, spec.orders ?? 1, spec.signedSlices ?? 0)");
+    expect(app).toMatch(/const signedSlices = o\.signedOrders\?\.length/);
+    expect(app).not.toContain("raw / BigInt(spec.orders ?? 1)");
   });
 });
 
