@@ -170,9 +170,13 @@ export function word32(x: bigint): Hex {
 /**
  * Refuse to sponsor a `LzOftBridgeOutModule` send unless the order binds the
  * sponsor as its ONLY possible filler, for its whole life, in one shot (audit
- * 2026-09-30 X-DIFF-REST-3). `makeOnBehalf` sees no filler identity, so the
- * module cannot tell the sponsor's own fill from anyone else's: any filler of the
- * sponsored order makes the sponsor pay. Safe only when:
+ * 2026-09-30 X-DIFF-REST-3). The module now binds the filler ON-CHAIN: a
+ * sponsored spec must be signed as a `SETTLE` item (`ItemOp.SETTLE`, the seam that
+ * passes the filler) and the filler must be the sponsor or an agent it named via
+ * `setSponsorFiller`; a sponsored `MAKE` item reverts `SponsoredSendNeedsSettle`.
+ * This check is therefore a LIVENESS preflight — without it a stranger's fill
+ * merely reverts, but the sponsor cannot rely on filling an order others may also
+ * try to fill. Sponsor only when:
  *   • `exclusiveFiller == sponsor`, a HARD window (`exclusivityOverrideBps == 0`)
  *     that lasts the order's life (`exclusivityEndTime >= expiry`, or the uint32
  *     maximum on a block-clocked order);

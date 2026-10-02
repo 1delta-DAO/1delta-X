@@ -99,9 +99,9 @@ All in [`FluidModules.sol`](src/FluidModules.sol); minimal protocol surface in
 
 | Contract | Op | Fluid action | Notes |
 |---|---|---|---|
-| `FluidDepositModule` | MAKE | pull collateral → `operate(nftId, +amount, 0)` | permissionless; rejects `nftId == 0` |
-| `FluidRepayModule` | MAKE | pull debt token → `operate(nftId, 0, −amount)` | pull-exact; `amount` must be ≤ live debt (Fluid reverts literal over-payback) |
-| `FluidTakerModule` | TAKE | `op=0` borrow / `op=1` withdraw, JIT NFT custody, proceeds → `receiver` | one module address covers both legs of the round-trip under one `setApprovalForAll`; `data = abi.encode(uint8 op, vault, factory, nftId)` |
+| `FluidDepositModule` | MAKE | pull collateral → `operate(nftId, +amount, 0)` | permissionless on Fluid; rejects `nftId == 0`; `nftId` must be the MAKER's position (`NotPositionOwner`, via the vault's own factory — audit 2026-09-30 L-CENSUS-8) |
+| `FluidRepayModule` | MAKE | pull debt token → `operate(nftId, 0, −amount)`; `Full`: `operate(nftId, 0, type(int256).min)` | `data = abi.encode(vault, debtToken, nftId[, mode[, totalAmount]])`; `nftId` must be the maker's (`NotPositionOwner`). `Exact` (default) is pull-exact and `amount` must be ≤ live debt (Fluid reverts a literal over-payback). `Full` = the TAGGED word `0xB0DE0001` (`DustHandler.encodeMode(Full)`; an untagged `1` reverts `InvalidModeWord`) is the **live-debt clamp**: `amount` is a ceiling, Fluid's repay-all takes exactly the live debt and the buffer is returned; full-fill only (`totalAmount`@128 mandatory) |
+| `FluidTakerModule` | TAKE | `op=0` borrow / `op=1` withdraw, JIT NFT custody, proceeds → `receiver` | one module address covers both legs of the round-trip under one `setApprovalForAll`; `data = abi.encode(uint8 op, vault, factory, nftId)`; `nonReentrant` like its custody siblings |
 | `FluidOperateModule` | TAKE | fused **Open** (supply `sideAmount` + borrow) / **Close** (repay `sideAmount` + withdraw) in one `operate` | `sideAmount` in `data` doesn't pro-rate ⇒ **full-fill only** (`FullFillGuard`); Close supports repay-all via `FLUID_ALL` + `repayCeiling` over-pull + residual sweep |
 | `FluidTakeForModule` | TAKE_FOR | fused open where the collateral is the core-sized `forAmount` | **partial fills work** on an existing position (one `operate` per slice); `nftId == 0` stays full-fill only — a fresh mint is position *identity*, N slices would mint N positions |
 

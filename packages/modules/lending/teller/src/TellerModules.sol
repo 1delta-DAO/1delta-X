@@ -40,8 +40,22 @@ import {ITellerPool, ITellerV2, TellerPayment} from "./interfaces/ITeller.sol";
 ///      maker-data-choosable on a shared singleton (F25 / lead A-3), and a
 ///      `full` close whose `amount` is below the owed figure fails closed on that
 ///      allowance rather than reaching for any other balance.
+///
+///      THE LOAN IS BOUND TO THE MAKER (2026-09-30 audit L-CENSUS-8 (3)). `repayLoan`
+///      is permissionless, so a `bidId` that is not the maker's own loan — a typo, a
+///      stale id after a re-borrow — used to spend the maker's funds retiring a
+///      stranger's debt. `getLoanBorrower(bidId)` must equal the maker, the same
+///      "cheap insurance" the Liquity and Gearbox value-in modules take; a maker who
+///      genuinely wants to repay someone else's loan does it outside an order.
 library TellerRepayLib {
-    function repay(address tellerV2, address token, uint256 bidId, bool full, uint256 amount) internal {
+    /// @dev The signed `bidId` is not a loan of `onBehalfOf`.
+    error NotBorrower(uint256 bidId, address borrower);
+
+    function repay(address tellerV2, address token, uint256 bidId, bool full, uint256 amount, address onBehalfOf)
+        internal
+    {
+        address borrower = ITellerV2(tellerV2).getLoanBorrower(bidId);
+        if (borrower != onBehalfOf) revert NotBorrower(bidId, borrower);
         SafeTransferLib.forceApprove(token, tellerV2, amount);
         if (full || amount >= _owed(tellerV2, bidId)) {
             ITellerV2(tellerV2).repayLoanFull(bidId);
@@ -152,7 +166,7 @@ contract TellerRepayModule is IMakerModule {
         if (amount > 0) {
             permit3.transferFrom(onBehalfOf, address(this), principalToken, uint160(amount));
             // Clamped at the LIVE debt — the venue does not clamp (L-CMT-1).
-            TellerRepayLib.repay(tellerV2, principalToken, bidId, full, amount);
+            TellerRepayLib.repay(tellerV2, principalToken, bidId, full, amount, onBehalfOf);
         }
 
         // Sweep the unused buffer (`repayLoanFull` pulls only what is owed, and an

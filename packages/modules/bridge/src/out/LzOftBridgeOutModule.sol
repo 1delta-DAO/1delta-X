@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
+import {ISettlementModule} from "@core/interfaces/ISettlementModule.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {BridgeOutBase} from "./BridgeOutBase.sol";
@@ -51,13 +52,18 @@ import {IOFT} from "../vendor/ILayerZero.sol";
 ///         allowance moves by {increaseFeeSponsorship} / {decreaseFeeSponsorship}
 ///         as well as the absolute {approveFeeSponsorship}, so a re-approval need
 ///         not race the maker;
-///       • it CANNOT bind the FILLER: `makeOnBehalf` receives no filler identity
-///         (the {IMakerModule} seam carries none), so any filler of the sponsored
-///         order makes the sponsor pay. A solver that prices the fee into its
-///         own quote must therefore sponsor only orders that name it as HARD
-///         `exclusiveFiller` for their whole life and that are full-fill only —
-///         an off-chain rule the SDK checks (`assertLzSponsorshipSafe`) before a
-///         sponsor signs up to an order.
+///       • it BINDS THE FILLER on-chain. A sponsored send must ride the `SETTLE`
+///         item op ({ISettlementModule.settle}), the one seam on which the core
+///         passes the filler, and the filler must be the sponsor itself or an
+///         agent the sponsor named ({setSponsorFiller}). The `MAKE` seam
+///         ({IMakerModule.makeOnBehalf}) carries no filler identity, so a
+///         sponsored spec dispatched as `MAKE` now reverts
+///         {SponsoredSendNeedsSettle} instead of letting any filler of the order
+///         make the sponsor pay (audit 2026-09-30 X-DIFF-REST-3 part (a); this
+///         used to be an off-chain rule only). A self-paid send (`feePayer ==
+///         maker`) works on both seams. The SDK's `assertLzSponsorshipSafe`
+///         (hard lifelong `exclusiveFiller` = sponsor) remains a LIVENESS check:
+///         a non-sponsor filler now simply reverts.
 ///
 ///     ⚠ TOKEN BINDING (audit 2026-09-30 BRIDGE-B-2). `inputToken` MUST be
 ///     `IOFT(oft).token()`, and this is now checked on-chain. A native OFT burns
@@ -76,7 +82,7 @@ import {IOFT} from "../vendor/ILayerZero.sol";
 ///     guaranteed floor the destination order's input leg is authored against.
 ///     For a token whose local and shared decimals match (USDT0 at 6) zero is
 ///     correct; for an 18-decimal OFT it must at least cover the dust.
-contract LzOftBridgeOutModule is BridgeOutBase {
+contract LzOftBridgeOutModule is BridgeOutBase, ISettlementModule {
     /// @notice Native balance available to pay LayerZero messaging fees, per payer.
     ///         Deliberately a ledger rather than a pooled float: a pooled balance
     ///         would let any order drain whatever anyone else deposited.
@@ -91,9 +97,17 @@ contract LzOftBridgeOutModule is BridgeOutBase {
     ///         charge `payer`, whatever the maker's own `maxNativeFee` says.
     mapping(address payer => mapping(address maker => uint256)) public maxFeePerSend;
 
+    /// @notice `sponsorFiller[payer][filler]` — `filler` may fill orders that spend
+    ///         `payer`'s sponsorship (besides `payer` itself). Lets a sponsor fill
+    ///         through its own executor contract. Never name a PERMISSIONLESS
+    ///         contract (a public solver anyone can drive): its address is then
+    ///         every caller's.
+    mapping(address payer => mapping(address filler => bool)) public sponsorFiller;
+
     event ToppedUp(address indexed payer, uint256 amount, uint256 balance);
     event WithdrawnNative(address indexed payer, uint256 amount, uint256 balance);
     event FeeSponsorshipSet(address indexed payer, address indexed maker, uint256 amount, uint256 maxPerSend);
+    event SponsorFillerSet(address indexed payer, address indexed filler, bool allowed);
 
     error FeeAboveCap();
     error InsufficientNativeCredit();
@@ -103,6 +117,12 @@ contract LzOftBridgeOutModule is BridgeOutBase {
     error FeeNotSponsored();
     /// @dev `IOFT(oft).token() != inputToken` — see the TOKEN BINDING note.
     error OftTokenMismatch();
+    /// @dev A sponsored spec (`feePayer != maker`) was dispatched on the `MAKE` seam,
+    ///      which carries no filler identity — sign it as a `SETTLE` item.
+    error SponsoredSendNeedsSettle();
+    /// @dev A sponsored send filled by someone other than the sponsor or one of
+    ///      its named agents ({setSponsorFiller}).
+    error FillerNotSponsor(address filler);
 
     /// @param oft               Stargate pool or OFT/adapter on THIS chain.
     /// @param inputToken        ERC20 pulled from the maker. Must be `IOFT.token()`.
@@ -188,6 +208,14 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         emit FeeSponsorshipSet(msg.sender, maker, a, maxFeePerSend[msg.sender][maker]);
     }
 
+    /// @notice Allow (or stop allowing) `filler` to fill orders that spend the
+    ///         caller's sponsorship — for a sponsor that fills through its own
+    ///         executor contract. Keyed by `msg.sender`.
+    function setSponsorFiller(address filler, bool allowed) external {
+        sponsorFiller[msg.sender][filler] = allowed;
+        emit SponsorFillerSet(msg.sender, filler, allowed);
+    }
+
     /// @notice Reclaim unspent credit. Keyed by `msg.sender`, so only ever your own.
     function withdrawNative(uint256 amount) external {
         uint256 bal = nativeCredit[msg.sender];
@@ -203,7 +231,29 @@ contract LzOftBridgeOutModule is BridgeOutBase {
     // ──────────────────── Fill path ────────────────────
 
     /// @inheritdoc IMakerModule
+    /// @dev Self-paid sends only: a sponsored spec reverts {SponsoredSendNeedsSettle}.
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override onlySettlement {
+        _send(onBehalfOf, amount, data, address(0));
+    }
+
+    /// @inheritdoc ISettlementModule
+    /// @dev The `SETTLE` twin of {makeOnBehalf}, identical except that the core
+    ///      passes the `filler`, which a sponsored send must be bound to. `filler`
+    ///      is used ONLY for that check — nothing is ever pulled from it (the
+    ///      SETTLE rule, {ISettlementModule}); the bridged tokens come from the
+    ///      MAKER under its own Permit3 allowance to this module, exactly as on
+    ///      the MAKE seam.
+    function settle(address maker, address filler, uint256 amount, bytes calldata data)
+        external
+        override
+        onlySettlement
+    {
+        _send(maker, amount, data, filler);
+    }
+
+    /// @param filler the fill's filler on the SETTLE seam; `address(0)` on the MAKE
+    ///               seam, where it is unknown.
+    function _send(address onBehalfOf, uint256 amount, bytes calldata data, address filler) private {
         LzSpec memory s = abi.decode(data, (LzSpec));
         _checkDestination(s.dstRecipient, s.dstChainId);
         // The endpoint id is a SEPARATE namespace from the chain id, and nothing
@@ -237,6 +287,10 @@ contract LzOftBridgeOutModule is BridgeOutBase {
         // Someone else's credit only with their consent to THIS maker, and only up
         // to the amount they extended — see the contract note.
         if (s.feePayer != onBehalfOf) {
+            // The filler binding (X-DIFF-REST-3 a): only the sponsor, or an agent it
+            // named, may make it pay. The MAKE seam cannot tell, so it refuses.
+            if (filler == address(0)) revert SponsoredSendNeedsSettle();
+            if (filler != s.feePayer && !sponsorFiller[s.feePayer][filler]) revert FillerNotSponsor(filler);
             uint256 allowed = feeAllowance[s.feePayer][onBehalfOf];
             if (fee > allowed || fee > maxFeePerSend[s.feePayer][onBehalfOf]) revert FeeNotSponsored();
             unchecked {

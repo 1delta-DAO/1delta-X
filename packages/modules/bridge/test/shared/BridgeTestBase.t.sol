@@ -167,11 +167,24 @@ abstract contract BridgeTestBase is MockSettlementBase {
         view
         returns (Order memory o)
     {
+        o = _srcOrderOp(nonce, payAmount, bridgeAmount, module, spec, ItemOp.MAKE);
+    }
+
+    /// @dev {_srcOrder} with the item dispatched on `op` — a SPONSORED LayerZero send
+    ///      rides `SETTLE`, the seam that carries the filler (X-DIFF-REST-3).
+    function _srcOrderOp(
+        uint256 nonce,
+        uint256 payAmount,
+        uint256 bridgeAmount,
+        address module,
+        bytes memory spec,
+        ItemOp op
+    ) internal view returns (Order memory o) {
         o = _blank(nonce);
         o.legsIn = _legsIn1(address(tC), payAmount);
         o.legsOut = _legsOut1(address(tA), bridgeAmount); // recipient 0 == the maker
         Item[] memory _tmpitems = new Item[](1);
-        _tmpitems[0] = Item({op: ItemOp.MAKE, module: module, amount: bridgeAmount, recipient: address(0), data: spec});
+        _tmpitems[0] = Item({op: op, module: module, amount: bridgeAmount, recipient: address(0), data: spec});
         o.items = PackedEncode.items(_tmpitems);
     }
 

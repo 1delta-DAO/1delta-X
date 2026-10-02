@@ -41,6 +41,7 @@ contract AuditTellerRepayClampTest is Test {
         preFund = new TellerPreFundModule(address(new RevertingPermit3()), settlement);
         repayModule = new TellerRepayModule(address(permit3), settlement);
         depositModule = new TellerPoolDepositModule(address(permit3), settlement);
+        tellerV2.setBorrower(BID_ID, maker);
     }
 
     function _repayData(bool full) internal view returns (bytes memory) {
@@ -176,5 +177,45 @@ contract AuditTellerRepayClampTest is Test {
         assertEq(pool.sharesOf(maker), 500e6, "maker credited");
         assertEq(asset.balanceOf(address(depositModule)), 0, "module holds nothing");
         assertEq(asset.allowance(address(depositModule), address(pool)), 0, "scoped approval cleared");
+    }
+
+    // ──────────────── L-CENSUS-8 (3): the loan is bound to the maker ────────────────
+
+    uint256 constant STRANGER_BID = 77;
+
+    /// A signed `bidId` that is a STRANGER's loan used to spend the maker's funds
+    /// retiring that stranger's debt (repay is permissionless on Teller). The pull
+    /// module now refuses: the maker keeps its funds, the stranger's loan is untouched.
+    function test_audit_L_CENSUS_8_pullRepayRefusesStrangersLoan() public {
+        address stranger = address(0x5742);
+        tellerV2.setBorrower(STRANGER_BID, stranger);
+        tellerV2.setOwed(STRANGER_BID, 800e6);
+        _grantPull(address(repayModule), 1_000e6);
+
+        vm.prank(settlement);
+        try repayModule.makeOnBehalf(maker, 1_000e6, abi.encode(address(tellerV2), address(asset), STRANGER_BID, false))
+        {} catch {}
+
+        assertEq(tellerV2.owed(STRANGER_BID), 800e6, "stranger's loan untouched");
+        assertEq(asset.balanceOf(maker), 1_000e6, "maker keeps its funds");
+    }
+
+    /// Same binding on the pre-fund module: the delivered funds stay on the module
+    /// (the fill reverts) rather than retiring a stranger's loan.
+    function test_audit_L_CENSUS_8_preFundRepayRefusesStrangersLoan() public {
+        address stranger = address(0x5742);
+        tellerV2.setBorrower(STRANGER_BID, stranger);
+        tellerV2.setOwed(STRANGER_BID, 800e6);
+        asset.mint(address(preFund), 1_000e6);
+        uint256 desc = (uint256(1) << 255) | (uint256(1) << 253) | (uint256(uint160(address(asset))) << 16)
+            | (uint256(TellerPreFundModule.Op.Repay) << 244);
+
+        vm.prank(settlement);
+        try preFund.makeOnBehalf(
+            maker, 1_000e6, abi.encode(desc, address(tellerV2), address(asset), STRANGER_BID, false)
+        ) {} catch {}
+
+        assertEq(tellerV2.owed(STRANGER_BID), 800e6, "stranger's loan untouched");
+        assertEq(asset.balanceOf(address(tellerV2)), 0, "nothing paid to the venue");
     }
 }

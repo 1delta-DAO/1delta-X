@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order} from "@core/settlement/Settlement.sol";
+import {Order, ItemOp} from "@core/settlement/Settlement.sol";
 
 import {LzOftBridgeOutModule} from "../src/out/LzOftBridgeOutModule.sol";
 import {BridgedOrderInbox} from "../src/BridgedOrderInbox.sol";
@@ -308,7 +308,9 @@ contract LzPathTest is BridgeTestBase {
         bytes memory spec = _specPaidBy(_hashOrder(dst), solver);
         LzOftBridgeOutModule.LzSpec memory sp = abi.decode(spec, (LzOftBridgeOutModule.LzSpec));
         sp.maxNativeFee = 0.5 ether;
-        Order memory src = _srcOrder(1, PAY, BRIDGE, address(lzOut), abi.encode(sp));
+        // Sponsored specs ride SETTLE (the filler-carrying seam, X-DIFF-REST-3); the
+        // filler here IS the named payer, so the refusal is the missing consent.
+        Order memory src = _srcOrderOp(1, PAY, BRIDGE, address(lzOut), abi.encode(sp), ItemOp.SETTLE);
         _wireSourceParties(address(lzOut), PAY, BRIDGE);
         bytes memory sig = _sign(src);
 
@@ -328,7 +330,8 @@ contract LzPathTest is BridgeTestBase {
         vm.stopPrank();
 
         Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
-        Order memory src = _srcOrder(1, PAY, BRIDGE, address(lzOut), _specPaidBy(_hashOrder(dst), solver));
+        Order memory src =
+            _srcOrderOp(1, PAY, BRIDGE, address(lzOut), _specPaidBy(_hashOrder(dst), solver), ItemOp.SETTLE);
         _wireSourceParties(address(lzOut), PAY, BRIDGE);
         bytes memory sig = _sign(src);
 
@@ -347,7 +350,8 @@ contract LzPathTest is BridgeTestBase {
         vm.stopPrank();
 
         Order memory dst = _dstOrder(1, DELIVERED, DST_OUT);
-        Order memory src = _srcOrder(1, PAY, BRIDGE, address(lzOut), _specPaidBy(_hashOrder(dst), solver));
+        Order memory src =
+            _srcOrderOp(1, PAY, BRIDGE, address(lzOut), _specPaidBy(_hashOrder(dst), solver), ItemOp.SETTLE);
         _wireSourceParties(address(lzOut), PAY, BRIDGE);
         bytes memory sig = _sign(src);
 

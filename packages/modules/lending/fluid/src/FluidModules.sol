@@ -5,6 +5,7 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {FullFillGuard} from "@lib/FullFillGuard.sol";
+import {DustHandler} from "@lib/DustHandler.sol";
 import {Narrow160} from "@lib/Narrow160.sol";
 import {FundingPreflight} from "@lib/FundingPreflight.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
@@ -157,6 +158,23 @@ abstract contract FluidBase {
         if (nftId == 0) revert FreshPositionUnsupported();
     }
 
+    /// @dev The signed position is not the maker's.
+    error NotPositionOwner(uint256 nftId, address owner);
+
+    /// @dev Bind a VALUE-IN leg's `nftId` to the maker (2026-09-30 audit L-CENSUS-8
+    ///      (3)). Supply and payback are permissionless on Fluid, so a signed id that
+    ///      is not the maker's — a typo, a stale id after a close — used to spend the
+    ///      maker's funds on a stranger's position. The owner is read from the
+    ///      vault's OWN factory (`constantsView().factory`): `vault` is maker-signed
+    ///      and this leg only ever moves the maker's money, so a lying vault can
+    ///      only misdirect its own signer's funds — the same posture as before, minus
+    ///      the honest-mistake gift. The "cheap insurance" Liquity and Gearbox take.
+    function _requirePositionOwner(address vault, uint256 nftId, address user) internal view {
+        (, address factory,,,,) = IFluidVault(vault).constantsView();
+        address owner = IFluidVaultFactory(factory).ownerOf(nftId);
+        if (owner != user) revert NotPositionOwner(nftId, owner);
+    }
+
     /// @dev `uint256 → int256` guarding the high bit (always true for real amounts).
     function _signed(uint256 x) internal pure returns (int256) {
         require(x <= uint256(type(int256).max), "amount overflow");
@@ -283,6 +301,7 @@ contract FluidDepositModule is IMakerModule, FluidBase {
 
         (address vault, address collateralToken, uint256 nftId) = abi.decode(data, (address, address, uint256));
         _requireExistingPosition(nftId);
+        _requirePositionOwner(vault, nftId, onBehalfOf);
 
         uint256 floor = SafeTransferLib.balanceOf(collateralToken, address(this));
         _pullAndApprove(collateralToken, amount, onBehalfOf, vault);
@@ -299,15 +318,23 @@ contract FluidDepositModule is IMakerModule, FluidBase {
 
 // ──────────────────── Fluid repay maker module ────────────────────
 //
-// Single-op maker: pays back `amount` of the user's debt, pull-exact (pulls
-// exactly what it pays, so the module never holds a residual). `amount` must not
-// exceed the live debt — Fluid reverts an over-payback of a literal amount; the
-// off-chain layer sizes it under the debt (a full close is the `FluidOperateModule`
-// Close path, which over-pulls a ceiling, uses the repay-all sentinel, and sweeps
-// the residual). Payback is permissionless ⇒ no NFT grant. `nonReentrant` guards
-// weird-token transfer hooks during the Permit3 pull.
+// Single-op maker: pays back the user's debt. Payback is permissionless on Fluid
+// ⇒ no NFT grant, but the position must be the MAKER's ({_requirePositionOwner}).
+// `nonReentrant` guards weird-token transfer hooks during the Permit3 pull.
 //
-// `data = abi.encode(address vault, address debtToken, uint256 nftId)`.
+//   `Exact` (default): pays back exactly `amount`, pull-exact. `amount` must not
+//     exceed the live debt — Fluid reverts an over-payback of a literal amount.
+//   `Full` (the TAGGED mode word, `DustHandler.encodeMode(Full)` = 0xB0DE0001):
+//     THE LIVE-DEBT CLAMP (2026-09-30 audit L-CENSUS-8 (4)). `amount` is a CEILING:
+//     the module pulls it, pays back with Fluid's repay-ALL sentinel
+//     (`type(int256).min`, so the vault consumes exactly the live debt), and returns
+//     the unused buffer to the maker. A debt above the ceiling fails closed on the
+//     scoped vault approval. FULL-FILL ONLY: `totalAmount`@128 is mandatory and the
+//     slice must equal it ({FullFillGuard}) — a slice of a ceiling is not a ceiling.
+//     Interest accrued between signing and fill is no longer a revert.
+//
+// `data = abi.encode(address vault, address debtToken, uint256 nftId[, uint256 mode[, uint256 totalAmount]])`
+//   — vault@0, debtToken@32, nftId@64 (base = 96); mode@96; totalAmount@128.
 //
 contract FluidRepayModule is IMakerModule, FluidBase {
     uint256 private _locked = 1;
@@ -328,11 +355,16 @@ contract FluidRepayModule is IMakerModule, FluidBase {
 
         (address vault, address debtToken, uint256 nftId) = abi.decode(data, (address, address, uint256));
         _requireExistingPosition(nftId);
+        _requirePositionOwner(vault, nftId, onBehalfOf);
+        bool full = DustHandler.readBalanceMode(data, 96) == DustHandler.BalanceMode.Full;
+        if (full) FullFillGuard.requireFullFillFromData(data, 128, amount);
 
         if (amount > 0) {
             uint256 floor = SafeTransferLib.balanceOf(debtToken, address(this));
             _pullAndApprove(debtToken, amount, onBehalfOf, vault);
-            IFluidVault(vault).operate(nftId, 0, -_signed(amount), address(0));
+            // `Full`: repay-ALL — the vault takes exactly the live debt, bounded by
+            // the `amount` approval just granted; the rest is returned below.
+            IFluidVault(vault).operate(nftId, 0, full ? type(int256).min : -_signed(amount), address(0));
         // Return what `operate` did not consume AND clear the vault grant. The
         // composite `_open` path was already fixed for exactly this ("a short pull
         // stranded the difference here permanently along with a live vault allowance
@@ -385,8 +417,17 @@ contract FluidTakerModule is ITakerModule, FluidCustodyBase {
         Withdraw // 1 — withdraw collateral to receiver
     }
 
+    /// @dev Same guard as {FluidOperateModule} / {FluidTakeForModule} (2026-09-30
+    ///      audit L-CENSUS-8 (5)): the NFT sits in this module between the custody
+    ///      pull and the hand-back, and `_operateOut` makes an external call to the
+    ///      vault and, on a native leg, to `receiver` via WETH in between. The
+    ///      Permit3 take lock covers the shipped path; this keeps the module sound on
+    ///      its own rather than by an outer contract's invariant.
+    uint256 private _locked = 1;
+
     error OnlyPermit3();
     error BadOp(uint8 op);
+    error Reentrancy();
 
     constructor(address _permit3, address _vaultFactory, address _wrappedNative)
         FluidCustodyBase(_permit3, _vaultFactory, _wrappedNative)
@@ -394,6 +435,8 @@ contract FluidTakerModule is ITakerModule, FluidCustodyBase {
 
     function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external override {
         if (msg.sender != address(permit3)) revert OnlyPermit3();
+        if (_locked != 1) revert Reentrancy();
+        _locked = 2;
 
         (uint8 op, address vault, address factory, uint256 nftId) = abi.decode(data, (uint8, address, address, uint256));
         if (op > uint8(Op.Withdraw)) revert BadOp(op);
@@ -406,6 +449,7 @@ contract FluidTakerModule is ITakerModule, FluidCustodyBase {
             _operateOut(vault, nftId, -_signed(amount), 0, amount, receiver, onBehalfOf);
         }
         IFluidVaultFactory(vaultFactory).transferFrom(address(this), onBehalfOf, nftId);
+        _locked = 1;
     }
 }
 
