@@ -157,7 +157,10 @@ describe("message encode/decode", () => {
   });
 
   it("handles a zero-legged fill-module order (empty anchor legs)", () => {
-    const nftSwap: Order = { ...CANONICAL_ORDER, legsIn: [], legsOut: [], fillTotal: 1n };
+    // No invariants: with legsOut empty, an invariant-only order needs a lifelong hard
+    // exclusiveFiller (VAL-1, `assertInvariantConsideration`); this test is about the
+    // empty-leg codec round-trip only.
+    const nftSwap: Order = { ...CANONICAL_ORDER, legsIn: [], legsOut: [], invariants: [], fillTotal: 1n };
     const back = decodeOrderAnnounce(encodeOrderAnnounce({ order: nftSwap, sig: "0x", sigless: true }));
     expect(back.order).toEqual(nftSwap);
     expect(back.sigless).toBe(true);
