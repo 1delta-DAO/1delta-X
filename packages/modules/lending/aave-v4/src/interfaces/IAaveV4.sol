@@ -41,6 +41,34 @@ interface ITakerPositionManager {
     // ── Owner-side allowance grants (the V4-native gate for TAKE ops) ──
     function approveWithdraw(address spoke, uint256 reserveId, address spender, uint256 amount) external;
     function approveBorrow(address spoke, uint256 reserveId, address spender, uint256 amount) external;
+
+    // ── Signed allowance grants (EIP-712, domain `TakerPositionManager`/`1`) ──
+    // `WithdrawPermit(address spoke,uint256 reserveId,address owner,address spender,
+    //   uint256 amount,uint256 nonce,uint256 deadline)` (BorrowPermit: same fields).
+    // ANY submitter; the grant SETS the allowance; `nonce` is a keyed nonce
+    // (`key << 64 | sequence`), consumed on success; `signature` is verified by
+    // SignatureChecker (ECDSA or ERC-1271).
+    struct TakerPermit {
+        address spoke;
+        uint256 reserveId;
+        address owner;
+        address spender;
+        uint256 amount;
+        uint256 nonce;
+        uint256 deadline;
+    }
+
+    function approveWithdrawWithSig(TakerPermit calldata params, bytes calldata signature) external;
+    function approveBorrowWithSig(TakerPermit calldata params, bytes calldata signature) external;
+
+    function withdrawAllowance(address spoke, uint256 reserveId, address owner, address spender)
+        external
+        view
+        returns (uint256);
+    function borrowAllowance(address spoke, uint256 reserveId, address owner, address spender)
+        external
+        view
+        returns (uint256);
 }
 
 interface ISpokeV4 {

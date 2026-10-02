@@ -514,7 +514,15 @@ allowance, and `executeFill` is permissionless, so any residue is claimable by
 anyone with a self-signed order. That posture depends on every sweep being
 exhaustive: the flash solvers sweep each fill's profit out in the flash asset,
 refuse SETTLE items (`SettleItemsUnsupported`), and refuse Settlement / the
-EXECUTOR / themselves as profit recipient. Their `PERMIT_ENVELOPE` sig form fills a
+EXECUTOR / themselves as profit recipient. **Accepted, not hardened (2026-10-02,
+X-SPEC-7):** gating `setupTokenApproval` or replacing it with per-fill scoped
+approvals was considered and rejected. It would not change who can reach a
+residue: `executeFill` is permissionless by design, any per-fill approval would be
+armed by the attacker's own call, and `_sweep` already pays the solver's WHOLE
+balance of the flash asset to the caller-named recipient. A balance floor (the
+`NativeSettler` defence) contradicts that whole-balance sweep. The zero-balance
+rule is the posture; deploy an operator-gated solver when a contract must hold
+inventory. Their `PERMIT_ENVELOPE` sig form fills a
 PermitBatchWitness order through `fillWithPermit` inside the flash, so
 permit-witness first fills ARE fillable with zero inventory (SDK
 `encodeFlashPermitEnvelope`). **Never name an open flash solver or an open

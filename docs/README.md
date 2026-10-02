@@ -205,7 +205,7 @@ is a maker-signed, pay-per-use module call — the fast path stays inline and fr
 - **[SECURITY.md](../SECURITY.md)** — the authoritative security document: trust
   model, the invariants each layer upholds, the caveats integrators get wrong
   (revoking Permit3 is **not** a kill switch; a contract that fills on its own
-  behalf must hold no balance; position-ID modules must bind the position to
+  behalf must defend its balance; position-ID modules must bind the position to
   `onBehalfOf`), and the audit history with findings and fixes.
 
   **Read the "Breaking change for integrators" section before touching an

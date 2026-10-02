@@ -78,6 +78,20 @@ The Permit3 gating is identical to v3 — only the **protocol-native** gate diff
 | v4 **position-manager** approval (`spoke.setUserPositionManager(pm, true)`) | the spoke | lets the PM act for the maker at all (MAKE + TAKE) |
 | v4 **taker grant** (`TakerPM.approveBorrow` / `approveWithdraw(spoke, reserveId, module, cap)`) | the taker PM | TAKE only — the v4-native analogue of v3's aToken pull / `approveDelegation` |
 
+**The taker grant can be signed instead of sent** (L-CV2-6). Append
+`abi.encode(signedAmount, nonce, deadline, bytes signature)` — the maker's EIP-712
+`WithdrawPermit` / `BorrowPermit` over `(spoke, reserveId, owner = maker, spender =
+module, signedAmount, nonce, deadline)` on the TakerPM's domain
+(`TakerPositionManager`, `1`; keyed nonce from `pm.nonces(maker, key)`) — and the
+module replays `approveWithdrawWithSig` / `approveBorrowWithSig` in-call. Offsets:
+borrow @128; withdraw `Exact` @160 (the mode word at 128 is then mandatory, `0`);
+withdraw `Full` @192. The replay is best-effort (a front-run lands the same grant)
+and is skipped when the standing allowance already covers the fill, because the PM
+SETS the allowance. Sign `signedAmount` = the item total (or `type(uint256).max` for
+`Full`) so partial fills keep working; sign `deadline` no later than the order's,
+since cancelling the order does not consume the PM nonce (`pm.useNonce(key)` does).
+`setUserPositionManager` stays a one-time on-chain step.
+
 > **Collateral is not auto-enabled.** Unlike v3's `supply`, a freshly supplied v4
 > reserve does *not* count as collateral until
 > `spoke.setUsingAsCollateral(reserveId, true, maker)` is called — borrowing
