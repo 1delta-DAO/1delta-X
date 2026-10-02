@@ -35,6 +35,12 @@ the live venue by `test/fork/TellerRepayClampFork.t.sol`.
   surplus) if the amount covers it. This is the safe setting for an
   auction-priced or partially fillable repay.
 
+**The loan must be the maker's own.** Repay is permissionless on Teller, so both
+repay modules check `tellerV2.getLoanBorrower(bidId) == maker` and revert
+`NotBorrower` otherwise (audit 2026-09-30 L-CENSUS-8): a wrong `bidId` no longer
+spends the maker's funds on a stranger's debt. Repaying someone else's loan is done
+outside an order.
+
 Venue liveness limit: `repayLoan` reverts `PaymentNotMinimum` when a partial
 payment is below the current cycle's minimum due (`duePrincipal + interest`). On a
 loan whose duration is one payment cycle that minimum is the whole owed amount, so

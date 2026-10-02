@@ -297,9 +297,19 @@ junk token but naming a real native OFT burned the module's resident balance.
 **Fee sponsorship** (`feePayer != maker`) is consent per (payer, maker) with an
 amount (`approveFeeSponsorship` / `increaseFeeSponsorship` /
 `decreaseFeeSponsorship`) and a per-message cap (`maxFeePerSend`), and a sponsored
-send must be the whole item (`LzSpec.totalAmount`). It cannot bind the FILLER — the
-maker-module seam carries no filler identity — so a solver should sponsor only
-orders that name it as hard `exclusiveFiller` for their whole life.
+send must be the whole item (`LzSpec.totalAmount`). It is also **bound to the
+FILLER** (audit 2026-09-30 X-DIFF-REST-3): a sponsored spec must be signed as a
+`SETTLE` item — the one seam on which the core passes the filler
+(`ISettlementModule.settle(maker, filler, amount, data)`) — and the filler must be
+the sponsor itself or an agent it named with `setSponsorFiller(agent, true)`
+(never a permissionless public solver). On the `MAKE` seam, which carries no filler
+identity, a sponsored spec reverts `SponsoredSendNeedsSettle`; a self-paid spec
+(`feePayer == maker`) works on either seam. **BREAKING:** sponsored orders signed
+as `MAKE` items no longer fill. The SDK's `assertLzSponsorshipSafe` (hard lifelong
+`exclusiveFiller` = sponsor, full-fill only) is now a liveness preflight — a
+stranger's fill reverts instead of charging the sponsor. `SETTLE` items are not
+admitted by `matchSettle`, so sponsored sends fill through the single-order and
+batch entrypoints only.
 
 ### Recovery order for a LayerZero delivery that hasn't credited
 

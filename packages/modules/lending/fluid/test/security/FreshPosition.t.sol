@@ -24,6 +24,16 @@ contract FreshMintingVault {
 
     mapping(uint256 => address) public ownerOf;
 
+    function setOwner(uint256 id, address o) external {
+        ownerOf[id] = o;
+    }
+
+    /// @dev Acts as its own VaultFactory for the value-in owner binding
+    ///      (L-CENSUS-8): `constantsView().factory` is this contract.
+    function constantsView() external view returns (address, address, address, address, address, address) {
+        return (address(0), address(this), address(0), address(0), address(0), address(0));
+    }
+
     function operate(uint256 nftId, int256, int256, address) external returns (uint256 id, int256, int256) {
         if (nftId == 0) {
             id = nextId++;
@@ -125,10 +135,14 @@ contract FluidFreshPositionTest is Test {
 
         // Sanity: a NON-zero nftId gets past the guard and reaches the pull, which
         // is what proves the guard is the thing rejecting the sentinel above and
-        // not some unrelated earlier revert.
+        // not some unrelated earlier revert. The id must be the maker's own
+        // position — the value-in owner binding (L-CENSUS-8) reads the vault's
+        // factory before the pull, so the vault is a real (mock) one now.
+        FreshMintingVault vault = new FreshMintingVault();
+        vault.setOwner(42, maker);
         vm.prank(SETTLEMENT);
         vm.expectRevert(RevertingPermit3.Pulled.selector);
-        deposit.makeOnBehalf(maker, 1_000e6, abi.encode(address(0x1111), TOKEN, uint256(42)));
+        deposit.makeOnBehalf(maker, 1_000e6, abi.encode(address(vault), TOKEN, uint256(42)));
     }
 
     /// Only Settlement may drive the maker legs — the guard does not weaken the

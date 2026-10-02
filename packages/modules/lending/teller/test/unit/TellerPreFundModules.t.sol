@@ -79,6 +79,7 @@ contract MockTellerPool {
 contract MockTellerV2 {
     MockERC20 public immutable principal;
     mapping(uint256 => uint256) public owed;
+    mapping(uint256 => address) public borrowerOf;
     uint256 public minDue;
     uint256 public repayLoanCalls;
     uint256 public repayLoanFullCalls;
@@ -96,6 +97,14 @@ contract MockTellerV2 {
 
     function setOwed(uint256 bidId, uint256 amount) external {
         owed[bidId] = amount;
+    }
+
+    function setBorrower(uint256 bidId, address b) external {
+        borrowerOf[bidId] = b;
+    }
+
+    function getLoanBorrower(uint256 bidId) external view returns (address) {
+        return borrowerOf[bidId];
     }
 
     function setMinDue(uint256 m) external {
@@ -148,6 +157,7 @@ contract TellerPreFundModulesTest is Test {
         permit3 = new RevertingPermit3();
 
         preFund = new TellerPreFundModule(address(permit3), address(settlement));
+        tellerV2.setBorrower(BID_ID, maker);
     }
 
     /// @dev `(1 << 255) | index` — fund from `legsOut[index]`.

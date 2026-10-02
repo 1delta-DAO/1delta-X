@@ -166,8 +166,14 @@ contract ListaAudit20260930Test is ListaModulesBase {
         deal(USD1, maker, 300e18);
         vm.prank(maker);
         permit3.approveToken(address(brokerModule), USD1, 500e18, 0);
+        // G-LENS_PARITY-1: the book alone funds nothing without the ERC-20 approval
+        // to Permit3 that spends it, so the preflight now caps by it too.
         (, available) = brokerModule.fundingSource(maker, pullRepay);
-        assertEq(available, 300e18, "min(balance, Permit3 grant to the module)");
+        assertEq(available, 0, "no ERC-20 approval to Permit3: nothing is pullable");
+        vm.prank(maker);
+        IERC20(USD1).approve(address(permit3), type(uint256).max);
+        (, available) = brokerModule.fundingSource(maker, pullRepay);
+        assertEq(available, 300e18, "min(balance, Permit3 grant to the module, approval to Permit3)");
     }
 
     function test_audit_L_ML_5_preFundRepayStillReportsMax() public view {

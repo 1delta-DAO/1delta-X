@@ -229,7 +229,7 @@ contract GearboxPoolWithdrawModule is ITakerModule, IPositionSource {
     ///      `maxWithdraw`, is deliberate: `maxWithdraw` is a REACHABILITY figure,
     ///      clipped by pool illiquidity that third parties move, and pricing a
     ///      one-shot exit off it lets a fill resolve small instead of reverting
-    ///      (2026-09-10 audit, finding 1; see {IGearboxPoolV3.balanceOf}). An
+    ///      (2026-09-10 audit, finding 1; see {IGearboxPoolV3.previewRedeem}). An
     ///      illiquid pool therefore makes the `Full` withdraw revert, by design.
     ///      `asset` comes from the POOL, never from `data`: it is the token the
     ///      withdraw actually pays out, so it is the only honest answer to the

@@ -555,7 +555,7 @@ contract Audit20260930BridgeTest is BridgeTestBase {
     /// sponsor one messaging fee per slice. A sponsored send is the whole item.
     function test_audit_X_DIFF_REST_3_sponsoredSendCannotBeSliced() public onSourceChain {
         _sponsor(0.2 ether, 0.05 ether);
-        Order memory src = _srcOrder(1, 500e18, 100e18, address(lzOut), _sponsoredSpec(keccak256("d"), 100e18));
+        Order memory src = _srcSettle(_sponsoredSpec(keccak256("d"), 100e18));
         _wireSourceParties(address(lzOut), 500e18, 100e18);
         bytes memory sig = _sign(src);
 
@@ -572,7 +572,7 @@ contract Audit20260930BridgeTest is BridgeTestBase {
     /// A sponsored send with no signed total fails closed.
     function test_audit_X_DIFF_REST_3_sponsoredSendWithoutTotalFailsClosed() public onSourceChain {
         _sponsor(0.2 ether, 0.05 ether);
-        Order memory src = _srcOrder(1, 500e18, 100e18, address(lzOut), _sponsoredSpec(keccak256("d"), 0));
+        Order memory src = _srcSettle(_sponsoredSpec(keccak256("d"), 0));
         _wireSourceParties(address(lzOut), 500e18, 100e18);
         bytes memory sig = _sign(src);
         vm.prank(solver);
@@ -583,12 +583,123 @@ contract Audit20260930BridgeTest is BridgeTestBase {
     /// The sponsor's per-send cap binds whatever the maker's `maxNativeFee` says.
     function test_audit_X_DIFF_REST_3_perSendCapBinds() public onSourceChain {
         _sponsor(1 ether, 0.005 ether); // quote is 0.01
-        Order memory src = _srcOrder(1, 500e18, 100e18, address(lzOut), _sponsoredSpec(keccak256("d"), 100e18));
+        Order memory src = _srcSettle(_sponsoredSpec(keccak256("d"), 100e18));
         _wireSourceParties(address(lzOut), 500e18, 100e18);
         bytes memory sig = _sign(src);
         vm.prank(solver);
         vm.expectRevert(LzOftBridgeOutModule.FeeNotSponsored.selector);
         settlement.fill(src, sig, 500e18);
+    }
+
+    /// @dev A sponsored source order: the LZ item on the filler-carrying SETTLE seam.
+    function _srcSettle(bytes memory spec) internal view returns (Order memory) {
+        return _srcOrderOp(1, 500e18, 100e18, address(lzOut), spec, ItemOp.SETTLE);
+    }
+
+    /// X-DIFF-REST-3 part (a), THE FILLER BINDING. The sponsor topped up and
+    /// sponsored the maker so it could price the messaging fee into ITS OWN quote.
+    /// Before, any filler of that order made the sponsor pay (the MAKE seam carried no
+    /// filler). Now a stranger filling the sponsored order reverts and the sponsor's
+    /// credit and allowance are untouched; the sponsor itself still fills.
+    function test_audit_X_DIFF_REST_3_strangerCannotSpendSponsorship() public onSourceChain {
+        _sponsor(0.2 ether, 0.05 ether);
+        Order memory src = _srcSettle(_sponsoredSpec(keccak256("d"), 100e18));
+        _wireSourceParties(address(lzOut), 500e18, 100e18);
+        address stranger = makeAddr("stranger");
+        tA.mint(stranger, 100e18);
+        vm.prank(stranger);
+        tA.approve(address(permit3), type(uint256).max);
+        vm.prank(stranger);
+        permit3.approveToken(address(settlement), address(tA), type(uint160).max, 0);
+        bytes memory sig = _sign(src);
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(LzOftBridgeOutModule.FillerNotSponsor.selector, stranger));
+        settlement.fill(src, sig, 500e18);
+        assertEq(lzOut.nativeCredit(solver), 0.5 ether, "sponsor credit untouched");
+        assertEq(lzOut.feeAllowance(solver, maker), 0.2 ether, "sponsor allowance untouched");
+
+        vm.prank(solver);
+        settlement.fill(src, sig, 500e18);
+        assertEq(lzOut.feeAllowance(solver, maker), 0.19 ether, "the sponsor's own fill pays");
+    }
+
+    /// THE ORIGINAL ATTACK, on the seam every sponsored order used before: a stranger
+    /// fills a MAKE-dispatched sponsored order. It used to succeed and charge the
+    /// sponsor; now the MAKE seam refuses a sponsored spec and the sponsor pays nothing.
+    function test_audit_X_DIFF_REST_3_strangerFillOnMakeSeamChargesNothing() public onSourceChain {
+        _sponsor(0.2 ether, 0.05 ether);
+        Order memory src = _srcOrder(1, 500e18, 100e18, address(lzOut), _sponsoredSpec(keccak256("d"), 100e18));
+        _wireSourceParties(address(lzOut), 500e18, 100e18);
+        address stranger = makeAddr("stranger");
+        tA.mint(stranger, 100e18);
+        vm.startPrank(stranger);
+        tA.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tA), type(uint160).max, 0);
+        vm.stopPrank();
+        bytes memory sig = _sign(src);
+
+        vm.prank(stranger);
+        try settlement.fill(src, sig, 500e18) {} catch {}
+        assertEq(lzOut.nativeCredit(solver), 0.5 ether, "sponsor credit untouched");
+        assertEq(lzOut.feeAllowance(solver, maker), 0.2 ether, "sponsor allowance untouched");
+    }
+
+    /// The same spec dispatched as MAKE (no filler identity) is refused outright,
+    /// even when the sponsor is the one filling.
+    function test_audit_X_DIFF_REST_3_sponsoredSpecOnMakeSeamRefused() public onSourceChain {
+        _sponsor(0.2 ether, 0.05 ether);
+        Order memory src = _srcOrder(1, 500e18, 100e18, address(lzOut), _sponsoredSpec(keccak256("d"), 100e18));
+        _wireSourceParties(address(lzOut), 500e18, 100e18);
+        bytes memory sig = _sign(src);
+        vm.prank(solver);
+        vm.expectRevert(LzOftBridgeOutModule.SponsoredSendNeedsSettle.selector);
+        settlement.fill(src, sig, 500e18);
+        assertEq(lzOut.nativeCredit(solver), 0.5 ether, "sponsor credit untouched");
+    }
+
+    /// A sponsor may name its own executor as an agent; revoking it re-closes.
+    function test_audit_X_DIFF_REST_3_sponsorNamedAgentMayFill() public onSourceChain {
+        _sponsor(0.2 ether, 0.05 ether);
+        address agent = makeAddr("sponsorAgent");
+        vm.prank(solver);
+        lzOut.setSponsorFiller(agent, true);
+        Order memory src = _srcSettle(_sponsoredSpec(keccak256("d"), 100e18));
+        _wireSourceParties(address(lzOut), 500e18, 100e18);
+        tA.mint(agent, 100e18);
+        vm.startPrank(agent);
+        tA.approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(settlement), address(tA), type(uint160).max, 0);
+        vm.stopPrank();
+        bytes memory sig = _sign(src);
+
+        vm.prank(solver);
+        lzOut.setSponsorFiller(agent, false);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(LzOftBridgeOutModule.FillerNotSponsor.selector, agent));
+        settlement.fill(src, sig, 500e18);
+
+        vm.prank(solver);
+        lzOut.setSponsorFiller(agent, true);
+        vm.prank(agent);
+        settlement.fill(src, sig, 500e18);
+        assertEq(lzOut.feeAllowance(solver, maker), 0.19 ether, "agent's fill charged the sponsor once");
+    }
+
+    /// A SELF-paid send works on the SETTLE seam too (filler unconstrained).
+    function test_audit_X_DIFF_REST_3_selfPaidSendOnSettleSeam() public onSourceChain {
+        LzOftBridgeOutModule.LzSpec memory sp =
+            abi.decode(_sponsoredSpec(keccak256("d"), 0), (LzOftBridgeOutModule.LzSpec));
+        sp.feePayer = maker;
+        vm.deal(maker, 1 ether);
+        vm.prank(maker);
+        lzOut.topUpFor{value: 0.1 ether}(maker);
+        Order memory src = _srcSettle(abi.encode(sp));
+        _wireSourceParties(address(lzOut), 500e18, 100e18);
+        bytes memory sig = _sign(src);
+        vm.prank(solver);
+        settlement.fill(src, sig, 500e18);
+        assertEq(lzOut.nativeCredit(maker), 0.09 ether, "maker paid its own fee");
     }
 
     /// Relative adjustments avoid the absolute-set approve race.

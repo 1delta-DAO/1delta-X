@@ -324,9 +324,21 @@ contract FluidFoTToken {
 ///      caller HOLDS — the delivered delta of a fee-on-transfer pull.
 contract HoldingsPullVault {
     address internal immutable token;
+    /// @dev Position owner for the value-in owner binding (L-CENSUS-8); the vault
+    ///      acts as its own VaultFactory.
+    address internal immutable owner;
 
-    constructor(address t) {
+    constructor(address t, address o) {
         token = t;
+        owner = o;
+    }
+
+    function constantsView() external view returns (address, address, address, address, address, address) {
+        return (address(0), address(this), address(0), address(0), address(0), address(0));
+    }
+
+    function ownerOf(uint256) external view returns (address) {
+        return owner;
     }
 
     function operate(uint256 nftId, int256, int256, address) external payable returns (uint256, int256, int256) {
@@ -355,7 +367,7 @@ contract FluidFoTGrantClearTest is Test {
         depositModule = new FluidDepositModule(address(permit3), settlement);
         repayModule = new FluidRepayModule(address(permit3), settlement);
         token = new FluidFoTToken();
-        vault = new HoldingsPullVault(address(token));
+        vault = new HoldingsPullVault(address(token), maker);
         token.mint(maker, 10_000e6);
         vm.startPrank(maker);
         token.approve(address(permit3), type(uint256).max);

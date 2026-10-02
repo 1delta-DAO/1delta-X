@@ -56,4 +56,7 @@ interface ITellerV2 {
     /// @notice The live amount owed on `bidId` at `timestamp` (principal + accrued
     ///         interest). Public view on TellerV2.
     function calculateAmountOwed(uint256 bidId, uint256 timestamp) external view returns (TellerPayment memory);
+    /// @notice The loan's borrower (`bids[bidId].borrower`). Public view on TellerV2;
+    ///         the repay modules bind it to the maker.
+    function getLoanBorrower(uint256 bidId) external view returns (address borrower);
 }

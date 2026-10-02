@@ -143,7 +143,8 @@ contract TellerPreFundModule is PreFundModuleBase, IMakerModule, IFundingSource 
             // `repayLoan`, which pays the uncapped amount to the lender (L-CMT-1).
             // Scoped approve + CLEAR inside — `tellerV2` is maker-data-choosable on
             // a shared singleton (F25 / lead A-3).
-            TellerRepayLib.repay(tellerV2, principalToken, bidId, full, forAmount);
+            // `bidId` must be the maker's own loan ({TellerRepayLib}, L-CENSUS-8).
+            TellerRepayLib.repay(tellerV2, principalToken, bidId, full, forAmount, onBehalfOf);
         }
         // Sweep the unused buffer — the DELTA this fill produced, never the floor.
         uint256 bal = IERC20(principalToken).balanceOf(address(this));
