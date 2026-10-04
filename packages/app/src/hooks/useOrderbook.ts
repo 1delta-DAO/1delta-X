@@ -1,6 +1,6 @@
 import { useMemo, useSyncExternalStore } from "react";
 
-import { orderbook } from "../backend/mock";
+import { orderbook } from "../backend/book";
 import type { Fill, RestingOrder } from "../lib/types";
 
 /**

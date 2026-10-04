@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { BOOK_IS_REMOTE } from "../backend/book";
 import { PROMOTION } from "../config/promotion";
 import { TermsLink } from "./TermsLink";
 
@@ -132,10 +133,17 @@ export function PreAuditGate({
               <TermsLink>Terms &amp; Conditions</TermsLink> exclude U.S. Persons and sanctioned jurisdictions, and USDRIF carries its own transfer restrictions.
             </li>
             )}
-            <li>
-              Order distribution and fills in this beta are <b>simulated in your browser</b>: your signatures are
-              real, but nothing is broadcast and no fill shown here happened on-chain.
-            </li>
+            {BOOK_IS_REMOTE ? (
+              <li>
+                Your signed orders are <b>posted to a public orderbook</b>: any filler can settle them on-chain
+                until they expire or are cancelled on-chain. A fill is shown only once it is reported from the chain.
+              </li>
+            ) : (
+              <li>
+                Order distribution and fills in this beta are <b>simulated in your browser</b>: your signatures are
+                real, but nothing is broadcast and no fill shown here happened on-chain.
+              </li>
+            )}
             <li>Nothing here is financial, investment, legal or tax advice.</li>
           </ul>
           {review ? (

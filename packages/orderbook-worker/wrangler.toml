@@ -1,0 +1,62 @@
+# Cloudflare Worker + Durable Object orderbook — Rootstock beta (chain 30).
+# Deploy: see README.md. Vars below are defaults; addresses marked PLACEHOLDER
+# must be replaced once the contracts are deployed (until then every write
+# answers 503 "orderbook not configured" and the alarm skips chain work).
+
+name = "orderbook-1delta-rsk"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+# Reachable at <name>.<account>.workers.dev. Set to false (and drop any route)
+# to make the app's service binding the ONLY way in — see README.
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "BOOK"
+class_name = "OrderBookDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OrderBookDO"]
+
+# The cron only re-arms the Durable Object's self-rescheduling alarm.
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+
+[vars]
+CHAIN_ID = "30"
+SETTLEMENT = "0x0000000000000000000000000000000000000000"   # PLACEHOLDER
+PERMIT3 = "0x0000000000000000000000000000000000000000"      # PLACEHOLDER
+LENS = "0x0000000000000000000000000000000000000000"         # PLACEHOLDER
+RPC_URL = "https://public-node.rsk.co"
+# Filler the lens previews validators for (zero = open filler).
+DEFAULT_FILLER = ""
+OCO_MODULES = ""
+# The beta market: USDRIF / USDT0 (USD0). Leg tokens outside this list are 422.
+ALLOWED_TOKENS = "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37,0x779ded0c9e1022225f8e0630b35a9b54be713736"
+MAX_ORDERS = "5000"
+MAX_ORDERS_PER_MAKER = "100"
+MAX_CURVE_POINTS = "32"
+MAX_ORDER_JSON_BYTES = "32768"
+MIN_TTL_SECONDS = "15"
+MAX_TTL_SECONDS = "7776000"
+REQUIRE_DELTA_VERIFY = "false"
+MAX_BODY_BYTES = "262144"
+RATE_LIMIT_IP_CAPACITY = "120"
+RATE_LIMIT_IP_REFILL = "1"
+RATE_LIMIT_MAKER_CAPACITY = "120"
+RATE_LIMIT_MAKER_REFILL = "1"
+ALARM_INTERVAL_SECONDS = "20"
+# Rootstock: ~30s blocks. 2000 blocks per alarm, 2 confirmations, 1 day initial lookback.
+MAX_LOG_RANGE = "2000"
+CONFIRMATIONS = "2"
+START_BLOCK = ""
+INITIAL_LOOKBACK_BLOCKS = "2880"
+REVALIDATE_SECONDS = "60"
+MAX_RECHECK_PER_ALARM = "500"
+TOMBSTONE_TTL_SECONDS = "1209600"
+MAX_TOMBSTONES = "20000"
+MAX_FILLS = "50000"
+# BINDING_KEY is a secret: `wrangler secret put BINDING_KEY` (see README).

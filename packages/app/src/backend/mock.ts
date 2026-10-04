@@ -312,6 +312,3 @@ function roundToStep(n: number, step: number): number {
   const dp = Math.max(0, Math.min(12, Math.ceil(-Math.log10(step))));
   return Number((Math.round(n / step) * step).toFixed(dp));
 }
-
-/** One book per tab — the same singleton a real transport-backed client would be. */
-export const orderbook: OrderbookApi = new MockOrderbook();

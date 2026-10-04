@@ -74,6 +74,8 @@ export interface MarketObservation {
  * exposes (an in-memory map with add/remove listeners). Swapping the mock for a
  * real client — a REST/WS session against `@1delta-x/orderbook-server`, or a
  * Waku transport — is an implementation of this interface, not a UI change.
+ * `backend/book.ts` picks one: `RemoteOrderbook` when `VITE_ORDERBOOK_URL` is
+ * set, else `MockOrderbook`.
  */
 export interface OrderbookApi {
   /** Live resting orders, newest first. */
@@ -96,10 +98,24 @@ export interface OrderbookApi {
   cancel(orderHash: string, signed: SignedCancel): Promise<void>;
   /** Drop a row whose orders were cancelled ON-CHAIN (the transaction is mined). */
   confirmHardCancel(orderHash: string): void;
-  /** Attach a newly signed TWAP slice to its row; only signed slices can fill. */
-  addSlice(orderHash: string, signed: SignedOrder): void;
-  /** Record the part of a SIGNED order that crossed immediately. Mock fills are `simulated`. */
+  /**
+   * Attach a newly signed TWAP slice to its row; only signed slices can fill.
+   * A real book POSTs the slice first and rejects (throws) when the server does.
+   */
+  addSlice(orderHash: string, signed: SignedOrder): void | Promise<void>;
+  /**
+   * Record the part of a SIGNED order that crossed immediately. Mock fills are
+   * `simulated`; a real book ignores this — the crossing part fills when a real
+   * filler fills the signed order, and is shown then.
+   */
   recordTake(req: RecordTakeRequest): void;
   /** Feed the current market state in; drives expiry and fill progress. */
   observe(obs: MarketObservation): void;
+  /**
+   * Re-load what the book already holds for this maker — their live resting
+   * orders and indexed fills — so a page reload does not forget them. A real
+   * book reads `GET /orders?maker=` and `GET /fills?maker=`; the mock has
+   * nothing to restore. Idempotent per maker.
+   */
+  restore?(maker: `0x${string}`): Promise<void>;
 }

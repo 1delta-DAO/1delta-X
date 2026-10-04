@@ -21,7 +21,11 @@ export function mergeLadder(pool: PoolBook, resting: RestingOrder[]): { bids: Le
     for (const o of resting) {
       // A soft-cancelled order is retracted from the book even though its
       // signature still lives; showing it as depth would invite fills on it.
-      if (o.side !== side || o.cancelled) continue;
+      if (o.side !== side || o.cancelled || o.offBook) continue;
+      // A real-book order priced THROUGH the pool mid is marketable and waiting
+      // for a filler, not depth: drawing it would cross the ladder and let the
+      // next ticket quote against the maker's own pending order.
+      if (o.book === "remote" && (side === "buy" ? o.price >= pool.mid : o.price <= pool.mid)) continue;
       const left = o.size - o.filled;
       if (left <= EPS) continue;
       const at = byPrice.get(o.price);

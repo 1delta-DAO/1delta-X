@@ -94,7 +94,8 @@ test:
 test-sdk:
 	cd packages/sdk && npx vitest run
 
-## The whole TypeScript side: SDK, orderbook, orderbook-server, auction, app. BUILDS
+## The whole TypeScript side: SDK, orderbook, orderbook-server, orderbook-worker
+## (workerd tests + the protobuf-free bundle check), auction, app, rif-filler. BUILDS
 ## THE DISTS FIRST — the orderbook, server, auction and app packages import
 ## `@1delta-x/sdk` (and the server `@1delta-x/orderbook`) through their compiled
 ## `dist/`, so a stale build ran the server suite against months-old code and hid a
@@ -104,8 +105,10 @@ test-ts:
 	cd packages/sdk && npx tsc -p tsconfig.json && npx vitest run
 	cd packages/orderbook && npx tsc -p tsconfig.json && npx vitest run
 	cd packages/orderbook-server && npx tsc --noEmit -p tsconfig.json && npx vitest run
+	cd packages/orderbook-worker && npx tsc --noEmit -p tsconfig.json && npx vitest run && node scripts/bundle-check.mjs
 	cd packages/auction && npx tsc --noEmit -p tsconfig.json && npx vitest run
 	cd packages/app && npx tsc --noEmit -p tsconfig.json && npx vitest run
+	cd packages/rif-filler && npx tsc --noEmit -p tsconfig.json && npx vitest run
 
 ## Compile one package: make build PKG=modules-aave-v3
 build:

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { buildSoftCancel, encodeCancelOrders, signOrder, signSoftCancel } from "@1delta-x/sdk";
 import { createPublicClient, createWalletClient, custom, formatUnits, zeroAddress, type Address } from "viem";
 
-import { orderbook } from "./backend/mock";
+import { BOOK_IS_REMOTE, orderbook } from "./backend/book";
 import type { SignedOrder } from "./backend/api";
 import { Header } from "./components/Header";
 import { MarketPicker } from "./components/MarketPicker";
@@ -101,6 +101,12 @@ export default function App() {
     },
     [tokens, rawBalances],
   );
+
+  // A page reload must not forget the maker's resting orders and fills: once a
+  // wallet is connected, ask the real book what it holds for this account.
+  useEffect(() => {
+    if (wallet.address) void orderbook.restore?.(wallet.address).catch(() => {});
+  }, [wallet.address]);
 
   const resting = useRestingOrders(ticket.marketId);
   const fills = useFills();
@@ -325,7 +331,7 @@ export default function App() {
           hash: order.id,
           headline: `${fmtAmt(amount)} ${payToken} in ${ticket.slices} slices, ${ticket.everyMin} min apart`,
           detail: `slice 1 signed at ${fmtPrice(plan.price, tick)} ${ticket.market.quote}/${ticket.market.base} — sign each later slice from Open orders when it comes due`,
-          note: `slice 1 of ${ticket.slices} signed · simulated book${undeployed}`,
+          note: `slice 1 of ${ticket.slices} signed · ${BOOK_IS_REMOTE ? "posted to the orderbook" : "simulated book"}${undeployed}`,
         });
         ticket.clearAmount();
         allowanceState.refresh();
@@ -350,8 +356,23 @@ export default function App() {
           signed,
         });
         hash = order.id;
+      } else if (BOOK_IS_REMOTE) {
+        // On a REAL book a market order is only a market order if a filler can
+        // see it: post it like any other signed order (a short dutch auction).
+        // It shows as a row until a filler takes it or it expires.
+        const order = await orderbook.place({
+          marketId,
+          side,
+          type: "limit",
+          size: plan.crossedBase,
+          price: q.avg > 0 ? q.avg : plan.price,
+          ttlMs: plan.ttlSeconds * 1000,
+          signed,
+        });
+        hash = order.id;
       }
       // The crossing part of the SIGNED order, as the simulated book fills it.
+      // (A real book ignores this: it fills when a real filler fills it.)
       if (plan.crossedBase > 0) {
         orderbook.recordTake({ marketId, side, size: plan.crossedBase, price: q.avg, bySource: q.bySource });
       }
@@ -363,9 +384,11 @@ export default function App() {
           ? `${restingLabel(q.resting).toLowerCase()} at ${fmtPrice(q.resting.price, tick)}`
           : undefined,
         note: `${
-          plan.kind === "limit"
-            ? "signed · resting in the simulated book"
-            : "signed · settlement simulated — nothing was broadcast"
+          BOOK_IS_REMOTE
+            ? "signed · posted to the orderbook · awaiting a filler — fills appear when they settle on-chain"
+            : plan.kind === "limit"
+              ? "signed · resting in the simulated book"
+              : "signed · settlement simulated — nothing was broadcast"
         }${undeployed}`,
       });
       ticket.clearAmount();
@@ -459,7 +482,7 @@ export default function App() {
           orders: o.slices.total,
           signedSlices,
         });
-        orderbook.addSlice(o.id, signed);
+        await orderbook.addSlice(o.id, signed);
       } catch (e) {
         setOrderError(errorText(e));
       }
@@ -579,9 +602,10 @@ export default function App() {
           <a href="https://github.com/1delta-DAO/token-lists" target="_blank" rel="noreferrer">
             1delta-DAO/token-lists
           </a>
-          . Order distribution runs against an in-browser mock of the orderbook backend: signatures are real,
-          but resting, fills and soft cancels are simulated locally, nothing is broadcast, and no fill shown
-          here happened on-chain.
+          .{" "}
+          {BOOK_IS_REMOTE
+            ? "Signed orders and soft cancels are posted to a live orderbook server; any filler can fill them on-chain, and a fill is shown only once the server reports it from the chain."
+            : "Order distribution runs against an in-browser mock of the orderbook backend: signatures are real, but resting, fills and soft cancels are simulated locally, nothing is broadcast, and no fill shown here happened on-chain."}
         </p>
         <p>
           <TermsLink>Prize draw Terms &amp; Conditions</TermsLink>

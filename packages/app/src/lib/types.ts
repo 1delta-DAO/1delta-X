@@ -114,6 +114,19 @@ export interface RestingOrder {
    * or is hard-cancelled on-chain (G-TS_SIGN-4).
    */
   cancelled?: "soft";
+  /**
+   * `remote`: this row was ACCEPTED by a real orderbook server
+   * (`VITE_ORDERBOOK_URL`) and its progress comes from that server — never from
+   * a simulation. Absent for the in-browser mock.
+   */
+  book?: "remote";
+  /**
+   * Set when the real book stopped distributing the order for a reason other
+   * than a fill or the maker's own soft cancel (evicted as unfunded / invalid,
+   * or unknown to the server after a restart). The signature is still valid
+   * on-chain until expiry, so the row stays — labelled — until it expires.
+   */
+  offBook?: string;
 }
 
 /** One TWAP slice's order parameters, in human units. */
@@ -141,12 +154,17 @@ export interface Fill {
    * True for every fill the in-browser mock produces: nothing was broadcast and
    * `tx` is not a transaction hash. The UI must never present one as settled
    * on-chain (G-TS_SIGN-15).
+   *
+   * False only for a fill a real orderbook server reported from the chain. Its
+   * `tx` is then the settlement transaction hash from the server's fill index,
+   * or EMPTY when the server indexes no fills (it is never made up).
    */
   simulated: boolean;
 }
 
-export function orderStatus(o: RestingOrder): "open" | "partial" | "filling" | "soft-cancelled" {
+export function orderStatus(o: RestingOrder): "open" | "partial" | "filling" | "soft-cancelled" | "off-book" {
   if (o.cancelled === "soft") return "soft-cancelled";
+  if (o.offBook) return "off-book";
   if (o.slices && o.slices.done > 0) return "filling";
   return o.filled > 0 ? "partial" : "open";
 }

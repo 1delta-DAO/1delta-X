@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { BOOK_IS_REMOTE } from "../backend/book";
 import { marketById } from "../config/markets";
 import { ago, fmtAmt, fmtPrice, shortHex, until } from "../lib/format";
 import { SOURCE_NAME, dueSlices, needsSliceSignature, orderStatus, type Fill, type RestingOrder } from "../lib/types";
@@ -67,7 +68,9 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
         <span className="lbl">
           {tab === "open"
             ? "signed orders · a free cancel only hides one; cancel on-chain to make it unfillable"
-            : "simulated fills — the in-browser book broadcasts nothing"}
+            : BOOK_IS_REMOTE
+              ? "fills reported by the orderbook from the chain"
+              : "simulated fills — the in-browser book broadcasts nothing"}
         </span>
       </div>
 
@@ -134,9 +137,13 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                           <span
                             className="st"
                             data-v={status}
-                            title={status === "soft-cancelled" ? SOFT_CANCEL_NOTE : undefined}
+                            title={status === "soft-cancelled" ? SOFT_CANCEL_NOTE : status === "off-book" ? o.offBook : undefined}
                           >
-                            {status === "soft-cancelled" ? "hidden · still fillable" : status}
+                            {status === "soft-cancelled"
+                              ? "hidden · still fillable"
+                              : status === "off-book"
+                                ? "off book · still fillable"
+                                : status}
                           </span>
                         </td>
                         <td>{until(o.expiresAt)}</td>
@@ -147,7 +154,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                               {dueSlices(o, now) > o.slices.signed + 1 ? ` (${dueSlices(o, now) - o.slices.signed} due)` : ""}
                             </button>
                           )}
-                          {!o.cancelled && (
+                          {!o.cancelled && !o.offBook && (
                             <button
                               type="button"
                               className="x"
@@ -180,7 +187,11 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
             {myFills.length === 0 ? (
               <tbody>
                 <tr>
-                  <td className="empty">No fills yet. Fills here are simulated by the in-browser book.</td>
+                  <td className="empty">
+                    {BOOK_IS_REMOTE
+                      ? "No fills yet. A fill appears here once the orderbook reports it from the chain."
+                      : "No fills yet. Fills here are simulated by the in-browser book."}
+                  </td>
                 </tr>
               </tbody>
             ) : (
@@ -224,8 +235,14 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                           <span className="faint" title="Produced by the in-browser mock — no transaction exists">
                             simulated
                           </span>
+                        ) : f.tx ? (
+                          <span className="txl" title={f.tx}>
+                            {shortHex(f.tx, 10, 6)}
+                          </span>
                         ) : (
-                          <span className="txl">{shortHex(f.tx, 10, 6)}</span>
+                          <span className="faint" title="The orderbook reported this order filled but indexes no fill transactions">
+                            tx not indexed
+                          </span>
                         )}
                       </td>
                     </tr>

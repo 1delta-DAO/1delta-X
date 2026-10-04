@@ -8,6 +8,11 @@ WebSocket access layer over [`@1delta-x/orderbook`](../orderbook)'s verified
 and the HTTP/WS surface lets browser makers/fillers that can't run a relay talk
 to it. Protobuf on the wire throughout; the chain stays the source of truth.
 
+> For the Rootstock beta this server is replaced by the Cloudflare Worker +
+> Durable Object book in [`../orderbook-worker`](../orderbook-worker) (JSON only,
+> durable state, alarm-driven maintenance). This server stays as the protobuf /
+> WebSocket reference node.
+
 **Going P2P is one line:** the backend runs its `Book` over an
 `InMemoryTransport`; a Waku deployment runs the same `Book` over a
 `WakuTransport`. The routes, verification, and wire format are unchanged.
@@ -18,9 +23,23 @@ to it. Protobuf on the wire throughout; the chain stays the source of truth.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | `/orders` | protobuf `OrderAnnounce` | `202 {orderHash}` · `422` unfillable · `503` at capacity · `413` oversized · `429` rate-limited |
-| POST | `/cancels` | protobuf `SoftCancel` | `202 {evicted, requested}` · `403` bad signature |
+| POST | `/orders` | protobuf `OrderAnnounce`, or JSON `{order, sig}` | `202 {orderHash}` · `422` unfillable · `503` at capacity · `413` oversized · `429` rate-limited |
+| POST | `/cancels` | protobuf `SoftCancel`, or JSON `{cancel, sig}` | `202 {evicted, requested}` · `403` bad signature |
 | POST | `/replaces` | protobuf `OrderReplace` | `202 {orderHash, replaces}` · `422` |
+
+**JSON bodies** (`content-type: application/json`) exist for browsers under a
+strict CSP, which cannot run protobufjs (it compiles encoders with
+`new Function`). The shapes are the SDK's `Order` / `SoftCancel` with every
+`bigint` as a **decimal string** (`"1000"` — not a number, not hex), addresses as
+`0x`+40 hex (lowercase or a valid checksum) and bytes as even-length `0x` hex;
+`side` is `0` or `1`, `curve`/`items` integers are JSON numbers;
+`baselinePriorityFeeWei` is the only optional order field. Parsing is strict
+(`src/json.ts`, now a thin wrapper over the SDK's `json.ts` — the same parser the
+[Worker orderbook](../orderbook-worker) uses, so both hash a JSON body identically): an unknown, missing or ill-typed field is a `400 invalid JSON …`.
+The raw body is capped at 4 × `MAX_BODY_BYTES`, then the parsed message is
+re-encoded to protobuf, held to `MAX_BODY_BYTES`, and decoded again — so from
+there on it is byte-for-byte the protobuf post: the same admission, Layer 1/2
+verification, maker billing, status codes and transport publish.
 
 ### Reads
 

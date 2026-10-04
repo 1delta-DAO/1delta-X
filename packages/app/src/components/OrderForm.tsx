@@ -1,3 +1,4 @@
+import { BOOK_IS_REMOTE } from "../backend/book";
 import { pairsWith, symbolsOn } from "../config/markets";
 import type { Ticket } from "../hooks/useTicket";
 import type { TokenIndex } from "../hooks/useTokenIndex";
@@ -460,7 +461,7 @@ export function OrderForm(props: OrderFormProps) {
         {receipt && (
           <div className="receipt">
             <span className="lbl" style={{ color: "var(--lime)" }}>
-              Order signed · simulated book, nothing broadcast
+              {BOOK_IS_REMOTE ? "Order signed · posted to the orderbook, awaiting a filler" : "Order signed · simulated book, nothing broadcast"}
             </span>
             <div>{receipt.headline}</div>
             {receipt.detail && <div className="k">{receipt.detail}</div>}

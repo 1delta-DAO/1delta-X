@@ -8,6 +8,7 @@ import {
   decodeSoftCancel,
   encodeOrderAnnounce,
   encodeOrderList,
+  encodeSoftCancel,
   encodeStreamMessage,
   FillIndex,
   InMemoryTransport,
@@ -19,8 +20,10 @@ import {
   type AdmissionPolicy,
   type BookEntry,
   type OrderbookConfig,
+  type OrderAnnounce,
   type OrderQuery,
   type OrderSummary,
+  type SignedSoftCancel,
   type SortKey,
 } from "@1delta-x/orderbook";
 import {
@@ -49,9 +52,25 @@ import {
 } from "viem";
 import type { WebSocket as WsWebSocket } from "ws";
 
-import { clientAddress, createRateLimiter, ROUTE_COST, type RateLimiter, type RateLimitOptions } from "./ratelimit";
+import { announceFromJson, JsonBodyError, parseJsonBytes, softCancelFromJson } from "./json";
+import {
+  clientAddress,
+  createRateLimiter,
+  DEFAULT_RATE_LIMIT,
+  ROUTE_COST,
+  type RateLimiter,
+  type RateLimitOptions,
+} from "./ratelimit";
 
 const PROTOBUF_CONTENT_TYPES = ["application/x-protobuf", "application/protobuf", "application/octet-stream"];
+
+/**
+ * A JSON body spells every byte as two hex characters plus field names, so the
+ * raw cap on it is this multiple of `maxBodyBytes`. It only bounds the parse: the
+ * body is then re-encoded to protobuf, and THAT is held to `maxBodyBytes` exactly
+ * like a protobuf post — so both content types admit the same orders.
+ */
+const JSON_BODY_FACTOR = 4;
 
 /** Largest page a caller may ask for. Beyond this, paginate. */
 const MAX_PAGE = 500;
@@ -171,6 +190,12 @@ export interface BuildServerOptions {
   fillsFromBlock?: bigint;
   fillIndex?: FillIndex;
   logger?: boolean;
+  /**
+   * Raw size cap on a JSON `POST /orders` / `POST /cancels` body, checked before
+   * parsing. Default `JSON_BODY_FACTOR × maxBodyBytes`. (The protobuf re-encoding
+   * is then held to `maxBodyBytes` itself.)
+   */
+  maxJsonBodyBytes?: number;
 }
 
 export interface OrderbookServer {
@@ -224,6 +249,13 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
   });
 
   app.addContentTypeParser(PROTOBUF_CONTENT_TYPES, { parseAs: "buffer" }, (_req, body, done) => done(null, body));
+  // JSON bodies arrive as raw bytes too: the routes size-gate them before parsing
+  // and parse them STRICTLY themselves (see ./json.ts) — Fastify's default parser
+  // would have built an arbitrary object first. No route reads a parsed JSON body.
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "buffer" }, (_req, body, done) => done(null, body));
+  const maxJsonBodyBytes =
+    opts.maxJsonBodyBytes ?? JSON_BODY_FACTOR * (opts.rateLimit?.maxBodyBytes ?? DEFAULT_RATE_LIMIT.maxBodyBytes);
   await app.register(websocket);
 
   const transport = opts.transport ?? new InMemoryTransport();
@@ -331,6 +363,65 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     return true;
   };
 
+  const isJsonBody = (request: FastifyRequest): boolean =>
+    (request.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase() === "application/json";
+
+  /**
+   * Read a maker write in either content type, as `{ value, bytes }` where
+   * `bytes` is its PROTOBUF encoding — what the size gate, admission and the
+   * transport see. Protobuf posts go through exactly as before. A JSON post is
+   * capped raw, parsed strictly (400 on anything unknown or ill-typed), encoded
+   * to protobuf, held to the same body gate, and DECODED again — so it reaches
+   * every later check as the identical object a protobuf post of it would.
+   * Answers the request itself and returns `null` when it must stop.
+   */
+  const readWrite = <T>(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    what: "OrderAnnounce" | "SoftCancel",
+    codec: { decode: (b: Uint8Array) => T; encode: (v: T) => Uint8Array; fromJson: (v: unknown) => T },
+  ): { value: T; bytes: Uint8Array } | null => {
+    const raw = request.body as Uint8Array | undefined;
+    if (!isJsonBody(request)) {
+      if (!gateBody(raw, reply)) return null;
+      try {
+        return { value: codec.decode(raw!), bytes: raw! };
+      } catch {
+        void reply.code(400).send({ error: `undecodable ${what}` });
+        return null;
+      }
+    }
+    if (!raw || raw.length === 0) {
+      void reply.code(400).send({ error: "empty body" });
+      return null;
+    }
+    if (raw.length > maxJsonBodyBytes) {
+      void reply.code(413).send({ error: `body exceeds ${maxJsonBodyBytes} bytes` });
+      return null;
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = codec.encode(codec.fromJson(parseJsonBytes(raw)));
+    } catch (err) {
+      const why = err instanceof JsonBodyError ? err.message : "not encodable";
+      void reply.code(400).send({ error: `invalid JSON ${what}: ${why}` });
+      return null;
+    }
+    if (!gateBody(bytes, reply)) return null;
+    try {
+      return { value: codec.decode(bytes), bytes };
+    } catch {
+      void reply.code(400).send({ error: `undecodable ${what}` });
+      return null;
+    }
+  };
+  const announceCodec = { decode: decodeOrderAnnounce, encode: encodeOrderAnnounce, fromJson: announceFromJson };
+  const cancelCodec = {
+    decode: decodeSoftCancel,
+    encode: (c: SignedSoftCancel) => encodeSoftCancel(c),
+    fromJson: softCancelFromJson,
+  };
+
   const address = (value: string | undefined): Address | undefined =>
     value && isAddress(value) ? (value as Address) : undefined;
 
@@ -419,15 +510,9 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
 
   app.post("/orders", async (request, reply) => {
     if (!gate(request, reply, ROUTE_COST.write)) return reply;
-    const body = request.body as Uint8Array | undefined;
-    if (!gateBody(body, reply)) return reply;
-
-    let announce;
-    try {
-      announce = decodeOrderAnnounce(body!);
-    } catch {
-      return reply.code(400).send({ error: "undecodable OrderAnnounce" });
-    }
+    const read = readWrite<OrderAnnounce>(request, reply, "OrderAnnounce", announceCodec);
+    if (!read) return reply;
+    const { value: announce, bytes: body } = read;
 
     // Local checks before the expensive ones. Structure and capacity cost
     // nothing to judge and reject the bulk of abuse, so they go first. The hash
@@ -445,7 +530,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
 
     // The book's own gate (tombstones, then the admission policy with its
     // displacement rule) — the same one the transport path runs.
-    const verdict = book.precheck(announce.order, orderHash, { encodedBytes: body!.length, policy: admission });
+    const verdict = book.precheck(announce.order, orderHash, { encodedBytes: body.length, policy: admission });
     if (!verdict.ok) {
       return reply.code(verdict.capacity ? 503 : 422).send({ error: verdict.reason ?? "rejected" });
     }
@@ -478,7 +563,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     // publish then only relays to other transport subscribers (the book dedupes).
     const admitted = book.admit(res.orderHash, announce, res.state);
     if (!admitted.ok) return reply.code(admitted.capacity ? 503 : 422).send({ error: admitted.reason ?? "rejected" });
-    await transport.publish(ordersTopic, body!);
+    await transport.publish(ordersTopic, body);
     return reply.code(202).send({ orderHash: res.orderHash });
   });
 
@@ -576,14 +661,9 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
 
   app.post("/cancels", async (request, reply) => {
     if (!gate(request, reply, ROUTE_COST.cancel)) return reply;
-    const body = request.body as Uint8Array | undefined;
-    if (!gateBody(body, reply)) return reply;
-    let cancel;
-    try {
-      cancel = decodeSoftCancel(body!);
-    } catch {
-      return reply.code(400).send({ error: "undecodable SoftCancel" });
-    }
+    const read = readWrite<SignedSoftCancel>(request, reply, "SoftCancel", cancelCodec);
+    if (!read) return reply;
+    const { value: cancel, bytes: body } = read;
     let verdict;
     try {
       verdict = await cancelVerifier.verify(cancel);
@@ -607,7 +687,7 @@ export async function buildServer(opts: BuildServerOptions): Promise<OrderbookSe
     // the book evicts only the named orders that name this maker.
     const evicted = book.applyVerifiedCancel(cancel, verdict);
 
-    await transport.publish(cancelsTopic, body!);
+    await transport.publish(cancelsTopic, body);
     broadcast(encodeStreamMessage({ kind: StreamKind.CANCEL, cancel }));
     return reply.code(202).send({ evicted, requested: cancel.cancel.orderHashes.length });
   });

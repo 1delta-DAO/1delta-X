@@ -12,10 +12,23 @@ import { getAddress, isAddress, zeroAddress, type Address } from "viem";
  *
  *   VITE_DEPLOYMENTS='{"31":{"settlement":"0x…","permit3":"0x…","lens":"0x…","solver":"0x…"}}'
  *
- * Optionally, `"marketSolvers": {"<marketId>": "0x…"}` names a different
- * delta-verify `exclusiveFiller` per market — e.g. the `UsdrifInventorySolver`
- * for the inventory-served `rsk-30-usdrif-usd0` market (audit 2026-09-30
- * APP-RIF4). Markets without an entry use `solver`. See {@link solverForMarket}.
+ * `solver` may be the zero address (or omitted): orders then sign PLAIN pull
+ * delivery with no named filler, open to any filler.
+ *
+ * Optionally, `"marketSolvers": {"<marketId>": "0x…" | "pull"}` overrides that
+ * per market:
+ *  - an address names a different delta-verify `exclusiveFiller` — e.g. the
+ *    `UsdrifInventorySolver` for the inventory-served `rsk-30-usdrif-usd0`
+ *    market (audit 2026-09-30 APP-RIF4);
+ *  - the literal `"pull"` means orders on that market use plain pull delivery
+ *    and name NO filler (`exclusiveFiller = 0`, no delta-verify bit), so a plain
+ *    EOA filler bot can fill them with `Settlement.fillUpTo` — an EOA cannot run
+ *    the fill callback a delta-verify order needs.
+ * Markets without an entry use `solver`. See {@link solverForMarket}.
+ *
+ *   VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…",
+ *     "solver":"0x0000000000000000000000000000000000000000",
+ *     "marketSolvers":{"rsk-30-usdrif-usd0":"pull"}}}'
  */
 export interface DeploymentConfig extends Deployment {
   /** Read-only companion — `getOrderRelevantStates` is the orderbook's Layer 2. */
@@ -28,9 +41,17 @@ export interface DeploymentConfig extends Deployment {
    * see `buildOrder`, which falls back to plain delivery without one.
    */
   solver: Address;
-  /** Per-market overrides of {@link solver} (market id → filler). Empty when none. */
+  /**
+   * Per-market overrides of {@link solver} (market id → filler). Empty when none.
+   * The zero address here is the parsed form of `"pull"`: plain pull delivery,
+   * no named filler. (A literal zero ADDRESS in the raw config is still rejected
+   * — pull mode has to be asked for by name, never reached by a typo.)
+   */
   marketSolvers: Record<string, Address>;
 }
+
+/** The `marketSolvers` value that selects plain pull delivery with no named filler. */
+export const PULL_MODE = "pull";
 
 type RawDeployments = Record<
   string,
@@ -77,14 +98,20 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       console.warn(`VITE_DEPLOYMENTS[${key}] has a missing or invalid address — treating chain ${key} as not deployed`);
       continue;
     }
-    // Per-market solver overrides: every entry must be a valid non-zero address,
-    // or the whole deployment is dropped (a typo must not silently fall back).
+    // Per-market solver overrides: every entry must be a valid non-zero address
+    // or the literal "pull", or the whole deployment is dropped (a typo must not
+    // silently fall back). "pull" is stored as the zero address, which
+    // `buildOrder` signs as plain pull delivery open to any filler.
     const marketSolvers: Record<string, Address> = {};
     let badMarket = false;
     if (entry.marketSolvers !== undefined) {
       if (!entry.marketSolvers || typeof entry.marketSolvers !== "object") badMarket = true;
       else {
         for (const [m, v] of Object.entries(entry.marketSolvers as Record<string, unknown>)) {
+          if (v === PULL_MODE) {
+            marketSolvers[m] = zeroAddress;
+            continue;
+          }
           const a = addr(v, true);
           if (!a || a === zeroAddress) badMarket = true;
           else marketSolvers[m] = a;
@@ -125,8 +152,20 @@ export function configuredChains(): number[] {
  * override when configured (e.g. an inventory solver for an inventory-served
  * market), else the deployment-wide {@link DeploymentConfig.solver}. `undefined`
  * without a deployment.
+ *
+ * The ZERO address means plain pull delivery with no named filler — a market
+ * configured as `"pull"`, or a deployment whose `solver` is zero. `buildOrder`
+ * then sets neither the delta-verify bit nor an `exclusiveFiller`. A `"pull"`
+ * override wins over a non-zero deployment-wide `solver`.
  */
 export function solverForMarket(deployment: DeploymentConfig | null, marketId: string): Address | undefined {
   if (!deployment) return undefined;
-  return deployment.marketSolvers[marketId] ?? deployment.solver;
+  return Object.prototype.hasOwnProperty.call(deployment.marketSolvers, marketId)
+    ? deployment.marketSolvers[marketId]
+    : deployment.solver;
+}
+
+/** True when orders on `marketId` sign plain pull delivery with no named filler. */
+export function isPullMarket(deployment: DeploymentConfig | null, marketId: string): boolean {
+  return solverForMarket(deployment, marketId) === zeroAddress;
 }

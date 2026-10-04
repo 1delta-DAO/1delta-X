@@ -13,7 +13,7 @@ signs.
 ```bash
 pnpm run app                          # http://localhost:5175
 pnpm --filter @1delta-x/app build     # typecheck + static bundle in dist/
-pnpm --filter @1delta-x/app test      # vitest: order encoding, funding plan, mock book, worker headers
+pnpm --filter @1delta-x/app test      # vitest: order encoding, funding plan, mock + remote book, worker headers
 ```
 
 No API key. A wallet is needed to sign; the book renders without one.
@@ -45,6 +45,172 @@ curl -X POST https://<your-domain>/api/oku/rootstock/cush/liveBlock \
   -H 'content-type: application/json' -d '{"id":1,"params":[]}'
 ```
 
+## Configuration: `VITE_DEPLOYMENTS` and `VITE_ORDERBOOK_URL`
+
+Both are build-time variables (Vite inlines every `VITE_*` into the public
+bundle — they are addresses and a URL, not secrets).
+
+**`VITE_DEPLOYMENTS`** — where UniversalSettlement lives, per chain id
+([`src/config/deployments.ts`](src/config/deployments.ts)). Unset means "not
+deployed": orders still build, hash and sign, but no filler can use them.
+
+```bash
+VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…","solver":"0x…","marketSolvers":{"<marketId>":"0x…"}}}'
+```
+
+| Key | Meaning |
+| --- | --- |
+| `settlement`, `permit3` | Required, non-zero. The EIP-712 domain and the approval target. |
+| `lens` | Optional (zero when omitted). |
+| `solver` | The `exclusiveFiller` orders name by default, signing **delta-verify** delivery (timing bit 104) that only that filler can fill. May be the **zero address** (or omitted): orders then sign plain pull delivery, open to any filler. |
+| `marketSolvers` | Optional per-market override: `"<marketId>": "0x…"` names a different delta-verify filler for that market; `"<marketId>": "pull"` (exactly that literal) signs **plain pull delivery with `exclusiveFiller = 0`** on that market, whatever `solver` says. |
+
+Every address is validated. A malformed address, a zero `settlement`/`permit3`,
+or a `marketSolvers` value that is neither a non-zero address nor exactly
+`"pull"` (`"PULL"`, `" pull"`, the zero address, …) drops that chain's whole
+entry — it is treated as not deployed rather than half-used.
+
+**Rootstock beta.** The USDRIF/USDT0 market (`rsk-30-usdrif-usd0`) is filled
+by a plain EOA bot calling `Settlement.fillUpTo`. An EOA cannot run the fill
+callback a delta-verify order needs, so that market must sign pull delivery and
+name no filler:
+
+```bash
+VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…","solver":"0x0000000000000000000000000000000000000000","marketSolvers":{"rsk-30-usdrif-usd0":"pull"}}}'
+```
+
+(`solver` may be zero; with it zero every Rootstock market signs pull delivery,
+and the `"pull"` entry keeps the USDRIF market on pull even if a `solver` is
+configured later.)
+
+**`VITE_ORDERBOOK_URL`** — where signed orders go
+([`src/backend/book.ts`](src/backend/book.ts)).
+
+- **Unset:** the in-browser mock (`src/backend/mock.ts`). Nothing is broadcast,
+  and every fill it produces is flagged `simulated` and shown as such.
+- **Set** (e.g. `https://book.example` or a same-origin `/api/book`): the
+  `RemoteOrderbook` in [`src/backend/remote.ts`](src/backend/remote.ts) talks to
+  the orderbook — for the Rootstock beta the Cloudflare Worker book
+  [`@1delta-x/orderbook-worker`](../orderbook-worker) (same JSON routes and status
+  codes as `@1delta-x/orderbook-server`, which still works as an origin):
+  - **place** → `POST /orders` with the JSON body `{order, sig}` (bigints as
+    decimal strings — the server's strict JSON form, re-encoded to protobuf and
+    checked exactly like a protobuf post).
+    Only a `202` creates a row; a `422` (with the server's reason), `503`, `429`,
+    an unreachable server or a mismatched order hash is shown as an error and
+    nothing is listed as resting. Market orders are posted too (a 60 s auction),
+    since on a real book an order no filler can see does nothing.
+  - **Hide** (soft cancel) → `POST /cancels` with the JSON body `{cancel, sig}`;
+    the row is marked only on `202`.
+  - every ~6 s, `GET /orders/:hash/status` for each order you posted, plus one
+    `GET /fills?maker=…`. Progress (`filled`) moves only on what the server
+    reports from the chain. A fill row carries the settlement **transaction hash
+    from the server's fill index**; when the node runs without a fill index
+    (`/fills` → 501) a fill the book reported as `Filled` is shown with
+    "tx not indexed" — a hash is never made up, and nothing is `simulated`.
+  - **on load, once a wallet is connected**: `GET /orders?maker=…` and
+    `GET /fills?maker=…` (`restore`), so a page reload brings back your resting
+    orders (with the progress the book reports) and your indexed fills —
+    including fills of orders that already left the book, when the node served
+    the signed order with the fill (the Worker book does). Each order is parsed
+    strictly and must hash to the node's `orderHash` and name your address;
+    an order that is not one of this app's markets is not shown. A TWAP comes
+    back as its signed slices, each a plain limit row.
+  - an order the server evicted for another reason (unfunded, invalidated,
+    expired) or no longer knows (the demo server is in-memory; a restart forgets
+    it) stays listed as **off book · still fillable** until expiry; `Cancelled`
+    on-chain removes it.
+
+  The app does not load protobufjs at all: protobufjs compiles its encoders
+  with `new Function`, which this app's CSP (`script-src 'self'`, no
+  `'unsafe-eval'`) forbids, so the bodies are JSON.
+
+**Use `VITE_ORDERBOOK_URL=/api/book`.** The orderbook server sends no CORS
+headers and the CSP's `connect-src` is `'self'` plus the feeds, so the book must
+be same-origin:
+
+- **Production:** `public/_worker.js` forwards `/api/book/*` server-side to, in
+  order of preference:
+  1. the **service binding `ORDERBOOK`** → the `@1delta-x/orderbook-worker`
+     Worker (see *Binding the Worker orderbook* below), else
+  2. the Pages environment variable **`ORDERBOOK_ORIGIN`** (e.g.
+     `https://book.example`, optionally with a path prefix).
+
+  Neither (or an origin that is not an http(s) URL) →
+  `503 {"error":"orderbook not configured"}`; there is no default.
+  Only `POST orders`, `GET orders?…`, `POST cancels`,
+  `GET orders/<0x+64 hex>/status` and `GET fills?…` are forwarded (other paths
+  `400`, other methods `405`); POST bodies must be JSON or protobuf and at most
+  256 KiB; only `content-type` and `accept` are passed on, and responses carry
+  the same security headers as the app (plus `retry-after`, `x-next-cursor`,
+  `x-total-count`).
+- **Development:** `vite` proxies `/api/book` to `ORDERBOOK_PROXY_TARGET`
+  (default `http://localhost:8080`).
+
+```bash
+VITE_ORDERBOOK_URL=/api/book ORDERBOOK_PROXY_TARGET=http://localhost:8080 pnpm run app
+```
+
+### Binding the Worker orderbook
+
+Deploy `packages/orderbook-worker` first (its README), then bind it to the Pages
+project:
+
+- **Dashboard:** Pages project → *Settings* → *Bindings* → *Add* → *Service
+  binding*: variable name **`ORDERBOOK`**, service **`orderbook-1delta-rsk`**
+  (the worker's `name`), for Production (and Preview if wanted).
+- **or `wrangler.toml`** for the Pages project (`pages_build_output_dir =
+  "dist"`):
+
+  ```toml
+  [[services]]
+  binding = "ORDERBOOK"
+  service = "orderbook-1delta-rsk"
+  ```
+
+- **Binding key** — the same random value on both sides:
+
+  ```bash
+  KEY=$(openssl rand -hex 32)
+  echo "$KEY" | npx wrangler secret put BINDING_KEY                         # orderbook worker
+  echo "$KEY" | npx wrangler pages secret put ORDERBOOK_BINDING_KEY --project-name <pages-project>
+  ```
+
+**How the client IP reaches the book, and why it cannot be spoofed.** A
+service-binding request carries exactly the headers the Pages worker puts on it:
+Cloudflare's edge does not rewrite them, and a freshly built request has no
+`cf-connecting-ip` at all (so without help every visitor would share one
+rate-limit bucket). The Pages worker therefore copies the address Cloudflare saw
+on the visitor's request (`cf-connecting-ip`, set by the edge — a client cannot
+choose it) into `x-orderbook-client-ip`, adds `x-orderbook-binding-key:
+ORDERBOOK_BINDING_KEY`, and also forwards `cf-connecting-ip` as-is. It builds
+the upstream headers from scratch, so nothing the client sent under those names
+is passed on. The orderbook worker uses `x-orderbook-client-ip` **only** when
+the key matches its `BINDING_KEY` secret (constant-time compare); otherwise it
+ignores the header and bills the edge-set `cf-connecting-ip` — which is what any
+direct request to the worker's public URL gets, so a client calling the worker
+directly with a forged `x-orderbook-client-ip` is billed to its real address.
+`x-forwarded-for` is never read. Without a key configured the binding still
+works; the book then falls back to the forwarded `cf-connecting-ip`. To make the
+binding the only way in, set `workers_dev = false` in the worker's
+`wrangler.toml` (the beta filler then uses `/api/book` too).
+
+**Orderbook server behind the worker.** The worker sets `x-forwarded-for` to
+the address Cloudflare saw (`cf-connecting-ip`), replacing anything the client
+sent. Without `TRUST_PROXY` the server bills every request to the worker's
+egress address, so all browsers share one rate-limit bucket. Run it with:
+
+- `TRUST_PROXY=true`
+- `TRUSTED_PROXY_HOPS=1` when the worker's request reaches the server directly;
+  add one per proxy of your own that APPENDS to `x-forwarded-for` in front of
+  the server (e.g. nginx `$proxy_add_x_forwarded_for` → `2`).
+- and make the server reachable **only** through the worker (Cloudflare Tunnel,
+  or a firewall allowing Cloudflare's ranges only). With `TRUST_PROXY` on, anyone
+  who can reach the server directly can write their own `x-forwarded-for` and
+  pick a fresh bucket per request. A filler bot on the same host or private
+  network is fine: a request with no `x-forwarded-for` is billed to its socket
+  address.
+
 ## What is real and what is not
 
 | Part | Status |
@@ -56,10 +222,10 @@ curl -X POST https://<your-domain>/api/oku/rootstock/cush/liveBlock \
 | Wallet connection, chain switching, balances | **Live.** EIP-6963 + viem, read through the wallet |
 | Ladder merge, fill simulation, resting/crossing split | **Real.** `src/lib/univ3.ts`, `src/lib/ladder.ts` |
 | Order signing (EIP-712) | **Real.** Pinned tokens, nonce < 2^255 and above the on-chain `minValidNonce` |
-| Order distribution: resting, soft cancels, fills | **Mocked in-browser.** `src/backend/mock.ts`; every fill is flagged `simulated` and shown as such |
+| Order distribution: resting, soft cancels, fills | **Mocked in-browser** by default (`src/backend/mock.ts`; every fill flagged `simulated`). **Live** with `VITE_ORDERBOOK_URL` (`src/backend/remote.ts`): posted to `@1delta-x/orderbook-server`, fills only as reported from the chain |
 | Funding: ERC-20 approve to Permit3 + Permit3 grant to Settlement | **Live.** Both legs, each exactly the ticket's input; revocable from the form |
 | On-chain cancel (`Settlement.cancelOrders`) | **Live** when a Settlement is configured |
-| Settlement transactions | **Simulated.** Signing is real; nothing is broadcast to a filler |
+| Settlement transactions | **Simulated** with the mock. With `VITE_ORDERBOOK_URL`, real fillers settle on-chain; the app sends none itself |
 | Pre-audit disclosure | **Live.** Acknowledgement gate, reopenable from the strip |
 | Draw Terms | **Live.** Own page at `/terms.html`, rendered from `TC.md` |
 
@@ -121,8 +287,9 @@ signed order behind the row; after it is mined no filler can settle them. With
 no wallet on the order's chain nothing is cancelled — an unsigned eviction
 would only hide the order from its own maker.
 
-**Nothing is simulated as real.** Market orders are signed and then *not*
-broadcast; the receipt says so. A limit ticket is signed as one order for its
+**Nothing is simulated as real.** With the mock, market orders are signed and
+then *not* broadcast; the receipt says so. With `VITE_ORDERBOOK_URL` set they
+are posted, and the real book never records a simulated fill. A limit ticket is signed as one order for its
 whole size (a short opening auction from the book's price down to the limit),
 so the part that crosses the book now is filled from that signed order rather
 than recorded as a fill no signature backs. TWAP slices fill only once signed.
@@ -131,7 +298,8 @@ transaction hash.
 
 **Security headers.** `public/_worker.js` sets a CSP (`frame-ancestors 'none'`,
 `script-src 'self'`, `connect-src` limited to the feeds the app calls),
-`X-Frame-Options: DENY` and `nosniff` on every asset. A self-hosted
+`X-Frame-Options: DENY` and `nosniff` on every asset and on every `/api/book`
+proxy response. A self-hosted
 `VITE_OKU_BASE` on another origin must be added to `connect-src`.
 `VITE_GRAPH_KEY` is inlined into the public bundle: use a domain-restricted,
 capped key.
@@ -268,7 +436,7 @@ interface OrderbookApi {
   place(req): Promise<RestingOrder>;            // req.signed is required
   cancel(orderHash, signedCancel): Promise<void>; // soft: marks, never evicts
   confirmHardCancel(orderHash): void;           // after cancelOrders is mined
-  addSlice(orderHash, signed): void;            // a TWAP slice signed when due
+  addSlice(orderHash, signed): void | Promise<void>; // a TWAP slice signed when due
   recordTake(req): void;
   observe(obs): void;
 }
@@ -276,9 +444,9 @@ interface OrderbookApi {
 
 That is deliberately the shape `@1delta-x/orderbook`'s `Book` already exposes —
 an in-memory map keyed by order hash, with add/remove listeners. A real client
-(REST/WS against `@1delta-x/orderbook-server`, or a Waku transport) is an
-implementation of this interface plus EIP-712 signing in `place`. No component
-changes.
+is an implementation of this interface: `src/backend/remote.ts` is the REST one
+against `@1delta-x/orderbook-server`, selected by `VITE_ORDERBOOK_URL` (see
+Configuration); a Waku transport would be another.
 
 The mock is not a simulation of the settlement contract. It holds signed
 orders, marks them soft-cancelled on a signed retraction (keeping the row),
@@ -304,7 +472,9 @@ src/
   lib/funding.ts        the two funding legs (ERC-20 → Permit3, Permit3 grant → Settlement)
   lib/chain.ts          on-chain reads: PERMIT3() check, minValidNonce, funding state
   backend/api.ts        the order-distribution seam
-  backend/mock.ts       in-browser stand-in
+  backend/mock.ts       in-browser stand-in (default)
+  backend/remote.ts     REST client of @1delta-x/orderbook-server (VITE_ORDERBOOK_URL)
+  backend/book.ts       picks one of the two
   lib/markdown.tsx      the markdown subset TC.md uses, rendered dependency-free
   terms.tsx             second entry point — the standalone /terms.html page
   wallet/               EIP-6963 discovery, connection, chain switch, allowances, balances

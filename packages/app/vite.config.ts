@@ -31,6 +31,14 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/oku/, ""),
       },
+      // Same-origin path to a local `@1delta-x/orderbook-server` (default port
+      // 8080), for `VITE_ORDERBOOK_URL=/api/book`. The server sends no CORS
+      // headers, so a browser on another origin cannot POST to it directly.
+      "/api/book": {
+        target: process.env.ORDERBOOK_PROXY_TARGET ?? "http://localhost:8080",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/book/, ""),
+      },
     },
   },
   build: {
