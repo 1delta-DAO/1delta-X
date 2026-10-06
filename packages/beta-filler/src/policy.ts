@@ -1,7 +1,8 @@
 import { DELTA_VERIFY_OUTPUTS_BIT, isProportional, type Order } from "@1delta-x/sdk";
 import { zeroAddress, type Address } from "viem";
 
-import type { Config, Policy } from "./config";
+import { MOC_FEE_BPS, type Config, type Policy } from "./config";
+import type { SpendEntry } from "./state";
 
 /**
  * Pure decision logic: which orders this filler takes, at what size and price.
@@ -19,17 +20,16 @@ const ONE = 10n ** 18n;
 const USDT0_TO_18 = 10n ** 12n;
 
 /**
- * Accept only the plain one-in/one-out shape the beta app signs. Every extra
- * feature (items, validators, modules, fee legs, proportional legs, delta-verify,
- * single-signature permits) is a way for the price we preview to differ from what
- * we pay, so in the beta we simply do not take it.
+ * The plain one-in/one-out shape the beta app signs, minus the delivery-mode and
+ * exclusivity checks (which differ per strategy). Every extra feature (items,
+ * validators, modules, fee legs, proportional legs, single-signature permits) is a
+ * way for the price we preview to differ from what we pay, so in the beta we
+ * simply do not take it. Shared by the inventory and route strategies.
  */
-export function classify(
+export function plainShape(
   order: Order,
-  cfg: Pick<Config, "tokens"> & { policy: Pick<Policy, "buyUsdrif" | "sellUsdrif"> },
-  me: Address,
   extras: { hasPermitBatch?: boolean; sigless?: boolean } = {},
-): Verdict<{ direction: Direction }> {
+): Verdict<{}> {
   if (extras.hasPermitBatch) return { ok: false, reason: "single-signature permit orders not supported" };
   if (extras.sigless) return { ok: false, reason: "on-chain-approved (sigless) orders not supported" };
   if (order.legsIn.length !== 1 || order.legsOut.length !== 1) return { ok: false, reason: "not one-in/one-out" };
@@ -39,20 +39,41 @@ export function classify(
   if (order.fillModule !== zeroAddress || order.pricingModule !== zeroAddress) {
     return { ok: false, reason: "fill/pricing modules not supported" };
   }
-  if ((order.timing >> DELTA_VERIFY_OUTPUTS_BIT) & 1n) {
-    return { ok: false, reason: "delta-verify order: needs a callback filler, an EOA cannot fill it" };
-  }
-  if (order.exclusiveFiller !== zeroAddress && order.exclusiveFiller.toLowerCase() !== me.toLowerCase()) {
-    return { ok: false, reason: "names another exclusive filler" };
-  }
   const legIn = order.legsIn[0]!;
   const legOut = order.legsOut[0]!;
   if (isProportional(legIn.start)) return { ok: false, reason: "proportional (balance-relative) leg" };
   if (legOut.recipient !== zeroAddress && legOut.recipient.toLowerCase() !== order.maker.toLowerCase()) {
     return { ok: false, reason: "output goes to a third party" };
   }
-  const tin = legIn.token.toLowerCase();
-  const tout = legOut.token.toLowerCase();
+  return { ok: true };
+}
+
+/** Whether the order carries timing bit 104 (delta-verify / direct delivery). */
+export function isDeltaVerify(order: Order): boolean {
+  return ((order.timing >> DELTA_VERIFY_OUTPUTS_BIT) & 1n) === 1n;
+}
+
+/**
+ * INVENTORY strategy: the plain shape, pull delivery only (an EOA cannot run the
+ * callback a delta-verify order needs), open or exclusive to this wallet, on the
+ * USDRIF/USDT0 pair.
+ */
+export function classify(
+  order: Order,
+  cfg: Pick<Config, "tokens"> & { policy: Pick<Policy, "buyUsdrif" | "sellUsdrif"> },
+  me: Address,
+  extras: { hasPermitBatch?: boolean; sigless?: boolean } = {},
+): Verdict<{ direction: Direction }> {
+  const shape = plainShape(order, extras);
+  if (!shape.ok) return shape;
+  if (isDeltaVerify(order)) {
+    return { ok: false, reason: "delta-verify order: needs a callback filler, an EOA cannot fill it" };
+  }
+  if (order.exclusiveFiller !== zeroAddress && order.exclusiveFiller.toLowerCase() !== me.toLowerCase()) {
+    return { ok: false, reason: "names another exclusive filler" };
+  }
+  const tin = order.legsIn[0]!.token.toLowerCase();
+  const tout = order.legsOut[0]!.token.toLowerCase();
   const usdrif = cfg.tokens.usdrif.toLowerCase();
   const usdt0 = cfg.tokens.usdt0.toLowerCase();
   if (tin === usdrif && tout === usdt0) {
@@ -92,6 +113,27 @@ export function priceOk(direction: Direction, paid: bigint, received: bigint, p:
   return { ok: true, price };
 }
 
+/** Whether `order` prices the same at every time: no curve and every leg fixed (`end == 0`). */
+export function isFixedPrice(order: Order): boolean {
+  return order.curve.length === 0 && order.legsIn.every((l) => l.end === 0n) && order.legsOut.every((l) => l.end === 0n);
+}
+
+/**
+ * Zero-RPC price pre-filter for a FIXED-price plain order: its implied price at full
+ * size (we pay `legsOut[0].start`, receive `legsIn[0].start` — either direction)
+ * against MAX_BUY_PRICE / MIN_SELL_PRICE. A partial fill scales both legs and rounds
+ * maker-ward, so the price at any size is that one or worse: out of bounds here means
+ * out of bounds after any preview. An order whose price moves with time passes (it
+ * is judged on a live preview).
+ */
+export function fixedPriceOk(order: Order, direction: Direction, p: Policy): Verdict<{}> {
+  const legIn = order.legsIn[0];
+  const legOut = order.legsOut[0];
+  if (!isFixedPrice(order) || !legIn || !legOut) return { ok: true };
+  const v = priceOk(direction, legOut.start, legIn.start, p);
+  return v.ok ? { ok: true } : { ok: false, reason: `fixed-price order: ${v.reason}` };
+}
+
 /**
  * Buy side only: the USDT0 we would actually get back by redeeming the received
  * USDRIF at MoC's oracle and selling the RIF on the pool must beat what we pay by
@@ -102,6 +144,35 @@ export function exitOk(paidUsdt0: bigint, exitQuoteUsdt0: bigint, p: Policy): Ve
   const edgeBps = ((exitQuoteUsdt0 - paidUsdt0) * 10_000n) / paidUsdt0;
   if (edgeBps < p.minExitEdgeBps) return { ok: false, reason: `exit edge ${edgeBps} bps < ${p.minExitEdgeBps}` };
   return { ok: true, edgeBps };
+}
+
+/**
+ * The inventory fill's all-in cost gate. `edgeUsdt0` is what the fill earns before
+ * gas (buy: live redeem+sell exit − paid; sell: received − mint replacement cost).
+ * It must cover the fill's own gas, its pro-rata share of the rebalance it causes,
+ * and `minProfitUsdt0` — all already converted to USDT0 by the caller.
+ */
+export function inventoryProfitOk(edgeUsdt0: bigint, costUsdt0: bigint, minProfitUsdt0: bigint): Verdict<{ marginUsdt0: bigint }> {
+  const margin = edgeUsdt0 - costUsdt0 - minProfitUsdt0;
+  if (margin < 0n) {
+    return { ok: false, reason: `unprofitable after gas: edge ${edgeUsdt0} < gas+rebalance ${costUsdt0} + min profit ${minProfitUsdt0} (USDT0 units)` };
+  }
+  return { ok: true, marginUsdt0: margin };
+}
+
+/** Pro-rata share of a rebalance cost for a fill of `usdrif` when a rebalance batches `redeemMin`. */
+export function rebalanceShare(costWei: bigint, usdrif: bigint, redeemMin: bigint): bigint {
+  if (redeemMin === 0n || usdrif >= redeemMin) return costWei;
+  return (costWei * usdrif + redeemMin - 1n) / redeemMin; // round up: never under-charge
+}
+
+/**
+ * Sell side: the USDT0 it costs to replace `usdrif` sold from inventory — ~$1 each
+ * through a MoC mint, plus the mint fee (`MOC_FEE_BPS`); 18 → 6 decimals, rounded up.
+ * Used by both the all-in gate and the recorded `profitEst`, so the two agree.
+ */
+export function mintReplaceUsdt0(usdrif: bigint): bigint {
+  return (usdrif * (10_000n + MOC_FEE_BPS) + 10n ** 16n - 1n) / 10n ** 16n;
 }
 
 /** USDT0 notional of a fill (the USDT0 side, whichever direction). */
@@ -129,7 +200,7 @@ export function capFillAmount(fillAmount: bigint, paidAtFill: bigint, capPaid: b
 export class Budget {
   constructor(
     private readonly caps: Record<string, bigint>,
-    private spends: { token: string; amount: string; at: number }[] = [],
+    private spends: SpendEntry[] = [],
     private readonly windowMs = 3_600_000,
   ) {}
 
@@ -146,12 +217,35 @@ export class Budget {
     return cap > used ? cap - used : 0n;
   }
 
-  spend(token: Address, amount: bigint, now: number) {
+  /**
+   * Record a spend. `ref` (a tx hash) makes it a reservation {@link settle} can
+   * adjust later — and makes the spend idempotent per `(ref, token)`: a dropped
+   * tx re-sent with identical bytes has the same hash, and used to stack a second
+   * full-limit entry the receipt's `settle` could never reach (review 2026-10-05).
+   * The entry takes the newer time, so the window runs from the actual send.
+   */
+  spend(token: Address, amount: bigint, now: number, ref?: string) {
     this.prune(now);
-    this.spends.push({ token: token.toLowerCase(), amount: amount.toString(), at: now });
+    const k = token.toLowerCase();
+    const i = ref ? this.spends.findIndex((s) => s.ref === ref && s.token === k) : -1;
+    const entry = { token: k, amount: amount.toString(), at: now, ...(ref ? { ref } : {}) };
+    if (i < 0) this.spends.push(entry);
+    else this.spends[i] = entry;
   }
 
-  toJSON() {
+  /**
+   * Replace the amount of the reservation tagged `ref` for `token` (0 removes it).
+   * The entry keeps its original time, so the rolling window is unchanged.
+   */
+  settle(ref: string, token: Address, amount: bigint): void {
+    const k = token.toLowerCase();
+    const i = this.spends.findIndex((s) => s.ref === ref && s.token === k);
+    if (i < 0) return;
+    if (amount === 0n) this.spends.splice(i, 1);
+    else this.spends[i] = { ...this.spends[i]!, amount: amount.toString() };
+  }
+
+  toJSON(): SpendEntry[] {
     return this.spends;
   }
 }

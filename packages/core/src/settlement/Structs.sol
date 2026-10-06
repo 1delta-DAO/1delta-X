@@ -334,7 +334,8 @@ struct FillCtx {
     //                       against its own resolved `owed` ledger.
     uint256 minBump; //       the FILLER'S price floor on the resolved bump, in bps of the band
     //                       (0 = none). Set by a floored entry ({Core.fillUpTo},
-    //                       {Core.fillWithPermit}, {Core.fillWithPermitTake}, {Core.batchFill})
+    //                       {Core.fillWithPermit}, {Core.fillWithPermitTake}, {Core.batchFill},
+    //                       the takerData {Core.fillWithCallback} — since 2026-10)
     //                       before {OrderState._openFill}, which checks it the moment the bump
     //                       is resolved and reverts {OrderState.BumpTooLow}. Until audit
     //                       2026-09-30 (PERIPH-1.v3) only `fillUpTo` had a floor, so the FIRST

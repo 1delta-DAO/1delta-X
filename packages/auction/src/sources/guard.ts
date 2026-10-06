@@ -5,23 +5,22 @@ import { isNative } from "./http";
 
 /**
  * Validation for THIRD-PARTY route calldata (Sushi `swap/v7`, Nordstern) before it
- * reaches a STANDING `AggregatorFillSolver` (audit 2026-09-30 AUCTION-AGG4).
+ * reaches an `AggregatorFillSolver` (audit 2026-09-30 AUCTION-AGG4; updated
+ * 2026-10-04).
  *
- * A standing instance funds routes from maximal router approvals primed for every
- * token it trades, and its router allowlist pins WHERE a call goes, not WHAT it
- * says. A compromised or buggy aggregator API returning `sweepToken(token, self)`,
- * a `transferFrom` path or a swap to another recipient would spend the standing
- * approval on a token the order never touched. So an API-sourced route bound for a
- * standing executor is decoded first: an allowlisted router, an allowlisted
- * selector, no native value unless the input is native, and the request's tokens
- * and recipient present in the calldata as word-aligned ABI words (not merely as
- * a substring — see {hasWord}). Anything else is dropped. The token / recipient
- * test is a PRESENCE check, not a decode: it cannot prove the named recipient is
- * the one the router pays when the calldata also names another. The selector
- * allowlist is what bounds that — admit only swap entrypoints whose recipient is
- * a fixed head word, never a multicall / sweep / transfer-capable selector. A per-fill
- * (`standing = false`) instance spends only this fill's deltas, so it needs none of
- * this — send API routes there when no guard is configured.
+ * The solver now runs every route in its push-funded, always-empty
+ * `RouteSandbox`, with no router allowlist and no standing approvals, so a
+ * compromised or buggy aggregator API can reach only the fill's in-flight input:
+ * a pull fill then fails the solver's output check, but on a direct (delta-verify)
+ * fill the input residue — the spread — is the route's to divert. So an API-sourced
+ * route is still decoded first: an allowlisted router, an allowlisted selector, no
+ * native value unless the input is native, and the request's tokens and recipient
+ * present in the calldata as word-aligned ABI words (not merely as a substring —
+ * see {hasWord}). Anything else is dropped. The token / recipient test is a
+ * PRESENCE check, not a decode: it cannot prove the named recipient is the one the
+ * router pays when the calldata also names another. The selector allowlist is what
+ * bounds that — admit only swap entrypoints whose recipient is a fixed head word,
+ * never a multicall / sweep / transfer-capable selector.
  */
 export interface RouteGuard {
   /** Router addresses the executor's allowlist admits. */

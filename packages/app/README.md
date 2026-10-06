@@ -38,6 +38,13 @@ the configured project root, so it is silently dropped whenever the root is not
 this package — and a dropped proxy fails quietly, with `GET` falling through to
 the SPA handler and `POST` returning 405.
 
+It is the Pages **main module**, so it must export **only** its default handler:
+workerd refuses to start a main module with any other kind of export, and an exported
+constant (`BOOK_MAX_BODY_BYTES`, the CSP string) once failed the whole deployment with
+"Incorrect type for map entry 'BOOK_MAX_BODY_BYTES'". `test/workerEntry.test.ts` pins
+the rule; `make workers-smoke` (repo root) starts the worker in `wrangler pages dev` and
+checks it serves.
+
 After deploying, this should return a block number:
 
 ```bash
@@ -70,18 +77,79 @@ or a `marketSolvers` value that is neither a non-zero address nor exactly
 `"pull"` (`"PULL"`, `" pull"`, the zero address, …) drops that chain's whole
 entry — it is treated as not deployed rather than half-used.
 
-**Rootstock beta.** The USDRIF/USDT0 market (`rsk-30-usdrif-usd0`) is filled
-by a plain EOA bot calling `Settlement.fillUpTo`. An EOA cannot run the fill
-callback a delta-verify order needs, so that market must sign pull delivery and
-name no filler:
+**Rootstock beta.** Two fillers run from one bot,
+[`@1delta-x/beta-filler`](../beta-filler) (full deploy runbook in its README), hosted as
+the Cloudflare Worker [`@1delta-x/filler-worker`](../filler-worker):
+
+- **route** (DEX aggregator path) — an operator EOA drives the operator-gated
+  `AggregatorFillSolver`, which swaps the maker's input on Oku's Uniswap v3
+  SwapRouter02 and pays the maker. It fills **delta-verify** orders that name
+  the solver as `exclusiveFiller` (the route pays the maker directly), and plain
+  pull orders open to anyone. So for the aggregator path
+  **`solver` = the deployed `AggregatorFillSolver` address**: every market
+  without a `marketSolvers` override signs delta-verify orders exclusive to it.
+- **inventory** — the same EOA fills USDRIF/USDT0 out of its own wallet with
+  `Settlement.fillUpTo`. An EOA cannot run the fill callback a delta-verify
+  order needs, so **`rsk-30-usdrif-usd0` stays `"pull"`** (plain pull delivery,
+  no named filler). The route strategy can fill those pull orders too; the bot
+  tries inventory first and falls back to route.
 
 ```bash
-VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…","solver":"0x0000000000000000000000000000000000000000","marketSolvers":{"rsk-30-usdrif-usd0":"pull"}}}'
+VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…","solver":"0x<AggregatorFillSolver>","marketSolvers":{"rsk-30-usdrif-usd0":"pull"}}}'
 ```
 
-(`solver` may be zero; with it zero every Rootstock market signs pull delivery,
-and the `"pull"` entry keeps the USDRIF market on pull even if a `solver` is
-configured later.)
+| Market | Signs | Filled by |
+| --- | --- | --- |
+| `rsk-30-wrbtc-usd0` | delta-verify, `exclusiveFiller` = solver | route (direct delivery) |
+| `rsk-30-weth-wrbtc` | delta-verify, `exclusiveFiller` = solver | route (direct delivery) |
+| `rsk-30-usdrif-usd0` | pull, `exclusiveFiller` = 0 | inventory, else route (pull) |
+
+⚠ A delta-verify order is fillable **only** by its named filler. Set `solver`
+only once that `AggregatorFillSolver` is deployed, gated to the bot's operator
+key, and the bot is running with `AGGREGATOR_SOLVER` set to the same address —
+otherwise those markets' orders cannot be filled by anyone until they expire.
+With `solver` zero every Rootstock market signs pull delivery (the route
+strategy still fills them, at ~25–45k more gas per fill), and the `"pull"` entry
+keeps the USDRIF market on pull whatever `solver` says.
+
+**Rootstock beta deploy runbook** (the full version, with the reasoning, is in
+[`packages/beta-filler/README.md`](../beta-filler/README.md#beta-deploy-runbook-rootstock-chain-30)):
+
+1. **Core** — `make deploy-core RPC=https://public-node.rsk.co CORE_SALT=0x…
+   DEPLOY_ARGS="--account deployer --sender 0x… --gas-estimate-multiplier 110 --legacy --slow"
+   VERIFY_ARGS="--verify --verifier blockscout --verifier-url https://rootstock.blockscout.com/api/"`
+   → Permit3, Settlement, SettlementLens (Rootstock's 10M block gas limit needs the
+   110% multiplier for the ~7.3M-gas lens; `--legacy` because Rootstock has no
+   EIP-1559 fee market).
+2. **Aggregator** — `SETTLEMENT=0x… OPERATORS=0x<filler EOA>
+   FLOOR_TOKENS=<WRBTC>,<USDT0>,<WETH>,<USDRIF> make deploy-aggregator-fill RPC=…
+   DEPLOY_ARGS=… VERIFY_ARGS=…` (Cancun `solvers-deploy` profile; asserts every
+   immutable after deploy; the script refuses the retired `STANDING` /
+   `PRIME_TOKENS` / `ROUTERS`).
+3. **Orderbook worker** — `[vars]` `SETTLEMENT`/`PERMIT3`/`LENS` and **`START_BLOCK`
+   (required: the Settlement deploy block)**; `ALLOWED_TOKENS` defaults to
+   USDRIF, USDT0, WRBTC, WETH; `REQUIRE_DELTA_VERIFY=false`; secrets `BINDING_KEY` and
+   **`RPC_URL_SECRET` — required: a keyed Rootstock RPC that serves `eth_getLogs`**.
+   Rootstock's public node (the `RPC_URL` default) answers `eth_getLogs` with
+   `-32601`, so on it the book never indexes fills or sees on-chain cancels; its
+   `/health` then reports `logsUnsupported: true`. `make workers-smoke`, then
+   `wrangler deploy`.
+4. **App vars** — `VITE_ORDERBOOK_URL=/api/book` and the `VITE_DEPLOYMENTS` above
+   with `solver` = the AggregatorFillSolver and `rsk-30-usdrif-usd0: "pull"`.
+5. **Filler** — deploy the Worker
+   [`@1delta-x/filler-worker`](../filler-worker) (runbook in its README) in dry run:
+   - secrets `PRIVATE_KEY` (the operator EOA), `ADMIN_TOKEN` and `ALERT_WEBHOOK_URL`;
+   - `[vars]` `SETTLEMENT` / `PERMIT3` / `LENS`, `AGGREGATOR_SOLVER` and
+     `ROUTE_PROFIT_RECIPIENT`;
+   - the `ORDERBOOK` service binding to `orderbook-1delta-rsk`.
+
+   `GET /status` (admin bearer token) must show `configured: true` and the solver
+   checks passing. The Node CLI (`packages/beta-filler`, `pnpm status`) runs the same
+   core for local checks.
+6. **Dry run → live** — place one small order per market; each must show a
+   `dry-run` outcome with `simulation ok` in `/status`. Then
+   `POST /dry-run {"on": false}`. Publish the app build from step 4 only once the
+   filler runs live: delta-verify orders are fillable by the solver alone.
 
 **`VITE_ORDERBOOK_URL`** — where signed orders go
 ([`src/backend/book.ts`](src/backend/book.ts)).
@@ -98,8 +166,10 @@ configured later.)
     checked exactly like a protobuf post).
     Only a `202` creates a row; a `422` (with the server's reason), `503`, `429`,
     an unreachable server or a mismatched order hash is shown as an error and
-    nothing is listed as resting. Market orders are posted too (a 60 s auction),
-    since on a real book an order no filler can see does nothing.
+    nothing is listed as resting. Market orders are posted too (a 60 s auction
+    that then rests at its floor; 5 min life — the book refuses TTLs under
+    120 s and the filler skips orders expiring within 90 s, see
+    `lib/plan.ts`), since on a real book an order no filler can see does nothing.
   - **Hide** (soft cancel) → `POST /cancels` with the JSON body `{cancel, sig}`;
     the row is marked only on `202`.
   - every ~6 s, `GET /orders/:hash/status` for each order you posted, plus one
@@ -193,7 +263,8 @@ directly with a forged `x-orderbook-client-ip` is billed to its real address.
 `x-forwarded-for` is never read. Without a key configured the binding still
 works; the book then falls back to the forwarded `cf-connecting-ip`. To make the
 binding the only way in, set `workers_dev = false` in the worker's
-`wrangler.toml` (the beta filler then uses `/api/book` too).
+`wrangler.toml` (the filler Worker keeps working over its own service binding; the
+Node CLI filler then uses `/api/book`).
 
 **Orderbook server behind the worker.** The worker sets `x-forwarded-for` to
 the address Cloudflare saw (`cf-connecting-ip`), replacing anything the client

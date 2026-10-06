@@ -71,14 +71,23 @@ These are the entries most worth keeping. In each case the safety argument runs
 through a *different* part of the system than the one that looks responsible, so a
 local, reasonable-looking change breaks it silently.
 
-### B-1. ~~`outstanding` undercounts what the pool owes~~ — **DOCUMENTED** (F25/G-11)
+### B-1. ~~`outstanding` undercounts what the pool owes~~ — **FIXED** (2026-10, task 07; documented F25/G-11)
 
 The guarantor is now named at the PRESEND site: `_sweepSurplus`'s per-token floor
 plus the refund transfer reverting on a drained pool, NOT the `outstanding` ledger
 its comment used to credit. The three changes that would reopen the hole are listed
-there. The ledger itself is unchanged by choice — seeding it with the reconciliation
-surplus would make the bound self-sufficient, but that is a hot-path change and
-should be argued on its own merits rather than smuggled in as a doc fix.
+there. ~~The ledger itself is unchanged by choice~~ — **2026-10 (task 07):** the ledger
+change landed on its own merits. The merit was liveness, not funds: an over-producing
+TAKE on the netted path handed the excess to the solver at PRESEND and the Phase-3
+refund then reverted `TransferFailed`, while the single-order path refunded the maker
+(review 2026-10-05 S2). `Batch._creditItemProceeds` now adds the part of a credit that
+crosses `owed` — `max(0, newCredit − max(oldCredit, owed))` — to `outstanding[t]`, so
+PRESEND nets the refund out and the sweep floor is a second guard rather than the only
+one. Cost: +126 bytes of Settlement (clean `core-deploy`), netted path only; the
+single-order hot path is untouched. Pinned by
+`test_S2_nettedPath_overProducingTakeRefundsMaker` (solvers) and the two
+`test_surplus_*` PRESEND tests in `MatchSettle.t.sol`, which now fill and refund the
+maker instead of reverting.
 
 ### B-2. ~~`fillWithPermitTake` treats authorization as a post-condition~~ — **CLOSED** (F25/G-11)
 

@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: print-packages test test-sdk test-ts build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill size-check-solvers $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── CI matrix source ──────────────────────────────────────────────────────────
 
@@ -95,7 +95,8 @@ test-sdk:
 	cd packages/sdk && npx vitest run
 
 ## The whole TypeScript side: SDK, orderbook, orderbook-server, orderbook-worker
-## (workerd tests + the protobuf-free bundle check), auction, app, rif-filler. BUILDS
+## (workerd tests + the protobuf-free bundle check), auction, app, beta-filler,
+## filler-worker (workerd tests + its bundle check). BUILDS
 ## THE DISTS FIRST — the orderbook, server, auction and app packages import
 ## `@1delta-x/sdk` (and the server `@1delta-x/orderbook`) through their compiled
 ## `dist/`, so a stale build ran the server suite against months-old code and hid a
@@ -108,7 +109,18 @@ test-ts:
 	cd packages/orderbook-worker && npx tsc --noEmit -p tsconfig.json && npx vitest run && node scripts/bundle-check.mjs
 	cd packages/auction && npx tsc --noEmit -p tsconfig.json && npx vitest run
 	cd packages/app && npx tsc --noEmit -p tsconfig.json && npx vitest run
-	cd packages/rif-filler && npx tsc --noEmit -p tsconfig.json && npx vitest run
+	cd packages/beta-filler && npx tsc --noEmit -p tsconfig.json && npx vitest run
+	cd packages/filler-worker && npx tsc --noEmit -p tsconfig.json && npx vitest run && node scripts/bundle-check.mjs
+
+## Startup smoke of the three Rootstock beta Workers in the real runtime: `wrangler dev
+## --local` for orderbook-worker and filler-worker, `wrangler pages dev` for the app's
+## Pages worker; each must start and answer /health (the app: `/` and `/api/book/*`).
+## Catches what the workerd unit suites cannot: a main module workerd refuses to start
+## (e.g. an exported string constant — B1, 2026-10-05). ~10 s, local only (no network,
+## no secrets). It spawns wrangler processes and binds local ports (18911–18913), so it
+## is NOT part of `test-ts`; CI runs it as its own step right after. Run it before a deploy.
+workers-smoke:
+	tools/workers-smoke.sh
 
 ## Compile one package: make build PKG=modules-aave-v3
 build:
@@ -320,7 +332,8 @@ size-check:
 	check periphery-deploy NativeSettler; \
 	check periphery-deploy OriginSettler7683; \
 	check periphery-deploy DestinationSettler7683; \
-	exit $$fail
+	[ $$fail -eq 0 ] || exit $$fail
+	@$(MAKE) --no-print-directory size-check-solvers
 
 # ── Deterministic deployment ─────────────────────────────────────────────────
 #
@@ -337,7 +350,21 @@ size-check:
 # settings, so the guard has to live here.
 #
 #   make predict-core RPC=https://...              # no key, no broadcast
-#   make deploy-core  RPC=https://... CORE_SALT=0x...
+#   make deploy-core  RPC=https://... CORE_SALT=0x... \
+#        DEPLOY_ARGS="--account deployer --sender 0x..." VERIFY_ARGS="..."
+#
+# DEPLOY_ARGS is passed through to `forge script` verbatim: the signer (a Foundry
+# keystore `--account NAME --sender 0x...`, `--ledger`, ...), `--slow`, `--legacy`,
+# gas-price flags. VERIFY_ARGS is empty by default (no verification). Rootstock
+# mainnet verifies on Blockscout:
+#
+#   VERIFY_ARGS="--verify --verifier blockscout --verifier-url https://rootstock.blockscout.com/api/"
+#
+# (Etherscan-family chains: VERIFY_ARGS="--verify" plus ETHERSCAN_API_KEY.)
+#
+# Rootstock also needs, in DEPLOY_ARGS: `--legacy` (no EIP-1559 fee market) and
+# `--gas-estimate-multiplier 110` (10M block gas limit; SettlementLens costs ~7.3M,
+# so forge's default 130% overshoots the block).
 #
 # CORE_SALT is REQUIRED for a real rollout; without it the script falls back to a
 # committed PLACEHOLDER salt and says so loudly. Once a rollout begins the salt
@@ -345,18 +372,55 @@ size-check:
 
 DEPLOY_SCRIPT := packages/core/script/Deploy.s.sol:DeployCore
 
+DEPLOY_ARGS ?=
+VERIFY_ARGS ?=
+
 ## Print the predicted core addresses for a chain. Read-only.
 predict-core:
 	@test -n "$(RPC)" || { echo "RPC is required: make predict-core RPC=https://..."; exit 1; }
 	FOUNDRY_PROFILE=core-deploy $(FORGE) script $(DEPLOY_SCRIPT) \
-		--sig 'predict()' --rpc-url $(RPC)
+		--sig 'predict()' --rpc-url $(RPC) $(DEPLOY_ARGS)
 
 ## Deploy the core singletons, asserting each lands on its predicted address.
 deploy-core:
 	@test -n "$(RPC)" || { echo "RPC is required: make deploy-core RPC=https://..."; exit 1; }
 	@test -n "$(CORE_SALT)" || echo ">> WARNING: CORE_SALT unset - using the PLACEHOLDER salt."
 	FOUNDRY_PROFILE=core-deploy $(FORGE) script $(DEPLOY_SCRIPT) \
-		--rpc-url $(RPC) --broadcast --verify
+		--rpc-url $(RPC) --broadcast $(DEPLOY_ARGS) $(VERIFY_ARGS)
+
+# ── AggregatorFillSolver (Rootstock beta "route" strategy) ────────────────────
+#
+# Plain CREATE (no salt) under `solvers-deploy` (evm_version = cancun — Rootstock
+# does not run Prague). Configured by env, read by the script — see the header of
+# packages/solvers/script/DeployAggregatorFill.s.sol:
+#
+#   SETTLEMENT=0x… OPERATORS=0x<filler EOA> \
+#   FLOOR_TOKENS=0x542f…(WRBTC),0x779D…(USDT0),0x2f6f…(WETH),0x3A15…(USDRIF) \
+#   make deploy-aggregator-fill RPC=https://public-node.rsk.co \
+#     DEPLOY_ARGS="--account deployer --sender 0x… --legacy --slow --gas-estimate-multiplier 110" \
+#     VERIFY_ARGS="…blockscout…"
+#
+# BREAKING (2026-10): no ROUTERS / STANDING / PRIME_TOKENS any more — the script
+# refuses them. The constructor deploys a RouteSandbox that runs every route and may
+# call any target; the solver never approves a router. FLOOR_TOKENS (optional) has
+# the deployer send the new solver 1 wei of each token (its balance floor).
+
+AGG_DEPLOY_SCRIPT := packages/solvers/script/DeployAggregatorFill.s.sol:DeployAggregatorFill
+
+## Deploy one AggregatorFillSolver instance and assert its immutables.
+deploy-aggregator-fill:
+	@test -n "$(RPC)" || { echo "RPC is required: make deploy-aggregator-fill RPC=https://... DEPLOY_ARGS=..."; exit 1; }
+	@test -n "$$SETTLEMENT" || { echo "SETTLEMENT (env) is required"; exit 1; }
+	FOUNDRY_PROFILE=solvers-deploy $(FORGE) script $(AGG_DEPLOY_SCRIPT) \
+		--rpc-url $(RPC) --broadcast $(DEPLOY_ARGS) $(VERIFY_ARGS)
+
+## Size of the deployable AggregatorFillSolver (solvers-deploy profile, Cancun).
+size-check-solvers:
+	@FOUNDRY_PROFILE=solvers-deploy $(FORGE) build --quiet --skip '*.s.sol'
+	@rt=$$(( ($$(FOUNDRY_PROFILE=solvers-deploy $(FORGE) inspect AggregatorFillSolver deployedBytecode | tr -d '[:space:]' | wc -c) - 2) / 2 )); \
+	ic=$$(( ($$(FOUNDRY_PROFILE=solvers-deploy $(FORGE) inspect AggregatorFillSolver bytecode | tr -d '[:space:]' | wc -c) - 2) / 2 )); \
+	printf "%-24s (%s) runtime %6d / 24576   initcode %6d / 49152\n" AggregatorFillSolver solvers-deploy $$rt $$ic; \
+	if [ $$rt -gt 24576 ] || [ $$ic -gt 49152 ]; then echo "FAIL: AggregatorFillSolver exceeds a deploy size limit"; exit 1; fi
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 
@@ -367,6 +431,8 @@ help:
 	@echo "  test-<name>           Shorthand (e.g. make test-modules-aave-v3)"
 	@echo "  build-<name>          Shorthand"
 	@echo "  test-all              All packages sequentially"
+	@echo "  test-ts               The TypeScript packages (vitest, tsc, worker bundle checks)"
+	@echo "  workers-smoke         Start the beta Workers in wrangler dev / pages dev and check /health"
 	@echo "  test-deployed         Core suite against the deployed (via-IR) Permit3/Settlement"
 	@echo "  build-all             Compile-check all packages"
 	@echo "  gas                   Regenerate the committed .gas-snapshot baseline"
@@ -375,5 +441,7 @@ help:
 	@echo "  size-check            Fail if Settlement/facet exceed deploy size limits"
 	@echo "  predict-core RPC=..   Print predicted deterministic core addresses"
 	@echo "  deploy-core  RPC=..   Deploy core singletons via the CREATE2 factory"
+	@echo "  deploy-aggregator-fill RPC=.. DEPLOY_ARGS=..  Deploy an AggregatorFillSolver (env-configured)"
+	@echo "  size-check-solvers    AggregatorFillSolver size under solvers-deploy (Cancun)"
 	@echo ""
 	@echo "Packages: $(PACKAGES)"

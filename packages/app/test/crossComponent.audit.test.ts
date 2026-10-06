@@ -43,3 +43,35 @@ describe("G-TS_SIGN-3 — the app draws nonces through the SDK", () => {
     expect(typeof buildOrder).toBe("function");
   });
 });
+
+/**
+ * Review 2026-10-05 (H1): three shipped defaults share one number and nothing
+ * reconciled them — the app's market TTL (60 s) was below the beta book's
+ * `MIN_TTL_SECONDS` (120 s), so every market ticket was refused with a 422, and
+ * below the filler's `EXPIRY_MARGIN_SECONDS` (90 s), so an admitted one would
+ * never have been quoted. Read the two wrangler files so the triangle is pinned
+ * where the numbers actually live.
+ */
+describe("APP-TTL-1 — a market order outlives the book's minimum TTL and the filler's expiry margin", () => {
+  const wranglerVar = (pkg: string, name: string): number => {
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    const { resolve } = require("node:path") as typeof import("node:path");
+    const toml = readFileSync(resolve(__dirname, "..", "..", pkg, "wrangler.toml"), "utf8");
+    const m = toml.match(new RegExp(`^${name}\\s*=\\s*"(\\d+)"`, "m"));
+    if (!m) throw new Error(`${pkg}/wrangler.toml has no ${name}`);
+    return Number(m[1]);
+  };
+
+  it("test_audit_APP_TTL1_marketTtlClearsBookMinAndFillerMargin", async () => {
+    const { MARKET_TTL_SECONDS, MARKET_DECAY_SECONDS } = await import("../src/lib/plan");
+    const bookMin = wranglerVar("orderbook-worker", "MIN_TTL_SECONDS");
+    const fillerMargin = wranglerVar("filler-worker", "EXPIRY_MARGIN_SECONDS");
+    // Admitted by the book at all…
+    expect(MARKET_TTL_SECONDS).toBeGreaterThanOrEqual(bookMin);
+    // …and still quotable by the filler for at least two Rootstock blocks after
+    // the auction has reached its floor.
+    expect(MARKET_TTL_SECONDS - fillerMargin - MARKET_DECAY_SECONDS).toBeGreaterThanOrEqual(60);
+    // The auction itself is the short part.
+    expect(MARKET_DECAY_SECONDS).toBeLessThan(MARKET_TTL_SECONDS);
+  });
+});

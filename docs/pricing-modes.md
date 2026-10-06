@@ -303,8 +303,8 @@ also means the fee is paid **once** rather than once per intermediate hop.
   who runs the callback. (Re-audit F30, 2026-09-25.) Naming a **contract** hands
   the check to that contract's access control — whoever can make it call
   `fillWithCallback` runs the callback — so the shipped `AggregatorFillSolver`
-  refuses a delta-verify order unless it is gated to an operator set
-  (`DirectNeedsOperators`).
+  is always gated to an operator set (its constructor refuses an empty set,
+  `NoOperators`, since the 2026-10 RouteSandbox change).
 - **Callback-only.** Nothing in the settler delivers these legs, so the order is
   fillable only through `fillWithCallback`. Plain `fill`/`fillUpTo`/`batchFill`
   reach the check with nothing delivered and revert `DeltaTooLow`; the netted

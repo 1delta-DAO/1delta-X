@@ -26,9 +26,11 @@ import {
 } from "@1delta-x/sdk";
 import { hashTypedData, isAddress, type Address, type Hex } from "viem";
 
+import { readCappedBytes } from "./body";
 import type { ChainLog, ChainReader, WorkerChainEvent } from "./chain";
 import type { WorkerConfig } from "./config";
 import { ROUTE_COST, SqlRateLimiter } from "./ratelimit";
+import { isMethodNotFound, redactRpcUrl } from "./redact";
 import { count, getMeta, migrate, setMeta, type Sql, type SqlValue } from "./store";
 
 /** The verifier surface the book needs — `Verifier` from `@1delta-x/orderbook/pure` in production. */
@@ -59,6 +61,10 @@ const DEFAULT_PAGE = 100;
 const MAX_INCONCLUSIVE_STRIKES = 3;
 const CANCELLED_SENTINEL = (1n << 256n) - 1n;
 const HASH = /^0x[0-9a-fA-F]{64}$/;
+/** After a failed `eth_getLogs` the span is held (no doubling back up) this long. */
+const LOG_SPAN_COOLDOWN_SECONDS = 600;
+/** What `/health` and the alarm say when the RPC serves no `eth_getLogs` at all. */
+export const LOGS_UNSUPPORTED = "RPC_URL does not serve eth_getLogs (JSON-RPC -32601): the fill index and on-chain cancels are stalled — set RPC_URL_SECRET to a provider that does (wrangler secret put RPC_URL_SECRET)";
 
 export type GraveReason = "filled" | "cancelled" | "soft-cancelled" | "expired" | "evicted" | "displaced";
 
@@ -147,27 +153,9 @@ function secs(n: bigint): number {
 }
 
 async function readCapped(request: Request, cap: number): Promise<string | null> {
-  if (!request.body) return "";
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > cap) {
-      await reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  const out = new Uint8Array(size);
-  let at = 0;
-  for (const c of chunks) {
-    out.set(c, at);
-    at += c.byteLength;
-  }
-  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(out);
+  const bytes = await readCappedBytes(request.body, cap);
+  if (bytes === null) return null;
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
 }
 
 // ──────────────────── the book ────────────────────
@@ -217,7 +205,7 @@ export class OrderBookCore {
       return json({ error: "not found" }, 404);
     } catch (err) {
       // Never echo an error: an RPC error message carries the RPC URL (API key included).
-      this.lastError = err instanceof Error ? err.message.split("\n")[0]!.slice(0, 200) : "error";
+      this.lastError = this.redact(err instanceof Error ? err.message.split("\n")[0]!.slice(0, 200) : "error");
       return json({ error: "internal error" }, 500);
     }
   }
@@ -756,20 +744,53 @@ export class OrderBookCore {
 
   private health(): Response {
     const c = this.cfg;
+    const logs = this.logsHealth();
     return json({
       chainId: c.chain.chainId,
       settlement: c.chain.settlement,
       permit3: c.chain.permit3,
       lens: c.chain.lens,
       configured: c.configured,
+      // Which binding the RPC URL came from — never the URL (it may carry an API key).
+      rpc: c.rpcSource,
       orders: this.size(),
       tombstones: count(this.sql, `SELECT COUNT(*) AS n FROM graves`),
       softCancels: count(this.sql, `SELECT COUNT(*) AS n FROM soft_cancels`),
       admission: { maxOrders: c.admission.maxOrders, maxOrdersPerMaker: c.admission.maxOrdersPerMaker },
       fills: this.coverage(),
+      // The alarm loop: a monitor flags `lastAlarm` older than ~3 × `alarmIntervalSeconds`.
+      alarmIntervalSeconds: c.alarmIntervalMs / 1000,
+      revalidateSeconds: this.revalidateSeconds(),
       lastAlarm: getMeta(this.sql, "lastAlarm") ?? null,
+      // Top-level for monitors: the RPC answers eth_getLogs with "method not found".
+      logsUnsupported: logs.unsupported,
+      logs,
       lastError: this.lastError ?? getMeta(this.sql, "lastError") ?? null,
     });
+  }
+
+  /** The log scan's state: ok / unsupported, the current adaptive span, the last success and failure. */
+  private logsHealth(): { ok: boolean; unsupported: boolean; span: string; lastOkAt: number | null; lastErrorAt: number | null; lastError: string | null } {
+    const okAt = getMeta(this.sql, "logsOkAt");
+    const errAt = getMeta(this.sql, "logsErrorAt");
+    const unsupported = getMeta(this.sql, "logsUnsupported") !== undefined;
+    return {
+      ok: !unsupported && (errAt === undefined || (okAt !== undefined && Number(okAt) >= Number(errAt))),
+      unsupported,
+      span: this.logSpan().toString(),
+      lastOkAt: okAt === undefined ? null : Number(okAt),
+      lastErrorAt: errAt === undefined ? null : Number(errAt),
+      lastError: getMeta(this.sql, "logsError") ?? null,
+    };
+  }
+
+  /** Re-check cadence: the configured one, or the fallback while the RPC serves no logs. */
+  private revalidateSeconds(): number {
+    return getMeta(this.sql, "logsUnsupported") !== undefined ? this.cfg.revalidateNoLogsSeconds : this.cfg.revalidateSeconds;
+  }
+
+  private redact(text: string): string {
+    return redactRpcUrl(text, this.cfg.chain.rpcUrl);
   }
 
   // ──────────────────── maintenance (the alarm) ────────────────────
@@ -784,9 +805,16 @@ export class OrderBookCore {
    *      `head − confirmations`: index fills, evict on-chain cancels and nonce
    *      invalidations (zero lens calls), mark partially filled orders dirty;
    *   4. re-check dirty orders, then the stalest, on the lens (bounded per pass).
+   *
+   * The pass has a wall-clock budget (`ALARM_BUDGET_SECONDS`): past it no further
+   * fill is sized (the cursor stops at the first log not applied) and no re-check
+   * starts; the next pass runs 1 s later. Every RPC call has an 8 s timeout and the
+   * re-check sweep its own call and time bound, so a hanging RPC cannot push an
+   * alarm toward Cloudflare's 15-minute alarm wall-clock limit.
    */
   async maintain(): Promise<number> {
     const now = this.deps.now();
+    const deadline = this.deps.nowMs() + this.cfg.alarmBudgetMs;
     const errors: string[] = [];
     this.prune(now);
 
@@ -797,18 +825,25 @@ export class OrderBookCore {
     let behind = false;
     if (this.cfg.configured) {
       try {
-        behind = await this.scanLogs();
+        behind = await this.scanLogs(deadline);
       } catch (err) {
-        errors.push(`logs: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        const msg = this.redact(err instanceof Error ? err.message.split("\n")[0]! : String(err)).slice(0, 300);
+        errors.push(`logs: ${msg}`);
+        setMeta(this.sql, "logsError", msg);
+        setMeta(this.sql, "logsErrorAt", String(now));
       }
-      try {
-        await this.recheck(now);
-      } catch (err) {
-        errors.push(`recheck: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+      if (this.deps.nowMs() < deadline) {
+        try {
+          await this.recheck(now);
+        } catch (err) {
+          errors.push(`recheck: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        }
+      } else {
+        behind = true; // the budget went on the log scan: re-check on the next pass, 1 s from now
       }
     }
     setMeta(this.sql, "lastAlarm", String(now));
-    if (errors.length) setMeta(this.sql, "lastError", `${now} ${errors.join("; ").slice(0, 300)}`);
+    if (errors.length) setMeta(this.sql, "lastError", this.redact(`${now} ${errors.join("; ")}`).slice(0, 400));
     return behind ? 1_000 : this.cfg.alarmIntervalMs;
   }
 
@@ -826,11 +861,32 @@ export class OrderBookCore {
       );
       setMeta(this.sql, "fillsDropped", String(Number(getMeta(this.sql, "fillsDropped") ?? "0") + over));
     }
-    this.limiter.prune(c.rate.idleSeconds, c.rate.maxKeys);
+    this.limiter.prune(
+      [
+        { prefix: "ip:", bucket: c.rate.ip },
+        { prefix: "mk:", bucket: c.rate.maker },
+      ],
+      c.rate.idleSeconds,
+      c.rate.maxKeys,
+    );
+  }
+
+  /**
+   * The blocks one `eth_getLogs` asks for: `MAX_LOG_RANGE`, halved after every failed
+   * read (a provider range cap, or a timeout on a wide range) and doubled back after
+   * a successful one once no read failed for {@link LOG_SPAN_COOLDOWN_SECONDS} —
+   * persisted in `meta`, so a capped provider cannot stall the cursor forever.
+   */
+  private logSpan(): bigint {
+    const stored = getMeta(this.sql, "logSpan");
+    const max = this.cfg.maxLogRange > 0n ? this.cfg.maxLogRange : 1n;
+    if (stored === undefined || !/^\d+$/.test(stored)) return max;
+    const v = BigInt(stored);
+    return v < 1n ? 1n : v > max ? max : v;
   }
 
   /** @returns true when the cursor is still behind the confirmed head. */
-  private async scanLogs(): Promise<boolean> {
+  private async scanLogs(deadline = Infinity): Promise<boolean> {
     const head = await this.deps.chain.blockNumber();
     const safe = head > this.cfg.confirmations ? head - this.cfg.confirmations : 0n;
     const stored = getMeta(this.sql, "logCursor");
@@ -841,17 +897,50 @@ export class OrderBookCore {
       setMeta(this.sql, "logFrom", from.toString());
     }
     if (from > safe) return false;
-    const to = from + this.cfg.maxLogRange - 1n < safe ? from + this.cfg.maxLogRange - 1n : safe;
-    const logs = await this.deps.chain.logs(from, to);
-    await this.applyLogs(logs);
+    const span = this.logSpan();
+    const to = from + span - 1n < safe ? from + span - 1n : safe;
+    const now = this.deps.now();
+    let logs: ChainLog[];
+    try {
+      logs = await this.deps.chain.logs(from, to);
+    } catch (err) {
+      if (isMethodNotFound(err)) {
+        // Not a range problem: no span helps. Loud, and the lens re-check falls back
+        // to the 60 s cadence (it is then the only way fills and cancels reach the book).
+        if (getMeta(this.sql, "logsUnsupported") === undefined) setMeta(this.sql, "logsUnsupported", String(now));
+        throw new Error(LOGS_UNSUPPORTED);
+      }
+      setMeta(this.sql, "logSpan", (span > 1n ? span / 2n : 1n).toString());
+      setMeta(this.sql, "logSpanFailedAt", String(now));
+      throw err;
+    }
+    this.sql.exec(`DELETE FROM meta WHERE key = 'logsUnsupported'`);
+    setMeta(this.sql, "logsOkAt", String(now));
+    const failedAt = Number(getMeta(this.sql, "logSpanFailedAt") ?? "0");
+    if (span < this.cfg.maxLogRange && now - failedAt >= LOG_SPAN_COOLDOWN_SECONDS) {
+      const grown = span * 2n;
+      setMeta(this.sql, "logSpan", (grown > this.cfg.maxLogRange ? this.cfg.maxLogRange : grown).toString());
+    }
+    const stoppedAt = await this.applyLogs(logs, deadline);
+    if (stoppedAt < logs.length) {
+      // Out of time: resume AT the block of the first log not applied. That block's
+      // logs before it are re-read idempotently (fills by their (txHash, logIndex)
+      // key, cancellations are no-ops the second time).
+      setMeta(this.sql, "logCursor", logs[stoppedAt]!.blockNumber.toString());
+      return true;
+    }
     // Advanced only after the whole range applied: a failure re-reads it, and the
     // fill table's (txHash, logIndex) key makes the re-read idempotent.
     setMeta(this.sql, "logCursor", (to + 1n).toString());
     return to < safe;
   }
 
-  /** Apply one range of logs in chain order. Exposed for tests through {@link maintain}. */
-  private async applyLogs(logs: readonly ChainLog[]): Promise<void> {
+  /**
+   * Apply one range of logs in chain order. Exposed for tests through {@link maintain}.
+   * @returns the index of the first log NOT applied (`logs.length` = all): sizing a
+   *   fill costs RPC calls, so none is started once `deadline` (ms) has passed.
+   */
+  private async applyLogs(logs: readonly ChainLog[], deadline = Infinity): Promise<number> {
     // The block that carries the LAST fill of an order within a block gets the
     // delta; same-block siblings report `null` (one cumulative covers them all).
     const lastInBlock = new Map<string, number>();
@@ -871,6 +960,7 @@ export class OrderBookCore {
       const hash = e.orderHash.toLowerCase();
       const known = count(this.sql, `SELECT COUNT(*) AS n FROM fills WHERE tx_hash = ? AND log_index = ?`, log.txHash.toLowerCase(), log.logIndex);
       if (known > 0) continue;
+      if (this.deps.nowMs() >= deadline) return i;
 
       const cum = await this.cumulativeAt(hash as Hex, log.blockNumber, cumCache);
       let amount: bigint | null = null;
@@ -894,6 +984,7 @@ export class OrderBookCore {
       );
       this.applyFillProgress(hash, cum, log.txHash.toLowerCase() as Hex);
     }
+    return logs.length;
   }
 
   /**
@@ -1016,7 +1107,7 @@ export class OrderBookCore {
     const rows = this.sql
       .exec<OrderRow>(
         `SELECT * FROM orders WHERE dirty = 1 OR checked_at <= ? ORDER BY dirty DESC, checked_at ASC LIMIT ?`,
-        now - this.cfg.revalidateSeconds,
+        now - this.revalidateSeconds(),
         this.cfg.maxRecheckPerAlarm,
       )
       .toArray();

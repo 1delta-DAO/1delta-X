@@ -55,12 +55,12 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         _run("1-wei dust floor, zero surplus  ", aggSolver, 1, AMOUNT_OUT);
     }
 
-    /// @dev Retain mode needs an operator set since audit 2026-09-30 AGG-1
-    ///      ({RetainNeedsOperators}), so the retain benchmarks run on a gated instance.
+    /// @dev A fresh single-operator instance for the retain benchmarks (every
+    ///      instance is gated since 2026-10; this one is not shared with the base).
     function _gated() internal returns (AggregatorFillSolver g) {
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        g = new AggregatorFillSolver(address(settlement), _routers(address(router)), ops, _noSplit(), false, _none());
+        g = new AggregatorFillSolver(address(settlement), ops, _noSplit());
     }
 
     function test_gas_retain_seeded() public {
@@ -75,37 +75,38 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         _warmWorld();
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        AggregatorFillSolver g = new AggregatorFillSolver(address(settlement), _routers(address(router)), ops, _noSplit(), false, _none());
+        AggregatorFillSolver g = new AggregatorFillSolver(address(settlement), ops, _noSplit());
         tA.mint(address(g), 1);
         tB.mint(address(g), 1);
         _runTo("gated, retain, seeded (fresh tx)", g, 1, AMOUNT_OUT, address(g));
     }
 
     function test_gas_direct_seeded() public {
-        // Direct orders need a gated instance (re-audit 2026-09-29).
+        _direct("direct, retain, seeded (fresh tx)", NO_PATCH);
+    }
+
+    /// @dev The same direct fill with `amountOutOffset` set: the TYPED callback (the
+    ///      live `pricedOut[0]` patched into the exact-output word, task 06). The
+    ///      difference to {test_gas_direct_seeded} is the typed payload's price.
+    function test_gas_direct_seeded_liveAmountOut() public {
+        _direct("direct, live amountOut (typed)   ", 4);
+    }
+
+    function _direct(string memory label, uint256 outOffset) internal {
+        // A fresh single-operator instance, so the direct benchmark starts cold.
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        aggSolver = new AggregatorFillSolver(address(settlement), _routers(address(router)), ops, _noSplit(), false, _none());
+        aggSolver = new AggregatorFillSolver(address(settlement), ops, _noSplit());
         _warmWorld();
         tA.mint(address(aggSolver), 1);
         Order memory o = _directOrder(1);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker);
         p.profitRecipient = address(aggSolver);
+        p.amountOutOffset = outOffset;
         uint256 g0 = gasleft();
         aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
-        console.log("direct, retain, seeded (fresh tx)", g0 - gasleft());
-    }
-
-    function test_gas_standingAllowance() public {
-        _warmWorld();
-        address[] memory prime = new address[](1);
-        prime[0] = address(tA);
-        AggregatorFillSolver st =
-            new AggregatorFillSolver(address(settlement), _routers(address(router)), _standingOps(), _noSplit(), true, prime);
-        tA.mint(address(st), 1);
-        tB.mint(address(st), 1);
-        _runTo("standing allowance, seeded     ", st, 1, AMOUNT_OUT, address(st));
+        console.log(label, g0 - gasleft());
     }
 
     function test_gas_retain() public {

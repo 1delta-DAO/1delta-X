@@ -46,7 +46,11 @@ export const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS orders_maker ON orders(maker)`,
   `CREATE INDEX IF NOT EXISTS orders_added ON orders(added_at, hash)`,
   `CREATE INDEX IF NOT EXISTS orders_expiry ON orders(expiry)`,
-  `CREATE INDEX IF NOT EXISTS orders_check ON orders(dirty, checked_at)`,
+  // No index on (dirty, checked_at): every lens re-check rewrites `checked_at`, and
+  // each index entry is one more billed row written per re-check, while the re-check
+  // query's scan of ≤ MAX_ORDERS rows is cheap reads. Objects created before this
+  // change carry the index: dropped (idempotent).
+  `DROP INDEX IF EXISTS orders_check`,
   `CREATE TABLE IF NOT EXISTS graves (
     hash TEXT PRIMARY KEY,
     maker TEXT NOT NULL,
@@ -82,6 +86,8 @@ export const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS buckets (key TEXT PRIMARY KEY, tokens REAL NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS billed (key TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
+  // The bills prune keeps the newest `maxBilled` by `at`: walk an index, not a sort.
+  `CREATE INDEX IF NOT EXISTS billed_at ON billed(at)`,
 ];
 
 export function migrate(sql: Sql): void {

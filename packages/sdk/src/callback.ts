@@ -61,6 +61,11 @@ export function isPostInputs(mode: CallbackMode): boolean {
  * expressive shape — any function on any contract — and it is why both exist.
  * The call runs through the allowance-less `SolverCallbackExecutor`, so the
  * target sees THAT as `msg.sender`, never the settlement.
+ *
+ * `takerData` / `minBumpBps` select the 8-arg overload (either one set; the other
+ * defaults to `"0x"` / `0n`). `minBumpBps` is the filler's price floor on the
+ * resolved bump, exactly `fillUpTo`'s (`0` = none; a miss reverts `BumpTooLow`).
+ * BREAKING (2026-10): there is no 7-arg `(…, takerData)` overload any more.
  */
 export function encodeFillWithCallback(args: {
   order: Order;
@@ -70,6 +75,7 @@ export function encodeFillWithCallback(args: {
   callbackData: Hex;
   mode: CallbackMode;
   takerData?: Hex;
+  minBumpBps?: bigint;
 }): Hex {
   const base = [
     packOrder(args.order) as never,
@@ -79,10 +85,11 @@ export function encodeFillWithCallback(args: {
     args.callbackData,
     args.mode,
   ];
+  const long = args.takerData !== undefined || args.minBumpBps !== undefined;
   return encodeFunctionData({
     abi: SETTLEMENT_ABI,
     functionName: "fillWithCallback",
-    args: (args.takerData === undefined ? base : [...base, args.takerData]) as never,
+    args: (long ? [...base, args.takerData ?? "0x", args.minBumpBps ?? 0n] : base) as never,
   });
 }
 

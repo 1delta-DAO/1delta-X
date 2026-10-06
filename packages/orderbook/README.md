@@ -39,12 +39,15 @@ maker/filler ── HttpTransport ──▶ demo backend ── InMemoryTranspor
 Every inbound announce runs the gauntlet, cheapest first:
 
 - **Layer 1 (local, zero RPC):** recompute `hashOrderStruct(order)`; require a fill
-  denominator; `deadline > now`; for 65-byte sigs, `recoverTypedDataAddress` over
-  the order (a non-maker recover defers: it may be a nominated delegate).
+  denominator; `deadline > now`; for 65- or 64-byte (EIP-2098) sigs, recover over
+  the order with the settler's `ecrecover` semantics (`recoverEcdsa`: `v` must be
+  27/28; a zero-address recover is refused; a non-maker recover defers: it may be
+  a nominated delegate).
   Contract (EIP-1271 / 7702) sigs defer to Layer 2. An announce carrying a
   `permitBatch` is a single-signature `fillWithPermit` order: its `sig` is the
-  Permit3 `PermitBatchWitness` signature, proven HERE (65-byte ECDSA maker only,
-  batch unexpired, every token spender = this settlement); Layer 2 then gates it
+  Permit3 `PermitBatchWitness` signature, proven HERE (ECDSA maker only, 65 or
+  64 bytes, same `ecrecover` semantics; batch unexpired; every token AND taker
+  spender = this settlement); Layer 2 then gates it
   on lifecycle only, since its allowance is what the permit grants at fill time.
 - **Layer 2 (one view call):** `SettlementLens.getOrderRelevantStates` returns
   `status` (nonce/deadline/filled), `fillableAmount` (live Permit3 allowance +

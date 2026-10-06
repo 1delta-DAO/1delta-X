@@ -70,6 +70,16 @@ library DustHandler {
     ///         so a trailing 32-byte word is unambiguous. An out-of-range value
     ///         reverts {InvalidModeWord} — the check is on the FULL word, before
     ///         any narrowing.
+    ///
+    ///      ⚠ UNTAGGED, UNLIKE {readBalanceMode} (review 2026-10-06). The MODE_TAG fix —
+    ///      an auth tail's first word read as the mode — was applied to `BalanceMode`
+    ///      only. A maker who omits this optional word but appends a tail whose first
+    ///      word is a small integer (a Comet / Morpho auth nonce of 1) gets `Recycle`
+    ///      instead of `SweepToUser`: benign (the residual is best-effort re-supplied
+    ///      into the maker's own position, falling back to the sweep) and not
+    ///      filler-reachable (`data` is maker-signed), and tagging it now would change
+    ///      every signed blob that carries a `DustAction` — left as the documented
+    ///      asymmetry rather than a BREAKING re-encode.
     function readAction(bytes calldata data, uint256 baseLen) internal pure returns (DustAction) {
         if (data.length < baseLen + 32) return DustAction.SweepToUser;
         uint256 word = uint256(bytes32(data[baseLen:baseLen + 32]));

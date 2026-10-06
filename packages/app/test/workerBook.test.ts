@@ -10,7 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error — plain JS worker module
 const workerModule = await import("../public/_worker.js");
 const worker = workerModule.default as { fetch: (r: Request, env: unknown) => Promise<Response> };
-const MAX: number = workerModule.BOOK_MAX_BODY_BYTES;
+/**
+ * The proxy's body cap. Not imported: the worker exports nothing but its default
+ * handler (workerd refuses a main module exporting a number). The boundary test
+ * below pins the value through behaviour instead.
+ */
+const MAX = 256 * 1024;
 
 const APP = "https://app.example";
 const ORIGIN = "https://book.internal";
@@ -145,6 +150,16 @@ describe("worker /api/book proxy — not an open relay", () => {
     expect(res.status).toBe(405);
     expectSecurityHeaders(res);
     expect(seen).toHaveLength(0);
+  });
+
+  it("the body cap is exactly 256 KiB: a body of MAX bytes is forwarded, MAX + 1 is a 413", async () => {
+    const at = await call("/api/book/orders", { method: "POST", headers: { "content-type": "application/json" }, body: "x".repeat(MAX) });
+    expect(at.status).toBe(202);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.body).toHaveLength(MAX);
+    const over = await call("/api/book/orders", { method: "POST", headers: { "content-type": "application/json" }, body: "x".repeat(MAX + 1) });
+    expect(over.status).toBe(413);
+    expect(seen).toHaveLength(1);
   });
 
   it("refuses other content types and oversized bodies", async () => {

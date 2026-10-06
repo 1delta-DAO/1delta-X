@@ -76,6 +76,18 @@ contract FunnelGrantModule is IMakerModule {
     ///      the grant item the SAME `Item.amount` as the item that consumes it
     ///      makes both slices identical under a partial fill, so the allowance is
     ///      consumed exactly and nothing is left over.
+    ///
+    ///      ⚠ FIXED-INPUT SHAPES ONLY (review 2026-10-06, task 13). `amount` is the
+    ///      pro-rata slice of a CONSTANT, so it can match a consumer that is itself a
+    ///      constant fraction — a MAKE/TAKE item, or a FIXED `legsIn` leg. An
+    ///      AUCTIONED input (a BUY order, a rising relayer-fee leg) is priced per fill
+    ///      and outgrows any constant once it moves; a grant sized for it reverts on
+    ///      allowance. Cover such a leg with the funnel's `enableToken` instead.
+    ///      And a TAKER grant overwrites (Permit3 `approveTaker` is a plain set) any
+    ///      live allowance on the same `(spender, module, ref)` key with
+    ///      `(slice, now)`: a sibling order with byte-identical TAKE `data` that
+    ///      relied on a standing taker allowance stalls after this fill. Both fail
+    ///      closed; see the package README, "Two liveness limits".
     function makeOnBehalf(address onBehalfOf, uint256 amount, bytes calldata data) external override {
         if (msg.sender != SETTLEMENT) revert OnlySettlement();
         if (amount > type(uint160).max) revert AmountOverflow();

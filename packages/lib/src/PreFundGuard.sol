@@ -178,8 +178,14 @@ library PreFundGuard {
     }
 
     /// @notice The balance that was here BEFORE this fill's delivery — EXACTLY so
-    ///         only for exact-transfer funding tokens, or under the core's
-    ///         delta-verify delivery mode.
+    ///         only for exact-transfer funding tokens delivered NOMINALLY. (This used
+    ///         to add "or under the core's delta-verify delivery mode"; wrong — review
+    ///         2026-10-06. Delta-verify checks the recipient's increase is `>= amt` and
+    ///         still records `outs[j] = amt`, so a solver that over-delivers to a
+    ///         pre-fund module leaves the excess BELOW this floor: it is neither
+    ///         supplied nor swept, and strands on the singleton. Nothing module-side
+    ///         can tell it from pre-existing balance; the typed callback's priced
+    ///         amounts are what keep a route from over-delivering.)
     /// @dev ⚠ `forAmount` IS THE PRICED DELIVERY, NOT THE MEASURED RECEIPT
     ///      (2026-09-30 audit, L-LIB-9 / L-ED-7). The core records `outs[j] = amt`
     ///      for a nominal push; it does not measure what landed here. For a

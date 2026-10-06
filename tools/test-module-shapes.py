@@ -238,6 +238,7 @@ contract BadMeasure {
         uint256 floor = IERC20(token).balanceOf(address(this));
         IVault(vault).redeemFor(amount, onBehalfOf);
         uint256 received = IERC20(token).balanceOf(address(this)) - floor;
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(token, receiver, received);
     }
 }"""},
@@ -255,6 +256,7 @@ contract OkMeasure {
         uint256 floor = IERC20(token).balanceOf(address(this));
         IVault(vault).redeemFor(amount, onBehalfOf);
         uint256 received = IERC20(token).balanceOf(address(this)) - floor;
+        FullFillGuard.requireDelivered(received, amount);
         SafeTransferLib.safeTransfer(token, receiver, received);
     }
 }"""},
@@ -273,6 +275,115 @@ contract XBrokerModule {
 }"""},
     True,
     "retired TAKE_FOR shape",
+)
+
+# (9) per `op` branch, review 2026-10-06 M2 — the Venus shape: the Withdraw branch
+# carries the bound, the Borrow branch measures and caps but does not. The
+# whole-function search let the sibling vouch for it.
+_LADDER = """
+contract XTakerModule {
+    enum Op { Borrow, Withdraw }
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+        (uint8 op, address v, address t) = abi.decode(data, (uint8, address, address));
+        if (op == uint8(Op.Borrow)) {
+            uint256 balBefore = IERC20(t).balanceOf(address(this));
+            IV(v).borrowBehalf(onBehalfOf, amount);
+            uint256 received = IERC20(t).balanceOf(address(this)) - balBefore;
+            %BORROW_BOUND%
+            t.safeTransfer(receiver, received < amount ? received : amount);
+        } else if (op == uint8(Op.Withdraw)) {
+            _withdraw(onBehalfOf, amount, receiver, v, t);
+        } else {
+            revert BadOp(op);
+        }
+    }
+    function _withdraw(address onBehalfOf, uint256 amount, address receiver, address v, address t) private {
+        uint256 balBefore = IERC20(t).balanceOf(address(this));
+        IV(v).redeemUnderlyingBehalf(onBehalfOf, amount);
+        uint256 received = IERC20(t).balanceOf(address(this)) - balBefore;
+        FullFillGuard.requireDelivered(received, amount);
+        t.safeTransfer(receiver, received < amount ? received : amount);
+    }
+}"""
+case(
+    "M2 per-branch: bounded sibling does not cover the unbounded branch",
+    {"packages/m/src/Bad.sol": _LADDER.replace("%BORROW_BOUND%", "")},
+    True,
+    "op branch `Borrow`",
+)
+case(
+    "M2 per-branch: every measured branch bounded passes",
+    {"packages/m/src/Ok.sol": _LADDER.replace("%BORROW_BOUND%", "FullFillGuard.requireDelivered(received, amount);")},
+    False,
+)
+case(
+    "M2 per-branch: a hand-rolled `< amount` revert is the bound",
+    {"packages/m/src/Ok.sol": _LADDER.replace("%BORROW_BOUND%", "if (received < amount) revert Short(received, amount);")},
+    False,
+)
+# A single-op module on a venue verified exact-or-revert passes by its allow-list
+# row; the identical body under a name with no row fires.
+_SINGLE = """
+contract %NAME% {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+        (address spoke, address pm, uint256 id, address asset) = abi.decode(data, (address, address, uint256, address));
+        uint256 balBefore = IERC20(asset).balanceOf(address(this));
+        IPM(pm).borrowOnBehalfOf(spoke, id, amount, onBehalfOf);
+        uint256 received = IERC20(asset).balanceOf(address(this)) - balBefore;
+        SafeTransferLib.safeTransfer(asset, receiver, received < amount ? received : amount);
+    }
+}"""
+case(
+    "M2 venue-exact allow-list row passes (AaveV4BorrowModule)",
+    {"packages/m/src/Ok.sol": _SINGLE.replace("%NAME%", "AaveV4BorrowModule")},
+    False,
+)
+case(
+    "M2 same single-op body without an allow-list row fires",
+    {"packages/m/src/Bad.sol": _SINGLE.replace("%NAME%", "SomeBorrowModule")},
+    True,
+    "op branch `takeOnBehalf`",
+)
+
+# (17) review 2026-10-06 M3 — a taker whose `amount` is in another unit than the
+# proceeds must implement IProceedsAsset and name both units in its header.
+_SMART = """
+// Burns `amount` LP units and pays ONE pool coin to `receiver`.
+contract ListaSmartTakerModule is ITakerModule%IFACE% {
+    function takeOnBehalf(address onBehalfOf, uint256 amount, address receiver, bytes calldata data) external {
+        if (msg.sender != address(permit3)) revert OnlyPermit3();
+        (address provider, uint256 i, uint256 minOutRate) = abi.decode(data, (address, uint256, uint256));
+        IProvider(provider).withdrawCollateralOneCoin(amount, i, amount * minOutRate / 1e18, onBehalfOf, receiver);
+    }
+%FN%
+}"""
+_PROCEEDS_FN = "    function proceedsAsset(bytes calldata data) external view returns (address) { return coin; }"
+case(
+    "M3 unit-converting taker without IProceedsAsset fires",
+    {"packages/m/src/Bad.sol": _SMART.replace("%IFACE%", "").replace("%FN%", "")},
+    True,
+    "does not implement IProceedsAsset",
+)
+case(
+    "M3 unit-converting taker with IProceedsAsset + both units in header passes",
+    {"packages/m/src/Ok.sol": _SMART.replace("%IFACE%", ", IProceedsAsset").replace("%FN%", _PROCEEDS_FN)},
+    False,
+)
+case(
+    "M3 header that does not name the proceeds unit fires",
+    {"packages/m/src/Bad.sol": _SMART.replace("%IFACE%", ", IProceedsAsset").replace("%FN%", _PROCEEDS_FN)
+        .replace("pays ONE pool coin", "pays the output")},
+    True,
+    "missing unit(s) coin",
+)
+case(
+    "M3 rate-scaled `amount` floor in an unregistered taker fires",
+    {"packages/m/src/Bad.sol": _SMART.replace("ListaSmartTakerModule", "OtherLpTakerModule")
+        .replace("%IFACE%", ", IProceedsAsset").replace("%FN%", _PROCEEDS_FN)},
+    True,
+    "UNIT_CONVERTING_TAKERS",
 )
 
 

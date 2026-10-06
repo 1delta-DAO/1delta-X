@@ -365,6 +365,18 @@ not a quote. Use `previewFill` for the size.
   balance-relative funding descriptors below full fill.
 - The order is left **partially filled** after its one fill. That is intended; the
   `AlreadyFilled` guard is what makes it safe.
+- **No `FullFillGuard`-protected item can ride a position-sized order** (review
+  2026-10-06, task 13). `FullFillGuard.requireFullFill` admits only a slice equal to
+  the signed total, and here the slice is `item.amount · delta / fillTotal` with
+  `delta` the LIVE position — unknowable at signing, and below the cap in every case
+  this module exists for. So the guard reverts the fill whenever the position is not
+  exactly the cap. That is correct (each guarded item is one that must not be split),
+  but it rules these out of a `PositionFillModule` order: `ERC20PermitTransferModule`,
+  `NftSettlementModule`, the 3-word (full-fill) form of `ProportionalSweepModule`, an
+  Across deposit with `dstOrderHash != 0` and a sponsored LZ send
+  (`BridgeOutBase._fullFillGate` / `LzOftBridgeOutModule`), and every lending
+  module's `BalanceMode.Full` branch (which is the per-venue alternative to this
+  mechanism anyway). Fails closed — the fill reverts, nothing moves.
 
 ## Tests
 

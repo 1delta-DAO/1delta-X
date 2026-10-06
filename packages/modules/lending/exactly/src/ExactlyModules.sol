@@ -13,6 +13,7 @@ import {ProratedBound} from "@lib/ProratedBound.sol";
 import {Narrow160} from "@lib/Narrow160.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {ITakeFloor} from "@lib/interfaces/ITakeFloor.sol";
 
 import {IExactlyMarket} from "./interfaces/IExactly.sol";
 
@@ -91,8 +92,10 @@ contract ExactlyDepositModule is IMakerModule {
 // (`previewRefund(accounts(o).floatingBorrowShares)` — NOT `previewDebt`, which
 // adds every fixed position) and repay `min(amount, debt)` — SweepToUser never
 // pulls the over-repay buffer. Fixed: repay `amount` face at `maturity`, bounded
-// by the maker-signed `maxAssets` (scaled with the slice); any unspent buffer is
-// disposed to the user (or recycled). Either way disposal is locked to
+// by the maker-signed `maxAssets` (scaled with the slice; a signed 0 is refused);
+// an EMPTY fixed position or a dust slice whose scaled ceiling floors to 0 is
+// SKIPPED rather than reverted (task 12, the pre-fund twin's rule). Any unspent
+// buffer is disposed to the user (or recycled). Either way disposal is locked to
 // `onBehalfOf` / the market.
 //
 // `nonReentrant` guards weird-token transfer hooks.
@@ -136,6 +139,12 @@ contract ExactlyRepayModule is IMakerModule {
 
     error Reentrancy();
     error NotSettlement();
+    /// @dev A fixed-maturity repay signed with `maxAssets == 0`. Every such fill
+    ///      reverted inside Exactly before (`Disagreement` on a live position, a
+    ///      division by zero on an empty one); it is named here so that the dust-slice
+    ///      skip in {_pullAndRepay} — which keys on the SCALED bound being 0 — can
+    ///      never turn a zero-bound order into a silent no-op.
+    error ZeroMaxAssets();
 
     constructor(address _permit3, address _settlement) {
         permit3 = IPermit3(_permit3);
@@ -183,9 +192,11 @@ contract ExactlyRepayModule is IMakerModule {
     /// @dev Reads the maker-signed `totalAmount@160` and scales an absolute bound
     ///      with the slice. Fails closed when the word is absent — an order without
     ///      a total is exactly the order that was unprotected. Mirrors
-    ///      {ExactlyTakerModule._scaledBound}.
+    ///      {ExactlyTakerModule._scaledBound}. A signed bound of 0 is refused
+    ///      ({ZeroMaxAssets}), so a scaled 0 always means a DUST slice.
     function _scaledBound(bytes calldata data, uint256 bound, uint256 amount) private pure returns (uint256) {
         if (data.length < 192) revert ProratedBound.BoundTotalMissing();
+        if (bound == 0) revert ZeroMaxAssets();
         return ProratedBound.scale(bound, amount, uint256(bytes32(data[160:192])));
     }
 
@@ -230,10 +241,24 @@ contract ExactlyRepayModule is IMakerModule {
             // straight overpay. The pull is scaled too, or N slices would draw
             // N x maxAssets from the maker's allowance. {ProratedBound} is already
             // applied to `borrowAtMaturity` in this same file.
-            if (maxAssets > 0) {
-                permit3.transferFrom(onBehalfOf, address(this), asset, Narrow160.to160(maxAssets));
-                SafeTransferLib.forceApprove(asset, market, maxAssets);
-            }
+            //
+            // ⚠ SKIP, DO NOT REVERT, ON AN EMPTY POSITION OR A DUST SLICE (review
+            // 2026-10-06, task 12 — the twin of {ExactlyPreFundModule._repayFixed}).
+            // Exactly does not treat an empty fixed borrow as a no-op:
+            // `FixedLib.scaleProportionally` divides by `principal + fee` and reverts,
+            // so once the debt is closed (by an earlier slice, another order, or a
+            // third party) every later slice of this order was unfillable. And a dust
+            // slice scales the signed ceiling to 0 (`_scaledBound` floors), which
+            // `repayAtMaturity` refuses with `Disagreement` for any non-zero face —
+            // a filler-chosen slice size could then wedge the order's tail. Both are
+            // liveness, not value: nothing is pulled, the slice's face simply stays
+            // with the maker (a dust slice's face is below one unit of the ceiling's
+            // resolution). `maxAssets == 0` here can only be a dust slice — a SIGNED
+            // zero is refused in `_scaledBound` ({ZeroMaxAssets}).
+            (uint256 principal, uint256 fee) = IExactlyMarket(market).fixedBorrowPositions(maturity, onBehalfOf);
+            if (principal + fee == 0 || maxAssets == 0) return;
+            permit3.transferFrom(onBehalfOf, address(this), asset, Narrow160.to160(maxAssets));
+            SafeTransferLib.forceApprove(asset, market, maxAssets);
             IExactlyMarket(market).repayAtMaturity(maturity, amount, maxAssets, onBehalfOf);
         }
     }
@@ -288,6 +313,19 @@ contract ExactlyRepayModule is IMakerModule {
 //   base: op@0, market@32, asset@64, maturity@96, bound@128, totalAmount@160
 //         (base length 192)
 //     — `bound` = maxAssets (borrow-at-maturity) / minAssetsRequired (withdraw-at-maturity).
+//       ⚠ ON A PRE-MATURITY WITHDRAW `minAssetsRequired` IS THE MAKER'S WALLET-DRAW CAP
+//       (review 2026-10-06). `withdrawAtMaturity` pays `assetsDiscounted < amount`
+//       before maturity, straight to the receiver; the module does not bound it
+//       (the discount is legitimate), so {Core._payInputsToSolver} / `Batch._stepPull`
+//       bill `owed − assetsDiscounted` to the maker's WALLET. The fixed rate that sets
+//       the discount is a live utilisation figure of that maturity, which a filler can
+//       raise in the same block by borrowing first, and the induced discount accrues
+//       to the pool's remaining fixed depositors — so a maker signs the draw they
+//       accept here: wallet draw ≤ `owed − minAssetsRequired`. `0` means "any
+//       discount the IRM's max rate produces". Sign it non-zero on every order whose
+//       `maturity > now`; after maturity the face is paid in full and it is inert.
+//       `SettlementLensChecks.validateOrder` flags a zero one through {takeFloored}
+//       ({ITakeFloor}, task 12); pinned on-fork by `PreMaturityWithdraw.t.sol`.
 //     — `totalAmount` is the item's FULL maker-signed amount. BREAKING (F26): it is
 //       new, and it is MANDATORY on the at-maturity borrow leg, where it scales the
 //       absolute `maxAssets` ceiling with the slice ({ProratedBound}). One field
@@ -333,12 +371,29 @@ contract ExactlyRepayModule is IMakerModule {
 //  under-sized `value` fails CLOSED: the Market reverts on allowance, killing the
 //  fill — never over-spending.
 //
-contract ExactlyTakerModule is ITakerModule, IPositionSource {
+contract ExactlyTakerModule is ITakerModule, IPositionSource, ITakeFloor {
     IPermit3 public immutable permit3;
 
     enum Op {
         Borrow, // 0
         Withdraw // 1
+    }
+
+    /// @inheritdoc ITakeFloor
+    /// @dev The pre-maturity fixed withdraw is the one branch that under-delivers BY
+    ///      DESIGN (`assetsDiscounted < amount`), and `minAssetsRequired` (`bound`, word 4)
+    ///      is the only cap on what the core then bills to the maker's wallet (see
+    ///      the header). The discount itself is legitimate, so the rule is NOT
+    ///      "floor ≥ leg" — a maker may accept a bounded draw — only that SOME floor
+    ///      was signed: `op == Withdraw ∧ maturity > now ∧ bound == 0` reports
+    ///      `false`. Every other branch is exact-or-revert and reports `true`; so does
+    ///      a fixed withdraw at or after maturity, where the face is paid in full.
+    ///      Time-dependent like the rest of `validateOrder`: an order flagged now
+    ///      stops being flagged once its maturity passes.
+    function takeFloored(uint256, address, uint256, bytes calldata data) external view override returns (bool) {
+        (uint256 op,,, uint256 maturity, uint256 bound) =
+            abi.decode(data, (uint256, address, address, uint256, uint256));
+        return op != uint256(Op.Withdraw) || maturity <= block.timestamp || bound != 0;
     }
 
     /// @inheritdoc IPositionSource

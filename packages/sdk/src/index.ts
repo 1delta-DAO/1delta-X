@@ -26,3 +26,4 @@ export * from "./venueAuth";
 export * from "./lending";
 export * from "./native";
 export * from "./json";
+export * from "./aggregator";

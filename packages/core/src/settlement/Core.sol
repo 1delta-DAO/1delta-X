@@ -119,12 +119,26 @@ abstract contract Core is Base {
         bytes calldata callbackData,
         CallbackMode mode
     ) external returns (uint256[] memory fillAmountsOut) {
-        return _fillCallback(order, sig, fillAmount, callbackTarget, callbackData, mode, "");
+        return _fillCallback(order, sig, fillAmount, callbackTarget, callbackData, mode, "", 0);
     }
 
     /// @notice {fillWithCallback} overload carrying a filler-supplied `takerData`
-    ///         blob into the order's validators and invariants. See {fill}'s
-    ///         takerData overload for the adversarial/validator-verified rule.
+    ///         blob into the order's validators and invariants (see {fill}'s
+    ///         takerData overload for the adversarial/validator-verified rule) and
+    ///         the filler's `minBumpBps` PRICE FLOOR — exactly {fillUpTo}'s (`0` =
+    ///         none; a miss reverts {OrderState.BumpTooLow} before anything moves).
+    /// @dev    The floor is for a callback filler that QUOTES before inclusion (an
+    ///         aggregator route): without it the only bound on a maker-ward move of
+    ///         the tick between the preview and the block — a priority auction
+    ///         included at a lower bid, a basefee-indexed `gasBumpBps`, a custom
+    ///         curve — is the route's own calldata, which on a delta-verify BUY
+    ///         erodes the filler's margin silently (review 2026-10-05 §4).
+    ///
+    ///         BREAKING (2026-10): this REPLACES the 7-arg `(…, mode, takerData)`
+    ///         overload rather than sitting beside it — a third overload measured
+    ///         +307 bytes of Settlement (clean `core-deploy`), widening the existing
+    ///         one +43. Same trade as {fillWithPermit}'s. Callers of the old 7-arg
+    ///         shape append `0`.
     function fillWithCallback(
         Order calldata order,
         bytes calldata sig,
@@ -132,13 +146,14 @@ abstract contract Core is Base {
         address callbackTarget,
         bytes calldata callbackData,
         CallbackMode mode,
-        bytes calldata takerData
+        bytes calldata takerData,
+        uint256 minBumpBps
     ) external returns (uint256[] memory fillAmountsOut) {
-        return _fillCallback(order, sig, fillAmount, callbackTarget, callbackData, mode, takerData);
+        return _fillCallback(order, sig, fillAmount, callbackTarget, callbackData, mode, takerData, minBumpBps);
     }
 
-    /// @dev Shared body of both {fillWithCallback} overloads — see
-    ///      {_fillWithPermitCore} for why the pairs are funnelled, not duplicated.
+    /// @dev Shared body of every {fillWithCallback} overload — see
+    ///      {_fillWithPermitCore} for why the overloads are funnelled, not duplicated.
     function _fillCallback(
         Order calldata order,
         bytes calldata sig,
@@ -146,13 +161,15 @@ abstract contract Core is Base {
         address callbackTarget,
         bytes calldata callbackData,
         CallbackMode mode,
-        bytes memory takerData
+        bytes memory takerData,
+        uint256 minBumpBps
     ) private returns (uint256[] memory outs) {
-        bytes32 orderHash = order.hash();
         FillCtx memory ctx;
-        _gateFillState(order, orderHash, ctx);
-        _enter();
-        _verifySignature(orderHash, sig, order.maker, ctx);
+        // The prologue in its own frame so `orderHash` never enters this one: with
+        // `minBumpBps` live across the fill the LEGACY (non-via-IR) profile has no
+        // stack slot left for it — {fillUpTo}'s reason for {_openCustomFill}.
+        _openSigned(order, sig, ctx);
+        ctx.minBump = minBumpBps; // checked by {OrderState._openFill}
         // `type(uint256).max` — "whatever remains" — is resolved by {OrderState._openFill}
         // for every entry; see the note there and {Proportional} for who should pass it.
         outs = _fillCore(
@@ -161,6 +178,15 @@ abstract contract Core is Base {
         _exit();
     }
 
+    /// @dev The signed-order prologue: hash, the READ-ONLY fill-state gate, arm the
+    ///      guard, verify. The gate before {Base._enter} is the point of the
+    ///      ordering; {Base._enter} states the rule.
+    function _openSigned(Order calldata order, bytes calldata sig, FillCtx memory ctx) private {
+        bytes32 orderHash = order.hash();
+        _gateFillState(order, orderHash, ctx);
+        _enter();
+        _verifySignature(orderHash, sig, order.maker, ctx);
+    }
 
     /// @notice Single-signature fill: the maker's `sig` is over a Permit3
     ///         `PermitBatch` whose witness is `SettlementOrder{settlement: this,

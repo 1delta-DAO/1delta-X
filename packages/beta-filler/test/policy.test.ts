@@ -3,6 +3,7 @@ import { zeroAddress, type Address } from "viem";
 import { describe, expect, it } from "vitest";
 
 import { loadConfig, parseFixed, ROOTSTOCK } from "../src/config";
+import { Guard } from "../src/guard";
 import { Budget, capFillAmount, classify, exitOk, fillPrice, priceOk } from "../src/policy";
 
 const ME = "0x00000000000000000000000000000000000000Aa" as Address;
@@ -133,5 +134,41 @@ describe("sizing", () => {
     expect(b.remaining(usdt0, 1_000)).toBe(400n);
     expect(b.remaining(usdt0, 3_600_001)).toBe(1_000n);
     expect(b.remaining(ROOTSTOCK.usdrif as Address, 0)).toBe(0n);
+  });
+});
+
+describe("Budget reservations (review 2026-10-05, L1)", () => {
+  it("a re-send with the same ref replaces the reservation instead of stacking a second one", () => {
+    const usdt0 = ROOTSTOCK.usdt0 as Address;
+    const b = new Budget({ [usdt0.toLowerCase()]: 1_000n });
+    b.spend(usdt0, 600n, 0, "0xhash");
+    // Dropped after 15 min and re-sent with identical bytes → same hash, same ref.
+    b.spend(usdt0, 600n, 900_000, "0xhash");
+    expect(b.remaining(usdt0, 900_001)).toBe(400n);
+    // The receipt settles the one entry to the real cost.
+    b.settle("0xhash", usdt0, 100n);
+    expect(b.remaining(usdt0, 900_002)).toBe(900n);
+    // Distinct refs still stack.
+    b.spend(usdt0, 50n, 900_003, "0xother");
+    expect(b.remaining(usdt0, 900_004)).toBe(850n);
+    // The replaced entry carries the later time: it expires an hour after the re-send.
+    expect(b.remaining(usdt0, 3_600_001)).toBe(850n);
+    expect(b.remaining(usdt0, 4_500_010)).toBe(1_000n);
+  });
+});
+
+describe("backoff horizon (review 2026-10-05, L6)", () => {
+  it("a 5th strike on an order with an absurd expiry blacklists to the largest Date, not past it", () => {
+    const g = new Guard(loadConfig(ENV).gas);
+    const key = "0xabc";
+    const absurd = 10n ** 20n; // seconds — far past what `Date` can represent in ms
+    let now = 1_000;
+    for (let i = 0; i < 5; i++) {
+      g.onRevert(key, now, absurd, "boom");
+      now = g.entry(key)!.until + 1;
+    }
+    const until = g.entry(key)!.until;
+    expect(until).toBe(8_640_000_000_000_000);
+    expect(() => new Date(until).toISOString()).not.toThrow();
   });
 });

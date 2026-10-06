@@ -339,6 +339,88 @@ contract ExactlyRepayAndPreFundRegressionsTest is Test {
         _preFundRepay(data, total - total / 2);
         assertLe(_fixedDebt(maturity), 1, "both halves retire the face (floor rounding may leave a wei)");
     }
+
+    // ──────────────── review 2026-10-06 task 12: the pull fixed repay's twin fixes ────────────────
+
+    function _pullGrant(uint256 amount) internal {
+        deal(USDC, maker, amount);
+        vm.startPrank(maker);
+        IERC20(USDC).approve(address(permit3), type(uint256).max);
+        permit3.approveToken(address(repayModule), USDC, type(uint160).max, 0);
+        vm.stopPrank();
+    }
+
+    function _pullFixedData(uint256 maturity, uint256 maxAssets, uint256 total) internal pure returns (bytes memory) {
+        return abi.encode(MARKET_USDC, USDC, maturity, maxAssets, uint256(DustHandler.DustAction.SweepToUser), total);
+    }
+
+    /// @notice An EMPTY fixed borrow is skipped, not reverted: Exactly divides by
+    ///         `principal + fee` in `FixedLib.scaleProportionally`, so once the debt is
+    ///         closed (here: repaid by the maker directly) every later slice of the
+    ///         order used to be unfillable. Nothing is pulled.
+    function test_review_1006_pullFixedRepay_emptyPosition_skips() public {
+        uint256 maturity = _nextMaturity();
+        uint256 owed = _seedDebt(maturity, DEBT);
+        _pullGrant(owed * 2);
+        bytes memory data = _pullFixedData(maturity, owed, owed);
+
+        // The venue itself refuses the empty position — what the module used to reach.
+        vm.startPrank(maker);
+        IERC20(USDC).approve(MARKET_USDC, owed);
+        IExactlyMarket(MARKET_USDC).repayAtMaturity(maturity, owed, owed, maker);
+        IERC20(USDC).approve(MARKET_USDC, 0);
+        vm.stopPrank();
+        assertEq(_fixedDebt(maturity), 0, "precondition: closed");
+        vm.prank(maker);
+        vm.expectRevert();
+        IExactlyMarket(MARKET_USDC).repayAtMaturity(maturity, owed, owed, maker);
+
+        uint256 wallet = IERC20(USDC).balanceOf(maker);
+        vm.prank(settlement);
+        repayModule.makeOnBehalf(maker, owed, data);
+        assertEq(IERC20(USDC).balanceOf(maker), wallet, "nothing pulled");
+        assertEq(IERC20(USDC).balanceOf(address(repayModule)), 0, "module holds nothing");
+    }
+
+    /// @notice A DUST slice whose scaled ceiling floors to 0 is skipped, not sent to
+    ///         the venue as `maxAssets = 0` (`Disagreement` for any non-zero face): a
+    ///         filler-chosen slice size could otherwise wedge the order's tail. The
+    ///         next real slice still repays.
+    function test_review_1006_pullFixedRepay_dustSlice_skips() public {
+        uint256 maturity = _nextMaturity();
+        uint256 owed = _seedDebt(maturity, DEBT);
+        _pullGrant(owed * 2);
+        // A ceiling one-millionth of the total: any slice under 1e6 wei of face
+        // scales it to 0.
+        uint256 total = owed;
+        uint256 maxAssets = owed / 1e6;
+        bytes memory data = _pullFixedData(maturity, maxAssets, total);
+
+        uint256 wallet = IERC20(USDC).balanceOf(maker);
+        uint256 debt = _fixedDebt(maturity);
+        vm.prank(settlement);
+        repayModule.makeOnBehalf(maker, 1, data); // 1 · maxAssets / total == 0
+        assertEq(IERC20(USDC).balanceOf(maker), wallet, "dust slice pulls nothing");
+        assertEq(_fixedDebt(maturity), debt, "and retires nothing");
+
+        // A properly signed order's next slice still goes through.
+        bytes memory full = _pullFixedData(maturity, owed, owed);
+        vm.prank(settlement);
+        repayModule.makeOnBehalf(maker, owed / 2, full);
+        assertLt(_fixedDebt(maturity), debt, "a real slice repays");
+    }
+
+    /// @notice A SIGNED zero ceiling stays a revert (it always was — `Disagreement` on
+    ///         a live position), now named, so the dust skip can never turn it into a
+    ///         silent no-op.
+    function test_review_1006_pullFixedRepay_signedZeroCeiling_reverts() public {
+        uint256 maturity = _nextMaturity();
+        uint256 owed = _seedDebt(maturity, DEBT);
+        _pullGrant(owed);
+        vm.prank(settlement);
+        vm.expectRevert(ExactlyRepayModule.ZeroMaxAssets.selector);
+        repayModule.makeOnBehalf(maker, owed, _pullFixedData(maturity, 0, owed));
+    }
 }
 
 // ═══════════════════ X-STATIC-1.v1: no standing grant after a FoT repay ═══════════════════
@@ -396,6 +478,13 @@ contract HoldingsPullMarket {
         uint256 bal = FoTToken(token).balanceOf(msg.sender);
         FoTToken(token).transferFrom(msg.sender, address(this), bal);
         return (bal, bal);
+    }
+
+    /// @dev A live (non-empty) fixed borrow: {ExactlyRepayModule} skips an EMPTY
+    ///      position instead of calling the venue (task 12, 2026-10-06), so the mock
+    ///      must report one for the venue call under test to be reached.
+    function fixedBorrowPositions(uint256, address) external pure returns (uint256, uint256) {
+        return (1, 0);
     }
 
     function repayAtMaturity(uint256, uint256, uint256, address) external returns (uint256) {

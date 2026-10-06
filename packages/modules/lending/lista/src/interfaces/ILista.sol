@@ -104,6 +104,19 @@ interface IListaSmartProvider {
         address onBehalf,
         address receiver
     ) external;
+
+    /// @notice The provider's two-coin StableSwap pool — the authority on coin order
+    ///         (`dex().coins(i)`). Public state variable of the deployed
+    ///         `SmartProvider` (verified on BSC against 0xC3be…24dE → dex 0x3DcE…6131,
+    ///         `coins(0)` = slisBNB, `coins(1)` = the native 0xEeee… sentinel).
+    function dex() external view returns (address);
+}
+
+/// @notice The SmartProvider's StableSwap pool — only the coin roster is read.
+interface IListaStableSwap {
+    /// @notice Pool coin `i`; reverts out of range. The native coin reads as the
+    ///         0xEeee… sentinel.
+    function coins(uint256 i) external view returns (address);
 }
 
 /// @notice The Lista fixed-term `LendingBroker` — the debt-side gateway.

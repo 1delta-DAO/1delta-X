@@ -117,7 +117,7 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
     ///      fill would.
     function bump(
         bytes32, /*orderHash*/
-        address, /*maker*/
+        address, /*maker — read from calldata in {_makerLegBand}, see there*/
         address, /*filler*/
         uint256, /*prevFilled*/
         uint256 total,
@@ -130,15 +130,15 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
         // BUY (== 1) its INPUT band. Reject the mismatch loudly — otherwise `_band`
         // would read the FIXED side as the band and price the order at `start`
         // forever, silently ignoring the peg this module exists to track.
-        bool isBuy = (orderTiming >> 101) & 1 == 1;
-        if (PRICE_OUTPUT == isBuy) revert SideMismatch();
+        if (PRICE_OUTPUT == ((orderTiming >> 101) & 1 == 1)) revert SideMismatch();
+
+        (uint256 anchor, uint256 rise, uint256 start, uint256 end) = _band(total, legsIn, legsOut);
 
         // Sequencer first: a down (or just-restarted) L2 sequencer leaves the feed's
         // last answer looking fresh while the market has moved (PRICE-8).
         int256 answer = ChainlinkRead.readL2(FEED, MAX_STALENESS, SEQUENCER_UPTIME_FEED, GRACE_PERIOD);
         if (answer < MIN_ANSWER || answer > MAX_ANSWER) revert ImplausiblePrice();
 
-        (uint256 anchor, uint256 rise, uint256 start, uint256 end) = _band(total, legsIn, legsOut);
         uint256 fair = (anchor * uint256(answer) * NUM) / DEN;
         // A fair amount that truncates to zero (an over-scaled DEN, a dust anchor)
         // would silently price every SELL at its floor: refuse it instead.
@@ -213,27 +213,82 @@ contract ChainlinkPeggedPriceModule is IPriceModule {
     ///  with time. The oracle cannot price a different token, so that coupling is the
     ///  maker's signed choice: sign the fee leg FIXED if it is not wanted.
     ///  Cross-reference: `docs/reference-audits.md` §C13, finding F8.
+    ///
+    ///  ⚠ THE OUTPUT LEG IS THE MAKER'S, NOT `legsOut[0]` BY INDEX (review
+    ///  2026-10-05 S3, applied here 2026-10-06). The core's own rules for these legs
+    ///  are recipient-aware ({Pricing.outputAt} lifts only maker-addressed legs,
+    ///  {OrderGates._overrideHasCarrier} walks recipients), and an in-kind sourcing
+    ///  fee is legitimately signed as the FIRST output leg
+    ///  (`legsOut = [tokenIn → originator, tokenOut → maker]`, docs/originator-fees.md).
+    ///  Read by index, that fee leg became the "band" (SELL: a fixed leg, `end == 0`
+    ///  → bump 0 → the maker's leg clears at its ambition on every fill, the peg
+    ///  silently gone) or the "anchor" (BUY: a fee-sized anchor → `fair` far below
+    ///  `start` → bump 0 → the maker pays `start` forever). Maker-favourable in
+    ///  direction, but the order never tracks the oracle it was signed to track. So
+    ///  the priced / anchor leg is the FIRST output leg addressed to the maker
+    ///  (`recipient == 0` or `== maker`); an order with none has nothing to peg
+    ///  ({NoBand}). Pinned in `test/ReviewPeggedFeeFirst.t.sol`.
     function _band(uint256 total, bytes calldata legsIn, bytes calldata legsOut)
         private
         view
         returns (uint256 anchor, uint256 rise, uint256 start, uint256 end)
     {
         if (PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE) == 0) revert NoBand();
-        if (PackedArrays.validateFixed(legsOut, PackedArrays.LEG_OUT_STRIDE) == 0) revert NoBand();
+        // Each side is two two-word helpers: one decoded leg held beside the four
+        // return values is already the legacy profile's whole stack.
         if (PRICE_OUTPUT) {
-            (, uint256 s0, uint256 e0) = PackedArrays.legIn(legsIn, 0);
-            if (Proportional.isProportional(s0)) {
-                // `e0` is the proportional CAP here, not a decay endpoint: the core
-                // charges exactly the resolved amount (`total`), never `inTick`.
-                anchor = total;
-            } else {
-                anchor = s0;
-                if (e0 > s0) rise = e0 - s0;
-            }
-            (, start, end,) = PackedArrays.legOut(legsOut, 0);
+            (anchor, rise) = _sellAnchor(total, legsIn);
+            (start, end) = _makerLegBand(legsOut);
         } else {
-            (, anchor,,) = PackedArrays.legOut(legsOut, 0);
+            (anchor,) = _makerLegBand(legsOut);
             (, start, end) = PackedArrays.legIn(legsIn, 0);
         }
+    }
+
+    /// @dev A SELL's anchor: `legsIn[0].start` and how far it rises — or `total` for
+    ///      a {Proportional} marker (see the ⚠ on {_band}).
+    function _sellAnchor(uint256 total, bytes calldata legsIn) private pure returns (uint256 anchor, uint256 rise) {
+        (, uint256 s0, uint256 e0) = PackedArrays.legIn(legsIn, 0);
+        // `e0` is the proportional CAP here, not a decay endpoint: the core charges
+        // exactly the resolved amount (`total`), never `inTick`.
+        if (Proportional.isProportional(s0)) return (total, 0);
+        anchor = s0;
+        if (e0 > s0) rise = e0 - s0;
+    }
+
+    /// @dev `(start, end)` of the first output leg the MAKER receives — see the ⚠ on
+    ///      {_band}. Reverts {NoBand} when no output leg is the maker's.
+    ///
+    ///      THE MAKER IS READ FROM CALLDATA, NOT PASSED. {bump} has nine parameters
+    ///      (thirteen stack words with the three calldata slices), and reaching its
+    ///      second one from under them to push a sixth argument is one DUP past the
+    ///      legacy profile this package compiles with — every arrangement of locals
+    ///      measured. `bump` is this contract's only external function and the lens
+    ///      STATICCALLs it with the same ABI, so word 2 of `msg.data` IS `maker`;
+    ///      the selector check keeps that true if a second entry is ever added.
+    function _makerLegBand(bytes calldata legsOut) private view returns (uint256, uint256) {
+        if (msg.sig != this.bump.selector) revert NoBand();
+        address maker;
+        /// @solidity memory-safe-assembly
+        assembly {
+            maker := shr(96, shl(96, calldataload(0x24)))
+        }
+        uint256 n = PackedArrays.validateFixed(legsOut, PackedArrays.LEG_OUT_STRIDE);
+        for (uint256 j; j < n; ++j) {
+            if (_isMakerLeg(maker, legsOut, j)) return _legBand(legsOut, j);
+        }
+        revert NoBand();
+    }
+
+    /// @dev Three one-liners rather than one tuple assignment: the four-value
+    ///      `legOut` decode beside a loop index and two named returns is what tipped
+    ///      the legacy profile's stack.
+    function _isMakerLeg(address maker, bytes calldata legsOut, uint256 j) private pure returns (bool) {
+        (,,, address to) = PackedArrays.legOut(legsOut, j);
+        return to == address(0) || to == maker;
+    }
+
+    function _legBand(bytes calldata legsOut, uint256 j) private pure returns (uint256 s, uint256 e) {
+        (, s, e,) = PackedArrays.legOut(legsOut, j);
     }
 }

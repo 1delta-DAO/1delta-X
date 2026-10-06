@@ -236,7 +236,12 @@ contract AggregatorItemFillTest is AggregatorFillSolverTest {
         o.maker = attacker;
         bytes memory sig = _signWith(o, pk);
         RoutePlan memory plan = _planFor(1e18, address(aggSolver), 0, NO_PATCH);
+        // A stranger cannot drive the instance at all (gated-only since 2026-10)…
         vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, attacker));
+        aggSolver.executeItemFill(o, sig, 1e18, plan, "", 0);
+        // …and an OPERATOR submitting the attacker's hostile order still cannot
+        // pay it out of the parked balance: the delta bound holds.
         vm.expectRevert();
         aggSolver.executeItemFill(o, sig, 1e18, plan, "", 0);
         assertEq(tB.balanceOf(address(aggSolver)), 50e18, "residue untouched");
@@ -249,7 +254,7 @@ contract AggregatorItemFillTest is AggregatorFillSolverTest {
         address[] memory ops = new address[](1);
         ops[0] = address(this);
         AggregatorFillSolver g =
-            new AggregatorFillSolver(address(settlement), _routers(address(router)), ops, _noSplit(), false, _none());
+            new AggregatorFillSolver(address(settlement), ops, _noSplit());
         Order memory o = _order(7);
         o.timing |= uint256(1) << 104;
         o.exclusiveFiller = address(g);

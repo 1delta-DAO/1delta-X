@@ -29,7 +29,7 @@ side of a brokered market runs through a **`LendingBroker`**. Depends on `@core`
 | `ListaNativeSupplyCollateralModule` | MAKE | `abi.encode(provider, MarketParams[, permit])` — pull wrapped native, unwrap, payable supply |
 | `ListaNativeCollateralTakerModule` | TAKE | `abi.encode(provider, moolah, MarketParams[, BalanceMode])` — provider pays native, wrapped back → receiver |
 | `ListaSmartSupplyCollateralModule` | MAKE | `abi.encode(provider, coin, coinIndex, minLpRateE18, MarketParams[, permit])` — one-sided coin zap into LP collateral |
-| `ListaSmartTakerModule` | TAKE | `abi.encode(provider, moolah, coinIndex, minOutRateE18, MarketParams)` — burn LP units, one coin → receiver |
+| `ListaSmartTakerModule` | TAKE | `abi.encode(provider, moolah, coinIndex, minOutRateE18, MarketParams)` — burn LP units, one coin → receiver. `item.amount` is LP, the leg is coin: sign `minOutRateE18 · amount / 1e18 ≥ legsIn[0].start` (`takeFloored`, checked by `SettlementLens.validateOrder`); `proceedsAsset` reads the coin via `provider.dex().coins(i)` |
 | `ListaPreFundModule` | MAKE (preFund) | `abi.encode(forDesc, moolah, MarketParams)` — supply the core-delivered leg from the module's own balance |
 
 ### The two files, split by venue

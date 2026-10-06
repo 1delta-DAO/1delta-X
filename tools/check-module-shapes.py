@@ -14,7 +14,9 @@ enforced nowhere — which is the §F23 failure mode this file exists to avoid.
   8. A module never pays out a RAW self-balance — every `balanceOf(address(this))`
      is a floor or a delta.
   9. A `Full`/whole-item leg that forwards `min(received, amount)` carries the
-     delivered bound, and every Exact branch on a CLAMPING venue does too.
+     delivered bound, and every Exact branch on a CLAMPING venue does too. PER `op`
+     BRANCH: every take branch that forwards a measured delta carries the bound or
+     a venue-exactness allow-list row (review 2026-10-06 M2).
  10. A SETTLE module never pulls FROM the filler (X-SPEC-1).
  11. A SETTLE module that moves an UNSCALED amount decoded from `data` is
      whole-fill only (X-ARITH-3).
@@ -29,6 +31,8 @@ enforced nowhere — which is the §F23 failure mode this file exists to avoid.
      the spender is a pinned immutable named in an allow-list (L-CENSUS-7a).
  16. A token whose balance a TAKE seam measures is derived from the venue, checked
      against it, pinned, or keys the venue call itself (L-CENSUS-7b).
+ 17. A taker module whose `amount` is not in the proceeds token's unit implements
+     `IProceedsAsset` AND names the conversion in its header (review 2026-10-06 M3).
 
 All rules run over COMMENT-STRIPPED source (L-CENSUS-7): a pin, guard or clear that
 exists only in a comment (`// if (msg.sender != settlement) revert …`) used to
@@ -404,6 +408,183 @@ CLAMPING_VENUE_MODULES = {
 }
 DELIVERY_BOUND = re.compile(r"FullFillGuard\.requireDelivered\s*\(|\bWouldBorrow\b")
 
+# ── (9) per `op` branch (review 2026-10-06 M2) ────────────────────────────────
+#
+# Rule 9 above searches the WHOLE reachable body of `takeOnBehalf`, so ONE bounded
+# branch satisfied it for every branch: `VenusTakerModule.Op.Borrow` measured its
+# delta and forwarded `min(received, amount)` with no `requireDelivered`, while both
+# withdraw branches carried the bound — and the module passed. A short borrow was
+# then forwarded short and {Core._payInputsToSolver} billed the gap to the MAKER'S
+# WALLET while the maker kept the full debt.
+#
+# So the comment-stripped body is split on its `if (op == …) { } else if (op == …)
+# { } else { }` ladder, and each branch is checked over what IT reaches (the other
+# branches' blocks are blanked before the call closure is recomputed, so a helper
+# only a sibling calls does not lend this branch its bound). A function with no
+# ladder is one branch, labelled `takeOnBehalf`.
+#
+# A branch is held to the bound when it MEASURES A DELTA AND FORWARDS IT: a
+# `balanceOf(address(this))` of a token that the branch then transfers to
+# `receiver`, or a `min(received, amount)` forward of any measured amount. A branch the venue pays `receiver` directly is not measured here —
+# the core measures that arrival itself — and a self-balance read that only floors
+# a value-IN leg (`_returnUnused`) is not a delivery. The bound is
+# `requireDelivered`, a `WouldBorrow` pre-check, or the same assertion hand-rolled
+# (`if (got < amount) revert …` — `RiverProceeds.settle`, Fluid's native path).
+#
+# COVERAGE LIMIT: the split is on the `op` ladder only. A `BalanceMode` Full/Exact
+# fork INSIDE one op branch is still searched as a whole, so a bounded `Full` arm
+# vouches for its `Exact` sibling — that pairing is what CLAMPING_VENUE_MODULES
+# (above) exists for, and what an Exact arm on an exact-or-revert venue relies on.
+#
+# VENUE_EXACT_BRANCHES is the escape hatch: a branch whose venue call transfers
+# EXACTLY the requested amount or reverts, so the measured delta is defence in
+# depth and the cap cannot bite. A row is a claim about the venue's code, written
+# down with the reason — not a way to silence the check. Every row assumes the
+# deployment policy that fee-on-transfer / rebasing borrow reserves are out of
+# scope (module-security-model, assumption A1); a venue that only fails that way
+# on such a reserve is still exact here. Venus is deliberately NOT a row: its BSC
+# markets are where A1 is weakest, so its borrow branch carries the bound (M2).
+TAKE_BRANCH_BOUND = re.compile(
+    r"FullFillGuard\.requireDelivered\s*\(|\bWouldBorrow\b"
+    r"|\bif\s*\([^;{}]*<\s*amount\s*\)\s*revert\b"
+)
+OP_LADDER_HEAD = re.compile(r"\bif\s*\(\s*_?op\s*==")
+VENUE_EXACT_BRANCHES = {
+    ("AaveV2BorrowModule", "takeOnBehalf"): (
+        "Aave v2 LendingPool.borrow: validateBorrow reverts on liquidity/health/mode, then "
+        "aToken.transferUnderlyingTo(msg.sender, amount) moves exactly `amount` — no clamp"
+    ),
+    ("AaveV3CreditModule", "Borrow"): (
+        "_borrowLeg -> Aave v3 Pool.borrow: borrow cap / liquidity / health revert in "
+        "ValidationLogic, then transferUnderlyingTo(user, amount) moves exactly `amount`"
+    ),
+    ("AaveV3CreditModule", "Leverage"): (
+        "same _borrowLeg as Borrow (the supply leg before it is value-IN): Aave v3 "
+        "Pool.borrow is exact-or-revert"
+    ),
+    ("AaveV4BorrowModule", "takeOnBehalf"): (
+        "Aave v4 TakerPositionManager.borrowOnBehalfOf -> Spoke.borrow -> Hub.draw "
+        "transfers exactly `amount` or reverts (draw cap / liquidity / health); unlike "
+        "Spoke.withdraw (a CLAMPING_VENUE_MODULES row) a borrow is never clamped"
+    ),
+}
+
+
+def _block_end(text: str, open_brace: int) -> int:
+    depth = 0
+    for k in range(open_brace, len(text)):
+        if text[k] == "{":
+            depth += 1
+        elif text[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return k + 1
+    return len(text)
+
+
+def op_ladder(text: str) -> list:
+    """The first `if (op == …) {…} else if (op == …) {…} else {…}` ladder in `text`,
+    as [(label, block_start, block_end)]. Label = the `Op.X` names in the condition
+    joined by `|` (`"else"` for a trailing else block). An `else revert …;` tail has
+    no block and adds no branch — it is the rule-7 reject."""
+    for m in OP_LADDER_HEAD.finditer(text):
+        if text[: m.start()].rstrip().endswith("else"):
+            continue  # a middle rung; the head is earlier
+        blocks = []
+        i = m.start()
+        while True:
+            rung = re.compile(r"\s*(?:else\s+)?if\s*\(" if blocks else r"if\s*\(").match(text, i)
+            if not rung:
+                break
+            paren = rung.end() - 1
+            cond = arg_span(text, paren)
+            brace = re.compile(r"\s*\{").match(text, paren + len(cond) + 2)
+            if not brace or not re.search(r"\b_?op\s*==", cond):
+                break
+            end = _block_end(text, brace.end() - 1)
+            label = "|".join(re.findall(r"\bOp\.(\w+)", cond)) or cond.strip()
+            blocks.append((label, brace.end() - 1, end))
+            i = end
+            if re.compile(r"\s*else\s+if\b").match(text, i):
+                continue
+            tail = re.compile(r"\s*else\s*\{").match(text, i)
+            if tail:
+                blocks.append(("else", tail.end() - 1, _block_end(text, tail.end() - 1)))
+            break
+        if blocks:
+            return blocks
+    return []
+
+
+def take_branches(fns: dict, entry: str) -> list:
+    """[(label, reach)] — `entry`'s reachable text once per `op` branch (see rule 9
+    per-branch above), or one `(entry, reach)` when no ladder is reached."""
+    closure = _closure(fns, entry)
+    for f in closure:
+        ladder = op_ladder(fns[f])
+        if not ladder:
+            continue
+        out = []
+        for idx, (label, _a, _b) in enumerate(ladder):
+            text = fns[f]
+            for jdx, (_l, a, b) in enumerate(ladder):
+                if jdx != idx:
+                    text = text[:a] + " " * (b - a) + text[b:]
+            fx = dict(fns)
+            fx[f] = text
+            out.append((label, "\n".join(fx[n] for n in _closure(fx, entry))))
+        return out
+    return [(entry, "\n".join(fns[n] for n in closure))] if closure else []
+
+
+def forwards_measured_delta(reach: str) -> bool:
+    """A `balanceOf(address(this))` token that the same text transfers to `receiver`,
+    or any `min(received, amount)` forward (`CAP_FORWARD` — also the native paths,
+    which measure `address(this).balance` and forward the wrapped delta)."""
+    if CAP_FORWARD.search(reach):
+        return True
+    for a, b in SELF_BAL_TOKEN.findall(reach):
+        v = re.escape(a or b)
+        if re.search(r"safeTransfer\s*\(\s*" + v + r"\s*,\s*receiver\b|(?<![\w.])" + v + r"\.safeTransfer\s*\(\s*receiver\b", reach):
+            return True
+    return False
+
+
+# ── (17) a unit-converting taker declares its proceeds asset (review 2026-10-06 M3) ──
+#
+# The core prices `legsIn[0]` in the PROCEEDS token and measures what lands; the
+# module is handed `item.amount`. When the two are in different units — a SmartLP
+# withdraw burns `amount` LP and pays ONE pool coin — nothing on-chain ties the
+# maker's signed conversion floor to the leg's `owed`, and a floor below it has the
+# shortfall pulled from the maker's wallet. The lens can check that pairing only if
+# it can see the conversion: the module must implement {IProceedsAsset} (so the
+# stranded-proceeds preflight runs) AND its header — the encoder spec — must name
+# both units, so whoever signs the floor knows it is a rate between them.
+#
+# Detection is syntactic, and stated as a heuristic: a venue call in the take seam
+# that is handed `amount` scaled by a rate (`amount * minOutRate / 1e18`) — a floor
+# in a different unit than the `amount` it scales. Every such module must have a
+# row below naming the two units; a row is then held to the two obligations whether
+# or not the heuristic still fires. (A conversion the heuristic cannot see — a floor
+# computed into a local first — is caught only by adding the row; that is the
+# coverage limit.)
+RATE_SCALED_AMOUNT = re.compile(r"\bamount\s*\*\s*\w*[rR]ate\w*\s*/")
+UNIT_CONVERTING_TAKERS = {
+    # (item `amount` unit, proceeds unit, what converts) — both unit words must
+    # appear in the contract's header.
+    "ListaSmartTakerModule": ("LP", "coin", "withdrawCollateralOneCoin burns `amount` SmartLP units, pays one pool coin"),
+}
+PROCEEDS_FN = re.compile(r"\bfunction\s+proceedsAsset\s*\(")
+
+
+def rate_scaled_venue_call(reach: str) -> bool:
+    for m in re.finditer(r"\.\s*(\w+)\s*\(", reach):
+        if m.group(1) in NON_VENUE_CALLS:
+            continue
+        if RATE_SCALED_AMOUNT.search(arg_span(reach, m.end() - 1)):
+            return True
+    return False
+
 # ── (10) a SETTLE module never pulls FROM the filler (X-SPEC-1) ───────────────
 #
 # `ISettlementModule.settle(maker, filler, amount, data)` hands the module the
@@ -719,6 +900,8 @@ def main() -> int:
     bad_ops = []
     raw_pay = []
     unbounded_full = []
+    unbounded_branches = []
+    unit_split = []
     header_drift = []
     filler_pulls = []
     unscaled_settle = []
@@ -915,6 +1098,30 @@ def main() -> int:
                     unbounded_full.append(
                         (path.relative_to(ROOT), name, "takeOnBehalf on a clamping venue: " + CLAMPING_VENUE_MODULES[name])
                     )
+            # 9, per `op` branch (review 2026-10-06 M2): one bounded branch no longer
+            # vouches for its siblings.
+            if TAKE.search(body):
+                branch_fns = dict(file_fns)
+                branch_fns.update(all_functions(body))
+                for label, reach in take_branches(branch_fns, "takeOnBehalf"):
+                    if not forwards_measured_delta(reach) or TAKE_BRANCH_BOUND.search(reach):
+                        continue
+                    if (name, label) in VENUE_EXACT_BRANCHES:
+                        continue
+                    unbounded_branches.append((path.relative_to(ROOT), name, label))
+
+            # ── (17) a unit-converting taker declares its proceeds asset ──
+            if TAKE.search(body):
+                detected = rate_scaled_venue_call(reachable_body(body, "takeOnBehalf"))
+                row = UNIT_CONVERTING_TAKERS.get(name)
+                if detected and row is None:
+                    unit_split.append((path.relative_to(ROOT), name, "venue call takes a rate-scaled `amount` floor; add a UNIT_CONVERTING_TAKERS row naming both units"))
+                elif row is not None:
+                    if "IProceedsAsset" not in inherits or not PROCEEDS_FN.search(body):
+                        unit_split.append((path.relative_to(ROOT), name, "does not implement IProceedsAsset.proceedsAsset (" + row[2] + ")"))
+                    absent = [u for u in row[:2] if not re.search(r"(?<![A-Za-z])" + re.escape(u) + r"(?![A-Za-z])", header, re.IGNORECASE)]
+                    if absent:
+                        unit_split.append((path.relative_to(ROOT), name, "header does not name the conversion: missing unit(s) " + ", ".join(absent)))
 
             # ── (10) / (11) SETTLE modules ──
             sm = SETTLE_SIG.search(body)
@@ -1110,6 +1317,36 @@ def main() -> int:
             "without it a position short of the total (partial liquidation, a prior fill)\n"
             "delivers less and `Core._payInputsToSolver` bills the shortfall to the MAKER'S\n"
             "WALLET. Add the bound right after `received` is measured.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if unbounded_branches:
+        print(f"{len(unbounded_branches)} take branch(es) forward a measured delta without the delivered bound:\n", file=sys.stderr)
+        for rel, name, label in unbounded_branches:
+            print(f"  {rel}: contract {name} (op branch `{label}`)", file=sys.stderr)
+        print(
+            "\nRule 9 per `op` branch (review 2026-10-06 M2). This branch measures what the\n"
+            "venue delivered and forwards `min(received, amount)` — so a short delivery is\n"
+            "forwarded short and {Core._payInputsToSolver} bills the gap to the MAKER'S\n"
+            "WALLET. A bounded SIBLING branch does not cover it. Add\n"
+            "`FullFillGuard.requireDelivered(received, amount)` after the measurement, or —\n"
+            "only if the venue call is exact-or-revert — add (contract, branch) to\n"
+            "VENUE_EXACT_BRANCHES with the venue code that makes it so.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if unit_split:
+        print(f"{len(unit_split)} unit-converting taker module(s) are not declared:\n", file=sys.stderr)
+        for rel, name, why in unit_split:
+            print(f"  {rel}: contract {name}\n      {why}", file=sys.stderr)
+        print(
+            "\nRule 17 (review 2026-10-06 M3). The core prices the leg in the PROCEEDS token;\n"
+            "this module's `amount` is in another unit. Implement `IProceedsAsset` so the\n"
+            "lens preflight can see the proceeds token, and name both units (the row in\n"
+            "UNIT_CONVERTING_TAKERS) in the contract header, so the maker signing the\n"
+            "conversion floor knows it must cover the leg's `owed`.",
             file=sys.stderr,
         )
         return 1

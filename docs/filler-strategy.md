@@ -71,9 +71,9 @@ Measured on the *smallest* contested plan — two item-free orders, no validator
 
 | race loss | gas |
 | --- | --- |
-| unguarded (`matchSettle` direct) | 34,679 |
-| guarded | **3,641** |
-| saved | 31,038 (**−89%**) |
+| unguarded (`matchSettle` direct) | 23,409 |
+| guarded | **3,743** |
+| saved | 19,666 (**−84%**) |
 
 That is the floor of the benefit. Guarded cost grows by one `SLOAD` per order;
 unguarded cost grows with plan size, item count, and validator work — an order

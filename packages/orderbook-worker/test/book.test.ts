@@ -68,7 +68,7 @@ describe("POST /orders — admission", () => {
     const soon = await signed(alice, { expiry: BigInt(now() + 5) });
     const r2 = await call(book, "POST", "/orders", soon.body);
     expect(r2.status).toBe(422);
-    expect(r2.body.error).toMatch(/min 15s/);
+    expect(r2.body.error).toMatch(/min 120s/);
     expect(world.lensCalls).toBe(calls);
 
     // Layer 1: a garbage 65-byte signature does not recover.
@@ -256,9 +256,9 @@ describe("the maintenance alarm", () => {
 
   it("evicts expired orders into tombstones", async () => {
     const book = freshBook();
-    const o = await signed(alice, { expiry: BigInt(now() + 60) });
+    const o = await signed(alice, { expiry: BigInt(now() + 150) }); // MIN_TTL_SECONDS = 120
     expect((await call(book, "POST", "/orders", o.body)).status).toBe(202);
-    world.offset = 120;
+    world.offset = 200;
     await runDurableObjectAlarm(book);
     expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({ live: false, status: "Expired", reason: "expired" });
     expect((await call(book, "GET", "/orders")).body.total).toBe(0);
@@ -281,7 +281,7 @@ describe("the maintenance alarm", () => {
     const book = freshBook();
     const o = await signed(alice);
     await call(book, "POST", "/orders", o.body);
-    world.offset = 120; // past REVALIDATE_SECONDS
+    world.offset = 360; // past REVALIDATE_SECONDS (300)
     world.lensDown = true;
     await runDurableObjectAlarm(book);
     expect((await call(book, "GET", `/orders/${o.hash}/status`)).body.live).toBe(true);

@@ -5,6 +5,7 @@ import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
 import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
+import {ITakeFloor} from "@lib/interfaces/ITakeFloor.sol";
 
 import {Order, ItemOp, OrderSide, FillCtx} from "@core/settlement/Structs.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";
@@ -938,12 +939,17 @@ contract SettlementLensChecks {
     ///      recipient routes the proceeds away from the settler deliberately (the
     ///      EXECUTOR is refused outright). See {IProceedsAsset} and
     ///      `docs/reference-audits.md` §F22.
+    ///
+    ///      Same gate, second question ({ITakeFloor}, review 2026-10-06 tasks 11/12):
+    ///      a venue that under-delivers BY DESIGN bills the shortfall to the maker's
+    ///      wallet, and only the module can say whether the floor signed in its blob
+    ///      bounds that. It answers for `legsIn[0]` at full fill; silence is skipped.
     function _proceedsItemAt(Order calldata order, uint256 cursor)
         private
         view
         returns (bool, string memory, uint256)
     {
-        (uint256 op, address module,, address to, bytes calldata data, uint256 nxt) =
+        (uint256 op, address module, uint256 amount, address to, bytes calldata data, uint256 nxt) =
             PackedArrays.itemAt(order.items, cursor);
         // An item paid to the EXECUTOR is taken by the next callback solver (single
         // path) or the matcher's own CALL (netted path) — audit 2026-09-30
@@ -957,7 +963,28 @@ contract SettlementLensChecks {
         if (got != address(0) && !_isInputLegToken(order.legsIn, got)) {
             return (false, "item delivers a token no input leg can consume", nxt);
         }
+        if (!_takeFloored(order.legsIn, module, amount, data)) {
+            return (false, "item proceeds floor does not bound the wallet draw on its input leg", nxt);
+        }
         return (true, "", nxt);
+    }
+
+    /// @dev `module.takeFloored(amount, legsIn[0].token, legsIn[0].start, data)` —
+    ///      best-effort, same posture as {_proceedsAsset}: a failed call or a short
+    ///      return is "unknown" and passes; only an explicit zero word fails. No input
+    ///      leg means nothing is measured, so nothing can be billed — passes; so does a
+    ///      {Proportional} leg 0, whose `start` is a marker, not an amount.
+    function _takeFloored(bytes calldata legsIn, address module, uint256 amount, bytes calldata data)
+        private
+        view
+        returns (bool)
+    {
+        if (PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE) == 0) return true;
+        (address token, uint256 start,) = PackedArrays.legIn(legsIn, 0);
+        if (Proportional.isProportional(start)) return true;
+        (bool ok, bytes memory ret) =
+            module.staticcall(abi.encodeCall(ITakeFloor.takeFloored, (amount, token, start, data)));
+        return !ok || ret.length < 32 || abi.decode(ret, (uint256)) != 0;
     }
 
     /// @dev `module.proceedsAsset(data)` — best-effort, same posture as
@@ -1028,6 +1055,10 @@ contract SettlementLensChecks {
     ///             the floor itself, so the comparison fails exactly when the fill
     ///             would (G-LENS_PARITY-3).
     ///
+    ///         `available` for a PULL leg reference counts the fill's own delivery of
+    ///         that leg to the maker, which lands before the module pulls it — see
+    ///         {_liftPullLegRef} (review 2026-10-06, task 13).
+    ///
     ///         ⚠ `available >= required` IS NOT A GUARANTEE, for two deliberate
     ///         reasons. A SELL leg is priced per fill with a `ceil`, so N partial
     ///         fills can pull a few units MORE than the leg total — size the module's
@@ -1096,9 +1127,54 @@ contract SettlementLensChecks {
         bool pullMake = op == uint256(ItemOp.MAKE)
             && (data.length < 32 || uint256(bytes32(data[0:32])) >> 253 != 5);
         out.required[k] = pullMake ? amount : _requiredFunding(order, outs, data);
+        if (!pullMake && out.available[k] < out.required[k]) _liftPullLegRef(order, outs, out, k, data);
         unchecked {
             return (n2, k + 1);
         }
+    }
+
+    /// @dev A PULL leg reference (descriptor bits `100`) funds from the very delivery
+    ///      the fill lands on the maker FIRST: {Core._deliverOutputs} pays `legsOut[j]`
+    ///      to the maker before the items run, and only then does the module's
+    ///      `permit3.transferFrom(maker, module, …)` pull `outs[j]`. The module's
+    ///      {IFundingSource.fundingSource} reads the wallet as it is NOW, before that
+    ///      delivery, so `available` under-reported a fillable order — typically a
+    ///      maker who holds none of the asset yet — as unfunded (review 2026-10-06,
+    ///      task 13 item 1).
+    ///
+    ///      The lift re-applies the other two caps a Permit3 pull has, since the
+    ///      module's figure is already `min(book, balance, approval)` and only the
+    ///      balance term moves: `min(available + outs[j], book (expiry-aware), the
+    ///      maker's ERC-20 approval to Permit3)`, and it only ever RAISES `available`.
+    ///      Gated to the shape the settler funds that way: the leg is the maker's
+    ///      (`0` or `maker`) and is denominated in the asset the module names. The
+    ///      residual under-report: a module that grants the Permit3 approval at fill
+    ///      time ({PermitHelper} tail) with no standing approval is not lifted —
+    ///      fail-closed, as before. Its own frame for the legacy stack limit.
+    function _liftPullLegRef(
+        Order calldata order,
+        uint256[] memory outs,
+        SettlementLens.ItemFunding memory out,
+        uint256 k,
+        bytes calldata data
+    ) private view {
+        if (data.length < 32) return;
+        uint256 desc = uint256(bytes32(data[0:32]));
+        if (desc >> 253 != 4) return; // leg reference, pull form (bit 253 clear)
+        uint256 j = desc & 0xffff;
+        if (j >= outs.length) return;
+        (address token,,, address r) = PackedArrays.legOut(order.legsOut, j);
+        if (token != out.assets[k] || (r != address(0) && r != order.maker)) return;
+        (uint160 book, uint48 exp) = PERMIT3.tokenAllowance(order.maker, out.modules[k], token);
+        if (exp != 0 && exp < block.timestamp) return;
+        // No overflow: only reached with `available < required == outs[j]`.
+        uint256 lifted = out.available[k] + outs[j];
+        if (lifted > book) lifted = book;
+        (bool ok, bytes memory ret) =
+            token.staticcall(abi.encodeWithSignature("allowance(address,address)", order.maker, address(PERMIT3)));
+        uint256 approved = ok && ret.length >= 32 ? abi.decode(ret, (uint256)) : 0;
+        if (lifted > approved) lifted = approved;
+        if (lifted > out.available[k]) out.available[k] = lifted;
     }
 
     /// @dev The full-fill delivery of every output leg for the DEAREST filler — see

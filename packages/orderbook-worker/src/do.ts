@@ -3,7 +3,7 @@ import { CancelVerifier, Verifier } from "@1delta-x/orderbook/pure";
 import { createPublicClient, http, type PublicClient } from "viem";
 
 import { viemChainReader } from "./chain";
-import { loadConfig, type Env, type WorkerConfig } from "./config";
+import { loadConfig, RPC_TIMEOUT_MS, type Env, type WorkerConfig } from "./config";
 import { json, OrderBookCore, type CoreDeps } from "./core";
 
 /** Header the entry worker sets with the client address it resolved. Only the entry worker can reach the DO. */
@@ -11,12 +11,18 @@ export const CLIENT_IP_HEADER = "x-ob-client-ip";
 
 export type DepsFactory = (cfg: WorkerConfig) => CoreDeps;
 
-/** Production deps: viem over `RPC_URL`, the library's Layer 1/2 and soft-cancel verifiers. */
+/**
+ * Production deps: viem over `RPC_URL_SECRET` / `RPC_URL`, the library's Layer 1/2 and
+ * soft-cancel verifiers. Every RPC call has an explicit 8 s timeout (one retry), and
+ * a lens re-check sweep is bounded in calls AND wall-clock time (`cfg.verifier`), so
+ * a hanging RPC cannot hold an alarm for minutes.
+ */
 export const defaultDeps: DepsFactory = (cfg) => {
   let client: PublicClient | undefined;
-  const getClient = (): PublicClient => (client ??= createPublicClient({ transport: http(cfg.chain.rpcUrl, { batch: false, retryCount: 1 }) }) as PublicClient);
+  const getClient = (): PublicClient =>
+    (client ??= createPublicClient({ transport: http(cfg.chain.rpcUrl, { batch: false, retryCount: 1, timeout: RPC_TIMEOUT_MS }) }) as PublicClient);
   return {
-    verifier: new Verifier(getClient(), cfg.chain),
+    verifier: new Verifier(getClient(), cfg.chain, { maxRecheckCalls: cfg.verifier.maxRecheckCalls, maxSweepMs: cfg.verifier.maxSweepMs }),
     cancelVerifier: new CancelVerifier(getClient, cfg.chain),
     chain: viemChainReader(getClient(), cfg.chain.settlement, cfg.ocoModules),
     now: () => Math.floor(Date.now() / 1000),

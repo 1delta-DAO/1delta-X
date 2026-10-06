@@ -167,7 +167,11 @@ export function OrderForm(props: OrderFormProps) {
       ]);
     }
     rows.push(["Minimum received", `${fmtAmt(quote.minReceived)} ${recvToken}`, "good"]);
-    rows.push(["Expires", mode === "market" ? "60 seconds" : mode === "twap" ? "on completion" : "24 hours", ""]);
+    rows.push([
+      "Expires",
+      mode === "market" ? "5 minutes (1 minute auction, then rests at the minimum)" : mode === "twap" ? "on completion" : "24 hours",
+      "",
+    ]);
   }
 
   const canSign = ready && !needsApproval && !signing && amount > 0 && !overBalance && !!quote && quote.totalIn > 0;

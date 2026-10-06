@@ -239,7 +239,8 @@ abstract contract Batch is Core {
     struct MatchCtx {
         address[] tokens; //      touched-token universe (deduped, derived on-chain)
         uint256[] beforeBal; //   per-token pre-context balance snapshot
-        uint256[] outstanding; // per-token output obligations NOT YET delivered
+        uint256[] outstanding; // per-token pool obligations NOT YET paid: undelivered
+        //                        outputs + input-leg over-credit ({_creditItemProceeds}, B-1)
         FillCtx[] fills; //       per-order resolved fill context
         uint256[][] outs; //      per-order per-OUTPUT-leg amount (computed at open)
         uint256[][] owed; //      per-order per-INPUT-leg amount  (computed at open)
@@ -792,7 +793,18 @@ abstract contract Batch is Core {
             if (gain != 0) {
                 (bool isLeg, uint256 j) = _legInIndexOf(legsIn, nIn, token);
                 if (isLeg) {
-                    st.credit[i][j] += gain;
+                    // B-1: the part of this credit that crosses `owed` is the
+                    // Phase-3 refund {_matchReconcileInputs} will pay the maker —
+                    // an obligation of the pool from THIS moment, so it joins
+                    // `outstanding` and a later PRESEND nets it out instead of
+                    // handing it to the solver. `max(c, o)`: only the crossing part,
+                    // once, however the credit arrives (several TAKEs, a late TAKE
+                    // after the PULL).
+                    uint256 c = st.credit[i][j];
+                    uint256 o = st.owed[i][j];
+                    uint256 nc = c + gain;
+                    st.credit[i][j] = nc;
+                    if (nc > o) st.outstanding[t] += nc - (c > o ? c : o);
                 } else {
                     SafeTransferLib.safeTransfer(token, order.maker, gain);
                 }
@@ -828,28 +840,27 @@ abstract contract Batch is Core {
     ///      obligations not yet delivered are netted out first — so unlike a
     ///      fixed-phase pre-send (which nets against ALL obligations before any
     ///      delivery has happened), this is correct at ANY point in the schedule
-    ///      FOR DELIVERY OBLIGATIONS.
+    ///      for delivery obligations and, since B-1, for input-leg refunds.
     ///
-    ///      ⚠ `outstanding` IS NOT THE WHOLE OF WHAT THE POOL OWES, and this bound
-    ///      alone does not make the schedule safe. It is seeded from output legs
-    ///      ({_matchOpenAll}) and decremented by DELIVER — nothing else. It does NOT
-    ///      include the Phase-3 obligations: {_matchReconcileInputs}'s surplus
-    ///      refund to a maker whose item over-credited an input leg, or
-    ///      {_creditItemProceeds}'s non-leg refunds. So a schedule that runs an ITEM
-    ///      which over-produces an input token and then PRESENDs it hands the solver
-    ///      money the settler still owes a maker, and THIS function will not stop it.
+    ///      `outstanding` is seeded from output legs ({_matchOpenAll}), decremented
+    ///      by DELIVER, and — since B-1 (2026-10) — INCREMENTED by
+    ///      {_creditItemProceeds} the moment an item credit pushes an input leg past
+    ///      its `owed`: that excess is the Phase-3 refund {_matchReconcileInputs}
+    ///      owes the maker, so it is an obligation of the pool from then on and a
+    ///      later PRESEND nets it out. Before B-1 the excess was handed to the solver
+    ///      and the refund then found a drained pool (`TransferFailed`) — no funds at
+    ///      risk, but an over-producing TAKE could not fill on the netted path while
+    ///      the single-order path refunded the maker. Non-leg item gains are refunded
+    ///      inside {_creditItemProceeds} itself, so they never reach the pool.
     ///
-    ///      What stops it is {_sweepSurplus}'s per-token `nowBal >= beforeBal[k]`
-    ///      floor, plus the refund transfer itself reverting on a drained pool —
-    ///      every `legsIn` token is in `st.tokens` by construction of
-    ///      {_collectTokens}, so no refund token escapes that floor. That is the
-    ///      guarantor; name it here so it is not silently removed. Three changes
-    ///      would reopen the hole with nothing else covering it: narrowing the swept
-    ///      token set, moving a refund after {_sweepSurplus}, or adding a Phase-2
-    ///      refund path. Seeding `outstanding` with the reconciliation surplus as it
-    ///      accrues would make the bound self-sufficient; that is a change to a hot
-    ///      path and is deliberately NOT bundled with documenting the status quo
-    ///      (see `docs/audit-2026-09-leads.md` B-1).
+    ///      The bound is now self-sufficient for every obligation the pool carries,
+    ///      but it is NOT the only guard and must not become the sole one:
+    ///      {_sweepSurplus}'s per-token `nowBal >= beforeBal[k]` floor, plus every
+    ///      refund transfer reverting on a drained pool, still back it (every
+    ///      `legsIn` token is in `st.tokens` by construction of {_collectTokens}).
+    ///      Narrowing the swept token set, moving a refund after {_sweepSurplus}, or
+    ///      adding a refund path that does not feed `outstanding` would each weaken
+    ///      it (see `docs/audit-2026-09-leads.md` B-1).
     function _stepPresend(MatchCtx memory st, uint256 t, uint256 s) internal {
         if (t >= st.tokens.length) revert PlanBadStep(s);
         address token = st.tokens[t];

@@ -39,6 +39,14 @@ export const world = {
   /** `filled(hash)` per `hash@block` (and `hash@latest`). */
   filled: new Map<string, bigint>(),
   lensCalls: 0,
+  /** `eth_getLogs` throws this (e.g. a -32601 "method not found" error). */
+  logsError: undefined as unknown,
+  /** The provider's `eth_getLogs` range cap in blocks (a wider read throws). */
+  logsMaxRange: undefined as bigint | undefined,
+  /** Every `[from, to]` the alarm asked `eth_getLogs` for. */
+  logsCalls: [] as Array<[bigint, bigint]>,
+  /** Seconds every `filled(hash)` read advances the clock (a slow RPC). */
+  filledCostS: 0,
 };
 
 export function resetWorld(): void {
@@ -49,6 +57,10 @@ export function resetWorld(): void {
   world.logs = [];
   world.filled.clear();
   world.lensCalls = 0;
+  world.logsError = undefined;
+  world.logsMaxRange = undefined;
+  world.logsCalls = [];
+  world.filledCostS = 0;
 }
 
 export const now = (): number => Math.floor(Date.now() / 1000) + world.offset;
@@ -105,8 +117,14 @@ function scriptedVerifier(): CoreDeps["verifier"] {
 
 const chain: ChainReader = {
   blockNumber: async () => world.head,
-  logs: async (from, to) => world.logs.filter((l) => l.blockNumber >= from && l.blockNumber <= to),
+  async logs(from, to) {
+    world.logsCalls.push([from, to]);
+    if (world.logsError !== undefined) throw world.logsError;
+    if (world.logsMaxRange !== undefined && to - from + 1n > world.logsMaxRange) throw new Error(`query exceeds max block range ${world.logsMaxRange}`);
+    return world.logs.filter((l) => l.blockNumber >= from && l.blockNumber <= to);
+  },
   async filledAt(hash, block) {
+    world.offset += world.filledCostS;
     const v = world.filled.get(`${hash.toLowerCase()}@${block ?? "latest"}`);
     if (v === undefined) {
       // Unset history reads as "before any fill".

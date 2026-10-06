@@ -397,6 +397,18 @@ test   = "packages/solvers/test"
 script = "packages/solvers/script"
 out    = "out/solvers"
 
+# The DEPLOYED solver artifacts (`make deploy-aggregator-fill`). Same optimizer
+# settings as [profile.solvers] (inherited from [default]: legacy codegen, runs =
+# 20,000) — only the EVM target differs. Rootstock (chain 30) does not run Prague, so
+# a Rootstock deploy must be compiled for Cancun, exactly like `core-deploy`.
+# AggregatorFillSolver runtime under this profile: see `make size-check-solvers`.
+[profile.solvers-deploy]
+src         = "packages/solvers/src"
+test        = "packages/solvers/script"
+script      = "packages/solvers/script"
+out         = "out/solvers-deploy"
+evm_version = "cancun"
+
 [profile.modules-aave-v2]
 src    = "packages/modules/lending/aave-v2/src"
 test   = "packages/modules/lending/aave-v2/test"

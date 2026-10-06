@@ -15,6 +15,12 @@
  * `oku.trade` get an `access-control-allow-origin` header, every other origin
  * gets none — so a browser on a deployed domain can never call it directly.
  * A worker is server-side, where CORS does not apply.
+ *
+ * EXPORTS: only `export default`. This file is the Pages MAIN module, and workerd
+ * refuses to start one that exports anything but entrypoints — an exported string
+ * or number (the CSP, the body cap) failed the whole deployment with "Incorrect type
+ * for map entry 'BOOK_MAX_BODY_BYTES'". Tests read these values through the worker's
+ * behaviour (response headers, the 413 boundary), never through an export.
  */
 const OKU_ORIGIN = "https://omni.icarus.tools";
 const PROXY_PREFIX = "/api/oku/";
@@ -32,7 +38,7 @@ const PROXY_PREFIX = "/api/oku/";
  * styles only — scripts stay `'self'`. A self-hosted `VITE_OKU_BASE` on another
  * origin must be added to `connect-src`.
  */
-export const CONTENT_SECURITY_POLICY = [
+const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
@@ -45,7 +51,7 @@ export const CONTENT_SECURITY_POLICY = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-export const SECURITY_HEADERS = {
+const SECURITY_HEADERS = {
   "content-security-policy": CONTENT_SECURITY_POLICY,
   "x-frame-options": "DENY",
   "x-content-type-options": "nosniff",
@@ -54,7 +60,7 @@ export const SECURITY_HEADERS = {
 };
 
 /** A copy of `response` with the security headers set. Asset responses are immutable, hence the copy. */
-export function withSecurityHeaders(response) {
+function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
@@ -97,7 +103,7 @@ export function withSecurityHeaders(response) {
  */
 const BOOK_PREFIX = "/api/book/";
 /** The server's raw JSON cap (4 × its 64 KiB `MAX_BODY_BYTES` default). */
-export const BOOK_MAX_BODY_BYTES = 256 * 1024;
+const BOOK_MAX_BODY_BYTES = 256 * 1024;
 const BOOK_POST_TYPES = ["application/json", "application/x-protobuf"];
 const ORDER_STATUS_PATH = /^orders\/0x[0-9a-fA-F]{64}\/status$/;
 /** Base URL of a service-binding request; the host is ignored by the callee. */

@@ -278,6 +278,41 @@ contract ListaSmartLpTest is ListaModulesBase {
     }
 
 
+    // ──────────────────── The lens hooks (task 11, 2026-10-06) ────────────────────
+
+    /// @dev {IProceedsAsset}: the coin is read THROUGH the signed provider
+    ///      (`dex().coins(coinIndex)`), so the blob needs no new field. Against the
+    ///      live provider: coin 0 is slisBNB, the native index reports the sentinel.
+    function test_smartTaker_proceedsAsset_readsTheLiveRoster() public view {
+        assertEq(smartTaker.proceedsAsset(_smartWithdrawData()), SLISBNB, "coin 0 = slisBNB");
+        bytes memory nativeIdx = abi.encode(PROVIDER_SMART, MOOLAH, uint256(1), MIN_OUT_RATE, _mpSmart());
+        assertEq(smartTaker.proceedsAsset(nativeIdx), 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE, "native sentinel");
+    }
+
+    /// @dev {ITakeFloor}: the LP→coin floor must cover `legsIn[0].start`, in the coin.
+    function test_smartTaker_takeFloored_bridgesLpToCoin() public view {
+        uint256 lp = 1e18;
+        uint256 floor = lp * MIN_OUT_RATE / 1e18; // 0.85 slisBNB
+        bytes memory data = _smartWithdrawData();
+        assertTrue(smartTaker.takeFloored(lp, SLISBNB, floor, data), "floor == leg");
+        assertTrue(smartTaker.takeFloored(lp, SLISBNB, floor - 1, data), "floor above leg");
+        assertFalse(smartTaker.takeFloored(lp, SLISBNB, floor + 1, data), "floor below leg: wallet draw");
+        assertFalse(smartTaker.takeFloored(lp, WBNB, floor, data), "leg in another coin");
+    }
+
+    /// @dev The floor the lens checks is the one the venue enforces: a burn signed at
+    ///      `minOutRate` delivers at least `amount · rate / 1e18` of the coin, so a leg
+    ///      at or under that is never short.
+    function test_smartTaker_flooredLeg_isCoveredOnFork() public {
+        uint256 minted = _supplyLp();
+        vm.prank(maker);
+        IMoolah(MOOLAH).setAuthorization(address(smartTaker), true);
+        uint256 legStart = minted * MIN_OUT_RATE / 1e18;
+        assertTrue(smartTaker.takeFloored(minted, SLISBNB, legStart, _smartWithdrawData()));
+        vm.prank(address(permit3));
+        smartTaker.takeOnBehalf(maker, minted, solver, _smartWithdrawData());
+        assertGe(IERC20(SLISBNB).balanceOf(solver), legStart, "delivery covers the floored leg");
+    }
 
     // ──────────────────── The LP BROKER combination ────────────────────
 

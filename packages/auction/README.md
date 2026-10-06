@@ -255,22 +255,20 @@ proxy, no flash-loan or margin machinery. Add your own source for private
 inventory or a venue we do not cover; a source that fails is skipped, not fatal,
 so the default degrades to whichever aggregator is up rather than to nothing.
 
-⚠ **An API's calldata is inside the trust boundary of a STANDING executor.** A
-standing-allowance `AggregatorFillSolver` funds routes from max approvals on
-every primed token, and its router allowlist pins *where* a call goes, not *what*
-it says — so a compromised or MITM'd API response (`sweepToken`, a multicall
-`pull`, a swap to another recipient) can spend the instance's whole balance
-(audit 2026-09-30 AGG-4). Set `executorStanding: true` with a `routeGuard`
-(`{ routers, selectors }`): every executable route is then checked by
-`checkApiRoute` — allowlisted router and selector, no native value on an ERC-20
-input, and the order's tokens and the requested recipient present as
-word-aligned ABI words — and a route that fails is dropped before it can be bid
-on. A standing executor without a guard is refused at construction. The token /
-recipient test is a presence check, not a decode, so allowlist only swap
-entrypoints whose recipient is a fixed argument (never `multicall`, `sweepToken`
-or a transfer-capable selector). Without a guard, execute API routes through a
-per-fill (`standing = false`) instance, which can only ever spend that fill's
-deltas.
+⚠ **An API's calldata is inside the executor's trust boundary.** (Updated
+2026-10-04.) `AggregatorFillSolver` no longer has a router allowlist or standing
+approvals: every route runs in its push-funded, always-empty `RouteSandbox`, so a
+hostile API response can reach only the fill's in-flight input — on a pull fill the
+solver's output check then reverts it, but on a direct (delta-verify) fill the input
+residue (the spread) is the route's to divert. So validate executable routes
+before bidding: `executorStanding: true` with a `routeGuard` (`{ routers, selectors
+}`) runs `checkApiRoute` — allowlisted router and selector, no native value on an
+ERC-20 input, and the order's tokens and the requested recipient present as
+word-aligned ABI words — and drops a route that fails. (The flag keeps its old
+name; it now means "validate API routes".) The token / recipient test is a
+presence check, not a decode, so allowlist only swap entrypoints whose recipient is
+a fixed argument (never `multicall`, `sweepToken` or a transfer-capable selector).
+`packages/beta-filler` goes further for Sushi and fully decodes `snwap`.
 
 **Three API differences that misprice silently if crossed**, all pinned by tests:
 

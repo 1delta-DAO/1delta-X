@@ -210,12 +210,13 @@ That place exists:
 *is* the swapper (`PostInputs` mode: take `tokenIn`, route it, deliver
 `tokenOut`), so it measures the surplus as a balance delta and splits it — the
 same reason 0x Settler can run its `POSITIVE_SLIPPAGE` action. The split is a
-constructor `SurplusPolicy`, immutable like the router allowlist. It binds only
+constructor `SurplusPolicy`, immutable like the operator set. It binds only
 the spread that actually reaches the contract — i.e. routes written by operators:
 a caller who writes its own route can deliver exactly the signed amount and keep the
 spread elsewhere, and on-chain enforcement against opaque route calldata is
-infeasible (accepted). The constructor therefore refuses a non-zero policy on an
-OPEN instance (`PolicyNeedsOperators`, 2026-09-30 AGG-3):
+infeasible (accepted). Every instance is therefore operator-gated: since the
+2026-10 RouteSandbox change the constructor refuses an empty operator set outright
+(`NoOperators`; it superseded the 2026-09-30 AGG-3 `PolicyNeedsOperators` check):
 
 | Share | Set by | Goes to |
 | --- | --- | --- |

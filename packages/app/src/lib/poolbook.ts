@@ -208,7 +208,12 @@ export async function fetchVenue(
         throw new Error(`pool does not hold ${base.symbol}`);
       }
 
-      const ladder = buildLadder(liquidity, { baseIsToken0: isToken0, maxRungs: MAX_RUNGS, maxSpread: MAX_SPREAD });
+      // Rungs are priced net of the pool's fee (task 15), so a market quote — and the
+      // MARKET_SLIPPAGE_BPS floor below it — is relative to what the pool executes,
+      // not the raw tick maths. The pinned tier; if the indexer reports a higher one,
+      // the higher (a quote may only err toward what the maker can actually get).
+      const fee = Math.max(ref.feeBps, Number.isFinite(meta.fee) && meta.fee > 0 && meta.fee < 1_000_000 ? meta.fee : 0);
+      const ladder = buildLadder(liquidity, { baseIsToken0: isToken0, maxRungs: MAX_RUNGS, maxSpread: MAX_SPREAD, fee });
       const tag = (r: { price: number; size: number }): Level => ({
         price: r.price,
         size: r.size,

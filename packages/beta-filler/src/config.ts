@@ -1,5 +1,7 @@
 import { getAddress, isAddress, type Address, type Hex } from "viem";
 
+import { SUSHI_RED_SNWAPPER_ROOTSTOCK, type SushiConfig } from "./sushi";
+
 /** Rootstock mainnet addresses (chain 30). Verified on-chain — see the repo's MoC notes. */
 export const ROOTSTOCK = {
   chainId: 30,
@@ -14,7 +16,92 @@ export const ROOTSTOCK = {
   quoterV2: "0xb51727c996C68E60F598A923a5006853cd2fEB31",
   /** RIF/USDT0 0.3% pool fee tier. */
   rifUsdt0Fee: 3000,
+  wrbtc: "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d",
+  weth: "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",
 } as const satisfies Record<string, string | number>;
+
+/**
+ * The Uniswap v3 (Oku) pools of the app's Rootstock markets
+ * (packages/app/src/config/markets.ts) — the ones SwapRouter02 can route locally.
+ * Sushi liquidity (and Sushi's own view of these pools) is reached through the
+ * Sushi API source instead (`SUSHI_ENABLED`, pull orders only) — the solver has no
+ * router allowlist, so no redeploy is needed for it.
+ */
+export const ROOTSTOCK_POOLS: readonly RoutePool[] = [
+  { market: "rsk-30-wrbtc-usd0", tokenA: ROOTSTOCK.wrbtc, tokenB: ROOTSTOCK.usdt0, fee: 3000, pool: "0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd" },
+  { market: "rsk-30-weth-wrbtc", tokenA: ROOTSTOCK.weth, tokenB: ROOTSTOCK.wrbtc, fee: 3000, pool: "0x7717364fa619fc22a8f8eae124e79a1b9a2cf3e6" },
+  { market: "rsk-30-usdrif-usd0", tokenA: ROOTSTOCK.usdrif, tokenB: ROOTSTOCK.usdt0, fee: 500, pool: "0xd845702af381f0405661747a6a20bde0401a19d6" },
+];
+
+/**
+ * Default multi-hop paths (swap order; each is usable in either direction).
+ * USDRIF → USDT0 → WRBTC is what prices gas for a USDRIF-output fill; it also lets
+ * the route strategy take a USDRIF↔WRBTC order should one appear.
+ */
+export const ROOTSTOCK_PATHS = `${ROOTSTOCK.usdrif}>500>${ROOTSTOCK.usdt0}>3000>${ROOTSTOCK.wrbtc}`;
+
+/** One Uniswap v3 pool, by its two tokens and fee tier (hundredths of a bip). */
+export interface RoutePool {
+  market?: string;
+  tokenA: Address | string;
+  tokenB: Address | string;
+  fee: number;
+  pool?: string;
+}
+
+/** A multi-hop path in swap order: `tokens[0] →fees[0]→ tokens[1] → …`. */
+export interface RoutePath {
+  tokens: Address[];
+  fees: number[];
+}
+
+/** The "route" strategy: fills through `AggregatorFillSolver.executeFill` from the operator EOA. */
+export interface RouteConfig {
+  /** The deployed, operator-gated AggregatorFillSolver (msg.sender to Settlement). */
+  solver: Address;
+  pools: RoutePool[];
+  paths: RoutePath[];
+  /** Haircut on the live quote before the profitability test, bps. */
+  slippageBps: bigint;
+  /**
+   * The haircut for a stable pair (both tokens in {@link usdTokens}). The quote is
+   * read on the block we simulate on and the plan's on-chain floor bounds the
+   * output, so the haircut only buys protection against a move before inclusion —
+   * which a $1/$1 pool barely has. A miss costs a revert's gas, never principal.
+   */
+  stableSlippageBps: bigint;
+  /**
+   * Gas units assumed for an executeFill before the simulation's own estimate —
+   * the FLOOR of the gas the plan is priced at (the sent plan is rebuilt at
+   * max(this, simulated × 1.25) and that same figure is the tx gas limit).
+   */
+  gasEstimate: bigint;
+  /** Refuse any route fill whose priced gas limit exceeds this (gas units). */
+  maxGas: bigint;
+  /**
+   * Route candidates must have BOTH tokens in this allowlist — with Sushi on, any
+   * pair would otherwise pass classification (and cost an API call each sweep).
+   */
+  routeTokens: Address[];
+  /** Extra profit required on top of gas, in RBTC wei (converted like the gas). */
+  minProfitWei: bigint;
+  /** Fallback RBTC price (USD, 18-dec fixed) when no pool path prices RBTC in the output token. */
+  rbtcUsd?: bigint;
+  /** Tokens worth $1: the {@link rbtcUsd} fallback, and the pairs {@link stableSlippageBps} applies to. */
+  usdTokens: Address[];
+  /** RoutePlan.profitRecipient; zero = the operator EOA. */
+  profitRecipient: Address;
+  /** Rolling one-hour cap on the number of route fills (gas is capped by {@link Config.gas}). */
+  hourlyFills: bigint;
+  /** The Sushi API route source (pull orders only). */
+  sushi: SushiConfig;
+  /**
+   * Whether local Oku routes compete on PULL orders (default on). Off = Sushi-only
+   * pull fills; the pools still price gas, and DIRECT orders always use Oku (the only
+   * exact-output source).
+   */
+  okuPull: boolean;
+}
 
 export const USDRIF_DECIMALS = 18;
 export const USDT0_DECIMALS = 6;
@@ -39,6 +126,17 @@ export interface Policy {
   maxFillUsdt0: bigint;
   /** Smallest fill worth the gas, in USDT0 units. */
   minFillUsdt0: bigint;
+  /** Gas units assumed for one inventory fill before it is estimated (re-checked with the real limit). */
+  inventoryGasEstimate: bigint;
+  /**
+   * Gas units of the rebalance a fill eventually causes (redeem + RIF sale), charged
+   * to each fill pro rata to its size over REDEEM_MIN_USDRIF (capped at the whole).
+   */
+  rebalanceGas: bigint;
+  /** Absolute profit floor per inventory fill, USDT0 units, on top of gas. */
+  minProfitUsdt0: bigint;
+  /** Optional RBTC price (USD, 18 dec) — gas is priced at max(pool quote, this). */
+  rbtcUsd?: bigint;
   /** Rolling one-hour outflow caps — the hot wallet's blast radius per hour. */
   hourlyUsdt0: bigint;
   hourlyUsdrif: bigint;
@@ -59,6 +157,8 @@ export interface Policy {
 export interface Config {
   chainId: number;
   rpcUrl: string;
+  /** Where {@link rpcUrl} came from: the `RPC_URL_SECRET` secret wins over `RPC_URL`. */
+  rpcSource: "RPC_URL_SECRET" | "RPC_URL" | "default";
   privateKey: Hex;
   settlement: Address;
   permit3: Address;
@@ -67,13 +167,49 @@ export interface Config {
   tokens: { usdrif: Address; usdt0: Address; rif: Address };
   moc: { core: Address; queue: Address };
   uniswap: { router: Address; quoter: Address; rifUsdt0Fee: number };
+  /** Wrapped RBTC — the native-price anchor for gas costing. */
+  wrbtc: Address;
   policy: Policy;
+  /** Per-strategy switches. For an order both could fill, inventory goes first. */
+  strategies: { inventory: boolean; route: boolean };
+  /** Set when the route strategy is configured (AGGREGATOR_SOLVER). */
+  route?: RouteConfig;
   /** When true (the default) nothing is broadcast: every decision is simulated and logged. */
   dryRun: boolean;
   /** Re-scan cadence for the book and the rebalancer, ms. */
   pollMs: number;
-  /** Rolling-budget state survives restarts here. */
+  /** Rolling-budget, gas and per-order backoff state survives restarts here. */
   stateFile: string;
+  /** Gas policy shared by BOTH strategies (one hourly RBTC budget, one price ceiling). */
+  gas: GasPolicy;
+  /** How the engine walks the book (what it re-quotes, and when). */
+  sweep: SweepPolicy;
+}
+
+export interface SweepPolicy {
+  /**
+   * An order every strategy passed on (unprofitable, out of price, below minimum, a
+   * shape no strategy takes) — or one we just FILLED — is not re-quoted for this long
+   * unless the book reports a different `fillableAmount` for it. Each re-quote costs
+   * a preview, quotes and gas reads: a book of 31 resting orders used to cost ~67 RPC
+   * calls per tick. An order whose price moves with time (a decaying leg) is held at
+   * most {@link AUCTION_RECHECK_MS}.
+   */
+  restingRecheckMs: number;
+  /** Orders expiring within this many seconds are skipped: a tx cannot land in time on ~30 s blocks. */
+  expiryMarginS: number;
+}
+
+/** Hold cap for an order whose price moves with time (any leg `end != 0`, a curve, a gas bump or a priority auction). */
+export const AUCTION_RECHECK_MS = 30_000;
+
+export interface GasPolicy {
+  /** Rolling one-hour cap on RBTC spent on fill gas, wei — inventory and route together. */
+  hourlyWei: bigint;
+  /** Never send a fill above this gas price, wei. */
+  maxGasPriceWei: bigint;
+  /** How long to wait for a receipt before treating the tx as pending, ms. */
+  receiptTimeoutMs: number;
 }
 
 type Env = Record<string, string | undefined>;
@@ -103,10 +239,50 @@ function fixed(env: Env, key: string, fallback: string, decimals: number): bigin
   return parseFixed(env[key] ?? fallback, decimals);
 }
 
-function bps(env: Env, key: string, fallback: number): bigint {
-  const v = BigInt(env[key] ?? String(fallback));
-  if (v < 0n || v > 10_000n) throw new Error(`env ${key} must be 0..10000 bps`);
+/** A non-negative integer env value (decimal digits only — "", "1.5", "0x10", "abc" are refused). */
+function uint(env: Env, key: string, fallback: bigint | number): bigint {
+  const raw = env[key];
+  if (raw === undefined) return BigInt(fallback);
+  const v = raw.trim();
+  if (!/^\d+$/.test(v)) throw new Error(`env ${key} must be a non-negative integer: ${JSON.stringify(raw)}`);
+  return BigInt(v);
+}
+
+/** A strictly positive integer env value. Fail closed: NaN, 0, negative and non-integers throw. */
+function posInt(env: Env, key: string, fallback: bigint | number): bigint {
+  const v = uint(env, key, fallback);
+  if (v <= 0n) throw new Error(`env ${key} must be > 0`);
   return v;
+}
+
+/** {@link posInt} as a JS number (must stay a safe integer). */
+function posNum(env: Env, key: string, fallback: number): number {
+  const v = posInt(env, key, fallback);
+  if (v > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`env ${key} is too large`);
+  return Number(v);
+}
+
+/** A Uniswap v3 fee tier: an integer in (0, 2^24). */
+export function parseFee(raw: string, what: string): number {
+  const v = raw.trim();
+  const f = /^\d+$/.test(v) ? Number(v) : NaN;
+  if (!Number.isInteger(f) || f <= 0 || f >= 1 << 24) throw new Error(`${what}: bad fee ${JSON.stringify(raw)}`);
+  return f;
+}
+
+function bps(env: Env, key: string, fallback: number): bigint {
+  const v = uint(env, key, fallback);
+  if (v > 10_000n) throw new Error(`env ${key} must be 0..10000 bps`);
+  return v;
+}
+
+function addrList(env: Env, key: string, fallback: readonly string[]): Address[] {
+  const raw = env[key];
+  const items = raw === undefined ? [...fallback] : raw.split(",").map((t) => t.trim()).filter(Boolean);
+  return items.map((t) => {
+    if (!isAddress(t, { strict: false })) throw new Error(`env ${key}: not an address: ${t}`);
+    return getAddress(t);
+  });
 }
 
 function flag(env: Env, key: string, fallback: boolean): boolean {
@@ -115,7 +291,93 @@ function flag(env: Env, key: string, fallback: boolean): boolean {
   return v === "1" || v.toLowerCase() === "true";
 }
 
-export function loadConfig(env: Env = process.env): Config {
+/**
+ * `ROUTE_PATHS`: `;`-separated paths, each `token>fee>token[>fee>token…]` in swap
+ * order, e.g. `0xUSDRIF>500>0xUSDT0>3000>0xWRBTC`. Empty string = none.
+ */
+export function parsePaths(raw: string): RoutePath[] {
+  return raw
+    .split(";")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const parts = p.split(">").map((x) => x.trim());
+      if (parts.length < 3 || parts.length % 2 === 0) throw new Error(`ROUTE_PATHS: bad path ${p}`);
+      const tokens: Address[] = [];
+      const fees: number[] = [];
+      parts.forEach((x, i) => {
+        if (i % 2 === 0) {
+          if (!isAddress(x, { strict: false })) throw new Error(`ROUTE_PATHS: not an address: ${x}`);
+          tokens.push(getAddress(x));
+        } else {
+          fees.push(parseFee(x, "ROUTE_PATHS"));
+        }
+      });
+      return { tokens, fees };
+    });
+}
+
+/** `ROUTE_POOLS`: `;`-separated `tokenA/tokenB/fee` triples. Unset = the app's Rootstock markets. */
+export function parsePools(raw: string): RoutePool[] {
+  return raw
+    .split(";")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const [a, b, f] = p.split("/").map((x) => x.trim());
+      if (!a || !b || !f || !isAddress(a, { strict: false }) || !isAddress(b, { strict: false })) {
+        throw new Error(`ROUTE_POOLS: bad pool ${p} (want tokenA/tokenB/fee)`);
+      }
+      return { tokenA: getAddress(a), tokenB: getAddress(b), fee: parseFee(f, "ROUTE_POOLS") };
+    });
+}
+
+function loadRoute(env: Env): RouteConfig | undefined {
+  if (!env.AGGREGATOR_SOLVER) return undefined;
+  const rbtcUsd = env.RBTC_PRICE_USD ? parseFixed(env.RBTC_PRICE_USD, 18) : undefined;
+  if (rbtcUsd === 0n) throw new Error("env RBTC_PRICE_USD must be > 0");
+  const gasEstimate = posInt(env, "ROUTE_GAS_ESTIMATE", 320_000);
+  const maxGas = posInt(env, "MAX_ROUTE_GAS", 1_200_000);
+  if (gasEstimate > maxGas) throw new Error(`ROUTE_GAS_ESTIMATE ${gasEstimate} exceeds MAX_ROUTE_GAS ${maxGas}`);
+  return {
+    solver: addr(env, "AGGREGATOR_SOLVER"),
+    pools: env.ROUTE_POOLS !== undefined ? parsePools(env.ROUTE_POOLS) : [...ROOTSTOCK_POOLS],
+    paths: parsePaths(env.ROUTE_PATHS ?? ROOTSTOCK_PATHS),
+    slippageBps: bps(env, "ROUTE_SLIPPAGE_BPS", 30),
+    stableSlippageBps: bps(env, "ROUTE_STABLE_SLIPPAGE_BPS", 5),
+    gasEstimate,
+    maxGas,
+    routeTokens: addrList(env, "ROUTE_TOKENS", [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif]),
+    minProfitWei: fixed(env, "MIN_PROFIT_RBTC", "0", 18),
+    rbtcUsd,
+    usdTokens: (env.USD_TOKENS ? env.USD_TOKENS.split(",") : [ROOTSTOCK.usdt0, ROOTSTOCK.usdrif]).map((t) => getAddress(t.trim())),
+    profitRecipient: addr(env, "ROUTE_PROFIT_RECIPIENT", "0x0000000000000000000000000000000000000000"),
+    hourlyFills: uint(env, "ROUTE_HOURLY_FILLS", 60),
+    okuPull: flag(env, "ROUTE_OKU_PULL", true),
+    sushi: {
+      enabled: flag(env, "SUSHI_ENABLED", true),
+      baseUrl: env.SUSHI_API_URL ?? "https://api.sushi.com",
+      router: addr(env, "SUSHI_ROUTER", SUSHI_RED_SNWAPPER_ROOTSTOCK),
+      timeoutMs: posNum(env, "SUSHI_TIMEOUT_MS", 4_000),
+      executors: addrList(env, "SUSHI_EXECUTORS", []),
+      maxPerSweep: posNum(env, "SUSHI_MAX_PER_SWEEP", 10),
+    },
+  };
+}
+
+function loadGas(env: Env): GasPolicy {
+  // HOURLY_GAS_RBTC covers both strategies; ROUTE_HOURLY_GAS_RBTC is its pre-2026-10 name.
+  const hourly = env.HOURLY_GAS_RBTC ?? env.ROUTE_HOURLY_GAS_RBTC ?? "0.002";
+  const maxGasPriceWei = fixed(env, "MAX_GAS_PRICE_GWEI", "0.1", 9);
+  if (maxGasPriceWei === 0n) throw new Error("env MAX_GAS_PRICE_GWEI must be > 0");
+  return {
+    hourlyWei: parseFixed(hourly, 18),
+    maxGasPriceWei,
+    receiptTimeoutMs: posNum(env, "RECEIPT_TIMEOUT_MS", 120_000),
+  };
+}
+
+export function loadConfig(env: Env): Config {
   const privateKey = req(env, "PRIVATE_KEY");
   if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) throw new Error("PRIVATE_KEY must be a 0x-prefixed 32-byte hex key");
   const policy: Policy = {
@@ -126,10 +388,14 @@ export function loadConfig(env: Env = process.env): Config {
     minSellPrice: fixed(env, "MIN_SELL_PRICE", "1.003", 18),
     maxFillUsdt0: fixed(env, "MAX_FILL_USDT0", "500", USDT0_DECIMALS),
     minFillUsdt0: fixed(env, "MIN_FILL_USDT0", "5", USDT0_DECIMALS),
+    inventoryGasEstimate: posInt(env, "INVENTORY_GAS_ESTIMATE", 260_000),
+    rebalanceGas: posInt(env, "REBALANCE_GAS", 450_000),
+    minProfitUsdt0: fixed(env, "INVENTORY_MIN_PROFIT_USDT0", "0.02", USDT0_DECIMALS),
+    ...(env.RBTC_PRICE_USD ? { rbtcUsd: parseFixed(env.RBTC_PRICE_USD, 18) } : {}),
     hourlyUsdt0: fixed(env, "HOURLY_USDT0", "2000", USDT0_DECIMALS),
     hourlyUsdrif: fixed(env, "HOURLY_USDRIF", "2000", USDRIF_DECIMALS),
     usdrifReserve: fixed(env, "USDRIF_RESERVE", "0", USDRIF_DECIMALS),
-    redeemMin: fixed(env, "REDEEM_MIN_USDRIF", "50", USDRIF_DECIMALS),
+    redeemMin: fixed(env, "REDEEM_MIN_USDRIF", "1000", USDRIF_DECIMALS),
     redeemSlippageBps: bps(env, "REDEEM_SLIPPAGE_BPS", 50),
     rifSellMin: fixed(env, "RIF_SELL_MIN", "200", 18),
     rifSellMaxDiscountBps: bps(env, "RIF_SELL_MAX_DISCOUNT_BPS", 150),
@@ -138,9 +404,21 @@ export function loadConfig(env: Env = process.env): Config {
   if (policy.buyUsdrif && policy.maxBuyPrice >= 10n ** 18n) {
     throw new Error("MAX_BUY_PRICE must be below 1.0: redemption returns $1 of RIF minus the MoC fee");
   }
+  const route = loadRoute(env);
+  const strategies = {
+    inventory: flag(env, "INVENTORY_ENABLED", true),
+    route: flag(env, "ROUTE_ENABLED", route !== undefined),
+  };
+  if (strategies.route && !route) throw new Error("ROUTE_ENABLED=1 needs AGGREGATOR_SOLVER");
+  if (!strategies.inventory && !strategies.route) throw new Error("both strategies are disabled");
+  // A keyed RPC goes in the RPC_URL_SECRET secret (the Worker: a var and a secret
+  // cannot share a name, so the public-node RPC_URL var line can stay).
+  const rpcSecret = env.RPC_URL_SECRET?.trim();
+  const rpcVar = env.RPC_URL?.trim();
   return {
-    chainId: Number(env.CHAIN_ID ?? ROOTSTOCK.chainId),
-    rpcUrl: env.RPC_URL ?? ROOTSTOCK.rpcUrl,
+    chainId: posNum(env, "CHAIN_ID", ROOTSTOCK.chainId),
+    rpcUrl: rpcSecret || rpcVar || ROOTSTOCK.rpcUrl,
+    rpcSource: rpcSecret ? "RPC_URL_SECRET" : rpcVar ? "RPC_URL" : "default",
     privateKey: privateKey as Hex,
     settlement: addr(env, "SETTLEMENT"),
     permit3: addr(env, "PERMIT3"),
@@ -155,12 +433,20 @@ export function loadConfig(env: Env = process.env): Config {
     uniswap: {
       router: addr(env, "SWAP_ROUTER", ROOTSTOCK.swapRouter),
       quoter: addr(env, "QUOTER_V2", ROOTSTOCK.quoterV2),
-      rifUsdt0Fee: Number(env.RIF_USDT0_FEE ?? ROOTSTOCK.rifUsdt0Fee),
+      rifUsdt0Fee: parseFee(env.RIF_USDT0_FEE ?? String(ROOTSTOCK.rifUsdt0Fee), "RIF_USDT0_FEE"),
     },
+    wrbtc: addr(env, "WRBTC", ROOTSTOCK.wrbtc),
     policy,
+    strategies,
+    route,
     // Fail safe: only an explicit DRY_RUN=0 broadcasts.
     dryRun: !(env.DRY_RUN === "0" || env.DRY_RUN?.toLowerCase() === "false"),
-    pollMs: Number(env.POLL_MS ?? 15_000),
-    stateFile: env.STATE_FILE ?? ".rif-filler-state.json",
+    pollMs: posNum(env, "POLL_MS", 15_000),
+    stateFile: env.STATE_FILE || ".beta-filler-state.json",
+    gas: loadGas(env),
+    sweep: {
+      restingRecheckMs: 1000 * Number(uint(env, "RESTING_RECHECK_SECONDS", 300)),
+      expiryMarginS: Number(uint(env, "EXPIRY_MARGIN_SECONDS", 90)),
+    },
   };
 }

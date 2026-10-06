@@ -5,11 +5,13 @@ import {
   encodeProportional,
   hashOrderStruct,
   OrderSide,
+  orderTypedData,
   permit3Nonce,
   Permit3MessageKind,
   permitBatch,
   signPermitWitness,
   softCancelTypedData,
+  takerPermit,
   tokenPermit,
   type Order,
 } from "@1delta-x/sdk";
@@ -28,6 +30,7 @@ import {
 
 import { Book } from "../src/book";
 import { CancelVerifier } from "../src/cancels";
+import { toDeployment } from "../src/config";
 import { OrderbookClient, signSoftCancel } from "../src/client";
 import { FillIndex } from "../src/fills";
 import type { OrderAnnounce } from "../src/messages";
@@ -412,6 +415,151 @@ describe("A-FLEX-2 — single-signature fillWithPermit announces verify", () => 
     const sig = await signPermitWitness(stranger, batch, order, config);
     const res = await new Verifier(lens(true), config, { batchWindowMs: 0 }).verifyAnnounce({ order, sig, permitBatch: batch });
     expect(res.ok).toBe(false);
+  });
+});
+
+// ──────────────────── SIGNATURE-VALIDATION-REVIEW F1–F3 ────────────────────
+
+/** A 65-byte sig with its `v` byte rewritten (yParity-style 0/1, as some wallets emit). */
+const withV = (sig: Hex, v: number): Hex => `${sig.slice(0, 130)}${v.toString(16).padStart(2, "0")}` as Hex;
+const toCompact = (sig: Hex): Hex => compactSignatureToHex(signatureToCompactSignature(parseSignature(sig)));
+const FOREIGN = "0x00000000000000000000000000000000000000ff" as Address;
+const MODULE = "0x4444444444444444444444444444444444444444" as Address;
+const REF = `0x${"ab".repeat(32)}` as Hex;
+
+/** Counts lens calls; answers like a live permit order (see A-FLEX-2) with the given sig verdict. */
+function countingLens(sigValid: boolean) {
+  const calls = { n: 0 };
+  const client = {
+    readContract: async () => {
+      calls.n++;
+      return [[OrderStatus.Fillable], [1000n], [sigValid], [true]];
+    },
+  } as unknown as PublicClient;
+  return { client, calls };
+}
+
+describe("SIG-REVIEW F1 — every permit grant must name this settlement", () => {
+  const nonce = () => permit3Nonce(Permit3MessageKind.Batch, 1n);
+
+  it("test_sigreview_F1_taker_permit_to_a_foreign_spender_is_rejected", async () => {
+    const order = orderFor(maker.address);
+    const batch = permitBatch(
+      [tokenPermit(config.settlement, TOKEN_A, 1000n, 4_000_000_000)],
+      [takerPermit(FOREIGN, MODULE, REF, 1000n, 4_000_000_000)],
+      nonce(),
+      inADay(),
+    );
+    const sig = await signPermitWitness(maker, batch, order, config);
+    const res = await new Verifier(countingLens(true).client, config).verifyLayer1({ order, sig, permitBatch: batch });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("permit batch grants a spender other than this settlement");
+  });
+
+  it("test_sigreview_F1_token_permit_to_a_foreign_spender_is_rejected", async () => {
+    const order = orderFor(maker.address);
+    const batch = permitBatch([tokenPermit(FOREIGN, TOKEN_A, 1000n, 4_000_000_000)], [], nonce(), inADay());
+    const sig = await signPermitWitness(maker, batch, order, config);
+    const res = await new Verifier(countingLens(true).client, config).verifyLayer1({ order, sig, permitBatch: batch });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("permit batch grants a spender other than this settlement");
+  });
+
+  it("test_sigreview_F1_taker_permit_to_this_settlement_is_admitted", async () => {
+    const order = orderFor(maker.address);
+    const batch = permitBatch(
+      [tokenPermit(config.settlement, TOKEN_A, 1000n, 4_000_000_000)],
+      [takerPermit(config.settlement, MODULE, REF, 1000n, 4_000_000_000)],
+      nonce(),
+      inADay(),
+    );
+    const sig = await signPermitWitness(maker, batch, order, config);
+    const res = await new Verifier(countingLens(true).client, config).verifyLayer1({ order, sig, permitBatch: batch });
+    expect(res).toMatchObject({ ok: true, permit: true });
+  });
+});
+
+describe("SIG-REVIEW F2/F3 — Layer 1 recovers with the settler's ecrecover semantics", () => {
+  const batchFor = () =>
+    permitBatch([tokenPermit(config.settlement, TOKEN_A, 1000n, 4_000_000_000)], [], permit3Nonce(Permit3MessageKind.Batch, 1n), inADay());
+  const signOrderAs = (o: Order) => maker.signTypedData(orderTypedData(o, toDeployment(config)));
+
+  it("test_sigreview_F2_permit_sig_with_v_0_or_1_is_rejected", async () => {
+    const order = orderFor(maker.address);
+    const batch = batchFor();
+    const sig = await signPermitWitness(maker, batch, order, config);
+    for (const v of [0, 1]) {
+      const { client, calls } = countingLens(false);
+      const verifier = new Verifier(client, config, { batchWindowMs: 0 });
+      const l1 = await verifier.verifyLayer1({ order, sig: withV(sig, v), permitBatch: batch });
+      expect(l1.ok).toBe(false);
+      expect(l1.reason).toBe("permit signature does not recover");
+      // End to end: no longer admitted (and reported Fillable) on the lens's lifecycle alone.
+      const res = await verifier.verifyAnnounce({ order, sig: withV(sig, v), permitBatch: batch });
+      expect(res.ok).toBe(false);
+      expect(calls.n).toBe(0);
+    }
+  });
+
+  it("test_sigreview_F3_permit_compact_sig_from_the_maker_is_admitted", async () => {
+    const order = orderFor(maker.address);
+    const batch = batchFor();
+    const compact = toCompact(await signPermitWitness(maker, batch, order, config));
+    expect((compact.length - 2) / 2).toBe(64);
+    const verifier = new Verifier(countingLens(false).client, config, { batchWindowMs: 0 });
+    expect(await verifier.verifyLayer1({ order, sig: compact, permitBatch: batch })).toMatchObject({ ok: true, permit: true, deferSig: false });
+    const res = await verifier.verifyAnnounce({ order, sig: compact, permitBatch: batch });
+    expect(res.ok).toBe(true);
+    expect(res.state?.isSignatureValid).toBe(true);
+  });
+
+  it("test_sigreview_F3_permit_compact_sig_from_someone_else_is_rejected", async () => {
+    const order = orderFor(maker.address);
+    const batch = batchFor();
+    const compact = toCompact(await signPermitWitness(stranger, batch, order, config));
+    const res = await new Verifier(countingLens(true).client, config).verifyLayer1({ order, sig: compact, permitBatch: batch });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("permit signature is not the maker's");
+  });
+
+  it("test_sigreview_F2_permit_sig_of_nonstandard_length_is_still_refused", async () => {
+    const order = orderFor(maker.address);
+    const batch = batchFor();
+    const sig = await signPermitWitness(maker, batch, order, config);
+    const res = await new Verifier(countingLens(true).client, config).verifyLayer1({ order, sig: `${sig}00` as Hex, permitBatch: batch });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/^permit announce: only an ECDSA maker signature/);
+  });
+
+  it("test_sigreview_F2_order_sig_with_v_0_is_rejected_without_a_lens_call", async () => {
+    const order = orderFor(maker.address);
+    const sig = withV(await signOrderAs(order), 0);
+    const { client, calls } = countingLens(true);
+    const verifier = new Verifier(client, config, { batchWindowMs: 0 });
+    const l1 = await verifier.verifyLayer1({ order, sig });
+    expect(l1.ok).toBe(false);
+    expect(l1.reason).toBe("signature does not recover");
+    expect((await verifier.verifyAnnounce({ order, sig })).ok).toBe(false);
+    expect(calls.n).toBe(0);
+  });
+
+  it("test_sigreview_F3_order_compact_sig_from_the_maker_is_admitted_without_deferring", async () => {
+    const order = orderFor(maker.address);
+    const compact = toCompact(await signOrderAs(order));
+    const verifier = new Verifier(countingLens(true).client, config, { batchWindowMs: 0 });
+    expect(await verifier.verifyLayer1({ order, sig: compact })).toMatchObject({ ok: true, deferSig: false });
+    expect((await verifier.verifyAnnounce({ order, sig: compact })).ok).toBe(true);
+  });
+
+  it("test_sigreview_F2_order_sig_from_a_delegate_still_defers_to_the_lens", async () => {
+    // F29 lead unchanged: a valid recover to a non-maker may be a nominated delegate.
+    const order = orderFor(maker.address);
+    const sig = await stranger.signTypedData(orderTypedData(order, toDeployment(config)));
+    expect(await new Verifier(countingLens(true).client, config).verifyLayer1({ order, sig })).toMatchObject({ ok: true, deferSig: true });
+    expect(await new Verifier(countingLens(true).client, config).verifyLayer1({ order, sig: toCompact(sig) })).toMatchObject({
+      ok: true,
+      deferSig: true,
+    });
   });
 });
 

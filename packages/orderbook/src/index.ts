@@ -4,6 +4,7 @@ export * from "./topics";
 export * from "./transport";
 export * from "./verify";
 export * from "./cancels";
+export * from "./ecdsa";
 export * from "./watcher";
 export * from "./book";
 export * from "./query";

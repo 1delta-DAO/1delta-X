@@ -22,9 +22,13 @@ name: test
 #                        from ALL_PACKAGES. Before the 2026-09-30 audit CI gated only
 #                        the core (goal 8 verdict), and `modules-erc4626` ran nowhere.
 #   • ts               — the TypeScript side (`make test-ts`: sdk, orderbook,
-#                        orderbook-server, orderbook-worker, auction, app, rif-filler),
+#                        orderbook-server, orderbook-worker, auction, app, beta-filler,
+#                        filler-worker),
 #                        including the shared golden
-#                        encoding fixtures.
+#                        encoding fixtures; then, as its own step, `make workers-smoke`:
+#                        the three beta Workers STARTED in the real runtime (`wrangler
+#                        dev --local` / `wrangler pages dev`, ~10 s, local only) — a main
+#                        module workerd refuses to start passes every unit test.
 #
 # Fork tests read their RPC from the secrets below; without one, each fork base
 # falls back to its baked-in public endpoints (works, but can be rate-limited).
@@ -150,5 +154,8 @@ jobs:
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: SDK, orderbook, orderbook-server, orderbook-worker, auction, app, rif-filler
+      - name: SDK, orderbook, orderbook-server, orderbook-worker, auction, app, beta-filler, filler-worker
         run: make test-ts
+
+      - name: Beta Workers start in the real runtime (wrangler dev / pages dev)
+        run: SKIP_BUILD=1 make workers-smoke   # test-ts built the dists the workers bundle

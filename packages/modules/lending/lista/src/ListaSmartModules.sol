@@ -6,11 +6,13 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {IMakerModule} from "@core/interfaces/IMakerModule.sol";
 import {ITakerModule} from "@core/interfaces/ITakerModule.sol";
+import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
+import {ITakeFloor} from "@lib/interfaces/ITakeFloor.sol";
 import {DelegationHelper} from "@lib/DelegationHelper.sol";
 import {PermitHelper} from "@lib/PermitHelper.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
-import {IListaSmartProvider, MarketParams} from "./interfaces/ILista.sol";
+import {IListaSmartProvider, IListaStableSwap, MarketParams} from "./interfaces/ILista.sol";
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Lista SmartLP collateral modules (`SmartProvider` markets)
@@ -123,12 +125,29 @@ contract ListaSmartSupplyCollateralModule is IMakerModule {
 // `amount` to the live position off-chain; if a liquidation moved the balance
 // first, the burn reverts — fail closed, nothing partial.
 //
+// ⚠ THE LEG IS PRICED IN COIN, THE ITEM IN LP (review 2026-10-06). The core prices
+// `legsIn[0]` (coin) and measures the coin that lands; `item.amount` is LP. Nothing
+// on-chain ties the two, so the maker's signature has to: sign
+// `minOutRateE18 · item.amount / 1e18 ≥ legsIn[0].start` — then a one-coin removal
+// that pays MORE than the leg is refunded to the maker and one that pays LESS cannot
+// happen (the provider reverts under the rate). Signed looser, the shortfall
+// between what landed and `legsIn[0]`'s `owed` is pulled from the maker's WALLET
+// by {Core._payInputsToSolver} / `Batch._stepPull`. A StableSwap one-coin removal
+// never yields exactly `owed`, so over-delivery is the normal case: on `matchSettle`
+// it is refunded since core B-1 (2026-10-06); before that the netted path reverted.
+// The lens now holds the maker to both halves (task 11, 2026-10-06), with no change
+// to the blob: {proceedsAsset} reads the coin THROUGH the provider
+// (`IListaSmartProvider(provider).dex().coins(coinIndex)`), so the stranded-proceeds
+// preflight runs for this item; and {takeFloored} ({ITakeFloor}) reports
+// `minOutRateE18 · item.amount / 1e18 ≥ legsIn[0].start ∧ legsIn[0].token == coin`,
+// which `SettlementLensChecks.validateOrder` flags when false.
+//
 // `data = abi.encode(provider, moolah, coinIndex, minOutRateE18, MarketParams[, nonce, deadline, v, r, s])`
 //   — provider@0, moolah@32, coinIndex@64, minOutRate@96, MarketParams@128
 //     (base = 288); optional 160-byte {DelegationHelper.replayMorphoAuth}
 //     block@288 (total 448).
 //
-contract ListaSmartTakerModule is ITakerModule {
+contract ListaSmartTakerModule is ITakerModule, IProceedsAsset, ITakeFloor {
     IPermit3 public immutable permit3;
 
     error OnlyPermit3();
@@ -151,5 +170,35 @@ contract ListaSmartTakerModule is ITakerModule {
         IListaSmartProvider(provider).withdrawCollateralOneCoin(
             mp, amount, coinIndex, amount * minOutRate / 1e18, onBehalfOf, receiver
         );
+    }
+
+    /// @inheritdoc IProceedsAsset
+    /// @dev The coin the provider pays out, read THROUGH the signed provider — the
+    ///      blob names neither the dex nor the coin, and re-encoding it to carry one
+    ///      would be BREAKING for every signed order. `dex().coins(i)` is the same
+    ///      roster the provider itself pays from, so it cannot disagree with the
+    ///      delivery. An out-of-range `coinIndex` reverts (the lens reads that as
+    ///      "unknown"); the fill reverts on it too. A native index reports the
+    ///      0xEeee… sentinel, which no ERC-20 leg can match — flagged, correctly.
+    function proceedsAsset(bytes calldata data) public view override returns (address) {
+        (address provider,, uint256 coinIndex) = abi.decode(data, (address, address, uint256));
+        return IListaStableSwap(IListaSmartProvider(provider).dex()).coins(coinIndex);
+    }
+
+    /// @inheritdoc ITakeFloor
+    /// @dev The LP→coin bridge the core cannot see (see the header): the full-fill
+    ///      floor `item.amount · minOutRateE18 / 1e18` must cover `legsIn[0].start`,
+    ///      and the leg must be denominated in the coin paid out. Floors computed
+    ///      exactly as {takeOnBehalf} computes them; a rate whose multiply would
+    ///      overflow reverts every fill, so it reports `false` rather than reverting.
+    function takeFloored(uint256 amount, address legToken, uint256 legStart, bytes calldata data)
+        external
+        view
+        override
+        returns (bool)
+    {
+        uint256 rate = uint256(bytes32(data[96:128]));
+        if (rate != 0 && amount > type(uint256).max / rate) return false;
+        return amount * rate / 1e18 >= legStart && legToken == proceedsAsset(data);
     }
 }

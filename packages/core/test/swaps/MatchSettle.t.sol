@@ -620,9 +620,11 @@ contract MatchSettleTest is CoreSettlementBase {
     //
     // A TAKE that produces MORE than its leg owes leaves a surplus the maker is
     // entitled to — the "cash back" a dutch-auctioned leverage order pays when it
-    // fills early. It sits in the pool between the item and the deferred flush, and
-    // `PRESEND`'s bound (`outstanding`) tracks only UNDELIVERED OUTPUT LEGS — it
-    // knows nothing about a pending surplus refund. So: can the solver take it?
+    // fills early. It sits in the pool between the item and the deferred flush. Since
+    // B-1 (2026-10) `PRESEND`'s bound (`outstanding`) carries that pending refund the
+    // moment the item over-credits the leg; before, it tracked only UNDELIVERED OUTPUT
+    // LEGS and the grab below reverted the whole context instead. So: can the solver
+    // take it?
 
     /// @dev A leverage order whose borrow over-produces by `excess` — the surplus is
     ///      owed back to the maker.
@@ -657,10 +659,10 @@ contract MatchSettleTest is CoreSettlementBase {
     }
 
     // ── The attack: PRESEND the surplus to the solver before the deferred flush can
-    //    refund it. `outstanding` is 0 by then (every output delivered), so the
-    //    pre-send bound does NOT protect the maker's refund — it hands the whole
-    //    unencumbered balance over. The flush then cannot pay the maker, and the
-    //    whole context reverts. The surplus is unstealable, not unreachable. ──
+    //    refund it. Every output is delivered by then, but `outstanding[USDC]` still
+    //    holds the 500 refund (B-1), so the PRESEND sends nothing and the flush pays
+    //    the maker. Before B-1 the PRESEND handed it over and the flush's refund
+    //    reverted the whole context — unstealable either way, and now also fillable. ──
     function test_surplus_cannotBePresentAwayFromMaker() public {
         uint256 excess = 500e6;
         (Order memory a, Order memory b) = _overProducingLeverage(excess);
@@ -671,21 +673,20 @@ contract MatchSettleTest is CoreSettlementBase {
         s[2] = _step(MatchStep.ITEM, 1, 0);
         s[3] = _step(MatchStep.ITEM, 1, 1); //    pool now holds 2500 USDC
         s[4] = _step(MatchStep.DELIVER, 0, 0); // pays Alice 2000 → 500 left, owed to Bob
-        s[5] = _step(MatchStep.PRESEND, 1, 0); // ← grab it: outstanding[USDC] is now 0
+        s[5] = _step(MatchStep.PRESEND, 1, 0); // ← grab it: outstanding[USDC] = the 500 refund
 
         MatchPlan memory p = _two(a, b, makerPk, bobPk, s);
         vm.prank(solver);
-        vm.expectRevert(); // the flush's refund to Bob finds an empty pool
         settlement.matchSettle(p);
 
-        // Atomic: nothing moved at all.
         assertEq(IERC20(USDC).balanceOf(solver), 0, "solver got nothing");
-        assertEq(IERC20(USDC).balanceOf(bob), 0, "maker's balance untouched");
+        assertEq(IERC20(USDC).balanceOf(bob), excess, "the over-provision went to the MAKER");
+        assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "pool flat");
     }
 
-    // ── …and the same holds if the solver tries to cover its grab with the pool's
-    //    own funds: taking ANY of the surplus makes some reconciliation short, so
-    //    there is no ordering that both extracts it and settles. ──
+    // ── …and the same holds BEFORE delivery: `outstanding[USDC]` is Alice's 2000
+    //    undelivered PLUS the 500 refund, so the PRESEND sends nothing. (Before B-1
+    //    it grabbed exactly the 500 and the flush reverted.) ──
     function test_surplus_presendBeforeDelivery_alsoFails() public {
         uint256 excess = 500e6;
         (Order memory a, Order memory b) = _overProducingLeverage(excess);
@@ -695,16 +696,16 @@ contract MatchSettleTest is CoreSettlementBase {
         s[1] = _step(MatchStep.DELIVER, 1, 0);
         s[2] = _step(MatchStep.ITEM, 1, 0);
         s[3] = _step(MatchStep.ITEM, 1, 1);
-        s[4] = _step(MatchStep.PRESEND, 1, 0); // outstanding[USDC] = 2000 (Alice undelivered)
-        s[5] = _step(MatchStep.DELIVER, 0, 0); // …so this grabs exactly the 500 surplus
+        s[4] = _step(MatchStep.PRESEND, 1, 0); // outstanding[USDC] = 2000 (Alice) + 500 (refund)
+        s[5] = _step(MatchStep.DELIVER, 0, 0);
 
         MatchPlan memory p = _two(a, b, makerPk, bobPk, s);
         vm.prank(solver);
-        vm.expectRevert();
         settlement.matchSettle(p);
 
         assertEq(IERC20(USDC).balanceOf(solver), 0, "solver got nothing");
-        assertEq(IERC20(USDC).balanceOf(bob), 0, "maker's balance untouched");
+        assertEq(IERC20(USDC).balanceOf(bob), excess, "the over-provision went to the MAKER");
+        assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "pool flat");
     }
 
     // ── Single-order path: `fillUpTo`'s `recipient` redirect moves the filler's

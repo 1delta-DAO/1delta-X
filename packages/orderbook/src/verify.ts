@@ -7,9 +7,10 @@ import {
   SETTLEMENT_LENS_ABI,
   type Order,
 } from "@1delta-x/sdk";
-import { keccak256, recoverTypedDataAddress, type Hex, type PublicClient } from "viem";
+import { hashTypedData, keccak256, type Hex, type PublicClient, type TypedDataDefinition } from "viem";
 
 import { fillerOf, toDeployment, type OrderbookConfig } from "./config";
+import { recoverEcdsa } from "./ecdsa";
 import type { OrderAnnounce } from "./messages";
 
 /** Mirrors {SettlementLens.OrderStatus}. `Fillable` (1) is the admit gate. */
@@ -73,6 +74,17 @@ export interface VerifierOptions {
    */
   maxRecheckCalls?: number;
   /**
+   * Wall-clock budget of one `verifyLayer2` sweep, ms (read on `nowMs`). Once it is
+   * spent no further lens call is STARTED — first-level chunks included, which
+   * `maxRecheckCalls` does not count — and every row not answered yet stays
+   * `Inconclusive` (never `isolated`: kept, never a strike). It bounds a sweep
+   * against a hanging RPC: without it, `batches + maxRecheckCalls` calls, each up
+   * to the transport timeout × its retries, ran back to back (a Durable Object
+   * alarm has a 15-minute wall-clock limit). A call already in flight still runs
+   * to its own timeout. Default: unbounded.
+   */
+  maxSweepMs?: number;
+  /**
    * How long an ingest waits for others to share its lens call (ms). Every
    * announce used to fire its own `eth_call`, unbatched and unbounded. Default 5.
    */
@@ -116,6 +128,8 @@ interface SweepBudget {
   calls: number;
   succeeded: number;
   lastError: unknown;
+  /** `nowMs` past which no lens call is started (Infinity = unbounded). */
+  deadline: number;
 }
 
 const INCONCLUSIVE: Layer2Result = {
@@ -159,6 +173,7 @@ export class Verifier {
   private readonly nowMs: () => number;
   private readonly batchSize: number;
   private readonly maxRecheckCalls: number;
+  private readonly maxSweepMs: number;
   private readonly batchWindowMs: number;
   private readonly maxConcurrentCalls: number;
   private readonly maxQueued: number;
@@ -180,6 +195,7 @@ export class Verifier {
     this.nowMs = opts?.nowMs ?? (() => Date.now());
     this.batchSize = Math.max(1, opts?.batchSize ?? 100);
     this.maxRecheckCalls = Math.max(0, opts?.maxRecheckCalls ?? 64);
+    this.maxSweepMs = opts?.maxSweepMs !== undefined && opts.maxSweepMs >= 0 ? opts.maxSweepMs : Infinity;
     this.batchWindowMs = Math.max(0, opts?.batchWindowMs ?? 5);
     this.maxConcurrentCalls = Math.max(1, opts?.maxConcurrentCalls ?? 4);
     this.maxQueued = Math.max(1, opts?.maxQueued ?? 2_000);
@@ -217,47 +233,64 @@ export class Verifier {
     // delegate, and a 1271 maker cannot be judged off-chain.
     if (a.permitBatch) {
       const batch = a.permitBatch;
-      if (sig.length !== 132) {
-        return { ok: false, reason: "permit announce: only a 65-byte ECDSA maker signature is verifiable", orderHash, deferSig: false };
-      }
       if (batch.deadline <= BigInt(this.now())) return { ok: false, reason: "permit batch expired", orderHash, deferSig: false };
+      // Every grant, token AND taker, must name this settlement. A taker grant to
+      // a foreign spender left the TAKE item unfunded on-chain, and the announce
+      // sat in the book until a sweep evicted it (signature review F1).
       const settlement = this.config.settlement.toLowerCase();
-      if (batch.tokens.some((t) => t.spender.toLowerCase() !== settlement)) {
+      if (
+        batch.tokens.some((t) => t.spender.toLowerCase() !== settlement) ||
+        batch.takers.some((t) => t.spender.toLowerCase() !== settlement)
+      ) {
         return { ok: false, reason: "permit batch grants a spender other than this settlement", orderHash, deferSig: false };
       }
-      let signer: Hex;
+      // `ecrecover` semantics, as Permit3 applies them: 65 bytes with v ∈ {27, 28}
+      // or 64-byte EIP-2098. viem's recover also took v = 0/1, which Permit3
+      // rejects, and Layer 2 trusts this verdict for the signature, so such an
+      // announce read `Fillable` until expiry (F2); a compact signature Permit3
+      // fills was refused (F3). Any other length is a 1271 maker — not judgeable.
+      let standardLength: boolean, signer: Hex | undefined;
       try {
-        signer = await recoverTypedDataAddress({
-          ...permitWitnessTypedData(batch, order, toDeployment(this.config)),
-          signature: sig,
-        } as unknown as Parameters<typeof recoverTypedDataAddress>[0]);
+        ({ standardLength, signer } = await recoverEcdsa(
+          hashTypedData(permitWitnessTypedData(batch, order, toDeployment(this.config)) as unknown as TypedDataDefinition),
+          sig,
+        ));
       } catch {
+        // A batch the Permit3 types cannot encode (e.g. a malformed `ref`).
         return { ok: false, reason: "permit signature does not recover", orderHash, deferSig: false };
       }
+      if (!standardLength) {
+        return { ok: false, reason: "permit announce: only an ECDSA maker signature (65 or 64 bytes) is verifiable", orderHash, deferSig: false };
+      }
+      if (!signer) return { ok: false, reason: "permit signature does not recover", orderHash, deferSig: false };
       if (signer.toLowerCase() !== order.maker.toLowerCase()) {
         return { ok: false, reason: "permit signature is not the maker's", orderHash, deferSig: false };
       }
       return { ok: true, orderHash, deferSig: false, permit: true };
     }
 
-    // 65-byte ECDSA sig (0x + 130 hex): recover here and require the maker. A
-    // non-65-byte sig is a contract wallet (EIP-1271) or 7702 account — un-
-    // recoverable locally, so defer the verdict to the lens.
-    if (sig.length === 132) {
-      let recovered: Hex;
-      try {
-        recovered = await recoverTypedDataAddress({
-          ...orderTypedData(order, toDeployment(this.config)),
-          signature: sig,
-        } as unknown as Parameters<typeof recoverTypedDataAddress>[0]);
-      } catch {
-        return { ok: false, reason: "signature does not recover", orderHash, deferSig: false };
-      }
+    // 65-byte or 64-byte (EIP-2098) ECDSA sig: recover here, with the settler's
+    // `ecrecover` semantics, and require the maker. Any other length is a contract
+    // wallet (EIP-1271) or 7702 account — unrecoverable locally, so defer the
+    // verdict to the lens.
+    let standardLength: boolean, signer: Hex | undefined;
+    try {
+      ({ standardLength, signer } = await recoverEcdsa(
+        hashTypedData(orderTypedData(order, toDeployment(this.config)) as unknown as TypedDataDefinition),
+        sig,
+      ));
+    } catch {
+      return { ok: false, reason: "signature does not recover", orderHash, deferSig: false };
+    }
+    if (standardLength) {
+      // No signer = `ecrecover` yields address(0) (e.g. v = 0/1). The lens would
+      // say "invalid" too; refuse here and save the call (F2).
+      if (!signer) return { ok: false, reason: "signature does not recover", orderHash, deferSig: false };
       // A recover to someone other than the maker is not a rejection: the settler
       // (and the lens) accept a maker-NOMINATED delegate (`orderSignerExpiry`),
       // which this local step cannot see. Defer to Layer 2, which reads the
       // registry, instead of refusing every session-key-signed order (F29 lead).
-      if (recovered.toLowerCase() !== order.maker.toLowerCase()) {
+      if (signer.toLowerCase() !== order.maker.toLowerCase()) {
         return { ok: true, orderHash, deferSig: true };
       }
       return { ok: true, orderHash, deferSig: false };
@@ -289,14 +322,15 @@ export class Verifier {
    *     without the per-order gas cap), are re-checked in smaller calls until
    *     each order has been asked on its own;
    *   • an order still `Inconclusive` alone gets one uncapped single-order call.
-   * All of it is bounded by `maxRecheckCalls`; what the budget does not reach stays
-   * `Inconclusive`. If NO call in the sweep succeeded the RPC is the problem, not
-   * the orders, and the last error is thrown instead of a book's worth of verdicts.
+   * All of it is bounded by `maxRecheckCalls`, and the whole sweep by `maxSweepMs`;
+   * what the budget does not reach stays `Inconclusive`. If NO call in the sweep
+   * succeeded the RPC is the problem, not the orders, and the last error is thrown
+   * instead of a book's worth of verdicts.
    */
   async verifyLayer2(entries: readonly Layer2Entry[]): Promise<Layer2Result[]> {
     if (entries.length === 0) return [];
     const out: Layer2Result[] = new Array<Layer2Result>(entries.length);
-    const budget: SweepBudget = { calls: this.maxRecheckCalls, succeeded: 0, lastError: undefined };
+    const budget: SweepBudget = { calls: this.maxRecheckCalls, succeeded: 0, lastError: undefined, deadline: this.nowMs() + this.maxSweepMs };
     for (let i = 0; i < entries.length; i += this.batchSize) {
       const idx: number[] = [];
       for (let k = i; k < Math.min(i + this.batchSize, entries.length); k++) idx.push(k);
@@ -304,6 +338,11 @@ export class Verifier {
     }
     if (budget.succeeded === 0 && budget.lastError !== undefined) throw budget.lastError;
     return out;
+  }
+
+  /** Whether the sweep's wall-clock budget is spent (no new lens call may start). */
+  private outOfTime(budget: SweepBudget): boolean {
+    return this.nowMs() >= budget.deadline;
   }
 
   /** Classify `idx`, recursing into smaller calls wherever an answer is not a verdict. */
@@ -314,13 +353,12 @@ export class Verifier {
     budget: SweepBudget,
     isRecheck: boolean,
   ): Promise<void> {
-    if (isRecheck) {
-      if (budget.calls <= 0) {
-        for (const i of idx) out[i] = INCONCLUSIVE;
-        return;
-      }
-      budget.calls--;
+    if (this.outOfTime(budget) || (isRecheck && budget.calls <= 0)) {
+      // Not reached this sweep: kept as `Inconclusive` (not `isolated`), never evicted.
+      for (const i of idx) out[i] = INCONCLUSIVE;
+      return;
     }
+    if (isRecheck) budget.calls--;
 
     let rows: Layer2Result[];
     try {
@@ -371,7 +409,7 @@ export class Verifier {
    * one that still cannot be is reported `Inconclusive` + `isolated`.
    */
   private async resolveAlone(e: Layer2Entry, budget: SweepBudget): Promise<Layer2Result> {
-    if (budget.calls <= 0) return INCONCLUSIVE;
+    if (budget.calls <= 0 || this.outOfTime(budget)) return INCONCLUSIVE;
     budget.calls--;
     try {
       const [status, fillableAmount, isSignatureValid, vp] = (await this.client.readContract({

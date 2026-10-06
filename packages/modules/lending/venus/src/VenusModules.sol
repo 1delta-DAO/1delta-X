@@ -291,6 +291,13 @@ contract VenusTakerModule is ITakerModule, IProceedsAsset {
             uint256 err = IVToken(vToken).borrowBehalf(onBehalfOf, amount);
             if (err != 0) revert VenusError(err);
             uint256 received = IERC20(underlying).balanceOf(address(this)) - balBefore;
+            // "Fail closed" means REVERT, not "forward less" (review 2026-10-06, the
+            // sibling the two withdraw branches' G-VENUE_A-2 bound missed): with the
+            // cap alone a short borrow (a fee-on-transfer underlying, a capped
+            // market) was forwarded short and {Core._payInputsToSolver} billed the
+            // gap to the MAKER'S WALLET while the maker kept the full debt. The venue
+            // call is sized at the slice, so this cannot misfire on a partial fill.
+            FullFillGuard.requireDelivered(received, amount);
             // Deliver the measured proceeds, capped at the signed amount; excess to the
             // maker below. Never exceeds `received`, so an under-delivering vToken
             // cannot be topped up from a stray module balance.

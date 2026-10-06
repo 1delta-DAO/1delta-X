@@ -1,10 +1,13 @@
 {
-  "name": "@1delta-x/rif-filler",
+  "name": "@1delta-x/beta-filler",
   "license": "MIT",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "description": "Minimal beta filler for the Rootstock USDRIF/USDT0 market run from an EOA: fills orders from the orderbook out of hot-wallet inventory, then rebalances through MoC redemption and the Uniswap v3 RIF pool.",
+  "exports": {
+    "./core": "./src/core.ts"
+  },
   "scripts": {
     "build": "pnpm --filter @1delta-x/sdk build && tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",

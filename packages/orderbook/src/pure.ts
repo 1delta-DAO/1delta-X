@@ -13,6 +13,7 @@ export * from "./messages";
 export * from "./config";
 export * from "./verify";
 export * from "./cancels";
+export * from "./ecdsa";
 export * from "./admission";
 export { isOcoGroupLeg, type ChainEvent } from "./watcher";
 export { anchorAmounts, orderPrice, tokensIn, tokensOut, summarize, type OrderSummary } from "./query";

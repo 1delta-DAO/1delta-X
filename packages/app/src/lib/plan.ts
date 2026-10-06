@@ -2,8 +2,32 @@ import type { Quote } from "./ladder";
 import { inputWei } from "./order";
 import type { OrderType, Side } from "./types";
 
-/** How long a market order stays live, and how long its auction runs. */
-export const MARKET_TTL_SECONDS = 60;
+/**
+ * How long a market order's dutch auction runs: it decays from the quoted price
+ * to the floor over this window, then RESTS at the floor until it expires.
+ */
+export const MARKET_DECAY_SECONDS = 60;
+/**
+ * How long a market order stays live. ⚠ Not the auction length (review
+ * 2026-10-05): the beta book refuses any order expiring within its
+ * `MIN_TTL_SECONDS` (120 s, packages/orderbook-worker/wrangler.toml) and the
+ * filler never touches one expiring within its `EXPIRY_MARGIN_SECONDS` (90 s,
+ * packages/filler-worker/wrangler.toml — three Rootstock blocks for a tx to
+ * land), so a 60-second order was refused by the book and, had it been admitted,
+ * would have been held by the filler for its whole life. The life has to exceed
+ * both; the margin above them is the fill window. Pinned by
+ * `test/crossComponent.audit.test.ts` against the two wrangler files.
+ */
+export const MARKET_TTL_SECONDS = 300;
+/**
+ * Slippage floor quoted on market orders: the auction decays from the book's
+ * price to `crossedOut × (1 − this)`. Lives here (not in App.tsx) so node
+ * scripts can sign exactly the app's market shape. Since task 15 the book's pool
+ * rungs are priced NET of each pool's fee tier (`applyPoolFee`, lib/univ3.ts), so
+ * these 50 bps are headroom over an EXECUTABLE price — before, a 0.3 % pool's fee
+ * alone ate 30 of them and no filler could fill at the floor.
+ */
+export const MARKET_SLIPPAGE_BPS = 50;
 /** How long a resting limit order lives. */
 export const LIMIT_TTL_SECONDS = 24 * 3600;
 
@@ -91,7 +115,7 @@ export function planTicket(a: PlanArgs): TicketPlan | null {
       targetOut,
       minOut,
       ttlSeconds: LIMIT_TTL_SECONDS,
-      decaySeconds: targetOut > minOut ? MARKET_TTL_SECONDS : 0,
+      decaySeconds: targetOut > minOut ? MARKET_DECAY_SECONDS : 0,
       orders: 1,
       fundingTtlSeconds: LIMIT_TTL_SECONDS,
       crossedBase: q.crossedBase,
@@ -100,7 +124,8 @@ export function planTicket(a: PlanArgs): TicketPlan | null {
   }
 
   // A market order is a short dutch auction: the maker names the price the
-  // book shows now and a floor, and lets fillers compete in between.
+  // book shows now and a floor, and lets fillers compete in between — then it
+  // rests at the floor for the remainder of its life (see MARKET_TTL_SECONDS).
   return {
     kind: "market",
     price,
@@ -108,7 +133,7 @@ export function planTicket(a: PlanArgs): TicketPlan | null {
     targetOut: q.crossedOut,
     minOut: q.minReceived,
     ttlSeconds: MARKET_TTL_SECONDS,
-    decaySeconds: MARKET_TTL_SECONDS,
+    decaySeconds: MARKET_DECAY_SECONDS,
     orders: 1,
     fundingTtlSeconds: MARKET_TTL_SECONDS,
     crossedBase: q.crossedBase,

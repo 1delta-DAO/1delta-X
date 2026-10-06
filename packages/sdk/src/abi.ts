@@ -175,7 +175,9 @@ export const SETTLEMENT_ABI = [
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
   },
   // Overload carrying the shared `takerData` blob into validators/invariants and
-  // any price module. Distinct selector; the 6-arg form stays for callers without.
+  // any price module, and the filler's `minBumpBps` price floor (exactly
+  // `fillUpTo`'s; 0 = none). Distinct selector; the 6-arg form stays for callers
+  // without. BREAKING (2026-10): replaces the 7-arg `(…, mode, takerData)` overload.
   {
     type: "function",
     name: "fillWithCallback",
@@ -188,6 +190,7 @@ export const SETTLEMENT_ABI = [
       { name: "callbackData", type: "bytes" },
       { name: "mode", type: "uint8" },
       { name: "takerData", type: "bytes" },
+      { name: "minBumpBps", type: "uint256" },
     ],
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
   },

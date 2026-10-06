@@ -2,6 +2,14 @@
 # Deploy: see README.md. Vars below are defaults; addresses marked PLACEHOLDER
 # must be replaced once the contracts are deployed (until then every write
 # answers 503 "orderbook not configured" and the alarm skips chain work).
+#
+# Secrets (never in this file): `wrangler secret put <NAME>`
+#   BINDING_KEY     shared with the app's Pages project (ORDERBOOK_BINDING_KEY) and
+#                   the filler worker — see README "Client IP and spoofing"
+#   RPC_URL_SECRET  REQUIRED IN PRODUCTION: a keyed Rootstock RPC that serves
+#                   eth_getLogs (e.g. Alchemy, which documents eth_getLogs on
+#                   Rootstock). Read in preference to the RPC_URL var below, so the
+#                   var line can stay (a var and a secret cannot share a name).
 
 name = "orderbook-1delta-rsk"
 main = "src/index.ts"
@@ -9,6 +17,10 @@ compatibility_date = "2025-09-01"
 # Reachable at <name>.<account>.workers.dev. Set to false (and drop any route)
 # to make the app's service binding the ONLY way in — see README.
 workers_dev = true
+# No per-version preview URLs (<version>-<name>.<account>.workers.dev): each would be
+# one more public way in to the same Durable Object, outside the binding and the
+# routes this file declares.
+preview_urls = false
 
 [[durable_objects.bindings]]
 name = "BOOK"
@@ -30,33 +42,65 @@ CHAIN_ID = "30"
 SETTLEMENT = "0x0000000000000000000000000000000000000000"   # PLACEHOLDER
 PERMIT3 = "0x0000000000000000000000000000000000000000"      # PLACEHOLDER
 LENS = "0x0000000000000000000000000000000000000000"         # PLACEHOLDER
+# Fallback only. Rootstock's public node does NOT serve eth_getLogs (JSON-RPC
+# -32601), so on it the fill index and on-chain cancels never advance: /health then
+# reports `logsUnsupported: true`, the filler worker alerts, and the lens re-check
+# falls back to a 60 s cadence. Set the RPC_URL_SECRET secret (see the top).
 RPC_URL = "https://public-node.rsk.co"
+# Optional Durable Object location hint, e.g. "wnam" (near the public Rootstock RPCs).
+# Only affects where the object is first CREATED; an existing object never moves.
+DO_LOCATION_HINT = ""
 # Filler the lens previews validators for (zero = open filler).
 DEFAULT_FILLER = ""
 OCO_MODULES = ""
-# The beta market: USDRIF / USDT0 (USD0). Leg tokens outside this list are 422.
-ALLOWED_TOKENS = "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37,0x779ded0c9e1022225f8e0630b35a9b54be713736"
-MAX_ORDERS = "5000"
+# The beta markets' tokens: USDRIF, USDT0 (USD0), WRBTC, WETH — the app's three
+# Rootstock markets (USDRIF/USDT0, WRBTC/USDT0, WETH/WRBTC). Leg tokens outside this
+# list are 422; without WRBTC and WETH every route-market order was refused.
+ALLOWED_TOKENS = "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37,0x779ded0c9e1022225f8e0630b35a9b54be713736,0x542fda317318ebf1d3deaf76e0b632741a7e677d,0x2f6f07cdcf3588944bf4c42ac74ff24bf56e7590"
+# 1000 = the beta filler's intake window (INTAKE_MAX_PAGES 2 × INTAKE_PAGE_SIZE 500 in
+# packages/filler-worker/wrangler.toml): every order this book holds is one the filler
+# sees. Raise both together.
+MAX_ORDERS = "1000"
 MAX_ORDERS_PER_MAKER = "100"
 MAX_CURVE_POINTS = "32"
 MAX_ORDER_JSON_BYTES = "32768"
-MIN_TTL_SECONDS = "15"
+# ≥ 4 Rootstock blocks (~30 s each): an order that expires sooner can hardly be
+# filled (the filler skips anything expiring within 90 s), so the book refuses it.
+MIN_TTL_SECONDS = "120"
 MAX_TTL_SECONDS = "7776000"
 REQUIRE_DELTA_VERIFY = "false"
 MAX_BODY_BYTES = "262144"
 RATE_LIMIT_IP_CAPACITY = "120"
-RATE_LIMIT_IP_REFILL = "1"
+# 3 tokens/s per visitor: an open app tab spends (T + 2) tokens every 6 s for T
+# tracked orders (one /orders/:hash/status read each, cost 1, plus one /fills query,
+# cost 2). At 1/s (6 tokens per poll) a tab with more than 4 resting orders ran dry
+# and was throttled; 3/s sustains 16 per tab.
+RATE_LIMIT_IP_REFILL = "3"
 RATE_LIMIT_MAKER_CAPACITY = "120"
 RATE_LIMIT_MAKER_REFILL = "1"
 ALARM_INTERVAL_SECONDS = "20"
-# Rootstock: ~30s blocks. 2000 blocks per alarm, 2 confirmations, 1 day initial lookback.
+# Wall-clock budget of one alarm pass (fill sizing + lens re-check). Past it the pass
+# stops and the next one runs 1 s later; with the 8 s RPC timeout an alarm stays far
+# inside Cloudflare's 15-minute alarm limit.
+ALARM_BUDGET_SECONDS = "240"
+# Rootstock: ~30s blocks. At most 2000 blocks per eth_getLogs — halved automatically
+# after a failed read (a provider's range cap) and grown back after successes —
+# 2 confirmations, 1 day initial lookback.
 MAX_LOG_RANGE = "2000"
 CONFIRMATIONS = "2"
+# REQUIRED for a real deployment: the Settlement deploy block. Unset, a fresh object
+# indexes only the last INITIAL_LOOKBACK_BLOCKS (~1 day) and older fills are missing.
 START_BLOCK = ""
 INITIAL_LOOKBACK_BLOCKS = "2880"
-REVALIDATE_SECONDS = "60"
+# Fills and cancels reach the book from the logs; the lens re-check only catches
+# balance / allowance moves, so every 5 min is enough. While the RPC serves no
+# eth_getLogs the re-check is the ONLY signal and falls back to 60 s automatically.
+REVALIDATE_SECONDS = "300"
 MAX_RECHECK_PER_ALARM = "500"
 TOMBSTONE_TTL_SECONDS = "1209600"
 MAX_TOMBSTONES = "20000"
 MAX_FILLS = "50000"
-# BINDING_KEY is a secret: `wrangler secret put BINDING_KEY` (see README).
+# Subrequests: Workers Paid allows 10,000 subrequests per invocation by default
+# (Free: 50) — https://developers.cloudflare.com/workers/platform/limits/ — and an
+# alarm makes ~2 RPC calls idle plus 2–3 per fill it indexes and the re-check sweep,
+# bounded by ALARM_BUDGET_SECONDS.

@@ -64,6 +64,14 @@ taker module enforces `msg.sender == permit3`; the MAKE modules enforce
   `maxAssets` with the slice (`totalAmount@160`), bounds the transfer and disposes
   any surplus. A gasless fixed repay signs the EIP-2612 permit for an explicit
   `value` ≥ the item's `maxAssets` — a face-valued permit cannot cover the pull.
+  A signed `maxAssets` of 0 reverts `ZeroMaxAssets`; an EMPTY fixed position, or a
+  dust slice whose scaled ceiling floors to 0, is skipped (nothing pulled) rather
+  than reverted — the pre-fund twin's rule (review 2026-10-06, task 12).
+- Pre-maturity fixed withdraw pays `assetsDiscounted < amount`, and the core bills
+  `owed − assetsDiscounted` to the maker's WALLET; `minAssetsRequired` is the only
+  cap, and the discount's rate is one a filler can raise in the same block. Sign it
+  non-zero — `SettlementLens.validateOrder` flags a zero one via
+  `ExactlyTakerModule.takeFloored` (`ITakeFloor`).
 - Fixed withdraw: Exactly's `withdrawAtMaturity` **clamps** a request above the
   fixed deposit instead of reverting, so the taker module reads
   `fixedDepositPositions` and reverts `ShortFixedPosition` when the slice exceeds

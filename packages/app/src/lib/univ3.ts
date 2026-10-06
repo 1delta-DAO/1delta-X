@@ -147,6 +147,11 @@ export interface Rung {
 export interface LadderOptions {
   /** True when the market's BASE is the pool's token0. */
   baseIsToken0: boolean;
+  /**
+   * The pool's fee tier in HUNDREDTHS OF A BIP (Uniswap/Sushi `fee`: 3000 = 0.30 %),
+   * applied to every rung by {@link applyPoolFee}. Omitted/0 = raw tick prices.
+   */
+  fee?: number;
   /** Most rungs to return per side. */
   maxRungs: number;
   /** Stop walking once a rung's price is this far from mid, as a fraction. */
@@ -157,6 +162,41 @@ export interface Ladder {
   bids: Rung[];
   asks: Rung[];
   mid: number;
+}
+
+/** Fee tiers are stored in hundredths of a bip: 1e6 = 100 %. */
+export const FEE_DENOMINATOR = 1_000_000;
+
+/** A pool fee tier (hundredths of a bip, 3000 = 0.30 %) as a fraction (0.003). */
+export function feeFraction(fee: number): number {
+  if (!Number.isFinite(fee) || fee < 0 || fee >= FEE_DENOMINATOR) throw new Error(`pool fee ${fee} out of range (hundredths of a bip)`);
+  return fee / FEE_DENOMINATOR;
+}
+
+/**
+ * Price a ladder at what the pool EXECUTES, not its raw tick maths (task 15).
+ *
+ * A v3 pool takes its fee out of the INPUT: selling `x` base swaps `(1 − f)·x`
+ * through the curve, buying base costs `cost / (1 − f)` of quote. So a rung that
+ * the tick maths prices at `p` is, to a taker,
+ *
+ *   bid  `p × (1 − f)`, absorbing `size / (1 − f)` base (gross of the fee), and
+ *   ask  `p / (1 − f)` (≈ `p × (1 + f)`), supplying the same `size` base.
+ *
+ * The quote-token side of each rung is unchanged — the fee only moves the price.
+ * `mid` stays the TRUE mid (sqrt price): the ladder's spread now shows the fee.
+ * Resting signed orders (`LMT`, merged by `mergeLadder`) carry no pool fee and
+ * are never passed through here.
+ */
+export function applyPoolFee(ladder: Ladder, fee: number): Ladder {
+  const f = feeFraction(fee);
+  if (f === 0) return ladder;
+  const keep = 1 - f;
+  return {
+    bids: ladder.bids.map((r) => ({ price: r.price * keep, size: r.size / keep })),
+    asks: ladder.asks.map((r) => ({ price: r.price / keep, size: r.size })),
+    mid: ladder.mid,
+  };
 }
 
 /**
@@ -227,9 +267,12 @@ export function buildLadder(pool: PoolLiquidity, opts: LadderOptions): Ladder {
   const asks = baseIsToken0 ? upward : downward;
 
   const within = (r: Rung) => Math.abs(r.price / mid - 1) <= maxSpread;
-  return {
-    bids: bids.filter(within).sort((a, b) => b.price - a.price),
-    asks: asks.filter(within).sort((a, b) => a.price - b.price),
-    mid,
-  };
+  return applyPoolFee(
+    {
+      bids: bids.filter(within).sort((a, b) => b.price - a.price),
+      asks: asks.filter(within).sort((a, b) => a.price - b.price),
+      mid,
+    },
+    opts.fee ?? 0,
+  );
 }

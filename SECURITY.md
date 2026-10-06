@@ -498,11 +498,12 @@ shipped self-filling contract uses one of them (2026-09-30 X-SPEC-7):
   `DestinationSettler7683`.
 - **Delta-scoped, per-fill approvals**: `AggregatorFillSolver` approves Settlement
   for exactly THIS fill's measured proceeds, zeroes the approval after the fill,
-  restricts routers to an allowlist, and is operator-gated for retain mode and
-  surplus policies. Its `executeItemFill` entry (a one-order `matchSettle` plan:
-  TAKE items early, wallet-funded MAKE late; not SETTLE, TAKE_FOR, PUSH-funded MAKE
-  or delta-verify) has the same router allowlist, delta-only amounts and operator
-  gating as `executeFill`, and never approves Settlement at all.
+  runs every route in its `RouteSandbox` (below) and approves nothing else, and is
+  operator-gated — every instance, since 2026-10 (constructor `NoOperators`). Its
+  `executeItemFill` entry (a one-order `matchSettle` plan: TAKE items early,
+  wallet-funded MAKE late; not SETTLE, TAKE_FOR, PUSH-funded MAKE or delta-verify)
+  has the same sandboxed route, delta-only amounts and operator gating as
+  `executeFill`, and never approves Settlement at all.
 - **Operator gating plus owner budgets**: `UsdrifInventorySolver` holds inventory
   by design; only operators can fill, bounded by owner-set routes, a rate floor,
   per-window budgets and a per-fill `maxSpent` (see M-8).
@@ -530,6 +531,75 @@ permit-witness first fills ARE fillable with zero inventory (SDK
 validator** — those gate Settlement's immediate `msg.sender`, so naming a
 permissionless contract admits every caller of it (VAL-5); use an operator-gated
 instance instead.
+
+**`RouteSandbox`: arbitrary route targets without a router allowlist** (2026-10-04;
+trust argument corrected 2026-10 quick audit). The solver used to pin the route's
+target to an immutable router set because it made the call FROM ITS OWN IDENTITY,
+which holds value and Settlement approvals. The route now runs in a per-solver
+`RouteSandbox` (deployed by the solver's constructor, owner-only `exec`), and
+arbitrary targets are allowed — **chosen by operators only**:
+
+- **Gated-only (BREAKING, 2026-10).** `AggregatorFillSolver`'s constructor reverts
+  `NoOperators` on an empty operator set; there are no permissionless instances.
+  An arbitrary-call sandbox is incompatible with permissionless routing: every
+  target the sandbox calls keeps a standing max approval on that call's `tokenIn`,
+  and a token target can be made to `approve` anyone. On an open instance a
+  stranger planted one with a self-signed fill (`target = tB, data =
+  approve(harvester, max)`, or `target = harvester`), and later took an honest
+  fill's spread above `minOut` from inside that fill — PoC 1: a bait order
+  `legsIn = [100 tA, 1 wei EVIL]`, `legsOut = [90 tB]`, 1 wei EVIL donated to the
+  sandbox, an honest route paying the sandbox 100 tB with `minOut` 95, and
+  EVIL's `transfer` hook pulling 5 tB during the sweep; PoC 2: a hooked
+  exact-output router whose hook pulls the leftover `tokenIn`. Bounded by the
+  filler's spread above `minOut`, never the maker's funds. With the gate, the set
+  of approved targets is exactly the set the operators' routes named.
+- **Push-funded.** The solver `transfer`s exactly the fill's measured `tokenIn`
+  delta to the sandbox; the sandbox never calls `transferFrom`, so nobody — the
+  solver included — ever approves it. A solver→sandbox allowance would be a drain,
+  since the target may be a token (`target = USDT0, data = transferFrom(solver,
+  attacker, bal)`); the solver approves no router or target at all, only
+  Settlement (scoped, cleared after the fill).
+- **Ends empty, outputs first.** Every `exec` unconditionally sweeps every token of
+  the order back to the solver (`FLOOR = 0`; a dust floor was measured and was
+  refund-neutral), **output tokens first, then `tokenIn`, then the other inputs**
+  (defence in depth: a `transfer` hook in a non-output token runs after the spread
+  has left). Its standing approvals therefore reach nothing BETWEEN fills — but
+  they are **not** worthless (this note used to say they sit "over an empty
+  account" and that a loss "fails that fill's output check"): a holder that gains
+  control during a later fill can take that fill's in-flight spread above
+  `minOut`, and the fill still passes. Sweep ordering cannot help when control is
+  taken during the route call (PoC 2). **Residual, operator trust:** never name a
+  target you would not trust with a later fill's in-flight balance
+  (`test_poc2_residual_operatorNamedTargetKeepsItsApproval` pins it).
+- **No authority.** Nobody grants it a Permit3 book, a signer slot or a role, it
+  holds no native coin (`exec` is not payable, no `receive`), and it refuses the
+  solver, Settlement, Permit3, the EXECUTOR and itself as targets
+  (`ForbiddenTarget`, defence in depth). Tokens are not refused.
+- The input bound the per-fill router approval used to provide (a route cannot
+  spend more than the fill delivered) is structural — the sandbox holds only the
+  delta and nobody may pull from the solver — and is still measured
+  (`RouteOverspent`, reachable only for a token whose holder's balance a route can
+  seize). The stale-Settlement-approval clear is unchanged.
+- **Stranded tokens.** The sweep covers only the order's tokens; a token outside it
+  that a route leaves in the sandbox (an intermediate hop's refund) stays there
+  until an operator routes `target = token, data = transfer(solver, balance)` and
+  `sweep`s it on (tested).
+- **Fee-on-transfer.** A FoT `tokenIn` routed with `amountInOffset` always reverts:
+  the patched amount is what reached the solver, and the push to the sandbox is a
+  second taxed transfer. Accepted — core stays asset-general, solvers may
+  specialise (this one to exactly-transferring tokens).
+- **Residual trust**: on the DIRECT (delta-verify) path a route may divert the
+  input residue (the spread) — not the maker's funds, which the core's delta check
+  protects. Executors that forward third-party API calldata must decode and
+  validate it (the beta filler does, for Sushi).
+
+Pinned by `RouteSandbox.t.sol` (pull more than pushed — exact `RouteFailed`, pull
+from the solver, token as target, thief route on both paths, re-entry into the
+solver / sandbox / Settlement, residue and sandbox-paid output swept, the
+delta-push probe, `RouteOverspent` on a seized input, stranded-token recovery,
+PoC 1 / PoC 2 stranger plants refused, output-first sweep vs a hook token,
+non-owner `exec`, forbidden targets, native value) and `RouteSandboxFork.t.sol`
+(Oku SwapRouter02 and Sushi RedSnwapper on a Rootstock fork).
 
 **The EXECUTOR is a public trampoline** (2026-09-30 CORE-FILLER-4). Anyone can run
 an empty `matchSettle` and make `SolverCallbackExecutor` call any target, so the
@@ -908,6 +978,42 @@ Settlement after the remediation: **24,311 / 24,576** bytes in a clean via-IR bu
 ---
 
 ## Breaking change for integrators
+
+### 2026-10 — `AggregatorFillSolver` is operator-gated only
+
+- The constructor reverts `NoOperators()` on an empty operator set; there are no
+  permissionless instances (an arbitrary-call sandbox let a stranger plant a
+  standing approval that reached later honest fills' spread — see "`RouteSandbox`"
+  above). `DirectNeedsOperators`, `PolicyNeedsOperators` and
+  `RetainNeedsOperators` are removed (unreachable). `GATED()` stays, as a constant
+  `true`; `isOperator` no longer depends on it.
+- The sandbox sweeps output tokens first (the solver orders `sweepTokens`); the
+  `exec` signature is unchanged.
+- `DeployAggregatorFill.s.sol` requires `OPERATORS`, refuses `ALLOW_OPEN`, bounds the
+  ppm env values instead of truncating them, and refuses an operator with code
+  (contract or EIP-7702 delegated EOA) unless `ALLOW_CONTRACT_OPERATORS=true`.
+- SDK `AGGREGATOR_FILL_SOLVER_ABI`: the three removed errors replaced by
+  `NoOperators`. A fee-on-transfer `tokenIn` with `amountInOffset` reverts (accepted).
+
+### 2026-10-04 — `AggregatorFillSolver` routes through `RouteSandbox`
+
+The order typehash, wire format and golden hash are unchanged; Settlement and
+Permit3 are untouched. **`AggregatorFillSolver` needs a new deployment:**
+
+- Constructor `(settlement, operators, policy)` — the router set, `standing` flag
+  and prime list are gone. `isAllowedRouter`, `prime`, `STANDING_ALLOWANCE`, the
+  `Primed` event and the errors `RouterNotAllowed`, `RouterIsProtocol`,
+  `RouterCallFailed`, `NotStandingAllowance` and `StandingNeedsOperators` are
+  removed. New: `SANDBOX()` (the `RouteSandbox`), whose `ForbiddenTarget(address)`,
+  `RouteFailed(bytes)` and `OnlyOwner()` now surface (wrapped in
+  `CallbackFailed`) where `RouterCallFailed` / `RouterNotAllowed` used to.
+- `RoutePlan.router` is any target. The router sees the SANDBOX as its payer
+  (`msg.sender`); quote pull routes to pay the solver (paying the sandbox settles
+  too, but exposes the proceeds for the rest of the route call). Only
+  `legsIn[0]`'s token is pushed to the route.
+- `DeployAggregatorFill.s.sol` / `make deploy-aggregator-fill` refuse `ROUTERS`,
+  `STANDING` and `PRIME_TOKENS`; optional `FLOOR_TOKENS` seeds the solver floor.
+  SDK `AGGREGATOR_FILL_SOLVER_ABI` and `packages/beta-filler` are updated.
 
 ### 2026-09-30 — whole-tree audit remediation
 

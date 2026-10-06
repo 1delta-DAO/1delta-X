@@ -84,7 +84,14 @@ abstract contract UsdrifForkBase is Test {
     }
 
     function __fork(string calldata rpc) external {
-        vm.createSelectFork(rpc, 8_920_000);
+        vm.createSelectFork(rpc, _forkBlock());
+    }
+
+    /// @dev The pinned block. A suite replaying a recorded third-party fixture (e.g.
+    ///      Sushi API calldata, packages/solvers/test/RouteSandboxFork.t.sol) pins the
+    ///      block the fixture was quoted at instead.
+    function _forkBlock() internal view virtual returns (uint256) {
+        return 8_920_000;
     }
 
     // ──────────────────── Order EIP-712 signing ────────────────────

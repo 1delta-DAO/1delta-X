@@ -1,17 +1,17 @@
 import { packOrder, SETTLEMENT_LENS_ABI, type Order } from "@1delta-x/sdk";
 import {
   createPublicClient,
-  createWalletClient,
   defineChain,
+  encodeFunctionData,
   erc20Abi,
   http,
   maxUint256,
   type Address,
   type Hex,
+  type LocalAccount,
   type PublicClient,
-  type WalletClient,
 } from "viem";
-import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
+import { privateKeyToAccount } from "viem/accounts";
 
 import type { Config } from "./config";
 
@@ -118,14 +118,26 @@ export const SWAP_ROUTER02_ABI = [
   },
 ] as const;
 
+/**
+ * What the filler needs from a chain: a public client for reads and simulation,
+ * and a LOCAL account that signs legacy transactions itself (the signed bytes'
+ * hash is recorded as pending BEFORE the broadcast — see guard.ts `broadcast`).
+ */
 export interface Chain {
   pub: PublicClient;
-  wallet: WalletClient;
-  account: PrivateKeyAccount;
+  account: LocalAccount;
   me: Address;
+  chainId: number;
 }
 
-export function connect(cfg: Config): Chain {
+export interface ConnectOptions {
+  /** Custom fetch for the RPC transport (the Worker counts subrequests through it). */
+  fetchFn?: typeof fetch;
+  /** Transport retries per call (viem's default 3; the Worker uses 1). */
+  retryCount?: number;
+}
+
+export function connect(cfg: Config, opts: ConnectOptions = {}): Chain {
   const chain = defineChain({
     id: cfg.chainId,
     name: cfg.chainId === 30 ? "Rootstock" : `chain-${cfg.chainId}`,
@@ -133,12 +145,16 @@ export function connect(cfg: Config): Chain {
     rpcUrls: { default: { http: [cfg.rpcUrl] } },
   });
   const account = privateKeyToAccount(cfg.privateKey);
-  const transport = http(cfg.rpcUrl);
+  const transport = http(cfg.rpcUrl, {
+    batch: false,
+    ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
+    ...(opts.retryCount !== undefined ? { retryCount: opts.retryCount } : {}),
+  });
   return {
     pub: createPublicClient({ chain, transport }) as PublicClient,
-    wallet: createWalletClient({ chain, transport, account }),
     account,
     me: account.address,
+    chainId: cfg.chainId,
   };
 }
 
@@ -146,27 +162,85 @@ export async function balanceOf(c: Chain, token: Address, who: Address = c.me): 
   return c.pub.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [who] });
 }
 
+/** `token.allowance(me, spender)`. */
+export async function allowanceOf(c: Chain, token: Address, spender: Address): Promise<bigint> {
+  return c.pub.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [c.me, spender] });
+}
+
+/** How long one `eth_gasPrice` answer is reused (Rootstock's minimum gas price moves slowly). */
+export const GAS_PRICE_TTL_MS = 10_000;
+
+/**
+ * The same chain with `getGasPrice` answered from a short-lived cache: every order
+ * of a sweep (and every strategy on it) used to ask `eth_gasPrice` again — 197 of
+ * the 809 calls a resting-book soak window cost. A failed read is not cached.
+ */
+export function withGasPriceCache(c: Chain, ttlMs: number = GAS_PRICE_TTL_MS, now: () => number = Date.now): Chain {
+  let hit: { at: number; price: Promise<bigint> } | undefined;
+  const getGasPrice = (): Promise<bigint> => {
+    const t = now();
+    if (!hit || t - hit.at >= ttlMs || t < hit.at) {
+      const price = c.pub.getGasPrice();
+      const entry = { at: t, price };
+      hit = entry;
+      price.catch(() => {
+        if (hit === entry) hit = undefined;
+      });
+    }
+    return hit.price;
+  };
+  const pub = new Proxy(c.pub, {
+    get: (target, key, receiver) => (key === "getGasPrice" ? getGasPrice : Reflect.get(target, key, receiver)),
+  });
+  return { ...c, pub };
+}
+
+/**
+ * The `eth_call` gas price for a lens preview. A priority auction prices off
+ * `tx.gasprice − basefee` and a gas-bump order off the basefee, so a preview quoted
+ * at the default gas price (0) is the NO-BID tick, not the one the fill will see
+ * (review 2026-10-05 §4). Pass the gas price the fill will be SENT with. viem's
+ * `readContract` forwards it to `eth_call` at runtime but does not declare it, hence
+ * the spread.
+ */
+function atGasPrice(gasPrice: bigint | undefined): object {
+  return gasPrice === undefined ? {} : { gasPrice };
+}
+
 export async function previewFill(
   c: Chain,
   lens: Address,
   order: Order,
   fillAmount: bigint,
+  /** Who Settlement will see as `msg.sender`: our EOA (inventory) or the solver contract (route). */
+  filler: Address = c.me,
+  /** The gas price the fill will be sent with — see {@link atGasPrice}. */
+  gasPrice?: bigint,
 ): Promise<{ delta: bigint; received: readonly bigint[]; paid: readonly bigint[] }> {
   const [delta, received, paid] = (await c.pub.readContract({
     address: lens,
     abi: SETTLEMENT_LENS_ABI,
     functionName: "previewFill",
-    args: [packOrder(order) as never, fillAmount, c.me, "0x"],
+    args: [packOrder(order) as never, fillAmount, filler, "0x"],
+    ...atGasPrice(gasPrice),
   })) as readonly [bigint, readonly bigint[], readonly bigint[]];
   return { delta, received, paid };
 }
 
-export async function previewBump(c: Chain, lens: Address, order: Order): Promise<bigint> {
+export async function previewBump(
+  c: Chain,
+  lens: Address,
+  order: Order,
+  filler: Address = c.me,
+  /** The gas price the fill will be sent with — see {@link atGasPrice}. */
+  gasPrice?: bigint,
+): Promise<bigint> {
   return (await c.pub.readContract({
     address: lens,
     abi: SETTLEMENT_LENS_ABI,
     functionName: "previewBump",
-    args: [packOrder(order) as never, c.me, "0x"],
+    args: [packOrder(order) as never, filler, "0x"],
+    ...atGasPrice(gasPrice),
   })) as bigint;
 }
 
@@ -202,43 +276,37 @@ export async function quoteRifToUsdt0(c: Chain, cfg: Config, amountIn: bigint): 
   return result[0];
 }
 
+/** USDT0 out for `amountIn` WRBTC on the WRBTC/USDT0 pool (fee `fee`), quoted live. */
+export async function quoteWrbtcToUsdt0(c: Chain, cfg: Config, amountIn: bigint, fee = 3000): Promise<bigint> {
+  if (amountIn === 0n) return 0n;
+  const { result } = await c.pub.simulateContract({
+    address: cfg.uniswap.quoter,
+    abi: QUOTER_V2_ABI,
+    functionName: "quoteExactInputSingle",
+    args: [{ tokenIn: cfg.wrbtc, tokenOut: cfg.tokens.usdt0, amountIn, fee, sqrtPriceLimitX96: 0n }],
+  });
+  return result[0];
+}
+
 /**
- * Make sure `spender` may pull at least `needed` of `token` from us. Approves a
- * bounded `target` (never unlimited), resetting to 0 first for tokens that refuse
- * a non-zero → non-zero change.
+ * The approval tx (if any) that lets `spender` pull at least `needed` of `token`
+ * from us: a bounded `target` (never unlimited). A token that refuses a non-zero →
+ * non-zero change is first reset to 0 — as its OWN tx (`reset`), so the caller
+ * sends one transaction per tick and comes back for the second.
  */
-export async function ensureAllowance(
+export async function allowanceCall(
   c: Chain,
   token: Address,
   spender: Address,
   needed: bigint,
   target: bigint,
-  dryRun: boolean,
-  log: (m: string) => void,
-): Promise<void> {
-  const current = await c.pub.readContract({
-    address: token,
-    abi: erc20Abi,
-    functionName: "allowance",
-    args: [c.me, spender],
-  });
-  if (current >= needed) return;
+  /** The allowance already read by the caller (saves the read). */
+  known?: bigint,
+): Promise<{ data: Hex; amount: bigint; reset: boolean } | undefined> {
+  const current = known ?? (await allowanceOf(c, token, spender));
+  if (current >= needed) return undefined;
   const amount = target > needed ? target : needed;
   if (amount === maxUint256) throw new Error("refusing an unlimited approval");
-  if (dryRun) {
-    log(`[dry-run] would approve ${spender} for ${amount} of ${token}`);
-    return;
-  }
-  if (current > 0n) await send(c, { address: token, abi: erc20Abi, functionName: "approve", args: [spender, 0n] }, log);
-  await send(c, { address: token, abi: erc20Abi, functionName: "approve", args: [spender, amount] }, log);
-}
-
-/** Simulate, then broadcast and wait for a successful receipt. */
-export async function send(c: Chain, call: Parameters<PublicClient["simulateContract"]>[0], log: (m: string) => void, value?: bigint): Promise<Hex> {
-  const { request } = await c.pub.simulateContract({ ...call, account: c.account, ...(value ? { value } : {}) } as never);
-  const hash = await c.wallet.writeContract(request as never);
-  const receipt = await c.pub.waitForTransactionReceipt({ hash });
-  if (receipt.status !== "success") throw new Error(`tx ${hash} reverted`);
-  log(`tx ${hash} mined in block ${receipt.blockNumber}`);
-  return hash;
+  if (current > 0n) return { data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, 0n] }), amount: 0n, reset: true };
+  return { data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, amount] }), amount, reset: false };
 }

@@ -58,9 +58,59 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@26.1.1)
 
+  packages/beta-filler:
+    dependencies:
+      '@1delta-x/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      viem:
+        specifier: ^2.21.0
+        version: 2.54.3(typescript@5.9.3)(zod@4.4.3)
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.1
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.20.1)
+
   packages/core: {}
 
   packages/docs-site: {}
+
+  packages/filler-worker:
+    dependencies:
+      '@1delta-x/beta-filler':
+        specifier: workspace:*
+        version: link:../beta-filler
+      '@1delta-x/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      viem:
+        specifier: ^2.21.0
+        version: 2.54.3(typescript@5.9.3)(zod@4.4.3)
+    devDependencies:
+      '@cloudflare/vitest-pool-workers':
+        specifier: ^0.22.0
+        version: 0.22.0(@cloudflare/workers-types@5.20261004.1)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11(@types/node@26.1.1)(vite@6.4.3(@types/node@26.1.1)(tsx@4.23.1)))
+      '@cloudflare/workers-types':
+        specifier: ^5.20261004.1
+        version: 5.20261004.1
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.0
+        version: 4.1.11(@types/node@26.1.1)(vite@6.4.3(@types/node@26.1.1)(tsx@4.23.1))
+      wrangler:
+        specifier: ^4.40.0
+        version: 4.147.0(@cloudflare/workers-types@5.20261004.1)(@types/node@26.1.1)
 
   packages/lib: {}
 
@@ -204,28 +254,6 @@ importers:
         version: 4.147.0(@cloudflare/workers-types@5.20261004.1)(@types/node@26.1.1)
 
   packages/periphery: {}
-
-  packages/rif-filler:
-    dependencies:
-      '@1delta-x/sdk':
-        specifier: workspace:*
-        version: link:../sdk
-      viem:
-        specifier: ^2.21.0
-        version: 2.54.3(typescript@5.9.3)(zod@4.4.3)
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.20.1
-      tsx:
-        specifier: ^4.19.0
-        version: 4.23.1
-      typescript:
-        specifier: ^5.4.0
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1.0
-        version: 2.1.9(@types/node@22.20.1)
 
   packages/sdk:
     dependencies:
@@ -3110,6 +3138,7 @@ snapshots:
   '@types/node@26.1.1':
     dependencies:
       undici-types: 8.3.0
+    optional: true
 
   '@types/prop-types@15.7.15': {}
 
@@ -3624,7 +3653,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
-      '@types/node': 26.1.1
+      '@types/node': 22.20.1
       long: 5.3.2
 
   quick-format-unescaped@4.0.4: {}
@@ -3837,7 +3866,8 @@ snapshots:
 
   undici-types@6.21.0: {}
 
-  undici-types@8.3.0: {}
+  undici-types@8.3.0:
+    optional: true
 
   undici@7.29.0: {}
 

@@ -134,30 +134,22 @@ contract SplitHookToken {
 ///         and the any-size sentinel) and the AGG-8 test gaps (reentrancy from the
 ///         route and from the split, same-token orders, the diversion limit).
 contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
-    function _gated(address[] memory routers, SurplusPolicy memory policy) internal returns (AggregatorFillSolver g) {
+    function _gated(SurplusPolicy memory policy) internal returns (AggregatorFillSolver g) {
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        g = new AggregatorFillSolver(address(settlement), routers, ops, policy, false, _none());
+        g = new AggregatorFillSolver(address(settlement), ops, policy);
     }
 
     // ═══════════════════════════ AGG-1 ═══════════════════════════
 
-    /// AGG-1: retain mode on an open instance parked value no function could move
-    /// again. It is refused there now.
-    function test_audit_AGG_1_retainRefusedOnOpenInstance() public {
-        Order memory o = _order(900);
-        bytes memory sig = _sign(o);
-        RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
-        p.profitRecipient = address(aggSolver);
-        vm.expectRevert(AggregatorFillSolver.RetainNeedsOperators.selector);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
-        assertEq(tB.balanceOf(address(aggSolver)), 0, "nothing locked");
-    }
+    // AGG-1: retain mode on an open instance parked value no function could move
+    // again. `test_audit_AGG_1_retainRefusedOnOpenInstance` pinned the refusal; it
+    // was deleted in 2026-10 with the open mode itself ({NoOperators}).
 
     /// AGG-1: on a gated instance the retained spread comes back out through the
     /// operators' `sweep` — the exit the NatSpec promised and did not exist.
     function test_audit_AGG_1_gatedRetainIsRecoverableBySweep() public {
-        AggregatorFillSolver g = _gated(_routers(address(router)), _noSplit());
+        AggregatorFillSolver g = _gated(_noSplit());
         Order memory o = _order(901);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _planFor(AMOUNT_IN, address(g), AMOUNT_OUT, NO_PATCH);
@@ -176,11 +168,13 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
         assertEq(tB.balanceOf(address(g)), 1, "dust floor kept");
     }
 
-    /// AGG-1: an open instance has no operators, so nothing can be swept from it.
-    function test_audit_AGG_1_sweepRefusedOnOpenInstance() public {
+    /// AGG-1: only operators sweep. (Was `…_sweepRefusedOnOpenInstance`; there are
+    /// no open instances since 2026-10, so it now pins the non-operator refusal.)
+    function test_audit_AGG_1_sweepRefusedForNonOperator() public {
         tB.mint(address(aggSolver), 1e18);
-        vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, address(this)));
-        aggSolver.sweep(address(tB), address(this), 1e18);
+        vm.prank(address(0xD00D));
+        vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, address(0xD00D)));
+        aggSolver.sweep(address(tB), address(0xD00D), 1e18);
     }
 
     // ═══════════════════════════ AGG-2 ═══════════════════════════
@@ -213,9 +207,7 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
         TwoOutRouter r2 = new TwoOutRouter(address(tA), address(tB), address(tC), 3e18);
         tB.mint(address(r2), 1_000e18);
         tC.mint(address(r2), 1_000e18);
-        address[] memory rs = new address[](1);
-        rs[0] = address(r2);
-        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), rs, _open(), _noSplit(), false, _none());
+        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), _ops(), _noSplit());
 
         address[] memory outs = new address[](2);
         (outs[0], outs[1]) = (address(tB), address(tC));
@@ -228,6 +220,8 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
             minOut: AMOUNT_OUT,
             maxPay: 0,
             amountInOffset: NO_PATCH,
+            amountOutOffset: NO_PATCH,
+            minBumpBps: 0,
             profitRecipient: address(0),
             originator: address(0),
             originatorPpm: 0,
@@ -245,19 +239,14 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
     // ═══════════════════════════ AGG-3 ═══════════════════════════
 
     /// AGG-3: an open caller writes the route and can keep the spread from ever
-    /// reaching the split, so a non-zero policy on an open instance is refused.
-    function test_audit_AGG_3_policyNeedsOperators() public {
-        vm.expectRevert(AggregatorFillSolver.PolicyNeedsOperators.selector);
-        new AggregatorFillSolver(
-            address(settlement),
-            _routers(address(router)),
-            _open(),
-            SurplusPolicy({makerPpm: 1, protocolPpm: 0, protocolRecipient: address(0)}),
-            false,
-            _none()
-        );
-        // The zero policy stays available to open instances.
-        new AggregatorFillSolver(address(settlement), _routers(address(router)), _open(), _noSplit(), false, _none());
+    /// reaching the split, so a non-zero policy needed operators. Since 2026-10 every
+    /// instance does: no policy, zero or not, deploys without an operator set.
+    function test_audit_AGG_3_noInstanceWithoutOperators() public {
+        vm.expectRevert(AggregatorFillSolver.NoOperators.selector);
+        new AggregatorFillSolver(address(settlement), new address[](0), SurplusPolicy({makerPpm: 1, protocolPpm: 0, protocolRecipient: address(0)}));
+        vm.expectRevert(AggregatorFillSolver.NoOperators.selector);
+        new AggregatorFillSolver(address(settlement), new address[](0), _noSplit());
+        assertTrue(new AggregatorFillSolver(address(settlement), _ops(), _noSplit()).GATED());
     }
 
     /// AGG-3 / AGG-8: pin the documented limit — the policy binds only the spread
@@ -266,10 +255,8 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
     function test_audit_AGG_3_policyBindsOnlyTheSpreadThatArrives() public {
         DivertRouter dr = new DivertRouter(address(tA), address(tB));
         tB.mint(address(dr), 1_000e18);
-        address[] memory rs = new address[](1);
-        rs[0] = address(dr);
         AggregatorFillSolver g =
-            _gated(rs, SurplusPolicy({makerPpm: 500_000, protocolPpm: 0, protocolRecipient: address(0)}));
+            _gated(SurplusPolicy({makerPpm: 500_000, protocolPpm: 0, protocolRecipient: address(0)}));
         Order memory o = _order(904);
         bytes memory sig = _sign(o);
         address divertTo = address(0xD1);
@@ -278,6 +265,8 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
             minOut: AMOUNT_OUT,
             maxPay: 0,
             amountInOffset: NO_PATCH,
+            amountOutOffset: NO_PATCH,
+            minBumpBps: 0,
             profitRecipient: address(0),
             originator: address(0),
             originatorPpm: 0,
@@ -294,12 +283,14 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
 
     /// AGG-8: a router that re-enters `executeFill` mid-route is refused (the
     /// settler is locked and the solver is mid-fill), and the outer fill completes.
+    /// The router is listed as an OPERATOR (a contract operator), so the re-entry
+    /// passes the operator gate and reaches the reentrancy guard it pins.
     function test_audit_AGG_8_reentrantRouterCannotNestAFill() public {
         ReentrantRouter rr = new ReentrantRouter(address(tA), address(tB));
         tB.mint(address(rr), 1_000e18);
-        address[] memory rs = new address[](1);
-        rs[0] = address(rr);
-        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), rs, _open(), _noSplit(), false, _none());
+        address[] memory ops = new address[](2);
+        (ops[0], ops[1]) = (address(this), address(rr));
+        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), ops, _noSplit());
 
         Order memory inner = _order(906);
         bytes memory innerSig = _sign(inner);
@@ -325,9 +316,7 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
     function test_audit_AGG_8_reentrantOnFillWithinTheFillIsRefused() public {
         ReentrantRouter rr = new ReentrantRouter(address(tA), address(tB));
         tB.mint(address(rr), 1_000e18);
-        address[] memory rs = new address[](1);
-        rs[0] = address(rr);
-        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), rs, _open(), _noSplit(), false, _none());
+        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), _ops(), _noSplit());
         FillRoute memory r = _anyRoute();
         r.router = address(rr);
         rr.arm(address(s), abi.encodeCall(AggregatorFillSolver.onFill, (r)));
@@ -349,9 +338,11 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
         SplitHookToken hook = new SplitHookToken();
         MockRouter rh = new MockRouter(address(tA), address(hook));
         hook.mint(address(rh), 1_000e18);
-        address[] memory rs = new address[](2);
-        (rs[0], rs[1]) = (address(rh), address(router));
-        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), rs, _open(), _noSplit(), false, _none());
+        // The hook token is an operator (a contract operator), so its re-entry
+        // reaches the in-fill state guard rather than stopping at the gate.
+        address[] memory ops = new address[](2);
+        (ops[0], ops[1]) = (address(this), address(hook));
+        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), ops, _noSplit());
 
         // The nested fill the hook will try: an ordinary tA→tB order.
         Order memory inner = _order(909);

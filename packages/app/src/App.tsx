@@ -28,15 +28,12 @@ import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/lad
 import { readMinValidNonce, type Reader } from "./lib/chain";
 import { hasLeftover, planFunding, type FundingStep } from "./lib/funding";
 import { buildOrder } from "./lib/order";
-import { planTicket, requiredInputWei, sliceCap, type TicketPlan } from "./lib/plan";
+import { MARKET_SLIPPAGE_BPS, planTicket, requiredInputWei, sliceCap, type TicketPlan } from "./lib/plan";
 import type { RestingOrder, Side, SliceSpec } from "./lib/types";
 import { useAllowance } from "./wallet/useAllowance";
 import { useBalances } from "./wallet/useBalances";
 import { useSigner } from "./wallet/useSigner";
 import { useWallet } from "./wallet/useWallet";
-
-/** Slippage floor quoted on market orders. */
-const SLIPPAGE_BPS = 50;
 
 const DAY_MS = 24 * 3600_000;
 
@@ -152,7 +149,7 @@ export default function App() {
       side: ticket.side,
       amountIn: ticket.amount,
       limit: ticket.mode === "market" ? null : ticket.limit,
-      slippageBps: SLIPPAGE_BPS,
+      slippageBps: MARKET_SLIPPAGE_BPS,
     });
   }, [ready, merged, ticket.side, ticket.amount, ticket.mode, ticket.limit]);
 

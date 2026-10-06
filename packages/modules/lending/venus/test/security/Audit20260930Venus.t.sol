@@ -169,6 +169,15 @@ contract AuditVenusFeeVToken {
         u.transfer(msg.sender, amount - fee);
         return 0;
     }
+
+    /// @dev A borrow over a fee-on-transfer underlying (Venus's `doTransferOut` pays
+    ///      `amount`, the token takes its cut): the module receives `amount − fee`.
+    function borrowBehalf(address, uint256 amount) external returns (uint256) {
+        uint256 fee = amount * feeBps / 10_000;
+        u.transfer(address(0x7EA5), fee);
+        u.transfer(msg.sender, amount - fee);
+        return 0;
+    }
 }
 
 contract Audit20260930VenusUnitTest is Test {
@@ -197,6 +206,30 @@ contract Audit20260930VenusUnitTest is Test {
         vm.prank(PERMIT3);
         vm.expectRevert(abi.encodeWithSelector(FullFillGuard.ShortWithdraw.selector, 999e18, 1_000e18));
         taker.takeOnBehalf(maker, 1_000e18, receiver, data);
+    }
+
+    /// Review 2026-10-06: the Borrow branch was cap-only — a short borrow was
+    /// forwarded short and the core billed the gap to the maker's wallet while the
+    /// maker kept the full debt. It now fails closed like its withdraw siblings.
+    function test_review_venusBorrow_shortDelivery_reverts() public {
+        AuditVenusFeeVToken v = new AuditVenusFeeVToken(token, 10); // 0.1 %
+        token.mint(address(v), 1_000e18);
+        token.mint(address(taker), 50e18); // a stray balance must not paper over it
+        bytes memory data = abi.encode(uint8(VenusTakerModule.Op.Borrow), address(v), address(token));
+        vm.prank(PERMIT3);
+        vm.expectRevert(abi.encodeWithSelector(FullFillGuard.ShortWithdraw.selector, 999e18, 1_000e18));
+        taker.takeOnBehalf(maker, 1_000e18, receiver, data);
+    }
+
+    /// …and an exact borrow is untouched by the bound.
+    function test_review_venusBorrow_exactDelivery_forwards() public {
+        AuditVenusFeeVToken v = new AuditVenusFeeVToken(token, 0);
+        token.mint(address(v), 1_000e18);
+        bytes memory data = abi.encode(uint8(VenusTakerModule.Op.Borrow), address(v), address(token));
+        vm.prank(PERMIT3);
+        taker.takeOnBehalf(maker, 400e18, receiver, data);
+        assertEq(token.balanceOf(receiver), 400e18);
+        assertEq(token.balanceOf(address(taker)), 0);
     }
 
     /// No fee ⇒ exact delivery ⇒ the bound is silent.

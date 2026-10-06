@@ -47,6 +47,14 @@ contract WideToken {
 contract MockFixedMarket {
     uint256 public calls;
 
+    /// @dev A live (non-empty) fixed borrow: {ExactlyRepayModule} skips an EMPTY
+    ///      position instead of calling the venue (task 12, 2026-10-06), so the mock
+    ///      must report one for the venue call under test to be reached.
+    function fixedBorrowPositions(uint256, address) external pure returns (uint256, uint256) {
+        return (1, 0);
+    }
+
+
     function repayAtMaturity(uint256, uint256 positionAssets, uint256, address) external returns (uint256) {
         calls++;
         WideToken(_asset).transferFrom(msg.sender, address(this), positionAssets);

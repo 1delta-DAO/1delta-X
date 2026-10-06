@@ -107,23 +107,16 @@ contract RawSwapComparisonTest is UsdrifForkBase {
 
     function setUp() public virtual override {
         super.setUp();
-        address[] memory routers = new address[](1);
-        routers[0] = SWAP_ROUTER_02;
-        // Gated to this test contract: direct (delta-verify) orders require an
-        // operator set since re-audit 2026-09-29 ({DirectNeedsOperators}).
+        // No router set since 2026-10-04: SwapRouter02 is called from the solver's
+        // RouteSandbox like any other target.
+        // Gated to this test contract: every instance needs an operator set
+        // (constructor {NoOperators}, 2026-10).
         // The maker is listed too: `test_cmp_user_selfServeDex` measures a USER
         // driving the solver for their own order.
         address[] memory ops = new address[](2);
         ops[0] = address(this);
         ops[1] = maker;
-        agg = new AggregatorFillSolver(
-            address(settlement),
-            routers,
-            ops,
-            SurplusPolicy({makerPpm: 0, protocolPpm: 0, protocolRecipient: address(0)}),
-            false,
-            new address[](0)
-        );
+        agg = new AggregatorFillSolver(address(settlement), ops, SurplusPolicy({makerPpm: 0, protocolPpm: 0, protocolRecipient: address(0)}));
         vm.label(address(agg), "aggregatorSolver");
         vm.label(SWAP_ROUTER_02, "swapRouter02");
     }
@@ -157,6 +150,8 @@ contract RawSwapComparisonTest is UsdrifForkBase {
             minOut: FLOOR_OUT,
             maxPay: 0,
             amountInOffset: NO_PATCH,
+            amountOutOffset: NO_PATCH,
+            minBumpBps: 0,
             profitRecipient: address(agg),
             originator: address(0),
             originatorPpm: 0,

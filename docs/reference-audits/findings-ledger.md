@@ -1398,8 +1398,17 @@ share round-trip property is not yet expressible in core (no share-venue mock).
   an open instance).** The router allowlist pins where the call goes, not what it
   says; inside `onFill` the router's `msg.sender` is the solver, so caller-written
   calldata could spend the standing approval on any primed token. The constructor
-  now refuses `standing` without an operator set (`StandingNeedsOperators`). Pinned by
-  `test_standing_openInstanceIsRefused`, `test_standing_strangerCannotDriveARoute`.
+  now refuses `standing` without an operator set (`StandingNeedsOperators`). Those
+  tests were retired on 2026-10-04 with the standing mode itself: the solver no
+  longer approves any router (routes run in a push-funded, empty `RouteSandbox`),
+  so the class is closed structurally — pinned by
+  `test_sandbox_tokenTargetCannotPullFromTheSolver`,
+  `test_sandbox_unpatchedOverQuoteCannotReachTheSolver` and
+  `test_sandbox_plantedApprovalNeedsControlInsideALaterFill` (renamed 2026-10: the
+  sandbox's own standing approvals are NOT worthless — a stranger could plant one
+  that reached a later fill's in-flight spread, so every instance is now gated:
+  `test_gate_emptySetReverts`, `test_poc1_strangerCannotPlantATokenApproval`,
+  `test_poc2_strangerCannotPlantViaANoopTarget`).
 - **`MidnightFlashSolver.onFlashLoan` ignored the initiator (LOW).** Now
   `caller == address(this)` (`ForeignInitiator`), as the Aave sibling does. Pinned by
   `test_midnight_foreignInitiator_reverts`.
@@ -1495,7 +1504,8 @@ inside one shared `_pullViaPermit3`). Rejected-as-worse measurements are listed 
   control.** An order naming an OPEN `AggregatorFillSolver` handed the pin to
   anyone; through a router that takes a caller-chosen executor the F30 attack
   returned. The solver now refuses direct orders unless gated
-  (`DirectNeedsOperators`). Pinned by `test_direct_openInstanceIsRefused`.
+  (`DirectNeedsOperators`). Since 2026-10 no open instance can be built at all
+  (`NoOperators`); pinned by `test_gate_emptySetReverts`.
 
 **Low — fixed.** A relayed delegate nomination may now only EXTEND the stored
 expiry (the F29-7 fix covered a permit relayed after its own expiry, not a shorter
@@ -1755,9 +1765,10 @@ forced-out-of-gas leaf (VAL-2): `test_audit_VAL_2_negatedPredicate_revertingTarg
 `test_audit_VAL_2_tryNegateLeaf_outOfGas_neverPasses`,
 `test_audit_VAL_2_zeroPriceRevertsNotFalse`. AggregatorFillSolver retain mode,
 stranded non-anchor inputs and SurplusPolicy bypass (AGG-1..3):
-`test_audit_AGG_1_retainRefusedOnOpenInstance`,
+`test_audit_AGG_1_gatedRetainIsRecoverableBySweep`,
 `test_audit_AGG_2_nonAnchorInputLegIsNotStranded`,
-`test_audit_AGG_3_policyNeedsOperators`. Inventory solver operator bound and
+`test_audit_AGG_3_noInstanceWithoutOperators` (the open-instance refusals were
+superseded in 2026-10 by gated-only construction). Inventory solver operator bound and
 delta-verify delivery (PERIPH-1.v2, RIF-4):
 `test_audit_PERIPH_1_v2_operatorMaxSpentBoundsTheFill`,
 `test_audit_RIF_4_deltaVerifyOrderNamingTheSolverFills`. MocPriceBandValidator

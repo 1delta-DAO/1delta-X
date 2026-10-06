@@ -142,6 +142,45 @@ describe("F1 — a poison order cannot take its chunk (or the sweep) down with i
     for (const r of res) expect(r.status).toBe(OrderStatus.Inconclusive);
   });
 
+  it("maxSweepMs: a hanging RPC cannot stretch a sweep — no lens call starts past the budget", async () => {
+    // Every call "hangs" for the transport timeout (10 s on the fake clock), then fails.
+    let clock = 0;
+    let calls = 0;
+    const hanging = {
+      readContract: async () => {
+        calls++;
+        clock += 10_000;
+        throw new Error("The request took too long to respond.");
+      },
+    } as unknown as PublicClient;
+    // Unbounded, every chunk is bisected down to single rows on timeouts: 3 × (1 + 2 + 4) calls.
+    const unbounded = new Verifier(hanging, config, { batchSize: 4, nowMs: () => clock });
+    await expect(unbounded.verifyLayer2(honest(12).map(entry))).rejects.toThrow(/too long/);
+    expect(calls).toBe(21);
+
+    calls = 0;
+    clock = 0;
+    const bounded = new Verifier(hanging, config, { batchSize: 4, maxSweepMs: 25_000, nowMs: () => clock });
+    await expect(bounded.verifyLayer2(honest(12).map(entry))).rejects.toThrow(/too long/);
+    // Calls start at t = 0, 10 s, 20 s; the one that would start at 30 s does not.
+    expect(calls).toBe(3);
+  });
+
+  it("maxSweepMs: rows the budget did not reach are Inconclusive (kept), the rest are verdicts", async () => {
+    let clock = 0;
+    const slow = {
+      readContract: async (args: { args: unknown[] }) => {
+        clock += 10_000;
+        const n = (args.args[0] as unknown[]).length;
+        return [Array(n).fill(OrderStatus.Fillable), Array(n).fill(1000n), Array(n).fill(true), Array(n).fill(true)];
+      },
+    } as unknown as PublicClient;
+    const v = new Verifier(slow, config, { batchSize: 4, maxSweepMs: 15_000, nowMs: () => clock });
+    const res = await v.verifyLayer2(honest(12).map(entry));
+    expect(res.map((r) => r.status)).toEqual([...Array(8).fill(OrderStatus.Fillable), ...Array(4).fill(OrderStatus.Inconclusive)]);
+    expect(res.slice(8).every((r) => !r.isolated && !r.ok)).toBe(true);
+  });
+
   it("throws when NO call succeeds — an RPC outage is not a book's worth of verdicts", async () => {
     const dead = { readContract: async () => Promise.reject(new Error("fetch failed")) } as unknown as PublicClient;
     const v = new Verifier(dead, config, { batchSize: 2 });

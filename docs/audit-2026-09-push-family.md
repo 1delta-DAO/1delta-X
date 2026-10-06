@@ -571,6 +571,17 @@ generators (the zero-slice strand, the clamp-sized sweep) are themselves closed.
   family, so `SettlementLens` cannot flag a mis-paired pre-fund item. Bit 253 now makes
   the shape readable, and the lens has 2.8KB spare.
 - **The venue contracts themselves**, which are integrations, not this code.
+- **Over-delivery under delta-verify** (review 2026-10-06, task 13). `PreFundGuard.floorOf`
+  is exact only for a NOMINAL delivery of an exact-transfer token — its NatSpec used to
+  add "or under the core's delta-verify delivery mode", which is wrong. Delta-verify
+  checks that the recipient's balance rose by `>= amt` and still records
+  `outs[j] = amt`, so a solver that over-delivers to a pre-fund module leaves the excess
+  BELOW the floor: neither supplied nor swept, stranded on the shared singleton. Nothing
+  module-side can tell it from pre-existing balance. The guard is upstream: the typed
+  callback (`ISettlementCallback`) hands the solver the priced amounts, and a route that
+  sends exactly those never over-delivers. Not a maker loss (the maker receives the
+  priced leg's worth of position); it is solver-funded residue, which the floor rule
+  keeps out of any later fill's payout.
 - Absence of proof is not proof of absence: this is a census against four known
   vector classes plus three mechanical scans, not a claim that no fifth class
   exists.

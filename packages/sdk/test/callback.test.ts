@@ -79,6 +79,22 @@ describe("encodeFillWithCallback", () => {
     expect((decodeFunctionData({ abi: SETTLEMENT_ABI, data: with_ }).args as readonly unknown[])[6]).toBe("0x1234");
   });
 
+  it("carries the filler's minBumpBps floor in the 8-arg overload", () => {
+    const floor = encodeFillWithCallback({ ...base, mode: CallbackMode.PostInputsTypedDirect, minBumpBps: 5_000n });
+    // The selector `forge inspect Settlement methodIdentifiers` reports for the
+    // (…, takerData, minBumpBps) overload.
+    expect(floor.slice(0, 10)).toBe("0x3d4a8695");
+    const args = decodeFunctionData({ abi: SETTLEMENT_ABI, data: floor }).args as readonly unknown[];
+    expect(args[6]).toBe("0x");
+    expect(args[7]).toBe(5_000n);
+    // takerData alone still lands on the same overload, floor 0.
+    const td = decodeFunctionData({
+      abi: SETTLEMENT_ABI,
+      data: encodeFillWithCallback({ ...base, mode: CallbackMode.PreDelivery, takerData: "0x1234" }),
+    }).args as readonly unknown[];
+    expect(td[7]).toBe(0n);
+  });
+
   it("carries the typed modes through as plain uint8", () => {
     const data = encodeFillWithCallback({ ...base, mode: CallbackMode.PreDeliveryTyped });
     expect((decodeFunctionData({ abi: SETTLEMENT_ABI, data }).args as readonly unknown[])[5]).toBe(2);
