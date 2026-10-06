@@ -1,0 +1,29 @@
+{
+  "name": "@1delta-x/filler-worker",
+  "license": "MIT",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker + SQLite Durable Object that runs the Rootstock beta filler (@1delta-x/beta-filler core): alarm-driven ticks, one outstanding tx, admin API, alerts, fills/P&L log.",
+  "scripts": {
+    "build-libs": "pnpm --filter @1delta-x/sdk build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "bundle-check": "node scripts/bundle-check.mjs",
+    "e2e:app-shape": "e2e/staging.sh app-shape"
+  },
+  "dependencies": {
+    "@1delta-x/beta-filler": "workspace:*",
+    "@1delta-x/sdk": "workspace:*",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20261004.1",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.40.0"
+  }
+}

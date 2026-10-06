@@ -1,0 +1,178 @@
+# Cloudflare Worker + Durable Object running the Rootstock beta filler (chain 30).
+# Deploy runbook: README.md. Vars below are defaults; addresses marked PLACEHOLDER
+# must be replaced once the contracts are deployed (until then every tick only
+# records "not configured" and sends nothing).
+#
+# Secrets (never in this file): `wrangler secret put <NAME>`
+#   PRIVATE_KEY        the hot wallet / operator EOA (0x + 64 hex)
+#   ADMIN_TOKEN        bearer token for every admin route (openssl rand -hex 32)
+#   ALERT_WEBHOOK_URL  Slack incoming-webhook URL, or Telegram's
+#                      https://api.telegram.org/bot<token>/sendMessage (see ALERT_FORMAT)
+#   RPC_URL_SECRET     recommended: a keyed Rootstock RPC, read in preference to the
+#                      RPC_URL var below (so the var line can stay — a var and a
+#                      secret cannot share a name)
+#   ORDERBOOK_BINDING_KEY  optional: the orderbook's BINDING_KEY, so its rate limiter
+#                      bills the filler its own bucket instead of "unknown"
+
+name = "filler-1delta-rsk"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+# The admin routes refuse *.workers.dev hosts unless ADMIN_ALLOW_WORKERS_DEV = "true"
+# (only /health answers there). PRODUCTION: serve the admin API on a custom domain
+# BEHIND CLOUDFLARE ACCESS (a second factor in front of ADMIN_TOKEN, which can take
+# the filler live), then set workers_dev = false:
+#   routes = [{ pattern = "filler.example.com", custom_domain = true }]
+# Never set ADMIN_ALLOW_WORKERS_DEV = "true" in production.
+workers_dev = true
+# No per-version preview URLs (<version>-<name>.<account>.workers.dev): each would be
+# one more public hostname for this worker (and its admin routes, if ever allowed on
+# workers.dev).
+preview_urls = false
+
+[[durable_objects.bindings]]
+name = "FILLER"
+class_name = "FillerDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FillerDO"]
+
+# Order intake: a service binding to the orderbook worker (no public hop, no
+# per-IP rate limit shared with visitors). ORDERBOOK_URL is the fallback when the
+# binding is absent.
+[[services]]
+binding = "ORDERBOOK"
+service = "orderbook-1delta-rsk"
+
+# The cron only re-arms the Durable Object's self-rescheduling alarm.
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+
+[vars]
+# ── safety ───────────────────────────────────────────────────────────────────
+# Dry run is ON by default: nothing is broadcast until DRY_RUN = "0" here or
+# `POST /dry-run {"on": false}` on the admin API.
+DRY_RUN = "1"
+# Start paused? ("true" = no sends until `POST /resume`). Pending txs are still resolved.
+START_PAUSED = "false"
+# Keep "false" in production (see workers_dev above).
+ADMIN_ALLOW_WORKERS_DEV = "false"
+
+# ── chain / deployment ──────────────────────────────────────────────────────
+CHAIN_ID = "30"
+# Fallback only: set the RPC_URL_SECRET secret to a keyed provider (the public node
+# rate-limits — a 45 s HTTP 429 brownout is a tested failure mode — and the filler
+# makes tens of thousands of calls a day).
+RPC_URL = "https://public-node.rsk.co"
+SETTLEMENT = "0x0000000000000000000000000000000000000000"   # PLACEHOLDER
+PERMIT3 = "0x0000000000000000000000000000000000000000"      # PLACEHOLDER
+LENS = "0x0000000000000000000000000000000000000000"         # PLACEHOLDER
+# The deployed AggregatorFillSolver (route strategy). Empty = route strategy off.
+AGGREGATOR_SOLVER = ""
+ORDERBOOK_URL = ""
+ORDERBOOK_CLIENT_IP = "127.0.0.2"
+# Optional Durable Object location hint, e.g. "wnam" (near the public Rootstock RPCs).
+# Only affects where the object is first CREATED; an existing object never moves.
+DO_LOCATION_HINT = ""
+
+# ── strategies (see packages/beta-filler/README.md for every knob) ──────────
+INVENTORY_ENABLED = "1"
+# ROUTE_ENABLED defaults to on iff AGGREGATOR_SOLVER is set.
+ROUTE_PROFIT_RECIPIENT = "0x0000000000000000000000000000000000000000"
+ROUTE_SLIPPAGE_BPS = "30"
+ROUTE_STABLE_SLIPPAGE_BPS = "5"
+ROUTE_GAS_ESTIMATE = "320000"
+MAX_ROUTE_GAS = "1200000"
+ROUTE_HOURLY_FILLS = "60"
+MIN_PROFIT_RBTC = "0"
+SUSHI_ENABLED = "1"
+ROUTE_OKU_PULL = "1"
+SUSHI_EXECUTORS = ""
+SUSHI_MAX_PER_SWEEP = "10"
+SUSHI_TIMEOUT_MS = "4000"
+BUY_USDRIF = "1"
+SELL_USDRIF = "0"
+MAX_BUY_PRICE = "0.995"
+MIN_EXIT_EDGE_BPS = "30"
+MIN_SELL_PRICE = "1.003"
+MAX_FILL_USDT0 = "500"
+MIN_FILL_USDT0 = "5"
+# Inventory all-in gas gate: a fill must earn its own gas (priced at the real limit),
+# its pro-rata share of the rebalance it causes, and this minimum profit.
+INVENTORY_GAS_ESTIMATE = "260000"
+REBALANCE_GAS = "450000"
+INVENTORY_MIN_PROFIT_USDT0 = "0.02"
+# RBTC_PRICE_USD = "85000"   # optional floor for gas pricing; the higher of it and the WRBTC/USDT0 pool is used
+HOURLY_USDT0 = "2000"
+HOURLY_USDRIF = "2000"
+USDRIF_RESERVE = "0"
+REDEEM_MIN_USDRIF = "1000"   # batch size: one redeem+sell (~450k gas ≈ $1) per 1000 USDRIF
+REDEEM_SLIPPAGE_BPS = "50"
+RIF_SELL_MIN = "200"
+RIF_SELL_SLIPPAGE_BPS = "50"
+RIF_SELL_MAX_DISCOUNT_BPS = "150"
+
+# ── gas policy (shared by both strategies and the rebalancer) ───────────────
+HOURLY_GAS_RBTC = "0.002"
+MAX_GAS_PRICE_GWEI = "0.1"
+RECEIPT_TIMEOUT_MS = "120000"
+
+# ── tick loop and per-tick bounds ───────────────────────────────────────────
+# Keep TICK_SECONDS ≤ 8: a Durable Object idle for ~10 s is evicted from memory, and
+# every tick after an eviction rebuilds the engine (config, state load, the route
+# strategy's 6-call solver check) and loses its in-memory caches (resting verdicts,
+# the gas price).
+TICK_SECONDS = "5"
+# While a tx is outstanding: one receipt read per PENDING_TICK_SECONDS. Rootstock
+# blocks come every ~30 s, so 1 s polled ~30 times per fill for nothing; 3 s
+# notices a receipt within ~10% of a block.
+PENDING_TICK_SECONDS = "3"
+# Orders evaluated per tick (never-seen orders first, then round-robin; the cursor is
+# kept in the DO).
+MAX_ORDERS_PER_TICK = "10"
+# An order every strategy passed on (unprofitable, out of price, below minimum) — or
+# one we just filled — is not re-quoted for this long unless the book reports a
+# different fillable for it (a resting book used to cost ~67 RPC calls per tick).
+RESTING_RECHECK_SECONDS = "300"
+# Orders expiring within this many seconds are skipped: a tx cannot land in time on
+# ~30 s blocks (the orderbook refuses TTLs under 120 s).
+EXPIRY_MARGIN_SECONDS = "90"
+# Subrequests (RPC calls + the book fetch) per tick. Workers Paid allows 10,000
+# subrequests per invocation by default (Free: 50) —
+# https://developers.cloudflare.com/workers/platform/limits/ — this bound is about
+# RPC cost and tick length, not the platform limit. A new order is only started while
+# at least SUBREQUESTS_PER_ORDER remain.
+MAX_SUBREQUESTS_PER_TICK = "500"
+SUBREQUESTS_PER_ORDER = "40"
+# Wall-clock budget per tick; no new order is started after it.
+TICK_BUDGET_MS = "20000"
+# 2 × 500 = 1000 orders: the orderbook's MAX_ORDERS (keep them in step).
+INTAKE_MAX_PAGES = "2"
+INTAKE_PAGE_SIZE = "500"
+BALANCE_CHECK_SECONDS = "300"
+# The rebalancer step (redeem USDRIF / sell RIF; inventory only) runs at most this often.
+REBALANCE_SECONDS = "30"
+MAX_FILL_ROWS = "20000"
+# The monitor reads the orderbook's /health this often over the ORDERBOOK binding (60 s
+# after an inconclusive read: unreachable, or the book's alarm has not run yet) and
+# alerts on a stale alarm loop (last alarm > 3 × its interval) or a failing log scan
+# (above all an RPC that does not serve eth_getLogs).
+BOOK_HEALTH_SECONDS = "300"
+
+# ── alerts (ALERT_WEBHOOK_URL is a secret) ──────────────────────────────────
+ALERT_FORMAT = "slack"          # slack | telegram
+ALERT_TELEGRAM_CHAT_ID = ""
+ALERT_NAME = "filler-1delta-rsk"
+ALERT_MIN_RBTC = "0.001"
+ALERT_MIN_USDT0 = "50"
+ALERT_MIN_USDRIF = "0"
+ALERT_REVERTS_PER_HOUR = "3"
+# Also the threshold for "sends refused: untracked tx(s) in flight" (pending nonce > mined).
+ALERT_PENDING_TX_SECONDS = "600"
+ALERT_MOC_PENDING_SECONDS = "900"
+ALERT_RPC_ERROR_STREAK = "5"
+ALERT_COOLDOWN_SECONDS = "3600"
+ALERT_MAX_PER_HOUR = "12"
