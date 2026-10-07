@@ -30,7 +30,13 @@ yet: the app ↔ book ↔ filler configuration, the Cloudflare filler runtime, a
 deploy script. **One blocking finding there (§5): the app's market orders could not
 be booked at all.** Fixed.
 
-Gate after all changes (2026-10-06): `make test-ts` green (sdk 324, orderbook 133,
+> **Status 2026-10-06 (end of day):** every follow-up in §10 and every task the review
+> opened (03–15) is done (`tasks/done/`). Items still open after the pre-merge audit of
+> the same day are listed in **§11**, split into smart-contract and backend/frontend.
+> Sections below keep their original text as the record; resolved items carry a
+> "Resolved" note.
+
+Gate after all changes (2026-10-06, as first written): `make test-ts` green (sdk 324, orderbook 133,
 auction 78, orderbook-server 45, app 106, orderbook-worker 107, beta-filler 176,
 filler-worker 35, both worker bundle checks), solvers 603 / 603 (non-fork, on the
 tree with the parallel session's B-1 + typed callback) + the Rootstock fork suite
@@ -132,7 +138,7 @@ pool and the plan reverts `TransferFailed`. The single-order path refunds the ma
 (`test_S2_singleOrderPath_overProducingTakeRefundsMaker`). Under-production is fine
 (`PULL` draws the shortfall).
 
-Not fixed in the core on purpose: the B-1 change (accrue over-credit into
+~~Not fixed in the core on purpose~~ (superseded: B-1 landed, see the note above): the B-1 change (accrue over-credit into
 `outstanding` in `_creditItemProceeds`) touches the netted hot path of a contract at
 the EIP-170 wall that the beta does not redeploy. Size TAKE items to the leg —
 position-sized fills (`docs/position-sized-fills.md`) resolve both from the live
@@ -160,6 +166,12 @@ Pinned: `test_S2_nettedPath_overProducingTakeRefundsMaker` (was `…TakeReverts`
   ORDERED / CANONICAL (`test_S2_lateTakeOnInputToken_burnsTheMakerAllowance`: a
   maker with an exact allowance ends the fill at 0 allowance and an unchanged
   wallet).
+  **Update 2026-10-06 (ACCEPTED-PATTERNS-REVIEW B8, resolved):** only CANONICAL
+  forbids it — ORDERED still admits the late TAKE
+  (`test_S2_lateTakeOnInputToken_canonicalRefusesTheSchedule`). The SDK now signs
+  CANONICAL for such orders by default (`withDefaultItemPolicy`; `signOrder` refuses
+  ANY unless explicit) and the lens `validateOrder` flags an input-funding TAKE below
+  CANONICAL. Core unchanged.
 - When `tokens[0]` is also an output token and the route under-consumes, the netted
   path pushes the unspent input residue to the pool with the outputs and the sweep
   returns it: two extra transfers, no accounting effect. Left as is — skipping the
@@ -191,6 +203,10 @@ Pinned: `test_S2_nettedPath_overProducingTakeRefundsMaker` (was `…TakeReverts`
 
 ### Hardened: route path refuses orders whose tick can move maker-ward after the preview
 
+> **Superseded 2026-10-06 (task 08):** `fillWithCallback` now carries `minBumpBps`, the
+> plan passes it through, previews run at the send `gasPrice`, and `classifyRoute` no
+> longer refuses these three shapes.
+
 `classifyRoute` ([route.ts L107–111](packages/beta-filler/src/route.ts)) now refuses
 priority auctions (timing bit 103 / `priorityScale`), gas-bump orders (`gasBumpBps`,
 ∝ basefee) and custom `curve`s. The plan's floor/cap (`maxPay`, `amountOut`,
@@ -201,6 +217,10 @@ order. A maker-ward move is a revert on pull and direct-SELL fills but a silent,
 band-bounded margin erosion on a direct BUY. Four new tests in `route.test.ts`.
 
 ### Known, sized, not fixed: direct-path SELL forgoes the decay since the preview
+
+> **Resolved 2026-10-06 (tasks 05 + 06):** a direct SELL still inside its decay window
+> patches the route's `amountOut` to the core's live `pricedOut` (typed callback), so
+> the filler keeps the decay. Gate stays conservative (priced on the preview).
 
 On a delta-verify (direct) order the route is exact-output for the previewed
 `owed`; at inclusion the core only requires `outputAt(block.timestamp)`, which on a
@@ -219,8 +239,9 @@ live tick (solver change). Decision for the operators; sized in
   slice silently but `fillWithCallback` reverts `OverFill`, so a competing partial
   between the book read and our simulation is a skip + backoff, and one between the
   simulation and inclusion burns a revert's gas (open pull orders only).
-- `delivered[0] > owed` guard in `routeFiller.ts` is unreachable (`maxPay` already
-  caps the pull inside the same simulation) — harmless.
+- `delivered[0] > owed` guard in `routeFiller.ts` was unreachable (`maxPay` already
+  caps the pull inside the same simulation). **Removed 2026-10-06**; a comment at the
+  simulation names the on-chain cap instead.
 
 ### Checked and consistent (off-chain)
 `amountInOffset` for all four SwapRouter02 encoders and snwap, hand-decoded;
@@ -287,7 +308,8 @@ are consistent and tested. Fixed, each with a test:
   `admit` cannot throw on an order from a book without `MAX_TTL`
   (`policy.test.ts` "backoff horizon"). Real expiries are unchanged.
 
-Documented / accepted (not fixed): a receipt landing after `RECEIPT_TIMEOUT_MS`
+Documented / accepted (not fixed) — **all FIXED 2026-10-06 (task 09)**, each with a
+test: a receipt landing after `RECEIPT_TIMEOUT_MS`
 leaves `gas_used` from the receipt and `gas_cost_wei` from the limit in the same
 fills row (the e2e verifier flags that row; policy choice); a storage failure in
 `guard.commit()` leaves an un-broadcast tx pending until the 60 s re-broadcast
@@ -314,7 +336,7 @@ Small fixes: the deploy script now mirrors the constructor's `BadSurplusSplit` a
 named env errors (ppm sum ≤ 1e6, `PROTOCOL_RECIPIENT` required with a protocol
 share); `make size-check` runs `size-check-solvers` too (CI never gated the solver's
 size); the SDK ABI gained `MalformedPackedArray()` (the one solver-side revert it
-could not decode); `CHAIN_ID` added to the filler README's env table. Left as is:
+could not decode); `CHAIN_ID` added to the filler README's env table. Left as is (**labelled 2026-10-06, task 10**):
 the three gas figures quoted across READMEs (267k/290k, 247.9k/305.9k, 242.6k/277.6k)
 are different measurements (fork net-of-refund vs execution vs unit) and should be
 labelled as such.
@@ -349,7 +371,7 @@ Documented, no code change (all class (c) or venue-by-design):
 - `ExactlyTakerModule` fixed-maturity withdraw legitimately pays `assetsDiscounted <
   amount` before maturity; the core bills the discount to the maker's wallet and the
   only bound is `minAssetsRequired`, which may be signed 0 (every existing test warps
-  past maturity). Header now names it the maker's wallet-draw cap; task 12 — resolved 2026-10-06 (lens flags the zero floor, pre-maturity fork test, pull `repayAtMaturity` twin fixes).
+  past maturity). Header now names it the maker's wallet-draw cap; task 12 — resolved 2026-10-06 (lens flags the zero floor, pre-maturity fork test, pull `repayAtMaturity` twin fixes). **Resolved 2026-10-06 (ACCEPTED-PATTERNS-REVIEW B15):** a zero floor filled before maturity now REVERTS `ZeroMinAssets` in the module (twin of `ZeroMaxAssets`); at/after maturity 0 stays legal; the lens flag remains as the early warning.
 - `PreFundGuard.floorOf` NatSpec claimed exactness "under delta-verify" — false
   (delta-verify is `>=`; a solver over-delivery to a pre-fund module strands below
   the floor). Corrected.
@@ -411,6 +433,10 @@ the quote by design).
 
 ## 10. Follow-up candidates (not blocking)
 
+> **All five done 2026-10-06:** 1 = task 07, 2 = task 06 (+ 05), 3 = task 08,
+> 4 = task 03 (`e2e:app-shape`, passes with production values after task 15),
+> 5 = task 09.
+
 1. Core B-1: accrue `credit − owed` into `outstanding` as it happens, making the
    `PRESEND` bound self-sufficient (unblocks over-producing TAKEs on the netted path).
 2. Typed-callback `onFill`: net same-token output obligations out of the routed
@@ -424,3 +450,35 @@ the quote by design).
 5. Filler runtime: settle gas on any receipt (also after the timeout), compare
    `getTransactionCount` with the pending nonce on the overdue path, roll back the
    in-memory pending on a failed `commit()`.
+
+## 11. Still open after the 2026-10-06 pre-merge audit
+
+Four review agents (contracts, modules + tooling, filler, book/app/SDK) read the full
+working set before it was merged. No critical or high finding; no path loses maker
+or filler principal. What remains, strictly split by layer (task files in `tasks/`):
+
+### Smart contracts (Settlement untouched by all)
+
+| task | finding | severity | deploy |
+| --- | --- | --- | --- |
+| 16 | the live `amountOutOffset` patch writes `pricedOut[0]`, not the anchor output leg — a fee leg listed first reverts | low | solver |
+| 17 | `executeItemFill` silently ignores `minBumpBps` / `amountOutOffset` — should revert | low | solver |
+| 18 | lens `ITakeFloor` check tests `legsIn[0]` and its full amount — rejects valid multi-leg / multi-item Lista orders | medium-low | lens |
+| 19 | shapes checker rule 9: loose bound regex, `Op(op) ==` ladders not split, one forward form missed | low | none (tooling) |
+| 20 | solver header says every fill is typed; Exactly repay on a closed position now skips (undocumented) | info | none (docs) |
+
+### Backend / frontend (no contract change)
+
+| task | finding | severity |
+| --- | --- | --- |
+| 21 | filler: an RPC error on the receipt read can resolve our own mined tx as "replaced" — wrong fills log / P&L, early re-quote | medium |
+| 22 | filler: a send error is rolled back on one immediate "not found" | low |
+| 23 | book: per-IP rate limit keys on the full IPv6 address (no /64 aggregation); drained buckets evicted first | medium |
+| 24 | book: permit announces stay Fillable after `batch.deadline` until `order.expiry` | medium |
+| 25 | book + filler: truncate-then-redact can leak a partial RPC key (`/health`, filler DO, engine) | low |
+| 26 | app: indexer fee can widen a market floor (cap at the pinned tier); `applyPoolFee` comment wrong on asks | low |
+| 27 | auction `guard.ts` says the sandbox has no standing approvals (it has) | low |
+
+Accepted-by-design items (§2 smaller items, §3, §4 liveness, §8 documented notes) are
+assessed against common practice in `ACCEPTED-PATTERNS-REVIEW.md`.
+

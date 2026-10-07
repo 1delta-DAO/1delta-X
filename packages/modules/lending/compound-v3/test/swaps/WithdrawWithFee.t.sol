@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order, Item, ItemOp} from "@core/settlement/Settlement.sol";
+import {ItemPolicy} from "@core/settlement/Structs.sol";
 import {IComet} from "../../src/interfaces/ICompoundV3.sol";
 import {CompoundV3ModulesBase} from "../shared/CompoundV3ModulesBase.t.sol";
 
@@ -33,6 +34,10 @@ contract WithdrawWithFeeTest is CompoundV3ModulesBase {
             op: ItemOp.TAKE, module: address(takerModule), amount: usdcIn, recipient: address(0), data: takerData
         });
         order = _order(maker, 1, USDC, USDC, usdcIn, usdcOut, items);
+        // The withdraw credits the input leg, so sign CANONICAL: below it a
+        // `matchSettle` caller may PULL the leg first and spend the allowance twice
+        // (ACCEPTED-PATTERNS-REVIEW B8; the lens flags it).
+        order.timing = ItemPolicy.pack(order.timing, ItemPolicy.CANONICAL);
     }
 
     function _approveMakerBaseWithdrawSide(uint256 usdcIn, bytes32 ref) internal {

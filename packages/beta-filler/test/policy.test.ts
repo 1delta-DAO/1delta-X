@@ -1,10 +1,10 @@
-import { OrderSide, withDeltaVerifyOutputs, type Order } from "@1delta-x/sdk";
+import { BLOCK_CLOCK_BIT, OrderSide, packTiming, withDeltaVerifyOutputs, type Order } from "@1delta-x/sdk";
 import { zeroAddress, type Address } from "viem";
 import { describe, expect, it } from "vitest";
 
 import { loadConfig, parseFixed, ROOTSTOCK } from "../src/config";
 import { Guard } from "../src/guard";
-import { Budget, capFillAmount, classify, exitOk, fillPrice, priceOk } from "../src/policy";
+import { Budget, capFillAmount, classify, exclusivityFor, exitOk, fillPrice, priceOk, windowEndMs } from "../src/policy";
 
 const ME = "0x00000000000000000000000000000000000000Aa" as Address;
 const MAKER = "0x00000000000000000000000000000000000000bB" as Address;
@@ -77,7 +77,7 @@ describe("classify", () => {
   });
   it.each([
     ["delta-verify (EOA cannot fill)", { timing: withDeltaVerifyOutputs(0n) }, /delta-verify/],
-    ["another exclusive filler", { exclusiveFiller: OTHER }, /exclusive/],
+    ["another filler's HARD window", { exclusiveFiller: OTHER, timing: packTiming(0, 0, 2_000_000_000) }, /exclusive.*hard window/],
     ["fee leg", { legsOut: [exitOrder().legsOut[0]!, { ...exitOrder().legsOut[0]!, recipient: OTHER }] }, /one-in/],
     ["third-party recipient", { legsOut: [{ ...exitOrder().legsOut[0]!, recipient: OTHER }] }, /third party/],
     ["pricing module", { pricingModule: OTHER }, /modules/],
@@ -95,6 +95,53 @@ describe("classify", () => {
   it("refuses permit-batch and sigless announces", () => {
     expect(classify(exitOrder(), cfg, ME, { hasPermitBatch: true }).ok).toBe(false);
     expect(classify(exitOrder(), cfg, ME, { sigless: true }).ok).toBe(false);
+  });
+});
+
+describe("exclusivity window (B13: the app's pull markets name the SOLVER for ~2 blocks)", () => {
+  const NOW = 1_800_000_000n;
+  /** The app's pull-market shape: soft window to OTHER (the solver contract) for 60 s, 5 bps. */
+  const windowed = (over: Partial<Order> = {}) =>
+    exitOrder({ exclusiveFiller: OTHER, timing: packTiming(Number(NOW) - 10, 60, Number(NOW) + 50), exclusivityOverrideBps: 5n, ...over });
+
+  it("inside another filler's SOFT window the EOA is an outsider that may fill at the premium", () => {
+    expect(exclusivityFor(windowed(), ME, NOW)).toEqual({ kind: "soft", endsAt: NOW + 50n, overrideBps: 5n });
+    expect(classify(windowed(), cfg, ME, { nowS: NOW })).toEqual({ ok: true, direction: "buyUsdrif" });
+  });
+  it("after the window the order is open to every filler", () => {
+    expect(exclusivityFor(windowed(), ME, NOW + 50n)).toEqual({ kind: "open" });
+    expect(exclusivityFor(windowed({ exclusivityOverrideBps: 0n }), ME, NOW + 50n)).toEqual({ kind: "open" });
+    expect(classify(windowed({ exclusivityOverrideBps: 0n }), cfg, ME, { nowS: NOW + 50n }).ok).toBe(true);
+  });
+  it("a HARD window (override 0) refuses the outsider until it ends", () => {
+    const v = classify(windowed({ exclusivityOverrideBps: 0n }), cfg, ME, { nowS: NOW });
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.reason).toMatch(/hard window until 1800000050/);
+  });
+  it("a soft window with no carrier leg is HARD (OrderGates._overrideHasCarrier): a zero SELL output", () => {
+    const noCarrier = windowed({ legsOut: [{ ...exitOrder().legsOut[0]!, start: 0n }] });
+    expect(exclusivityFor(noCarrier, ME, NOW).kind).toBe("hard");
+  });
+  it("the app's BUY shape carries it on the input leg", () => {
+    const buy = windowed({
+      side: OrderSide.BUY,
+      legsIn: [{ token: ROOTSTOCK.usdt0, start: 99_000_000n, end: 100_000_000n }],
+      legsOut: [{ token: ROOTSTOCK.usdrif, start: 99n * 10n ** 18n, end: 0n, recipient: zeroAddress }],
+    });
+    expect(exclusivityFor(buy, ME, NOW).kind).toBe("soft");
+  });
+  it("our own window is no window; a block-clocked foreign window is treated as hard", () => {
+    expect(exclusivityFor(windowed({ exclusiveFiller: ME }), ME, NOW)).toEqual({ kind: "open" });
+    const blocks = windowed({ timing: packTiming(0, 0, 7_000_000) | (1n << BLOCK_CLOCK_BIT) });
+    expect(exclusivityFor(blocks, ME, NOW).kind).toBe("hard");
+    expect(windowEndMs(blocks, Number(NOW) * 1000)).toBeUndefined();
+  });
+  it("windowEndMs: the re-quote moment while the window runs, nothing after", () => {
+    expect(windowEndMs(windowed(), Number(NOW) * 1000)).toBe(Number(NOW + 50n) * 1000);
+    expect(windowEndMs(windowed(), Number(NOW + 50n) * 1000)).toBeUndefined();
+    expect(windowEndMs(exitOrder(), Number(NOW) * 1000)).toBeUndefined();
+    // Delta-verify: whole-life exclusive by the core (F30) — no window to wait for.
+    expect(windowEndMs(windowed({ timing: withDeltaVerifyOutputs(packTiming(0, 0, Number(NOW) + 50)) }), Number(NOW) * 1000)).toBeUndefined();
   });
 });
 

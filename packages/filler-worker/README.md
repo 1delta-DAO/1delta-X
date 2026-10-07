@@ -458,7 +458,7 @@ through the app's Pages worker — and signs five tickets, one fresh maker each:
 | --- | --- | --- |
 | `market-sell` | WRBTC/USD0 | SELL, decaying output leg (`packTiming(now, 60, 0)`), timing bit 104, `exclusiveFiller` = solver |
 | `market-buy` | WRBTC/USD0 | BUY, rising input leg, bit 104, `exclusiveFiller` = solver |
-| `market-usdrif` | USDRIF/USD0 | SELL, decaying output leg, pull, `exclusiveFiller` = 0 |
+| `market-usdrif` | USDRIF/USD0 | SELL, decaying output leg, pull, `exclusiveFiller` = 0 (the B13 soft window is opt-in, off by default) |
 | `limit` | WRBTC/USD0 | resting limit SELL, 24 h, fixed legs |
 | `twap` | WRBTC/USD0 | TWAP slice 1 (4 × 5 min), fixed legs |
 
@@ -470,12 +470,13 @@ its floor. The app's ladder is reduced to one fee-less rung at the pool's on-cha
 (what the app's tick ladder centres on; the Oku feed is not on the fork). Results:
 `e2e/.run/app-shape-*/results/app-shape.json`.
 
-⚠ With every production value — including the app's 50 bps market floor — no market
-order fills: on the fork the floor sits below the pool fee (0.3 % on WRBTC/USD0) + the
-filler's `ROUTE_SLIPPAGE_BPS` haircut (30 bps) + gas, and USDRIF at its floor misses the
-inventory's `MIN_EXIT_EDGE_BPS` (2026-10-06: exit edge 16 bps < 30). That is an economics
-finding, not a gate one; `MARKET_SLIPPAGE_BPS=100` widens only the floor (disclosed in the
-log and results as an ECONOMICS OVERRIDE) so the timing gates can be exercised.
+Economics (2026-10-07): the app's ladder is fee-net (task 15), the app's market floor is
+30 bps, and the filler's haircut is 10 bps (volatile) / 5 bps (stable) with
+`MIN_PROFIT_RBTC = 0`, so every market ticket fills with production values. A filler
+fills once floor-side slack covers its gas (≈ $0.7–0.9 a route fill), so a ticket needs
+roughly (gas ÷ (floor − haircut)) of notional to fill at all: ≈ $360–$450 on WRBTC,
+≈ $280–$360 on stables. `MARKET_SLIPPAGE_BPS=<bps>` overrides the floor for an
+economics experiment (disclosed in the log and results as an ECONOMICS OVERRIDE).
 
 Perturb ONE of the three constants to see it fail: `APP_MARKET_TTL_SECONDS=60` (the app's
 `MARKET_TTL_SECONDS`), `MIN_TTL_SECONDS=400` (book), or `EXPIRY_MARGIN_SECONDS=250`

@@ -321,11 +321,13 @@ contract ExactlyRepayModule is IMakerModule {
 //       the discount is a live utilisation figure of that maturity, which a filler can
 //       raise in the same block by borrowing first, and the induced discount accrues
 //       to the pool's remaining fixed depositors — so a maker signs the draw they
-//       accept here: wallet draw ≤ `owed − minAssetsRequired`. `0` means "any
-//       discount the IRM's max rate produces". Sign it non-zero on every order whose
-//       `maturity > now`; after maturity the face is paid in full and it is inert.
-//       `SettlementLensChecks.validateOrder` flags a zero one through {takeFloored}
-//       ({ITakeFloor}, task 12); pinned on-fork by `PreMaturityWithdraw.t.sol`.
+//       accept here: wallet draw ≤ `owed − minAssetsRequired`. A signed `0` filled
+//       while `maturity > now` REVERTS `ZeroMinAssets` (B15, 2026-10-06 — the twin of
+//       the repay side's `ZeroMaxAssets`); after maturity the face is paid in full,
+//       the floor is inert and `0` stays legal. `SettlementLensChecks.validateOrder`
+//       flags the same zero through {takeFloored} ({ITakeFloor}, task 12) as the
+//       pre-signing early warning; pinned on-fork by `PreMaturityWithdraw.t.sol` and
+//       without RPC by `test/security/PreMaturityZeroFloor.t.sol`.
 //     — `totalAmount` is the item's FULL maker-signed amount. BREAKING (F26): it is
 //       new, and it is MANDATORY on the at-maturity borrow leg, where it scales the
 //       absolute `maxAssets` ceiling with the slice ({ProratedBound}). One field
@@ -390,6 +392,10 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource, ITakeFloor {
     ///      a fixed withdraw at or after maturity, where the face is paid in full.
     ///      Time-dependent like the rest of `validateOrder`: an order flagged now
     ///      stops being flagged once its maturity passes.
+    ///      Since B15 (2026-10-06) `takeOnBehalf` REVERTS `ZeroMinAssets` on exactly
+    ///      this predicate, so a flagged order cannot fill; this view stays as the
+    ///      lens's early warning — it lets the order be rejected before signing
+    ///      instead of failing at fill time. Keep the two predicates identical.
     function takeFloored(uint256, address, uint256, bytes calldata data) external view override returns (bool) {
         (uint256 op,,, uint256 maturity, uint256 bound) =
             abi.decode(data, (uint256, address, address, uint256, uint256));
@@ -442,6 +448,11 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource, ITakeFloor {
     /// @dev A fixed-maturity withdraw asked for more than the fixed deposit holds.
     ///      The venue would CLAMP rather than revert — see {_withdrawAtMaturity}.
     error ShortFixedPosition(uint256 amount, uint256 position);
+    /// @dev A fixed-maturity withdraw signed with `minAssetsRequired == 0` filled
+    ///      BEFORE maturity: an unbounded wallet draw (`owed − assetsDiscounted`) whose
+    ///      discount a filler can widen in the same block. Twin of the repay side's
+    ///      {ExactlyRepayModule.ZeroMaxAssets} (ACCEPTED-PATTERNS-REVIEW B15).
+    error ZeroMinAssets();
 
     constructor(address _permit3) {
         permit3 = IPermit3(_permit3);
@@ -522,6 +533,12 @@ contract ExactlyTakerModule is ITakerModule, IPositionSource, ITakeFloor {
         address receiver,
         address onBehalfOf
     ) private {
+        // A pre-maturity withdraw pays `assetsDiscounted < amount` and the core bills
+        // the gap to the maker's WALLET; `minAssets` is the only cap on that draw and
+        // the filler can widen the discount in the same block. A signed 0 is refused,
+        // mirroring the repay side's {ZeroMaxAssets} (B15). At/after maturity the face
+        // is paid in full, so a 0 floor stays legal there.
+        if (minAssets == 0 && maturity > block.timestamp) revert ZeroMinAssets();
         (uint256 principal, uint256 fee) = IExactlyMarket(market).fixedDepositPositions(maturity, onBehalfOf);
         if (amount > principal + fee) revert ShortFixedPosition(amount, principal + fee);
         IExactlyMarket(market).withdrawAtMaturity(maturity, amount, minAssets, receiver, onBehalfOf);

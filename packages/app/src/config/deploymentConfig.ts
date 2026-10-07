@@ -35,6 +35,38 @@ import { getAddress, isAddress, zeroAddress, type Address } from "viem";
  *   VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…",
  *     "solver":"0x0000000000000000000000000000000000000000",
  *     "marketSolvers":{"rsk-30-usdrif-usd0":"pull"}}}'
+ *
+ * PULL-MARKET EXCLUSIVITY WINDOW (UniswapX-style, B13) — OPT-IN, OFF BY DEFAULT.
+ * With a window configured, a pull market with a non-zero deployment `solver`
+ * signs `exclusiveFiller = solver` with a SOFT window: for `seconds` after signing
+ * only the solver fills at the signed price; any other filler may fill inside the
+ * window by paying the maker `overrideBps` more (`OrderGates.exclusivityOverride`),
+ * and after it the order is open to everyone until it expires. Optional keys:
+ *
+ *   "pullExclusivity":   {"seconds": 60, "overrideBps": 5}             deployment-wide
+ *   "marketExclusivity": {"<marketId>": {"seconds": 60}}                 per market
+ *
+ * Each object takes only those two keys, both optional (a missing one inherits:
+ * market ← deployment ← {@link DEFAULT_PULL_EXCLUSIVITY} = 0 s / 5 bps). `seconds`
+ * is an integer in [0, 600]; `0` (the default) means no window — the order names
+ * no filler and is open from the start. 60 s ≈ 2 Rootstock blocks is the UniswapX
+ * "~2 blocks" practice if a deployment opts in. `overrideBps` is an integer in
+ * [1, 10 000]: a window is always SOFT. Anything else drops the deployment.
+ *
+ * WHY OFF BY DEFAULT (2026-10-06, "no additional gas on fills"): measured on the
+ * plain SELL fill, naming one filler with a window costs +509 gas per fill (+245
+ * exec, +264 calldata) over `exclusiveFiller = 0`; a FILLER_SET covering both our
+ * solver contract and the inventory EOA costs +1,229..+1,304 and is not expressible
+ * in the SDK (its `curve` is typed curve points). And a single-solver window makes
+ * our own inventory EOA (it fills via `fillUpTo` as itself) an OUTSIDER that must
+ * pay the premium or wait the window out.
+ *
+ * DIRECT (delta-verify) markets are unaffected: the core fills a bit-104 order for
+ * its named filler ONLY, for its WHOLE life (Core `_snapshotOutRecipients`, ledger
+ * F30 — a balance delta cannot tell this fill's delivery from an unrelated inflow,
+ * so the callback runner must be the maker's choice), so there is no window to open
+ * and no outsider to charge. That is the trade: direct saves the solver ~35k gas per
+ * fill; pull + window lets anyone fill after ~2 blocks.
  */
 export interface DeploymentConfig extends Deployment {
   /** Read-only companion — `getOrderRelevantStates` is the orderbook's Layer 2. */
@@ -54,6 +86,49 @@ export interface DeploymentConfig extends Deployment {
    * — pull mode has to be asked for by name, never reached by a typo.)
    */
   marketSolvers: Record<string, Address>;
+  /** Deployment-wide pull-market window (defaults filled in). */
+  pullExclusivity: ExclusivityWindow;
+  /** Per-market windows, fully resolved against {@link pullExclusivity}. Empty when none. */
+  marketExclusivity: Record<string, ExclusivityWindow>;
+}
+
+/** A pull market's soft exclusivity window, as configured. */
+export interface ExclusivityWindow {
+  /** Window length in seconds from signing; `0` = no window (open from the start). */
+  seconds: number;
+  /** What an outsider pays the maker inside the window, bps (1..10 000). */
+  overrideBps: number;
+}
+
+/**
+ * No window (open pull, zero gas change) — the window is opt-in; see "WHY OFF BY
+ * DEFAULT" above. The 5 bps is what an opt-in that gives only `seconds` inherits.
+ */
+export const DEFAULT_PULL_EXCLUSIVITY: ExclusivityWindow = Object.freeze({ seconds: 0, overrideBps: 5 });
+/** Upper bound on a configured window: 20 Rootstock blocks. Longer is a typo, not a policy. */
+export const MAX_EXCLUSIVITY_SECONDS = 600;
+
+/** What `buildOrder` needs to sign a pull market's soft window. */
+export interface PullExclusivity extends ExclusivityWindow {
+  /** The `exclusiveFiller` named for the window — the deployment's solver. */
+  filler: Address;
+}
+
+/**
+ * Parse one exclusivity object over `base`. `null` = invalid (the caller drops the
+ * deployment). Strict: an object with only `seconds` / `overrideBps`, each a safe
+ * integer in range.
+ */
+function parseWindow(v: unknown, base: ExclusivityWindow): ExclusivityWindow | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  if (Object.keys(o).some((k) => k !== "seconds" && k !== "overrideBps")) return null;
+  const int = (x: unknown, lo: number, hi: number): number | null =>
+    typeof x === "number" && Number.isSafeInteger(x) && x >= lo && x <= hi ? x : null;
+  const seconds = o.seconds === undefined ? base.seconds : int(o.seconds, 0, MAX_EXCLUSIVITY_SECONDS);
+  const overrideBps = o.overrideBps === undefined ? base.overrideBps : int(o.overrideBps, 1, 10_000);
+  if (seconds === null || overrideBps === null) return null;
+  return { seconds, overrideBps };
 }
 
 /** The `marketSolvers` value that selects plain pull delivery with no named filler. */
@@ -61,7 +136,7 @@ export const PULL_MODE = "pull";
 
 type RawDeployments = Record<
   string,
-  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers", unknown>>
+  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers" | "pullExclusivity" | "marketExclusivity", unknown>>
 >;
 
 /**
@@ -128,7 +203,27 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       console.warn(`VITE_DEPLOYMENTS[${key}].marketSolvers has an invalid entry — treating chain ${key} as not deployed`);
       continue;
     }
-    out[chainId] = { chainId, settlement, permit3, lens, solver, marketSolvers };
+    // Pull-market exclusivity windows: strict, like the addresses — a typo here
+    // must not silently sign a different window than the operator asked for.
+    const pullExclusivity = entry.pullExclusivity === undefined ? { ...DEFAULT_PULL_EXCLUSIVITY } : parseWindow(entry.pullExclusivity, DEFAULT_PULL_EXCLUSIVITY);
+    const marketExclusivity: Record<string, ExclusivityWindow> = {};
+    let badWindow = pullExclusivity === null;
+    if (pullExclusivity && entry.marketExclusivity !== undefined) {
+      const me = entry.marketExclusivity;
+      if (!me || typeof me !== "object" || Array.isArray(me)) badWindow = true;
+      else {
+        for (const [m, v] of Object.entries(me as Record<string, unknown>)) {
+          const w = parseWindow(v, pullExclusivity);
+          if (!w) badWindow = true;
+          else marketExclusivity[m] = w;
+        }
+      }
+    }
+    if (badWindow || !pullExclusivity) {
+      console.warn(`VITE_DEPLOYMENTS[${key}] has an invalid pullExclusivity / marketExclusivity — treating chain ${key} as not deployed`);
+      continue;
+    }
+    out[chainId] = { chainId, settlement, permit3, lens, solver, marketSolvers, pullExclusivity, marketExclusivity };
   }
   return out;
 }
@@ -154,4 +249,19 @@ export function solverForMarket(deployment: DeploymentConfig | null, marketId: s
 /** True when orders on `marketId` sign plain pull delivery with no named filler. */
 export function isPullMarket(deployment: DeploymentConfig | null, marketId: string): boolean {
   return solverForMarket(deployment, marketId) === zeroAddress;
+}
+
+/**
+ * The soft exclusivity window a PULL market's orders sign: the deployment's
+ * `solver` as `exclusiveFiller` for the market's (or the deployment's) window.
+ * `undefined` — sign no window, open from the start — when there is no deployment,
+ * the market is DIRECT (its delta-verify exclusivity is whole-life by the core,
+ * F30), the deployment has no solver to favour, or the window is 0 seconds.
+ */
+export function exclusivityForMarket(deployment: DeploymentConfig | null, marketId: string): PullExclusivity | undefined {
+  if (!deployment || !isPullMarket(deployment, marketId) || deployment.solver === zeroAddress) return undefined;
+  const w = Object.prototype.hasOwnProperty.call(deployment.marketExclusivity, marketId)
+    ? deployment.marketExclusivity[marketId]!
+    : deployment.pullExclusivity;
+  return w.seconds > 0 ? { filler: deployment.solver, seconds: w.seconds, overrideBps: w.overrideBps } : undefined;
 }

@@ -13,7 +13,8 @@
  * Tickets (one fresh maker each):
  *   market-sell   rsk-30-wrbtc-usd0  SELL WRBTC, decaying output leg, direct (bit 104, exclusiveFiller = solver)
  *   market-buy    rsk-30-wrbtc-usd0  BUY  WRBTC, rising input leg,     direct
- *   market-usdrif rsk-30-usdrif-usd0 SELL USDRIF, decaying output leg, pull (exclusiveFiller = 0)
+ *   market-usdrif rsk-30-usdrif-usd0 SELL USDRIF, decaying output leg, pull (exclusiveFiller = 0: the
+ *                 B13 soft window is opt-in and OFF by default — zero gas change)
  *   limit         rsk-30-wrbtc-usd0  resting limit SELL (24 h, fixed)
  *   twap          rsk-30-wrbtc-usd0  TWAP slice 1 (fixed)
  *
@@ -48,7 +49,7 @@ import { decodeFunctionData, parseAbiItem, zeroAddress, type Address, type Hex }
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 
 import { postOrder, OrderbookHttpError } from "../../app/src/backend/remote";
-import { parseDeployments, solverForMarket, type DeploymentConfig } from "../../app/src/config/deploymentConfig";
+import { DEFAULT_PULL_EXCLUSIVITY, exclusivityForMarket, parseDeployments, solverForMarket, type DeploymentConfig } from "../../app/src/config/deploymentConfig";
 import { assertPoolTokens, marketById, pinnedToken } from "../../app/src/config/markets";
 import { fundingCalls, planFunding } from "../../app/src/lib/funding";
 import { quote as appQuote } from "../../app/src/lib/ladder";
@@ -219,6 +220,7 @@ async function prepareAndPost(t: Ticket, i: number): Promise<Posted> {
     pay: pay as { address: Address; decimals: number },
     recv: recv as { address: Address; decimals: number },
     solver: solverForMarket(deployment, t.marketId),
+    exclusivity: exclusivityForMarket(deployment, t.marketId),
     amountIn: plan.amountIn,
     targetOut: plan.targetOut,
     minOut: plan.minOut,
@@ -268,7 +270,8 @@ async function main(): Promise<void> {
     log(
       `${t.id.padEnd(13)} POST /orders → ${p.status}${p.error ? ` (${p.error})` : ""}  ${p.hash.slice(0, 12)}  ttl ${p.plan.ttlSeconds}s decay ${p.plan.decaySeconds}s  ` +
         `in ${o.legsIn[0]!.start}${o.legsIn[0]!.end ? `→${o.legsIn[0]!.end}` : ""}  out ${o.legsOut[0]!.start}${o.legsOut[0]!.end ? `→${o.legsOut[0]!.end}` : ""}  ` +
-        `bit104 ${direct ? 1 : 0}  exclusiveFiller ${o.exclusiveFiller === zeroAddress ? "0" : o.exclusiveFiller.slice(0, 10)}`,
+        `bit104 ${direct ? 1 : 0}  exclusiveFiller ${o.exclusiveFiller === zeroAddress ? "0" : o.exclusiveFiller.slice(0, 10)}` +
+        (unpackTiming(o.timing).exclusivityEndTime ? `  window →t+${unpackTiming(o.timing).exclusivityEndTime - (unpackTiming(o.timing).decayStartTime || p.postedAt)} s @ ${o.exclusivityOverrideBps} bps` : ""),
     );
     if (p.status !== 202) fail(`${t.id}: book answered ${p.status} (${p.error ?? "?"}), want 202`);
   }
@@ -280,7 +283,19 @@ async function main(): Promise<void> {
   shape("market-sell", ms.legsOut[0]!.end !== 0n && ms.legsOut[0]!.end < ms.legsOut[0]!.start, "decaying output leg");
   shape("market-sell", ((ms.timing >> 104n) & 1n) === 1n && ms.exclusiveFiller.toLowerCase() === env.solver.toLowerCase(), "bit 104 + exclusiveFiller = solver");
   shape("market-buy", mb.legsIn[0]!.end > mb.legsIn[0]!.start, "rising input leg");
-  shape("market-usdrif", ((mu.timing >> 104n) & 1n) === 0n && mu.exclusiveFiller === zeroAddress, "pull, exclusiveFiller = 0");
+  // B13: the soft window is opt-in (DEFAULT_PULL_EXCLUSIVITY = 0 s) — the production
+  // shape stays open pull: no named filler, no window, no override (zero gas change).
+  shape(
+    "market-usdrif",
+    DEFAULT_PULL_EXCLUSIVITY.seconds === 0 &&
+      ((mu.timing >> 104n) & 1n) === 0n &&
+      mu.exclusiveFiller === zeroAddress &&
+      unpackTiming(mu.timing).exclusivityEndTime === 0 &&
+      mu.exclusivityOverrideBps === 0n,
+    "pull, exclusiveFiller = 0, no window (window is opt-in)",
+  );
+  // Direct markets are unchanged: no window, no override (whole-life exclusivity is the core's, F30).
+  shape("market-sell", unpackTiming(ms.timing).exclusivityEndTime === 0 && ms.exclusivityOverrideBps === 0n, "direct: no window, no override");
 
   // Wait for the market orders.
   const markets = posted.filter((p) => p.t.mode === "market" && p.status === 202);
@@ -339,7 +354,10 @@ async function main(): Promise<void> {
     const paid = p.payBefore - payAfter;
     const floorOut = p.order.legsOut[0]!.end !== 0n ? p.order.legsOut[0]!.end : p.order.legsOut[0]!.start;
     const ceilIn = p.order.legsIn[0]!.end !== 0n ? p.order.legsIn[0]!.end : p.order.legsIn[0]!.start;
-    Object.assign(rec, { filled: true, tx: f.tx, at: f.at, sinceStart: f.at - x.start, sinceFloor: f.at - x.floorAt, to: tx.to, strategy, delivery, note: note.slice(0, 160), got, floorOut, paid, ceilIn });
+    const winEnd = unpackTiming(p.order.timing).exclusivityEndTime;
+    const inWindow = winEnd !== 0 && f.at < winEnd;
+    const asExclusive = p.order.exclusiveFiller !== zeroAddress && f.solver.toLowerCase() === p.order.exclusiveFiller.toLowerCase();
+    Object.assign(rec, { filled: true, tx: f.tx, at: f.at, sinceStart: f.at - x.start, sinceFloor: f.at - x.floorAt, to: tx.to, strategy, delivery, note: note.slice(0, 160), got, floorOut, paid, ceilIn, windowEnd: winEnd || undefined, inWindow, filler: f.solver, asExclusive });
     // Task 05: did the direct route patch the live owed in, and how much decay did that keep?
     let live = "";
     if (isDirectOrder && tx.to?.toLowerCase() === env.solver.toLowerCase()) {
@@ -355,7 +373,8 @@ async function main(): Promise<void> {
       }
     }
     summary.push(rec);
-    log(`${p.t.id}: filled t+${f.at - x.start} s (${f.at - x.floorAt >= 0 ? `${f.at - x.floorAt} s after` : `${x.floorAt - f.at} s before`} the floor), ${delivery} via ${strategy} → ${tx.to}; maker got ${got} (floor ${floorOut}), paid ${paid} (cap ${ceilIn})${live}`);
+    const win = winEnd ? `; ${inWindow ? "INSIDE" : "after"} the window (ends t+${winEnd - x.start} s) as ${asExclusive ? "the exclusive filler" : "an outsider"}` : "";
+    log(`${p.t.id}: filled t+${f.at - x.start} s (${f.at - x.floorAt >= 0 ? `${f.at - x.floorAt} s after` : `${x.floorAt - f.at} s before`} the floor), ${delivery} via ${strategy} → ${tx.to}; maker got ${got} (floor ${floorOut}), paid ${paid} (cap ${ceilIn})${live}${win}`);
     if (f.at > x.quoteBy) fail(`${p.t.id}: filled ${f.at - x.floorAt} s after the floor, past the first re-quote bound (${x.quoteBy - x.floorAt} s)`);
     if (f.at > x.lastSend + landing) fail(`${p.t.id}: filled after expiry − EXPIRY_MARGIN_SECONDS`);
     if (got < floorOut) fail(`${p.t.id}: maker got ${got} < floor ${floorOut}`);

@@ -14,7 +14,7 @@ import {
 import { zeroAddress, type Address } from "viem";
 
 import type { RouteConfig, RoutePath } from "./config";
-import { isDeltaVerify, plainShape, type Verdict } from "./policy";
+import { exclusivityFor, isDeltaVerify, plainShape, type Verdict } from "./policy";
 
 /**
  * Pure decision logic of the ROUTE strategy: zero-inventory fills through the
@@ -85,6 +85,32 @@ export function patchesLiveOutput(order: Order, direct: boolean, nowSec: bigint)
   return nowSec < BigInt(t.decayStartTime) + BigInt(t.decayDuration);
 }
 
+/** Rootstock's block interval, seconds: how far one block of delay moves an auction. */
+export const BLOCK_SECONDS = 30n;
+
+/**
+ * What the live patch can capture on this fill: one block of `legsOut[0]`'s decay
+ * (capped at what is left of it), pro rata to `owed`, rounded down. Only meaningful
+ * when {@link patchesLiveOutput} holds; the caller weighs it against
+ * {@link TYPED_CALLBACK_GAS}, so a small ticket does not pay the typed path's gas for
+ * a decay worth less than it. A block-clock order counts one block of its decay.
+ */
+export function liveDecayPerBlock(order: Order, owed: bigint, nowSec: bigint): bigint {
+  const leg = order.legsOut[0];
+  if (!leg || leg.end === 0n || leg.end >= leg.start) return 0n;
+  const t = unpackTiming(order.timing);
+  const dur = BigInt(t.decayDuration);
+  if (dur === 0n) return 0n;
+  let steps = 1n;
+  if (((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 0n) {
+    const end = BigInt(t.decayStartTime) + dur;
+    const left = end > nowSec ? end - nowSec : 0n;
+    steps = left < BLOCK_SECONDS ? left : BLOCK_SECONDS;
+  }
+  if (steps > dur) steps = dur;
+  return (owed * (leg.start - leg.end) * steps) / (leg.start * dur);
+}
+
 const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /**
@@ -129,9 +155,12 @@ export interface RouteClass {
  *     direct BUY lost margin silently; review 2026-10-05 §4.)
  *   • a delta-verify order IS allowed — when it names OUR solver as
  *     `exclusiveFiller` (the core fills such an order only for that filler);
- *   • a pull order must be open (`exclusiveFiller` 0) or name the solver — the
+ *   • a pull order must be open (`exclusiveFiller` 0), name the solver — the
  *     core compares `exclusiveFiller` with the SOLVER contract, which is
- *     `msg.sender` to Settlement, never with our EOA.
+ *     `msg.sender` to Settlement, never with our EOA — or name another filler
+ *     whose window is over or SOFT (the solver-side preview prices the premium).
+ *     The app's pull markets name THIS solver with a ~2-block soft window (B13):
+ *     inside it the route fills premium-free, after it the order is open to all.
  *   • BOTH tokens must be in `ROUTE_TOKENS` (default: the Rootstock market tokens
  *     WRBTC, USDT0, WETH, USDRIF) — otherwise, with Sushi on, every pair in the
  *     book would pass and cost an API call per sweep;
@@ -141,7 +170,7 @@ export interface RouteClass {
 export function classifyRoute(
   order: Order,
   rc: Pick<RouteConfig, "solver" | "pools" | "paths" | "routeTokens"> & { sushi?: { enabled: boolean } },
-  extras: { hasPermitBatch?: boolean; sigless?: boolean } = {},
+  extras: { hasPermitBatch?: boolean; sigless?: boolean; nowS?: bigint } = {},
 ): Verdict<RouteClass> {
   const shape = plainShape(order, extras);
   if (!shape.ok) return shape;
@@ -150,7 +179,12 @@ export function classifyRoute(
   if (direct) {
     if (!eq(ex, rc.solver)) return { ok: false, reason: "delta-verify order for another filler" };
   } else if (ex !== zeroAddress && !eq(ex, rc.solver)) {
-    return { ok: false, reason: "names another exclusive filler" };
+    // Another filler's window: the core admits the solver once it ends, or inside
+    // a SOFT one at the premium (the solver-side preview prices it) — refused only
+    // while a HARD one runs. Our own app's pull orders name THIS solver, so for
+    // them the route is the exclusive filler and pays nothing (B13).
+    const w = exclusivityFor(order, rc.solver, extras.nowS ?? BigInt(Math.floor(Date.now() / 1000)));
+    if (w.kind === "hard") return { ok: false, reason: "names another exclusive filler (hard window)" };
   }
   const tokenIn = order.legsIn[0]!.token;
   const tokenOut = order.legsOut[0]!.token;

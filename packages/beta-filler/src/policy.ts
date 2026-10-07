@@ -1,4 +1,4 @@
-import { DELTA_VERIFY_OUTPUTS_BIT, isProportional, type Order } from "@1delta-x/sdk";
+import { BLOCK_CLOCK_BIT, DELTA_VERIFY_OUTPUTS_BIT, isProportional, overrideHasCarrier, unpackTiming, type Order } from "@1delta-x/sdk";
 import { zeroAddress, type Address } from "viem";
 
 import { MOC_FEE_BPS, type Config, type Policy } from "./config";
@@ -54,23 +54,74 @@ export function isDeltaVerify(order: Order): boolean {
 }
 
 /**
+ * How `me` stands against a PULL order's exclusivity at `nowS` (unix seconds) — the
+ * off-chain reading of `OrderGates.exclusivityOverride`:
+ *   • `open`      — no `exclusiveFiller`, the window is over, or we ARE the named filler;
+ *   • `soft`      — another filler's window is still running, but it is SOFT: the
+ *                   core lets us fill by paying `exclusivityOverrideBps` to the maker
+ *                   (a carrier leg exists, override in (0, 10 000]). The lens previews
+ *                   it for `filler = me`, so every price / profit gate downstream sees
+ *                   the premium — nothing else has to price it;
+ *   • `hard`      — another filler's window is running and the core would refuse us
+ *                   (`NotExclusiveFiller`): override 0, nothing to carry it, or a
+ *                   block-clocked window we cannot place on the wall clock.
+ * Delta-verify orders are NOT read here (their exclusivity is whole-life, Core F30).
+ *
+ * Why this matters (B13, 2026-10-06): the app's PULL markets name the deployment's
+ * SOLVER contract with a ~2-block soft window. The inventory strategy fills as our
+ * EOA, so inside that window it is an outsider like any other — it may fill at the
+ * premium (the maker is better off, and the preview prices it), or wait the ≤ 2
+ * blocks for the window to end; the engine re-quotes a held order the moment its
+ * window ends ({@link windowEndMs}).
+ */
+export function exclusivityFor(
+  order: Order,
+  me: Address,
+  nowS: bigint,
+): { kind: "open" } | { kind: "soft"; endsAt: bigint; overrideBps: bigint } | { kind: "hard"; endsAt?: bigint } {
+  const ex = order.exclusiveFiller;
+  if (ex === zeroAddress || ex.toLowerCase() === me.toLowerCase()) return { kind: "open" };
+  const endsAt = BigInt(unpackTiming(order.timing).exclusivityEndTime);
+  const blockClock = ((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 1n;
+  if (!blockClock && nowS >= endsAt) return { kind: "open" };
+  const bps = order.exclusivityOverrideBps;
+  if (blockClock) return { kind: "hard" };
+  if (bps === 0n || bps > 10_000n || !overrideHasCarrier(order)) return { kind: "hard", endsAt };
+  return { kind: "soft", endsAt, overrideBps: bps };
+}
+
+/**
+ * When a held order should be re-quoted because its exclusivity window ends — the one
+ * moment its price steps in an outsider's favour (the premium drops away, a hard
+ * window opens). `undefined` when there is no running timestamp-clocked window.
+ */
+export function windowEndMs(order: Order, nowMs: number): number | undefined {
+  if (order.exclusiveFiller === zeroAddress || isDeltaVerify(order)) return undefined;
+  if (((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 1n) return undefined;
+  const end = unpackTiming(order.timing).exclusivityEndTime * 1000;
+  return end > nowMs ? end : undefined;
+}
+
+/**
  * INVENTORY strategy: the plain shape, pull delivery only (an EOA cannot run the
- * callback a delta-verify order needs), open or exclusive to this wallet, on the
- * USDRIF/USDT0 pair.
+ * callback a delta-verify order needs), on the USDRIF/USDT0 pair, and fillable by
+ * this wallet NOW: open, exclusive to this wallet, or inside another filler's SOFT
+ * window (priced at the override by the preview — see {@link exclusivityFor}).
  */
 export function classify(
   order: Order,
   cfg: Pick<Config, "tokens"> & { policy: Pick<Policy, "buyUsdrif" | "sellUsdrif"> },
   me: Address,
-  extras: { hasPermitBatch?: boolean; sigless?: boolean } = {},
+  extras: { hasPermitBatch?: boolean; sigless?: boolean; nowS?: bigint } = {},
 ): Verdict<{ direction: Direction }> {
   const shape = plainShape(order, extras);
   if (!shape.ok) return shape;
   if (isDeltaVerify(order)) {
     return { ok: false, reason: "delta-verify order: needs a callback filler, an EOA cannot fill it" };
   }
-  if (order.exclusiveFiller !== zeroAddress && order.exclusiveFiller.toLowerCase() !== me.toLowerCase()) {
-    return { ok: false, reason: "names another exclusive filler" };
+  const ex = exclusivityFor(order, me, extras.nowS ?? BigInt(Math.floor(Date.now() / 1000)));
+  if (ex.kind === "hard") {
+    return { ok: false, reason: `exclusive to another filler (hard window${ex.endsAt !== undefined ? ` until ${ex.endsAt}` : ""})` };
   }
   const tin = order.legsIn[0]!.token.toLowerCase();
   const tout = order.legsOut[0]!.token.toLowerCase();

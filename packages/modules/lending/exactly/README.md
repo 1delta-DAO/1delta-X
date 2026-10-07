@@ -69,9 +69,11 @@ taker module enforces `msg.sender == permit3`; the MAKE modules enforce
   than reverted — the pre-fund twin's rule (review 2026-10-06, task 12).
 - Pre-maturity fixed withdraw pays `assetsDiscounted < amount`, and the core bills
   `owed − assetsDiscounted` to the maker's WALLET; `minAssetsRequired` is the only
-  cap, and the discount's rate is one a filler can raise in the same block. Sign it
-  non-zero — `SettlementLens.validateOrder` flags a zero one via
-  `ExactlyTakerModule.takeFloored` (`ITakeFloor`).
+  cap, and the discount's rate is one a filler can raise in the same block. A signed
+  `minAssetsRequired` of 0 filled before maturity reverts `ZeroMinAssets` (B15,
+  2026-10-06 — the twin of the repay side's `ZeroMaxAssets`); at/after maturity the
+  face is paid in full and 0 stays legal. `SettlementLens.validateOrder` flags the
+  same zero floor up front via `ExactlyTakerModule.takeFloored` (`ITakeFloor`).
 - Fixed withdraw: Exactly's `withdrawAtMaturity` **clamps** a request above the
   fixed deposit instead of reverting, so the taker module reads
   `fixedDepositPositions` and reverts `ShortFixedPosition` when the slice exceeds

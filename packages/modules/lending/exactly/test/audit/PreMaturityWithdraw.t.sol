@@ -25,7 +25,9 @@ import {IExactlyMarket, IExactlyAuditor} from "../../src/interfaces/IExactly.sol
 ///         — must be signed non-zero. Every earlier test signed it 0 and warped past
 ///         maturity; this suite pins the pre-maturity path:
 ///
-///           • the wallet draw is EXACTLY `owed − assetsDiscounted` (zero floor);
+///           • a zero floor REVERTS `ZeroMinAssets` (B15, 2026-10-06 — it used to
+///             bill exactly `owed − assetsDiscounted` to the wallet), and stays
+///             legal at/after maturity;
 ///           • a non-zero floor caps it, and a same-block rate raise that would push
 ///             the discount past the floor makes the fill revert instead;
 ///           • the lens flags the zero-floor order and passes the floored one.
@@ -144,9 +146,11 @@ contract ExactlyPreMaturityWithdrawTest is CoreSettlementBase {
         vm.stopPrank();
     }
 
-    /// @notice Zero floor: the maker's wallet pays EXACTLY the discount, and the lens
-    ///         flags the order before it is signed.
-    function test_preMaturity_zeroFloor_walletBilledExactlyTheDiscount() public {
+    /// @notice Zero floor before maturity: the lens flags it up front, and since B15
+    ///         (2026-10-06) the module REVERTS `ZeroMinAssets` at fill time — the
+    ///         unbounded wallet draw (`owed − assetsDiscounted`, which a filler can
+    ///         widen in the same block) is no longer reachable. Wallet untouched.
+    function test_preMaturity_zeroFloor_reverts() public {
         assertLt(block.timestamp, maturity, "pre-maturity");
         bytes memory data = _data(0);
         _grants(data);
@@ -156,17 +160,35 @@ contract ExactlyPreMaturityWithdrawTest is CoreSettlementBase {
         assertFalse(ok, "zero floor flagged");
         assertEq(why, FLOOR_WHY);
 
-        uint256 disc = _discounted();
-        assertLt(disc, SIGNED, "precondition: a pre-maturity discount exists");
+        assertLt(_discounted(), SIGNED, "precondition: a pre-maturity discount exists");
 
         uint256 walletBefore = IERC20(USDC).balanceOf(maker);
         bytes memory sig = _sign(order);
         vm.prank(solver);
+        vm.expectRevert(ExactlyTakerModule.ZeroMinAssets.selector);
         settlement.fill(order, sig, SIGNED);
+        assertEq(IERC20(USDC).balanceOf(maker), walletBefore, "wallet untouched");
+    }
 
-        assertEq(walletBefore - IERC20(USDC).balanceOf(maker), SIGNED - disc, "wallet draw == owed - assetsDiscounted");
-        assertEq(IERC20(USDC).balanceOf(solver), SIGNED, "filler paid the full leg");
-        assertEq(IERC20(WETH).balanceOf(maker), WETH_OUT);
+    /// @notice The same zero-floor order is legal once maturity has passed: the face is
+    ///         paid in full, nothing is billed to the wallet, and the lens passes it.
+    function test_atMaturity_zeroFloor_fillsAtFace() public {
+        // Warp FIRST: the order builder stamps a 1h deadline from `block.timestamp`.
+        // A fixed withdraw reads no price feed, so the warp trips no oracle staleness.
+        vm.warp(maturity);
+        bytes memory data = _data(0);
+        _grants(data);
+        Order memory order = _order(4, data);
+        bytes memory sig = _sign(order);
+
+        (bool ok, string memory why) = lens.validateOrder(order);
+        assertTrue(ok, why);
+
+        uint256 walletBefore = IERC20(USDC).balanceOf(maker);
+        vm.prank(solver);
+        settlement.fill(order, sig, SIGNED);
+        assertEq(IERC20(USDC).balanceOf(maker), walletBefore, "no wallet draw at maturity");
+        assertEq(IERC20(USDC).balanceOf(solver), SIGNED);
     }
 
     /// @notice A floor at the live discounted amount caps the draw at `owed − floor`

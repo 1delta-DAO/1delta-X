@@ -1,6 +1,17 @@
 import { parseDeployments, type DeploymentConfig } from "./deploymentConfig";
 
-export { PULL_MODE, isPullMarket, parseDeployments, solverForMarket, type DeploymentConfig } from "./deploymentConfig";
+export {
+  DEFAULT_PULL_EXCLUSIVITY,
+  MAX_EXCLUSIVITY_SECONDS,
+  PULL_MODE,
+  exclusivityForMarket,
+  isPullMarket,
+  parseDeployments,
+  solverForMarket,
+  type DeploymentConfig,
+  type ExclusivityWindow,
+  type PullExclusivity,
+} from "./deploymentConfig";
 
 const CONFIGURED = parseDeployments(import.meta.env.VITE_DEPLOYMENTS);
 

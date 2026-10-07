@@ -1068,7 +1068,7 @@ constant in `data` is an AMOUNT; nobody applied the same reasoning when it is a
 | --- | --- | --- |
 | `ExactlyTakerModule` (`borrowAtMaturity`) | `maxAssets` | max — **fails OPEN** |
 | `LiquityV2TakerModule` (`withdrawBold`) | `maxUpfrontFee` | max — **fails OPEN** |
-| `ExactlyTakerModule` (`withdrawAtMaturity`), `ExactlyDepositModule` | `minAssetsRequired` | min — fails CLOSED *(2026-09-30 L-CV2-1.v1: the venue also CLAMPS a request above principal + fee, so a short fixed position used to bill the maker's wallet; the module now pre-checks `fixedDepositPositions` and reverts `ShortFixedPosition`)* |
+| `ExactlyTakerModule` (`withdrawAtMaturity`), `ExactlyDepositModule` | `minAssetsRequired` | min — fails CLOSED *(2026-09-30 L-CV2-1.v1: the venue also CLAMPS a request above principal + fee, so a short fixed position used to bill the maker's wallet; the module now pre-checks `fixedDepositPositions` and reverts `ShortFixedPosition`; B15 2026-10-06: a pre-maturity withdraw signed `minAssetsRequired == 0` reverts `ZeroMinAssets`)* |
 
 Quantified by the regression test against the pre-fix code: a maker signing
 "borrow 10,000, never owe more than 11,000" filled in 7 slices had **7× their

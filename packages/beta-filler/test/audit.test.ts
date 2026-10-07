@@ -159,7 +159,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("M-1: the sent plan's floor is priced at the gas limit actually sent", () => {
+describe("M-1: the sent plan's floor is priced at the MEASURED gas; the limit adds headroom only (2026-10-07)", () => {
   it("a fill whose simulation burns more than MAX_ROUTE_GAS is refused (was: sent with a 320k-priced floor)", async () => {
     const { chain, sent } = fakeChain({ simGas: 5_000_000n, receipt: "success" });
     const { rf } = routeFiller({}, chain);
@@ -169,7 +169,7 @@ describe("M-1: the sent plan's floor is priced at the gas limit actually sent", 
     expect(sent).toHaveLength(0);
   });
 
-  it("simulated gas above the estimate: plan REBUILT at gasUsed × 1.25, RE-SIMULATED, sent with exactly that gas limit", async () => {
+  it("simulated gas above the estimate: plan REBUILT at gasUsed, RE-SIMULATED, sent with a gasUsed × 1.25 limit", async () => {
     const { chain, sent, counts } = fakeChain({ simGas: 500_000n, receipt: "success" });
     const { rf, cfg } = routeFiller({}, chain);
     const out = await rf.consider(entry() as never);
@@ -179,9 +179,11 @@ describe("M-1: the sent plan's floor is priced at the gas limit actually sent", 
     const gasLimit = sent[0]!.gas!;
     expect(gasLimit).toBe(625_000n);
     const floorProfit = planOf(sent[0]!.data).minOut - OWED; // what the chain guarantees the bot
-    const gasLimitCostOut = rbtcToUsdt0(gasLimit * GAS_PRICE);
-    expect(floorProfit).toBe(gasLimitCostOut + rbtcToUsdt0(cfg.route!.minProfitWei));
-    expect(floorProfit).toBeGreaterThanOrEqual(gasLimitCostOut);
+    // Priced at the measurement (estimateGas = gross, before refunds), not the limit:
+    // pricing the 1.25× limit overcharged every quote by ~40 %.
+    const measuredCostOut = rbtcToUsdt0(500_000n * GAS_PRICE);
+    expect(floorProfit).toBe(measuredCostOut + rbtcToUsdt0(cfg.route!.minProfitWei));
+    expect(floorProfit).toBeLessThan(rbtcToUsdt0(gasLimit * GAS_PRICE));
   });
 
   it("simulated gas below the estimate: no rebuild; the gas limit is the estimate the floor was priced at", async () => {
@@ -193,13 +195,13 @@ describe("M-1: the sent plan's floor is priced at the gas limit actually sent", 
     expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(cfg.route!.gasEstimate * GAS_PRICE));
   });
 
-  it("a re-simulation that measures still more gas re-prices again (converges on the measured limit)", async () => {
+  it("a re-simulation that measures still more gas re-prices again (converges on the measured gas)", async () => {
     const { chain, sent, counts } = fakeChain({ simGas: [400_000n, 480_000n, 480_000n], receipt: "success" });
     const { rf } = routeFiller({}, chain);
     expect((await rf.consider(entry() as never)).status).toBe("pending");
     expect(counts.call).toBe(3);
-    expect(sent[0]!.gas).toBe(600_000n);
-    expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(600_000n * GAS_PRICE));
+    expect(sent[0]!.gas).toBe(600_000n); // 480k × 1.25
+    expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(480_000n * GAS_PRICE));
   });
 
   it("MAX_ROUTE_GAS is configurable, and must be ≥ ROUTE_GAS_ESTIMATE", () => {
@@ -321,6 +323,45 @@ const inventoryEntry = () => ({
   orderHash: ("0x" + "02".repeat(32)) as Hex,
   announce: { order: order({ legsIn: [{ token: ROOTSTOCK.usdrif, start: 100n * 10n ** 18n, end: 0n }], legsOut: [{ token: ROOTSTOCK.usdt0, start: 90_000_000n, end: 0n, recipient: zeroAddress }] }), sig: "0x" as Hex },
   state: { ok: true, status: "Fillable", fillableAmount: 100n * 10n ** 18n, validatorsPass: true },
+});
+
+describe("B13: the inventory EOA inside the app's soft window (exclusiveFiller = the SOLVER contract)", () => {
+  const cfg = loadConfig({ ...ENV, MIN_EXIT_EDGE_BPS: "0" });
+  const invBudget = () => new Budget({ [ROOTSTOCK.usdt0.toLowerCase()]: 10n ** 12n });
+  const windowed = (overrideBps: bigint) => {
+    const e = inventoryEntry();
+    const nowS = Math.floor(Date.now() / 1000);
+    return { ...e, announce: { ...e.announce, order: { ...e.announce.order, exclusiveFiller: SOLVER, timing: packTiming(0, 0, nowS + 60), exclusivityOverrideBps: overrideBps } } };
+  };
+
+  it("SOFT window: the EOA is an outsider; it previews AS ITSELF (so the premium is priced) and fills if the gates pass", async () => {
+    const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+    const pub = (chain as unknown as { pub: { readContract: (a: { functionName: string; args?: unknown[] }) => Promise<unknown> } }).pub;
+    const inner = pub.readContract;
+    const fillers: unknown[] = [];
+    pub.readContract = async (a) => {
+      if (a.functionName === "previewFill") fillers.push(a.args?.[2]);
+      return inner(a);
+    };
+    const logs: string[] = [];
+    const out = await new Filler(cfg, chain, invBudget(), (m) => logs.push(m)).consider(windowed(5n) as never);
+    expect(out).toMatchObject({ status: "pending", strategy: "inventory" });
+    expect(sent).toHaveLength(1);
+    // Previewed for msg.sender = our EOA — the lens applies OrderGates.exclusivityOverride to it.
+    expect(fillers.length).toBeGreaterThan(0);
+    for (const f of fillers) expect(String(f).toLowerCase()).toBe(ACCOUNT.address.toLowerCase());
+    expect(logs.some((l) => /in-window outsider: \+5 bps to the maker/.test(l))).toBe(true);
+  });
+
+  it("HARD window (override 0): refused with zero RPC until it ends", async () => {
+    const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+    const f = new Filler(cfg, chain, invBudget(), () => {});
+    expect(f.accepts(windowed(0n) as never)).toBe(false);
+    const out = await f.consider(windowed(0n) as never);
+    expect(out).toMatchObject({ status: "skipped", rest: true });
+    expect(out.reason).toMatch(/hard window/);
+    expect(sent).toHaveLength(0);
+  });
 });
 
 describe("M-3: the inventory strategy has the gas budget, the gas-price ceiling and the backoff", () => {
@@ -694,12 +735,12 @@ describe("task 08: the route plan carries the filler's on-chain bump floor", () 
 });
 
 describe("task 05: a direct SELL still decaying patches the live owed; the typed gas is priced", () => {
-  const directEntry = (decaying: boolean) => {
+  const directEntry = (decaying: boolean, end = 895_000_000n) => {
     const now = Math.floor(Date.now() / 1000);
     const ord = order({
       timing: withDeltaVerifyOutputs(packTiming(now - 10, 60, 0)),
       exclusiveFiller: SOLVER,
-      legsOut: [{ token: ROOTSTOCK.usdt0, start: 905_000_000n, end: decaying ? 895_000_000n : 0n, recipient: zeroAddress }],
+      legsOut: [{ token: ROOTSTOCK.usdt0, start: 905_000_000n, end: decaying ? end : 0n, recipient: zeroAddress }],
     });
     return { orderHash: ("0x" + "05".repeat(32)) as Hex, announce: { order: ord, sig: "0x" as Hex }, state: { ok: true, status: "Fillable", fillableAmount: RECEIVED, validatorsPass: true } };
   };
@@ -715,6 +756,17 @@ describe("task 05: a direct SELL still decaying patches the live owed; the typed
     expect(plan.amountInOffset).toBe(NO_PATCH);
     expect(sent[0]!.gas).toBe(cfg.route!.gasEstimate + TYPED_CALLBACK_GAS);
     expect(logs.some((l) => l.includes("direct+live"))).toBe(true);
+  });
+
+  it("a decay worth less than the typed path's gas per block: NO_PATCH, untyped gas (small tickets pay nothing extra)", async () => {
+    // 1,000 units (0.001 USDT0) of decay over 60 s: one block captures ~500 units,
+    // far below 6k gas at the test gas price.
+    const { chain, sent } = fakeChain({ simGas: 200_000n, receipt: "success" });
+    const { rf, cfg, logs } = routeFiller({}, chain);
+    expect((await rf.consider(directEntry(true, 904_999_000n) as never)).status).toBe("pending");
+    expect(planFields(sent[0]!.data).amountOutOffset).toBe(NO_PATCH);
+    expect(sent[0]!.gas).toBe(cfg.route!.gasEstimate);
+    expect(logs.some((l) => l.includes("direct+live"))).toBe(false);
   });
 
   it("fixed-output direct order: NO_PATCH and the untyped gas estimate", async () => {

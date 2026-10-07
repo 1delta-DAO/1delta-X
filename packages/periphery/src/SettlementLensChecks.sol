@@ -7,7 +7,7 @@ import {IProceedsAsset} from "@core/interfaces/IProceedsAsset.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {ITakeFloor} from "@lib/interfaces/ITakeFloor.sol";
 
-import {Order, ItemOp, OrderSide, FillCtx} from "@core/settlement/Structs.sol";
+import {Order, ItemOp, ItemPolicy, OrderSide, FillCtx} from "@core/settlement/Structs.sol";
 import {OrderHash} from "@core/settlement/OrderHash.sol";
 import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
@@ -965,6 +965,19 @@ contract SettlementLensChecks {
         }
         if (!_takeFloored(order.legsIn, module, amount, data)) {
             return (false, "item proceeds floor does not bound the wallet draw on its input leg", nxt);
+        }
+        // Third question, same gate (ACCEPTED-PATTERNS-REVIEW B8, 2026-10-06): a TAKE
+        // whose proceeds credit an INPUT leg lets a permissionless `matchSettle`
+        // schedule that leg's PULL first. {Batch._stepPull} then draws the whole leg
+        // from the maker's wallet, the late TAKE credits it again and Phase 3 refunds
+        // the tokens — but not the Permit3 ALLOWANCE the first draw spent. Only
+        // {ItemPolicy.CANONICAL} orders PULL after the item group; ORDERED/ATOMIC
+        // order the items among themselves and leave the PULL free. Plain TAKE only:
+        // `matchSettle` refuses any order carrying a TAKE_FOR. `got != 0` here already
+        // means "an input-leg token" (the rule above returned otherwise), so an item
+        // routed to the maker (borrow after deposit) or a silent module never trips it.
+        if (got != address(0) && op == uint256(ItemOp.TAKE) && order.itemPolicy() < ItemPolicy.CANONICAL) {
+            return (false, "input-funding TAKE needs ItemPolicy.CANONICAL (late TAKE spends the allowance twice)", nxt);
         }
         return (true, "", nxt);
     }

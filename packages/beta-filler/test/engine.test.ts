@@ -2,7 +2,7 @@
  * The non-blocking tick model (2026-10): one outstanding tx, receipts read by later
  * ticks, state in an injected StateStore, the rebalancer under the shared Guard.
  */
-import { AGGREGATOR_FILL_SOLVER_ABI, OrderSide, type Order } from "@1delta-x/sdk";
+import { AGGREGATOR_FILL_SOLVER_ABI, OrderSide, packTiming, type Order } from "@1delta-x/sdk";
 import { decodeFunctionData, encodeFunctionResult, erc20Abi, keccak256, parseTransaction, TransactionNotFoundError, zeroAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it } from "vitest";
@@ -449,6 +449,27 @@ describe("M1: a resting book is not re-quoted every tick", () => {
     expect((await e.tick({ fetchEntries: async () => [decaying] })).evaluated).toBe(0);
     c.t += 15_000;
     expect((await e.tick({ fetchEntries: async () => [decaying] })).evaluated).toBe(1);
+  });
+
+  it("B13: a held order is re-quoted when its exclusivity window ends, not a full hold later", async () => {
+    const { w, chain } = world();
+    w.owed = 5_000_000_000n; // unprofitable: every strategy passes, the order is held
+    const { c, now } = clock();
+    const e = await engineAt(now, {}, chain);
+    const nowS = Math.floor(c.t / 1000);
+    // The app's pull-market shape: our solver's soft window ends 10 s from now (a fixed
+    // price, so without the cap the hold would be RESTING_RECHECK_SECONDS = 300 s).
+    const windowed = entry("01", { exclusiveFiller: SOLVER, timing: packTiming(0, 0, nowS + 10), exclusivityOverrideBps: 5n });
+    await e.tick({ fetchEntries: async () => [windowed] });
+    const quoted = w.previews;
+    expect(quoted).toBeGreaterThan(0);
+    c.t += 5_000;
+    expect((await e.tick({ fetchEntries: async () => [windowed] })).evaluated).toBe(0);
+    c.t += 5_000; // the window ends
+    expect((await e.tick({ fetchEntries: async () => [windowed] })).evaluated).toBe(1);
+    // After it, the ordinary resting hold applies again.
+    c.t += 5_000;
+    expect((await e.tick({ fetchEntries: async () => [windowed] })).evaluated).toBe(0);
   });
 
   it("never-seen orders go first: a new order is picked up on the next tick however many rest in the book", async () => {

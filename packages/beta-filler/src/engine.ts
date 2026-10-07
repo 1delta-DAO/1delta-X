@@ -4,7 +4,7 @@ import { dispatch, type Strategy } from "./dispatch";
 import { Filler, type FillOutcome } from "./filler";
 import { GAS, Guard, resolvePending as resolveTx, type PendingTx, type Resolution } from "./guard";
 import type { BookEntry } from "./intake";
-import { Budget, isFixedPrice } from "./policy";
+import { Budget, isFixedPrice, windowEndMs } from "./policy";
 import { Rebalancer, type RebalanceOutcome } from "./rebalance";
 import { ROUTE_FILLS, RouteFiller } from "./routeFiller";
 import { sanitize } from "./sanitize";
@@ -392,8 +392,13 @@ export class Engine {
         await this.noteOutcome(out);
         if (out.status === "dry-run") this.dryRunSeen.set(e.orderHash, this.now());
         if (out.status === "skipped" && out.rest && this.cfg.sweep.restingRecheckMs > 0) {
+          const at = this.now();
           const ttl = isFixedPrice(e.announce.order) ? this.cfg.sweep.restingRecheckMs : Math.min(this.cfg.sweep.restingRecheckMs, AUCTION_RECHECK_MS);
-          this.holds.set(h, { until: this.now() + ttl, fillable, why: "passed" });
+          // Never hold past the end of a running exclusivity window: that is when an
+          // outsider's price steps (the soft premium drops, a hard window opens), and
+          // the app's pull markets end theirs ~2 blocks in (B13).
+          const winEnd = windowEndMs(e.announce.order, at);
+          this.holds.set(h, { until: winEnd !== undefined ? Math.min(at + ttl, winEnd) : at + ttl, fillable, why: "passed" });
         }
       }
       // (Read through a widened reference: TS narrowed `this.guard.pending` to

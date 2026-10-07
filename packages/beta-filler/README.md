@@ -10,7 +10,7 @@ runs every order through up to two strategies, **inventory first, route second**
 | Capital | wallet inventory (USDT0 / USDRIF) | none — the maker's input is swapped on Oku's Uniswap v3 SwapRouter02 |
 | Markets | `rsk-30-usdrif-usd0` only | every configured pool: `rsk-30-wrbtc-usd0`, `rsk-30-weth-wrbtc`, `rsk-30-usdrif-usd0` (+ optional multi-hop paths) |
 | Delta-verify orders (timing bit 104) | **no** (an EOA cannot run the fill callback) | **yes**, when `exclusiveFiller` = our solver: the route pays the maker directly |
-| Pull orders | `exclusiveFiller` 0 or this wallet | `exclusiveFiller` 0 (or the solver) |
+| Pull orders | `exclusiveFiller` 0, this wallet, or another filler whose window is over or **soft** (it pays the premium inside the window) | the same, measured against the **solver**. If a deployment opts in to the app's pull window, which names the solver, the route fills inside it with no premium |
 | Spread | the price we chose (`MAX_BUY_PRICE` …) minus fill gas, a share of the rebalance gas + MoC exec fee, and `INVENTORY_MIN_PROFIT_USDT0` | pool quote − owed − gas − `MIN_PROFIT_RBTC`; goes to `ROUTE_PROFIT_RECIPIENT` (default: the operator EOA) |
 | Gas per fill (fork-measured, see below) | ≈ 154.4k gross tx | ≈ 247.9k direct / ≈ 282.9k pull, net of refund |
 | Switch | `INVENTORY_ENABLED` (default on) | `ROUTE_ENABLED` (default on iff `AGGREGATOR_SOLVER` is set) |
@@ -67,7 +67,9 @@ ever in flight.
 `addedAt`), then the rest round-robin. An order every strategy passed on at its current
 terms (unprofitable, out of price, below the minimum, no route), and an order we just
 filled, are held for `RESTING_RECHECK_SECONDS` unless the book reports a different
-`fillableAmount` for them; orders expiring within `EXPIRY_MARGIN_SECONDS` are skipped;
+`fillableAmount` for them. A held order whose exclusivity window is still running is
+re-quoted when the window ends, which is when an outsider's price improves. Orders
+expiring within `EXPIRY_MARGIN_SECONDS` are skipped;
 `eth_gasPrice` is cached for 10 s across orders and strategies (`src/engine.ts`).
 
 ## Order policy (both strategies)
@@ -78,10 +80,18 @@ Only the shape the beta app signs:
 - not proportional, not a permit-batch or sigless announce.
 
 Then per strategy:
-- **inventory:** not delta-verify; `exclusiveFiller` zero or this wallet; the USDRIF/USDT0
-  pair.
+- **inventory:** not delta-verify. `exclusiveFiller` is zero or this wallet, or the order
+  is inside another filler's **soft** window or past it. Refused only while a **hard**
+  window runs (override 0, no carrier leg, or a block-clocked window). Only the
+  USDRIF/USDT0 pair. The app's pull markets are open by default. If a deployment
+  opts in to the app's window (`pullExclusivity`), the order names the *solver
+  contract*, so inside that window this EOA is an outsider. The lens
+  preview runs with `filler` = the EOA, so the premium is already in every price and
+  profit gate. The EOA fills if the order is still worth it, and otherwise it waits
+  for the window to end (`exclusivityFor` in `src/policy.ts`).
 - **route:** delta-verify **only** when `exclusiveFiller` is `AGGREGATOR_SOLVER` (direct
-  mode); otherwise `exclusiveFiller` zero or the solver (pull mode); both tokens must be
+  mode); otherwise `exclusiveFiller` zero or the solver (pull mode), or another filler
+  whose window is over or soft; both tokens must be
   in `ROUTE_TOKENS` (default: the Rootstock market tokens WRBTC, USDT0, WETH, USDRIF —
   with Sushi on, every other pair would otherwise pass and cost an API call per sweep);
   the pair must be routable on a configured pool or path (or, for a pull order, by Sushi). The core compares `exclusiveFiller` with
@@ -267,14 +277,20 @@ Per order:
 7. **simulate** `executeFill` by `eth_call` from the operator, decode `fillAmountsOut`
    (must be non-zero, and ≤ the previewed owed on the pull path) and take
    `eth_estimateGas`;
-8. **re-price at the measured gas**: G = max(`ROUTE_GAS_ESTIMATE`, simulated × 1.25),
-   refused above `MAX_ROUTE_GAS`. If G is above the gas the plan's floor was built at,
-   the plan is **rebuilt** with gas priced at G (new `minOut` / `amountInMaximum`, gate
-   re-run) and **re-simulated** — repeated until the plan's priced gas covers its own
-   measured limit. So the on-chain floor always covers every unit of gas the tx can
-   burn; a gas-heavy maker token cannot grief the operator;
-9. **send** a legacy tx at the priced gas price with gas limit = **exactly G**, after
-   checking the shared gas budget against G × price. One route fill is reserved; a
+8. **re-price at the measured gas**: P = max(`ROUTE_GAS_ESTIMATE`, simulated). If P is
+   above the gas the plan's floor was built at, the plan is **rebuilt** with gas
+   priced at P (new `minOut` / `amountInMaximum`, gate re-run) and **re-simulated** —
+   repeated until the plan's priced gas covers its own measurement. The economics are
+   priced at the measurement, NOT the gas limit (2026-10-07): `eth_estimateGas` is the
+   gross gas before refunds and already sits above what a receipt charges (e2e
+   2026-10-06: estimates 363k–404k vs receipts 317k–341k), so pricing the 1.25× limit
+   made every quote ~40 % more expensive in gas — ≈ $0.30 a fill, 1.5 % of a $20
+   ticket. The trade: a tx that burns past its estimate can lose at most
+   `(G − P) × gasPrice`, cents on Rootstock; a gas-heavy maker token is still bounded
+   by `MAX_ROUTE_GAS`;
+9. **send** a legacy tx at the priced gas price with gas limit G = max(P, ⌈simulated ×
+   1.25⌉) (headroom only, refused above `MAX_ROUTE_GAS`), after checking the shared gas
+   budget against G × price. One route fill is reserved; a
    later tick reads the receipt (gas charged even on a revert; see *Gas policy* for
    reverts and timeouts).
 
@@ -316,10 +332,10 @@ Route strategy:
 | `AGGREGATOR_SOLVER` | — | the deployed, operator-gated `AggregatorFillSolver` |
 | `ROUTE_POOLS` | the app's 3 Rootstock Uniswap v3 pools | `;`-separated `tokenA/tokenB/fee` (fee in hundredths of a bip) |
 | `ROUTE_PATHS` | `USDRIF>500>USDT0>3000>WRBTC` | `;`-separated multi-hop paths in swap order, usable both ways (`""` = none) |
-| `ROUTE_SLIPPAGE_BPS` | `30` | haircut on the live quote in the gate |
-| `ROUTE_STABLE_SLIPPAGE_BPS` | `5` | the haircut instead when both tokens are in `USD_TOKENS` (e.g. USDRIF/USDT0 on the 0.05 % pool). The quote is read on the simulated block and the plan's on-chain floor bounds the output, so a miss costs a revert's gas, never principal; a $1/$1 pool barely moves before inclusion. At 30 bps the app's 300 USDRIF market never cleared its 50 bps floor (task 15) |
-| `ROUTE_GAS_ESTIMATE` | `320000` | gas assumed by the profitability gate before the simulation, and the FLOOR of the re-price loop: limit G = max(`ROUTE_GAS_ESTIMATE`, ⌈simulated × 1.25⌉) (`routeFiller.ts`, `GAS_LIMIT_PCT = 125`). 320k sits above the net pull gas a fill pays (282.9k) and below the gross pull gas the node simulates (343.5k; execution 310.5k + 21k alone is 331.5k), so the gate never under-assumes a fill's real cost, and on today's sandboxed shapes the measured term wins (direct ⌈285.8k × 1.25⌉ ≈ 357k, pull ≈ 429k — one re-price round). Figures: `SandboxGasBench.test_sandbox_gas_*`, see *What the gas row measures* |
-| `MAX_ROUTE_GAS` | `1200000` | refuse a route fill whose priced gas limit (simulated × 1.25) exceeds this. The floor is priced at this limit, so a higher cap cannot cost profit — it only bounds per-tx exposure. A live Sushi route measured ~554k simulated (693k priced) — one operator-observed `eth_estimateGas` (gross), no repo test, not re-run |
+| `ROUTE_SLIPPAGE_BPS` | `10` | haircut on the live quote in the gate (non-stable pairs). The quote is read on the simulated block and the plan's on-chain floor (`minOut` / `amountInMaximum`) bounds the output, so a price move before inclusion costs a revert's gas, never principal; 10 bps covers a ~30 s Rootstock block of BTC drift. Was 30 until 2026-10-07, which together with gas pushed the app's market fills to the floor |
+| `ROUTE_STABLE_SLIPPAGE_BPS` | `5` | the haircut instead when both tokens are in `USD_TOKENS` (e.g. USDRIF/USDT0 on the 0.05 % pool). The quote is read on the simulated block and the plan's on-chain floor bounds the output, so a miss costs a revert's gas, never principal; a $1/$1 pool barely moves before inclusion. At 30 bps the app's 300 USDRIF market never cleared its then-50 bps floor (task 15) |
+| `ROUTE_GAS_ESTIMATE` | `320000` | gas assumed by the profitability gate before the simulation, and the FLOOR of the re-price loop: the plan is priced at P = max(`ROUTE_GAS_ESTIMATE`, simulated) and sent with limit G = max(P, ⌈simulated × 1.25⌉) (`routeFiller.ts`, `GAS_LIMIT_PCT = 125` — headroom only, not priced since 2026-10-07). 320k sits above the net pull gas a fill pays (282.9k) and below the gross pull gas the node simulates (343.5k; execution 310.5k + 21k alone is 331.5k), so the gate never under-assumes a fill's real cost, and on today's sandboxed shapes the measured term wins (direct ⌈285.8k × 1.25⌉ ≈ 357k, pull ≈ 429k — one re-price round). Figures: `SandboxGasBench.test_sandbox_gas_*`, see *What the gas row measures* |
+| `MAX_ROUTE_GAS` | `1200000` | refuse a route fill whose gas limit (simulated × 1.25) exceeds this. It bounds per-tx exposure, including the at-most `(limit − simulated) × gasPrice` a fill can lose when it burns past its estimate (the floor is priced at the simulated gas). A live Sushi route measured ~554k simulated (693k priced) — one operator-observed `eth_estimateGas` (gross), no repo test, not re-run |
 | `ROUTE_TOKENS` | `WRBTC,USDT0,WETH,USDRIF` | comma-separated allowlist; both tokens of a route candidate must be in it |
 | `MIN_PROFIT_RBTC` | `0` | profit required on top of gas, in RBTC. 0: the operator's infra is near-free, so a fill that covers its gas and haircut is worth taking |
 | `RBTC_PRICE_USD`, `USD_TOKENS` | unset, `USDT0,USDRIF` | RBTC price for $1 tokens; the higher of it and the pool price is used (both strategies) |
@@ -453,7 +469,9 @@ VITE_DEPLOYMENTS='{"30":{"settlement":"0x<Settlement>","permit3":"0x<Permit3>","
 
 `solver` = the AggregatorFillSolver: the WRBTC/USDT0 and WETH/WRBTC markets sign
 delta-verify orders exclusive to it. `rsk-30-usdrif-usd0` stays `"pull"` for the inventory
-strategy. Deploy the app only once step 5 runs live — a delta-verify order can be filled
+strategy. Those orders are open to every filler. The soft window
+(`pullExclusivity`, see the app README) is opt-in and off by default, because it
+costs gas on every fill. Deploy the app only once step 5 runs live — a delta-verify order can be filled
 by nobody else.
 
 **5. Filler.** Production: deploy [`@1delta-x/filler-worker`](../filler-worker) in dry
@@ -544,11 +562,15 @@ and `PORT` override the defaults.
   `outputAt(t_incl)` there: the route pays exactly what the core verifies and the
   decay since the preview stays on the solver as INPUT residue (our spread, like the
   rest of the unconsumed input). Before this the route paid the previewed owed and the decay —
-  ≈ 0.25 % of notional per Rootstock block on the app's 0.5 %-band market auctions,
+  ≈ 0.25 % of notional per Rootstock block on the app's then-0.5 %-band market auctions (0.3 % since 2026-10-07, ≈ 0.15 % per block),
   more than the whole gas + min-profit margin — went to the maker. Costs and
   conservatism: the typed path's ~+5.9k execution gas (179,773 vs 173,864 in
   `AggregatorFillGasTest.test_gas_direct_seeded_liveAmountOut` / `test_gas_direct_seeded`)
-  is added to the plan's gas estimate as `TYPED_CALLBACK_GAS` = 6,000; the profit gate
+  is added to the plan's gas estimate as `TYPED_CALLBACK_GAS` = 6,000 — and only paid when
+  it pays for itself: the patch is used only if one 30 s block of the leg's decay, pro
+  rata to this fill (`liveDecayPerBlock`), is worth more than 6k gas in the output token
+  (2026-10-07; on the app's 0.3 % / 60 s market auctions that is tickets above ≈ $9,
+  so small test tickets keep the untyped path). The profit gate
   and `amountInMaximum` are still sized on the PREVIEWED owed, so no decay is counted
   on (it is upside only). A direct BUY (fixed output — the rise is already measured
   on-chain), an order past its decay window, and every pull plan keep `NO_PATCH`:

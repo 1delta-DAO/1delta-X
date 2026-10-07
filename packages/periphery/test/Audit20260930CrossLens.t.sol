@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, ItemOp, CurvePoint} from "@core/settlement/Structs.sol";
+import {Order, Item, ItemOp, ItemPolicy, CurvePoint} from "@core/settlement/Structs.sol";
 import {OrderGates} from "@core/settlement/OrderGates.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {IFillModule} from "@core/interfaces/IFillModule.sol";
@@ -129,6 +129,8 @@ contract Audit20260930CrossLensTest is MockSettlementBase {
     function test_audit_CORE_MATCH_4_itemToExecutorFlagged() public {
         address m = address(new ProceedsOnlyModule20260930(address(tA)));
         Order memory ctl = _takeOrder(4, m, address(0));
+        // An input-funding TAKE must sign CANONICAL (B8, 2026-10-06) to be a clean control.
+        ctl.timing = ItemPolicy.pack(ctl.timing, ItemPolicy.CANONICAL);
         (bool ok,) = lens.validateOrder(ctl);
         assertTrue(ok, "control: proceeds in an input-leg token to the settler");
 

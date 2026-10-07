@@ -200,7 +200,21 @@ export interface SweepPolicy {
   expiryMarginS: number;
 }
 
-/** Hold cap for an order whose price moves with time (any leg `end != 0`, a curve, a gas bump or a priority auction). */
+/**
+ * Hold cap for an order whose price moves with time (any leg `end != 0`, a curve, a
+ * gas bump or a priority auction).
+ *
+ * 30 s = one Rootstock block, i.e. about one re-quote per block — the meaningful
+ * cadence, since every preview is an `eth_call` at `latest` and returns the same
+ * answer until the next block lands. Considered and NOT done (2026-10-06): tying the
+ * re-quote to block ARRIVAL instead. It would cut the phase lag (a hold placed late
+ * in block N expires late in N+1 rather than at N+1's first tick), but it costs an
+ * `eth_blockNumber` on every 5 s tick against the public node's rate limit, where a
+ * held order costs zero RPC today, and the lag it saves is bounded by one block,
+ * which the app's 300 s life and the e2e's `floor + hold + tick + landing` bound
+ * already absorb. The step that DOES matter on a block clock — the end of an
+ * exclusivity window — gets its own cap ({@link windowEndMs} in the engine).
+ */
 export const AUCTION_RECHECK_MS = 30_000;
 
 export interface GasPolicy {
@@ -343,7 +357,7 @@ function loadRoute(env: Env): RouteConfig | undefined {
     solver: addr(env, "AGGREGATOR_SOLVER"),
     pools: env.ROUTE_POOLS !== undefined ? parsePools(env.ROUTE_POOLS) : [...ROOTSTOCK_POOLS],
     paths: parsePaths(env.ROUTE_PATHS ?? ROOTSTOCK_PATHS),
-    slippageBps: bps(env, "ROUTE_SLIPPAGE_BPS", 30),
+    slippageBps: bps(env, "ROUTE_SLIPPAGE_BPS", 10),
     stableSlippageBps: bps(env, "ROUTE_STABLE_SLIPPAGE_BPS", 5),
     gasEstimate,
     maxGas,

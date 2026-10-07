@@ -3,7 +3,7 @@ import type { Hex } from "viem";
 import { hashOrderStruct, signOrder, type TypedDataSigner } from "./orders";
 import { isFillOnce, renonceOcoItems } from "./oco";
 import { buildSoftCancel, signSoftCancel, type SoftCancel } from "./softcancel";
-import { assertOrderNonce, type Deployment, type Order } from "./types";
+import { assertOrderNonce, withDefaultItemPolicy, type Deployment, type ItemPolicy, type Order } from "./types";
 
 /**
  * Cancel-and-replace — "amend" as one operation.
@@ -98,6 +98,12 @@ export interface AmendOptions {
    * the replacement and a former sibling can then fill.
    */
   leaveNonceGroup?: boolean;
+  /**
+   * An explicit item policy for the replacement. Unset, the replacement gets the
+   * SDK default ({@link withDefaultItemPolicy}): `CANONICAL` when a TAKE funds an
+   * input leg and the policy would otherwise be `ANY`.
+   */
+  itemPolicy?: ItemPolicy;
 }
 
 /**
@@ -144,7 +150,7 @@ export function patchOrder(prev: Order, nextNonce: bigint, patch: OrderPatch = {
   // shape that revived a soft-cancelled leg (F29 finding 3). Re-home it unless
   // the patch supplies its own items.
   const items = patch.items ?? renonceOcoItems(prev.items, prev.nonce, nonce);
-  return { ...prev, ...patch, items, maker: prev.maker, nonce };
+  return withDefaultItemPolicy({ ...prev, ...patch, items, maker: prev.maker, nonce }, { itemPolicy: opts.itemPolicy });
 }
 
 /**
@@ -164,11 +170,14 @@ export async function amendOrder(
   opts?: { now?: bigint; ttlSeconds?: bigint; headBlock?: bigint } & AmendOptions,
 ): Promise<AmendResult> {
   const replaces = hashOrderStruct(prev);
-  const order = patchOrder(prev, nextNonce, patch, { leaveNonceGroup: opts?.leaveNonceGroup });
+  const order = patchOrder(prev, nextNonce, patch, {
+    leaveNonceGroup: opts?.leaveNonceGroup,
+    itemPolicy: opts?.itemPolicy,
+  });
   const orderHash = hashOrderStruct(order);
   if (orderHash === replaces) throw new Error("amendOrder: patch is a no-op (identical order hash)");
 
-  const sig = await signOrder(signer, order, d, { headBlock: opts?.headBlock });
+  const sig = await signOrder(signer, order, d, { headBlock: opts?.headBlock, itemPolicy: opts?.itemPolicy });
   const cancel = buildSoftCancel(prev.maker, [replaces], opts);
   const cancelSig = await signSoftCancel(signer, cancel, d);
 

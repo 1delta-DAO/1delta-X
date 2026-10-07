@@ -24,6 +24,7 @@ import {
   haircutBps,
   nativeToTokenAtQuote,
   nativeToUsdToken,
+  liveDecayPerBlock,
   patchesLiveOutput,
   PPM,
   rankRoutes,
@@ -52,7 +53,15 @@ export const ROUTE_FILLS = "route:fills" as Address;
 const NATIVE_REF = 10n ** 15n;
 /** How long a native→token conversion is reused, ms. */
 const PRICE_TTL_MS = 60_000;
-/** Headroom on the simulation's gas measurement: the gas limit we price AND send. */
+/**
+ * Headroom on the simulation's gas measurement for the gas LIMIT we send. The
+ * economics (gate + the plan's on-chain floor) are priced at the measurement itself:
+ * `estimateGas` is the GROSS gas a tx needs before refunds, already above what a
+ * receipt charges (e2e 2026-10-06: estimates 363k–404k vs receipts 317k–341k), so
+ * pricing the 1.25× limit overcharged every fill by ~40 %. The cost is a bounded
+ * worst case: a tx that burns past its estimate loses at most
+ * `(limit − estimate) × gasPrice` — cents on Rootstock.
+ */
 const GAS_LIMIT_PCT = 125n;
 /** Re-price/re-simulate rounds before giving up on a gas figure that keeps growing. */
 const MAX_REPRICE_ROUNDS = 3;
@@ -211,8 +220,11 @@ export class RouteFiller {
     // decay since the preview stays with us as input residue. That switches the solver
     // to the typed callback, whose extra gas is part of the estimate the plan's floor
     // is priced at (the re-price step below then works from the measured figure).
-    const liveOut = patchesLiveOutput(order, direct, BigInt(Math.floor(now / 1000)));
-    const gasEstimate = rc.gasEstimate + (liveOut ? TYPED_CALLBACK_GAS : 0n);
+    //    Only worth it when one block of decay beats the typed path's gas (decided in
+    //    step 3, once gas is priced in the output token): small tickets skip it.
+    const nowSec = BigInt(Math.floor(now / 1000));
+    const liveCandidate = patchesLiveOutput(order, direct, nowSec);
+    const earlyGas = rc.gasEstimate + (liveCandidate ? TYPED_CALLBACK_GAS : 0n);
 
     // 0. Fills per hour, the gas-price ceiling, and a cheap early look at the shared
     //    gas budget (the binding check is against the final gas LIMIT, step 7).
@@ -220,7 +232,7 @@ export class RouteFiller {
     const gasPrice = await chain.pub.getGasPrice();
     const priceErr = this.guard.checkGasPrice(gasPrice);
     if (priceErr) return this.skip(orderHash, priceErr);
-    const early = this.guard.gasRoom(gasPrice * gasEstimate, now);
+    const early = this.guard.gasRoom(gasPrice * earlyGas, now);
     if (early) return this.skip(orderHash, early);
 
     // 1. Preview as the SOLVER — Settlement's msg.sender, so exclusivity, the
@@ -279,6 +291,12 @@ export class RouteFiller {
     // 3. Gas (+ min profit) in output units; rank by output net of each route's gas.
     const profitOut = await this.nativeToToken(rc.minProfitWei, tokenOut);
     const gasOutAt = (gasUnits: bigint) => this.nativeToToken(gasPrice * gasUnits, tokenOut);
+    let liveOut = false;
+    if (liveCandidate) {
+      const typedOut = await gasOutAt(TYPED_CALLBACK_GAS);
+      liveOut = typedOut !== undefined && liveDecayPerBlock(order, owed, nowSec) > typedOut;
+    }
+    const gasEstimate = rc.gasEstimate + (liveOut ? TYPED_CALLBACK_GAS : 0n);
     const gasOut = await gasOutAt(gasEstimate);
     if (gasOut === undefined || profitOut === undefined) {
       return this.skip(orderHash, `cannot price RBTC in ${tokenOut} (configure a WRBTC path or RBTC_PRICE_USD)`);
@@ -317,8 +335,9 @@ export class RouteFiller {
       const sim = await chain.pub.call({ account: chain.me, to: rc.solver, data, gasPrice });
       if (!sim.data) throw new Error("simulation returned no data");
       const delivered = decodeAggregatorExecuteFillResult(sim.data);
+      // No `delivered[0] > owed` check: on the pull path the plan's `maxPay = owed`
+      // already reverts any larger payout inside this same simulation.
       if (delivered.length !== order.legsOut.length || delivered[0]! === 0n) throw new Error(`simulation delivered ${delivered.join(",")}`);
-      if (!direct && delivered[0]! > owed) throw new Error(`simulation delivered ${delivered[0]} > previewed owed ${owed}`);
       const gasUsed = await chain.pub.estimateGas({ account: chain.me, to: rc.solver, data, gasPrice });
       return { plan, data, delivered, gasUsed };
     };
@@ -365,18 +384,19 @@ export class RouteFiller {
     }
     const { c: best, tag } = picked;
 
-    // 6. Re-price at the MEASURED gas. The gas limit we will send is
-    //    G = max(estimate, simulated × 1.25). If G is above the gas the plan's floor
-    //    was built at, rebuild the floor at G and re-simulate (the new floor changes
-    //    the calldata, so the gas is measured again) — until the plan's priced gas
-    //    covers its own measured limit. The tx then goes out with gas limit = G
-    //    exactly: the on-chain floor covers every unit of gas the tx can burn.
+    // 6. Re-price at the MEASURED gas. The plan's floor is priced at
+    //    P = max(estimate, simulated); if P is above the gas the floor was built at,
+    //    rebuild the floor at P and re-simulate (the new floor changes the calldata,
+    //    so the gas is measured again) until the priced gas covers its own
+    //    measurement. The tx goes out with gas limit G = max(P, simulated × 1.25):
+    //    headroom against a moved state, NOT priced into the quote (see GAS_LIMIT_PCT).
     let sim = picked.sim;
     let priced = gasEstimate;
     for (let round = 0; ; round++) {
-      const need = [gasEstimate, ceilPct(sim.gasUsed, GAS_LIMIT_PCT)].reduce((a, b) => (a > b ? a : b));
-      if (need > rc.maxGas) {
-        return this.skipBackoff(orderHash, `simulated gas ${sim.gasUsed} → limit ${need} above MAX_ROUTE_GAS ${rc.maxGas}`);
+      const need = sim.gasUsed > gasEstimate ? sim.gasUsed : gasEstimate;
+      const limit = ceilPct(sim.gasUsed, GAS_LIMIT_PCT);
+      if ((limit > need ? limit : need) > rc.maxGas) {
+        return this.skipBackoff(orderHash, `simulated gas ${sim.gasUsed} → limit ${limit > need ? limit : need} above MAX_ROUTE_GAS ${rc.maxGas}`);
       }
       if (need <= priced) break;
       if (round >= MAX_REPRICE_ROUNDS) return this.skipBackoff(orderHash, `gas did not converge (simulated ${sim.gasUsed}, priced ${priced})`);
@@ -392,7 +412,8 @@ export class RouteFiller {
         return this.skipBackoff(orderHash, `re-simulation at gas ${priced} reverted: ${sanitize(errorReason(e))}`);
       }
     }
-    const gasLimit = priced;
+    const measuredLimit = ceilPct(sim.gasUsed, GAS_LIMIT_PCT);
+    const gasLimit = measuredLimit > priced ? measuredLimit : priced;
 
     // 7. The shared hourly gas budget must cover the full gas LIMIT at this price.
     const room = this.guard.gasRoom(gasLimit * gasPrice, Date.now());

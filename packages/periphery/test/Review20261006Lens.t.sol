@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Order, Item, ItemOp, LegIn} from "@core/settlement/Structs.sol";
+import {Order, Item, ItemOp, ItemPolicy, LegIn} from "@core/settlement/Structs.sol";
 import {IPermit3} from "@core/interfaces/IPermit3.sol";
 import {ITakerForModule} from "@core/interfaces/ITakerForModule.sol";
 import {IFundingSource} from "@core/interfaces/IFundingSource.sol";
@@ -75,6 +75,19 @@ contract MockPullTakeFor1006 is ITakerForModule, IFundingSource, IProceedsAsset 
     }
 }
 
+/// @dev A TAKE module that only names its proceeds asset — all the B8 rule reads.
+contract ProceedsOnlyTake1006 is IProceedsAsset {
+    address public immutable ASSET;
+
+    constructor(address a) {
+        ASSET = a;
+    }
+
+    function proceedsAsset(bytes calldata) external view override returns (address) {
+        return ASSET;
+    }
+}
+
 /// @title Review 2026-10-06 — lens rules for tasks 11, 12 and 13 (item 1)
 /// @notice 11: a Lista SmartLP withdraw whose LP-unit rate floor does not cover its
 ///         coin-unit input leg is malformed; the coin is resolved through the provider.
@@ -135,6 +148,12 @@ contract Review20261006LensTest is MockSettlementBase {
         o.items = _item(ItemOp.TAKE, address(exactlyTaker), IN_, _exactlyData(op, maturity, bound));
     }
 
+    /// An input-funding TAKE passes only under CANONICAL (B8, 2026-10-06).
+    function _canonical(Order memory o) internal pure returns (Order memory) {
+        o.timing = ItemPolicy.pack(o.timing, ItemPolicy.CANONICAL);
+        return o;
+    }
+
     function _assertOk(Order memory o, string memory label) internal view {
         (bool ok, string memory why) = lens.validateOrder(o);
         assertTrue(ok, string.concat(label, ": ", why));
@@ -161,8 +180,8 @@ contract Review20261006LensTest is MockSettlementBase {
     }
 
     function test_lista_rateFloorAtOrAboveLeg_passes() public view {
-        _assertOk(_listaOrder(4, 0, 1e18), "at the leg");
-        _assertOk(_listaOrder(5, 0, 1.05e18), "above the leg");
+        _assertOk(_canonical(_listaOrder(4, 0, 1e18)), "at the leg");
+        _assertOk(_canonical(_listaOrder(5, 0, 1.05e18)), "above the leg");
     }
 
     /// The coin the provider pays is not `legsIn[0].token`: with no leg in that coin
@@ -289,5 +308,67 @@ contract Review20261006LensTest is MockSettlementBase {
         permit3.approveToken(address(pullTakeFor), address(tC), type(uint160).max, 0);
         vm.stopPrank();
         assertEq(lens.previewItemFunding(o).available[0], 0);
+    }
+
+    // ═══════════ ACCEPTED-PATTERNS-REVIEW B8: late TAKE on an input-leg token ═══════════
+    //
+    // A TAKE that credits an input leg, signed below CANONICAL, lets any `matchSettle`
+    // caller PULL that leg first — the maker's Permit3 allowance is spent twice for
+    // one fill. The core behaviour is pinned in
+    // `AggregatorAmountMismatch.t.sol::test_S2_lateTakeOnInputToken_burnsTheMakerAllowance`.
+
+    string constant B8_WHY = "input-funding TAKE needs ItemPolicy.CANONICAL (late TAKE spends the allowance twice)";
+
+    /// SELL tA for tB; one TAKE whose proceeds (`asset`) go to `to`, signed at `policy`.
+    function _b8Order(uint256 nonce, address asset, address to, uint256 policy) internal returns (Order memory o) {
+        o = _plainOrder(nonce, address(tA), address(tB), IN_, OUT_);
+        Item[] memory its = new Item[](1);
+        its[0] = Item({op: ItemOp.TAKE, module: address(new ProceedsOnlyTake1006(asset)), amount: IN_, recipient: to, data: ""});
+        o.items = PackedEncode.items(its);
+        o.timing = ItemPolicy.pack(o.timing, policy);
+    }
+
+    function test_B8_inputFundingTake_belowCanonical_flagged() public {
+        _assertFlag(_b8Order(40, address(tA), address(0), ItemPolicy.ANY), B8_WHY);
+        _assertFlag(_b8Order(41, address(tA), address(settlement), ItemPolicy.ANY), B8_WHY);
+        // ORDERED / ATOMIC order the items among themselves; the PULL stays free.
+        _assertFlag(_b8Order(42, address(tA), address(0), ItemPolicy.ORDERED), B8_WHY);
+        _assertFlag(_b8Order(43, address(tA), address(0), ItemPolicy.ATOMIC), B8_WHY);
+    }
+
+    function test_B8_inputFundingTake_canonical_passes() public {
+        _assertOk(_b8Order(44, address(tA), address(0), ItemPolicy.CANONICAL), "canonical");
+    }
+
+    /// The input token on a LATER leg (a rising fee leg) is still an input leg.
+    function test_B8_inputFundingTake_laterLeg_flagged() public {
+        Order memory o = _b8Order(45, address(tC), address(0), ItemPolicy.ANY);
+        LegIn[] memory legs = new LegIn[](2);
+        legs[0] = LegIn(address(tA), IN_, 0);
+        legs[1] = LegIn(address(tC), 1, 0);
+        o.legsIn = PackedEncode.legsIn(legs);
+        _assertFlag(o, B8_WHY);
+    }
+
+    /// No false positives: a TAKE in an OUTPUT-only token routed to the maker (borrow
+    /// after the deposit), an input-token TAKE routed to the maker, and a module that
+    /// cannot name its proceeds are all left alone at ANY.
+    function test_B8_noFalsePositives() public {
+        _assertOk(_b8Order(46, address(tB), maker, ItemPolicy.ANY), "output-token borrow to the maker");
+        _assertOk(_b8Order(47, address(tA), maker, ItemPolicy.ANY), "input-token take to the maker");
+        Order memory o = _plainOrder(48, address(tA), address(tB), IN_, OUT_);
+        Item[] memory its = new Item[](1);
+        its[0] = Item({op: ItemOp.TAKE, module: address(0xdead), amount: IN_, recipient: address(0), data: ""});
+        o.items = PackedEncode.items(its);
+        _assertOk(o, "silent module");
+        // A plain order with no items at all.
+        _assertOk(_plainOrder(49, address(tA), address(tB), IN_, OUT_), "no items");
+    }
+
+    /// TAKE_FOR is exempt: `matchSettle` refuses any order carrying one, so no
+    /// schedule can put a PULL ahead of it.
+    function test_B8_takeFor_notFlagged() public view {
+        (Order memory o,) = _pullOrder(50);
+        _assertOk(o, "TAKE_FOR at ANY");
     }
 }

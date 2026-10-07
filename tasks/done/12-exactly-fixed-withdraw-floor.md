@@ -58,3 +58,17 @@ Header documents the rule now.
   the old branch). The two local mock markets (`Narrow160Overflow.t.sol`,
   `HoldingsPullMarket`) gained a `fixedBorrowPositions` view returning a live position.
 - `modules-exactly` 59/59 (was 53).
+
+## Follow-up: on-chain refusal (2026-10-06, ACCEPTED-PATTERNS-REVIEW B15)
+
+- The lens flag was only an off-chain warning while the repay sibling refuses a
+  signed 0 on-chain. `ExactlyTakerModule._withdrawAtMaturity` now reverts
+  `ZeroMinAssets()` when `maturity > block.timestamp ∧ minAssetsRequired == 0`
+  (checked before the position read); at/after maturity a zero floor stays legal.
+  `takeFloored` keeps the same predicate (NatSpec: early warning, keep identical).
+- Not an encoding change; only pre-maturity zero-floor fixed withdraws (already
+  lens-flagged) stop filling.
+- Tests: new mock suite `test/security/PreMaturityZeroFloor.t.sol` (5 incl. a fuzz
+  pinning revert ⇔ `!takeFloored`); fork `PreMaturityWithdraw.t.sol` zero-floor test
+  now expects the revert (`test_preMaturity_zeroFloor_reverts`) and gained
+  `test_atMaturity_zeroFloor_fillsAtFace`. `modules-exactly` 65/65 (was 59).

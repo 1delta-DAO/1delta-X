@@ -137,6 +137,10 @@ wrangler_start() {
     sleep 1
   done
   wait_http "http://127.0.0.1:$WRANGLER_PORT/ob/health" 60 || die "orderbook not reachable (see $run/wrangler.log)"
+  # Warm the app's /api/book path too (Pages worker → ORDERBOOK binding): /ob/health
+  # bypasses it, and the first request down it under wrangler dev could drop with
+  # "Network connection lost" — which a run then blamed on its first ticket.
+  wait_http "http://127.0.0.1:$WRANGLER_PORT/api/book/orders" 30 || die "app book proxy not reachable (see $run/wrangler.log)"
 }
 
 # SIGKILL the whole wrangler process group (wrangler + workerd): a crash, not a shutdown.

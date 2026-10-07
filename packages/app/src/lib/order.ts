@@ -1,6 +1,7 @@
 import {
   OrderSide,
   hashOrderStruct,
+  overrideHasCarrier,
   packTiming,
   randomOrderNonce as sdkRandomOrderNonce,
   withDeltaVerifyOutputs,
@@ -39,6 +40,15 @@ export interface BuildOrderArgs {
    * unset (zero / omitted), it signs plain pull delivery, fillable by anyone.
    */
   solver?: Address;
+  /**
+   * PULL orders only (ignored when {@link solver} is set): a UniswapX-style SOFT
+   * exclusivity window — `filler` (the deployment's solver) is exclusive for
+   * `seconds` from `now`; any other filler may fill inside it by paying the maker
+   * `overrideBps` more; after it the order is open to every filler until expiry.
+   * Omitted (or `seconds` 0): no window, open from the start. See
+   * `exclusivityForMarket` (config/deploymentConfig.ts).
+   */
+  exclusivity?: { filler: Address; seconds: number; overrideBps: number };
   /**
    * The most PAY wei this order may commit — the maker's raw balance, or its
    * share for one TWAP slice. The input leg never commits more than this (see
@@ -224,9 +234,17 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     ];
   }
 
-  const timing = decaying ? packTiming(now, decaySeconds, 0) : packTiming(0, 0, 0);
   const solver = args.solver ?? zeroAddress;
   const direct = solver !== zeroAddress;
+  // SOFT EXCLUSIVITY WINDOW (pull only, B13). A direct order needs none: the core
+  // already fills it for its named filler only, for its whole life (F30).
+  const win = !direct && args.exclusivity && args.exclusivity.seconds > 0 && args.exclusivity.filler !== zeroAddress ? args.exclusivity : undefined;
+  if (win && (!Number.isSafeInteger(win.overrideBps) || win.overrideBps < 1 || win.overrideBps > 10_000)) {
+    throw new Error(`exclusivity overrideBps ${win.overrideBps} outside [1, 10000]`);
+  }
+  // `exclusivityEndTime` is on the order's own clock — unix seconds here.
+  const windowEnd = win ? now + win.seconds : 0;
+  const timing = decaying ? packTiming(now, decaySeconds, windowEnd) : packTiming(0, 0, windowEnd);
 
   const order: Order = {
     maker,
@@ -250,10 +268,16 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     // order on another venue), so the settler lets ONLY the order's
     // `exclusiveFiller` fill a delta-verify order. We name our operator-gated
     // solver; without one configured we sign plain pull delivery, open to all.
+    //
+    // PULL WITH A WINDOW: the deployment's solver first, everyone after. Inside the
+    // window an outsider fills only by paying `overrideBps` to the maker — on the
+    // SELL output (addressed to the maker) or the BUY input, the legs
+    // `OrderGates._overrideHasCarrier` accepts; checked below, because a window
+    // with no carrier is silently HARD on-chain.
     timing: direct ? withDeltaVerifyOutputs(timing) : timing,
-    exclusiveFiller: direct ? solver : zeroAddress,
+    exclusiveFiller: direct ? solver : win ? win.filler : zeroAddress,
     minFillAnchor: 0n,
-    exclusivityOverrideBps: 0n,
+    exclusivityOverrideBps: win ? BigInt(win.overrideBps) : 0n,
     curve: [],
     gasBumpBps: 0n,
     gasPriceRef: 0n,
@@ -265,6 +289,13 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     fillTotal: 0n,
     pricingModule: zeroAddress,
   };
+
+  if (win && !overrideHasCarrier(order)) {
+    // Every shape this builder signs has a carrier (a non-zero maker-addressed SELL
+    // output, a non-zero BUY input); a zero one is a dead order anyway. Refuse
+    // rather than sign a window the maker did not ask to be hard.
+    throw new Error("exclusivity window has no leg to carry the override (it would be hard)");
+  }
 
   return { order, hash: hashOrderStruct(order), clamped: cap.clamped };
 }

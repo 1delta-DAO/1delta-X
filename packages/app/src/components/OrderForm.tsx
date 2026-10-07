@@ -76,7 +76,26 @@ interface OrderFormProps {
   signError: string | null;
   /** The EIP-712 domain orders are signed into, so it is never a mystery. */
   domain: { settlement: string; chainLabel: string; deployed: boolean };
+  /**
+   * Who may fill this market's orders, as signed: `direct` = our solver only, for
+   * the order's whole life (delta-verify); otherwise pull delivery, with our solver
+   * soft-exclusive for `windowSeconds` (0 = open to every filler from the start).
+   */
+  delivery: { direct: boolean; windowSeconds: number; overrideBps: number };
   onSign: () => void;
+}
+
+/** "~2 blocks" on Rootstock's ~30 s clock. */
+function blocksLabel(seconds: number): string {
+  const n = Math.max(1, Math.round(seconds / 30));
+  return `~${n} block${n === 1 ? "" : "s"}`;
+}
+
+/** The "Filled by" line: what the signed order lets each filler do, and when. */
+export function deliveryLabel(d: { direct: boolean; windowSeconds: number; overrideBps: number }): string {
+  if (d.direct) return "our solver only (direct delivery)";
+  if (d.windowSeconds <= 0) return "any filler";
+  return `our solver first for ${blocksLabel(d.windowSeconds)} (others pay you +${d.overrideBps} bps), then any filler`;
 }
 
 const MODES = [
@@ -107,6 +126,7 @@ export function OrderForm(props: OrderFormProps) {
     recvAddress,
     signError,
     domain,
+    delivery,
     onSign,
   } = props;
 
@@ -172,6 +192,7 @@ export function OrderForm(props: OrderFormProps) {
       mode === "market" ? "5 minutes (1 minute auction, then rests at the minimum)" : mode === "twap" ? "on completion" : "24 hours",
       "",
     ]);
+    if (domain.deployed) rows.push(["Filled by", deliveryLabel(delivery), ""]);
   }
 
   const canSign = ready && !needsApproval && !signing && amount > 0 && !overBalance && !!quote && quote.totalIn > 0;

@@ -15,7 +15,7 @@ import { RaffleNotice } from "./components/Raffle";
 import { Stats } from "./components/Stats";
 import { TermsLink } from "./components/TermsLink";
 import { chainById, chainLabel } from "./config/chains";
-import { deploymentFor, solverForMarket } from "./config/deployments";
+import { deploymentFor, exclusivityForMarket, solverForMarket } from "./config/deployments";
 import { marketById, pinnedToken, symbolsOn } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
 import { useFills, useRestingOrders } from "./hooks/useOrderbook";
@@ -106,6 +106,12 @@ export default function App() {
   }, [wallet.address]);
 
   const resting = useRestingOrders(ticket.marketId);
+  // Who may fill this market's orders, as they will be signed (shown on the form).
+  const marketDelivery = useMemo(() => {
+    const solver = solverForMarket(deployment, ticket.marketId);
+    const win = exclusivityForMarket(deployment, ticket.marketId);
+    return { direct: !!solver && solver !== zeroAddress, windowSeconds: win?.seconds ?? 0, overrideBps: win?.overrideBps ?? 0 };
+  }, [deployment, ticket.marketId]);
   const fills = useFills();
   const allOrders = useRestingOrders();
 
@@ -274,6 +280,8 @@ export default function App() {
         pay,
         recv,
         solver: solverForMarket(deployment, spec.marketId),
+        // Pull markets: the solver's ~2-block soft window, then open to all (B13).
+        exclusivity: exclusivityForMarket(deployment, spec.marketId),
         amountIn: spec.amountIn,
         targetOut: spec.targetOut,
         minOut: spec.minOut,
@@ -556,6 +564,7 @@ export default function App() {
               chainLabel: chainLabel(chainId),
               deployed: deployment !== null,
             }}
+            delivery={marketDelivery}
             onSign={sign}
           />
           <OrderBook

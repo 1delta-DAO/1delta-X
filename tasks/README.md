@@ -4,6 +4,8 @@ One numbered file per task (`NN-slug.md`), each with a status / package / severi
 source / opened header and Problem → Change → Acceptance sections. A finished task
 is marked `done` in its header and moved to `done/`.
 
+## Done (2026-10-06)
+
 | # | task | kind | status |
 | --- | --- | --- | --- |
 | 01 | orderbook: taker-permit spenders in the permit-announce path | off-chain fix | done → `done/` |
@@ -22,5 +24,33 @@ is marked `done` in its header and moved to `done/`.
 | 14 | ~~[shapes checker: rule 9 per branch](done/14-shapes-checker-per-branch.md)~~ | tooling | done 2026-10-06 |
 | 15 | ~~[app market orders unprofitable at the 50 bps floor](done/15-market-floor-economics.md)~~ | decision | done 2026-10-06 (fee-net ladder + 5 bps stable haircut, 0 min profit; e2e passes) |
 
-Sources: `../REVIEW-2026-10-05-amount-mismatch.md` (03–14),
-`../SIGNATURE-VALIDATION-REVIEW.md` (01–02).
+
+## Open — smart contracts
+
+Solver items need a solver redeploy; the lens item a lens redeploy. Settlement is untouched by all of them.
+
+| # | task | layer | severity |
+| --- | --- | --- | --- |
+| 16 | [Solver: the live `amountOutOffset` patch writes `pricedOut[0]`, not the anchor output leg](16-solver-live-patch-anchor-leg.md) | contract | low |
+| 17 | [Solver: `executeItemFill` silently ignores `minBumpBps` and `amountOutOffset`](17-solver-itemfill-ignored-fields.md) | contract | low |
+| 18 | [Lens: the `ITakeFloor` check rejects valid multi-leg and multi-item orders](18-lens-takefloored-leg-selection.md) | contract | medium-low |
+| 19 | [Shapes checker: rule 9 can be satisfied by accident](19-shapes-rule9-gaps.md) | contract (tooling) | low |
+| 20 | [Contract docs drift (solver header, Exactly repay behaviour)](20-contract-docs-drift.md) | contract (docs) | info |
+
+## Open — backend / frontend
+
+No contract change; none waits on a deploy.
+
+| # | task | layer | severity |
+| --- | --- | --- | --- |
+| 21 | [Filler: a mined tx can be resolved as "replaced" on a flaky RPC](21-filler-replaced-false-positive.md) | backend | medium |
+| 22 | [Filler: a send error is rolled back on one immediate "not found"](22-filler-send-error-rollback.md) | backend | low |
+| 23 | [Book: per-IP rate limit keys on the full IPv6 address](23-book-ipv6-ratelimit.md) | backend | medium |
+| 24 | [Book: permit announces stay Fillable after the permit deadline](24-book-permit-deadline-staleness.md) | backend | medium |
+| 25 | [Book + filler: truncate-then-redact can leak a partial RPC key](25-redact-before-truncate.md) | backend | low |
+| 26 | [App: cap the indexer's pool fee; fix the `applyPoolFee` comment](26-app-fee-cap-and-comment.md) | frontend | low |
+| 27 | [Auction: `guard.ts` says the sandbox has no standing approvals](27-auction-guard-comment.md) | backend (docs) | low |
+
+Sources: `../REVIEW-2026-10-05-amount-mismatch.md` (03–15),
+`../SIGNATURE-VALIDATION-REVIEW.md` (01–02), the 2026-10-06 pre-merge audit (16–27,
+recorded in the review doc's §11).

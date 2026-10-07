@@ -70,12 +70,46 @@ VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…","
 | `settlement`, `permit3` | Required, non-zero. The EIP-712 domain and the approval target. |
 | `lens` | Optional (zero when omitted). |
 | `solver` | The `exclusiveFiller` orders name by default, signing **delta-verify** delivery (timing bit 104) that only that filler can fill. May be the **zero address** (or omitted): orders then sign plain pull delivery, open to any filler. |
-| `marketSolvers` | Optional per-market override: `"<marketId>": "0x…"` names a different delta-verify filler for that market; `"<marketId>": "pull"` (exactly that literal) signs **plain pull delivery with `exclusiveFiller = 0`** on that market, whatever `solver` says. |
+| `marketSolvers` | Optional per-market override: `"<marketId>": "0x…"` names a different delta-verify filler for that market; `"<marketId>": "pull"` (exactly that literal) signs **plain pull delivery** on that market, whatever `solver` says. By default the order names no filler (`exclusiveFiller = 0`). With an opted-in window (below) and a non-zero `solver`, it names the solver for that window. |
+| `pullExclusivity` | Optional, **opt-in**: `{"seconds": 60, "overrideBps": 5}`, the **soft exclusivity window** pull markets sign. The defaults are `seconds` 0 (no window) and `overrideBps` 5. `seconds` is an integer in [0, 600]. `overrideBps` is an integer in [1, 10000]. Either key may be omitted, and it then keeps the default. |
+| `marketExclusivity` | Optional per-market override of `pullExclusivity`: `{"<marketId>": {"seconds": 0}}`. Each missing key inherits the deployment's value. |
 
 Every address is validated. A malformed address, a zero `settlement`/`permit3`,
-or a `marketSolvers` value that is neither a non-zero address nor exactly
-`"pull"` (`"PULL"`, `" pull"`, the zero address, …) drops that chain's whole
-entry — it is treated as not deployed rather than half-used.
+a `marketSolvers` value that is neither a non-zero address nor exactly
+`"pull"` (`"PULL"`, `" pull"`, the zero address, …), or an exclusivity object
+with an unknown key, a non-integer, or an out-of-range value drops that chain's
+whole entry — it is treated as not deployed rather than half-used.
+
+**The pull-market exclusivity window (UniswapX style, opt-in, off by default).**
+With a window configured, a pull market's order names the deployment's `solver` as
+`exclusiveFiller` with
+`exclusivityEndTime = now + seconds` and `exclusivityOverrideBps = overrideBps`.
+For that window the solver fills at the signed price. Any other filler may fill
+inside it too, but must pay the maker `overrideBps` more: a higher SELL output, or
+a lower BUY input. Those are the legs `OrderGates._overrideHasCarrier` accepts.
+Every shape the app signs has one, and `buildOrder` refuses to sign a window
+without one, because the core would make that window **hard**. After the window
+the order is open to every filler until it expires. Rootstock blocks are about
+30 s apart, so `"seconds": 60` is about 2 blocks, the "~2 blocks" UniswapX uses on
+Ethereum. With `solver` zero there is nobody to favour, so a pull order names no
+filler and is open from the start. A window of `0`, the default, gives the same
+result.
+
+It is **off by default because it costs gas on every fill**. We measured it on the
+plain SELL fill against `exclusiveFiller = 0`. Naming one filler with a window adds
+**+509 gas per fill** (+245 execution, +264 calldata). The inventory bot fills with
+`fillUpTo` from its own EOA. Under a single-solver window that EOA counts as an
+**outsider**, so it must pay the premium or wait for the window to end. Covering
+both our fillers with a `FILLER_SET` would cost **+1,229 to +1,304 gas per fill**,
+and the SDK cannot express it today: `curve` is typed as curve points.
+
+The window applies **only to pull markets**. On a direct (delta-verify) market
+the core fills the order for its named filler only, for its **whole life**, with
+no window and no override (`Core._snapshotOutRecipients`, findings ledger F30). A
+balance delta cannot tell this fill's delivery from an inflow the maker paid for
+somewhere else, so only the filler the maker named may run the callback. Direct
+delivery saves the solver about 35k gas per fill. Pull delivery with a window
+lets any filler step in after about 2 blocks.
 
 **Rootstock beta.** Two fillers run from one bot,
 [`@1delta-x/beta-filler`](../beta-filler) (full deploy runbook in its README), hosted as
@@ -91,8 +125,13 @@ the Cloudflare Worker [`@1delta-x/filler-worker`](../filler-worker):
 - **inventory** — the same EOA fills USDRIF/USDT0 out of its own wallet with
   `Settlement.fillUpTo`. An EOA cannot run the fill callback a delta-verify
   order needs, so **`rsk-30-usdrif-usd0` stays `"pull"`** (plain pull delivery,
-  no named filler). The route strategy can fill those pull orders too; the bot
-  tries inventory first and falls back to route.
+  open to any filler; the opt-in window is off). The route strategy can fill those
+  pull orders too. The bot tries inventory first and falls back to route. If a
+  deployment opts in to a window, the core compares `exclusiveFiller` with the
+  solver *contract*, so inside the window the inventory EOA is an outsider. It
+  then fills only if the fill is still profitable after the premium, which its
+  own preview prices in. Otherwise it waits, and the bot re-quotes the order when
+  the window ends.
 
 ```bash
 VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…","solver":"0x<AggregatorFillSolver>","marketSolvers":{"rsk-30-usdrif-usd0":"pull"}}}'
@@ -166,10 +205,13 @@ keeps the USDRIF market on pull whatever `solver` says.
     checked exactly like a protobuf post).
     Only a `202` creates a row; a `422` (with the server's reason), `503`, `429`,
     an unreachable server or a mismatched order hash is shown as an error and
-    nothing is listed as resting. Market orders are posted too (a 60 s auction
-    that then rests at its floor; 5 min life — the book refuses TTLs under
-    120 s and the filler skips orders expiring within 90 s, see
-    `lib/plan.ts`), since on a real book an order no filler can see does nothing.
+    nothing is listed as resting. Market orders are posted too, since on a
+    real book an order no filler can see does nothing. A market order is a 60 s
+    auction. It then rests at its floor until it expires after 5 minutes. On a
+    pull market it is open to every filler, unless the deployment opts in to
+    the soft exclusivity window. The book refuses TTLs under 120 s and the
+    filler skips orders that expire within 90 s, so see `lib/plan.ts` and the
+    exclusivity section above.
   - **Hide** (soft cancel) → `POST /cancels` with the JSON body `{cancel, sig}`;
     the row is marked only on `202`.
   - every ~6 s, `GET /orders/:hash/status` for each order you posted, plus one

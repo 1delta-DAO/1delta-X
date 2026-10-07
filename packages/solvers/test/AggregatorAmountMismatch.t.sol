@@ -4,6 +4,8 @@ pragma solidity ^0.8.28;
 import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 
 import {Order, Item, ItemOp, LegIn, LegOut} from "@core/settlement/Settlement.sol";
+import {ItemPolicy} from "@core/settlement/Structs.sol";
+import {Base} from "@core/settlement/Base.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 import {AggregatorFillSolver, RoutePlan, NO_PATCH} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
@@ -280,6 +282,54 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         assertEq(tA.balanceOf(address(router)), AMOUNT_IN, "routed once");
         (uint160 allowAfter,) = permit3.tokenAllowance(maker, address(settlement), address(tA));
         assertEq(allowAfter, 0, "the token allowance is gone although the wallet paid nothing");
+    }
+
+    /// S2 / schedule, the maker's fix (ACCEPTED-PATTERNS-REVIEW B8, 2026-10-06): the
+    /// same late-TAKE schedule against ORDERED still burns the allowance — ORDERED only
+    /// orders the items among themselves — while CANONICAL makes `_stepPull` refuse a
+    /// PULL ahead of the item group, so the schedule reverts and spends nothing. This
+    /// is why the SDK defaults such orders to CANONICAL and the lens flags anything less.
+    function test_S2_lateTakeOnInputToken_canonicalRefusesTheSchedule() public {
+        _makerApprove(address(settlement), address(tA), AMOUNT_IN * 2); // exact for two fills
+        Item[] memory items = new Item[](1);
+        items[0] = Item({
+            op: ItemOp.TAKE,
+            module: address(taker),
+            amount: AMOUNT_IN,
+            recipient: address(0),
+            data: abi.encode(address(tA), AMOUNT_IN)
+        });
+
+        // ORDERED: the late TAKE is still admitted and the leg is pulled first.
+        Order memory o = _order(24);
+        o.items = PackedEncode.items(items);
+        o.timing = ItemPolicy.pack(o.timing, ItemPolicy.ORDERED);
+        _authItems(o, items[0].data);
+        (bool ok, bytes memory ret) = address(aggSolver).call(
+            abi.encodeCall(
+                IAggregatorItemFill.executeItemFill,
+                (o, _sign(o), AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 1 << 0)
+            )
+        );
+        assertTrue(ok, string(ret));
+        (uint160 allow,) = permit3.tokenAllowance(maker, address(settlement), address(tA));
+        assertEq(allow, AMOUNT_IN, "ORDERED: one leg's allowance spent on a TAKE-funded leg");
+
+        // CANONICAL: the same schedule reverts.
+        o = _order(25);
+        o.items = PackedEncode.items(items);
+        o.timing = ItemPolicy.pack(o.timing, ItemPolicy.CANONICAL);
+        _authItems(o, items[0].data);
+        (ok, ret) = address(aggSolver).call(
+            abi.encodeCall(
+                IAggregatorItemFill.executeItemFill,
+                (o, _sign(o), AMOUNT_IN, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD), bytes(""), 1 << 0)
+            )
+        );
+        assertFalse(ok, "CANONICAL refuses PULL before the TAKE");
+        assertEq(bytes4(ret), Base.ItemPolicyViolated.selector, "refused by _stepPull's CANONICAL gate");
+        (allow,) = permit3.tokenAllowance(maker, address(settlement), address(tA));
+        assertEq(allow, AMOUNT_IN, "nothing spent");
     }
 
     /// S2 / reference: the same order on the single-order path (an inventory filler)

@@ -24,10 +24,12 @@ export const MARKET_TTL_SECONDS = 300;
  * price to `crossedOut × (1 − this)`. Lives here (not in App.tsx) so node
  * scripts can sign exactly the app's market shape. Since task 15 the book's pool
  * rungs are priced NET of each pool's fee tier (`applyPoolFee`, lib/univ3.ts), so
- * these 50 bps are headroom over an EXECUTABLE price — before, a 0.3 % pool's fee
- * alone ate 30 of them and no filler could fill at the floor.
+ * these bps are headroom over an EXECUTABLE price — before, a 0.3 % pool's fee
+ * alone ate 30 of 50 and no filler could fill at the floor. 30 since 2026-10-07: the
+ * filler's quote haircut is 10 bps (volatile) / 5 bps (stable), so 30 still leaves
+ * 20–25 bps for gas while makers keep 20 bps more than at 50 (they end at the floor).
  */
-export const MARKET_SLIPPAGE_BPS = 50;
+export const MARKET_SLIPPAGE_BPS = 30;
 /** How long a resting limit order lives. */
 export const LIMIT_TTL_SECONDS = 24 * 3600;
 
@@ -126,6 +128,11 @@ export function planTicket(a: PlanArgs): TicketPlan | null {
   // A market order is a short dutch auction: the maker names the price the
   // book shows now and a floor, and lets fillers compete in between — then it
   // rests at the floor for the remainder of its life (see MARKET_TTL_SECONDS).
+  // A PULL market's order is open to every filler (B13); a deployment may opt in
+  // to a ~2-block soft window for its solver (`pullExclusivity`,
+  // config/deploymentConfig.ts — off by default, it costs gas per fill). The 300 s
+  // life is right for 30 s blocks: the auction is ~2 blocks, the rest is the
+  // landing margin the book / filler gates need.
   return {
     kind: "market",
     price,

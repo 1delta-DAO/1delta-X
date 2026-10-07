@@ -25,6 +25,7 @@ import {
   nativeToUsdToken,
   grossUp,
   haircutBps,
+  liveDecayPerBlock,
   patchesLiveOutput,
   TYPED_CALLBACK_GAS,
   rankRoutes,
@@ -102,7 +103,7 @@ describe("route config", () => {
     expect(rc.pools.map((p) => p.market)).toEqual(["rsk-30-wrbtc-usd0", "rsk-30-weth-wrbtc", "rsk-30-usdrif-usd0"]);
     expect(rc.paths).toHaveLength(1);
     expect(rc.paths[0]!.fees).toEqual([500, 3000]);
-    expect(rc.slippageBps).toBe(30n);
+    expect(rc.slippageBps).toBe(10n);
     expect(rc.stableSlippageBps).toBe(5n);
     expect(rc.minProfitWei).toBe(0n);
     expect(loadConfig({ ...ENV, ROUTE_STABLE_SLIPPAGE_BPS: "12" }).route!.stableSlippageBps).toBe(12n);
@@ -149,10 +150,24 @@ describe("classifyRoute", () => {
   it("takes a pull order naming our solver as exclusive filler", () => {
     expect(classifyRoute(wrbtcOrder({ exclusiveFiller: SOLVER }), rc).ok).toBe(true);
   });
+  it("B13: the app's pull-market shape — our solver's soft ~2-block window — is ours, premium-free", () => {
+    const now = 1_800_000_000;
+    const app = wrbtcOrder({ exclusiveFiller: SOLVER, timing: packTiming(now, 60, now + 60), exclusivityOverrideBps: 5n });
+    const v = classifyRoute(app, rc, { nowS: BigInt(now + 1) });
+    expect(v.ok && !v.direct).toBe(true);
+  });
+  it("another filler's window: refused only while it is HARD; a soft one or an ended one is fillable", () => {
+    const now = 1_800_000_000;
+    const soft = wrbtcOrder({ exclusiveFiller: OTHER, timing: packTiming(0, 0, now + 60), exclusivityOverrideBps: 5n });
+    const hard = wrbtcOrder({ exclusiveFiller: OTHER, timing: packTiming(0, 0, now + 60) });
+    expect(classifyRoute(soft, rc, { nowS: BigInt(now) }).ok).toBe(true);
+    expect(classifyRoute(hard, rc, { nowS: BigInt(now) }).ok).toBe(false);
+    expect(classifyRoute(hard, rc, { nowS: BigInt(now + 60) }).ok).toBe(true);
+  });
   it.each([
     ["delta-verify for another filler", { timing: withDeltaVerifyOutputs(0n), exclusiveFiller: OTHER }, /another filler/],
     ["delta-verify open (core refuses it anyway)", { timing: withDeltaVerifyOutputs(0n) }, /another filler/],
-    ["pull order for another filler", { exclusiveFiller: OTHER }, /another exclusive/],
+    ["pull order in another filler's HARD window", { exclusiveFiller: OTHER, timing: packTiming(0, 0, 4_000_000_000) }, /another exclusive/],
     ["same token", { legsOut: [{ token: ROOTSTOCK.wrbtc, start: 1n, end: 0n, recipient: zeroAddress }] }, /same-token/],
     ["third-party recipient", { legsOut: [{ token: ROOTSTOCK.usdt0, start: 1n, end: 0n, recipient: OTHER }] }, /third party/],
     ["fee leg", { legsOut: [wrbtcOrder().legsOut[0]!, { ...wrbtcOrder().legsOut[0]!, recipient: OTHER }] }, /one-in/],
@@ -205,6 +220,27 @@ describe("classifyRoute", () => {
   it("refuses permit-batch and sigless announces", () => {
     expect(classifyRoute(wrbtcOrder(), rc, { hasPermitBatch: true }).ok).toBe(false);
     expect(classifyRoute(wrbtcOrder(), rc, { sigless: true }).ok).toBe(false);
+  });
+});
+
+describe("liveDecayPerBlock (task 05 threshold)", () => {
+  const mk = (start: bigint, end: bigint, decayStart: number, dur: number, blockClock = false) =>
+    ({
+      legsOut: [{ token: ROOTSTOCK.usdt0, start, end, recipient: zeroAddress }],
+      timing: packTiming(decayStart, dur, 0) | (blockClock ? 1n << 102n : 0n),
+    }) as never;
+  it("one 30 s block of decay, pro rata to owed, rounded down", () => {
+    // 1,000 → 900 over 60 s: 30 s is half the span = 50 of 1,000 ⇒ 5 % of owed.
+    expect(liveDecayPerBlock(mk(1_000n, 900n, 1_000, 60), 2_000n, 1_010n)).toBe(100n);
+  });
+  it("capped at what is left of the decay; 0 once it is over or the leg is fixed/rising", () => {
+    expect(liveDecayPerBlock(mk(1_000n, 900n, 1_000, 60), 2_000n, 1_050n)).toBe(33n); // 10 s left
+    expect(liveDecayPerBlock(mk(1_000n, 900n, 1_000, 60), 2_000n, 1_060n)).toBe(0n);
+    expect(liveDecayPerBlock(mk(1_000n, 0n, 1_000, 60), 2_000n, 1_010n)).toBe(0n);
+    expect(liveDecayPerBlock(mk(1_000n, 1_100n, 1_000, 60), 2_000n, 1_010n)).toBe(0n);
+  });
+  it("a block-clock order counts one block of its decay", () => {
+    expect(liveDecayPerBlock(mk(1_000n, 900n, 100, 4, true), 2_000n, 0n)).toBe(50n);
   });
 });
 

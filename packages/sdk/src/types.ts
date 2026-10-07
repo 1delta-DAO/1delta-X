@@ -496,7 +496,9 @@ export function itemPolicyOf(timing: bigint): ItemPolicy {
  * item-bearing orders at `ANY` on purpose, and rejecting them there would either
  * break the pinned hash or force a wire change to buy nothing. `ANY` is also
  * REQUIRED to participate in a cycle. Call this from your own order builder and
- * decide there.
+ * decide there — or use {@link withDefaultItemPolicy}, which signs `CANONICAL` for
+ * the one shape that actually needs it (a TAKE funding an input leg) and which
+ * {@link signOrder} now enforces (ACCEPTED-PATTERNS-REVIEW B8, 2026-10-06).
  *
  * @see `docs/audit-2026-09-leads.md` A-4
  */
@@ -509,6 +511,75 @@ export function itemPolicyWarning(order: Order): string | null {
     "tokens but not the Permit3 allowance. Sign ItemPolicy.CANONICAL unless this order " +
     "participates in a cycle — withItemPolicy(timing, ItemPolicy.CANONICAL)."
   );
+}
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/** Options for {@link takeFundsInputLeg} / {@link withDefaultItemPolicy}. */
+export interface ItemPolicyDefaultOptions {
+  /**
+   * An EXPLICIT policy. When set it is signed as-is — `ItemPolicy.ANY` included
+   * (e.g. an order meant to join a `matchSettle` CYCLE) — and no default applies.
+   */
+  itemPolicy?: ItemPolicy;
+  /** The Settlement address: a TAKE whose `recipient` equals it lands where `0x0` does. */
+  settlement?: Address;
+  /**
+   * Resolve a TAKE item's proceeds token — typically `IProceedsAsset.proceedsAsset(data)`
+   * on its module. Return `undefined` when unknown. Without a resolver (or on
+   * `undefined`) a settler-routed TAKE is assumed to fund an input leg: that is
+   * the only shape that does not strand its proceeds on the single-order path
+   * (the lens rejects the other one as "item delivers a token no input leg can
+   * consume"), and CANONICAL costs such an order nothing there.
+   */
+  proceedsAsset?: (item: Item) => Address | undefined;
+}
+
+/**
+ * Does any plain `TAKE` item deliver its proceeds to the settler in a token one of
+ * the order's INPUT legs consumes? That is the shape `ACCEPTED-PATTERNS-REVIEW.md`
+ * B8 is about: under any policy below `CANONICAL` a `matchSettle` caller may PULL
+ * that leg before the TAKE, so the maker's Permit3 allowance is spent twice for one
+ * fill. Mirrors the lens rule in `SettlementLensChecks._proceedsItemAt`.
+ *
+ * Not counted: a TAKE routed elsewhere (`recipient` = the maker — a borrow after the
+ * deposit), a TAKE whose proceeds are an output-only token, `TAKE_FOR` (`matchSettle`
+ * refuses any order carrying one), and an order with no input legs.
+ */
+export function takeFundsInputLeg(order: Order, opts: ItemPolicyDefaultOptions = {}): boolean {
+  if (order.legsIn.length === 0) return false;
+  const ins = new Set(order.legsIn.map((l) => l.token.toLowerCase()));
+  const settlement = opts.settlement?.toLowerCase();
+  return order.items.some((it) => {
+    if (it.op !== ItemOp.TAKE) return false;
+    const to = it.recipient.toLowerCase();
+    if (to !== ZERO_ADDRESS && to !== settlement) return false;
+    const asset = opts.proceedsAsset?.(it);
+    return asset === undefined || ins.has(asset.toLowerCase());
+  });
+}
+
+/**
+ * Apply the SDK's item-policy DEFAULT to an order before it is signed.
+ *
+ *  - `opts.itemPolicy` set → signed exactly as given (an explicit `ANY` included).
+ *  - the order's `timing` already carries a non-`ANY` policy → kept (it was set on
+ *    purpose with {@link withItemPolicy}).
+ *  - otherwise, when {@link takeFundsInputLeg} → `ItemPolicy.CANONICAL`.
+ *
+ * Why CANONICAL and not ORDERED: ORDERED (and ATOMIC) only order the maker's items
+ * among THEMSELVES; a `PULL` of an input leg may still be scheduled ahead of them.
+ * CANONICAL is the one level `Batch._stepPull` enforces against — it reverts a PULL
+ * of an order whose items have not all run. It is also exactly the single-order
+ * path's fixed shape (deliver → items → pull), so `fill`/`fillUpTo` behave the same.
+ * The cost is on the netted path only: the order can no longer join a CYCLE, and a
+ * solver cannot use the TAKE's proceeds to fund this order's own delivery.
+ */
+export function withDefaultItemPolicy(order: Order, opts: ItemPolicyDefaultOptions = {}): Order {
+  if (opts.itemPolicy !== undefined) return { ...order, timing: withItemPolicy(order.timing, opts.itemPolicy) };
+  if (itemPolicyOf(order.timing) !== ItemPolicy.ANY) return order;
+  if (!takeFundsInputLeg(order, opts)) return order;
+  return { ...order, timing: withItemPolicy(order.timing, ItemPolicy.CANONICAL) };
 }
 
 /// Read the four `timing` mode flags an author may set. The clocks come from

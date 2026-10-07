@@ -4,7 +4,15 @@ import { encodeFunctionData, hashStruct, hashTypedData, keccak256, type Address,
 import { SETTLEMENT_ABI } from "./abi";
 import { ORDER_TYPES, settlementDomain } from "./eip712";
 import { assertPermit3Nonce, Permit3MessageKind } from "./permit3nonce";
-import { BLOCK_CLOCK_BIT, type Deployment, type Order, type PermitBatch } from "./types";
+import {
+  BLOCK_CLOCK_BIT,
+  ItemPolicy,
+  itemPolicyOf,
+  takeFundsInputLeg,
+  type Deployment,
+  type Order,
+  type PermitBatch,
+} from "./types";
 
 /** Minimal signer surface — a viem `LocalAccount`/`WalletClient` satisfies this. */
 export interface TypedDataSigner {
@@ -68,13 +76,33 @@ export function assertBlockClockHeadroom(
  * A BLOCK-clocked order (timing bit 102) requires `opts.headBlock` — the chain's
  * current block number — and is refused near the `uint32` block-clock limit
  * ({@link assertBlockClockHeadroom}).
+ *
+ * An order whose plain `TAKE` funds an input leg ({@link takeFundsInputLeg}) must
+ * carry a policy other than `ItemPolicy.ANY` — run it through
+ * {@link withDefaultItemPolicy} first (it signs `CANONICAL`). Signing it at `ANY`
+ * lets any `matchSettle` caller PULL the leg before the TAKE and spend the maker's
+ * Permit3 allowance twice for one fill (`ACCEPTED-PATTERNS-REVIEW.md` B8), so it
+ * needs the explicit `opts.itemPolicy: ItemPolicy.ANY` (e.g. a CYCLE participant).
+ * This cannot default silently here: the caller keeps and submits its own `order`
+ * object, which must match what was signed.
  */
 export async function signOrder(
   signer: TypedDataSigner,
   order: Order,
   d: Deployment,
-  opts?: { headBlock?: bigint },
+  opts?: { headBlock?: bigint; itemPolicy?: ItemPolicy },
 ): Promise<Hex> {
+  if (
+    itemPolicyOf(order.timing) === ItemPolicy.ANY &&
+    opts?.itemPolicy !== ItemPolicy.ANY &&
+    takeFundsInputLeg(order, { settlement: d.settlement })
+  ) {
+    throw new Error(
+      "signOrder: a TAKE item funds an input leg but the order signs ItemPolicy.ANY — a matchSettle caller could " +
+        "pull that leg first and spend the Permit3 allowance twice. Apply withDefaultItemPolicy(order) (CANONICAL), " +
+        "or pass opts.itemPolicy = ItemPolicy.ANY to sign ANY deliberately.",
+    );
+  }
   if (((order.timing >> BLOCK_CLOCK_BIT) & 1n) === 1n) {
     if (opts?.headBlock === undefined) {
       throw new Error("signOrder: a block-clocked order needs opts.headBlock (the chain head) to check the uint32 clock range");

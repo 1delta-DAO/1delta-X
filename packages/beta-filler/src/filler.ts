@@ -11,6 +11,7 @@ import {
   Budget,
   capFillAmount,
   classify,
+  exclusivityFor,
   exitOk,
   fixedPriceOk,
   fmt18,
@@ -248,7 +249,11 @@ export class Filler {
     }
 
     // 6. Simulate the exact calldata from our address.
-    const tag = `${direction} ${orderHash} pay ${paid} ${pay} for ${received} ${receive} @ ${fmt18(price.price)}`;
+    // Inside another filler's SOFT window we fill as an outsider: the preview above
+    // (filler = our EOA) already priced the premium, so the gates saw it; say so.
+    const ex = exclusivityFor(order, chain.me, BigInt(Math.floor(now / 1000)));
+    const premium = ex.kind === "soft" ? ` (in-window outsider: +${ex.overrideBps} bps to the maker)` : "";
+    const tag = `${direction} ${orderHash} pay ${paid} ${pay} for ${received} ${receive} @ ${fmt18(price.price)}${premium}`;
     let simPaid = paid;
     let simReceived = received;
     try {

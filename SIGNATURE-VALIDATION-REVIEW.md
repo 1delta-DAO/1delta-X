@@ -26,7 +26,10 @@ digest binds the contract that consumes it (through the EIP-712 domain, the
 typehash and selector literals in the assembly call sites were recomputed and
 match.
 
-**Off-chain: three liveness gaps, no funds at risk.** All three sit in the
+**Off-chain: three liveness gaps, no funds at risk. All three FIXED 2026-10-06**
+(tasks 01–02, `tasks/done/`): Layer 1 now checks taker spenders too and recovers with
+`ecrecover` semantics through the shared `recoverEcdsa` (`packages/orderbook/src/ecdsa.ts`).
+The original text follows as the record of what was found. All three sit in the
 orderbook verifier's single-signature (`fillWithPermit`) announce path, which
 was added in the 2026-09-30 remediation (A-FLEX-2). They let an order into the
 book that the settler will refuse, or keep one out that it would accept. Two are
@@ -251,6 +254,11 @@ Constants recomputed with `cast keccak` and `cast sig` (section 2).
 ---
 
 ## 7. Recommended follow-ups
+
+> **Status 2026-10-06: all done.** 1–3 landed with tests named after the findings
+> (`test/audit20260930.test.ts`, SIG-REVIEW blocks; orderbook 143/143). 4 needed no
+> change. Whether the §5 asymmetries match common practice (Permit2 / UniswapX) is
+> assessed in `ACCEPTED-PATTERNS-REVIEW.md`.
 
 1. **verify.ts:** check `batch.takers[i].spender` against the settlement next to
    the existing token check (F1).
