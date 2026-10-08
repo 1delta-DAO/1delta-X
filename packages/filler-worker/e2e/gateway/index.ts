@@ -3,12 +3,15 @@
  * multi-config `wrangler dev` session, because only the primary is served over
  * HTTP. It plays two roles the harness needs:
  *
- *   /api/book/*  → the app's REAL Pages worker (packages/app/public/_worker.js),
+ *   /api/book/*, /api/quote
+ *                → the app's REAL Pages worker (packages/app/public/_worker.js),
  *                  which proxies to the orderbook over the ORDERBOOK service binding
  *                  with the Pages-style `x-orderbook-client-ip` +
  *                  `x-orderbook-binding-key` headers. `x-sim-ip` stands in for the
  *                  edge-set `cf-connecting-ip`, so each simulated visitor gets its
  *                  own rate-limit bucket, exactly as distinct visitors would.
+ *                  `/api/quote` goes on to the filler over the FILLER binding with
+ *                  `x-filler-client-ip` + `x-filler-binding-key` (FILLER_BINDING_KEY).
  *   /ob/*        → the orderbook worker directly (health, `/orders/:hash`), as a
  *                  hit on its public route would arrive (cf-connecting-ip only).
  *   /filler/*    → the filler worker (admin API; auth is the filler's own).
@@ -23,6 +26,7 @@ interface Env {
   ORDERBOOK: Fetcher;
   FILLER: Fetcher;
   ORDERBOOK_BINDING_KEY?: string;
+  FILLER_BINDING_KEY?: string;
 }
 
 const SIM_IP = "x-sim-ip";
@@ -38,7 +42,7 @@ export default {
     const method = request.method.toUpperCase();
     const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
 
-    if (url.pathname === "/api/book" || url.pathname.startsWith("/api/book/")) {
+    if (url.pathname === "/api/book" || url.pathname.startsWith("/api/book/") || url.pathname === "/api/quote" || url.pathname.startsWith("/api/quote/")) {
       const headers = new Headers(request.headers);
       headers.delete(SIM_IP);
       headers.set("cf-connecting-ip", ip);
@@ -46,6 +50,8 @@ export default {
       return (pages as { fetch: (r: Request, e: unknown) => Promise<Response> }).fetch(req, {
         ORDERBOOK: env.ORDERBOOK,
         ORDERBOOK_BINDING_KEY: env.ORDERBOOK_BINDING_KEY ?? "",
+        FILLER: env.FILLER,
+        FILLER_BINDING_KEY: env.FILLER_BINDING_KEY ?? "",
       });
     }
     if (url.pathname.startsWith("/ob/")) {

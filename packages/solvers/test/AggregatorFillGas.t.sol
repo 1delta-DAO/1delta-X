@@ -117,6 +117,25 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         _runTo("retain: third fill              ", g, 3, AMOUNT_OUT, address(g));
     }
 
+    /// @dev The SELF-SEEDING first fill (2026-10): a cold solver, the route patched
+    ///      (`amountInOffset` = 4), spread paid out — it keeps one wei of tA and of
+    ///      tB. Then a second fill in the same tx, which finds both floors. (Same-tx
+    ///      slots are dirty — see the README; the fresh-tx figures are the fork's
+    ///      `SelfSeedColdBench` / `SelfSeedSteadyBench`.)
+    function test_gas_selfSeed_patched() public {
+        _warmWorld();
+        for (uint256 i = 1; i <= 2; ++i) {
+            Order memory o = _order(i);
+            bytes memory sig = _sign(o);
+            RoutePlan memory p = _planFor(AMOUNT_IN, address(aggSolver), AMOUNT_OUT, 4);
+            uint256 g0 = gasleft();
+            aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+            console.log(i == 1 ? "self-seed: first fill (cold)    " : "self-seed: second fill (same tx)", g0 - gasleft());
+        }
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "tA floor self-seeded");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "tB floor self-seeded");
+    }
+
     function test_gas_second_fill() public {
         _warmWorld();
         _run("first fill                      ", aggSolver, 1, AMOUNT_OUT);

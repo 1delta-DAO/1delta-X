@@ -143,9 +143,11 @@ contract AggregatorItemFillTest is AggregatorFillSolverTest {
         assertEq(tB.balanceOf(maker), makerB, "the delivery was deposited straight on");
         assertEq(tB.balanceOf(address(depositor)), AMOUNT_OUT, "the MAKE item deposited the delivered output");
         assertEq(tA.balanceOf(address(router)), AMOUNT_IN, "the route sold the borrowed input");
-        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "caller keeps the spread");
+        // Zero inventory up front; it ends holding only the self-seeded 1-wei tB
+        // floor, out of the caller's spread (NO_PATCH route: no input wei withheld).
+        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "caller keeps the spread");
         assertEq(tA.balanceOf(address(aggSolver)), 0, "zero inventory: no input residue");
-        assertEq(tB.balanceOf(address(aggSolver)), 0, "zero inventory: no output residue");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "only the 1-wei output floor");
         assertEq(tA.balanceOf(address(settlement)), 0, "pool flat");
         assertEq(tB.balanceOf(address(settlement)), 0, "pool flat");
         assertEq(settlement.filled(_hashOrder(o)), AMOUNT_IN, "order fully filled");
@@ -202,8 +204,8 @@ contract AggregatorItemFillTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         aggSolver.executeItemFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", 0);
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
-        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "spread to the caller");
-        assertEq(tB.balanceOf(address(aggSolver)), 0);
+        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "spread to the caller, less the floor");
+        assertEq(tB.balanceOf(address(aggSolver)), 1);
     }
 
     /// AGG-6: the new callback is bound like {onFill} — only the EXECUTOR, only

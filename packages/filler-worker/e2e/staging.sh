@@ -11,7 +11,9 @@
 #   packages/filler-worker/e2e/staging.sh load|restart|soak|report|status
 #   packages/filler-worker/e2e/staging.sh down
 #   packages/filler-worker/e2e/staging.sh app-shape    # the app's market/limit/TWAP shapes vs the
-#                                                      #   PRODUCTION gates (own stack, up → run → down)
+#                                                      #   PRODUCTION gates (own stack, up → run → down);
+#                                                      #   market tickets via /api/quote (MARKET_PATH=dutch:
+#                                                      #   the pre-quote gas-floor Dutch path)
 #
 # See the README section "Local staging + load test" for every knob. The run
 # directory (configs, .dev.vars, DO state, logs, results) is e2e/.run/<label>/,
@@ -113,7 +115,7 @@ start_proxy() {
   # process group we can kill), not a forked subshell holding our stdout open.
   (cd "$PKG" && {
     PROXY_PORT=$PROXY_PORT UPSTREAM="http://127.0.0.1:$ANVIL_PORT" RUN_DIR="$run" LATENCY_MS=$LATENCY_MS JITTER_MS=$JITTER_MS \
-      RATE_LIMIT_RPS=$RATE_LIMIT_RPS GAS_PRICE_WEI=$GAS_PRICE_WEI DENY_METHODS="${DENY_METHODS:-}" setsid "$TSX" e2e/rpc-proxy.ts </dev/null >"$run/proxy.log" 2>&1 &
+      RATE_LIMIT_RPS=$RATE_LIMIT_RPS GAS_PRICE_WEI=$GAS_PRICE_WEI MIN_GAS_PRICE_WEI=${MIN_GAS_PRICE_WEI:-} DENY_METHODS="${DENY_METHODS:-}" setsid "$TSX" e2e/rpc-proxy.ts </dev/null >"$run/proxy.log" 2>&1 &
     echo $! >"$run/pids/proxy"
   })
   wait_http "http://127.0.0.1:$PROXY_PORT/__stats" 30 || die "proxy did not start (see $run/proxy.log)"
@@ -186,6 +188,7 @@ EOF
   umask 077
   cat >"$run/gateway/.dev.vars" <<EOF
 ORDERBOOK_BINDING_KEY=$BINDING_KEY
+FILLER_BINDING_KEY=$BINDING_KEY
 EOF
   # The RPC goes in RPC_URL_SECRET, as in production; the RPC_URL var points at a
   # proxy tag nothing may ever call (`ob-var` / `filler-var` in the proxy's stats
@@ -215,6 +218,7 @@ AGGREGATOR_SOLVER=$SOLVER
 PRIVATE_KEY=$OPERATOR_KEY
 ADMIN_TOKEN=$ADMIN_TOKEN
 ORDERBOOK_BINDING_KEY=$BINDING_KEY
+QUOTE_BINDING_KEY=$BINDING_KEY
 ALERT_WEBHOOK_URL=$proxy/__webhook
 DRY_RUN=0
 MAX_GAS_PRICE_GWEI=$MAX_GAS_PRICE_GWEI
@@ -253,8 +257,12 @@ EOF
   [ -f "$PACKAGES/orderbook/dist/pure.js" ] || (cd "$ROOT" && pnpm --filter @1delta-x/orderbook build >/dev/null)
 
   GAS_PRICE_WEI=${GAS_PRICE_WEI:-$(cast gas-price --rpc-url "$FORK_URL" 2>/dev/null || echo 26065600)}
+  # Rootstock's block-header minimumGasPrice (the filler sends at it × GAS_PRICE_MIN_MULT_BPS);
+  # anvil drops the field, so the proxy re-adds it. Unset/unreadable: GAS_PRICE_WEI / 1.1.
+  MIN_GAS_PRICE_WEI=${MIN_GAS_PRICE_WEI:-$(cast rpc eth_getBlockByNumber latest false --rpc-url "$FORK_URL" 2>/dev/null \
+    | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["minimumGasPrice"], 16))' 2>/dev/null || echo $(( GAS_PRICE_WEI * 10 / 11 )))}
   FORK_BLOCK=${FORK_BLOCK:-$(( $(cast block-number --rpc-url "$FORK_URL") - 2 ))}
-  export GAS_PRICE_WEI FORK_BLOCK
+  export GAS_PRICE_WEI MIN_GAS_PRICE_WEI FORK_BLOCK
   echo "$FORK_BLOCK" >"$run/fork-block"
   start_anvil "$run"
   local rpc="http://127.0.0.1:$ANVIL_PORT"
@@ -297,7 +305,7 @@ EOF
 import json, sys
 run = sys.argv[1]
 env = json.load(open(f"{run}/env.json"))
-secret = {"PRIVATE_KEY", "ADMIN_TOKEN", "BINDING_KEY", "ORDERBOOK_BINDING_KEY"}
+secret = {"PRIVATE_KEY", "ADMIN_TOKEN", "BINDING_KEY", "ORDERBOOK_BINDING_KEY", "QUOTE_BINDING_KEY"}
 for w in ("orderbook", "filler"):
     vs = {}
     for line in open(f"{run}/{w}/.dev.vars"):

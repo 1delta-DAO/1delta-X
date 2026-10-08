@@ -2,15 +2,17 @@
  * The non-blocking tick model (2026-10): one outstanding tx, receipts read by later
  * ticks, state in an injected StateStore, the rebalancer under the shared Guard.
  */
-import { AGGREGATOR_FILL_SOLVER_ABI, OrderSide, packTiming, type Order } from "@1delta-x/sdk";
+import { AGGREGATOR_FILL_SOLVER_ABI, bumpBps, currentAmountInAt, currentAmountOutAt, OrderSide, packTiming, type Order } from "@1delta-x/sdk";
 import { decodeFunctionData, encodeFunctionResult, erc20Abi, keccak256, parseTransaction, TransactionNotFoundError, zeroAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MOC_CORE_ABI } from "../src/chain";
 import { loadConfig, ROOTSTOCK } from "../src/config";
 import { Engine, roundRobin } from "../src/engine";
 import { GAS, Guard, broadcast } from "../src/guard";
+import { priceOk } from "../src/policy";
+import { profitableAt } from "../src/recheck";
 import { MemoryStateStore, STATE_KEY, type FillerState } from "../src/state";
 
 const SOLVER = "0x00000000000000000000000000000000000050a1" as Address;
@@ -66,6 +68,13 @@ function world() {
     previews: 0,
     /** What the fake lens previews as owed (raise it to make every route quote unprofitable). */
     owed: OWED,
+    /** Clock-driven preview hooks (a decaying order): owed / received / the lens bump now. */
+    owedAt: undefined as undefined | (() => bigint),
+    receivedAt: undefined as undefined | (() => bigint),
+    bumpAt: undefined as undefined | (() => bigint),
+    usdt0: 0n,
+    /** What estimateGas measures for any tx. */
+    gasUsed: 200_000n,
     gasPriceCalls: 0,
     /** Effects of mined txs not applied yet (approve → allowance, redeemTP → balance). */
     applied: 0,
@@ -138,10 +147,10 @@ function world() {
         case "SANDBOX": return SANDBOX;
         case "OWNER": return SOLVER;
         case "MAKER_SURPLUS_PPM": case "PROTOCOL_SURPLUS_PPM": return 0;
-        case "previewFill": w.previews++; return [0n, [RECEIVED], [w.owed]];
-        case "previewBump": return 0n; // the route plan's minBumpBps (task 08)
+        case "previewFill": w.previews++; return [0n, [w.receivedAt?.() ?? RECEIVED], [w.owedAt?.() ?? w.owed]];
+        case "previewBump": return w.bumpAt?.() ?? 0n; // the route plan's minBumpBps (task 08)
         case "decimals": return 6;
-        case "balanceOf": return address.toLowerCase() === ROOTSTOCK.usdrif.toLowerCase() ? w.usdrif : address.toLowerCase() === ROOTSTOCK.rif.toLowerCase() ? w.rif : 0n;
+        case "balanceOf": return address.toLowerCase() === ROOTSTOCK.usdrif.toLowerCase() ? w.usdrif : address.toLowerCase() === ROOTSTOCK.rif.toLowerCase() ? w.rif : address.toLowerCase() === ROOTSTOCK.usdt0.toLowerCase() ? w.usdt0 : 0n;
         case "allowance": return w.allowance;
         case "getPACtp": return 10n ** 17n; // 10 RIF per USDRIF
         case "getExecFee": return 1_000n;
@@ -156,7 +165,7 @@ function world() {
       return { result: [(amountIn * 100_000n * 10n ** 6n) / 10n ** 18n, [], [], 100_000n] };
     },
     call: async () => ({ data: encodeFunctionResult({ abi: AGGREGATOR_FILL_SOLVER_ABI, functionName: "executeFill", result: [OWED] }) }),
-    estimateGas: async () => 200_000n,
+    estimateGas: async () => w.gasUsed,
   };
   return { w, chain: { pub, account: ACCOUNT, me: ACCOUNT.address, chainId: 30 } as never };
 }
@@ -647,5 +656,216 @@ describe("M2: the rebalancer does not churn approvals", () => {
     expect(t3.rebalance).toMatchObject({ action: "redeem", status: "sent" });
     expect(decodeFunctionData({ abi: MOC_CORE_ABI, data: w.sent[2]!.data }).args[1]).toBe(USDRIF(180));
     expect(w.approvals).toEqual([USDRIF(200)]);
+  });
+});
+
+describe("a decaying order is re-quoted when its gate is predicted to pass (fake clock)", () => {
+  // The strategies read Date.now(); the engine reads the same faked clock.
+  beforeEach(() => vi.useFakeTimers({ toFake: ["Date"] }));
+  afterEach(() => vi.useRealTimers());
+  const T0 = 1_800_000_000; // decay start, unix s
+  const TICK = 5;
+  const nowS = () => BigInt(Math.floor(Date.now() / 1000));
+  const at = (s: number) => vi.setSystemTime(s * 1000);
+  const timing = packTiming(T0, 60, 0);
+
+  async function engineFor(chain: unknown, env: Record<string, string> = {}) {
+    const cfg = loadConfig({ ...ENV, ...env });
+    const logs: string[] = [];
+    const e = await Engine.create({ cfg, chain: chain as never, store: new MemoryStateStore(), log: (m) => logs.push(m), now: () => Date.now() });
+    return { e, logs };
+  }
+
+  /** Tick every TICK s from T0 + 5 to the floor (+ one hold); per tick: whether the order was evaluated, and the outcome. */
+  async function drive(e: Engine, book: unknown[], stop = (r: Awaited<ReturnType<Engine["tick"]>>) => !!r.sent) {
+    const evals: Array<{ t: number; reason?: string; recheckAt?: number; sent: boolean }> = [];
+    for (let t = T0 + 5; t <= T0 + 95; t += TICK) {
+      at(t);
+      const r = await e.tick({ fetchEntries: async () => book as never, rebalance: false });
+      if (r.evaluated) evals.push({ t: t - T0, reason: r.outcomes[0]?.reason, recheckAt: r.outcomes[0]?.recheckAt, sent: !!r.sent });
+      if (stop(r)) break;
+    }
+    return evals;
+  }
+
+  /** The route gate's threshold, from its own refusal: quote − haircut − gas − profit. */
+  const threshold = (reason: string) => {
+    const m = /= (\d+) < owed \d+ \+ gas (\d+) \+ profit (\d+)/.exec(reason)!;
+    return BigInt(m[1]!) - BigInt(m[2]!) - BigInt(m[3]!);
+  };
+  const firstTickAtOrAfter = (s: number) => Math.ceil((s - 5) / TICK) * TICK + 5;
+
+  it("route, SELL (decaying output): first look beyond one hold → capped; then re-quoted at the predicted second, filled mid-auction", async () => {
+    const { w, chain } = world();
+    const o = { ...order(), timing, legsOut: [{ token: ROOTSTOCK.usdt0, start: 1_005_000_000n, end: 995_000_000n, recipient: zeroAddress }] } as Order;
+    w.owedAt = () => currentAmountOutAt(o, 0, nowS());
+    w.bumpAt = () => bumpBps(o, nowS());
+    const { e } = await engineFor(chain);
+    const evals = await drive(e, [entry("01", o)]);
+    const thr = threshold(evals[0]!.reason!);
+    let tStar = T0;
+    while (currentAmountOutAt(o, 0, BigInt(tStar)) > thr) tStar++;
+    const rel = tStar - T0;
+    expect(rel).toBeGreaterThan(35); // not visible from the first look (t+5, horizon 30 s)
+    expect(rel).toBeLessThan(60); // but well before the floor
+    // t+5: no prediction inside the horizon → the 30 s cap; t+35: predicted tStar; sent at the first tick ≥ tStar.
+    expect(evals.map((x) => x.t)).toEqual([5, 35, firstTickAtOrAfter(rel)]);
+    expect(evals[0]!.recheckAt).toBeUndefined();
+    expect(evals[1]!.recheckAt).toBe(tStar * 1000);
+    expect(evals[2]!.sent).toBe(true);
+    expect(firstTickAtOrAfter(rel)).toBeLessThan(60); // the old fixed hold re-quoted at t+65, after the floor
+  });
+
+  it("route, BUY (rising input): re-quoted at the predicted second, the quote scaled with the input", async () => {
+    const { w, chain } = world();
+    const o = {
+      ...order(), side: OrderSide.BUY, timing,
+      legsIn: [{ token: ROOTSTOCK.wrbtc, start: 9_900_000_000_000_000n, end: 10_100_000_000_000_000n }],
+      legsOut: [{ token: ROOTSTOCK.usdt0, start: 995_000_000n, end: 0n, recipient: zeroAddress }],
+    } as Order;
+    w.owed = 995_000_000n;
+    w.receivedAt = () => currentAmountInAt(o, 0, nowS());
+    w.bumpAt = () => bumpBps(o, nowS());
+    const { e } = await engineFor(chain);
+    const evals = await drive(e, [entry("01", o, 995_000_000n)]);
+    // The fake pool is linear (1 WRBTC = 100,000 USDT0): quote(received) = received · 1e11 / 1e18 · 1e6.
+    const m = /quote (\d+) −(\d+)bps = \d+ < owed (\d+) \+ gas (\d+) \+ profit (\d+)/.exec(evals[0]!.reason!)!;
+    const [hBps, owed, gas, profit] = [BigInt(m[2]!), BigInt(m[3]!), BigInt(m[4]!), BigInt(m[5]!)];
+    const passes = (t: number) => {
+      const q = (currentAmountInAt(o, 0, BigInt(t)) * 100_000n * 10n ** 6n) / 10n ** 18n;
+      return (q * (10_000n - hBps)) / 10_000n >= owed + gas + profit;
+    };
+    let tStar = T0;
+    while (!passes(tStar)) tStar++;
+    const rel = tStar - T0;
+    expect(rel).toBeGreaterThan(5);
+    expect(rel).toBeLessThan(35); // inside the first look's horizon
+    expect(evals[0]!.recheckAt).toBe(tStar * 1000);
+    expect(evals.map((x) => x.t)).toEqual([5, firstTickAtOrAfter(rel)]);
+    expect(evals[1]!.sent).toBe(true);
+  });
+
+  it("route: unprofitable only at the MEASURED gas is a resting verdict with a prediction — no backoff strike", async () => {
+    const { w, chain } = world();
+    const o = { ...order(), timing, legsOut: [{ token: ROOTSTOCK.usdt0, start: 1_005_000_000n, end: 995_000_000n, recipient: zeroAddress }] } as Order;
+    w.owedAt = () => currentAmountOutAt(o, 0, nowS());
+    w.bumpAt = () => bumpBps(o, nowS());
+    w.gasUsed = 1_200_000n; // the simulation burns far more than ROUTE_GAS_ESTIMATE
+    const { e } = await engineFor(chain, { MAX_ROUTE_GAS: "3000000" });
+    at(T0 + 50); // the estimate-gas gate passes here; the measured one does not yet
+    const r = await e.tick({ fetchEntries: async () => [entry("01", o)] as never, rebalance: false });
+    const out = r.outcomes[0]!;
+    expect(out).toMatchObject({ status: "skipped", rest: true, reason: expect.stringMatching(/unprofitable.*simulated gas 1200000/) });
+    expect(e.guard.admit(entry("01").orderHash, "route", Date.now())).toBeUndefined(); // no strategy backoff
+    expect(out.recheckAt).toBeGreaterThan((T0 + 50) * 1000);
+    expect(out.recheckAt).toBeLessThanOrEqual((T0 + 60) * 1000); // at worst the floor
+  });
+
+  const INV = { INVENTORY_ENABLED: "1", ROUTE_ENABLED: "0" };
+
+  it("inventory, SELL order (our USDT0 payment decays): re-quoted when the price gate is predicted to pass", async () => {
+    const { w, chain } = world();
+    w.usdt0 = 10n ** 12n;
+    const received = 100n * 10n ** 18n;
+    const o = {
+      ...order(), timing,
+      legsIn: [{ token: ROOTSTOCK.usdrif, start: received, end: 0n }],
+      legsOut: [{ token: ROOTSTOCK.usdt0, start: 100_000_000n, end: 99_000_000n, recipient: zeroAddress }],
+    } as Order;
+    w.owedAt = () => currentAmountOutAt(o, 0, nowS());
+    w.receivedAt = () => received;
+    w.bumpAt = () => bumpBps(o, nowS());
+    const { e } = await engineFor(chain, INV);
+    const cfg = loadConfig({ ...ENV, ...INV });
+    let tStar = T0;
+    while (!priceOk("buyUsdrif", currentAmountOutAt(o, 0, BigInt(tStar)), received, cfg.policy).ok) tStar++;
+    const rel = tStar - T0;
+    expect(rel).toBeGreaterThan(5);
+    expect(rel).toBeLessThan(35);
+    const evals = await drive(e, [entry("01", o, received)], (r) => r.evaluated > 0 && !/above max/.test(r.outcomes[0]?.reason ?? ""));
+    expect(evals[0]).toMatchObject({ t: 5, reason: expect.stringMatching(/above max/), recheckAt: tStar * 1000 });
+    // The next evaluation is the first tick at/after tStar — and the price gate no longer refuses it.
+    expect(evals[1]!.t).toBe(firstTickAtOrAfter(rel));
+    expect(evals[1]!.reason ?? "").not.toMatch(/above max/);
+  });
+
+  it("inventory, BUY order (the USDRIF we receive rises): re-quoted when the price gate is predicted to pass", async () => {
+    const { w, chain } = world();
+    w.usdt0 = 10n ** 12n;
+    const pay = 100_000_000n;
+    const o = {
+      ...order(), side: OrderSide.BUY, timing,
+      legsIn: [{ token: ROOTSTOCK.usdrif, start: 100n * 10n ** 18n, end: 1015n * 10n ** 17n }],
+      legsOut: [{ token: ROOTSTOCK.usdt0, start: pay, end: 0n, recipient: zeroAddress }],
+    } as Order;
+    w.owedAt = () => pay;
+    w.receivedAt = () => currentAmountInAt(o, 0, nowS());
+    w.bumpAt = () => bumpBps(o, nowS());
+    const { e } = await engineFor(chain, INV);
+    const cfg = loadConfig({ ...ENV, ...INV });
+    let tStar = T0;
+    while (!priceOk("buyUsdrif", pay, currentAmountInAt(o, 0, BigInt(tStar)), cfg.policy).ok) tStar++;
+    const rel = tStar - T0;
+    expect(rel).toBeGreaterThan(5);
+    expect(rel).toBeLessThan(35);
+    const evals = await drive(e, [entry("01", o, pay)], (r) => r.evaluated > 0 && !/above max/.test(r.outcomes[0]?.reason ?? ""));
+    expect(evals[0]).toMatchObject({ t: 5, reason: expect.stringMatching(/above max/), recheckAt: tStar * 1000 });
+    expect(evals[1]!.t).toBe(firstTickAtOrAfter(rel));
+    expect(evals[1]!.reason ?? "").not.toMatch(/above max/);
+  });
+
+  it("a fixed-price order keeps its resting cadence (no prediction)", async () => {
+    const { w, chain } = world();
+    w.owed = 5_000_000_000n;
+    const { e } = await engineFor(chain);
+    at(T0);
+    const r = await e.tick({ fetchEntries: async () => [entry("01")] as never, rebalance: false });
+    expect(r.outcomes[0]).toMatchObject({ status: "skipped", rest: true });
+    expect(r.outcomes[0]!.recheckAt).toBeUndefined();
+    at(T0 + 290);
+    expect((await e.tick({ fetchEntries: async () => [entry("01")] as never, rebalance: false })).evaluated).toBe(0);
+  });
+
+  it("a preview that reverts AuctionNotStarted (the block lags the clock) is not a failure: no backoff", async () => {
+    const { w, chain } = world();
+    w.owedAt = () => {
+      throw Object.assign(new Error('The contract function "previewFill" reverted with the following signature:\n0xeffaea80'), { signature: "0xeffaea80" });
+    };
+    const { e } = await engineFor(chain);
+    at(T0);
+    const r = await e.tick({ fetchEntries: async () => [entry("01", { timing })] as never, rebalance: false });
+    expect(r.outcomes[0]).toMatchObject({ status: "skipped", reason: expect.stringMatching(/auction not started/) });
+    expect(e.guard.admit(entry("01").orderHash, "route", Date.now())).toBeUndefined();
+  });
+});
+
+describe("profitableAt", () => {
+  const T0 = 1_800_000_000n;
+  const sell = (over: Partial<Order> = {}) =>
+    ({ ...order(), timing: packTiming(Number(T0), 60, 0), legsOut: [{ token: ROOTSTOCK.usdt0, start: 1_060n * 10n ** 6n, end: 1_000n * 10n ** 6n, recipient: zeroAddress }], ...over }) as Order;
+  const base = (o: Order, now: bigint, passes: (p: bigint, r: bigint) => boolean) =>
+    profitableAt({ order: o, bumpNow: bumpBps(o, now), paid: currentAmountOutAt(o, 0, now), received: RECEIVED, nowS: now, horizonS: 30n, passes });
+
+  it("SELL: the first second the decaying payment is at most the threshold (1 USDT0 per second here)", () => {
+    // t+20: bump 3333 bps (floored, as on-chain) → 1040.002 USDT0 > 1040; t+21 → 1039.
+    expect(base(sell(), T0 + 5n, (p) => p <= 1_040n * 10n ** 6n)).toBe(T0 + 21n);
+    expect(base(sell(), T0 + 5n, (p) => p <= 1_065n * 10n ** 6n)).toBe(T0 + 5n); // already passes
+  });
+  it("scales a partial / premium-priced preview by the tick ratio, not the absolute leg", () => {
+    const o = sell();
+    const now = T0 + 10n;
+    const half = currentAmountOutAt(o, 0, now) / 2n;
+    const t = profitableAt({ order: o, bumpNow: bumpBps(o, now), paid: half, received: RECEIVED / 2n, nowS: now, horizonS: 30n, passes: (p) => p <= 520n * 10n ** 6n });
+    expect(t).toBe(T0 + 21n);
+  });
+  it("the floor inside the horizon is returned when the gate never passes; beyond it, undefined", () => {
+    expect(base(sell(), T0 + 40n, () => false)).toBe(T0 + 60n);
+    expect(base(sell(), T0 + 5n, () => false)).toBeUndefined();
+  });
+  it("orders the clock alone cannot price: undefined", () => {
+    const pass = () => true;
+    expect(base(sell({ timing: 0n }), T0, pass)).toBeUndefined(); // no decay
+    expect(profitableAt({ order: sell({ gasBumpBps: 5n, gasPriceRef: 1n }), bumpNow: 0n, paid: 1n, received: 1n, nowS: T0, horizonS: 30n, passes: pass })).toBeUndefined();
+    expect(profitableAt({ order: sell({ priorityScale: 1n, timing: packTiming(Number(T0), 60, 0) | (1n << 103n) }), bumpNow: 0n, paid: 1n, received: 1n, nowS: T0, horizonS: 30n, passes: pass })).toBeUndefined();
   });
 });

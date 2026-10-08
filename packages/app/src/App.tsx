@@ -18,6 +18,8 @@ import { chainById, chainLabel } from "./config/chains";
 import { deploymentFor, exclusivityForMarket, solverForMarket } from "./config/deployments";
 import { marketById, pinnedToken, symbolsOn } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
+import { useMarketFloorInputs } from "./hooks/useMarketFloor";
+import { quoteUrl, useMarketQuote } from "./hooks/useMarketQuote";
 import { useFills, useRestingOrders } from "./hooks/useOrderbook";
 import { usePoolBook } from "./hooks/usePoolBook";
 import { useTheme } from "./hooks/useTheme";
@@ -27,7 +29,18 @@ import { fmtAmt, fmtPrice } from "./lib/format";
 import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/ladder";
 import { readMinValidNonce, type Reader } from "./lib/chain";
 import { hasLeftover, planFunding, type FundingStep } from "./lib/funding";
-import { buildOrder } from "./lib/order";
+import { buildOrder, inputWei } from "./lib/order";
+import {
+  defaultSlippageBps,
+  quoteDelivery,
+  quotedTerms,
+  quotesSupported,
+  quoteView,
+  slippageBpsFor,
+  type FillerQuote,
+  type QuoteRequest,
+  type SlippageSetting,
+} from "./lib/quote";
 import { MARKET_SLIPPAGE_BPS, planTicket, requiredInputWei, sliceCap, type TicketPlan } from "./lib/plan";
 import type { RestingOrder, Side, SliceSpec } from "./lib/types";
 import { useAllowance } from "./wallet/useAllowance";
@@ -36,6 +49,9 @@ import { useSigner } from "./wallet/useSigner";
 import { useWallet } from "./wallet/useWallet";
 
 const DAY_MS = 24 * 3600_000;
+
+/** Where market tickets ask the filler for an indicative quote (lib/quote.ts); null = never (mock book). */
+const QUOTE_URL = quoteUrl(import.meta.env.VITE_QUOTE_URL, BOOK_IS_REMOTE);
 
 /** Past this the pool ladder is old enough to say so rather than imply it is live. */
 const STALE_MS = 30_000;
@@ -161,8 +177,54 @@ export default function App() {
 
   const payMeta = tokens.view(ticket.payToken);
 
-  const plan: TicketPlan | null = useMemo(
-    () =>
+  // A market ticket's floor is sized for the filler's gas: live gas price (wallet
+  // provider), RBTC priced off the WRBTC/USD0 mid, haircut + fill gas mirroring the
+  // filler (lib/marketFloor.ts). Small tickets carry a higher floor, shown before signing.
+  const floorInputs = useMarketFloorInputs({
+    provider: wallet.provider,
+    chainId,
+    onChain,
+    marketId: ticket.marketId,
+    side: ticket.side,
+    deployment,
+    mid: pool.book?.mid ?? null,
+  });
+
+  // MARKET tickets are priced by the FILLER's indicative quote (lib/quote.ts): the order
+  // starts at what the filler would deliver now (route output − gas − its gas margin)
+  // and decays to the maker's slippage protection. No quote (mock book, no filler on the
+  // chain, endpoint down) → the gas-sized floor above, unchanged.
+  const [slippage, setSlippage] = useState<SlippageSetting>({ mode: "auto" });
+  const autoSlippageBps = defaultSlippageBps(chainId, ticket.market.base, ticket.market.quote);
+  const slippageBps = slippageBpsFor(slippage, autoSlippageBps);
+  const payPinned = pinnedToken(chainId, ticket.payToken);
+  const recvPinned = pinnedToken(chainId, ticket.recvToken);
+  const quoteReq: QuoteRequest | null = useMemo(() => {
+    if (ticket.mode !== "market" || !deployment || !quotesSupported(chainId) || ticket.amount <= 0 || !payPinned || !recvPinned) return null;
+    // The exact input the order will commit: the typed amount, capped at the balance.
+    const amountIn = inputWei(ticket.amount, payPinned.decimals, balanceWei(ticket.payToken));
+    if (amountIn === 0n) return null;
+    return {
+      chainId,
+      marketId: ticket.marketId,
+      side: ticket.side,
+      tokenIn: payPinned.address,
+      tokenOut: recvPinned.address,
+      amountIn,
+      delivery: quoteDelivery(deployment, ticket.marketId),
+      ...(wallet.address ? { maker: wallet.address } : {}),
+    };
+  }, [ticket.mode, ticket.amount, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, balanceWei, wallet.address]);
+  const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
+  const termsOf = useCallback(
+    (fq: FillerQuote | null) =>
+      fq && payPinned && recvPinned ? quotedTerms(fq, { payDecimals: payPinned.decimals, recvDecimals: recvPinned.decimals, slippageBps }) : undefined,
+    [payPinned, recvPinned, slippageBps],
+  );
+  const terms = useMemo(() => termsOf(marketQuote.quote), [termsOf, marketQuote.quote]);
+
+  const planWith = useCallback(
+    (quoted: ReturnType<typeof termsOf>) =>
       q && pool.book
         ? planTicket({
             q,
@@ -173,10 +235,15 @@ export default function App() {
             limit: ticket.limit,
             slices: ticket.slices,
             everyMin: ticket.everyMin,
+            floor: floorInputs,
+            quoted,
           })
         : null,
-    [q, pool.book, ticket.amount, ticket.everyMin, ticket.limit, ticket.mode, ticket.side, ticket.slices],
+    [q, pool.book, ticket.amount, ticket.everyMin, ticket.limit, ticket.mode, ticket.side, ticket.slices, floorInputs],
   );
+  const plan: TicketPlan | null = useMemo(() => planWith(terms), [planWith, terms]);
+  const rfq = plan?.kind === "market" && plan.quoted && marketQuote.quote && recvPinned ? quoteView(marketQuote.quote, plan.quoted, recvPinned.decimals) : null;
+  const quoteStatus: "quoted" | "loading" | "fallback" | "off" = !quoteReq ? "off" : rfq ? "quoted" : marketQuote.loading ? "loading" : "fallback";
 
   const payWei = balanceWei(ticket.payToken);
 
@@ -301,11 +368,22 @@ export default function App() {
     [balanceWei, chainId, deployment, signer, wallet.address, wallet.provider],
   );
 
+  const planNow = plan;
   const sign = useCallback(async () => {
-    if (!q || !plan) return;
+    if (!q || !planNow) return;
     setSigning(true);
     try {
       const { marketId, side, payToken, recvToken, amount } = ticket;
+      // A quoted market ticket re-quotes right before the wallet prompt, so the order
+      // starts at a price at most one request old; a failed re-quote signs the
+      // gas-floor fallback rather than a stale quote.
+      let plan = planNow;
+      let quoted = false;
+      if (plan.kind === "market" && quoteReq) {
+        const fresh = await marketQuote.refresh();
+        plan = planWith(termsOf(fresh)) ?? plan;
+        quoted = !!plan.quoted;
+      }
       const undeployed = deployment === null ? " · domain not deployed" : "";
       const spec: SliceSpec = {
         amountIn: plan.amountIn,
@@ -384,13 +462,17 @@ export default function App() {
 
       setReceipt({
         hash,
-        headline: `${fmtAmt(plan.amountIn)} ${payToken} → at least ${fmtAmt(plan.minOut)} ${recvToken}`,
+        headline: quoted
+          ? `${fmtAmt(plan.amountIn)} ${payToken} → ≈ ${fmtAmt(plan.targetOut)} ${recvToken} (at least ${fmtAmt(plan.minOut)})`
+          : `${fmtAmt(plan.amountIn)} ${payToken} → at least ${fmtAmt(plan.minOut)} ${recvToken}`,
         detail: q.resting
           ? `${restingLabel(q.resting).toLowerCase()} at ${fmtPrice(q.resting.price, tick)}`
           : undefined,
         note: `${
           BOOK_IS_REMOTE
-            ? "signed · posted to the orderbook · awaiting a filler — fills appear when they settle on-chain"
+            ? quoted
+              ? "signed at the filler's quote · posted to the orderbook — it fills at the quote within a block or two, down to your minimum if the price moves; not filled after ~2 blocks? cancel and re-quote"
+              : "signed · posted to the orderbook · awaiting a filler — fills appear when they settle on-chain"
             : plan.kind === "limit"
               ? "signed · resting in the simulated book"
               : "signed · settlement simulated — nothing was broadcast"
@@ -406,7 +488,7 @@ export default function App() {
     } finally {
       setSigning(false);
     }
-  }, [allowanceState, deployment, plan, q, signDraft, tick, ticket]);
+  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf]);
 
   const [orderError, setOrderError] = useState<string | null>(null);
 
@@ -557,6 +639,11 @@ export default function App() {
             allowance={allowance}
             maxAmount={maxAmount}
             overBalance={overBalance}
+            floor={plan?.kind === "market" && plan.floor ? { ...plan.floor, minOut: plan.minOut, targetOut: plan.targetOut } : null}
+            rfq={rfq}
+            quoteStatus={quoteStatus}
+            quoteError={marketQuote.error}
+            slippage={{ setting: slippage, bps: slippageBps, autoBps: autoSlippageBps, set: setSlippage }}
             recvAddress={tokens.view(ticket.recvToken).address ?? null}
             signError={signError}
             domain={{

@@ -67,6 +67,12 @@ import { getAddress, isAddress, zeroAddress, type Address } from "viem";
  * so the callback runner must be the maker's choice), so there is no window to open
  * and no outsider to charge. That is the trade: direct saves the solver ~35k gas per
  * fill; pull + window lets anyone fill after ~2 blocks.
+ *
+ * FILL GAS (optional, `"fillGas": {"direct": 352000, "pull": 370000}`): the gas one
+ * filler fill is priced at, which sizes the market floor of small tickets
+ * (lib/marketFloor.ts). Defaults = `DEFAULT_FILL_GAS`: what the filler PRICES a fill at
+ * before it has learned a receipt ratio (`eth_estimateGas` × 0.88). Each key optional,
+ * an integer in [21 000, 2 000 000]; anything else drops the deployment.
  */
 export interface DeploymentConfig extends Deployment {
   /** Read-only companion — `getOrderRelevantStates` is the orderbook's Layer 2. */
@@ -90,6 +96,55 @@ export interface DeploymentConfig extends Deployment {
   pullExclusivity: ExclusivityWindow;
   /** Per-market windows, fully resolved against {@link pullExclusivity}. Empty when none. */
   marketExclusivity: Record<string, ExclusivityWindow>;
+  /** Net gas per filler fill, by delivery — sizes small tickets' market floor. Defaults when absent. */
+  fillGas?: FillGas;
+}
+
+/** Net gas of one filler fill, per delivery (lib/marketFloor.ts). */
+export interface FillGas {
+  direct: number;
+  pull: number;
+}
+
+/**
+ * The beta filler's `eth_estimateGas` for one fill, per delivery: the top of the
+ * production e2e range (2026-10-07: direct 363k–385k, pull 386k–404k), rounded up.
+ */
+export const FILLER_FILL_GAS_ESTIMATE: Readonly<FillGas> = Object.freeze({ direct: 400_000, pull: 420_000 });
+/**
+ * The filler's receipt/estimate gas ratio before it has learned one, ppm — MUST equal
+ * `DEFAULT_GAS_RECEIPT_RATIO` in packages/filler-worker/wrangler.toml (and the
+ * beta-filler config default); pinned by test/crossComponent.audit.test.ts (APP-FLOOR-2).
+ * The filler prices a fill at estimate × r, r = max(receipt / estimate) over its last
+ * 20 receipts of that shape, clamped to [0.6, 1.0] (packages/beta-filler gasRatio.ts).
+ */
+export const FILLER_DEFAULT_GAS_RECEIPT_RATIO_PPM = 880_000;
+
+/** ⌈estimate × ratio⌉, rounded up to a thousand gas (integer arithmetic, no float noise). */
+const pricedFillGas = (estimate: number) => Math.ceil((estimate * FILLER_DEFAULT_GAS_RECEIPT_RATIO_PPM) / 1_000_000 / 1_000) * 1_000;
+
+/**
+ * The gas the filler PRICES a fill at before it has any receipt: its estimate × the
+ * default ratio — direct 400k × 0.88 = 352k, pull 420k × 0.88 = 369.6k → 370k.
+ * Conservative by construction: the filler's LEARNED ratio only goes lower (receipts
+ * run 0.845–0.877 of the estimate on a fresh solver, less once the solver's floors
+ * are seeded), so it prices a fill at or below this and fills before the auction
+ * reaches the floor. Re-exported by lib/marketFloor.ts.
+ */
+export const DEFAULT_FILL_GAS: Readonly<FillGas> = Object.freeze({
+  direct: pricedFillGas(FILLER_FILL_GAS_ESTIMATE.direct),
+  pull: pricedFillGas(FILLER_FILL_GAS_ESTIMATE.pull),
+});
+
+function parseFillGas(v: unknown): FillGas | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  if (Object.keys(o).some((k) => k !== "direct" && k !== "pull")) return null;
+  const int = (x: unknown, dflt: number): number | null =>
+    x === undefined ? dflt : typeof x === "number" && Number.isSafeInteger(x) && x >= 21_000 && x <= 2_000_000 ? x : null;
+  const direct = int(o.direct, DEFAULT_FILL_GAS.direct);
+  const pull = int(o.pull, DEFAULT_FILL_GAS.pull);
+  return direct === null || pull === null ? null : { direct, pull };
 }
 
 /** A pull market's soft exclusivity window, as configured. */
@@ -136,7 +191,7 @@ export const PULL_MODE = "pull";
 
 type RawDeployments = Record<
   string,
-  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers" | "pullExclusivity" | "marketExclusivity", unknown>>
+  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers" | "pullExclusivity" | "marketExclusivity" | "fillGas", unknown>>
 >;
 
 /**
@@ -223,7 +278,12 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       console.warn(`VITE_DEPLOYMENTS[${key}] has an invalid pullExclusivity / marketExclusivity — treating chain ${key} as not deployed`);
       continue;
     }
-    out[chainId] = { chainId, settlement, permit3, lens, solver, marketSolvers, pullExclusivity, marketExclusivity };
+    const fillGas = entry.fillGas === undefined ? { ...DEFAULT_FILL_GAS } : parseFillGas(entry.fillGas);
+    if (!fillGas) {
+      console.warn(`VITE_DEPLOYMENTS[${key}].fillGas is invalid — treating chain ${key} as not deployed`);
+      continue;
+    }
+    out[chainId] = { chainId, settlement, permit3, lens, solver, marketSolvers, pullExclusivity, marketExclusivity, fillGas };
   }
   return out;
 }

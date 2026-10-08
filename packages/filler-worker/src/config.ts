@@ -15,6 +15,8 @@ export interface Env {
   ADMIN_TOKEN?: string;
   ALERT_WEBHOOK_URL?: string;
   ORDERBOOK_BINDING_KEY?: string;
+  /** Secret shared with the app's Pages worker: lets it name the visitor's IP on `POST /quote` (src/clientIp.ts). */
+  QUOTE_BINDING_KEY?: string;
   RPC_URL?: string;
   RPC_URL_SECRET?: string;
   DO_LOCATION_HINT?: string;
@@ -41,6 +43,8 @@ export interface WorkerConfig {
   orderbookClientIp: string;
   /** How often the monitor reads the orderbook's /health (its alarm loop and log scan), ms. */
   bookHealthMs: number;
+  /** The public `POST /quote` limits (per visitor IP and for everyone together). */
+  quote: { ip: { capacity: number; refillPerSecond: number }; global: { capacity: number; refillPerSecond: number } };
   alerts: AlertConfig;
 }
 
@@ -105,6 +109,10 @@ export function loadWorkerConfig(env: Env): WorkerConfig {
     orderbookUrl: (v.ORDERBOOK_URL ?? "").replace(/\/+$/, ""),
     orderbookClientIp: v.ORDERBOOK_CLIENT_IP ?? "127.0.0.2",
     bookHealthMs: 1000 * num(v.BOOK_HEALTH_SECONDS, 300, "BOOK_HEALTH_SECONDS", 10),
+    quote: {
+      ip: { capacity: num(v.QUOTE_RATE_IP_CAPACITY, 30, "QUOTE_RATE_IP_CAPACITY", 1), refillPerSecond: num(v.QUOTE_RATE_IP_REFILL, 0.5, "QUOTE_RATE_IP_REFILL", 0) },
+      global: { capacity: num(v.QUOTE_RATE_GLOBAL_CAPACITY, 300, "QUOTE_RATE_GLOBAL_CAPACITY", 1), refillPerSecond: num(v.QUOTE_RATE_GLOBAL_REFILL, 5, "QUOTE_RATE_GLOBAL_REFILL", 0) },
+    },
     alerts: {
       ...(v.ALERT_WEBHOOK_URL ? { webhookUrl: v.ALERT_WEBHOOK_URL } : {}),
       format,

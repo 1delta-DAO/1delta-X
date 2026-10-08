@@ -194,8 +194,10 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
 
         aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
 
-        assertEq(tC.balanceOf(address(aggSolver)), 0, "no third-token input stranded on the solver");
-        assertEq(tC.balanceOf(address(this)), extra, "it reached the filler as residue");
+        // Only the self-seeded 1-wei floor stays (a zero snapshot), out of the
+        // filler's residue — deliberate, not stranded.
+        assertEq(tC.balanceOf(address(aggSolver)), 1, "no third-token input stranded on the solver");
+        assertEq(tC.balanceOf(address(this)), extra - 1, "it reached the filler as residue");
     }
 
     // ═══════════════════════════ AGG-6 ═══════════════════════════
@@ -231,8 +233,8 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
 
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "leg 0 delivered");
         assertEq(tC.balanceOf(maker), 2e18, "leg 1 (second token) delivered");
-        assertEq(tC.balanceOf(address(this)), 1e18, "second-token surplus split to the filler");
-        assertEq(tC.balanceOf(address(s)), 0, "nothing left behind");
+        assertEq(tC.balanceOf(address(this)), 1e18 - 1, "second-token surplus split to the filler");
+        assertEq(tC.balanceOf(address(s)), 1, "nothing left behind but the 1-wei floor");
         assertEq(tC.allowance(address(s), address(settlement)), 0, "no approval outlived the fill");
     }
 
@@ -359,7 +361,7 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
         s.executeFill(o, sig, AMOUNT_IN, p, "");
 
         assertFalse(hook.reentrySucceeded(), "no nested fill during the split");
-        assertEq(hook.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "the outer split still paid the filler");
+        assertEq(hook.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "the outer split still paid the filler");
         assertEq(tB.balanceOf(maker), 0, "the nested order was not filled");
     }
 
@@ -372,8 +374,8 @@ contract AggregatorAudit20260930Test is AggregatorFillSolverTest {
         uint256 makerBefore = tA.balanceOf(maker);
         aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
         assertEq(makerBefore - tA.balanceOf(maker), AMOUNT_IN - AMOUNT_OUT, "maker paid in, got out, in one token");
-        assertEq(tA.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "spread to the filler once");
-        assertEq(tA.balanceOf(address(aggSolver)), 0, "nothing left behind");
+        assertEq(tA.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "spread to the filler once");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "nothing left behind but the 1-wei floor");
     }
 
     // ═══════════════════════════ AGG-7 ═══════════════════════════

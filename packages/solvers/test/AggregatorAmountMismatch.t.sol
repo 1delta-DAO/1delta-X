@@ -68,9 +68,13 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         assertTrue(ok, string(ret));
         assertEq(tA.balanceOf(ORIGINATOR), FEE, "fee paid from the kept-back input");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT);
-        assertEq(tA.balanceOf(address(router)), AMOUNT_IN - FEE, "route sold input - fee");
-        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - FEE - AMOUNT_OUT, "spread");
-        assertEq(tA.balanceOf(address(aggSolver)), 0);
+        // First fill on a zero balance: the patched route is one wei short (the
+        // self-seeded tA floor, AFTER the kept-back fee), and the tB split keeps a
+        // 1-wei floor too — both out of the filler's spread, never the fee or maker.
+        assertEq(tA.balanceOf(address(router)), AMOUNT_IN - FEE - 1, "route sold input - fee - the floor");
+        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - FEE - AMOUNT_OUT - 2, "spread, less both floors");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "the 1-wei tA floor");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "the 1-wei tB floor");
     }
 
     /// S1 / pull path, unpatched at `received − fee`: the fee is paid from the
@@ -81,8 +85,10 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         assertTrue(ok, string(ret));
         assertEq(tA.balanceOf(ORIGINATOR), FEE, "fee paid from the unrouted residue");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT);
+        // NO_PATCH: the route pulls its quoted figure, so no input wei is withheld
+        // (it would fail that pull); only the tB split seeds its floor.
         assertEq(tA.balanceOf(address(router)), AMOUNT_IN - FEE, "route sold input - fee");
-        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - FEE - AMOUNT_OUT, "spread");
+        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - FEE - AMOUNT_OUT - 1, "spread, less the tB floor");
         assertEq(tA.balanceOf(address(aggSolver)), 0);
     }
 
@@ -94,10 +100,13 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         assertTrue(ok, string(ret));
         assertEq(tA.balanceOf(ORIGINATOR), FEE, "fee delivered from the pool");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT);
-        assertEq(tA.balanceOf(address(router)), AMOUNT_IN - FEE, "route sold input - fee");
-        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - FEE - AMOUNT_OUT, "spread");
+        // The netted path seeds exactly like the pull path: a patched route one wei
+        // short of the PRESEND, and the tB floor out of the swept spread.
+        assertEq(tA.balanceOf(address(router)), AMOUNT_IN - FEE - 1, "route sold input - fee - the floor");
+        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - FEE - AMOUNT_OUT - 2, "spread, less both floors");
         assertEq(tA.balanceOf(address(settlement)), 0, "pool flat");
-        assertEq(tA.balanceOf(address(aggSolver)), 0);
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "the 1-wei tA floor");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "the 1-wei tB floor");
     }
 
     // ───────────── S3: minOut / maxPay keyed to the wrong token ─────────────
@@ -185,8 +194,8 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         (ok, ret) = _pull(o, _planFor(AMOUNT_IN, address(aggSolver), 96e18, NO_PATCH));
         assertTrue(ok, string(ret));
         assertEq(tB.balanceOf(maker), makerB - extraIn + AMOUNT_OUT, "paid the tB leg, received the output");
-        assertEq(tB.balanceOf(address(this)), 96e18 + extraIn - AMOUNT_OUT);
-        assertEq(tB.balanceOf(address(aggSolver)), 0);
+        assertEq(tB.balanceOf(address(this)), 96e18 + extraIn - AMOUNT_OUT - 1, "less the 1-wei tB floor");
+        assertEq(tB.balanceOf(address(aggSolver)), 1);
     }
 
     /// S3(iii): `maxPay` is per TOKEN — two tB legs (maker 90 + fee 2) need `maxPay ≥ 92`.
@@ -240,11 +249,11 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         (bool ok, bytes memory ret) = _netted(o, _planFor(1, address(aggSolver), AMOUNT_OUT, AMOUNT_WORD));
         assertTrue(ok, string(ret));
         assertEq(tA.balanceOf(maker), makerA + EXTRA, "maker refunded the over-production");
-        assertEq(tA.balanceOf(address(router)), AMOUNT_IN, "the route swapped exactly owed");
+        assertEq(tA.balanceOf(address(router)), AMOUNT_IN - 1, "the route swapped exactly owed, less the floor");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
         assertEq(tA.balanceOf(address(settlement)), 0, "pool flat");
-        assertEq(tA.balanceOf(address(aggSolver)), 0, "no input residue on the solver");
-        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "spread to the caller");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "no input residue on the solver but the floor");
+        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 2, "spread to the caller, less both floors");
     }
 
     /// S2 / schedule: a TAKE that produces the INPUT-LEG token flagged LATE fills —
@@ -279,7 +288,7 @@ contract AggregatorAmountMismatchTest is AggregatorItemFillTest {
         assertTrue(ok, string(ret));
         assertEq(tA.balanceOf(maker), makerA, "wallet net zero: pulled 100, refunded 100");
         assertEq(tA.balanceOf(address(taker)), 1_000e18 - AMOUNT_IN, "the position still funded the fill");
-        assertEq(tA.balanceOf(address(router)), AMOUNT_IN, "routed once");
+        assertEq(tA.balanceOf(address(router)), AMOUNT_IN - 1, "routed once (less the self-seeded floor)");
         (uint160 allowAfter,) = permit3.tokenAllowance(maker, address(settlement), address(tA));
         assertEq(allowAfter, 0, "the token allowance is gone although the wallet paid nothing");
     }

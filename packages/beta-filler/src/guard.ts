@@ -2,6 +2,7 @@ import { keccak256, TransactionNotFoundError, type Address, type Hex } from "vie
 
 import type { Chain } from "./chain";
 import type { GasPolicy } from "./config";
+import type { GasMeter } from "./gasRatio";
 import { Budget } from "./policy";
 import { sanitize } from "./sanitize";
 import type { SpendEntry } from "./state";
@@ -135,6 +136,8 @@ export interface PendingTx {
   timedOut?: boolean;
   /** A strategy-budget reservation made at send time (released on a timely revert). */
   reserved?: { budget: string; token: string; amount: string };
+  /** Fills: the shape and `eth_estimateGas` at send, learned from once the receipt is read (gasRatio.ts). */
+  gasMeter?: GasMeter;
   info?: TxInfo;
 }
 
@@ -378,6 +381,8 @@ export interface SendRequest {
   expiry?: bigint;
   /** Reserve `amount` of `token` on the registered budget `budget` until the receipt. */
   reserve?: { budget: string; token: Address; amount: bigint };
+  /** Fills: learn this shape's receipt/estimate ratio from the receipt (see {@link PendingTx.gasMeter}). */
+  gasMeter?: GasMeter;
   info?: TxInfo;
 }
 
@@ -450,6 +455,7 @@ export async function broadcast(chain: Chain, guard: Guard, a: SendRequest, now:
     expiry: (a.expiry ?? 0n).toString(),
     sentAt: now,
     ...(a.reserve ? { reserved: { budget: a.reserve.budget, token: a.reserve.token.toLowerCase(), amount: a.reserve.amount.toString() } } : {}),
+    ...(a.gasMeter ? { gasMeter: a.gasMeter } : {}),
     ...(a.info ? { info: a.info } : {}),
   };
   guard.chargeGas(cost, now, hash);
@@ -490,7 +496,9 @@ export const GAS_LIMIT_PCT = 125n;
 
 /**
  * Estimate (which also simulates — a reverting call throws) and {@link broadcast}
- * a fixed-shape call at the current gas price with limit = estimate × 1.25.
+ * a fixed-shape call at the send gas price (`chain.pub.getGasPrice()`, which the
+ * engine answers with the block-minimum price — chain.ts `withSendGasPrice`) with
+ * limit = estimate × 1.25.
  */
 export async function estimateAndBroadcast(
   chain: Chain,

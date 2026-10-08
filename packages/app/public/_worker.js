@@ -8,8 +8,10 @@
  * `/api/oku/*` just falls through to the SPA handler, GET returns index.html and
  * POST returns 405, which is exactly the symptom this replaced.
  *
- * It proxies two things: Oku, and the orderbook under `/api/book/*` (an
- * `ORDERBOOK` service binding, else `ORDERBOOK_ORIGIN`) — see {@link proxyBook}.
+ * It proxies three things: Oku, the orderbook under `/api/book/*` (an
+ * `ORDERBOOK` service binding, else `ORDERBOOK_ORIGIN`) — see {@link proxyBook} —
+ * and the filler's indicative quote at `/api/quote` (a `FILLER` service binding,
+ * else `FILLER_ORIGIN`) — see {@link proxyQuote}.
  *
  * Oku: Oku allow-lists CORS origins — `localhost:*` and
  * `oku.trade` get an `access-control-allow-origin` header, every other origin
@@ -231,6 +233,65 @@ function bookJson(body, status, extra = {}) {
   );
 }
 
+/**
+ * Same-origin proxy to the FILLER's public indicative quote (`POST /api/quote` →
+ * the filler Worker's `POST /quote`, packages/beta-filler src/quote.ts) — what market
+ * tickets start their Dutch order at (src/lib/quote.ts).
+ *
+ * Upstreams, in order: `env.FILLER` — a SERVICE BINDING to `filler-1delta-rsk` — else
+ * `env.FILLER_ORIGIN` (its HTTPS origin); neither → `503 quote service not configured`
+ * and the app falls back to its gas-floor market order. Exactly one route, POST only,
+ * JSON only, body ≤ 2 KiB; only `content-type` / `accept` are forwarded.
+ *
+ * CLIENT IP, as for the book: the visitor's edge-set `cf-connecting-ip` goes into
+ * `x-filler-client-ip`, with `x-filler-binding-key: env.FILLER_BINDING_KEY`; the filler
+ * honours the claimed address only when that key equals its `QUOTE_BINDING_KEY`
+ * secret, so its per-IP rate limit bills the visitor, never this worker.
+ */
+const QUOTE_PATH = "/api/quote";
+const QUOTE_MAX_BODY_BYTES = 2048;
+const FILLER_BINDING_BASE = "https://filler.binding";
+
+async function proxyQuote(request, env, url) {
+  if (url.pathname !== QUOTE_PATH) return bookJson({ error: "unsupported path" }, 400);
+  if (request.method !== "POST") return bookJson({ error: "method not allowed" }, 405, { allow: "POST" });
+  const type = (request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (type !== "application/json") return bookJson({ error: "unsupported content type" }, 415);
+  if (Number(request.headers.get("content-length") ?? "0") > QUOTE_MAX_BODY_BYTES) return bookJson({ error: "body too large" }, 413);
+  const body = await readCapped(request, QUOTE_MAX_BODY_BYTES);
+  if (body === null) return bookJson({ error: "body too large" }, 413);
+
+  const binding = env?.FILLER && typeof env.FILLER.fetch === "function" ? env.FILLER : null;
+  let target = null;
+  if (binding) target = `${FILLER_BINDING_BASE}/quote`;
+  else {
+    const origin = typeof env?.FILLER_ORIGIN === "string" ? env.FILLER_ORIGIN.trim() : "";
+    try {
+      const base = origin ? new URL(origin) : null;
+      if (base && (base.protocol === "https:" || base.protocol === "http:")) target = `${base.origin}${base.pathname.replace(/\/+$/, "")}/quote`;
+    } catch {
+      target = null;
+    }
+  }
+  if (!target) return bookJson({ error: "quote service not configured" }, 503);
+
+  const headers = { "content-type": "application/json", accept: "application/json" };
+  const ip = request.headers.get("cf-connecting-ip");
+  if (ip) headers["x-filler-client-ip"] = ip;
+  const key = typeof env?.FILLER_BINDING_KEY === "string" ? env.FILLER_BINDING_KEY : "";
+  if (key) headers["x-filler-binding-key"] = key;
+  try {
+    const init = { method: "POST", headers, body, redirect: "manual" };
+    const upstream = binding ? await binding.fetch(new Request(target, init)) : await fetch(target, init);
+    const out = { "content-type": upstream.headers.get("content-type") ?? "application/json", "cache-control": "no-store" };
+    const retry = upstream.headers.get("retry-after");
+    if (retry) out["retry-after"] = retry;
+    return withSecurityHeaders(new Response(upstream.body, { status: upstream.status, headers: out }));
+  } catch {
+    return bookJson({ error: "quote service unreachable" }, 502);
+  }
+}
+
 /** Only Oku's own JSON-RPC shape, so this cannot be used as an open relay. */
 const ALLOWED_PATH = /^[a-z0-9-]+\/cush\/[a-zA-Z0-9_]+$/;
 
@@ -238,6 +299,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname.startsWith(BOOK_PREFIX) || url.pathname === "/api/book") return proxyBook(request, env, url);
+    if (url.pathname === QUOTE_PATH || url.pathname.startsWith(`${QUOTE_PATH}/`)) return proxyQuote(request, env, url);
     if (!url.pathname.startsWith(PROXY_PREFIX)) return withSecurityHeaders(await serveAsset(request, env));
 
     const path = url.pathname.slice(PROXY_PREFIX.length);

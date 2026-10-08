@@ -14,13 +14,17 @@ import { decodeErrorResult, erc20Abi, type Address, type Hex } from "viem";
 import { previewBump, previewFill, type Chain } from "./chain";
 import type { Config, RouteConfig, RoutePath } from "./config";
 import type { FillOutcome } from "./filler";
+import { gasShape, GasRatios } from "./gasRatio";
 import type { BookEntry } from "./intake";
 import { broadcast, Guard } from "./guard";
 import type { Budget, Verdict } from "./policy";
+import type { PricedCandidate, QuoteBook } from "./quote";
+import { isAuctionNotStarted, recheckAtMs, scaleUp } from "./recheck";
 import {
   buildRoutePlan,
   candidatePaths,
   classifyRoute,
+  grossUp,
   haircutBps,
   nativeToTokenAtQuote,
   nativeToUsdToken,
@@ -55,12 +59,12 @@ const NATIVE_REF = 10n ** 15n;
 const PRICE_TTL_MS = 60_000;
 /**
  * Headroom on the simulation's gas measurement for the gas LIMIT we send. The
- * economics (gate + the plan's on-chain floor) are priced at the measurement itself:
- * `estimateGas` is the GROSS gas a tx needs before refunds, already above what a
- * receipt charges (e2e 2026-10-06: estimates 363k–404k vs receipts 317k–341k), so
- * pricing the 1.25× limit overcharged every fill by ~40 %. The cost is a bounded
- * worst case: a tx that burns past its estimate loses at most
- * `(limit − estimate) × gasPrice` — cents on Rootstock.
+ * economics (gate + the plan's on-chain floor) are priced at the measurement × r:
+ * `estimateGas` is the GROSS gas a tx needs before refunds, above what a receipt
+ * charges (e2e 2026-10-06: estimates 363k–404k vs receipts 317k–341k), and r is the
+ * receipt/estimate ratio learned per fill shape from our own receipts (gasRatio.ts,
+ * 0.88 before any). The cost is a bounded worst case: a tx that burns past
+ * r × estimate loses at most `(receipt − r × estimate) × gasPrice` — cents on Rootstock.
  */
 const GAS_LIMIT_PCT = 125n;
 /** Re-price/re-simulate rounds before giving up on a gas figure that keeps growing. */
@@ -81,11 +85,12 @@ const ceilPct = (v: bigint, pct: bigint) => (v * pct + 99n) / 100n;
  * of each route's own gas → profitability gate at ROUTE_GAS_ESTIMATE (quote × (1 −
  * slippage) ≥ owed + grossUp(gas + min profit), gas in output units, grossed up
  * for the solver's maker/protocol surplus split) → build → eth_call executeFill
- * from the operator and decode → **re-price**: gas limit G = max(estimate,
- * simulated × 1.25) ≤ MAX_ROUTE_GAS; if G exceeds what the plan was priced at,
- * REBUILD the plan's floor (minOut / amountInMaximum) at G and RE-SIMULATE → send
- * with gas limit exactly G. So the on-chain floor always covers the gas the tx may
- * burn, never a guess.
+ * from the operator and decode → **re-price**: priced gas P = max(estimate,
+ * simulated) × r (r = the learned receipt/estimate ratio of the fill's shape,
+ * gasRatio.ts); if P exceeds what the plan was priced at, REBUILD the plan's floor
+ * (minOut / amountInMaximum) at P and RE-SIMULATE → send with gas limit
+ * G = max(P, simulated × 1.25) ≤ MAX_ROUTE_GAS. The gas price is the send price
+ * (latest block minimumGasPrice × GAS_PRICE_MIN_MULT_BPS, chain.ts).
  */
 export class RouteFiller {
   private readonly rc: RouteConfig;
@@ -105,6 +110,9 @@ export class RouteFiller {
     private readonly log: (m: string) => void,
     private readonly onSpend: () => void = () => {},
     readonly guard: Guard = new Guard(cfg.gas),
+    readonly gasRatios: GasRatios = new GasRatios(cfg.gas.defaultReceiptRatioPpm),
+    /** Quotes this filler issued (./quote.ts): an order signed from one is gated without the haircut. */
+    readonly quotes?: QuoteBook,
   ) {
     if (!cfg.route) throw new Error("RouteFiller: no route config (AGGREGATOR_SOLVER unset)");
     this.rc = cfg.route;
@@ -182,6 +190,9 @@ export class RouteFiller {
       await this.init();
       return await this.tryFill(orderHash, order, entry.announce.sig, fillable, cls.direct, cls.paths);
     } catch (e) {
+      // The latest block predates the auction's start (Rootstock's ~30 s blocks lag
+      // the wall clock the app stamped it with): not a failure — try the next tick.
+      if (isAuctionNotStarted(e)) return this.skip(orderHash, "auction not started at the latest block");
       // Nothing was sent (a sent tx is handled inside tryFill): short strategy-scoped backoff.
       this.guard.onSimFail(orderHash, "route", Date.now());
       const reason = sanitize(errorReason(e));
@@ -191,13 +202,13 @@ export class RouteFiller {
   }
 
   /** `rest`: a verdict about the order's terms against the market (see FillOutcome.rest), not our transient state. */
-  private skip(orderHash: Hex, reason: string, rest = false): FillOutcome {
+  private skip(orderHash: Hex, reason: string, rest = false, recheckAt?: number): FillOutcome {
     if (this.skipped.get(orderHash) !== reason) {
       if (this.skipped.size > 5_000) this.skipped.clear(); // a long-running host must not grow without bound
       this.skipped.set(orderHash, reason);
-      this.log(`· [route] skip ${orderHash}: ${reason}`);
+      this.log(`· [route] skip ${orderHash}: ${reason}${recheckAt !== undefined ? ` (re-quote at ${new Date(recheckAt).toISOString()})` : ""}`);
     }
-    return { orderHash, status: "skipped", reason, strategy: "route", ...(rest ? { rest: true } : {}) };
+    return { orderHash, status: "skipped", reason, strategy: "route", ...(rest ? { rest: true } : {}), ...(rest && recheckAt !== undefined ? { recheckAt } : {}) };
   }
 
   /** A pre-send refusal that would recur on every sweep: skip AND back off briefly. */
@@ -224,6 +235,9 @@ export class RouteFiller {
     //    step 3, once gas is priced in the output token): small tickets skip it.
     const nowSec = BigInt(Math.floor(now / 1000));
     const liveCandidate = patchesLiveOutput(order, direct, nowSec);
+    // Gas is PRICED at estimate × r, r learned per shape from our receipts (gasRatio.ts).
+    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, order.legsOut[0]!.token);
+    const pricedGas = (estimate: bigint) => this.gasRatios.priced(shape, estimate);
     const earlyGas = rc.gasEstimate + (liveCandidate ? TYPED_CALLBACK_GAS : 0n);
 
     // 0. Fills per hour, the gas-price ceiling, and a cheap early look at the shared
@@ -252,7 +266,13 @@ export class RouteFiller {
     //    only, at most SUSHI_MAX_PER_SWEEP API calls per sweep — a Sushi API route,
     //    decoded and validated against this fill.
     const tokenOut = order.legsOut[0]!.token;
-    const slippageBps = haircutBps(rc, order.legsIn[0]!.token, tokenOut);
+    // An order signed from a quote WE issued (matched by its terms, ./quote.ts) is gated
+    // WITHOUT the haircut: the quote already charged gas + its gas margin, and it would
+    // be refused for a cushion the quote never asked for. The plan's on-chain floor
+    // (minOut / amountInMaximum at owed + gas) still turns a move before inclusion into
+    // a revert, never a loss. Every other order keeps the haircut.
+    const quoted = this.quotes?.match(orderHash, order, now, cfg.quote.matchGraceSeconds);
+    const slippageBps = quoted ? 0n : haircutBps(rc, order.legsIn[0]!.token, tokenOut);
     const raw: Array<{ source: "oku"; path: RoutePath; out: bigint; gasUnits: bigint } | { source: "sushi"; quote: SushiQuote; out: bigint; gasUnits: bigint }> = [];
     // A quote we could not GET (an RPC failure, the Sushi per-sweep cap, an API error)
     // says nothing about the order: a skip then is not a resting verdict.
@@ -293,11 +313,11 @@ export class RouteFiller {
     const gasOutAt = (gasUnits: bigint) => this.nativeToToken(gasPrice * gasUnits, tokenOut);
     let liveOut = false;
     if (liveCandidate) {
-      const typedOut = await gasOutAt(TYPED_CALLBACK_GAS);
+      const typedOut = await gasOutAt(pricedGas(TYPED_CALLBACK_GAS));
       liveOut = typedOut !== undefined && liveDecayPerBlock(order, owed, nowSec) > typedOut;
     }
     const gasEstimate = rc.gasEstimate + (liveOut ? TYPED_CALLBACK_GAS : 0n);
-    const gasOut = await gasOutAt(gasEstimate);
+    const gasOut = await gasOutAt(pricedGas(gasEstimate));
     if (gasOut === undefined || profitOut === undefined) {
       return this.skip(orderHash, `cannot price RBTC in ${tokenOut} (configure a WRBTC path or RBTC_PRICE_USD)`);
     }
@@ -345,6 +365,7 @@ export class RouteFiller {
     // 4. Every candidate that passes the gate at the ASSUMED gas and builds a plan, best first.
     const viable: Array<{ c: Candidate; plan: RoutePlan; margin: bigint }> = [];
     const refusals: string[] = [];
+    let buildFailed = false;
     for (const c of rankRoutes(cands)) {
       const g = gate(c, gasOut);
       if (!g.ok) {
@@ -353,13 +374,22 @@ export class RouteFiller {
       }
       const built = build(c, g.costOut);
       if (!built.ok) {
+        buildFailed = true;
         refusals.push(built.reason);
         continue;
       }
       viable.push({ c, plan: built.plan, margin: g.marginOut });
     }
+    // When the gate will pass for a DECAYING order, the quotes held (./recheck.ts):
+    // the owed output falls / the received input — and so the quote — rises with the
+    // order's own clock. Re-quoted then, not a fixed hold later.
+    const passesAt = (list: readonly Candidate[], g: bigint) => (pd: bigint, rv: bigint) =>
+      list.some((c) => routeProfitable({ quotedOut: scaleUp(c.out, rv, received), owed: pd, slippageBps, gasOut: g, minProfitOut: profitOut, keepPpm: this.keepPpm }).ok);
+    const recheck = (passes: (pd: bigint, rv: bigint) => boolean) => recheckAtMs(order, minBumpBps, owed, received, nowSec, passes);
     // Every candidate failed the profit gate (or could not be built): the order's price against the pools.
-    if (viable.length === 0) return this.skip(orderHash, refusals.join("; "), !transient);
+    if (viable.length === 0) {
+      return this.skip(orderHash, refusals.join("; "), !transient, transient || buildFailed ? undefined : recheck(passesAt(cands, gasOut)));
+    }
 
     // 5. Simulate from the operator and decode — the best viable candidate first,
     //    falling through to the next if its simulation reverts (e.g. a Sushi route
@@ -368,7 +398,7 @@ export class RouteFiller {
     let lastReason = "";
     for (const v of viable) {
       const via = v.c.source === "oku" ? `oku ${v.c.path.tokens.length - 1} hop` : "sushi";
-      const tag = `${direct ? (liveOut ? "direct+live" : "direct") : "pull"} ${orderHash} in ${received} ${order.legsIn[0]!.token} → owed ${owed} ${tokenOut} (${via}, quote ${v.c.out}, margin ${v.margin})`;
+      const tag = `${direct ? (liveOut ? "direct+live" : "direct") : "pull"}${quoted ? ` quoted ${quoted.id}` : ""} ${orderHash} in ${received} ${order.legsIn[0]!.token} → owed ${owed} ${tokenOut} (${via}, quote ${v.c.out}, margin ${v.margin})`;
       try {
         picked = { c: v.c, sim: await simulate(v.plan), tag, margin: v.margin };
         break;
@@ -385,15 +415,15 @@ export class RouteFiller {
     const { c: best, tag } = picked;
 
     // 6. Re-price at the MEASURED gas. The plan's floor is priced at
-    //    P = max(estimate, simulated); if P is above the gas the floor was built at,
-    //    rebuild the floor at P and re-simulate (the new floor changes the calldata,
-    //    so the gas is measured again) until the priced gas covers its own
+    //    P = max(estimate, simulated) × r; if P is above the gas the floor was built
+    //    at, rebuild the floor at P and re-simulate (the new floor changes the
+    //    calldata, so the gas is measured again) until the priced gas covers its own
     //    measurement. The tx goes out with gas limit G = max(P, simulated × 1.25):
     //    headroom against a moved state, NOT priced into the quote (see GAS_LIMIT_PCT).
     let sim = picked.sim;
-    let priced = gasEstimate;
+    let priced = pricedGas(gasEstimate);
     for (let round = 0; ; round++) {
-      const need = sim.gasUsed > gasEstimate ? sim.gasUsed : gasEstimate;
+      const need = pricedGas(sim.gasUsed > gasEstimate ? sim.gasUsed : gasEstimate);
       const limit = ceilPct(sim.gasUsed, GAS_LIMIT_PCT);
       if ((limit > need ? limit : need) > rc.maxGas) {
         return this.skipBackoff(orderHash, `simulated gas ${sim.gasUsed} → limit ${limit > need ? limit : need} above MAX_ROUTE_GAS ${rc.maxGas}`);
@@ -402,8 +432,12 @@ export class RouteFiller {
       if (round >= MAX_REPRICE_ROUNDS) return this.skipBackoff(orderHash, `gas did not converge (simulated ${sim.gasUsed}, priced ${priced})`);
       priced = need;
       const g2Out = await gasOutAt(priced);
-      const g2 = g2Out === undefined ? undefined : gate(best, g2Out);
-      if (!g2 || !g2.ok) return this.skipBackoff(orderHash, `${g2 && !g2.ok ? g2.reason : "cannot price gas"} (simulated gas ${sim.gasUsed}, limit ${priced})`);
+      if (g2Out === undefined) return this.skipBackoff(orderHash, `cannot price gas (simulated gas ${sim.gasUsed}, priced ${priced})`);
+      const g2 = gate(best, g2Out);
+      // Unprofitable at the MEASURED gas is a verdict about the order's price, not a
+      // failure: rest (no strike, no backoff) and, for a decaying order, re-quote
+      // when it clears at this gas.
+      if (!g2.ok) return this.skip(orderHash, `${g2.reason} (simulated gas ${sim.gasUsed}, priced ${priced})`, true, recheck(passesAt([best], g2Out)));
       const rebuilt = build(best, g2.costOut);
       if (!rebuilt.ok) return this.skipBackoff(orderHash, `${rebuilt.reason} (re-priced at gas ${priced})`);
       try {
@@ -420,7 +454,7 @@ export class RouteFiller {
     if (room) return this.skip(orderHash, room);
 
     if (cfg.dryRun) {
-      this.log(`[dry-run] [route] would fill ${tag}, gas limit ${gasLimit} (simulated ${sim.gasUsed}, delivers ${sim.delivered[0]})`);
+      this.log(`[dry-run] [route] would fill ${tag}, gas limit ${gasLimit} (simulated ${sim.gasUsed}, priced ${priced}, delivers ${sim.delivered[0]})`);
       return { orderHash, status: "dry-run", paid: sim.delivered[0], received, strategy: "route" };
     }
 
@@ -439,6 +473,7 @@ export class RouteFiller {
       orderHash,
       expiry: order.expiry,
       reserve: { budget: "route", token: ROUTE_FILLS, amount: 1n },
+      gasMeter: { shape, estimate: sim.gasUsed.toString() },
       info: {
         tag: `${tag} (limit ${gasLimit})`,
         payToken: tokenOut,
@@ -456,9 +491,69 @@ export class RouteFiller {
         throw new Error(r.reason);
       case "sent":
         this.onSpend();
-        this.log(`→ [route] sent executeFill ${tag} tx ${r.tx} (gas limit ${gasLimit} @ ${gasPrice} wei, simulated ${sim.gasUsed})`);
+        this.log(`→ [route] sent executeFill ${tag} tx ${r.tx} (gas limit ${gasLimit} @ ${gasPrice} wei, simulated ${sim.gasUsed}, priced ${priced} at r ${Number(this.gasRatios.ratioPpm(shape)) / 1e6})`);
         return { orderHash, status: "pending", tx: r.tx, paid: sim.delivered[0], received, strategy: "route", final: true };
     }
+  }
+
+  /**
+   * The route candidate for an indicative quote (./quote.ts): the best output for
+   * `amountIn` over every configured Oku path (and, for a PULL ticket, a Sushi API
+   * route), ranked like a fill — by output net of each route's own gas — and one fill's
+   * cost in the output token, priced as the fill gate prices it: estimate × r × the send
+   * gas price, + MIN_PROFIT_RBTC, grossed up for the solver's surplus split. With no
+   * order to simulate, the estimate is max(ROUTE_GAS_ESTIMATE, the largest estimate
+   * learned for the shape, else QUOTE_GAS_ESTIMATE_DIRECT / _PULL).
+   */
+  async quoteRoute(a: { tokenIn: Address; tokenOut: Address; amountIn: bigint; direct: boolean; gasPrice: bigint }): Promise<Verdict<{ candidate: PricedCandidate }>> {
+    const { cfg, rc } = this;
+    await this.init();
+    const inList = (t: Address) => rc.routeTokens.some((x) => x.toLowerCase() === t.toLowerCase());
+    if (!inList(a.tokenIn) || !inList(a.tokenOut)) return { ok: false, reason: "route: pair outside ROUTE_TOKENS" };
+    const paths = candidatePaths(a.tokenIn, a.tokenOut, rc);
+    const sushi = !a.direct && rc.sushi.enabled;
+    if (paths.length === 0 && !sushi) return { ok: false, reason: "route: no configured pool/path for the pair" };
+    const raw: Array<{ source: "oku" | "sushi"; out: bigint; gasUnits: bigint; hops?: number }> = [];
+    for (const path of a.direct || rc.okuPull ? paths : []) {
+      const q = await this.quoteWithGas(path, a.amountIn).catch(() => undefined);
+      if (q && q.out > 0n) raw.push({ source: "oku", out: q.out, gasUnits: q.gasUnits, hops: path.tokens.length - 1 });
+    }
+    if (sushi) {
+      const v = await fetchSushiRoute(rc.sushi, {
+        chainId: cfg.chainId,
+        tokenIn: a.tokenIn,
+        tokenOut: a.tokenOut,
+        amountIn: a.amountIn,
+        sender: this.sandbox!,
+        recipient: rc.solver,
+        slippageBps: haircutBps(rc, a.tokenIn, a.tokenOut),
+      });
+      if (v.ok) raw.push({ source: "sushi", out: v.amountOut, gasUnits: v.gasUnits });
+    }
+    if (raw.length === 0) return { ok: false, reason: "route: no quote from any source" };
+    const shape = gasShape("route", a.direct ? "direct" : "pull", a.tokenIn, a.tokenOut);
+    const learned = this.gasRatios.typicalEstimate(shape);
+    const fallback = a.direct ? cfg.quote.gasEstimateDirect : cfg.quote.gasEstimatePull;
+    const base = learned ?? fallback;
+    const estimate = base > rc.gasEstimate ? base : rc.gasEstimate;
+    const gasUnits = this.gasRatios.priced(shape, estimate);
+    const gasOut = await this.nativeToToken(a.gasPrice * gasUnits, a.tokenOut);
+    const profitOut = await this.nativeToToken(rc.minProfitWei, a.tokenOut);
+    if (gasOut === undefined || profitOut === undefined) return { ok: false, reason: `route: cannot price RBTC in ${a.tokenOut}` };
+    const cands: Array<RouteCandidate & { hops?: number; source: "oku" | "sushi" }> = [];
+    for (const r of raw) cands.push({ ...r, routeGasOut: (await this.nativeToToken(a.gasPrice * r.gasUnits, a.tokenOut)) ?? 0n });
+    const best = rankRoutes(cands)[0]!;
+    return {
+      ok: true,
+      candidate: {
+        strategy: "route",
+        grossOut: best.out,
+        costOut: grossUp(gasOut + profitOut, this.keepPpm),
+        gasUnits,
+        source: best.source,
+        ...(best.hops !== undefined ? { hops: best.hops } : {}),
+      },
+    };
   }
 
   /** QuoterV2 exact-input quote along a swap-order path. */

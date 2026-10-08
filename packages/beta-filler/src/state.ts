@@ -1,4 +1,6 @@
+import type { GasRatioState } from "./gasRatio";
 import type { GuardState } from "./guard";
+import type { QuoteBookState } from "./quote";
 import type { RebalanceState } from "./rebalance";
 
 /**
@@ -51,6 +53,10 @@ export interface FillerState {
   recent?: RecentEvent[];
   /** Own-fill holds `[orderHash, until ms, book fillable at send]` (see engine.ts `Hold`). */
   ownFills?: Array<[string, number, string]>;
+  /** Learned receipt/estimate gas ratios per fill shape (gasRatio.ts; ≤ 20 samples × 64 shapes). */
+  gasRatios?: GasRatioState;
+  /** Indicative quotes issued and the orders matched to them (quote.ts; ≤ MAX_QUOTES). */
+  quotes?: QuoteBookState;
 }
 
 /** An in-memory store (tests, one-shot runs). */

@@ -5,6 +5,8 @@ import {
   Engine,
   fetchOrders,
   fmtUnits,
+  parseQuoteRequest,
+  quoteToJson,
   ROOTSTOCK,
   sanitize,
   type BookEntry,
@@ -19,7 +21,9 @@ import { formatEther, type Address } from "viem";
 
 import { Alerter, emptyAlertState, type AlertState } from "./alerts";
 import { isConfigured, loadFillerConfig, loadWorkerConfig, rpcUrls, type Env, type WorkerConfig } from "./config";
+import { DO_IP_HEADER } from "./clientIp";
 import { countSince, listFills, migrateFills, recordResolution, toCsv, type Sql } from "./fills";
+import { migrateBuckets, SqlRateLimiter } from "./ratelimit";
 
 /** What the DO needs from the outside world — swapped wholesale in tests. */
 export interface WorkerDeps {
@@ -161,11 +165,14 @@ export class FillerDO extends DurableObject<Env> {
   private readonly logTail: string[] = [];
   private readonly sql: Sql;
   private readonly store: StateStore;
+  private readonly limiter: SqlRateLimiter;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql as unknown as Sql;
     migrateFills(this.sql);
+    migrateBuckets(this.sql);
+    this.limiter = new SqlRateLimiter(this.sql, () => deps.now());
     this.store = {
       get: async <T>(k: string) => (await ctx.storage.get<T>(k)) ?? undefined,
       put: async (k: string, v: unknown) => ctx.storage.put(k, v),
@@ -538,6 +545,7 @@ export class FillerDO extends DurableObject<Env> {
         const limit = Math.max(120, 3 * ((this.wcfg?.tickMs ?? 5_000) / 1000));
         return json({ ok: age !== null && age <= limit, lastTickAgeSeconds: age });
       }
+      if (path === "/quote" && method === "POST") return await this.quote(request);
       if (path === "/status" && method === "GET") return json(await this.status());
       if (path === "/pause" && method === "POST") {
         ws.paused = true;
@@ -572,6 +580,51 @@ export class FillerDO extends DurableObject<Env> {
       return json({ error: "not found" }, 404);
     } catch (e) {
       return json({ error: `internal error: ${errMsg(e)}` }, 500);
+    }
+  }
+
+  /**
+   * The public `POST /quote` (the entry worker checked method, type and size, and
+   * resolved the caller's IP into {@link DO_IP_HEADER}): rate limit (per IP, then
+   * global) → the filler must be live-capable (configured, not paused) → strict
+   * request parsing → the engine prices it with its own strategies and gas model
+   * (beta-filler src/quote.ts). Nothing secret leaves: errors are sanitized and the
+   * RPC URLs redacted. The quote's RPC calls count against the running tick's
+   * subrequest meter (they share one chain client).
+   */
+  private async quote(request: Request): Promise<Response> {
+    const wcfg = this.wcfg;
+    if (!wcfg) return json({ error: "quote service unavailable" }, 503);
+    const ip = request.headers.get(DO_IP_HEADER) || "unknown";
+    for (const [key, bucket] of [[`ip:${ip}`, wcfg.quote.ip], ["global", wcfg.quote.global]] as const) {
+      const r = this.limiter.take(key, bucket);
+      if (!r.ok) return json({ error: "rate limited", retryAfter: r.retryAfter }, 429, { "retry-after": String(r.retryAfter) });
+    }
+    const ws = await this.state();
+    if (ws.paused) return json({ error: "filler paused" }, 503);
+    let engine: Engine;
+    try {
+      engine = await this.getEngine();
+    } catch {
+      return json({ error: "quote service unavailable" }, 503);
+    }
+    if (!isConfigured(engine.cfg)) return json({ error: "quote service unavailable" }, 503);
+    let body: unknown;
+    try {
+      body = JSON.parse(await request.text());
+    } catch {
+      return json({ error: "body must be JSON" }, 400);
+    }
+    const parsed = parseQuoteRequest(body, engine.cfg);
+    if (!parsed.ok) return json({ error: sanitize(parsed.reason, 200) }, 400);
+    try {
+      const r = await engine.quote(parsed.req);
+      if (!r.ok) return json({ error: "no quote", reason: redact(sanitize(r.reason, 300), rpcUrls(this.env)) }, 422);
+      // `live`: false while the filler runs dry (it would quote, but not fill).
+      return json({ ...quoteToJson(r.quote), live: !engine.cfg.dryRun });
+    } catch (e) {
+      this.log(`quote failed: ${errMsg(e)}`);
+      return json({ error: "quote failed" }, 502);
     }
   }
 
@@ -680,7 +733,15 @@ export class FillerDO extends DurableObject<Env> {
         strategies: cfg.strategies,
         solver: cfg.route?.solver ?? null,
         profitRecipient: cfg.route?.profitRecipient ?? null,
-        gas: { hourlyRbtc: formatEther(cfg.gas.hourlyWei), maxGasPriceWei: cfg.gas.maxGasPriceWei.toString(), receiptTimeoutMs: cfg.gas.receiptTimeoutMs },
+        gas: {
+          hourlyRbtc: formatEther(cfg.gas.hourlyWei),
+          maxGasPriceWei: cfg.gas.maxGasPriceWei.toString(),
+          receiptTimeoutMs: cfg.gas.receiptTimeoutMs,
+          minGasPriceMultBps: cfg.gas.minGasPriceMultBps.toString(),
+          defaultReceiptRatio: Number(cfg.gas.defaultReceiptRatioPpm) / 1e6,
+          // The learned receipt/estimate ratio per fill shape (beta-filler gasRatio.ts).
+          receiptRatios: engine.gasRatios.summary(),
+        },
         policy: Object.fromEntries(Object.entries(cfg.policy).map(([k, v]) => [k, String(v)])),
         sushi: cfg.route ? { enabled: cfg.route.sushi.enabled, executorsPinned: cfg.route.sushi.executors.length } : null,
       },

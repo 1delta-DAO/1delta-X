@@ -42,7 +42,7 @@ import {FreshTxComparisonTest, ISwapRouter02} from "./RawSwapComparison.t.sol";
 ///  inherited `setUp` leaves different slots warm, so compare designs only within
 ///  one harness.
 contract SandboxGasBench is FreshTxComparisonTest {
-    function _seedSolverFloor() internal override {
+    function _seedSolverFloor() internal virtual override {
         deal(USDRIF, address(agg), 1);
         deal(USDT0, address(agg), 1);
         deal(USDRIF, TREASURY, 1);
@@ -85,6 +85,128 @@ contract SandboxGasBench is FreshTxComparisonTest {
 
     function test_sandbox_gas_pull() public {
         _bench("SANDBOX pull (fresh tx, steady state)", false);
+    }
+}
+
+/// @dev SwapRouter02's exact-output entry (no deadline field, unlike v3's SwapRouter).
+interface ISwapRouter02Out {
+    struct ExactOutputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24 fee;
+        address recipient;
+        uint256 amountOut;
+        uint256 amountInMaximum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    function exactOutputSingle(ExactOutputSingleParams calldata p) external payable returns (uint256);
+}
+
+/// @title SelfSeedColdBench
+/// @notice The SELF-SEEDING balance floor (2026-10), priced on the live pool: the
+///         FIRST fill of a solver that holds nothing — no `FLOOR_TOKENS`, no `deal`
+///         — in the shapes the beta sends: PULL = exact-input with `amountInOffset`
+///         set (routes `delta − 1`, keeps one wei of USDRIF and of USDT0); DIRECT =
+///         exact-output to the maker (the USDRIF residue keeps one wei). Same
+///         fixture as {SandboxGasBench} (treasury paid before, the sandbox's
+///         standing router approval in place) minus the solver's floor.
+///         {SelfSeedSteadyBench} measures the fill AFTER one such first fill.
+contract SelfSeedColdBench is SandboxGasBench {
+    /// @dev `exactInputSingle(params)`: the struct is static, `amountIn` is its 5th word.
+    uint256 internal constant EXACT_IN_AMOUNT_WORD = 4 + 4 * 32;
+
+    function _seedSolverFloor() internal virtual override {
+        deal(USDRIF, TREASURY, 1);
+        deal(USDT0, TREASURY, 1);
+        vm.prank(address(agg.SANDBOX()));
+        IERC20(USDRIF).approve(SWAP_ROUTER_02, type(uint256).max);
+    }
+
+    function _seedPlan(bool direct) internal view returns (RoutePlan memory p) {
+        if (direct) {
+            p = _plan(maker);
+            p.minOut = 0;
+            p.data = abi.encodeCall(
+                ISwapRouter02Out.exactOutputSingle,
+                (
+                    ISwapRouter02Out.ExactOutputSingleParams({
+                        tokenIn: USDRIF,
+                        tokenOut: USDT0,
+                        fee: FEE,
+                        recipient: maker,
+                        amountOut: FLOOR_OUT,
+                        amountInMaximum: AMOUNT_IN,
+                        sqrtPriceLimitX96: 0
+                    })
+                )
+            );
+        } else {
+            p = _plan(address(agg));
+            p.amountInOffset = EXACT_IN_AMOUNT_WORD;
+        }
+        p.profitRecipient = TREASURY;
+    }
+
+    function _benchSeed(string memory label, uint256 nonce, bool direct) internal {
+        Order memory o = _order(nonce, direct);
+        bytes memory sig = _sign(o);
+        RoutePlan memory p = _seedPlan(direct);
+        bytes memory cd = abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, ""));
+        // No balance read before the measurement: it would warm USDT0 (a proxy) and
+        // the maker's slot and understate the fill by ~10k.
+        uint256 g0 = gasleft();
+        agg.executeFill(o, sig, AMOUNT_IN, p, "");
+        uint256 used = g0 - gasleft();
+        _reportNet(label, used, cd);
+        assertGe(IERC20(USDT0).balanceOf(maker), FLOOR_OUT, "maker paid");
+        // Whatever the starting state, every touched token ends at its 1-wei floor.
+        assertEq(IERC20(USDRIF).balanceOf(address(agg)), 1, "USDRIF floor");
+        assertEq(IERC20(USDT0).balanceOf(address(agg)), direct ? _usdt0Floor() : 1, "USDT0 floor");
+    }
+
+    /// @dev The direct path never touches USDT0: whatever the fixture left.
+    function _usdt0Floor() internal view virtual returns (uint256) {
+        return 0;
+    }
+
+    function test_selfseed_pull() public virtual {
+        _benchSeed("SELF-SEED pull, FIRST fill (cold solver)", 80, false);
+    }
+
+    function test_selfseed_direct() public virtual {
+        _benchSeed("SELF-SEED direct, FIRST fill (cold solver)", 80, true);
+    }
+}
+
+/// @title SelfSeedSteadyBench
+/// @notice The same two fills AFTER the solver self-seeded: `setUp` runs one real
+///         pull fill on the cold instance (a different nonce word, so the measured
+///         fill's nonce write is as cold as in {SandboxGasBench}) and re-funds the
+///         maker. Compare with {SandboxGasBench} (floor `deal`t in `setUp`, i.e.
+///         what `FLOOR_TOKENS` gives): the self-seeded floor must price the same.
+contract SelfSeedSteadyBench is SelfSeedColdBench {
+    function _seedSolverFloor() internal override {
+        super._seedSolverFloor();
+        Order memory o = _order(80 + 256 * 7, false);
+        // (No require on the floors here: the same fixture, run against the pre-2026-10
+        // contract, is how the "no floor after a prior fill" baseline was measured.)
+        agg.executeFill(o, _sign(o), AMOUNT_IN, _seedPlan(false), "");
+        deal(USDRIF, maker, AMOUNT_IN);
+        vm.prank(maker);
+        permit3.approveToken(address(settlement), USDRIF, uint160(AMOUNT_IN), 0);
+    }
+
+    function _usdt0Floor() internal pure override returns (uint256) {
+        return 1;
+    }
+
+    function test_selfseed_pull() public override {
+        _benchSeed("SELF-SEED pull, STEADY state (self-seeded)", 80, false);
+    }
+
+    function test_selfseed_direct() public override {
+        _benchSeed("SELF-SEED direct, STEADY state (self-seeded)", 80, true);
     }
 }
 
@@ -218,7 +340,11 @@ contract SushiRouteForkTest is UsdrifForkBase {
     }
 
     /// @dev PULL fill, Sushi route paying the SOLVER: the maker gets the signed
-    ///      99 USDT0, the treasury the rest of the swap, nothing stays behind.
+    ///      99 USDT0, the treasury the rest of the swap, and nothing stays behind
+    ///      but the self-seeded 1-wei floors (first fill on a fresh instance): the
+    ///      patched snwap `amountIn` is one wei of USDRIF short — worth less than one
+    ///      USDT0 unit, so the route's output is unchanged — and the USDT0 split
+    ///      keeps one wei out of the treasury's share.
     function test_sushi_usdrifToUsdt0_pullFill() public {
         Order memory o = _order(1, USDRIF, 100e18, 99e6);
         bytes memory sig = _sign(o);
@@ -227,8 +353,9 @@ contract SushiRouteForkTest is UsdrifForkBase {
         agg.executeFill(o, sig, 100e18, p, "");
         console.log("sushi USDRIF->USDT0 pull fill, exec gas", g0 - gasleft());
         assertEq(IERC20(USDT0).balanceOf(maker), 99e6, "maker paid its signed output");
-        assertEq(IERC20(USDT0).balanceOf(TREASURY), 99_756_478 - 99e6, "spread to the treasury");
-        assertEq(IERC20(USDT0).balanceOf(address(agg)), 0, "solver keeps nothing");
+        assertEq(IERC20(USDT0).balanceOf(TREASURY), 99_756_478 - 99e6 - 1, "spread to the treasury, less the floor");
+        assertEq(IERC20(USDT0).balanceOf(address(agg)), 1, "solver keeps only the USDT0 floor");
+        assertEq(IERC20(USDRIF).balanceOf(address(agg)), 1, "solver keeps only the USDRIF floor");
         _sandboxEmpty();
         assertEq(IERC20(USDT0).allowance(address(agg), address(settlement)), 0, "no Settlement allowance left");
         assertEq(IERC20(USDRIF).allowance(address(agg), address(agg.SANDBOX())), 0, "the solver never approves the sandbox");
@@ -241,9 +368,13 @@ contract SushiRouteForkTest is UsdrifForkBase {
         RoutePlan memory p = _plan(_forSolver(SUSHI_WRBTC_USDT0, address(agg)), 840e6, SNWAP_AMOUNT_IN_OFFSET);
         uint256 makerBefore = IERC20(USDT0).balanceOf(maker);
         uint256 treasuryBefore = IERC20(USDT0).balanceOf(TREASURY);
+        // The USDT0 floor self-seeds only if no earlier fill on this instance did
+        // (this test also runs second, from {test_oku_swapRouter02_pullFill_sameInstance}).
+        uint256 seed = IERC20(USDT0).balanceOf(address(agg)) == 0 ? 1 : 0;
         agg.executeFill(o, sig, 1e16, p, "");
         assertEq(IERC20(USDT0).balanceOf(maker) - makerBefore, 840e6, "maker paid");
-        assertEq(IERC20(USDT0).balanceOf(TREASURY) - treasuryBefore, 848_238_757 - 840e6, "spread to the treasury");
+        assertEq(IERC20(USDT0).balanceOf(TREASURY) - treasuryBefore, 848_238_757 - 840e6 - seed, "spread to the treasury");
+        assertEq(IERC20(WRBTC).balanceOf(address(agg)), 1, "the WRBTC floor self-seeded");
         _sandboxEmpty();
     }
 
@@ -257,7 +388,7 @@ contract SushiRouteForkTest is UsdrifForkBase {
             _plan(_forSolver(SUSHI_USDRIF_USDT0, address(agg.SANDBOX())), 99e6, SNWAP_AMOUNT_IN_OFFSET);
         agg.executeFill(o, sig, 100e18, p, "");
         assertEq(IERC20(USDT0).balanceOf(maker), 99e6, "maker paid");
-        assertEq(IERC20(USDT0).balanceOf(TREASURY), 99_756_478 - 99e6, "spread to the treasury");
+        assertEq(IERC20(USDT0).balanceOf(TREASURY), 99_756_478 - 99e6 - 1, "spread to the treasury, less the floor");
         _sandboxEmpty();
     }
 

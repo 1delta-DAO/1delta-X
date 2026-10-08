@@ -71,9 +71,10 @@ export interface RouteConfig {
    */
   stableSlippageBps: bigint;
   /**
-   * Gas units assumed for an executeFill before the simulation's own estimate —
-   * the FLOOR of the gas the plan is priced at (the sent plan is rebuilt at
-   * max(this, simulated × 1.25) and that same figure is the tx gas limit).
+   * `eth_estimateGas` units assumed for an executeFill before the simulation's own
+   * estimate — the floor of the estimate the plan is priced at: the sent plan is
+   * priced at max(this, simulated) × r (the learned receipt ratio, gasRatio.ts) and
+   * sent with gas limit max(that, simulated × 1.25).
    */
   gasEstimate: bigint;
   /** Refuse any route fill whose priced gas limit exceeds this (gas units). */
@@ -126,7 +127,7 @@ export interface Policy {
   maxFillUsdt0: bigint;
   /** Smallest fill worth the gas, in USDT0 units. */
   minFillUsdt0: bigint;
-  /** Gas units assumed for one inventory fill before it is estimated (re-checked with the real limit). */
+  /** `eth_estimateGas` units assumed for one inventory fill before it is estimated (priced × r, re-checked with the real estimate × r). */
   inventoryGasEstimate: bigint;
   /**
    * Gas units of the rebalance a fill eventually causes (redeem + RIF sale), charged
@@ -184,6 +185,42 @@ export interface Config {
   gas: GasPolicy;
   /** How the engine walks the book (what it re-quotes, and when). */
   sweep: SweepPolicy;
+  /** The public indicative quote endpoint (`POST /quote` on the Worker, ./quote.ts). */
+  quote: QuotePolicy;
+}
+
+/**
+ * Indicative quotes (./quote.ts, 2026-10-07): what the filler would pay for a market
+ * ticket NOW — the best route (or inventory) output for the ticket's input, minus the
+ * fill's gas, minus a margin on that gas. The app signs a short Dutch order that STARTS
+ * at the quote and decays to the maker's own slippage floor.
+ */
+export interface QuotePolicy {
+  /** Serve `POST /quote` at all (`QUOTE_ENABLED`, default on). */
+  enabled: boolean;
+  /** Margin on the fill's gas cost, bps of that cost (`QUOTE_GAS_MARGIN_BPS`, default 1000 = +10 %). */
+  gasMarginBps: bigint;
+  /** Optional extra price tolerance taken off the quoted output, bps of it (`QUOTE_TOLERANCE_BPS`, default 0). */
+  toleranceBps: bigint;
+  /** How long a quote is valid, seconds (`QUOTE_TTL_SECONDS`, default 30 = one Rootstock block). */
+  ttlSeconds: number;
+  /**
+   * How long after `validUntil` an order may still be MATCHED to the quote it was
+   * signed from (`QUOTE_MATCH_GRACE_SECONDS`, default 120): the wallet prompt and the
+   * book post take time. A matched order is gated without the quote haircut.
+   */
+  matchGraceSeconds: number;
+  /**
+   * `eth_estimateGas` units a quote assumes for one fill before the filler has learned
+   * an estimate for the shape (direct / pull route fills; the inventory path uses
+   * INVENTORY_GAS_ESTIMATE). Then: the max of the learned estimates (gasRatio.ts).
+   * Defaults = the top of the production e2e range (2026-10-07: direct 363k–385k,
+   * pull 386k–404k), as the app's FILLER_FILL_GAS_ESTIMATE.
+   */
+  gasEstimateDirect: bigint;
+  gasEstimatePull: bigint;
+  /** Identical requests within this many ms reuse the priced result (fresh quote id). */
+  cacheMs: number;
 }
 
 export interface SweepPolicy {
@@ -193,7 +230,8 @@ export interface SweepPolicy {
    * unless the book reports a different `fillableAmount` for it. Each re-quote costs
    * a preview, quotes and gas reads: a book of 31 resting orders used to cost ~67 RPC
    * calls per tick. An order whose price moves with time (a decaying leg) is held at
-   * most {@link AUCTION_RECHECK_MS}.
+   * most {@link AUCTION_RECHECK_MS} — and, within that, until the moment a strategy
+   * predicts its gate passes (./recheck.ts), or the auction's floor.
    */
   restingRecheckMs: number;
   /** Orders expiring within this many seconds are skipped: a tx cannot land in time on ~30 s blocks. */
@@ -214,6 +252,9 @@ export interface SweepPolicy {
  * which the app's 300 s life and the e2e's `floor + hold + tick + landing` bound
  * already absorb. The step that DOES matter on a block clock — the end of an
  * exclusivity window — gets its own cap ({@link windowEndMs} in the engine).
+ *
+ * This is a CAP: an unprofitable decaying order is re-quoted sooner, at the second
+ * its gate is predicted to pass from its own pricing ({@link profitableAt}, 2026-10-07).
  */
 export const AUCTION_RECHECK_MS = 30_000;
 
@@ -224,7 +265,30 @@ export interface GasPolicy {
   maxGasPriceWei: bigint;
   /** How long to wait for a receipt before treating the tx as pending, ms. */
   receiptTimeoutMs: number;
+  /**
+   * Every tx is sent (and every fill priced) at ⌈latestBlock.minimumGasPrice × this /
+   * 10000⌉ (`GAS_PRICE_MIN_MULT_BPS`, ≥ 10000, default {@link DEFAULT_GAS_PRICE_MIN_MULT_BPS});
+   * `eth_gasPrice` only when the block has no `minimumGasPrice` (see chain.ts `readSendGasPrice`).
+   */
+  minGasPriceMultBps: bigint;
+  /**
+   * receipt/estimate gas ratio, ppm, priced before any receipt of a fill shape
+   * (`DEFAULT_GAS_RECEIPT_RATIO`, a decimal in [0.6, 1.0], default 0.88 — see gasRatio.ts).
+   */
+  defaultReceiptRatioPpm: bigint;
 }
+
+/**
+ * Rootstock has no fee market: a block carries a miner-voted `minimumGasPrice`, and
+ * `eth_gasPrice` answers min × 1.1 (rskj's default `rpc.minGasPriceMultiplier`). The
+ * minimum may move at most ±1 % per block (RSKIP-09), so a tx at min × 1.03 stays
+ * includable through TWO consecutive maximal rises after the block we read
+ * (1.01² = 1.0201 < 1.03 < 1.01³) — enough when our read is a block stale (it is
+ * cached ≤ 10 s; blocks are ~25–30 s) and the tx misses one block. 1.02 would hold
+ * for exactly one rise (1.0201 > 1.02). Sources and the eviction behaviour: chain.ts
+ * `readSendGasPrice`. The extra 1 % costs ~1 % of a ~$0.30 fill's gas.
+ */
+export const DEFAULT_GAS_PRICE_MIN_MULT_BPS = 10_300;
 
 type Env = Record<string, string | undefined>;
 
@@ -379,15 +443,40 @@ function loadRoute(env: Env): RouteConfig | undefined {
   };
 }
 
+function loadQuote(env: Env): QuotePolicy {
+  const gasMarginBps = uint(env, "QUOTE_GAS_MARGIN_BPS", 1_000);
+  // 0..100000 bps: up to +1000 % on the gas (a 10× cushion is a typo-sized ceiling).
+  if (gasMarginBps > 100_000n) throw new Error("env QUOTE_GAS_MARGIN_BPS must be 0..100000");
+  const ttlSeconds = posNum(env, "QUOTE_TTL_SECONDS", 30);
+  if (ttlSeconds > 600) throw new Error("env QUOTE_TTL_SECONDS must be 1..600");
+  return {
+    enabled: flag(env, "QUOTE_ENABLED", true),
+    gasMarginBps,
+    toleranceBps: bps(env, "QUOTE_TOLERANCE_BPS", 0),
+    ttlSeconds,
+    matchGraceSeconds: Number(uint(env, "QUOTE_MATCH_GRACE_SECONDS", 120)),
+    gasEstimateDirect: posInt(env, "QUOTE_GAS_ESTIMATE_DIRECT", 360_000),
+    gasEstimatePull: posInt(env, "QUOTE_GAS_ESTIMATE_PULL", 380_000),
+    cacheMs: Number(uint(env, "QUOTE_CACHE_MS", 5_000)),
+  };
+}
+
 function loadGas(env: Env): GasPolicy {
   // HOURLY_GAS_RBTC covers both strategies; ROUTE_HOURLY_GAS_RBTC is its pre-2026-10 name.
   const hourly = env.HOURLY_GAS_RBTC ?? env.ROUTE_HOURLY_GAS_RBTC ?? "0.002";
   const maxGasPriceWei = fixed(env, "MAX_GAS_PRICE_GWEI", "0.1", 9);
   if (maxGasPriceWei === 0n) throw new Error("env MAX_GAS_PRICE_GWEI must be > 0");
+  const minGasPriceMultBps = uint(env, "GAS_PRICE_MIN_MULT_BPS", DEFAULT_GAS_PRICE_MIN_MULT_BPS);
+  // Below 10000 the tx would be under the block minimum (never mined); above 2× it is a typo.
+  if (minGasPriceMultBps < 10_000n || minGasPriceMultBps > 20_000n) throw new Error("env GAS_PRICE_MIN_MULT_BPS must be 10000..20000");
+  const defaultReceiptRatioPpm = fixed(env, "DEFAULT_GAS_RECEIPT_RATIO", "0.88", 6);
+  if (defaultReceiptRatioPpm < 600_000n || defaultReceiptRatioPpm > 1_000_000n) throw new Error("env DEFAULT_GAS_RECEIPT_RATIO must be 0.6..1.0");
   return {
     hourlyWei: parseFixed(hourly, 18),
     maxGasPriceWei,
     receiptTimeoutMs: posNum(env, "RECEIPT_TIMEOUT_MS", 120_000),
+    minGasPriceMultBps,
+    defaultReceiptRatioPpm,
   };
 }
 
@@ -458,6 +547,7 @@ export function loadConfig(env: Env): Config {
     pollMs: posNum(env, "POLL_MS", 15_000),
     stateFile: env.STATE_FILE || ".beta-filler-state.json",
     gas: loadGas(env),
+    quote: loadQuote(env),
     sweep: {
       restingRecheckMs: 1000 * Number(uint(env, "RESTING_RECHECK_SECONDS", 300)),
       expiryMarginS: Number(uint(env, "EXPIRY_MARGIN_SECONDS", 90)),

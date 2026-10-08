@@ -1,12 +1,16 @@
 import { decodeFillUpToResult, encodeFillUpTo, type Order } from "@1delta-x/sdk";
 import type { BookEntry } from "./intake";
-import type { Hex } from "viem";
+import type { Address, Hex } from "viem";
+
+import type { PricedCandidate } from "./quote";
 
 import { sanitize } from "./sanitize";
 
 import { allowanceCall, balanceOf, MOC_QUEUE_ABI, OPER_REDEEM_TP, previewBump, previewFill, quoteRifToUsdt0, quoteWrbtcToUsdt0, rifForUsdrif, type Chain } from "./chain";
 import { MOC_FEE_BPS, type Config } from "./config";
+import { gasShape, GasRatios } from "./gasRatio";
 import { broadcast, estimateAndBroadcast, Guard } from "./guard";
+import { isAuctionNotStarted, recheckAtMs, scaleUp } from "./recheck";
 import {
   Budget,
   capFillAmount,
@@ -14,6 +18,7 @@ import {
   exclusivityFor,
   exitOk,
   fixedPriceOk,
+  isFixedPrice,
   fmt18,
   legsFor,
   mintReplaceUsdt0,
@@ -55,6 +60,13 @@ export interface FillOutcome {
    * book's fillable for it changes or RESTING_RECHECK_SECONDS pass.
    */
   rest?: boolean;
+  /**
+   * With `rest` on an order whose price moves with time: when (ms, wall clock) its
+   * gate is expected to pass, the market held fixed (./recheck.ts) — the engine
+   * re-quotes it then instead of a full {@link AUCTION_RECHECK_MS} later. Unset: no
+   * prediction (the cap applies).
+   */
+  recheckAt?: number;
 }
 
 /**
@@ -67,7 +79,9 @@ export interface FillOutcome {
  *
  * Gas: the shared {@link Guard} (one hourly RBTC budget with the route strategy,
  * MAX_GAS_PRICE_GWEI, per-order backoff). The tx gas limit is the simulation's
- * estimate × 1.25, and the budget is checked against limit × price before sending.
+ * estimate × 1.25, and the budget is checked against limit × price before sending;
+ * the profit gate prices the fill's gas at estimate × r (the receipt/estimate ratio
+ * learned for this shape, gasRatio.ts) at the send price (chain.ts `withSendGasPrice`).
  *
  * Non-blocking: a live fill SENDS and returns `pending`; the receipt is read by a
  * later tick. A missing Settlement approval is sent as its own tx first (the
@@ -85,6 +99,7 @@ export class Filler {
     private readonly log: (m: string) => void,
     private readonly onSpend: () => void = () => {},
     readonly guard: Guard = new Guard(cfg.gas),
+    readonly gasRatios: GasRatios = new GasRatios(cfg.gas.defaultReceiptRatioPpm),
   ) {
     guard.register("inventory", budget);
   }
@@ -125,6 +140,8 @@ export class Filler {
       if (blocked) return { ...this.skip(orderHash, blocked.reason), final: blocked.global };
       return await this.tryFill(orderHash, order, entry.announce.sig, fillable, cls.direction);
     } catch (e) {
+      // The latest block predates the auction's start (blocks lag the wall clock): try the next tick.
+      if (isAuctionNotStarted(e)) return this.skip(orderHash, "auction not started at the latest block");
       // Nothing was sent (a sent tx is handled inside tryFill): short strategy-scoped backoff.
       this.guard.onSimFail(orderHash, "inventory", Date.now());
       const reason = sanitize(e instanceof Error ? e.message.split("\n")[0]! : String(e));
@@ -154,6 +171,51 @@ export class Filler {
     return fromPool > fromUsd ? fromPool : fromUsd;
   }
 
+  /**
+   * The inventory candidate for an indicative quote (./quote.ts) — BUY side only (the
+   * maker sells USDRIF for USDT0; we pay USDT0 out of inventory). What we would pay for
+   * `amountIn` USDRIF is bounded three ways, exactly the gates a fill must pass:
+   *   • the price cap: amountIn × MAX_BUY_PRICE (`capOut`);
+   *   • the exit edge: paid ≤ exit / (1 + MIN_EXIT_EDGE_BPS), exit = the live redeem-and-
+   *     sell value of the USDRIF (`capOut` too);
+   *   • the all-in profit: paid ≤ exit − INVENTORY_MIN_PROFIT_USDT0 − cost, cost = the
+   *     fill's gas (estimate × r, estimate = max(INVENTORY_GAS_ESTIMATE, the largest
+   *     learned for the shape)) + its share of the rebalance — `grossOut` is
+   *     exit − min profit and `costOut` the cost, so the quote's gas margin applies.
+   * Refused when the ticket is outside MIN_FILL / MAX_FILL, or the wallet or the hourly
+   * budget could not pay it.
+   */
+  async quoteInventory(tokenIn: Address, tokenOut: Address, amountIn: bigint, gasPrice: bigint): Promise<Verdict<{ candidate: PricedCandidate }>> {
+    const { cfg, chain } = this;
+    const p = cfg.policy;
+    const t = cfg.tokens;
+    if (tokenIn.toLowerCase() !== t.usdrif.toLowerCase() || tokenOut.toLowerCase() !== t.usdt0.toLowerCase()) return { ok: false, reason: "inventory: not USDRIF→USDT0" };
+    if (!p.buyUsdrif) return { ok: false, reason: "inventory: buy side disabled" };
+    const ONE = 10n ** 18n;
+    const priceCap = (amountIn * p.maxBuyPrice) / ONE / 10n ** 12n; // USDRIF 18 dec × price 1e18 → USDT0 6 dec
+    const rif = ((await rifForUsdrif(chain, cfg, amountIn)) * (10_000n - MOC_FEE_BPS)) / 10_000n;
+    const exit = await quoteRifToUsdt0(chain, cfg, rif);
+    const edgeCap = (exit * 10_000n) / (10_000n + p.minExitEdgeBps);
+    const shape = gasShape("inventory", "inventory", t.usdrif, t.usdt0);
+    const learned = this.gasRatios.typicalEstimate(shape);
+    const estimate = learned !== undefined && learned > p.inventoryGasEstimate ? learned : p.inventoryGasEstimate;
+    const gasUnits = this.gasRatios.priced(shape, estimate);
+    const rebalanceWei = await this.rebalanceShareWei(gasPrice, amountIn);
+    const cost = await this.rbtcToUsdt0(gasPrice * gasUnits + rebalanceWei);
+    if (cost === undefined) return { ok: false, reason: "inventory: cannot price gas in USDT0" };
+    const capOut = priceCap < edgeCap ? priceCap : edgeCap;
+    const grossOut = exit - p.minProfitUsdt0;
+    if (capOut <= 0n || grossOut <= 0n) return { ok: false, reason: "inventory: no edge at this size" };
+    const most = capOut < grossOut ? capOut : grossOut;
+    if (most < p.minFillUsdt0) return { ok: false, reason: "inventory: below minimum fill" };
+    if (most > p.maxFillUsdt0) return { ok: false, reason: "inventory: above maximum fill" };
+    const now = Date.now();
+    const room = this.budget.remaining(t.usdt0, now);
+    const bal = await balanceOf(chain, t.usdt0);
+    if (most > room || most > bal) return { ok: false, reason: "inventory: no capacity (balance / hourly budget)" };
+    return { ok: true, candidate: { strategy: "inventory", grossOut, capOut, costOut: cost, gasUnits, source: "inventory" } };
+  }
+
   /** What the fill earns before gas, in USDT0 units. */
   private async edgeUsdt0(direction: Direction, paid: bigint, received: bigint): Promise<bigint> {
     if (direction === "buyUsdrif") {
@@ -173,13 +235,28 @@ export class Filler {
   }
 
   /** `rest`: a verdict about the order's terms (see FillOutcome.rest), not our transient state. */
-  private skip(orderHash: Hex, reason: string, rest = false): FillOutcome {
+  private skip(orderHash: Hex, reason: string, rest = false, recheckAt?: number): FillOutcome {
     if (this.skipped.get(orderHash) !== reason) {
       if (this.skipped.size > 5_000) this.skipped.clear(); // a long-running host must not grow without bound
       this.skipped.set(orderHash, reason);
-      this.log(`· [inventory] skip ${orderHash}: ${reason}`);
+      this.log(`· [inventory] skip ${orderHash}: ${reason}${recheckAt !== undefined ? ` (re-quote at ${new Date(recheckAt).toISOString()})` : ""}`);
     }
-    return { orderHash, status: "skipped", reason, strategy: "inventory", ...(rest ? { rest: true } : {}) };
+    return { orderHash, status: "skipped", reason, strategy: "inventory", ...(rest ? { rest: true } : {}), ...(rest && recheckAt !== undefined ? { recheckAt } : {}) };
+  }
+
+  /**
+   * For a DECAYING order a gate refused: when it is expected to pass (ms), with the
+   * market held fixed (./recheck.ts). One extra read (the lens bump the preview was
+   * priced at), only on this path; a failed read is simply no prediction.
+   */
+  private async recheckAt(order: Order, gasPrice: bigint, paid: bigint, received: bigint, passes: (paid: bigint, received: bigint) => boolean): Promise<number | undefined> {
+    if (isFixedPrice(order)) return undefined;
+    try {
+      const bumpNow = await previewBump(this.chain, this.cfg.lens, order, this.chain.me, gasPrice);
+      return recheckAtMs(order, bumpNow, paid, received, BigInt(Math.floor(Date.now() / 1000)), passes);
+    } catch {
+      return undefined;
+    }
   }
 
   private async tryFill(orderHash: Hex, order: Order, sig: Hex, fillable: bigint, direction: Direction): Promise<FillOutcome> {
@@ -215,25 +292,39 @@ export class Filler {
 
     // 2. Price.
     const price = priceOk(direction, paid, received, p);
-    if (!price.ok) return this.skip(orderHash, price.reason, true);
+    if (!price.ok) {
+      return this.skip(orderHash, price.reason, true, await this.recheckAt(order, gasPrice, paid, received, (pd, rv) => priceOk(direction, pd, rv, p).ok));
+    }
 
     // 3. Buy side: the live exit (redeem at oracle − MoC fee, sell RIF on the pool) must beat what we pay.
     if (direction === "buyUsdrif") {
       const rif = ((await rifForUsdrif(chain, cfg, received)) * (10_000n - MOC_FEE_BPS)) / 10_000n;
       const exitUsdt0 = await quoteRifToUsdt0(chain, cfg, rif);
       const exit = exitOk(paid, exitUsdt0, p);
-      if (!exit.ok) return this.skip(orderHash, exit.reason, true);
+      if (!exit.ok) {
+        // The exit is the received USDRIF's round trip: it scales with what we receive.
+        const at = await this.recheckAt(order, gasPrice, paid, received, (pd, rv) => exitOk(pd, scaleUp(exitUsdt0, rv, received), p).ok);
+        return this.skip(orderHash, exit.reason, true, at);
+      }
     }
 
     // 3b. All-in cost: the fill's own gas, its share of the rebalance it causes and a
     //     minimum profit, priced in USDT0 at max(pool quote, RBTC_PRICE_USD). A fill
     //     whose spread does not cover them is skipped (audit follow-up 2026-10-05).
+    //     The fill's gas is priced at estimate × r (gasRatio.ts), r learned per shape.
+    const shape = gasShape("inventory", "inventory", receive, pay);
     const edgeUsdt0 = await this.edgeUsdt0(direction, paid, received);
     const rebalanceWei = await this.rebalanceShareWei(gasPrice, direction === "buyUsdrif" ? received : paid);
-    const preCost = await this.rbtcToUsdt0(gasPrice * p.inventoryGasEstimate + rebalanceWei);
+    const preCost = await this.rbtcToUsdt0(gasPrice * this.gasRatios.priced(shape, p.inventoryGasEstimate) + rebalanceWei);
     if (preCost === undefined) return this.skip(orderHash, "cannot price gas in USDT0 (no pool quote and no RBTC_PRICE_USD)");
+    // The edge at another (paid, received), the market held: buy — the exit value
+    // (edge + paid) scales with the USDRIF received; sell — received − mint cost.
+    const edgeAt = (pd: bigint, rv: bigint) => (direction === "buyUsdrif" ? scaleUp(edgeUsdt0 + paid, rv, received) - pd : rv - mintReplaceUsdt0(pd));
     const pre = inventoryProfitOk(edgeUsdt0, preCost, p.minProfitUsdt0);
-    if (!pre.ok) return this.skip(orderHash, pre.reason, true);
+    if (!pre.ok) {
+      const at = await this.recheckAt(order, gasPrice, paid, received, (pd, rv) => inventoryProfitOk(edgeAt(pd, rv), preCost, p.minProfitUsdt0).ok);
+      return this.skip(orderHash, pre.reason, true, at);
+    }
 
     // 4. Floor: the bump we just priced at. Inclusion at a worse tick reverts (BumpTooLow).
     const minBumpBps = await previewBump(chain, cfg.lens, order, chain.me, gasPrice);
@@ -282,11 +373,16 @@ export class Filler {
     const gas = (est * GAS_LIMIT_PCT + 99n) / 100n;
     const room = this.guard.gasRoom(gas * gasPrice, Date.now());
     if (room) return this.skip(orderHash, room);
-    // Re-check the all-in gate with the REAL gas limit (the worst case we can be charged).
-    const realCost = await this.rbtcToUsdt0(gasPrice * gas + rebalanceWei);
+    // Re-check the all-in gate with the REAL estimate × r (what the receipt is
+    // expected to charge; a heavier burn loses at most (receipt − r × est) × price).
+    const pricedGas = this.gasRatios.priced(shape, est);
+    const realCost = await this.rbtcToUsdt0(gasPrice * pricedGas + rebalanceWei);
     if (realCost === undefined) return this.skip(orderHash, "cannot price gas in USDT0");
     const post = inventoryProfitOk(edgeUsdt0, realCost, p.minProfitUsdt0);
-    if (!post.ok) return this.skip(orderHash, post.reason, true);
+    if (!post.ok) {
+      const at = await this.recheckAt(order, gasPrice, paid, received, (pd, rv) => inventoryProfitOk(edgeAt(pd, rv), realCost, p.minProfitUsdt0).ok);
+      return this.skip(orderHash, post.reason, true, at);
+    }
 
     // 8. Broadcast (legacy, Rootstock has no EIP-1559 market) and return: the
     //    receipt is read by a later tick. The outflow is reserved until then.
@@ -305,6 +401,7 @@ export class Filler {
       orderHash,
       expiry: order.expiry,
       reserve: { budget: "inventory", token: pay, amount: simPaid },
+      gasMeter: { shape, estimate: est.toString() },
       info: {
         tag,
         payToken: pay,
@@ -322,7 +419,7 @@ export class Filler {
         throw new Error(r.reason);
       case "sent":
         this.onSpend();
-        this.log(`→ [inventory] sent fill ${tag} tx ${r.tx} (gas limit ${gas} @ ${gasPrice} wei)`);
+        this.log(`→ [inventory] sent fill ${tag} tx ${r.tx} (gas limit ${gas} @ ${gasPrice} wei, estimate ${est}, priced ${pricedGas})`);
         return { orderHash, status: "pending", tx: r.tx, paid: simPaid, received: simReceived, strategy: "inventory", final: true };
     }
   }

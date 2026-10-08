@@ -469,11 +469,12 @@ contract RouteSandboxTest is AggregatorFillSolverTest {
         );
         aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
         assertEq(tB.balanceOf(maker), 40e18, "maker paid from the swept output");
-        assertEq(tB.balanceOf(address(this)), 10e18, "output spread to the caller");
-        assertEq(tA.balanceOf(address(this)), AMOUNT_IN / 2, "unconsumed input to the caller");
+        assertEq(tB.balanceOf(address(this)), 10e18 - 1, "output spread to the caller");
+        assertEq(tA.balanceOf(address(this)), AMOUNT_IN / 2 - 1, "unconsumed input to the caller");
         _assertSandboxEmpty();
-        assertEq(tA.balanceOf(address(aggSolver)), 0, "solver keeps nothing");
-        assertEq(tB.balanceOf(address(aggSolver)), 0, "solver keeps nothing");
+        // Both balances were zero before the fill: each keeps the self-seeded floor.
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "solver keeps only the floor");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "solver keeps only the floor");
     }
 
     /// @dev A donation sitting on the sandbox is not anyone's: the next call sweeps
@@ -646,7 +647,7 @@ contract RouteSandboxTest is AggregatorFillSolverTest {
         assertTrue(evil.hookRan(), "the hook ran during the sweep");
         assertEq(tB.balanceOf(address(h)), 0, "the harvester got nothing");
         assertEq(tB.balanceOf(eve), AMOUNT_OUT, "maker paid");
-        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "filler kept the whole spread");
+        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "filler kept the whole spread but the floor");
         _assertSandboxEmpty();
     }
 
@@ -665,7 +666,7 @@ contract RouteSandboxTest is AggregatorFillSolverTest {
         p.minOut = AMOUNT_OUT;
         aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
         assertEq(tA.balanceOf(address(h)), 0, "the harvester got nothing");
-        assertEq(tA.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "the filler kept the input residue");
+        assertEq(tA.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "the filler kept the input residue, less the floor");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
     }
 

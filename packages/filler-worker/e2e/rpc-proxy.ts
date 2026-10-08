@@ -11,14 +11,18 @@
  *  - injects latency (mean ± uniform jitter, per HTTP request);
  *  - optionally rate-limits (token bucket per tag → HTTP 429, JSON-RPC -32005);
  *  - answers `eth_gasPrice` with Rootstock's price (anvil always says 1 gwei
- *    whatever `--gas-price` is; anvil mines any price ≥ the 0 base fee);
+ *    whatever `--gas-price` is; anvil mines any price ≥ the 0 base fee), and adds
+ *    Rootstock's `minimumGasPrice` block-header field (MIN_GAS_PRICE_WEI, default
+ *    GAS_PRICE_WEI / 1.1 — rskj's eth_gasPrice is min × 1.1) to every
+ *    `eth_getBlockBy*` result that lacks it, so the filler and the app price gas
+ *    off the block minimum exactly as on mainnet;
  *  - logs every `eth_sendRawTransaction` (hash, from, nonce) — the double-send /
  *    nonce-clash evidence — and can HOLD or DROP them (crash-during-broadcast test);
  *  - is the alert webhook sink (`POST /__webhook`);
  *  - streams a per-call timeline to $RUN_DIR/rpc-timeline.jsonl.
  *
  * Control: GET /__stats, POST /__reset, POST /__config {latencyMs, jitterMs,
- * rateLimit: {perSecond, burst} | null, gasPriceWei, sendRaw: "pass"|"hold"|"hold-drop"|"drop",
+ * rateLimit: {perSecond, burst} | null, gasPriceWei, minGasPriceWei, sendRaw: "pass"|"hold"|"hold-drop"|"drop",
  * holdMs}, GET /__txs, GET /__webhooks.
  */
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -37,6 +41,8 @@ interface Config {
   /** Token bucket per tag; `tags` limits it to those tags (default: every tag). */
   rateLimit: { perSecond: number; burst: number; tags?: string[] } | null;
   gasPriceWei: string | null;
+  /** Injected as `minimumGasPrice` (hex) into eth_getBlockBy* results; null = pass blocks through. */
+  minGasPriceWei: string | null;
   /**
    * pass: forward. hold: wait holdMs, then forward (the node gets it late).
    * hold-drop: wait holdMs, then never forward (a broadcast lost in flight — kill
@@ -56,6 +62,7 @@ const config: Config = {
   jitterMs: Number(process.env.JITTER_MS ?? 0),
   rateLimit: process.env.RATE_LIMIT_RPS ? { perSecond: Number(process.env.RATE_LIMIT_RPS), burst: Number(process.env.RATE_LIMIT_BURST ?? process.env.RATE_LIMIT_RPS) } : null,
   gasPriceWei: process.env.GAS_PRICE_WEI ?? "26065600",
+  minGasPriceWei: process.env.MIN_GAS_PRICE_WEI || ((BigInt(process.env.GAS_PRICE_WEI ?? "26065600") * 10n) / 11n).toString(),
   sendRaw: "pass",
   holdMs: 0,
   deny: (process.env.DENY_METHODS ?? "")
@@ -167,6 +174,21 @@ async function forward(body: string): Promise<{ status: number; text: string; ms
   return { status: r.status, text, ms: Date.now() - t0 };
 }
 
+/** Rootstock's block-header `minimumGasPrice`, added to eth_getBlockBy* results that lack it (anvil). */
+function withMinGasPrice(calls: Array<{ method?: string }>, text: string): string {
+  if (!config.minGasPriceWei || !calls.some((c) => c.method === "eth_getBlockByNumber" || c.method === "eth_getBlockByHash")) return text;
+  try {
+    const j = JSON.parse(text) as { result?: Record<string, unknown> | null } | Array<{ result?: Record<string, unknown> | null }>;
+    const hex = `0x${BigInt(config.minGasPriceWei).toString(16)}`;
+    for (const one of Array.isArray(j) ? j : [j]) {
+      if (one.result && typeof one.result === "object" && one.result.minimumGasPrice === undefined) one.result.minimumGasPrice = hex;
+    }
+    return JSON.stringify(j);
+  } catch {
+    return text;
+  }
+}
+
 async function handleRpc(tag: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readBody(req);
   const s = tagStats(tag);
@@ -241,7 +263,7 @@ async function handleRpc(tag: string, req: IncomingMessage, res: ServerResponse)
     }
     for (const c of calls) timelineBuf.push(`${JSON.stringify({ t, tag, m: c.method, ms: up.ms, lat: Math.round(lat), ...(errCode ? { err: errCode } : {}) })}\n`);
     res.writeHead(up.status, { "content-type": "application/json" });
-    res.end(up.text);
+    res.end(withMinGasPrice(calls, up.text));
   } catch (e) {
     const k = `upstream:${(e as Error).message.slice(0, 60)}`;
     s.errors[k] = (s.errors[k] ?? 0) + 1;
@@ -288,5 +310,5 @@ const server = createServer((req, res) => {
 });
 server.keepAliveTimeout = 30_000;
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`rpc-proxy :${PORT} → ${UPSTREAM} (latency ${config.latencyMs}±${config.jitterMs} ms, gasPrice ${config.gasPriceWei ?? "upstream"})`);
+  console.log(`rpc-proxy :${PORT} → ${UPSTREAM} (latency ${config.latencyMs}±${config.jitterMs} ms, gasPrice ${config.gasPriceWei ?? "upstream"}, block minimumGasPrice ${config.minGasPriceWei ?? "upstream"})`);
 });

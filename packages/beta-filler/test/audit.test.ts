@@ -70,6 +70,8 @@ const RECEIVED = 10n ** 16n;
 const LS = String.fromCharCode(0x2028);
 const ACCOUNT = privateKeyToAccount(("0x" + "11".repeat(32)) as Hex);
 /** 1 RBTC = 100,000 USDT0 (6 dec): the fake QuoterV2's price along any path. */
+/** The gas a fill is PRICED at before any receipt: ⌈estimate × 0.88⌉ (DEFAULT_GAS_RECEIPT_RATIO, gasRatio.ts). */
+const R = (gas: bigint) => (gas * 880_000n + 999_999n) / 1_000_000n;
 const rbtcToUsdt0 = (wei: bigint) => (wei * 100_000n * 10n ** 6n + 10n ** 18n - 1n) / 10n ** 18n;
 
 type Receipt = "success" | "reverted" | "timeout";
@@ -179,20 +181,21 @@ describe("M-1: the sent plan's floor is priced at the MEASURED gas; the limit ad
     const gasLimit = sent[0]!.gas!;
     expect(gasLimit).toBe(625_000n);
     const floorProfit = planOf(sent[0]!.data).minOut - OWED; // what the chain guarantees the bot
-    // Priced at the measurement (estimateGas = gross, before refunds), not the limit:
-    // pricing the 1.25× limit overcharged every quote by ~40 %.
-    const measuredCostOut = rbtcToUsdt0(500_000n * GAS_PRICE);
+    // Priced at the measurement × r (estimateGas = gross, before refunds; r = the
+    // receipt/estimate ratio, 0.88 before any receipt), not the limit: pricing the
+    // 1.25× limit overcharged every quote by ~40 %.
+    const measuredCostOut = rbtcToUsdt0(R(500_000n) * GAS_PRICE);
     expect(floorProfit).toBe(measuredCostOut + rbtcToUsdt0(cfg.route!.minProfitWei));
     expect(floorProfit).toBeLessThan(rbtcToUsdt0(gasLimit * GAS_PRICE));
   });
 
-  it("simulated gas below the estimate: no rebuild; the gas limit is the estimate the floor was priced at", async () => {
+  it("simulated gas below the estimate: no rebuild; the gas limit is the estimate × r the floor was priced at", async () => {
     const { chain, sent, counts } = fakeChain({ simGas: 200_000n, receipt: "success" });
     const { rf, cfg } = routeFiller({}, chain);
     expect((await rf.consider(entry() as never)).status).toBe("pending");
     expect(counts.call).toBe(1);
-    expect(sent[0]!.gas).toBe(cfg.route!.gasEstimate);
-    expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(cfg.route!.gasEstimate * GAS_PRICE));
+    expect(sent[0]!.gas).toBe(R(cfg.route!.gasEstimate)); // 281,600 > 200k × 1.25
+    expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(R(cfg.route!.gasEstimate) * GAS_PRICE));
   });
 
   it("a re-simulation that measures still more gas re-prices again (converges on the measured gas)", async () => {
@@ -201,7 +204,7 @@ describe("M-1: the sent plan's floor is priced at the MEASURED gas; the limit ad
     expect((await rf.consider(entry() as never)).status).toBe("pending");
     expect(counts.call).toBe(3);
     expect(sent[0]!.gas).toBe(600_000n); // 480k × 1.25
-    expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(480_000n * GAS_PRICE));
+    expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(R(480_000n) * GAS_PRICE));
   });
 
   it("MAX_ROUTE_GAS is configurable, and must be ≥ ROUTE_GAS_ESTIMATE", () => {
@@ -364,6 +367,20 @@ describe("B13: the inventory EOA inside the app's soft window (exclusiveFiller =
   });
 });
 
+describe("2026-10-07: the inventory gate prices gas at estimate × r; the limit keeps its 1.25× headroom", () => {
+  const cfg = loadConfig({ ...ENV, MIN_EXIT_EDGE_BPS: "0" });
+  it("priced at ⌈160k × 0.88⌉ = 140,800, sent with limit 200k, the estimate recorded for learning", async () => {
+    const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+    const logs: string[] = [];
+    const g = new Guard(cfg.gas);
+    const f = new Filler(cfg, chain, new Budget({ [ROOTSTOCK.usdt0.toLowerCase()]: 10n ** 12n }), (m) => logs.push(m), () => {}, g);
+    expect((await f.consider(inventoryEntry() as never)).status).toBe("pending");
+    expect(sent[0]!.gas).toBe(200_000n);
+    expect(logs.some((l) => /estimate 160000, priced 140800/.test(l))).toBe(true);
+    expect(g.pending!.gasMeter).toEqual({ shape: `inventory:inventory:${ROOTSTOCK.usdrif.toLowerCase()}:${ROOTSTOCK.usdt0.toLowerCase()}`, estimate: "160000" });
+  });
+});
+
 describe("M-3: the inventory strategy has the gas budget, the gas-price ceiling and the backoff", () => {
   const cfg = loadConfig({ ...ENV, MIN_EXIT_EDGE_BPS: "0" });
   const invBudget = () => new Budget({ [ROOTSTOCK.usdt0.toLowerCase()]: 10n ** 12n });
@@ -461,7 +478,7 @@ describe("L-5: a receipt timeout charges conservatively and parks the order unti
     const t0 = Date.now();
     expect((await resolvePending(chain, guard, t0 + 1_000))?.status).toBe("waiting");
     expect((await resolvePending(chain, guard, t0 + cfg.gas.receiptTimeoutMs + 1))?.status).toBe("timeout");
-    expect(guard.gas.remaining(GAS, Date.now())).toBe(cfg.gas.hourlyWei - cfg.route!.gasEstimate * GAS_PRICE);
+    expect(guard.gas.remaining(GAS, Date.now())).toBe(cfg.gas.hourlyWei - R(cfg.route!.gasEstimate) * GAS_PRICE); // the limit
     expect(budget.remaining(ROUTE_FILLS, Date.now())).toBe(59n);
     const b = await rf.consider(entry() as never);
     expect(b).toMatchObject({ status: "skipped", final: true });
@@ -639,7 +656,7 @@ describe("L-4: the profit gate accounts for the solver's maker/protocol surplus 
     const { chain, sent } = fakeChain({ simGas: 200_000n, receipt: "success", makerPpm: 150_000, protocolPpm: 50_000 });
     const { rf, cfg, logs } = routeFiller({}, chain);
     expect((await rf.consider(entry() as never)).status).toBe("pending");
-    const cost = rbtcToUsdt0(cfg.route!.gasEstimate * GAS_PRICE) + rbtcToUsdt0(cfg.route!.minProfitWei);
+    const cost = rbtcToUsdt0(R(cfg.route!.gasEstimate) * GAS_PRICE) + rbtcToUsdt0(cfg.route!.minProfitWei);
     const floor = planOf(sent[0]!.data).minOut - OWED;
     expect(floor).toBe(grossUp(cost, 800_000n));
     expect((floor * 800_000n) / 1_000_000n).toBeGreaterThanOrEqual(cost); // OUR share still covers gas + profit
@@ -747,14 +764,14 @@ describe("task 05: a direct SELL still decaying patches the live owed; the typed
   const planFields = (data: Hex) =>
     decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data }).args[3] as { amountOutOffset: bigint; amountInOffset: bigint };
 
-  it("decaying direct SELL: amountOutOffset = the exactOutputSingle amountOut word; gas limit = estimate + TYPED_CALLBACK_GAS", async () => {
+  it("decaying direct SELL: amountOutOffset = the exactOutputSingle amountOut word; gas limit = (estimate + TYPED_CALLBACK_GAS) × r", async () => {
     const { chain, sent } = fakeChain({ simGas: 200_000n, receipt: "success" });
     const { rf, cfg, logs } = routeFiller({}, chain);
     expect((await rf.consider(directEntry(true) as never)).status).toBe("pending");
     const plan = planFields(sent[0]!.data);
     expect(plan.amountOutOffset).toBe(132n);
     expect(plan.amountInOffset).toBe(NO_PATCH);
-    expect(sent[0]!.gas).toBe(cfg.route!.gasEstimate + TYPED_CALLBACK_GAS);
+    expect(sent[0]!.gas).toBe(R(cfg.route!.gasEstimate + TYPED_CALLBACK_GAS));
     expect(logs.some((l) => l.includes("direct+live"))).toBe(true);
   });
 
@@ -765,7 +782,7 @@ describe("task 05: a direct SELL still decaying patches the live owed; the typed
     const { rf, cfg, logs } = routeFiller({}, chain);
     expect((await rf.consider(directEntry(true, 904_999_000n) as never)).status).toBe("pending");
     expect(planFields(sent[0]!.data).amountOutOffset).toBe(NO_PATCH);
-    expect(sent[0]!.gas).toBe(cfg.route!.gasEstimate);
+    expect(sent[0]!.gas).toBe(R(cfg.route!.gasEstimate));
     expect(logs.some((l) => l.includes("direct+live"))).toBe(false);
   });
 
@@ -774,7 +791,7 @@ describe("task 05: a direct SELL still decaying patches the live owed; the typed
     const { rf, cfg } = routeFiller({}, chain);
     expect((await rf.consider(directEntry(false) as never)).status).toBe("pending");
     expect(planFields(sent[0]!.data).amountOutOffset).toBe(NO_PATCH);
-    expect(sent[0]!.gas).toBe(cfg.route!.gasEstimate);
+    expect(sent[0]!.gas).toBe(R(cfg.route!.gasEstimate));
   });
 
   it("pull orders never patch the output", async () => {

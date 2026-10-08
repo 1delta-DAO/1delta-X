@@ -4,6 +4,8 @@ import type { Ticket } from "../hooks/useTicket";
 import type { TokenIndex } from "../hooks/useTokenIndex";
 import { fmtAmt, fmtPrice, shortHex } from "../lib/format";
 import { restingLabel, type Quote } from "../lib/ladder";
+import { GAS_NOTE_BPS, type MarketFloor } from "../lib/marketFloor";
+import { MAX_SLIPPAGE_BPS, type QuoteView, type SlippageSetting } from "../lib/quote";
 import { SOURCE_NAME, SOURCE_VAR, SOURCES, type Source } from "../lib/types";
 import { TokenSelect } from "./TokenSelect";
 
@@ -70,6 +72,22 @@ interface OrderFormProps {
   maxAmount: string | undefined;
   /** The ticket commits more than the wallet holds, compared in wei. */
   overBalance: boolean;
+  /**
+   * A MARKET ticket's gas-sized floor and the guaranteed minimum it signs
+   * (lib/marketFloor.ts). Null for limit / TWAP, or where the flat floor applies.
+   */
+  floor: (MarketFloor & { minOut: number; targetOut: number }) | null;
+  /**
+   * A MARKET ticket priced by the filler's indicative quote (lib/quote.ts): what you
+   * receive ≈, the gas share, the minimum under your slippage. Null = no quote (the
+   * `floor` fallback above, or limit / TWAP).
+   */
+  rfq: QuoteView | null;
+  /** Where the market quote stands: quoted, being fetched, unavailable (floor fallback), or not applicable. */
+  quoteStatus: "quoted" | "loading" | "fallback" | "off";
+  quoteError: string | null;
+  /** The maker's slippage protection for quoted market tickets. */
+  slippage: { setting: SlippageSetting; bps: number; autoBps: number; set: (s: SlippageSetting) => void };
   /** The pinned address of the token you receive — shown, because the wallet only shows the legs as a hex blob. */
   recvAddress: string | null;
   /** Why the last signature attempt failed — a declined wallet prompt, usually. */
@@ -123,6 +141,11 @@ export function OrderForm(props: OrderFormProps) {
     allowance,
     maxAmount,
     overBalance,
+    floor,
+    rfq,
+    quoteStatus,
+    quoteError,
+    slippage,
     recvAddress,
     signError,
     domain,
@@ -186,10 +209,42 @@ export function OrderForm(props: OrderFormProps) {
         Math.abs(vsMid) > 2 ? "warn" : "",
       ]);
     }
-    rows.push(["Minimum received", `${fmtAmt(quote.minReceived)} ${recvToken}`, "good"]);
+    if (mode === "market" && rfq) {
+      // The FILLER's quote: what it would deliver now, net of its gas (+ margin). The
+      // order starts there and only decays toward the minimum if the price moves.
+      rows.push(["You receive", `≈ ${fmtAmt(rfq.receive)} ${recvToken}`, "good"]);
+      rows.push([
+        "Network gas",
+        `${fmtAmt(rfq.gas)} ${recvToken} · ${(rfq.gasBps / 100).toFixed(2)}% of the ticket (incl. +${rfq.gasMarginBps / 100}% margin)`,
+        rfq.gasBps > GAS_NOTE_BPS ? "warn" : "",
+      ]);
+      rows.push(["Minimum received", `${fmtAmt(rfq.minOut)} ${recvToken} (slippage ${(rfq.slippageBps / 100).toFixed(2)}%)`, ""]);
+      rows.push(["Quoted by", `our filler · ${rfq.source}${rfq.live ? "" : " · DRY RUN (will not fill)"}`, rfq.live ? "" : "warn"]);
+    } else if (mode === "market" && floor) {
+      // The guaranteed minimum is what the signed order commits — the plan's, not the
+      // flat-floor quote's — and the floor % says how far under the book it sits.
+      // The filler takes the order once the auction crosses its break-even (haircut +
+      // gas), so that — not the floor — is the likely outcome; labelled as an estimate.
+      const likely = floor.targetOut * (1 - floor.likelyBps / 10_000);
+      if (likely > floor.minOut) rows.push(["Likely received", `≈ ${fmtAmt(likely)} ${recvToken}`, ""]);
+      rows.push(["Minimum received", `${fmtAmt(floor.minOut)} ${recvToken}`, "good"]);
+      rows.push([
+        "Price floor",
+        `−${(floor.bps / 100).toFixed(2)}% of the quote${floor.gasBound ? " · raised for network gas" : ""}${floor.approximate ? " · approx." : ""}`,
+        floor.bps > GAS_NOTE_BPS ? "warn" : "",
+      ]);
+    } else {
+      rows.push(["Minimum received", `${fmtAmt(quote.minReceived)} ${recvToken}`, "good"]);
+    }
     rows.push([
       "Expires",
-      mode === "market" ? "5 minutes (1 minute auction, then rests at the minimum)" : mode === "twap" ? "on completion" : "24 hours",
+      mode === "market"
+        ? rfq
+          ? "5 minutes (starts at the quote, decays to the minimum over 3.5 minutes)"
+          : "5 minutes (1 minute auction, then rests at the minimum)"
+        : mode === "twap"
+          ? "on completion"
+          : "24 hours",
       "",
     ]);
     if (domain.deployed) rows.push(["Filled by", deliveryLabel(delivery), ""]);
@@ -272,7 +327,7 @@ export function OrderForm(props: OrderFormProps) {
               type="text"
               readOnly
               placeholder="0.0"
-              value={quote && quote.totalOut > 0 ? fmtAmt(quote.totalOut) : ""}
+              value={mode === "market" && rfq ? fmtAmt(rfq.receive) : quote && quote.totalOut > 0 ? fmtAmt(quote.totalOut) : ""}
             />
             <TokenSelect
               value={recvToken}
@@ -403,6 +458,55 @@ export function OrderForm(props: OrderFormProps) {
             </div>
           ))}
         </dl>
+        {mode === "market" && quoteStatus !== "off" && (
+          <div className="field">
+            <div className="top">
+              <span className="lbl">Slippage protection</span>
+              <span className="bal">
+                <button type="button" disabled={slippage.setting.mode === "auto"} onClick={() => slippage.set({ mode: "auto" })}>
+                  auto ({(slippage.autoBps / 100).toFixed(2)}%)
+                </button>
+              </span>
+            </div>
+            <div className="inp">
+              <input
+                type="number"
+                min="0.01"
+                max={MAX_SLIPPAGE_BPS / 100}
+                step="0.01"
+                aria-label="Custom slippage, percent"
+                placeholder={(slippage.autoBps / 100).toFixed(2)}
+                value={slippage.setting.mode === "custom" ? String(slippage.bps / 100) : ""}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  slippage.set(e.target.value === "" || !Number.isFinite(v) || v <= 0 ? { mode: "auto" } : { mode: "custom", bps: Math.round(v * 100) });
+                }}
+              />
+              <span className="unit">%</span>
+            </div>
+            <span className="capnote dim">
+              {quoteStatus === "quoted"
+                ? "The order starts at the filler's quote and can only decay to this much below it, over 3.5 minutes."
+                : quoteStatus === "loading"
+                  ? "Asking the filler for a quote…"
+                  : `Filler quote unavailable${quoteError ? ` (${quoteError.slice(0, 80)})` : ""} — the order uses the gas-sized floor below.`}
+            </span>
+          </div>
+        )}
+
+        {mode === "market" && !rfq && floor && quote && amount > 0 && floor.gasBound && (
+          <span className={floor.bps > GAS_NOTE_BPS ? "capnote" : "capnote dim"} style={{ lineHeight: 1.5 }}>
+            {floor.bps > GAS_NOTE_BPS && (
+              <>
+                <b>Small order: ~{(floor.gasBps / 100).toFixed(2)}% goes to network gas.</b>{" "}
+              </>
+            )}
+            The filler pays ≈ {fmtAmt(floor.gasCostOut)} {recvToken} of gas per fill whatever the size, so small
+            tickets carry a higher floor: {floor.haircutBps} bps quote haircut + {floor.gasBps} bps gas +{" "}
+            {floor.bufferBps} bps (vs {floor.baseBps} bps on larger tickets). The auction starts at the quote and is
+            usually filled as soon as the gas is covered, before it reaches the floor.
+          </span>
+        )}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
           {gate ? (
@@ -417,7 +521,10 @@ export function OrderForm(props: OrderFormProps) {
                     type="button"
                     className={allowance.covered ? "cta ok" : "cta line"}
                     disabled={
-                      allowance.covered || allowance.approving || allowance.required <= 0 || allowance.mismatch !== null
+                      allowance.covered ||
+                      allowance.approving ||
+                      allowance.required <= 0 ||
+                      allowance.mismatch !== null
                     }
                     onClick={allowance.approve}
                   >

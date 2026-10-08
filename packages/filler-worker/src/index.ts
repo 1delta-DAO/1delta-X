@@ -1,4 +1,5 @@
 import { isAdmin } from "./auth";
+import { DO_IP_HEADER, quoteClientIp } from "./clientIp";
 import { locationHint, type Env } from "./config";
 import { FillerDO } from "./do";
 
@@ -29,6 +30,9 @@ function stubFor(env: Env): DurableObjectStub<FillerDO> {
   return env.FILLER.get(env.FILLER.idFromName("filler"), hint ? { locationHint: hint } : undefined) as DurableObjectStub<FillerDO>;
 }
 
+/** `POST /quote` body cap: the request is a handful of short fields. */
+const QUOTE_MAX_BODY = 2048;
+
 const allowWorkersDev = (env: Env) => typeof env.ADMIN_ALLOW_WORKERS_DEV === "string" && env.ADMIN_ALLOW_WORKERS_DEV.trim().toLowerCase() === "true";
 
 export default {
@@ -40,6 +44,20 @@ export default {
     if (path === "/health") {
       if (method !== "GET") return json({ error: "method not allowed" }, 405, { allow: "GET" });
       return stubFor(env).fetch(new Request("https://filler/health"));
+    }
+    // PUBLIC: an indicative quote for a market ticket (packages/beta-filler src/quote.ts).
+    // No auth (the app's visitors call it through the Pages worker's `/api/quote`), a
+    // body cap, and a per-IP + global rate limit in the Durable Object. Answers on
+    // *.workers.dev too: it reveals nothing the chain does not.
+    if (path === "/quote") {
+      if (method !== "POST") return json({ error: "method not allowed" }, 405, { allow: "POST" });
+      const type = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+      if (type !== "application/json") return json({ error: "content-type must be application/json" }, 415);
+      if (Number(request.headers.get("content-length") ?? "0") > QUOTE_MAX_BODY) return json({ error: "body too large" }, 413);
+      const body = await request.text();
+      if (body.length > QUOTE_MAX_BODY) return json({ error: "body too large" }, 413);
+      const ip = await quoteClientIp(request, env.QUOTE_BINDING_KEY);
+      return stubFor(env).fetch(new Request("https://filler/quote", { method: "POST", headers: { "content-type": "application/json", [DO_IP_HEADER]: ip }, body }));
     }
     const want = ADMIN_ROUTES[path];
     if (!want) return json({ error: "not found" }, 404);

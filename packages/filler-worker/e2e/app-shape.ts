@@ -10,6 +10,16 @@
  * app's Pages worker to a book running the production `MIN_TTL_SECONDS`, while the
  * filler runs the production `EXPIRY_MARGIN_SECONDS` / `TICK_SECONDS`.
  *
+ * MARKET PATH (2026-10-07): by default (`MARKET_PATH=quote`) each market ticket asks the
+ * filler for an indicative quote through the app's Pages worker (`POST /api/quote`, as
+ * the app does — lib/quote.ts), signs a 60 s Dutch order STARTING at the quote and
+ * decaying to quote × (1 − the app's auto slippage: 10 bps stable / 30 bps volatile,
+ * `QUOTE_SLIPPAGE_BPS` overrides), re-quoting right before signing. `MARKET_PATH=dutch`
+ * runs the pre-quote path (the ladder price decaying to the gas-sized floor) — the app's
+ * fallback when no quote is available. The report tabulates, per market ticket: the
+ * quote's grossOut, its gas (+margin), the signed start / min, posted→fill latency, what
+ * the maker got vs the quote, and receipt gas vs the gas the quote and the fill priced.
+ *
  * Tickets (one fresh maker each):
  *   market-sell   rsk-30-wrbtc-usd0  SELL WRBTC, decaying output leg, direct (bit 104, exclusiveFiller = solver)
  *   market-buy    rsk-30-wrbtc-usd0  BUY  WRBTC, rising input leg,     direct
@@ -53,7 +63,10 @@ import { DEFAULT_PULL_EXCLUSIVITY, exclusivityForMarket, parseDeployments, solve
 import { assertPoolTokens, marketById, pinnedToken } from "../../app/src/config/markets";
 import { fundingCalls, planFunding } from "../../app/src/lib/funding";
 import { quote as appQuote } from "../../app/src/lib/ladder";
-import { buildOrder } from "../../app/src/lib/order";
+import { readGasPrice } from "../../app/src/lib/chain";
+import { FILLER_GAS_PRICE_MIN_MULT_BPS, floorInputsFor, FLOOR_PROFILES } from "../../app/src/lib/marketFloor";
+import { buildOrder, inputWei } from "../../app/src/lib/order";
+import { defaultSlippageBps, fetchQuote, quoteDelivery, quotedTerms, type FillerQuote, type QuoteRequest } from "../../app/src/lib/quote";
 import { MARKET_DECAY_SECONDS, MARKET_SLIPPAGE_BPS, MARKET_TTL_SECONDS, planTicket, requiredInputWei, sliceCap, type TicketPlan } from "../../app/src/lib/plan";
 import type { Level, Side } from "../../app/src/lib/types";
 import { applyPoolFee, priceFromSqrt } from "../../app/src/lib/univ3";
@@ -62,6 +75,12 @@ import { admin, balanceOf, deal, loadEnv, nowS, publicClient, setBalance, sleep,
 
 const env = loadEnv();
 const pub = publicClient(env);
+/**
+ * The app's view of the chain for the floor's gas price: through the rpc-proxy, which
+ * adds Rootstock's block `minimumGasPrice` to anvil's blocks (anvil drops the field and
+ * answers eth_gasPrice with 1 gwei) — so `readGasPrice` takes its production path.
+ */
+const appPub = publicClient({ anvilUrl: `${env.proxyUrl}/app` });
 const HERE = new URL(".", import.meta.url).pathname;
 const PACKAGES = join(HERE, "..", "..");
 
@@ -105,6 +124,17 @@ const eff = {
  */
 const slippageBps = process.env.MARKET_SLIPPAGE_BPS ? Number(process.env.MARKET_SLIPPAGE_BPS) : MARKET_SLIPPAGE_BPS;
 const perturbed = (Object.keys(prod) as Array<keyof typeof prod>).filter((k) => prod[k] !== eff[k]);
+/**
+ * How market tickets are priced. `quote` (default, the app since 2026-10-07): the
+ * filler's indicative quote over the app's Pages worker (`/api/quote`) — the order
+ * starts at it and decays to quote × (1 − slippage). `dutch`: the pre-quote path (the
+ * ladder price decaying to the ticket-sized gas floor, lib/marketFloor.ts) — what the
+ * app falls back to when no quote is available.
+ */
+const MARKET_PATH = (process.env.MARKET_PATH ?? "quote") as "quote" | "dutch";
+if (MARKET_PATH !== "quote" && MARKET_PATH !== "dutch") throw new Error("MARKET_PATH must be quote or dutch");
+/** Optional maker slippage override (bps) for quoted tickets; default the app's auto value. */
+const SLIPPAGE_OVERRIDE = process.env.QUOTE_SLIPPAGE_BPS ? Number(process.env.QUOTE_SLIPPAGE_BPS) : undefined;
 
 // ──────────────────── the app's view ────────────────────
 
@@ -172,6 +202,11 @@ interface Posted {
   recvBefore: bigint;
   payBefore: bigint;
   postedAt: number;
+  /** The filler quote the order was signed from (quoted market tickets). */
+  quote?: FillerQuote;
+  /** When that quote was fetched (unix s) and how long before the POST. */
+  quotedAt?: number;
+  slippageBps?: number;
 }
 
 const tokenOf = (sym: string) => pinnedToken(30, sym)!;
@@ -186,15 +221,54 @@ async function prepareAndPost(t: Ticket, i: number): Promise<Posted> {
   const tag = (r: { price: number; size: number }): Level => ({ ...r, source: "UNI", pool: market.pools[0]!.address, feeBps: feeTier });
   const limit = t.limitX ? mid * t.limitX : null;
   const q = appQuote({ bids: lad.bids.map(tag), asks: lad.asks.map(tag), side: t.side, amountIn: t.amount, limit: t.mode === "market" ? null : limit, slippageBps });
-  let plan = planTicket({ q, mid, mode: t.mode, side: t.side, amount: t.amount, limit: t.mode === "market" ? null : limit, slices: t.slices ?? 1, everyMin: t.everyMin ?? 1 });
-  if (!plan) throw new Error(`${t.id}: planTicket returned null`);
-  if (plan.kind === "market" && eff.appTtl !== plan.ttlSeconds) plan = { ...plan, ttlSeconds: eff.appTtl, fundingTtlSeconds: eff.appTtl }; // APP_MARKET_TTL_SECONDS perturbation
-
+  // The app's ticket-sized market floor (lib/marketFloor.ts) from the fork's gas price
+  // and WRBTC/USD0 pool mid — `slippageBps` stays the flat base (and its override).
+  const floor = floorInputsFor({
+    chainId: 30, marketId: t.marketId, side: t.side, deployment, mid, baseBps: slippageBps,
+    // The app's own read (lib/chain.ts): latest block minimumGasPrice × the filler's multiplier.
+    gasPriceWei: await readGasPrice(appPub, FILLER_GAS_PRICE_MIN_MULT_BPS),
+    nativeUsd: await midOf(FLOOR_PROFILES[30]!.nativeUsdMarket),
+  });
   // App.tsx#signDraft: pay/recv from the pinned config, solver from the deployment.
   const paySym = t.side === "sell" ? market.base : market.quote;
   const recvSym = t.side === "sell" ? market.quote : market.base;
   const pay = tokenOf(paySym);
   const recv = tokenOf(recvSym);
+  const ip = `10.77.0.${i + 1}`;
+  // QUOTED market tickets (App.tsx): the filler's quote through the app's Pages worker,
+  // as this visitor; the order starts at it and floors at the maker's slippage.
+  const quoted = t.mode === "market" && MARKET_PATH === "quote";
+  const quoteSlippageBps = SLIPPAGE_OVERRIDE ?? defaultSlippageBps(30, market.base, market.quote);
+  const quoteReq: QuoteRequest = {
+    chainId: 30,
+    marketId: t.marketId,
+    side: t.side,
+    tokenIn: pay.address as Address,
+    tokenOut: recv.address as Address,
+    amountIn: inputWei(t.amount, pay.decimals),
+    delivery: quoteDelivery(deployment, t.marketId),
+    maker: privateKeyToAccount(testKey(`${env.label}:app-shape`, i)).address,
+  };
+  const getQuote = () =>
+    fetchQuote((u, init) => fetch(u, { ...init, headers: { ...(init?.headers as Record<string, string>), "x-sim-ip": ip } }), `${env.gatewayUrl}/api/quote`, quoteReq);
+  const planFrom = (fq?: FillerQuote) =>
+    planTicket({
+      q, mid, mode: t.mode, side: t.side, amount: t.amount, limit: t.mode === "market" ? null : limit, slices: t.slices ?? 1, everyMin: t.everyMin ?? 1, floor,
+      quoted: fq ? quotedTerms(fq, { payDecimals: pay.decimals, recvDecimals: recv.decimals, slippageBps: quoteSlippageBps }) : undefined,
+    });
+  let fq: FillerQuote | undefined;
+  if (quoted) {
+    try {
+      fq = await getQuote();
+    } catch (e) {
+      fail(`${t.id}: /api/quote failed: ${(e as Error).message}`);
+    }
+  }
+  let plan = planFrom(fq);
+  if (!plan) throw new Error(`${t.id}: planTicket returned null`);
+  if (plan.floor) log(`${t.id}: market floor ${plan.floor.bps} bps (haircut ${plan.floor.haircutBps} + gas ${plan.floor.gasBps} + ${plan.floor.bufferBps}, base ${plan.floor.baseBps}; ${floor!.fillGas} gas @ ${floor!.gasPriceWei} wei${floor!.fallback?.gasPrice ? " FALLBACK" : ""} = ${plan.floor.gasCostOut.toPrecision(4)} ${t.side === "sell" ? market.quote : market.base})`);
+  if (plan.kind === "market" && eff.appTtl !== plan.ttlSeconds) plan = { ...plan, ttlSeconds: eff.appTtl, fundingTtlSeconds: eff.appTtl }; // APP_MARKET_TTL_SECONDS perturbation
+
   const maker = privateKeyToAccount(testKey(`${env.label}:app-shape`, i));
 
   // Balance: the ticket's exact input (as the app sees it), dealt by storage write.
@@ -212,6 +286,27 @@ async function prepareAndPost(t: Ticket, i: number): Promise<Posted> {
     const h = await w.sendTransaction({ to: c.to, data: c.data, gas: 150_000n, gasPrice: BigInt(env.gasPriceWei), type: "legacy" });
     const rc = await pub.waitForTransactionReceipt({ hash: h, pollingInterval: 500, timeout: 120_000 });
     if (rc.status !== "success") throw new Error(`${t.id}: funding tx ${h} reverted`);
+  }
+
+  // App.tsx#sign: a quoted ticket re-quotes right before the wallet prompt (the funding
+  // txs above took blocks); the order is built from that fresh quote.
+  let quotedAt: number | undefined;
+  if (quoted && fq) {
+    try {
+      fq = await getQuote();
+      quotedAt = nowS();
+      const p2 = planFrom(fq);
+      if (p2) plan = eff.appTtl !== p2.ttlSeconds ? { ...p2, ttlSeconds: eff.appTtl, fundingTtlSeconds: eff.appTtl } : p2;
+      log(
+        `${t.id}: quote ${fq.quoteId} (${fq.strategy}/${fq.source}): gross ${fq.grossOut}, gas ${fq.gasUnits} units = ${fq.gasCostOut} (+${fq.gasMarginBps / 100}% → ${fq.gasChargeOut}) ⇒ amountOut ${fq.amountOut} ` +
+          `(${((Number(fq.grossOut - fq.amountOut) / Number(fq.grossOut)) * 1e4).toFixed(1)} bps under gross); slippage ${quoteSlippageBps} bps`,
+      );
+    } catch (e) {
+      fail(`${t.id}: re-quote before signing failed: ${(e as Error).message}`);
+      fq = undefined;
+      const p2 = planFrom(undefined);
+      if (p2) plan = p2;
+    }
   }
 
   const draft = buildOrder({
@@ -235,7 +330,6 @@ async function prepareAndPost(t: Ticket, i: number): Promise<Posted> {
   let status = 0;
   let error: string | undefined;
   // The app's own client, through the app's Pages worker (`/api/book`), as its own visitor IP.
-  const ip = `10.77.0.${i + 1}`;
   const doFetch = async (url: string, init?: RequestInit) => {
     const r = await fetch(url, { ...init, headers: { ...(init?.headers as Record<string, string>), "x-sim-ip": ip } });
     status = r.status;
@@ -247,7 +341,10 @@ async function prepareAndPost(t: Ticket, i: number): Promise<Posted> {
   } catch (e) {
     error = e instanceof OrderbookHttpError ? `${e.status} ${e.reason}` : (e as Error).message;
   }
-  return { t, maker, plan, order: draft.order, hash: draft.hash.toLowerCase() as Hex, pay: pay.address as Address, recv: recv.address as Address, status, error, recvBefore, payBefore, postedAt };
+  return {
+    t, maker, plan, order: draft.order, hash: draft.hash.toLowerCase() as Hex, pay: pay.address as Address, recv: recv.address as Address, status, error, recvBefore, payBefore, postedAt,
+    ...(fq ? { quote: fq, quotedAt, slippageBps: quoteSlippageBps } : {}),
+  };
 }
 
 // ──────────────────── the run ────────────────────
@@ -348,7 +445,11 @@ async function main(): Promise<void> {
     const tx = await pub.getTransaction({ hash: f.tx });
     const note = String(row?.note ?? "");
     const strategy = String(row?.strategy ?? "?");
-    const delivery = strategy === "inventory" ? "pull" : note.startsWith("direct") ? "direct" : note.startsWith("pull") ? "pull" : "?";
+    // The fills row is written when the filler reads the receipt (a later tick), so it can
+    // still be missing right after the fill lands: classify from the tx itself then.
+    const delivery = row
+      ? strategy === "inventory" ? "pull" : note.startsWith("direct") ? "direct" : note.startsWith("pull") ? "pull" : "?"
+      : tx.to?.toLowerCase() === env.solver.toLowerCase() ? (isDirectOrder ? "direct" : "pull") : "pull";
     const [recvAfter, payAfter] = await Promise.all([balanceOf(pub, p.recv, p.maker.address), balanceOf(pub, p.pay, p.maker.address)]);
     const got = recvAfter - p.recvBefore;
     const paid = p.payBefore - payAfter;
@@ -372,9 +473,42 @@ async function main(): Promise<void> {
         live = `; (could not decode the plan: ${(e as Error).message.split("\n")[0]})`;
       }
     }
+    // Gas: what the filler estimated and PRICED (its send log line) vs the receipt.
+    let gasNote = "";
+    try {
+      const rc = await pub.getTransactionReceipt({ hash: f.tx });
+      const sentLine = wlog.find((l) => l.includes(f.tx) && /→ \[(route|inventory)\] sent/.test(l)) ?? "";
+      const est = /(?:simulated|estimate) (\d+)/.exec(sentLine)?.[1];
+      const priced = /priced (\d+)/.exec(sentLine)?.[1];
+      const ratio = /at r ([0-9.]+)/.exec(sentLine)?.[1];
+      const limit = /gas limit (\d+)/.exec(sentLine)?.[1];
+      Object.assign(rec, { gasUsed: rc.gasUsed, gasEstimate: est, gasPriced: priced, gasRatio: ratio, gasLimit: limit, gasPrice: tx.gasPrice, floorBps: p.plan.floor?.bps, floorGasCostOut: p.plan.floor?.gasCostOut });
+      gasNote = `; gas: receipt ${rc.gasUsed}${est ? ` / estimate ${est} = ${(Number(rc.gasUsed) / Number(est)).toFixed(3)}` : ""}${priced ? `, priced ${priced}${ratio ? ` (r ${ratio})` : ""} → receipt − priced ${Number(rc.gasUsed) - Number(priced)}` : ""}${limit ? `, limit ${limit}` : ""} @ ${tx.gasPrice} wei`;
+    } catch (e) {
+      gasNote = `; (gas: ${(e as Error).message.split("\n")[0]})`;
+    }
+    // The quote the order was signed from: what the filler promised vs what the maker got.
+    const latency = f.at - p.postedAt;
+    Object.assign(rec, { latency, startOut: p.order.legsOut[0]!.start, startIn: p.order.legsIn[0]!.start });
+    if (p.quote) {
+      const fq = p.quote;
+      // Effective rate (out per in) vs the quote's: covers SELL (fixed in, decaying out)
+      // and BUY (fixed out, rising in) alike.
+      const vsQuoteBps = paid > 0n ? ((Number(got) / Number(paid)) / (Number(fq.amountOut) / Number(fq.amountIn)) - 1) * 1e4 : NaN;
+      Object.assign(rec, {
+        quote: {
+          id: fq.quoteId, strategy: fq.strategy, source: fq.source, amountIn: fq.amountIn, grossOut: fq.grossOut, gasUnits: fq.gasUnits,
+          gasCostOut: fq.gasCostOut, gasChargeOut: fq.gasChargeOut, amountOut: fq.amountOut,
+          amountOutVsGrossBps: (Number(fq.grossOut - fq.amountOut) / Number(fq.grossOut)) * 1e4,
+          quotedToPostS: p.quotedAt !== undefined ? p.postedAt - p.quotedAt : undefined,
+        },
+        slippageBps: p.slippageBps,
+        vsQuoteBps,
+      });
+    }
     summary.push(rec);
     const win = winEnd ? `; ${inWindow ? "INSIDE" : "after"} the window (ends t+${winEnd - x.start} s) as ${asExclusive ? "the exclusive filler" : "an outsider"}` : "";
-    log(`${p.t.id}: filled t+${f.at - x.start} s (${f.at - x.floorAt >= 0 ? `${f.at - x.floorAt} s after` : `${x.floorAt - f.at} s before`} the floor), ${delivery} via ${strategy} → ${tx.to}; maker got ${got} (floor ${floorOut}), paid ${paid} (cap ${ceilIn})${live}${win}`);
+    log(`${p.t.id}: filled t+${f.at - x.start} s (${f.at - x.floorAt >= 0 ? `${f.at - x.floorAt} s after` : `${x.floorAt - f.at} s before`} the floor), ${delivery} via ${strategy} → ${tx.to}; maker got ${got} (floor ${floorOut}, ${p.plan.floor ? `${p.plan.floor.bps} bps gas floor` : p.slippageBps !== undefined ? `quote − ${p.slippageBps} bps slippage` : "?"}), paid ${paid} (cap ${ceilIn})${live}${win}${gasNote}`);
     if (f.at > x.quoteBy) fail(`${p.t.id}: filled ${f.at - x.floorAt} s after the floor, past the first re-quote bound (${x.quoteBy - x.floorAt} s)`);
     if (f.at > x.lastSend + landing) fail(`${p.t.id}: filled after expiry − EXPIRY_MARGIN_SECONDS`);
     if (got < floorOut) fail(`${p.t.id}: maker got ${got} < floor ${floorOut}`);
@@ -384,7 +518,21 @@ async function main(): Promise<void> {
     } else if (delivery !== "pull") fail(`${p.t.id}: pull order landed as ${delivery}`);
   }
 
-  const result = { prod, eff, perturbed, slippageBps, appSlippageBps: MARKET_SLIPPAGE_BPS, posted: posted.map((p) => ({ id: p.t.id, status: p.status, error: p.error, hash: p.hash, ttl: p.plan.ttlSeconds, decay: p.plan.decaySeconds })), markets: summary, failures };
+  // The per-ticket table (quoted tickets: the quote vs what the maker got).
+  const f6 = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x.toFixed(1) : "—");
+  log(`market tickets (${MARKET_PATH} path):`);
+  log("| ticket | strategy | quote grossOut | gas (+margin) | amountOut = start | min | start vs gross | posted→fill | maker got | got vs quote | gas receipt / quote-priced / fill-priced |");
+  log("|---|---|---|---|---|---|---|---|---|---|---|");
+  for (const r of summary) {
+    const qq = r.quote as Record<string, unknown> | undefined;
+    const order = markets.find((m) => m.hash === r.hash)!.order;
+    const min = order.legsOut[0]!.end !== 0n ? order.legsOut[0]!.end : order.legsIn[0]!.end !== 0n ? `in ≤ ${order.legsIn[0]!.end}` : order.legsOut[0]!.start;
+    log(
+      `| ${r.id} | ${qq ? `${qq.strategy}/${qq.source}` : String(r.strategy ?? "?")} | ${qq?.grossOut ?? "—"} | ${qq ? `${qq.gasCostOut} (${qq.gasChargeOut})` : "—"} | ${r.startOut}${order.legsIn[0]!.end ? ` for in ${r.startIn}` : ""} | ${min} | ${qq ? `−${f6(qq.amountOutVsGrossBps)} bps` : "—"} | ${r.filled ? `${r.latency} s` : "NOT FILLED"} | ${r.got ?? "—"} (paid ${r.paid ?? "—"}) | ${qq ? `${f6(r.vsQuoteBps)} bps` : "—"} | ${r.gasUsed ?? "—"} / ${qq?.gasUnits ?? "—"} / ${r.gasPriced ?? "—"} |`,
+    );
+  }
+
+  const result = { marketPath: MARKET_PATH, prod, eff, perturbed, slippageBps, appSlippageBps: MARKET_SLIPPAGE_BPS, posted: posted.map((p) => ({ id: p.t.id, status: p.status, error: p.error, hash: p.hash, ttl: p.plan.ttlSeconds, decay: p.plan.decaySeconds })), markets: summary, failures };
   log(`results → ${writeResult("app-shape", result)}`);
   if (failures.length) {
     log(`FAILED (${failures.length}):`);

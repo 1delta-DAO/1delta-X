@@ -26,7 +26,12 @@ codegen, runs 20,000, `evm_version = prague` — on a Rootstock fork at block 8,
 | route direct ≈ 247.9k | **net** tx gas = execution 252,567 + calldata + 21k − refund 37,900 (under the EIP-3529 gasUsed / 5 cap); gross 285.8k; sandboxed solver, solver floor SEEDED (1 wei of each token, treasury paid before), sandbox approval standing | `SandboxGasBench.test_sandbox_gas_direct` (`packages/solvers/test/RouteSandboxFork.t.sol`) |
 | route pull ≈ 282.9k | **net** tx gas = execution 310,502 + calldata + 21k − refund 60,600; gross 343.5k; same fixture | `SandboxGasBench.test_sandbox_gas_pull` |
 
-Untyped callback (`amountOutOffset = NO_PATCH`; a still-decaying direct SELL now sends the typed path, ~+5.9k, see Limitations). The figures
+Untyped callback (`amountOutOffset = NO_PATCH`; a still-decaying direct SELL now sends the typed path, ~+5.9k, see Limitations).
+"Floor SEEDED" is what every fill sees after the solver's FIRST fill of a token: since
+2026-10 the solver keeps that 1 wei itself, so no deploy-time seeding is needed; the first
+fill of each token costs ~+11k (direct) / ~+25k (pull) net more, and the floor-bearing
+code path +52 / +77 execution on the rows above (`packages/solvers/README.md`, *The
+floor seeds itself*). The figures
 the bot actually sees are the node's `eth_estimateGas` — the GROSS figure (refunds
 are credited after execution, so the limit must cover them) — and the receipt's
 `gasUsed`, which is net. Rootstock's own gas schedule is not Prague's; treat the
@@ -68,9 +73,41 @@ ever in flight.
 terms (unprofitable, out of price, below the minimum, no route), and an order we just
 filled, are held for `RESTING_RECHECK_SECONDS` unless the book reports a different
 `fillableAmount` for them. A held order whose exclusivity window is still running is
-re-quoted when the window ends, which is when an outsider's price improves. Orders
+re-quoted when the window ends, which is when an outsider's price improves.
+
+**Decaying orders are re-quoted when they turn profitable** (`src/recheck.ts`). An order
+whose price moves with time (a decaying output, a rising input) is held at most 30 s
+(`AUCTION_RECHECK_MS`, one Rootstock block). Within that cap, a strategy that refuses it
+on price or profit also says WHEN its gate will pass: the order's own pricing is
+deterministic (the SDK mirror `bumpBps`), so what we pay and receive at each future second
+follow from the preview (scaled by the leg tick, from the lens `previewBump` at the same
+block), and the gate is re-run against them with the market held fixed (the quote, gas
+and exit scale with what we receive). The order is re-quoted at the first tick at or after
+that second; at the floor if the gate does not pass before it; at the cap if neither
+falls within it. Both strategies do this: route (the profit gate, at the estimated gas
+and, after a simulation, at the MEASURED gas) and inventory (the price, exit and all-in
+profit gates). The bias is early: a concave pool quote is over-estimated, so at worst
+a re-quote is wasted, never late. Orders the clock alone cannot price (a price module, a
+priority auction, a gas bump, a block clock) keep the 30 s cap; fixed-price orders keep
+`RESTING_RECHECK_SECONDS`. Before this (2026-10-07 e2e, 30 bps floor) the 0.01 WRBTC /
+800 USDT0 market fills landed 8–11 s after the floor although the gate cleared ~t+50 s:
+the looks were at t+5, t+35, t+65.
+
+Not done: sending **early**, priced at the expected inclusion block. Every path is
+loss-safe against it (direct: `DeltaTooLow`; pull: the solver's `minOut` / `maxPay`
+sized from the preview; inventory: `minBumpBps`), but not revert-safe: the preview,
+the simulation and the gas estimate would have to run at a future timestamp (block
+overrides, not reliably available on Rootstock nodes), and any inclusion in a block
+stamped earlier than priced reverts, which costs gas plus an on-chain strike (a 1 min
+block on the order). So the filler sends at the first tick its gate passes on the
+latest block.
+
+Unprofitable at the measured gas (route, after the simulation) is a resting verdict,
+not a failure: no strategy backoff. A preview that reverts `AuctionNotStarted` (the
+latest block predates the auction's start, which the app stamps from the wall clock)
+is retried on the next tick without a backoff. Orders
 expiring within `EXPIRY_MARGIN_SECONDS` are skipped;
-`eth_gasPrice` is cached for 10 s across orders and strategies (`src/engine.ts`).
+the send gas price (below) is cached for 10 s across orders and strategies (`src/engine.ts`).
 
 ## Order policy (both strategies)
 
@@ -121,6 +158,8 @@ sent.
    `previewBump` as `minBumpBps`, so a maker-ward price move before inclusion reverts.
 5. **Broadcasts** under the shared gas policy (below):
    - refuses a gas price above `MAX_GAS_PRICE_GWEI`;
+   - re-checks the all-in gate with the fill's gas priced at `eth_estimateGas` × r
+     (the learned receipt ratio, see *Gas price and priced gas*);
    - sends a legacy tx with gas limit = `eth_estimateGas` × 1.25, after pre-checking the
      shared hourly gas budget against limit × price;
    - reserves the payment on the hourly outflow budget, and returns. A later tick reads
@@ -154,6 +193,64 @@ bound how fast even a stream of bad orders can drain it. Only the filler's own
 transactions spend its Settlement approval (core pulls output legs only from the
 address that called the fill).
 
+## Gas price and priced gas (both strategies, 2026-10-07)
+
+**Send gas price.** Rootstock has no fee market. Every block header carries a
+miner-voted `minimumGasPrice`; a block may only include txs priced at or above its
+own minimum, and the minimum moves at most ±1 % per block (RSKIP-09; rskj
+`BlockGasPriceRange` / `PrevMinGasPriceRule`). `eth_gasPrice` answers that minimum
+× 1.1. The filler now sends **every** tx (fills, approvals, rebalancing) at
+⌈latest block `minimumGasPrice` × `GAS_PRICE_MIN_MULT_BPS` / 10000⌉ (default
+**10300**, +3 %), read from `eth_getBlockByNumber("latest")` (`src/chain.ts`
+`readSendGasPrice`, cached 10 s), and prices the profit gates, the plan floors and
+the hourly gas budget at that same figure. Without the field (an anvil fork, another
+chain) or when the block read fails, it falls back to `eth_gasPrice`; the source in
+use is logged once (and again when it changes). `MAX_GAS_PRICE_GWEI` applies to the
+send price.
+
+Why +3 % and not +2 %: verified against rskj master (2026-10-07) and the public node
+(RSKj 9.0.3):
+
+- pool admission needs `gasPrice ≥` the node's best block minimum, with no buffer
+  (`TxValidatorMinimuGasPriceValidator`); a block needs every tx `≥` its own minimum
+  (`TxsMinGasPriceRule`), and a mining node evicts a pooled tx a risen minimum left
+  behind (`BlockToMineBuilder` → `MinerUtils`);
+- two maximal rises after the block we read give min × 1.0201: +2 % survives exactly
+  one, +3 % two (three would need 1.0303). The cached read can be a block stale (≤ 10 s
+  on ~25–30 s blocks), so +3 % still lands one block late;
+- live minimum 23,696,000 wei, unchanged since ~March 2025 (201 samples over 20k blocks,
+  53 weekly samples over a year); its last move (Dec 2024 – Mar 2025, 59.24 → 23.70
+  Mwei) went in exact 1 % steps.
+
+A tx a longer rise strands is not repriced: the re-broadcast sends the same signed
+bytes, and the 15-minute drop rule frees the nonce (rskj also needs a +40 % bump to
+replace a same-nonce tx still pooled). On the public node a 1.03 tx costs ~6 % less
+than `eth_gasPrice`.
+
+**Priced gas.** `eth_estimateGas` is the GROSS gas a tx needs (the limit must cover
+refunds credited after execution); the receipt charges less — e2e on a fresh solver
+362,894 → 317,478 (0.875), 368,300 → 322,884 (0.877), 403,523 → 341,007 (0.845), and
+less again once the solver's 1-wei floors are seeded. Both strategies now price a
+fill's gas (the gate and, for the route, the plan's on-chain floor) at
+⌈`eth_estimateGas` × r⌉, where r is LEARNED per fill shape — (strategy, delivery
+direct / pull / inventory, tokenIn, tokenOut) — from the filler's own receipts
+(`src/gasRatio.ts`):
+
+- before any receipt of the shape: `DEFAULT_GAS_RECEIPT_RATIO` (0.88);
+- after: the **max** of receipt / estimate over the last 20 successful receipts of the
+  shape (conservative: one heavy fill holds r up for 20 fills), clamped to [0.6, 1.0].
+  Reverted receipts are not learned from (a revert burns less);
+- the estimate is recorded on the pending tx at send (`PendingTx.gasMeter`) and the
+  ratio computed when its receipt is read; the samples persist in the engine state
+  (`gasRatios`, the same store — `STATE_FILE` / Durable Object storage), at most 20 per
+  shape × 64 shapes. `/status` shows them (`config.gas.receiptRatios`).
+
+The gas **limit** is unchanged: max(priced, ⌈estimate × 1.25⌉). The risk is bounded: a
+fill that burns more than r × estimate loses at most `(receipt − r × estimate) × gas
+price` — with r ≥ 0.6 and the receipt ≤ the 1.25× limit, at most 0.65 × estimate × price
+(≈ $0.60 at 400k gas, 24.4 Mwei, $95k RBTC); in practice r is the max of recent
+receipts of the same shape, so a miss is the spread between them (a few %).
+
 ## Gas policy and per-order backoff (both strategies)
 
 Both strategies and the rebalancer share one `Guard` (`src/guard.ts`), persisted through
@@ -163,15 +260,16 @@ the state store (`STATE_FILE` for the CLI, Durable Object storage for the Worker
   `ROUTE_HOURLY_GAS_RBTC` is still read). Every fill tx is pre-checked against its gas
   **limit** × gas price — never an estimate — and charged with the receipt's real cost
   (`gasUsed × effectiveGasPrice`) **even when it reverts**.
-- **Gas-price ceiling** `MAX_GAS_PRICE_GWEI` (default `0.1`; Rootstock runs at ≈ 0.026):
-  above it nothing is sent. All fill txs are legacy (type 0) at the priced gas price.
+- **Gas-price ceiling** `MAX_GAS_PRICE_GWEI` (default `0.1`; Rootstock runs at ≈ 0.024):
+  above it nothing is sent. All txs are legacy (type 0) at the send gas price below.
 - **Per-order backoff:**
   - an **on-chain revert** is a strike and blocks the order for **every** strategy:
     1 min, 4 min, 16 min, 1 h; the 5th strike blacklists it until the order's expiry.
     Dispatch never falls through to the route strategy on an order whose inventory tx
     just reverted (and vice versa);
   - a failure **before sending** (simulation revert, `MAX_ROUTE_GAS`, RPC error) blocks
-    only that strategy, 30 s doubling to 5 min — the other strategy may still try;
+    only that strategy, 30 s doubling to 5 min — the other strategy may still try. An
+    unprofitable verdict is never a failure (it rests, see "What a sweep re-quotes");
   - **every sent tx is pending** until a later tick reads its receipt. It is charged
     conservatively at send time: gas at the full **limit**, plus the inventory outflow or
     one route fill. Nothing else is sent while it is outstanding.
@@ -263,7 +361,7 @@ Per order:
    route's own gas (QuoterV2's estimate / Sushi's `gasSpent`, priced like the fill gas);
 5. **gate** the best-ranked candidate (falling through to the next on failure):
    `quote × (1 − haircut) ≥ owed + gas + min profit`, all in output
-   units; haircut = `ROUTE_STABLE_SLIPPAGE_BPS` for a $1/$1 pair, else `ROUTE_SLIPPAGE_BPS`. Gas = chain gas price × `ROUTE_GAS_ESTIMATE`; gas and `MIN_PROFIT_RBTC` are
+   units; haircut = `ROUTE_STABLE_SLIPPAGE_BPS` for a $1/$1 pair, else `ROUTE_SLIPPAGE_BPS`. Gas = send gas price × `ROUTE_GAS_ESTIMATE` × r (the learned receipt ratio); gas and `MIN_PROFIT_RBTC` are
    converted from RBTC into the output token by a QuoterV2 quote of 0.001 WRBTC along a
    configured WRBTC → output path (cached 60 s) and, for a $1 token (`USD_TOKENS`), by
    `RBTC_PRICE_USD` — the **higher** of the two when both exist, so a thin pool can only
@@ -277,18 +375,19 @@ Per order:
 7. **simulate** `executeFill` by `eth_call` from the operator, decode `fillAmountsOut`
    (must be non-zero, and ≤ the previewed owed on the pull path) and take
    `eth_estimateGas`;
-8. **re-price at the measured gas**: P = max(`ROUTE_GAS_ESTIMATE`, simulated). If P is
-   above the gas the plan's floor was built at, the plan is **rebuilt** with gas
+8. **re-price at the measured gas**: P = ⌈max(`ROUTE_GAS_ESTIMATE`, simulated) × r⌉, r
+   the learned receipt/estimate ratio of the fill's shape (*Gas price and priced gas*).
+   If P is above the gas the plan's floor was built at, the plan is **rebuilt** with gas
    priced at P (new `minOut` / `amountInMaximum`, gate re-run) and **re-simulated** —
    repeated until the plan's priced gas covers its own measurement. The economics are
-   priced at the measurement, NOT the gas limit (2026-10-07): `eth_estimateGas` is the
-   gross gas before refunds and already sits above what a receipt charges (e2e
-   2026-10-06: estimates 363k–404k vs receipts 317k–341k), so pricing the 1.25× limit
-   made every quote ~40 % more expensive in gas — ≈ $0.30 a fill, 1.5 % of a $20
-   ticket. The trade: a tx that burns past its estimate can lose at most
-   `(G − P) × gasPrice`, cents on Rootstock; a gas-heavy maker token is still bounded
-   by `MAX_ROUTE_GAS`;
-9. **send** a legacy tx at the priced gas price with gas limit G = max(P, ⌈simulated ×
+   priced at the measurement × r, NOT the gas limit: `eth_estimateGas` is the gross gas
+   before refunds and sits above what a receipt charges (e2e 2026-10-06: estimates
+   363k–404k vs receipts 317k–341k); pricing the 1.25× limit (before 2026-10-07) made
+   every quote ~40 % more expensive in gas, and the raw estimate (until the receipt
+   ratio) ~14 %. The trade: a tx that burns past r × estimate can lose at most
+   `(receipt − P) × gasPrice`, cents on Rootstock; a gas-heavy maker token is still
+   bounded by `MAX_ROUTE_GAS`;
+9. **send** a legacy tx at the send gas price with gas limit G = max(P, ⌈simulated ×
    1.25⌉) (headroom only, refused above `MAX_ROUTE_GAS`), after checking the shared gas
    budget against G × price. One route fill is reserved; a
    later tick reads the receipt (gas charged even on a revert; see *Gas policy* for
@@ -300,6 +399,57 @@ primed tokens to check any more.)
 
 What the hot key can lose here: only RBTC for gas. The solver holds no inventory, and
 every amount it moves is a delta of the current fill.
+
+## Indicative quotes (`POST /quote`, 2026-10-07)
+
+[`src/quote.ts`](src/quote.ts). The Worker serves a public `POST /quote`
+(packages/filler-worker); the app calls it through its Pages worker (`/api/quote`) for
+every market ticket and signs a UniswapX-style **Dutch order that starts at the quote**
+and decays to the maker's slippage protection over 210 s (app `QUOTED_DECAY_SECONDS`: a short decay charged the maker ~4 bps per 8 s of inclusion latency).
+
+```
+amountOut = grossOut − ⌈gasCostOut × (1 + QUOTE_GAS_MARGIN_BPS / 1e4)⌉ − grossOut × QUOTE_TOLERANCE_BPS / 1e4
+```
+
+- **grossOut**: the filler's real pricing for that order shape. The route candidate
+  (`RouteFiller.quoteRoute`) quotes `amountIn` on every configured Oku path (QuoterV2)
+  and, for a PULL ticket, a Sushi API route. Candidates are ranked by output net of each
+  route's own gas, as a fill ranks them. A BUY ticket (pay the quote token, receive the
+  base) is quoted the same way: exact input of the pay amount.
+- **gasCostOut**: one fill's cost in the output token, priced as the fill gate prices it.
+  It is estimate × r (the receipt ratio learned per shape, `gasRatio.ts`) × the send gas
+  price (block `minimumGasPrice` × `GAS_PRICE_MIN_MULT_BPS`), plus `MIN_PROFIT_RBTC`,
+  grossed up for the solver's surplus split. No order exists yet, so nothing is
+  simulated. The estimate is the largest `eth_estimateGas` among the shape's last 20
+  successful fills (now also learned, `GasRatios.typicalEstimate`). Before any, it is
+  `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` (360k / 380k; × the 0.88 default ratio ≈ the e2e receipts), and never below `ROUTE_GAS_ESTIMATE`.
+- **Inventory** (USDRIF → USDT0, pull, `BUY_USDRIF`): `Filler.quoteInventory` bounds what
+  the hot wallet would pay by the gates a fill must pass. Those are `MAX_BUY_PRICE`, the
+  exit edge (`MIN_EXIT_EDGE_BPS` over the live redeem-and-sell value), and the all-in
+  profit (exit − `INVENTORY_MIN_PROFIT_USDT0` − gas − rebalance share, with the gas
+  margin applied). It is refused outside `MIN_FILL` / `MAX_FILL`, or when the wallet or
+  hourly budget could not pay. The better of route and inventory is quoted
+  (`strategy`).
+- **No haircut** in a quote: it is fresh, and the margin on gas is the cushion.
+
+**Quoted orders are recognised.** Every issued quote is kept in a bounded registry
+(`QuoteBook`, ≤ 300, persisted with the engine state). An order matches a quote when it
+has the same tokens, the same maker (when the quote named one), the quoted delivery
+mode, an input no larger than quoted, and a START price no better for the maker than the
+quote's rate (1 bp slack). It must also be first seen within `validUntil` +
+`QUOTE_MATCH_GRACE_SECONDS`. The newest unbound quote wins, and a quote binds one order.
+`RouteFiller` gates a matched order **without the route haircut**:
+live output ≥ owed + the fill's priced gas. The quote already charged gas + margin, and
+would otherwise be refused for a 10 bps cushion it never asked for: on a $1000 ticket,
+10 bps is $1, more than the $0.18 gas margin. The plan's on-chain floor (`minOut` /
+`amountInMaximum` at owed + gas) still turns a move before inclusion into a revert,
+never a loss. Unquoted orders keep today's gate, and the inventory gates have no
+haircut.
+
+Refusals: `QUOTE_ENABLED=0`; a pair outside `ROUTE_TOKENS` (and not inventory); gas
+above the output (dust); a gas price above `MAX_GAS_PRICE_GWEI`. Identical requests
+within `QUOTE_CACHE_MS` reuse the priced result under a fresh quote id. Tests:
+`test/quote.test.ts`.
 
 ## Configuration
 
@@ -318,8 +468,10 @@ Common:
 | `POLL_MS`, `STATE_FILE` | `15000`, `.beta-filler-state.json` | CLI poll cadence (1 s while a tx is pending); budgets, the per-order backoff, the pending tx and the MoC op survive restarts here |
 | `HOURLY_GAS_RBTC` | `0.002` | rolling one-hour RBTC gas cap, **both strategies together** (old name `ROUTE_HOURLY_GAS_RBTC` still read) |
 | `MAX_GAS_PRICE_GWEI` | `0.1` | never send a fill above this gas price |
+| `GAS_PRICE_MIN_MULT_BPS` | `10300` | send (and price) every tx at ⌈latest block `minimumGasPrice` × this / 10000⌉; `eth_gasPrice` when the block has no such field. 10000..20000 (see *Gas price and priced gas*) |
+| `DEFAULT_GAS_RECEIPT_RATIO` | `0.88` | receipt / estimate ratio a fill shape is priced at before its first receipt; afterwards the max of its last 20, clamped to [0.6, 1.0]. 0.6..1.0 |
 | `RECEIPT_TIMEOUT_MS` | `120000` | after this without a receipt, a sent tx's outflow / fill reservation is final (a late receipt still settles the gas) |
-| `RESTING_RECHECK_SECONDS` | `300` | an order every strategy passed on, or one we just filled, is not re-quoted for this long unless the book's fillable for it changes (≤ 30 s for a time-varying price; `0` = off) |
+| `RESTING_RECHECK_SECONDS` | `300` | an order every strategy passed on, or one we just filled, is not re-quoted for this long unless the book's fillable for it changes (≤ 30 s for a time-varying price, sooner when a strategy predicts its gate passes; `0` = off) |
 | `EXPIRY_MARGIN_SECONDS` | `90` | orders expiring within this are skipped (a tx cannot land in time on ~30 s blocks) |
 
 Every numeric knob fails closed: a non-integer, `NaN`, empty or non-positive value (where
@@ -334,8 +486,8 @@ Route strategy:
 | `ROUTE_PATHS` | `USDRIF>500>USDT0>3000>WRBTC` | `;`-separated multi-hop paths in swap order, usable both ways (`""` = none) |
 | `ROUTE_SLIPPAGE_BPS` | `10` | haircut on the live quote in the gate (non-stable pairs). The quote is read on the simulated block and the plan's on-chain floor (`minOut` / `amountInMaximum`) bounds the output, so a price move before inclusion costs a revert's gas, never principal; 10 bps covers a ~30 s Rootstock block of BTC drift. Was 30 until 2026-10-07, which together with gas pushed the app's market fills to the floor |
 | `ROUTE_STABLE_SLIPPAGE_BPS` | `5` | the haircut instead when both tokens are in `USD_TOKENS` (e.g. USDRIF/USDT0 on the 0.05 % pool). The quote is read on the simulated block and the plan's on-chain floor bounds the output, so a miss costs a revert's gas, never principal; a $1/$1 pool barely moves before inclusion. At 30 bps the app's 300 USDRIF market never cleared its then-50 bps floor (task 15) |
-| `ROUTE_GAS_ESTIMATE` | `320000` | gas assumed by the profitability gate before the simulation, and the FLOOR of the re-price loop: the plan is priced at P = max(`ROUTE_GAS_ESTIMATE`, simulated) and sent with limit G = max(P, ⌈simulated × 1.25⌉) (`routeFiller.ts`, `GAS_LIMIT_PCT = 125` — headroom only, not priced since 2026-10-07). 320k sits above the net pull gas a fill pays (282.9k) and below the gross pull gas the node simulates (343.5k; execution 310.5k + 21k alone is 331.5k), so the gate never under-assumes a fill's real cost, and on today's sandboxed shapes the measured term wins (direct ⌈285.8k × 1.25⌉ ≈ 357k, pull ≈ 429k — one re-price round). Figures: `SandboxGasBench.test_sandbox_gas_*`, see *What the gas row measures* |
-| `MAX_ROUTE_GAS` | `1200000` | refuse a route fill whose gas limit (simulated × 1.25) exceeds this. It bounds per-tx exposure, including the at-most `(limit − simulated) × gasPrice` a fill can lose when it burns past its estimate (the floor is priced at the simulated gas). A live Sushi route measured ~554k simulated (693k priced) — one operator-observed `eth_estimateGas` (gross), no repo test, not re-run |
+| `ROUTE_GAS_ESTIMATE` | `320000` | `eth_estimateGas` units assumed by the profitability gate before the simulation, and the FLOOR of the re-price loop: the plan is priced at P = ⌈max(`ROUTE_GAS_ESTIMATE`, simulated) × r⌉ (r = the learned receipt ratio) and sent with limit G = max(P, ⌈simulated × 1.25⌉) (`routeFiller.ts`, `GAS_LIMIT_PCT = 125` — headroom only, not priced since 2026-10-07). 320k sits above the net pull gas a fill pays (282.9k) and below the gross pull gas the node simulates (343.5k; execution 310.5k + 21k alone is 331.5k), so the gate never under-assumes a fill's real cost, and on today's sandboxed shapes the measured term wins (direct ⌈285.8k × 1.25⌉ ≈ 357k, pull ≈ 429k — one re-price round). Figures: `SandboxGasBench.test_sandbox_gas_*`, see *What the gas row measures* |
+| `MAX_ROUTE_GAS` | `1200000` | refuse a route fill whose gas limit (simulated × 1.25) exceeds this. It bounds per-tx exposure, including the at-most `(limit − priced) × gasPrice` a fill can lose when it burns past what it was priced at (the floor is priced at the simulated gas × r). A live Sushi route measured ~554k simulated (693k priced) — one operator-observed `eth_estimateGas` (gross), no repo test, not re-run |
 | `ROUTE_TOKENS` | `WRBTC,USDT0,WETH,USDRIF` | comma-separated allowlist; both tokens of a route candidate must be in it |
 | `MIN_PROFIT_RBTC` | `0` | profit required on top of gas, in RBTC. 0: the operator's infra is near-free, so a fill that covers its gas and haircut is worth taking |
 | `RBTC_PRICE_USD`, `USD_TOKENS` | unset, `USDT0,USDRIF` | RBTC price for $1 tokens; the higher of it and the pool price is used (both strategies) |
@@ -350,6 +502,18 @@ Route strategy:
 | `SUSHI_EXECUTORS` | empty (warned) | comma-separated snwap executor pin list; when set, any other executor is refused |
 | `SUSHI_MAX_PER_SWEEP` | `10` | Sushi API calls per sweep over the book, at most |
 
+Indicative quotes (`POST /quote` on the Worker, *Indicative quotes* above):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `QUOTE_ENABLED` | `1` | serve quotes at all |
+| `QUOTE_GAS_MARGIN_BPS` | `1000` | margin on one fill's gas cost (+10 %), 0..100000 |
+| `QUOTE_TOLERANCE_BPS` | `0` | optional extra price tolerance taken off the quoted output, bps of grossOut |
+| `QUOTE_TTL_SECONDS` | `30` | quote validity (one Rootstock block), 1..600 |
+| `QUOTE_MATCH_GRACE_SECONDS` | `120` | an order first seen this long after `validUntil` still matches its quote (wallet prompt, book post) |
+| `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` | `400000` / `420000` | `eth_estimateGas` assumed per route fill before one is learned for the shape (then the max learned) |
+| `QUOTE_CACHE_MS` | `5000` | identical requests reuse the priced result |
+
 Inventory strategy:
 
 | Env | Default | Meaning |
@@ -361,7 +525,7 @@ Inventory strategy:
 | `MAX_FILL_USDT0` / `MIN_FILL_USDT0` | `500` / `5` | per-order notional bounds |
 | `HOURLY_USDT0` / `HOURLY_USDRIF` | `2000` / `2000` | rolling one-hour outflow caps |
 | `USDRIF_RESERVE`, `REDEEM_MIN_USDRIF`, `REDEEM_SLIPPAGE_BPS` | `0`, `1000`, `50` | redemption; `REDEEM_MIN_USDRIF` is also the batch size the rebalance cost is amortised over |
-| `INVENTORY_GAS_ESTIMATE` | `260000` | gas assumed for an inventory fill before estimation (re-checked at the real limit) |
+| `INVENTORY_GAS_ESTIMATE` | `260000` | `eth_estimateGas` units assumed for an inventory fill before estimation, priced × r (re-checked at the real estimate × r) |
 | `REBALANCE_GAS` | `450000` | gas of the redeem + RIF sale a fill eventually causes, charged pro rata (fill ÷ `REDEEM_MIN_USDRIF`, capped at 1) plus the MoC exec fee |
 | `INVENTORY_MIN_PROFIT_USDT0` | `0.02` | absolute profit floor per inventory fill, on top of gas |
 | `RIF_SELL_MIN`, `RIF_SELL_SLIPPAGE_BPS`, `RIF_SELL_MAX_DISCOUNT_BPS` | `200`, `50`, `150` | RIF sale |
@@ -415,19 +579,23 @@ Record `Permit3`, `Settlement`, `SettlementLens` and the deploy block.
 **2. AggregatorFillSolver** — `solvers-deploy` profile (Cancun), plain CREATE, gated to
 the bot's EOA. The constructor deploys the solver's `RouteSandbox`; there is no router
 set, standing flag or prime list any more (BREAKING 2026-10: the script refuses
-`ROUTERS`, `STANDING`, `PRIME_TOKENS`). `FLOOR_TOKENS` (optional) has the deployer send
-the new solver 1 wei of each traded token — its balance floor, which pays on the pull
-path (the deployer must hold 1 wei of each):
+`ROUTERS`, `STANDING`, `PRIME_TOKENS`). The solver's 1-wei balance floor (−34k execution
+gas per fill once present) **seeds itself** since 2026-10: a token it holds none of keeps
+one wei out of the filler's side of its first fill of it, on both the pull (patched
+`amountIn`) and the direct (exact-output residue) shapes this bot sends — see
+`packages/solvers/README.md`, *The floor seeds itself*. So `FLOOR_TOKENS` is **no longer
+needed**; it still works (the deployer sends 1 wei of each listed token, and must hold
+it) and only spares each token's first fill the refund it forgoes:
 
 ```sh
 SETTLEMENT=0x<Settlement> \
 OPERATORS=0x<filler EOA> \
-FLOOR_TOKENS=0x542fDA317318eBF1d3DEAf76E0b632741A7e677d,0x779Ded0c9e1022225f8E0630b35a9b54bE713736,0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37 \
 make deploy-aggregator-fill RPC=$RPC DEPLOY_ARGS="$DEPLOY_ARGS" VERIFY_ARGS="$VERIFY_ARGS"
 # MAKER_SURPLUS_PPM / PROTOCOL_SURPLUS_PPM / PROTOCOL_RECIPIENT default to 0.
+# Optional pre-seed (WRBTC, USDT0, WETH, USDRIF):
+# FLOOR_TOKENS=0x542fDA317318eBF1d3DEAf76E0b632741A7e677d,0x779Ded0c9e1022225f8E0630b35a9b54bE713736,0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590,0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37
 ```
-
-(The tokens are WRBTC, USDT0, WETH, USDRIF.) The script prints the solver and sandbox
+ The script prints the solver and sandbox
 addresses and reverts unless every immutable — Settlement, executor, gate, operators,
 policy, and the sandbox's owner / Settlement / Permit3 / executor — reads back as
 requested. Verify the sandbox on Blockscout too (it is a contract creation inside the
@@ -532,7 +700,8 @@ and `PORT` override the defaults.
   re-broadcast verbatim.
 - A resting order is re-quoted at most every `RESTING_RECHECK_SECONDS` (unless its
   book fillable changes): a market move that makes it profitable is noticed within
-  that window, not within a tick.
+  that window, not within a tick. A decaying order's re-quote time is predicted with
+  the market held fixed: a market move in our favour is noticed within 30 s, not at once.
 - One host per key: the budgets live in that host's state store.
 - Route: local quotes are Uniswap v3 (Oku) only; Sushi liquidity is reached through the
   Sushi API, and only for PULL orders (direct orders need an exact-output route to the

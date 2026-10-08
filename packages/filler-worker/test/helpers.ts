@@ -200,7 +200,12 @@ function fakeChain(account: { address: Address; signTransaction: unknown }, coun
       }
       throw new Error(`unexpected read ${functionName}`);
     },
-    simulateContract: async ({ args }: { args: [Hex, bigint] }) => (hit(), { result: [(args[1] * 100_000n * 10n ** 6n) / 10n ** 18n, [], [], 100_000n] }),
+    // QuoterV2 at 1 WRBTC = 100k USDT0, either direction (the path's first token says which).
+    simulateContract: async ({ args }: { args: [Hex, bigint] }) => {
+      hit();
+      const usdt0In = args[0].slice(2, 42).toLowerCase() === USDT0.slice(2).toLowerCase();
+      return { result: [usdt0In ? args[1] * 10n ** 7n : (args[1] * 100_000n * 10n ** 6n) / 10n ** 18n, [], [], 100_000n] };
+    },
     call: async () => {
       hit();
       if (world.callError) throw new Error(world.callError);

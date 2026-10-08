@@ -48,10 +48,14 @@ interface IERC20Min {
 ///                          truncated)
 ///    PROTOCOL_SURPLUS_PPM  default 0 (same)
 ///    PROTOCOL_RECIPIENT    default 0x0 (required when PROTOCOL_SURPLUS_PPM != 0)
-///    FLOOR_TOKENS          optional comma list — tokens to seed a 1-wei balance
-///                          floor of on the SOLVER (the deployer must hold 1 wei
-///                          of each; see the README on the balance floor). The
-///                          removed ROUTERS / STANDING / PRIME_TOKENS are refused.
+///    FLOOR_TOKENS          optional, and NO LONGER NEEDED (2026-10) — comma list of
+///                          tokens to pre-seed a 1-wei balance floor of on the
+///                          SOLVER (the deployer must hold 1 wei of each). The
+///                          solver now seeds that floor itself, out of the
+///                          filler's side of its first fill of each token (README,
+///                          "The floor seeds itself"); pre-seeding only saves that
+///                          one fill the refund it forgoes. The removed ROUTERS /
+///                          STANDING / PRIME_TOKENS are refused.
 ///
 ///  Usage (Rootstock, Foundry keystore)
 ///  ───────────────────────────────────
@@ -103,8 +107,9 @@ contract DeployAggregatorFill is Script {
 
         vm.startBroadcast();
         agg = new AggregatorFillSolver(settlement, operators, policy);
-        // The solver's balance floor: one wei per traded token, so each fill's
-        // inbound transfer rewrites a live slot (README, "the balance floor").
+        // OPTIONAL pre-seed of the solver's balance floor: one wei per listed token,
+        // so even the FIRST fill's inbound transfer rewrites a live slot. Without it
+        // the solver keeps one wei of each token out of its own first fill of it.
         for (uint256 i; i < floorTokens.length; i++) {
             require(IERC20Min(floorTokens[i]).transfer(address(agg), 1), "floor seed transfer failed");
         }

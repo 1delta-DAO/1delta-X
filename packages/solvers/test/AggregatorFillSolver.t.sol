@@ -205,8 +205,10 @@ contract AggregatorFillSolverTest is MockSettlementBase {
 
     // ════════════════════════ the happy path ════════════════════════
 
-    /// @dev Zero inventory: the solver starts and ends with nothing, and the maker
-    ///      is paid entirely out of the swap the callback performed.
+    /// @dev Zero inventory: the solver starts with nothing, and the maker is paid
+    ///      entirely out of the swap the callback performed. It ends holding only
+    ///      the self-seeded 1-wei floor of the token it was paid in (2026-10), taken
+    ///      out of the caller's spread.
     function test_agg_zeroInventoryFill() public {
         assertEq(tB.balanceOf(address(aggSolver)), 0, "solver holds no output up front");
 
@@ -216,9 +218,10 @@ contract AggregatorFillSolverTest is MockSettlementBase {
 
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT, "maker got its signed output");
         assertEq(tA.balanceOf(address(router)), AMOUNT_IN, "the router took the maker's input");
-        // The spread is swept out; the contract keeps nothing between fills.
-        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "caller keeps the spread");
-        assertEq(tB.balanceOf(address(aggSolver)), 0, "no output retained");
+        // The spread is swept out, less the 1-wei floor a zero balance self-seeds.
+        assertEq(tB.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "caller keeps the spread");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "only the 1-wei output floor retained");
+        // NO_PATCH: the route pulled its quoted figure, so no input wei was withheld.
         assertEq(tA.balanceOf(address(aggSolver)), 0, "no input left stranded");
     }
 
@@ -390,9 +393,10 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
         // 4 = the offset of `amountIn`, immediately after the selector.
         aggSolver.executeFill(o, sig, AMOUNT_IN / 2, _planFor(AMOUNT_IN, address(aggSolver), 1, 4), "");
 
-        assertEq(tA.balanceOf(address(router)), AMOUNT_IN / 2, "router pulled what the fill delivered");
+        // Less the 1-wei input floor a patched route withholds on a zero balance.
+        assertEq(tA.balanceOf(address(router)), AMOUNT_IN / 2 - 1, "router pulled what the fill delivered");
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT / 2, "maker paid pro-rata");
-        assertEq(tA.balanceOf(address(aggSolver)), 0, "no input stranded");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "only the 1-wei input floor stays");
     }
 
     /// @dev Patching also sweeps a route quoted for LESS than arrived — otherwise
@@ -401,8 +405,9 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
         Order memory o = _order(22);
         bytes memory sig = _sign(o);
         aggSolver.executeFill(o, sig, AMOUNT_IN, _planFor(AMOUNT_IN / 4, address(aggSolver), 1, 4), "");
-        assertEq(tA.balanceOf(address(router)), AMOUNT_IN, "whole input routed, not just the quoted quarter");
-        assertEq(tA.balanceOf(address(aggSolver)), 0, "nothing stranded");
+        // The whole input less the self-seeded 1-wei floor.
+        assertEq(tA.balanceOf(address(router)), AMOUNT_IN - 1, "whole input routed, not just the quoted quarter");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "nothing stranded but the floor");
     }
 
     /// @dev A route quoted for less, WITHOUT patching, strands the remainder —
@@ -416,7 +421,8 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
         aggSolver.executeFill(o, sig, AMOUNT_IN, _planFor(AMOUNT_IN / 4, address(aggSolver), 1, NO_PATCH), "");
         // Swept to the caller rather than stranded in the contract — but still
         // unswapped, which is the inefficiency `amountInOffset` removes.
-        assertEq(tA.balanceOf(address(this)), (AMOUNT_IN * 3) / 4, "three quarters never routed");
+        // Less the 1-wei floor the zero-balance residue split keeps.
+        assertEq(tA.balanceOf(address(this)), (AMOUNT_IN * 3) / 4 - 1, "three quarters never routed");
     }
 
     /// @dev On a TIGHT order the under-quoted route cannot cover the maker's
@@ -495,8 +501,9 @@ contract AggregatorPayCapTest is AggregatorFillSolverTest {
         address treasury = address(0x7EA5);
         Order memory o = _order(33);
         aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(AMOUNT_OUT, treasury), "");
-        assertEq(tB.balanceOf(treasury), AMOUNT_IN - AMOUNT_OUT, "treasury got the spread");
-        assertEq(tB.balanceOf(address(aggSolver)), 0, "contract holds nothing after");
+        // Less the 1-wei floor a zero balance self-seeds out of the filler's share.
+        assertEq(tB.balanceOf(treasury), AMOUNT_IN - AMOUNT_OUT - 1, "treasury got the spread");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "contract holds only the floor after");
     }
 
     /// @dev `address(0)` pays the caller — whoever executed and carried the risk.
@@ -507,7 +514,7 @@ contract AggregatorPayCapTest is AggregatorFillSolverTest {
         RoutePlan memory plan = _capped(AMOUNT_OUT, address(0));
         vm.prank(filler);
         aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
-        assertEq(tB.balanceOf(filler), AMOUNT_IN - AMOUNT_OUT, "caller keeps the spread");
+        assertEq(tB.balanceOf(filler), AMOUNT_IN - AMOUNT_OUT - 1, "caller keeps the spread, less the floor");
     }
 
     /// @dev `maxPay = 0` keeps the old approve-everything behaviour. It is safe
@@ -622,7 +629,9 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
 
         assertEq(puppet.calls(), 1, "the target ran");
         assertEq(puppet.lastCaller(), address(aggSolver.SANDBOX()), "as the sandbox, never as the solver");
-        assertEq(tA.balanceOf(eve), 1, "eve's unrouted wei came back to her as residue");
+        // Eve's unrouted wei is a residue on a zero snapshot, so it seeds the floor.
+        assertEq(tA.balanceOf(eve), 0, "eve's unrouted wei became the solver's floor");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "the 1-wei input floor");
         assertEq(tA.balanceOf(address(aggSolver.SANDBOX())), 0, "the sandbox ends empty");
     }
 
@@ -732,14 +741,16 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         uint256 makerBefore = tB.balanceOf(maker);
 
         vm.expectEmit(true, true, false, true, address(splitSolver));
-        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 5e18, 1e18, 0, 4e18);
+        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 5e18, 1e18, 0, 4e18 - 1);
         vm.prank(FILLER);
         splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
 
+        // The maker's and the protocol's shares are computed on the WHOLE spread;
+        // the self-seeded 1-wei floor comes out of the filler's remainder only.
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT + 5e18, "maker: signed price + 50% improvement");
         assertEq(tB.balanceOf(PROTOCOL), 1e18, "protocol: 10% of the spread");
-        assertEq(tB.balanceOf(FILLER), 4e18, "filler: the remainder");
-        assertEq(tB.balanceOf(address(splitSolver)), 0, "nothing strands");
+        assertEq(tB.balanceOf(FILLER), 4e18 - 1, "filler: the remainder, less the floor");
+        assertEq(tB.balanceOf(address(splitSolver)), 1, "only the 1-wei floor stays");
     }
 
     /// @dev The originator's share comes OUT OF THE FILLER'S remainder: maker and
@@ -756,7 +767,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT + 5e18, "maker unchanged by the originator share");
         assertEq(tB.balanceOf(PROTOCOL), 1e18, "protocol unchanged by the originator share");
         assertEq(tB.balanceOf(ORIGINATOR), 2e18, "originator: 20%");
-        assertEq(tB.balanceOf(FILLER), 2e18, "filler: 40% - 20%");
+        assertEq(tB.balanceOf(FILLER), 2e18 - 1, "filler: 40% - 20%, less the 1-wei floor");
     }
 
     /// @dev A caller can give away exactly its remainder and no more. Checked
@@ -806,13 +817,14 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         // output spread 5 B: 50% / 10% / 40%
         assertEq(tB.balanceOf(maker) - makerB, 20e18 + 2.5e18, "maker: signed + 50% of the B spread");
         assertEq(tB.balanceOf(PROTOCOL), 0.5e18, "protocol: 10% of the B spread");
-        assertEq(tB.balanceOf(FILLER), 2e18, "filler: 40% of the B spread");
+        assertEq(tB.balanceOf(FILLER), 2e18 - 1, "filler: 40% of the B spread, less the floor");
         // input residue 75 A: the same 50% / 10% / 40%, not 100% to the filler
         assertEq(makerA - tA.balanceOf(maker), AMOUNT_IN - 37.5e18, "maker: paid 100 A, 50% of the unspent 75 A back");
         assertEq(tA.balanceOf(PROTOCOL), 7.5e18, "protocol: 10% of the unspent input");
-        assertEq(tA.balanceOf(FILLER), 30e18, "filler: 40% of the unspent input");
-        assertEq(tA.balanceOf(address(splitSolver)), 0, "no A strands");
-        assertEq(tB.balanceOf(address(splitSolver)), 0, "no B strands");
+        assertEq(tA.balanceOf(FILLER), 30e18 - 1, "filler: 40% of the unspent input, less the floor");
+        // Only the self-seeded 1-wei floors stay — out of the filler's shares.
+        assertEq(tA.balanceOf(address(splitSolver)), 1, "no A strands but the floor");
+        assertEq(tB.balanceOf(address(splitSolver)), 1, "no B strands but the floor");
     }
 
     /// @dev No surplus, no split: a route quoted exactly at the maker's price
@@ -842,7 +854,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         plan.profitRecipient = treasury;
         vm.prank(FILLER);
         splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
-        assertEq(tB.balanceOf(treasury), 4e18, "filler share to the named recipient");
+        assertEq(tB.balanceOf(treasury), 4e18 - 1, "filler share to the named recipient, less the floor");
         assertEq(tB.balanceOf(FILLER), 0, "caller got nothing directly");
         assertEq(tB.balanceOf(PROTOCOL), 1e18);
     }
@@ -862,8 +874,8 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         uint256 toProtocol = (spread * PROTOCOL_PPM) / PPM;
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT - 7 + toMaker);
         assertEq(tB.balanceOf(PROTOCOL), toProtocol);
-        assertEq(tB.balanceOf(FILLER), spread - toMaker - toProtocol, "filler absorbs the rounding");
-        assertEq(tB.balanceOf(address(splitSolver)), 0, "nothing strands");
+        assertEq(tB.balanceOf(FILLER), spread - toMaker - toProtocol - 1, "filler absorbs the rounding");
+        assertEq(tB.balanceOf(address(splitSolver)), 1, "nothing strands but the floor");
     }
 
     /// @dev Policy validation at construction.
@@ -883,10 +895,10 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory plan = _plan(address(aggSolver), AMOUNT_OUT);
         vm.expectEmit(true, true, false, true, address(aggSolver));
-        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 0, 0, 0, SPREAD);
+        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 0, 0, 0, SPREAD - 1);
         vm.prank(FILLER);
         aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
-        assertEq(tB.balanceOf(FILLER), SPREAD);
+        assertEq(tB.balanceOf(FILLER), SPREAD - 1, "the spread, less the self-seeded 1-wei floor");
     }
 }
 
@@ -947,8 +959,8 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         vm.prank(OPERATOR);
         gated.executeFill(o, sig, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
-        assertEq(tB.balanceOf(OPERATOR), AMOUNT_IN - AMOUNT_OUT, "operator keeps the spread");
-        assertEq(tB.balanceOf(address(gated)), 0, "no output retained");
+        assertEq(tB.balanceOf(OPERATOR), AMOUNT_IN - AMOUNT_OUT - 1, "operator keeps the spread, less the floor");
+        assertEq(tB.balanceOf(address(gated)), 1, "only the self-seeded 1-wei floor retained");
     }
 
     /// @dev THE POINT OF THE GATE. `exclusiveFiller` is compared to the fill's
@@ -1031,8 +1043,9 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
         assertEq(outs[0], AMOUNT_OUT, "core reports the priced leg");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid by the router directly");
         assertEq(tB.balanceOf(address(aggSolver)), 0, "no output ever here");
-        assertEq(tA.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT, "spread returned as unspent input");
-        assertEq(tA.balanceOf(address(aggSolver)), 0, "no input left");
+        // The residue lands on a zero snapshot, so it self-seeds the 1-wei input floor.
+        assertEq(tA.balanceOf(address(this)), AMOUNT_IN - AMOUNT_OUT - 1, "spread returned as unspent input");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "no input left but the floor");
         assertEq(tB.allowance(address(aggSolver), address(settlement)), 0, "Settlement was never approved");
     }
 
@@ -1080,8 +1093,10 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
         split.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker), "");
         uint256 spread = AMOUNT_IN - AMOUNT_OUT;
         // The maker paid AMOUNT_IN and got half the residue back, in the same token.
+        // The maker's half is untouched by the self-seeded floor: it comes out of the
+        // caller's half.
         assertEq(makerABefore - tA.balanceOf(maker), AMOUNT_IN - spread / 2, "maker's half of the residue, as price improvement");
-        assertEq(tA.balanceOf(address(this)), spread - spread / 2, "caller's half");
+        assertEq(tA.balanceOf(address(this)), spread - spread / 2 - 1, "caller's half, less the floor");
     }
 
     /// @dev M15 (2026-10 quick audit, mutation testing): on the direct path an
@@ -1100,7 +1115,7 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid by the route");
         assertEq(tB.balanceOf(address(aggSolver)), parked, "the parked tB never moved");
         assertEq(tB.balanceOf(treasury), 0, "nothing of it paid as surplus");
-        assertEq(tA.balanceOf(treasury), AMOUNT_IN - AMOUNT_OUT, "the real spread, as input residue");
+        assertEq(tA.balanceOf(treasury), AMOUNT_IN - AMOUNT_OUT - 1, "the real spread, as input residue, less the floor");
     }
 
     /// @dev The order flag is what selects the path — the same route on an
@@ -1313,8 +1328,12 @@ contract AggregatorProportionalSentinelTest is AggregatorSurplusSplitTest {
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT + spread / 2, "signed output + 50% improvement");
         assertEq(tB.balanceOf(PROTOCOL), spread / 10, "protocol fee: 10% of the REAL spread");
         assertEq(tB.balanceOf(ORIGINATOR), spread / 5, "originator: 20% of the REAL spread");
-        assertEq(tB.balanceOf(FILLER), spread * 2 / 10, "filler: 40% - 20%");
-        assertEq(tB.balanceOf(address(splitSolver)), 0, "nothing strands");
+        // makerPpm != 0: the patched route is NOT shortened by the input floor (the
+        // maker's 50% would shrink with it); the output floor comes out of the
+        // filler's remainder only.
+        assertEq(tB.balanceOf(FILLER), spread * 2 / 10 - 1, "filler: 40% - 20%, less the floor");
+        assertEq(tB.balanceOf(address(splitSolver)), 1, "nothing strands but the 1-wei floor");
+        assertEq(tA.balanceOf(address(splitSolver)), 0, "no input floor withheld under a maker share");
     }
 
     /// The balance SHRANK below the signed output (a maker front-running the fill,
@@ -1427,6 +1446,9 @@ contract AggregatorLivePricingTest is AggregatorFillSolverTest {
     function test_live_directSellAfterDecay_paysTheLiveTickAndKeepsTheDecay() public {
         uint256 elapsed = DECAY / 2;
         uint256 live = OUT_START - (OUT_START - OUT_END) * elapsed / DECAY; // 92.5 tB
+        // Steady state: the 1-wei input floor the first fill would otherwise
+        // self-seed out of its residue, so both fills below compare like for like.
+        tA.mint(address(aggSolver), 1);
 
         // Control — the old behaviour: the quoted 95 reaches the maker.
         (uint256 quotedToMaker, uint256 quotedResidue) = _fillLate(_decayingDirectSell(1), elapsed, NO_PATCH);
@@ -1438,7 +1460,7 @@ contract AggregatorLivePricingTest is AggregatorFillSolverTest {
         assertEq(liveToMaker, live, "patched: the maker gets outputAt(t_incl)");
         assertEq(liveResidue, AMOUNT_IN - live, "patched: residue = live spread");
         assertEq(liveResidue - quotedResidue, OUT_START - live, "the residue grew by exactly the decay");
-        assertEq(tA.balanceOf(address(aggSolver)), 0, "nothing parked");
+        assertEq(tA.balanceOf(address(aggSolver)), 1, "nothing parked but the floor");
         assertEq(tB.balanceOf(address(aggSolver)), 0, "no output ever here");
     }
 

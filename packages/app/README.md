@@ -73,6 +73,7 @@ VITE_DEPLOYMENTS='{"30":{"settlement":"0x…","permit3":"0x…","lens":"0x…","
 | `marketSolvers` | Optional per-market override: `"<marketId>": "0x…"` names a different delta-verify filler for that market; `"<marketId>": "pull"` (exactly that literal) signs **plain pull delivery** on that market, whatever `solver` says. By default the order names no filler (`exclusiveFiller = 0`). With an opted-in window (below) and a non-zero `solver`, it names the solver for that window. |
 | `pullExclusivity` | Optional, **opt-in**: `{"seconds": 60, "overrideBps": 5}`, the **soft exclusivity window** pull markets sign. The defaults are `seconds` 0 (no window) and `overrideBps` 5. `seconds` is an integer in [0, 600]. `overrideBps` is an integer in [1, 10000]. Either key may be omitted, and it then keeps the default. |
 | `marketExclusivity` | Optional per-market override of `pullExclusivity`: `{"<marketId>": {"seconds": 0}}`. Each missing key inherits the deployment's value. |
+| `fillGas` | Optional: `{"direct": 352000, "pull": 370000}`, the gas the filler prices one fill at per delivery (its `eth_estimateGas` 400k / 420k × its default receipt ratio 0.88), which sizes small market tickets' floor (see *Market orders: the ticket-sized floor*). Defaults are those two numbers. Each key is optional and must be an integer in [21000, 2000000]. |
 
 Every address is validated. A malformed address, a zero `settlement`/`permit3`,
 a `marketSolvers` value that is neither a non-zero address nor exactly
@@ -207,7 +208,8 @@ keeps the USDRIF market on pull whatever `solver` says.
     an unreachable server or a mismatched order hash is shown as an error and
     nothing is listed as resting. Market orders are posted too, since on a
     real book an order no filler can see does nothing. A market order is a 60 s
-    auction. It then rests at its floor until it expires after 5 minutes. On a
+    auction. It then rests at its floor (ticket-sized, see *Market orders: the
+    ticket-sized floor*) until it expires after 5 minutes. On a
     pull market it is open to every filler, unless the deployment opts in to
     the soft exclusivity window. The book refuses TTLs under 120 s and the
     filler skips orders that expire within 90 s, so see `lib/plan.ts` and the
@@ -323,6 +325,120 @@ egress address, so all browsers share one rate-limit bucket. Run it with:
   pick a fresh bucket per request. A filler bot on the same host or private
   network is fine: a request with no `x-forwarded-for` is billed to its socket
   address.
+
+## Market orders: the filler's quote (2026-10-07)
+
+Where a filler runs (Rootstock), a market ticket is priced by the filler itself, in the
+UniswapX style ([`src/lib/quote.ts`](src/lib/quote.ts),
+[`src/hooks/useMarketQuote.ts`](src/hooks/useMarketQuote.ts)):
+
+1. The form asks `POST /api/quote` (the Pages worker → the filler Worker's `POST /quote`
+   over the `FILLER` service binding) what the filler would deliver for this ticket now.
+   It asks debounced on the amount, every 15 s while the ticket is on screen, and again
+   right before the wallet prompt. The filler answers
+   `amountOut = route output − one fill's gas × (1 + 10 % margin)`: its own route
+   pricing, gas at its learned estimate × receipt ratio × send gas price, and no haircut
+   (packages/beta-filler README *Indicative quotes*).
+2. The form shows **You receive ≈ amountOut**, the **network gas** incl. the margin, and
+   that gas as a % of the ticket. It also shows the **minimum** under the maker's
+   **slippage protection**: auto = 10 bps on a stable pair (USDRIF/USD0), 30 bps
+   otherwise (`SLIPPAGE_DEFAULT_BPS`), or a custom % up to 5 %.
+3. The signed order is a 60 s **Dutch order starting at the quote**: SELL output
+   `amountOut → amountOut × (1 − slippage)`; BUY fixed output = that minimum, with the
+   input rising from the quoted rate to the full pay amount. It keeps
+   `MARKET_TTL_SECONDS` (300 s) so the book (`MIN_TTL_SECONDS` 120) and filler
+   (`EXPIRY_MARGIN_SECONDS` 90) gates hold. Delivery and `exclusiveFiller` follow the
+   deployment config as before. The order encoding is unchanged, and no quote id is
+   signed or posted: the filler recognises an order signed from its own quote by its
+   terms and gates it without its route haircut.
+4. The filler fills it on its next tick when the price held, since the start is its own
+   break-even plus the gas margin. If the price moved, it fills a little down the decay,
+   never below the minimum. The receipt says so: not filled after ~2 blocks → cancel and
+   re-quote.
+
+**Fallback.** No quote (the mock book, a chain without a filler, the endpoint down, a
+4xx/5xx, or an answer that fails `parseQuote`'s checks against the request) → the
+market ticket signs the ticket-sized gas floor below, unchanged. The form says
+"filler quote unavailable". Limit and TWAP tickets never quote.
+
+Config: `VITE_QUOTE_URL` overrides the endpoint (default `/api/quote` whenever
+`VITE_ORDERBOOK_URL` is set, none with the mock book). The Pages project needs a
+**service binding `FILLER` → `filler-1delta-rsk`** (or `FILLER_ORIGIN`) and the secret
+`FILLER_BINDING_KEY` = the filler's `QUOTE_BINDING_KEY`, so the filler's per-IP rate
+limit bills the visitor. The proxy (`public/_worker.js` `proxyQuote`) forwards exactly
+`POST /api/quote`, JSON, ≤ 2 KiB, with only `content-type` / `accept` and the visitor's
+`cf-connecting-ip` as `x-filler-client-ip`. In development, `vite` proxies `/api/quote`
+to `QUOTE_PROXY_TARGET` (default `http://localhost:8787/quote`). Tests:
+`test/marketQuote.test.ts`, `test/workerQuote.test.ts`.
+
+## Market orders: the ticket-sized floor (fallback)
+
+When no filler quote is available, a market order is a 60 s dutch auction from the book's **executable** (fee-net)
+price down to a floor, the minimum the maker is guaranteed
+([`src/lib/plan.ts`](src/lib/plan.ts), [`src/lib/marketFloor.ts`](src/lib/marketFloor.ts)).
+The beta filler takes an order only when `quote × (1 − haircut) ≥ owed + gas`. Its
+haircut is 10 bps, or 5 bps when both tokens are $1 tokens (USDT0, USDRIF). It prices
+a fill at about 352k (direct) / 370k (pull) gas, ≈ $0.75 on Rootstock today. A flat 30 bps floor covers that only from about $300 up. A $20
+ticket could never be filled and simply expired. So the floor scales with the ticket:
+
+```
+floorBps = max(MARKET_SLIPPAGE_BPS (30),
+               haircutBps(pair) + ceil(gasCostInReceiveToken / expectedOut × 1e4) + 2)
+```
+
+- **Gas price**: what the filler sends at — the latest block's `minimumGasPrice` ×
+  1.03 (`FILLER_GAS_PRICE_MIN_MULT_BPS` = the filler's `GAS_PRICE_MIN_MULT_BPS`), read
+  over the wallet's provider every 30 s while the wallet is on the market's chain
+  (`lib/chain.ts` `readGasPrice`). A node that does not return the field: its
+  `eth_gasPrice` / 1.1 (rskj's buffer) × 1.03. Without a wallet, or after a failed or
+  absurd read (more than 0.1 gwei, the filler's `MAX_GAS_PRICE_GWEI`), the floor uses
+  Rootstock's minimum × 1.03 (24,406,880 wei). A live price below the minimum is
+  raised to it.
+- **RBTC → receive token**: WRBTC is 1. A $1 token is priced at the WRBTC/USD0 market's
+  mid. On that market the live mid is reused, and on any other market the app fetches
+  that book once a minute. The other leg of a WRBTC-quoted market uses the market's
+  own mid. If no sane pool price has been read (a $1-token price outside
+  $1k–$10M per RBTC counts as broken), the floor uses a deliberately high
+  $150,000 per RBTC and the form marks the floor "approx.".
+- **Fill gas**: `fillGas.direct` when the market's orders name a solver
+  (delta-verify), otherwise `fillGas.pull`. With no deployment the pull figure is
+  used. The defaults are what the filler prices a fill at before it has learned
+  anything: its `eth_estimateGas` (top of the production e2e range, 400k direct /
+  420k pull) × its default receipt ratio `DEFAULT_GAS_RECEIPT_RATIO` (0.88) = 352k /
+  370k. The filler then learns the ratio per fill shape from its own receipts (max of
+  the last 20), and that only goes lower (0.845–0.877 on a fresh solver, less once the
+  solver's floors are seeded) — so the floor stays conservative and the filler fills
+  before the auction reaches it.
+- **Haircuts** mirror `ROUTE_SLIPPAGE_BPS` / `ROUTE_STABLE_SLIPPAGE_BPS` in
+  [`packages/filler-worker/wrangler.toml`](../filler-worker/wrangler.toml).
+  `test/crossComponent.audit.test.ts` (APP-FLOOR-1) reads that file and fails when the
+  two copies disagree; APP-FLOOR-2 does the same for `GAS_PRICE_MIN_MULT_BPS` and
+  `DEFAULT_GAS_RECEIPT_RATIO`.
+
+Small tickets are **not refused**. They get a worse floor, and the order form shows
+the guaranteed minimum, the floor %, and, above 1 %, a note saying how much of it is
+network gas. It also shows a **likely received** estimate. The filler fills as soon as
+the decaying auction reaches its break-even (haircut + gas), so the likely price is
+there, not at the floor. The only bound is a sanity clamp below 100 %, so that
+`minOut` stays positive. Chains with no filler (Ethereum, BNB Chain) keep the flat
+30 bps.
+
+Rootstock at 24,406,880 wei (the 23,696,000 minimum × 1.03) and RBTC ≈ $85,500 gives
+these floors (bps under the executable price; WRBTC = direct, 352k gas; USDRIF = pull,
+370k gas — the gas the filler PRICES before its first receipt, `eth_estimateGas` × 0.88).
+Before 2026-10-07 (eth_gasPrice 26,065,600 wei × the raw estimate 400k / 420k) they
+were $20: 458 / 476, $100: 102 / 101, $300: 42 / 39.
+
+| Ticket | WRBTC/USD0 (haircut 10) | USDRIF/USD0 (haircut 5) |
+| --- | --- | --- |
+| $20 | 380 (10 + 368 + 2) | 394 (5 + 387 + 2) |
+| $100 | 86 (10 + 74 + 2) | 85 (5 + 78 + 2) |
+| $300 | 37 (10 + 25 + 2) | 33 (5 + 26 + 2) |
+| $1,000 | 30 (10 + 8 + 2 = 20 → 30) | 30 (5 + 8 + 2 = 15 → 30) |
+
+The filler-worker app-shape e2e (`packages/filler-worker/e2e/app-shape.ts`) builds
+its market tickets through the same `readGasPrice` → `floorInputsFor` → `planTicket`
+path, with the fork's block minimum (re-added by the rpc-proxy) and pool mid.
 
 ## What is real and what is not
 

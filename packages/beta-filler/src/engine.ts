@@ -1,10 +1,12 @@
-import { withGasPriceCache, type Chain } from "./chain";
+import { withSendGasPrice, type Chain } from "./chain";
 import { AUCTION_RECHECK_MS, type Config } from "./config";
 import { dispatch, type Strategy } from "./dispatch";
 import { Filler, type FillOutcome } from "./filler";
+import { GasRatios } from "./gasRatio";
 import { GAS, Guard, resolvePending as resolveTx, type PendingTx, type Resolution } from "./guard";
 import type { BookEntry } from "./intake";
-import { Budget, isFixedPrice, windowEndMs } from "./policy";
+import { Budget, isFixedPrice, windowEndMs, type Verdict } from "./policy";
+import { QuoteBook, Quoter, type QuoteRequest, type QuoteResult } from "./quote";
 import { Rebalancer, type RebalanceOutcome } from "./rebalance";
 import { ROUTE_FILLS, RouteFiller } from "./routeFiller";
 import { sanitize } from "./sanitize";
@@ -131,6 +133,11 @@ export class Engine {
   readonly filler?: Filler;
   readonly route?: RouteFiller;
   readonly rebalancer: Rebalancer;
+  /** Learned receipt/estimate gas ratios, shared by both strategies (gasRatio.ts). */
+  readonly gasRatios: GasRatios;
+  /** Indicative quotes issued (./quote.ts) — an order signed from one is gated without the haircut. */
+  readonly quotes: QuoteBook;
+  readonly quoter: Quoter;
   readonly strategies: Strategy[] = [];
   private cursor: string | undefined;
   private recentEvents: RecentEvent[];
@@ -146,13 +153,16 @@ export class Engine {
     const { cfg, log } = o;
     this.cfg = cfg;
     this.now = o.now ?? Date.now;
-    // One eth_gasPrice per ~10 s for every strategy and the rebalancer (it was asked
-    // again for every order by every strategy).
-    const chain = withGasPriceCache(o.chain, undefined, this.now);
+    // ONE send gas price (latest block minimumGasPrice × GAS_PRICE_MIN_MULT_BPS,
+    // eth_gasPrice without one) per ~10 s for every strategy and the rebalancer: the
+    // gates, the budget and the signed tx all read it through chain.pub.getGasPrice().
+    const chain = withSendGasPrice(o.chain, { multBps: cfg.gas.minGasPriceMultBps, now: this.now, log });
     this.chain = chain;
     const mark = () => {
       this.dirty = true;
     };
+    this.gasRatios = new GasRatios(cfg.gas.defaultReceiptRatioPpm, state.gasRatios ?? {}, mark);
+    this.quotes = new QuoteBook(state.quotes ?? [], mark);
     this.guard = new Guard(cfg.gas, state.guard ?? {}, mark, () => this.save());
     this.budget = new Budget(
       { [cfg.tokens.usdt0.toLowerCase()]: cfg.policy.hourlyUsdt0, [cfg.tokens.usdrif.toLowerCase()]: cfg.policy.hourlyUsdrif },
@@ -164,16 +174,17 @@ export class Engine {
     // Strategy order: inventory first, route second (see dispatch.ts). Both share
     // ONE guard: the hourly RBTC gas budget, MAX_GAS_PRICE_GWEI, the backoff.
     if (cfg.strategies.inventory) {
-      const f = new Filler(cfg, chain, this.budget, log, mark, this.guard);
+      const f = new Filler(cfg, chain, this.budget, log, mark, this.guard, this.gasRatios);
       this.filler = f;
       this.strategies.push({ name: "inventory", consider: (e) => f.consider(e), accepts: (e) => f.accepts(e) });
     }
     if (cfg.strategies.route) {
-      const r = new RouteFiller(cfg, chain, this.routeBudget, log, mark, this.guard);
+      const r = new RouteFiller(cfg, chain, this.routeBudget, log, mark, this.guard, this.gasRatios, this.quotes);
       this.route = r;
       this.strategies.push({ name: "route", consider: (e) => r.consider(e), accepts: (e) => r.accepts(e), beginSweep: () => r.beginSweep() });
     }
     this.rebalancer = new Rebalancer(cfg, chain, log, this.guard, { ...(state.rebalance ?? {}) }, mark);
+    this.quoter = new Quoter(cfg, chain, this.guard, this.quotes, { route: this.route, inventory: this.filler }, this.now);
     this.cursor = state.cursor;
     this.recentEvents = [...(state.recent ?? [])];
     for (const [h, until, fillable] of state.ownFills ?? []) this.holds.set(h, { until, fillable, why: "filled" });
@@ -208,7 +219,18 @@ export class Engine {
       ...(this.cursor ? { cursor: this.cursor } : {}),
       recent: this.recentEvents,
       ...(ownFills.length ? { ownFills } : {}),
+      gasRatios: this.gasRatios.toJSON(),
+      ...(this.quotes.size ? { quotes: this.quotes.toJSON() } : {}),
     };
+  }
+
+  /**
+   * An indicative quote for a market ticket (./quote.ts): priced by the same strategies
+   * and gas model the fills use, recorded so the order signed from it is recognised.
+   * Read-only on the chain; never sends anything.
+   */
+  async quote(req: QuoteRequest): Promise<Verdict<{ quote: QuoteResult }>> {
+    return this.quoter.quote(req);
   }
 
   async save(): Promise<void> {
@@ -263,6 +285,13 @@ export class Engine {
       case "success":
         if (p.kind === "fill") this.o.log(`✓ ${who} filled ${p.info?.tag ?? p.orderHash} tx ${p.hash} gas ${res.gasUsed}`);
         else this.o.log(`✓ ${who} ${what} tx ${p.hash} mined, gas ${res.gasUsed}`);
+        // Learn this fill shape's receipt/estimate ratio (successful receipts only: a
+        // revert burns less and would under-price the next fills).
+        if (p.gasMeter && res.gasUsed !== undefined) {
+          const est = BigInt(p.gasMeter.estimate);
+          this.gasRatios.record(p.gasMeter.shape, est, res.gasUsed, now);
+          this.o.log(`  gas ${res.gasUsed} / estimate ${est} = ${(Number(res.gasUsed) / Number(est)).toFixed(3)}; ${p.gasMeter.shape} now priced at r = ${Number(this.gasRatios.ratioPpm(p.gasMeter.shape)) / 1e6}`);
+        }
         // Do not re-quote the order we just filled while the book still serves it
         // (it indexes the fill a minute or so later): hold it until its fillable changes.
         if (p.kind === "fill" && p.orderHash && p.bookFillable !== undefined) {
@@ -333,6 +362,7 @@ export class Engine {
     let held = 0;
     if (this.guard.pending) return { evaluated, outcomes, sent: undefined, held };
     this.beginSweep();
+    this.quotes.prune(this.now(), this.cfg.quote.matchGraceSeconds);
     const recheck = this.o.dryRunRecheckMs ?? 60_000;
     const now = this.now();
     const nowS = BigInt(Math.floor(now / 1000));
@@ -393,12 +423,19 @@ export class Engine {
         if (out.status === "dry-run") this.dryRunSeen.set(e.orderHash, this.now());
         if (out.status === "skipped" && out.rest && this.cfg.sweep.restingRecheckMs > 0) {
           const at = this.now();
-          const ttl = isFixedPrice(e.announce.order) ? this.cfg.sweep.restingRecheckMs : Math.min(this.cfg.sweep.restingRecheckMs, AUCTION_RECHECK_MS);
+          const fixed = isFixedPrice(e.announce.order);
+          const ttl = fixed ? this.cfg.sweep.restingRecheckMs : Math.min(this.cfg.sweep.restingRecheckMs, AUCTION_RECHECK_MS);
+          let until = at + ttl;
+          // A decaying order whose gate a strategy expects to pass sooner (./recheck.ts:
+          // the order's own pricing against this quote) is re-quoted then — the first
+          // tick at or after that moment, never later than the cap. A prediction at or
+          // before `at` (the block lags the clock) means the very next tick.
+          if (!fixed && out.recheckAt !== undefined) until = Math.min(until, Math.max(out.recheckAt, at));
           // Never hold past the end of a running exclusivity window: that is when an
           // outsider's price steps (the soft premium drops, a hard window opens), and
           // the app's pull markets end theirs ~2 blocks in (B13).
           const winEnd = windowEndMs(e.announce.order, at);
-          this.holds.set(h, { until: winEnd !== undefined ? Math.min(at + ttl, winEnd) : at + ttl, fillable, why: "passed" });
+          this.holds.set(h, { until: winEnd !== undefined ? Math.min(until, winEnd) : until, fillable, why: "passed" });
         }
       }
       // (Read through a widened reference: TS narrowed `this.guard.pending` to

@@ -63,7 +63,9 @@ One `FillerDO` instance (`idFromName("filler")`). Each alarm runs one tick of th
    - **resting orders**: one every strategy passed on at its current terms
      (unprofitable, out of price, below the minimum, no route) is not re-quoted for
      `RESTING_RECHECK_SECONDS` (300) unless the book reports a different
-     `fillableAmount` for it (at most 30 s for an order whose price moves with time).
+     `fillableAmount` for it. An order whose price moves with time is held at most 30 s,
+     and is re-quoted at the second its gate is predicted to pass (the order's own
+     pricing against this quote; beta-filler `src/recheck.ts`), or at its floor.
      A transient refusal (gas price, budgets, balance, a backoff) is not held. 31
      resting orders used to cost ~67 RPC calls per tick (~388k/day);
    - **an order we just filled**, until the book reports a different fillable for it
@@ -73,8 +75,15 @@ One `FillerDO` instance (`idFromName("filler")`). Each alarm runs one tick of th
      curve, every leg `end == 0`) whose implied price is outside `MAX_BUY_PRICE` /
      `MIN_SELL_PRICE`.
 
-   `eth_gasPrice` is read once per ~10 s for every order and strategy (it was read
-   per order per strategy).
+   The send gas price — ⌈latest block `minimumGasPrice` × `GAS_PRICE_MIN_MULT_BPS`
+   (10300) / 10000⌉, `eth_gasPrice` only on a chain without the field — is read once
+   per ~10 s for every order and strategy, and is what every gate, the gas budget and
+   the signed tx use. Fills are priced at `eth_estimateGas` × r, r learned per fill
+   shape from the filler's own receipts (`DEFAULT_GAS_RECEIPT_RATIO` = 0.88 before the
+   first; the max of the last 20 after, clamped to [0.6, 1.0]); the gas limit keeps
+   its 1.25× headroom. The samples live in the engine state in DO storage and show in
+   `/status` → `config.gas.receiptRatios`. Rules, sources and the bounded risk: the
+   beta-filler README, *Gas price and priced gas*.
 3. If nothing was sent, run **one rebalancer step** (inventory only, at most every
    `REBALANCE_SECONDS`, default 30): redeem USDRIF through MoC, or sell RIF. A missing approval is sent as its own tx first. These txs
    go through the same Guard: the hourly gas budget, `MAX_GAS_PRICE_GWEI`, the
@@ -131,7 +140,7 @@ With no `ADMIN_TOKEN` set, every admin route is refused.
 
 | Route | |
 |---|---|
-| `GET /status` | address, balances (RBTC / USDT0 / USDRIF / RIF / WRBTC / WETH), budgets left, the pending tx (incl. re-broadcasts), an untracked-in-flight streak, the MoC redemption, the orderbook's last `/health` (alarm, logs), recent fills / reverts / skips, the backoff list, alerts, last tick, config summary incl. `rpcSource` (never the key, the admin token, the webhook URL or a secret RPC URL) |
+| `GET /status` | address, balances (RBTC / USDT0 / USDRIF / RIF / WRBTC / WETH), budgets left, the pending tx (incl. re-broadcasts), an untracked-in-flight streak, the MoC redemption, the orderbook's last `/health` (alarm, logs), recent fills / reverts / skips, the backoff list, alerts, last tick, config summary incl. `rpcSource` and the learned gas receipt ratios (`config.gas.receiptRatios`) (never the key, the admin token, the webhook URL or a secret RPC URL) |
 | `POST /pause` / `POST /resume` | stop or allow **new** sends. A pending tx is still resolved, and a running tick stops before its next order |
 | `POST /dry-run` `{"on": true\|false}` | runtime override of `DRY_RUN`, persisted in the DO |
 | `POST /tick` | run a tick now (joins the running one if any) |
@@ -153,6 +162,42 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" -X POST $ADMIN/pause
 curl -s -H "Authorization: Bearer $ADMIN_TOKEN" -X POST $ADMIN/dry-run -d '{"on":false}'
 curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$ADMIN/fills?format=csv&since=2026-10-01" > fills.csv
 ```
+
+## Public quote endpoint (`POST /quote`, 2026-10-07)
+
+The only unauthenticated route besides `/health`. It returns an **indicative quote** for
+a market ticket, priced by the engine's own strategies and gas model (packages/beta-filler
+`src/quote.ts`, see its README *Indicative quotes*):
+`amountOut = grossOut − gas × (1 + QUOTE_GAS_MARGIN_BPS)`. The app reaches it through its
+Pages worker's `/api/quote`, over a `FILLER` service binding (or `FILLER_ORIGIN`), and
+signs a Dutch order starting at `amountOut` and decaying over 210 s.
+
+```sh
+curl -s -X POST https://filler.example.com/quote -H 'content-type: application/json' \
+  -d '{"chainId":30,"marketId":"rsk-30-wrbtc-usd0","side":"sell","amountIn":"10000000000000000","delivery":"direct"}'
+# → {"quoteId":"q_…","amountIn":"…","amountOut":"…","grossOut":"…","gasUnits":"352000","gasPriceWei":"…",
+#    "gasCostOut":"…","gasChargeOut":"…","gasMarginBps":"2000","toleranceBps":"0","validUntil":…,
+#    "strategy":"route","route":{"source":"oku","hops":1},"delivery":"direct","live":true, …}
+```
+
+The request takes `chainId`, `side` (`sell` | `buy`, the app's side against the base),
+`amountIn` (wei of the PAY token, decimal string), `delivery` (`direct` | `pull`, from
+the app's deployment config), and a `marketId` or `tokenIn` / `tokenOut`. An optional
+`maker` restricts the quote to that maker's order. Amounts are decimal strings. `live`
+is false while the filler runs dry.
+
+| Guard | |
+|---|---|
+| method / type / size | `POST`, `application/json`, body ≤ 2 KiB (entry worker); 405 / 415 / 413 |
+| validation | strict: unknown fields, a wrong `chainId`, a bad amount, unknown market or inconsistent tokens → 400 |
+| rate limit | DO SQLite token buckets, checked BEFORE parsing: per visitor IP (`QUOTE_RATE_IP_CAPACITY` 30, refill `QUOTE_RATE_IP_REFILL` 0.5/s) and global (`QUOTE_RATE_GLOBAL_CAPACITY` 300, refill 5/s) → 429 + `retry-after` |
+| client IP | `x-filler-client-ip` only with `x-filler-binding-key` = the `QUOTE_BINDING_KEY` secret (the app's Pages worker); else `cf-connecting-ip`; `x-forwarded-for` never (`src/clientIp.ts`) |
+| state | 503 while paused or not configured; 422 `no quote` (no route, gas above the output, gas price above the ceiling) |
+| secrets | errors sanitized, RPC URLs redacted; never the key or tokens |
+
+A quote's RPC calls share the engine's chain client, so they count against the running
+tick's subrequest meter. Identical requests within `QUOTE_CACHE_MS` (5 s) are priced
+once. Tests: `test/quote.test.ts`.
 
 ## Fills / P&L log
 
@@ -234,6 +279,11 @@ npx wrangler secret put ALERT_WEBHOOK_URL    # Slack webhook, or the Telegram se
 npx wrangler secret put RPC_URL_SECRET
 # optional: the orderbook's BINDING_KEY, so its rate limiter bills the filler its own bucket
 npx wrangler secret put ORDERBOOK_BINDING_KEY
+# recommended: shared with the app's Pages worker (its FILLER_BINDING_KEY), so POST /quote
+# is rate-limited per VISITOR rather than one shared bucket for the whole app
+KEY=$(openssl rand -hex 32)
+echo "$KEY" | npx wrangler secret put QUOTE_BINDING_KEY
+echo "$KEY" | npx wrangler pages secret put FILLER_BINDING_KEY --project-name <pages-project>
 ```
 
 **3. Service binding.** `wrangler.toml` already binds `ORDERBOOK` → `orderbook-1delta-rsk`.
@@ -356,7 +406,11 @@ packages/filler-worker/e2e/staging.sh down
 5. Starts `e2e/rpc-proxy.ts` between the workers and anvil. It:
    - counts calls per worker and method;
    - injects latency (`LATENCY_MS`, `JITTER_MS`) and optionally rate-limits (`RATE_LIMIT_RPS`);
-   - answers `eth_gasPrice` with Rootstock's price (anvil always reports 1 gwei);
+   - answers `eth_gasPrice` with Rootstock's price (anvil always reports 1 gwei), and
+     adds Rootstock's `minimumGasPrice` field to every `eth_getBlockBy*` result
+     (`MIN_GAS_PRICE_WEI`, read from the real chain's latest block by `staging.sh`,
+     else `GAS_PRICE_WEI` / 1.1), so the filler and the app-shape floor take the
+     production gas-price path;
    - logs every raw tx sent;
    - is the alert webhook sink.
 6. Runs ONE `wrangler dev --local` with three `-c` configs:
@@ -463,7 +517,8 @@ through the app's Pages worker — and signs five tickets, one fresh maker each:
 | `twap` | WRBTC/USD0 | TWAP slice 1 (4 × 5 min), fixed legs |
 
 It fails (exit 1) unless every POST answers 202, every market order fills on-chain by
-its floor plus the filler's first re-quote (auction hold cap 30 s + one tick + landing)
+its floor plus the filler's first re-quote (auction hold cap 30 s + one tick + landing;
+a large ticket now fills mid-auction, at the first tick its gate passes)
 and before `expiry − EXPIRY_MARGIN_SECONDS`, the direct market lands as `direct`
 (route strategy, tx to the solver) and USDRIF as `pull`, and each maker gets at least
 its floor. The app's ladder is reduced to one fee-less rung at the pool's on-chain mid
@@ -477,6 +532,32 @@ fills once floor-side slack covers its gas (≈ $0.7–0.9 a route fill), so a t
 roughly (gas ÷ (floor − haircut)) of notional to fill at all: ≈ $360–$450 on WRBTC,
 ≈ $280–$360 on stables. `MARKET_SLIPPAGE_BPS=<bps>` overrides the floor for an
 economics experiment (disclosed in the log and results as an ECONOMICS OVERRIDE).
+
+**Market path (2026-10-07).** By default (`MARKET_PATH=quote`) each market ticket asks
+the filler for a quote through the app's Pages worker (`POST /api/quote`, the gateway
+forwards it over the `FILLER` binding with the visitor IP + `FILLER_BINDING_KEY`). It
+re-quotes after funding, right before signing, and signs the app's Dutch order:
+start = `amountOut`, minimum = quote × (1 − auto slippage 30 / 10 bps;
+`QUOTE_SLIPPAGE_BPS` overrides). `MARKET_PATH=dutch` runs the pre-quote gas-floor path,
+the app's fallback. The run ends with a per-ticket table: quote grossOut, gas (+margin),
+signed start / min, start vs gross, posted→fill, maker got, got vs quote, and receipt gas
+vs the gas the quote and the fill priced. Production gates, 2 s fork blocks, fresh
+filler (no learned estimate yet, so quotes price 400k / 420k × 0.88):
+
+| sizes | ticket | quote gross → start (gas + 20 %) | posted→fill | got vs quote | receipt / quote-priced / fill-priced gas |
+| --- | --- | --- | --- | --- | --- |
+| small | sell 0.000234 WRBTC (direct) | 19.374 → 18.520 USD0 (−441 bps) | 11 s | −5.5 bps | 317,764 / 352,000 / 319,599 |
+| small | buy $20 of WRBTC (direct) | −429 bps | 11 s | −5.5 bps | 343,199 / 352,000 / 333,534 |
+| small | sell 20 USDRIF (pull, **inventory**) | 19.688 → 19.112 USD0 (−293 bps) | 11 s | −1.8 bps | 166,622 / 228,800 / 159,099 |
+| default | sell 0.01 WRBTC | 827.37 → 826.51 USD0 (−10.3 bps) | 7 s | −4.0 bps | 323,428 / 352,000 / 324,583 |
+| default | buy $800 of WRBTC | −10.7 bps | 8 s | −4.0 bps | 349,911 / 352,000 / 339,440 |
+| default | sell 300 USDRIF (pull, route) | 299.33 → 298.43 USD0 (−29.9 bps) | 8 s | −1.3 bps | 324,184 / 369,600 / 340,296 |
+
+Every market order filled on the filler's first tick after posting, as a quoted order
+(`quoted q_…` in the send log, gated without the route haircut). Without that, the
+default-size orders would have waited for ~10 bps of decay. "Got vs quote" is the decay
+that elapsed before inclusion on the fork's clock (8 s of a 60 s / 30 bps decay ≈ 4 bps).
+The same small tickets on `MARKET_PATH=dutch` filled at their gas floor after ~60 s.
 
 Perturb ONE of the three constants to see it fail: `APP_MARKET_TTL_SECONDS=60` (the app's
 `MARKET_TTL_SECONDS`), `MIN_TTL_SECONDS=400` (book), or `EXPIRY_MARGIN_SECONDS=250`

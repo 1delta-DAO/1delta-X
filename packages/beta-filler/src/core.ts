@@ -13,5 +13,6 @@ export { entryFromJson, fetchOrders, type BookEntry, type IntakeOptions, type In
 export { Budget, fmtUnits } from "./policy";
 export type { RebalanceOutcome, RebalanceState } from "./rebalance";
 export { ROUTE_FILLS } from "./routeFiller";
+export { netQuote, parseQuoteRequest, quoteMatches, quoteMarkets, quoteToJson, QuoteBook, Quoter, MAX_QUOTES, type Delivery, type IssuedQuote, type QuoteRequest, type QuoteResult } from "./quote";
 export { sanitize } from "./sanitize";
 export { MemoryStateStore, STATE_KEY, type FillerState, type RecentEvent, type StateStore } from "./state";

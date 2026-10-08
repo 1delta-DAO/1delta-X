@@ -39,12 +39,22 @@ export async function dispatch(entry: BookEntry, strategies: readonly Strategy[]
   let last: FillOutcome | undefined;
   // `rest` survives only if EVERY strategy passed on the order at its current terms
   // (see FillOutcome.rest): then the engine need not re-quote it until the book's
-  // fillable for it changes.
+  // fillable for it changes — or, for a decaying order, until the earliest time a
+  // strategy predicts its gate passes.
   let rest = true;
+  // The earliest moment any strategy expects its verdict to flip (FillOutcome.recheckAt).
+  let recheckAt: number | undefined;
   for (const s of strategies) {
     last = await s.consider(entry);
     if (!(last.status === "skipped" && last.rest)) rest = false;
-    if (took(last) || last.final) return { ...last, rest: false };
+    else if (last.recheckAt !== undefined) recheckAt = recheckAt === undefined ? last.recheckAt : Math.min(recheckAt, last.recheckAt);
+    if (took(last) || last.final) return { ...strip(last), rest: false };
   }
-  return last ? { ...last, rest } : last;
+  if (!last) return last;
+  return { ...strip(last), rest, ...(rest && recheckAt !== undefined ? { recheckAt } : {}) };
+}
+
+function strip(o: FillOutcome): FillOutcome {
+  const { recheckAt: _, ...rest } = o;
+  return rest;
 }

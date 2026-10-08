@@ -167,20 +167,116 @@ export async function allowanceOf(c: Chain, token: Address, spender: Address): P
   return c.pub.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [c.me, spender] });
 }
 
-/** How long one `eth_gasPrice` answer is reused (Rootstock's minimum gas price moves slowly). */
+/** How long one send-gas-price answer is reused (Rootstock's minimum gas price moves at most 1 % per ~30 s block). */
 export const GAS_PRICE_TTL_MS = 10_000;
 
+/** Where a send gas price came from. */
+export type GasPriceSource = "minimumGasPrice" | "eth_gasPrice";
+
+export interface SendGasPrice {
+  wei: bigint;
+  source: GasPriceSource;
+  /** The latest block's `minimumGasPrice`, when it had one. */
+  minWei?: bigint;
+}
+
+/** A JSON-RPC quantity (hex string, decimal string, number or bigint) → bigint; undefined when absent / malformed. */
+export function quantity(v: unknown): bigint | undefined {
+  try {
+    if (typeof v === "bigint") return v;
+    if (typeof v === "number" && Number.isSafeInteger(v)) return BigInt(v);
+    if (typeof v === "string" && /^(0x[0-9a-fA-F]+|\d+)$/.test(v.trim())) return BigInt(v.trim());
+  } catch {
+    // fall through
+  }
+  return undefined;
+}
+
 /**
- * The same chain with `getGasPrice` answered from a short-lived cache: every order
- * of a sweep (and every strategy on it) used to ask `eth_gasPrice` again — 197 of
- * the 809 calls a resting-book soak window cost. A failed read is not cached.
+ * The gas price every tx is SENT at — and so the price every profit gate and the gas
+ * budget are priced at: ⌈latestBlock.minimumGasPrice × multBps / 10000⌉.
+ *
+ * Rootstock has no fee market (verified 2026-10-07 against rskj master 53c040f,
+ * paths under rskj-core/src/main/java/, and RSKj/9.0.3 on public-node.rsk.co):
+ *
+ *  • each block header carries a miner-voted `minimumGasPrice` (RSKIP-09,
+ *    https://github.com/rsksmart/RSKIPs/blob/master/IPs/RSKIP09.md) that may move at
+ *    most ±1 % from its parent's (co/rsk/mine/BlockGasPriceRange.java,
+ *    VARIATION_PERCENTAGE_RANGE = 1, enforced by co/rsk/validators/PrevMinGasPriceRule;
+ *    miners clamp their target to it, co/rsk/mine/MinimumGasPriceCalculator);
+ *  • every tx in a block must pay ≥ THAT block's minimum (TxsMinGasPriceRule); a
+ *    node's pool admits a tx at ≥ its best block's minimum, with no buffer
+ *    (TxValidatorMinimuGasPriceValidator); a MINING node evicts a pending tx that a
+ *    risen minimum leaves behind (BlockToMineBuilder → MinerUtils, removePendingTransactions);
+ *  • `eth_gasPrice` answers bestBlock.min × `rpc.minGasPriceMultiplier` (1.1) unless
+ *    blocks run ≥ 90 % full (GasPriceTracker; EthereumImpl.getGasPrice);
+ *  • live: 23,696,000 wei, flat since ~March 2025 (201 samples over 20k blocks, 53
+ *    weekly samples over a year: no change); its last move (Dec 2024 – Mar 2025,
+ *    59.24 → 23.70 Mwei) went in exact 1 % steps, both ways.
+ *
+ * So min × 1.03 (config.ts DEFAULT_GAS_PRICE_MIN_MULT_BPS) is admitted
+ * everywhere and stays includable through two consecutive maximal rises after the
+ * block read; 1.02 through one. A tx stranded by a longer rise is not repriced:
+ * re-broadcast keeps the signed bytes, and the 15-minute drop rule (guard.ts) frees
+ * the nonce — note rskj needs a +40 % bump to REPLACE a same-nonce tx still pooled
+ * (`transaction.gasPriceBump`). `eth_gasPrice` (+10 %) would pay ~7 % more on every
+ * fill to cover a rise that has not happened for 19 months.
+ *
+ * Fallback: `eth_gasPrice` when the latest block has no `minimumGasPrice` (anvil
+ * forks, non-Rootstock chains) or the block read fails. viem's `getBlock` passes
+ * fields it does not know through untouched (a hex string here).
  */
-export function withGasPriceCache(c: Chain, ttlMs: number = GAS_PRICE_TTL_MS, now: () => number = Date.now): Chain {
+export async function readSendGasPrice(pub: Pick<PublicClient, "getGasPrice"> & Partial<Pick<PublicClient, "getBlock">>, multBps: bigint): Promise<SendGasPrice> {
+  let minWei: bigint | undefined;
+  if (pub.getBlock) {
+    try {
+      const block = (await pub.getBlock({ blockTag: "latest" })) as { minimumGasPrice?: unknown } | null;
+      minWei = quantity(block?.minimumGasPrice);
+    } catch {
+      minWei = undefined; // an RPC hiccup: eth_gasPrice below (~7 % dearer, never cheaper than the minimum)
+    }
+  }
+  if (minWei !== undefined && minWei > 0n) return { wei: (minWei * multBps + 9_999n) / 10_000n, source: "minimumGasPrice", minWei };
+  return { wei: await pub.getGasPrice(), source: "eth_gasPrice" };
+}
+
+export interface SendGasPriceOptions {
+  /** ⌈min × multBps / 10000⌉ (config `GAS_PRICE_MIN_MULT_BPS`). */
+  multBps: bigint;
+  ttlMs?: number;
+  now?: () => number;
+  /** Told which source priced the sends: on the first read and whenever it changes. */
+  log?: (m: string) => void;
+}
+
+/**
+ * The same chain with `getGasPrice` answering THE SEND PRICE ({@link readSendGasPrice})
+ * from a short-lived cache. Every strategy, the rebalancer and `estimateAndBroadcast`
+ * read the price through `chain.pub.getGasPrice()`, so the profit gates, the gas
+ * budget, the lens previews and the signed tx all use this one figure. Every order of
+ * a sweep used to ask `eth_gasPrice` again (197 of the 809 calls a resting-book soak
+ * window cost); a failed read is not cached.
+ */
+export function withSendGasPrice(c: Chain, o: SendGasPriceOptions): Chain {
+  const ttlMs = o.ttlMs ?? GAS_PRICE_TTL_MS;
+  const now = o.now ?? Date.now;
+  const inner = c.pub;
   let hit: { at: number; price: Promise<bigint> } | undefined;
+  let lastSource: GasPriceSource | undefined;
   const getGasPrice = (): Promise<bigint> => {
     const t = now();
     if (!hit || t - hit.at >= ttlMs || t < hit.at) {
-      const price = c.pub.getGasPrice();
+      const price = readSendGasPrice(inner, o.multBps).then((r) => {
+        if (r.source !== lastSource) {
+          lastSource = r.source;
+          o.log?.(
+            r.source === "minimumGasPrice"
+              ? `gas price: sending at latest block minimumGasPrice ${r.minWei} × ${o.multBps} bps = ${r.wei} wei`
+              : `gas price: the latest block has no minimumGasPrice — sending at eth_gasPrice (${r.wei} wei)`,
+          );
+        }
+        return r.wei;
+      });
       const entry = { at: t, price };
       hit = entry;
       price.catch(() => {
@@ -189,7 +285,7 @@ export function withGasPriceCache(c: Chain, ttlMs: number = GAS_PRICE_TTL_MS, no
     }
     return hit.price;
   };
-  const pub = new Proxy(c.pub, {
+  const pub = new Proxy(inner, {
     get: (target, key, receiver) => (key === "getGasPrice" ? getGasPrice : Reflect.get(target, key, receiver)),
   });
   return { ...c, pub };

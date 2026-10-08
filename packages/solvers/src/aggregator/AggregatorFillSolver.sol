@@ -163,14 +163,25 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///  this contract deliberately holds some. Every inbound transfer to a ZERO
 ///  balance slot costs the token's 0→non-zero SSTORE (≈20k), twice per fill
 ///  (`tokenIn` arrives, `tokenOut` arrives), and the matching refunds are capped
-///  per transaction. Keep a floor of each traded token here — one wei is enough
-///  — and both writes become non-zero→non-zero (measured: 222.7k → 178.9k
-///  execution gas on the two-token benchmark). `RoutePlan.profitRecipient ==
-///  address(this)` (retain mode, {_splitSurplus}) maintains that floor by
-///  itself, since the filler's share of the spread simply stays put — and is
-///  recoverable by the operators with {sweep} (audit 2026-09-30 AGG-1: retain mode
-///  used to be refused on open instances, where nothing could move it out; there
-///  are no open instances any more).
+///  per transaction. A floor of one wei per traded token makes both writes
+///  non-zero→non-zero (Rootstock fork, live pool: −34.1k execution gas per fill on
+///  both paths, `SelfSeedSteadyBench` vs `SelfSeedColdBench` on the pre-2026-10
+///  contract).
+///
+///  THE FLOOR SEEDS ITSELF (2026-10) — no deploy-time token list is needed. A
+///  token whose pre-fill snapshot is ZERO keeps one wei of THIS fill: {_splitSurplus}
+///  pays the filler's share less one wei (output spread, input residue, any token,
+///  both entries), and {_seedIn} routes `delta − 1` on a pull / netted fill whose
+///  route follows `amountInOffset`. Both come out of the filler's side only — the
+///  maker's priced amount, the fee legs, the core's verified delivery and every
+///  {SurplusPolicy} share are computed exactly as on a seeded instance (pinned
+///  twin-for-twin in `test/AggregatorSelfSeed.t.sol`); `_seedIn` lists the paths it
+///  skips and why. Every later snapshot includes the wei, so it is never re-split
+///  and sustains itself. `RoutePlan.profitRecipient == address(this)` (retain
+///  mode) keeps the filler's whole share here anyway — recoverable by the
+///  operators with {sweep} (audit 2026-09-30 AGG-1: retain mode used to be refused
+///  on open instances, where nothing could move it out; there are no open
+///  instances any more).
 ///
 ///  THE OPERATOR SET — mandatory since 2026-10
 ///  ──────────────────────────────────────────
@@ -270,8 +281,11 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///        takes at most `maxPay`, so profit >= `minOut - maxPay` by construction
 /// @param amountInOffset byte offset within `data` of the 32-byte input amount to
 ///        REWRITE with the amount actually routed — this fill's input delta less the
-///        output legs it owes in that same token (see {AggregatorFillSolver.onSettlementFill})
-///        — or {NO_PATCH} to leave the calldata exactly as the aggregator returned it.
+///        output legs it owes in that same token (see {AggregatorFillSolver.onSettlementFill}),
+///        and, on the first pull / netted fill of a token the solver holds none of,
+///        less the one wei it keeps as its self-seeded balance floor
+///        ({AggregatorFillSolver._seedIn}) — or {NO_PATCH} to leave the calldata
+///        exactly as the aggregator returned it.
 ///        See the ⚠ note on {AggregatorFillSolver} about resolved amounts.
 /// @param amountOutOffset byte offset within `data` of the 32-byte OUTPUT amount to
 ///        rewrite with `legsOut[0]`'s live price at inclusion (the core's typed
@@ -292,11 +306,11 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///        carries no floor). BREAKING (2026-10): new field.
 /// @param profitRecipient where the FILLER'S share of the spread goes once the
 ///        maker is paid and the {SurplusPolicy} has taken the maker's and the
-///        protocol's shares; `address(0)` = `msg.sender`; the solver contract
-///        itself = keep it here (retain mode — no transfer, and the balance
-///        floor that makes the next fill cheaper; see the note on holding
-///        nothing between fills). The operators recover retained value with
-///        {AggregatorFillSolver.sweep}
+///        protocol's shares — less one wei of a token the solver held none of
+///        before the fill (the self-seeded balance floor); `address(0)` =
+///        `msg.sender`; the solver contract itself = keep it here (retain mode —
+///        no transfer; see the note on holding nothing between fills). The
+///        operators recover retained value with {AggregatorFillSolver.sweep}
 /// @param originator the party that sourced the order (frontend, wallet, API
 ///        integrator) — paid `originatorPpm` of the output surplus. `address(0)`
 ///        with `originatorPpm == 0` = no originator share
@@ -476,9 +490,16 @@ contract AggregatorFillSolver {
     uint32 public immutable PROTOCOL_SURPLUS_PPM;
     address public immutable PROTOCOL_RECIPIENT;
 
-    /// @notice One fill's output-surplus split. `toFiller` is what reached
-    ///         `RoutePlan.profitRecipient`; the input-side residue (an
-    ///         under-consumed route) is NOT surplus and goes there unlogged.
+    /// @dev Whether {_seedIn} may withhold the input floor wei from a route: only
+    ///      when NO immutable policy share depends on the spread (maker and protocol
+    ///      both 0), so the wei it costs the spread is the filler's alone. One
+    ///      immutable instead of two compares on the seeding branch.
+    bool private immutable SEED_INPUT;
+
+    /// @notice One fill's surplus split, per token. `toFiller` is what reached
+    ///         `RoutePlan.profitRecipient` — one wei short of the filler's share on
+    ///         the fill that self-seeds the token's balance floor (or the whole
+    ///         share, kept here, in retain mode).
     event SurplusSplit(
         address indexed token,
         address indexed maker,
@@ -548,6 +569,7 @@ contract AggregatorFillSolver {
         MAKER_SURPLUS_PPM = policy.makerPpm;
         PROTOCOL_SURPLUS_PPM = policy.protocolPpm;
         PROTOCOL_RECIPIENT = policy.protocolRecipient;
+        SEED_INPUT = policy.makerPpm == 0 && policy.protocolPpm == 0;
         SETTLEMENT = Settlement(payable(settlement));
         address executor = address(Settlement(payable(settlement)).EXECUTOR());
         EXECUTOR = executor;
@@ -843,7 +865,8 @@ contract AggregatorFillSolver {
     ///      originator share. Silent when nothing was left over, which is the
     ///      normal case for a route quoted at the maker's price. Shares floor;
     ///      the filler takes the rounding dust along with its remainder, so
-    ///      nothing strands here.
+    ///      nothing strands here — except, ONCE per token, the self-seeded 1-wei
+    ///      balance floor (below), which is the filler's own.
     ///
     ///      `plan.originatorPpm` was bounded in {_plan}, BEFORE the fill, so a
     ///      mis-set share fails the round rather than reverting after the maker
@@ -873,7 +896,22 @@ contract AggregatorFillSolver {
         // inbound transfers rewrite a live slot instead of paying to create one
         // (measured: ~44k execution gas per fill on a two-token route). The
         // operators take it out with {sweep}; see the README on the balance floor.
-        if (toFiller != 0 && filler != address(this)) SafeTransferLib.safeTransfer(token, filler, toFiller);
+        if (filler != address(this)) {
+            // SELF-SEEDING BALANCE FLOOR (2026-10): a token this contract held
+            // NOTHING of before the fill keeps ONE WEI of the FILLER'S share, so
+            // every later fill of it finds a live balance slot (README, "Dust is
+            // worth having"). Out of the filler's remainder only — the maker's,
+            // the protocol's and the originator's shares above are computed on the
+            // whole surplus and untouched. The floor then sustains itself: every
+            // later amount is a delta against a snapshot that includes it.
+            // `before` is already on the stack, so a non-seeding fill pays one test.
+            if (before == 0 && toFiller != 0) {
+                unchecked {
+                    --toFiller;
+                }
+            }
+            if (toFiller != 0) SafeTransferLib.safeTransfer(token, filler, toFiller);
+        }
         emit SurplusSplit(token, maker, toMaker, toProtocol, toOriginator, toFiller);
     }
 
@@ -1197,10 +1235,12 @@ contract AggregatorFillSolver {
     ///      ({NO_PATCH} = untouched).
     function _route(FillRoute calldata r, uint256 kept, uint256 outOffset, uint256 amountOut) private {
         address tokenIn = r.tokens[0];
-        uint256 amountIn = SafeTransferLib.balanceOf(tokenIn, address(this)) - r.before[0];
+        uint256 before0 = r.before[0];
+        uint256 amountIn = SafeTransferLib.balanceOf(tokenIn, address(this)) - before0;
         unchecked {
             amountIn = amountIn > kept ? amountIn - kept : 0;
         }
+        if (before0 == 0) amountIn = _seedIn(r, amountIn);
         if (amountIn != 0) SafeTransferLib.safeTransfer(tokenIn, address(SANDBOX), amountIn);
         SANDBOX.exec(
             tokenIn,
@@ -1209,6 +1249,38 @@ contract AggregatorFillSolver {
             _sweepOrder(r.tokens, r.outMask)
         );
         _checkInputs(r.tokens, r.before, r.inMask);
+    }
+
+    /// @dev SELF-SEEDING FLOOR, INPUT SIDE — reached only when this contract held no
+    ///      `tokens[0]` before the fill. Route ONE WEI LESS than the fill delivered,
+    ///      so it stays here and the next fill's inbound `tokenIn` rewrites a live
+    ///      slot. {_splitSurplus} sees it as a 1-wei input residue on a zero
+    ///      snapshot and keeps it (the filler's share). Every condition below is a
+    ///      case where withholding could hurt someone other than the filler or
+    ///      fail the fill, so seeding is skipped there and left to the residue:
+    ///        • DIRECT order — the route pays the maker, so on an exact-input route
+    ///          one wei less input is less for the MAKER; the exact-output direct
+    ///          route already leaves the spread here as `tokenIn` residue;
+    ///        • `amountInOffset == NO_PATCH` — the route pulls its QUOTED figure,
+    ///          and a sandbox one wei short of it reverts the fill;
+    ///        • a non-zero MAKER or PROTOCOL share ({SEED_INPUT} false) — one wei
+    ///          less input is a smaller output spread, and those parties own a share
+    ///          of it (sub-wei of value, but their take must never depend on this
+    ///          contract's floor). A per-call ORIGINATOR share does not stop it: it
+    ///          is the operator's carve-out of its own remainder, and shrinks by at
+    ///          most `originatorPpm` of one input wei's worth, once per token;
+    ///        • `amountIn < 2` — nothing left to route.
+    ///      What remains is a PULL / netted fill whose route follows the patched
+    ///      amount: the maker is paid exactly its priced amount out of the
+    ///      proceeds, so the wei comes out of the filler's spread. It reverts only
+    ///      where that spread is smaller than one wei of input is worth — below
+    ///      `minOut` or below the core's pull — i.e. a route quoted at zero margin.
+    function _seedIn(FillRoute calldata r, uint256 amountIn) private view returns (uint256) {
+        // Cheapest tests first: an immutable, a stack word, then the calldata reads.
+        if (!SEED_INPUT || amountIn < 2 || r.amountInOffset == NO_PATCH || r.direct) return amountIn;
+        unchecked {
+            return amountIn - 1;
+        }
     }
 
     /// @dev The order the sandbox sweeps in: OUTPUT tokens first (they hold the

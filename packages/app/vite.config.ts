@@ -39,6 +39,13 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/book/, ""),
       },
+      // The filler's indicative quote (`POST /quote` on the filler Worker, e.g. a
+      // local `wrangler dev` of packages/filler-worker on :8787), for market tickets.
+      "/api/quote": {
+        target: process.env.QUOTE_PROXY_TARGET ?? "http://localhost:8787",
+        changeOrigin: true,
+        rewrite: () => "/quote",
+      },
     },
   },
   build: {

@@ -261,6 +261,62 @@ entrypoint is owner/operator-gated.
     exceed the gasUsed / 5 cap) and is refund-neutral on the direct path — see the
     `RouteSandbox` dust-floor note below. The floor is self-sustaining: the route consumes exactly
     what the fill delivered, so the wei stays.
+    *The floor seeds itself* (2026-10; no `FLOOR_TOKENS` needed). A token the
+    solver held NOTHING of before a fill keeps one wei of that fill, out of the
+    filler's side only: `_splitSurplus` pays the filler's share less one wei
+    (output spread, input residue, a non-anchor input leg — any token, both
+    entries), and `_seedIn` routes `delta − 1` of the anchor input on a pull or
+    netted fill whose route is patched (`amountInOffset` set). The maker's priced
+    amount, every fee leg, the core's verified / pulled delivery and every
+    `SurplusPolicy` share are computed exactly as on a pre-seeded instance —
+    pinned twin-for-twin (cold vs seeded instance, same order) in
+    `test/AggregatorSelfSeed.t.sol`, incl. the typed callback with an in-kind fee
+    leg, the netted `executeItemFill` path and a partial-fill / rate fuzz
+    (`testFuzz_seed_pull_makerIndependentOfFloor`). Per path:
+
+    | path | `tokenIn` floor | `tokenOut` floor |
+    | --- | --- | --- |
+    | pull, `amountInOffset` set (the beta's pull shape) | 1st fill — route one wei short | 1st fill with a spread |
+    | pull, `NO_PATCH` | only if the route leaves input residue (a short route would fail its quoted pull) | 1st fill with a spread |
+    | direct, exact-output (the beta's direct shape) | 1st fill — out of the input residue (route NOT shortened) | never lands here |
+    | direct, exact-input | never (the maker owns the whole output; shortening the route would short the maker) | never lands here |
+    | `executeItemFill`, patched | 1st fill — route one wei short of the PRESEND | 1st fill with a swept spread |
+    | non-zero maker or protocol share | residue only — not withheld (their cut of the spread must not depend on the floor) | 1st fill, from the filler's remainder |
+    | filler share 0 (maker + protocol = 100%), or retain mode | no seed / retain keeps everything anyway | same |
+
+    The one fill a withheld wei can fail is a patched pull route quoted at ZERO
+    margin over `minOut` / the maker's pull (the spread must cover one input wei's
+    worth): it reverts `InsufficientOutput` before anything settles
+    (`test_seed_zeroMarginPatchedRoute_revertsOnlyCold`). Real quotes carry gas +
+    min profit, and one wei of an 18-decimal input moved the live Sushi route by
+    zero USDT0 units (`test_sushi_usdrifToUsdt0_pullFill`). The 1-wei residue is
+    split by the policy like any residue, so with a 100% maker / protocol / originator
+    share it goes to that party and the token simply seeds from a later fill.
+    Measured on the live Rootstock pool (block 8,920,000, profile `solvers`,
+    execution / net tx gas, spread to a pre-paid treasury, 2026-10-07):
+
+    | fill | pre-2026-10 contract (no floor) | self-seeding |
+    | --- | --- | --- |
+    | pull, FIRST fill on a cold instance (`SelfSeedColdBench.test_selfseed_pull`) | 344,815 / 301,945 | 348,958 / 326,574 |
+    | pull, every later fill (`SelfSeedSteadyBench.test_selfseed_pull`) | 344,815 / 301,945 | **310,692 / 282,708** |
+    | direct exact-output, FIRST fill (`SelfSeedColdBench.test_selfseed_direct`) | 310,774 / 275,183 | 311,040 / 286,444 |
+    | direct exact-output, every later fill (`SelfSeedSteadyBench.test_selfseed_direct`) | 310,774 / 275,183 | **276,651 / 266,355** |
+
+    i.e. −34.1k execution per fill on both paths (the exact-output direct path
+    writes the `tokenIn` slot twice — arrival, then the residue swept back after the
+    push emptied it — so one wei saves two 0→non-zero writes), −19.2k net pull and
+    −8.8k net direct; the first fill pays +24.6k / +11.3k net (refunds it no longer
+    earns), so the floor has paid for itself by the second / third fill. The
+    self-seeded steady state prices exactly like a `deal`t or `FLOOR_TOKENS` floor
+    (pull 310,692 patched here vs `SandboxGasBench.test_sandbox_gas_pull` 310,579
+    unpatched). On an instance that ALREADY has its floors the code adds +77 / +52
+    execution on the pull path (with / without a spread) and +15 on the direct
+    path (`test_gas_baseline_dust`, `test_gas_baseline_dust_noSurplus`,
+    `test_gas_direct_seeded`: 208,578 → 208,655, 198,955 → 199,007, 173,864 →
+    173,879; `SandboxGasBench` direct 252,567 → 252,619, pull 310,502 → 310,579). A
+    token that can NEVER be seeded on its path (a `NO_PATCH` pull route that
+    consumes the whole input) re-runs the `_seedIn` checks each fill: +185
+    (`test_gas_retain`, 159,236 → 159,421).
     *Retained value is not.* `RoutePlan.profitRecipient = the solver` measured
     **0** against paying the spread straight out on the direct-delivery path —
     an exact-input route leaves no residue to retain (re-run 2026-10-06: 275,459
@@ -277,18 +333,19 @@ entrypoint is owner/operator-gated.
     path 168.2k → 173.3k, direct 135.5k → 139.8k). Today's unit benchmark
     (`AggregatorFillGas.t.sol`, `FOUNDRY_PROFILE=solvers`, mocked router and tokens,
     EXECUTION gas inside the test — no 21k intrinsic, no calldata, refunds not
-    deducted; re-run 2026-10-06, after the sandbox, the 2026-10-05 anchor fix and
-    tasks 06/08):
+    deducted; re-run 2026-10-07, after the sandbox, the 2026-10-05 anchor fix,
+    tasks 06/08 and the self-seeding floor):
 
     | test | figure | floor |
     | --- | --- | --- |
-    | `test_gas_baseline_cold` (pull) | 252,378 | none |
-    | `test_gas_baseline_dust` (pull, 10% surplus) | 208,578 | 1 wei per token, minted in the test body |
-    | `test_gas_baseline_dust_noSurplus` (pull) | 198,955 | 1 wei per token, minted in the test body |
-    | `test_gas_retain_seeded` / `test_gas_gated_seeded` (pull, retain) | 197,321 | 1 wei per token, minted in the test body |
-    | `test_gas_retain` second / third fill (same tx) | 159,236 | warm from the first fill |
-    | `test_gas_direct_seeded` (direct, untyped) | 173,864 | 1 wei `tokenIn`, minted in the test body |
-    | `test_gas_direct_seeded_liveAmountOut` (direct, typed) | 179,773 | 1 wei `tokenIn`, minted in the test body |
+    | `test_gas_baseline_cold` (pull) | 252,644 | none (the fill self-seeds `tokenOut`) |
+    | `test_gas_baseline_dust` (pull, 10% surplus) | 208,655 | 1 wei per token, minted in the test body |
+    | `test_gas_baseline_dust_noSurplus` (pull) | 199,007 | 1 wei per token, minted in the test body |
+    | `test_gas_retain_seeded` / `test_gas_gated_seeded` (pull, retain) | 197,336 | 1 wei per token, minted in the test body |
+    | `test_gas_retain` second / third fill (same tx) | 159,421 | warm from the first fill |
+    | `test_gas_selfSeed_patched` first / second fill (same tx) | 256,807 / 144,009 | none, then self-seeded |
+    | `test_gas_direct_seeded` (direct, untyped) | 173,879 | 1 wei `tokenIn`, minted in the test body |
+    | `test_gas_direct_seeded_liveAmountOut` (direct, typed) | 179,786 | 1 wei `tokenIn`, minted in the test body |
     | `test_gas_floor_plainFill` (inventory EOA, plain `fill`) | 91,058 | — |
 
     One forge test is one transaction, so a floor minted in the test body is a
@@ -429,7 +486,11 @@ settings as `solvers`, `evm_version = cancun` for Rootstock). It reads `SETTLEME
 `OPERATORS` (required, 1–4: the constructor reverts on an empty set and the old
 `ALLOW_OPEN` is refused), the surplus-policy ppm values (read as `uint256` and
 bounded — never silently truncated to `uint32`) and the optional `FLOOR_TOKENS` (1
-wei of each sent to the new solver) from the environment. An operator with code —
+wei of each sent to the new solver) from the environment. `FLOOR_TOKENS` is **no
+longer needed** (2026-10): the solver seeds a token's 1-wei floor out of its own
+first fill of it (see *The floor seeds itself* above). Pre-seeding still works and
+saves that first fill the refund it forgoes (~+11k / +25k net, direct / pull) — worth
+it only for a token you expect to trade exactly once or twice. An operator with code —
 a contract or an EIP-7702 delegated EOA — is logged loudly and refused unless
 `ALLOW_CONTRACT_OPERATORS=true`. It takes the signer from the CLI flags, and
 reverts unless every immutable — including the deployed
@@ -437,9 +498,10 @@ reverts unless every immutable — including the deployed
 **BREAKING (2026-10):** the constructor is `(settlement, operators, policy)` and
 reverts `NoOperators` on an empty set; the script refuses the removed `ROUTERS`,
 `STANDING`, `PRIME_TOKENS` and `ALLOW_OPEN`.
-`make size-check-solvers` reports the runtime size under that profile (15,176 /
-24,576 bytes, initcode 19,562 — which embeds the sandbox — re-run 2026-10-06
-after tasks 06/08; was 13,935 / 18,314 after the 2026-10 gated-only change). The Rootstock beta runbook is in `packages/beta-filler/README.md`.
+`make size-check-solvers` reports the runtime size under that profile (15,127 /
+24,576 bytes, initcode 19,560 — which embeds the sandbox — re-run 2026-10-07
+after the self-seeding floor; 15,176 / 19,562 after tasks 06/08, 13,935 / 18,314
+after the 2026-10 gated-only change). The Rootstock beta runbook is in `packages/beta-filler/README.md`.
 
 ## Losing races cheaply
 

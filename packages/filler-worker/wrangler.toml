@@ -13,6 +13,9 @@
 #                      secret cannot share a name)
 #   ORDERBOOK_BINDING_KEY  optional: the orderbook's BINDING_KEY, so its rate limiter
 #                      bills the filler its own bucket instead of "unknown"
+#   QUOTE_BINDING_KEY  recommended: shared with the app's Pages worker (its
+#                      FILLER_BINDING_KEY) so `POST /quote` is rate-limited per VISITOR
+#                      (x-filler-client-ip); without it every app visitor shares one bucket
 
 name = "filler-1delta-rsk"
 main = "src/index.ts"
@@ -100,7 +103,7 @@ MIN_EXIT_EDGE_BPS = "30"
 MIN_SELL_PRICE = "1.003"
 MAX_FILL_USDT0 = "500"
 MIN_FILL_USDT0 = "5"
-# Inventory all-in gas gate: a fill must earn its own gas (priced at the real limit),
+# Inventory all-in gas gate: a fill must earn its own gas (estimate × the learned receipt ratio),
 # its pro-rata share of the rebalance it causes, and this minimum profit.
 INVENTORY_GAS_ESTIMATE = "260000"
 REBALANCE_GAS = "450000"
@@ -119,6 +122,42 @@ RIF_SELL_MAX_DISCOUNT_BPS = "150"
 HOURLY_GAS_RBTC = "0.002"
 MAX_GAS_PRICE_GWEI = "0.1"
 RECEIPT_TIMEOUT_MS = "120000"
+# Every tx is sent (and every fill priced) at ⌈latest block minimumGasPrice × this /
+# 10000⌉ — eth_gasPrice (= min × 1.1 on rskj) only when the block has no such field.
+# The minimum moves ≤ ±1 %/block (RSKIP-09): +3 % stays includable through two
+# consecutive maximal rises after the block read (+2 % through one). 10000..20000.
+# The app's floor uses the same multiplier (pinned by APP-FLOOR-2).
+GAS_PRICE_MIN_MULT_BPS = "10300"
+# Fills are PRICED at eth_estimateGas × r, r = max(receipt / estimate) over the last 20
+# receipts of the fill's shape, clamped to [0.6, 1.0]; this is r before any receipt
+# (e2e on a fresh solver: 0.845–0.877). The gas LIMIT keeps estimate × 1.25.
+DEFAULT_GAS_RECEIPT_RATIO = "0.88"
+
+# ── indicative quotes: PUBLIC `POST /quote` (packages/beta-filler src/quote.ts) ─
+# amountOut = route (or inventory) output − one fill's gas × (1 + QUOTE_GAS_MARGIN_BPS),
+# gas priced as the fill gate prices it (estimate × the learned receipt ratio × the
+# send price). The app signs a Dutch order starting AT the quote and decaying over 210 s. Reached by the
+# app's Pages worker over a FILLER service binding (`/api/quote`); the secret
+# QUOTE_BINDING_KEY lets it name the visitor's IP for the per-IP limit.
+QUOTE_ENABLED = "1"
+QUOTE_GAS_MARGIN_BPS = "1000"
+QUOTE_TOLERANCE_BPS = "0"
+QUOTE_TTL_SECONDS = "30"
+# An order first seen up to this long after its quote's validUntil is still matched to
+# it (gated without the route haircut — the quote's gas margin is the cushion).
+QUOTE_MATCH_GRACE_SECONDS = "120"
+# eth_estimateGas assumed per fill before one is learned for the shape (then: the max
+# learned). × the 0.88 default receipt ratio ≈ the production e2e receipts (2026-10-07:
+# 318k–343k direct, 324k pull); was 400k / 420k, which over-priced a fresh filler's
+# small-ticket quotes by ~1 %.
+QUOTE_GAS_ESTIMATE_DIRECT = "360000"
+QUOTE_GAS_ESTIMATE_PULL = "380000"
+QUOTE_CACHE_MS = "5000"
+# Token buckets (DO SQLite): per visitor IP, and for everyone together (RPC cost bound).
+QUOTE_RATE_IP_CAPACITY = "30"
+QUOTE_RATE_IP_REFILL = "0.5"
+QUOTE_RATE_GLOBAL_CAPACITY = "300"
+QUOTE_RATE_GLOBAL_REFILL = "5"
 
 # ── tick loop and per-tick bounds ───────────────────────────────────────────
 # Keep TICK_SECONDS ≤ 8: a Durable Object idle for ~10 s is evicted from memory, and
