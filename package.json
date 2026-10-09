@@ -6,5 +6,6 @@
     "build": "forge build",
     "test": "forge test",
     "app": "pnpm --filter @1delta-x/app dev"
-  }
+  },
+  "packageManager": "pnpm@10.16.1"
 }

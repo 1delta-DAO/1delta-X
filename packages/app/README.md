@@ -54,6 +54,10 @@ curl -X POST https://<your-domain>/api/oku/rootstock/cush/liveBlock \
 
 ## Configuration: `VITE_DEPLOYMENTS` and `VITE_ORDERBOOK_URL`
 
+The Rootstock beta's values are committed in [`.env.production`](.env.production) (all public;
+Vite loads it for `vite build`, and a Pages build env var of the same name overrides it).
+Addresses: [docs/deployment-rootstock-beta.md](../../docs/deployment-rootstock-beta.md).
+
 Both are build-time variables (Vite inlines every `VITE_*` into the public
 bundle — they are addresses and a URL, not secrets).
 

@@ -70,11 +70,11 @@ CHAIN_ID = "30"
 # rate-limits — a 45 s HTTP 429 brownout is a tested failure mode — and the filler
 # makes tens of thousands of calls a day).
 RPC_URL = "https://public-node.rsk.co"
-SETTLEMENT = "0x0000000000000000000000000000000000000000"   # PLACEHOLDER
-PERMIT3 = "0x0000000000000000000000000000000000000000"      # PLACEHOLDER
-LENS = "0x0000000000000000000000000000000000000000"         # PLACEHOLDER
+SETTLEMENT = "0xe6EDbb5c49Fb4CFb313476e3B78E274D3584ddf5"   # Rootstock beta 2026-10-09 (b23ec90)
+PERMIT3 = "0xabaefb5ae495Dcbce40d1e057346f31A500668a8"
+LENS = "0xF9e905EdCC376FDaBF62Ca0966624611721C5206"
 # The deployed AggregatorFillSolver (route strategy). Empty = route strategy off.
-AGGREGATOR_SOLVER = ""
+AGGREGATOR_SOLVER = "0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287"
 ORDERBOOK_URL = ""
 ORDERBOOK_CLIENT_IP = "127.0.0.2"
 # Optional Durable Object location hint, e.g. "wnam" (near the public Rootstock RPCs).

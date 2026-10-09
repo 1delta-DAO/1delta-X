@@ -39,9 +39,9 @@ enabled = true
 
 [vars]
 CHAIN_ID = "30"
-SETTLEMENT = "0x0000000000000000000000000000000000000000"   # PLACEHOLDER
-PERMIT3 = "0x0000000000000000000000000000000000000000"      # PLACEHOLDER
-LENS = "0x0000000000000000000000000000000000000000"         # PLACEHOLDER
+SETTLEMENT = "0xe6EDbb5c49Fb4CFb313476e3B78E274D3584ddf5"   # Rootstock beta 2026-10-09 (b23ec90)
+PERMIT3 = "0xabaefb5ae495Dcbce40d1e057346f31A500668a8"
+LENS = "0xF9e905EdCC376FDaBF62Ca0966624611721C5206"
 # Fallback only. Rootstock's public node does NOT serve eth_getLogs (JSON-RPC
 # -32601), so on it the fill index and on-chain cancels never advance: /health then
 # reports `logsUnsupported: true`, the filler worker alerts, and the lens re-check

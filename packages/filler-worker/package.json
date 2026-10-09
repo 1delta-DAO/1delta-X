@@ -12,7 +12,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "bundle-check": "node scripts/bundle-check.mjs",
-    "e2e:app-shape": "e2e/staging.sh app-shape"
+    "e2e:app-shape": "e2e/staging.sh app-shape",
+    "cf:build": "pnpm --filter \"@1delta-x/filler-worker^...\" build"
   },
   "dependencies": {
     "@1delta-x/beta-filler": "workspace:*",

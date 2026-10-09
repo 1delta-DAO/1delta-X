@@ -11,7 +11,8 @@
     "test": "vitest run",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "bundle-check": "node scripts/bundle-check.mjs"
+    "bundle-check": "node scripts/bundle-check.mjs",
+    "cf:build": "pnpm --filter \"@1delta-x/orderbook-worker^...\" build"
   },
   "dependencies": {
     "@1delta-x/orderbook": "workspace:*",
