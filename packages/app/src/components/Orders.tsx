@@ -3,7 +3,10 @@ import { useEffect, useState } from "react";
 import { BOOK_IS_REMOTE } from "../backend/book";
 import { marketById } from "../config/markets";
 import { ago, fmtAmt, fmtPrice, shortHex, until } from "../lib/format";
-import { SOURCE_NAME, dueSlices, needsSliceSignature, orderStatus, type Fill, type RestingOrder } from "../lib/types";
+import { fillStatusLabel, orderTypeLabel, rowStatus, rowStatusLabel } from "../lib/orderLifecycle";
+import type { TxState } from "../lib/txFlow";
+import { SOURCE_NAME, dueSlices, needsSliceSignature, type Fill, type RestingOrder } from "../lib/types";
+import { TxLink, TxStatus } from "./TxStatus";
 import type { TokenIndex } from "../hooks/useTokenIndex";
 import { PairIcon } from "./TokenIcon";
 
@@ -24,6 +27,10 @@ interface OrdersProps {
   /** Sign a TWAP's next due slice. */
   onSignSlice: (order: RestingOrder) => void;
   error: string | null;
+  /** The on-chain cancel in flight / last finished. */
+  cancelTx?: TxState;
+  onRetryCancel?: () => void;
+  cancelChainId?: number;
 }
 
 /** Explains, per row, what a cancel has and has not done. */
@@ -40,7 +47,7 @@ function Pair({ marketId, tokens }: { marketId: string; tokens: TokenIndex }) {
   );
 }
 
-export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, onSignSlice, error }: OrdersProps) {
+export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, onSignSlice, error, cancelTx, onRetryCancel, cancelChainId }: OrdersProps) {
   const [tab, setTab] = useState<"open" | "fills">("open");
   // Due TWAP slices appear on a clock, not on a book event.
   const [now, setNow] = useState(() => Date.now());
@@ -75,6 +82,11 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
       </div>
 
       {error && <div className="signerr">{error}</div>}
+      {cancelTx && cancelTx.kind !== "idle" && (
+        <div style={{ padding: "8px 22px" }}>
+          <TxStatus state={cancelTx} chainId={cancelChainId ?? 30} onRetry={onRetryCancel} />
+        </div>
+      )}
       <div className="sx">
         {tab === "open" ? (
           <table className="o">
@@ -101,8 +113,9 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                 </thead>
                 <tbody>
                   {mine.map((o) => {
-                    const pct = (o.filled / o.size) * 100;
-                    const status = orderStatus(o);
+                    const pct = Math.min(100, (o.filled / o.size) * 100);
+                    const status = rowStatus(o, now);
+                    const chainId = marketById(o.marketId).chainId;
                     return (
                       <tr key={o.id}>
                         <td className="pc">
@@ -110,7 +123,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                         </td>
                         <td>
                           <span className="ty">
-                            {o.type === "twap" ? "TWAP" : "Limit"}
+                            {orderTypeLabel(o)}
                             {o.slices ? ` · ${o.slices.done}/${o.slices.total}` : ""}
                           </span>
                         </td>
@@ -137,14 +150,23 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                           <span
                             className="st"
                             data-v={status}
-                            title={status === "soft-cancelled" ? SOFT_CANCEL_NOTE : status === "off-book" ? o.offBook : undefined}
+                            title={
+                              status === "soft-cancelled"
+                                ? SOFT_CANCEL_NOTE
+                                : status === "off-book"
+                                  ? o.offBook
+                                  : status === "fill-pending"
+                                    ? "A filler sent the fill transaction; waiting for it to be mined"
+                                    : undefined
+                            }
                           >
-                            {status === "soft-cancelled"
-                              ? "hidden · still fillable"
-                              : status === "off-book"
-                                ? "off book · still fillable"
-                                : status}
+                            {rowStatusLabel(status)}
                           </span>
+                          {status === "fill-pending" && o.pendingFill && (
+                            <div className="txl" style={{ fontSize: 10.5 }}>
+                              <TxLink chainId={chainId} hash={o.pendingFill.txHash} />
+                            </div>
+                          )}
                         </td>
                         <td>{until(o.expiresAt)}</td>
                         <td>
@@ -154,7 +176,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                               {dueSlices(o, now) > o.slices.signed + 1 ? ` (${dueSlices(o, now) - o.slices.signed} due)` : ""}
                             </button>
                           )}
-                          {!o.cancelled && !o.offBook && (
+                          {!o.cancelled && !o.offBook && status !== "filled" && (
                             <button
                               type="button"
                               className="x"
@@ -164,10 +186,11 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                               Hide
                             </button>
                           )}
-                          {o.signed?.deployed && (
+                          {o.signed?.deployed && status !== "filled" && (
                             <button
                               type="button"
                               className="x"
+                              disabled={cancelTx ? cancelTx.kind === "wallet" || cancelTx.kind === "submitted" || cancelTx.kind === "confirming" : false}
                               title="Settlement.cancelOrders — one transaction; afterwards no filler can settle it"
                               onClick={() => onHardCancel(o)}
                             >
@@ -200,10 +223,11 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                   <tr>
                     <th>When</th>
                     <th>Market</th>
+                    <th>Type</th>
                     <th>Side</th>
                     <th>Size</th>
                     <th>Price</th>
-                    <th>Source</th>
+                    <th>Status</th>
                     <th>Filler</th>
                     <th>Transaction</th>
                   </tr>
@@ -216,32 +240,48 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                         <Pair marketId={f.marketId} tokens={tokens} />
                       </td>
                       <td>
+                        <span className="ty" title={`filled from ${SOURCE_NAME[f.source]}`}>{f.orderType ? orderTypeLabel({ type: f.orderType }) : f.simulated ? "—" : "Limit"}</span>
+                      </td>
+                      <td>
                         <span className="chip" data-s={f.side}>
                           {f.side}
                         </span>
                       </td>
                       <td>
-                        {fmtAmt(f.size)} {marketById(f.marketId).base}
+                        {f.size > 0 ? (
+                          <>
+                            {fmtAmt(f.size)} {marketById(f.marketId).base}
+                          </>
+                        ) : (
+                          <span className="faint">—</span>
+                        )}
                       </td>
                       <td>{fmtPrice(f.price, tickOf(f.marketId))}</td>
                       <td>
-                        <span className="sr" data-k={f.source} style={{ fontSize: 11 }}>
-                          {SOURCE_NAME[f.source]}
+                        <span className="st" data-v={f.status ?? "filled"}>
+                          {fillStatusLabel(f)}
                         </span>
                       </td>
-                      <td className="dim">{f.filler}</td>
+                      <td className="dim">{f.size > 0 ? f.filler : "—"}</td>
                       <td>
                         {f.simulated ? (
                           <span className="faint" title="Produced by the in-browser mock — no transaction exists">
                             simulated
                           </span>
                         ) : f.tx ? (
-                          <span className="txl" title={f.tx}>
-                            {shortHex(f.tx, 10, 6)}
+                          <span className="txl">
+                            <TxLink chainId={marketById(f.marketId).chainId} hash={f.tx} />
+                          </span>
+                        ) : f.size > 0 ? (
+                          <span
+                            className="faint"
+                            title={`Filled on-chain; the orderbook has not reported the transaction yet. Order ${f.orderHash ?? f.id}`}
+                          >
+                            order {shortHex(f.orderHash ?? f.id, 8, 6)} · filled
                           </span>
                         ) : (
-                          <span className="faint" title="The orderbook reported this order filled but indexes no fill transactions">
-                            tx not indexed
+                          <span className="faint" title={f.orderHash}>
+                            order {shortHex(f.orderHash ?? f.id, 8, 6)}
                           </span>
                         )}
                       </td>

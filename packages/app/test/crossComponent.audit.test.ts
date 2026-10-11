@@ -77,6 +77,39 @@ describe("APP-TTL-1 — a market order outlives the book's minimum TTL and the f
 });
 
 /**
+ * 2026-10-11 (limit-order expiry selector, 1 h … 90 days): every choice must be
+ * admitted by the beta book — at least its `MIN_TTL_SECONDS`, at most its
+ * `MAX_TTL_SECONDS` LESS a clock-skew margin (the book measures `expiry − its now`).
+ * A choice past the book's max would be signed by the maker and refused with a 422.
+ */
+describe("APP-TTL-2 — every limit expiry choice fits inside the book's TTL window", () => {
+  const wranglerVar = (pkg: string, name: string): number => {
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    const { resolve } = require("node:path") as typeof import("node:path");
+    const toml = readFileSync(resolve(__dirname, "..", "..", pkg, "wrangler.toml"), "utf8");
+    const m = toml.match(new RegExp(`^${name}\\s*=\\s*"(\\d+)"`, "m"));
+    if (!m) throw new Error(`${pkg}/wrangler.toml has no ${name}`);
+    return Number(m[1]);
+  };
+
+  it("test_audit_APP_TTL2_limitExpiryChoicesWithinBookMinMax", async () => {
+    const { EXPIRY_OPTIONS, MAX_LIMIT_TTL_SECONDS, EXPIRY_CLOCK_MARGIN_SECONDS, limitTtlSeconds } = await import("../src/lib/plan");
+    const bookMin = wranglerVar("orderbook-worker", "MIN_TTL_SECONDS");
+    const bookMax = wranglerVar("orderbook-worker", "MAX_TTL_SECONDS");
+    expect(bookMax).toBe(7_776_000); // 90 days, as the selector promises
+    expect(MAX_LIMIT_TTL_SECONDS).toBeLessThanOrEqual(bookMax - EXPIRY_CLOCK_MARGIN_SECONDS);
+    expect(EXPIRY_CLOCK_MARGIN_SECONDS).toBeGreaterThanOrEqual(300);
+    for (const o of EXPIRY_OPTIONS) {
+      const ttl = limitTtlSeconds(o.id);
+      expect(ttl).toBeGreaterThanOrEqual(bookMin);
+      expect(ttl).toBeLessThanOrEqual(MAX_LIMIT_TTL_SECONDS);
+    }
+    // The longest choice is (just under) the book's max, not some smaller cap.
+    expect(limitTtlSeconds("90d")).toBe(MAX_LIMIT_TTL_SECONDS);
+  });
+});
+
+/**
  * 2026-10-07 (ticket-sized market floor): the app sizes a small market ticket's floor
  * to clear the filler's quote haircut + gas (lib/marketFloor.ts). If the deployed
  * filler's haircut rises above the app's copy, every small ticket is signed a few bps

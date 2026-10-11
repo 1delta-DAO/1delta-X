@@ -2,6 +2,7 @@ import { erc20Abi, formatEther } from "viem";
 
 import { balanceOf, connect } from "./chain";
 import { loadConfig, parseFixed } from "./config";
+import { fillReporter } from "./bookReport";
 import { dispatch } from "./dispatch";
 import { Engine } from "./engine";
 import type { FillOutcome } from "./filler";
@@ -15,7 +16,14 @@ const cfg = loadConfig(process.env);
 const chain = connect(cfg);
 const log = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
 /** STATE_FILE: inventory outflows, route fill counter, shared gas spends, per-order backoff, the pending tx. */
-const engine = await Engine.create({ cfg, chain, store: new FileStateStore(cfg.stateFile), log });
+/**
+ * ORDERBOOK_BINDING_KEY (optional, the book's BINDING_KEY secret): report our fill
+ * txs to `ORDERBOOK_URL/fills/report` (broadcast → pending, receipt → confirmed /
+ * failed) so the book indexes them from the receipt — its RPC may serve no
+ * eth_getLogs. Best effort, 3 s bounded; unset = nothing reported.
+ */
+const onEvent = fillReporter({ base: cfg.orderbookUrl, fetch: (u, i) => fetch(u, i), bindingKey: process.env.ORDERBOOK_BINDING_KEY, log });
+const engine = await Engine.create({ cfg, chain, store: new FileStateStore(cfg.stateFile), log, onEvent });
 
 /** How often the CLI polls an outstanding tx's receipt, ms. */
 const RECEIPT_POLL_MS = 1_000;

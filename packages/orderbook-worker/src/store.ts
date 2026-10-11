@@ -17,6 +17,8 @@ export interface Sql {
  *   graves        evicted orders (filled / cancelled / expired / evicted / displaced), with a TTL
  *   soft_cancels  maker-bound soft-cancel tombstones, keyed (hash, maker) as in the Book
  *   fills         the fill index, keyed (txHash, logIndex)
+ *   pending_fills fill txs a trusted filler reported as BROADCAST, not yet mined
+ *                 (`POST /fills/report` status "pending"); short-lived markers
  *   meta          the log cursor and alarm bookkeeping
  *   buckets       rate-limit token buckets (per IP, per maker)
  *   billed        orders / cancels already charged to their maker
@@ -83,6 +85,13 @@ export const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS fills_maker ON fills(maker, block_number, log_index)`,
   `CREATE INDEX IF NOT EXISTS fills_order ON fills(order_hash, block_number, log_index)`,
   `CREATE INDEX IF NOT EXISTS fills_block ON fills(block_number, log_index)`,
+  `CREATE TABLE IF NOT EXISTS pending_fills (
+    order_hash TEXT NOT NULL,
+    tx_hash TEXT NOT NULL,
+    sent_at INTEGER NOT NULL,
+    PRIMARY KEY (order_hash, tx_hash)
+  )`,
+  `CREATE INDEX IF NOT EXISTS pending_fills_tx ON pending_fills(tx_hash)`,
   `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS buckets (key TEXT PRIMARY KEY, tokens REAL NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS billed (key TEXT PRIMARY KEY, at INTEGER NOT NULL)`,

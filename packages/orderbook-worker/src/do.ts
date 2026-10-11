@@ -8,6 +8,12 @@ import { json, OrderBookCore, type CoreDeps } from "./core";
 
 /** Header the entry worker sets with the client address it resolved. Only the entry worker can reach the DO. */
 export const CLIENT_IP_HEADER = "x-ob-client-ip";
+/**
+ * Set to "1" by the entry worker ONLY after it verified the caller's binding key
+ * (`isTrustedCaller`); the entry worker builds every DO request's headers from
+ * scratch, so a client cannot set it.
+ */
+export const TRUSTED_HEADER = "x-ob-trusted";
 
 export type DepsFactory = (cfg: WorkerConfig) => CoreDeps;
 
@@ -74,7 +80,7 @@ export class OrderBookDO extends DurableObject<Env> {
     const core = this.getCore();
     if (!core) return json({ error: `orderbook misconfigured: ${this.configError ?? "unknown"}` }, 500);
     await this.ensureAlarm();
-    return core.handle(request, request.headers.get(CLIENT_IP_HEADER) ?? "unknown");
+    return core.handle(request, request.headers.get(CLIENT_IP_HEADER) ?? "unknown", request.headers.get(TRUSTED_HEADER) === "1");
   }
 
   async alarm(): Promise<void> {

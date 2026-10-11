@@ -1,13 +1,14 @@
 import { env } from "cloudflare:test";
 import { CancelVerifier, OrderStatus, Verifier, type Layer2Result, type OrderAnnounce } from "@1delta-x/orderbook/pure";
 import { hashOrderStruct, orderToJson, OrderSide, signOrder, softCancelOrders, softCancelToJson, type Deployment, type Order } from "@1delta-x/sdk";
-import { zeroAddress, type Address, type Hex, type PublicClient } from "viem";
+import { SETTLEMENT_ABI } from "@1delta-x/sdk";
+import { encodeEventTopics, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-import type { ChainLog, ChainReader } from "../src/chain";
+import type { ChainLog, ChainReader, ChainReceipt, RawLog } from "../src/chain";
 import type { Env } from "../src/config";
 import type { CoreDeps } from "../src/core";
-import { CLIENT_IP_HEADER, setDepsFactory } from "../src/do";
+import { CLIENT_IP_HEADER, setDepsFactory, TRUSTED_HEADER } from "../src/do";
 
 export const testEnv = env as unknown as Env;
 
@@ -47,6 +48,9 @@ export const world = {
   logsCalls: [] as Array<[bigint, bigint]>,
   /** Seconds every `filled(hash)` read advances the clock (a slow RPC). */
   filledCostS: 0,
+  /** `eth_getTransactionReceipt` per lower-case tx hash; `"throw"` = an RPC error. */
+  receipts: new Map<string, ChainReceipt | "throw">(),
+  receiptCalls: 0,
 };
 
 export function resetWorld(): void {
@@ -61,6 +65,8 @@ export function resetWorld(): void {
   world.logsMaxRange = undefined;
   world.logsCalls = [];
   world.filledCostS = 0;
+  world.receipts.clear();
+  world.receiptCalls = 0;
 }
 
 export const now = (): number => Math.floor(Date.now() / 1000) + world.offset;
@@ -133,6 +139,12 @@ const chain: ChainReader = {
     return v;
   },
   blockTime: async (block) => 1_700_000_000 + Number(block) * 30,
+  async receipt(tx) {
+    world.receiptCalls++;
+    const r = world.receipts.get(tx.toLowerCase());
+    if (r === "throw") throw new Error("rpc down");
+    return r ?? null;
+  },
 };
 
 setDepsFactory(() => ({
@@ -199,10 +211,16 @@ export async function call(
   path: string,
   body?: string,
   ip = "198.51.100.7",
+  trusted = false,
 ): Promise<{ status: number; body: Record<string, unknown>; headers: Headers }> {
   const res = await stub.fetch(`https://book.test${path}`, {
     method,
-    headers: { [CLIENT_IP_HEADER]: ip, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+    headers: {
+      [CLIENT_IP_HEADER]: ip,
+      // What the entry worker sets after a binding-key check (see entry.test.ts for the check itself).
+      ...(trusted ? { [TRUSTED_HEADER]: "1" } : {}),
+      ...(body !== undefined ? { "content-type": "application/json" } : {}),
+    },
     ...(body !== undefined ? { body } : {}),
   });
   const text = await res.text();
@@ -221,5 +239,23 @@ export function fillLog(hash: Hex, maker: Address, block: bigint, logIndex = 0, 
     blockNumber: block,
     logIndex,
     txHash: tx ?? (`0x${block.toString(16).padStart(32, "0")}${logIndex.toString(16).padStart(32, "0")}` as Hex),
+  };
+}
+
+/** A raw `OrderFilled` log as a receipt carries it, emitted by `address` (the Settlement unless overridden). */
+export function rawFillLog(hash: Hex, maker: Address, block: bigint, logIndex: number, tx: Hex, address: Address = deployment.settlement): RawLog {
+  const topics = encodeEventTopics({ abi: SETTLEMENT_ABI, eventName: "OrderFilled", args: { orderHash: hash, maker, solver: bob.address } } as never) as Hex[];
+  return { address, topics, data: "0x", blockNumber: block, logIndex, transactionHash: tx };
+}
+
+/** A raw log of some other event (an ERC-20 Transfer-shaped log) — noise in a receipt. */
+export function rawNoiseLog(block: bigint, logIndex: number, tx: Hex, address: Address = USDRIF): RawLog {
+  return {
+    address,
+    topics: ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", `0x${"0".repeat(24)}${alice.address.slice(2)}` as Hex, `0x${"0".repeat(24)}${bob.address.slice(2)}` as Hex],
+    data: `0x${"0".repeat(63)}1`,
+    blockNumber: block,
+    logIndex,
+    transactionHash: tx,
   };
 }

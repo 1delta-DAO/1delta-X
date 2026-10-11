@@ -1,3 +1,4 @@
+import { outcomeEntry } from "../lib/orderLifecycle";
 import { SOURCES, dueSlices, type Fill, type RestingOrder, type Side } from "../lib/types";
 import type {
   MarketObservation,
@@ -125,6 +126,8 @@ export class MockOrderbook implements OrderbookApi {
   }
 
   confirmHardCancel(orderHash: string): void {
+    const o = this.restingOrders.find((x) => x.id === orderHash);
+    if (o?.mine) this.settled.push({ ...outcomeEntry(o, "cancelled", Date.now()), simulated: true });
     this.restingOrders = this.restingOrders.filter((o) => o.id !== orderHash);
     this.emit();
   }
@@ -242,6 +245,10 @@ export class MockOrderbook implements OrderbookApi {
 
     for (const o of this.restingOrders) {
       if (o.expiresAt <= now) {
+        // Your own order does not vanish: it ends in Recent fills as Expired.
+        if (o.mine && o.filled < o.size * (1 - 1e-6)) {
+          this.settled.push({ ...outcomeEntry(o, "expired", now), simulated: true });
+        }
         changed = true;
         continue;
       }
@@ -294,6 +301,10 @@ export class MockOrderbook implements OrderbookApi {
             at: now,
             mine: true,
             simulated: true,
+            orderHash: o.id,
+            orderType: o.type,
+            orderSize: o.size,
+            status: o.filled >= o.size * (1 - 1e-6) ? "filled" : "partial",
           });
         }
       }

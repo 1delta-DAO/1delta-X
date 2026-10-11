@@ -59,6 +59,10 @@ export const world = {
   /** `eth_call` (the fill simulation) throws this message (e.g. a provider error quoting the RPC URL). */
   callError: undefined as string | undefined,
   alerts: [] as Array<{ url: string; body: Record<string, unknown> }>,
+  /** `POST /fills/report` calls the book received: body + the binding key presented. */
+  reports: [] as Array<{ body: Record<string, unknown>; key: string | null }>,
+  /** How the fake book answers a report: ok, a 500, a thrown network error, or never (hang). */
+  reportMode: "ok" as "ok" | "500" | "throw" | "hang",
 };
 
 export function resetWorld(): void {
@@ -81,6 +85,8 @@ export function resetWorld(): void {
     inFlightExtra: 0,
     callError: undefined,
     alerts: [],
+    reports: [],
+    reportMode: "ok",
   });
 }
 
@@ -220,7 +226,14 @@ function fakeChain(account: { address: Address; signTransaction: unknown }, coun
 export const testDeps: Parameters<typeof setDeps>[0] = {
   // The REAL account from the PRIVATE_KEY binding signs (viem's privateKeyToAccount in workerd).
   makeChain: (cfg, rpc) => fakeChain(privateKeyToAccount(cfg.privateKey), rpc.count, cfg.chainId),
-  fetchBook: async (url) => {
+  fetchBook: async (url, init) => {
+    if (new URL(url).pathname === "/fills/report") {
+      world.reports.push({ body: JSON.parse(String(init?.body)), key: new Headers(init?.headers).get("x-orderbook-binding-key") });
+      if (world.reportMode === "throw") throw new Error("book unreachable");
+      if (world.reportMode === "500") return new Response("boom", { status: 500 });
+      if (world.reportMode === "hang") return new Promise<Response>(() => {});
+      return Response.json({ results: [{ result: "indexed" }] });
+    }
     if (new URL(url).pathname === "/health") {
       world.healthFetches++;
       return Response.json(world.bookHealth ?? healthyBook());

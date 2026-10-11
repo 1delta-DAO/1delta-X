@@ -264,7 +264,7 @@ describe("remote orderbook client — status polling shows only REAL fills", () 
     expect(book.fills()).toHaveLength(0);
   });
 
-  it("an order cancelled on-chain leaves the open orders with no fill", async () => {
+  it("an order cancelled on-chain leaves the open orders with no fill — and a Cancelled entry", async () => {
     const s = signedOrder();
     const { fn } = fakeFetch((url, init) => {
       if (init?.method === "POST") return accept(s.hash)(url, init);
@@ -276,7 +276,9 @@ describe("remote orderbook client — status polling shows only REAL fills", () 
     await place(book, s);
     await book.poll();
     expect(book.orders()).toHaveLength(0);
-    expect(book.fills()).toHaveLength(0);
+    // It does not vanish: one entry says it was cancelled, and nothing changed hands.
+    expect(book.fills()).toHaveLength(1);
+    expect(book.fills()[0]).toMatchObject({ status: "cancelled", size: 0, tx: "", orderHash: s.hash });
   });
 });
 

@@ -52,8 +52,42 @@ export const MARKET_TTL_SECONDS = 300;
  * a small ticket just gets a worse floor, and the form says how much of it is gas.
  */
 export const MARKET_SLIPPAGE_BPS = 30;
-/** How long a resting limit order lives. */
+/** How long a resting limit order lives by default (the expiry selector's "1 day"). */
 export const LIMIT_TTL_SECONDS = 24 * 3600;
+
+/**
+ * Margin under the book's `MAX_TTL_SECONDS` (packages/orderbook-worker/wrangler.toml,
+ * 90 days) for the longest choice: the book measures `expiry − its now` when it
+ * admits the order, so a browser clock a few minutes ahead of the book's — plus the
+ * seconds between signing and posting — must not push a "90 days" order over.
+ */
+export const EXPIRY_CLOCK_MARGIN_SECONDS = 600;
+/** The longest a limit order may be signed for — pinned ≤ the book's max by test/crossComponent.audit.test.ts. */
+export const MAX_LIMIT_TTL_SECONDS = 90 * 24 * 3600 - EXPIRY_CLOCK_MARGIN_SECONDS;
+/** The shortest: the book refuses anything expiring within its MIN_TTL_SECONDS (120 s). */
+export const MIN_LIMIT_TTL_SECONDS = 3600;
+
+/** The limit-order expiry selector. The Permit3 grant follows the choice (`fundingTtlSeconds`). */
+export const EXPIRY_OPTIONS = [
+  { id: "1h", label: "1 hour", short: "1h", seconds: 3600 },
+  { id: "1d", label: "1 day", short: "1d", seconds: LIMIT_TTL_SECONDS },
+  { id: "7d", label: "7 days", short: "7d", seconds: 7 * 24 * 3600 },
+  { id: "30d", label: "30 days", short: "30d", seconds: 30 * 24 * 3600 },
+  { id: "90d", label: "90 days", short: "90d", seconds: MAX_LIMIT_TTL_SECONDS },
+] as const;
+export type ExpiryId = (typeof EXPIRY_OPTIONS)[number]["id"];
+export const DEFAULT_EXPIRY: ExpiryId = "1d";
+
+/** A limit order's life for a selector choice (unknown → the default), always within [min, max]. */
+export function limitTtlSeconds(id: string | undefined): number {
+  const o = EXPIRY_OPTIONS.find((x) => x.id === id) ?? EXPIRY_OPTIONS.find((x) => x.id === DEFAULT_EXPIRY)!;
+  return Math.min(MAX_LIMIT_TTL_SECONDS, Math.max(MIN_LIMIT_TTL_SECONDS, o.seconds));
+}
+
+/** "1 day", "90 days" — for Details and the orders table. */
+export function expiryLabel(id: string | undefined): string {
+  return (EXPIRY_OPTIONS.find((x) => x.id === id) ?? EXPIRY_OPTIONS.find((x) => x.id === DEFAULT_EXPIRY)!).label;
+}
 
 /**
  * What the next signature actually commits, plus what funding it needs.
@@ -117,6 +151,12 @@ export interface PlanArgs {
    * (no filler, endpoint down) = the gas-sized floor path.
    */
   quoted?: QuotedTerms;
+  /**
+   * A LIMIT ticket's expiry choice (`EXPIRY_OPTIONS` id). Omitted = 1 day. The order's
+   * life AND its funding (the Permit3 grant) follow it. Market tickets ignore it (300 s);
+   * a TWAP's life is its schedule.
+   */
+  expiry?: ExpiryId;
 }
 
 export function planTicket(a: PlanArgs): TicketPlan | null {
@@ -155,16 +195,17 @@ export function planTicket(a: PlanArgs): TicketPlan | null {
     const amountIn = q.totalIn;
     const minOut = side === "sell" ? amountIn * limit : amountIn / limit;
     const targetOut = Math.max(q.totalOut, minOut);
+    const ttl = limitTtlSeconds(a.expiry);
     return {
       kind: "limit",
       price,
       amountIn,
       targetOut,
       minOut,
-      ttlSeconds: LIMIT_TTL_SECONDS,
+      ttlSeconds: ttl,
       decaySeconds: targetOut > minOut ? MARKET_DECAY_SECONDS : 0,
       orders: 1,
-      fundingTtlSeconds: LIMIT_TTL_SECONDS,
+      fundingTtlSeconds: ttl,
       crossedBase: q.crossedBase,
       restingBase: q.resting.size,
     };

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 
 import { buildSoftCancel, encodeCancelOrders, signOrder, signSoftCancel } from "@1delta-x/sdk";
 import { createPublicClient, createWalletClient, custom, formatUnits, zeroAddress, type Address } from "viem";
@@ -27,7 +27,9 @@ import { useTicket, type TicketDeps } from "./hooks/useTicket";
 import { useTokenIndex } from "./hooks/useTokenIndex";
 import { fmtAmt, fmtPrice } from "./lib/format";
 import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/ladder";
-import { readMinValidNonce, userTxGas, type Reader } from "./lib/chain";
+import { readFilled, readMinValidNonce, userTxGas, type Reader } from "./lib/chain";
+import { orderPhase, phaseLine, type PhaseLine } from "./lib/orderLifecycle";
+import { IDLE, inFlight, runTx, txReducer } from "./lib/txFlow";
 import { fmtWei, fundingButtonLabel, hasLeftover, planFunding, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
 import { buildOrder, inputWei } from "./lib/order";
 import { exceedsBalance, marketFigures, maxSpendableWei, sourceName, wrappableWei, wrapSpendableWei } from "./lib/ticketView";
@@ -49,7 +51,6 @@ import { useBalances } from "./wallet/useBalances";
 import { useSigner } from "./wallet/useSigner";
 import { useWallet } from "./wallet/useWallet";
 
-const DAY_MS = 24 * 3600_000;
 
 /** Where market tickets ask the filler for an indicative quote (lib/quote.ts); null = never (mock book). */
 const QUOTE_URL = quoteUrl(import.meta.env.VITE_QUOTE_URL, BOOK_IS_REMOTE);
@@ -126,6 +127,23 @@ export default function App() {
   useEffect(() => {
     if (wallet.address) void orderbook.restore?.(wallet.address).catch(() => {});
   }, [wallet.address]);
+
+  // When an order leaves the book without a reported fill, the book checks
+  // `Settlement.filled(hash)` — through the wallet's provider (the CSP allows no
+  // direct RPC), and only for orders signed on the chain the wallet is on.
+  useEffect(() => {
+    const provider = wallet.provider;
+    const config = chainById(chainId);
+    if (!provider || !onChain || !config) {
+      orderbook.setFillReader?.(null);
+      return;
+    }
+    const reader = createPublicClient({ chain: config.chain, transport: custom(provider) }) as unknown as Reader;
+    orderbook.setFillReader?.(async (signed) =>
+      signed.deployed && signed.deployment.chainId === chainId ? readFilled(reader, signed.deployment.settlement, signed.hash) : null,
+    );
+    return () => orderbook.setFillReader?.(null);
+  }, [wallet.provider, onChain, chainId]);
 
   const resting = useRestingOrders(ticket.marketId);
   // Who may fill this market's orders, as they will be signed (shown on the form).
@@ -246,9 +264,10 @@ export default function App() {
             everyMin: ticket.everyMin,
             floor: floorInputs,
             quoted,
+            expiry: ticket.expiry,
           })
         : null,
-    [q, pool.book, ticket.amount, ticket.everyMin, ticket.limit, ticket.mode, ticket.side, ticket.slices, floorInputs],
+    [q, pool.book, ticket.amount, ticket.everyMin, ticket.limit, ticket.mode, ticket.side, ticket.slices, ticket.expiry, floorInputs],
   );
   const plan: TicketPlan | null = useMemo(() => planWith(terms), [planWith, terms]);
   const rfq = plan?.kind === "market" && plan.quoted && marketQuote.quote && recvPinned ? quoteView(marketQuote.quote, plan.quoted, recvPinned.decimals) : null;
@@ -352,10 +371,13 @@ export default function App() {
     approving: allowanceState.busy,
     error: allowanceState.error,
     approve: () => plan && void allowanceState.fund(requiredWei, plan.fundingTtlSeconds),
+    tx: allowanceState.tx,
     revoke: () => void allowanceState.revoke(),
   };
 
   const [signing, setSigning] = useState(false);
+  /** The order card's in-flight phase, before the book has a row for it. */
+  const [signPhase, setSignPhase] = useState<"signing" | "posting" | null>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [signError, setSignError] = useState<string | null>(null);
   const [connectRequest, setConnectRequest] = useState(0);
@@ -431,6 +453,9 @@ export default function App() {
   const sign = useCallback(async () => {
     if (!q || !planNow) return;
     setSigning(true);
+    setSignPhase("signing");
+    setReceipt(null);
+    setSignError(null);
     try {
       const { marketId, side, payToken, recvToken, amount } = ticket;
       // A quoted market ticket re-quotes right before the wallet prompt, so the order
@@ -458,6 +483,7 @@ export default function App() {
         // from the Open orders row — when it comes due, and only a signed
         // slice can fill.
         const signed = await signDraft({ ...spec, marketId, side, orders: plan.orders });
+        setSignPhase("posting");
         const order = await orderbook.place({
           marketId,
           side,
@@ -486,6 +512,7 @@ export default function App() {
       // phantom trade in the history (G-TS_SIGN-3, G-TS_SIGN-15).
       const signed = await signDraft({ ...spec, marketId, side });
       let hash: string = signed.hash;
+      setSignPhase("posting");
 
       if (plan.kind === "limit" && q.resting && ticket.limit) {
         const order = await orderbook.place({
@@ -495,7 +522,8 @@ export default function App() {
           size: plan.crossedBase + plan.restingBase,
           filled: plan.crossedBase,
           price: ticket.limit,
-          ttlMs: DAY_MS,
+          // The chosen expiry (lib/plan EXPIRY_OPTIONS) — the order's own `expiry` is the same value.
+          ttlMs: plan.ttlSeconds * 1000,
           signed,
         });
         hash = order.id;
@@ -506,7 +534,8 @@ export default function App() {
         const order = await orderbook.place({
           marketId,
           side,
-          type: "limit",
+          // Shown as "Market" — a short Dutch auction from the quote, not a resting limit.
+          type: "market",
           size: plan.crossedBase,
           price: q.avg > 0 ? q.avg : plan.price,
           ttlMs: plan.ttlSeconds * 1000,
@@ -548,6 +577,7 @@ export default function App() {
       setSignError(errorText(e));
     } finally {
       setSigning(false);
+      setSignPhase(null);
     }
   }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf, rawBalances]);
 
@@ -587,11 +617,10 @@ export default function App() {
    * transaction, behind a confirm. WRBTC that a resting order sells is not held
    * back: unwrapping it leaves that order unfillable, which the prompt says.
    */
-  const [unwrapping, setUnwrapping] = useState(false);
-  const [unwrapError, setUnwrapError] = useState<string | null>(null);
+  const [unwrapTx, dispatchUnwrap] = useReducer(txReducer, IDLE);
+  const unwrapping = inFlight(unwrapTx);
   const wrappedWei = wrappedSymbol ? balanceWei(wrappedSymbol) : undefined;
   const unwrap = useCallback(async () => {
-    setUnwrapError(null);
     const address = wrappedSymbol ? pinnedToken(chainId, wrappedSymbol)?.address : undefined;
     const config = chainById(chainId);
     if (!wallet.provider || !wallet.address || !onChain || !address || !config || !wrappedWei || wrappedWei <= 0n) return;
@@ -601,18 +630,21 @@ export default function App() {
         `One transaction (WRBTC.withdraw). Orders that sell ${wrappedSymbol} cannot fill without it.`,
     );
     if (!ok) return;
-    setUnwrapping(true);
+    const account = wallet.address;
+    const provider = wallet.provider;
     try {
       const call = unwrapCall(address as Address, wrappedWei);
-      const client = createWalletClient({ account: wallet.address, chain: config.chain, transport: custom(wallet.provider) });
-      const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) });
-      const hash = await client.sendTransaction({ to: call.to, data: call.data, chain: config.chain, account: wallet.address, ...(await userTxGas(reader, config.chain.id)) });
-      const receipt = await reader.waitForTransactionReceipt({ hash });
-      if (receipt.status !== "success") throw new Error("unwrap transaction reverted");
-    } catch (e) {
-      setUnwrapError(errorText(e));
+      const client = createWalletClient({ account, chain: config.chain, transport: custom(provider) });
+      const reader = createPublicClient({ chain: config.chain, transport: custom(provider) });
+      // wallet → submitted → confirming → confirmed / failed, shown under the wallet strip.
+      await runTx(dispatchUnwrap, { label: `Unwrap ${amount} ${wrappedSymbol}`, step: 1, of: 1 }, {
+        send: async () => client.sendTransaction({ to: call.to, data: call.data, chain: config.chain, account, ...(await userTxGas(reader, config.chain.id)) }),
+        wait: (hash) => reader.waitForTransactionReceipt({ hash }),
+        blockNumber: () => reader.getBlockNumber(),
+      });
+    } catch {
+      // the status line says what happened
     } finally {
-      setUnwrapping(false);
       rawBalances.refresh();
       allowanceState.refresh();
     }
@@ -622,9 +654,13 @@ export default function App() {
    * HARD cancel: `Settlement.cancelOrders(nonces)` for every signed order
    * behind the row — one transaction, after which no filler can settle them.
    */
+  const [cancelTx, dispatchCancel] = useReducer(txReducer, IDLE);
+  const [cancelling, setCancelling] = useState<RestingOrder | null>(null);
   const hardCancel = useCallback(
     async (o: RestingOrder) => {
+      if (inFlight(cancelTx)) return;
       setOrderError(null);
+      setCancelling(o);
       const signedOrders = o.signedOrders ?? (o.signed ? [o.signed] : []);
       const settlement = signedOrders[0]?.deployment.settlement;
       if (!wallet.provider || !wallet.address || !onChain || !settlement || !signedOrders[0]?.deployed) {
@@ -633,24 +669,28 @@ export default function App() {
       }
       const config = chainById(signedOrders[0].deployment.chainId);
       if (!config) return;
+      const account = wallet.address;
       try {
-        const client = createWalletClient({ account: wallet.address, chain: config.chain, transport: custom(wallet.provider) });
+        const client = createWalletClient({ account, chain: config.chain, transport: custom(wallet.provider) });
         const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) });
-        const hash = await client.sendTransaction({
-          to: settlement as Address,
-          data: encodeCancelOrders(signedOrders.map((x) => x.order.nonce)),
-          chain: config.chain,
-          account: wallet.address,
-          ...(await userTxGas(reader, config.chain.id)),
+        await runTx(dispatchCancel, { label: `Cancel on-chain ${o.id.slice(0, 10)}…`, step: 1, of: 1 }, {
+          send: async () =>
+            client.sendTransaction({
+              to: settlement as Address,
+              data: encodeCancelOrders(signedOrders.map((x) => x.order.nonce)),
+              chain: config.chain,
+              account,
+              ...(await userTxGas(reader, config.chain.id)),
+            }),
+          wait: (hash) => reader.waitForTransactionReceipt({ hash }),
+          blockNumber: () => reader.getBlockNumber(),
         });
-        const receipt = await reader.waitForTransactionReceipt({ hash });
-        if (receipt.status !== "success") throw new Error("cancel transaction reverted");
         orderbook.confirmHardCancel(o.id);
-      } catch (e) {
-        setOrderError(errorText(e));
+      } catch {
+        // the status line (cancelTx) says what happened
       }
     },
-    [onChain, wallet.address, wallet.provider],
+    [onChain, wallet.address, wallet.provider, cancelTx],
   );
 
   /** Sign a TWAP's next due slice — the same order as slice 1, on a fresh nonce. */
@@ -674,6 +714,14 @@ export default function App() {
     },
     [signDraft],
   );
+
+  // The order card's one status line: the in-flight phase until the book holds the
+  // order, then whatever the book / chain says about it (lib/orderLifecycle).
+  const orderLine: PhaseLine | null = signPhase
+    ? phaseLine({ kind: signPhase })
+    : receipt
+      ? phaseLine(orderPhase(receipt.hash, allOrders, fills))
+      : null;
 
   const tickOf = useCallback((marketId: string) => ticks[marketId] ?? 4, [ticks]);
 
@@ -733,6 +781,8 @@ export default function App() {
             ready={ready}
             signing={signing}
             receipt={receipt}
+            orderLine={orderLine}
+            chainId={chainId}
             gate={gate}
             allowance={allowance}
             maxAmount={maxAmount}
@@ -758,7 +808,7 @@ export default function App() {
             }
             unwrap={
               wrappedSymbol && wrappedWei !== undefined && wrappedWei > 0n
-                ? { symbol: wrappedSymbol, busy: unwrapping, error: unwrapError, action: () => void unwrap() }
+                ? { symbol: wrappedSymbol, busy: unwrapping, error: null, tx: unwrapTx, action: () => void unwrap() }
                 : null
             }
             onConnect={() => setConnectRequest((n) => n + 1)}
@@ -792,6 +842,9 @@ export default function App() {
           onHardCancel={hardCancel}
           onSignSlice={signSlice}
           error={orderError}
+          cancelTx={cancelTx}
+          onRetryCancel={cancelling ? () => void hardCancel(cancelling) : undefined}
+          cancelChainId={cancelling ? marketById(cancelling.marketId).chainId : chainId}
         />
       </main>
 

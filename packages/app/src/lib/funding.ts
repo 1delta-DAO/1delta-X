@@ -173,6 +173,8 @@ export interface Call {
   data: Hex;
   /** Native coin sent with the call (only a wrap carries any). */
   value?: bigint;
+  /** What the transaction does, for the status line ("Approve to Permit3"). */
+  label?: string;
 }
 
 /** The WETH9 surface of a wrapped native coin (WRBTC 0x542f…: verified WETH9 port, solc 0.5.17). */
@@ -208,17 +210,17 @@ const approveData = (spender: Address, amount: bigint): Hex =>
 export function fundingCalls(steps: readonly FundingStep[], t: FundingTargets): Call[] {
   return steps.map((s) =>
     s.kind === "wrap"
-      ? wrapCall(t.token, s.amount)
+      ? { ...wrapCall(t.token, s.amount), label: `Wrap ${fmtWei(s.amount)}` }
       : s.kind === "erc20-approve"
-        ? { to: t.token, data: approveData(t.permit3, s.amount) }
-        : { to: t.permit3, data: encodeApproveToken(t.settlement, t.token, s.amount, s.expiration) },
+        ? { to: t.token, data: approveData(t.permit3, s.amount), label: "Approve to Permit3" }
+        : { to: t.permit3, data: encodeApproveToken(t.settlement, t.token, s.amount, s.expiration), label: "Grant Settlement via Permit3" },
   );
 }
 
 /** Clear both legs: the ERC-20 approval to Permit3 and the book grant to Settlement. */
 export function revokeCalls(state: FundingState, t: FundingTargets): Call[] {
   const calls: Call[] = [];
-  if (state.grantAmount > 0n) calls.push({ to: t.permit3, data: encodeRevokeToken(t.settlement, t.token) });
-  if (state.erc20Allowance > 0n) calls.push({ to: t.token, data: approveData(t.permit3, 0n) });
+  if (state.grantAmount > 0n) calls.push({ to: t.permit3, data: encodeRevokeToken(t.settlement, t.token), label: "Revoke the Permit3 grant" });
+  if (state.erc20Allowance > 0n) calls.push({ to: t.token, data: approveData(t.permit3, 0n), label: "Revoke the approval" });
   return calls;
 }

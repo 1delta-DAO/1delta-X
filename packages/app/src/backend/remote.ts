@@ -1,6 +1,7 @@
 import { hashOrderStruct, orderFromJson, OrderSide, type Order } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
+import { CANCELLED_SENTINEL, isFull, outcomeEntry, retireReason, type Outcome } from "../lib/orderLifecycle";
 import type { Fill, RestingOrder } from "../lib/types";
 import type {
   MarketObservation,
@@ -24,6 +25,16 @@ import type { RowResolver } from "./restore";
  *                              — read once per maker by {@link RemoteOrderbook.restore}
  *                              so a page reload brings back resting orders and fills
  *
+ *   (optional, consumed when present) `pendingFill: { txHash, sentAt }` on a status /
+ *   order item, or a `/fills` record with `status: "pending"` — a filler's SENT fill.
+ *
+ * When an order leaves the book it moves to Recent fills, never just vanishes: a
+ * fill shows with its transaction (from `/fills`, or the grave's `txHash`), or
+ * without one until the index catches up (then it gets it); an expiry or an
+ * on-chain cancel gets an entry of its own. Orders the book stops listing without
+ * saying they filled are checked against `Settlement.filled(hash)` through the
+ * wallet ({@link RemoteOrderbook.setFillReader}).
+ *
  * Unlike the mock it simulates NOTHING. A row exists only once the server
  * answered 202 for its signed order; `filled` moves only on what the server
  * reports from the chain; a fill row is created only for a fill the server
@@ -42,9 +53,6 @@ import type { RowResolver } from "./restore";
 
 /** How often the maker's live orders are re-checked against the server. */
 export const POLL_MS = 6_000;
-
-/** How long a fill the book called `Filled` waits for the fill index before it is shown without a hash. */
-const INDEX_GRACE_TICKS = 20;
 
 /** Fills kept in memory — the same bound the mock uses. */
 const MAX_FILLS = 60;
@@ -76,6 +84,8 @@ export interface RemoteOrderbookOptions {
    * Without it nothing is restored (the client cannot tell which market an order is on).
    */
   resolveRow?: RowResolver;
+  /** `Settlement.filled(hash)` reader for orders that leave the book (see {@link RemoteOrderbook.setFillReader}). */
+  readFilled?: FillReader;
 }
 
 /** Pages of `GET /orders?maker=` read on restore, at most (500 orders each). */
@@ -209,12 +219,24 @@ export async function postCancel(
   return { evicted, requested: typeof j.requested === "number" ? j.requested : signed.cancel.orderHashes.length };
 }
 
+
 // ──────────────────── status / fills shapes (server JSON) ────────────────────
+
+/** A filler's fill transaction the book knows was SENT but not yet mined (optional; degrades when absent). */
+interface PendingFillBody {
+  txHash?: unknown;
+  sentAt?: unknown;
+}
 
 interface StatusBody {
   live?: boolean;
   status?: string;
   filledAmount?: string | null;
+  /** Graves: why it left the book (`filled` / `cancelled` / `expired` / `evicted` / …). */
+  reason?: string;
+  /** Graves of filled orders: the (latest) fill transaction. */
+  txHash?: string;
+  pendingFill?: PendingFillBody | null;
 }
 
 interface FillBody {
@@ -227,11 +249,20 @@ interface FillBody {
   at?: number | null;
   cumulative?: string | null;
   amount?: string | null;
+  /** `"pending"` = sent by a filler, not mined yet. Absent / anything else = mined. */
+  status?: string;
 }
+
+const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 
 function toBig(v: unknown): bigint | null {
   if (typeof v !== "string" || !/^\d+$/.test(v)) return null;
   return BigInt(v);
+}
+
+function pendingOf(p: PendingFillBody | null | undefined): { txHash: string; sentAt?: number } | undefined {
+  if (!p || typeof p.txHash !== "string" || !TX_HASH.test(p.txHash)) return undefined;
+  return { txHash: p.txHash, ...(typeof p.sentAt === "number" ? { sentAt: p.sentAt } : {}) };
 }
 
 /**
@@ -244,30 +275,61 @@ export function anchorOf(order: Order): bigint {
   return order.side === OrderSide.SELL ? (order.legsIn[0]?.start ?? 0n) : (order.legsOut[0]?.start ?? 0n);
 }
 
-/** One signed order the maker posted, as the poller follows it. */
+/**
+ * A restored order's type: this app signs market orders with a 300 s life and
+ * limit orders with ≥ 1 h, so anything living under 15 minutes was a market ticket.
+ */
+export function inferType(createdAtMs: number, expiresAtMs: number): "market" | "limit" {
+  return expiresAtMs - createdAtMs <= 15 * 60_000 ? "market" : "limit";
+}
+
+/** One signed order the maker posted, as the poller follows it — kept after its row leaves, for the tx upgrade. */
 interface Tracked {
   rowId: string;
   hash: Hex;
   maker: Address;
   anchor: bigint;
-  /** Anchor wei the chain says is filled, as far as the server has told us. */
+  signed: SignedOrder;
+  /** Anchor wei the chain says is filled, as far as the server (or the chain read) has told us. */
   filledWei: bigint;
-  /** Anchor wei already shown as fill rows. */
-  shownWei: bigint;
+  /** Anchor wei shown as fill rows WITH a transaction hash. */
+  indexedWei: bigint;
+  /** Anchor wei shown as a fill row WITHOUT one (the index had not caught up), and that row's id. */
+  hashlessWei: bigint;
+  hashlessId?: string;
   /** The status endpoint has nothing more to say (tombstoned / unknown): only fills are polled. */
   statusDone: boolean;
-  /** The book reported `Filled` but the fill index has not caught up: ticks waited. */
+  /** A live row's fill the index has not explained yet: ticks waited. */
   awaitingIndex?: number;
+  /** The grave's fill transaction (the book's own record of the filling tx). */
+  statusTx?: string;
+  cancelledOnChain?: boolean;
+  /** What the chain read was last done for. */
+  chainChecked?: "gone" | "expired";
+  /** Row snapshot, so fills can still be placed once the row is gone. */
+  snap: { marketId: string; side: RestingOrder["side"]; price: number; perOrder: number; type: RestingOrder["type"]; size: number };
+  /** Finished orders: keep polling fills (for a hash upgrade) until then. */
+  keepUntil?: number;
 }
+
+/** How long the open-orders view waits for the fill index to explain a LIVE row's partial fill. */
+const INDEX_GRACE_TICKS = 20;
+/** How long a finished order's hashless fill keeps waiting for its transaction from `/fills`. */
+const FINISHED_KEEP_MS = 30 * 60_000;
 
 function shortAddr(a: string | undefined): string {
   return a && a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : (a ?? "unknown");
 }
 
+/** Reads `Settlement.filled(hash)` for a signed order (anchor wei; max = cancelled), or null when it cannot. */
+export type FillReader = (signed: SignedOrder) => Promise<bigint | null>;
+
 export class RemoteOrderbook implements OrderbookApi {
   private rows: RestingOrder[] = [];
   private settled: Fill[] = [];
   private readonly tracked = new Map<string, Tracked>();
+  /** Orders whose row is gone but whose fill rows may still get their transaction. */
+  private readonly finished = new Map<string, Tracked>();
   private readonly seenFills = new Set<string>();
   private readonly listeners = new Set<() => void>();
   private readonly baseUrl: string;
@@ -282,6 +344,7 @@ export class RemoteOrderbook implements OrderbookApi {
   private readonly resolveRow: RowResolver | undefined;
   /** Makers already restored (lower-cased) — restore runs once per maker per tab. */
   private readonly restored = new Set<string>();
+  private fillReader: FillReader | null;
 
   constructor(opts: RemoteOrderbookOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
@@ -291,6 +354,15 @@ export class RemoteOrderbook implements OrderbookApi {
     this.pollMs = opts.pollMs ?? POLL_MS;
     this.now = opts.now ?? (() => Date.now());
     this.resolveRow = opts.resolveRow;
+    this.fillReader = opts.readFilled ?? null;
+  }
+
+  /**
+   * The on-chain fallback for orders that leave the book: `Settlement.filled(hash)`
+   * through the wallet's provider (the CSP allows no direct RPC). Null = no wallet.
+   */
+  setFillReader(reader: FillReader | null): void {
+    this.fillReader = reader;
   }
 
   orders(marketId?: string): RestingOrder[] {
@@ -342,7 +414,7 @@ export class RemoteOrderbook implements OrderbookApi {
     };
     this.rows = this.rows.filter((r) => r.id !== row.id);
     this.rows.push(row);
-    this.track(row.id, req.signed);
+    this.track(row, req.signed);
     this.emit();
     return row;
   }
@@ -361,7 +433,9 @@ export class RemoteOrderbook implements OrderbookApi {
   }
 
   confirmHardCancel(orderHash: string): void {
-    this.dropRow(orderHash);
+    const row = this.rows.find((o) => o.id === orderHash);
+    if (row) this.retire(row, "cancelled");
+    else this.dropRow(orderHash);
     this.emit();
   }
 
@@ -372,7 +446,7 @@ export class RemoteOrderbook implements OrderbookApi {
     await postOrder(this.doFetch, this.baseUrl, signed);
     o.signedOrders = [...(o.signedOrders ?? []), signed];
     o.slices.signed += 1;
-    this.track(o.id, signed);
+    this.track(o, signed);
     this.emit();
   }
 
@@ -426,7 +500,7 @@ export class RemoteOrderbook implements OrderbookApi {
 
   /** One `GET /orders` item → a tracked row. @returns whether a row was added. */
   private restoreOrder(raw: unknown, maker: string): boolean {
-    const item = raw as { orderHash?: unknown; order?: unknown; sig?: unknown; addedAt?: unknown; filledAmount?: unknown };
+    const item = raw as { orderHash?: unknown; order?: unknown; sig?: unknown; addedAt?: unknown; filledAmount?: unknown; pendingFill?: PendingFillBody };
     let order: Order;
     try {
       order = orderFromJson(item?.order);
@@ -442,24 +516,27 @@ export class RemoteOrderbook implements OrderbookApi {
     if (!placed) return false;
 
     const addedAt = typeof item.addedAt === "number" ? item.addedAt * 1000 : this.now();
+    const expiresAt = Number(order.expiry) * 1000;
     const signed: SignedOrder = { order, sig: item.sig as Hex, hash, deployment: placed.deployment, deployed: true };
+    const pending = pendingOf(item.pendingFill);
     const row: RestingOrder = {
       id: hash,
       marketId: placed.marketId,
       side: placed.side,
-      type: "limit",
+      type: inferType(addedAt, expiresAt),
       size: placed.size,
       filled: 0,
       price: placed.price,
       createdAt: addedAt,
-      expiresAt: Number(order.expiry) * 1000,
+      expiresAt,
       mine: true,
       signed,
       signedOrders: [signed],
       book: "remote",
+      ...(pending ? { pendingFill: pending } : {}),
     };
     this.rows.push(row);
-    this.track(row.id, signed);
+    this.track(row, signed);
     const t = this.tracked.get(hash.toLowerCase())!;
     const filled = toBig(item.filledAmount);
     // Progress the book already knows; the fill rows that explain it arrive from
@@ -479,7 +556,8 @@ export class RemoteOrderbook implements OrderbookApi {
         if (await this.pollStatus(t)) changed = true;
         if (this.now() < this.pausedUntil) break;
       }
-      if (this.tracked.size && this.now() >= this.pausedUntil && (await this.pollFills())) changed = true;
+      if ((this.tracked.size || this.finished.size) && this.now() >= this.pausedUntil && (await this.pollFills())) changed = true;
+      if (await this.checkChain()) changed = true;
       if (this.settle()) changed = true;
       if (changed) this.emit();
     } finally {
@@ -489,21 +567,39 @@ export class RemoteOrderbook implements OrderbookApi {
 
   // ── internals ──────────────────────────────────────────
 
-  private track(rowId: string, signed: SignedOrder): void {
+  private track(row: RestingOrder, signed: SignedOrder): void {
     this.tracked.set(signed.hash.toLowerCase(), {
-      rowId,
+      rowId: row.id,
       hash: signed.hash,
       maker: signed.order.maker,
       anchor: anchorOf(signed.order),
+      signed,
       filledWei: 0n,
-      shownWei: 0n,
+      indexedWei: 0n,
+      hashlessWei: 0n,
       statusDone: false,
+      snap: {
+        marketId: row.marketId,
+        side: row.side,
+        price: row.price,
+        perOrder: row.size / (row.slices?.total ?? 1),
+        type: row.type,
+        size: row.size,
+      },
     });
   }
 
+  /** Drop a row; its tracked orders move to `finished` while a fill row still lacks its transaction. */
   private dropRow(rowId: string): void {
     this.rows = this.rows.filter((o) => o.id !== rowId);
-    for (const [k, t] of this.tracked) if (t.rowId === rowId) this.tracked.delete(k);
+    for (const [k, t] of this.tracked) {
+      if (t.rowId !== rowId) continue;
+      this.tracked.delete(k);
+      if (this.fillIndex && t.hashlessWei > 0n) {
+        t.keepUntil = this.now() + FINISHED_KEEP_MS;
+        this.finished.set(k, t);
+      }
+    }
   }
 
   private rowOf(t: Tracked): RestingOrder | undefined {
@@ -547,25 +643,70 @@ export class RemoteOrderbook implements OrderbookApi {
       t.filledWei = filled > t.anchor ? t.anchor : filled;
       changed = true;
     }
+    if (row) {
+      const pending = pendingOf(body.pendingFill);
+      if (pending?.txHash !== row.pendingFill?.txHash) {
+        if (pending) row.pendingFill = pending;
+        else delete row.pendingFill;
+        changed = true;
+      }
+    }
+    if (typeof body.txHash === "string" && TX_HASH.test(body.txHash)) t.statusTx = body.txHash;
     if (body.live === false) {
       t.statusDone = true;
-      if (body.status === "Filled") {
+      if (body.status === "Filled" || body.reason === "filled") {
         if (t.filledWei < t.anchor) {
           t.filledWei = t.anchor;
           changed = true;
         }
-      } else if (body.status === "Cancelled") {
-        // Cancelled ON-CHAIN (from this or another device): final, nothing left to show.
-        if (row) {
-          this.dropRow(row.id);
-          return true;
-        }
+      } else if (body.status === "Cancelled" || body.reason === "cancelled") {
+        // Cancelled ON-CHAIN (from this or another device): it ends in Recent fills as Cancelled.
+        t.cancelledOnChain = true;
+        changed = true;
+      } else if (body.reason === "expired") {
+        // The book dropped it at expiry; `settle` retires it (after the chain read).
+        changed = true;
       } else if (row && !row.cancelled && !row.offBook) {
-        // Evicted for another reason (expired, unfunded, invalidated). The last
-        // known summary does not say which, and the signature may still be
-        // fillable if the maker re-funds — so the row says what is known.
+        // Evicted for another reason (unfunded, invalidated). The last known summary
+        // does not say which, and the signature may still be fillable if the maker
+        // re-funds — so the row says what is known.
         row.offBook =
           "no longer distributed by the orderbook (expired, unfunded or invalidated) — cancel on-chain to be sure it cannot fill";
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * `Settlement.filled(hash)` for orders the book stopped listing without saying
+   * they filled — off book, or past expiry — so a fill the book missed still ends
+   * as a fill, and an expiry is called an expiry only once the chain agrees.
+   */
+  private async checkChain(): Promise<boolean> {
+    const read = this.fillReader;
+    if (!read) return false;
+    let changed = false;
+    const now = this.now();
+    for (const t of this.tracked.values()) {
+      if (t.filledWei >= t.anchor || t.cancelledOnChain) continue;
+      const row = this.rowOf(t);
+      if (!row) continue;
+      const phase: Tracked["chainChecked"] = row.expiresAt <= now ? "expired" : t.statusDone ? "gone" : undefined;
+      if (!phase || t.chainChecked === phase) continue;
+      t.chainChecked = phase;
+      let v: bigint | null = null;
+      try {
+        v = await read(t.signed);
+      } catch {
+        v = null;
+      }
+      if (v === null) continue;
+      if (v === CANCELLED_SENTINEL) {
+        t.cancelledOnChain = true;
+        changed = true;
+      } else if (v > t.filledWei) {
+        t.filledWei = v > t.anchor ? t.anchor : v;
         changed = true;
       }
     }
@@ -575,13 +716,16 @@ export class RemoteOrderbook implements OrderbookApi {
   /** One `/fills?maker=` read per maker covers every tracked order. @returns whether anything changed. */
   private async pollFills(): Promise<boolean> {
     if (!this.fillIndex) return false;
+    const now = this.now();
+    for (const [k, t] of this.finished) if ((t.keepUntil ?? 0) <= now || t.hashlessWei === 0n) this.finished.delete(k);
     let changed = false;
-    const makers = new Set([...this.tracked.values()].map((t) => t.maker.toLowerCase()));
+    const makers = new Set([...this.tracked.values(), ...this.finished.values()].map((t) => t.maker.toLowerCase()));
     for (const maker of makers) {
       const res = await this.get(`/fills?maker=${maker}&limit=100`);
       if (!res) continue;
       if (res.status === 501) {
         this.fillIndex = false;
+        this.finished.clear();
         return changed;
       }
       if (!res.ok) continue;
@@ -593,19 +737,31 @@ export class RemoteOrderbook implements OrderbookApi {
 
   /**
    * Fold `/fills` rows in, oldest first so per-order cumulatives grow
-   * monotonically. A fill of a tracked order advances it; with `history`, a fill
-   * of an order no longer tracked (it left the book before this page loaded) is
-   * shown as a past fill when the node served its signed order.
+   * monotonically. A fill of a tracked (or recently finished) order advances it
+   * and, when a fill row for it was shown WITHOUT a transaction, gives that size
+   * its transaction; with `history`, a fill of an order no longer tracked (it left
+   * the book before this page loaded) is shown when the node served its order.
+   * A record marked `status: "pending"` is a SENT fill: it flags the row, nothing more.
    * @returns whether anything changed.
    */
   private applyFills(fills: readonly FillBody[], history: boolean): boolean {
     let changed = false;
     for (const f of [...fills].reverse()) {
       if (typeof f.orderHash !== "string") continue;
-      const tx = typeof f.txHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(f.txHash) ? f.txHash : "";
-      const key = `${tx}:${f.logIndex ?? ""}:${f.orderHash.toLowerCase()}`;
-      if (!tx || this.seenFills.has(key)) continue;
-      const t = this.tracked.get(f.orderHash.toLowerCase());
+      const tx = typeof f.txHash === "string" && TX_HASH.test(f.txHash) ? f.txHash : "";
+      if (!tx) continue;
+      const h = f.orderHash.toLowerCase();
+      const t = this.tracked.get(h) ?? this.finished.get(h);
+      if (f.status === "pending") {
+        const row = t && this.rowOf(t);
+        if (row && row.pendingFill?.txHash !== tx) {
+          row.pendingFill = { txHash: tx, ...(typeof f.at === "number" ? { sentAt: f.at } : {}) };
+          changed = true;
+        }
+        continue;
+      }
+      const key = `${tx}:${f.logIndex ?? ""}:${h}`;
+      if (this.seenFills.has(key)) continue;
       if (!t) {
         if (history && this.pushHistoricalFill(f, tx)) {
           this.seenFills.add(key);
@@ -614,20 +770,42 @@ export class RemoteOrderbook implements OrderbookApi {
         continue;
       }
       this.seenFills.add(key);
+      const row = this.rowOf(t);
+      if (row?.pendingFill?.txHash === tx) delete row.pendingFill;
       const cumulative = toBig(f.cumulative);
       const amount = toBig(f.amount);
-      let delta = amount ?? (cumulative !== null && cumulative > t.shownWei ? cumulative - t.shownWei : null);
-      if (delta !== null && t.shownWei + delta > t.anchor) delta = t.anchor - t.shownWei;
+      let delta = amount ?? (cumulative !== null && cumulative > t.indexedWei ? cumulative - t.indexedWei : null);
+      // A fill whose size the index does not say, for an order with a hashless row: it is that row's transaction.
+      if (delta === null && t.hashlessWei > 0n) delta = t.hashlessWei;
+      if (delta !== null && t.indexedWei + delta > t.anchor) delta = t.anchor - t.indexedWei;
       if (cumulative !== null && cumulative > t.filledWei) t.filledWei = cumulative > t.anchor ? t.anchor : cumulative;
+      const at = typeof f.at === "number" ? f.at * 1000 : this.now();
       if (delta !== null) {
-        t.shownWei += delta;
-        if (t.shownWei > t.filledWei) t.filledWei = t.shownWei;
+        // The part of this fill already on screen without a hash: shrink (or drop) that row.
+        const convert = delta < t.hashlessWei ? delta : t.hashlessWei;
+        if (convert > 0n) this.shrinkHashless(t, convert);
+        t.indexedWei += delta;
+        if (t.indexedWei > t.filledWei) t.filledWei = t.indexedWei;
+        if (delta === 0n) continue; // nothing left to show (already counted)
       }
-      const row = this.rowOf(t);
-      if (row) this.pushFill(row, t, delta, tx, f.solver, typeof f.at === "number" ? f.at * 1000 : this.now());
+      this.pushFill(t, delta, tx, f.solver, at);
       changed = true;
     }
     return changed;
+  }
+
+  private shrinkHashless(t: Tracked, wei: bigint): void {
+    t.hashlessWei -= wei;
+    const i = this.settled.findIndex((x) => x.id === t.hashlessId);
+    if (i < 0) return;
+    if (t.hashlessWei <= 0n) {
+      t.hashlessWei = 0n;
+      this.settled.splice(i, 1);
+      t.hashlessId = undefined;
+      return;
+    }
+    const f = this.settled[i]!;
+    this.settled[i] = { ...f, size: Math.max(0, f.size - fraction(wei, t.anchor) * t.snap.perOrder) };
   }
 
   /** A fill of an order that is no longer tracked, placed by its served order. @returns whether it was shown. */
@@ -642,13 +820,16 @@ export class RemoteOrderbook implements OrderbookApi {
     if (hashOrderStruct(order).toLowerCase() !== f.orderHash.toLowerCase()) return false;
     const placed = this.resolveRow(order);
     const amount = toBig(f.amount);
+    const cumulative = toBig(f.cumulative);
     const anchor = anchorOf(order);
     if (!placed) return false;
     this.settled.push({
       id: `${tx}-${f.orderHash.toLowerCase()}`,
+      orderHash: f.orderHash,
       marketId: placed.marketId,
       side: placed.side,
       size: amount === null || anchor === 0n ? 0 : fraction(amount > anchor ? anchor : amount, anchor) * placed.size,
+      orderSize: placed.size,
       price: placed.price,
       source: "LMT",
       filler: shortAddr(f.solver),
@@ -656,30 +837,85 @@ export class RemoteOrderbook implements OrderbookApi {
       at: typeof f.at === "number" ? f.at * 1000 : this.now(),
       mine: true,
       simulated: false,
+      status: cumulative !== null && anchor > 0n && cumulative >= anchor ? "filled" : "partial",
     });
-    if (this.settled.length > MAX_FILLS) this.settled = this.fills().slice(0, MAX_FILLS);
+    this.trimFills();
     return true;
   }
 
-  private pushFill(row: RestingOrder, t: Tracked, deltaWei: bigint | null, tx: string, solver: string | undefined, at: number): void {
-    const perOrder = row.size / (row.slices?.total ?? 1);
-    const size = deltaWei === null || t.anchor === 0n ? 0 : fraction(deltaWei, t.anchor) * perOrder;
+  /**
+   * One fill row for `deltaWei` of `t`. With a `tx` it counts as indexed (the
+   * caller has already moved `indexedWei`); without, it grows the order's single
+   * hashless row — the one a later `/fills` record gives its transaction.
+   */
+  private pushFill(t: Tracked, deltaWei: bigint | null, tx: string, solver: string | undefined, at: number): void {
+    const size = deltaWei === null || t.anchor === 0n ? 0 : fraction(deltaWei, t.anchor) * t.snap.perOrder;
+    const status: Fill["status"] = t.filledWei >= t.anchor ? "filled" : "partial";
+    if (!tx && t.hashlessId) {
+      const i = this.settled.findIndex((x) => x.id === t.hashlessId);
+      if (i >= 0) {
+        const f = this.settled[i]!;
+        this.settled[i] = { ...f, size: f.size + size, at, status };
+        return;
+      }
+    }
+    const id = tx ? `${tx}-${t.hash}-${this.settled.length}` : `${t.hash}-${at}`;
+    if (!tx) t.hashlessId = id;
     this.settled.push({
-      id: tx ? `${tx}-${t.hash}-${this.settled.length}` : `${t.hash}-${at}`,
-      marketId: row.marketId,
-      side: row.side,
+      id,
+      orderHash: t.hash,
+      orderType: t.snap.type,
+      marketId: t.snap.marketId,
+      side: t.snap.side,
       size,
+      orderSize: t.snap.size,
       // The SIGNED limit price — the floor the fill had to meet. An auction may
       // have filled better; the transaction is the authority.
-      price: row.price,
+      price: t.snap.price,
       source: "LMT",
       filler: tx ? shortAddr(solver) : "unknown",
       tx,
       at,
       mine: true,
       simulated: false,
+      status,
     });
+    this.trimFills();
+  }
+
+  private trimFills(): void {
     if (this.settled.length > MAX_FILLS) this.settled = this.fills().slice(0, MAX_FILLS);
+  }
+
+  /** Show every not-yet-shown filled wei of `t` now: with the grave's transaction when the book named one. */
+  private flushUnshown(t: Tracked, at: number): void {
+    const shown = t.indexedWei + t.hashlessWei;
+    if (t.filledWei <= shown) return;
+    const delta = t.filledWei - shown;
+    if (t.statusTx && !t.indexedWei && !t.hashlessWei) {
+      t.indexedWei += delta;
+      this.pushFill(t, delta, t.statusTx, undefined, at);
+    } else {
+      t.hashlessWei += delta;
+      this.pushFill(t, delta, "", undefined, at);
+    }
+    t.awaitingIndex = undefined;
+  }
+
+  /** A row is done: show what it filled, say how it ended, and take it off the open orders. */
+  private retire(row: RestingOrder, outcome: Outcome): void {
+    const now = this.now();
+    const mine = [...this.tracked.values()].filter((t) => t.rowId === row.id);
+    for (const t of mine) {
+      delete row.pendingFill;
+      this.flushUnshown(t, now);
+    }
+    // A filled order's fill rows say it all; an expiry / cancel gets its own entry.
+    if (outcome !== "filled") {
+      this.settled.push(outcomeEntry(row, outcome === "partially-filled" ? "expired" : outcome, now));
+      this.trimFills();
+    }
+    this.dropRow(row.id);
   }
 
   /** Fold tracked progress into the rows; retire finished and expired rows. @returns whether anything changed. */
@@ -687,18 +923,16 @@ export class RemoteOrderbook implements OrderbookApi {
     let changed = false;
     const now = this.now();
     for (const t of this.tracked.values()) {
-      if (t.filledWei <= t.shownWei) {
+      if (t.filledWei <= t.indexedWei + t.hashlessWei) {
         t.awaitingIndex = undefined;
         continue;
       }
-      // The chain moved but no indexed fill explains it (yet). With an index,
-      // give it time; without one there will never be a hash, so show the
-      // fill as a fill whose transaction is unknown — never an invented one.
+      // A LIVE row moved but no indexed fill explains it (yet). With an index,
+      // give it time; without one there will never be a hash, so show the fill
+      // now as a fill whose transaction is unknown — never an invented one.
+      // (A row that is done is flushed by `retire` without waiting.)
       if (this.fillIndex && (t.awaitingIndex = (t.awaitingIndex ?? 0) + 1) < INDEX_GRACE_TICKS) continue;
-      const row = this.rowOf(t);
-      if (row) this.pushFill(row, t, t.filledWei - t.shownWei, "", undefined, now);
-      t.shownWei = t.filledWei;
-      t.awaitingIndex = undefined;
+      this.flushUnshown(t, now);
       changed = true;
     }
     for (const row of [...this.rows]) {
@@ -719,10 +953,15 @@ export class RemoteOrderbook implements OrderbookApi {
           changed = true;
         }
       }
-      const pendingIndex = mine.some((t) => t.filledWei > t.shownWei);
-      const fullyFilled = row.size - row.filled <= row.size * 1e-6;
-      if ((fullyFilled && !pendingIndex) || row.expiresAt <= now) {
-        this.dropRow(row.id);
+      if (row.pendingFill && isFull(row.filled, row.size)) {
+        delete row.pendingFill;
+        changed = true;
+      }
+      // Past expiry with a chain reader that has not had its say yet: wait one poll.
+      const awaitingChain = row.expiresAt <= now && this.fillReader !== null && mine.some((t) => t.filledWei < t.anchor && !t.cancelledOnChain && t.chainChecked !== "expired");
+      const outcome = retireReason(row, { now, cancelledOnChain: mine.some((t) => t.cancelledOnChain) });
+      if (outcome && !(awaitingChain && outcome !== "filled" && outcome !== "cancelled")) {
+        this.retire(row, outcome);
         changed = true;
       }
     }

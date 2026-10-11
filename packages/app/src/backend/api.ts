@@ -27,7 +27,8 @@ export interface SignedCancel {
 export interface PlaceOrderRequest {
   marketId: string;
   side: Side;
-  type: "limit" | "twap";
+  /** "market": a market ticket's short Dutch auction, shown as "Market" (lib/orderLifecycle). */
+  type: "market" | "limit" | "twap";
   /** BASE amount to work. */
   size: number;
   price: number;
@@ -118,4 +119,11 @@ export interface OrderbookApi {
    * nothing to restore. Idempotent per maker.
    */
   restore?(maker: `0x${string}`): Promise<void>;
+  /**
+   * The on-chain fallback a real book uses when an order leaves it without a
+   * reported fill: `Settlement.filled(hash)` for a signed order (anchor wei, max =
+   * cancelled), or null when it cannot read. Set when a wallet is on the chain;
+   * null clears it. The mock needs none.
+   */
+  setFillReader?(reader: ((signed: SignedOrder) => Promise<bigint | null>) | null): void;
 }

@@ -7,6 +7,7 @@ import type { TokenIndex } from "../hooks/useTokenIndex";
 import { fmt, fmtAmt, fmtPrice, shortHex } from "../lib/format";
 import { restingLabel, type Quote } from "../lib/ladder";
 import { GAS_NOTE_BPS, type MarketFloor } from "../lib/marketFloor";
+import { EXPIRY_OPTIONS, expiryLabel } from "../lib/plan";
 import { MAX_SLIPPAGE_BPS, type SlippageSetting } from "../lib/quote";
 import {
   balanceState,
@@ -21,7 +22,10 @@ import {
   type MarketFigures,
 } from "../lib/ticketView";
 import { SOURCE_NAME, SOURCE_VAR, SOURCES, type Source } from "../lib/types";
+import type { PhaseLine } from "../lib/orderLifecycle";
+import type { TxState } from "../lib/txFlow";
 import { TokenSelect } from "./TokenSelect";
+import { OrderStatusLine, TxStatus } from "./TxStatus";
 
 export interface Receipt {
   hash: string;
@@ -71,6 +75,8 @@ export interface AllowanceView {
   error: string | null;
   approve: () => void;
   revoke: () => void;
+  /** The funding transaction in flight / last finished (wrap, approve, grant, revoke). */
+  tx?: TxState;
 }
 
 interface OrderFormProps {
@@ -84,6 +90,10 @@ interface OrderFormProps {
   ready: boolean;
   signing: boolean;
   receipt: Receipt | null;
+  /** The signed ticket's live status: Signing… → Posted → Fill submitted → Filled / Expired. */
+  orderLine?: PhaseLine | null;
+  /** For explorer links. */
+  chainId: number;
   gate: Gate | null;
   allowance: AllowanceView;
   /** The exact wallet balance as a decimal string, for "max". */
@@ -118,7 +128,7 @@ interface OrderFormProps {
   /** The pay token is the wrapped native coin: RBTC above the gas reserve counts as spendable (human units). */
   autoWrap?: { symbol: string; value: number } | null;
   /** The wallet holds the wrapped native coin: offer turning it back (behind a confirm). */
-  unwrap?: { symbol: string; busy: boolean; error: string | null; action: () => void } | null;
+  unwrap?: { symbol: string; busy: boolean; error: string | null; tx?: TxState; action: () => void } | null;
   onConnect: () => void;
   onSign: () => void;
 }
@@ -164,6 +174,8 @@ export function OrderForm(props: OrderFormProps) {
     ready,
     signing,
     receipt,
+    orderLine,
+    chainId,
     gate,
     allowance,
     maxAmount,
@@ -290,8 +302,8 @@ export function OrderForm(props: OrderFormProps) {
           ? "5 minutes (starts at the quote, decays to the minimum over 3.5 minutes)"
           : "5 minutes (1 minute auction, then rests at the minimum)"
         : mode === "twap"
-          ? "on completion"
-          : "24 hours",
+          ? `each slice ${ticket.everyMin + 1} min after it is signed · schedule ${twapMinutes >= 60 ? `${(twapMinutes / 60).toFixed(1)} h` : `${twapMinutes} min`}`
+          : `${expiryLabel(ticket.expiry)} (the Permit3 grant lasts as long, +1 h)`,
       "",
     ]);
   }
@@ -369,6 +381,7 @@ export function OrderForm(props: OrderFormProps) {
           )}
         </div>
         {unwrap?.error && <div className="signerr">{unwrap.error}</div>}
+        {unwrap?.tx && <TxStatus state={unwrap.tx} chainId={chainId} onRetry={unwrap.action} />}
 
         <div className="field">
           <div className="top">
@@ -508,6 +521,23 @@ export function OrderForm(props: OrderFormProps) {
                   <span>Minimum received</span>
                   <span className="m">{minLine}</span>
                 </div>
+              </div>
+            )}
+            {mode === "limit" && (
+              <div className="expiry" role="radiogroup" aria-label="Order expires after">
+                <span className="lbl">Expires</span>
+                {EXPIRY_OPTIONS.map((o) => (
+                  <button
+                    key={o.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={ticket.expiry === o.id}
+                    title={`The order and its Permit3 grant live ${o.label}`}
+                    onClick={() => ticket.setExpiry(o.id)}
+                  >
+                    {o.short}
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -731,6 +761,7 @@ export function OrderForm(props: OrderFormProps) {
                       </>
                     )}
                   </span>
+                  {allowance.tx && <TxStatus state={allowance.tx} chainId={chainId} onRetry={allowance.approving ? undefined : allowance.approve} />}
                   {allowance.mismatch && <div className="signerr">{allowance.mismatch}</div>}
                   {allowance.error && <div className="signerr">{allowance.error}</div>}
                 </>
@@ -766,11 +797,17 @@ export function OrderForm(props: OrderFormProps) {
           {signError && <div className="signerr">{signError}</div>}
         </div>
 
+        {!receipt && orderLine && (
+          <div className="receipt">
+            <OrderStatusLine line={orderLine} chainId={chainId} />
+          </div>
+        )}
         {receipt && (
           <div className="receipt">
             <span className="lbl" style={{ color: "var(--lime)" }}>
-              {BOOK_IS_REMOTE ? "Order signed · posted to the orderbook, awaiting a filler" : "Order signed · simulated book, nothing broadcast"}
+              {BOOK_IS_REMOTE ? "Order signed · posted to the orderbook" : "Order signed · simulated book, nothing broadcast"}
             </span>
+            {orderLine && <OrderStatusLine line={orderLine} chainId={chainId} />}
             <div>{receipt.headline}</div>
             {receipt.detail && <div className="k">{receipt.detail}</div>}
             <div className="k">{shortHex(receipt.hash, 12, 8)}</div>

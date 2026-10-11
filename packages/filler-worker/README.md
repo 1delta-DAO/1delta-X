@@ -287,7 +287,8 @@ openssl rand -hex 32 | tee /dev/stderr | npx wrangler secret put ADMIN_TOKEN   #
 npx wrangler secret put ALERT_WEBHOOK_URL    # Slack webhook, or the Telegram sendMessage URL
 # recommended: a keyed RPC; read in preference to the RPC_URL var (which can stay)
 npx wrangler secret put RPC_URL_SECRET
-# optional: the orderbook's BINDING_KEY, so its rate limiter bills the filler its own bucket
+# recommended: the orderbook's BINDING_KEY — its rate limiter bills the filler its own
+# bucket, AND the filler reports its fill txs to the book's POST /fills/report (below)
 npx wrangler secret put ORDERBOOK_BINDING_KEY
 # recommended: shared with the app's Pages worker (its FILLER_BINDING_KEY), so POST /quote
 # is rate-limited per VISITOR rather than one shared bucket for the whole app
@@ -302,6 +303,18 @@ That worker must be deployed in the **same account** first. Without the binding,
 `cf-connecting-ip`, so the orderbook bills them to `unknown` unless
 `ORDERBOOK_BINDING_KEY` is set. The default `ORDERBOOK_CLIENT_IP` names the filler's own
 bucket.
+
+**Fill reports.** With `ORDERBOOK_BINDING_KEY` set, the engine's events are reported to
+the book's `POST /fills/report` over the same transport (beta-filler `bookReport.ts`):
+a broadcast fill → `{txHash, orderHash, status: "pending"}` (the book serves it as the
+order's `pendingFill`, so the app can show "Fill submitted"); a success receipt →
+`{txHash, status: "confirmed"}` (the book reads the receipt itself and indexes the
+fill — the public Rootstock node serves no `eth_getLogs`, so this is how our fills
+reach `GET /fills`); a revert or drop → `{txHash, status: "failed"}`. A receipt
+timeout reports nothing (still pending). Approvals and rebalancing txs are never
+reported. Best effort: each report is bounded at 3 s and every failure is logged
+and swallowed — a tick never fails or stalls on it. Without the key nothing is sent
+(the book would `403`).
 
 **4. Deploy in dry run.**
 

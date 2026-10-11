@@ -9,6 +9,7 @@ export { dispatch, type Strategy } from "./dispatch";
 export { Engine, roundRobin, type EngineEvent, type EngineOptions, type Log, type TickLimits, type TickOptions, type TickReport } from "./engine";
 export type { FillOutcome } from "./filler";
 export { BACKOFF, GAS, Guard, broadcast, resolvePending, type PendingTx, type Resolution, type TxInfo, type TxKind } from "./guard";
+export { BINDING_KEY_HEADER, fillReporter, fillReportOf, REPORT_TIMEOUT_MS, type FillReport, type ReporterOptions } from "./bookReport";
 export { entryFromJson, fetchOrders, type BookEntry, type IntakeOptions, type IntakeResult } from "./intake";
 export { Budget, fmtUnits } from "./policy";
 export type { RebalanceOutcome, RebalanceState } from "./rebalance";

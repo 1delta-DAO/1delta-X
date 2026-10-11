@@ -19,7 +19,22 @@ export interface Reader {
 const SETTLEMENT_READS = parseAbi([
   "function PERMIT3() view returns (address)",
   "function minValidNonce(address) view returns (uint256)",
+  "function filled(bytes32) view returns (uint256)",
 ]);
+
+/**
+ * `Settlement.filled(orderHash)`: cumulative filled amount in the order's ANCHOR
+ * units; `type(uint256).max` = cancelled on-chain (OrderState.sol). The key is the
+ * SDK's struct hash (`SignedOrder.hash`).
+ */
+export async function readFilled(reader: Reader, settlement: Address, orderHash: `0x${string}`): Promise<bigint> {
+  return (await reader.readContract({
+    address: settlement,
+    abi: SETTLEMENT_READS,
+    functionName: "filled",
+    args: [orderHash],
+  })) as bigint;
+}
 
 /**
  * Throw unless the configured Settlement really is wired to the configured

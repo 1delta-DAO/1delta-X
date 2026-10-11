@@ -393,6 +393,45 @@ the button into *Insufficient … balance*. The book draws the active quote as a
 line on the side it takes from (*Your quote · 82,460 · via Sushi*) and the slippage
 minimum as a dashed line.
 
+### Order lifecycle and transaction status (2026-10-11)
+
+A filled market order used to show as type *Limit*, status *PARTIAL* at 100 %, then
+vanish when its 300 s life ended — with Recent fills empty, because the fill row
+waited for the fill index and the expiry dropped the order first. Now
+([`src/lib/orderLifecycle.ts`](src/lib/orderLifecycle.ts)):
+
+- **Type**: a market ticket's order is *Market* (a short Dutch auction from the
+  filler's quote), a limit *Limit*, a TWAP *TWAP*. A restored order living ≤ 15 min
+  is taken for a market ticket.
+- **Status**: *filled* once filled ≥ size, *partial* only for 0 < filled < size,
+  *fill submitted* (with the tx link) while the book reports a filler's sent fill
+  (`pendingFill: {txHash, sentAt}` on `/orders/:hash/status`).
+- **Leaving the book** always leaves a Recent-fills row: a fill with its transaction
+  (from `GET /fills`, or the grave's `txHash`); when neither is known yet it shows the
+  order hash and *filled*, and gets its link when `/fills` catches up (no double
+  count). An order that expires unfilled shows *Expired* (or *Expired · 40 % filled*),
+  one cancelled on-chain *Cancelled*. An order the book stops listing without saying
+  it filled — off book, or at expiry — is checked against `Settlement.filled(hash)`
+  through the wallet's provider (`setFillReader`; the CSP allows no direct RPC).
+- **The order card** under the form carries one line: *Signing…* → *Posting…* →
+  *Posted to the orderbook* → *Fill submitted · tx ↗* → *Filled ✓ · tx ↗* /
+  *Expired* / *Cancelled*. Links go to `rootstock.blockscout.com`.
+- **Transactions the app sends itself** — wrap, approve, Permit3 grant, revoke,
+  unwrap, on-chain cancel — show *step k of n · <action> — confirm in your wallet…* →
+  *submitted · 0xab…cd ↗* → *confirming… (sent after block N)* → *confirmed ✓* /
+  *failed: <reason>* / *rejected in wallet*, with a *retry* link after a failure;
+  buttons stay disabled while one is in flight
+  ([`src/lib/txFlow.ts`](src/lib/txFlow.ts)).
+
+### Limit-order expiry (2026-10-11)
+
+Limit tickets choose their life: **1 h, 1 day (default), 7 days, 30 days, 90 days**
+(`EXPIRY_OPTIONS`, [`src/lib/plan.ts`](src/lib/plan.ts)). The Permit3 grant follows
+the choice (`fundingTtlSeconds`, +1 h margin) and Details shows it. 90 days is the
+book's `MAX_TTL_SECONDS` (7,776,000) less a 10-minute clock-skew margin, pinned by
+`test/crossComponent.audit.test.ts` (APP-TTL-2). Market orders keep their 300 s; a
+TWAP's life is its schedule.
+
 ## Market orders: the ticket-sized floor (fallback)
 
 When no filler quote is available, a market order is a 60 s dutch auction from the book's **executable** (fee-net)
@@ -687,6 +726,29 @@ ladder reads as synthetic even though the numbers are real. Walking the ticks
 gives one rung per range where liquidity is genuinely constant, so sizes vary by
 60–250% across the visible ladder and a concentrated position shows up as a
 cliff.
+
+### What the book DRAWS: price bands (2026-10-11)
+
+The walk prices against ~20 bps curve slices; drawing one row per slice put 14–26
+rows on a side, alternating UNI / SUSHI. The book now groups the slices into price
+bands ([`src/lib/bookRows.ts`](src/lib/bookRows.ts) `bucketize`), ~8 rows a side
+(stretched to at most 14 to keep a previewed or own order on screen; the rest is the
+"N deeper rows" note):
+
+- **Width**: the smallest of 10 / 20 / 25 / 50 / 100 / 200 bps such that 8 bands
+  cover the first 26 slices of the deeper side (what the slice view used to show),
+  never finer than the price grid. One width for both sides, anchored at each side's
+  touch; the legend says it ("rows group 50 bps").
+- **Price** = the band's size-weighted average (total quote / total base): what
+  consuming the whole band costs, the same figure the walk charges. Not the best edge
+  (overstates what the band's size trades at) nor a boundary (no slice traded there).
+  **Size** and **cumulative** are exact sums.
+- **Sources** merge into one chip (`UNI+SUSHI`, by size share); the tooltip keeps the
+  per-pool split and the band's best–worst slice range.
+- **Signed limit orders (LMT) never merge**: each is its own row at its signed price.
+- **Click** sets the limit at the band's far edge (its worst slice), so the order fills
+  through the row — what its cumulative promises. An LMT row picks its own price.
+- The quote and minimum markers slot between bands by price (`markerIndex`).
 
 ## Two venues, one ladder
 

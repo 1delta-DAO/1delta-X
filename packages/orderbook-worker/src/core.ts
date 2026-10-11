@@ -27,7 +27,7 @@ import {
 import { hashTypedData, isAddress, type Address, type Hex } from "viem";
 
 import { readCappedBytes } from "./body";
-import type { ChainLog, ChainReader, WorkerChainEvent } from "./chain";
+import { decodeReceiptLogs, type ChainLog, type ChainReader, type WorkerChainEvent } from "./chain";
 import type { WorkerConfig } from "./config";
 import { ROUTE_COST, SqlRateLimiter } from "./ratelimit";
 import { isMethodNotFound, redactRpcUrl } from "./redact";
@@ -64,6 +64,12 @@ const HASH = /^0x[0-9a-fA-F]{64}$/;
 /** After a failed `eth_getLogs` the span is held (no doubling back up) this long. */
 const LOG_SPAN_COOLDOWN_SECONDS = 600;
 /** What `/health` and the alarm say when the RPC serves no `eth_getLogs` at all. */
+/** `POST /fills/report`: at most this many tx hashes per call. */
+export const MAX_REPORTS = 20;
+/** A "pending" fill marker is served (and kept) this long after its broadcast. */
+export const PENDING_FILL_TTL_SECONDS = 600;
+/** At most this many pending markers are kept (oldest dropped first). */
+const MAX_PENDING_FILLS = 500;
 export const LOGS_UNSUPPORTED = "RPC_URL does not serve eth_getLogs (JSON-RPC -32601): the fill index and on-chain cancels are stalled — set RPC_URL_SECRET to a provider that does (wrangler secret put RPC_URL_SECRET)";
 
 export type GraveReason = "filled" | "cancelled" | "soft-cancelled" | "expired" | "evicted" | "displaced";
@@ -184,7 +190,11 @@ export class OrderBookCore {
 
   // ──────────────────── routing ────────────────────
 
-  async handle(request: Request, ip: string): Promise<Response> {
+  /**
+   * @param trusted the caller presented the `BINDING_KEY` (the entry worker checked
+   *   it, constant-time, and says so in a header only it can set) — the filler.
+   */
+  async handle(request: Request, ip: string, trusted = false): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = request.method.toUpperCase();
@@ -196,6 +206,11 @@ export class OrderBookCore {
         return json({ error: "method not allowed" }, 405, { allow: "GET, POST" });
       }
       if (path === "/cancels") return method === "POST" ? await this.postCancel(request, ip) : json({ error: "method not allowed" }, 405, { allow: "POST" });
+      if (path === "/fills/report") {
+        if (method !== "POST") return json({ error: "method not allowed" }, 405, { allow: "POST" });
+        if (!trusted) return json({ error: "forbidden: /fills/report needs the binding key" }, 403);
+        return await this.reportFills(request);
+      }
       if (path === "/fills") return method === "GET" ? (this.gate(ip, ROUTE_COST.query) ?? this.listFills(url)) : json({ error: "method not allowed" }, 405, { allow: "GET" });
       const m = /^\/orders\/(0x[0-9a-fA-F]{64})(\/status)?$/.exec(path);
       if (m) {
@@ -505,6 +520,7 @@ export class OrderBookCore {
       opts?.txHash ?? null,
     );
     this.sql.exec(`DELETE FROM orders WHERE hash = ?`, hash);
+    this.sql.exec(`DELETE FROM pending_fills WHERE order_hash = ?`, hash);
     this.deps.verifier.invalidate(hash as Hex);
   }
 
@@ -605,6 +621,7 @@ export class OrderBookCore {
       sig: a.sig,
       addedAt: r.added_at,
       filledAmount: this.summaryOf(r).filledAmount,
+      pendingFill: this.pendingFillOf(r.hash),
       state: s
         ? {
             status: STATUS_NAME[s.status] ?? "Unknown",
@@ -624,7 +641,7 @@ export class OrderBookCore {
 
   private status(hash: string): Response {
     const row = this.sql.exec<OrderRow>(`SELECT * FROM orders WHERE hash = ?`, hash).toArray()[0];
-    if (row) return json({ live: true, ...this.summaryOf(row) });
+    if (row) return json({ live: true, ...this.summaryOf(row), pendingFill: this.pendingFillOf(hash) });
     const grave = this.sql
       .exec<{ reason: string; removed_at: number; summary: string; tx_hash: string | null }>(
         `SELECT reason, removed_at, summary, tx_hash FROM graves WHERE hash = ?`,
@@ -852,6 +869,7 @@ export class OrderBookCore {
     this.sql.exec(`DELETE FROM soft_cancels WHERE until <= ?`, now);
     this.sql.exec(`DELETE FROM graves WHERE removed_at < ?`, now - c.tombstoneTtlSeconds);
     this.sql.exec(`DELETE FROM graves WHERE hash IN (SELECT hash FROM graves ORDER BY removed_at DESC LIMIT -1 OFFSET ?)`, c.maxTombstones);
+    this.sql.exec(`DELETE FROM pending_fills WHERE sent_at <= ?`, now - PENDING_FILL_TTL_SECONDS);
     this.sql.exec(`DELETE FROM billed WHERE key IN (SELECT key FROM billed ORDER BY at DESC LIMIT -1 OFFSET ?)`, c.maxBilled);
     const over = count(this.sql, `SELECT COUNT(*) AS n FROM fills`) - c.maxFills;
     if (over > 0) {
@@ -964,7 +982,11 @@ export class OrderBookCore {
 
       const cum = await this.cumulativeAt(hash as Hex, log.blockNumber, cumCache);
       let amount: bigint | null = null;
-      if (cum !== null && lastInBlock.get(`${hash}@${log.blockNumber}`) === i) {
+      // A row of ANOTHER tx in this block already carries the block's delta (one
+      // reported from its receipt): this one says null, so the total is not doubled.
+      const blockSized =
+        count(this.sql, `SELECT COUNT(*) AS n FROM fills WHERE order_hash = ? AND block_number = ? AND amount IS NOT NULL`, hash, Number(log.blockNumber)) > 0;
+      if (cum !== null && !blockSized && lastInBlock.get(`${hash}@${log.blockNumber}`) === i) {
         const prev = await this.cumulativeBefore(hash as Hex, log.blockNumber, cumCache);
         if (prev !== null && cum > prev) amount = cum - prev;
       }
@@ -982,6 +1004,8 @@ export class OrderBookCore {
         cum === null ? null : cum.toString(),
         amount === null ? null : amount.toString(),
       );
+      // The broadcast marker of this tx (if a filler reported one) is now a real fill.
+      this.sql.exec(`DELETE FROM pending_fills WHERE tx_hash = ?`, log.txHash.toLowerCase());
       this.applyFillProgress(hash, cum, log.txHash.toLowerCase() as Hex);
     }
     return logs.length;
@@ -1141,9 +1165,116 @@ export class OrderBookCore {
           s.status === OrderStatus.Filled ? "filled" : s.status === OrderStatus.Cancelled ? "cancelled" : s.status === OrderStatus.Expired ? "expired" : "evicted";
         // A fill the log scan saw but could not size (fill-once, proportional) still names its tx.
         const tx = reason === "filled" ? this.latestFillTx(r.hash) : undefined;
+        // A fill nobody reported (no log, no receipt — another filler, an RPC with no
+        // eth_getLogs): the tombstone is the record. The lens said Filled, so a fixed
+        // anchor is fully consumed; `/orders/:hash/status` then serves status "Filled",
+        // this filledAmount, `removedAt` (when it was detected) and no txHash.
+        if (reason === "filled" && r.filled === null) {
+          const anchor = anchorOf(parseAnnounce(r.announce).order);
+          if (anchor !== null && anchor > 0n) this.sql.exec(`UPDATE orders SET filled = ? WHERE hash = ?`, anchor.toString(), r.hash);
+        }
         this.evict(r.hash, reason, tx ? { txHash: tx } : undefined);
       }
     }
+  }
+
+  // ──────────────────── POST /fills/report ────────────────────
+
+  /** The newest unexpired broadcast marker of a live order, or null. */
+  private pendingFillOf(hash: string): { txHash: string; sentAt: number } | null {
+    const row = this.sql
+      .exec<{ tx_hash: string; sent_at: number }>(
+        `SELECT tx_hash, sent_at FROM pending_fills WHERE order_hash = ? AND sent_at > ? ORDER BY sent_at DESC, tx_hash ASC LIMIT 1`,
+        hash,
+        this.deps.now() - PENDING_FILL_TTL_SECONDS,
+      )
+      .toArray()[0];
+    return row ? { txHash: row.tx_hash, sentAt: row.sent_at } : null;
+  }
+
+  /**
+   * A trusted filler reports its own fill txs (the book's RPC may serve no
+   * `eth_getLogs`, so the log scan never sees them). Body: one report or an array
+   * of at most {@link MAX_REPORTS}; a report is a tx hash string or
+   * `{ txHash, status?: "confirmed" | "pending" | "failed", orderHash? }`.
+   *
+   *   confirmed (default) — the book reads the receipt ITSELF and indexes the
+   *     Settlement's own logs through {@link applyLogs}, the very code the log scan
+   *     runs: the stored fill and its side effects are identical. Nothing the
+   *     reporter says beyond the hash is used.
+   *   pending — a broadcast marker on the live order `orderHash` (served as
+   *     `pendingFill` until the fill is indexed, the tx is reported failed, or
+   *     {@link PENDING_FILL_TTL_SECONDS} pass).
+   *   failed — the tx reverted or was dropped: its markers are cleared.
+   */
+  private async reportFills(request: Request): Promise<Response> {
+    const body = await this.readJsonBody(request);
+    if (body instanceof Response) return body;
+    const items = Array.isArray(body) ? body : [body];
+    if (items.length === 0) return json({ error: "no reports" }, 400);
+    if (items.length > MAX_REPORTS) return json({ error: `at most ${MAX_REPORTS} reports per call` }, 413);
+    const reports: Array<{ txHash: string; status: "confirmed" | "pending" | "failed"; orderHash?: string }> = [];
+    for (const it of items) {
+      const o = typeof it === "string" ? { txHash: it } : (it as Record<string, unknown> | null);
+      const tx = o?.txHash;
+      if (typeof tx !== "string" || !HASH.test(tx)) return json({ error: "txHash is not a 32-byte hash" }, 400);
+      const status = o?.status ?? "confirmed";
+      if (status !== "confirmed" && status !== "pending" && status !== "failed") return json({ error: 'status must be "confirmed", "pending" or "failed"' }, 400);
+      const oh = o?.orderHash;
+      if (oh !== undefined && (typeof oh !== "string" || !HASH.test(oh))) return json({ error: "orderHash is not a 32-byte hash" }, 400);
+      if (status === "pending" && oh === undefined) return json({ error: 'a "pending" report needs its orderHash' }, 400);
+      reports.push({ txHash: tx.toLowerCase(), status, ...(oh ? { orderHash: oh.toLowerCase() } : {}) });
+    }
+    if (!this.cfg.configured) return json({ error: "orderbook not configured (settlement / lens not deployed yet)" }, 503);
+    const results: Record<string, unknown>[] = [];
+    for (const r of reports) results.push(await this.reportOne(r));
+    return json({ results });
+  }
+
+  private async reportOne(r: { txHash: string; status: "confirmed" | "pending" | "failed"; orderHash?: string }): Promise<Record<string, unknown>> {
+    const tx = r.txHash;
+    if (r.status === "failed") {
+      this.sql.exec(`DELETE FROM pending_fills WHERE tx_hash = ?`, tx);
+      return { txHash: tx, result: "cleared" };
+    }
+    if (r.status === "pending") {
+      const oh = r.orderHash!;
+      if (!this.isLive(oh)) return { txHash: tx, orderHash: oh, result: "unknown-order" };
+      // Already indexed (the receipt beat the broadcast report): no marker.
+      if (count(this.sql, `SELECT COUNT(*) AS n FROM fills WHERE tx_hash = ?`, tx) > 0) return { txHash: tx, orderHash: oh, result: "already-indexed" };
+      this.sql.exec(`INSERT OR IGNORE INTO pending_fills (order_hash, tx_hash, sent_at) VALUES (?, ?, ?)`, oh, tx, this.deps.now());
+      const over = count(this.sql, `SELECT COUNT(*) AS n FROM pending_fills`) - MAX_PENDING_FILLS;
+      if (over > 0) this.sql.exec(`DELETE FROM pending_fills WHERE rowid IN (SELECT rowid FROM pending_fills ORDER BY sent_at ASC LIMIT ?)`, over);
+      return { txHash: tx, orderHash: oh, result: "pending" };
+    }
+    let receipt;
+    try {
+      receipt = await this.deps.chain.receipt(tx as Hex);
+    } catch (err) {
+      this.lastError = this.redact(err instanceof Error ? err.message.split("\n")[0]!.slice(0, 200) : "error");
+      return { txHash: tx, result: "rpc-error" };
+    }
+    if (!receipt) return { txHash: tx, result: "no-receipt" };
+    if (receipt.status !== "success") {
+      this.sql.exec(`DELETE FROM pending_fills WHERE tx_hash = ?`, tx);
+      return { txHash: tx, result: "reverted" };
+    }
+    // Only the Settlement's own events (and configured OCO modules'), positioned
+    // by the receipt — never the reporter's word.
+    const logs = decodeReceiptLogs(receipt.logs, this.cfg.chain.settlement, this.cfg.ocoModules).filter((l) => l.txHash.toLowerCase() === tx);
+    const fills = logs.filter((l) => l.event.kind === "filled");
+    const known = (l: ChainLog) => count(this.sql, `SELECT COUNT(*) AS n FROM fills WHERE tx_hash = ? AND log_index = ?`, tx, l.logIndex) > 0;
+    const before = fills.filter(known).length;
+    await this.applyLogs(logs);
+    this.sql.exec(`DELETE FROM pending_fills WHERE tx_hash = ?`, tx);
+    if (fills.length === 0) return { txHash: tx, result: "no-fills", events: logs.length };
+    return {
+      txHash: tx,
+      result: before === fills.length ? "known" : "indexed",
+      blockNumber: receipt.blockNumber.toString(),
+      fills: fills.map((l) => ({ orderHash: (l.event as { orderHash: Hex }).orderHash.toLowerCase(), logIndex: l.logIndex })),
+      indexed: fills.length - before,
+    };
   }
 
   private latestFillTx(hash: string): Hex | undefined {

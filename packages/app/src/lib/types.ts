@@ -1,4 +1,5 @@
 import type { TokenRef } from "./oku";
+import { rowStatus } from "./orderLifecycle";
 
 /** Which way the maker is going, always expressed against the market's BASE. */
 export type Side = "buy" | "sell";
@@ -90,7 +91,8 @@ export interface RestingOrder {
   id: string;
   marketId: string;
   side: Side;
-  type: Exclude<OrderType, "market">;
+  /** "market" = a market ticket's short Dutch auction from the filler's quote (lib/orderLifecycle). */
+  type: OrderType;
   size: number;
   filled: number;
   price: number;
@@ -134,6 +136,12 @@ export interface RestingOrder {
    * on-chain until expiry, so the row stays — labelled — until it expires.
    */
   offBook?: string;
+  /**
+   * A filler's fill transaction the book reports as SENT but not yet mined
+   * (`pendingFill` on the status / order, or a `status: "pending"` fill record).
+   * Shown as "fill submitted"; cleared when the book stops reporting it.
+   */
+  pendingFill?: { txHash: string; sentAt?: number };
 }
 
 /** One TWAP slice's order parameters, in human units. */
@@ -167,13 +175,25 @@ export interface Fill {
    * or EMPTY when the server indexes no fills (it is never made up).
    */
   simulated: boolean;
+  /** The order this entry belongs to (struct hash), when known. */
+  orderHash?: string;
+  orderType?: OrderType;
+  /**
+   * What this entry says about its order: a fill that completed it ("filled"),
+   * one that left some open ("partial"), or the order's end without (more) fill —
+   * "expired" / "cancelled" (size 0; `filledPct` says how much had filled).
+   * Absent = "filled" (simulated mock fills).
+   */
+  status?: "filled" | "partial" | "partially-filled" | "expired" | "cancelled";
+  /** The whole order's BASE size, for context. */
+  orderSize?: number;
+  /** Percent of the order filled when it ended (outcome entries). */
+  filledPct?: number;
 }
 
-export function orderStatus(o: RestingOrder): "open" | "partial" | "filling" | "soft-cancelled" | "off-book" {
-  if (o.cancelled === "soft") return "soft-cancelled";
-  if (o.offBook) return "off-book";
-  if (o.slices && o.slices.done > 0) return "filling";
-  return o.filled > 0 ? "partial" : "open";
+/** @deprecated use `rowStatus` (lib/orderLifecycle) — kept for callers that pass no clock. */
+export function orderStatus(o: RestingOrder, now: number = Date.now()) {
+  return rowStatus(o, now);
 }
 
 /** How many of a TWAP's slices are due by `now` (slice 1 is due at creation). */

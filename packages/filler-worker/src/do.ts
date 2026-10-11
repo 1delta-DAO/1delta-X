@@ -4,6 +4,7 @@ import {
   connect,
   Engine,
   fetchOrders,
+  fillReporter,
   fmtUnits,
   parseQuoteRequest,
   quoteToJson,
@@ -31,6 +32,8 @@ export interface WorkerDeps {
   makeChain(cfg: Config, rpc: { fetchFn: typeof fetch; count: () => void }): Chain;
   /** Overrides the book transport (service binding / ORDERBOOK_URL). */
   fetchBook?: (url: string, init?: RequestInit) => Promise<Response>;
+  /** Overrides the fill-report timeout (default beta-filler REPORT_TIMEOUT_MS, 3 s). */
+  reportTimeoutMs?: number;
   /** Overrides the webhook transport. */
   fetchAlert?: (url: string, init: RequestInit) => Promise<Response>;
   now(): number;
@@ -237,8 +240,29 @@ export class FillerDO extends DurableObject<Env> {
     return Engine.create({ cfg, chain, store: this.store, log: this.log, now: () => deps.now(), onEvent: (e) => this.onEvent(e) });
   }
 
-  private onEvent(e: EngineEvent): void {
+  private async onEvent(e: EngineEvent): Promise<void> {
     if (e.type === "resolved") recordResolution(this.sql, e.resolution, deps.now(), this.wcfg?.maxFillRows ?? 20_000);
+    await this.reportToBook(e);
+  }
+
+  /**
+   * Tell the orderbook about our fill txs (`POST /fills/report`, beta-filler
+   * bookReport.ts): broadcast → "pending", success receipt → "confirmed" (the book
+   * re-reads the receipt itself and indexes the fill — its RPC serves no
+   * eth_getLogs), revert/drop → "failed". Only with ORDERBOOK_BINDING_KEY (the book
+   * 403s without it). Best effort, bounded at 3 s, never throws: a tick never
+   * fails or stalls on it.
+   */
+  private async reportToBook(e: EngineEvent): Promise<void> {
+    const key = this.env.ORDERBOOK_BINDING_KEY;
+    const wcfg = this.wcfg;
+    if (!key || !wcfg || (e.type !== "sent" && e.type !== "resolved")) return;
+    try {
+      const t = this.bookTransport(wcfg);
+      await fillReporter({ base: t.base, fetch: t.doFetch, bindingKey: key, headers: t.headers, log: this.log, ...(deps.reportTimeoutMs !== undefined ? { timeoutMs: deps.reportTimeoutMs } : {}) })(e);
+    } catch (err) {
+      this.log(`book report: ${errMsg(err)}`);
+    }
   }
 
   private alerter(ws: WorkerState): Alerter | undefined {

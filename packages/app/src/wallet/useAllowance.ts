@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useReducer, useState } from "react";
 import { createPublicClient, createWalletClient, custom, erc20Abi, type Address } from "viem";
 
 import { chainById } from "../config/chains";
 import { readFundingState, userTxGas, verifyDeployment, type Reader } from "../lib/chain";
 import { fundingCalls, planFunding, revokeCalls, type Call, type FundingState, type WrapSource } from "../lib/funding";
+import { IDLE, inFlight, isRejection, runTx, txReducer, type TxState } from "../lib/txFlow";
 import type { EIP1193Provider } from "./eip6963";
 
 export interface AllowanceArgs {
@@ -34,6 +35,8 @@ export interface AllowanceState {
   mismatch: string | null;
   busy: boolean;
   error: string | null;
+  /** The transaction in flight (or the last one's end): wallet → submitted → confirming → confirmed / failed. */
+  tx: TxState;
   /**
    * Send whatever `planFunding` says is missing for an order of `amount` wei
    * living `ttlSeconds`: the exact ERC-20 approval to Permit3 and the exact,
@@ -63,6 +66,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  const [tx, dispatchTx] = useReducer(txReducer, IDLE);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -96,6 +100,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
   // leaves its error describing something no longer on screen.
   useEffect(() => {
     setError(null);
+    dispatchTx({ type: "reset" });
   }, [token, permit3, settlement, chainId]);
 
   const wrapping = args.autoWrap ?? null;
@@ -115,6 +120,8 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
         exec: (call: Call) => Promise<void>;
         reread: () => Promise<FundingState>;
         nativeBalance: () => Promise<bigint>;
+        /** How many transactions the whole flow sends (for "step k of n"). */
+        setTotal: (n: number) => void;
       }) => Promise<Call[]> | Call[],
     ) => {
       if (!provider || !owner || !token || !permit3 || !settlement) return;
@@ -126,6 +133,13 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
       const publicClient = createPublicClient({ chain: config.chain, transport: custom(provider) });
       const wallet = createWalletClient({ account: owner, chain: config.chain, transport: custom(provider) });
       const reader = publicClient as unknown as Reader;
+      // Failures the status line already shows (tx state) are not repeated as `error`.
+      const shown = new Set<unknown>();
+      const run: typeof runTx = (d, m, i) =>
+        runTx(d, m, i).catch((e: unknown) => {
+          shown.add(e);
+          throw e;
+        });
 
       try {
         // Re-verified and re-read at click time: the plan is built from what
@@ -133,28 +147,40 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
         await verifyDeployment(reader, { settlement, permit3 });
         const reread = () => readFundingState(reader, { token, owner, permit3, settlement });
         let state = await reread();
+        let step = 0;
+        let total = 1;
+        const io = {
+          wait: (hash: `0x${string}`) => publicClient.waitForTransactionReceipt({ hash }),
+          blockNumber: () => publicClient.getBlockNumber(),
+        };
         const exec = async (call: Call) => {
-          const tx = { to: call.to, data: call.data, chain: config.chain, account: owner, ...(call.value ? { value: call.value } : {}), ...(await userTxGas(publicClient, config.chain.id)) };
-          let hash: `0x${string}`;
+          const txReq = { to: call.to, data: call.data, chain: config.chain, account: owner, ...(call.value ? { value: call.value } : {}), ...(await userTxGas(publicClient, config.chain.id)) };
+          step += 1;
+          if (step > total) total = step;
+          const meta = { label: call.label ?? "Transaction", step, of: total };
           try {
-            hash = await wallet.sendTransaction(tx);
+            await run(dispatchTx, meta, { ...io, send: () => wallet.sendTransaction(txReq) });
           } catch (e) {
             // Some ERC-20s refuse to move a non-zero allowance straight to
             // another non-zero value; reset to zero and retry, ERC-20 leg only
-            // (a wrap is a payable call to the same token: never retried).
-            if (call.to !== token || call.value || state.erc20Allowance === 0n) throw e;
-            const reset = await wallet.writeContract({
-              address: token,
-              abi: erc20Abi,
-              functionName: "approve",
-              args: [permit3, 0n],
-              ...(await userTxGas(publicClient, config.chain.id)),
+            // (a wrap is a payable call to the same token: never retried; a
+            // prompt the user rejected is not retried either).
+            if (call.to !== token || call.value || state.erc20Allowance === 0n || isRejection(e)) throw e;
+            total += 1;
+            await run(dispatchTx, { label: "Reset the approval to 0", step, of: total }, {
+              ...io,
+              send: async () =>
+                wallet.writeContract({
+                  address: token,
+                  abi: erc20Abi,
+                  functionName: "approve",
+                  args: [permit3, 0n],
+                  ...(await userTxGas(publicClient, config.chain.id)),
+                }),
             });
-            await publicClient.waitForTransactionReceipt({ hash: reset });
-            hash = await wallet.sendTransaction(tx);
+            step += 1;
+            await run(dispatchTx, { ...meta, step, of: total }, { ...io, send: () => wallet.sendTransaction(txReq) });
           }
-          const receipt = await publicClient.waitForTransactionReceipt({ hash });
-          if (receipt.status !== "success") throw new Error("transaction reverted");
         };
         const calls = await build({
           state,
@@ -162,12 +188,16 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
           exec,
           reread: async () => (state = await reread()),
           nativeBalance: () => publicClient.getBalance({ address: owner }),
+          setTotal: (n) => {
+            total = Math.max(n, step);
+          },
         });
+        total = Math.max(total, step + calls.length);
         for (const call of calls) await exec(call);
       } catch (e) {
         // A declined prompt is an ordinary outcome: report it and leave the
         // reading at whatever the chain actually says.
-        setError(message(e));
+        if (!shown.has(e)) setError(message(e));
       } finally {
         refresh();
         setBusy(false);
@@ -179,7 +209,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
   const nativeSymbol = wrapping?.nativeSymbol ?? null;
   const fund = useCallback(
     (amount: bigint, ttlSeconds: number) =>
-      send(async ({ state, reader, exec, reread, nativeBalance: readNative }) => {
+      send(async ({ state, reader, exec, reread, nativeBalance: readNative, setTotal }) => {
         const targets = { token: token!, permit3: permit3!, settlement: settlement! };
         // The wallet's balances at click time: a wrap is sized from what the chain
         // says now, never from a render that may be a block old.
@@ -193,6 +223,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
         };
         let plan = planFunding(state, amount, ttlSeconds, Math.floor(Date.now() / 1000), await wrapSource());
         if (plan.blocked) throw new Error(plan.blocked);
+        setTotal(plan.steps.length);
         if (plan.steps[0]?.kind === "wrap") {
           await exec(fundingCalls([plan.steps[0]], targets)[0]!);
           onBalancesChanged?.();
@@ -212,5 +243,5 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
     [send, token, permit3, settlement],
   );
 
-  return { funding, mismatch, busy, error, fund, revoke, refresh };
+  return { funding, mismatch, busy: busy || inFlight(tx), error, tx, fund, revoke, refresh };
 }

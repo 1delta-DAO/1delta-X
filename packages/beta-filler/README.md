@@ -502,6 +502,7 @@ Common:
 | `PRIVATE_KEY` | — | the hot wallet / operator EOA (RBTC for gas; inventory for the inventory strategy) |
 | `SETTLEMENT`, `PERMIT3`, `LENS` | — | core deployment |
 | `ORDERBOOK_URL` | — | the worker book (`workers.dev` URL) or the app's `/api/book` |
+| `ORDERBOOK_BINDING_KEY` | — | the book's `BINDING_KEY` secret (CLI only; the Worker has its own): when set, fill txs are reported to `ORDERBOOK_URL/fills/report` — broadcast → `pending`, success → `confirmed`, revert / drop → `failed` (`src/bookReport.ts`; best effort, 3 s bound). Needed for our fills to appear in the book's `GET /fills` while its RPC serves no `eth_getLogs` |
 | `RPC_URL_SECRET` | — | a keyed Rootstock RPC; wins over `RPC_URL` (on the Worker a secret, so the `RPC_URL` var line can stay) |
 | `RPC_URL` | `https://public-node.rsk.co` | Rootstock RPC (fallback) |
 | `CHAIN_ID` | `30` | the chain the RPC must report (Rootstock mainnet); Sushi quotes are requested for it |

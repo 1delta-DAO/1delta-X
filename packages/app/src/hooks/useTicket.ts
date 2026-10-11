@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { defaultChain, marketById, marketFor, marketsOn, pairsWith } from "../config/markets";
 import { clearingPrice } from "../lib/ladder";
+import { DEFAULT_EXPIRY, type ExpiryId } from "../lib/plan";
 import { priceSizingAmount } from "../lib/ticket";
 import type { Level, OrderType, Side } from "../lib/types";
 
@@ -35,6 +36,8 @@ export function useTicket(deps: TicketDeps) {
   const [priceTouched, setPriceTouched] = useState(false);
   const [slices, setSlices] = useState(12);
   const [everyMin, setEveryMin] = useState(30);
+  /** A limit order's life (lib/plan EXPIRY_OPTIONS); the Permit3 grant follows it. */
+  const [expiry, setExpiry] = useState<ExpiryId>(DEFAULT_EXPIRY);
 
   const market = marketById(marketId);
   const payToken = side === "sell" ? market.base : market.quote;
@@ -163,6 +166,8 @@ export function useTicket(deps: TicketDeps) {
     sizedTo,
     slices,
     everyMin,
+    expiry,
+    setExpiry,
     setChain,
     setMode,
     setAmount,

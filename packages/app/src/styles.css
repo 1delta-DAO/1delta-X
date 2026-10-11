@@ -325,6 +325,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .sr[data-k="UNI"] { color: var(--uni); }
 .sr[data-k="SUSHI"] { color: var(--sushi); }
 .sr[data-k="LMT"] { color: var(--lmt); }
+.sr[data-k="MIX"] { color: var(--dim); }
 
 .lvl.hit { background: var(--raise); }
 .lvl.hit::after {
@@ -430,6 +431,20 @@ td.dim { color: var(--dim); }
 .st[data-v="open"] { color: var(--faint); }
 .st[data-v="partial"] { color: var(--orange); }
 .st[data-v="filling"] { color: var(--lime); }
+.st[data-v="filled"] { color: var(--lime); }
+.st[data-v="fill-pending"] { color: var(--lime); }
+.st[data-v="expired"], .st[data-v="cancelled"] { color: var(--faint); }
+.st[data-v="partially-filled"] { color: var(--orange); }
+.st a, .txl a, a.txl { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+
+/* one-line transaction / order state: "Submitted · 0xab…cd ↗" */
+.txs { font-family: var(--mono); font-size: 11px; color: var(--dim); line-height: 1.5; display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+.txs[data-v="confirmed"], .txs[data-v="filled"] { color: var(--lime); }
+.txs[data-v="failed"], .txs[data-v="rejected"] { color: var(--ask); }
+.txs[data-v="expired"], .txs[data-v="cancelled"] { color: var(--faint); }
+.txs .step { color: var(--faint); }
+.txs a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.txs button { font: inherit; background: none; border: 0; color: var(--lime); text-decoration: underline; cursor: pointer; padding: 0; }
 
 .x {
   border: 1px solid var(--line); background: none; color: var(--dim); border-radius: 999px;
@@ -654,3 +669,12 @@ main.reading .md .mdquote { margin-bottom: 26px; }
   .qmark { padding-inline: 16px; gap: 10px; }
   .qmark .ql { font-size: 11px; }
 }
+
+/* limit-order expiry selector */
+.expiry { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.expiry .lbl { margin-right: 4px; }
+.expiry button {
+  border: 1px solid var(--line); background: none; color: var(--dim); border-radius: 999px;
+  font-family: var(--mono); font-size: 11px; padding: 4px 11px; cursor: pointer;
+}
+.expiry button[aria-checked="true"] { border-color: var(--ink); color: var(--ink); }

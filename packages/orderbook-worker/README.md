@@ -27,6 +27,14 @@ code generator.
 > and a `lastError` naming `RPC_URL_SECRET`, the lens re-check falls back from
 > `REVALIDATE_SECONDS` (300 s) to 60 s (it is then the only way fills and cancels reach
 > the book), and the filler worker's monitor alerts (`book:logs-unsupported`).
+>
+> **Partial cover without such an RPC: receipt-reported fills.** The public node does
+> serve `eth_getTransactionReceipt`. The beta filler reports each of its own fill txs
+> to `POST /fills/report` (binding-key gated, see below); the book reads the receipt
+> itself and indexes the Settlement's `OrderFilled` logs through the same code the
+> log scan runs. Fills by anyone else still reach the book only through the lens
+> re-check (tombstoned `Filled`, no `txHash`, no `/fills` row — see *Fills nobody
+> reported*). On-chain cancels still need `eth_getLogs`.
 
 ## Routes
 
@@ -36,10 +44,11 @@ Same semantics and status codes as `orderbook-server` where it has the route.
 |---|---|---|
 | POST | `/orders` | body `{order, sig}` (SDK `Order`, bigints as decimal strings — the SDK's strict `orderFromJson`). `202 {orderHash}` · `202 {orderHash, duplicate: true}` for a live order · `422 {error}` (admission, Layer 1, Layer 2, soft-cancelled) · `503` capacity / verification unavailable / not configured · `400` bad JSON · `413` · `415` non-JSON · `429` |
 | POST | `/cancels` | body `{cancel, sig}`. `202 {evicted, requested}` · `403` signature is not the named maker's · `503` |
-| GET | `/orders` | `{orders: [{orderHash, order, sig, addedAt, filledAmount, state}], total, nextCursor?}`. Filters `maker`, `token`, `tokenIn`, `tokenOut`, `side`, `fillableOnly`, `expiresAfter`, `includeExpired`; `limit` (≤500) and keyset `cursor` (`<addedAt>~<hash>`, newest first; also in `x-next-cursor`). An unsupported filter is a `400`, never silently ignored. |
+| GET | `/orders` | `{orders: [{orderHash, order, sig, addedAt, filledAmount, pendingFill, state}], total, nextCursor?}`. `pendingFill` is `{txHash, sentAt}` (sentAt unix seconds, the book's clock at the report) while a trusted filler has reported a fill tx for the order as BROADCAST and it is not yet indexed / failed / older than 10 min; else `null`. Filters `maker`, `token`, `tokenIn`, `tokenOut`, `side`, `fillableOnly`, `expiresAfter`, `includeExpired`; `limit` (≤500) and keyset `cursor` (`<addedAt>~<hash>`, newest first; also in `x-next-cursor`). An unsupported filter is a `400`, never silently ignored. |
 | GET | `/orders/:hash` | the one live order in the same shape · `404` |
-| GET | `/orders/:hash/status` | `{live: true, …OrderSummary}`, or the tombstone `{live: false, …lastSummary, reason, removedAt, txHash?}` with `reason` ∈ `filled` `cancelled` `soft-cancelled` `expired` `evicted` `displaced` · `404` |
-| GET | `/fills` | `?maker` `solver` `orderHash` `fromBlock` `limit` `cursor` → `{fills: [{orderHash, maker, solver, blockNumber, txHash, logIndex, at, cumulative, amount, order?}], total, nextCursor?, coverage}`, newest first. `order` is the signed order when this node held it. |
+| GET | `/orders/:hash/status` | `{live: true, …OrderSummary, pendingFill}` (`pendingFill` as on `/orders`), or the tombstone `{live: false, …lastSummary, reason, removedAt, txHash?}` with `reason` ∈ `filled` `cancelled` `soft-cancelled` `expired` `evicted` `displaced` · `404` |
+| GET | `/fills` | `?maker` `solver` `orderHash` `fromBlock` `limit` `cursor` → `{fills: [{orderHash, maker, solver, blockNumber, txHash, logIndex, at, cumulative, amount, order?}], total, nextCursor?, coverage}`, newest first. `order` is the signed order when this node held it. Every row is a MINED fill with a real `txHash` (from `eth_getLogs` or a reported receipt — the two produce identical rows); broadcast-only fills are `pendingFill` on the order, never a `/fills` row. |
+| POST | `/fills/report` | **trusted callers only** (`x-orderbook-binding-key` = `BINDING_KEY`, constant-time; else `403`). Body: one report or an array of ≤ 20 (`413` beyond); a report is a tx-hash string or `{txHash, status?, orderHash?}`, `status` ∈ `"confirmed"` (default) `"pending"` `"failed"`. → `200 {results: [{txHash, result, …}]}` in body order — see *Receipt-reported fills* |
 | GET | `/health` | config, counts, fill coverage, `rpc` (which binding the URL came from: `RPC_URL_SECRET` / `RPC_URL` — never the URL), `alarmIntervalSeconds`, `revalidateSeconds` (effective), `lastAlarm`, **`logsUnsupported`**, `logs` (`{ok, unsupported, span, lastOkAt, lastErrorAt, lastError}`), `lastError` (RPC URL redacted) |
 
 The entry worker **buffers** every request body (at most `MAX_BODY_BYTES`; larger is
@@ -75,6 +84,7 @@ One `OrderBookDO` per chain (`idFromName("chain:<CHAIN_ID>")`), SQLite storage
 | `graves` | tombstones: last summary, reason, tx hash, announce; TTL `TOMBSTONE_TTL_SECONDS`, cap `MAX_TOMBSTONES` |
 | `soft_cancels` | `(hash, maker)` soft-cancel tombstones (pending ones capped per maker, dropped first) |
 | `fills` | the fill index, keyed `(txHash, logIndex)`; cap `MAX_FILLS` (oldest dropped, reported in `coverage.dropped`) |
+| `pending_fills` | broadcast markers `(orderHash, txHash, sentAt)` from `POST /fills/report` `"pending"`; dropped when the tx is indexed, reported failed / reverted, the order leaves the book, or after 600 s; cap 500 |
 | `meta` | log cursor, first scanned block, the adaptive log span, logs ok / error / unsupported, last alarm / error |
 | `buckets` | rate-limit token buckets `ip:<addr>` / `mk:<maker>` |
 | `billed` | orders / cancels already charged to their maker (indexed by `at` for its prune) |
@@ -149,6 +159,38 @@ tombstone still names the indexed tx. A fill of an order already tombstoned
 (e.g. soft-cancelled, then filled by someone holding the signature) updates the
 tombstone. Fills of orders this node never held are indexed too (`/fills?maker=`
 covers the maker's whole history from the first scanned block).
+
+### Receipt-reported fills (`POST /fills/report`)
+
+For an RPC without `eth_getLogs`. The beta filler (`packages/beta-filler`
+`bookReport.ts`, wired in `filler-worker` and the Node CLI) reports its own fill
+txs; the entry worker checks the binding key (`isTrustedCaller`, constant-time) and
+tells the DO in an internal header it sets from scratch (`x-ob-trusted`), so a
+client cannot claim it.
+
+| `status` | the book does | `result` values |
+|---|---|---|
+| `"confirmed"` (default; a bare hash string) | reads `eth_getTransactionReceipt` itself; requires `status: success`; keeps ONLY logs emitted by the configured Settlement (and `GroupClaimed` from `OCO_MODULES`) — a look-alike `OrderFilled` from any other contract is dropped, exactly as the `eth_getLogs` address filter drops it — and runs them through `applyLogs`, the log scan's own code: same `filled(hash)` reads at the block and `block − 1`, same block timestamp, same tombstone / `filledAmount` / dirty side effects. Nothing the caller sends beyond the hash is used. Clears the tx's pending markers. | `indexed` (new rows, `{blockNumber, fills: [{orderHash, logIndex}], indexed}`) · `known` (already indexed, `indexed: 0`) · `no-fills` (success, but no Settlement fill log; `events` = other book events applied) · `reverted` · `no-receipt` (not mined / unknown to the book's RPC) · `rpc-error` |
+| `"pending"` + `orderHash` | stores a broadcast marker on the LIVE order (served as `pendingFill: {txHash, sentAt}`) | `pending` · `unknown-order` (not live here) · `already-indexed` |
+| `"failed"` | deletes the tx's markers (revert / drop) | `cleared` |
+
+Idempotent on `(txHash, logIndex)` across re-reports and the log scan. When two
+txs fill one order in the same block, the first row stored carries the block's
+delta and the other `amount: null`, whichever path stored them, so the total is not
+counted twice. A `400` is a malformed body (hash shape, unknown `status`,
+`"pending"` without `orderHash`); `503` before the contracts are configured.
+
+### Fills nobody reported
+
+A fill by a filler that does not report, on an RPC without `eth_getLogs`, is seen
+only by the lens re-check (`Filled`). The order is tombstoned `reason: "filled"`
+and, when the book had no progress for it, its `filledAmount` is set to the fixed
+anchor (the lens said fully filled). `/orders/:hash/status` then serves
+`{live: false, status: "Filled", reason: "filled", filledAmount, removedAt}` with
+no `txHash`; `removedAt` is when the book detected it. No `/fills` row is made:
+`/fills` serves only fills that have a tx hash and block, so its row shape and
+cursor stay the same. A partial fill by someone else shows only as a smaller
+`fillableAmount` on the live order.
 
 ### Client IP and spoofing
 

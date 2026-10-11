@@ -22,6 +22,17 @@ function safeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/**
+ * The caller presented the `BINDING_KEY` secret (constant-time compare) — the
+ * app's Pages worker or the filler, over the service binding. False when no key is
+ * configured. Gates `POST /fills/report`.
+ */
+export function isTrustedCaller(request: Request, env: Pick<Env, "BINDING_KEY">): boolean {
+  const key = env.BINDING_KEY?.trim();
+  const presented = request.headers.get(BINDING_KEY_HEADER);
+  return !!key && presented !== null && safeEqual(presented, key);
+}
+
 const IP = /^[0-9a-fA-F:.]{2,45}$/;
 
 /**

@@ -1,18 +1,19 @@
 import { Fragment, useMemo } from "react";
 
 import { fmt, fmtAmt, fmtPrice } from "../lib/format";
+import { BUCKETS_MAX, BUCKETS_TARGET, bucketWidthBps, bucketize, sourceTag, type BookRow } from "../lib/bookRows";
 import { refine, restingLabel, topOfBook, type RestingPreview } from "../lib/ladder";
 import { markerIndex } from "../lib/ticketView";
 import type { VenueStatus } from "../hooks/usePoolBook";
 import { SOURCE_NAME, SOURCE_VAR, type Level, type Side, type Venue } from "../lib/types";
 
-/** Rungs shown per side before the ladder is cut off. */
-const ROWS = 14;
+/** Rows shown per side before the ladder is cut off (price buckets, lib/bookRows). */
+const ROWS = BUCKETS_TARGET;
 /** Hard cap when the ladder is stretched to keep a far-out preview visible. */
-const MAX_ROWS = 26;
+const MAX_ROWS = BUCKETS_MAX;
 
 interface Row {
-  level: Level;
+  row: BookRow;
   cum: number;
   preview?: RestingPreview;
 }
@@ -57,7 +58,7 @@ export interface BookMarker {
 function markersAt(rows: Row[], m: BookMarker | null, side: "bid" | "ask"): Map<number, Array<"quote" | "min">> {
   const at = new Map<number, Array<"quote" | "min">>();
   if (!m || m.side !== side) return at;
-  const prices = rows.map((r) => r.level.price);
+  const prices = rows.map((r) => r.row.price);
   const descending = side === "bid";
   const put = (i: number, k: "quote" | "min") => at.set(i, [...(at.get(i) ?? []), k]);
   put(markerIndex(prices, m.price, descending), "quote");
@@ -85,35 +86,36 @@ function QuoteLine({ m, kind, tick }: { m: BookMarker; kind: "quote" | "min"; ti
   );
 }
 
-function assemble(levels: Level[], preview: RestingPreview | null, descending: boolean) {
-  const rows: Row[] = levels.map((level) => ({ level, cum: 0 }));
+function previewRow(p: RestingPreview): BookRow {
+  return { kind: "lmt", price: p.price, size: p.size, source: "LMT", sources: ["LMT"], pick: p.price, best: p.price, worst: p.price, slices: 1, parts: [] };
+}
+
+/** Exported for tests: the displayed rows of one side, with cumulative depth and the cut. */
+export function assemble(buckets: BookRow[], preview: RestingPreview | null, descending: boolean, rowsTarget = ROWS, rowsMax = MAX_ROWS) {
+  const rows: Row[] = buckets.map((row) => ({ row, cum: 0 }));
   let previewIdx = -1;
 
   if (preview) {
     // Merge before totalling so the preview's own cumulative is right and every
     // rung past it reflects the depth it adds.
     let i = 0;
-    while (i < rows.length && (descending ? rows[i].level.price > preview.price : rows[i].level.price < preview.price)) i++;
+    while (i < rows.length && (descending ? rows[i]!.row.price > preview.price : rows[i]!.row.price < preview.price)) i++;
     previewIdx = i;
-    rows.splice(i, 0, {
-      level: { price: preview.price, size: preview.size, source: "LMT" },
-      cum: 0,
-      preview,
-    });
+    rows.splice(i, 0, { row: previewRow(preview), cum: 0, preview });
   }
 
   let cum = 0;
   let ownIdx = -1;
   for (let i = 0; i < rows.length; i++) {
-    cum += rows[i].level.size;
-    rows[i].cum = cum;
-    if ((rows[i].level.mine ?? 0) > 0) ownIdx = i;
+    cum += rows[i]!.row.size;
+    rows[i]!.cum = cum;
+    if ((rows[i]!.row.mine ?? 0) > 0) ownIdx = i;
   }
 
   // Stretch past the default depth for two things the ladder must never hide:
   // the order being composed, and size you already have resting. +2 rather than
   // +1 because both usually sit next to the rung they joined.
-  const cut = Math.min(Math.max(ROWS, previewIdx + 2, ownIdx + 2), MAX_ROWS);
+  const cut = Math.min(Math.max(rowsTarget, previewIdx + 2, ownIdx + 2), rowsMax);
   return { rows: rows.slice(0, cut), total: cum, hidden: Math.max(0, rows.length - cut) };
 }
 
@@ -151,27 +153,34 @@ function LadderRow({
     );
   }
 
-  const own = row.level.mine ?? 0;
-  const level = row.level;
-  // The tooltip names the exact pool this size is in — an aggregated ladder is
-  // only honest if you can still trace a rung back to where it came from.
-  const origin = level.pool
-    ? `${SOURCE_NAME[level.source]} ${(level.feeBps ?? 0) / 10_000}% · ${level.pool}`
-    : SOURCE_NAME[level.source];
+  const r = row.row;
+  const own = r.mine ?? 0;
+  // The tooltip names the exact pools this size is in — an aggregated ladder is
+  // only honest if you can still trace a row back to where it came from.
+  const origin =
+    r.kind === "lmt"
+      ? SOURCE_NAME.LMT
+      : r.parts
+          .map((p) => `${SOURCE_NAME[p.source]}${p.pool ? ` ${(p.feeBps ?? 0) / 10_000}% ${p.pool.slice(0, 6)}…${p.pool.slice(-4)}` : ""}: ${fmtAmt(p.size)}`)
+          .join(" · ");
+  const range =
+    r.kind === "bucket" && r.slices > 1
+      ? ` · avg of ${r.slices} slices ${fmtPrice(r.best, tick)}–${fmtPrice(r.worst, tick)}`
+      : "";
   return (
     <button
       type="button"
       className={`lvl${own > 0 ? " owned" : ""}`}
       data-side={rung}
-      title={`${origin} · click to set limit price`}
-      onClick={() => onPick(row.level.price, rung)}
+      title={`${origin}${range} · click to set limit ${fmtPrice(r.pick, tick)}${r.kind === "bucket" && r.slices > 1 ? " (fills through this row)" : ""}`}
+      onClick={() => onPick(r.pick, rung)}
     >
       <span className="dep" style={{ width }} />
-      <span className="px">{fmtPrice(row.level.price, tick)}</span>
-      <span className="sz">{fmtAmt(row.level.size)}</span>
+      <span className="px">{fmtPrice(r.price, tick)}</span>
+      <span className="sz">{fmtAmt(r.size)}</span>
       <span className="cum">{fmtAmt(row.cum)}</span>
-      <span className="sr" data-k={row.level.source}>
-        {own > 0 ? "LMT ·YOU" : row.level.source}
+      <span className="sr" data-k={r.sources.length > 1 ? "MIX" : r.source}>
+        {own > 0 ? "LMT ·YOU" : sourceTag(r)}
       </span>
     </button>
   );
@@ -191,10 +200,16 @@ export function OrderBook(props: OrderBookProps) {
     // `refine`), not one row per tick range: a sparse pool's single range spans
     // percent, and its AVERAGE drawn as one row sat far below the touch and the
     // quote line. Signed limit orders are flat rungs and pass through unchanged.
-    const askSide = assemble(refine(asks, false), preview?.side === "ask" ? preview : null, false);
-    const bidSide = assemble(refine(bids, true), preview?.side === "bid" ? preview : null, true);
-    return { askSide, bidSide, maxCum: Math.max(askSide.total, bidSide.total, 1) };
-  }, [asks, bids, preview]);
+    // Then grouped into ~8 price buckets per side (lib/bookRows): one width for
+    // both sides, LMT rungs kept as their own rows.
+    const a = refine(asks, false);
+    const b = refine(bids, true);
+    const mid0 = topOfBook(bids, asks).mid;
+    const width = bucketWidthBps([a, b], mid0 ? (10 ** -tick / mid0) * 10_000 : 0);
+    const askSide = assemble(bucketize(a, false, width), preview?.side === "ask" ? preview : null, false);
+    const bidSide = assemble(bucketize(b, true, width), preview?.side === "bid" ? preview : null, true);
+    return { askSide, bidSide, width, maxCum: Math.max(askSide.total, bidSide.total, 1) };
+  }, [asks, bids, preview, tick]);
 
   // The TOUCH: marginal prices (a pool rung's `start`), not the rung averages shown
   // per row — on a sparse pool those sit percent away from where the next unit trades.
@@ -259,7 +274,7 @@ export function OrderBook(props: OrderBookProps) {
               .map((row, i) => ({ row, i }))
               .reverse()
               .map(({ row, i }) => (
-                <Fragment key={`a${row.level.price}-${row.level.source}-${i}`}>
+                <Fragment key={`a${row.row.price}-${row.row.kind}-${i}`}>
                   <LadderRow row={row} rung="ask" maxCum={view.maxCum} tick={tick} onPick={onPickPrice} />
                   {(askMarks.get(i) ?? []).slice().reverse().map((k) => (
                     <QuoteLine key={`am${i}-${k}`} m={marker!} kind={k} tick={tick} />
@@ -295,7 +310,7 @@ export function OrderBook(props: OrderBookProps) {
 
           <div>
             {view.bidSide.rows.map((row, i) => (
-              <Fragment key={`b${row.level.price}-${row.level.source}-${i}`}>
+              <Fragment key={`b${row.row.price}-${row.row.kind}-${i}`}>
                 {(bidMarks.get(i) ?? []).map((k) => (
                   <QuoteLine key={`bm${i}-${k}`} m={marker!} kind={k} tick={tick} />
                 ))}
@@ -331,17 +346,19 @@ export function OrderBook(props: OrderBookProps) {
             </span>
             {view.bidSide.hidden + view.askSide.hidden > 0 && (
               <span style={{ color: "var(--faint)" }}>
-                {view.bidSide.hidden + view.askSide.hidden} deeper rungs priced but not shown
+                {view.bidSide.hidden + view.askSide.hidden} deeper rows priced but not shown · rows group{" "}
+                {view.width} bps
               </span>
             )}
           </div>
           <p className="bknote">
             A limit order does not have to cross. Name a price the book has not reached and the part that does
-            not fill <b>rests where you put it</b> — often inside the spread, marked in the ladder above. Each
-            pool rung is one range between initialized ticks, priced at what it actually costs to consume, so
-            a concentrated position shows up as the cliff it is. Rungs from every venue sit in one sorted
-            ladder and each keeps its own tag, so the best bid and the best ask can be in different pools —
-            hover a row to see exactly which. <b>LMT</b> rungs are signed orders a filler can take at any time.
+            not fill <b>rests where you put it</b> — often inside the spread, marked in the ladder above. Pool
+            depth is priced on each pool&rsquo;s curve and grouped into price bands of {view.width} bps from the
+            touch: a row&rsquo;s price is what consuming the whole band costs on average, its size and cumulative
+            are exact sums, and a band filled from several pools says so (UNI+SUSHI) — hover a row for the
+            per-pool split. Clicking a band sets your limit at its far edge, so the order fills through it.{" "}
+            <b>LMT</b> rows are signed orders a filler can take at any time, each at its own price.
           </p>
         </>
       )}
