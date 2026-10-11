@@ -41,8 +41,9 @@ export interface SushiConfig {
   router: Address;
   timeoutMs: number;
   /**
-   * Pinned snwap executors (Sushi's RouteProcessor). Empty = not pinned (warned at
-   * start-up); when set, any other executor is refused.
+   * Pinned snwap executors (Sushi's RouteProcessor). Default on chain 30:
+   * {@link SUSHI_SNWAP_EXECUTOR_ROOTSTOCK}. Empty (`SUSHI_EXECUTORS=""`) = not pinned
+   * (warned at start-up); when set, any other executor is refused.
    */
   executors: Address[];
   /** At most this many Sushi API calls per sweep over the book. */
@@ -51,6 +52,8 @@ export interface SushiConfig {
 
 /** Sushi's RedSnwapper on Rootstock (chain 30) — `tx.to` of every swap/v7 response. */
 export const SUSHI_RED_SNWAPPER_ROOTSTOCK = "0xAC4c6e212A361c968F1725b4d055b47E63F80b75" as Address;
+/** The snwap executor (Sushi's RouteProcessor) every Rootstock swap/v7 route named (re-checked 2026-10-11): the default `SUSHI_EXECUTORS` pin on chain 30. */
+export const SUSHI_SNWAP_EXECUTOR_ROOTSTOCK = "0xC10eE9031F2a0B84766A86B55a8D90F357910fb4" as Address;
 
 export interface SushiRequest {
   chainId: number;

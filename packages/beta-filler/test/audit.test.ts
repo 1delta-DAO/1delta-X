@@ -613,7 +613,8 @@ describe("L-1: decodeSnwap / validateSushiRoute strictness", () => {
 
   it("init warns when Sushi is on and no executor is pinned", async () => {
     const { chain } = fakeChain({ simGas: 200_000n, receipt: "success" });
-    const { rf, logs } = routeFiller({ SUSHI_ENABLED: "1" }, chain);
+    // Pinned by default on chain 30 (2026-10-11); "" explicitly unpins.
+    const { rf, logs } = routeFiller({ SUSHI_ENABLED: "1", SUSHI_EXECUTORS: "" }, chain);
     await rf.init();
     expect(logs.some((l) => /SUSHI_EXECUTORS is empty/.test(l))).toBe(true);
     const pinned = routeFiller({ SUSHI_ENABLED: "1", SUSHI_EXECUTORS: EVIL }, fakeChain({ simGas: 1n, receipt: "success" }).chain);

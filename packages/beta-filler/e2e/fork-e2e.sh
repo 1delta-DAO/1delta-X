@@ -20,6 +20,11 @@
 #        d. sushi   — pull, 97%, Oku routes off (ROUTE_OKU_PULL=0): the live Sushi API
 #                     route (RedSnwapper calldata) runs through the sandbox
 #                     (SKIP_SUSHI=1 skips it; it needs api.sushi.com and a fresh fork)
+#        e. nordstern — 100 USDRIF → USDT0 pull, Oku and Sushi off: the live Nordstern
+#                     API route (AggregatorGuard calldata, no amount patch) runs through
+#                     the sandbox; prints the API's toAmount, the haircut figure, Oku's
+#                     QuoterV2 figure and what the route DELIVERED (maker + operator).
+#                     (SKIP_NORDSTERN=1 skips it; needs api.nordstern.finance)
 #   3. feeds each order to `beta-filler fill-json` (bypassing the orderbook) in
 #      LIVE mode, route strategy only;
 #   4. asserts each maker received at least the owed USDT0 (and c. nothing).
@@ -87,8 +92,9 @@ run_case() { # name mode price_pct expect(filled|skipped) maker_key_index [extra
   cast rpc anvil_setBalance "$maker" 0x3635C9ADC5DEA00000 --rpc-url "$RPC" >/dev/null
   echo ">> 2/3. case $name: $mode order at $pct% of the quote"
   local line
-  line=$(cd "$PKG" && MAKER_KEY=$key MODE=$mode PRICE_PCT=$pct OUT="$WORK/$name.json" npx tsx e2e/make-order.ts | tail -1)
+  line=$(cd "$PKG" && TOKEN_IN=${TOKEN_IN:-WRBTC} MAKER_KEY=$key MODE=$mode PRICE_PCT=$pct OUT="$WORK/$name.json" npx tsx e2e/make-order.ts | tail -1)
   echo "   $line"
+  echo "$line" >"$WORK/$name.order"
   local owed; owed=$(sed -E 's/.* owed=([0-9]+).*/\1/' <<<"$line")
   # anvil's eth_gasPrice answers 1 gwei whatever --gas-price says (Rootstock: ~0.026), so
   # lift the filler's MAX_GAS_PRICE_GWEI ceiling (default 0.1) for the fork only.
@@ -110,8 +116,24 @@ run_case() { # name mode price_pct expect(filled|skipped) maker_key_index [extra
 # moves the fork's WRBTC/USDT0 pool away from it (snwap's amountOutMin then fails, and
 # the filler falls back to the Oku route — which is what the later pull case sees).
 if [ "${SKIP_SUSHI:-0}" != 1 ]; then
-  run_case sushi pull 97 filled 4 ROUTE_OKU_PULL=0
+  run_case sushi pull 97 filled 4 ROUTE_OKU_PULL=0 NORDSTERN_ENABLED=0
   grep -q "✓ \[route\] filled pull .*(sushi, quote" "$WORK/sushi.out" || { echo "FAIL sushi: the fill did not go through the Sushi route"; exit 1; }
+fi
+# Nordstern: USDRIF → USDT0 (a pool the WRBTC cases do not move). The operator's USDT0
+# rise is the spread (profitRecipient 0 ⇒ msg.sender); route output = owed + spread.
+if [ "${SKIP_NORDSTERN:-0}" != 1 ]; then
+  op_before=$(balance "$USDT0" "$OPERATOR")
+  # 40 %: anvil's own blocks carry no minimumGasPrice, so the fill is priced at its
+  # 1 gwei eth_gasPrice (~40× Rootstock's) — ~$40 of gas on a $100 ticket. The owed
+  # amount does not change what the route delivers, which is what this case measures.
+  TOKEN_IN=USDRIF run_case nordstern pull 40 filled 5 ROUTE_OKU_PULL=0 SUSHI_ENABLED=0 NORDSTERN_ENABLED=1
+  grep -q "✓ \[route\] filled pull .*(nordstern api" "$WORK/nordstern.out" || { echo "FAIL nordstern: the fill did not go through the Nordstern route"; exit 1; }
+  op_gain=$(( $(balance "$USDT0" "$OPERATOR") - op_before ))
+  n_owed=$(sed -nE 's/.* owed=([0-9]+).*/\1/p' "$WORK/nordstern.order")
+  n_oku=$(sed -nE 's/.* quote=([0-9]+).*/\1/p' "$WORK/nordstern.order")
+  n_api=$(grep -oE "nordstern api [0-9]+" "$WORK/nordstern.out" | tail -1 | awk '{print $3}')
+  n_priced=$(grep -oE "nordstern api [0-9]+, quote [0-9]+" "$WORK/nordstern.out" | tail -1 | awk '{print $5}')
+  echo "   NORDSTERN 100 USDRIF→USDT0: api toAmount $n_api | priced (−haircut) $n_priced | Oku QuoterV2 $n_oku | delivered $(( n_owed + op_gain )) (owed $n_owed + spread $op_gain)"
 fi
 run_case direct direct 97 filled 1
 run_case pull pull 97 filled 2

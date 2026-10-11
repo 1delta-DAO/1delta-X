@@ -319,9 +319,10 @@ approves a router — any target works, see packages/solvers/README.md), and:
   surplus to the solver; Settlement then pulls the owed amount. `minOut` = owed + gas +
   min profit, `maxPay` = the previewed owed amount, and `amountInOffset` points at the
   calldata's `amountIn` word so the swap uses exactly what the fill delivered. The
-  surplus over the pull is our spread. Two route SOURCES compete (below): the local Oku
-  path (SwapRouter02 `exactInput(Single)`, `amountOutMinimum` = owed + gas + min profit)
-  and the **Sushi API**.
+  surplus over the pull is our spread. Three route SOURCES compete (below): the local Oku
+  path (SwapRouter02 `exactInput(Single)`, `amountOutMinimum` = owed + gas + min profit),
+  the **Sushi API** and the **Nordstern API** (2026-10-11). The two API calls run in
+  parallel.
 
 **The Sushi source (pull orders only).** `GET {SUSHI_API_URL}/swap/v7/30` with
 `tokenIn`, `tokenOut`, `amount` = the previewed input, `maxSlippage` =
@@ -338,13 +339,49 @@ exactly the previewed input (never 0 — that means "the router's own balance");
 built — `amountOutMin` ≥ owed + gas + min profit. The calldata must be **canonical**
 (re-encoding the decoded arguments must give the same bytes: no trailing data, no
 relocated `executorData`), and when `SUSHI_EXECUTORS` is set the `executor` must be one
-of those addresses (empty = not pinned; a warning is logged at start-up). The executor
-observed on Rootstock in 2026-10 is `0xc10EE9031F2a0B84766A86b55A8d90F357910fb4`; verify
-it before pinning. At most `SUSHI_MAX_PER_SWEEP` API calls are made per sweep. API
+of those addresses. On chain 30 the default pin is `0xC10eE9031F2a0B84766A86B55a8D90F357910fb4`
+(the snwap executor every Rootstock route named, re-checked 2026-10-11); `SUSHI_EXECUTORS=""`
+explicitly unpins (a warning is logged at start-up). At most `SUSHI_MAX_PER_SWEEP` API calls are made per sweep. API
 strings are sanitized (control characters stripped, truncated) before they are logged. `amountInOffset` = 36 (snwap's
 `amountIn` word; the executor swaps what it actually received, but `amountOutMin` is a
 fixed figure, so the quote is taken for the exact amount). Any failure (HTTP, timeout,
 shape) just drops the Sushi candidate.
+
+**The Nordstern source (pull orders only, 2026-10-11, [`src/nordstern.ts`](src/nordstern.ts)).**
+`GET {NORDSTERN_API_URL}/aggregator/30?src&dst&amount&from&slippage` with `amount` = the
+previewed input, `from` = the SOLVER (the API writes it into the calldata as the
+recipient) and `slippage` in PERCENT = max(the gate haircut, `NORDSTERN_HAIRCUT_BPS`).
+Every request carries `Referer: NORDSTERN_REFERER` — without one the API answers HTTP 429
+("Please add a HTTP REFERER header … pointing to your projects domain"). `tx.to` is
+Nordstern's **AggregatorGuard** (Rootstock `0x63d3C7Ab37ca36A2A0A338076C163fF60c72527c`,
+verified, immutable): it pulls `amountIn` from its caller (the sandbox) to
+`firstTokenReceiver`, calls `executor.executeSwap(msg.data[26:])` and requires
+`recipient`'s `tokenOut` balance to rise by `minAmountOut`. Its calldata is selector
+`0x3f0bde25` + PACKED fields (byte offsets incl. selector): 4 `id` u16, 6 `executor`,
+26 `amountIn` u128, 42 `minAmountOut` u128, 58 a flag byte, 59 `firstTokenReceiver`,
+79 `recipient`, 99 `tokenIn`, 119 `tokenOut`, then opaque route bytes. Every response is
+decoded and refused unless: `tx.to` = the pinned `NORDSTERN_ROUTER`; no native value;
+the selector matches and route bytes follow the head; `executor` ∈ `NORDSTERN_EXECUTORS`
+— a STRICT pin, empty = every route refused (default on chain 30:
+`0xb4FE60CD05A3e68668007Cee83DDFD9A50A45B36`, source unverified, same deployer as the
+guard); `firstTokenReceiver` = that executor; `recipient` = the solver; `tokenIn` /
+`tokenOut` = the order's; `amountIn` = exactly the previewed input (never 0);
+0 < `minAmountOut` ≤ `toAmount`, and — when the plan is built — `minAmountOut` ≥ owed +
+gas + min profit. **No amount patch**: `amountIn` is a 16-byte field and the plan's
+`amountInOffset` rewrites a 32-byte word (it would clobber the executor's address
+bytes), so the plan carries `NO_PATCH` and the quote is requested for the exact input;
+a fill that delivers more leaves input residue, one that delivers less reverts in the
+guard's `transferFrom`. **Pricing**: `toAmount` is never trusted. The candidate is
+ranked, gated and `/quote`d at `toAmount × (1 − NORDSTERN_HAIRCUT_BPS)` (default 2 bps),
+its route gas at `gasEstimate × 1.2` (the API docs' advice). Measured on a Rootstock fork
+(2026-10-11, `e2e/fork-e2e.sh`, 100 USDRIF → USDT0): API `toAmount` 99,780,943, priced
+99,760,986, Oku QuoterV2 99,767,630, delivered **99,767,630** — exactly the Oku figure,
+the API 1.3 bps high. The executeFill simulation then runs with the plan's `minOut` =
+owed + gas + min profit, so a route delivering less than the gate assumed reverts there.
+The fork fill's receipt was 334,803 gas (the Oku pull fill in the same run: 289,756;
+Sushi: 489,602 — different pairs; the re-price step prices whatever is measured). At most
+`NORDSTERN_MAX_PER_SWEEP` calls per sweep; a miss (cap, HTTP, 422 "no swap route found",
+timeout, shape) just drops the candidate — transient, no backoff strike.
 
 Per order:
 1. **classify** (above);
@@ -357,8 +394,10 @@ Per order:
    0 the preview was the no-bid tick). The bump becomes the plan's `minBumpBps`;
 4. **quote** the input → output on QuoterV2 (`quoteExactInput`) along every candidate
    path (each matching pool fee tier, each configured multi-hop path) and, for a pull
-   order, fetch + validate a Sushi route; rank all candidates by output NET of each
-   route's own gas (QuoterV2's estimate / Sushi's `gasSpent`, priced like the fill gas);
+   order, fetch + validate a Sushi and a Nordstern route (in parallel); rank all
+   candidates by output NET of each route's own gas (QuoterV2's estimate / Sushi's
+   `gasSpent` / Nordstern's `gasEstimate` × 1.2, priced like the fill gas) — Nordstern's
+   output at its haircut figure;
 5. **gate** the best-ranked candidate (falling through to the next on failure):
    `quote × (1 − haircut) ≥ owed + gas + min profit`, all in output
    units; haircut = `ROUTE_STABLE_SLIPPAGE_BPS` for a $1/$1 pair, else `ROUTE_SLIPPAGE_BPS`. Gas = send gas price × `ROUTE_GAS_ESTIMATE` × r (the learned receipt ratio); gas and `MIN_PROFIT_RBTC` are
@@ -372,6 +411,8 @@ Per order:
 6. **build** the RoutePlan: Oku — SwapRouter02 calldata (SDK `encodeExactInput(Single)` /
    `encodeExactOutput(Single)`, `swapRouter02AmountInOffset`); Sushi — the validated
    snwap calldata, offset 36, refused if its `amountOutMin` < owed + gas + min profit;
+   Nordstern — the validated guard calldata, `NO_PATCH`, refused if its `minAmountOut`
+   < owed + gas + min profit;
 7. **simulate** `executeFill` by `eth_call` from the operator, decode `fillAmountsOut`
    (must be non-zero, and ≤ the previewed owed on the pull path) and take
    `eth_estimateGas`;
@@ -413,8 +454,9 @@ amountOut = grossOut − ⌈gasCostOut × (1 + QUOTE_GAS_MARGIN_BPS / 1e4)⌉ �
 
 - **grossOut**: the filler's real pricing for that order shape. The route candidate
   (`RouteFiller.quoteRoute`) quotes `amountIn` on every configured Oku path (QuoterV2)
-  and, for a PULL ticket, a Sushi API route. Candidates are ranked by output net of each
-  route's own gas, as a fill ranks them. A BUY ticket (pay the quote token, receive the
+  and, for a PULL ticket, the Sushi and Nordstern API routes (Nordstern at
+  `toAmount × (1 − NORDSTERN_HAIRCUT_BPS)`, never its raw figure). Candidates are ranked
+  by output net of each route's own gas, as a fill ranks them. A BUY ticket (pay the quote token, receive the
   base) is quoted the same way: exact input of the pay amount.
 - **gasCostOut**: one fill's cost in the output token, priced as the fill gate prices it.
   It is estimate × r (the receipt ratio learned per shape, `gasRatio.ts`) × the send gas
@@ -499,8 +541,16 @@ Route strategy:
 | `SUSHI_API_URL` | `https://api.sushi.com` | API base |
 | `SUSHI_ROUTER` | `0xAC4c6e212A361c968F1725b4d055b47E63F80b75` | the pinned RedSnwapper; any other `tx.to` is refused |
 | `SUSHI_TIMEOUT_MS` | `4000` | per-request timeout |
-| `SUSHI_EXECUTORS` | empty (warned) | comma-separated snwap executor pin list; when set, any other executor is refused |
+| `SUSHI_EXECUTORS` | chain 30: `0xC10eE9031F2a0B84766A86B55a8D90F357910fb4`; else empty | comma-separated snwap executor pin list; any other executor is refused. `""` explicitly unpins (warned) |
 | `SUSHI_MAX_PER_SWEEP` | `10` | Sushi API calls per sweep over the book, at most |
+| `NORDSTERN_ENABLED` | `0` (the Worker's wrangler.toml: `1`) | the Nordstern API route source (pull orders only) |
+| `NORDSTERN_API_URL` | `https://api.nordstern.finance` | API base |
+| `NORDSTERN_ROUTER` | `0x63d3C7Ab37ca36A2A0A338076C163fF60c72527c` | the pinned AggregatorGuard; any other `tx.to` is refused |
+| `NORDSTERN_EXECUTORS` | chain 30: `0xb4FE60CD05A3e68668007Cee83DDFD9A50A45B36`; else empty | STRICT executor pin: any other executor is refused, and an empty list refuses every route |
+| `NORDSTERN_REFERER` | `https://1delta-x.pages.dev` | the `Referer` header every request sends (required by the API) |
+| `NORDSTERN_HAIRCUT_BPS` | `2` | 0..1000: the candidate is priced at `toAmount × (1 − this)`; also the minimum slippage asked of the API |
+| `NORDSTERN_MAX_PER_SWEEP` | `10` | Nordstern API calls per sweep over the book, at most |
+| `NORDSTERN_TIMEOUT_MS` | `3000` | per-request timeout |
 
 Indicative quotes (`POST /quote` on the Worker, *Indicative quotes* above):
 
@@ -604,9 +654,9 @@ solver's constructor).
 *Why no router set:* every route runs in the `RouteSandbox`, which is push-funded with
 exactly the fill's input, approved by nobody (the solver included) and ends every call
 empty, so its standing approvals to arbitrary targets grant nothing and a new venue (the
-Sushi API's RedSnwapper, say) needs no redeploy. The solver never approves a router. The
+Sushi API's RedSnwapper or Nordstern's AggregatorGuard, say) needs no redeploy. The solver never approves a router. The
 remaining trust is in the route calldata: Oku routes are built locally by this bot (SDK
-encoders); Sushi routes come from a third-party API and are fully decoded and validated
+encoders); Sushi and Nordstern routes come from third-party APIs and are fully decoded and validated
 before use (above), on the pull path only, where a hostile route can at worst make the
 fill revert. Cost: ~+11.5k gas per fill against the old per-fill-approval instance
 (~+18k net against the old standing one; net tx gas, solver floor seeded, Rootstock
@@ -683,8 +733,12 @@ then polls its receipt until it resolves. It asserts: the **direct**
 (delta-verify) and **pull** orders fill and each maker receives at least the owed USDT0,
 an order priced at 100% of the quote is skipped as unprofitable, and a **Sushi-routed
 pull** order (`ROUTE_OKU_PULL=0` for that case, so the live Sushi API calldata is what
-runs against the fork) fills through the sandbox. The Sushi case needs
-the fork to be recent (the API quotes live state); `SKIP_SUSHI=1` skips it. `FORK_URL`
+runs against the fork) fills through the sandbox, and a **Nordstern-routed pull** order
+(100 USDRIF → USDT0, Oku and Sushi off, priced at 40 % — anvil's own blocks price gas at
+1 gwei) fills through the sandbox and prints the API's `toAmount`, the haircut figure,
+Oku's QuoterV2 figure and what the route delivered. The API cases need
+the fork to be recent (the APIs quote live state); `SKIP_SUSHI=1` / `SKIP_NORDSTERN=1`
+skip them. `FORK_URL`
 and `PORT` override the defaults.
 
 ## Known limits (beta)
@@ -703,10 +757,15 @@ and `PORT` override the defaults.
   that window, not within a tick. A decaying order's re-quote time is predicted with
   the market held fixed: a market move in our favour is noticed within 30 s, not at once.
 - One host per key: the budgets live in that host's state store.
-- Route: local quotes are Uniswap v3 (Oku) only; Sushi liquidity is reached through the
-  Sushi API, and only for PULL orders (direct orders need an exact-output route to the
-  maker, which the API does not offer). Gas for a Sushi-only pair is priced like any
-  other (a WRBTC path or `RBTC_PRICE_USD`), else the order is skipped.
+- Route: local quotes are Uniswap v3 (Oku) only; Sushi and Nordstern liquidity is
+  reached through their APIs, and only for PULL orders (direct orders need an
+  exact-output route to the maker, which neither API offers). Gas for an API-only pair
+  is priced like any other (a WRBTC path or `RBTC_PRICE_USD`), else the order is skipped.
+- Route: on today's Rootstock pairs all three sources find the same Oku pools; Nordstern's
+  `toAmount` runs ~1 bp above Oku's QuoterV2 figure for the same pool, so after its
+  2 bps haircut it ranks LAST unless it finds a genuinely better route. Its executor is
+  unverified source: the guard's own balance check, the plan's `minOut` and the
+  simulation bound what it can do to a fill (a revert), not its code.
 - Route: the route takes the whole fillable amount in one swap; there is no sizing
   against pool depth beyond the profitability gate. The size is the book's
   `fillableAmount`: the lens preview silently trims an oversized slice, but

@@ -744,6 +744,9 @@ export class FillerDO extends DurableObject<Env> {
         },
         policy: Object.fromEntries(Object.entries(cfg.policy).map(([k, v]) => [k, String(v)])),
         sushi: cfg.route ? { enabled: cfg.route.sushi.enabled, executorsPinned: cfg.route.sushi.executors.length } : null,
+        nordstern: cfg.route
+          ? { enabled: cfg.route.nordstern.enabled, executorsPinned: cfg.route.nordstern.executors.length, haircutBps: cfg.route.nordstern.haircutBps.toString() }
+          : null,
       },
       logTail: this.logTail.slice(-50),
     };

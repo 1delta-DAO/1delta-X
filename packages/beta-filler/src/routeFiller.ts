@@ -37,10 +37,16 @@ import {
   type RouteCandidate,
 } from "./route";
 import { sanitize } from "./sanitize";
+import { buildNordsternPlan, fetchNordsternRoute, type NordsternQuote } from "./nordstern";
 import { buildSushiPlan, fetchSushiRoute, type SushiQuote } from "./sushi";
 
-/** One ranked candidate: an Oku path (built locally) or a validated Sushi route. */
-type Candidate = RouteCandidate & ({ source: "oku"; path: RoutePath } | { source: "sushi"; quote: SushiQuote });
+/** A validated API route (pull orders only), with the output it is priced at. */
+type ApiRaw =
+  | { source: "sushi"; quote: SushiQuote; out: bigint; gasUnits: bigint }
+  | { source: "nordstern"; quote: NordsternQuote; out: bigint; gasUnits: bigint };
+
+/** One ranked candidate: an Oku path (built locally) or a validated API route (Sushi, Nordstern). */
+type Candidate = RouteCandidate & ({ source: "oku"; path: RoutePath } | { source: "sushi"; quote: SushiQuote } | { source: "nordstern"; quote: NordsternQuote });
 
 /** One simulated plan: its calldata, what it delivers, and the gas the node measured. */
 interface Simulated {
@@ -99,6 +105,7 @@ export class RouteFiller {
   /** Our share of each fill's surplus after the solver's maker/protocol split, ppm. */
   private keepPpm = PPM;
   private sushiCalls = 0;
+  private nordsternCalls = 0;
   private readonly skipped = new Map<Hex, string>();
   private readonly prices = new Map<string, { at: number; perRef: bigint | undefined }>();
   private readonly decimals = new Map<string, number>();
@@ -157,15 +164,65 @@ export class RouteFiller {
     if (this.rc.sushi.enabled && this.rc.sushi.executors.length === 0) {
       this.log(`⚠ SUSHI_EXECUTORS is empty: snwap executors are NOT pinned (any executor the API returns is accepted)`);
     }
+    if (this.rc.nordstern.enabled && this.rc.nordstern.executors.length === 0) {
+      this.log(`⚠ NORDSTERN_EXECUTORS is empty: every Nordstern route will be refused (the pin is strict)`);
+    }
     this.log(
-      `route strategy: solver ${s} (${gated ? "gated" : "OPEN"}), sandbox ${sandbox}, surplus split maker ${makerPpm} / protocol ${protocolPpm} ppm (we keep ${keep}), ${this.rc.pools.length} pool(s), ${this.rc.paths.length} path(s), sushi ${this.rc.sushi.enabled ? `on (${this.rc.sushi.router}, ≤${this.rc.sushi.maxPerSweep}/sweep)` : "off"}`,
+      `route strategy: solver ${s} (${gated ? "gated" : "OPEN"}), sandbox ${sandbox}, surplus split maker ${makerPpm} / protocol ${protocolPpm} ppm (we keep ${keep}), ${this.rc.pools.length} pool(s), ${this.rc.paths.length} path(s), sushi ${this.rc.sushi.enabled ? `on (${this.rc.sushi.router}, ≤${this.rc.sushi.maxPerSweep}/sweep)` : "off"}, nordstern ${this.rc.nordstern.enabled ? `on (${this.rc.nordstern.router}, ≤${this.rc.nordstern.maxPerSweep}/sweep, haircut ${this.rc.nordstern.haircutBps} bps)` : "off"}`,
     );
     this.ready = true;
   }
 
-  /** Reset the per-sweep Sushi API call counter. */
+  /** Reset the per-sweep API call counters (Sushi, Nordstern). */
   beginSweep(): void {
     this.sushiCalls = 0;
+    this.nordsternCalls = 0;
+  }
+
+  /**
+   * The API route candidates for a PULL fill of `amountIn`: Sushi and Nordstern, each
+   * when enabled, fetched in PARALLEL and validated against this exact request. With
+   * `orderHash` (a fill) each source is capped at its MAX_PER_SWEEP calls per sweep and
+   * a refusal is logged; `/quote` (no hash) is bounded by its own rate limit and cache.
+   * Any miss — cap, HTTP, timeout, shape — is TRANSIENT: it says nothing about the
+   * order, so it never earns a backoff strike or a resting verdict.
+   */
+  private async apiRoutes(
+    a: { tokenIn: Address; tokenOut: Address; amountIn: bigint; slippageBps: bigint },
+    orderHash?: Hex,
+  ): Promise<{ raw: ApiRaw[]; transient: boolean; reasons: string[] }> {
+    const { cfg, rc } = this;
+    const raw: ApiRaw[] = [];
+    const reasons: string[] = [];
+    let transient = false;
+    const admit = (name: "sushi" | "nordstern", max: number): boolean => {
+      if (!orderHash) return true;
+      const used = name === "sushi" ? this.sushiCalls : this.nordsternCalls;
+      if (used >= max) {
+        transient = true;
+        this.log(`· [route] ${orderHash} ${name}: per-sweep cap (${max}) reached`);
+        return false;
+      }
+      if (name === "sushi") this.sushiCalls++;
+      else this.nordsternCalls++;
+      return true;
+    };
+    const base = { chainId: cfg.chainId, tokenIn: a.tokenIn, tokenOut: a.tokenOut, amountIn: a.amountIn, recipient: rc.solver, slippageBps: a.slippageBps };
+    const [sushi, nordstern] = await Promise.all([
+      rc.sushi.enabled && admit("sushi", rc.sushi.maxPerSweep) ? fetchSushiRoute(rc.sushi, { ...base, sender: this.sandbox! }) : undefined,
+      rc.nordstern.enabled && admit("nordstern", rc.nordstern.maxPerSweep) ? fetchNordsternRoute(rc.nordstern, base) : undefined,
+    ]);
+    for (const v of [sushi, nordstern]) {
+      if (!v) continue;
+      if (v.ok) {
+        raw.push(v.source === "sushi" ? { source: "sushi", quote: v, out: v.amountOut, gasUnits: v.gasUnits } : { source: "nordstern", quote: v, out: v.amountOut, gasUnits: v.gasUnits });
+      } else {
+        transient = true;
+        reasons.push(v.reason);
+        if (orderHash) this.log(`· [route] ${orderHash} ${sanitize(v.reason)}`);
+      }
+    }
+    return { raw, transient, reasons };
   }
 
   /** Whether this strategy would even look at the order (cheap, no RPC). */
@@ -263,8 +320,9 @@ export class RouteFiller {
     if (received === 0n || owed === 0n) return this.skip(orderHash, "zero-sized preview", true);
 
     // 2. Candidates: every configured Oku path (QuoterV2), plus — PULL orders
-    //    only, at most SUSHI_MAX_PER_SWEEP API calls per sweep — a Sushi API route,
-    //    decoded and validated against this fill.
+    //    only, at most SUSHI_MAX_PER_SWEEP / NORDSTERN_MAX_PER_SWEEP API calls per
+    //    sweep — a Sushi and a Nordstern API route, decoded and validated against this
+    //    fill (Nordstern priced at its haircut figure, never its raw toAmount).
     const tokenOut = order.legsOut[0]!.token;
     // An order signed from a quote WE issued (matched by its terms, ./quote.ts) is gated
     // WITHOUT the haircut: the quote already charged gas + its gas margin, and it would
@@ -273,8 +331,8 @@ export class RouteFiller {
     // a revert, never a loss. Every other order keeps the haircut.
     const quoted = this.quotes?.match(orderHash, order, now, cfg.quote.matchGraceSeconds);
     const slippageBps = quoted ? 0n : haircutBps(rc, order.legsIn[0]!.token, tokenOut);
-    const raw: Array<{ source: "oku"; path: RoutePath; out: bigint; gasUnits: bigint } | { source: "sushi"; quote: SushiQuote; out: bigint; gasUnits: bigint }> = [];
-    // A quote we could not GET (an RPC failure, the Sushi per-sweep cap, an API error)
+    const raw: Array<{ source: "oku"; path: RoutePath; out: bigint; gasUnits: bigint } | ApiRaw> = [];
+    // A quote we could not GET (an RPC failure, an API per-sweep cap, an API error)
     // says nothing about the order: a skip then is not a resting verdict.
     let transient = false;
     for (const path of direct || rc.okuPull ? paths : []) {
@@ -284,27 +342,10 @@ export class RouteFiller {
       });
       if (q && q.out > 0n) raw.push({ source: "oku", path, out: q.out, gasUnits: q.gasUnits });
     }
-    if (!direct && rc.sushi.enabled) {
-      if (this.sushiCalls >= rc.sushi.maxPerSweep) {
-        transient = true;
-        this.log(`· [route] ${orderHash} sushi: per-sweep cap (${rc.sushi.maxPerSweep}) reached`);
-      } else {
-        this.sushiCalls++;
-        const v = await fetchSushiRoute(rc.sushi, {
-          chainId: cfg.chainId,
-          tokenIn: order.legsIn[0]!.token,
-          tokenOut,
-          amountIn: received,
-          sender: this.sandbox!,
-          recipient: rc.solver,
-          slippageBps,
-        });
-        if (v.ok) raw.push({ source: "sushi", quote: v, out: v.amountOut, gasUnits: v.gasUnits });
-        else {
-          transient = true;
-          this.log(`· [route] ${orderHash} ${sanitize(v.reason)}`);
-        }
-      }
+    if (!direct) {
+      const api = await this.apiRoutes({ tokenIn: order.legsIn[0]!.token, tokenOut, amountIn: received, slippageBps }, orderHash);
+      raw.push(...api.raw);
+      if (api.transient) transient = true;
     }
     if (raw.length === 0) return this.skip(orderHash, "no quote from any source", !transient);
 
@@ -330,6 +371,7 @@ export class RouteFiller {
       routeProfitable({ quotedOut: c.out, owed, slippageBps, gasOut: g, minProfitOut: profitOut, keepPpm: this.keepPpm });
     const build = (c: Candidate, costOut: bigint): Verdict<{ plan: RoutePlan }> => {
       if (c.source === "sushi") return buildSushiPlan({ quote: c.quote, owed, costOut, profitRecipient: rc.profitRecipient, minBumpBps });
+      if (c.source === "nordstern") return buildNordsternPlan({ quote: c.quote, owed, costOut, profitRecipient: rc.profitRecipient, minBumpBps });
       try {
         const { plan } = buildRoutePlan({
           direct,
@@ -392,12 +434,13 @@ export class RouteFiller {
     }
 
     // 5. Simulate from the operator and decode — the best viable candidate first,
-    //    falling through to the next if its simulation reverts (e.g. a Sushi route
-    //    quoted on state that has since moved, failing snwap's own amountOutMin).
+    //    falling through to the next if its simulation reverts (e.g. an API route
+    //    quoted on state that has since moved, failing its own floor, or one that
+    //    delivers less than its priced figure, failing the plan's minOut).
     let picked: { c: Candidate; sim: Simulated; tag: string; margin: bigint } | undefined;
     let lastReason = "";
     for (const v of viable) {
-      const via = v.c.source === "oku" ? `oku ${v.c.path.tokens.length - 1} hop` : "sushi";
+      const via = v.c.source === "oku" ? `oku ${v.c.path.tokens.length - 1} hop` : v.c.source === "nordstern" ? `nordstern api ${v.c.quote.apiAmountOut}` : "sushi";
       const tag = `${direct ? (liveOut ? "direct+live" : "direct") : "pull"}${quoted ? ` quoted ${quoted.id}` : ""} ${orderHash} in ${received} ${order.legsIn[0]!.token} → owed ${owed} ${tokenOut} (${via}, quote ${v.c.out}, margin ${v.margin})`;
       try {
         picked = { c: v.c, sim: await simulate(v.plan), tag, margin: v.margin };
@@ -498,8 +541,8 @@ export class RouteFiller {
 
   /**
    * The route candidate for an indicative quote (./quote.ts): the best output for
-   * `amountIn` over every configured Oku path (and, for a PULL ticket, a Sushi API
-   * route), ranked like a fill — by output net of each route's own gas — and one fill's
+   * `amountIn` over every configured Oku path (and, for a PULL ticket, the Sushi and
+   * Nordstern API routes — Nordstern at its haircut figure), ranked like a fill — by output net of each route's own gas — and one fill's
    * cost in the output token, priced as the fill gate prices it: estimate × r × the send
    * gas price, + MIN_PROFIT_RBTC, grossed up for the solver's surplus split. With no
    * order to simulate, the estimate is max(ROUTE_GAS_ESTIMATE, the largest estimate
@@ -511,25 +554,18 @@ export class RouteFiller {
     const inList = (t: Address) => rc.routeTokens.some((x) => x.toLowerCase() === t.toLowerCase());
     if (!inList(a.tokenIn) || !inList(a.tokenOut)) return { ok: false, reason: "route: pair outside ROUTE_TOKENS" };
     const paths = candidatePaths(a.tokenIn, a.tokenOut, rc);
-    const sushi = !a.direct && rc.sushi.enabled;
-    if (paths.length === 0 && !sushi) return { ok: false, reason: "route: no configured pool/path for the pair" };
-    const raw: Array<{ source: "oku" | "sushi"; out: bigint; gasUnits: bigint; hops?: number }> = [];
+    const api = !a.direct && (rc.sushi.enabled || rc.nordstern.enabled);
+    if (paths.length === 0 && !api) return { ok: false, reason: "route: no configured pool/path for the pair" };
+    const raw: Array<{ source: "oku" | "sushi" | "nordstern"; out: bigint; gasUnits: bigint; hops?: number }> = [];
+    // The API calls run alongside the Oku quotes (one round trip, not three).
+    const apiP = api
+      ? this.apiRoutes({ tokenIn: a.tokenIn, tokenOut: a.tokenOut, amountIn: a.amountIn, slippageBps: haircutBps(rc, a.tokenIn, a.tokenOut) })
+      : Promise.resolve({ raw: [] as ApiRaw[], transient: false, reasons: [] as string[] });
     for (const path of a.direct || rc.okuPull ? paths : []) {
       const q = await this.quoteWithGas(path, a.amountIn).catch(() => undefined);
       if (q && q.out > 0n) raw.push({ source: "oku", out: q.out, gasUnits: q.gasUnits, hops: path.tokens.length - 1 });
     }
-    if (sushi) {
-      const v = await fetchSushiRoute(rc.sushi, {
-        chainId: cfg.chainId,
-        tokenIn: a.tokenIn,
-        tokenOut: a.tokenOut,
-        amountIn: a.amountIn,
-        sender: this.sandbox!,
-        recipient: rc.solver,
-        slippageBps: haircutBps(rc, a.tokenIn, a.tokenOut),
-      });
-      if (v.ok) raw.push({ source: "sushi", out: v.amountOut, gasUnits: v.gasUnits });
-    }
+    for (const r of (await apiP).raw) raw.push({ source: r.source, out: r.out, gasUnits: r.gasUnits });
     if (raw.length === 0) return { ok: false, reason: "route: no quote from any source" };
     const shape = gasShape("route", a.direct ? "direct" : "pull", a.tokenIn, a.tokenOut);
     const learned = this.gasRatios.typicalEstimate(shape);
@@ -540,7 +576,7 @@ export class RouteFiller {
     const gasOut = await this.nativeToToken(a.gasPrice * gasUnits, a.tokenOut);
     const profitOut = await this.nativeToToken(rc.minProfitWei, a.tokenOut);
     if (gasOut === undefined || profitOut === undefined) return { ok: false, reason: `route: cannot price RBTC in ${a.tokenOut}` };
-    const cands: Array<RouteCandidate & { hops?: number; source: "oku" | "sushi" }> = [];
+    const cands: Array<RouteCandidate & { hops?: number }> = [];
     for (const r of raw) cands.push({ ...r, routeGasOut: (await this.nativeToToken(a.gasPrice * r.gasUnits, a.tokenOut)) ?? 0n });
     const best = rankRoutes(cands)[0]!;
     return {

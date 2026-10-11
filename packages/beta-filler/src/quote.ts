@@ -15,8 +15,10 @@ import type { RouteFiller } from "./routeFiller";
  *     amountOut = grossOut − ⌈gasCostOut × (1 + QUOTE_GAS_MARGIN_BPS / 1e4)⌉ − grossOut × QUOTE_TOLERANCE_BPS / 1e4
  *
  *   • grossOut — the filler's real pricing for that order shape: the best route output
- *     for `amountIn` (every configured Oku path on QuoterV2; a Sushi API route too when
- *     the delivery is PULL), ranked by output net of each route's own gas — or, on the
+ *     for `amountIn` (every configured Oku path on QuoterV2; Sushi and Nordstern API
+ *     routes too when the delivery is PULL — Nordstern at toAmount × (1 −
+ *     NORDSTERN_HAIRCUT_BPS), never its raw figure), ranked by output net of each
+ *     route's own gas — or, on the
  *     USDRIF→USDT0 pull market, the inventory strategy's price when it is better.
  *   • gasCostOut — one fill's gas in the output token, exactly as the fill gate prices
  *     it: estimate × r (the receipt/estimate ratio learned per fill shape, gasRatio.ts)
@@ -66,7 +68,7 @@ export interface PricedCandidate {
   costOut: bigint;
   /** The gas units the cost is priced at (estimate × r). */
   gasUnits: bigint;
-  /** Where the price comes from: `oku` (n hops), `sushi`, `inventory`. */
+  /** Where the price comes from: `oku` (n hops), `sushi`, `nordstern`, `inventory`. */
   source: string;
   hops?: number;
 }

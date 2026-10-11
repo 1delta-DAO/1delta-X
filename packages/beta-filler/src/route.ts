@@ -165,11 +165,11 @@ export interface RouteClass {
  *     WRBTC, USDT0, WETH, USDRIF) — otherwise, with Sushi on, every pair in the
  *     book would pass and cost an API call per sweep;
  *   • the pair must be routable on a configured pool or path — or, for a PULL
- *     order with the Sushi source enabled, Sushi may find the route instead.
+ *     order with an API source enabled (Sushi, Nordstern), the API may find the route instead.
  */
 export function classifyRoute(
   order: Order,
-  rc: Pick<RouteConfig, "solver" | "pools" | "paths" | "routeTokens"> & { sushi?: { enabled: boolean } },
+  rc: Pick<RouteConfig, "solver" | "pools" | "paths" | "routeTokens"> & { sushi?: { enabled: boolean }; nordstern?: { enabled: boolean } },
   extras: { hasPermitBatch?: boolean; sigless?: boolean; nowS?: bigint } = {},
 ): Verdict<RouteClass> {
   const shape = plainShape(order, extras);
@@ -193,7 +193,7 @@ export function classifyRoute(
     return { ok: false, reason: "pair outside ROUTE_TOKENS" };
   }
   const paths = candidatePaths(tokenIn, tokenOut, rc);
-  if (paths.length === 0 && (direct || !rc.sushi?.enabled)) return { ok: false, reason: "no configured pool/path for the pair" };
+  if (paths.length === 0 && (direct || !(rc.sushi?.enabled || rc.nordstern?.enabled))) return { ok: false, reason: "no configured pool/path for the pair" };
   return { ok: true, direct, tokenIn, tokenOut, paths };
 }
 
@@ -372,7 +372,7 @@ export function buildRoutePlan(a: {
 
 /** One executable route candidate for a PULL fill. */
 export interface RouteCandidate {
-  source: "oku" | "sushi";
+  source: "oku" | "sushi" | "nordstern";
   /** The quoted output for the fill's input. */
   out: bigint;
   /** The route's OWN gas (not the whole fill), in output-token units. */

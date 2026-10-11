@@ -3,16 +3,18 @@
  * the request validation, the registry that recognises an order signed from one of our
  * quotes, and the fill gate for such an order (no route haircut).
  */
-import { AGGREGATOR_FILL_SOLVER_ABI, OrderSide, packTiming, type Order } from "@1delta-x/sdk";
-import { decodeFunctionData, encodeFunctionResult, keccak256, parseTransaction, zeroAddress, type Address, type Hex } from "viem";
+import { AGGREGATOR_FILL_SOLVER_ABI, NO_PATCH, OrderSide, SUSHI_RED_SNWAPPER_ABI, packTiming, type Order } from "@1delta-x/sdk";
+import { concat, decodeFunctionData, encodeFunctionData, encodeFunctionResult, keccak256, numberToHex, parseTransaction, zeroAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { loadConfig, ROOTSTOCK } from "../src/config";
 import { Engine } from "../src/engine";
 import { gasShape } from "../src/gasRatio";
 import { MAX_QUOTES, netQuote, parseQuoteRequest, QuoteBook, quoteMatches, quoteToJson, type IssuedQuote, type QuoteRequest } from "../src/quote";
 import { MemoryStateStore, STATE_KEY, type FillerState } from "../src/state";
+import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK } from "../src/nordstern";
+import { SUSHI_RED_SNWAPPER_ROOTSTOCK, SUSHI_SNWAP_EXECUTOR_ROOTSTOCK } from "../src/sushi";
 
 const SOLVER = "0x00000000000000000000000000000000000050a1" as Address;
 const SANDBOX = "0x0000000000000000000000000000000000005a4d" as Address;
@@ -407,5 +409,118 @@ describe("filler: an order signed from OUR quote is filled at the quote, without
     expect(t.outcomes[0]?.status).toBe("skipped");
     expect(t.outcomes[0]?.reason).toMatch(/unprofitable: quote \d+ −0bps/);
     expect(w.sent).toHaveLength(0);
+  });
+});
+
+describe("dual aggregator (2026-10-11): Sushi + Nordstern compete with Oku on PULL markets", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const ceilMul = (v: bigint, keepBps: bigint) => (v * keepBps + 9_999n) / 10_000n;
+
+  /**
+   * A fake api.sushi.com + api.nordstern.finance answering for whatever is asked:
+   * `sushiOut` / `nordOut` are the APIs' claimed outputs (assumedAmountOut / toAmount),
+   * and the calldata carries each API's floor at the requested slippage — what the
+   * real APIs return (minToAmount = ⌈toAmount × (1 − slippage %)⌉).
+   */
+  function apis(o: { sushiOut: bigint; nordOut: bigint }) {
+    const seen = { sushi: 0, nordstern: 0, referer: [] as string[] };
+    const f = vi.fn(async (input: string, init?: RequestInit) => {
+      const u = new URL(input);
+      if (u.host === "api.sushi.com") {
+        seen.sushi++;
+        const p = u.searchParams;
+        const slip = BigInt(Math.round(Number(p.get("maxSlippage")) * 10_000));
+        const data = encodeFunctionData({
+          abi: SUSHI_RED_SNWAPPER_ABI,
+          functionName: "snwap",
+          args: [p.get("tokenIn") as Address, BigInt(p.get("amount")!), p.get("recipient") as Address, p.get("tokenOut") as Address, ceilMul(o.sushiOut, 10_000n - slip), SUSHI_SNWAP_EXECUTOR_ROOTSTOCK, "0x01"],
+        });
+        return new Response(JSON.stringify({ status: "Success", assumedAmountOut: o.sushiOut.toString(), gasSpent: 77_000, tx: { to: SUSHI_RED_SNWAPPER_ROOTSTOCK, data, value: "0" } }));
+      }
+      if (u.host === "api.nordstern.finance") {
+        seen.nordstern++;
+        seen.referer.push((init?.headers as Record<string, string>)?.Referer ?? "");
+        const p = u.searchParams;
+        const slip = BigInt(Math.round(Number(p.get("slippage")) * 100));
+        const min = ceilMul(o.nordOut, 10_000n - slip);
+        const ex = NORDSTERN_EXECUTOR_ROOTSTOCK.toLowerCase() as Hex;
+        const data = concat([
+          "0x3f0bde25", "0x4e9e", ex, numberToHex(BigInt(p.get("amount")!), { size: 16 }), numberToHex(min, { size: 16 }), "0x05", ex,
+          (p.get("from")!.toLowerCase()) as Hex, (p.get("src")!.toLowerCase()) as Hex, (p.get("dst")!.toLowerCase()) as Hex, "0xd845702af381f0405661747a6a20bde0401a19d607040201ff",
+        ]);
+        return new Response(JSON.stringify({ toAmount: o.nordOut.toString(), minToAmount: min.toString(), gasEstimate: "68490", tx: { from: p.get("from"), to: NORDSTERN_GUARD_ROOTSTOCK, data, value: "0" } }));
+      }
+      throw new Error(`unexpected fetch ${input}`);
+    });
+    vi.stubGlobal("fetch", f);
+    return seen;
+  }
+  const DUAL = { ...ENV, SUSHI_ENABLED: "1", NORDSTERN_ENABLED: "1" };
+
+  it("/quote: all three sources are priced; Nordstern wins at toAmount × (1 − 2 bps) when that still nets the most", async () => {
+    // Oku: 1000 USDT0 (QuoterV2 gas 100k); Sushi 1000.5 (77k); Nordstern claims 1001.0 (68.5k × 1.2).
+    const seen = apis({ sushiOut: 1_000_500_000n, nordOut: 1_001_000_000n });
+    const { chain } = fake();
+    const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
+    const v = await e.quote(sellReq());
+    if (!v.ok) throw new Error(v.reason);
+    expect(v.quote.route).toEqual({ source: "nordstern" });
+    expect(v.quote.grossOut).toBe((1_001_000_000n * 9_998n) / 10_000n); // never the raw toAmount
+    expect(seen).toMatchObject({ sushi: 1, nordstern: 1 });
+    expect(seen.referer).toEqual(["https://1delta-x.pages.dev"]);
+  });
+
+  it("/quote: a higher RAW Nordstern toAmount loses to Sushi once the haircut is applied", async () => {
+    apis({ sushiOut: 1_000_500_000n, nordOut: 1_000_600_000n }); // 1000.6 × 0.9998 = 1000.39988 < 1000.5
+    const { chain } = fake();
+    const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
+    const v = await e.quote(sellReq());
+    expect(v.ok && v.quote.route).toEqual({ source: "sushi" });
+    expect(v.ok && v.quote.grossOut).toBe(1_000_500_000n);
+  });
+
+  it("/quote: direct delivery never asks the APIs (exact-input only); an API failure leaves Oku standing", async () => {
+    const seen = apis({ sushiOut: 2_000_000_000n, nordOut: 2_000_000_000n });
+    const { chain } = fake();
+    const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
+    const d = await e.quote(sellReq({ delivery: "direct" }));
+    expect(d.ok && d.quote.route).toEqual({ source: "oku", hops: 1 });
+    expect(seen).toMatchObject({ sushi: 0, nordstern: 0 });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("rate limited", { status: 429 })));
+    const p = await e.quote(sellReq({ amountIn: 2n * 10n ** 16n }));
+    expect(p.ok && p.quote.route).toEqual({ source: "oku", hops: 1 });
+  });
+
+  it("fill: a pull order routes through the Nordstern guard — NO amount patch, floor = owed + gas, guard floor ≥ that", async () => {
+    apis({ sushiOut: 1_000_500_000n, nordOut: 1_001_000_000n });
+    const { chain, w } = fake();
+    const e = await Engine.create({ cfg: loadConfig(DUAL), chain, store: new MemoryStateStore(), log: () => {} });
+    w.received = 10n ** 16n;
+    w.owed = 990_000_000n;
+    const t = await e.tick({ fetchEntries: async () => [entry("0d", order({ legsOut: [{ token: USDT0, start: 990_000_000n, end: 0n, recipient: zeroAddress }] }))] });
+    expect(t.outcomes[0]?.status).toBe("pending");
+    const plan = decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data: w.sent[0]!.data }).args[3] as {
+      router: Address; minOut: bigint; maxPay: bigint; amountInOffset: bigint; amountOutOffset: bigint; data: Hex;
+    };
+    expect(plan.router).toBe(NORDSTERN_GUARD_ROOTSTOCK);
+    expect(plan.amountInOffset).toBe(NO_PATCH);
+    expect(plan.amountOutOffset).toBe(NO_PATCH);
+    expect(plan.maxPay).toBe(990_000_000n);
+    expect(plan.minOut).toBeGreaterThan(990_000_000n);
+    const guardMin = BigInt("0x" + plan.data.slice(2 + 42 * 2, 2 + 58 * 2));
+    expect(guardMin).toBeGreaterThanOrEqual(plan.minOut);
+    expect(e.pending?.info?.tag).toMatch(/\(nordstern api 1001000000, quote 1000799800/);
+  });
+
+  it("fill: the per-sweep caps bound each API separately (NORDSTERN_MAX_PER_SWEEP)", async () => {
+    const seen = apis({ sushiOut: 1_000_000n, nordOut: 1_000_000n }); // both unprofitable: nothing sends
+    const { chain, w } = fake();
+    const e = await Engine.create({ cfg: loadConfig({ ...DUAL, NORDSTERN_MAX_PER_SWEEP: "1", SUSHI_MAX_PER_SWEEP: "2" }), chain, store: new MemoryStateStore(), log: () => {} });
+    w.received = 10n ** 16n;
+    w.owed = 999_999_000n;
+    const o = (n: bigint) => order({ nonce: n, legsOut: [{ token: USDT0, start: 999_999_000n, end: 0n, recipient: zeroAddress }] });
+    await e.tick({ fetchEntries: async () => [entry("e1", o(1n)), entry("e2", o(2n)), entry("e3", o(3n))] });
+    expect(seen.nordstern).toBe(1);
+    expect(seen.sushi).toBe(2);
   });
 });

@@ -84,13 +84,13 @@ describe("route config", () => {
     expect(loadConfig({ ...ENV, INVENTORY_ENABLED: "0" }).strategies).toEqual({ inventory: false, route: true });
     expect(() => loadConfig({ ...ENV, INVENTORY_ENABLED: "0", ROUTE_ENABLED: "0" })).toThrow(/both/);
   });
-  it("enables the Sushi source by default, pinned to Rootstock's RedSnwapper", () => {
+  it("enables the Sushi source by default, pinned to Rootstock's RedSnwapper and snwap executor", () => {
     expect(rc.sushi).toEqual({
       enabled: true,
       baseUrl: "https://api.sushi.com",
       router: "0xAC4c6e212A361c968F1725b4d055b47E63F80b75",
       timeoutMs: 4000,
-      executors: [],
+      executors: ["0xC10eE9031F2a0B84766A86B55a8D90F357910fb4"],
       maxPerSweep: 10,
     });
     expect(loadConfig({ ...ENV, SUSHI_ENABLED: "0" }).route!.sushi.enabled).toBe(false);

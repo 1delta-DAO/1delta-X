@@ -195,6 +195,9 @@ is false while the filler runs dry.
 | state | 503 while paused or not configured; 422 `no quote` (no route, gas above the output, gas price above the ceiling) |
 | secrets | errors sanitized, RPC URLs redacted; never the key or tokens |
 
+A `pull` quote also asks the Sushi and Nordstern APIs (in parallel, when enabled);
+Nordstern's figure enters at `toAmount × (1 − NORDSTERN_HAIRCUT_BPS)`, and the response's
+`route.source` names the winner (`oku` | `sushi` | `nordstern` | `inventory`).
 A quote's RPC calls share the engine's chain client, so they count against the running
 tick's subrequest meter. Identical requests within `QUOTE_CACHE_MS` (5 s) are priced
 once. Tests: `test/quote.test.ts`.
@@ -267,7 +270,14 @@ npx wrangler login
   (a treasury; zero = the hot wallet);
 - keep **`DRY_RUN = "1"`**;
 - review the strategy, gas and alert knobs. Every knob of the Node CLI has the same
-  name and default; see the beta-filler README.
+  name and default; see the beta-filler README. Two deliberate differences from the
+  code defaults (2026-10-11): the **pull-order API sources** — Sushi with its snwap
+  executor pinned (`SUSHI_EXECUTORS`, the chain-30 default spelled out) and Nordstern
+  ON (`NORDSTERN_ENABLED = "1"`; off in code), with its guard, STRICT executor pin,
+  `NORDSTERN_REFERER` (the API answers 429 without a Referer), a 2 bps haircut on its
+  `toAmount` and a per-sweep cap. Both compete with Oku on pull orders and on pull
+  `/quote`s; `GET /status` → `config.sushi` / `config.nordstern` shows what is live.
+  Turning Nordstern off is `NORDSTERN_ENABLED = "0"` and a redeploy.
 
 **2. Secrets.** Each one is a separate `wrangler secret put`:
 
@@ -425,7 +435,7 @@ packages/filler-worker/e2e/staging.sh down
 
 Overrides: `RPC_URL_SECRET` (the proxy — as in production; the `RPC_URL` var points at
 a proxy tag that must stay unused, `ob-var` / `filler-var`), the addresses, `CHAIN_ID`,
-`START_BLOCK`, `CONFIRMATIONS=1`, `DRY_RUN=0`, `SUSHI_ENABLED=0`, `RBTC_PRICE_USD` (the
+`START_BLOCK`, `CONFIRMATIONS=1`, `DRY_RUN=0`, `SUSHI_ENABLED=0`, `NORDSTERN_ENABLED=0`, `RBTC_PRICE_USD` (the
 pool) and a treasury `ROUTE_PROFIT_RECIPIENT`. `MIN_TTL_SECONDS=15` (orderbook) and
 `EXPIRY_MARGIN_SECONDS=6` (filler) scale the production 120 s / 90 s to the fork's 2 s
 blocks (the same ≥ 4 blocks), so the short-expiry kinds still test expiry races.

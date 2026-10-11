@@ -91,11 +91,26 @@ ROUTE_GAS_ESTIMATE = "320000"
 MAX_ROUTE_GAS = "1200000"
 ROUTE_HOURLY_FILLS = "60"
 MIN_PROFIT_RBTC = "0"
+# Pull-order API route sources (exact-input only; direct orders always use Oku).
+# Each response is fully decoded and validated against the fill (beta-filler README).
 SUSHI_ENABLED = "1"
 ROUTE_OKU_PULL = "1"
-SUSHI_EXECUTORS = ""
+# Pinned snwap executor (Sushi's RouteProcessor on Rootstock, re-checked 2026-10-11):
+# any other executor is refused. "" would UNPIN it (warned at start-up).
+SUSHI_EXECUTORS = "0xC10eE9031F2a0B84766A86B55a8D90F357910fb4"
 SUSHI_MAX_PER_SWEEP = "10"
 SUSHI_TIMEOUT_MS = "4000"
+# Nordstern aggregator (2026-10-11; off by default in code, on for the beta). The guard
+# (NORDSTERN_ROUTER) defaults to Rootstock's 0x63d3…527c; the executor pin is STRICT
+# (empty = every route refused). Priced at toAmount × (1 − NORDSTERN_HAIRCUT_BPS): the
+# API's figure ran ~1 bp above what a fork execution delivered. The API refuses
+# requests without a Referer naming the integrating project's domain.
+NORDSTERN_ENABLED = "1"
+NORDSTERN_EXECUTORS = "0xb4FE60CD05A3e68668007Cee83DDFD9A50A45B36"
+NORDSTERN_REFERER = "https://1delta-x.pages.dev"
+NORDSTERN_HAIRCUT_BPS = "2"
+NORDSTERN_MAX_PER_SWEEP = "10"
+NORDSTERN_TIMEOUT_MS = "3000"
 BUY_USDRIF = "1"
 SELL_USDRIF = "0"
 MAX_BUY_PRICE = "0.995"

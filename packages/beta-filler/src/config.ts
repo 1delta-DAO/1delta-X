@@ -1,6 +1,7 @@
 import { getAddress, isAddress, type Address, type Hex } from "viem";
 
-import { SUSHI_RED_SNWAPPER_ROOTSTOCK, type SushiConfig } from "./sushi";
+import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK, type NordsternConfig } from "./nordstern";
+import { SUSHI_RED_SNWAPPER_ROOTSTOCK, SUSHI_SNWAP_EXECUTOR_ROOTSTOCK, type SushiConfig } from "./sushi";
 
 /** Rootstock mainnet addresses (chain 30). Verified on-chain — see the repo's MoC notes. */
 export const ROOTSTOCK = {
@@ -96,6 +97,8 @@ export interface RouteConfig {
   hourlyFills: bigint;
   /** The Sushi API route source (pull orders only). */
   sushi: SushiConfig;
+  /** The Nordstern API route source (pull orders only; ./nordstern.ts). */
+  nordstern: NordsternConfig;
   /**
    * Whether local Oku routes compete on PULL orders (default on). Off = Sushi-only
    * pull fills; the pools still price gas, and DIRECT orders always use Oku (the only
@@ -415,6 +418,7 @@ function loadRoute(env: Env): RouteConfig | undefined {
   const rbtcUsd = env.RBTC_PRICE_USD ? parseFixed(env.RBTC_PRICE_USD, 18) : undefined;
   if (rbtcUsd === 0n) throw new Error("env RBTC_PRICE_USD must be > 0");
   const gasEstimate = posInt(env, "ROUTE_GAS_ESTIMATE", 320_000);
+  const onRootstock = posNum(env, "CHAIN_ID", ROOTSTOCK.chainId) === ROOTSTOCK.chainId;
   const maxGas = posInt(env, "MAX_ROUTE_GAS", 1_200_000);
   if (gasEstimate > maxGas) throw new Error(`ROUTE_GAS_ESTIMATE ${gasEstimate} exceeds MAX_ROUTE_GAS ${maxGas}`);
   return {
@@ -437,10 +441,31 @@ function loadRoute(env: Env): RouteConfig | undefined {
       baseUrl: env.SUSHI_API_URL ?? "https://api.sushi.com",
       router: addr(env, "SUSHI_ROUTER", SUSHI_RED_SNWAPPER_ROOTSTOCK),
       timeoutMs: posNum(env, "SUSHI_TIMEOUT_MS", 4_000),
-      executors: addrList(env, "SUSHI_EXECUTORS", []),
+      // Pinned by default on Rootstock (the executor every swap/v7 route named,
+      // 2026-10); SUSHI_EXECUTORS = "" explicitly unpins (warned at start-up).
+      executors: addrList(env, "SUSHI_EXECUTORS", onRootstock ? [SUSHI_SNWAP_EXECUTOR_ROOTSTOCK] : []),
       maxPerSweep: posNum(env, "SUSHI_MAX_PER_SWEEP", 10),
     },
+    nordstern: {
+      // OFF by default in code; the Worker's wrangler.toml turns it on for the beta.
+      enabled: flag(env, "NORDSTERN_ENABLED", false),
+      baseUrl: env.NORDSTERN_API_URL ?? "https://api.nordstern.finance",
+      router: addr(env, "NORDSTERN_ROUTER", NORDSTERN_GUARD_ROOTSTOCK),
+      // STRICT pin: an empty list accepts no route (the executor's source is unverified).
+      executors: addrList(env, "NORDSTERN_EXECUTORS", onRootstock ? [NORDSTERN_EXECUTOR_ROOTSTOCK] : []),
+      referer: env.NORDSTERN_REFERER || "https://1delta-x.pages.dev",
+      timeoutMs: posNum(env, "NORDSTERN_TIMEOUT_MS", 3_000),
+      maxPerSweep: posNum(env, "NORDSTERN_MAX_PER_SWEEP", 10),
+      haircutBps: nordsternHaircut(env),
+    },
   };
+}
+
+/** NORDSTERN_HAIRCUT_BPS: 0..1000 (default 2) — a haircut above 10 % is a typo, not a policy. */
+function nordsternHaircut(env: Env): bigint {
+  const v = bps(env, "NORDSTERN_HAIRCUT_BPS", 2);
+  if (v > 1_000n) throw new Error("env NORDSTERN_HAIRCUT_BPS must be 0..1000");
+  return v;
 }
 
 function loadQuote(env: Env): QuotePolicy {
