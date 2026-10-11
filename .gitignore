@@ -32,3 +32,4 @@ docs/local/
 
 # Python bytecode
 __pycache__/
+.secrets.local/
