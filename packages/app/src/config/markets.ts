@@ -84,6 +84,19 @@ export const TOKENS: Record<number, Record<string, PinnedToken>> = {
   },
 };
 
+/**
+ * The chain's wrapped native coin, by config symbol, where the app AUTO-WRAPS it:
+ * a ticket selling it may be funded from the native coin (WRBTC ← RBTC). Only
+ * Rootstock: WRBTC 0x542f… is a verified WETH9 port (`deposit()` payable,
+ * `withdraw(uint)`, `Deposit`/`Withdrawal` events), checked on-chain 2026-10-11.
+ */
+export const WRAPPED_NATIVE: Record<number, string> = { 30: "WRBTC" };
+
+/** The auto-wrapped symbol on a chain, or undefined. */
+export function wrappedNativeSymbol(chainId: number): string | undefined {
+  return WRAPPED_NATIVE[chainId];
+}
+
 /** The pinned token behind a config symbol on a chain, or `undefined` if none is configured. */
 export function pinnedToken(chainId: number, symbol: string): PinnedToken | undefined {
   return TOKENS[chainId]?.[symbol];

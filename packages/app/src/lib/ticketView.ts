@@ -8,6 +8,7 @@
  * exists (mock book, no filler on the chain, endpoint down) — mixing the two put
  * a quote above mid next to a ladder average 4 % below it (2026-10-11).
  */
+import { WRAP_GAS_RESERVE_WEI } from "./funding";
 import type { Quote } from "./ladder";
 import { toWei } from "./order";
 import type { QuoteView } from "./quote";
@@ -170,17 +171,55 @@ export function maxSpendableWei(balance: bigint, native: boolean, reserve: bigin
   return balance > reserve ? balance - reserve : 0n;
 }
 
+/**
+ * What a ticket that SELLS the wrapped native coin (WRBTC) can spend, wei: the
+ * wrapped balance plus whatever native coin (RBTC) is above the gas reserve — the
+ * funding plan wraps the shortfall first (lib/funding.ts). Unknown while the
+ * wrapped balance is; an unread native balance adds nothing (never assumed).
+ */
+export function wrapSpendableWei(
+  tokenWei: bigint | undefined,
+  nativeWei: bigint | undefined,
+  reserve: bigint = WRAP_GAS_RESERVE_WEI,
+): bigint | undefined {
+  if (tokenWei === undefined) return undefined;
+  return tokenWei + wrappableWei(nativeWei, reserve);
+}
+
+/** The native coin a wrap may use: the balance above the gas reserve, never negative. */
+export function wrappableWei(nativeWei: bigint | undefined, reserve: bigint = WRAP_GAS_RESERVE_WEI): bigint {
+  return nativeWei !== undefined && nativeWei > reserve ? nativeWei - reserve : 0n;
+}
+
 export type BalanceState =
   | { kind: "disconnected"; text: string }
   | { kind: "wrong-network"; text: string }
   | { kind: "loading"; text: string }
   | { kind: "ok"; text: string; value: number };
 
-/** One balance line: a number only when it can be one. */
-export function balanceState(a: { connected: boolean; onChain: boolean; value: number | undefined; symbol: string }): BalanceState {
+/**
+ * One balance line: a number only when it can be one. `wrappable` is native coin
+ * the ticket auto-wraps (already net of the gas reserve): it is added to the
+ * value and named on the line, "0.01 WRBTC + 0.04995 RBTC (auto-wrapped)".
+ */
+export function balanceState(a: {
+  connected: boolean;
+  onChain: boolean;
+  value: number | undefined;
+  symbol: string;
+  wrappable?: { value: number; symbol: string } | null;
+}): BalanceState {
   if (!a.connected) return { kind: "disconnected", text: "Connect wallet" };
   if (!a.onChain) return { kind: "wrong-network", text: "Wrong network" };
   if (a.value === undefined) return { kind: "loading", text: "…" };
+  const w = a.wrappable;
+  if (w && w.value > 0) {
+    return {
+      kind: "ok",
+      text: `${fmtBalance(a.value)} ${a.symbol} + ${fmtBalance(w.value)} ${w.symbol} (auto-wrapped)`,
+      value: a.value + w.value,
+    };
+  }
   return { kind: "ok", text: `${fmtBalance(a.value)} ${a.symbol}`, value: a.value };
 }
 

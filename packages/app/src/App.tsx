@@ -16,7 +16,7 @@ import { Stats } from "./components/Stats";
 import { TermsLink } from "./components/TermsLink";
 import { chainById, chainLabel } from "./config/chains";
 import { deploymentFor, exclusivityForMarket, solverForMarket } from "./config/deployments";
-import { marketById, pinnedToken, symbolsOn } from "./config/markets";
+import { marketById, pinnedToken, symbolsOn, wrappedNativeSymbol } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
 import { useMarketFloorInputs } from "./hooks/useMarketFloor";
 import { quoteUrl, useMarketQuote } from "./hooks/useMarketQuote";
@@ -28,9 +28,9 @@ import { useTokenIndex } from "./hooks/useTokenIndex";
 import { fmtAmt, fmtPrice } from "./lib/format";
 import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/ladder";
 import { readMinValidNonce, type Reader } from "./lib/chain";
-import { hasLeftover, planFunding, type FundingStep } from "./lib/funding";
+import { fmtWei, fundingButtonLabel, hasLeftover, planFunding, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
 import { buildOrder, inputWei } from "./lib/order";
-import { exceedsBalance, marketFigures, maxSpendableWei, sourceName } from "./lib/ticketView";
+import { exceedsBalance, marketFigures, maxSpendableWei, sourceName, wrappableWei, wrapSpendableWei } from "./lib/ticketView";
 import {
   defaultSlippageBps,
   quoteDelivery,
@@ -58,13 +58,6 @@ const QUOTE_URL = quoteUrl(import.meta.env.VITE_QUOTE_URL, BOOK_IS_REMOTE);
 const STALE_MS = 30_000;
 
 const EMPTY_DEPS: TicketDeps = { bids: [], asks: [], tick: 4, balances: {} };
-
-function stepLabel(step: FundingStep | undefined, amount: string, token: string): string {
-  if (!step) return `Approve ${token}`;
-  return step.kind === "erc20-approve"
-    ? `Approve exactly ${amount} ${token} to Permit3`
-    : `Grant Settlement exactly ${amount} ${token} via Permit3`;
-}
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message.split("\n")[0]! : String(e);
@@ -114,6 +107,18 @@ export default function App() {
       return address ? rawBalances.raw[address.toLowerCase()] : undefined;
     },
     [tokens, rawBalances],
+  );
+
+  // AUTO-WRAP (Rootstock): a ticket that sells WRBTC may be funded from RBTC — the
+  // funding plan wraps exactly the shortfall first (lib/funding.ts), keeping
+  // WRAP_GAS_RESERVE_WEI of RBTC back for gas. Only the WRBTC-pay direction.
+  const wrappedSymbol = wrappedNativeSymbol(chainId);
+  const nativeSymbol = chainById(chainId)?.chain.nativeCurrency.symbol ?? "native";
+  /** What a ticket paying `symbol` can spend, wei: the token, plus wrappable native coin for WRBTC. */
+  const spendableWei = useCallback(
+    (symbol: string): bigint | undefined =>
+      symbol === wrappedSymbol ? wrapSpendableWei(balanceWei(symbol), rawBalances.native) : balanceWei(symbol),
+    [balanceWei, wrappedSymbol, rawBalances.native],
   );
 
   // A page reload must not forget the maker's resting orders and fills: once a
@@ -205,7 +210,7 @@ export default function App() {
     // The exact input the order will commit: the typed amount, capped at the balance —
     // unless the typed amount is over it: then quote what was typed (the form shows
     // "insufficient" and will not sign) rather than silently pricing a smaller ticket.
-    const bal = balanceWei(ticket.payToken);
+    const bal = spendableWei(ticket.payToken);
     const amountIn = inputWei(ticket.amount, payPinned.decimals, exceedsBalance(ticket.amountStr, payPinned.decimals, bal) ? undefined : bal);
     if (amountIn === 0n) return null;
     return {
@@ -218,7 +223,7 @@ export default function App() {
       delivery: quoteDelivery(deployment, ticket.marketId),
       ...(wallet.address ? { maker: wallet.address } : {}),
     };
-  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, balanceWei, wallet.address]);
+  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address]);
   const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
   const termsOf = useCallback(
     (fq: FillerQuote | null) =>
@@ -249,7 +254,11 @@ export default function App() {
   const rfq = plan?.kind === "market" && plan.quoted && marketQuote.quote && recvPinned ? quoteView(marketQuote.quote, plan.quoted, recvPinned.decimals) : null;
   const quoteStatus: "quoted" | "loading" | "fallback" | "off" = !quoteReq ? "off" : rfq ? "quoted" : marketQuote.loading ? "loading" : "fallback";
 
-  const payWei = balanceWei(ticket.payToken);
+  /** The pay token itself, wei (WRBTC for a WRBTC ticket — what the wrap tops up). */
+  const payTokenWei = balanceWei(ticket.payToken);
+  const autoWrap = ticket.payToken === wrappedSymbol;
+  /** What the ticket can spend, wei: the token, plus RBTC above the gas reserve when auto-wrapping. */
+  const payWei = spendableWei(ticket.payToken);
 
   // PRE-AUDIT POLICY: fund exactly this ticket and nothing more — both legs,
   // the ERC-20 approval to Permit3 and the Permit3 book grant to Settlement
@@ -264,8 +273,8 @@ export default function App() {
   // never see a "max" that rounded above the balance.
   const overBalance =
     (payWei !== undefined && requiredWei > payWei) || exceedsBalance(ticket.amountStr, payMeta.decimals, payWei);
-  // Pinned pay tokens are ERC-20s (WRBTC, not RBTC), so "Max" is the whole balance;
-  // a native coin would keep a gas reserve back (lib/ticketView.ts).
+  // Pinned pay tokens are ERC-20s (WRBTC, not RBTC), so "Max" is the whole spendable
+  // balance — for WRBTC that already holds the RBTC gas reserve back (wrapSpendableWei).
   const maxAmount =
     payWei !== undefined && payMeta.decimals !== undefined ? formatUnits(maxSpendableWei(payWei, false), payMeta.decimals) : undefined;
 
@@ -295,7 +304,6 @@ export default function App() {
         amount: `≈ ${fmtAmt(figures.receive)} ${ticket.recvToken}`,
       }
     : null;
-  const nativeSymbol = chainById(chainId)?.chain.nativeCurrency.symbol ?? "native";
   const nativeBalance = rawBalances.native !== undefined ? Number(formatUnits(rawBalances.native, 18)) : undefined;
 
   const allowanceState = useAllowance({
@@ -305,12 +313,18 @@ export default function App() {
     onChain,
     token: payMeta.address ?? null,
     deployment: deployment ? { permit3: deployment.permit3, settlement: deployment.settlement } : null,
+    autoWrap: autoWrap ? { nativeSymbol } : null,
+    onBalancesChanged: rawBalances.refresh,
   });
 
   const nowSec = Math.floor(Date.now() / 1000);
   const funding = allowanceState.funding;
+  const wrapSource =
+    autoWrap && payTokenWei !== undefined && rawBalances.native !== undefined
+      ? { tokenBalance: payTokenWei, nativeBalance: rawBalances.native, nativeSymbol }
+      : undefined;
   const fundingPlan =
-    funding && plan ? planFunding(funding, requiredWei, plan.fundingTtlSeconds, nowSec) : undefined;
+    funding && plan && (!autoWrap || wrapSource) ? planFunding(funding, requiredWei, plan.fundingTtlSeconds, nowSec, wrapSource) : undefined;
   const requiredHuman = payMeta.decimals !== undefined ? Number(formatUnits(requiredWei, payMeta.decimals)) : 0;
 
   const allowance: AllowanceView = {
@@ -322,8 +336,17 @@ export default function App() {
         : undefined,
     covered: fundingPlan?.covered ?? false,
     trims: fundingPlan?.trims ?? false,
-    nextLabel: stepLabel(fundingPlan?.steps[0], fmtAmt(requiredHuman), ticket.payToken),
+    buttonLabel: fundingButtonLabel(fundingPlan ?? { steps: [], trims: false }, {
+      amount: fmtAmt(requiredHuman),
+      token: ticket.payToken,
+      nativeSymbol,
+    }),
     remaining: fundingPlan?.steps.length ?? 0,
+    wrap:
+      fundingPlan?.steps[0]?.kind === "wrap"
+        ? { amount: fmtWei(fundingPlan.steps[0].amount), reserve: fmtWei(WRAP_GAS_RESERVE_WEI), nativeSymbol }
+        : null,
+    blocked: fundingPlan?.blocked ?? null,
     leftover: funding !== undefined && hasLeftover(funding, nowSec),
     mismatch: allowanceState.mismatch,
     approving: allowanceState.busy,
@@ -560,6 +583,42 @@ export default function App() {
   );
 
   /**
+   * UNWRAP: `WRBTC.withdraw(balance)` — the whole wrapped balance back to RBTC, one
+   * transaction, behind a confirm. WRBTC that a resting order sells is not held
+   * back: unwrapping it leaves that order unfillable, which the prompt says.
+   */
+  const [unwrapping, setUnwrapping] = useState(false);
+  const [unwrapError, setUnwrapError] = useState<string | null>(null);
+  const wrappedWei = wrappedSymbol ? balanceWei(wrappedSymbol) : undefined;
+  const unwrap = useCallback(async () => {
+    setUnwrapError(null);
+    const address = wrappedSymbol ? pinnedToken(chainId, wrappedSymbol)?.address : undefined;
+    const config = chainById(chainId);
+    if (!wallet.provider || !wallet.address || !onChain || !address || !config || !wrappedWei || wrappedWei <= 0n) return;
+    const amount = fmtWei(wrappedWei);
+    const ok = window.confirm(
+      `Unwrap ${amount} ${wrappedSymbol} to ${nativeSymbol}?\n\n` +
+        `One transaction (WRBTC.withdraw). Orders that sell ${wrappedSymbol} cannot fill without it.`,
+    );
+    if (!ok) return;
+    setUnwrapping(true);
+    try {
+      const call = unwrapCall(address as Address, wrappedWei);
+      const client = createWalletClient({ account: wallet.address, chain: config.chain, transport: custom(wallet.provider) });
+      const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) });
+      const hash = await client.sendTransaction({ to: call.to, data: call.data, chain: config.chain, account: wallet.address });
+      const receipt = await reader.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new Error("unwrap transaction reverted");
+    } catch (e) {
+      setUnwrapError(errorText(e));
+    } finally {
+      setUnwrapping(false);
+      rawBalances.refresh();
+      allowanceState.refresh();
+    }
+  }, [wrappedSymbol, chainId, wallet.provider, wallet.address, onChain, wrappedWei, nativeSymbol, rawBalances, allowanceState]);
+
+  /**
    * HARD cancel: `Settlement.cancelOrders(nonces)` for every signed order
    * behind the row — one transaction, after which no filler can settle them.
    */
@@ -691,6 +750,16 @@ export default function App() {
             }}
             delivery={marketDelivery}
             wallet={{ connected: !!wallet.address, onChain, native: { symbol: nativeSymbol, balance: nativeBalance } }}
+            autoWrap={
+              autoWrap
+                ? { symbol: nativeSymbol, value: Number(formatUnits(wrappableWei(rawBalances.native), 18)) }
+                : null
+            }
+            unwrap={
+              wrappedSymbol && wrappedWei !== undefined && wrappedWei > 0n
+                ? { symbol: wrappedSymbol, busy: unwrapping, error: unwrapError, action: () => void unwrap() }
+                : null
+            }
             onConnect={() => setConnectRequest((n) => n + 1)}
             onSign={sign}
           />

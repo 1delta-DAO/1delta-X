@@ -475,6 +475,7 @@ path, with the fork's block minimum (re-added by the rpc-proxy) and pool mid.
 | Order signing (EIP-712) | **Real.** Pinned tokens, nonce < 2^255 and above the on-chain `minValidNonce` |
 | Order distribution: resting, soft cancels, fills | **Mocked in-browser** by default (`src/backend/mock.ts`; every fill flagged `simulated`). **Live** with `VITE_ORDERBOOK_URL` (`src/backend/remote.ts`): posted to `@1delta-x/orderbook-server`, fills only as reported from the chain |
 | Funding: ERC-20 approve to Permit3 + Permit3 grant to Settlement | **Live.** Both legs, each exactly the ticket's input; revocable from the form |
+| Auto-wrap RBTC → WRBTC (selling WRBTC), unwrap | **Live.** `WRBTC.deposit` of exactly the shortfall before the approve; `WRBTC.withdraw` from the wallet strip |
 | On-chain cancel (`Settlement.cancelOrders`) | **Live** when a Settlement is configured |
 | Settlement transactions | **Simulated** with the mock. With `VITE_ORDERBOOK_URL`, real fillers settle on-chain; the app sends none itself |
 | Pre-audit disclosure | **Live.** Acknowledgement gate, reopenable from the strip |
@@ -512,6 +513,52 @@ on its own shortly after the order expires. Approving a new ticket for the same
 token replaces the previous one's funding. A TWAP funds its whole schedule up
 front (each slice is a separate order, signed when due), so a later slice needs
 no further approval.
+
+**Auto-wrap: selling WRBTC with RBTC (2026-10-11).** A ticket that *pays* WRBTC
+(Rootstock's wrapped native coin, `WRAPPED_NATIVE` in `config/markets.ts`) may be
+funded from RBTC. When the wallet's WRBTC balance is below the ticket's input, the
+plan gains a step **before** the two above:
+
+0. `WRBTC.deposit{value: shortfall}()` with `shortfall = required − WRBTC balance`,
+   exact in wei — never more, so RBTC beyond this order stays RBTC.
+
+The button reads "Wrap 0.0123 RBTC → WRBTC (1 of 3)". The wrap, approve and
+grant go out from one click, one receipt at a time; after the wrap's receipt
+the app re-reads the funding legs **and** both balances and re-plans the
+approve and grant from what the chain then says (`useAllowance.fund`). Balances
+for the plan are read at click time, not from the last render.
+
+WRBTC (`0x542f…7e677d`) is a verified WETH9 port on Rootstock Blockscout
+(contract name `WRBTC`, solc 0.5.17, 1,763 bytes): `deposit()` payable (also the
+fallback), `withdraw(uint)`, `Deposit`/`Withdrawal` events; selectors
+`0xd0e30db0`/`0x2e1a7d4d` and both event topics are in the deployed bytecode.
+
+*Gas reserve.* A wrap must leave `WRAP_GAS_RESERVE_WEI` = **0.00005 RBTC**
+(`lib/funding.ts`). Measured with `cast estimate` on Rootstock: `deposit` 43,010
+gas, `approve` 44,016, `Permit3.approveToken` 45,723 — ~133k gas for the whole
+sequence, ~0.0000035 RBTC at the node's ~26 Mwei (`minimumGasPrice` 23.7 Mwei);
+~0.0000065 RBTC with a later hard cancel and a two-transaction revoke. The
+reserve buys ~1.9M gas at 26 Mwei, about 7× that budget, so wallet-padded gas
+limits and a several-fold price spike still fit; at ≈ $100k/BTC it is ~$5 left
+unwrapped. A plan whose wrap would cut into it is refused with a message
+(`FundingPlan.blocked`), and the button stays disabled.
+
+*Balance, Max, insufficient.* For a WRBTC-pay ticket the spendable balance is
+`WRBTC + max(0, RBTC − reserve)` (`wrapSpendableWei`, `lib/ticketView.ts`); Max,
+the input cap, the quote request and the "insufficient" state all use it, and the
+balance line reads "0 WRBTC + 0.04995 RBTC (auto-wrapped)". Because Max already
+holds the reserve back, an order Max fills always passes the wrap's reserve check.
+The order itself is signed against the real WRBTC balance — signing is gated on
+funding, which includes the wrap. Only tickets that PAY WRBTC (selling WRBTC for USD0,
+buying WETH with WRBTC) auto-wrap; tickets paying USD0, USDRIF or WETH are
+unaffected.
+
+*Unwrap.* When the wallet holds WRBTC, the wallet strip shows **unwrap** next to
+it: after a confirm it sends `WRBTC.withdraw(full WRBTC balance)`. It does not
+hold back WRBTC a resting order sells — the confirm says so. WRBTC pays out with
+Solidity `transfer` (2,300 gas stipend), so a smart-contract wallet whose
+`receive` does real work cannot unwrap through it; EOAs and EIP-7702 accounts
+with a plain `receive` can.
 
 The amount funded and the amount signed come from the same `plan` value
 (`lib/plan.ts`), and both are capped at the wallet's raw on-chain balance, so
@@ -730,7 +777,7 @@ src/
   lib/order.ts          ticket → EIP-712 order: locale-free wei maths, nonce draw, input cap
   lib/plan.ts           what one ticket signs and funds
   lib/ticketView.ts     what the form / book show: quote-first figures, quote marker, balances, Max
-  lib/funding.ts        the two funding legs (ERC-20 → Permit3, Permit3 grant → Settlement)
+  lib/funding.ts        the funding steps (RBTC → WRBTC wrap, ERC-20 → Permit3, Permit3 grant → Settlement)
   lib/chain.ts          on-chain reads: PERMIT3() check, minValidNonce, funding state
   backend/api.ts        the order-distribution seam
   backend/mock.ts       in-browser stand-in (default)

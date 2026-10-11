@@ -55,10 +55,14 @@ export interface AllowanceView {
   covered: boolean;
   /** A standing approval or grant exceeds this ticket and the next step trims it. */
   trims: boolean;
-  /** What the next transaction does. */
-  nextLabel: string;
+  /** The funding button: the next transaction and its place, "Wrap 0.0123 RBTC → WRBTC (1 of 3)". */
+  buttonLabel: string;
   /** Transactions still to send. */
   remaining: number;
+  /** The next step wraps native coin first (WRBTC tickets funded from RBTC). */
+  wrap: { amount: string; reserve: string; nativeSymbol: string } | null;
+  /** Why funding cannot proceed (the wrap would eat the gas reserve), or null. */
+  blocked: string | null;
   /** Something is left approved or granted that a revoke would clear. */
   leftover: boolean;
   /** Set when the configured Permit3 is not the one Settlement uses. */
@@ -111,6 +115,10 @@ interface OrderFormProps {
   delivery: { direct: boolean; windowSeconds: number; overrideBps: number };
   /** The wallet as the balance lines need it. */
   wallet: { connected: boolean; onChain: boolean; native: { symbol: string; balance: number | undefined } };
+  /** The pay token is the wrapped native coin: RBTC above the gas reserve counts as spendable (human units). */
+  autoWrap?: { symbol: string; value: number } | null;
+  /** The wallet holds the wrapped native coin: offer turning it back (behind a confirm). */
+  unwrap?: { symbol: string; busy: boolean; error: string | null; action: () => void } | null;
   onConnect: () => void;
   onSign: () => void;
 }
@@ -170,6 +178,8 @@ export function OrderForm(props: OrderFormProps) {
     domain,
     delivery,
     wallet,
+    autoWrap,
+    unwrap,
     onConnect,
     onSign,
   } = props;
@@ -192,9 +202,11 @@ export function OrderForm(props: OrderFormProps) {
   const resting = quote?.resting ?? null;
   const twapMinutes = ticket.slices * ticket.everyMin;
 
-  const balOf = (symbol: string, value: number | undefined) =>
-    balanceState({ connected: wallet.connected, onChain: wallet.onChain, value, symbol });
-  const payBal = balOf(payToken, payBalance);
+  const balOf = (symbol: string, value: number | undefined, wrappable?: { value: number; symbol: string } | null) =>
+    balanceState({ connected: wallet.connected, onChain: wallet.onChain, value, symbol, wrappable });
+  // Selling WRBTC: RBTC above the gas reserve is spendable too (auto-wrapped at funding).
+  const payBal = balOf(payToken, payBalance, autoWrap);
+  const paySpendable = payBal.kind === "ok" ? payBal.value : payBalance;
   const recvBal = balOf(recvToken, balances[recvToken]);
 
   // ---- the limit / TWAP route bar (a market ticket's source is a chip in Details)
@@ -334,6 +346,20 @@ export function OrderForm(props: OrderFormProps) {
               {[market.base, market.quote].map((sym) => (
                 <span key={sym} className="m">
                   <b>{balances[sym] === undefined ? "…" : fmtBalance(balances[sym]!)}</b> {sym}
+                  {unwrap && unwrap.symbol === sym && (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        className="linkbtn"
+                        disabled={unwrap.busy}
+                        title={`Turn all your ${sym} back into ${wallet.native.symbol} (asks to confirm first)`}
+                        onClick={unwrap.action}
+                      >
+                        {unwrap.busy ? "unwrapping…" : "unwrap"}
+                      </button>
+                    </>
+                  )}
                 </span>
               ))}
               <span className="m" title="Native coin, pays gas for approvals">
@@ -342,6 +368,7 @@ export function OrderForm(props: OrderFormProps) {
             </span>
           )}
         </div>
+        {unwrap?.error && <div className="signerr">{unwrap.error}</div>}
 
         <div className="field">
           <div className="top">
@@ -352,7 +379,7 @@ export function OrderForm(props: OrderFormProps) {
               {payBal.kind === "ok" && (
                 <button
                   type="button"
-                  disabled={maxAmount === undefined || payBalance === undefined || payBalance <= 0}
+                  disabled={maxAmount === undefined || paySpendable === undefined || paySpendable <= 0}
                   onClick={() => maxAmount !== undefined && ticket.setAmount(maxAmount)}
                 >
                   Max
@@ -381,7 +408,8 @@ export function OrderForm(props: OrderFormProps) {
           </div>
           {overBalance && (
             <span className="capnote">
-              exceeds your balance of {fmtBalance(payBalance ?? 0)} {payToken}
+              exceeds your {autoWrap && autoWrap.value > 0 ? "spendable " : ""}balance of {fmtBalance(paySpendable ?? 0)} {payToken}
+              {autoWrap && autoWrap.value > 0 ? ` (incl. ${autoWrap.symbol} to wrap)` : ""}
             </span>
           )}
           {!overBalance && quote && isMarket && figures?.basis !== "quote" && quote.unfilledIn > 0 && amount > 0 && (
@@ -659,7 +687,13 @@ export function OrderForm(props: OrderFormProps) {
                   <button
                     type="button"
                     className={allowance.covered ? "cta ok" : "cta line"}
-                    disabled={allowance.covered || allowance.approving || allowance.required <= 0 || allowance.mismatch !== null}
+                    disabled={
+                      allowance.covered ||
+                      allowance.approving ||
+                      allowance.required <= 0 ||
+                      allowance.mismatch !== null ||
+                      allowance.blocked !== null
+                    }
                     onClick={allowance.approve}
                   >
                     {allowance.mismatch
@@ -669,11 +703,17 @@ export function OrderForm(props: OrderFormProps) {
                         : allowance.approving
                           ? "Confirm in your wallet…"
                           : allowance.required > 0
-                            ? `${allowance.trims ? "Reduce: " : ""}${allowance.nextLabel}${
-                                allowance.remaining > 1 ? ` (1 of ${allowance.remaining})` : ""
-                              }`
+                            ? allowance.buttonLabel
                             : `Approve ${payToken}`}
                   </button>
+                  {allowance.wrap && !allowance.covered && (
+                    <span className="capnote dim">
+                      You hold too little {payToken}: the first transaction wraps exactly {allowance.wrap.amount}{" "}
+                      {allowance.wrap.nativeSymbol} into {payToken} (1:1), keeping at least {allowance.wrap.reserve}{" "}
+                      {allowance.wrap.nativeSymbol} for gas
+                    </span>
+                  )}
+                  {allowance.blocked && <div className="signerr">{allowance.blocked}</div>}
                   <span className="capnote dim">
                     Pre-audit: the approval and the Permit3 grant to Settlement are capped at this order&rsquo;s size
                     and stay until a fill uses them or you revoke them — the grant also lapses shortly after the
@@ -710,10 +750,11 @@ export function OrderForm(props: OrderFormProps) {
                 Network fee <b>0</b> — the filler pays
               </>
             )}
-            {allowance.spender !== null && !allowance.covered && (
+            {allowance.spender !== null && !allowance.covered && !overBalance && (
               <>
                 <br />
-                the approval and grant above are the only transactions you send
+                {allowance.wrap ? "the wrap, approval and grant above are" : "the approval and grant above are"} the only
+                transactions you send
               </>
             )}
           </div>
