@@ -128,3 +128,27 @@ export async function readGasPrice(reader: GasReader, multBps: number): Promise<
     return null;
   }
 }
+
+/**
+ * Multiplier for the app's OWN transactions (wrap, approve, Permit3 grant, unwrap,
+ * on-chain cancel) on Rootstock: the block `minimumGasPrice` + 1 %. Rootstock has no
+ * fee auction — a block includes every tx at or above its minimum, so paying more
+ * buys nothing unless blocks are full — and consensus lets the minimum move at most
+ * ±1 % per block (RSKIP-09), so +1 % survives one maximal rise between read and
+ * inclusion. Wallets otherwise send at `eth_gasPrice` = minimum + 10 %.
+ */
+export const USER_GAS_PRICE_MULT_BPS = 10_100;
+
+/** Rootstock mainnet / testnet: the chains whose blocks carry `minimumGasPrice`. */
+const MIN_GAS_PRICE_CHAINS = new Set([30, 31]);
+
+/**
+ * Gas-price fields to spread into a wallet `sendTransaction` / `writeContract`:
+ * `{ type: "legacy", gasPrice }` at the Rootstock floor + 1 %, or `{}` (let the wallet
+ * price it) on other chains or when the price cannot be read.
+ */
+export async function userTxGas(reader: GasReader, chainId: number): Promise<{ type: "legacy"; gasPrice: bigint } | Record<string, never>> {
+  if (!MIN_GAS_PRICE_CHAINS.has(chainId)) return {};
+  const gasPrice = await readGasPrice(reader, USER_GAS_PRICE_MULT_BPS);
+  return gasPrice ? { type: "legacy", gasPrice } : {};
+}

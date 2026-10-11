@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createPublicClient, createWalletClient, custom, erc20Abi, type Address } from "viem";
 
 import { chainById } from "../config/chains";
-import { readFundingState, verifyDeployment, type Reader } from "../lib/chain";
+import { readFundingState, userTxGas, verifyDeployment, type Reader } from "../lib/chain";
 import { fundingCalls, planFunding, revokeCalls, type Call, type FundingState, type WrapSource } from "../lib/funding";
 import type { EIP1193Provider } from "./eip6963";
 
@@ -134,7 +134,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
         const reread = () => readFundingState(reader, { token, owner, permit3, settlement });
         let state = await reread();
         const exec = async (call: Call) => {
-          const tx = { to: call.to, data: call.data, chain: config.chain, account: owner, ...(call.value ? { value: call.value } : {}) };
+          const tx = { to: call.to, data: call.data, chain: config.chain, account: owner, ...(call.value ? { value: call.value } : {}), ...(await userTxGas(publicClient, config.chain.id)) };
           let hash: `0x${string}`;
           try {
             hash = await wallet.sendTransaction(tx);
@@ -148,6 +148,7 @@ export function useAllowance(args: AllowanceArgs): AllowanceState {
               abi: erc20Abi,
               functionName: "approve",
               args: [permit3, 0n],
+              ...(await userTxGas(publicClient, config.chain.id)),
             });
             await publicClient.waitForTransactionReceipt({ hash: reset });
             hash = await wallet.sendTransaction(tx);

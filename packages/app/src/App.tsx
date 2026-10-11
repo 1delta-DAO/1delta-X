@@ -27,7 +27,7 @@ import { useTicket, type TicketDeps } from "./hooks/useTicket";
 import { useTokenIndex } from "./hooks/useTokenIndex";
 import { fmtAmt, fmtPrice } from "./lib/format";
 import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/ladder";
-import { readMinValidNonce, type Reader } from "./lib/chain";
+import { readMinValidNonce, userTxGas, type Reader } from "./lib/chain";
 import { fmtWei, fundingButtonLabel, hasLeftover, planFunding, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
 import { buildOrder, inputWei } from "./lib/order";
 import { exceedsBalance, marketFigures, maxSpendableWei, sourceName, wrappableWei, wrapSpendableWei } from "./lib/ticketView";
@@ -606,7 +606,7 @@ export default function App() {
       const call = unwrapCall(address as Address, wrappedWei);
       const client = createWalletClient({ account: wallet.address, chain: config.chain, transport: custom(wallet.provider) });
       const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) });
-      const hash = await client.sendTransaction({ to: call.to, data: call.data, chain: config.chain, account: wallet.address });
+      const hash = await client.sendTransaction({ to: call.to, data: call.data, chain: config.chain, account: wallet.address, ...(await userTxGas(reader, config.chain.id)) });
       const receipt = await reader.waitForTransactionReceipt({ hash });
       if (receipt.status !== "success") throw new Error("unwrap transaction reverted");
     } catch (e) {
@@ -641,6 +641,7 @@ export default function App() {
           data: encodeCancelOrders(signedOrders.map((x) => x.order.nonce)),
           chain: config.chain,
           account: wallet.address,
+          ...(await userTxGas(reader, config.chain.id)),
         });
         const receipt = await reader.waitForTransactionReceipt({ hash });
         if (receipt.status !== "success") throw new Error("cancel transaction reverted");

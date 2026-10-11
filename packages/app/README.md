@@ -514,6 +514,13 @@ token replaces the previous one's funding. A TWAP funds its whole schedule up
 front (each slice is a separate order, signed when due), so a later slice needs
 no further approval.
 
+**Gas price of the app's own transactions (2026-10-11).** Wrap, approve, Permit3 grant,
+unwrap and on-chain cancel are sent as legacy transactions at the latest block's
+`minimumGasPrice` **+ 1 %** (`USER_GAS_PRICE_MULT_BPS`, `lib/chain.ts` `userTxGas`),
+not the wallet's `eth_gasPrice` (minimum + 10 %). Rootstock has no fee auction and the
+minimum moves at most ±1 % per block, so +1 % is included as fast as +10 %. Other
+chains, or a failed read, leave pricing to the wallet.
+
 **Auto-wrap: selling WRBTC with RBTC (2026-10-11).** A ticket that *pays* WRBTC
 (Rootstock's wrapped native coin, `WRAPPED_NATIVE` in `config/markets.ts`) may be
 funded from RBTC. When the wallet's WRBTC balance is below the ticket's input, the
