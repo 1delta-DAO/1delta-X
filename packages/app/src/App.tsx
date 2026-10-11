@@ -7,7 +7,7 @@ import { BOOK_IS_REMOTE, orderbook } from "./backend/book";
 import type { SignedOrder } from "./backend/api";
 import { Header } from "./components/Header";
 import { MarketPicker } from "./components/MarketPicker";
-import { OrderBook } from "./components/OrderBook";
+import { OrderBook, type BookMarker } from "./components/OrderBook";
 import { OrderForm, type AllowanceView, type Gate, type Receipt } from "./components/OrderForm";
 import { Orders } from "./components/Orders";
 import { PreAuditGate, PreAuditStrip, useAcknowledgement } from "./components/PreAudit";
@@ -30,6 +30,7 @@ import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/lad
 import { readMinValidNonce, type Reader } from "./lib/chain";
 import { hasLeftover, planFunding, type FundingStep } from "./lib/funding";
 import { buildOrder, inputWei } from "./lib/order";
+import { exceedsBalance, marketFigures, maxSpendableWei, sourceName } from "./lib/ticketView";
 import {
   defaultSlippageBps,
   quoteDelivery,
@@ -201,8 +202,11 @@ export default function App() {
   const recvPinned = pinnedToken(chainId, ticket.recvToken);
   const quoteReq: QuoteRequest | null = useMemo(() => {
     if (ticket.mode !== "market" || !deployment || !quotesSupported(chainId) || ticket.amount <= 0 || !payPinned || !recvPinned) return null;
-    // The exact input the order will commit: the typed amount, capped at the balance.
-    const amountIn = inputWei(ticket.amount, payPinned.decimals, balanceWei(ticket.payToken));
+    // The exact input the order will commit: the typed amount, capped at the balance —
+    // unless the typed amount is over it: then quote what was typed (the form shows
+    // "insufficient" and will not sign) rather than silently pricing a smaller ticket.
+    const bal = balanceWei(ticket.payToken);
+    const amountIn = inputWei(ticket.amount, payPinned.decimals, exceedsBalance(ticket.amountStr, payPinned.decimals, bal) ? undefined : bal);
     if (amountIn === 0n) return null;
     return {
       chainId,
@@ -214,7 +218,7 @@ export default function App() {
       delivery: quoteDelivery(deployment, ticket.marketId),
       ...(wallet.address ? { maker: wallet.address } : {}),
     };
-  }, [ticket.mode, ticket.amount, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, balanceWei, wallet.address]);
+  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, balanceWei, wallet.address]);
   const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
   const termsOf = useCallback(
     (fq: FillerQuote | null) =>
@@ -258,9 +262,41 @@ export default function App() {
 
   // Exact comparison in wei — a float compare of a number with itself could
   // never see a "max" that rounded above the balance.
-  const overBalance = payWei !== undefined && requiredWei > payWei;
+  const overBalance =
+    (payWei !== undefined && requiredWei > payWei) || exceedsBalance(ticket.amountStr, payMeta.decimals, payWei);
+  // Pinned pay tokens are ERC-20s (WRBTC, not RBTC), so "Max" is the whole balance;
+  // a native coin would keep a gas reserve back (lib/ticketView.ts).
   const maxAmount =
-    payWei !== undefined && payMeta.decimals !== undefined ? formatUnits(payWei, payMeta.decimals) : undefined;
+    payWei !== undefined && payMeta.decimals !== undefined ? formatUnits(maxSpendableWei(payWei, false), payMeta.decimals) : undefined;
+
+  // MARKET figures: the filler's quote when there is one — every number on the form
+  // and the book's quote line come from it; the ladder walk only without a quote.
+  const figures = useMemo(
+    () =>
+      ticket.mode !== "market" || ticket.amount <= 0
+        ? null
+        : marketFigures({
+            side: ticket.side,
+            rfq,
+            ladder: q,
+            fallbackMinOut: plan?.kind === "market" && !plan.quoted ? plan.minOut : null,
+            fallbackGas: plan?.kind === "market" && !plan.quoted && plan.floor ? plan.floor.gasCostOut : null,
+            mid: pool.book?.mid ?? null,
+          }),
+    [ticket.mode, ticket.amount, ticket.side, rfq, q, plan, pool.book?.mid],
+  );
+  const bookMarker: BookMarker | null = figures
+    ? {
+        side: ticket.side === "sell" ? "bid" : "ask",
+        price: figures.price,
+        minPrice: figures.minPrice,
+        label: figures.basis === "quote" ? "Your quote" : "Book estimate",
+        via: figures.basis === "quote" ? `via ${sourceName(figures.source)}` : "no filler quote",
+        amount: `≈ ${fmtAmt(figures.receive)} ${ticket.recvToken}`,
+      }
+    : null;
+  const nativeSymbol = chainById(chainId)?.chain.nativeCurrency.symbol ?? "native";
+  const nativeBalance = rawBalances.native !== undefined ? Number(formatUnits(rawBalances.native, 18)) : undefined;
 
   const allowanceState = useAllowance({
     provider: wallet.provider,
@@ -418,6 +454,7 @@ export default function App() {
         });
         ticket.clearAmount();
         allowanceState.refresh();
+        rawBalances.refresh();
         return;
       }
 
@@ -480,6 +517,7 @@ export default function App() {
       });
       ticket.clearAmount();
       allowanceState.refresh();
+      rawBalances.refresh();
     } catch (e) {
       // A rejected signature is a normal outcome, not a crash — say what
       // happened and leave the ticket exactly as it was.
@@ -488,7 +526,7 @@ export default function App() {
     } finally {
       setSigning(false);
     }
-  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf]);
+  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf, rawBalances]);
 
   const [orderError, setOrderError] = useState<string | null>(null);
 
@@ -640,7 +678,7 @@ export default function App() {
             maxAmount={maxAmount}
             overBalance={overBalance}
             floor={plan?.kind === "market" && plan.floor ? { ...plan.floor, minOut: plan.minOut, targetOut: plan.targetOut } : null}
-            rfq={rfq}
+            figures={figures}
             quoteStatus={quoteStatus}
             quoteError={marketQuote.error}
             slippage={{ setting: slippage, bps: slippageBps, autoBps: autoSlippageBps, set: setSlippage }}
@@ -652,6 +690,8 @@ export default function App() {
               deployed: deployment !== null,
             }}
             delivery={marketDelivery}
+            wallet={{ connected: !!wallet.address, onChain, native: { symbol: nativeSymbol, balance: nativeBalance } }}
+            onConnect={() => setConnectRequest((n) => n + 1)}
             onSign={sign}
           />
           <OrderBook
@@ -669,6 +709,7 @@ export default function App() {
             venues={pool.book?.venues ?? []}
             status={pool.venues}
             onRetry={pool.refresh}
+            marker={bookMarker}
           />
         </div>
 

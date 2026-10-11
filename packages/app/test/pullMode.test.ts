@@ -243,11 +243,11 @@ describe("pull-market soft exclusivity window", () => {
   });
 });
 
-describe("the form's \"Filled by\" line", () => {
-  it("states the signed delivery: direct, soft window then open, or open", async () => {
-    const { deliveryLabel } = await import("../src/components/OrderForm");
-    expect(deliveryLabel({ direct: true, windowSeconds: 0, overrideBps: 0 })).toBe("our solver only (direct delivery)");
-    expect(deliveryLabel({ direct: false, windowSeconds: 60, overrideBps: 5 })).toBe("our solver first for ~2 blocks (others pay you +5 bps), then any filler");
-    expect(deliveryLabel({ direct: false, windowSeconds: 0, overrideBps: 0 })).toBe("any filler");
+describe("the form's exclusivity line (\"Filled by\" was removed 2026-10-11)", () => {
+  it("speaks only when a pull market opted in to a soft window", async () => {
+    const { exclusivityLabel } = await import("../src/lib/ticketView");
+    expect(exclusivityLabel({ direct: true, windowSeconds: 0, overrideBps: 0 })).toBeNull();
+    expect(exclusivityLabel({ direct: false, windowSeconds: 60, overrideBps: 5 })).toBe("our solver first for ~2 blocks (others pay you +5 bps)");
+    expect(exclusivityLabel({ direct: false, windowSeconds: 0, overrideBps: 0 })).toBeNull();
   });
 });

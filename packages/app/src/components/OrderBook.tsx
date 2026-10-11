@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { Fragment, useMemo } from "react";
 
 import { fmt, fmtAmt, fmtPrice } from "../lib/format";
-import { restingLabel, type RestingPreview } from "../lib/ladder";
+import { refine, restingLabel, topOfBook, type RestingPreview } from "../lib/ladder";
+import { markerIndex } from "../lib/ticketView";
 import type { VenueStatus } from "../hooks/usePoolBook";
 import { SOURCE_NAME, SOURCE_VAR, type Level, type Side, type Venue } from "../lib/types";
 
@@ -34,6 +35,54 @@ interface OrderBookProps {
   /** Per-pool load phase, so a venue still in flight says so instead of reading as empty. */
   status: VenueStatus[];
   onRetry: () => void;
+  /** A market ticket's active quote, drawn into the side it takes from. */
+  marker: BookMarker | null;
+}
+
+/** The quote line drawn into the ladder. */
+export interface BookMarker {
+  side: "bid" | "ask";
+  price: number;
+  /** The slippage minimum's price; ≤ 0 = none. */
+  minPrice: number;
+  /** "Your quote", or "Book estimate" without a filler quote. */
+  label: string;
+  /** "via Sushi"… */
+  via: string;
+  /** "≈ 8,246 USD0". */
+  amount: string;
+}
+
+/** Marker rows, by insertion index into the side's best-first rows. */
+function markersAt(rows: Row[], m: BookMarker | null, side: "bid" | "ask"): Map<number, Array<"quote" | "min">> {
+  const at = new Map<number, Array<"quote" | "min">>();
+  if (!m || m.side !== side) return at;
+  const prices = rows.map((r) => r.level.price);
+  const descending = side === "bid";
+  const put = (i: number, k: "quote" | "min") => at.set(i, [...(at.get(i) ?? []), k]);
+  put(markerIndex(prices, m.price, descending), "quote");
+  if (m.minPrice > 0) put(markerIndex(prices, m.minPrice, descending), "min");
+  return at;
+}
+
+function QuoteLine({ m, kind, tick }: { m: BookMarker; kind: "quote" | "min"; tick: number }) {
+  if (kind === "min") {
+    return (
+      <div className="qmark min" data-side={m.side} title="The order never fills below this price (your slippage protection)">
+        <span className="px">{fmt(m.minPrice, tick)}</span>
+        <span className="ql">minimum</span>
+      </div>
+    );
+  }
+  return (
+    <div className="qmark" data-side={m.side} title="Where your market order prices right now">
+      <span className="px">{fmt(m.price, tick)}</span>
+      <span className="ql">
+        {m.label} · <b>{fmt(m.price, tick)}</b> · {m.via}
+      </span>
+      <span className="qa">{m.amount}</span>
+    </div>
+  );
 }
 
 function assemble(levels: Level[], preview: RestingPreview | null, descending: boolean) {
@@ -129,7 +178,7 @@ function LadderRow({
 }
 
 export function OrderBook(props: OrderBookProps) {
-  const { bids, asks, base, quote, tick, side, preview, onPickPrice, loading, error, block, venues, status, onRetry } =
+  const { bids, asks, base, quote, tick, side, preview, onPickPrice, loading, error, block, venues, status, onRetry, marker } =
     props;
   const phaseOf = (pool: string) => status.find((s) => s.pool.toLowerCase() === pool.toLowerCase())?.phase;
   // A pool that has not answered yet has no `Venue` row of its own, so the
@@ -138,15 +187,22 @@ export function OrderBook(props: OrderBookProps) {
   const pending = status.filter((s) => s.phase === "loading" && !venues.some((v) => v.pool.toLowerCase() === s.pool.toLowerCase()));
 
   const view = useMemo(() => {
-    const askSide = assemble(asks, preview?.side === "ask" ? preview : null, false);
-    const bidSide = assemble(bids, preview?.side === "bid" ? preview : null, true);
+    // Rows are the same ~20 bps curve slices the walk prices against (lib/ladder
+    // `refine`), not one row per tick range: a sparse pool's single range spans
+    // percent, and its AVERAGE drawn as one row sat far below the touch and the
+    // quote line. Signed limit orders are flat rungs and pass through unchanged.
+    const askSide = assemble(refine(asks, false), preview?.side === "ask" ? preview : null, false);
+    const bidSide = assemble(refine(bids, true), preview?.side === "bid" ? preview : null, true);
     return { askSide, bidSide, maxCum: Math.max(askSide.total, bidSide.total, 1) };
   }, [asks, bids, preview]);
 
-  const bestBid = view.bidSide.rows.find((r) => !r.preview)?.level.price ?? bids[0]?.price;
-  const bestAsk = view.askSide.rows.find((r) => !r.preview)?.level.price ?? asks[0]?.price;
-  const mid = bestBid !== undefined && bestAsk !== undefined ? (bestBid + bestAsk) / 2 : null;
-  const spreadBps = mid ? ((bestAsk! - bestBid!) / mid) * 10_000 : null;
+  // The TOUCH: marginal prices (a pool rung's `start`), not the rung averages shown
+  // per row — on a sparse pool those sit percent away from where the next unit trades.
+  const top = topOfBook(bids, asks);
+  const mid = top.mid;
+  const spreadBps = mid ? ((top.ask! - top.bid!) / mid) * 10_000 : null;
+  const askMarks = markersAt(view.askSide.rows, marker, "ask");
+  const bidMarks = markersAt(view.bidSide.rows, marker, "bid");
 
   const lmtDepth = bids.reduce((n, l) => n + (l.source === "LMT" ? l.size : 0), 0);
   const poolDepth = bids.reduce((n, l) => n + (l.source === "LMT" ? 0 : l.size), 0);
@@ -195,16 +251,21 @@ export function OrderBook(props: OrderBookProps) {
           </div>
 
           <div>
-            {[...view.askSide.rows].reverse().map((row, i) => (
-              <LadderRow
-                key={`a${row.level.price}-${row.level.source}-${i}`}
-                row={row}
-                rung="ask"
-                maxCum={view.maxCum}
-                tick={tick}
-                onPick={onPickPrice}
-              />
+            {/* Displayed worst-first: a marker at ascending index i sits just above row i-1. */}
+            {(askMarks.get(view.askSide.rows.length) ?? []).slice().reverse().map((k) => (
+              <QuoteLine key={`am-end-${k}`} m={marker!} kind={k} tick={tick} />
             ))}
+            {view.askSide.rows
+              .map((row, i) => ({ row, i }))
+              .reverse()
+              .map(({ row, i }) => (
+                <Fragment key={`a${row.level.price}-${row.level.source}-${i}`}>
+                  <LadderRow row={row} rung="ask" maxCum={view.maxCum} tick={tick} onPick={onPickPrice} />
+                  {(askMarks.get(i) ?? []).slice().reverse().map((k) => (
+                    <QuoteLine key={`am${i}-${k}`} m={marker!} kind={k} tick={tick} />
+                  ))}
+                </Fragment>
+              ))}
           </div>
 
           <div className="spread">
@@ -234,14 +295,15 @@ export function OrderBook(props: OrderBookProps) {
 
           <div>
             {view.bidSide.rows.map((row, i) => (
-              <LadderRow
-                key={`b${row.level.price}-${row.level.source}-${i}`}
-                row={row}
-                rung="bid"
-                maxCum={view.maxCum}
-                tick={tick}
-                onPick={onPickPrice}
-              />
+              <Fragment key={`b${row.level.price}-${row.level.source}-${i}`}>
+                {(bidMarks.get(i) ?? []).map((k) => (
+                  <QuoteLine key={`bm${i}-${k}`} m={marker!} kind={k} tick={tick} />
+                ))}
+                <LadderRow row={row} rung="bid" maxCum={view.maxCum} tick={tick} onPick={onPickPrice} />
+              </Fragment>
+            ))}
+            {(bidMarks.get(view.bidSide.rows.length) ?? []).map((k) => (
+              <QuoteLine key={`bm-end-${k}`} m={marker!} kind={k} tick={tick} />
             ))}
           </div>
 

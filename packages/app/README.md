@@ -375,6 +375,24 @@ limit bills the visitor. The proxy (`public/_worker.js` `proxyQuote`) forwards e
 to `QUOTE_PROXY_TARGET` (default `http://localhost:8787/quote`). Tests:
 `test/marketQuote.test.ts`, `test/workerQuote.test.ts`.
 
+### What the form shows (2026-10-11)
+
+One price per market ticket: the filler's quote. *You receive*, the effective price,
+*versus mid* and the minimum all derive from it
+([`src/lib/ticketView.ts`](src/lib/ticketView.ts) `marketFigures`); the ladder walk is
+only the fallback when there is no quote (labelled "book estimate"). Visible: *You pay*
+(with the wallet balance and **Max** = the exact balance; a native coin would keep a
+gas reserve), *You receive* (with its balance), one *Network fee ≈* line (gas incl. the
+filler's margin) and the minimum as a small line. Price, versus mid, source, slippage,
+expiry, an opted-in exclusivity window, the signed receive address and the Settlement
+domain sit in a **Details** disclosure, closed by default and remembered per viewer
+(`localStorage` `1dx.form.details`). A wallet strip shows the market's two tokens and
+native RBTC (re-read every 15 s, on account / chain change and after signing; "Connect
+wallet" / "wrong network" instead of numbers). A typed amount above the balance turns
+the button into *Insufficient … balance*. The book draws the active quote as a violet
+line on the side it takes from (*Your quote · 82,460 · via Sushi*) and the slippage
+minimum as a dashed line.
+
 ## Market orders: the ticket-sized floor (fallback)
 
 When no filler quote is available, a market order is a 60 s dutch auction from the book's **executable** (fee-net)
@@ -596,9 +614,18 @@ price, and converts each range into one rung:
   below the current price holds only token1, but pushing the price down through
   it takes exactly the token0 that range *would* hold — so one amount formula
   serves bids and asks alike, and both sides of the ladder are comparable.
-- **Price** is the range's average execution price (`quote / base`), which is
-  what the fill walk needs. Quoting the marginal price instead would
-  systematically over-quote every rung.
+- **Price** is the range's average execution price (`quote / base`) — what
+  consuming the WHOLE range costs, and what the row shows.
+- **`start` / `end`** are the marginal prices at the range's two ends. Liquidity is
+  constant in between, so the walk prices a PARTIAL rung on the curve
+  (`sellOnRung` / `buyOnRung` in [`src/lib/ladder.ts`](src/lib/ladder.ts)) and cuts
+  wide rungs into ~20 bps pieces (`refine`) so venues interleave by what each slice
+  really costs. Before 2026-10-11 a partial rung paid the whole range's average: on
+  Rootstock's sparse WRBTC/USD0 pool one bid range spans ~11 %, so 0.1 WRBTC walked
+  to 78,202 while the touch was 83,056 (the filler quoted 82,460 net of gas; the
+  walk now gives 82,469). The book's **mid** is the midpoint of the marginal touch
+  (`topOfBook`), not of the two best rung averages (which read 81,374 against a
+  spot of 83,306).
 
 This matters. A bucketed price/size feed is a *rendering* of the same tick data,
 but every bucket inside one position's range comes out the same size — the
@@ -702,6 +729,7 @@ src/
   lib/tokens.ts         1delta token lists (icons only), lazily loaded, cached with a TTL
   lib/order.ts          ticket → EIP-712 order: locale-free wei maths, nonce draw, input cap
   lib/plan.ts           what one ticket signs and funds
+  lib/ticketView.ts     what the form / book show: quote-first figures, quote marker, balances, Max
   lib/funding.ts        the two funding legs (ERC-20 → Permit3, Permit3 grant → Settlement)
   lib/chain.ts          on-chain reads: PERMIT3() check, minValidNonce, funding state
   backend/api.ts        the order-distribution seam

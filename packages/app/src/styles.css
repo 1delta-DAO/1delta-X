@@ -572,3 +572,83 @@ main.reading { max-width: 760px; padding-top: 8px; }
 main.reading .md { display: block; }
 main.reading .md h2 { margin-bottom: 14px; }
 main.reading .md .mdquote { margin-bottom: 26px; }
+
+/* ── order form: balances, quote summary, details ─────── */
+.wstrip {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-radius: 10px; padding: 9px 13px; background: var(--bg);
+}
+.wstrip .m { font-size: 11px; color: var(--dim); }
+.wbals { display: flex; gap: 6px 14px; flex-wrap: wrap; justify-content: flex-end; }
+.wbals b { color: var(--ink); font-weight: 700; }
+.balconnect {
+  border: 0; background: none; padding: 0; color: var(--lime); font-family: var(--mono);
+  font-size: 11px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px;
+}
+.field .bal .balconnect { padding: 0; }
+.field .bal .m { color: var(--dim); }
+.field .bal .m.warn, .wstrip .m.warn { color: var(--orange); }
+.field .bal button:disabled { opacity: .35; cursor: not-allowed; }
+.inp.over { border-color: var(--orange); }
+
+.qsum { display: flex; flex-direction: column; gap: 4px; padding: 2px 2px 0; }
+.qsum > div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--dim); }
+.qsum > div .m { color: var(--ink); text-align: right; }
+.qsum > div.minor { font-size: 11.5px; color: var(--faint); }
+.qsum > div.minor .m { color: var(--dim); }
+.qsum > div.warn { color: var(--orange); }
+.qspin {
+  display: inline-block; width: 7px; height: 7px; margin-left: 7px; border-radius: 50%;
+  background: var(--violet); animation: venue-pulse 1.1s ease-in-out infinite; vertical-align: middle;
+}
+
+.details { border: 1px solid var(--line); border-radius: 10px; }
+.dtoggle {
+  width: 100%; display: flex; align-items: center; gap: 10px; border: 0; background: none;
+  padding: 11px 14px; text-align: left;
+}
+.dtoggle:hover { background: var(--raise); border-radius: 10px; }
+.dtoggle .drate { flex: 1; text-align: right; font-size: 11px; color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dtoggle .car { color: var(--faint); font-size: 10px; }
+.dbody { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+.dbody .sum > div { font-size: 12.5px; padding: 8px 0; }
+.dbody .sum dd { overflow-wrap: anywhere; }
+.srcchip {
+  display: inline-block; font-family: var(--mono); font-size: 10.5px; padding: 2px 9px;
+  border-radius: 999px; border: 1px solid var(--violet); color: var(--violet);
+}
+.slip { display: flex; flex-direction: column; gap: 8px; }
+.slip .sl { font-size: 12.5px; color: var(--dim); }
+.slctl { display: flex; gap: 6px; }
+.slctl button, .slin {
+  border: 1px solid var(--line); background: none; color: var(--dim); border-radius: 999px;
+  font-family: var(--mono); font-size: 11px; padding: 6px 12px;
+}
+.slctl button[aria-pressed="true"] { border-color: var(--ink); color: var(--ink); }
+.slin { display: flex; align-items: center; gap: 4px; flex: 1; }
+.slin:focus-within { border-color: var(--lime); }
+.slin input { flex: 1; min-width: 0; border: 0; background: none; font-family: var(--mono); font-size: 11px; padding: 0; text-align: right; }
+.slin input:focus { outline: none; }
+.slip .capnote.dim, .dbody > .capnote.dim { text-align: left; }
+
+/* ── the active market quote, drawn into the ladder ───── */
+.qmark {
+  display: flex; align-items: center; gap: 14px; padding: 7px 24px;
+  font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums;
+  color: var(--ink); background: color-mix(in srgb, var(--violet) 14%, transparent);
+  border-block: 1px solid var(--violet);
+}
+.qmark .px { color: var(--violet); font-weight: 700; flex: none; }
+.qmark .ql { flex: 1; min-width: 0; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qmark .ql b { color: var(--ink); }
+.qmark .qa { flex: none; color: var(--ink); font-weight: 700; }
+.qmark.min {
+  background: none; border-block: 0; border-top: 1px dashed var(--line2);
+  padding-block: 4px; font-size: 10.5px; color: var(--faint);
+}
+.qmark.min .px { color: var(--faint); font-weight: 400; }
+.qmark.min .ql { color: var(--faint); text-transform: uppercase; letter-spacing: .1em; font-size: 9.5px; }
+@media (max-width: 640px) {
+  .qmark { padding-inline: 16px; gap: 10px; }
+  .qmark .ql { font-size: 11px; }
+}

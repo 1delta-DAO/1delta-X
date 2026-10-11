@@ -61,6 +61,105 @@ export interface Simulation {
   crossedBase: number;
 }
 
+/** The price a taker meets first on a rung: its marginal `start` when it has one. */
+export function topPrice(l: Level): number {
+  return l.start ?? l.price;
+}
+
+/**
+ * Best bid / best ask as MARGINAL prices (what the next unit actually trades at),
+ * and their midpoint. A pool rung's displayed `price` is the average over the whole
+ * range, which on a sparse pool sits far from the touch.
+ */
+export function topOfBook(bids: readonly Level[], asks: readonly Level[]): { bid: number | null; ask: number | null; mid: number | null } {
+  let bid: number | null = null;
+  let ask: number | null = null;
+  for (const l of bids) {
+    const p = topPrice(l);
+    if (p > 0 && (bid === null || p > bid)) bid = p;
+  }
+  for (const l of asks) {
+    const p = topPrice(l);
+    if (p > 0 && (ask === null || p < ask)) ask = p;
+  }
+  return { bid, ask, mid: bid !== null && ask !== null ? (bid + ask) / 2 : null };
+}
+
+/** Constant liquidity of a curve rung, in human units: size = L·|1/√start − 1/√end|. */
+function curveL(l: Level): number | null {
+  if (l.start === undefined || l.end === undefined || !(l.start > 0) || !(l.end > 0) || l.start === l.end) return null;
+  const d = Math.abs(1 / Math.sqrt(l.start) - 1 / Math.sqrt(l.end));
+  return d > 0 ? l.size / d : null;
+}
+
+/**
+ * QUOTE out for selling `base` (≤ size) into a bid rung from its start: the price
+ * falls along the curve, 1/√p' = 1/√start + base/L, out = L·(√start − √p').
+ * Flat rungs (no start/end) pay `price`.
+ */
+export function sellOnRung(l: Level, base: number): number {
+  const L = curveL(l);
+  if (L === null || base >= l.size) return base * l.price;
+  const s0 = Math.sqrt(l.start!);
+  const inv = 1 / s0 + base / L;
+  return L * (s0 - 1 / inv);
+}
+
+/**
+ * BASE out for spending `quote` (≤ size·price) on an ask rung from its start: the
+ * price rises, √p' = √start + quote/L, base = L·(1/√start − 1/√p').
+ */
+export function buyOnRung(l: Level, quote: number): number {
+  const L = curveL(l);
+  if (L === null || quote >= l.size * l.price) return quote / l.price;
+  const s0 = Math.sqrt(l.start!);
+  return L * (1 / s0 - 1 / (s0 + quote / L));
+}
+
+/** Most pieces one curve rung is cut into for the walk. */
+const MAX_PIECES = 32;
+/** Target width of one piece, as a price fraction (20 bps). */
+const PIECE_FRACTION = 0.002;
+
+/**
+ * Cut every curve rung into constant-liquidity pieces ~20 bps wide and re-sort.
+ *
+ * The displayed ladder keeps one rung per tick range, but a greedy walk over those
+ * ranges ordered by their AVERAGE price takes the wrong venue first whenever one
+ * venue's range is wide (its average is far from its touch) and another's is narrow.
+ * Walking pieces instead interleaves venues by what each slice really costs — the
+ * order a router would take them in. Piece sizes sum exactly to the rung's size.
+ */
+export function refine(levels: readonly Level[], descending: boolean): Level[] {
+  const out: Level[] = [];
+  let cut = false;
+  for (const l of levels) {
+    const L = curveL(l);
+    if (L === null) {
+      out.push(l);
+      continue;
+    }
+    const ratio = l.end! / l.start!;
+    const k = Math.min(MAX_PIECES, Math.max(1, Math.ceil(Math.abs(Math.log(ratio)) / Math.log1p(PIECE_FRACTION))));
+    if (k === 1) {
+      out.push(l);
+      continue;
+    }
+    cut = true;
+    let prev = l.start!;
+    let used = 0;
+    for (let i = 1; i <= k; i++) {
+      const next = i === k ? l.end! : l.start! * ratio ** (i / k);
+      const size = i === k ? l.size - used : L * Math.abs(1 / Math.sqrt(next) - 1 / Math.sqrt(prev));
+      used += size;
+      if (size > 0) out.push({ ...l, price: Math.sqrt(prev * next), size, start: prev, end: next, mine: undefined });
+      prev = next;
+    }
+  }
+  if (!cut) return out;
+  return out.sort((a, b) => (descending ? b.price - a.price : a.price - b.price));
+}
+
 /**
  * Walk the ladder for `amountIn` of the PAY token.
  *
@@ -68,6 +167,10 @@ export interface Simulation {
  * walks the asks. Ladder sizes are BASE on both sides, so the buy path converts
  * per rung rather than pretending the input is already in base units — the
  * shortcut is what makes a "buy 5,000 USDC of ETH" quote silently wrong.
+ *
+ * A pool rung consumed only in PART is priced on its curve (`sellOnRung` /
+ * `buyOnRung`) — not at its whole-range average, which priced 0.1 WRBTC 6 % under
+ * the pool's spot on a range 11 % wide (2026-10-11).
  */
 export function walk(levels: Level[], amountIn: number, side: Side, limit: number | null): Simulation {
   const bySource = emptyBySource();
@@ -86,12 +189,12 @@ export function walk(levels: Level[], amountIn: number, side: Side, limit: numbe
       const takeBase = Math.min(rem, l.size);
       rem -= takeBase;
       crossedBase += takeBase;
-      crossedOut += takeBase * l.price;
+      crossedOut += takeBase < l.size ? sellOnRung(l, takeBase) : takeBase * l.price;
       bySource[l.source] += takeBase;
     } else {
       const levelCost = l.size * l.price;
       const spend = Math.min(rem, levelCost);
-      const takeBase = spend / l.price;
+      const takeBase = spend < levelCost ? buyOnRung(l, spend) : l.size;
       rem -= spend;
       crossedBase += takeBase;
       crossedOut += takeBase;
@@ -157,7 +260,7 @@ export interface QuoteArgs {
 export function quote(args: QuoteArgs): Quote {
   const { bids, asks, side, amountIn, limit, slippageBps } = args;
   const levels = side === "sell" ? bids : asks;
-  const sim = walk(levels, amountIn, side, limit);
+  const sim = walk(refine(levels, side === "sell"), amountIn, side, limit);
 
   let resting: RestingPreview | null = null;
   if (limit !== null && sim.unfilledIn > EPS && limit > 0) {

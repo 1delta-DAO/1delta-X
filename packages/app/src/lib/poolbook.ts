@@ -4,6 +4,7 @@ import { fetchPoolLiquidity, fetchPoolMeta, type PoolMeta, type TokenRef } from 
 import { fetchSushiPool } from "./sushi";
 import { DEX_SOURCE, type Level, type PoolBook, type Venue } from "./types";
 import { buildLadder, type PoolLiquidity } from "./univ3";
+import { topOfBook } from "./ladder";
 
 /** Rungs walked out from mid per side, per venue, before the ladder is truncated. */
 const MAX_RUNGS = 90;
@@ -214,9 +215,10 @@ export async function fetchVenue(
       // the higher (a quote may only err toward what the maker can actually get).
       const fee = Math.max(ref.feeBps, Number.isFinite(meta.fee) && meta.fee > 0 && meta.fee < 1_000_000 ? meta.fee : 0);
       const ladder = buildLadder(liquidity, { baseIsToken0: isToken0, maxRungs: MAX_RUNGS, maxSpread: MAX_SPREAD, fee });
-      const tag = (r: { price: number; size: number }): Level => ({
+      const tag = (r: { price: number; size: number; start?: number; end?: number }): Level => ({
         price: r.price,
         size: r.size,
+        ...(r.start !== undefined && r.end !== undefined ? { start: r.start, end: r.end } : {}),
         source,
         pool: ref.address,
         feeBps: ref.feeBps,
@@ -249,8 +251,10 @@ export function assembleBook(
 
   // Mid is the midpoint of what a taker can actually get across all venues, not
   // any single pool's spot: the best bid and the best ask may be in different
-  // pools, which is the entire point of aggregating them.
-  const mid = (bids[0].price + asks[0].price) / 2;
+  // pools, which is the entire point of aggregating them. MARGINAL prices (each
+  // rung's `start`), not rung averages: on a sparse pool the first rung can span
+  // 10 % and the midpoint of two averages sat ~2 % under spot (2026-10-11).
+  const mid = topOfBook(bids, asks).mid!;
 
   return {
     pool: primaryPool(market).address,

@@ -209,6 +209,8 @@ export function quotedTerms(q: FillerQuote, a: { payDecimals: number; recvDecima
 /** What the form shows for a quoted ticket. */
 export interface QuoteView {
   quoteId: string;
+  /** PAY amount quoted (the ticket, capped at the balance). */
+  amountIn: number;
   /** ≈ what the maker receives: the quote. */
   receive: number;
   /** The route's output before gas. */
@@ -230,6 +232,7 @@ export function quoteView(q: FillerQuote, terms: QuotedTerms, recvDecimals: numb
   const gross = Number(formatUnits(q.grossOut, recvDecimals));
   return {
     quoteId: q.quoteId,
+    amountIn: terms.amountIn,
     receive: terms.targetOut,
     gross,
     gas,

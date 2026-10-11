@@ -1,11 +1,25 @@
+import { useState, type ReactNode } from "react";
+
 import { BOOK_IS_REMOTE } from "../backend/book";
 import { pairsWith, symbolsOn } from "../config/markets";
 import type { Ticket } from "../hooks/useTicket";
 import type { TokenIndex } from "../hooks/useTokenIndex";
-import { fmtAmt, fmtPrice, shortHex } from "../lib/format";
+import { fmt, fmtAmt, fmtPrice, shortHex } from "../lib/format";
 import { restingLabel, type Quote } from "../lib/ladder";
 import { GAS_NOTE_BPS, type MarketFloor } from "../lib/marketFloor";
-import { MAX_SLIPPAGE_BPS, type QuoteView, type SlippageSetting } from "../lib/quote";
+import { MAX_SLIPPAGE_BPS, type SlippageSetting } from "../lib/quote";
+import {
+  balanceState,
+  exclusivityLabel,
+  fmtBalance,
+  fmtFee,
+  readDetailsOpen,
+  signButton,
+  sourceName,
+  writeDetailsOpen,
+  type BalanceState,
+  type MarketFigures,
+} from "../lib/ticketView";
 import { SOURCE_NAME, SOURCE_VAR, SOURCES, type Source } from "../lib/types";
 import { TokenSelect } from "./TokenSelect";
 
@@ -78,11 +92,10 @@ interface OrderFormProps {
    */
   floor: (MarketFloor & { minOut: number; targetOut: number }) | null;
   /**
-   * A MARKET ticket priced by the filler's indicative quote (lib/quote.ts): what you
-   * receive ≈, the gas share, the minimum under your slippage. Null = no quote (the
-   * `floor` fallback above, or limit / TWAP).
+   * A MARKET ticket's figures (lib/ticketView.ts `marketFigures`): from the filler's
+   * quote when there is one, else the ladder estimate. Null for limit / TWAP.
    */
-  rfq: QuoteView | null;
+  figures: MarketFigures | null;
   /** Where the market quote stands: quoted, being fetched, unavailable (floor fallback), or not applicable. */
   quoteStatus: "quoted" | "loading" | "fallback" | "off";
   quoteError: string | null;
@@ -94,26 +107,12 @@ interface OrderFormProps {
   signError: string | null;
   /** The EIP-712 domain orders are signed into, so it is never a mystery. */
   domain: { settlement: string; chainLabel: string; deployed: boolean };
-  /**
-   * Who may fill this market's orders, as signed: `direct` = our solver only, for
-   * the order's whole life (delta-verify); otherwise pull delivery, with our solver
-   * soft-exclusive for `windowSeconds` (0 = open to every filler from the start).
-   */
+  /** A pull market's opted-in soft exclusivity window (shown in Details only when there is one). */
   delivery: { direct: boolean; windowSeconds: number; overrideBps: number };
+  /** The wallet as the balance lines need it. */
+  wallet: { connected: boolean; onChain: boolean; native: { symbol: string; balance: number | undefined } };
+  onConnect: () => void;
   onSign: () => void;
-}
-
-/** "~2 blocks" on Rootstock's ~30 s clock. */
-function blocksLabel(seconds: number): string {
-  const n = Math.max(1, Math.round(seconds / 30));
-  return `~${n} block${n === 1 ? "" : "s"}`;
-}
-
-/** The "Filled by" line: what the signed order lets each filler do, and when. */
-export function deliveryLabel(d: { direct: boolean; windowSeconds: number; overrideBps: number }): string {
-  if (d.direct) return "our solver only (direct delivery)";
-  if (d.windowSeconds <= 0) return "any filler";
-  return `our solver first for ${blocksLabel(d.windowSeconds)} (others pay you +${d.overrideBps} bps), then any filler`;
 }
 
 const MODES = [
@@ -124,6 +123,26 @@ const MODES = [
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function storage(): Storage | undefined {
+  try {
+    return typeof window === "undefined" ? undefined : window.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One balance readout: a number only when it can be one. */
+function Bal({ state, onConnect }: { state: BalanceState; onConnect: () => void }) {
+  if (state.kind === "disconnected") {
+    return (
+      <button type="button" className="balconnect" onClick={onConnect}>
+        Connect wallet
+      </button>
+    );
+  }
+  return <span className={`m${state.kind === "wrong-network" ? " warn" : ""}`}>{state.text}</span>;
 }
 
 export function OrderForm(props: OrderFormProps) {
@@ -142,7 +161,7 @@ export function OrderForm(props: OrderFormProps) {
     maxAmount,
     overBalance,
     floor,
-    rfq,
+    figures,
     quoteStatus,
     quoteError,
     slippage,
@@ -150,10 +169,21 @@ export function OrderForm(props: OrderFormProps) {
     signError,
     domain,
     delivery,
+    wallet,
+    onConnect,
     onSign,
   } = props;
 
   const { amount, payToken, recvToken, mode, side, market, payBalance } = ticket;
+  const isMarket = mode === "market";
+
+  const [detailsOpen, setDetailsOpen] = useState(() => readDetailsOpen(storage()));
+  const toggleDetails = () => {
+    setDetailsOpen((o) => {
+      writeDetailsOpen(storage(), !o);
+      return !o;
+    });
+  };
 
   // Nothing deployed means nothing can pull the input, so the approval step is
   // not skipped for convenience — there is genuinely nothing to approve.
@@ -162,8 +192,14 @@ export function OrderForm(props: OrderFormProps) {
   const resting = quote?.resting ?? null;
   const twapMinutes = ticket.slices * ticket.everyMin;
 
+  const balOf = (symbol: string, value: number | undefined) =>
+    balanceState({ connected: wallet.connected, onChain: wallet.onChain, value, symbol });
+  const payBal = balOf(payToken, payBalance);
+  const recvBal = balOf(recvToken, balances[recvToken]);
+
+  // ---- the limit / TWAP route bar (a market ticket's source is a chip in Details)
   const bar: Array<{ key: string; pct: number; color: string; label: string }> = [];
-  if (quote && amount > 0 && quote.filledIn > 0) {
+  if (!isMarket && quote && amount > 0 && quote.filledIn > 0) {
     for (const src of SOURCES as Source[]) {
       const share = quote.bySource[src];
       if (share <= 0) continue;
@@ -173,73 +209,72 @@ export function OrderForm(props: OrderFormProps) {
   }
   const unfilledPct = quote && amount > 0 ? (quote.unfilledIn / amount) * 100 : 0;
 
-  const rows: Array<[string, string, string]> = [];
-  if (quote) {
+  // ---- what you receive
+  const receiveValue = isMarket
+    ? figures
+      ? fmtAmt(figures.receive)
+      : ""
+    : quote && quote.totalOut > 0
+      ? fmtAmt(quote.totalOut)
+      : "";
+
+  // ---- Details rows: everything that is not pay / receive / fee / minimum
+  const rows: Array<[string, ReactNode, string]> = [];
+  let rate: string | null = null;
+  if (isMarket && figures) {
+    rate = `1 ${market.base} ≈ ${fmt(figures.price, tick)} ${market.quote}`;
+    rows.push(["Price", `${fmt(figures.price, tick)} ${market.quote}`, ""]);
+    if (figures.vsMidPct !== null) {
+      const v = figures.vsMidPct;
+      rows.push(["Versus mid", `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`, Math.abs(v) > 2 ? "warn" : ""]);
+    }
+    rows.push([
+      "Source",
+      <span className="srcchip" key="src">
+        {figures.basis === "quote" ? `filler quote · via ${sourceName(figures.source)}` : "book estimate (no filler quote)"}
+      </span>,
+      figures.live ? "" : "warn",
+    ]);
+    if (!figures.live) rows.push(["Status", "DRY RUN — the filler quotes but will not fill", "warn"]);
+    if (figures.networkFeeBps !== null) {
+      rows.push([
+        "Network fee share",
+        `${(figures.networkFeeBps / 100).toFixed(2)}% of the ticket${figures.basis === "quote" && quoteStatus === "quoted" ? "" : " (estimate)"}`,
+        figures.networkFeeBps > GAS_NOTE_BPS ? "warn" : "",
+      ]);
+    }
+    if (figures.basis === "ladder" && floor) {
+      rows.push([
+        "Price floor",
+        `−${(floor.bps / 100).toFixed(2)}% of the estimate${floor.gasBound ? " · raised for network gas" : ""}${floor.approximate ? " · approx." : ""}`,
+        floor.bps > GAS_NOTE_BPS ? "warn" : "",
+      ]);
+    }
+  } else if (!isMarket && quote) {
     // The blended price of everything the order does: what crosses now, and what
-    // rests at the price you named. Quoting only the crossing part reports "—"
-    // for an order placed inside the spread, which is the normal limit case.
+    // rests at the price you named.
     const avg =
-      quote.totalIn > 0 && quote.totalOut > 0
-        ? side === "sell"
-          ? quote.totalOut / quote.totalIn
-          : quote.totalIn / quote.totalOut
-        : 0;
+      quote.totalIn > 0 && quote.totalOut > 0 ? (side === "sell" ? quote.totalOut / quote.totalIn : quote.totalIn / quote.totalOut) : 0;
+    if (avg > 0) rate = `1 ${market.base} ≈ ${fmt(avg, tick)} ${market.quote}`;
     rows.push(["Average price", avg > 0 ? `${fmtPrice(avg, tick)} ${market.quote}` : "—", ""]);
     if (quote.unfilledIn > 0 && amount > 0) {
-      rows.push([
-        "Fills now",
-        quote.filledIn > 0 ? `${fmtAmt(quote.filledIn)} ${payToken}` : "nothing at this price",
-        "",
-      ]);
+      rows.push(["Fills now", quote.filledIn > 0 ? `${fmtAmt(quote.filledIn)} ${payToken}` : "nothing at this price", ""]);
       rows.push(
         resting
-          ? [
-              restingLabel(resting),
-              `${fmtAmt(quote.unfilledIn)} ${payToken}`,
-              resting.exhausted ? "warn" : "good",
-            ]
+          ? [restingLabel(resting), `${fmtAmt(quote.unfilledIn)} ${payToken}`, resting.exhausted ? "warn" : "good"]
           : ["Beyond book depth", `${fmtAmt(quote.unfilledIn)} ${payToken}`, "warn"],
       );
     }
     if (mid && avg > 0) {
       const vsMid = (avg / mid - 1) * 100;
-      rows.push([
-        "Versus mid",
-        `${vsMid >= 0 ? "+" : ""}${vsMid.toFixed(2)}%`,
-        Math.abs(vsMid) > 2 ? "warn" : "",
-      ]);
+      rows.push(["Versus mid", `${vsMid >= 0 ? "+" : ""}${vsMid.toFixed(2)}%`, Math.abs(vsMid) > 2 ? "warn" : ""]);
     }
-    if (mode === "market" && rfq) {
-      // The FILLER's quote: what it would deliver now, net of its gas (+ margin). The
-      // order starts there and only decays toward the minimum if the price moves.
-      rows.push(["You receive", `≈ ${fmtAmt(rfq.receive)} ${recvToken}`, "good"]);
-      rows.push([
-        "Network gas",
-        `${fmtAmt(rfq.gas)} ${recvToken} · ${(rfq.gasBps / 100).toFixed(2)}% of the ticket (incl. +${rfq.gasMarginBps / 100}% margin)`,
-        rfq.gasBps > GAS_NOTE_BPS ? "warn" : "",
-      ]);
-      rows.push(["Minimum received", `${fmtAmt(rfq.minOut)} ${recvToken} (slippage ${(rfq.slippageBps / 100).toFixed(2)}%)`, ""]);
-      rows.push(["Quoted by", `our filler · ${rfq.source}${rfq.live ? "" : " · DRY RUN (will not fill)"}`, rfq.live ? "" : "warn"]);
-    } else if (mode === "market" && floor) {
-      // The guaranteed minimum is what the signed order commits — the plan's, not the
-      // flat-floor quote's — and the floor % says how far under the book it sits.
-      // The filler takes the order once the auction crosses its break-even (haircut +
-      // gas), so that — not the floor — is the likely outcome; labelled as an estimate.
-      const likely = floor.targetOut * (1 - floor.likelyBps / 10_000);
-      if (likely > floor.minOut) rows.push(["Likely received", `≈ ${fmtAmt(likely)} ${recvToken}`, ""]);
-      rows.push(["Minimum received", `${fmtAmt(floor.minOut)} ${recvToken}`, "good"]);
-      rows.push([
-        "Price floor",
-        `−${(floor.bps / 100).toFixed(2)}% of the quote${floor.gasBound ? " · raised for network gas" : ""}${floor.approximate ? " · approx." : ""}`,
-        floor.bps > GAS_NOTE_BPS ? "warn" : "",
-      ]);
-    } else {
-      rows.push(["Minimum received", `${fmtAmt(quote.minReceived)} ${recvToken}`, "good"]);
-    }
+  }
+  if (quote || figures) {
     rows.push([
       "Expires",
-      mode === "market"
-        ? rfq
+      isMarket
+        ? figures?.basis === "quote"
           ? "5 minutes (starts at the quote, decays to the minimum over 3.5 minutes)"
           : "5 minutes (1 minute auction, then rests at the minimum)"
         : mode === "twap"
@@ -247,10 +282,29 @@ export function OrderForm(props: OrderFormProps) {
           : "24 hours",
       "",
     ]);
-    if (domain.deployed) rows.push(["Filled by", deliveryLabel(delivery), ""]);
   }
+  const excl = domain.deployed ? exclusivityLabel(delivery) : null;
+  if (excl) rows.push(["Exclusivity", excl, ""]);
 
-  const canSign = ready && !needsApproval && !signing && amount > 0 && !overBalance && !!quote && quote.totalIn > 0;
+  // ---- the visible minimum (market: from the figures; limit / TWAP: the limit price's)
+  const minLine = isMarket
+    ? figures
+      ? `${fmtAmt(figures.minOut)} ${recvToken}`
+      : null
+    : quote && quote.minReceived > 0
+      ? `${fmtAmt(quote.minReceived)} ${recvToken}`
+      : null;
+
+  const sb = signButton({
+    signing,
+    amount,
+    overBalance,
+    payToken,
+    ready,
+    quoting: quoteStatus === "loading",
+    priced: isMarket ? !!figures : !!quote && quote.totalIn > 0,
+  });
+  const canSign = !sb.disabled && !needsApproval;
 
   return (
     <div className="box">
@@ -267,26 +321,52 @@ export function OrderForm(props: OrderFormProps) {
           ))}
         </div>
 
+        <div className="wstrip" aria-label="Wallet balances">
+          <span className="lbl">Wallet</span>
+          {!wallet.connected ? (
+            <button type="button" className="balconnect" onClick={onConnect}>
+              Connect wallet
+            </button>
+          ) : !wallet.onChain ? (
+            <span className="m warn">wrong network — switch to {domain.chainLabel}</span>
+          ) : (
+            <span className="wbals">
+              {[market.base, market.quote].map((sym) => (
+                <span key={sym} className="m">
+                  <b>{balances[sym] === undefined ? "…" : fmtBalance(balances[sym]!)}</b> {sym}
+                </span>
+              ))}
+              <span className="m" title="Native coin, pays gas for approvals">
+                <b>{wallet.native.balance === undefined ? "…" : fmtBalance(wallet.native.balance)}</b> {wallet.native.symbol}
+              </span>
+            </span>
+          )}
+        </div>
+
         <div className="field">
           <div className="top">
             <span className="lbl">You pay</span>
             <span className="bal">
-              bal <span className="m">{payBalance === undefined ? "—" : fmtAmt(payBalance)}</span>
-              <button
-                type="button"
-                disabled={maxAmount === undefined || payBalance === undefined || payBalance <= 0}
-                onClick={() => maxAmount !== undefined && ticket.setAmount(maxAmount)}
-              >
-                max
-              </button>
+              {payBal.kind === "ok" ? <>Balance </> : null}
+              <Bal state={payBal} onConnect={onConnect} />
+              {payBal.kind === "ok" && (
+                <button
+                  type="button"
+                  disabled={maxAmount === undefined || payBalance === undefined || payBalance <= 0}
+                  onClick={() => maxAmount !== undefined && ticket.setAmount(maxAmount)}
+                >
+                  Max
+                </button>
+              )}
             </span>
           </div>
-          <div className="inp">
+          <div className={`inp${overBalance ? " over" : ""}`}>
             <input
               type="number"
               min="0"
               step="any"
               placeholder="0.0"
+              aria-label={`Amount of ${payToken} to pay`}
               value={ticket.amountStr}
               onChange={(e) => ticket.setAmount(e.target.value)}
             />
@@ -301,13 +381,12 @@ export function OrderForm(props: OrderFormProps) {
           </div>
           {overBalance && (
             <span className="capnote">
-              balance is {fmtAmt(payBalance ?? 0)} {payToken}
+              exceeds your balance of {fmtBalance(payBalance ?? 0)} {payToken}
             </span>
           )}
-          {!overBalance && quote && mode === "market" && quote.unfilledIn > 0 && amount > 0 && (
+          {!overBalance && quote && isMarket && figures?.basis !== "quote" && quote.unfilledIn > 0 && amount > 0 && (
             <span className="capnote">
-              book depth is {fmtAmt(quote.filledIn)} {payToken} — sweeping all of it at{" "}
-              {quote.avg > 0 ? fmtPrice(quote.avg, tick) : "—"}
+              book depth is {fmtAmt(quote.filledIn)} {payToken} — sweeping all of it at {quote.avg > 0 ? fmtPrice(quote.avg, tick) : "—"}
             </span>
           )}
         </div>
@@ -320,15 +399,14 @@ export function OrderForm(props: OrderFormProps) {
 
         <div className="field">
           <div className="top">
-            <span className="lbl">You receive</span>
+            <span className="lbl">You receive{isMarket && figures ? " ≈" : ""}</span>
+            <span className="bal">
+              {recvBal.kind === "ok" ? <>Balance </> : null}
+              {recvBal.kind === "disconnected" ? null : <Bal state={recvBal} onConnect={onConnect} />}
+            </span>
           </div>
           <div className="inp">
-            <input
-              type="text"
-              readOnly
-              placeholder="0.0"
-              value={mode === "market" && rfq ? fmtAmt(rfq.receive) : quote && quote.totalOut > 0 ? fmtAmt(quote.totalOut) : ""}
-            />
+            <input type="text" readOnly placeholder="0.0" aria-label={`Amount of ${recvToken} you receive`} value={receiveValue} />
             <TokenSelect
               value={recvToken}
               options={pairsWith(ticket.chainId, payToken)}
@@ -338,10 +416,29 @@ export function OrderForm(props: OrderFormProps) {
               label="Token you receive"
             />
           </div>
-          {recvAddress && (
-            <span className="capnote dim" title={recvAddress}>
-              you sign for {recvToken} at <span className="m">{shortHex(recvAddress, 8, 6)}</span>
-            </span>
+          {isMarket && amount > 0 && (
+            <div className="qsum">
+              {figures ? (
+                <>
+                  <div>
+                    <span>Network fee</span>
+                    <span className="m">
+                      {figures.networkFee !== null ? `≈ ${fmtFee(figures.networkFee)} ${recvToken}` : "paid by the filler"}
+                      {quoteStatus === "loading" && <em className="qspin" aria-label="refreshing quote" />}
+                    </span>
+                  </div>
+                  <div className="minor">
+                    <span>Minimum received</span>
+                    <span className="m">{minLine}</span>
+                  </div>
+                  {!figures.live && <div className="minor warn">Dry run — this quote will not be filled</div>}
+                </>
+              ) : (
+                <div className="minor">
+                  <span>{quoteStatus === "loading" ? "Fetching a quote…" : ready ? "No price for this size" : "Waiting for the book…"}</span>
+                </div>
+              )}
+            </div>
           )}
         </div>
 
@@ -377,6 +474,14 @@ export function OrderForm(props: OrderFormProps) {
                 {market.quote}/{market.base}
               </span>
             </div>
+            {minLine && (
+              <div className="qsum">
+                <div className="minor">
+                  <span>Minimum received</span>
+                  <span className="m">{minLine}</span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -415,103 +520,137 @@ export function OrderForm(props: OrderFormProps) {
           </div>
         )}
 
-        <div className="route">
-          <span className="lbl">Filled from</span>
-          <div className="rbar">
-            {bar.map((b) => (
-              <i key={b.key} style={{ width: `${b.pct}%`, background: b.color }} />
-            ))}
-            {unfilledPct > 0.01 && (
-              <i
-                style={{
-                  width: `${unfilledPct}%`,
-                  background: `repeating-linear-gradient(45deg, ${cssVar("--line")}, ${cssVar("--line")} 3px, transparent 3px, transparent 6px)`,
-                }}
-              />
-            )}
-            {!bar.length && unfilledPct <= 0.01 && <i style={{ width: "100%", background: "var(--line)" }} />}
+        {!isMarket && (
+          <div className="route">
+            <span className="lbl">Filled from</span>
+            <div className="rbar">
+              {bar.map((b) => (
+                <i key={b.key} style={{ width: `${b.pct}%`, background: b.color }} />
+              ))}
+              {unfilledPct > 0.01 && (
+                <i
+                  style={{
+                    width: `${unfilledPct}%`,
+                    background: `repeating-linear-gradient(45deg, ${cssVar("--line")}, ${cssVar("--line")} 3px, transparent 3px, transparent 6px)`,
+                  }}
+                />
+              )}
+              {!bar.length && unfilledPct <= 0.01 && <i style={{ width: "100%", background: "var(--line)" }} />}
+            </div>
+            <div className="rkeys">
+              {bar.map((b) => (
+                <span key={b.key}>
+                  <em style={{ background: b.color }} />
+                  {b.label}
+                </span>
+              ))}
+              {unfilledPct > 0.01 && (
+                <span style={{ color: resting ? "var(--lime)" : "var(--orange)" }}>
+                  {resting ? "rests " : "unfilled "}
+                  {unfilledPct.toFixed(0)}%
+                </span>
+              )}
+              {!bar.length && unfilledPct <= 0.01 && (
+                <span style={{ color: "var(--faint)" }}>{ready ? "enter an amount" : "waiting for the book"}</span>
+              )}
+            </div>
           </div>
-          <div className="rkeys">
-            {bar.map((b) => (
-              <span key={b.key}>
-                <em style={{ background: b.color }} />
-                {b.label}
-              </span>
-            ))}
-            {unfilledPct > 0.01 && (
-              <span style={{ color: resting ? "var(--lime)" : "var(--orange)" }}>
-                {resting ? "rests " : "unfilled "}
-                {unfilledPct.toFixed(0)}%
-              </span>
-            )}
-            {!bar.length && unfilledPct <= 0.01 && (
-              <span style={{ color: "var(--faint)" }}>{ready ? "enter an amount" : "waiting for the book"}</span>
-            )}
-          </div>
-        </div>
+        )}
 
-        <dl className="sum">
-          {rows.map(([k, v, cls]) => (
-            <div key={k}>
-              <dt>{k}</dt>
-              <dd className={cls}>{v}</dd>
-            </div>
-          ))}
-        </dl>
-        {mode === "market" && quoteStatus !== "off" && (
-          <div className="field">
-            <div className="top">
-              <span className="lbl">Slippage protection</span>
-              <span className="bal">
-                <button type="button" disabled={slippage.setting.mode === "auto"} onClick={() => slippage.set({ mode: "auto" })}>
-                  auto ({(slippage.autoBps / 100).toFixed(2)}%)
-                </button>
-              </span>
-            </div>
-            <div className="inp">
-              <input
-                type="number"
-                min="0.01"
-                max={MAX_SLIPPAGE_BPS / 100}
-                step="0.01"
-                aria-label="Custom slippage, percent"
-                placeholder={(slippage.autoBps / 100).toFixed(2)}
-                value={slippage.setting.mode === "custom" ? String(slippage.bps / 100) : ""}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  slippage.set(e.target.value === "" || !Number.isFinite(v) || v <= 0 ? { mode: "auto" } : { mode: "custom", bps: Math.round(v * 100) });
-                }}
-              />
-              <span className="unit">%</span>
-            </div>
-            <span className="capnote dim">
-              {quoteStatus === "quoted"
-                ? "The order starts at the filler's quote and can only decay to this much below it, over 3.5 minutes."
-                : quoteStatus === "loading"
-                  ? "Asking the filler for a quote…"
-                  : `Filler quote unavailable${quoteError ? ` (${quoteError.slice(0, 80)})` : ""} — the order uses the gas-sized floor below.`}
+        <div className={`details${detailsOpen ? " open" : ""}`}>
+          <button type="button" className="dtoggle" aria-expanded={detailsOpen} onClick={toggleDetails}>
+            <span className="lbl">Details</span>
+            <span className="drate m">{rate ?? ""}</span>
+            <span className="car" aria-hidden="true">
+              {detailsOpen ? "▴" : "▾"}
             </span>
-          </div>
-        )}
-
-        {mode === "market" && !rfq && floor && quote && amount > 0 && floor.gasBound && (
-          <span className={floor.bps > GAS_NOTE_BPS ? "capnote" : "capnote dim"} style={{ lineHeight: 1.5 }}>
-            {floor.bps > GAS_NOTE_BPS && (
-              <>
-                <b>Small order: ~{(floor.gasBps / 100).toFixed(2)}% goes to network gas.</b>{" "}
-              </>
-            )}
-            The filler pays ≈ {fmtAmt(floor.gasCostOut)} {recvToken} of gas per fill whatever the size, so small
-            tickets carry a higher floor: {floor.haircutBps} bps quote haircut + {floor.gasBps} bps gas +{" "}
-            {floor.bufferBps} bps (vs {floor.baseBps} bps on larger tickets). The auction starts at the quote and is
-            usually filled as soon as the gas is covered, before it reaches the floor.
-          </span>
-        )}
+          </button>
+          {detailsOpen && (
+            <div className="dbody">
+              {rows.length > 0 && (
+                <dl className="sum">
+                  {rows.map(([k, v, cls]) => (
+                    <div key={k}>
+                      <dt>{k}</dt>
+                      <dd className={cls}>{v}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              {isMarket && quoteStatus !== "off" && (
+                <div className="slip">
+                  <span className="sl">Slippage</span>
+                  <div className="slctl">
+                    <button
+                      type="button"
+                      aria-pressed={slippage.setting.mode === "auto"}
+                      onClick={() => slippage.set({ mode: "auto" })}
+                    >
+                      Auto {(slippage.autoBps / 100).toFixed(2)}%
+                    </button>
+                    <span className="slin">
+                      <input
+                        type="number"
+                        min="0.01"
+                        max={MAX_SLIPPAGE_BPS / 100}
+                        step="0.01"
+                        aria-label="Custom slippage, percent"
+                        placeholder="custom"
+                        value={slippage.setting.mode === "custom" ? String(slippage.bps / 100) : ""}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          slippage.set(
+                            e.target.value === "" || !Number.isFinite(v) || v <= 0 ? { mode: "auto" } : { mode: "custom", bps: Math.round(v * 100) },
+                          );
+                        }}
+                      />
+                      %
+                    </span>
+                  </div>
+                  <span className="capnote dim">
+                    {quoteStatus === "quoted"
+                      ? "The order starts at the filler's quote and can only decay to this much below it, over 3.5 minutes."
+                      : quoteStatus === "loading"
+                        ? "Asking the filler for a quote…"
+                        : `Filler quote unavailable${quoteError ? ` (${quoteError.slice(0, 80)})` : ""} — the order uses the gas-sized floor.`}
+                  </span>
+                </div>
+              )}
+              {isMarket && figures?.basis === "ladder" && floor && quote && amount > 0 && floor.gasBound && (
+                <span className={floor.bps > GAS_NOTE_BPS ? "capnote" : "capnote dim"} style={{ lineHeight: 1.5 }}>
+                  {floor.bps > GAS_NOTE_BPS && (
+                    <>
+                      <b>Small order: ~{(floor.gasBps / 100).toFixed(2)}% goes to network gas.</b>{" "}
+                    </>
+                  )}
+                  The filler pays ≈ {fmtAmt(floor.gasCostOut)} {recvToken} of gas per fill whatever the size, so small
+                  tickets carry a higher floor: {floor.haircutBps} bps quote haircut + {floor.gasBps} bps gas +{" "}
+                  {floor.bufferBps} bps (vs {floor.baseBps} bps on larger tickets). The auction starts at the estimate and is
+                  usually filled as soon as the gas is covered, before it reaches the floor.
+                </span>
+              )}
+              {recvAddress && (
+                <span className="capnote dim" title={recvAddress}>
+                  you sign for {recvToken} at <span className="m">{shortHex(recvAddress, 8, 6)}</span>
+                </span>
+              )}
+              {domain.deployed && (
+                <div className="domain" title="EIP-712 verifyingContract — a signature is bound to this address and chain">
+                  signing into Settlement <b>{shortHex(domain.settlement, 8, 6)}</b> on {domain.chainLabel}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
           {gate ? (
             <button type="button" className="cta" onClick={gate.action}>
               {gate.label}
+            </button>
+          ) : overBalance ? (
+            <button type="button" className="cta" disabled>
+              {sb.label}
             </button>
           ) : (
             <>
@@ -520,12 +659,7 @@ export function OrderForm(props: OrderFormProps) {
                   <button
                     type="button"
                     className={allowance.covered ? "cta ok" : "cta line"}
-                    disabled={
-                      allowance.covered ||
-                      allowance.approving ||
-                      allowance.required <= 0 ||
-                      allowance.mismatch !== null
-                    }
+                    disabled={allowance.covered || allowance.approving || allowance.required <= 0 || allowance.mismatch !== null}
                     onClick={allowance.approve}
                   >
                     {allowance.mismatch
@@ -562,12 +696,20 @@ export function OrderForm(props: OrderFormProps) {
                 </>
               )}
               <button type="button" className="cta" disabled={!canSign} onClick={onSign}>
-                {signing ? "Waiting for signature…" : "Sign order"}
+                {sb.label}
               </button>
             </>
           )}
           <div className="gas">
-            Network fee <b>0</b> — the filler pays
+            {isMarket && figures?.networkFee !== null && figures?.networkFee !== undefined ? (
+              <>
+                Signing is <b>free</b> — the network fee above comes out of what you receive
+              </>
+            ) : (
+              <>
+                Network fee <b>0</b> — the filler pays
+              </>
+            )}
             {allowance.spender !== null && !allowance.covered && (
               <>
                 <br />
@@ -575,18 +717,11 @@ export function OrderForm(props: OrderFormProps) {
               </>
             )}
           </div>
-          <div className="domain" title="EIP-712 verifyingContract — a signature is bound to this address and chain">
-            {domain.deployed ? (
-              <>
-                signing into Settlement <b>{shortHex(domain.settlement, 8, 6)}</b> on {domain.chainLabel}
-              </>
-            ) : (
-              <>
-                no Settlement deployed on {domain.chainLabel} — signatures are real but{" "}
-                <b className="warn">not fillable</b>
-              </>
-            )}
-          </div>
+          {!domain.deployed && (
+            <div className="domain" title="EIP-712 verifyingContract — a signature is bound to this address and chain">
+              no Settlement deployed on {domain.chainLabel} — signatures are real but <b className="warn">not fillable</b>
+            </div>
+          )}
           {signError && <div className="signerr">{signError}</div>}
         </div>
 

@@ -142,6 +142,16 @@ export interface Rung {
   price: number;
   /** Base-token amount the range can absorb or supply. */
   size: number;
+  /**
+   * Marginal prices at the range's two ends, quote per base: `start` at the end
+   * nearest the current price (where a taker starts consuming it), `end` at the far
+   * end. Liquidity is constant in between, so a PARTIAL fill of the rung is priced
+   * exactly from these (lib/ladder.ts `walk`) instead of at the whole range's
+   * average — on a sparse pool one rung can span 10 % and its average is nowhere
+   * near what the first slice of it pays (2026-10-11). Absent on synthetic rungs.
+   */
+  start?: number;
+  end?: number;
 }
 
 export interface LadderOptions {
@@ -192,9 +202,14 @@ export function applyPoolFee(ladder: Ladder, fee: number): Ladder {
   const f = feeFraction(fee);
   if (f === 0) return ladder;
   const keep = 1 - f;
+  const scale = (r: Rung, k: number, size: number): Rung => ({
+    price: r.price * k,
+    size,
+    ...(r.start !== undefined && r.end !== undefined ? { start: r.start * k, end: r.end * k } : {}),
+  });
   return {
-    bids: ladder.bids.map((r) => ({ price: r.price * keep, size: r.size / keep })),
-    asks: ladder.asks.map((r) => ({ price: r.price / keep, size: r.size })),
+    bids: ladder.bids.map((r) => scale(r, keep, r.size / keep)),
+    asks: ladder.asks.map((r) => scale(r, 1 / keep, r.size)),
     mid: ladder.mid,
   };
 }
@@ -231,13 +246,20 @@ export function buildLadder(pool: PoolLiquidity, opts: LadderOptions): Ladder {
   }
   if (at < 0) return { bids: [], asks: [], mid: 0 };
 
-  const priceOf = (lo: bigint, hi: bigint, L: bigint): Rung | null => {
+  // Marginal price at a sqrt price, in the app's orientation (quote per base).
+  const display = (sqrt: bigint): number => {
+    const p = priceFromSqrt(sqrt, pool.decimals0, pool.decimals1);
+    return baseIsToken0 ? p : 1 / p;
+  };
+
+  // `near` is the end the price is at when a taker reaches this range.
+  const priceOf = (lo: bigint, hi: bigint, L: bigint, near: bigint): Rung | null => {
     const a0 = amount0(L, lo, hi);
     const a1 = amount1(L, lo, hi);
     const size = baseIsToken0 ? toFloat(a0, pool.decimals0) : toFloat(a1, pool.decimals1);
     const cost = baseIsToken0 ? toFloat(a1, pool.decimals1) : toFloat(a0, pool.decimals0);
     if (!(size > 0) || !(cost > 0)) return null;
-    return { price: cost / size, size };
+    return { price: cost / size, size, start: display(near), end: display(near === lo ? hi : lo) };
   };
 
   // Rungs the price passes through going up, starting from the partial range the
@@ -245,14 +267,14 @@ export function buildLadder(pool: PoolLiquidity, opts: LadderOptions): Ladder {
   const upward: Rung[] = [];
   for (let i = at; i < ticks.length - 1 && upward.length < maxRungs; i++) {
     const lo = i === at ? sqrtP : ticks[i].sqrtPrice;
-    const rung = priceOf(lo, ticks[i + 1].sqrtPrice, liquidity[i]);
+    const rung = priceOf(lo, ticks[i + 1].sqrtPrice, liquidity[i], lo);
     if (rung) upward.push(rung);
   }
 
   const downward: Rung[] = [];
   for (let i = at; i >= 0 && downward.length < maxRungs; i--) {
     const hi = i === at ? sqrtP : ticks[i + 1].sqrtPrice;
-    const rung = priceOf(ticks[i].sqrtPrice, hi, liquidity[i]);
+    const rung = priceOf(ticks[i].sqrtPrice, hi, liquidity[i], hi);
     if (rung) downward.push(rung);
   }
 

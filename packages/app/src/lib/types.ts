@@ -39,6 +39,13 @@ export interface Level {
   feeBps?: number;
   /** Set when part of this level is the connected account's own resting size. */
   mine?: number;
+  /**
+   * Pool rungs only: the marginal price where a taker starts consuming the rung and
+   * where it ends (constant liquidity between, lib/univ3.ts `Rung`). With them the
+   * walk prices a partial fill on the curve; without (LMT) the rung is flat at `price`.
+   */
+  start?: number;
+  end?: number;
 }
 
 /** One AMM pool that contributed rungs to a market's ladder. */
