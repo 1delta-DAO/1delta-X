@@ -1,3 +1,4 @@
 .wrangler/
 .dev.vars
 e2e/.run/
+.admin.env

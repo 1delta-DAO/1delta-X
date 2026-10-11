@@ -58,7 +58,7 @@ enabled = true
 # ── safety ───────────────────────────────────────────────────────────────────
 # Dry run is ON by default: nothing is broadcast until DRY_RUN = "0" here or
 # `POST /dry-run {"on": false}` on the admin API.
-DRY_RUN = "1"
+DRY_RUN = "0"
 # Start paused? ("true" = no sends until `POST /resume`). Pending txs are still resolved.
 START_PAUSED = "false"
 # Keep "false" in production (see workers_dev above).
