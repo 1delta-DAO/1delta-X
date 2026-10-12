@@ -24,6 +24,25 @@ deployer `0x00001d4754680958E7f8fe42D60842Ebde4Cb30D`, gas price 23,696,000 wei
 | AggregatorFillSolver | `0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287` | settlement = Settlement, operators = [`0xcafe35944e3195d59b4a354Ea23D60a0445c083a`], policy = (maker 0, protocol 0, recipient 0x0) |
 | RouteSandbox (the solver's child) | `0xdadE4B0F9dEa9f2CC371E07f76653971b2c62C04` | (Settlement, Permit3, SolverCallbackExecutor); owner = the solver |
 
+## AggregatorFillSolver v2 (2026-10-12, commit 5388a6f) — CURRENT
+
+Direct Uniswap-v3-style pool routes + ERC-2612 permits + gas pass (see packages/solvers
+README). Plain CREATE from the same deployer (nonce 4), profile `solvers-deploy` (via-IR,
+runs 1,000,000, Cancun), tx `0x3708f6ca34056e4de0ad362a7c269ccad2cab03e55d1864b994e388b780bd8b2`
+(block 9,318,298, 5,102,404 gas at 23,696,000 wei = 0.000120907 RBTC).
+
+| contract | address | constructor |
+| --- | --- | --- |
+| AggregatorFillSolver | `0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1` | settlement = Settlement, operators = [`0xcafe35944e3195d59b4a354Ea23D60a0445c083a`], policy = (0, 0, 0x0), venues = [Oku `0xaF37EC98A00FD63689CF3060BF3B6784E00caD82`, Sushi v3 `0x46B3fDF7b5CDe91Ac049936bF0bDb12c5d22202e`] (init code hash `0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54`) |
+| RouteSandbox (child) | `0xda2Db66B3Ae47a1f5F89640666b7802423828c8b` | read from `SANDBOX()` — the script's log printed `0x7891F32f…` (forge's simulated child address, wrong) |
+
+Read back: `SETTLEMENT()` = Settlement, `EXECUTOR()` = `0x9685D6c5…8bA0`, `POOL_VENUES()` = 2,
+`poolFor(0, WRBTC, USDT0, 3000)` = `0xaeF6fABf…9Bbd` (the live Oku pool), surplus policy 0/0,
+`isOperator(0xcafe…)` = true, `isOperator(deployer)` = false, sandbox `OWNER()` = the solver.
+
+The v1 solver `0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287` (table above) is SUPERSEDED: the
+filler no longer drives it; delta-verify orders signed naming it can only be filled by it.
+
 ## Read back on mainnet (2026-10-09)
 
 Settlement `PERMIT3()` = Permit3; lens `SETTLEMENT()` and `CHECKS()` as above; solver

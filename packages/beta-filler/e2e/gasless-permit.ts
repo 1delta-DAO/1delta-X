@@ -76,7 +76,7 @@ const SETTLEMENT = getAddress("0xe6EDbb5c49Fb4CFb313476e3B78E274D3584ddf5");
 const LENS = getAddress("0xF9e905EdCC376FDaBF62Ca0966624611721C5206");
 // The live beta instance (0x33cc…E287) predates pool plans and `permits`: pass the
 // redeployed one. OPERATOR must be in its operator set (impersonated on the fork).
-const SOLVER = getAddress(process.env.AGGREGATOR_SOLVER ?? "0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287");
+const SOLVER = getAddress(process.env.AGGREGATOR_SOLVER ?? "0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1");
 const OPERATOR = getAddress(process.env.OPERATOR ?? "0xcafe35944e3195d59b4a354Ea23D60a0445c083a");
 const USDT0 = getAddress(ROOTSTOCK.usdt0);
 const WRBTC = getAddress(ROOTSTOCK.wrbtc);
