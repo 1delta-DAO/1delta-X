@@ -79,6 +79,8 @@ export interface PricedCandidate {
   /** Where the price comes from: `oku` (n hops), `sushi`, `nordstern`, `inventory`. */
   source: string;
   hops?: number;
+  /** A pool route's hops: tokens in swap order, each hop's fee tier and venue (`oku` / `sushi-v3`). */
+  path?: { tokens: Address[]; fees: number[]; venues: string[] };
 }
 
 export interface QuoteResult {
@@ -108,7 +110,7 @@ export interface QuoteResult {
   /** Unix seconds. */
   validUntil: number;
   strategy: "route" | "inventory";
-  route: { source: string; hops?: number };
+  route: { source: string; hops?: number; path?: { tokens: Address[]; fees: number[]; venues: string[] } };
 }
 
 /**
@@ -403,7 +405,7 @@ export class Quoter {
       issuedAt,
       validUntil,
       strategy: best.c.strategy,
-      route: { source: best.c.source, ...(best.c.hops !== undefined ? { hops: best.c.hops } : {}) },
+      route: { source: best.c.source, ...(best.c.hops !== undefined ? { hops: best.c.hops } : {}), ...(best.c.path ? { path: best.c.path } : {}) },
     };
     this.book.issue(
       {

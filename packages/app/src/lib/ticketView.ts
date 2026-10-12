@@ -41,6 +41,8 @@ export interface MarketFigures {
   source: string | null;
   /** False while the filler quotes in dry-run mode (it will not fill). */
   live: boolean;
+  /** The quoted pool route's hops, for the "how is this filled" hover. */
+  path?: import("./quote").FillerQuote["path"];
 }
 
 /** QUOTE per BASE for `amountIn` PAY → `out` RECEIVE. */
@@ -81,6 +83,7 @@ export function marketFigures(a: FigureArgs): MarketFigures | null {
       permitFee: r.permitGas > 0 ? r.permitGas : null,
       source: r.source,
       live: r.live,
+      ...(r.path ? { path: r.path } : {}),
     };
   }
   const q = a.ladder;
@@ -108,6 +111,8 @@ export function marketFigures(a: FigureArgs): MarketFigures | null {
 /** "sushi" → "Sushi", "uniswap-v3" → "Uniswap v3". */
 export function sourceName(source: string | null): string {
   if (!source || source === "?") return "our filler";
+  // A mixed pool route ("oku+sushi-v3"): every venue it swaps on, in hop order.
+  if (source.includes("+")) return [...new Set(source.split("+").map((x) => sourceName(x)))].join(" + ");
   const s = source.toLowerCase();
   if (s.startsWith("sushi")) return "Sushi";
   if (s.startsWith("uni")) return "Uniswap";
@@ -295,4 +300,19 @@ export function fmtFee(n: number): string {
 export function exceedsBalance(typed: string, decimals: number | undefined, balanceWei: bigint | undefined): boolean {
   if (balanceWei === undefined || decimals === undefined) return false;
   return toWei(typed, decimals) > balanceWei;
+}
+
+/** "Uniswap v3" / "SushiSwap v3" for a route venue key (`oku`, `sushi-v3`). */
+export function routeVenueName(v: string): string {
+  return v === "oku" ? "Uniswap v3" : v.startsWith("sushi") ? "SushiSwap v3" : v;
+}
+
+/**
+ * The hover on "Swap output": who fills it and over which pools —
+ * "Filled by the 1delta solver: USD0 → RIF on Uniswap v3 (0.30 %) → RIFP on SushiSwap v3 (0.30 %)".
+ */
+export function routeHover(source: string | null, path: { tokens: string[]; fees: number[]; venues: string[] } | undefined, symbolOf: (address: string) => string): string {
+  if (!path) return `Filled by the 1delta solver via ${sourceName(source)}`;
+  const hops = path.fees.map((f, i) => `${symbolOf(path.tokens[i + 1]!)} on ${routeVenueName(path.venues[i] ?? "")} (${(f / 10_000).toFixed(2)} %)`);
+  return `Filled by the 1delta solver: ${symbolOf(path.tokens[0]!)} → ${hops.join(" → ")}`;
 }

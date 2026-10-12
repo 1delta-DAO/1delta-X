@@ -778,3 +778,7 @@ main.reading .md .mdquote { margin-bottom: 26px; }
 .usdline { font-family: var(--mono); font-size: 11px; color: var(--faint); padding: 0 4px; margin-top: -2px; }
 .usdline .d { color: var(--dim); }
 .usdline .d.warn { color: var(--orange); }
+
+/* "Swap output · solver via …": the route is in the hover */
+.qsum .hov { cursor: help; text-decoration: underline dotted var(--line2); text-underline-offset: 3px; }
+.qsum .usdin { color: var(--faint); font-weight: 400; }

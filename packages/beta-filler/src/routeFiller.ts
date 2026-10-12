@@ -809,7 +809,7 @@ export class RouteFiller {
     const paths = this.pathsFor(a.tokenIn, a.tokenOut);
     const api = !a.direct && (rc.sushi.enabled || rc.nordstern.enabled);
     if (paths.length === 0 && !api) return { ok: false, reason: "route: no configured pool/path for the pair" };
-    const raw: Array<{ source: "pool" | "sushi" | "nordstern"; out: bigint; gasUnits: bigint; hops?: number; label: string; fees?: number[] }> = [];
+    const raw: Array<{ source: "pool" | "sushi" | "nordstern"; out: bigint; gasUnits: bigint; hops?: number; label: string; fees?: number[]; path?: RoutePath }> = [];
     // The API calls run alongside the pool quotes (one round trip, not three).
     const apiP = api
       ? this.apiRoutes({ tokenIn: a.tokenIn, tokenOut: a.tokenOut, amountIn: a.amountIn, slippageBps: haircutBps(rc, a.tokenIn, a.tokenOut) })
@@ -818,11 +818,11 @@ export class RouteFiller {
     const pq = await this.quoteMany(poolPaths, a.amountIn, "in");
     poolPaths.forEach((path, i) => {
       const q = pq[i]!;
-      if (q.ok) raw.push({ source: "pool", out: q.amount, gasUnits: poolRouteGasUnits(path.fees.length, q.gasUnits), hops: path.fees.length, label: pathLabel(path), fees: path.fees });
+      if (q.ok) raw.push({ source: "pool", out: q.amount, gasUnits: poolRouteGasUnits(path.fees.length, q.gasUnits), hops: path.fees.length, label: pathLabel(path), fees: path.fees, path });
     });
     for (const r of (await apiP).raw) raw.push({ source: r.source, out: r.out, gasUnits: r.gasUnits, label: r.source });
     if (raw.length === 0) return { ok: false, reason: "route: no quote from any source" };
-    const cands: Array<RouteCandidate & { hops?: number; label: string }> = [];
+    const cands: Array<RouteCandidate & { hops?: number; label: string; path?: RoutePath }> = [];
     for (const r of raw) cands.push({ ...r, routeGasOut: (await this.nativeToToken(a.gasPrice * rankingGasUnits(planKind(r), r.gasUnits), a.tokenOut)) ?? 0n });
     const best = rankRoutes(cands)[0]!;
     const delivery = a.direct ? "direct" : "pull";
@@ -859,6 +859,8 @@ export class RouteFiller {
         ...(permitGasUnits > 0n ? { permitGasUnits } : {}),
         source: best.label,
         ...(best.hops !== undefined ? { hops: best.hops } : {}),
+        // The hop-by-hop route, for the app's "how is this filled" hover.
+        ...(best.path ? { path: { tokens: best.path.tokens, fees: best.path.fees, venues: pathVenues(best.path).map(venueName) } } : {}),
       },
     };
   }

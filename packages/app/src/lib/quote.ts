@@ -128,6 +128,8 @@ export interface FillerQuote {
   delivery: "direct" | "pull";
   /** False while the filler runs dry (it quotes but does not fill). */
   live: boolean;
+  /** A pool route's hops (tokens in swap order, fee tiers, venues `oku` / `sushi-v3`); absent for an API route. */
+  path?: { tokens: Address[]; fees: number[]; venues: string[] };
 }
 
 export class QuoteError extends Error {
@@ -175,6 +177,7 @@ export function parseQuote(raw: unknown, req: Pick<QuoteRequest, "chainId" | "to
     source: typeof (o.route as { source?: unknown } | undefined)?.source === "string" ? String((o.route as { source: string }).source).slice(0, 20) : "?",
     delivery: o.delivery === "direct" ? "direct" : "pull",
     live: o.live !== false,
+    ...(parsePath((o.route as { path?: unknown } | undefined)?.path) ?? {}),
   };
   if (q.chainId !== req.chainId) throw new QuoteError(0, "quote: wrong chain");
   if (q.tokenIn !== getAddress(req.tokenIn) || q.tokenOut !== getAddress(req.tokenOut)) throw new QuoteError(0, "quote: wrong tokens");
@@ -183,6 +186,19 @@ export function parseQuote(raw: unknown, req: Pick<QuoteRequest, "chainId" | "to
   if (q.permitChargeOut > q.gasChargeOut) throw new QuoteError(0, "quote: bad permitChargeOut");
   if (!Number.isFinite(q.validUntil) || q.validUntil < nowS) throw new QuoteError(0, "quote: expired");
   return q;
+}
+
+/** The route's hop list, when well-formed (display only — never trusted for anything signed). */
+function parsePath(raw: unknown): { path: NonNullable<FillerQuote["path"]> } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const p = raw as { tokens?: unknown; fees?: unknown; venues?: unknown };
+  if (!Array.isArray(p.tokens) || !Array.isArray(p.fees) || !Array.isArray(p.venues)) return undefined;
+  const hops = p.fees.length;
+  if (hops < 1 || hops > 4 || p.tokens.length !== hops + 1 || p.venues.length !== hops) return undefined;
+  if (!p.tokens.every((t) => typeof t === "string" && isAddress(t, { strict: false }))) return undefined;
+  if (!p.fees.every((f) => Number.isInteger(f) && (f as number) > 0 && (f as number) < 1_000_000)) return undefined;
+  if (!p.venues.every((v) => typeof v === "string" && v.length < 20)) return undefined;
+  return { path: { tokens: (p.tokens as string[]).map((t) => getAddress(t)), fees: p.fees as number[], venues: p.venues as string[] } };
 }
 
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -258,6 +274,7 @@ export interface QuoteView {
   source: string;
   validUntil: number;
   live: boolean;
+  path?: FillerQuote["path"];
 }
 
 export function quoteView(q: FillerQuote, terms: QuotedTerms, recvDecimals: number): QuoteView {
@@ -277,5 +294,6 @@ export function quoteView(q: FillerQuote, terms: QuotedTerms, recvDecimals: numb
     source: q.source,
     validUntil: q.validUntil,
     live: q.live,
+    ...(q.path ? { path: q.path } : {}),
   };
 }

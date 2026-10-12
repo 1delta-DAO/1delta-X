@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 
 import { BOOK_IS_REMOTE } from "../backend/book";
-import { pairsWith, symbolsOn } from "../config/markets";
+import { pairsWith, symbolOfAddress, symbolsOn } from "../config/markets";
 import type { Ticket } from "../hooks/useTicket";
 import type { TokenIndex } from "../hooks/useTokenIndex";
 import { fmt, fmtAmt, fmtPrice, shortHex } from "../lib/format";
@@ -16,6 +16,7 @@ import {
   fmtFee,
   readDetailsOpen,
   signButton,
+  routeHover,
   sourceName,
   writeDetailsOpen,
   type BalanceState,
@@ -498,7 +499,9 @@ export function OrderForm(props: OrderFormProps) {
                 <>
                   {figures.grossReceive !== null && figures.networkFee !== null && (
                     <div>
-                      <span>Swap output · via {sourceName(figures.source)}</span>
+                      <span className="hov" title={routeHover(figures.source, figures.path, (a) => symbolOfAddress(chainId, a))}>
+                        Swap output · solver via {sourceName(figures.source)}
+                      </span>
                       <span className="m">
                         {fmtAmt(figures.grossReceive)} {recvToken}
                       </span>
@@ -509,6 +512,7 @@ export function OrderForm(props: OrderFormProps) {
                       <span>Network fee{figures.permitFee !== null ? " · incl. permit" : ""}</span>
                       <span className="m">
                         − {fmtFee(figures.networkFee)} {recvToken}
+                        {recvPx !== undefined && <span className="usdin"> ≈ {fmtUsd(figures.networkFee * recvPx)}</span>}
                         {quoteStatus === "loading" && <em className="qspin" aria-label="refreshing quote" />}
                       </span>
                     </div>
@@ -518,6 +522,7 @@ export function OrderForm(props: OrderFormProps) {
                       <span>of which your gasless permit</span>
                       <span className="m">
                         {fmtFee(figures.permitFee)} {recvToken}
+                        {recvPx !== undefined && <span className="usdin"> ≈ {fmtUsd(figures.permitFee * recvPx)}</span>}
                       </span>
                     </div>
                   )}

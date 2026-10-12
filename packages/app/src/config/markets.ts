@@ -148,6 +148,13 @@ export function wrappedNativeSymbol(chainId: number): string | undefined {
   return WRAPPED_NATIVE[chainId];
 }
 
+/** The config symbol of a pinned token address on a chain (display), else a short address. */
+export function symbolOfAddress(chainId: number, address: string): string {
+  const a = address.toLowerCase();
+  for (const [sym, t] of Object.entries(TOKENS[chainId] ?? {})) if (t.address === a) return sym;
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
+}
+
 /** The pinned token behind a config symbol on a chain, or `undefined` if none is configured. */
 export function pinnedToken(chainId: number, symbol: string): PinnedToken | undefined {
   return TOKENS[chainId]?.[symbol];

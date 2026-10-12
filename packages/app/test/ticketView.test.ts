@@ -242,3 +242,16 @@ describe("plainDecimal: amount fields never show scientific notation", () => {
     expect(plainDecimal(1e21)).not.toMatch(/e/);
   });
 });
+
+describe("route attribution: mixed venues and the solver hover", () => {
+  it("names every venue of a mixed route, and the hops in the hover", async () => {
+    const { sourceName, routeHover } = await import("../src/lib/ticketView");
+    expect(sourceName("oku+sushi-v3")).toBe("Uniswap + Sushi");
+    expect(sourceName("oku")).toBe("Uniswap");
+    const sym: Record<string, string> = { "0xa": "USD0", "0xb": "RIF", "0xc": "RIFP" };
+    expect(routeHover("oku+sushi-v3", { tokens: ["0xa", "0xb", "0xc"], fees: [3000, 3000], venues: ["oku", "sushi-v3"] }, (a) => sym[a]!)).toBe(
+      "Filled by the 1delta solver: USD0 → RIF on Uniswap v3 (0.30 %) → RIFP on SushiSwap v3 (0.30 %)",
+    );
+    expect(routeHover("nordstern", undefined, () => "?")).toBe("Filled by the 1delta solver via Nordstern");
+  });
+});

@@ -124,6 +124,12 @@ describe("fetchQuote: the request the app sends, the errors it maps", () => {
     expect(bodies[0]).toMatchObject({ funding: "permit" });
     expect(bodies[1]).not.toHaveProperty("funding");
   });
+  it("route.path: kept when well-formed (display only), dropped otherwise", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const path = { tokens: [WRBTC, USD0], fees: [3000], venues: ["oku"] };
+    expect(parseQuote({ ...sellJson(), validUntil: now + 30, route: { source: "oku", hops: 1, path } }, sellReq).path).toEqual(path);
+    expect(parseQuote({ ...sellJson(), validUntil: now + 30, route: { source: "oku", path: { ...path, fees: [3000, 500] } } }, sellReq).path).toBeUndefined();
+  });
   it("permitChargeOut: optional (older filler → 0), never above the whole gas charge", () => {
     const now = Math.floor(Date.now() / 1000);
     expect(parseQuote({ ...sellJson(), validUntil: now + 30 }, sellReq).permitChargeOut).toBe(0n);
