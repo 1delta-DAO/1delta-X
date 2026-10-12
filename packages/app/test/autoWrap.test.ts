@@ -22,7 +22,7 @@ const PERMIT3 = getAddress("0x000000000000000000000000000000000000aaaa");
 const SETTLEMENT = getAddress("0x00000000000000000000000000000000005e771e");
 const T = { token: WRBTC, permit3: PERMIT3, settlement: SETTLEMENT };
 const NOW = 1_700_000_000;
-const UNFUNDED = { erc20Allowance: 0n, grantAmount: 0n, grantExpiration: 0 };
+const UNFUNDED = { erc20Allowance: 0n, grantAmount: 0n, grantExpiration: 0, strict: true };
 const LABEL = { amount: "0.010000", token: "WRBTC", nativeSymbol: "RBTC" };
 
 describe("auto-wrap config", () => {
@@ -45,7 +45,7 @@ describe("planFunding with a wrap source", () => {
   });
 
   it("no wrap and covered when funding is set and WRBTC suffices", () => {
-    const funded = { erc20Allowance: milli(10), grantAmount: milli(10), grantExpiration: NOW + 99_999 };
+    const funded = { erc20Allowance: milli(10), grantAmount: milli(10), grantExpiration: NOW + 99_999, strict: true };
     const plan = planFunding(funded, milli(10), 300, NOW, { tokenBalance: milli(12), nativeBalance: 0n });
     expect(plan.covered).toBe(true);
   });
@@ -63,7 +63,7 @@ describe("planFunding with a wrap source", () => {
   });
 
   it("an otherwise-funded order still needs the wrap: not covered", () => {
-    const funded = { erc20Allowance: milli(10), grantAmount: milli(10), grantExpiration: NOW + 99_999 };
+    const funded = { erc20Allowance: milli(10), grantAmount: milli(10), grantExpiration: NOW + 99_999, strict: true };
     const plan = planFunding(funded, milli(10), 300, NOW, { tokenBalance: 0n, nativeBalance: milli(50) });
     expect(plan.steps).toEqual([{ kind: "wrap", amount: milli(10) }]);
     expect(plan.covered).toBe(false);
@@ -139,12 +139,12 @@ describe("step labels", () => {
   it("without a wrap the labels are the old ones", () => {
     const plan = planFunding(UNFUNDED, milli(10), 300, NOW, { tokenBalance: milli(10), nativeBalance: 0n });
     expect(fundingButtonLabel(plan, LABEL)).toBe("Approve exactly 0.010000 WRBTC to Permit3 (1 of 2)");
-    const grantOnly = planFunding({ erc20Allowance: milli(10), grantAmount: 0n, grantExpiration: 0 }, milli(10), 300, NOW);
+    const grantOnly = planFunding({ erc20Allowance: milli(10), grantAmount: 0n, grantExpiration: 0, strict: true }, milli(10), 300, NOW);
     expect(fundingButtonLabel(grantOnly, LABEL)).toBe("Grant Settlement exactly 0.010000 WRBTC via Permit3");
   });
 
   it("a trim says Reduce, but never on a wrap step", () => {
-    const big = { erc20Allowance: milli(99), grantAmount: 0n, grantExpiration: 0 };
+    const big = { erc20Allowance: milli(99), grantAmount: 0n, grantExpiration: 0, strict: true };
     const trim = planFunding(big, milli(10), 300, NOW, { tokenBalance: milli(10), nativeBalance: 0n });
     expect(fundingButtonLabel(trim, LABEL)).toMatch(/^Reduce: Approve exactly/);
     const wrapFirst = planFunding(big, milli(10), 300, NOW, { tokenBalance: 0n, nativeBalance: milli(50) });

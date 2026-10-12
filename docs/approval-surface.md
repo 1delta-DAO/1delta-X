@@ -144,6 +144,27 @@ those callers must retry without the permit (2026-09-30 X-SPEC-10). The aToken
 EIP-2612 block for Aave withdrawals already rides in-module
 (`AaveV3WithdrawModule`'s optional permit block; spender = the module).
 
+## The beta app's funding: one direct approval (2026-10-12)
+
+The app (`packages/app/src/lib/funding.ts`) funds an order with ONE transaction:
+`token.approve(Settlement, exact)`. It no longer sends two (`approve(Permit3)` plus
+`Permit3.approveToken(Settlement)`).
+
+- **Why it works:** Settlement's pull (`Base._pullViaPermit3`) tries the Permit3 leg,
+  then falls back to the maker's direct ERC-20 allowance unless `Permit3.isStrict`.
+  The lens counts both surfaces, so books and fillers see the order as fillable.
+- **ERC-2612 tokens** (USD₮0 …) use the same surface, signed rather than sent. The
+  permit's spender is Settlement, and the filler relays it inside the fill.
+- **What it gives up:** the Permit3 grant's auto-expiry. An unfilled order's exact
+  allowance stands until a fill or a revoke. Only a maker-signed order can spend it,
+  and a new order's approval replaces it.
+- **Strict-mode makers** have the direct surface refused, so they keep the two-leg
+  Permit3 plan.
+- **Live Permit3 legs** left from before still count as funded.
+- **Cost:** the maker sends about 45k gas instead of about 90k. A fill on the direct
+  surface pays for a failed Permit3 attempt plus the `isStrict` read first, a few
+  thousand gas, which the filler's learned gas absorbs.
+
 ## Residual venue-grant wiring — DONE (2026-09-03)
 
 - **Euler**: `DelegationHelper.replayEvcPermit` — a dynamic tail after

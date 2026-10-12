@@ -16,17 +16,46 @@ const T = { token: TOKEN, permit3: PERMIT3, settlement: SETTLEMENT };
 const NOW = 1_700_000_000;
 const src = (p: string) => readFileSync(resolve(__dirname, "..", p), "utf8");
 
-describe("A-IMMUT-1 — the app creates BOTH funding legs", () => {
+describe("DIRECT funding (default): one exact approve to Settlement, the surface its pull falls back to", () => {
+  const unfunded = { erc20Allowance: 0n, grantAmount: 0n, grantExpiration: 0, directAllowance: 0n, strict: false };
+  it("an unfunded maker sends ONE transaction: token.approve(Settlement, exact)", () => {
+    const plan = planFunding(unfunded, 500n, 300, NOW);
+    expect(plan.steps).toEqual([{ kind: "direct-approve", amount: 500n }]);
+    const [call] = fundingCalls(plan.steps, T);
+    expect(call!.to).toBe(TOKEN);
+    const d = decodeFunctionData({ abi: erc20Abi, data: call!.data });
+    expect([d.functionName, ...(d.args as unknown[])]).toEqual(["approve", SETTLEMENT, 500n]);
+  });
+  it("covered by an exact direct allowance (what a gasless permit leaves) or by live legacy Permit3 legs", () => {
+    expect(planFunding({ ...unfunded, directAllowance: 500n }, 500n, 300, NOW).covered).toBe(true);
+    expect(planFunding({ ...unfunded, erc20Allowance: 500n, grantAmount: 500n, grantExpiration: NOW + 7200 }, 500n, 300, NOW).covered).toBe(true);
+  });
+  it("still EXACT: a larger direct allowance is trimmed down to the order", () => {
+    const plan = planFunding({ ...unfunded, directAllowance: 9_999n }, 500n, 300, NOW);
+    expect(plan.steps).toEqual([{ kind: "direct-approve", amount: 500n }]);
+    expect(plan.trims).toBe(true);
+  });
+  it("strict mode refuses the direct surface → the two-leg Permit3 plan", () => {
+    const plan = planFunding({ ...unfunded, strict: true }, 500n, 300, NOW);
+    expect(plan.steps.map((x) => x.kind)).toEqual(["erc20-approve", "permit3-grant"]);
+  });
+  it("revoke clears the direct approval too", () => {
+    const calls = revokeCalls({ ...unfunded, directAllowance: 500n }, T);
+    expect(calls.map((c) => c.label)).toEqual(["Revoke the direct approval to Settlement"]);
+  });
+});
+
+describe("A-IMMUT-1 — the app creates BOTH funding legs (Permit3 path: strict-mode makers)", () => {
   it("test_audit_A_IMMUT_1_erc20ApprovalAloneIsNotFunded", () => {
     // Exactly the state the old app left behind: ERC-20 approve to Permit3,
     // no Permit3 book grant to Settlement → Permit3.transferFrom reverts.
-    const plan = planFunding({ erc20Allowance: 500n, grantAmount: 0n, grantExpiration: 0 }, 500n, 3600, NOW);
+    const plan = planFunding({ erc20Allowance: 500n, grantAmount: 0n, grantExpiration: 0, strict: true }, 500n, 3600, NOW);
     expect(plan.covered).toBe(false);
     expect(plan.steps).toEqual([{ kind: "permit3-grant", amount: 500n, expiration: NOW + 3600 + GRANT_MARGIN_SECONDS }]);
   });
 
   it("test_audit_A_IMMUT_1_grantNamesSettlementAsSpender", () => {
-    const plan = planFunding({ erc20Allowance: 0n, grantAmount: 0n, grantExpiration: 0 }, 500n, 60, NOW);
+    const plan = planFunding({ erc20Allowance: 0n, grantAmount: 0n, grantExpiration: 0, strict: true }, 500n, 60, NOW);
     const calls = fundingCalls(plan.steps, T);
     expect(calls).toHaveLength(2);
 
@@ -43,10 +72,10 @@ describe("A-IMMUT-1 — the app creates BOTH funding legs", () => {
   });
 
   it("test_audit_A_IMMUT_1_bothLegsExactIsCovered", () => {
-    const plan = planFunding({ erc20Allowance: 500n, grantAmount: 500n, grantExpiration: NOW + 7200 }, 500n, 3600, NOW);
+    const plan = planFunding({ erc20Allowance: 500n, grantAmount: 500n, grantExpiration: NOW + 7200, strict: true }, 500n, 3600, NOW);
     expect(plan.covered).toBe(true);
     // ...but a grant that lapses before the order does is not.
-    expect(planFunding({ erc20Allowance: 500n, grantAmount: 500n, grantExpiration: NOW + 10 }, 500n, 3600, NOW).covered).toBe(
+    expect(planFunding({ erc20Allowance: 500n, grantAmount: 500n, grantExpiration: NOW + 10, strict: true }, 500n, 3600, NOW).covered).toBe(
       false,
     );
   });
@@ -79,20 +108,20 @@ describe("A-IMMUT-1 — the app creates BOTH funding legs", () => {
 describe("G-TS_SIGN-5 — no false 'no standing allowance' promise; trim + revoke", () => {
   it("test_audit_G_TS_SIGN_5_largerAllowanceIsTrimmed", () => {
     // 5,000 left from a lapsed ticket; the new ticket needs 100 → NOT covered.
-    const plan = planFunding({ erc20Allowance: 5000n, grantAmount: 5000n, grantExpiration: NOW + 99999 }, 100n, 60, NOW);
+    const plan = planFunding({ erc20Allowance: 5000n, grantAmount: 5000n, grantExpiration: NOW + 99999, strict: true }, 100n, 60, NOW);
     expect(plan.covered).toBe(false);
     expect(plan.trims).toBe(true);
     expect(plan.steps.map((s) => s.amount)).toEqual([100n, 100n]);
   });
 
   it("test_audit_G_TS_SIGN_5_neverExpiringGrantIsTrimmed", () => {
-    const plan = planFunding({ erc20Allowance: 100n, grantAmount: 100n, grantExpiration: 0 }, 100n, 60, NOW);
+    const plan = planFunding({ erc20Allowance: 100n, grantAmount: 100n, grantExpiration: 0, strict: true }, 100n, 60, NOW);
     expect(plan.covered).toBe(false);
     expect(plan.steps[0]!.kind).toBe("permit3-grant");
   });
 
   it("test_audit_G_TS_SIGN_5_revokeClearsBothLegs", () => {
-    const state = { erc20Allowance: 100n, grantAmount: 100n, grantExpiration: NOW + 10 };
+    const state = { erc20Allowance: 100n, grantAmount: 100n, grantExpiration: NOW + 10, strict: true };
     expect(hasLeftover(state, NOW)).toBe(true);
     const calls = revokeCalls(state, T);
     const decoded = calls.map((c) =>
@@ -101,7 +130,7 @@ describe("G-TS_SIGN-5 — no false 'no standing allowance' promise; trim + revok
     expect(decoded.map((d) => d.functionName)).toEqual(["revokeToken", "approve"]);
     expect(decoded[0]!.args).toEqual([SETTLEMENT, TOKEN]);
     expect(decoded[1]!.args).toEqual([PERMIT3, 0n]);
-    expect(hasLeftover({ erc20Allowance: 0n, grantAmount: 5n, grantExpiration: NOW - 1 }, NOW)).toBe(false);
+    expect(hasLeftover({ erc20Allowance: 0n, grantAmount: 5n, grantExpiration: NOW - 1, strict: true }, NOW)).toBe(false);
   });
 
   it("test_audit_G_TS_SIGN_5_disclosureNoLongerPromisesNoStandingAllowance", () => {

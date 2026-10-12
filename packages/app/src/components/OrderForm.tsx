@@ -324,7 +324,7 @@ export function OrderForm(props: OrderFormProps) {
           : "5 minutes (1 minute auction, then rests at the minimum)"
         : mode === "twap"
           ? `each slice ${ticket.everyMin + 1} min after it is signed · schedule ${twapMinutes >= 60 ? `${(twapMinutes / 60).toFixed(1)} h` : `${twapMinutes} min`}`
-          : `${expiryLabel(ticket.expiry)} (the Permit3 grant lasts as long, +1 h)`,
+          : expiryLabel(ticket.expiry),
       "",
     ]);
   }
@@ -604,7 +604,7 @@ export function OrderForm(props: OrderFormProps) {
                     type="button"
                     role="radio"
                     aria-checked={ticket.expiry === o.id}
-                    title={`The order and its Permit3 grant live ${o.label}`}
+                    title={`The order lives ${o.label}`}
                     onClick={() => ticket.setExpiry(o.id)}
                   >
                     {o.short}
@@ -851,10 +851,17 @@ export function OrderForm(props: OrderFormProps) {
                     </span>
                   )}
                   {allowance.blocked && <div className="signerr">{allowance.blocked}</div>}
-                  <span className="capnote dim">
-                    Pre-audit: the approval and the Permit3 grant to Settlement are capped at this order&rsquo;s size
-                    and stay until a fill uses them or you revoke them — the grant also lapses shortly after the
-                    order expires
+                  <span className="capnote dim oneline">
+                    One exact approval
+                    <span
+                      className="info"
+                      tabIndex={0}
+                      role="img"
+                      aria-label="How the approval works"
+                      title={`One transaction: approve Settlement for exactly this order's ${payToken}. Settlement can only spend it through an order you signed; it stays until a fill uses it or you revoke it, and a new order's approval replaces it. (Makers in Permit3 strict mode approve Permit3 and grant Settlement instead — two transactions, the grant lapsing shortly after the order.)`}
+                    >
+                      i
+                    </span>
                     {allowance.current !== undefined && allowance.current > 0 && (
                       <> · currently approved {fmtAmt(allowance.current)} {payToken}</>
                     )}

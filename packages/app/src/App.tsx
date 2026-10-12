@@ -381,7 +381,9 @@ export default function App() {
     required: requiredHuman,
     current:
       funding !== undefined && payMeta.decimals !== undefined
-        ? Number(formatUnits(funding.erc20Allowance, payMeta.decimals))
+        ? // The surface this maker's plan uses: the direct approval to Settlement, or
+          // the approval to Permit3 for a strict-mode maker (lib/funding).
+          Number(formatUnits(funding.strict ? funding.erc20Allowance : (funding.directAllowance ?? 0n), payMeta.decimals))
         : undefined,
     covered: (fundingPlan?.covered ?? false) || gaslessActive,
     gasless:

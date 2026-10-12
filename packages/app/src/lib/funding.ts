@@ -20,6 +20,15 @@ import { encodeFunctionData, erc20Abi, formatUnits, type Address, type Hex } fro
  * lapses on its own. The ERC-20 approval to Permit3 has no expiry; it stays
  * until a fill uses it or the maker revokes it, which the UI says plainly and
  * offers a one-click revoke for (G-TS_SIGN-5).
+ *
+ * DIRECT funding (default since 2026-10-12): ONE transaction instead of two —
+ * `token.approve(Settlement, exact)`. Settlement's pull tries the Permit3 leg and
+ * falls back to the maker's direct ERC-20 allowance unless the maker is in Permit3
+ * strict mode (`Base._pullViaPermit3`; the lens counts both). It is the surface a
+ * gasless ERC-2612 permit already sets (spender = Settlement). Still EXACT; what it
+ * gives up is the grant's auto-expiry: an unfilled order's allowance stands until
+ * a fill or a revoke, and only a maker-signed order can spend it. Makers in strict
+ * mode keep the two-leg Permit3 plan (the direct surface is refused for them).
  */
 
 /** What the chain says today, for one (maker, token). */
@@ -43,6 +52,8 @@ export type FundingStep =
   /** `WRAPPED.deposit{value: amount}()`: turn native coin into the wrapped token the order sells. */
   | { kind: "wrap"; amount: bigint }
   | { kind: "erc20-approve"; amount: bigint }
+  /** `token.approve(Settlement, amount)`: the direct surface Settlement falls back to (one transaction). */
+  | { kind: "direct-approve"; amount: bigint }
   | { kind: "permit3-grant"; amount: bigint; expiration: number };
 
 export interface FundingPlan {
@@ -130,6 +141,24 @@ export function planFunding(
     steps.push({ kind: "wrap", amount: shortfall });
   }
 
+  // Already funded through the legacy Permit3 legs (an exact live grant AND enough
+  // approval behind it): nothing to send — Settlement's pull takes that leg first.
+  const needUntilP3 = now + ttlSeconds;
+  const permit3Covered =
+    state.erc20Allowance >= required &&
+    state.grantAmount === required &&
+    state.grantExpiration !== 0 &&
+    state.grantExpiration >= needUntilP3;
+
+  if (!state.strict) {
+    const direct = state.directAllowance ?? 0n;
+    if (direct !== required && !permit3Covered) {
+      trims ||= direct > required;
+      steps.push({ kind: "direct-approve", amount: required });
+    }
+    return { steps, covered: steps.length === 0, trims, blocked };
+  }
+
   if (state.erc20Allowance !== required) {
     trims ||= state.erc20Allowance > required;
     steps.push({ kind: "erc20-approve", amount: required });
@@ -155,6 +184,8 @@ export function fundingStepLabel(
   switch (step.kind) {
     case "wrap":
       return `Wrap ${fmtWei(step.amount)} ${a.nativeSymbol ?? "native"} → ${a.token}`;
+    case "direct-approve":
+      return `Approve exactly ${a.amount} ${a.token}`;
     case "erc20-approve":
       return `Approve exactly ${a.amount} ${a.token} to Permit3`;
     case "permit3-grant":
@@ -236,7 +267,9 @@ export function fundingCalls(steps: readonly FundingStep[], t: FundingTargets): 
   return steps.map((s) =>
     s.kind === "wrap"
       ? { ...wrapCall(t.token, s.amount), label: `Wrap ${fmtWei(s.amount)}` }
-      : s.kind === "erc20-approve"
+      : s.kind === "direct-approve"
+        ? { to: t.token, data: approveData(t.settlement, s.amount), label: "Approve to Settlement" }
+        : s.kind === "erc20-approve"
         ? { to: t.token, data: approveData(t.permit3, s.amount), label: "Approve to Permit3" }
         : { to: t.permit3, data: encodeApproveToken(t.settlement, t.token, s.amount, s.expiration), label: "Grant Settlement via Permit3" },
   );
