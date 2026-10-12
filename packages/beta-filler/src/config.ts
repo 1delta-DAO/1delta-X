@@ -252,6 +252,8 @@ export interface Policy {
 export interface Config {
   chainId: number;
   rpcUrl: string;
+  /** Per-request RPC timeout, ms (`RPC_TIMEOUT_MS`, default viem's 10 s; a lazily-forked anvil needs more). */
+  rpcTimeoutMs: number;
   /** Where {@link rpcUrl} came from: the `RPC_URL_SECRET` secret wins over `RPC_URL`. */
   rpcSource: "RPC_URL_SECRET" | "RPC_URL" | "default";
   privateKey: Hex;
@@ -704,6 +706,7 @@ export function loadConfig(env: Env): Config {
   return {
     chainId: posNum(env, "CHAIN_ID", ROOTSTOCK.chainId),
     rpcUrl: rpcSecret || rpcVar || ROOTSTOCK.rpcUrl,
+    rpcTimeoutMs: posNum(env, "RPC_TIMEOUT_MS", 10_000),
     rpcSource: rpcSecret ? "RPC_URL_SECRET" : rpcVar ? "RPC_URL" : "default",
     privateKey: privateKey as Hex,
     settlement: addr(env, "SETTLEMENT"),

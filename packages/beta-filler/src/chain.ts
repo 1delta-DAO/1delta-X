@@ -147,6 +147,7 @@ export function connect(cfg: Config, opts: ConnectOptions = {}): Chain {
   const account = privateKeyToAccount(cfg.privateKey);
   const transport = http(cfg.rpcUrl, {
     batch: false,
+    timeout: cfg.rpcTimeoutMs,
     ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
     ...(opts.retryCount !== undefined ? { retryCount: opts.retryCount } : {}),
   });
