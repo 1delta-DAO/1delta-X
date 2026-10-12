@@ -46,7 +46,7 @@ LENS = "0xF9e905EdCC376FDaBF62Ca0966624611721C5206"
 # -32601), so on it the fill index and on-chain cancels never advance: /health then
 # reports `logsUnsupported: true`, the filler worker alerts, and the lens re-check
 # falls back to a 60 s cadence. Set the RPC_URL_SECRET secret (see the top).
-RPC_URL = "https://public-node.rsk.co"
+RPC_URL = "https://rpc-gateway.1delta.io/30"
 # Optional Durable Object location hint, e.g. "wnam" (near the public Rootstock RPCs).
 # Only affects where the object is first CREATED; an existing object never moves.
 DO_LOCATION_HINT = ""

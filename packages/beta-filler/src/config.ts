@@ -254,6 +254,12 @@ export interface Config {
   rpcUrl: string;
   /** Per-request RPC timeout, ms (`RPC_TIMEOUT_MS`, default viem's 10 s; a lazily-forked anvil needs more). */
   rpcTimeoutMs: number;
+  /**
+   * Further RPC endpoints tried IN ORDER when the primary errors or times out
+   * (`RPC_FALLBACK_URLS`, comma-separated; 2026-10-12: public-node.rsk.co went dark and
+   * every quote waited 10–30 s for a 422).
+   */
+  rpcFallbackUrls: string[];
   /** Where {@link rpcUrl} came from: the `RPC_URL_SECRET` secret wins over `RPC_URL`. */
   rpcSource: "RPC_URL_SECRET" | "RPC_URL" | "default";
   privateKey: Hex;
@@ -707,6 +713,10 @@ export function loadConfig(env: Env): Config {
     chainId: posNum(env, "CHAIN_ID", ROOTSTOCK.chainId),
     rpcUrl: rpcSecret || rpcVar || ROOTSTOCK.rpcUrl,
     rpcTimeoutMs: posNum(env, "RPC_TIMEOUT_MS", 10_000),
+    rpcFallbackUrls: (env.RPC_FALLBACK_URLS ?? "")
+      .split(",")
+      .map((u) => u.trim())
+      .filter((u) => /^https?:\/\//.test(u)),
     rpcSource: rpcSecret ? "RPC_URL_SECRET" : rpcVar ? "RPC_URL" : "default",
     privateKey: privateKey as Hex,
     settlement: addr(env, "SETTLEMENT"),

@@ -4,6 +4,7 @@ import {
   defineChain,
   encodeFunctionData,
   erc20Abi,
+  fallback,
   http,
   maxUint256,
   type Address,
@@ -145,12 +146,17 @@ export function connect(cfg: Config, opts: ConnectOptions = {}): Chain {
     rpcUrls: { default: { http: [cfg.rpcUrl] } },
   });
   const account = privateKeyToAccount(cfg.privateKey);
-  const transport = http(cfg.rpcUrl, {
-    batch: false,
-    timeout: cfg.rpcTimeoutMs,
-    ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
-    ...(opts.retryCount !== undefined ? { retryCount: opts.retryCount } : {}),
-  });
+  const one = (url: string) =>
+    http(url, {
+      batch: false,
+      timeout: cfg.rpcTimeoutMs,
+      ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
+      ...(opts.retryCount !== undefined ? { retryCount: opts.retryCount } : {}),
+    });
+  // Primary first; on an error or timeout the next endpoint answers (viem `fallback`,
+  // unranked: the order is the operator's).
+  const urls = [cfg.rpcUrl, ...(cfg.rpcFallbackUrls ?? []).filter((u) => u !== cfg.rpcUrl)];
+  const transport = urls.length > 1 ? fallback(urls.map(one), { rank: false }) : one(cfg.rpcUrl);
   return {
     pub: createPublicClient({ chain, transport }) as PublicClient,
     account,

@@ -69,7 +69,12 @@ CHAIN_ID = "30"
 # Fallback only: set the RPC_URL_SECRET secret to a keyed provider (the public node
 # rate-limits — a 45 s HTTP 429 brownout is a tested failure mode — and the filler
 # makes tens of thousands of calls a day).
-RPC_URL = "https://public-node.rsk.co"
+RPC_URL = "https://rpc-gateway.1delta.io/30"
+# Tried in order when the primary errors or times out (2026-10-12: public-node.rsk.co
+# and mycrypto.rsk.co went dark — every quote waited 10–30 s and came back 422). A short
+# per-request timeout so a dead endpoint costs seconds, not the whole quote.
+RPC_FALLBACK_URLS = "https://public-node.rsk.co,https://mycrypto.rsk.co"
+RPC_TIMEOUT_MS = "6000"
 SETTLEMENT = "0xe6EDbb5c49Fb4CFb313476e3B78E274D3584ddf5"   # Rootstock beta 2026-10-09 (b23ec90)
 PERMIT3 = "0xabaefb5ae495Dcbce40d1e057346f31A500668a8"
 LENS = "0xF9e905EdCC376FDaBF62Ca0966624611721C5206"
