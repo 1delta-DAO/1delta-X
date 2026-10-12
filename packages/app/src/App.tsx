@@ -11,7 +11,6 @@ import { OrderForm, type AllowanceView, type Gate, type Receipt } from "./compon
 import { Orders } from "./components/Orders";
 import { PreAuditGate, PreAuditStrip, useAcknowledgement } from "./components/PreAudit";
 import { RaffleNotice } from "./components/Raffle";
-import { Stats } from "./components/Stats";
 import { TermsLink } from "./components/TermsLink";
 import { chainById, chainLabel } from "./config/chains";
 import { deploymentFor, exclusivityForMarket, solverForMarket } from "./config/deployments";
@@ -877,7 +876,6 @@ export default function App() {
       <main>
         <RaffleNotice chainId={chainId} />
 
-        <Stats bids={merged.bids} asks={merged.asks} base={ticket.market.base} venues={pool.book?.venues ?? []} />
 
         <div className="deck">
           <OrderForm
