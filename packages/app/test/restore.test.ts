@@ -126,9 +126,14 @@ describe("RemoteOrderbook.restore", () => {
     expect(historical).toMatchObject({ side: "sell", size: 50, simulated: false, mine: true });
     expect(notified).toBeGreaterThan(0);
 
-    // Once per maker.
+    // The restored rows' live status is read RIGHT AWAY (2026-10-12: after a reload a
+    // confirming fill waited a whole poll interval), not one interval later.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.some((c) => c === `/orders/${hashOrderStruct(live)}/status`)).toBe(true);
+
+    // Once per maker (the poll a restore triggers right away reads statuses, not /orders?maker).
     await book.restore(MAKER);
-    expect(calls).toHaveLength(2);
+    expect(calls.filter((c) => c.startsWith("/orders?maker")).length).toBe(1);
     book.subscribe(() => {})();
   });
 

@@ -379,6 +379,14 @@ export class RemoteOrderbook implements OrderbookApi {
    */
   setFillReader(reader: FillReader | null): void {
     this.fillReader = reader;
+    // A reader arriving (the wallet reconnected after a reload) can settle rows that
+    // finished while the tab was closed: look now, not one poll interval later.
+    if (reader && this.timer) this.pollSoon();
+  }
+
+  /** Run a poll right away (coalesced: a poll already running covers it). */
+  private pollSoon(): void {
+    queueMicrotask(() => void this.poll());
   }
 
   orders(marketId?: string): RestingOrder[] {
@@ -525,6 +533,8 @@ export class RemoteOrderbook implements OrderbookApi {
     }
     if (this.settle()) changed = true;
     if (changed) this.emit();
+    // Restored rows get their live status (pending fill, chain state) right away.
+    if (changed && this.timer) this.pollSoon();
   }
 
   /** One `GET /orders` item → a tracked row. @returns whether a row was added. */
@@ -1023,13 +1033,26 @@ export class RemoteOrderbook implements OrderbookApi {
   private start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => void this.poll(), this.pollMs);
+    // First look immediately: after a reload the open rows (a fill confirming, an
+    // order that filled meanwhile) must not wait a whole interval to update.
+    this.pollSoon();
+    if (typeof document !== "undefined") {
+      this.onVisible = () => {
+        if (document.visibilityState === "visible") this.pollSoon();
+      };
+      document.addEventListener("visibilitychange", this.onVisible);
+    }
   }
 
   private stop(): void {
     if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = undefined;
+    if (this.onVisible && typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onVisible);
+    this.onVisible = undefined;
   }
+
+  private onVisible: (() => void) | undefined;
 
   private emit(): void {
     for (const l of this.listeners) l();
