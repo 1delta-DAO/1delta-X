@@ -119,6 +119,10 @@ export interface QuoteResult {
  */
 /** How long a quote may reuse the last good gas-price read when the RPC fails, ms. */
 export const GAS_PRICE_STALE_MS = 10 * 60_000;
+/** A gas-price read younger than this is reused without asking the RPC again, ms. */
+export const GAS_PRICE_FRESH_MS = 20_000;
+/** Quotes slower than this are logged with a breakdown, ms. */
+export const SLOW_QUOTE_MS = 2_000;
 
 export function netQuote(a: { grossOut: bigint; costOut: bigint; gasMarginBps: bigint; toleranceBps: bigint; capOut?: bigint }): {
   amountOut: bigint;
@@ -335,6 +339,7 @@ export class Quoter {
     readonly book: QuoteBook,
     private readonly strategies: { route?: RouteFiller; inventory?: Filler },
     private readonly now: () => number = Date.now,
+    private readonly log: (m: string) => void = () => {},
   ) {}
 
   private policy(): QuotePolicy {
@@ -350,31 +355,51 @@ export class Quoter {
     // An RPC hiccup on the gas price must not sink the quote: reuse the last good read
     // for up to {@link GAS_PRICE_STALE_MS} (Rootstock's minimum gas price moves rarely
     // and slowly; the FILL re-reads it live before sending anything).
+    // A read under GAS_PRICE_FRESH_MS old is reused outright: it saves the quote one or
+    // two sequential RPC round trips (the minimum gas price changes rarely; the FILL
+    // re-reads it live).
+    const t0 = Date.now();
     let gasPrice: bigint;
-    try {
-      gasPrice = await this.chain.pub.getGasPrice();
-      this.lastGasPrice = { at, wei: gasPrice };
-    } catch (e) {
-      if (!this.lastGasPrice || at - this.lastGasPrice.at > GAS_PRICE_STALE_MS) throw e;
+    if (this.lastGasPrice && at - this.lastGasPrice.at < GAS_PRICE_FRESH_MS) {
       gasPrice = this.lastGasPrice.wei;
+    } else {
+      try {
+        gasPrice = await this.chain.pub.getGasPrice();
+        this.lastGasPrice = { at, wei: gasPrice };
+      } catch (e) {
+        if (!this.lastGasPrice || at - this.lastGasPrice.at > GAS_PRICE_STALE_MS) throw e;
+        gasPrice = this.lastGasPrice.wei;
+      }
     }
+    const tGas = Date.now() - t0;
     const err = this.guard.checkGasPrice(gasPrice);
     if (err) return { priced: [], gasPrice, reasons: [err] };
     const priced: PricedCandidate[] = [];
     const reasons: string[] = [];
     const { route, inventory } = this.strategies;
-    if (route) {
-      const r = await route.quoteRoute({ tokenIn: req.tokenIn, tokenOut: req.tokenOut, amountIn: req.amountIn, direct: req.delivery === "direct", gasPrice, permit: req.funding === "permit" }).catch((e: unknown) => ({ ok: false as const, reason: `route: ${(e as Error).message?.split("\n")[0] ?? e}` }));
+    // Both strategies price in PARALLEL (they were awaited one after the other).
+    const t1 = Date.now();
+    const [rr, ri] = await Promise.all([
+      route
+        ? route
+            .quoteRoute({ tokenIn: req.tokenIn, tokenOut: req.tokenOut, amountIn: req.amountIn, direct: req.delivery === "direct", gasPrice, permit: req.funding === "permit" })
+            .catch((e: unknown) => ({ ok: false as const, reason: `route: ${(e as Error).message?.split("\n")[0] ?? e}` }))
+        : undefined,
+      // The inventory EOA fills PULL orders only (an EOA cannot run a delta-verify callback).
+      // ...nor a permit-funded one (no executeFill to carry the permit).
+      inventory && req.delivery === "pull" && req.funding !== "permit"
+        ? inventory
+            .quoteInventory(req.tokenIn, req.tokenOut, req.amountIn, gasPrice)
+            .catch((e: unknown) => ({ ok: false as const, reason: `inventory: ${(e as Error).message?.split("\n")[0] ?? e}` }))
+        : undefined,
+    ]);
+    for (const r of [rr, ri]) {
+      if (!r) continue;
       if (r.ok) priced.push(r.candidate);
       else reasons.push(r.reason);
     }
-    // The inventory EOA fills PULL orders only (an EOA cannot run a delta-verify callback).
-    // ...nor a permit-funded one (no executeFill to carry the permit).
-    if (inventory && req.delivery === "pull" && req.funding !== "permit") {
-      const r = await inventory.quoteInventory(req.tokenIn, req.tokenOut, req.amountIn, gasPrice).catch((e: unknown) => ({ ok: false as const, reason: `inventory: ${(e as Error).message?.split("\n")[0] ?? e}` }));
-      if (r.ok) priced.push(r.candidate);
-      else reasons.push(r.reason);
-    }
+    const tAll = Date.now() - t0;
+    if (tAll > SLOW_QUOTE_MS) this.log(`quote slow: ${tAll} ms (gas price ${tGas} ms, strategies ${Date.now() - t1} ms) ${req.delivery} ${req.tokenIn.slice(0, 8)}→${req.tokenOut.slice(0, 8)}`);
     if (this.cache.size > 200) this.cache.clear();
     if (priced.length) this.cache.set(key, { at, priced, gasPrice });
     return { priced, gasPrice, reasons };

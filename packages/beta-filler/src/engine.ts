@@ -186,7 +186,7 @@ export class Engine {
       this.strategies.push({ name: "route", consider: (e) => r.consider(e), accepts: (e) => r.accepts(e), beginSweep: () => r.beginSweep() });
     }
     this.rebalancer = new Rebalancer(cfg, chain, log, this.guard, { ...(state.rebalance ?? {}) }, mark);
-    this.quoter = new Quoter(cfg, chain, this.guard, this.quotes, { route: this.route, inventory: this.filler }, this.now);
+    this.quoter = new Quoter(cfg, chain, this.guard, this.quotes, { route: this.route, inventory: this.filler }, this.now, (m) => this.o.log(m));
     this.cursor = state.cursor;
     this.recentEvents = [...(state.recent ?? [])];
     for (const [h, until, fillable] of state.ownFills ?? []) this.holds.set(h, { until, fillable, why: "filled" });
