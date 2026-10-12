@@ -111,7 +111,8 @@ export function sourceName(source: string | null): string {
   const s = source.toLowerCase();
   if (s.startsWith("sushi")) return "Sushi";
   if (s.startsWith("uni")) return "Uniswap";
-  if (s.startsWith("oku")) return "Oku";
+  // Oku runs a Uniswap v3 deployment (and is our tick indexer, not a quote source): the venue is Uniswap.
+  if (s.startsWith("oku")) return "Uniswap";
   if (s.startsWith("inventory")) return "filler inventory";
   return source.charAt(0).toUpperCase() + source.slice(1);
 }

@@ -50,6 +50,7 @@ No contract change; none waits on a deploy.
 | 25 | [Book + filler: truncate-then-redact can leak a partial RPC key](25-redact-before-truncate.md) | backend | low |
 | 26 | [App: cap the indexer's pool fee; fix the `applyPoolFee` comment](26-app-fee-cap-and-comment.md) | frontend | low |
 | 27 | [Auction: `guard.ts` says the sandbox has no standing approvals](27-auction-guard-comment.md) | backend (docs) | low |
+| 28 | [App: receive native RBTC from a fill (in-fill unwrap)](28-native-rbtc-receipts.md) | contracts + app + filler | feature (deferred) |
 
 Sources: `../REVIEW-2026-10-05-amount-mismatch.md` (03–15),
 `../SIGNATURE-VALIDATION-REVIEW.md` (01–02), the 2026-10-06 pre-merge audit (16–27,

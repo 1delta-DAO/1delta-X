@@ -759,3 +759,14 @@ main.reading .md .mdquote { margin-bottom: 26px; }
   .mt-orb::after, .mt-bar::after, .prog .mini.seek::after, .mt-steps li i, .mt-check { animation: none !important; }
   .mt-bar b { transition: none; }
 }
+
+/* quote loader: a skeleton where the number will land, never a stand-in number */
+.qskel {
+  display: inline-block; height: 12px; border-radius: 6px; vertical-align: middle;
+  background: linear-gradient(90deg, var(--raise) 0%, var(--line2) 45%, var(--raise) 90%);
+  background-size: 220% 100%; animation: qskel 1.15s ease-in-out infinite;
+}
+.qskel.big { flex: 1; height: 26px; max-width: 170px; margin: 4px 0; border-radius: 8px; }
+.qsum > div.qload { align-items: center; }
+@keyframes qskel { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+@media (prefers-reduced-motion: reduce) { .qskel { animation: none; } }

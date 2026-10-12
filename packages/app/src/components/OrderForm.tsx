@@ -253,6 +253,8 @@ export function OrderForm(props: OrderFormProps) {
   const unfilledPct = quote && amount > 0 ? (quote.unfilledIn / amount) * 100 : 0;
 
   // ---- what you receive
+  /** A quote for this ticket is on its way and nothing else may stand in for it (App). */
+  const awaitingQuote = isMarket && amount > 0 && quoteStatus === "loading" && !figures;
   const receiveValue = isMarket
     ? figures
       ? fmtAmt(figures.receive)
@@ -466,7 +468,11 @@ export function OrderForm(props: OrderFormProps) {
             </span>
           </div>
           <div className="inp">
-            <input type="text" readOnly placeholder="0.0" aria-label={`Amount of ${recvToken} you receive`} value={receiveValue} />
+            {awaitingQuote ? (
+              <span className="qskel big" role="status" aria-label="Fetching a quote" />
+            ) : (
+              <input type="text" readOnly placeholder="0.0" aria-label={`Amount of ${recvToken} you receive`} value={receiveValue} />
+            )}
             <TokenSelect
               value={recvToken}
               options={pairsWith(ticket.chainId, payToken)}
@@ -528,9 +534,22 @@ export function OrderForm(props: OrderFormProps) {
                   {!figures.live && <div className="minor warn">Dry run — this quote will not be filled</div>}
                 </>
               ) : (
-                <div className="minor">
-                  <span>{quoteStatus === "loading" ? "Fetching a quote…" : ready ? "No price for this size" : "Waiting for the book…"}</span>
-                </div>
+                awaitingQuote ? (
+                  <>
+                    <div className="qload">
+                      <span>Finding the best route…</span>
+                      <span className="qskel" style={{ width: 92 }} />
+                    </div>
+                    <div className="qload minor">
+                      <span>Network fee</span>
+                      <span className="qskel" style={{ width: 64 }} />
+                    </div>
+                  </>
+                ) : (
+                  <div className="minor">
+                    <span>{ready ? "No price for this size" : "Waiting for the book…"}</span>
+                  </div>
+                )
               )}
             </div>
           )}

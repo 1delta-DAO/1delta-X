@@ -313,7 +313,12 @@ export default function App() {
   // and the book's quote line come from it; the ladder walk only without a quote.
   const figures = useMemo(
     () =>
-      ticket.mode !== "market" || ticket.amount <= 0
+      // While a quote for THIS ticket is on its way there is no price to show: the
+      // ladder walk is a different (and for small / multi-hop tickets far-off)
+      // number, and flashing it before the quote replaced it read as a wrong quote.
+      // The form shows a loader instead; the ladder is only the fallback once the
+      // quote has failed.
+      ticket.mode !== "market" || ticket.amount <= 0 || quoteStatus === "loading"
         ? null
         : marketFigures({
             side: ticket.side,
@@ -323,7 +328,7 @@ export default function App() {
             fallbackGas: plan?.kind === "market" && !plan.quoted && plan.floor ? plan.floor.gasCostOut : null,
             mid: pool.book?.mid ?? null,
           }),
-    [ticket.mode, ticket.amount, ticket.side, rfq, q, plan, pool.book?.mid],
+    [ticket.mode, ticket.amount, ticket.side, rfq, q, plan, pool.book?.mid, quoteStatus],
   );
   const bookMarker: BookMarker | null = figures
     ? {
