@@ -87,7 +87,8 @@ INVENTORY_ENABLED = "1"
 ROUTE_PROFIT_RECIPIENT = "0x0000000000000000000000000000000000000000"
 ROUTE_SLIPPAGE_BPS = "10"
 ROUTE_STABLE_SLIPPAGE_BPS = "5"
-ROUTE_GAS_ESTIMATE = "320000"
+# v2 solver (2026-10-12): a pool plan assumes this − 30k = 265k (fork: 229k net direct).
+ROUTE_GAS_ESTIMATE = "295000"
 MAX_ROUTE_GAS = "1200000"
 ROUTE_HOURLY_FILLS = "60"
 MIN_PROFIT_RBTC = "0"
@@ -178,8 +179,9 @@ QUOTE_MATCH_GRACE_SECONDS = "120"
 # learned). × the 0.88 default receipt ratio ≈ the production e2e receipts (2026-10-07:
 # 318k–343k direct, 324k pull); was 400k / 420k, which over-priced a fresh filler's
 # small-ticket quotes by ~1 %.
-QUOTE_GAS_ESTIMATE_DIRECT = "360000"
-QUOTE_GAS_ESTIMATE_PULL = "380000"
+# v2 solver pool routes (2026-10-12): × 0.88 ≈ the fork receipts (229k direct / 252k pull).
+QUOTE_GAS_ESTIMATE_DIRECT = "265000"
+QUOTE_GAS_ESTIMATE_PULL = "290000"
 QUOTE_CACHE_MS = "5000"
 # Token buckets (DO SQLite): per visitor IP, and for everyone together (RPC cost bound).
 QUOTE_RATE_IP_CAPACITY = "30"
