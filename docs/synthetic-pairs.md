@@ -67,6 +67,26 @@ direction-dependent:
 show the oldest leg's block. If one leg is stale, the whole book is stale: compose
 only from legs at most 1 block apart, otherwise show "partial".
 
+### 2b. Fitting the existing book structure
+
+The book shows each pool's ticks. A synthetic pair has no pool, but nothing below the
+fetch layer actually needs one:
+
+- **`Level`:** a composed rung is `{price, size, source}` plus `start` / `end`, the
+  composite marginal price at each edge of the band. `walk()` already prices between
+  `start` and `end`, so partial fills inside a band stay close. `pool` and `feeBps`
+  stay unset, as for `LMT` rungs.
+- **`PoolBook`:** the composer returns the SAME shape (`bids`, `asks`, `mid`, `tick`,
+  `step`, `block`), with `venues` = every hop's pools. So `mergeLadder` (resting
+  orders), `walk` / `quote`, the cumulative column, the quote marker and
+  click-to-price need no change.
+- **What does change:**
+  - `fetchPoolBook` gets a synthetic branch that fetches each hop's venues and composes
+    them;
+  - a new `Source` (`ROUTE`, rendered as "via USD₮0"), with its colour and legend entry;
+  - the per-venue depth cards become per-hop cards ("USDRIF→USD₮0 depth");
+  - `assertPoolTokens` runs per hop.
+
 ### 3. The quote stays the authority
 
 Market tickets already sign at the FILLER's quote (`/api/quote`). The composed
