@@ -68,7 +68,7 @@ run() {
   cast rpc anvil_setBalance "$maker" 0x3635C9ADC5DEA00000 --rpc-url "$RPC" >/dev/null
   (cd "$PKG" && env MAKER_KEY=$key NONCE=$nonce FUND=$fund OUT="$WORK/$label.json" "$@" npx tsx e2e/sim-order.ts | tail -1) >"$WORK/$label.order"
   (cd "$PKG" && env PRIVATE_KEY=$OPERATOR_KEY ORDERBOOK_URL=http://unused.invalid INVENTORY_ENABLED=0 DRY_RUN=0 \
-     STATE_FILE="$WORK/state.json" RPC_TIMEOUT_MS=300000 MAX_GAS_PRICE_GWEI=2 SUSHI_ENABLED=0 NORDSTERN_ENABLED=0 ROUTE_OKU_PULL=1 \
+     STATE_FILE="$WORK/state.json" RPC_TIMEOUT_MS=300000 MAX_GAS_PRICE_GWEI=2 HOURLY_GAS_RBTC=100 SUSHI_ENABLED=0 NORDSTERN_ENABLED=0 ROUTE_OKU_PULL=1 \
      ROUTE_PROFIT_RECIPIENT="$SOLVER" npx tsx src/bin.ts fill-json "$WORK/$label.json") >"$WORK/$label.out" 2>&1 || true
   local tx; tx=$(grep -o '"tx":"0x[0-9a-f]*"' "$WORK/$label.out" | tail -1 | cut -d'"' -f4 || true)
   if [ -z "$tx" ] || ! grep -q '"status":"filled"' "$WORK/$label.out"; then

@@ -9,6 +9,7 @@ import type { FillOutcome } from "./filler";
 import { entryFromFile, FileStateStore } from "./fileStore";
 import { GAS, type Resolution } from "./guard";
 import { fetchOrders, type BookEntry } from "./intake";
+import { permitStage } from "./permit";
 import { fmtUnits } from "./policy";
 import type { RebalanceOutcome } from "./rebalance";
 
@@ -86,7 +87,17 @@ function outcomeOf(r: Resolution, sent: FillOutcome): FillOutcome {
  * fill is awaited and its resolution printed.
  */
 async function fillJson(file: string) {
-  const entry: BookEntry = entryFromFile(file);
+  let entry: BookEntry = entryFromFile(file);
+  // A gasless order's ERC-2612 permit goes through the same stage the book sweep runs
+  // (engine.stagePermit): fill WITH the permit, or with the allowance it already made.
+  if (entry.announce.erc2612Permit) {
+    const st = await permitStage(chain, cfg, entry, BigInt(Math.floor(Date.now() / 1000)));
+    const base = { ok: true, status: entry.state?.status ?? "Fillable", validatorsPass: true };
+    if (st.kind === "permit") entry = { ...entry, state: { ...base, fillableAmount: st.fillable }, fillPermit: st.permit };
+    else if (st.kind === "funded") entry = { ...entry, state: { ...base, fillableAmount: st.fillable } };
+    else if (st.kind === "dead") throw new Error(`permit: ${st.reason}`);
+    log(`permit stage: ${st.kind}`);
+  }
   log(`beta-filler ${chain.me} ${cfg.dryRun ? "DRY RUN" : "LIVE"} — one order from ${file}: ${entry.orderHash}`);
   if (engine.pending) log(`waiting for the outstanding tx ${engine.pending.hash} first`);
   await settle();
