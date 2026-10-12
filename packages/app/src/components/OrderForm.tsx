@@ -769,7 +769,7 @@ export function OrderForm(props: OrderFormProps) {
             </button>
           ) : (
             <>
-              {allowance.spender !== null && allowance.gasless?.selected && (
+              {allowance.spender !== null && allowance.gasless?.selected && allowance.required > 0 && (
                 <>
                   <button type="button" className="cta ok" disabled>
                     {`✓ No gas: sign a permit for exactly ${fmtAmt(allowance.required)} ${payToken}`}
