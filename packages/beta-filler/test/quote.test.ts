@@ -184,7 +184,7 @@ describe("parseQuoteRequest: strict validation", () => {
 });
 
 describe("Quoter: the filler's real pricing for the order shape", () => {
-  const pullShape = gasShape("route", "pull", WRBTC, USDT0);
+  const pullShape = gasShape("route", "pull", WRBTC, USDT0, SOLVER);
 
   it("SELL: grossOut = the best route output; gas = QUOTE_GAS_ESTIMATE_PULL × r × the send price; amountOut = gross − gas × 1.1", async () => {
     const { chain } = fake();
@@ -221,9 +221,9 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(p.ok && p.quote.gasUnits).toBe(e.gasRatios.priced(pullShape, 380_000n));
     // …never below the best candidate's plan-kind estimate — a pool plan: ROUTE_GAS_ESTIMATE
     // (320k) less SANDBOX_ROUTE_OVERHEAD_GAS: a tiny learned estimate is floored.
-    e.gasRatios.record(gasShape("route", "pull", USDT0, WRBTC), 100_000n, 90_000n, 2);
+    e.gasRatios.record(gasShape("route", "pull", USDT0, WRBTC, SOLVER), 100_000n, 90_000n, 2);
     const b = await e.quote(sellReq({ tokenIn: USDT0, tokenOut: WRBTC, amountIn: 20_000_000n, side: "buy" }));
-    expect(b.ok && b.quote.gasUnits).toBe(e.gasRatios.priced(gasShape("route", "pull", USDT0, WRBTC), 320_000n - SANDBOX_ROUTE_OVERHEAD_GAS));
+    expect(b.ok && b.quote.gasUnits).toBe(e.gasRatios.priced(gasShape("route", "pull", USDT0, WRBTC, SOLVER), 320_000n - SANDBOX_ROUTE_OVERHEAD_GAS));
   });
 
   it("BUY (pay USDT0, receive WRBTC): exact-input of the pay amount, gas charged in the RECEIVE token", async () => {

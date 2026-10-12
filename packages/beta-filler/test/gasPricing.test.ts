@@ -213,8 +213,8 @@ describe("send gas price: latest block minimumGasPrice × GAS_PRICE_MIN_MULT_BPS
 });
 
 describe("gas ratio learning (receipt / estimate per fill shape)", () => {
-  const A = gasShape("route", "pull", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0);
-  const B = gasShape("route", "direct", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0);
+  const A = gasShape("route", "pull", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, SOLVER);
+  const B = gasShape("route", "direct", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, SOLVER);
 
   it("default 0.88 before any receipt; priced = ⌈estimate × r⌉", () => {
     const g = new GasRatios();
@@ -279,7 +279,7 @@ describe("gas ratio learning (receipt / estimate per fill shape)", () => {
     const { chain, w } = fake({ estimate: 400_000n, gasUsed: 1n });
     const cfg = loadConfig(ENV);
     const ratios = new GasRatios(cfg.gas.defaultReceiptRatioPpm);
-    const shape = gasShape("route", "pull", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0);
+    const shape = gasShape("route", "pull", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, SOLVER);
     ratios.record(shape, 400_000n, 300_000n, 1); // learned r = 0.75
     const rf = new RouteFiller(cfg, chain, new Budget({ [ROUTE_FILLS]: 60n }), () => {}, () => {}, new Guard(cfg.gas), ratios);
     expect((await rf.consider(entry("01") as never)).status).toBe("pending");
@@ -293,7 +293,7 @@ describe("gas ratio learning (receipt / estimate per fill shape)", () => {
     const cfg = loadConfig(ENV);
     const e = await Engine.create({ cfg, chain, store, log: () => {} });
     await e.tick({ fetchEntries: async () => [entry("01")] });
-    const shape = gasShape("route", "pull", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0);
+    const shape = gasShape("route", "pull", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, SOLVER);
     expect(e.pending!.gasMeter).toEqual({ shape, estimate: "400000" });
     expect(minOutOf(w.sent[0]!.data) - OWED).toBe(rbtcToUsdt0(352_000n * SEND)); // default 0.88
     w.receipt = "success";
@@ -308,5 +308,21 @@ describe("gas ratio learning (receipt / estimate per fill shape)", () => {
     await e2.tick({ fetchEntries: async () => [entry("02")] });
     expect(minOutOf(w.sent[1]!.data) - OWED).toBe(rbtcToUsdt0(320_000n * SEND));
     expect(w.sent[1]!.gas).toBe(500_000n);
+  });
+});
+
+describe("2026-10-12: learned gas is keyed by the contract the fill calls (a redeploy starts fresh)", () => {
+  it("a v1 solver's receipts do not price a v2 solver's fills; the default ratio applies", () => {
+    const v1 = "0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287";
+    const v2 = "0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1";
+    const r = new GasRatios({});
+    const oldShape = gasShape("route", "direct", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, v1);
+    const newShape = gasShape("route", "direct", ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, v2);
+    expect(oldShape).not.toBe(newShape);
+    expect(newShape).toBe(gasShape("route", "direct", ROOTSTOCK.wrbtc.toUpperCase(), ROOTSTOCK.usdt0, v2.toLowerCase()));
+    r.record(oldShape, 414_536n, 354_336n, 1);
+    expect(r.typicalEstimate(oldShape)).toBe(414_536n);
+    expect(r.typicalEstimate(newShape)).toBeUndefined();
+    expect(r.ratioPpm(newShape)).toBe(r.ratioPpm(gasShape("route", "pull", ROOTSTOCK.usdrif, ROOTSTOCK.usdt0, v2)));
   });
 });

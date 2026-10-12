@@ -205,7 +205,7 @@ export class Filler {
     const rif = ((await rifForUsdrif(chain, cfg, amountIn)) * (10_000n - MOC_FEE_BPS)) / 10_000n;
     const exit = await quoteRifToUsdt0(chain, cfg, rif);
     const edgeCap = (exit * 10_000n) / (10_000n + p.minExitEdgeBps);
-    const shape = gasShape("inventory", "inventory", t.usdrif, t.usdt0);
+    const shape = gasShape("inventory", "inventory", t.usdrif, t.usdt0, cfg.settlement);
     const learned = this.gasRatios.typicalEstimate(shape);
     const estimate = learned !== undefined && learned > p.inventoryGasEstimate ? learned : p.inventoryGasEstimate;
     const gasUnits = this.gasRatios.priced(shape, estimate);
@@ -332,7 +332,7 @@ export class Filler {
     //     minimum profit, priced in USDT0 at max(pool quote, RBTC_PRICE_USD). A fill
     //     whose spread does not cover them is skipped (audit follow-up 2026-10-05).
     //     The fill's gas is priced at estimate × r (gasRatio.ts), r learned per shape.
-    const shape = gasShape("inventory", "inventory", receive, pay);
+    const shape = gasShape("inventory", "inventory", receive, pay, cfg.settlement);
     const edgeUsdt0 = await this.edgeUsdt0(direction, paid, received);
     const rebalanceWei = await this.rebalanceShareWei(gasPrice, direction === "buyUsdrif" ? received : paid);
     const preCost = await this.rbtcToUsdt0(gasPrice * this.gasRatios.priced(shape, p.inventoryGasEstimate) + rebalanceWei);

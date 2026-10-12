@@ -59,9 +59,15 @@ export interface GasMeter {
   estimate: string;
 }
 
-/** The shape key: strategy, delivery (direct / pull / inventory), tokenIn, tokenOut — lower-case. */
-export function gasShape(strategy: string, delivery: "direct" | "pull" | "inventory", tokenIn: string, tokenOut: string): string {
-  return `${strategy}:${delivery}:${tokenIn.toLowerCase()}:${tokenOut.toLowerCase()}`;
+/**
+ * The shape key: strategy, delivery (direct / pull / inventory), tokenIn, tokenOut and the
+ * contract the fill tx calls (`via`: the route solver, or Settlement for inventory) —
+ * lower-case. `via` is part of the key because a redeployed contract has its own gas
+ * profile: the v2 solver's direct fill is ~230k where the v1 receipts taught ~354k, and a
+ * pair's learned figure must not carry over a redeploy (2026-10-12).
+ */
+export function gasShape(strategy: string, delivery: "direct" | "pull" | "inventory", tokenIn: string, tokenOut: string, via: string): string {
+  return `${strategy}:${delivery}:${tokenIn.toLowerCase()}:${tokenOut.toLowerCase()}@${via.toLowerCase()}`;
 }
 
 const clamp = (v: bigint) => (v < MIN_PPM ? MIN_PPM : v > MAX_PPM ? MAX_PPM : v);

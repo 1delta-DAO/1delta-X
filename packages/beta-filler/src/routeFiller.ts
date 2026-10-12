@@ -520,7 +520,7 @@ export class RouteFiller {
     const nowSec = BigInt(Math.floor(now / 1000));
     const liveCandidate = patchesLiveOutput(order, direct, nowSec);
     // Gas is PRICED at estimate × r, r learned per shape from our receipts (gasRatio.ts).
-    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, order.legsOut[0]!.token);
+    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, order.legsOut[0]!.token, rc.solver);
     const pricedGas = (estimate: bigint) => this.gasRatios.priced(shape, estimate);
     // A gasless maker's order (./permit.ts) carries its ERC-2612 permit IN the fill: the
     // solver runs it first, in the same tx (and the same simulation). Its gas is part of
@@ -825,7 +825,7 @@ export class RouteFiller {
     const cands: Array<RouteCandidate & { hops?: number; label: string }> = [];
     for (const r of raw) cands.push({ ...r, routeGasOut: (await this.nativeToToken(a.gasPrice * rankingGasUnits(planKind(r), r.gasUnits), a.tokenOut)) ?? 0n });
     const best = rankRoutes(cands)[0]!;
-    const shape = gasShape("route", a.direct ? "direct" : "pull", a.tokenIn, a.tokenOut);
+    const shape = gasShape("route", a.direct ? "direct" : "pull", a.tokenIn, a.tokenOut, this.rc.solver);
     // Hops beyond the first cost POOL_HOP_GAS each on top of the single-hop figures (the
     // fallback and the plan-kind floor); a LEARNED estimate is the pair's own receipts,
     // whatever route they took, so it is only floored.
