@@ -751,7 +751,7 @@ Indicative quotes (`POST /quote` on the Worker, *Indicative quotes* above):
 | Env | Default | Meaning |
 |---|---|---|
 | `QUOTE_ENABLED` | `1` | serve quotes at all |
-| `QUOTE_GAS_MARGIN_BPS` | `1000` | margin on one fill's gas cost (+10 %), 0..100000 |
+| `QUOTE_GAS_MARGIN_BPS` | `1000` (production `wrangler.toml`: `300` since 2026-10-12) | margin on one fill's gas cost (+10 % default, +3 % live — r and the estimate are learned per shape from the last 5 receipts), 0..100000 |
 | `QUOTE_TOLERANCE_BPS` | `0` | optional extra price tolerance taken off the quoted output, bps of grossOut |
 | `QUOTE_TTL_SECONDS` | `30` | quote validity (one Rootstock block), 1..600 |
 | `QUOTE_MATCH_GRACE_SECONDS` | `120` | an order first seen this long after `validUntil` still matches its quote (wallet prompt, book post) |

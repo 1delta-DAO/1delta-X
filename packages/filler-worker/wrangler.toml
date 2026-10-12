@@ -177,7 +177,10 @@ DEFAULT_GAS_RECEIPT_RATIO = "0.88"
 # app's Pages worker over a FILLER service binding (`/api/quote`); the secret
 # QUOTE_BINDING_KEY lets it name the visitor's IP for the per-IP limit.
 QUOTE_ENABLED = "1"
-QUOTE_GAS_MARGIN_BPS = "1000"
+# 3 % (was 10 %): r is now the max of each shape's last 5 receipts and the estimate the
+# shape's own (permit / plain), so the priced gas tracks the receipt closely — a USD0 →
+# USDRIF gasless fill charged 0.79 against 0.66 of real gas (2026-10-12).
+QUOTE_GAS_MARGIN_BPS = "300"
 QUOTE_TOLERANCE_BPS = "0"
 QUOTE_TTL_SECONDS = "30"
 # An order first seen up to this long after its quote's validUntil is still matched to

@@ -36,7 +36,7 @@ const admin = (path: string) => worker.fetch(new Request(`https://filler.example
 const named = () => testEnv.FILLER.get(testEnv.FILLER.idFromName("filler")) as DurableObjectStub<FillerDO>;
 
 describe("POST /quote — the math", () => {
-  it("SELL 0.01 WRBTC: grossOut = the route output, amountOut = gross − gas × 1.1 (QUOTE_GAS_MARGIN_BPS 1000)", async () => {
+  it("SELL 0.01 WRBTC: grossOut = the route output, amountOut = gross − gas × 1.03 (QUOTE_GAS_MARGIN_BPS 300)", async () => {
     const res = await post(SELL);
     expect(res.status).toBe(200);
     const q = (await res.json()) as Record<string, string | number | boolean | Record<string, unknown>>;
@@ -44,10 +44,10 @@ describe("POST /quote — the math", () => {
     expect(q.gasUnits).toBe("281600"); // QUOTE_GAS_ESTIMATE_PULL 320k (wrangler.toml, v2 solver) × 0.88 (no receipt learned yet)
     const gasCost = rbtcToUsdt0(281_600n * GAS_PRICE);
     expect(q.gasCostOut).toBe(gasCost.toString());
-    const charge = (gasCost * 11_000n + 9_999n) / 10_000n;
+    const charge = (gasCost * 10_300n + 9_999n) / 10_000n;
     expect(q.gasChargeOut).toBe(charge.toString());
     expect(q.amountOut).toBe((1_000_000_000n - charge).toString());
-    expect(q.gasMarginBps).toBe("1000");
+    expect(q.gasMarginBps).toBe("300");
     expect(q.toleranceBps).toBe("0");
     expect(q.gasPriceWei).toBe(GAS_PRICE.toString());
     expect(q).toMatchObject({ chainId: 30, side: "sell", delivery: "pull", tokenIn: WRBTC, tokenOut: USDT0, strategy: "route", route: { source: "oku", hops: 1 }, live: true });
@@ -63,7 +63,7 @@ describe("POST /quote — the math", () => {
     expect([q.tokenIn, q.tokenOut]).toEqual([USDT0, WRBTC]);
     expect(q.grossOut).toBe((2n * 10n ** 14n).toString());
     expect(q.gasUnits).toBe("264000");
-    const charge = (264_000n * GAS_PRICE * 11_000n + 9_999n) / 10_000n;
+    const charge = (264_000n * GAS_PRICE * 10_300n + 9_999n) / 10_000n;
     expect(q.amountOut).toBe((2n * 10n ** 14n - charge).toString());
   });
 
