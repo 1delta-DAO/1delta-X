@@ -639,7 +639,7 @@ describe("RouteFiller: discovered multi-hop, mixed-venue routes", () => {
     const c = chain(LIVE_SHAPE(), { received: 0n, owed: 0n });
     const { rf, logs } = make(c.chain);
     await rf.init();
-    expect(logs.join("\n")).toMatch(/pool graph: 10 active \/ 11 pool\(s\) over 6 tokens × 4 fees × venues oku\+sushi-v3 \(2 eth_call\)/);
+    expect(logs.join("\n")).toMatch(/pool graph: 10 active \/ 11 pool\(s\) over 9 tokens × 4 fees × venues oku\+sushi-v3 \(3 eth_call\)/);
     const q = await quote(rf, USDRIF, WRBTC, 100n * 10n ** 18n);
     expect(q).toMatchObject({ ok: true, candidate: { hops: 2, source: "oku" } });
     // Fresh graph: no rediscovery on the next quote.

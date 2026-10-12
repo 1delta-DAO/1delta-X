@@ -191,7 +191,8 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 export async function fetchQuote(doFetch: FetchLike, url: string, req: QuoteRequest, signal?: AbortSignal): Promise<FillerQuote> {
   const body = JSON.stringify({
     chainId: req.chainId,
-    marketId: req.marketId,
+    // Tokens only: the pair is whatever the user picked, and a derived (routed) market
+    // has an id the filler never heard of. The filler routes by tokens (ROUTE_TOKENS).
     side: req.side,
     tokenIn: req.tokenIn,
     tokenOut: req.tokenOut,

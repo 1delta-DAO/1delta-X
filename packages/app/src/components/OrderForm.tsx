@@ -352,7 +352,7 @@ export function OrderForm(props: OrderFormProps) {
   const canSign = !sb.disabled && !needsApproval;
 
   return (
-    <div className="box">
+    <div className="box ticketbox">
       <div className="boxhead">
         <span className="lbl">Place an order</span>
         <span className="lbl">{side === "sell" ? `sell ${market.base}` : `buy ${market.base}`}</span>

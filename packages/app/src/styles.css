@@ -179,6 +179,8 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .deck { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 20px; align-items: start; }
 
 .box { border: 1px solid var(--line); border-radius: var(--r); background: var(--card); overflow: hidden; }
+/* the order form's token menus open past its bottom edge (every routed token is listed) */
+.box.ticketbox { overflow: visible; }
 .boxhead {
   padding: 18px 22px; border-bottom: 1px solid var(--line);
   display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
@@ -205,6 +207,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .tkbtn .car { color: var(--faint); font-size: 9px; }
 .tkmenu {
   position: absolute; right: 0; top: calc(100% + 8px); z-index: 50; width: 232px;
+  max-height: min(360px, 60vh); overflow-y: auto;
   background: var(--card); border: 1px solid var(--line2); border-radius: 12px; padding: 6px;
   box-shadow: 0 18px 44px -12px rgba(0, 0, 0, .85);
 }

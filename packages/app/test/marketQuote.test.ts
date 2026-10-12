@@ -111,7 +111,7 @@ describe("fetchQuote: the request the app sends, the errors it maps", () => {
     expect(q.amountOut).toBe(998_898_988n);
     expect(seen!.url).toBe("/api/quote");
     expect(seen!.init.method).toBe("POST");
-    expect(JSON.parse(String(seen!.init.body))).toEqual({ chainId: 30, marketId: "rsk-30-wrbtc-usd0", side: "sell", tokenIn: WRBTC, tokenOut: USD0, amountIn: "10000000000000000", delivery: "direct", maker: MAKER });
+    expect(JSON.parse(String(seen!.init.body))).toEqual({ chainId: 30, side: "sell", tokenIn: WRBTC, tokenOut: USD0, amountIn: "10000000000000000", delivery: "direct", maker: MAKER });
   });
   it("a permit-funded (gasless) ticket asks for funding: \"permit\" so the quote prices the in-fill permit gas", async () => {
     const bodies: unknown[] = [];

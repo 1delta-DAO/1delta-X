@@ -6,7 +6,6 @@ import { createPublicClient, createWalletClient, custom, formatUnits, zeroAddres
 import { BOOK_IS_REMOTE, orderbook } from "./backend/book";
 import type { SignedOrder } from "./backend/api";
 import { Header } from "./components/Header";
-import { MarketPicker } from "./components/MarketPicker";
 import { OrderBook, type BookMarker } from "./components/OrderBook";
 import { OrderForm, type AllowanceView, type Gate, type Receipt } from "./components/OrderForm";
 import { Orders } from "./components/Orders";
@@ -32,7 +31,7 @@ import { appNonces, fillOnceFor, openOrderNonces } from "./lib/nonces";
 import { orderPhase, phaseLine, type PhaseLine } from "./lib/orderLifecycle";
 import { IDLE, inFlight, runTx, txReducer } from "./lib/txFlow";
 import { fmtWei, fundingButtonLabel, hasLeftover, planFunding, planGasless, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
-import { gaslessDomain, signGaslessPermit } from "./lib/permit";
+import { detectPermitDomain, gaslessDomain, signGaslessPermit } from "./lib/permit";
 import { buildOrder, inputWei } from "./lib/order";
 import { exceedsBalance, marketFigures, maxSpendableWei, sourceName, wrappableWei, wrapSpendableWei } from "./lib/ticketView";
 import {
@@ -367,8 +366,29 @@ export default function App() {
   // signature next to the order replaces the approve + grant transactions — the
   // filler relays it. On by default where offered; "use approvals instead" opts out.
   const [gaslessChosen, setGaslessChosen] = useState(true);
+  // ANY ERC-2612 token, not only the pinned ones: the domain is reconstructed and
+  // proven against the token's own DOMAIN_SEPARATOR (lib/permit detectPermitDomain).
+  const [permitDomainOf, setPermitDomainOf] = useState<Record<string, boolean>>({});
+  const permitKey = payMeta.address ? `${chainId}:${payMeta.address.toLowerCase()}` : "";
+  useEffect(() => {
+    if (!permitKey || !payMeta.address || permitDomainOf[permitKey] !== undefined) return;
+    if (gaslessDomain(chainId, payMeta.address)) {
+      setPermitDomainOf((m) => ({ ...m, [permitKey]: true }));
+      return;
+    }
+    const config = chainById(chainId);
+    if (!wallet.provider || !config || !onChain) return;
+    const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) }) as unknown as Reader;
+    let alive = true;
+    void detectPermitDomain(reader, chainId, payMeta.address).then((d) => {
+      if (alive) setPermitDomainOf((m) => ({ ...m, [permitKey]: d !== undefined }));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [permitKey, payMeta.address, chainId, wallet.provider, onChain, permitDomainOf]);
   const gasless = planGasless(funding, {
-    permitSupported: deployment !== null && gaslessDomain(chainId, payMeta.address) !== undefined,
+    permitSupported: deployment !== null && permitDomainOf[permitKey] === true,
     needsWrap: fundingPlan?.steps.some((st) => st.kind === "wrap") ?? false,
     multiOrder: plan?.kind === "twap",
     covered: fundingPlan?.covered ?? false,
@@ -855,15 +875,6 @@ export default function App() {
       />
 
       <main>
-        <div className="toolbar">
-          <MarketPicker
-            chainId={chainId}
-            selected={ticket.marketId}
-            tokens={tokens}
-            onSelect={ticket.selectMarket}
-          />
-        </div>
-
         <RaffleNotice chainId={chainId} />
 
         <Stats bids={merged.bids} asks={merged.asks} base={ticket.market.base} venues={pool.book?.venues ?? []} />

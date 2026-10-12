@@ -127,6 +127,11 @@ export const TOKENS: Record<number, Record<string, PinnedToken>> = {
     USDRIF: { address: "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37", decimals: 18 },
     // RIF (ERC-677, no ERC-2612 permit) — decimals() = 18, read on-chain 2026-10-12.
     RIF: { address: "0x2acc95758f8b5f583470ba265eb685a8f45fc9d5", decimals: 18 },
+    // 2026-10-12, decimals() read on-chain. USDT 0xaf36… and USDC.e (Stargate) carry an
+    // ERC-2612 permit (docs/gasless-permit-relay.md); RIFPro (Money on Chain) does not.
+    USDT: { address: "0xaf368c91793cb22739386dfcbbb2f1a9e4bcbebf", decimals: 6 },
+    "USDC.e": { address: "0x74c9f2b00581f1b11aa7ff05aa9f608b7389de67", decimals: 6 },
+    RIFP: { address: "0xf4d27c56595ed59b66cc7f03cff5193e4bd74a61", decimals: 18 },
   },
 };
 
@@ -281,30 +286,125 @@ export const MARKETS: Market[] = [
     base: "RIF",
     quote: "WRBTC",
   },
-  // SYNTHETIC (2026-10-12, docs/synthetic-pairs.md): no WRBTC/USDRIF pool exists; the
-  // book is composed over WRBTC → USD₮0 (Uni + Sushi 0.3 %) → USDRIF (Uni 0.05 %), the
-  // route the filler takes (ROOTSTOCK_PATHS).
-  synthetic({
-    id: "rsk-30-wrbtc-usdrif",
+  // Permit-token and RIFPro markets (2026-10-12): getPool on both factories, token0/
+  // token1/fee read back, the deepest tier each. USDT/WRBTC ~$70k, RIF/USDT ~$128k,
+  // USDC.e/USD₮0 0.01 % ~$197k, RIFP/RIF ~$90k (Uni) + Sushi.
+  {
+    id: "rsk-30-usdt-wrbtc",
     chainId: 30,
+    pools: [{ dex: "uniswap-v3", address: "0xe54d5c25aad95cda8979ee502d4f3d70892444d1", feeBps: 3000 }],
     base: "WRBTC",
-    quote: "USDRIF",
-    via: [
-      {
-        base: "WRBTC",
-        quote: "USD0",
-        pools: [
-          { dex: "uniswap-v3", address: "0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd", feeBps: 3000 },
-          { dex: "sushiswap-v3", address: "0x6d778c369cb386d50f4ee676c5c264374c52fd71", feeBps: 3000 },
-        ],
-      },
-      { base: "USDRIF", quote: "USD0", pools: [{ dex: "uniswap-v3", address: "0xd845702af381f0405661747a6a20bde0401a19d6", feeBps: 500 }] },
+    quote: "USDT",
+  },
+  {
+    id: "rsk-30-rif-usdt",
+    chainId: 30,
+    pools: [{ dex: "uniswap-v3", address: "0xa89a86d3d9481a741833208676fa57d0f1d5c6cb", feeBps: 3000 }],
+    base: "RIF",
+    quote: "USDT",
+  },
+  {
+    id: "rsk-30-usdc.e-usd0",
+    chainId: 30,
+    pools: [{ dex: "uniswap-v3", address: "0xbbb5bc594f1551a0ea0758a99cf721951f280f5a", feeBps: 100 }],
+    base: "USDC.e",
+    quote: "USD0",
+  },
+  {
+    id: "rsk-30-rifp-rif",
+    chainId: 30,
+    pools: [
+      { dex: "uniswap-v3", address: "0x42c4fa60bcfe42019264def97a75c77f319e2c46", feeBps: 3000 },
+      { dex: "sushiswap-v3", address: "0x64e6fdd9f86cc2d8c25908eda4c6f1468a4301c3", feeBps: 3000 },
     ],
-  }),
+    base: "RIFP",
+    quote: "RIF",
+  },
 ];
 
+// ── DERIVED markets: any token pair the user picks (docs/synthetic-pairs.md) ──────
+//
+// The configured MARKETS are the POOLS. A pair the user picks that no pool holds is
+// derived on demand as a synthetic market over ONE hub — base → hub → quote, both
+// hops configured markets — so its book is composed from them (lib/synthetic).
+// Derived markets are cached (stable identity: the book hook keys on the object).
+
+/** Market id prefix per chain (`rsk-30-…`). */
+const CHAIN_PREFIX: Record<number, string> = { 1: "eth-1", 56: "bsc-56", 30: "rsk-30" };
+/** Hubs tried in order when a pair has no pool of its own. */
+const HUBS: Record<number, string[]> = { 30: ["USD0", "WRBTC", "RIF"], 1: ["ETH", "USDC"], 56: ["WBNB", "USDT"] };
+/** Which side quotes a derived pair: the first of these the pair holds is the QUOTE. */
+const QUOTE_RANK: Record<number, string[]> = {
+  30: ["USD0", "USDT", "USDC.e", "USDRIF", "WRBTC", "RIF", "WETH"],
+  1: ["USDC", "USDT", "ETH", "WBTC"],
+  56: ["USDT", "WBNB", "BTCB", "ETH"],
+};
+
+const derived = new Map<string, Market | null>();
+
+function directFor(chainId: number, a: string, b: string): Market | undefined {
+  return MARKETS.find((m) => m.chainId === chainId && ((m.base === a && m.quote === b) || (m.base === b && m.quote === a)));
+}
+
+/** [base, quote] of a derived pair. */
+function orient(chainId: number, a: string, b: string): [string, string] {
+  const rank = QUOTE_RANK[chainId] ?? [];
+  const ra = rank.indexOf(a);
+  const rb = rank.indexOf(b);
+  if (ra === -1 && rb === -1) return [a, b];
+  if (ra === -1) return [a, b];
+  if (rb === -1) return [b, a];
+  return ra < rb ? [b, a] : [a, b];
+}
+
+/** The synthetic market for a pair with no pool, via the first hub that connects it; undefined when none does. */
+export function derivedMarket(chainId: number, a: string, b: string): Market | undefined {
+  if (a === b || !pinnedToken(chainId, a) || !pinnedToken(chainId, b) || !CHAIN_PREFIX[chainId]) return undefined;
+  const [base, quote] = orient(chainId, a, b);
+  const id = `${CHAIN_PREFIX[chainId]}-${base.toLowerCase()}-${quote.toLowerCase()}`;
+  if (derived.has(id)) return derived.get(id) ?? undefined;
+  let out: Market | null = null;
+  for (const hub of HUBS[chainId] ?? []) {
+    if (hub === base || hub === quote) continue;
+    const m1 = directFor(chainId, base, hub);
+    const m2 = directFor(chainId, hub, quote);
+    if (!m1 || !m2) continue;
+    out = synthetic({
+      id,
+      chainId,
+      base,
+      quote,
+      via: [
+        { base: m1.base, quote: m1.quote, pools: m1.pools },
+        { base: m2.base, quote: m2.quote, pools: m2.pools },
+      ],
+    });
+    break;
+  }
+  derived.set(id, out);
+  return out ?? undefined;
+}
+
+/** A derived market back from its id (a restored order names one). */
+function derivedById(id: string): Market | undefined {
+  for (const [chainIdStr, prefix] of Object.entries(CHAIN_PREFIX)) {
+    if (!id.startsWith(`${prefix}-`)) continue;
+    const chainId = Number(chainIdStr);
+    const rest = id.slice(prefix.length + 1);
+    const syms = Object.keys(TOKENS[chainId] ?? {});
+    for (const x of syms) {
+      for (const y of syms) {
+        if (`${x.toLowerCase()}-${y.toLowerCase()}` !== rest) continue;
+        const m = derivedMarket(chainId, x, y);
+        if (m && m.id === id) return m;
+      }
+    }
+  }
+  return undefined;
+}
+
 export function marketById(id: string): Market {
-  const m = MARKETS.find((x) => x.id === id);
+  const m = MARKETS.find((x) => x.id === id) ?? derivedById(id);
   if (!m) throw new Error(`unknown market ${id}`);
   return m;
 }
@@ -336,18 +436,12 @@ export function symbolsOn(chainId: number): string[] {
   return out;
 }
 
+/** Every token `symbol` can trade against: a pool of its own, or a derived route via a hub. */
 export function pairsWith(chainId: number, symbol: string): string[] {
-  const out: string[] = [];
-  for (const m of marketsOn(chainId)) {
-    const other = m.base === symbol ? m.quote : m.quote === symbol ? m.base : null;
-    if (other && !out.includes(other)) out.push(other);
-  }
-  return out;
+  return symbolsOn(chainId).filter((other) => other !== symbol && marketFor(chainId, symbol, other) !== undefined);
 }
 
-/** The market quoting `a` against `b`, in whichever orientation it is configured. */
+/** The market for `a` against `b`: the configured pool market, else a derived synthetic one. */
 export function marketFor(chainId: number, a: string, b: string): Market | undefined {
-  return marketsOn(chainId).find(
-    (m) => (m.base === a && m.quote === b) || (m.base === b && m.quote === a),
-  );
+  return directFor(chainId, a, b) ?? derivedMarket(chainId, a, b);
 }

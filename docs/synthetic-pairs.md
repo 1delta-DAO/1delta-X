@@ -169,3 +169,20 @@ a direct market. The book marks them `LMT` as usual.
   - Result on 2026-10-12: the composed book (Uniswap pools only) vs QuoterV2
     `quoteExactInput` on WRBTC →0.3 %→ USD₮0 →0.05 %→ USDRIF stayed within **0.02 bps**
     at $10 / $100 / $1k / $10k, on both sides.
+
+## Derived markets (2026-10-12, follow-up)
+
+The header market picker is gone: the pair is whatever the user picks in the ticket.
+
+- **Lookup:** `marketFor(chainId, a, b)` returns the configured pool market if there is
+  one. Otherwise it returns a DERIVED synthetic market over the first hub (Rootstock:
+  USD0, WRBTC, RIF) that connects both tokens through configured markets.
+  - Orientation: the token higher in `QUOTE_RANK` is the quote.
+  - Id: `rsk-30-<base>-<quote>`, so WRBTC/USDRIF keeps its id.
+  - Derived markets are cached as stable objects and resolve back from their id.
+- **Token menus:** `pairsWith` lists every token reachable that way, directly or over
+  one hub.
+- **Quotes:** the app sends tokens only, never a `marketId`, so the filler routes any
+  pair in `ROUTE_TOKENS`.
+- **Limit:** a pair no single hub joins (e.g. USDC.e/RIFP) is not offered. Paths with
+  two hubs are future work.

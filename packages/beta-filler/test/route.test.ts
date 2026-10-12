@@ -251,7 +251,7 @@ describe("classifyRoute", () => {
   });
   it("ROUTE_TOKENS: with Sushi on, a pair outside the allowlist is refused before any quote (L-6)", () => {
     const doc = { legsOut: [{ token: ROOTSTOCK.doc, start: 1n, end: 0n, recipient: zeroAddress }] };
-    expect(rc.routeTokens).toEqual([ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif, ROOTSTOCK.rif]);
+    expect(rc.routeTokens).toEqual([ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif, ROOTSTOCK.rif, ROOTSTOCK.usdt, ROOTSTOCK.usdce, ROOTSTOCK.rifp]);
     expect(rc.sushi.enabled).toBe(true);
     const v = classifyRoute(wrbtcOrder(doc), rc);
     expect(v.ok).toBe(false);

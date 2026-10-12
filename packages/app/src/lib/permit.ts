@@ -30,9 +30,74 @@ import type { Reader } from "./chain";
  * time, and they would share the token nonce).
  */
 
-/** The pinned 2612 domain for the pay token, or undefined when gasless funding is not offered for it. */
+/** The pinned 2612 domain for the pay token, or undefined when it is not pinned (see {@link detectPermitDomain}). */
 export function gaslessDomain(chainId: number, token: Address | null | undefined): Erc2612Domain | undefined {
   return token ? erc2612DomainOf(chainId, token) : undefined;
+}
+
+const DETECT_ABI = [
+  { type: "function", name: "DOMAIN_SEPARATOR", stateMutability: "view", inputs: [], outputs: [{ type: "bytes32" }] },
+  { type: "function", name: "nonces", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "name", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
+  { type: "function", name: "version", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
+  {
+    type: "function",
+    name: "eip712Domain",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { type: "bytes1" },
+      { type: "string" },
+      { type: "string" },
+      { type: "uint256" },
+      { type: "address" },
+      { type: "bytes32" },
+      { type: "uint256[]" },
+    ],
+  },
+] as const;
+
+const detected = new Map<string, Promise<Erc2612Domain | undefined>>();
+
+/**
+ * ANY token's EIP-2612 domain, proven against the chain (2026-10-12): the pinned one
+ * (`ERC2612_TOKENS`) when there is one, else RECONSTRUCTED — ERC-5267
+ * `eip712Domain()`, or `name()` with `version()` / "1" / "2" — and accepted only when
+ * its separator equals the token's own `DOMAIN_SEPARATOR()` and `nonces()` answers.
+ *
+ * That equality is the whole safety argument: a token whose fallback answers any call
+ * (WRBTC, DOC) returns no bytes32, and a wrong name/version cannot hash to the live
+ * separator, so a signature is only ever made under the domain the token verifies.
+ * Cached per (chain, token) for the tab's life; a failed read is not cached.
+ */
+export function detectPermitDomain(reader: Reader, chainId: number, token: Address): Promise<Erc2612Domain | undefined> {
+  const pinned = erc2612DomainOf(chainId, token);
+  if (pinned) return Promise.resolve(pinned);
+  const key = `${chainId}:${token.toLowerCase()}`;
+  const hit = detected.get(key);
+  if (hit) return hit;
+  const read = <T>(functionName: string, args?: readonly unknown[]) =>
+    (reader.readContract({ address: token, abi: DETECT_ABI, functionName, ...(args ? { args } : {}) }) as Promise<T>).then(
+      (v) => v,
+      () => undefined,
+    );
+  const run = (async (): Promise<Erc2612Domain | undefined> => {
+    const [sep, nonce] = await Promise.all([read<Hex>("DOMAIN_SEPARATOR"), read<bigint>("nonces", [token])]);
+    if (typeof sep !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(sep) || typeof nonce !== "bigint") return undefined;
+    const candidates: { name: string; version: string }[] = [];
+    const d5267 = await read<readonly unknown[]>("eip712Domain");
+    if (Array.isArray(d5267) && typeof d5267[1] === "string" && typeof d5267[2] === "string") candidates.push({ name: d5267[1], version: d5267[2] });
+    const [name, version] = await Promise.all([read<string>("name"), read<string>("version")]);
+    if (typeof name === "string") for (const v of [version, "1", "2"]) if (typeof v === "string") candidates.push({ name, version: v });
+    for (const c of candidates) {
+      const domain: Erc2612Domain = { name: c.name, version: c.version, chainId, verifyingContract: token };
+      if (erc2612DomainSeparator(domain).toLowerCase() === sep.toLowerCase()) return domain;
+    }
+    return undefined;
+  })();
+  detected.set(key, run);
+  run.catch(() => detected.delete(key));
+  return run;
 }
 
 /** The allowance an order needs from its input token: the larger of its legs' start/end for that token. */
@@ -60,7 +125,7 @@ export async function signGaslessPermit(
   reader: Reader,
   a: { chainId: number; token: Address; owner: Address; settlement: Address; order: Order },
 ): Promise<Erc2612Permit> {
-  const domain = erc2612DomainOf(a.chainId, a.token);
+  const domain = await detectPermitDomain(reader, a.chainId, a.token);
   if (!domain) throw new Error("this token has no supported EIP-2612 permit");
   const [onChain, nonce] = await Promise.all([
     reader.readContract({ address: a.token, abi: ERC2612_ABI, functionName: "DOMAIN_SEPARATOR" }) as Promise<Hex>,

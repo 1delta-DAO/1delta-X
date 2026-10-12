@@ -27,6 +27,12 @@ export const ROOTSTOCK = {
   rifUsdt0Fee: 3000,
   wrbtc: "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d",
   weth: "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",
+  /** USDT 0xaf36… (ERC-2612) — pools vs WRBTC and RIF (2026-10-12). */
+  usdt: "0xAf368c91793CB22739386DFCbBb2F1A9e4bCBeBf",
+  /** USDC.e (Stargate, ERC-2612) — a 0.01 % pool vs USD₮0 (2026-10-12). */
+  usdce: "0x74c9f2b00581F1B11AA7ff05aa9F608B7389De67",
+  /** RIFPro (Money on Chain) — pools vs RIF on both venues (2026-10-12). */
+  rifp: "0xf4d27c56595Ed59B66cC7F03CFF5193e4bd74a61",
   /** Money on Chain's DOC — a hub with live USD₮0 pools on both venues (verified 2026-10-12). */
   doc: "0xe700691dA7b9851F2F35f8b8182c69c53CcaD9Db",
   /** Multicall3 (canonical address; code verified on chain 30 2026-10-12). */
@@ -557,7 +563,7 @@ function loadRoute(env: Env): RouteConfig | undefined {
     stableSlippageBps: bps(env, "ROUTE_STABLE_SLIPPAGE_BPS", 5),
     gasEstimate,
     maxGas,
-    routeTokens: addrList(env, "ROUTE_TOKENS", [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif, ROOTSTOCK.rif]),
+    routeTokens: addrList(env, "ROUTE_TOKENS", [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif, ROOTSTOCK.rif, ROOTSTOCK.usdt, ROOTSTOCK.usdce, ROOTSTOCK.rifp]),
     minProfitWei: fixed(env, "MIN_PROFIT_RBTC", "0", 18),
     rbtcUsd,
     discovery: loadDiscovery(env, onRootstock),
