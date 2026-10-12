@@ -461,7 +461,9 @@ export function OrderForm(props: OrderFormProps) {
 
         <div className="field">
           <div className="top">
-            <span className="lbl">You receive{isMarket && figures ? (figures.grossReceive !== null ? " ≈ · after network fee" : " ≈") : ""}</span>
+            <span className="lbl" title={isMarket && figures?.grossReceive != null ? "After the network fee (see the breakdown below)" : undefined}>
+              You receive{isMarket && figures ? (figures.grossReceive !== null ? " ≈ · net" : " ≈") : ""}
+            </span>
             <span className="bal">
               {recvBal.kind === "ok" ? <>Balance </> : null}
               {recvBal.kind === "disconnected" ? null : <Bal state={recvBal} onConnect={onConnect} />}
@@ -863,7 +865,7 @@ export function OrderForm(props: OrderFormProps) {
                       i
                     </span>
                     {allowance.current !== undefined && allowance.current > 0 && (
-                      <> · currently approved {fmtAmt(allowance.current)} {payToken}</>
+                      <> · {fmtAmt(allowance.current)} {payToken} approved</>
                     )}
                     {allowance.leftover && (
                       <>

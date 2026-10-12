@@ -222,7 +222,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .field .top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
 .field .bal { font-family: var(--mono); font-size: 11px; color: var(--faint); }
 .field .top > .lbl { white-space: nowrap; }
-.field .bal { text-align: right; }
+.field .bal { text-align: right; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .field .bal button {
   border: 0; background: none; color: var(--lime); font-family: var(--mono);
   font-size: 11px; padding: 0 0 0 7px; font-weight: 700;
@@ -773,7 +773,7 @@ main.reading .md .mdquote { margin-bottom: 26px; }
 }
 
 /* a one-line note with its long explanation behind an (i) */
-.capnote.oneline { display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+.capnote.oneline { display: flex; align-items: center; justify-content: center; gap: 4px 6px; flex-wrap: wrap; text-align: center; }
 .info {
   display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%;
   border: 1px solid var(--line2); color: var(--dim); font: italic 600 9.5px/1 Georgia, serif; cursor: help;
