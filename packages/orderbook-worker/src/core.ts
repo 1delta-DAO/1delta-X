@@ -14,14 +14,16 @@ import {
 } from "@1delta-x/orderbook/pure";
 import {
   announceFromJson,
+  announceToJson,
   hashOrderStruct,
+  isFillOnce,
   isProportional,
   JsonBodyError,
   orderFromJson,
-  orderToJson,
   OrderSide,
   softCancelFromJson,
   softCancelTypedData,
+  type Erc2612Permit,
   type Order,
 } from "@1delta-x/sdk";
 import { hashTypedData, isAddress, type Address, type Hex } from "viem";
@@ -91,6 +93,8 @@ interface StoredState {
   fillableAmount: string;
   isSignatureValid: boolean;
   validatorsPass: boolean;
+  /** Admitted on an unspent ERC-2612 permit (`Layer2Result.erc2612Live`); absent otherwise. */
+  erc2612Live?: boolean;
 }
 
 const STATUS_NAME: Record<number, string> = {
@@ -118,6 +122,7 @@ function toStored(s: Layer2Result): StoredState {
     fillableAmount: s.fillableAmount.toString(),
     isSignatureValid: s.isSignatureValid,
     validatorsPass: s.validatorsPass,
+    ...(s.erc2612Live ? { erc2612Live: true } : {}),
   };
 }
 
@@ -128,12 +133,17 @@ function fromStored(s: StoredState): Layer2Result {
     fillableAmount: BigInt(s.fillableAmount),
     isSignatureValid: s.isSignatureValid,
     validatorsPass: s.validatorsPass,
+    ...(s.erc2612Live ? { erc2612Live: true } : {}),
   };
 }
 
-/** The canonical stored / served form of an announce: `{order, sig}` with the SDK's fixed key order. */
-export function canonicalAnnounce(a: { order: Order; sig: Hex }): string {
-  return JSON.stringify({ order: orderToJson(a.order), sig: a.sig });
+/**
+ * The canonical stored / served form of an announce: `{order, sig, erc2612Permit?}`
+ * with the SDK's fixed key order (`announceToJson`). An announce without a permit
+ * stores byte-identically to before the field existed.
+ */
+export function canonicalAnnounce(a: { order: Order; sig: Hex; erc2612Permit?: Erc2612Permit }): string {
+  return JSON.stringify(announceToJson(a));
 }
 
 function parseAnnounce(text: string): OrderAnnounce {
@@ -613,12 +623,15 @@ export class OrderBookCore {
 
   /** One live order as served: the full signed announce (JSON) plus what the node knows about it. */
   private served(r: OrderRow): Record<string, unknown> {
-    const a = JSON.parse(r.announce) as { order: unknown; sig: string };
+    const a = JSON.parse(r.announce) as { order: unknown; sig: string; erc2612Permit?: unknown };
     const s = r.state ? (JSON.parse(r.state) as StoredState) : null;
     return {
       orderHash: r.hash,
       order: a.order,
       sig: a.sig,
+      // The maker's gasless funding permit, verbatim as admitted: a filler relays it
+      // (`token.permit(...)`) before its first fill. Absent for ordinary orders.
+      ...(a.erc2612Permit !== undefined ? { erc2612Permit: a.erc2612Permit } : {}),
       addedAt: r.added_at,
       filledAmount: this.summaryOf(r).filledAmount,
       pendingFill: this.pendingFillOf(r.hash),
@@ -629,6 +642,7 @@ export class OrderBookCore {
             fillableAmount: s.fillableAmount,
             isSignatureValid: s.isSignatureValid,
             validatorsPass: s.validatorsPass,
+            ...(s.erc2612Live ? { erc2612Live: true } : {}),
           }
         : null,
     };
@@ -980,13 +994,20 @@ export class OrderBookCore {
       if (known > 0) continue;
       if (this.deps.nowMs() >= deadline) return i;
 
-      const cum = await this.cumulativeAt(hash as Hex, log.blockNumber, cumCache);
-      let amount: bigint | null = null;
+      // A FILL-ONCE order's `filled` counter stays 0 (its progress is the consumed
+      // nonce) and the core only accepts a fill that closes it outright
+      // (`FillOnceMustBeFull`): its one OrderFilled IS the whole order, so the size is
+      // the fixed anchor — no `filled()` read, and nothing a lens re-check could add.
+      const held = this.knownOrder(hash);
+      const once = held !== null && isFillOnce(held);
+      const onceSize = once ? anchorOf(held) : null;
+      const cum = once ? onceSize : await this.cumulativeAt(hash as Hex, log.blockNumber, cumCache);
+      let amount: bigint | null = once ? onceSize : null;
       // A row of ANOTHER tx in this block already carries the block's delta (one
       // reported from its receipt): this one says null, so the total is not doubled.
       const blockSized =
         count(this.sql, `SELECT COUNT(*) AS n FROM fills WHERE order_hash = ? AND block_number = ? AND amount IS NOT NULL`, hash, Number(log.blockNumber)) > 0;
-      if (cum !== null && !blockSized && lastInBlock.get(`${hash}@${log.blockNumber}`) === i) {
+      if (!once && cum !== null && !blockSized && lastInBlock.get(`${hash}@${log.blockNumber}`) === i) {
         const prev = await this.cumulativeBefore(hash as Hex, log.blockNumber, cumCache);
         if (prev !== null && cum > prev) amount = cum - prev;
       }
@@ -1006,14 +1027,35 @@ export class OrderBookCore {
       );
       // The broadcast marker of this tx (if a filler reported one) is now a real fill.
       this.sql.exec(`DELETE FROM pending_fills WHERE tx_hash = ?`, log.txHash.toLowerCase());
-      this.applyFillProgress(hash, cum, log.txHash.toLowerCase() as Hex);
+      this.applyFillProgress(hash, cum, log.txHash.toLowerCase() as Hex, once);
+      // The fill consumed the maker's nonce: every other order of this maker on it
+      // (a shared-nonce OCO bracket's siblings) is now dead on-chain, exactly as
+      // after `cancelOrders([nonce])` — retired now, as that event would.
+      if (once && held.maker.toLowerCase() === e.maker.toLowerCase()) this.evictNonceSiblings(e.maker, held.nonce, hash);
     }
     return logs.length;
   }
 
+  /** The order behind `hash`, live or tombstoned; `null` when this book never held it. */
+  private knownOrder(hash: string): Order | null {
+    const row =
+      this.sql.exec<{ announce: string }>(`SELECT announce FROM orders WHERE hash = ?`, hash).toArray()[0] ??
+      this.sql.exec<{ announce: string }>(`SELECT announce FROM graves WHERE hash = ?`, hash).toArray()[0];
+    return row ? parseAnnounce(row.announce).order : null;
+  }
+
+  /** Live orders of `maker` on `nonce` other than `except`: retired as on-chain cancelled. */
+  private evictNonceSiblings(maker: string, nonce: bigint, except: string): void {
+    const rows = this.sql
+      .exec<{ hash: string; nonce: string }>(`SELECT hash, nonce FROM orders WHERE maker = ? AND hash != ?`, maker.toLowerCase(), except)
+      .toArray();
+    for (const r of rows) if (BigInt(r.nonce) === nonce) this.evict(r.hash, "cancelled", { status: "Cancelled" });
+  }
+
   /**
    * `filled(hash)` at a block, `null` when it does not carry a size: the
-   * cancelled sentinel, or `0` (a fill-once order keeps progress in its nonce).
+   * cancelled sentinel, or `0` (a fill-once order keeps progress in its nonce —
+   * one this book holds is sized from its anchor instead, see {@link applyLogs}).
    * A node that cannot serve the historical read falls back to latest.
    */
   private async cumulativeAt(hash: Hex, block: bigint, cache: Map<string, bigint | null>): Promise<bigint | null> {
@@ -1058,8 +1100,12 @@ export class OrderBookCore {
     return v;
   }
 
-  /** A fill moved an order: a full fill tombstones it (with the tx), a partial updates progress and marks it dirty. */
-  private applyFillProgress(hash: string, cum: bigint | null, txHash: Hex): void {
+  /**
+   * A fill moved an order: a full fill tombstones it (with the tx), a partial updates
+   * progress and marks it dirty. `once`: the order is FILL-ONCE, so this fill closed
+   * it whatever `cum` says (`null` for a proportional one, whose size is not fixed).
+   */
+  private applyFillProgress(hash: string, cum: bigint | null, txHash: Hex, once = false): void {
     const row = this.sql.exec<OrderRow>(`SELECT * FROM orders WHERE hash = ?`, hash).toArray()[0];
     if (row) {
       const order = parseAnnounce(row.announce).order;
@@ -1067,23 +1113,25 @@ export class OrderBookCore {
       if (cum !== null) {
         const prior = row.filled === null ? -1n : BigInt(row.filled);
         if (cum > prior) this.sql.exec(`UPDATE orders SET filled = ? WHERE hash = ?`, cum.toString(), hash);
-        if (anchor !== null && anchor > 0n && cum >= anchor) {
-          this.evict(hash, "filled", { status: "Filled", txHash });
-          return;
-        }
       }
-      // Partial, fill-once or proportional: only the lens knows what is left.
+      if (once || (cum !== null && anchor !== null && anchor > 0n && cum >= anchor)) {
+        this.evict(hash, "filled", { status: "Filled", txHash });
+        return;
+      }
+      // Partial or proportional: only the lens knows what is left.
       this.sql.exec(`UPDATE orders SET dirty = 1 WHERE hash = ?`, hash);
       return;
     }
     // Already evicted (soft-cancelled, displaced, …) but it still filled on-chain:
-    // keep the tombstone truthful.
+    // keep the tombstone truthful. That includes a fill-once order a lens re-check
+    // tombstoned as `cancelled` before this log was scanned (the lens cannot tell its
+    // fill from a nonce cancel — see {@link recheck}).
     const grave = this.sql.exec<{ summary: string; announce: string }>(`SELECT summary, announce FROM graves WHERE hash = ?`, hash).toArray()[0];
-    if (!grave || cum === null) return;
+    if (!grave || (cum === null && !once)) return;
     const summary = JSON.parse(grave.summary) as OrderSummary;
-    summary.filledAmount = cum.toString();
+    if (cum !== null) summary.filledAmount = cum.toString();
     const anchor = anchorOf(parseAnnounce(grave.announce).order);
-    const full = anchor !== null && anchor > 0n && cum >= anchor;
+    const full = once || (cum !== null && anchor !== null && anchor > 0n && cum >= anchor);
     if (full) summary.status = "Filled";
     this.sql.exec(
       `UPDATE graves SET summary = ?, reason = CASE WHEN ? THEN 'filled' ELSE reason END, tx_hash = COALESCE(?, tx_hash) WHERE hash = ?`,
@@ -1161,19 +1209,32 @@ export class OrderBookCore {
         r.hash,
       );
       if (!s.ok) {
+        // A FILL-ONCE order's fill and a cancel of its nonce leave the SAME state (the
+        // bit is set, `filled` stays 0), so the lens reports a completed fill-once order
+        // as `Cancelled`. An indexed fill row (log scan or a confirmed /fills/report)
+        // is what tells the two apart. Without one it stays `cancelled`; a fill row
+        // that arrives later still upgrades the tombstone ({@link applyFillProgress}).
+        const order = parseAnnounce(r.announce).order;
+        const onceFilled = s.status === OrderStatus.Cancelled && isFillOnce(order) && this.latestFillTx(r.hash) !== undefined;
         const reason: GraveReason =
-          s.status === OrderStatus.Filled ? "filled" : s.status === OrderStatus.Cancelled ? "cancelled" : s.status === OrderStatus.Expired ? "expired" : "evicted";
-        // A fill the log scan saw but could not size (fill-once, proportional) still names its tx.
+          s.status === OrderStatus.Filled || onceFilled
+            ? "filled"
+            : s.status === OrderStatus.Cancelled
+              ? "cancelled"
+              : s.status === OrderStatus.Expired
+                ? "expired"
+                : "evicted";
+        // A fill the log scan saw but could not size (proportional) still names its tx.
         const tx = reason === "filled" ? this.latestFillTx(r.hash) : undefined;
         // A fill nobody reported (no log, no receipt — another filler, an RPC with no
         // eth_getLogs): the tombstone is the record. The lens said Filled, so a fixed
         // anchor is fully consumed; `/orders/:hash/status` then serves status "Filled",
         // this filledAmount, `removedAt` (when it was detected) and no txHash.
-        if (reason === "filled" && r.filled === null) {
-          const anchor = anchorOf(parseAnnounce(r.announce).order);
+        if (reason === "filled" && (r.filled === null || onceFilled)) {
+          const anchor = anchorOf(order);
           if (anchor !== null && anchor > 0n) this.sql.exec(`UPDATE orders SET filled = ? WHERE hash = ?`, anchor.toString(), r.hash);
         }
-        this.evict(r.hash, reason, tx ? { txHash: tx } : undefined);
+        this.evict(r.hash, reason, { ...(onceFilled ? { status: "Filled" as const } : {}), ...(tx ? { txHash: tx } : {}) });
       }
     }
   }

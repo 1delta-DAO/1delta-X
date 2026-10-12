@@ -397,17 +397,36 @@ test   = "packages/solvers/test"
 script = "packages/solvers/script"
 out    = "out/solvers"
 
-# The DEPLOYED solver artifacts (`make deploy-aggregator-fill`). Same optimizer
-# settings as [profile.solvers] (inherited from [default]: legacy codegen, runs =
-# 20,000) — only the EVM target differs. Rootstock (chain 30) does not run Prague, so
-# a Rootstock deploy must be compiled for Cancun, exactly like `core-deploy`.
-# AggregatorFillSolver runtime under this profile: see `make size-check-solvers`.
+# The DEPLOYED solver artifacts (`make deploy-aggregator-fill`). Rootstock (chain 30)
+# does not run Prague, so a Rootstock deploy must be compiled for Cancun, exactly like
+# `core-deploy`. AggregatorFillSolver runtime under this profile: `make
+# size-check-solvers`.
+#
+# VIA-IR, runs = 1,000,000 — MEASURED 2026-10-12 on the Rootstock fork bench
+# (packages/solvers/test/PoolRouteFork.t.sol, net tx gas) against the legacy pipeline
+# this profile used before (runs 20,000):
+#
+#     pipeline   runs        runtime   1-hop direct   1-hop pull   3-hop pull
+#     legacy     20,000      ~20,1xx   baseline       baseline     baseline
+#     via-IR     200          15,918   −1.2k          −1.2k        −1.6k
+#     via-IR     20,000       19,645   −2.3k          −2.4k        −3.0k
+#     via-IR     1,000,000    20,935   −2.4k          −2.5k        −3.1k   ← here
+#
+# (runs ≥ 1,000,000 is byte-identical up to 2^32−1: a step function.) The test
+# profile [profile.solvers] stays LEGACY (a via-IR build of the whole test tree takes
+# >25 min); `make test-solvers-deployed` runs the full solvers suite against THIS
+# profile's AggregatorFillSolver artifact (`AGG_ARTIFACT`, see
+# packages/solvers/test/shared/AggDeploy.sol) — the analogue of core's
+# `make test-deployed`. The via-IR build emits no opcode class the legacy one did not
+# (MCOPY: both; TLOAD/TSTORE: neither — see [[no-transient-storage]]).
 [profile.solvers-deploy]
-src         = "packages/solvers/src"
-test        = "packages/solvers/script"
-script      = "packages/solvers/script"
-out         = "out/solvers-deploy"
-evm_version = "cancun"
+src            = "packages/solvers/src"
+test           = "packages/solvers/script"
+script         = "packages/solvers/script"
+out            = "out/solvers-deploy"
+evm_version    = "cancun"
+via_ir         = true
+optimizer_runs = 1000000
 
 [profile.modules-aave-v2]
 src    = "packages/modules/lending/aave-v2/src"

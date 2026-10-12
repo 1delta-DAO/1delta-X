@@ -5,9 +5,10 @@ import {PackedEncode} from "@coretest/shared/PackedEncode.sol";
 
 import {Order, LegOut} from "@core/settlement/Settlement.sol";
 import {ItemPolicy} from "@core/settlement/Structs.sol";
-import {AggregatorFillSolver, RoutePlan, SurplusPolicy, NO_PATCH} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {AggregatorFillSolver, RoutePlan, SurplusPolicy, NO_PATCH, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 import {AggregatorItemFillTest} from "./AggregatorItemFill.t.sol";
+import {newAgg} from "./shared/AggDeploy.sol";
 
 /// @title AggregatorSelfSeedTest
 /// @notice The SELF-SEEDING 1-wei balance floor (2026-10): a token the solver held
@@ -42,7 +43,7 @@ contract AggregatorSelfSeedTest is AggregatorItemFillTest {
     }
 
     function _instance(SurplusPolicy memory pol, bool seeded) internal returns (AggregatorFillSolver s) {
-        s = new AggregatorFillSolver(address(settlement), _ops(), pol);
+        s = newAgg(address(settlement), _ops(), pol, new PoolVenue[](0));
         if (seeded) {
             tA.mint(address(s), 1);
             tB.mint(address(s), 1);
@@ -78,7 +79,7 @@ contract AggregatorSelfSeedTest is AggregatorItemFillTest {
         uint256 fa = tA.balanceOf(FILLER);
         uint256 fb = tB.balanceOf(FILLER);
         uint256 ra = tA.balanceOf(address(router));
-        uint256[] memory outs = s.executeFill(o, sig, fillAmount, p, "");
+        uint256[] memory outs = s.executeFill(o, sig, fillAmount, p, "", new Permit2612[](0));
         t = Take(
             ma - tA.balanceOf(maker),
             tB.balanceOf(maker) - mb,
@@ -206,17 +207,22 @@ contract AggregatorSelfSeedTest is AggregatorItemFillTest {
     }
 
     /// Retain mode keeps the whole filler share anyway — the seed rule is not
-    /// applied twice and the event reports the full retained share.
+    /// applied twice: the full spread stays in the contract, the maker gets exactly
+    /// its signed price and neither the caller nor `FILLER` is paid anything.
     function test_seed_retainMode_unchanged() public {
         AggregatorFillSolver cold = _instance(_noSplit(), false);
         RoutePlan memory p = _pullPlan(cold, AMOUNT_OUT, NO_PATCH);
         p.profitRecipient = address(cold);
         Order memory o = _plain(cold, 1, false);
         bytes memory sig = _sign(o);
-        vm.expectEmit(true, true, false, true, address(cold));
-        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 0, 0, 0, AMOUNT_IN - AMOUNT_OUT);
-        cold.executeFill(o, sig, AMOUNT_IN, p, "");
+        uint256 makerB = tB.balanceOf(maker);
+        uint256 callerB = tB.balanceOf(address(this));
+        uint256 fillerB = tB.balanceOf(FILLER);
+        cold.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         _assertFloor(cold, 0, AMOUNT_IN - AMOUNT_OUT);
+        assertEq(tB.balanceOf(maker) - makerB, AMOUNT_OUT, "maker: exactly the signed price");
+        assertEq(tB.balanceOf(address(this)), callerB, "caller: no payout in retain mode");
+        assertEq(tB.balanceOf(FILLER), fillerB, "FILLER: no payout in retain mode");
     }
 
     /// The accepted edge: a route quoted at ZERO margin over `minOut` cannot give up
@@ -231,7 +237,7 @@ contract AggregatorSelfSeedTest is AggregatorItemFillTest {
         vm.expectRevert(
             _wrapped(abi.encodeWithSelector(AggregatorFillSolver.InsufficientOutput.selector, AMOUNT_IN - 1, AMOUNT_IN))
         );
-        cold.executeFill(o, sig, AMOUNT_IN, exact, "");
+        cold.executeFill(o, sig, AMOUNT_IN, exact, "", new Permit2612[](0));
         assertEq(tA.balanceOf(maker), makerA, "maker untouched");
 
         _fill(warm, _plain(warm, 2, false), AMOUNT_IN, _pullPlan(warm, AMOUNT_IN, AMOUNT_WORD));
@@ -349,11 +355,11 @@ contract AggregatorSelfSeedTest is AggregatorItemFillTest {
         Order memory o = _itemOrder(nonce, ItemPolicy.ANY);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _pullPlan(s, AMOUNT_OUT, AMOUNT_WORD);
-        s.executeItemFill(o, sig, AMOUNT_IN, p, "", LATE_DEPOSIT);
+        s.executeItemFill(o, sig, AMOUNT_IN, p, "", LATE_DEPOSIT, new Permit2612[](0));
     }
 
     function _netted(AggregatorFillSolver s, Order memory o) internal {
         bytes memory sig = _sign(o);
-        s.executeItemFill(o, sig, AMOUNT_IN, _pullPlan(s, AMOUNT_OUT, AMOUNT_WORD), "", 0);
+        s.executeItemFill(o, sig, AMOUNT_IN, _pullPlan(s, AMOUNT_OUT, AMOUNT_WORD), "", 0, new Permit2612[](0));
     }
 }

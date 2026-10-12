@@ -1,3 +1,4 @@
+import { MAX_POOL_HOPS } from "@1delta-x/sdk";
 import { getAddress, isAddress, type Address, type Hex } from "viem";
 
 import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK, type NordsternConfig } from "./nordstern";
@@ -15,23 +16,40 @@ export const ROOTSTOCK = {
   /** Oku Uniswap v3 SwapRouter02 — `ExactInputSingleParams` has NO deadline field. */
   swapRouter: "0x0B14ff67f0014046b4b99057Aec4509640b3947A",
   quoterV2: "0xb51727c996C68E60F598A923a5006853cd2fEB31",
+  /**
+   * SushiSwap v3 QuoterV2 (factory 0x46B3…202e = the solver's pool venue 1). Found via
+   * Blockscout (created by the factory's deployer 0x69ae…6327, 2024-05-21) and verified
+   * by eth_call 2026-10-12: `factory()` = 0x46B3…202e; quoteExactInputSingle(WRBTC →
+   * USD₮0, 0.001, fee 3000) = 82.965332 USD₮0 on pool 0x6d77…Fd71.
+   */
+  sushiV3Quoter: "0xE43ca1deE3f0fC1e2df73A0745674545f11A59f5",
   /** RIF/USDT0 0.3% pool fee tier. */
   rifUsdt0Fee: 3000,
   wrbtc: "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d",
   weth: "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",
+  /** Money on Chain's DOC — a hub with live USD₮0 pools on both venues (verified 2026-10-12). */
+  doc: "0xe700691dA7b9851F2F35f8b8182c69c53CcaD9Db",
+  /** Multicall3 (canonical address; code verified on chain 30 2026-10-12). */
+  multicall3: "0xcA11bde05977b3631167028862bE2a173976CA11",
 } as const satisfies Record<string, string | number>;
 
+/** Venue indices of the solver's pool allowlist as `DeployAggregatorFill.s.sol` deploys it on Rootstock (SDK `ROOTSTOCK_POOL_VENUES`). */
+export const VENUE_OKU = 0;
+export const VENUE_SUSHI_V3 = 1;
+
 /**
- * The Uniswap v3 (Oku) pools of the app's Rootstock markets
- * (packages/app/src/config/markets.ts) — the ones SwapRouter02 can route locally.
- * Sushi liquidity (and Sushi's own view of these pools) is reached through the
- * Sushi API source instead (`SUSHI_ENABLED`, pull orders only) — the solver has no
- * router allowlist, so no redeploy is needed for it.
+ * The pools the route strategy quotes locally and swaps on DIRECTLY (a pool plan,
+ * `RoutePlan.router = POOL_ROUTE`: the solver pays the pool in its swap callback — no
+ * sandbox, no router). Venue 0 = the Uniswap v3 (Oku) pools of the app's Rootstock
+ * markets (packages/app/src/config/markets.ts); venue 1 = SushiSwap v3's WRBTC/USD₮0
+ * pool, quoted only while SUSHI_V3_QUOTER is set. Sushi's aggregated liquidity is
+ * reached through the Sushi API source instead (`SUSHI_ENABLED`, pull orders only).
  */
 export const ROOTSTOCK_POOLS: readonly RoutePool[] = [
-  { market: "rsk-30-wrbtc-usd0", tokenA: ROOTSTOCK.wrbtc, tokenB: ROOTSTOCK.usdt0, fee: 3000, pool: "0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd" },
-  { market: "rsk-30-weth-wrbtc", tokenA: ROOTSTOCK.weth, tokenB: ROOTSTOCK.wrbtc, fee: 3000, pool: "0x7717364fa619fc22a8f8eae124e79a1b9a2cf3e6" },
-  { market: "rsk-30-usdrif-usd0", tokenA: ROOTSTOCK.usdrif, tokenB: ROOTSTOCK.usdt0, fee: 500, pool: "0xd845702af381f0405661747a6a20bde0401a19d6" },
+  { market: "rsk-30-wrbtc-usd0", tokenA: ROOTSTOCK.wrbtc, tokenB: ROOTSTOCK.usdt0, fee: 3000, venue: VENUE_OKU, pool: "0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd" },
+  { market: "rsk-30-weth-wrbtc", tokenA: ROOTSTOCK.weth, tokenB: ROOTSTOCK.wrbtc, fee: 3000, venue: VENUE_OKU, pool: "0x7717364fa619fc22a8f8eae124e79a1b9a2cf3e6" },
+  { market: "rsk-30-usdrif-usd0", tokenA: ROOTSTOCK.usdrif, tokenB: ROOTSTOCK.usdt0, fee: 500, venue: VENUE_OKU, pool: "0xd845702af381f0405661747a6a20bde0401a19d6" },
+  { tokenA: ROOTSTOCK.wrbtc, tokenB: ROOTSTOCK.usdt0, fee: 3000, venue: VENUE_SUSHI_V3, pool: "0x6d778c369cb386d50f4ee676c5c264374c52fd71" },
 ];
 
 /**
@@ -41,19 +59,58 @@ export const ROOTSTOCK_POOLS: readonly RoutePool[] = [
  */
 export const ROOTSTOCK_PATHS = `${ROOTSTOCK.usdrif}>500>${ROOTSTOCK.usdt0}>3000>${ROOTSTOCK.wrbtc}`;
 
-/** One Uniswap v3 pool, by its two tokens and fee tier (hundredths of a bip). */
+/** One Uniswap-v3-style pool, by its two tokens, fee tier (hundredths of a bip) and venue. */
 export interface RoutePool {
   market?: string;
   tokenA: Address | string;
   tokenB: Address | string;
   fee: number;
+  /**
+   * Index into the solver's pool-venue allowlist (`poolVenue(i)`): 0 = Uniswap v3
+   * (Oku), 1 = SushiSwap v3 on Rootstock. Unset = 0. The pool is quoted on that
+   * venue's QuoterV2 and swapped on the pool the solver derives for it.
+   */
+  venue?: number;
   pool?: string;
 }
 
-/** A multi-hop path in swap order: `tokens[0] →fees[0]→ tokens[1] → …`. */
+/**
+ * A multi-hop path in swap order: `tokens[0] →fees[0]→ tokens[1] → …`. Each hop
+ * swaps on its OWN venue (`venues[i]`, the solver encodes one per hop); a path whose
+ * hops share one venue may instead (or also) carry `venue` — the pre-2026-10-12 shape.
+ * Read it through `pathVenues` (./poolGraph.ts).
+ */
 export interface RoutePath {
   tokens: Address[];
   fees: number[];
+  /** The venue every hop swaps on (see {@link RoutePool.venue}); unset = 0. Ignored when `venues` is set. */
+  venue?: number;
+  /** One venue per hop (mixed-venue paths). */
+  venues?: number[];
+}
+
+/**
+ * Automatic pool routing (./poolGraph.ts): discover the pools between the route
+ * tokens and the hubs on every routable venue, enumerate multi-hop / mixed-venue
+ * paths, and quote the best few.
+ */
+export interface DiscoveryConfig {
+  /** `ROUTE_DISCOVERY` (default on). Off = only ROUTE_POOLS / ROUTE_PATHS, as before. */
+  enabled: boolean;
+  /** `ROUTE_FEE_TIERS` (default 100,500,3000,10000). */
+  feeTiers: number[];
+  /** `ROUTE_MIN_LIQUIDITY`: a pool's in-range `liquidity()` must reach this (default 1 = nonzero). */
+  minLiquidity: bigint;
+  /** `ROUTE_DISCOVERY_SECONDS` × 1000: re-read the graph this often (default 3600 s). */
+  refreshMs: number;
+  /**
+   * `ROUTE_HUB_TOKENS`: the only tokens a path may pass THROUGH (never an order's
+   * endpoints — those stay ROUTE_TOKENS). Rootstock default: WRBTC, USD₮0, RIF, DOC —
+   * the tokens with liquid pools to more than one other token (2026-10-12).
+   */
+  hubTokens: Address[];
+  /** `MULTICALL3` (Rootstock default: the canonical 0xcA11…CA11; "" = none: one `eth_call` per read). */
+  multicall?: Address;
 }
 
 /** The "route" strategy: fills through `AggregatorFillSolver.executeFill` from the operator EOA. */
@@ -62,6 +119,13 @@ export interface RouteConfig {
   solver: Address;
   pools: RoutePool[];
   paths: RoutePath[];
+  /**
+   * The QuoterV2 of each pool venue, by venue index: `[0]` = QUOTER_V2 (Oku), `[1]` =
+   * SUSHI_V3_QUOTER (unset = venue-1 pools and paths are never quoted, so never
+   * routed). Start-up checks each quoter's `factory()` against the solver's
+   * `poolVenue(i)` — a quote must price the very pool the plan swaps on.
+   */
+  venueQuoters: (Address | undefined)[];
   /** Haircut on the live quote before the profitability test, bps. */
   slippageBps: bigint;
   /**
@@ -72,10 +136,11 @@ export interface RouteConfig {
    */
   stableSlippageBps: bigint;
   /**
-   * `eth_estimateGas` units assumed for an executeFill before the simulation's own
-   * estimate — the floor of the estimate the plan is priced at: the sent plan is
-   * priced at max(this, simulated) × r (the learned receipt ratio, gasRatio.ts) and
-   * sent with gas limit max(that, simulated × 1.25).
+   * `eth_estimateGas` units assumed for an executeFill through the SANDBOX (an API
+   * route) before the simulation's own estimate — the floor of the estimate the plan
+   * is priced at: the sent plan is priced at max(this, simulated) × r (the learned
+   * receipt ratio, gasRatio.ts) and sent with gas limit max(that, simulated × 1.25).
+   * A pool plan assumes this − `SANDBOX_ROUTE_OVERHEAD_GAS` (route.ts `planGasEstimate`).
    */
   gasEstimate: bigint;
   /** Refuse any route fill whose priced gas limit exceeds this (gas units). */
@@ -89,6 +154,12 @@ export interface RouteConfig {
   minProfitWei: bigint;
   /** Fallback RBTC price (USD, 18-dec fixed) when no pool path prices RBTC in the output token. */
   rbtcUsd?: bigint;
+  /** Pool discovery and multi-hop enumeration (./poolGraph.ts). */
+  discovery: DiscoveryConfig;
+  /** `ROUTE_MAX_HOPS`: longest enumerated pool path (default 3, ≤ the solver's MAX_POOL_HOPS = 4). */
+  maxHops: number;
+  /** `ROUTE_MAX_CANDIDATES`: pool paths quoted per fill / quote, best estimated first (default 5). */
+  maxCandidates: number;
   /** Tokens worth $1: the {@link rbtcUsd} fallback, and the pairs {@link stableSlippageBps} applies to. */
   usdTokens: Address[];
   /** RoutePlan.profitRecipient; zero = the operator EOA. */
@@ -100,9 +171,9 @@ export interface RouteConfig {
   /** The Nordstern API route source (pull orders only; ./nordstern.ts). */
   nordstern: NordsternConfig;
   /**
-   * Whether local Oku routes compete on PULL orders (default on). Off = Sushi-only
-   * pull fills; the pools still price gas, and DIRECT orders always use Oku (the only
-   * exact-output source).
+   * Whether the local pool plans (Oku and the other venues, `ROUTE_OKU_PULL`) compete
+   * on PULL orders (default on). Off = API-only pull fills; the pools still price gas,
+   * and DIRECT orders always use a pool plan (the only exact-output source).
    */
   okuPull: boolean;
 }
@@ -190,6 +261,15 @@ export interface Config {
   sweep: SweepPolicy;
   /** The public indicative quote endpoint (`POST /quote` on the Worker, ./quote.ts). */
   quote: QuotePolicy;
+  /**
+   * Gasless makers (`PERMIT_FILLS_ENABLED`, default on): a book order may carry the
+   * maker's ERC-2612 permit (`erc2612Permit`, spender = Settlement) instead of an
+   * on-chain approval. The route strategy passes it into `executeFill`'s `permits`, so
+   * the solver runs `permit` and the fill in ONE tx (./permit.ts); the inventory
+   * strategy (EOA `fillUpTo`) cannot carry it. Off: such orders wait until something
+   * else funds them.
+   */
+  permitFills: boolean;
 }
 
 /**
@@ -372,45 +452,76 @@ function flag(env: Env, key: string, fallback: boolean): boolean {
   return v === "1" || v.toLowerCase() === "true";
 }
 
+/** A pool venue index (position in the solver's allowlist): an integer 0..255. */
+export function parseVenue(raw: string, what: string): number {
+  const v = raw.trim();
+  const n = /^\d+$/.test(v) ? Number(v) : NaN;
+  if (!Number.isInteger(n) || n < 0 || n > 255) throw new Error(`${what}: bad venue ${JSON.stringify(raw)} (want 0..255)`);
+  return n;
+}
+
 /**
  * `ROUTE_PATHS`: `;`-separated paths, each `token>fee>token[>fee>token…]` in swap
- * order, e.g. `0xUSDRIF>500>0xUSDT0>3000>0xWRBTC`. Empty string = none.
+ * order with an optional `@venue` suffix (every hop; default 0 = Oku), and/or a
+ * per-hop `fee:venue` (mixed venues), e.g. `0xUSDRIF>500>0xUSDT0>3000>0xWRBTC`,
+ * `0xWRBTC>3000>0xUSDT0@1` or `0xUSDRIF>500:0>0xUSDT0>3000:1>0xWRBTC`. Empty = none.
  */
 export function parsePaths(raw: string): RoutePath[] {
   return raw
     .split(";")
     .map((p) => p.trim())
     .filter(Boolean)
-    .map((p) => {
+    .map((entry) => {
+      const at = entry.lastIndexOf("@");
+      const p = at === -1 ? entry : entry.slice(0, at);
+      const venue = at === -1 ? 0 : parseVenue(entry.slice(at + 1), "ROUTE_PATHS");
       const parts = p.split(">").map((x) => x.trim());
       if (parts.length < 3 || parts.length % 2 === 0) throw new Error(`ROUTE_PATHS: bad path ${p}`);
+      if ((parts.length - 1) / 2 > MAX_POOL_HOPS) throw new Error(`ROUTE_PATHS: ${p} has more than ${MAX_POOL_HOPS} hops (the solver's pool-plan limit)`);
       const tokens: Address[] = [];
       const fees: number[] = [];
+      const venues: number[] = [];
       parts.forEach((x, i) => {
         if (i % 2 === 0) {
           if (!isAddress(x, { strict: false })) throw new Error(`ROUTE_PATHS: not an address: ${x}`);
           tokens.push(getAddress(x));
         } else {
-          fees.push(parseFee(x, "ROUTE_PATHS"));
+          const [f, v] = x.split(":");
+          if (v !== undefined && at !== -1) throw new Error(`ROUTE_PATHS: ${p} mixes a per-hop venue with an @venue suffix`);
+          fees.push(parseFee(f!, "ROUTE_PATHS"));
+          venues.push(v === undefined ? venue : parseVenue(v, "ROUTE_PATHS"));
         }
       });
-      return { tokens, fees };
+      const single = venues.every((v) => v === venues[0]);
+      return single ? { tokens, fees, venue: venues[0]! } : { tokens, fees, venues };
     });
 }
 
-/** `ROUTE_POOLS`: `;`-separated `tokenA/tokenB/fee` triples. Unset = the app's Rootstock markets. */
+/**
+ * `ROUTE_POOLS`: `;`-separated `tokenA/tokenB/fee[/venue]` entries (venue default 0 =
+ * Oku, 1 = SushiSwap v3). Unset = {@link ROOTSTOCK_POOLS}.
+ */
 export function parsePools(raw: string): RoutePool[] {
   return raw
     .split(";")
     .map((p) => p.trim())
     .filter(Boolean)
     .map((p) => {
-      const [a, b, f] = p.split("/").map((x) => x.trim());
-      if (!a || !b || !f || !isAddress(a, { strict: false }) || !isAddress(b, { strict: false })) {
-        throw new Error(`ROUTE_POOLS: bad pool ${p} (want tokenA/tokenB/fee)`);
+      const parts = p.split("/").map((x) => x.trim());
+      const [a, b, f, v] = parts;
+      if (parts.length > 4 || !a || !b || !f || !isAddress(a, { strict: false }) || !isAddress(b, { strict: false })) {
+        throw new Error(`ROUTE_POOLS: bad pool ${p} (want tokenA/tokenB/fee[/venue])`);
       }
-      return { tokenA: getAddress(a), tokenB: getAddress(b), fee: parseFee(f, "ROUTE_POOLS") };
+      return { tokenA: getAddress(a), tokenB: getAddress(b), fee: parseFee(f, "ROUTE_POOLS"), venue: v === undefined ? 0 : parseVenue(v, "ROUTE_POOLS") };
     });
+}
+
+/** An optional address env value: unset → `fallback`, `""` → none. */
+function optAddr(env: Env, key: string, fallback: string | undefined): Address | undefined {
+  const raw = env[key];
+  if (raw === undefined) return fallback === undefined ? undefined : getAddress(fallback);
+  if (raw.trim() === "") return undefined;
+  return addr(env, key);
 }
 
 function loadRoute(env: Env): RouteConfig | undefined {
@@ -425,6 +536,9 @@ function loadRoute(env: Env): RouteConfig | undefined {
     solver: addr(env, "AGGREGATOR_SOLVER"),
     pools: env.ROUTE_POOLS !== undefined ? parsePools(env.ROUTE_POOLS) : [...ROOTSTOCK_POOLS],
     paths: parsePaths(env.ROUTE_PATHS ?? ROOTSTOCK_PATHS),
+    // Venue 0's quoter is the same QUOTER_V2 the rebalancer uses; venue 1 (SushiSwap v3)
+    // defaults to Rootstock's Sushi QuoterV2 there and to none elsewhere.
+    venueQuoters: [addr(env, "QUOTER_V2", ROOTSTOCK.quoterV2), optAddr(env, "SUSHI_V3_QUOTER", onRootstock ? ROOTSTOCK.sushiV3Quoter : undefined)],
     slippageBps: bps(env, "ROUTE_SLIPPAGE_BPS", 10),
     stableSlippageBps: bps(env, "ROUTE_STABLE_SLIPPAGE_BPS", 5),
     gasEstimate,
@@ -432,6 +546,9 @@ function loadRoute(env: Env): RouteConfig | undefined {
     routeTokens: addrList(env, "ROUTE_TOKENS", [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif]),
     minProfitWei: fixed(env, "MIN_PROFIT_RBTC", "0", 18),
     rbtcUsd,
+    discovery: loadDiscovery(env, onRootstock),
+    maxHops: rangeNum(env, "ROUTE_MAX_HOPS", 3, 1, MAX_POOL_HOPS),
+    maxCandidates: rangeNum(env, "ROUTE_MAX_CANDIDATES", 5, 1, 32),
     usdTokens: (env.USD_TOKENS ? env.USD_TOKENS.split(",") : [ROOTSTOCK.usdt0, ROOTSTOCK.usdrif]).map((t) => getAddress(t.trim())),
     profitRecipient: addr(env, "ROUTE_PROFIT_RECIPIENT", "0x0000000000000000000000000000000000000000"),
     hourlyFills: uint(env, "ROUTE_HOURLY_FILLS", 60),
@@ -458,6 +575,27 @@ function loadRoute(env: Env): RouteConfig | undefined {
       maxPerSweep: posNum(env, "NORDSTERN_MAX_PER_SWEEP", 10),
       haircutBps: nordsternHaircut(env),
     },
+  };
+}
+
+/** An integer env value in [min, max] (fail closed). */
+function rangeNum(env: Env, key: string, fallback: number, min: number, max: number): number {
+  const v = Number(uint(env, key, fallback));
+  if (v < min || v > max) throw new Error(`env ${key} must be ${min}..${max}`);
+  return v;
+}
+
+function loadDiscovery(env: Env, onRootstock: boolean): DiscoveryConfig {
+  const fees = (env.ROUTE_FEE_TIERS ?? "100,500,3000,10000").split(",").map((x) => x.trim()).filter(Boolean).map((x) => parseFee(x, "ROUTE_FEE_TIERS"));
+  if (fees.length === 0) throw new Error("env ROUTE_FEE_TIERS must name at least one fee tier");
+  const hubDefault = onRootstock ? [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.rif, ROOTSTOCK.doc] : [];
+  return {
+    enabled: flag(env, "ROUTE_DISCOVERY", true),
+    feeTiers: [...new Set(fees)],
+    minLiquidity: uint(env, "ROUTE_MIN_LIQUIDITY", 1),
+    refreshMs: 1000 * posNum(env, "ROUTE_DISCOVERY_SECONDS", 3600),
+    hubTokens: addrList(env, "ROUTE_HUB_TOKENS", hubDefault),
+    multicall: optAddr(env, "MULTICALL3", onRootstock ? ROOTSTOCK.multicall3 : undefined),
   };
 }
 
@@ -577,5 +715,6 @@ export function loadConfig(env: Env): Config {
       restingRecheckMs: 1000 * Number(uint(env, "RESTING_RECHECK_SECONDS", 300)),
       expiryMarginS: Number(uint(env, "EXPIRY_MARGIN_SECONDS", 90)),
     },
+    permitFills: flag(env, "PERMIT_FILLS_ENABLED", true),
   };
 }

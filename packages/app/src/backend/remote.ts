@@ -1,7 +1,8 @@
-import { hashOrderStruct, orderFromJson, OrderSide, type Order } from "@1delta-x/sdk";
+import { erc2612PermitToJson, hashOrderStruct, isFillOnce, orderFromJson, OrderSide, type Order } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
-import { CANCELLED_SENTINEL, isFull, outcomeEntry, retireReason, type Outcome } from "../lib/orderLifecycle";
+import type { ChainFillState } from "../lib/chain";
+import { chainFillOutcome, isFull, outcomeEntry, retireReason, type Outcome } from "../lib/orderLifecycle";
 import type { Fill, RestingOrder } from "../lib/types";
 import type {
   MarketObservation,
@@ -99,10 +100,11 @@ function toJson(v: unknown): string {
 }
 
 /**
- * The body of `POST /orders`: `{order, sig}`. Only the SDK `Order` fields are
- * sent — the server rejects unknown keys.
+ * The body of `POST /orders`: `{order, sig, erc2612Permit?}`. Only the SDK `Order`
+ * fields are sent — the server rejects unknown keys. The permit (gasless funding,
+ * lib/permit.ts) is appended only when the order carries one.
  */
-export function encodeOrderBody(signed: Pick<SignedOrder, "order" | "sig">): string {
+export function encodeOrderBody(signed: Pick<SignedOrder, "order" | "sig" | "erc2612Permit">): string {
   const o = signed.order;
   const order = {
     maker: o.maker,
@@ -127,7 +129,7 @@ export function encodeOrderBody(signed: Pick<SignedOrder, "order" | "sig">): str
     fillTotal: o.fillTotal,
     pricingModule: o.pricingModule,
   };
-  return toJson({ order, sig: signed.sig });
+  return toJson({ order, sig: signed.sig, ...(signed.erc2612Permit ? { erc2612Permit: erc2612PermitToJson(signed.erc2612Permit) } : {}) });
 }
 
 /** The body of `POST /cancels`: `{cancel, sig}`. */
@@ -191,7 +193,7 @@ async function send(doFetch: FetchLike, url: string, body: string): Promise<Resp
 export async function postOrder(
   doFetch: FetchLike,
   baseUrl: string,
-  signed: Pick<SignedOrder, "order" | "sig" | "hash">,
+  signed: Pick<SignedOrder, "order" | "sig" | "hash" | "erc2612Permit">,
 ): Promise<{ orderHash: Hex; duplicate: boolean }> {
   const body = encodeOrderBody(signed);
   const res = await send(doFetch, joinUrl(baseUrl, "/orders"), body);
@@ -304,6 +306,13 @@ interface Tracked {
   /** The grave's fill transaction (the book's own record of the filling tx). */
   statusTx?: string;
   cancelledOnChain?: boolean;
+  /**
+   * A FILL-ONCE order the book tombstoned as `Cancelled`. For that shape the book's
+   * lens cannot tell a fill from a nonce cancel (both only set the nonce bit), so the
+   * verdict waits for the chain read (`chainFillOutcome`); it stands only when there
+   * is none to be had.
+   */
+  bookCancelled?: boolean;
   /** What the chain read was last done for. */
   chainChecked?: "gone" | "expired";
   /** Row snapshot, so fills can still be placed once the row is gone. */
@@ -321,8 +330,13 @@ function shortAddr(a: string | undefined): string {
   return a && a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : (a ?? "unknown");
 }
 
-/** Reads `Settlement.filled(hash)` for a signed order (anchor wei; max = cancelled), or null when it cannot. */
-export type FillReader = (signed: SignedOrder) => Promise<bigint | null>;
+/**
+ * Reads a signed order's on-chain fill state, or null when it cannot: either just
+ * `Settlement.filled(hash)` (anchor wei; max = cancelled), or — what the app wires
+ * (lib/chain.ts `readFillState`) — that plus, for a fill-once order, whether its
+ * nonce is consumed.
+ */
+export type FillReader = (signed: SignedOrder) => Promise<bigint | ChainFillState | null>;
 
 export class RemoteOrderbook implements OrderbookApi {
   private rows: RestingOrder[] = [];
@@ -345,6 +359,8 @@ export class RemoteOrderbook implements OrderbookApi {
   /** Makers already restored (lower-cased) — restore runs once per maker per tab. */
   private readonly restored = new Set<string>();
   private fillReader: FillReader | null;
+  /** Order hashes (lower-cased) this app sent an ON-CHAIN cancel for — see {@link markHardCancelSent}. */
+  private readonly userCancelled = new Set<string>();
 
   constructor(opts: RemoteOrderbookOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
@@ -432,7 +448,20 @@ export class RemoteOrderbook implements OrderbookApi {
     this.emit();
   }
 
+  /**
+   * The app BROADCAST `cancelOrders` for this row's nonces. Recorded before the
+   * receipt, so a chain read that already sees the nonce consumed is not mistaken for
+   * a fill-once order's fill ({@link chainFillOutcome}); kept even if the receipt
+   * wait then fails, since the tx may still land.
+   */
+  markHardCancelSent(orderHash: string): void {
+    const row = this.rows.find((o) => o.id === orderHash);
+    for (const s of row?.signedOrders ?? (row?.signed ? [row.signed] : [])) this.userCancelled.add(s.hash.toLowerCase());
+    this.userCancelled.add(orderHash.toLowerCase());
+  }
+
   confirmHardCancel(orderHash: string): void {
+    this.markHardCancelSent(orderHash);
     const row = this.rows.find((o) => o.id === orderHash);
     if (row) this.retire(row, "cancelled");
     else this.dropRow(orderHash);
@@ -660,8 +689,14 @@ export class RemoteOrderbook implements OrderbookApi {
           changed = true;
         }
       } else if (body.status === "Cancelled" || body.reason === "cancelled") {
-        // Cancelled ON-CHAIN (from this or another device): it ends in Recent fills as Cancelled.
-        t.cancelledOnChain = true;
+        if (isFillOnce(t.signed.order) && this.fillReader !== null && !this.userCancelled.has(t.hash.toLowerCase())) {
+          // A fill-once order: the book's "Cancelled" may be its FILL (a nonce bit
+          // either way). The chain read below decides (`chainFillOutcome`).
+          t.bookCancelled = true;
+        } else {
+          // Cancelled ON-CHAIN (from this or another device): it ends in Recent fills as Cancelled.
+          t.cancelledOnChain = true;
+        }
         changed = true;
       } else if (body.reason === "expired") {
         // The book dropped it at expiry; `settle` retires it (after the chain read).
@@ -695,19 +730,36 @@ export class RemoteOrderbook implements OrderbookApi {
       const phase: Tracked["chainChecked"] = row.expiresAt <= now ? "expired" : t.statusDone ? "gone" : undefined;
       if (!phase || t.chainChecked === phase) continue;
       t.chainChecked = phase;
-      let v: bigint | null = null;
+      let raw: bigint | ChainFillState | null = null;
       try {
-        v = await read(t.signed);
+        raw = await read(t.signed);
       } catch {
-        v = null;
+        raw = null;
       }
-      if (v === null) continue;
-      if (v === CANCELLED_SENTINEL) {
+      if (raw === null) {
+        // No chain to ask: the book's verdict stands.
+        if (t.bookCancelled) {
+          t.cancelledOnChain = true;
+          changed = true;
+        }
+        continue;
+      }
+      const v = typeof raw === "bigint" ? { filled: raw, nonceConsumed: false } : raw;
+      const fillOnce = isFillOnce(t.signed.order);
+      const out = chainFillOutcome({ ...v, fillOnce, anchor: t.anchor, userCancelled: this.userCancelled.has(t.hash.toLowerCase()) });
+      if (out.cancelled) {
         t.cancelledOnChain = true;
         changed = true;
-      } else if (v > t.filledWei) {
-        t.filledWei = v > t.anchor ? t.anchor : v;
+      } else if (out.filledWei > t.filledWei) {
+        t.filledWei = out.filledWei;
         changed = true;
+      } else if (t.bookCancelled && fillOnce && !v.nonceConsumed) {
+        // The book saw the nonce consumed; this provider does not (yet). Ask again
+        // next poll — until expiry, when the book's verdict stands.
+        if (phase === "expired") {
+          t.cancelledOnChain = true;
+          changed = true;
+        } else t.chainChecked = undefined;
       }
     }
     return changed;

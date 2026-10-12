@@ -1,23 +1,32 @@
 import {
+  AGGREGATOR_FILL_SOLVER_ABI,
   NO_PATCH,
   OrderSide,
+  POOL_ROUTE,
+  ROOTSTOCK_POOL_VENUES,
+  decodePoolRoute,
   encodeAggregatorExecuteFill,
+  encodePoolRoute,
   packTiming,
+  v3PoolAddress,
   withBlockClock,
-  SWAP_ROUTER02_ABI,
   withDeltaVerifyOutputs,
   withPriorityAuction,
   type Order,
 } from "@1delta-x/sdk";
-import { decodeFunctionData, hexToBigInt, sliceHex, zeroAddress, type Address, type Hex } from "viem";
+import { decodeFunctionData, encodeFunctionResult, getAddress, hexToBigInt, keccak256, parseTransaction, sliceHex, zeroAddress, type Address, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it, vi } from "vitest";
 
-import { loadConfig, parsePaths, parsePools, ROOTSTOCK, ROOTSTOCK_POOLS } from "../src/config";
+import { loadConfig, parsePaths, parsePools, ROOTSTOCK, ROOTSTOCK_POOLS, VENUE_OKU, VENUE_SUSHI_V3 } from "../src/config";
+import { aggregate3 } from "./multicallShim";
 import { dispatch, type Strategy } from "../src/dispatch";
 import type { FillOutcome } from "../src/filler";
 import type { BookEntry } from "../src/intake";
+import { Budget } from "../src/policy";
+import { ROUTE_FILLS, RouteFiller } from "../src/routeFiller";
 import {
-  buildRoutePlan,
+  buildPoolPlan,
   candidatePaths,
   classifyRoute,
   mulDivUp,
@@ -27,9 +36,16 @@ import {
   haircutBps,
   liveDecayPerBlock,
   patchesLiveOutput,
+  PERMIT_IN_FILL_GAS,
+  planGasEstimate,
+  planKind,
+  rankingGasUnits,
+  SANDBOX_ROUTE_OVERHEAD_GAS,
   TYPED_CALLBACK_GAS,
   rankRoutes,
   routeProfitable,
+  validatePoolPlan,
+  venueName,
 } from "../src/route";
 
 const SOLVER = "0x00000000000000000000000000000000000050a1" as Address;
@@ -98,39 +114,70 @@ describe("route config", () => {
     expect(loadConfig({ ...ENV, ROUTE_OKU_PULL: "0" }).route!.okuPull).toBe(false);
     expect(() => loadConfig({ ...ENV, SUSHI_ROUTER: "nope" })).toThrow(/SUSHI_ROUTER/);
   });
-  it("defaults to the app's three Rootstock Uniswap v3 pools and the USDRIF→WRBTC path", () => {
+  it("defaults to the app's three Rootstock Oku pools + SushiSwap v3 WRBTC/USDT0 (venue 1) and the USDRIF→WRBTC path", () => {
     expect(rc.pools).toEqual(ROOTSTOCK_POOLS);
-    expect(rc.pools.map((p) => p.market)).toEqual(["rsk-30-wrbtc-usd0", "rsk-30-weth-wrbtc", "rsk-30-usdrif-usd0"]);
+    expect(rc.pools.map((p) => p.market)).toEqual(["rsk-30-wrbtc-usd0", "rsk-30-weth-wrbtc", "rsk-30-usdrif-usd0", undefined]);
+    expect(rc.pools.map((p) => p.venue)).toEqual([VENUE_OKU, VENUE_OKU, VENUE_OKU, VENUE_SUSHI_V3]);
     expect(rc.paths).toHaveLength(1);
     expect(rc.paths[0]!.fees).toEqual([500, 3000]);
+    expect(rc.paths[0]!.venue).toBe(0);
     expect(rc.slippageBps).toBe(10n);
     expect(rc.stableSlippageBps).toBe(5n);
     expect(rc.minProfitWei).toBe(0n);
     expect(loadConfig({ ...ENV, ROUTE_STABLE_SLIPPAGE_BPS: "12" }).route!.stableSlippageBps).toBe(12n);
     expect(() => loadConfig({ ...ENV, ROUTE_STABLE_SLIPPAGE_BPS: "10001" })).toThrow(/ROUTE_STABLE_SLIPPAGE_BPS/);
   });
-  it("parses ROUTE_PATHS and ROUTE_POOLS", () => {
+  it("parses ROUTE_PATHS and ROUTE_POOLS, with an optional venue (default 0)", () => {
     const p = parsePaths(`${ROOTSTOCK.weth}>3000>${ROOTSTOCK.wrbtc}>3000>${ROOTSTOCK.usdt0}; `);
-    expect(p).toEqual([{ tokens: [ROOTSTOCK.weth, ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0], fees: [3000, 3000] }]);
+    expect(p).toEqual([{ tokens: [ROOTSTOCK.weth, ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0], fees: [3000, 3000], venue: 0 }]);
+    expect(parsePaths(`${ROOTSTOCK.wrbtc}>3000>${ROOTSTOCK.usdt0}@1`)).toEqual([{ tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0], fees: [3000], venue: 1 }]);
     expect(parsePaths("")).toEqual([]);
     expect(() => parsePaths(`${ROOTSTOCK.weth}>3000`)).toThrow();
     expect(() => parsePaths(`${ROOTSTOCK.weth}>x>${ROOTSTOCK.wrbtc}`)).toThrow(/fee/);
+    expect(() => parsePaths(`${ROOTSTOCK.wrbtc}>3000>${ROOTSTOCK.usdt0}@x`)).toThrow(/venue/);
+    expect(() => parsePaths(`${ROOTSTOCK.wrbtc}>3000>${ROOTSTOCK.usdt0}@256`)).toThrow(/venue/);
+    const five = [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.usdrif, ROOTSTOCK.usdt0, ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0].join(">3000>");
+    expect(() => parsePaths(five)).toThrow(/hops/); // 5 hops > MAX_POOL_HOPS
     expect(parsePools(`${ROOTSTOCK.wrbtc}/${ROOTSTOCK.usdt0}/500`)).toEqual([
-      { tokenA: ROOTSTOCK.wrbtc, tokenB: ROOTSTOCK.usdt0, fee: 500 },
+      { tokenA: ROOTSTOCK.wrbtc, tokenB: ROOTSTOCK.usdt0, fee: 500, venue: 0 },
+    ]);
+    expect(parsePools(`${ROOTSTOCK.wrbtc}/${ROOTSTOCK.usdt0}/3000/1`)).toEqual([
+      { tokenA: ROOTSTOCK.wrbtc, tokenB: ROOTSTOCK.usdt0, fee: 3000, venue: 1 },
     ]);
     expect(() => parsePools("a/b")).toThrow();
+    expect(() => parsePools(`${ROOTSTOCK.wrbtc}/${ROOTSTOCK.usdt0}/3000/-1`)).toThrow(/venue/);
+    expect(() => parsePools(`${ROOTSTOCK.wrbtc}/${ROOTSTOCK.usdt0}/3000/1/2`)).toThrow(/bad pool/);
+  });
+  it("venue quoters: QUOTER_V2 for venue 0, Rootstock's verified Sushi v3 QuoterV2 for venue 1 (SUSHI_V3_QUOTER, \"\" = none)", () => {
+    expect(rc.venueQuoters).toEqual([getAddress(ROOTSTOCK.quoterV2), getAddress(ROOTSTOCK.sushiV3Quoter)]);
+    expect(loadConfig({ ...ENV, SUSHI_V3_QUOTER: "" }).route!.venueQuoters).toEqual([getAddress(ROOTSTOCK.quoterV2), undefined]);
+    expect(loadConfig({ ...ENV, SUSHI_V3_QUOTER: OTHER }).route!.venueQuoters[1]).toBe(getAddress(OTHER));
+    expect(loadConfig({ ...ENV, CHAIN_ID: "31" }).route!.venueQuoters[1]).toBeUndefined(); // no default off Rootstock
+    expect(() => loadConfig({ ...ENV, SUSHI_V3_QUOTER: "nope" })).toThrow(/SUSHI_V3_QUOTER/);
+  });
+  it("every default pool address is the one the solver derives for its venue (CREATE2, SDK v3PoolAddress)", () => {
+    for (const p of ROOTSTOCK_POOLS) {
+      const derived = v3PoolAddress(ROOTSTOCK_POOL_VENUES[p.venue ?? 0]!, p.tokenA as Address, p.tokenB as Address, p.fee);
+      expect(derived.toLowerCase()).toBe(p.pool!.toLowerCase());
+    }
   });
 });
 
 describe("candidatePaths", () => {
-  it("finds a pool in either direction", () => {
-    expect(candidatePaths(ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, rc)).toEqual([{ tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0], fees: [3000] }]);
-    expect(candidatePaths(ROOTSTOCK.usdt0, ROOTSTOCK.wrbtc, rc)).toEqual([{ tokens: [ROOTSTOCK.usdt0, ROOTSTOCK.wrbtc], fees: [3000] }]);
-  });
-  it("uses a configured multi-hop path, reversed when needed", () => {
-    expect(candidatePaths(ROOTSTOCK.wrbtc, ROOTSTOCK.usdrif, rc)).toEqual([
-      { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.usdrif], fees: [3000, 500] },
+  it("finds a pool in either direction, on every venue that has it", () => {
+    expect(candidatePaths(ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, rc)).toEqual([
+      { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0], fees: [3000], venue: 0 },
+      { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0], fees: [3000], venue: 1 },
     ]);
+    expect(candidatePaths(ROOTSTOCK.usdt0, ROOTSTOCK.weth, rc)).toEqual([]);
+    expect(candidatePaths(ROOTSTOCK.wrbtc, ROOTSTOCK.weth, rc)).toEqual([{ tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.weth], fees: [3000], venue: 0 }]);
+  });
+  it("uses a configured multi-hop path, reversed when needed (venue kept)", () => {
+    expect(candidatePaths(ROOTSTOCK.wrbtc, ROOTSTOCK.usdrif, rc)).toEqual([
+      { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.usdrif], fees: [3000, 500], venue: 0 },
+    ]);
+    const sushiPath = { pools: [], paths: parsePaths(`${ROOTSTOCK.usdrif}>500>${ROOTSTOCK.usdt0}>3000>${ROOTSTOCK.wrbtc}@1`) };
+    expect(candidatePaths(ROOTSTOCK.wrbtc, ROOTSTOCK.usdrif, sushiPath)[0]!.venue).toBe(1);
   });
   it("finds nothing for an unconfigured pair", () => {
     expect(candidatePaths(ROOTSTOCK.weth, ROOTSTOCK.usdrif, rc)).toEqual([]);
@@ -294,143 +341,170 @@ describe("profitability", () => {
   });
 });
 
-describe("buildRoutePlan", () => {
-  const ROUTER = ROOTSTOCK.swapRouter as Address;
+describe("buildPoolPlan (direct pool routes, router = POOL_ROUTE)", () => {
   const received = 10n ** 16n;
   const owed = 900_000_000n;
   const quotedOut = 1_000_000_000n;
   const costOut = 2_000_000n;
-  const single = { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0] as Address[], fees: [3000] };
-  const multi = { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.usdrif] as Address[], fees: [3000, 500] };
+  const single = { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0] as Address[], fees: [3000], venue: 0 };
+  const multi = { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.usdrif] as Address[], fees: [3000, 500], venue: 0 };
+  const base = { received, owed, quotedOut, costOut, profitRecipient: zeroAddress, minBumpBps: 0n };
+  const directOrder = wrbtcOrder({ timing: withDeltaVerifyOutputs(0n), exclusiveFiller: SOLVER });
 
-  it("pull, single hop: exactInputSingle to the SOLVER, patched amountIn, minOut = owed + cost, maxPay = owed", () => {
-    const { plan, call } = buildRoutePlan({
-      direct: false, path: single, router: ROUTER, solver: SOLVER, maker: MAKER,
-      received, owed, quotedOut, costOut, profitRecipient: zeroAddress, minBumpBps: 0n,
-    });
-    expect(plan.router).toBe(ROUTER);
+  it("pull: exact-INPUT of received (amountOut word 0), amountInOffset = the amountIn word, minOut = owed + cost, maxPay = owed", () => {
+    const { plan, call } = buildPoolPlan({ ...base, direct: false, path: single });
+    expect(plan.router).toBe(POOL_ROUTE);
     expect(plan.minOut).toBe(owed + costOut);
     expect(plan.maxPay).toBe(owed);
-    expect(plan.amountInOffset).toBe(132n);
+    expect(plan.amountInOffset).toBe(0n);
+    expect(plan.amountOutOffset).toBe(NO_PATCH);
+    expect(call.amountOutOffset).toBe(NO_PATCH);
+    const d = decodePoolRoute(plan.data);
+    expect(d).toEqual({ amountIn: received, amountOut: 0n, tokens: single.tokens.map((t) => t.toLowerCase()), fees: [3000], venues: [0] });
     expect(word(plan.data, plan.amountInOffset)).toBe(received);
-    const d = decodeFunctionData({ abi: SWAP_ROUTER02_ABI, data: call.data });
-    expect(d.functionName).toBe("exactInputSingle");
-    const p = d.args[0] as { recipient: Address; amountOutMinimum: bigint; fee: number };
-    expect(p.recipient.toLowerCase()).toBe(SOLVER.toLowerCase());
-    expect(p.amountOutMinimum).toBe(owed + costOut);
-    expect(p.fee).toBe(3000);
+    // The same bytes the SDK encoder produces; the solver accepts the offsets.
+    expect(plan.data).toBe(encodePoolRoute({ tokens: single.tokens, fees: [3000], venues: [0], amountIn: received, amountOut: 0n }).data);
+    expect(() => encodeAggregatorExecuteFill({ order: wrbtcOrder(), sig: "0x", fillAmount: received, plan })).not.toThrow();
   });
 
-  it("pull, multi-hop: exactInput, offset at amountIn", () => {
-    const { plan } = buildRoutePlan({
-      direct: false, path: multi, router: ROUTER, solver: SOLVER, maker: MAKER,
-      received, owed, quotedOut, costOut, profitRecipient: OTHER, minBumpBps: 0n,
-    });
-    expect(plan.amountInOffset).toBe(100n);
-    expect(word(plan.data, plan.amountInOffset)).toBe(received);
+  it("pull, multi-hop on venue 1: every hop carries the path's venue", () => {
+    const { plan } = buildPoolPlan({ ...base, direct: false, path: { ...multi, venue: 1 }, profitRecipient: OTHER });
+    const d = decodePoolRoute(plan.data);
+    expect(d.venues).toEqual([1, 1]);
+    expect(d.fees).toEqual([3000, 500]);
+    expect(d.tokens[2]).toBe(ROOTSTOCK.usdrif.toLowerCase());
     expect(plan.profitRecipient).toBe(OTHER);
-    expect(decodeFunctionData({ abi: SWAP_ROUTER02_ABI, data: plan.data }).functionName).toBe("exactInput");
   });
 
-  it("direct, single hop: exactOutputSingle paying the MAKER exactly owed, bounded amountInMaximum, NO_PATCH", () => {
-    const { plan } = buildRoutePlan({
-      direct: true, path: single, router: ROUTER, solver: SOLVER, maker: MAKER,
-      received, owed, quotedOut, costOut, profitRecipient: zeroAddress, minBumpBps: 0n,
-    });
+  it("direct: exact-OUTPUT of owed, amountIn word = the input CEILING (received − margin), NO_PATCH on the input; no recipient field", () => {
+    const { plan } = buildPoolPlan({ ...base, direct: true, path: single });
+    expect(plan.router).toBe(POOL_ROUTE);
+    expect(plan.minOut).toBe(0n);
+    expect(plan.maxPay).toBe(0n);
     expect(plan.amountInOffset).toBe(NO_PATCH);
-    const d = decodeFunctionData({ abi: SWAP_ROUTER02_ABI, data: plan.data });
-    expect(d.functionName).toBe("exactOutputSingle");
-    const p = d.args[0] as { recipient: Address; amountOut: bigint; amountInMaximum: bigint };
-    expect(p.recipient.toLowerCase()).toBe(MAKER.toLowerCase());
-    expect(p.amountOut).toBe(owed);
+    expect(plan.amountOutOffset).toBe(NO_PATCH);
+    const d = decodePoolRoute(plan.data);
+    expect(d.amountOut).toBe(owed);
     // keep = ceil(2 USDT0 × 0.01 WRBTC / 1,000 USDT0) = 2e-5 WRBTC = 2e13 wei.
-    expect(p.amountInMaximum).toBe(received - 2n * 10n ** 13n);
-  });
-
-  it("direct, multi-hop: exactOutput over the REVERSED path", () => {
-    const { plan } = buildRoutePlan({
-      direct: true, path: multi, router: ROUTER, solver: SOLVER, maker: MAKER,
-      received, owed, quotedOut, costOut, profitRecipient: zeroAddress, minBumpBps: 0n,
-    });
-    const d = decodeFunctionData({ abi: SWAP_ROUTER02_ABI, data: plan.data });
-    expect(d.functionName).toBe("exactOutput");
-    const p = d.args[0] as { path: Hex };
-    expect(sliceHex(p.path, 0, 20)).toBe(ROOTSTOCK.usdrif.toLowerCase()); // tokenOut first
+    expect(d.amountIn).toBe(received - 2n * 10n ** 13n);
+    // Swap order (input first), unlike SwapRouter02's reversed exact-output path.
+    expect(d.tokens[0]).toBe(ROOTSTOCK.wrbtc.toLowerCase());
+    expect(() => encodeAggregatorExecuteFill({ order: directOrder, sig: "0x", fillAmount: received, plan })).not.toThrow();
   });
 
   it("carries minBumpBps (the filler's floor) on both paths; no output patch unless asked", () => {
     for (const direct of [false, true]) {
-      const { plan } = buildRoutePlan({
-        direct, path: single, router: ROUTER, solver: SOLVER, maker: MAKER,
-        received, owed, quotedOut, costOut, profitRecipient: zeroAddress, minBumpBps: 4_321n,
-      });
+      const { plan } = buildPoolPlan({ ...base, direct, path: single, minBumpBps: 4_321n });
       expect(plan.minBumpBps).toBe(4_321n);
       expect(plan.amountOutOffset).toBe(NO_PATCH);
     }
   });
 
-  it("task 05: a live-output direct plan points amountOutOffset at the router's amountOut word (single + multi hop)", () => {
-    for (const [path, off] of [[single, 132n], [multi, 100n]] as const) {
-      const { plan, call } = buildRoutePlan({
-        direct: true, path, router: ROUTER, solver: SOLVER, maker: MAKER,
-        received, owed, quotedOut, costOut, profitRecipient: zeroAddress, minBumpBps: 0n, liveOut: true,
-      });
-      expect(plan.amountOutOffset).toBe(off);
-      expect(plan.amountOutOffset).toBe(call.amountOutOffset);
-      // In bounds, and the word there IS the previewed owed the solver overwrites.
-      expect(plan.amountOutOffset + 32n <= BigInt((plan.data.length - 2) / 2)).toBe(true);
+  it("task 05: a live-output direct plan points amountOutOffset at the amountOut word (32), single + multi hop", () => {
+    for (const path of [single, multi]) {
+      const { plan } = buildPoolPlan({ ...base, direct: true, path, liveOut: true });
+      expect(plan.amountOutOffset).toBe(32n);
+      // The word there IS the previewed owed the solver overwrites with pricedOut[0].
       expect(word(plan.data, plan.amountOutOffset)).toBe(owed);
-      // The floor is unchanged: amountInMaximum still sized on the PREVIEWED owed.
+      // The ceiling is unchanged: still sized on the PREVIEWED owed.
       expect(plan.amountInOffset).toBe(NO_PATCH);
-      expect(word(plan.data, call.amountInOffset)).toBe(received - 2n * 10n ** 13n);
-      // The SDK encoder's bounds check accepts it.
-      expect(() => encodeAggregatorExecuteFill({ order: wrbtcOrder(), sig: "0x", fillAmount: received, plan })).not.toThrow();
+      expect(word(plan.data, 0n)).toBe(received - 2n * 10n ** 13n);
+      expect(() => encodeAggregatorExecuteFill({ order: directOrder, sig: "0x", fillAmount: received, plan })).not.toThrow();
     }
   });
 
-  it("task 05: liveOut is ignored on the pull path (exact-input has no amountOut word)", () => {
-    const { plan } = buildRoutePlan({
-      direct: false, path: single, router: ROUTER, solver: SOLVER, maker: MAKER,
-      received, owed, quotedOut, costOut, profitRecipient: zeroAddress, minBumpBps: 0n, liveOut: true,
-    });
-    expect(plan.amountOutOffset).toBe(NO_PATCH);
+  it("task 05: liveOut is ignored on the pull path (exact-input: setting it would turn the route exact-output)", () => {
+    expect(buildPoolPlan({ ...base, direct: false, path: single, liveOut: true }).plan.amountOutOffset).toBe(NO_PATCH);
   });
 
-  it("task 05: an out-of-bounds output offset is refused before signing", () => {
-    const { plan } = buildRoutePlan({
-      direct: true, path: single, router: ROUTER, solver: SOLVER, maker: MAKER,
-      received, owed, quotedOut, costOut, profitRecipient: zeroAddress, minBumpBps: 0n, liveOut: true,
-    });
-    const size = BigInt((plan.data.length - 2) / 2);
-    expect(() => encodeAggregatorExecuteFill({ order: wrbtcOrder(), sig: "0x", fillAmount: received, plan: { ...plan, amountOutOffset: size - 31n } })).toThrow(/amountOutOffset/);
-    expect(() => encodeAggregatorExecuteFill({ order: wrbtcOrder(), sig: "0x", fillAmount: received, plan: { ...plan, amountOutOffset: size - 32n } })).not.toThrow();
+  it("a pool plan offset other than 0 / 32 / NO_PATCH is refused before signing (the solver reverts BadPoolRoute)", () => {
+    const { plan } = buildPoolPlan({ ...base, direct: true, path: single });
+    expect(() => encodeAggregatorExecuteFill({ order: directOrder, sig: "0x", fillAmount: received, plan: { ...plan, amountOutOffset: 64n } })).toThrow(/amountOutOffset/);
+    expect(() => encodeAggregatorExecuteFill({ order: directOrder, sig: "0x", fillAmount: received, plan: { ...plan, amountInOffset: 32n } })).toThrow(/amountInOffset/);
   });
 
-  it("refuses a margin larger than the input", () => {
-    expect(() =>
-      buildRoutePlan({
-        direct: true, path: single, router: ROUTER, solver: SOLVER, maker: MAKER,
-        received, owed, quotedOut: 1n, costOut, profitRecipient: zeroAddress, minBumpBps: 0n,
-      }),
-    ).toThrow(/margin/);
+  it("refuses a margin larger than the input, and a zero quote", () => {
+    expect(() => buildPoolPlan({ ...base, direct: true, path: single, quotedOut: 1n })).toThrow(/margin/);
+    expect(() => buildPoolPlan({ ...base, direct: true, path: single, quotedOut: 0n })).toThrow(/zero quote/);
+  });
+});
+
+describe("validatePoolPlan (pre-send check against the order)", () => {
+  const received = 10n ** 16n;
+  const owed = 900_000_000n;
+  const single = { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0] as Address[], fees: [3000], venue: 0 };
+  const base = { received, owed, quotedOut: 1_000_000_000n, costOut: 2_000_000n, profitRecipient: zeroAddress, minBumpBps: 0n };
+  const ok = (direct: boolean, path = single) => buildPoolPlan({ ...base, direct, path }).plan;
+
+  it("accepts what buildPoolPlan builds, pull and direct", () => {
+    expect(validatePoolPlan(ok(false), wrbtcOrder(), { direct: false, path: single, received, owed }).ok).toBe(true);
+    expect(validatePoolPlan(ok(true), wrbtcOrder(), { direct: true, path: single, received, owed }).ok).toBe(true);
+  });
+  it.each([
+    ["a path that does not start at the order's input", () => ok(false, { ...single, tokens: [ROOTSTOCK.usdt0, ROOTSTOCK.wrbtc] as Address[] }), false, /first token/],
+    ["a path that does not end at the order's output", () => ok(false, { tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.usdrif] as Address[], fees: [3000, 500], venue: 0 }), false, /last token/],
+    ["another venue than the quoted path's", () => ok(false, { ...single, venue: 1 }), false, /venues/],
+    ["a pull plan swapping another amount", () => ({ ...ok(false), data: encodePoolRoute({ tokens: single.tokens, fees: [3000], venues: [0], amountIn: received - 1n, amountOut: 0n }).data }), false, /exact-input/],
+    ["a pull plan made exact-output", () => ({ ...ok(false), data: encodePoolRoute({ tokens: single.tokens, fees: [3000], venues: [0], amountIn: received, amountOut: 1n }).data }), false, /exact-input/],
+    ["a pull plan with an uncapped payout", () => ({ ...ok(false), maxPay: 0n }), false, /floor\/cap/],
+    ["a direct plan paying another amount", () => ({ ...ok(true), data: encodePoolRoute({ tokens: single.tokens, fees: [3000], venues: [0], amountIn: received - 1n, amountOut: owed + 1n }).data }), true, /exactly owed/],
+    ["a direct plan whose ceiling is the whole input (no margin)", () => ({ ...ok(true), data: encodePoolRoute({ tokens: single.tokens, fees: [3000], venues: [0], amountIn: received, amountOut: owed }).data }), true, /ceiling/],
+    ["a direct plan that patches its ceiling", () => ({ ...ok(true), amountInOffset: 0n }), true, /ceiling/],
+    ["another router", () => ({ ...ok(false), router: OTHER }), false, /POOL_ROUTE/],
+    ["malformed data", () => ({ ...ok(false), data: "0x1234" as Hex }), false, /malformed/],
+  ] as const)("refuses %s", (_n, mk, direct, reason) => {
+    const v = validatePoolPlan(mk(), wrbtcOrder(), { direct, path: single, received, owed });
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.reason).toMatch(reason);
+  });
+});
+
+describe("plan-kind gas (SANDBOX_ROUTE_OVERHEAD_GAS, PERMIT_IN_FILL_GAS)", () => {
+  it("the measured constants (PoolRouteFork.t.sol)", () => {
+    expect(SANDBOX_ROUTE_OVERHEAD_GAS).toBe(30_000n);
+    expect(PERMIT_IN_FILL_GAS).toBe(60_000n);
+  });
+  it("ROUTE_GAS_ESTIMATE is a sandbox plan's estimate; a pool plan's is that less the overhead", () => {
+    expect(planGasEstimate(320_000n, "sandbox")).toBe(320_000n);
+    expect(planGasEstimate(320_000n, "pool")).toBe(320_000n - SANDBOX_ROUTE_OVERHEAD_GAS);
+    expect(planGasEstimate(SANDBOX_ROUTE_OVERHEAD_GAS, "pool")).toBe(SANDBOX_ROUTE_OVERHEAD_GAS); // never ≤ 0
+  });
+  it("pool paths build pool plans, API routes sandbox plans; ranking charges the sandbox overhead to API routes only", () => {
+    expect(planKind({ source: "pool" })).toBe("pool");
+    expect(planKind({ source: "sushi" })).toBe("sandbox");
+    expect(planKind({ source: "nordstern" })).toBe("sandbox");
+    expect(rankingGasUnits("pool", 100_000n)).toBe(100_000n);
+    expect(rankingGasUnits("sandbox", 100_000n)).toBe(100_000n + SANDBOX_ROUTE_OVERHEAD_GAS);
+  });
+  it("venue names for logs and the quote API (the app shows Oku / Sushi)", () => {
+    expect([venueName(0), venueName(1), venueName(7)]).toEqual(["oku", "sushi-v3", "venue-7"]);
   });
 });
 
 describe("rankRoutes", () => {
   it("orders by output net of each route's own gas; ties keep input order", () => {
     const r = rankRoutes([
-      { source: "oku", out: 1_000n, routeGasOut: 10n },
+      { source: "pool", out: 1_000n, routeGasOut: 10n },
       { source: "sushi", out: 1_005n, routeGasOut: 20n },
       { source: "sushi", out: 995n, routeGasOut: 0n },
     ] as const);
-    // nets: oku 990, sushi 985, sushi 995
+    // nets: pool 990, sushi 985, sushi 995
     expect(r.map((c) => [c.source, c.out])).toEqual([
       ["sushi", 995n],
-      ["oku", 1_000n],
+      ["pool", 1_000n],
       ["sushi", 1_005n],
     ]);
-    expect(rankRoutes([{ source: "oku", out: 10n, routeGasOut: 0n }, { source: "sushi", out: 10n, routeGasOut: 0n }])[0]!.source).toBe("oku");
-    expect(rankRoutes([{ source: "sushi", out: 1_010n, routeGasOut: 9n }, { source: "oku", out: 1_000n, routeGasOut: 0n }])[0]!.source).toBe("sushi");
+    expect(rankRoutes([{ source: "pool", out: 10n, routeGasOut: 0n }, { source: "sushi", out: 10n, routeGasOut: 0n }])[0]!.source).toBe("pool");
+    expect(rankRoutes([{ source: "sushi", out: 1_010n, routeGasOut: 9n }, { source: "pool", out: 1_000n, routeGasOut: 0n }])[0]!.source).toBe("sushi");
+  });
+  it("the sandbox overhead decides a near tie: an API route must beat a pool plan by more than SANDBOX_ROUTE_OVERHEAD_GAS", () => {
+    // 1 output unit per gas unit; the API quotes 20k more, its own gas is equal.
+    const gas = 100_000n;
+    const pool = { source: "pool" as const, out: 1_000_000n, routeGasOut: rankingGasUnits("pool", gas) };
+    const api = { source: "sushi" as const, out: 1_020_000n, routeGasOut: rankingGasUnits("sandbox", gas) };
+    expect(rankRoutes([api, pool])[0]!.source).toBe("pool"); // 20k better < 30k overhead
+    const better = { ...api, out: 1_031_000n };
+    expect(rankRoutes([better, pool])[0]!.source).toBe("sushi"); // 31k better > 30k overhead
   });
 });
 
@@ -497,5 +571,139 @@ describe("patchesLiveOutput (task 05)", () => {
 
   it("the typed path's extra gas is the measured +5.9k, rounded up", () => {
     expect(TYPED_CALLBACK_GAS).toBe(6_000n);
+  });
+});
+
+describe("RouteFiller: pool venues against the deployed solver", () => {
+  const OKU = ROOTSTOCK_POOL_VENUES[0]!.factory;
+  const SUSHI = ROOTSTOCK_POOL_VENUES[1]!.factory;
+  const QUOTER_OKU = getAddress(ROOTSTOCK.quoterV2);
+  const QUOTER_SUSHI = getAddress(ROOTSTOCK.sushiV3Quoter);
+  const ACCOUNT = privateKeyToAccount(ENV.PRIVATE_KEY as Hex);
+  const RECEIVED = 10n ** 16n;
+  const OWED = 900_000_000n;
+
+  /** A solver with `venues` pool venues; each quoter reports `factories[addr]`; quotes per quoter address. */
+  function chain(o: { venues?: bigint | "missing"; factories?: Record<string, Address>; quotes?: Record<string, bigint> } = {}) {
+    const quoted: Address[] = [];
+    const sent: Hex[] = [];
+    const factories = o.factories ?? { [QUOTER_OKU.toLowerCase()]: OKU, [QUOTER_SUSHI.toLowerCase()]: SUSHI };
+    const quotes = o.quotes ?? { [QUOTER_OKU.toLowerCase()]: 1_000_000_000n, [QUOTER_SUSHI.toLowerCase()]: 1_001_000_000n };
+    const pub = {
+      getCode: async () => "0x60",
+      getGasPrice: async () => 60_000_000n,
+      getTransactionCount: async () => 0,
+      sendRawTransaction: async ({ serializedTransaction }: { serializedTransaction: Hex }) => {
+        sent.push(parseTransaction(serializedTransaction).data!);
+        return keccak256(serializedTransaction);
+      },
+      getTransactionReceipt: async () => {
+        throw new Error("Transaction receipt could not be found");
+      },
+      getTransaction: async () => ({}),
+      readContract: async ({ functionName, address, args }: { functionName: string; address: Address; args?: readonly unknown[] }) => {
+        switch (functionName) {
+          case "SETTLEMENT": return ENV.SETTLEMENT;
+          case "GATED": return true;
+          case "isOperator": return true;
+          case "SANDBOX": return "0x0000000000000000000000000000000000005a4d";
+          case "OWNER": return SOLVER;
+          case "MAKER_SURPLUS_PPM": case "PROTOCOL_SURPLUS_PPM": return 0;
+          case "POOL_VENUES":
+            if (o.venues === "missing") throw new Error("execution reverted");
+            return o.venues ?? 2n;
+          case "poolVenue": return [args![0] === 0n ? OKU : SUSHI, ROOTSTOCK_POOL_VENUES[0]!.initCodeHash];
+          case "factory": return factories[address.toLowerCase()];
+          case "previewFill": return [0n, [RECEIVED], [OWED]];
+          case "previewBump": return 0n;
+          case "decimals": return 6;
+          case "aggregate3":
+            // Batched quotes (Multicall3): served by the per-call quote mock below;
+            // discovery's getPool reads revert here (no graph: configured pools only).
+            return aggregate3(args![0] as never, async (c) => {
+              if (!c.functionName.startsWith("quote")) throw new Error("no pool");
+              return (await pub.simulateContract({ address: c.address, args: c.args as [Hex, bigint] })).result;
+            });
+        }
+        throw new Error(`unexpected read ${functionName}`);
+      },
+      simulateContract: async ({ address, args }: { address: Address; args: [Hex, bigint] }) => {
+        quoted.push(address);
+        // 1 WRBTC = 100k USDT0 at the venue's rate (scaled from 0.01 WRBTC → quotes[addr]).
+        const usdt0In = args[0].slice(2, 42).toLowerCase() === ROOTSTOCK.usdt0.slice(2).toLowerCase();
+        const rate = quotes[address.toLowerCase()]!;
+        return { result: [usdt0In ? (args[1] * 10n ** 16n) / rate : (args[1] * rate) / 10n ** 16n, [], [], 100_000n] };
+      },
+      call: async () => ({ data: encodeFunctionResult({ abi: AGGREGATOR_FILL_SOLVER_ABI, functionName: "executeFill", result: [OWED] }) }),
+      estimateGas: async () => 250_000n,
+    };
+    return { quoted, sent, chain: { pub, account: ACCOUNT, me: ACCOUNT.address, chainId: 30 } as never };
+  }
+  const make = (c: unknown, env: Record<string, string> = {}) => {
+    const cfg = loadConfig({ ...ENV, SUSHI_ENABLED: "0", DRY_RUN: "0", ...env });
+    const logs: string[] = [];
+    return { rf: new RouteFiller(cfg, c as never, new Budget({ [ROUTE_FILLS]: 60n }), (m) => logs.push(m)), logs };
+  };
+  const wrbtcPath = (venue: number) => ({ tokens: [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0] as Address[], fees: [3000], venue });
+
+  it("each venue is quoted on ITS quoter; the better one (SushiSwap v3) is sent as a venue-1 pool plan", async () => {
+    const c = chain();
+    const { rf, logs } = make(c.chain);
+    await rf.init();
+    expect(logs.join("\n")).toMatch(/venues oku\+sushi-v3/);
+    await rf.quote(wrbtcPath(1), RECEIVED);
+    expect(c.quoted.at(-1)).toBe(QUOTER_SUSHI);
+    await rf.quote(wrbtcPath(0), RECEIVED);
+    expect(c.quoted.at(-1)).toBe(QUOTER_OKU);
+    const e = { orderHash: ("0x" + "0a".repeat(32)) as Hex, announce: { order: wrbtcOrder(), sig: "0x" as Hex }, state: { ok: true, status: "Fillable", fillableAmount: RECEIVED, validatorsPass: true } };
+    const out = await rf.consider(e);
+    expect(out.status).toBe("pending");
+    const args = decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data: c.sent[0]! }).args;
+    const plan = args[3] as { router: Address; data: Hex; amountInOffset: bigint; minOut: bigint };
+    expect(plan.router).toBe(POOL_ROUTE);
+    expect(plan.amountInOffset).toBe(0n);
+    const d = decodePoolRoute(plan.data);
+    expect(d.venues).toEqual([1]);
+    expect(d.amountOut).toBe(0n); // pull: exact-input
+    expect(args[5]).toEqual([]); // no permit
+  });
+
+  it("a direct order is sent as an exact-output pool plan to the order's payee (no recipient in the plan)", async () => {
+    const c = chain();
+    const { rf } = make(c.chain);
+    const o = wrbtcOrder({ timing: withDeltaVerifyOutputs(0n), exclusiveFiller: SOLVER });
+    const e = { orderHash: ("0x" + "0b".repeat(32)) as Hex, announce: { order: o, sig: "0x" as Hex }, state: { ok: true, status: "Fillable", fillableAmount: RECEIVED, validatorsPass: true } };
+    expect((await rf.consider(e)).status).toBe("pending");
+    const plan = decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data: c.sent[0]! }).args[3] as { router: Address; data: Hex; amountInOffset: bigint; amountOutOffset: bigint };
+    expect(plan.router).toBe(POOL_ROUTE);
+    expect(plan.amountInOffset).toBe(NO_PATCH);
+    expect(plan.amountOutOffset).toBe(NO_PATCH);
+    const d = decodePoolRoute(plan.data);
+    expect(d.amountOut).toBe(OWED);
+    expect(d.amountIn).toBeLessThan(RECEIVED);
+  });
+
+  it("a quoter that prices another factory than the solver's venue disables that venue (a quote must price the pool the plan swaps on)", async () => {
+    const c = chain({ factories: { [QUOTER_OKU.toLowerCase()]: OKU, [QUOTER_SUSHI.toLowerCase()]: OKU } });
+    const { rf, logs } = make(c.chain);
+    await rf.init();
+    expect(logs.join("\n")).toMatch(/venue 1 \(sushi-v3\): quoter .* prices factory .* venue disabled/);
+    await expect(rf.quote(wrbtcPath(1), RECEIVED)).rejects.toThrow(/not routable/);
+    expect(await rf.quote(wrbtcPath(0), RECEIVED)).toBeGreaterThan(0n);
+  });
+
+  it("a venue the solver does not have, or one without a quoter, is ignored with a warning", async () => {
+    const one = make(chain({ venues: 1n }).chain);
+    await one.rf.init();
+    expect(one.logs.join("\n")).toMatch(/venue 1 \(sushi-v3\) is not on the solver \(POOL_VENUES = 1\)/);
+    await expect(one.rf.quote(wrbtcPath(1), RECEIVED)).rejects.toThrow(/not routable/);
+    const noQuoter = make(chain().chain, { SUSHI_V3_QUOTER: "" });
+    await noQuoter.rf.init();
+    expect(noQuoter.logs.join("\n")).toMatch(/venue 1 \(sushi-v3\) is without a quoter/);
+  });
+
+  it("a solver without POOL_VENUES predates pool plans and the permits argument: refused at start-up", async () => {
+    const { rf } = make(chain({ venues: "missing" }).chain);
+    await expect(rf.init()).rejects.toThrow(/POOL_VENUES/);
   });
 });

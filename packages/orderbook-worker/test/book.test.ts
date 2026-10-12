@@ -1,6 +1,7 @@
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { OrderStatus } from "@1delta-x/orderbook/pure";
-import { orderFromJson, hashOrderStruct } from "@1delta-x/sdk";
+import { hashOrderStruct, ocoNonceGroup, orderFromJson, orderToJson, signOrder, withFillOnce } from "@1delta-x/sdk";
+import { zeroAddress, type Hex } from "viem";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -8,10 +9,13 @@ import {
   bob,
   call,
   cancelBody,
+  deployment,
   fillLog,
   freshBook,
   mallory,
   now,
+  orderFor,
+  rawFillLog,
   resetWorld,
   signed,
   USDRIF,
@@ -363,19 +367,193 @@ describe("GET /orders filters and paging", () => {
   });
 });
 
-describe("fill-once fills (no size in `filled`)", () => {
-  it("are indexed without an amount, re-checked on the lens, and tombstoned as Filled with the tx", async () => {
+describe("fill-once fills (no size in `filled`; the lens says Cancelled)", () => {
+  // What the REAL SettlementLens answers for a completed fill-once order: its fill set
+  // the nonce bit and left `filled` at 0 — the same state a nonce cancel leaves.
+  const consumed = { ok: false, status: OrderStatus.Cancelled, fillableAmount: 0n, isSignatureValid: true, validatorsPass: true } as const;
+  const once = { timing: withFillOnce(0n) };
+
+  it("an indexed OrderFilled tombstones it as Filled — full size, with the tx, no lens call", async () => {
     const book = freshBook();
-    const o = await signed(alice);
+    const o = await signed(alice, once);
     await call(book, "POST", "/orders", o.body);
     world.head = 20n;
     const log = fillLog(o.hash, alice.address, 7n);
     world.logs = [log];
-    // `filled` stays 0: progress is in the nonce.
-    world.lens.set(o.hash, { ok: false, status: OrderStatus.Filled, fillableAmount: 0n, isSignatureValid: true, validatorsPass: true });
+    world.lens.set(o.hash, consumed);
+    const lensBefore = world.lensCalls;
     await runDurableObjectAlarm(book);
     const fill = ((await call(book, "GET", "/fills")).body.fills as Record<string, unknown>[])[0]!;
-    expect(fill).toMatchObject({ orderHash: o.hash, amount: null, cumulative: null, txHash: log.txHash });
-    expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({ live: false, status: "Filled", reason: "filled", txHash: log.txHash });
+    // The one fill a fill-once order can take is the whole order.
+    expect(fill).toMatchObject({ orderHash: o.hash, amount: "1000", cumulative: "1000", txHash: log.txHash });
+    expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({
+      live: false,
+      status: "Filled",
+      reason: "filled",
+      filledAmount: "1000",
+      txHash: log.txHash,
+    });
+    expect(world.lensCalls).toBe(lensBefore);
+  });
+
+  it("a confirmed /fills/report does the same", async () => {
+    const book = freshBook();
+    const o = await signed(alice, once);
+    await call(book, "POST", "/orders", o.body);
+    world.lens.set(o.hash, consumed);
+    const T = `0x${"e1".repeat(32)}` as Hex;
+    world.receipts.set(T, { status: "success", blockNumber: 9n, transactionHash: T, logs: [rawFillLog(o.hash, alice.address, 9n, 0, T)] });
+    const res = await call(book, "POST", "/fills/report", JSON.stringify({ txHash: T }), undefined, true);
+    expect((res.body.results as Record<string, unknown>[])[0]).toMatchObject({ result: "indexed", indexed: 1 });
+    expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({
+      live: false,
+      status: "Filled",
+      reason: "filled",
+      filledAmount: "1000",
+      txHash: T,
+    });
+    // The next alarm's lens re-check has nothing left to (mis)label.
+    await runDurableObjectAlarm(book);
+    expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({ status: "Filled", reason: "filled", txHash: T });
+  });
+
+  it("a lens re-check that ran BEFORE the log was indexed is upgraded from cancelled to Filled", async () => {
+    const book = freshBook();
+    const o = await signed(alice, once);
+    await call(book, "POST", "/orders", o.body);
+    world.lens.set(o.hash, consumed);
+    world.head = 5n; // the log scan has read up to block 5: the fill (block 12) is not in it yet
+    world.offset = 360; // past REVALIDATE_SECONDS: the re-check runs, no log yet
+    await runDurableObjectAlarm(book);
+    expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({ live: false, status: "Cancelled", reason: "cancelled" });
+    world.head = 20n;
+    const log = fillLog(o.hash, alice.address, 12n);
+    world.logs = [log];
+    await runDurableObjectAlarm(book);
+    expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({
+      live: false,
+      status: "Filled",
+      reason: "filled",
+      filledAmount: "1000",
+      txHash: log.txHash,
+    });
+  });
+
+  it("a lens re-check that sees Cancelled for a fill-once order WITH an indexed fill row maps it to Filled", async () => {
+    const book = freshBook();
+    const o = await signed(alice, once);
+    // The fill is indexed before this node holds the order (a lagging admission RPC
+    // still answered fillable), so the log alone could not tombstone it.
+    world.head = 20n;
+    const log = fillLog(o.hash, alice.address, 7n);
+    world.logs = [log];
+    await runDurableObjectAlarm(book);
+    expect((await call(book, "POST", "/orders", o.body)).status).toBe(202);
+    world.lens.set(o.hash, consumed);
+    world.offset = 360;
+    await runDurableObjectAlarm(book);
+    expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({
+      live: false,
+      status: "Filled",
+      reason: "filled",
+      filledAmount: "1000",
+      txHash: log.txHash,
+    });
+  });
+
+  it("a genuine nonce cancel of a fill-once order with no fill stays Cancelled (event and lens paths)", async () => {
+    const byEvent = freshBook();
+    const a = await signed(alice, { ...once, nonce: 4242n });
+    await call(byEvent, "POST", "/orders", a.body);
+    world.head = 10n;
+    world.logs = [{ event: { kind: "cancelledNonces", maker: alice.address, nonces: [4242n] }, blockNumber: 3n, logIndex: 0, txHash: `0x${"cd".repeat(32)}` }];
+    await runDurableObjectAlarm(byEvent);
+    expect((await call(byEvent, "GET", `/orders/${a.hash}/status`)).body).toMatchObject({ live: false, status: "Cancelled", reason: "cancelled" });
+    expect((await call(byEvent, "GET", `/orders/${a.hash}/status`)).body.txHash).toBeUndefined();
+
+    // No log at all (an RPC without eth_getLogs): only the lens re-check sees it.
+    world.logs = [];
+    const byLens = freshBook();
+    const b = await signed(alice, once);
+    await call(byLens, "POST", "/orders", b.body);
+    world.lens.set(b.hash, consumed);
+    world.offset = 360;
+    await runDurableObjectAlarm(byLens);
+    expect((await call(byLens, "GET", `/orders/${b.hash}/status`)).body).toMatchObject({ live: false, status: "Cancelled", reason: "cancelled" });
+  });
+
+  it("a shared-nonce OCO bracket: the filled leg is Filled, its sibling Cancelled at once; another maker's same nonce untouched", async () => {
+    const book = freshBook();
+    const [tp, sl] = ocoNonceGroup([orderFor(alice.address), orderFor(alice.address, { legsOut: [{ token: USDT0, start: 950n, end: 0n, recipient: zeroAddress }] })], 9001n);
+    const legs: Hex[] = [];
+    for (const leg of [tp!, sl!]) {
+      const sig = await signOrder(alice, leg, deployment);
+      const hash = hashOrderStruct(leg).toLowerCase() as Hex;
+      expect((await call(book, "POST", "/orders", JSON.stringify({ order: orderToJson(leg), sig }))).status).toBe(202);
+      legs.push(hash);
+    }
+    const stranger = await signed(bob, { ...once, nonce: 9001n });
+    await call(book, "POST", "/orders", stranger.body);
+    world.head = 30n;
+    const log = fillLog(legs[0]!, alice.address, 15n);
+    world.logs = [log];
+    const lensBefore = world.lensCalls;
+    await runDurableObjectAlarm(book);
+    expect((await call(book, "GET", `/orders/${legs[0]}/status`)).body).toMatchObject({ live: false, status: "Filled", reason: "filled", txHash: log.txHash });
+    expect((await call(book, "GET", `/orders/${legs[1]}/status`)).body).toMatchObject({ live: false, status: "Cancelled", reason: "cancelled" });
+    expect((await call(book, "GET", `/orders/${stranger.hash}/status`)).body.live).toBe(true);
+    expect(world.lensCalls).toBe(lensBefore);
+  });
+
+  it("an ordinary (not fill-once) order the lens calls Cancelled is still cancelled, even with a fill row", async () => {
+    const book = freshBook();
+    const o = await signed(alice);
+    await call(book, "POST", "/orders", o.body);
+    world.head = 20n;
+    world.logs = [fillLog(o.hash, alice.address, 7n)];
+    world.filled.set(`${o.hash}@7`, 400n);
+    world.lens.set(o.hash, { ...consumed });
+    await runDurableObjectAlarm(book); // partial fill indexed → dirty → lens says Cancelled
+    expect((await call(book, "GET", `/orders/${o.hash}/status`)).body).toMatchObject({ live: false, status: "Cancelled", reason: "cancelled", filledAmount: "400" });
+  });
+});
+
+describe("POST /orders — gasless ERC-2612 funding permit", () => {
+  async function withPermit(over: { spender?: `0x${string}`; deadlineDelta?: bigint } = {}) {
+    const { erc2612PermitToJson, erc2612TypedData, splitPermitSignature, orderToJson } = await import("@1delta-x/sdk");
+    const { deployment } = await import("./helpers");
+    const o = await signed(alice, { legsIn: [{ token: USDT0, start: 5_000_000n, end: 0n }], legsOut: [{ token: USDRIF, start: 4_900_000_000_000_000_000n, end: 0n, recipient: "0x0000000000000000000000000000000000000000" }] });
+    const m = { owner: alice.address, spender: over.spender ?? deployment.settlement, value: 5_000_000n, nonce: 0n, deadline: o.order.expiry + (over.deadlineDelta ?? 0n) };
+    const sig = await alice.signTypedData(erc2612TypedData({ name: "USD₮0", version: "1", chainId: deployment.chainId, verifyingContract: USDT0 }, m));
+    const permit = { token: USDT0, spender: m.spender, value: m.value, nonce: m.nonce, deadline: m.deadline, ...splitPermitSignature(sig) };
+    return { ...o, permit, body: JSON.stringify({ order: orderToJson(o.order), sig: o.sig, erc2612Permit: erc2612PermitToJson(permit) }) };
+  }
+
+  it("admits it on the verifier's live-permit verdict and serves the permit to fillers", async () => {
+    const book = freshBook();
+    const o = await withPermit();
+    world.lens.set(o.hash, { ok: true, status: OrderStatus.Fillable, fillableAmount: 0n, isSignatureValid: true, validatorsPass: true, erc2612Live: true });
+    const res = await call(book, "POST", "/orders", o.body);
+    expect(res.status).toBe(202);
+    const [row] = (await call(book, "GET", "/orders")).body.orders as Record<string, unknown>[];
+    const served = row!.erc2612Permit as Record<string, unknown>;
+    expect(served).toEqual(JSON.parse(o.body).erc2612Permit);
+    expect((row!.state as Record<string, unknown>).erc2612Live).toBe(true);
+    expect((row!.state as Record<string, unknown>).fillableAmount).toBe("0");
+    // An ordinary order serves no permit field at all.
+    const plain = await signed(bob);
+    await call(book, "POST", "/orders", plain.body);
+    const rows = (await call(book, "GET", "/orders")).body.orders as Record<string, unknown>[];
+    expect(rows.find((r) => r.orderHash === plain.hash)).not.toHaveProperty("erc2612Permit");
+  });
+
+  it("422s a permit to another spender or one that lapses before the order", async () => {
+    const book = freshBook();
+    const wrongSpender = await withPermit({ spender: bob.address });
+    expect((await call(book, "POST", "/orders", wrongSpender.body)).status).toBe(422);
+    const early = await withPermit({ deadlineDelta: -1n });
+    const res = await call(book, "POST", "/orders", early.body);
+    expect(res.status).toBe(422);
+    expect(String(res.body.error)).toMatch(/deadline/);
   });
 });

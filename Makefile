@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill size-check-solvers $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── CI matrix source ──────────────────────────────────────────────────────────
 
@@ -414,6 +414,15 @@ deploy-aggregator-fill:
 	FOUNDRY_PROFILE=solvers-deploy $(FORGE) script $(AGG_DEPLOY_SCRIPT) \
 		--rpc-url $(RPC) --broadcast $(DEPLOY_ARGS) $(VERIFY_ARGS)
 
+## The whole solvers suite against the DEPLOYED AggregatorFillSolver bytecode (the
+## `solvers-deploy` profile: via-IR, Cancun, runs 1e6). The suite itself compiles under
+## the legacy `solvers` profile; every test deploys the solver through `newAgg`
+## (packages/solvers/test/shared/AggDeploy.sol), which loads `AGG_ARTIFACT` instead.
+AGG_DEPLOYED_ARTIFACT := out/solvers-deploy/AggregatorFillSolver.sol/AggregatorFillSolver.json
+test-solvers-deployed:
+	FOUNDRY_PROFILE=solvers-deploy $(FORGE) build --quiet --skip '*.s.sol'
+	AGG_ARTIFACT=$(AGG_DEPLOYED_ARTIFACT) FOUNDRY_PROFILE=solvers $(FORGE) test
+
 ## Size of the deployable AggregatorFillSolver (solvers-deploy profile, Cancun).
 size-check-solvers:
 	@FOUNDRY_PROFILE=solvers-deploy $(FORGE) build --quiet --skip '*.s.sol'
@@ -443,5 +452,6 @@ help:
 	@echo "  deploy-core  RPC=..   Deploy core singletons via the CREATE2 factory"
 	@echo "  deploy-aggregator-fill RPC=.. DEPLOY_ARGS=..  Deploy an AggregatorFillSolver (env-configured)"
 	@echo "  size-check-solvers    AggregatorFillSolver size under solvers-deploy (Cancun)"
+	@echo "  test-solvers-deployed solvers suite against the deployed (via-IR) solver bytecode"
 	@echo ""
 	@echo "Packages: $(PACKAGES)"

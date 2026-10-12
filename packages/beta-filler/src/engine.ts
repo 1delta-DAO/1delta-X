@@ -5,6 +5,7 @@ import { Filler, type FillOutcome } from "./filler";
 import { GasRatios } from "./gasRatio";
 import { GAS, Guard, resolvePending as resolveTx, type PendingTx, type Resolution } from "./guard";
 import type { BookEntry } from "./intake";
+import { permitStage } from "./permit";
 import { Budget, isFixedPrice, windowEndMs, type Verdict } from "./policy";
 import { QuoteBook, Quoter, type QuoteRequest, type QuoteResult } from "./quote";
 import { Rebalancer, type RebalanceOutcome } from "./rebalance";
@@ -180,6 +181,7 @@ export class Engine {
     }
     if (cfg.strategies.route) {
       const r = new RouteFiller(cfg, chain, this.routeBudget, log, mark, this.guard, this.gasRatios, this.quotes);
+      r.restoreGraph(state.poolGraph);
       this.route = r;
       this.strategies.push({ name: "route", consider: (e) => r.consider(e), accepts: (e) => r.accepts(e), beginSweep: () => r.beginSweep() });
     }
@@ -221,6 +223,7 @@ export class Engine {
       ...(ownFills.length ? { ownFills } : {}),
       gasRatios: this.gasRatios.toJSON(),
       ...(this.quotes.size ? { quotes: this.quotes.toJSON() } : {}),
+      ...(this.route?.graphState() ? { poolGraph: this.route.graphState()! } : {}),
     };
   }
 
@@ -379,7 +382,7 @@ export class Engine {
       entries.filter((e) => this.seen.has(key(e))),
       this.cursor,
     );
-    for (const e of [...fresh, ...known]) {
+    for (let e of [...fresh, ...known]) {
       if (limits.canContinue && !limits.canContinue()) {
         bounded = true;
         break;
@@ -401,6 +404,24 @@ export class Engine {
         if (hold.why === "filled") this.dirty = true;
       }
       const wasSeen = this.seen.has(h);
+      // A gasless maker's order (an `erc2612Permit` on the announce): the book's
+      // fillable is the lens's allowance-capped figure, 0 until the permit runs.
+      // Re-read it here, and when only the permit can fund the order, hand the
+      // strategies the size it WILL have plus the permit the fill must carry
+      // (./permit.ts). Only for orders some strategy takes by shape: four reads each.
+      if (e.announce.erc2612Permit && this.shapeAccepted(e)) {
+        const staged = await this.stagePermit(e, nowS);
+        if (staged.outcome) {
+          outcomes.push(staged.outcome);
+          await this.noteOutcome(staged.outcome);
+          this.seen.add(h);
+          if (staged.outcome.rest && this.cfg.sweep.restingRecheckMs > 0) {
+            this.holds.set(h, { until: this.now() + this.cfg.sweep.restingRecheckMs, fillable, why: "passed" });
+          }
+          continue;
+        }
+        e = staged.entry;
+      }
       const accepted = this.strategies.some((s) => (s.accepts ? s.accepts(e) : true));
       if (accepted) {
         const seen = this.dryRunSeen.get(e.orderHash);
@@ -454,6 +475,33 @@ export class Engine {
     }
     if (this.dryRunSeen.size > 10_000) this.dryRunSeen.clear();
     return { evaluated, outcomes, bounded, held };
+  }
+
+  /** Whether any strategy takes the entry by SHAPE (its book fillable aside). Zero RPC. */
+  private shapeAccepted(e: BookEntry): boolean {
+    const probe: BookEntry = { ...e, state: { ok: true, status: e.state?.status ?? "Fillable", validatorsPass: true, fillableAmount: 1n } };
+    return this.strategies.some((s) => (s.accepts ? s.accepts(probe) : true));
+  }
+
+  /** {@link permitStage} for one entry: the entry to dispatch, or the outcome that ends it this tick. */
+  private async stagePermit(e: BookEntry, nowS: bigint): Promise<{ entry: BookEntry; outcome?: undefined } | { outcome: FillOutcome; entry?: undefined }> {
+    const base = { ok: true, status: e.state?.status ?? "Fillable", validatorsPass: e.state?.validatorsPass ?? true };
+    try {
+      const st = await permitStage(this.o.chain, this.cfg, e, nowS);
+      switch (st.kind) {
+        case "none":
+          return { entry: e };
+        case "funded":
+          return { entry: { ...e, state: { ...base, fillableAmount: st.fillable } } };
+        case "permit":
+          return { entry: { ...e, state: { ...base, fillableAmount: st.fillable }, fillPermit: st.permit } };
+        case "dead":
+          this.o.log(`· skip ${e.orderHash}: ${st.reason}`);
+          return { outcome: { orderHash: e.orderHash, status: "skipped", reason: st.reason, rest: true } };
+      }
+    } catch (err) {
+      return { outcome: { orderHash: e.orderHash, status: "failed", reason: `permit stage: ${errMsg(err)}` } };
+    }
   }
 
   /** One rebalancer step (redeem USDRIF / sell RIF), at most one tx. Inventory strategy only. */

@@ -356,6 +356,138 @@ entrypoint is owner/operator-gated.
     ⚠ Measuring this: EIP-2200 prices an SSTORE against the slot's value at the
     START OF THE TRANSACTION, so a benchmark that seeds a floor and zeroes it
     inline measures a dirty-slot write and reports the floor as worthless.
+    **Direct pool routes (2026-10-12, BREAKING constructor).** `RoutePlan.router =
+    POOL_ROUTE` (`address(0)`) makes `data` a pool plan — `amountIn(32) ‖
+    amountOut(32) ‖ token0 ‖ fee(3) ‖ venue(1) ‖ token1 ‖ …`, swap order, 1–4 hops,
+    `amountOut == 0` = exact-input — that the solver executes ITSELF: it calls
+    `pool.swap` and pays the owed input with a plain `transfer` inside
+    `uniswapV3SwapCallback`. No sandbox push, no router, no sweep, no approval. Pools
+    are never taken from calldata: each hop's pool is recomputed as
+    `CREATE2(factory, keccak256(abi.encode(token0, token1, fee)), initCodeHash)` over
+    an IMMUTABLE venue allowlist (`PoolVenue[]`, constructor, ≤ 4, `poolVenue(i)` /
+    `poolFor(venue, a, b, fee)` to check it). Rootstock: venue 0 = Uniswap v3 / Oku
+    (factory `0xaF37…aD82`), venue 1 = SushiSwap v3 (factory `0x46B3…202e`), both
+    with the canonical v3 init code hash `0xe34f…8b54` — verified by deriving the
+    live WRBTC/USDT0 0.3% pools `0xaeF6…9Bbd` / `0x6d77…Fd71` and the Oku
+    USDRIF/USDT0 0.05% pool `0xD845…19d6`
+    (`PoolRouteForkBench:test_fork_poolDerivation_bothVenues`). The callback pays
+    only (a) while `_active == SWAPPING` — set around the outermost `pool.swap` of an
+    operator's fill, in the existing guard slot (no new storage, no transient
+    storage); (b) when `msg.sender` is the derived pool of the hop its own data
+    names (a genuine pool calls back only the caller of its own `swap`, with that
+    caller's data); (c) the positive delta of the hop's INPUT token, and on hop 0 at
+    most the routed delta (exact-output: also ≤ the plan's ceiling word). Exact-output
+    multi-hop is the standard recursion (each callback buys its input from the
+    previous hop, paid straight to the calling pool). The path must start at
+    `legsIn[0]`'s token and end at the anchor output token; the last hop pays
+    `legsOut[0]`'s recipient on a direct order and the solver on a pull order — both
+    from the ORDER. Offsets keep their meaning: `amountInOffset = 0` rewrites the
+    amountIn word with the routed delta, `amountOutOffset = 32` the amountOut word with
+    the live `pricedOut[0]` (typed callback); anything else is `BadPoolRoute`.
+    `minOut` / `maxPay` / the core's delta check / the split / the self-seeded floor
+    are unchanged. Tests: `test/AggregatorPoolRoute.t.sol` (derivation, the four
+    shapes on one and two hops, both venues, every floor, the callback gates —
+    `test_callback_unarmed_revertsEvenForTheGenuinePool`,
+    `test_callback_armed_wrongCallerRefused`,
+    `test_callback_genuinePoolWithAnotherHopsData_refused`,
+    `test_callback_owedOnTheWrongToken_refused`, `test_callback_owedAboveBudget_refused`,
+    `test_callback_reentryFromSwapRefused`, `test_budget_exactOut_neverReachesHeldValue`).
+    Opaque aggregator routes (Sushi API / Nordstern) keep the sandbox path.
+    **Gas, pool vs sandbox vs a raw SwapRouter02 swap** — live Rootstock pools, block
+    9,295,925, fresh tx (all setup in `setUp`, nothing read in the measured tx),
+    steady state (solver floors, sandbox's standing router approval, recipients paid
+    before), spread to a treasury; execution / NET tx gas (execution + calldata + 21k
+    − refund, capped at gasUsed / 5); `PoolRouteForkBench` (`test/PoolRouteFork.t.sol`),
+    the DEPLOYED bytecode (`solvers-deploy`: via-IR, runs 1e6 — `AGG_ARTIFACT`, see
+    *Gas pass 2026-10-12* below; re-measured after the `SurplusSplit` event was
+    removed, −2,615…−2,618 on every solver fill, raw-router rows unchanged):
+
+    | shape | raw SwapRouter02 (trader's tx) | sandbox fill | **pool fill** | pool − sandbox (net) | pool vs raw (net) |
+    | --- | --- | --- | --- | --- | --- |
+    | 1 hop direct exact-out, 0.0002 WRBTC → 16 USDT0 (the live shape) | 101,402 / 121,186 (exactOutputSingle) | 264,694 / 263,426 | **205,847 / 229,039** | −34,387 | 1.89× |
+    | 1 hop direct exact-out, live `amountOut` (typed) | — | — | 211,272 / 234,440 | — | — |
+    | 1 hop direct exact-out on the SushiSwap v3 pool | — | — | 194,658 / 217,862 | — | — |
+    | 1 hop pull exact-in | 96,579 / 119,163 (exactInputSingle) | 299,725 / 281,117 | **252,063 / 252,291** | −28,826 | 2.12× |
+    | 2 hops direct exact-out, 100 USDRIF → USDT0 → 0.0011 WRBTC | 166,996 / 187,408 (exactOutput) | 334,995 / 334,439 | **269,598 / 293,338** | −41,101 | 1.57× |
+    | 2 hops pull exact-in | 192,256 / 195,568 (exactInput) | 388,527 / 350,803 | **315,642 / 313,642** | −37,161 | 1.60× |
+    | 3 hops direct exact-out, mixed venues: USDRIF →(Oku 0.05%) USDT0 →(Sushi 0.3%) WRBTC →(Oku 0.3%) 900 RIF | — | — | **340,156 / 364,208** | — | — |
+    | 3 hops pull exact-in, mixed venues | 292,989 / 276,677 (exactInput, all-Oku path) | — | **405,111 / 400,611** | — | 1.45× |
+    | ERC-2612 permit in the fill (USD₮0 → WRBTC, direct) | — | — | **277,305 / 282,849** | — | — |
+
+    ⚠ The 2-hop figures published here before 2026-10-12 (302,524 / 324,305) were 4.5k
+    LOW: the bench read `balanceOf(maker)` inside the measured transaction, which warmed
+    the account and slot the fill then wrote. Every pre-fill read is now taken in
+    `setUp` (or derived from what `setUp` dealt).
+    Unit benchmark (mocks, legacy test profile, read the difference only):
+    `AggregatorPoolRouteTest:test_gas_unit_direct_pool` 152,123 vs
+    `test_gas_unit_direct_sandbox` 179,483; `test_gas_unit_pull_pool` 177,029 vs
+    `test_gas_unit_pull_sandbox` 203,029.
+    **ERC-2612 permits (2026-10-12, BREAKING ABI).** `executeFill(order, sig,
+    fillAmount, plan, takerData, Permit2612[] permits)` and `executeItemFill(…,
+    lateItems, permits)` run `token.permit(owner, SETTLEMENT, value, deadline, v, r, s)`
+    for each entry BEFORE the fill: a gasless maker's book-carried permit funds the
+    order inside the fill transaction (Settlement's direct-approval fallback pulls with
+    the allowance). `owner` must be the order's maker (`PermitOwnerNotMaker`); a failed
+    call is accepted only if Settlement's allowance from the maker already covers
+    `value` (relayed / front-run), else `PermitFailed` before anything moves. A maker
+    in Permit3 strict mode has no fallback: the fill reverts `Permit3Denied`
+    (`test_permit_strictMakerHasNoFallback`). The old 5-argument entry is gone (one
+    selector, `0xd828b11a`). Gas (same fork bench, USD₮0 → WRBTC pool fill, net,
+    deployed bytecode after the 2026-10-12 gas pass): Permit3-funded 236,467, direct
+    approval 237,016, **permit in the fill 282,849 (+45.8k net / +58.7k execution:
+    USD₮0's allowance 0→value and nonce 0→1 writes)**; a permit someone already relayed
+    costs +33.2k when still passed (the failed call verifies the signature first) and 0
+    when omitted (`PoolRouteForkRelayedBench`); the replaced relay design's standalone
+    permit tx was 95,083 net — so in-fill saves ~49k gas and one block on the first fill.
+    **Gas pass 2026-10-12 — see the next item.**
+  - **Gas pass 2026-10-12** (`AggregatorFillSolver` only; no core change; every check
+    kept — operator gate, the 1/2/3/4/5/6 armed states, the callback's CREATE2 pool
+    derivation + hop budget, delta measurement, `minOut` / `maxPay`, `RouteOverspent`,
+    the Settlement-approval clear, permit owner == maker). Fork bench above, NET tx gas,
+    one change at a time, each measured on the legacy test build AND the via-IR deploy
+    build (1-hop direct / 1-hop pull / 2-hop pull / 3-hop pull):
+
+    | change | legacy Δ net | via-IR Δ net | kept |
+    | --- | --- | --- | --- |
+    | `_derive`: CREATE2 pool address hashed in scratch memory (was `abi.encodePacked` + `abi.encode` allocations), twice per hop | −492 / −492 / −1,000 / −1,514 | −758 / −758 / −1,534 / −2,311 | ✅ |
+    | hops read by raw `calldataload` at a proven-in-bounds offset; `pool.swap` encoded straight into free memory (`_poolSwap`: no `abi.encodePacked(budget, path)` copy, no second ABI copy, 64-byte return required instead of `extcodesize`) | −1,869 / −2,383 / −4,628 / −6,869 | −1,277 / −1,709 / −3,344 / −4,978 | ✅ |
+    | `uniswapV3SwapCallback`: budget / token by `calldataload` (was bounds-checked slices) | −375 per paying callback | −257 | ✅ |
+    | `_plan` reads `legsIn` / `legsOut` in CALLDATA (`PackedArrays`, was a memory copy via `PackedArraysMem`) — every path | −403…−428 | −2,617…−2,812 | ✅ |
+    | `_splitSurplus` skips the three ppm products when no share but the filler's exists (`SEED_INPUT && originatorPpm == 0`) — every path | −731 | −500 | ✅ |
+    | pool-route shape check + amount words by `calldataload` (`_poolShape`, `_poolAmounts`) | −996…−1,005 | −336 | ✅ |
+    | `NO_PATCH = 2^255`, any bit-255 offset = no patch (was `type(uint256).max`: 32 non-zero calldata bytes = 512 gas → 140) — `type(uint256).max` still reads as no patch | −770 (2 unpatched offsets) | −770 | ✅ |
+    | … the same tested as `offset >> 255` instead of `>= NO_PATCH` | +18, −147 B | +18 | ❌ |
+    | ERC-2612 `permit` call encoded in free memory, return data not copied | −271 (permit fill) / −518 (already relayed) | −198 / −511 | ✅ |
+    | hand-encoded `fillWithCallback` call, Yul helper functions | +2,587 | +3,687 | ❌ |
+    | … straight-line, canonical re-encoding with the decoder's own tail checks | −573 | −146 | ❌ (a hand-rolled `Order` ABI encoder on the fill path is not worth 146 gas on the shipped build) |
+    | **compiler: `solvers-deploy` → via-IR, runs 20,000** | — | −2.3k / −2.4k / −2.5k / −3.0k (vs legacy) | ✅ |
+    | … runs 1,000,000 (= 2^32−1, step function) | — | a further −93…−108 | ✅ (runtime 20,935) |
+    | … runs 200 | — | +1.1k…+1.4k vs runs 20,000 | ❌ |
+    | `SurplusSplit` event removed (LOG3 + 4 data words, emitted once per token per fill; nothing read it — off-chain, each share is the token's own `Transfer` log) — every path | −2,653 (1-hop direct / 1-hop pull / 2-hop direct / permit, each measured) | −2,618 direct, −2,615 pull (every pool and sandbox row above; retain −2,625…−2,628) | ✅ (runtime 20,779, −156 B) |
+    | 1-wei floor on each INTERMEDIATE token of an exact-input multi-hop route (`amount − 1` to the next hop) | +20.2k (2 hops) / +40.3k (3 hops) on the first fill, +3.1k per intermediate on every later one | — | ❌ (refund-neutral to begin with: the unseeded and the seeded intermediate measure 316,257 both — the slot round-trips inside the tx) |
+
+    Total, deployed bytecode vs the pre-pass legacy build (the event removal
+    included): **1-hop direct −11,060 (240,099 → 229,039), 1-hop pull −11,729, 2-hop
+    direct −13,686, 2-hop pull −15,163, 3-hop mixed direct −16,300, 3-hop mixed pull
+    −18,600, permit in the fill −11,756, sandbox routes −7.1k.** Measured but
+    deliberately NOT done: a packed `RoutePlan` encoding (a new entry point)
+    would save ≈1.1k calldata for ≈0.3k decode — not worth an ABI break; a 1-wei
+    Settlement allowance "floor" is both refund-neutral and a standing allowance (the
+    stale-approval PoC's precondition). The typed callback (live `amountOut`) costs
+    +5.4k net on the pool path — the core prices every leg twice; nothing to take out on
+    this side.
+    **Retain mode is the cheaper filler configuration** (`profitRecipient = the
+    solver`, swept in batches with `sweep`): 223,855 vs 229,039 direct (−5,184), 246,084
+    vs 252,291 pull (−6,207), 287,575 vs 293,338 2-hop direct, 308,458 vs 313,642 2-hop
+    pull — it skips the per-fill payout `transfer`. Defaults are unchanged.
+    **Deployed bytecode is via-IR now, tests compile legacy:** `make
+    test-solvers-deployed` builds `solvers-deploy` and runs the WHOLE solvers suite
+    against that artifact (every test deploys through `newAgg`,
+    `test/shared/AggDeploy.sol`, which loads `AGG_ARTIFACT`); the fork bench takes the
+    same switch. Assembly blocks each carry an `EQUIVALENT SOLIDITY` note; new pins:
+    `testFuzz_poolFor_matchesReferenceFormula`, `test_poolFor_preservesFreeMemoryPointer`,
+    `test_noPatch_anyBit255Value`, `test_callback_shortPrefixRecursionReverts`, the
+    `BadPoolSwap` selector in `test_route_nonexistentPoolReverts`.
   - `RouteSandbox.sol` — the identity every route runs from, deployed by the
     solver's constructor (`SANDBOX()`; `OWNER()` = the solver). One entry,
     `exec(tokenIn, target, data, sweepTokens)`, owner-only: (1) give `target` a
@@ -481,12 +613,25 @@ solvers.
 ## Deploying an AggregatorFillSolver
 
 `script/DeployAggregatorFill.s.sol`, driven by `make deploy-aggregator-fill RPC=…
-DEPLOY_ARGS=… VERIFY_ARGS=…` under the `solvers-deploy` profile (same optimizer
-settings as `solvers`, `evm_version = cancun` for Rootstock). It reads `SETTLEMENT`,
+DEPLOY_ARGS=… VERIFY_ARGS=…` under the `solvers-deploy` profile (via-IR, optimizer runs
+1,000,000, `evm_version = cancun` for Rootstock — since the 2026-10-12 gas pass; the test
+profile `solvers` stays legacy, so run `make test-solvers-deployed` before a deploy: the
+whole suite against this profile's artifact). It reads `SETTLEMENT`,
 `OPERATORS` (required, 1–4: the constructor reverts on an empty set and the old
 `ALLOW_OPEN` is refused), the surplus-policy ppm values (read as `uint256` and
-bounded — never silently truncated to `uint32`) and the optional `FLOOR_TOKENS` (1
-wei of each sent to the new solver) from the environment. `FLOOR_TOKENS` is **no
+bounded — never silently truncated to `uint32`), the POOL VENUES and the optional
+`FLOOR_TOKENS` (1 wei of each sent to the new solver) from the environment.
+**Pool venues (2026-10-12):** `POOL_FACTORIES` + `POOL_INIT_HASHES` (comma lists, same
+length, ≤ 4; venue index = position). Both unset on chain 30 = the verified Rootstock
+defaults, venue 0 = Uniswap v3 / Oku `0xaF37EC98A00FD63689CF3060BF3B6784E00caD82`,
+venue 1 = SushiSwap v3 `0x46B3fDF7b5CDe91Ac049936bF0bDb12c5d22202e`, both with
+`0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54`; unset
+elsewhere = no venues (pool routes off); `NO_POOL_VENUES=true` forces none. After
+deploying, the script reads every venue back and proves it with a probe pair —
+`poolFor(i, probe)` must equal the factory's own `getPool(probe)` and have code — the
+WRBTC/USDT0 0.3% pool on chain 30, or `POOL_PROBE="tokenA,tokenB,fee"` elsewhere — so
+a wrong init code hash fails the deploy, not the first fill.
+`FLOOR_TOKENS` is **no
 longer needed** (2026-10): the solver seeds a token's 1-wei floor out of its own
 first fill of it (see *The floor seeds itself* above). Pre-seeding still works and
 saves that first fill the refund it forgoes (~+11k / +25k net, direct / pull) — worth
@@ -495,13 +640,40 @@ a contract or an EIP-7702 delegated EOA — is logged loudly and refused unless
 `ALLOW_CONTRACT_OPERATORS=true`. It takes the signer from the CLI flags, and
 reverts unless every immutable — including the deployed
 `RouteSandbox`'s owner / Settlement / Permit3 / EXECUTOR — reads back as requested.
-**BREAKING (2026-10):** the constructor is `(settlement, operators, policy)` and
-reverts `NoOperators` on an empty set; the script refuses the removed `ROUTERS`,
-`STANDING`, `PRIME_TOKENS` and `ALLOW_OPEN`.
-`make size-check-solvers` reports the runtime size under that profile (15,127 /
-24,576 bytes, initcode 19,560 — which embeds the sandbox — re-run 2026-10-07
-after the self-seeding floor; 15,176 / 19,562 after tasks 06/08, 13,935 / 18,314
-after the 2026-10 gated-only change). The Rootstock beta runbook is in `packages/beta-filler/README.md`.
+**BREAKING (2026-10-12):** the constructor is `(settlement, operators, policy,
+venues)`; executeFill / executeItemFill take a trailing `Permit2612[] permits`.
+(2026-10: `(settlement, operators, policy)`, reverting `NoOperators` on an empty set;
+the script refuses the removed `ROUTERS`, `STANDING`, `PRIME_TOKENS` and
+`ALLOW_OPEN`.)
+`make size-check-solvers` reports the runtime size under that profile (**20,779** /
+24,576 bytes, initcode 25,430 — which embeds the sandbox — after the 2026-10-12 gas pass
+and the `SurplusSplit` event removal (−156 B; 20,935 / 25,586 before it), via-IR runs
+1e6; legacy runs 20,000 was 21,001 / 26,245 after pool routes
+and permits: ≈ +1.1k for the permit path, ≈ +1.8k for the route driver, the rest the
+callback, venue immutables and views; was 15,127 / 19,560 after the self-seeding floor,
+15,176 / 19,562 after tasks 06/08, 13,935 / 18,314 after the 2026-10 gated-only change).
+Simulated against live Rootstock (2026-10-12, `forge script` without `--broadcast`,
+`SETTLEMENT` = the beta's `0xe6ED…ddf5`): ~6.75M gas, both default venues derive their
+probe pool. The Rootstock beta runbook is in `packages/beta-filler/README.md`.
+
+**Redeploying the Rootstock beta solver (plain CREATE, new address):**
+
+```bash
+make size-check-solvers
+SETTLEMENT=0xe6EDbb5c49Fb4CFb313476e3B78E274D3584ddf5 \
+OPERATORS=0xcafe35944e3195d59b4a354Ea23D60a0445c083a \
+make deploy-aggregator-fill RPC=https://public-node.rsk.co \
+  DEPLOY_ARGS="--account deployer --sender 0x00001d4754680958E7f8fe42D60842Ebde4Cb30D --legacy --slow --gas-estimate-multiplier 110"
+# verify (Blockscout imports Sourcify): read SANDBOX() on-chain first — forge's
+# simulated child address is not reliable for the sandbox
+FOUNDRY_PROFILE=solvers-deploy forge verify-contract --verifier sourcify --chain 30 <solver> \
+  packages/solvers/src/aggregator/AggregatorFillSolver.sol:AggregatorFillSolver
+```
+
+Then point the app (`VITE_DEPLOYMENTS[30].solver` — delta-verify orders name it as
+`exclusiveFiller`) and the filler (`AGGREGATOR_SOLVER`) at the new address. Orders
+already signed for the OLD solver (exclusiveFiller = 0x33cc…E287) stay fillable only
+by it: keep the old instance's operator running until they expire or are cancelled.
 
 ## Losing races cheaply
 

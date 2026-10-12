@@ -84,6 +84,31 @@ export function outcomeOf(a: { filledWei: bigint; anchor: bigint; cancelled?: bo
   return a.filledWei > 0n ? "partially-filled" : "expired";
 }
 
+/**
+ * Read a chain fill state (lib/chain.ts `readFillState`) into progress + a cancel flag.
+ *
+ * A FILL-ONCE order (`timing` bit 100) records its fill by consuming its NONCE, not
+ * in `filled(hash)` (which stays 0) — and a nonce cancel consumes the same bit. The
+ * chain cannot tell the two apart; the app can, for its own cancels:
+ *   • the app sent an on-chain cancel for it (`userCancelled`) → cancelled;
+ *   • otherwise a consumed nonce is the fill → filled = the whole anchor (a fill-once
+ *     fill is all-or-nothing: the core reverts `FillOnceMustBeFull` on anything less).
+ * A SOFT cancel does not count: it never touches the nonce (the order stays fillable
+ * on-chain until expiry), so a nonce consumed after one is the fill it did not stop.
+ * The by-hash sentinel in `filled` is a cancel whatever the order's shape.
+ */
+export function chainFillOutcome(a: {
+  filled: bigint;
+  nonceConsumed: boolean;
+  fillOnce: boolean;
+  anchor: bigint;
+  userCancelled: boolean;
+}): { filledWei: bigint; cancelled: boolean } {
+  if (a.filled === CANCELLED_SENTINEL) return { filledWei: 0n, cancelled: true };
+  if (a.fillOnce && a.nonceConsumed) return a.userCancelled ? { filledWei: 0n, cancelled: true } : { filledWei: a.anchor, cancelled: false };
+  return { filledWei: a.filled > a.anchor ? a.anchor : a.filled, cancelled: false };
+}
+
 export function outcomeLabel(o: Outcome): string {
   return o === "partially-filled" ? "partially filled" : o;
 }

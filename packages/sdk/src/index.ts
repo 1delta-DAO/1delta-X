@@ -27,3 +27,4 @@ export * from "./lending";
 export * from "./native";
 export * from "./json";
 export * from "./aggregator";
+export * from "./erc2612";

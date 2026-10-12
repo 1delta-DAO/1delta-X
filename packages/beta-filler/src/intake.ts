@@ -1,4 +1,4 @@
-import { hashOrderStruct, orderFromJson, type Order } from "@1delta-x/sdk";
+import { erc2612PermitFromJson, hashOrderStruct, orderFromJson, type Erc2612Permit, type Order } from "@1delta-x/sdk";
 import type { Hex } from "viem";
 
 /**
@@ -10,11 +10,17 @@ import type { Hex } from "viem";
  */
 export interface BookEntry {
   orderHash: Hex;
-  announce: { order: Order; sig: Hex; permitBatch?: unknown; sigless?: boolean };
+  announce: { order: Order; sig: Hex; permitBatch?: unknown; sigless?: boolean; erc2612Permit?: Erc2612Permit };
   /** The book's last lens reading. `fillableAmount` sizes the first preview. */
   state?: { ok: boolean; status: string; fillableAmount: bigint; validatorsPass: boolean };
   /** When the book first took the order (unix seconds), if it says: never-seen orders are evaluated oldest first. */
   addedAt?: number;
+  /**
+   * Set by the engine (./permit.ts `permitStage` → "permit"), never by the book: the
+   * order is funded only by this maker ERC-2612 permit, so the fill must CARRY it
+   * (`executeFill`'s `permits`, route strategy). The inventory strategy skips it.
+   */
+  fillPermit?: Erc2612Permit;
 }
 
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -69,7 +75,7 @@ export async function fetchOrders(baseUrl: string, doFetch: FetchLike = fetch, o
 }
 
 function toEntry(raw: unknown): BookEntry | undefined {
-  const item = raw as { orderHash?: unknown; order?: unknown; sig?: unknown; state?: unknown; addedAt?: unknown };
+  const item = raw as { orderHash?: unknown; order?: unknown; sig?: unknown; state?: unknown; addedAt?: unknown; erc2612Permit?: unknown };
   let order: Order;
   try {
     order = orderFromJson(item?.order);
@@ -79,11 +85,21 @@ function toEntry(raw: unknown): BookEntry | undefined {
   const orderHash = hashOrderStruct(order);
   if (typeof item.orderHash !== "string" || item.orderHash.toLowerCase() !== orderHash.toLowerCase()) return undefined;
   if (typeof item.sig !== "string" || !/^0x(?:[0-9a-fA-F]{2})+$/.test(item.sig)) return undefined;
+  // The maker's gasless funding permit, if any. Malformed → the whole entry is dropped:
+  // carrying a permit we cannot parse is never right, and filling without it fails.
+  let erc2612Permit: Erc2612Permit | undefined;
+  if (item.erc2612Permit !== undefined) {
+    try {
+      erc2612Permit = erc2612PermitFromJson(item.erc2612Permit);
+    } catch {
+      return undefined;
+    }
+  }
   const s = item.state as { ok?: unknown; status?: unknown; fillableAmount?: unknown; validatorsPass?: unknown } | null | undefined;
   if (!s || s.ok !== true || s.validatorsPass !== true || typeof s.fillableAmount !== "string" || !/^\d+$/.test(s.fillableAmount)) return undefined;
   return {
     orderHash,
-    announce: { order, sig: item.sig as Hex },
+    announce: { order, sig: item.sig as Hex, ...(erc2612Permit ? { erc2612Permit } : {}) },
     state: { ok: true, status: String(s.status ?? "Fillable"), fillableAmount: BigInt(s.fillableAmount), validatorsPass: true },
     ...(typeof item.addedAt === "number" && Number.isFinite(item.addedAt) ? { addedAt: item.addedAt } : {}),
   };
@@ -96,15 +112,16 @@ function toEntry(raw: unknown): BookEntry | undefined {
  * (`fillTotal`, else the anchor leg: `legsIn[0]` for SELL, `legsOut[0]` for BUY).
  */
 export function entryFromJson(raw: unknown): BookEntry {
-  const item = raw as { order?: unknown; sig?: unknown; fillAmount?: unknown };
+  const item = raw as { order?: unknown; sig?: unknown; fillAmount?: unknown; erc2612Permit?: unknown };
   const order = orderFromJson(item?.order);
+  const erc2612Permit = item.erc2612Permit !== undefined ? erc2612PermitFromJson(item.erc2612Permit) : undefined;
   if (typeof item.sig !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(item.sig)) throw new Error("sig: expected 0x hex");
   const anchor = order.fillTotal !== 0n ? order.fillTotal : order.side === 0 ? order.legsIn[0]!.start : order.legsOut[0]!.start;
   const fillableAmount =
     typeof item.fillAmount === "string" && /^\d+$/.test(item.fillAmount) ? BigInt(item.fillAmount) : anchor;
   return {
     orderHash: hashOrderStruct(order),
-    announce: { order, sig: item.sig as Hex },
+    announce: { order, sig: item.sig as Hex, ...(erc2612Permit ? { erc2612Permit } : {}) },
     state: { ok: true, status: "Fillable", fillableAmount, validatorsPass: true },
   };
 }

@@ -2,17 +2,23 @@ import {
   concat,
   decodeFunctionData,
   decodeFunctionResult,
+  encodeAbiParameters,
   encodeFunctionData,
+  encodePacked,
+  getContractAddress,
   hexToBigInt,
+  keccak256,
   numberToHex,
   sliceHex,
   size,
   toFunctionSelector,
+  zeroAddress,
   type Address,
   type Hex,
 } from "viem";
 
 import { orderComponents } from "./abi";
+import type { Erc2612Permit } from "./erc2612";
 import { packOrder } from "./packed";
 import type { Order } from "./types";
 
@@ -41,14 +47,38 @@ import type { Order } from "./types";
  * `NoOperators` on an empty set): any target a route names keeps a standing
  * approval from the sandbox, so only operators may name targets. Never forward a
  * route whose target you would not trust with a later fill's in-flight balance.
+ *
+ * DIRECT POOL ROUTES (2026-10-12, BREAKING constructor + ABI): `plan.router =`
+ * {@link POOL_ROUTE} makes `plan.data` a pool plan ({@link encodePoolRoute}) the
+ * solver executes ITSELF against Uniswap-v3-style pools it derives from its
+ * immutable venue allowlist (`poolVenue(i)` / `poolFor(...)`), paying in
+ * `uniswapV3SwapCallback` — no sandbox, no router, no approval (Oku / Uniswap v3 and
+ * SushiSwap v3 on Rootstock). Opaque aggregator routes (Sushi API, Nordstern) keep
+ * the sandbox path.
+ *
+ * ERC-2612 PERMITS (2026-10-12, BREAKING): `executeFill(order, sig, fillAmount, plan,
+ * takerData, permits)` runs each maker permit (`spender` = Settlement, `owner` = the
+ * order's maker) before the fill — the gasless-maker funding path in the fill tx.
  */
 
-/** `RoutePlan.amountInOffset` / `amountOutOffset` sentinel: leave that word as quoted. `type(uint256).max`. */
-export const NO_PATCH: bigint = (1n << 256n) - 1n;
+/**
+ * `RoutePlan.amountInOffset` / `amountOutOffset` sentinel: leave that word as quoted.
+ * `2^255` (2026-10-12; was `type(uint256).max`): the contract reads ANY offset with bit
+ * 255 set as "no patch" ({@link isNoPatch}), and `2^255` is the cheapest such calldata
+ * word — one non-zero byte (140 gas on Rootstock's EIP-2028 schedule) instead of 32
+ * (512 gas), −372 gas per unpatched offset per fill.
+ */
+export const NO_PATCH: bigint = 1n << 255n;
+
+/** Whether an offset means "no patch" on-chain: bit 255 set ({@link NO_PATCH}, or the pre-2026-10-12 `type(uint256).max`). */
+export const isNoPatch = (offset: bigint): boolean => offset >> 255n !== 0n;
 
 /** Mirror of the Solidity `RoutePlan` struct (field order is load-bearing). */
 export interface RoutePlan {
-  /** The route's target — any contract (called by the sandbox, not the solver). */
+  /**
+   * The route's target — any contract (called by the sandbox, not the solver) — or
+   * {@link POOL_ROUTE} (`address(0)`): `data` is then an {@link encodePoolRoute} plan.
+   */
   router: Address;
   /**
    * Floor on the swap proceeds in the ANCHOR OUTPUT token — the first output token no
@@ -108,6 +138,44 @@ const routePlanComponents = [
   { name: "data", type: "bytes" },
 ] as const;
 
+/**
+ * One ERC-2612 permit for `executeFill`'s `permits` argument. The spender is not a
+ * field: the solver always calls `permit(owner, SETTLEMENT, …)`. `owner` must be the
+ * order's maker (`PermitOwnerNotMaker`).
+ */
+export interface Permit2612 {
+  token: Address;
+  owner: Address;
+  value: bigint;
+  deadline: bigint;
+  v: number;
+  r: Hex;
+  s: Hex;
+}
+
+const permit2612Components = [
+  { name: "token", type: "address" },
+  { name: "owner", type: "address" },
+  { name: "value", type: "uint256" },
+  { name: "deadline", type: "uint256" },
+  { name: "v", type: "uint8" },
+  { name: "r", type: "bytes32" },
+  { name: "s", type: "bytes32" },
+] as const;
+
+/**
+ * The announce's {@link Erc2612Permit} (maker-signed, travels with the order) as the
+ * solver's {@link Permit2612}. Throws unless the permit's spender is `settlement` —
+ * the solver can only ever submit a permit to its own SETTLEMENT, so a permit for
+ * another spender would just fail on-chain.
+ */
+export function toSolverPermit(maker: Address, p: Erc2612Permit, settlement: Address): Permit2612 {
+  if (p.spender.toLowerCase() !== settlement.toLowerCase()) {
+    throw new Error(`toSolverPermit: permit spender ${p.spender} is not Settlement ${settlement}`);
+  }
+  return { token: p.token, owner: maker, value: p.value, deadline: p.deadline, v: p.v, r: p.r, s: p.s };
+}
+
 const view = (name: string, type: string) =>
   ({ type: "function", name, stateMutability: "view", inputs: [], outputs: [{ name: "", type }] }) as const;
 
@@ -128,8 +196,48 @@ export const AGGREGATOR_FILL_SOLVER_ABI = [
       { name: "fillAmount", type: "uint256" },
       { name: "plan", type: "tuple", components: routePlanComponents },
       { name: "takerData", type: "bytes" },
+      { name: "permits", type: "tuple[]", components: permit2612Components },
     ],
     outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
+  },
+  {
+    type: "function",
+    name: "executeItemFill",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "order", type: "tuple", components: orderComponents },
+      { name: "sig", type: "bytes" },
+      { name: "fillAmount", type: "uint256" },
+      { name: "plan", type: "tuple", components: routePlanComponents },
+      { name: "takerData", type: "bytes" },
+      { name: "lateItems", type: "uint256" },
+      { name: "permits", type: "tuple[]", components: permit2612Components },
+    ],
+    outputs: [{ name: "fillAmountsOut", type: "uint256[]" }],
+  },
+  view("POOL_VENUES", "uint256"),
+  view("MAX_POOL_HOPS", "uint256"),
+  {
+    type: "function",
+    name: "poolVenue",
+    stateMutability: "view",
+    inputs: [{ name: "i", type: "uint256" }],
+    outputs: [
+      { name: "factory", type: "address" },
+      { name: "initCodeHash", type: "bytes32" },
+    ],
+  },
+  {
+    type: "function",
+    name: "poolFor",
+    stateMutability: "view",
+    inputs: [
+      { name: "venue", type: "uint256" },
+      { name: "tokenA", type: "address" },
+      { name: "tokenB", type: "address" },
+      { name: "fee", type: "uint24" },
+    ],
+    outputs: [{ name: "", type: "address" }],
   },
   view("SETTLEMENT", "address"),
   view("EXECUTOR", "address"),
@@ -190,6 +298,23 @@ export const AGGREGATOR_FILL_SOLVER_ABI = [
   { type: "error", name: "BadItemSchedule", inputs: [] },
   { type: "error", name: "DirectNotMatchable", inputs: [] },
   { type: "error", name: "NoLegs", inputs: [] },
+  // Pool routes (2026-10-12):
+  { type: "error", name: "BadVenue", inputs: [] },
+  { type: "error", name: "UnknownVenue", inputs: [{ name: "venue", type: "uint256" }] },
+  { type: "error", name: "BadPoolRoute", inputs: [] },
+  { type: "error", name: "NotPool", inputs: [] },
+  {
+    type: "error",
+    name: "PoolOverBudget",
+    inputs: [
+      { name: "owed", type: "uint256" },
+      { name: "budget", type: "uint256" },
+    ],
+  },
+  { type: "error", name: "BadPoolSwap", inputs: [] },
+  // Permits (2026-10-12):
+  { type: "error", name: "PermitOwnerNotMaker", inputs: [{ name: "owner", type: "address" }] },
+  { type: "error", name: "PermitFailed", inputs: [{ name: "token", type: "address" }] },
   // PackedArraysMem.validateLegsIn/Out inside `_plan` (a malformed legs blob):
   { type: "error", name: "MalformedPackedArray", inputs: [] },
   // RouteSandbox (bubbled through the solver):
@@ -227,27 +352,159 @@ export const ROUTE_SANDBOX_ABI = [
   { type: "error", name: "RouteFailed", inputs: [{ name: "ret", type: "bytes" }] },
 ] as const;
 
-/** Encode `AggregatorFillSolver.executeFill`. Send it from an operator. */
+/**
+ * Encode `AggregatorFillSolver.executeFill`. Send it from an operator. `permits`
+ * (default none) are the maker's ERC-2612 permits the solver runs before the fill —
+ * see {@link toSolverPermit}.
+ */
 export function encodeAggregatorExecuteFill(args: {
   order: Order;
   sig: Hex;
   fillAmount: bigint;
   plan: RoutePlan;
   takerData?: Hex;
+  permits?: readonly Permit2612[];
 }): Hex {
   const p = args.plan;
+  if (p.router.toLowerCase() === POOL_ROUTE) {
+    // The contract reverts `BadPoolRoute`; fail before signing anything.
+    decodePoolRoute(p.data);
+    if (!isNoPatch(p.amountInOffset) && p.amountInOffset !== POOL_AMOUNT_IN_OFFSET) {
+      throw new Error(`encodeAggregatorExecuteFill: pool route amountInOffset must be 0 or NO_PATCH`);
+    }
+    if (!isNoPatch(p.amountOutOffset) && p.amountOutOffset !== POOL_AMOUNT_OUT_OFFSET) {
+      throw new Error(`encodeAggregatorExecuteFill: pool route amountOutOffset must be 32 or NO_PATCH`);
+    }
+  }
   for (const field of ["amountInOffset", "amountOutOffset"] as const) {
     const off = p[field];
-    if (off !== NO_PATCH && off + 32n > BigInt(size(p.data))) {
+    if (!isNoPatch(off) && off + 32n > BigInt(size(p.data))) {
       // The contract reverts `PatchOutOfBounds`; fail before signing anything.
       throw new Error(`encodeAggregatorExecuteFill: ${field} ${off} past the end of a ${size(p.data)}-byte route`);
+    }
+  }
+  const permits = args.permits ?? [];
+  for (const pm of permits) {
+    if (pm.owner.toLowerCase() !== args.order.maker.toLowerCase()) {
+      // The contract reverts `PermitOwnerNotMaker`.
+      throw new Error(`encodeAggregatorExecuteFill: permit owner ${pm.owner} is not the maker ${args.order.maker}`);
     }
   }
   return encodeFunctionData({
     abi: AGGREGATOR_FILL_SOLVER_ABI,
     functionName: "executeFill",
-    args: [packOrder(args.order) as never, args.sig, args.fillAmount, p as never, args.takerData ?? "0x"],
+    args: [packOrder(args.order) as never, args.sig, args.fillAmount, p as never, args.takerData ?? "0x", permits as never],
   });
+}
+
+// ──────────────────── direct pool routes ────────────────────
+//
+// `RoutePlan.router = POOL_ROUTE` and `data = amountIn(32) ‖ amountOut(32) ‖ path`,
+// path in SWAP order `token0 ‖ fee(3) ‖ venue(1) ‖ token1 ‖ …` (24 bytes per hop).
+// `amountOut == 0` = exact-input. The solver derives every pool as
+// CREATE2(venue factory, keccak256(abi.encode(token0, token1, fee)), venue init hash)
+// and pays only that address, inside `uniswapV3SwapCallback`.
+
+/** `RoutePlan.router` sentinel for a direct pool route. */
+export const POOL_ROUTE: Address = zeroAddress;
+/** The pool route's patchable words: `amountIn` at 0, `amountOut` at 32. */
+export const POOL_AMOUNT_IN_OFFSET = 0n;
+export const POOL_AMOUNT_OUT_OFFSET = 32n;
+/** Mirrors the contract's `MAX_POOL_HOPS`. */
+export const MAX_POOL_HOPS = 4;
+
+/** The canonical Uniswap v3 pool init code hash — Oku and SushiSwap v3 on Rootstock both use it (verified 2026-10-12). */
+export const UNISWAP_V3_POOL_INIT_CODE_HASH: Hex = "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54";
+
+/** One venue of the solver's allowlist (`PoolVenue`). */
+export interface PoolVenue {
+  factory: Address;
+  initCodeHash: Hex;
+}
+
+/**
+ * The Rootstock (chain 30) venue allowlist `DeployAggregatorFill.s.sol` deploys by
+ * default, IN INDEX ORDER: 0 = Uniswap v3 (Oku), 1 = SushiSwap v3.
+ */
+export const ROOTSTOCK_POOL_VENUES: readonly PoolVenue[] = [
+  { factory: "0xaF37EC98A00FD63689CF3060BF3B6784E00caD82", initCodeHash: UNISWAP_V3_POOL_INIT_CODE_HASH },
+  { factory: "0x46B3fDF7b5CDe91Ac049936bF0bDb12c5d22202e", initCodeHash: UNISWAP_V3_POOL_INIT_CODE_HASH },
+];
+
+/** The pool the solver's `poolFor(venue, tokenA, tokenB, fee)` derives — same CREATE2 arithmetic. */
+export function v3PoolAddress(venue: PoolVenue, tokenA: Address, tokenB: Address, fee: number): Address {
+  const [t0, t1] = tokenA.toLowerCase() < tokenB.toLowerCase() ? [tokenA, tokenB] : [tokenB, tokenA];
+  const salt = keccak256(encodeAbiParameters([{ type: "address" }, { type: "address" }, { type: "uint24" }], [t0, t1, fee]));
+  return getContractAddress({ opcode: "CREATE2", from: venue.factory, salt, bytecodeHash: venue.initCodeHash });
+}
+
+/**
+ * A pool route's `data` + where its amounts sit, as a {@link RouterCall}:
+ * `amountInOffset` = 0 (the solver rewrites it with the routed delta when the plan
+ * sets it); `amountOutOffset` = 32 for an EXACT-OUTPUT route (`amountOut > 0`, the
+ * word `pricedOut[0]` is patched into on a direct order), {@link NO_PATCH} for an
+ * exact-input one (setting it would turn the route exact-output).
+ *
+ * @param tokens  the path in SWAP order (`tokens[0]` = the order's input)
+ * @param fees    one fee tier per hop
+ * @param venues  one venue index per hop (position in the solver's allowlist)
+ * @param amountIn exact-input: the amount swapped; exact-output: the input CEILING
+ * @param amountOut 0 = exact-input; else the exact output paid to the payee
+ */
+export function encodePoolRoute(p: {
+  tokens: readonly Address[];
+  fees: readonly number[];
+  venues: readonly number[];
+  amountIn: bigint;
+  amountOut: bigint;
+}): RouterCall {
+  const hops = p.tokens.length - 1;
+  if (hops < 1 || hops > MAX_POOL_HOPS || p.fees.length !== hops || p.venues.length !== hops) {
+    throw new Error(`encodePoolRoute: need 2..${MAX_POOL_HOPS + 1} tokens and one fee + venue per hop`);
+  }
+  const parts: Hex[] = [numberToHex(p.amountIn, { size: 32 }), numberToHex(p.amountOut, { size: 32 })];
+  p.tokens.forEach((t, i) => {
+    parts.push(t.toLowerCase() as Hex);
+    if (i < hops) {
+      const f = p.fees[i]!;
+      const v = p.venues[i]!;
+      if (!Number.isInteger(f) || f < 0 || f >= 1 << 24) throw new Error(`encodePoolRoute: bad fee ${f}`);
+      if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error(`encodePoolRoute: bad venue ${v}`);
+      parts.push(encodePacked(["uint24", "uint8"], [f, v]));
+    }
+  });
+  return {
+    data: concat(parts),
+    amountInOffset: POOL_AMOUNT_IN_OFFSET,
+    amountOutOffset: p.amountOut === 0n ? NO_PATCH : POOL_AMOUNT_OUT_OFFSET,
+  };
+}
+
+/** Decode a pool route's `data` (the inverse of {@link encodePoolRoute}); throws on any malformed shape the contract refuses. */
+export function decodePoolRoute(data: Hex): {
+  amountIn: bigint;
+  amountOut: bigint;
+  tokens: Address[];
+  fees: number[];
+  venues: number[];
+} {
+  const n = size(data);
+  if (n < 108 || (n - 84) % 24 !== 0 || (n - 84) / 24 > MAX_POOL_HOPS) throw new Error(`decodePoolRoute: malformed (${n} bytes)`);
+  const hops = (n - 84) / 24;
+  const tokens: Address[] = [];
+  const fees: number[] = [];
+  const venues: number[] = [];
+  for (let k = 0; k <= hops; k++) {
+    const at = 64 + 24 * k;
+    tokens.push(sliceHex(data, at, at + 20) as Address);
+    if (k < hops) {
+      fees.push(Number(hexToBigInt(sliceHex(data, at + 20, at + 23))));
+      venues.push(Number(hexToBigInt(sliceHex(data, at + 23, at + 24))));
+    }
+  }
+  const amountOut = hexToBigInt(sliceHex(data, 32, 64));
+  if (amountOut > (1n << 255n) - 1n) throw new Error("decodePoolRoute: amountOut exceeds int256");
+  return { amountIn: hexToBigInt(sliceHex(data, 0, 32)), amountOut, tokens, fees, venues };
 }
 
 /** Decode `executeFill`'s return (`fillAmountsOut`, one per output leg) from an `eth_call`. */
@@ -595,7 +852,7 @@ export function swapRouter02AmountOutOffset(data: Hex): bigint {
 
 /** Exactly what the solver's `_patch` does: overwrite the 32-byte word at `offset`. */
 export function patchAmountIn(data: Hex, offset: bigint, amount: bigint): Hex {
-  if (offset === NO_PATCH) return data;
+  if (isNoPatch(offset)) return data;
   const o = Number(offset);
   if (o + 32 > size(data)) throw new Error(`patchAmountIn: offset ${o} past the end of ${size(data)} bytes`);
   const tail: Hex = o + 32 === size(data) ? "0x" : sliceHex(data, o + 32);

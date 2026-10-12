@@ -12,18 +12,12 @@ import {Proportional} from "@core/settlement/Proportional.sol";
 import {OrderState} from "@core/settlement/OrderState.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
 import {LegOut} from "@core/settlement/Structs.sol";
-import {
-    AggregatorFillSolver,
-    RoutePlan,
-    FillRoute,
-    SurplusPolicy,
-    NO_PATCH,
-    PPM
-} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {AggregatorFillSolver, RoutePlan, FillRoute, SurplusPolicy, NO_PATCH, PPM, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 import {RouteSandbox} from "@solvers/aggregator/RouteSandbox.sol";
 
 import {MockSettlementBase, MockERC20} from "@coretest/shared/MockSettlementBase.t.sol";
+import {newAgg} from "./shared/AggDeploy.sol";
 
 /// @dev A stand-in for an aggregator router. Behaves like the real thing in the
 ///      one way that matters here: it PULLS its input from `msg.sender`, which is
@@ -79,7 +73,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
     function setUp() public virtual override {
         super.setUp();
         router = new MockRouter(address(tA), address(tB));
-        aggSolver = new AggregatorFillSolver(address(settlement), _ops(), _noSplit());
+        aggSolver = newAgg(address(settlement), _ops(), _noSplit(), new PoolVenue[](0));
         vm.label(address(aggSolver), "aggregatorSolver");
         vm.label(address(router), "mockRouter");
 
@@ -199,6 +193,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
             outMask: 2,
             outAnchor: 1,
             direct: false,
+            payee: address(0),
             data: ""
         });
     }
@@ -214,7 +209,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
 
         uint256 makerBefore = tB.balanceOf(maker);
         Order memory o = _order(1);
-        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
+        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", new Permit2612[](0));
 
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT, "maker got its signed output");
         assertEq(tA.balanceOf(address(router)), AMOUNT_IN, "the router took the maker's input");
@@ -235,8 +230,8 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         RoutePlan memory p = _plan(address(aggSolver), AMOUNT_OUT);
         vm.prank(address(0xD00D));
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, address(0xD00D)));
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, ""); // this contract: an operator
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0)); // this contract: an operator
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "filled by an operator");
     }
 
@@ -274,7 +269,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         vm.expectRevert(
             _wrapped(abi.encodeWithSelector(AggregatorFillSolver.InsufficientOutput.selector, uint256(0), AMOUNT_OUT))
         );
-        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
     }
 
     // ════════════════════════ solver-side protection ════════════════════════
@@ -289,7 +284,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         vm.expectRevert(
             _wrapped(abi.encodeWithSelector(AggregatorFillSolver.InsufficientOutput.selector, uint256(80e18), 85e18))
         );
-        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
     }
 
     /// @dev Even with `minOut` satisfied, a route that cannot cover the maker's
@@ -300,7 +295,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
         bytes memory sig = _sign(o);
         RoutePlan memory plan = _plan(address(aggSolver), 1);
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
     }
 
     // ════════════════════════ the callback guards ════════════════════════
@@ -335,7 +330,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
     ///      `AggregatorAudit20260930Test`.)
     function test_agg_onFill_isNotReusableAfterTheFill() public {
         Order memory o = _order(7);
-        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
+        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", new Permit2612[](0));
         vm.prank(address(settlement.EXECUTOR()));
         vm.expectRevert(AggregatorFillSolver.NotArmed.selector);
         aggSolver.onFill(_anyRoute());
@@ -362,7 +357,7 @@ contract AggregatorFillSolverTest is MockSettlementBase {
             data: hex"deadbeef"
         });
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, AMOUNT_IN, bad, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, bad, "", new Permit2612[](0));
     }
 }
 
@@ -380,7 +375,7 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory stale = _planFor(AMOUNT_IN, address(aggSolver), 1, NO_PATCH);
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, AMOUNT_IN / 2, stale, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN / 2, stale, "", new Permit2612[](0));
     }
 
     /// @dev With the offset set, `onFill` rewrites the amount to what actually
@@ -391,7 +386,7 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
         uint256 makerBefore = tB.balanceOf(maker);
 
         // 4 = the offset of `amountIn`, immediately after the selector.
-        aggSolver.executeFill(o, sig, AMOUNT_IN / 2, _planFor(AMOUNT_IN, address(aggSolver), 1, 4), "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN / 2, _planFor(AMOUNT_IN, address(aggSolver), 1, 4), "", new Permit2612[](0));
 
         // Less the 1-wei input floor a patched route withholds on a zero balance.
         assertEq(tA.balanceOf(address(router)), AMOUNT_IN / 2 - 1, "router pulled what the fill delivered");
@@ -404,7 +399,7 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
     function test_patch_underQuotedRouteSweepsTheSurplus() public {
         Order memory o = _order(22);
         bytes memory sig = _sign(o);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, _planFor(AMOUNT_IN / 4, address(aggSolver), 1, 4), "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _planFor(AMOUNT_IN / 4, address(aggSolver), 1, 4), "", new Permit2612[](0));
         // The whole input less the self-seeded 1-wei floor.
         assertEq(tA.balanceOf(address(router)), AMOUNT_IN - 1, "whole input routed, not just the quoted quarter");
         assertEq(tA.balanceOf(address(aggSolver)), 1, "nothing stranded but the floor");
@@ -418,7 +413,7 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
     function test_patch_withoutOffsetTheSurplusStrands() public {
         Order memory o = _plainOrder(23, address(tA), address(tB), AMOUNT_IN, 20e18);
         bytes memory sig = _sign(o);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, _planFor(AMOUNT_IN / 4, address(aggSolver), 1, NO_PATCH), "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _planFor(AMOUNT_IN / 4, address(aggSolver), 1, NO_PATCH), "", new Permit2612[](0));
         // Swept to the caller rather than stranded in the contract — but still
         // unswapped, which is the inefficiency `amountInOffset` removes.
         // Less the 1-wei floor the zero-balance residue split keeps.
@@ -433,7 +428,7 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory under = _planFor(AMOUNT_IN / 4, address(aggSolver), 1, NO_PATCH);
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, AMOUNT_IN, under, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, under, "", new Permit2612[](0));
     }
 
     /// @dev An offset past the end of the blob is refused rather than written
@@ -443,7 +438,7 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory bad = _planFor(AMOUNT_IN, address(aggSolver), 1, 9_999);
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, AMOUNT_IN, bad, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, bad, "", new Permit2612[](0));
     }
 
     /// @dev NO_PATCH leaves the aggregator's bytes byte-for-byte intact, which is
@@ -452,7 +447,7 @@ contract AggregatorAmountPatchTest is AggregatorFillSolverTest {
         Order memory o = _order(25);
         bytes memory sig = _sign(o);
         uint256 makerBefore = tB.balanceOf(maker);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, _planFor(AMOUNT_IN, address(aggSolver), AMOUNT_OUT, NO_PATCH), "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _planFor(AMOUNT_IN, address(aggSolver), AMOUNT_OUT, NO_PATCH), "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT, "exact-quote route still fills");
     }
 }
@@ -473,7 +468,7 @@ contract AggregatorPayCapTest is AggregatorFillSolverTest {
     function test_cap_exactPayFills() public {
         Order memory o = _order(30);
         uint256 makerBefore = tB.balanceOf(maker);
-        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(AMOUNT_OUT, address(this)), "");
+        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(AMOUNT_OUT, address(this)), "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT, "maker paid exactly its price");
     }
 
@@ -484,7 +479,7 @@ contract AggregatorPayCapTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory tight = _capped(AMOUNT_OUT - 1, address(this));
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, AMOUNT_IN, tight, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, tight, "", new Permit2612[](0));
     }
 
     /// @dev THE ALLOWANCE PROPERTY. With a cap, Settlement is never approved over
@@ -492,7 +487,7 @@ contract AggregatorPayCapTest is AggregatorFillSolverTest {
     ///      own profit, which an approve-everything callback would leave behind.
     function test_cap_leavesNoResidualAllowance() public {
         Order memory o = _order(32);
-        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(AMOUNT_OUT, address(this)), "");
+        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(AMOUNT_OUT, address(this)), "", new Permit2612[](0));
         assertEq(tB.allowance(address(aggSolver), address(settlement)), 0, "no allowance over the spread");
     }
 
@@ -500,7 +495,7 @@ contract AggregatorPayCapTest is AggregatorFillSolverTest {
     function test_cap_profitGoesToTheNamedRecipient() public {
         address treasury = address(0x7EA5);
         Order memory o = _order(33);
-        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(AMOUNT_OUT, treasury), "");
+        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(AMOUNT_OUT, treasury), "", new Permit2612[](0));
         // Less the 1-wei floor a zero balance self-seeds out of the filler's share.
         assertEq(tB.balanceOf(treasury), AMOUNT_IN - AMOUNT_OUT - 1, "treasury got the spread");
         assertEq(tB.balanceOf(address(aggSolver)), 1, "contract holds only the floor after");
@@ -513,7 +508,7 @@ contract AggregatorPayCapTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory plan = _capped(AMOUNT_OUT, address(0));
         vm.prank(filler);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
         assertEq(tB.balanceOf(filler), AMOUNT_IN - AMOUNT_OUT - 1, "caller keeps the spread, less the floor");
     }
 
@@ -524,7 +519,7 @@ contract AggregatorPayCapTest is AggregatorFillSolverTest {
     function test_cap_zeroMeansNoCap() public {
         Order memory o = _order(35);
         uint256 makerBefore = tB.balanceOf(maker);
-        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(0, address(this)), "");
+        aggSolver.executeFill(o, _sign(o), AMOUNT_IN, _capped(0, address(this)), "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT, "maker still capped by its own band");
     }
 }
@@ -549,7 +544,7 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
         super.setUp();
         address[] memory ops = new address[](2);
         (ops[0], ops[1]) = (address(this), eve);
-        aggSolver = new AggregatorFillSolver(address(settlement), ops, _noSplit());
+        aggSolver = newAgg(address(settlement), ops, _noSplit(), new PoolVenue[](0));
     }
 
     /// @dev A throwaway 1-wei order with `eve` as maker AND filler. The cheapest
@@ -595,7 +590,7 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
         bytes memory route = abi.encodeCall(MockRouter.swap, (1, address(aggSolver)));
 
         vm.prank(eve);
-        aggSolver.executeFill(o, sig, 1, _evePlan(eve, route), "");
+        aggSolver.executeFill(o, sig, 1, _evePlan(eve, route), "", new Permit2612[](0));
 
         assertEq(tC.balanceOf(eve), 0, "eve took nothing");
         assertEq(tC.balanceOf(address(aggSolver)), 50_000e18, "residue untouched");
@@ -610,7 +605,7 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
 
         vm.prank(eve);
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, 1, _evePlan(eve, ""), "");
+        aggSolver.executeFill(o, sig, 1, _evePlan(eve, ""), "", new Permit2612[](0));
 
         assertEq(tC.balanceOf(address(aggSolver)), 50_000e18, "residue untouched");
     }
@@ -625,7 +620,7 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
         p.router = address(puppet);
 
         vm.prank(eve);
-        aggSolver.executeFill(o, sig, 1, p, "");
+        aggSolver.executeFill(o, sig, 1, p, "", new Permit2612[](0));
 
         assertEq(puppet.calls(), 1, "the target ran");
         assertEq(puppet.lastCaller(), address(aggSolver.SANDBOX()), "as the sandbox, never as the solver");
@@ -650,7 +645,7 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
 
         vm.prank(eve);
         vm.expectRevert(AggregatorFillSolver.NoLegs.selector);
-        aggSolver.executeFill(o, sig, 1, _evePlan(eve, ""), "");
+        aggSolver.executeFill(o, sig, 1, _evePlan(eve, ""), "", new Permit2612[](0));
     }
 
     /// @dev The sandbox refuses the protocol's own contracts as targets — defence
@@ -666,7 +661,7 @@ contract AggregatorSolverHostileCallerTest is AggregatorFillSolverTest {
             vm.expectRevert(
                 _wrapped(abi.encodeWithSelector(RouteSandbox.ForbiddenTarget.selector, forbidden[i]))
             );
-            aggSolver.executeFill(o, sig, 1, p, "");
+            aggSolver.executeFill(o, sig, 1, p, "", new Permit2612[](0));
         }
     }
 }
@@ -709,7 +704,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
     function setUp() public override {
         super.setUp();
         // The suite's callers are this contract and FILLER.
-        splitSolver = new AggregatorFillSolver(address(settlement), _splitOps(), SurplusPolicy({makerPpm: MAKER_PPM, protocolPpm: PROTOCOL_PPM, protocolRecipient: PROTOCOL}));
+        splitSolver = newAgg(address(settlement), _splitOps(), SurplusPolicy({makerPpm: MAKER_PPM, protocolPpm: PROTOCOL_PPM, protocolRecipient: PROTOCOL}), new PoolVenue[](0));
         vm.label(address(splitSolver), "splitSolver");
     }
 
@@ -740,10 +735,8 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         RoutePlan memory plan = _splitPlan(address(0), 0);
         uint256 makerBefore = tB.balanceOf(maker);
 
-        vm.expectEmit(true, true, false, true, address(splitSolver));
-        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 5e18, 1e18, 0, 4e18 - 1);
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
 
         // The maker's and the protocol's shares are computed on the WHOLE spread;
         // the self-seeded 1-wei floor comes out of the filler's remainder only.
@@ -762,7 +755,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         uint256 makerBefore = tB.balanceOf(maker);
 
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
 
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT + 5e18, "maker unchanged by the originator share");
         assertEq(tB.balanceOf(PROTOCOL), 1e18, "protocol unchanged by the originator share");
@@ -780,11 +773,11 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
 
         uint256 makerBefore = tA.balanceOf(maker);
         vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, over, "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, over, "", new Permit2612[](0));
         assertEq(tA.balanceOf(maker), makerBefore, "nothing moved");
 
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, ok, "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, ok, "", new Permit2612[](0));
         assertEq(tB.balanceOf(ORIGINATOR), 4e18, "originator took the whole remainder");
         assertEq(tB.balanceOf(FILLER), 0, "filler gave it all away");
     }
@@ -795,7 +788,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory plan = _splitPlan(address(0), 1);
         vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
     }
 
     /// @dev THE INPUT SIDE IS SPLIT TOO (F28, 2026-09-12). A route that consumes
@@ -812,7 +805,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         uint256 makerB = tB.balanceOf(maker);
 
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
 
         // output spread 5 B: 50% / 10% / 40%
         assertEq(tB.balanceOf(maker) - makerB, 20e18 + 2.5e18, "maker: signed + 50% of the B spread");
@@ -835,7 +828,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         uint256 makerBefore = tB.balanceOf(maker);
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, _splitPlan(ORIGINATOR, 100_000), "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, _splitPlan(ORIGINATOR, 100_000), "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT, "maker: signed price only");
         assertEq(tB.balanceOf(PROTOCOL), 0);
         assertEq(tB.balanceOf(ORIGINATOR), 0);
@@ -853,7 +846,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         plan.maxPay = AMOUNT_OUT;
         plan.profitRecipient = treasury;
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
         assertEq(tB.balanceOf(treasury), 4e18 - 1, "filler share to the named recipient, less the floor");
         assertEq(tB.balanceOf(FILLER), 0, "caller got nothing directly");
         assertEq(tB.balanceOf(PROTOCOL), 1e18);
@@ -868,7 +861,7 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         uint256 makerBefore = tB.balanceOf(maker);
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, _splitPlan(address(0), 0), "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, _splitPlan(address(0), 0), "", new Permit2612[](0));
         uint256 spread = SPREAD + 7;
         uint256 toMaker = (spread * MAKER_PPM) / PPM;
         uint256 toProtocol = (spread * PROTOCOL_PPM) / PPM;
@@ -881,24 +874,28 @@ contract AggregatorSurplusSplitTest is AggregatorFillSolverTest {
     /// @dev Policy validation at construction.
     function test_split_constructorRejectsBadPolicy() public {
         vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
-        new AggregatorFillSolver(address(settlement), _ops(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_001, protocolRecipient: PROTOCOL}));
+        new AggregatorFillSolver(address(settlement), _ops(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_001, protocolRecipient: PROTOCOL}), new PoolVenue[](0));
         vm.expectRevert(AggregatorFillSolver.BadSurplusSplit.selector);
-        new AggregatorFillSolver(address(settlement), _ops(), SurplusPolicy({makerPpm: 0, protocolPpm: 1, protocolRecipient: address(0)}));
+        new AggregatorFillSolver(address(settlement), _ops(), SurplusPolicy({makerPpm: 0, protocolPpm: 1, protocolRecipient: address(0)}), new PoolVenue[](0));
         // The boundary is allowed: 100% away from the filler.
-        new AggregatorFillSolver(address(settlement), _splitOps(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_000, protocolRecipient: PROTOCOL}));
+        newAgg(address(settlement), _splitOps(), SurplusPolicy({makerPpm: 600_000, protocolPpm: 400_000, protocolRecipient: PROTOCOL}), new PoolVenue[](0));
     }
 
     /// @dev The zero policy is the pre-existing behaviour: the whole spread to the
-    ///      filler, no event-visible shares elsewhere.
+    ///      filler, no share elsewhere — the maker gets exactly its signed price,
+    ///      the protocol nothing, the contract only its 1-wei floor.
     function test_split_zeroPolicyIsTheOldBehaviour() public {
         Order memory o = _order(57);
         bytes memory sig = _sign(o);
         RoutePlan memory plan = _plan(address(aggSolver), AMOUNT_OUT);
-        vm.expectEmit(true, true, false, true, address(aggSolver));
-        emit AggregatorFillSolver.SurplusSplit(address(tB), maker, 0, 0, 0, SPREAD - 1);
+        uint256 makerBefore = tB.balanceOf(maker);
+        uint256 protocolBefore = tB.balanceOf(PROTOCOL);
         vm.prank(FILLER);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, plan, "", new Permit2612[](0));
         assertEq(tB.balanceOf(FILLER), SPREAD - 1, "the spread, less the self-seeded 1-wei floor");
+        assertEq(tB.balanceOf(maker) - makerBefore, AMOUNT_OUT, "maker: exactly the signed price");
+        assertEq(tB.balanceOf(PROTOCOL), protocolBefore, "protocol: nothing under the zero policy");
+        assertEq(tB.balanceOf(address(aggSolver)), 1, "only the 1-wei floor stays");
     }
 }
 
@@ -917,7 +914,7 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         super.setUp();
         address[] memory ops = new address[](1);
         ops[0] = OPERATOR;
-        gated = new AggregatorFillSolver(address(settlement), ops, _noSplit());
+        gated = newAgg(address(settlement), ops, _noSplit(), new PoolVenue[](0));
         vm.label(address(gated), "gatedSolver");
     }
 
@@ -933,10 +930,11 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
     ///      the policy. There is no open instance to plant a sandbox approval on.
     function test_gate_emptySetReverts() public {
         vm.expectRevert(AggregatorFillSolver.NoOperators.selector);
-        new AggregatorFillSolver(address(settlement), new address[](0), _noSplit());
+        new AggregatorFillSolver(address(settlement), new address[](0), _noSplit(), new PoolVenue[](0));
         vm.expectRevert(AggregatorFillSolver.NoOperators.selector);
         new AggregatorFillSolver(
-            address(settlement), new address[](0), SurplusPolicy({makerPpm: 1, protocolPpm: 0, protocolRecipient: address(0)})
+            address(settlement), new address[](0), SurplusPolicy({makerPpm: 1, protocolPpm: 0, protocolRecipient: address(0)}),
+            new PoolVenue[](0)
         );
     }
 
@@ -947,7 +945,7 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         vm.prank(STRANGER);
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, STRANGER));
-        gated.executeFill(o, sig, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
+        gated.executeFill(o, sig, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker), 0, "nothing settled");
     }
 
@@ -957,7 +955,7 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         Order memory o = _order(2);
         bytes memory sig = _sign(o);
         vm.prank(OPERATOR);
-        gated.executeFill(o, sig, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
+        gated.executeFill(o, sig, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid");
         assertEq(tB.balanceOf(OPERATOR), AMOUNT_IN - AMOUNT_OUT - 1, "operator keeps the spread, less the floor");
         assertEq(tB.balanceOf(address(gated)), 1, "only the self-seeded 1-wei floor retained");
@@ -975,11 +973,11 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         bytes memory sigG = _sign(g);
         vm.prank(STRANGER);
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, STRANGER));
-        gated.executeFill(g, sigG, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
+        gated.executeFill(g, sigG, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "", new Permit2612[](0));
 
         // ...and the operator, being the contract's caller, passes both gates.
         vm.prank(OPERATOR);
-        gated.executeFill(g, sigG, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "");
+        gated.executeFill(g, sigG, AMOUNT_IN, _plan(address(gated), AMOUNT_OUT), "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "operator filled the exclusive order");
     }
 
@@ -1003,11 +1001,11 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         address[] memory five = new address[](5);
         for (uint256 i; i < 5; i++) five[i] = address(bytes20(keccak256(abi.encode("r", i))));
         vm.expectRevert(AggregatorFillSolver.BadSetSize.selector);
-        new AggregatorFillSolver(address(settlement), five, _noSplit());
+        new AggregatorFillSolver(address(settlement), five, _noSplit(), new PoolVenue[](0));
 
         address[] memory four = new address[](4);
         for (uint256 i; i < 4; i++) four[i] = address(bytes20(keccak256(abi.encode("o", i))));
-        AggregatorFillSolver s = new AggregatorFillSolver(address(settlement), four, _noSplit());
+        AggregatorFillSolver s = newAgg(address(settlement), four, _noSplit(), new PoolVenue[](0));
         for (uint256 i; i < 4; i++) assertTrue(s.isOperator(four[i]));
         assertFalse(s.isOperator(address(0)));
         assertFalse(s.isOperator(address(this)), "only the listed four");
@@ -1017,7 +1015,7 @@ contract AggregatorOperatorGateTest is AggregatorFillSolverTest {
         address[] memory ops = new address[](1);
         ops[0] = address(0);
         vm.expectRevert(AggregatorFillSolver.BadOperator.selector);
-        new AggregatorFillSolver(address(settlement), ops, _noSplit());
+        new AggregatorFillSolver(address(settlement), ops, _noSplit(), new PoolVenue[](0));
     }
 }
 
@@ -1038,7 +1036,7 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
     function test_direct_exactOutputPaysMakerAndKeepsSpreadAsInput() public {
         Order memory o = _directOrder(1);
         bytes memory sig = _sign(o);
-        uint256[] memory outs = aggSolver.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker), "");
+        uint256[] memory outs = aggSolver.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker), "", new Permit2612[](0));
 
         assertEq(outs[0], AMOUNT_OUT, "core reports the priced leg");
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid by the router directly");
@@ -1056,7 +1054,7 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
         Order memory o = _directOrder(2);
         bytes memory sig = _sign(o);
         vm.expectRevert(Base.DeltaTooLow.selector);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, address(aggSolver)), "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, address(aggSolver)), "", new Permit2612[](0));
         assertEq(tA.balanceOf(maker), 1_000e18, "maker untouched");
     }
 
@@ -1068,7 +1066,7 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
         RoutePlan memory p = _exactOutPlan(AMOUNT_OUT - 1, AMOUNT_IN, maker);
         p.minOut = AMOUNT_OUT; // would be InsufficientOutput on the pull path
         vm.expectRevert(Base.DeltaTooLow.selector);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
     }
 
     /// @dev Over-delivery is price improvement the maker keeps; the spread just
@@ -1076,7 +1074,7 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
     function test_direct_exactInputRoute_givesTheMakerEverything() public {
         Order memory o = _directOrder(4);
         bytes memory sig = _sign(o);
-        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(maker, 0), "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(maker, 0), "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker), AMOUNT_IN, "the whole swap output went to the maker");
         assertEq(tA.balanceOf(address(this)), 0, "no spread left for the caller");
     }
@@ -1085,12 +1083,12 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
     function test_direct_surplusPolicyAppliesToTheResidue() public {
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        AggregatorFillSolver split = new AggregatorFillSolver(address(settlement), ops, SurplusPolicy({makerPpm: 500_000, protocolPpm: 0, protocolRecipient: address(0)}));
+        AggregatorFillSolver split = newAgg(address(settlement), ops, SurplusPolicy({makerPpm: 500_000, protocolPpm: 0, protocolRecipient: address(0)}), new PoolVenue[](0));
         Order memory o = _directOrder(5);
         o.exclusiveFiller = address(split);
         bytes memory sig = _sign(o);
         uint256 makerABefore = tA.balanceOf(maker);
-        split.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker), "");
+        split.executeFill(o, sig, AMOUNT_IN, _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker), "", new Permit2612[](0));
         uint256 spread = AMOUNT_IN - AMOUNT_OUT;
         // The maker paid AMOUNT_IN and got half the residue back, in the same token.
         // The maker's half is untouched by the self-seeded floor: it comes out of the
@@ -1111,7 +1109,7 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _exactOutPlan(AMOUNT_OUT, AMOUNT_IN, maker);
         p.profitRecipient = treasury;
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         assertEq(tB.balanceOf(maker), AMOUNT_OUT, "maker paid by the route");
         assertEq(tB.balanceOf(address(aggSolver)), parked, "the parked tB never moved");
         assertEq(tB.balanceOf(treasury), 0, "nothing of it paid as surplus");
@@ -1129,7 +1127,7 @@ contract AggregatorDirectDeliveryTest is AggregatorFillSolverTest {
         vm.expectRevert(
             _wrapped(abi.encodeWithSelector(AggregatorFillSolver.InsufficientOutput.selector, 0, AMOUNT_OUT))
         );
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
     }
 }
 
@@ -1160,7 +1158,7 @@ contract AggregatorStaleApprovalTest is AggregatorFillSolverTest {
         super.setUp();
         address[] memory ops = new address[](2);
         (ops[0], ops[1]) = (address(this), vm.addr(EVE_PK));
-        aggSolver = new AggregatorFillSolver(address(settlement), ops, _noSplit());
+        aggSolver = newAgg(address(settlement), ops, _noSplit(), new PoolVenue[](0));
     }
 
     /// @dev The residue an un-cleared fill would leave: a balance in a token the
@@ -1204,7 +1202,7 @@ contract AggregatorStaleApprovalTest is AggregatorFillSolverTest {
         // approval) is now impossible on top of the post-fill clear.
         vm.prank(eve);
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", new Permit2612[](0));
 
         assertEq(tC.balanceOf(eve), 0, "the stale approval paid nobody");
         assertEq(tC.balanceOf(address(aggSolver)), STALE, "the solver kept its balance");
@@ -1224,7 +1222,7 @@ contract AggregatorStaleApprovalTest is AggregatorFillSolverTest {
 
         vm.prank(address(0xD00D));
         vm.expectRevert(abi.encodeWithSelector(AggregatorFillSolver.NotOperator.selector, address(0xD00D)));
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
 
         assertEq(tB.balanceOf(address(aggSolver)), 0, "nothing parked on the shared contract");
         assertEq(tB.allowance(address(aggSolver), address(settlement)), 0, "no approval outlived the fill");
@@ -1266,7 +1264,7 @@ contract AggregatorStaleApprovalTest is AggregatorFillSolverTest {
 
         vm.prank(eve);
         vm.expectRevert();
-        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, _plan(address(aggSolver), AMOUNT_OUT), "", new Permit2612[](0));
         assertEq(tC.balanceOf(address(aggSolver)), STALE, "balance alone is not reachable");
     }
 }
@@ -1321,7 +1319,7 @@ contract AggregatorProportionalSentinelTest is AggregatorSurplusSplitTest {
         uint256 makerBefore = tB.balanceOf(maker);
 
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, ANY, plan, "");
+        splitSolver.executeFill(o, sig, ANY, plan, "", new Permit2612[](0));
 
         uint256 spread = 150e18 - AMOUNT_OUT; // 60
         assertEq(tA.balanceOf(maker), 0, "the whole live balance was sold");
@@ -1349,7 +1347,7 @@ contract AggregatorProportionalSentinelTest is AggregatorSurplusSplitTest {
 
         vm.prank(FILLER);
         vm.expectRevert();
-        splitSolver.executeFill(o, sig, ANY, _followingPlan(0), "");
+        splitSolver.executeFill(o, sig, ANY, _followingPlan(0), "", new Permit2612[](0));
 
         assertEq(tB.balanceOf(address(splitSolver)), 500e18, "the solver's own tB was never touched");
         assertEq(tA.balanceOf(maker), 50e18, "nothing moved");
@@ -1367,10 +1365,10 @@ contract AggregatorProportionalSentinelTest is AggregatorSurplusSplitTest {
 
         vm.prank(FILLER);
         vm.expectRevert(Proportional.ProportionalNeedsFullFill.selector);
-        splitSolver.executeFill(o, sig, AMOUNT_IN, _followingPlan(AMOUNT_OUT), "");
+        splitSolver.executeFill(o, sig, AMOUNT_IN, _followingPlan(AMOUNT_OUT), "", new Permit2612[](0));
 
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, ANY, _followingPlan(AMOUNT_OUT), "");
+        splitSolver.executeFill(o, sig, ANY, _followingPlan(AMOUNT_OUT), "", new Permit2612[](0));
         assertEq(tA.balanceOf(maker), 0, "the drifted balance was swept");
     }
 
@@ -1386,7 +1384,7 @@ contract AggregatorProportionalSentinelTest is AggregatorSurplusSplitTest {
         bytes memory sig = _sign(o);
 
         vm.prank(FILLER);
-        splitSolver.executeFill(o, sig, ANY, _followingPlan(AMOUNT_OUT + 2e18), "");
+        splitSolver.executeFill(o, sig, ANY, _followingPlan(AMOUNT_OUT + 2e18), "", new Permit2612[](0));
 
         assertEq(tB.balanceOf(address(0xFEE)), 2e18, "the signed fee leg is paid in full");
         assertEq(tB.balanceOf(PROTOCOL), (150e18 - AMOUNT_OUT - 2e18) / 10, "protocol fee on what is left");
@@ -1435,7 +1433,7 @@ contract AggregatorLivePricingTest is AggregatorFillSolverTest {
         vm.warp(block.timestamp + elapsed);
         uint256 makerB = tB.balanceOf(maker);
         uint256 mineA = tA.balanceOf(address(this));
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         toMaker = tB.balanceOf(maker) - makerB;
         residue = tA.balanceOf(address(this)) - mineA;
     }
@@ -1476,7 +1474,7 @@ contract AggregatorLivePricingTest is AggregatorFillSolverTest {
                 abi.encodeWithSelector(AggregatorFillSolver.PatchOutOfBounds.selector, p.data.length - 31, p.data.length)
             )
         );
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
     }
 
     // ───────────── task 08: the filler's floor on `fillWithCallback` ─────────────
@@ -1502,7 +1500,7 @@ contract AggregatorLivePricingTest is AggregatorFillSolverTest {
         bytes memory sig = _sign(o);
         vm.fee(1 gwei);
         vm.txGasPrice(1 gwei + bid);
-        (ok, ret) = address(aggSolver).call(abi.encodeCall(aggSolver.executeFill, (o, sig, AMOUNT_OUT, p, "")));
+        (ok, ret) = address(aggSolver).call(abi.encodeCall(aggSolver.executeFill, (o, sig, AMOUNT_OUT, p, "", new Permit2612[](0))));
     }
 
     /// Task 08: quoted at a 1 gwei bid (bump 5000 — the maker pays 97.5 tA), floored

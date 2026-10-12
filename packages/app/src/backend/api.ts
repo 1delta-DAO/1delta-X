@@ -1,6 +1,7 @@
-import type { Deployment, Order, SoftCancel } from "@1delta-x/sdk";
+import type { Deployment, Erc2612Permit, Order, SoftCancel } from "@1delta-x/sdk";
 import type { Hex } from "viem";
 
+import type { ChainFillState } from "../lib/chain";
 import type { Fill, RestingOrder, Side, SliceSpec, Source } from "../lib/types";
 
 /**
@@ -16,6 +17,12 @@ export interface SignedOrder {
   deployment: Deployment;
   /** False when no Settlement is deployed on this chain: the signature is real, but no filler can use it. */
   deployed: boolean;
+  /**
+   * Gasless funding (lib/permit.ts): the maker's ERC-2612 permit to Settlement for this
+   * order's input, sent with it to the book. A filler submits it right before the fill;
+   * the maker sends no approval transaction.
+   */
+  erc2612Permit?: Erc2612Permit;
 }
 
 /** Maker-signed retraction. Advisory — it evicts from books that honour it. */
@@ -100,6 +107,12 @@ export interface OrderbookApi {
   /** Drop a row whose orders were cancelled ON-CHAIN (the transaction is mined). */
   confirmHardCancel(orderHash: string): void;
   /**
+   * The app BROADCAST the on-chain cancel for this row (before its receipt). A
+   * fill-once order's fill and its nonce cancel leave the same on-chain trace; this
+   * is how a real book knows the consumed nonce was the user's cancel, not a fill.
+   */
+  markHardCancelSent?(orderHash: string): void;
+  /**
    * Attach a newly signed TWAP slice to its row; only signed slices can fill.
    * A real book POSTs the slice first and rejects (throws) when the server does.
    */
@@ -121,9 +134,10 @@ export interface OrderbookApi {
   restore?(maker: `0x${string}`): Promise<void>;
   /**
    * The on-chain fallback a real book uses when an order leaves it without a
-   * reported fill: `Settlement.filled(hash)` for a signed order (anchor wei, max =
+   * reported fill (and, for a fill-once order, whether its nonce is consumed —
+   * lib/chain.ts `readFillState`): `Settlement.filled(hash)` for a signed order (anchor wei, max =
    * cancelled), or null when it cannot read. Set when a wallet is on the chain;
    * null clears it. The mock needs none.
    */
-  setFillReader?(reader: ((signed: SignedOrder) => Promise<bigint | null>) | null): void;
+  setFillReader?(reader: ((signed: SignedOrder) => Promise<bigint | ChainFillState | null>) | null): void;
 }

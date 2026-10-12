@@ -78,15 +78,33 @@ message PermitBatch {
   bytes    deadline           = 4;
 }
 
+// A maker-signed ERC-2612 permit that FUNDS the order gaslessly: an ERC-20
+// allowance from the maker to the SETTLEMENT (the direct-approval fallback of
+// Settlement's pull), which a filler submits with token.permit(...) before it
+// fills. Not covered by the order signature; verified against the token's own
+// DOMAIN_SEPARATOR(). nonce = the token's nonces(maker) the maker signed over.
+message Erc2612Permit {
+  bytes  token    = 1;
+  bytes  spender  = 2;
+  bytes  value    = 3;
+  bytes  nonce    = 4;
+  bytes  deadline = 5;
+  uint32 v        = 6;
+  bytes  r        = 7;
+  bytes  s        = 8;
+}
+
 // A signed order in flight. The self-authenticating unit: (order, sig) verifies
 // against the Settlement domain with zero trust in the relay. Optional
 // permitBatch carries the single-signature fillWithPermit allowances; sigless
-// marks the on-chain approveOrder path (maker cannot ECDSA-sign).
+// marks the on-chain approveOrder path (maker cannot ECDSA-sign);
+// erc2612Permit optionally funds it gaslessly (see Erc2612Permit).
 message OrderAnnounce {
   Order       order       = 1;
   bytes       sig         = 2;
   PermitBatch permitBatch = 3;
   bool        sigless     = 4;
+  Erc2612Permit erc2612Permit = 5;
 }
 
 // Maker-signed soft cancel — the free, off-chain retraction.

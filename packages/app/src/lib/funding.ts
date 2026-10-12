@@ -30,6 +30,13 @@ export interface FundingState {
   grantAmount: bigint;
   /** Its expiry, unix seconds; `0` means NEVER expires in Permit3. */
   grantExpiration: number;
+  /**
+   * ERC-20 `allowance(maker, Settlement)` — the DIRECT surface a relayed ERC-2612
+   * permit creates (lib/permit.ts). Optional: older readers (and tests) omit it.
+   */
+  directAllowance?: bigint;
+  /** `Permit3.isStrict(maker, token)`: the direct surface is refused, so gasless funding is not offered. */
+  strict?: boolean;
 }
 
 export type FundingStep =
@@ -165,7 +172,25 @@ export function fundingButtonLabel(plan: Pick<FundingPlan, "steps" | "trims">, a
 /** Whether anything is left standing that a revoke would clear. */
 export function hasLeftover(state: FundingState, now: number): boolean {
   const grantLive = state.grantAmount > 0n && (state.grantExpiration === 0 || state.grantExpiration >= now);
-  return state.erc20Allowance > 0n || grantLive;
+  return state.erc20Allowance > 0n || grantLive || (state.directAllowance ?? 0n) > 0n;
+}
+
+/**
+ * Whether this ticket may be funded GASLESSLY — an ERC-2612 permit to Settlement,
+ * signed next to the order and relayed by the filler (lib/permit.ts) — instead of the
+ * approve + grant transactions. `reason` says why not, for the form.
+ */
+export function planGasless(
+  state: FundingState | undefined,
+  a: { permitSupported: boolean; needsWrap: boolean; multiOrder: boolean; covered: boolean },
+): { available: boolean; reason: string | null } {
+  if (!a.permitSupported) return { available: false, reason: null };
+  if (a.covered) return { available: false, reason: null }; // nothing to fund
+  if (!state) return { available: false, reason: null };
+  if (state.strict) return { available: false, reason: "Permit3 strict mode is on for this token: gasless funding uses a direct approval, which strict mode refuses" };
+  if (a.needsWrap) return { available: false, reason: "needs a wrap first" };
+  if (a.multiOrder) return { available: false, reason: "a TWAP signs one slice at a time; fund it with approvals" };
+  return { available: true, reason: null };
 }
 
 export interface Call {
@@ -217,10 +242,14 @@ export function fundingCalls(steps: readonly FundingStep[], t: FundingTargets): 
   );
 }
 
-/** Clear both legs: the ERC-20 approval to Permit3 and the book grant to Settlement. */
+/**
+ * Clear every funding surface: the ERC-20 approval to Permit3, the book grant to
+ * Settlement, and a direct approval to Settlement (what a relayed gasless permit leaves).
+ */
 export function revokeCalls(state: FundingState, t: FundingTargets): Call[] {
   const calls: Call[] = [];
   if (state.grantAmount > 0n) calls.push({ to: t.permit3, data: encodeRevokeToken(t.settlement, t.token), label: "Revoke the Permit3 grant" });
   if (state.erc20Allowance > 0n) calls.push({ to: t.token, data: approveData(t.permit3, 0n), label: "Revoke the approval" });
+  if ((state.directAllowance ?? 0n) > 0n) calls.push({ to: t.token, data: approveData(t.settlement, 0n), label: "Revoke the direct approval to Settlement" });
   return calls;
 }

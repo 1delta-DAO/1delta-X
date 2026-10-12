@@ -233,8 +233,10 @@ optional: the caller supplies the route, so an exact-output route
 the entire spread into unspent input and the maker's and protocol's shares read
 zero (F28, 2026-09-12). The residue is now split by the same shares, in `tokenIn`
 units, unpriced — it is maker input that was never needed, so no oracle is
-required to hand the maker's share back. One `SurplusSplit` event per token per
-fill carries the four amounts.
+required to hand the maker's share back. The split emits no event of its own
+(a per-token `SurplusSplit` log was removed 2026-10-12: 2,653 gas per fill,
+nothing read it) — each share is visible as the token's ERC-20 `Transfer` from
+the solver.
 
 This is the conversion analogue of §1–§3: relayer revenue = the band (or the
 rising input leg on a deposit), originator revenue = the fee leg (or fee item),

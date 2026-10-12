@@ -1,4 +1,4 @@
-import type { Order, PermitBatch, SoftCancel } from "@1delta-x/sdk";
+import type { Erc2612Permit, Order, PermitBatch, SoftCancel } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
 /**
@@ -14,6 +14,14 @@ export interface OrderAnnounce {
   permitBatch?: PermitBatch;
   /** On-chain `approveOrder` path — the maker cannot ECDSA-sign (rare). */
   sigless?: boolean;
+  /**
+   * Optional maker-signed ERC-2612 permit (`spender` = the Settlement) that funds the
+   * order without an approval transaction: a filler submits `token.permit(...)` just
+   * before it fills, and Settlement's direct-approval fallback pulls against the
+   * allowance it creates. NOT covered by `sig` — the book recovers it against the
+   * token's own `DOMAIN_SEPARATOR()` (see `Verifier.checkErc2612`).
+   */
+  erc2612Permit?: Erc2612Permit;
 }
 
 /**

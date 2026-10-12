@@ -1,4 +1,4 @@
-import { isProportional, OrderSide, proportionalBps, type Order } from "@1delta-x/sdk";
+import { isFillOnce, isProportional, OrderSide, proportionalBps, type Order } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
 import type { BookEntry } from "./book";
@@ -301,6 +301,9 @@ export function summarize(entry: BookEntry, progress?: bigint): OrderSummary {
   const CANCELLED = (1n << 256n) - 1n;
   let filled: bigint | null = null;
   if (progress !== undefined && progress !== CANCELLED) filled = progress;
+  // A FILL-ONCE order's `filled` counter stays 0 (its fill consumed the nonce), and
+  // its one fill is the whole order: once it is known Filled, the anchor is filled.
+  else if (state?.status === OrderStatus.Filled && isFillOnce(order) && anchor !== null && !proportional) filled = anchor;
   else if (state && anchor !== null && !proportional && state.fillableAmount === anchor) filled = 0n;
 
   return {

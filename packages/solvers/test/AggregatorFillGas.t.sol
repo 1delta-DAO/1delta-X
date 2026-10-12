@@ -3,8 +3,9 @@ pragma solidity ^0.8.28;
 
 import {console} from "forge-std/console.sol";
 import {Order} from "@core/settlement/Settlement.sol";
-import {AggregatorFillSolver, RoutePlan, NO_PATCH} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {AggregatorFillSolver, RoutePlan, NO_PATCH, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 import {AggregatorFillSolverTest} from "./AggregatorFillSolver.t.sol";
+import {newAgg} from "./shared/AggDeploy.sol";
 
 /// @title AggregatorFillGasTest
 /// @notice Gas benchmark for `executeFill` — raw execution gas, refunds excluded,
@@ -30,7 +31,7 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         RoutePlan memory p = _planFor(AMOUNT_IN, address(s), minOut, NO_PATCH);
         p.profitRecipient = to;
         uint256 g0 = gasleft();
-        s.executeFill(o, sig, AMOUNT_IN, p, "");
+        s.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         uint256 used = g0 - gasleft();
         console.log(label, used);
     }
@@ -60,7 +61,7 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
     function _gated() internal returns (AggregatorFillSolver g) {
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        g = new AggregatorFillSolver(address(settlement), ops, _noSplit());
+        g = newAgg(address(settlement), ops, _noSplit(), new PoolVenue[](0));
     }
 
     function test_gas_retain_seeded() public {
@@ -75,7 +76,7 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         _warmWorld();
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        AggregatorFillSolver g = new AggregatorFillSolver(address(settlement), ops, _noSplit());
+        AggregatorFillSolver g = newAgg(address(settlement), ops, _noSplit(), new PoolVenue[](0));
         tA.mint(address(g), 1);
         tB.mint(address(g), 1);
         _runTo("gated, retain, seeded (fresh tx)", g, 1, AMOUNT_OUT, address(g));
@@ -96,7 +97,7 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         // A fresh single-operator instance, so the direct benchmark starts cold.
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        aggSolver = new AggregatorFillSolver(address(settlement), ops, _noSplit());
+        aggSolver = newAgg(address(settlement), ops, _noSplit(), new PoolVenue[](0));
         _warmWorld();
         tA.mint(address(aggSolver), 1);
         Order memory o = _directOrder(1);
@@ -105,7 +106,7 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
         p.profitRecipient = address(aggSolver);
         p.amountOutOffset = outOffset;
         uint256 g0 = gasleft();
-        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+        aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         console.log(label, g0 - gasleft());
     }
 
@@ -129,7 +130,7 @@ contract AggregatorFillGasTest is AggregatorFillSolverTest {
             bytes memory sig = _sign(o);
             RoutePlan memory p = _planFor(AMOUNT_IN, address(aggSolver), AMOUNT_OUT, 4);
             uint256 g0 = gasleft();
-            aggSolver.executeFill(o, sig, AMOUNT_IN, p, "");
+            aggSolver.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
             console.log(i == 1 ? "self-seed: first fill (cold)    " : "self-seed: second fill (same tx)", g0 - gasleft());
         }
         assertEq(tA.balanceOf(address(aggSolver)), 1, "tA floor self-seeded");

@@ -1,4 +1,4 @@
-import { FILL_ONCE_BIT_INDEX, hashOrderStruct, type Order } from "@1delta-x/sdk";
+import { FILL_ONCE_BIT_INDEX, hashOrderStruct, isFillOnce, type Order } from "@1delta-x/sdk";
 import type { Address, Hex } from "viem";
 
 import { checkAdmission, DEFAULT_ADMISSION, type AdmissionPolicy, type AdmissionVerdict } from "./admission";
@@ -735,8 +735,23 @@ export class Book {
         );
         break;
       case "filled": {
+        const entry = this.entries.get(e.orderHash);
+        if (entry && sameMaker(entry, e.maker) && isFillOnce(entry.announce.order)) {
+          // A FILL-ONCE order only accepts the fill that closes it (`FillOnceMustBeFull`),
+          // so this fill IS the whole order — and no lens read could say so: the fill
+          // consumed the nonce and left `filled` at 0, which the lens reports as
+          // `Cancelled`. Record it as Filled and retire it now, with no RPC.
+          entry.state = { ...(entry.state ?? { isSignatureValid: true, validatorsPass: true }), ok: false, status: OrderStatus.Filled, fillableAmount: 0n };
+          evicted.push(e.orderHash);
+          this.evict(e.orderHash);
+          // The consumed nonce kills every other order of this maker on it (a
+          // shared-nonce OCO bracket's siblings), exactly as `cancelOrders([nonce])`.
+          const nonce = entry.announce.order.nonce;
+          evictMatching((other) => sameMaker(other, e.maker) && other.announce.order.nonce === nonce);
+          break;
+        }
         // Could be a partial. Only a lens read knows whether anything is left.
-        if (this.entries.has(e.orderHash)) {
+        if (entry) {
           dirty.push(e.orderHash);
           this.dirty.add(e.orderHash);
           this.scheduleDirtySweep();

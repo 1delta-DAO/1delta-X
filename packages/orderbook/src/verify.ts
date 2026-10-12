@@ -1,13 +1,19 @@
 import {
+  ERC2612_ABI,
+  encodeErc2612Permit,
+  erc2612Digest,
   hashOrderStruct,
+  isCanonicalPermitSig,
+  joinPermitSignature,
   orderTypedData,
   packOrder,
   permitWitnessTypedData,
   OrderSide,
   SETTLEMENT_LENS_ABI,
+  type Erc2612Permit,
   type Order,
 } from "@1delta-x/sdk";
-import { hashTypedData, keccak256, type Hex, type PublicClient, type TypedDataDefinition } from "viem";
+import { hashTypedData, keccak256, recoverAddress, type Hex, type PublicClient, type TypedDataDefinition } from "viem";
 
 import { fillerOf, toDeployment, type OrderbookConfig } from "./config";
 import { recoverEcdsa } from "./ecdsa";
@@ -54,6 +60,12 @@ export interface Layer2Result {
    * An `Inconclusive` without it only means "not reached this time".
    */
   isolated?: boolean;
+  /**
+   * The order is admitted on an UNSPENT ERC-2612 permit, not on a standing
+   * allowance: `fillableAmount` is still the lens's (0 until a filler relays the
+   * permit). Fillers that see it must relay `token.permit(...)` first.
+   */
+  erc2612Live?: boolean;
 }
 
 export interface VerifierOptions {
@@ -108,12 +120,33 @@ interface CacheEntry {
   orderHash: Hex;
 }
 
-/** One row for Layer 2. `permit` = the sig is a Permit3 witness sig Layer 1 already proved. */
+/**
+ * One row for Layer 2. `permit` = the sig is a Permit3 witness sig Layer 1 already proved.
+ * `erc2612Live` = the announce carries an UNSPENT, maker-signed ERC-2612 permit to the
+ * Settlement ({@link Verifier.checkErc2612}) and the maker holds the token: the
+ * allowance the lens caps `fillableAmount` by does not exist YET — a filler creates it
+ * with `token.permit(...)` right before its fill — so a zero there is not a reason to refuse.
+ */
 interface Layer2Entry {
   order: Order;
   sig: Hex;
   sigless?: boolean;
   permit?: boolean;
+  erc2612Live?: boolean;
+}
+
+/** {@link Verifier.checkErc2612}'s verdict on an announce's ERC-2612 permit. */
+export interface Erc2612Check {
+  /** Well-formed, names this settlement, and recovers to the maker under the token's on-chain domain. */
+  ok: boolean;
+  reason?: string;
+  /**
+   * Still able to create the allowance: `nonce == nonces(maker)`, the deadline ahead,
+   * the token's own `permit` accepts it in an `eth_call`, and the maker holds a balance.
+   * `false` on an `ok` permit means SPENT or superseded — the order is then judged on its
+   * on-chain funding alone, like any other.
+   */
+  live: boolean;
 }
 
 interface Queued {
@@ -220,6 +253,15 @@ export class Verifier {
 
     if (order.expiry <= BigInt(this.now())) return { ok: false, reason: "order expired", orderHash, deferSig: false };
 
+    // ERC-2612 funding permit: the local, zero-RPC half of its check (the rest —
+    // recovery under the token's on-chain domain, nonce, simulation — is
+    // {checkErc2612}). Refused rather than ignored when malformed: a book that
+    // served it would send fillers to relay a permit that cannot work.
+    if (a.erc2612Permit) {
+      const bad = this.erc2612Shape(a.order, a.erc2612Permit, !!a.permitBatch, !!a.sigless);
+      if (bad) return { ok: false, reason: bad, orderHash, deferSig: false };
+    }
+
     // sigless = on-chain approveOrder path; confirmed on-chain, never by recover.
     if (a.sigless) return { ok: true, orderHash, deferSig: true };
 
@@ -296,6 +338,63 @@ export class Verifier {
       return { ok: true, orderHash, deferSig: false };
     }
     return { ok: true, orderHash, deferSig: true };
+  }
+
+  /** The zero-RPC rules for an announce's ERC-2612 permit; a reason string, or undefined when it passes. */
+  private erc2612Shape(order: Order, p: Erc2612Permit, hasBatch: boolean, sigless: boolean): string | undefined {
+    if (hasBatch || sigless) return "erc2612Permit cannot be combined with a permitBatch or a sigless announce";
+    if (p.spender.toLowerCase() !== this.config.settlement.toLowerCase()) return "erc2612Permit spender is not this settlement";
+    if (!order.legsIn.some((l) => l.token.toLowerCase() === p.token.toLowerCase())) return "erc2612Permit token is not one of the order's input tokens";
+    if (p.value === 0n) return "erc2612Permit value is zero";
+    // The permit has to stay relayable for as long as the order can be filled:
+    // a deadline before the expiry leaves the order's tail unfundable.
+    if (p.deadline < order.expiry) return "erc2612Permit deadline is before the order's expiry";
+    if (p.deadline <= BigInt(this.now())) return "erc2612Permit expired";
+    if (!isCanonicalPermitSig(p)) return "erc2612Permit signature is not canonical (v must be 27/28, low s)";
+    return undefined;
+  }
+
+  /**
+   * The on-chain half of an ERC-2612 permit's check (three view reads + one
+   * `eth_call`). The signature is recovered LOCALLY against the token's own
+   * `DOMAIN_SEPARATOR()`, so no name/version string is trusted and a token whose
+   * domain changed is judged by the domain it enforces now; a token without the
+   * EIP-2612 views (WRBTC, DOC — whose fallback answers anything with empty data)
+   * fails the read and is refused. While the permit is unspent its exact
+   * `permit(...)` calldata is also run as an `eth_call`, so the token itself
+   * confirms nonce, deadline and signature before any filler pays to relay it.
+   * Only ECDSA (`v,r,s`) permits: a 1271 maker's is not judged here.
+   */
+  async checkErc2612(order: Order, p: Erc2612Permit): Promise<Erc2612Check> {
+    const maker = order.maker;
+    let ds: Hex, current: bigint, balance: bigint;
+    try {
+      [ds, current, balance] = await Promise.all([
+        this.client.readContract({ address: p.token, abi: ERC2612_ABI, functionName: "DOMAIN_SEPARATOR" }) as Promise<Hex>,
+        this.client.readContract({ address: p.token, abi: ERC2612_ABI, functionName: "nonces", args: [maker] }) as Promise<bigint>,
+        this.client.readContract({ address: p.token, abi: ERC2612_ABI, functionName: "balanceOf", args: [maker] }) as Promise<bigint>,
+      ]);
+    } catch (e) {
+      // A revert means "no EIP-2612 here"; anything else is the RPC — let the caller say "unavailable".
+      if (isContractRevert(e)) return { ok: false, reason: "erc2612Permit token does not implement EIP-2612 (DOMAIN_SEPARATOR / nonces)", live: false };
+      throw e;
+    }
+    let signer: Hex;
+    try {
+      signer = await recoverAddress({ hash: erc2612Digest(ds, maker, p), signature: joinPermitSignature(p) });
+    } catch {
+      return { ok: false, reason: "erc2612Permit signature does not recover", live: false };
+    }
+    if (signer.toLowerCase() !== maker.toLowerCase()) return { ok: false, reason: "erc2612Permit is not signed by the maker", live: false };
+    if (p.nonce > current) return { ok: false, reason: "erc2612Permit nonce is ahead of the token's nonces(maker)", live: false };
+    if (p.nonce < current || p.deadline <= BigInt(this.now()) || balance === 0n) return { ok: true, live: false };
+    try {
+      await this.client.call({ to: p.token, data: encodeErc2612Permit(maker, p) });
+    } catch (e) {
+      if (isContractRevert(e)) return { ok: false, reason: "erc2612Permit is refused by the token's permit()", live: false };
+      throw e;
+    }
+    return { ok: true, live: true };
   }
 
   /**
@@ -419,7 +518,7 @@ export class Verifier {
         args: [packOrder(e.order), e.sig, fillerOf(this.config), "0x"],
       })) as readonly [number, bigint, boolean, boolean];
       budget.succeeded++;
-      return toResult(status, fillableAmount, isSignatureValid, vp, e.permit);
+      return toResult(status, fillableAmount, isSignatureValid, vp, e.permit, e.erc2612Live);
     } catch (err) {
       budget.lastError = err;
       return { ...INCONCLUSIVE, isolated: true };
@@ -453,7 +552,7 @@ export class Verifier {
     return entries.map((e, i): Layer2Result =>
       statuses[i] === undefined
         ? INCONCLUSIVE
-        : toResult(statuses[i]!, fillableAmounts[i] ?? 0n, sigValids[i] ?? false, validatorsPass[i] ?? false, e.permit),
+        : toResult(statuses[i]!, fillableAmounts[i] ?? 0n, sigValids[i] ?? false, validatorsPass[i] ?? false, e.permit, e.erc2612Live),
     );
   }
 
@@ -461,7 +560,13 @@ export class Verifier {
   async verifyAnnounce(a: OrderAnnounce): Promise<VerifyResult> {
     const l1 = await this.verifyLayer1(a);
     if (!l1.ok) return { ok: false, reason: l1.reason, orderHash: l1.orderHash };
-    const state = await this.layer2Cached(l1.orderHash, a, l1.permit === true);
+    let erc2612Live = false;
+    if (a.erc2612Permit) {
+      const c = await this.checkErc2612(a.order, a.erc2612Permit);
+      if (!c.ok) return { ok: false, reason: c.reason, orderHash: l1.orderHash };
+      erc2612Live = c.live;
+    }
+    const state = await this.layer2Cached(l1.orderHash, a, l1.permit === true, erc2612Live);
     return { ok: state.ok, reason: state.ok ? undefined : reasonFor(state), orderHash: l1.orderHash, state };
   }
 
@@ -470,19 +575,31 @@ export class Verifier {
     // Book entries were admitted through {verifyAnnounce}, so a `permitBatch` on one
     // means Layer 1 already proved its witness signature — the stored announce is
     // first-seen and never overwritten (see `Book.admit`).
+    // An ERC-2612 permit is re-judged every sweep: once a filler relays it (or the
+    // maker spends the nonce) it stops being live, and the order then stands on the
+    // allowance it created — or on nothing. A read that fails counts as NOT live:
+    // the lens's own funding verdict then applies, which can only be stricter.
+    const live = await Promise.all(
+      entries.map((e) =>
+        e.announce.erc2612Permit && !e.announce.sigless
+          ? this.checkErc2612(e.announce.order, e.announce.erc2612Permit).then((c) => c.ok && c.live, () => false)
+          : Promise.resolve(false),
+      ),
+    );
     const states = await this.verifyLayer2(
-      entries.map((e) => ({
+      entries.map((e, i) => ({
         order: e.announce.order,
         sig: e.announce.sig,
         sigless: e.announce.sigless,
         permit: e.announce.permitBatch !== undefined && !e.announce.sigless,
+        erc2612Live: live[i],
       })),
     );
     const out = new Map<Hex, Layer2Result>();
     entries.forEach((e, i) => {
       const s = states[i];
       if (s) {
-        this.remember(Verifier.cacheKey(e.orderHash, e.announce, e.announce.permitBatch !== undefined && !e.announce.sigless), e.orderHash, s);
+        this.remember(Verifier.cacheKey(e.orderHash, e.announce, e.announce.permitBatch !== undefined && !e.announce.sigless, live[i]), e.orderHash, s);
         out.set(e.orderHash, s);
       }
     });
@@ -515,9 +632,12 @@ export class Verifier {
    * witness sig, proven by Layer 1) is its own mode, so its verdict is never served
    * to the same bytes presented as an order signature, or the reverse.
    */
-  private static cacheKey(orderHash: Hex, a: { sig: Hex; sigless?: boolean }, permit = false): Hex {
-    const mode = a.sigless ? "01" : permit ? "02" : "00";
-    return keccak256(`${orderHash}${mode}${keccak256(a.sig).slice(2)}` as Hex);
+  private static cacheKey(orderHash: Hex, a: { sig: Hex; sigless?: boolean; erc2612Permit?: Erc2612Permit }, permit = false, erc2612Live = false): Hex {
+    const mode = a.sigless ? "01" : permit ? "02" : erc2612Live ? "03" : "00";
+    // A live-permit verdict holds for THAT permit only: another (or none) under the
+    // same order and sig must not inherit it.
+    const p = erc2612Live && a.erc2612Permit ? keccak256(joinPermitSignature(a.erc2612Permit)).slice(2) : "";
+    return keccak256(`${orderHash}${mode}${keccak256(a.sig).slice(2)}${p}` as Hex);
   }
 
   /**
@@ -549,8 +669,8 @@ export class Verifier {
     if (keys && keys.size === 0) this.keysByHash.delete(orderHash);
   }
 
-  private async layer2Cached(orderHash: Hex, a: OrderAnnounce, permit: boolean): Promise<Layer2Result> {
-    const key = Verifier.cacheKey(orderHash, a, permit);
+  private async layer2Cached(orderHash: Hex, a: OrderAnnounce, permit: boolean, erc2612Live = false): Promise<Layer2Result> {
+    const key = Verifier.cacheKey(orderHash, a, permit, erc2612Live);
     const hit = this.cache.get(key);
     if (hit && this.nowMs() - hit.at < this.cacheTtlMs) return hit.res;
     const pending = this.inflight.get(key);
@@ -561,7 +681,7 @@ export class Verifier {
     // and server both read a throw as "verification unavailable", never as a verdict).
     if (this.queue.length >= this.maxQueued) throw new Error("verifier queue full");
     const p = new Promise<Layer2Result>((resolve, reject) => {
-      this.queue.push({ key, entry: { order: a.order, sig: a.sig, sigless: a.sigless, permit }, resolve, reject });
+      this.queue.push({ key, entry: { order: a.order, sig: a.sig, sigless: a.sigless, permit, erc2612Live }, resolve, reject });
     });
     this.inflight.set(key, p);
     const done = () => {
@@ -615,6 +735,7 @@ function toResult(
   isSignatureValid: boolean,
   validatorsPass: boolean,
   permit = false,
+  erc2612Live = false,
 ): Layer2Result {
   // No sigless special case: the lens reads the settler's own `orderApproved`
   // record for an empty sig, so an on-chain-authorized order is attested here
@@ -632,8 +753,25 @@ function toResult(
     // malformed) still comes from the lens.
     return { ok: s === OrderStatus.Fillable, status: s, fillableAmount, isSignatureValid: true, validatorsPass };
   }
-  const ok = s === OrderStatus.Fillable && isSignatureValid && fillableAmount > 0n;
-  return { ok, status: s, fillableAmount, isSignatureValid, validatorsPass };
+  // A live ERC-2612 permit funds the order the moment a filler relays it, so the
+  // lens's allowance-capped `fillableAmount` (0 before the relay) is reported, not
+  // gated on — exactly as for a Permit3 permit announce. The signature still comes
+  // from the lens, and {Verifier.checkErc2612} already required a non-zero balance.
+  const ok = s === OrderStatus.Fillable && isSignatureValid && (fillableAmount > 0n || erc2612Live);
+  return { ok, status: s, fillableAmount, isSignatureValid, validatorsPass, ...(erc2612Live ? { erc2612Live: true } : {}) };
+}
+
+/** Whether `e` is an execution revert (deterministic for the state), not a transport failure. */
+function isContractRevert(e: unknown): boolean {
+  let cur = e as { name?: unknown; message?: unknown; cause?: unknown; shortMessage?: unknown } | undefined;
+  for (let i = 0; cur && i < 8; i++) {
+    const n = typeof cur.name === "string" ? cur.name : "";
+    if (n === "ContractFunctionRevertedError" || n === "CallExecutionError" && /revert/i.test(String(cur.message)) || n === "ContractFunctionZeroDataError") return true;
+    if (n === "AbiDecodingZeroDataError" || n === "AbiDecodingDataSizeTooSmallError" || n === "PositionOutOfBoundsError") return true;
+    if (typeof cur.message === "string" && /execution reverted|VM Exception|reverted/i.test(cur.message)) return true;
+    cur = cur.cause as typeof cur;
+  }
+  return false;
 }
 
 function reasonFor(s: Layer2Result): string {

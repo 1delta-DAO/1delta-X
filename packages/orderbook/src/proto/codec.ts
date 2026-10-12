@@ -1,5 +1,5 @@
 import protobuf from "protobufjs";
-import type { CurvePoint, Item, LegIn, LegOut, Order, PermitBatch, TakerPermit, TokenPermit, Validator } from "@1delta-x/sdk";
+import type { CurvePoint, Erc2612Permit, Item, LegIn, LegOut, Order, PermitBatch, TakerPermit, TokenPermit, Validator } from "@1delta-x/sdk";
 import { ItemOp, OrderSide } from "@1delta-x/sdk";
 import { bytesToBigInt, bytesToHex, getAddress, hexToBytes, zeroAddress, type Address, type Hex } from "viem";
 
@@ -67,7 +67,8 @@ interface PbOrder {
 interface PbTokenPermit { spender: Uint8Array; token: Uint8Array; amount: Uint8Array; expiration: number }
 interface PbTakerPermit { spender: Uint8Array; module: Uint8Array; ref: Uint8Array; amount: Uint8Array; expiration: number }
 interface PbPermitBatch { tokens: PbTokenPermit[]; takers: PbTakerPermit[]; nonce: Uint8Array; deadline: Uint8Array }
-interface PbOrderAnnounce { order: PbOrder; sig: Uint8Array; permitBatch?: PbPermitBatch | null; sigless: boolean }
+interface PbErc2612Permit { token: Uint8Array; spender: Uint8Array; value: Uint8Array; nonce: Uint8Array; deadline: Uint8Array; v: number; r: Uint8Array; s: Uint8Array }
+interface PbOrderAnnounce { order: PbOrder; sig: Uint8Array; permitBatch?: PbPermitBatch | null; sigless: boolean; erc2612Permit?: PbErc2612Permit | null }
 interface PbSoftCancel { maker: Uint8Array; orderHashes: Uint8Array[]; issuedAt: Uint8Array; expiry: Uint8Array; sig: Uint8Array }
 interface PbOrderReplace { cancel: PbSoftCancel; announce: PbOrderAnnounce; replaces: Uint8Array }
 interface PbFillNotice { orderHash: Uint8Array; filler: Uint8Array }
@@ -148,12 +149,42 @@ function protoToPermitBatch(p: PbPermitBatch): PermitBatch {
   };
 }
 
+function erc2612ToProto(p: Erc2612Permit): PbErc2612Permit {
+  return {
+    token: addrToBytes(p.token),
+    spender: addrToBytes(p.spender),
+    value: u256ToBytes(p.value),
+    nonce: u256ToBytes(p.nonce),
+    deadline: u256ToBytes(p.deadline),
+    v: p.v,
+    r: hexToU8(p.r),
+    s: hexToU8(p.s),
+  };
+}
+function protoToErc2612(p: PbErc2612Permit): Erc2612Permit {
+  const word = (b: Uint8Array, what: string): Hex => {
+    if (!b || b.length !== 32) throw new Error(`Erc2612Permit.${what} must be 32 bytes`);
+    return u8ToHex(b) as Hex;
+  };
+  return {
+    token: bytesToAddr(p.token),
+    spender: bytesToAddr(p.spender),
+    value: bytesToU256(p.value),
+    nonce: bytesToU256(p.nonce),
+    deadline: bytesToU256(p.deadline),
+    v: toNum(p.v),
+    r: word(p.r, "r"),
+    s: word(p.s, "s"),
+  };
+}
+
 function announceToProto(a: OrderAnnounce): PbOrderAnnounce {
   return {
     order: orderToProto(a.order),
     sig: hexToU8(a.sig),
     permitBatch: a.permitBatch ? permitBatchToProto(a.permitBatch) : undefined,
     sigless: a.sigless ?? false,
+    erc2612Permit: a.erc2612Permit ? erc2612ToProto(a.erc2612Permit) : undefined,
   };
 }
 function protoToAnnounce(p: PbOrderAnnounce): OrderAnnounce {
@@ -163,6 +194,7 @@ function protoToAnnounce(p: PbOrderAnnounce): OrderAnnounce {
     sig: u8ToHex(p.sig),
     ...(p.permitBatch ? { permitBatch: protoToPermitBatch(p.permitBatch) } : {}),
     sigless: Boolean(p.sigless),
+    ...(p.erc2612Permit ? { erc2612Permit: protoToErc2612(p.erc2612Permit) } : {}),
   };
 }
 

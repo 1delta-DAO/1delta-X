@@ -5,6 +5,7 @@ import {
   packTiming,
   randomOrderNonce as sdkRandomOrderNonce,
   withDeltaVerifyOutputs,
+  withFillOnce,
   type LegIn,
   type LegOut,
   type Order,
@@ -58,8 +59,19 @@ export interface BuildOrderArgs {
   maxIn?: bigint;
   /** The maker's on-chain `minValidNonce`; a drawn nonce lands at or above it. */
   minValidNonce?: bigint;
-  /** Injectable so tests and the golden-hash check can pin them. */
+  /**
+   * The order nonce. The app passes a WORD-PACKED one (lib/nonces.ts); omitted, a
+   * uniform random draw above {@link minValidNonce}. Injectable so tests and the
+   * golden-hash check can pin it.
+   */
   nonce?: bigint;
+  /**
+   * FILL-ONCE (`timing` bit 100): the fill consumes the nonce's bitmap bit instead of
+   * writing a fresh `filled[orderHash]` slot, and only a FULL fill is accepted
+   * (`FillOnceMustBeFull`). Pays off only with a word-packed nonce (lib/nonces.ts).
+   * Off unless asked for; the app asks for MARKET tickets only (`fillOnceFor` in lib/nonces.ts).
+   */
+  fillOnce?: boolean;
   now?: number;
 }
 
@@ -244,7 +256,8 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
   }
   // `exclusivityEndTime` is on the order's own clock — unix seconds here.
   const windowEnd = win ? now + win.seconds : 0;
-  const timing = decaying ? packTiming(now, decaySeconds, windowEnd) : packTiming(0, 0, windowEnd);
+  const clock = decaying ? packTiming(now, decaySeconds, windowEnd) : packTiming(0, 0, windowEnd);
+  const timing = args.fillOnce ? withFillOnce(clock) : clock;
 
   const order: Order = {
     maker,

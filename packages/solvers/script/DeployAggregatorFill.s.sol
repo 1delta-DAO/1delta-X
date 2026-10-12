@@ -4,11 +4,15 @@ pragma solidity ^0.8.28;
 import {Script, console} from "forge-std/Script.sol";
 
 import {Settlement} from "@core/settlement/Settlement.sol";
-import {AggregatorFillSolver, SurplusPolicy} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {AggregatorFillSolver, SurplusPolicy, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 import {RouteSandbox} from "@solvers/aggregator/RouteSandbox.sol";
 
 interface IERC20Min {
     function transfer(address to, uint256 amount) external returns (bool);
+}
+
+interface IV3FactoryMin {
+    function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
 }
 
 /// @title DeployAggregatorFill
@@ -48,6 +52,19 @@ interface IERC20Min {
 ///                          truncated)
 ///    PROTOCOL_SURPLUS_PPM  default 0 (same)
 ///    PROTOCOL_RECIPIENT    default 0x0 (required when PROTOCOL_SURPLUS_PPM != 0)
+///    POOL_FACTORIES        comma list (0..4) — the Uniswap-v3-style factories a
+///                          DIRECT POOL ROUTE may swap on (venue index = position).
+///    POOL_INIT_HASHES      comma list, same length — each factory's pool init code
+///                          hash. Both unset on chain 30 = the verified Rootstock
+///                          defaults: venue 0 = Uniswap v3 / Oku factory
+///                          0xaF37EC98A00FD63689CF3060BF3B6784E00caD82, venue 1 =
+///                          SushiSwap v3 factory
+///                          0x46B3fDF7b5CDe91Ac049936bF0bDb12c5d22202e, both with the
+///                          canonical v3 hash 0xe34f199b…8b54 (checked 2026-10-12 by
+///                          deriving the live WRBTC/USDT0 0.3% pools 0xaeF6…9Bbd and
+///                          0x6d77…Fd71 — the script re-derives them after deploying).
+///                          Unset elsewhere = no venues (pool routes off).
+///    NO_POOL_VENUES        default false — true deploys with no venues even on 30.
 ///    FLOOR_TOKENS          optional, and NO LONGER NEEDED (2026-10) — comma list of
 ///                          tokens to pre-seed a 1-wei balance floor of on the
 ///                          SOLVER (the deployer must hold 1 wei of each). The
@@ -96,6 +113,7 @@ contract DeployAggregatorFill is Script {
             policy.protocolPpm == 0 || policy.protocolRecipient != address(0),
             "PROTOCOL_RECIPIENT is required when PROTOCOL_SURPLUS_PPM != 0"
         );
+        PoolVenue[] memory venues = _venues();
         address[] memory floorTokens = _addrList("FLOOR_TOKENS");
         for (uint256 i; i < floorTokens.length; i++) {
             require(floorTokens[i].code.length != 0, "a FLOOR_TOKENS entry has no code on this chain");
@@ -104,9 +122,10 @@ contract DeployAggregatorFill is Script {
         console.log("--- AggregatorFillSolver (chain %s) ---", block.chainid);
         console.log("settlement      ", settlement);
         console.log("operators       ", operators.length);
+        console.log("pool venues     ", venues.length);
 
         vm.startBroadcast();
-        agg = new AggregatorFillSolver(settlement, operators, policy);
+        agg = new AggregatorFillSolver(settlement, operators, policy, venues);
         // OPTIONAL pre-seed of the solver's balance floor: one wei per listed token,
         // so even the FIRST fill's inbound transfer rewrites a live slot. Without it
         // the solver keeps one wei of each token out of its own first fill of it.
@@ -118,6 +137,7 @@ contract DeployAggregatorFill is Script {
         console.log("AggregatorFillSolver", address(agg));
         console.log("RouteSandbox        ", address(agg.SANDBOX()));
         _assertDeployed(agg, settlement, operators, policy);
+        _assertVenues(agg, venues);
         console.log("immutables verified");
     }
 
@@ -146,6 +166,61 @@ contract DeployAggregatorFill is Script {
         for (uint256 i; i < operators.length; i++) {
             require(agg.isOperator(operators[i]), "operator not set");
             console.log("  operator", operators[i]);
+        }
+    }
+
+    /// @dev The venue allowlist: POOL_FACTORIES / POOL_INIT_HASHES, or the verified
+    ///      Rootstock defaults on chain 30 when both are unset.
+    function _venues() internal view returns (PoolVenue[] memory v) {
+        if (vm.envOr("NO_POOL_VENUES", false)) return new PoolVenue[](0);
+        address[] memory factories = _addrList("POOL_FACTORIES");
+        string memory rawHashes = vm.envOr("POOL_INIT_HASHES", string(""));
+        bytes32[] memory hashes = bytes(rawHashes).length == 0 ? new bytes32[](0) : vm.envBytes32("POOL_INIT_HASHES", ",");
+        require(factories.length == hashes.length, "POOL_FACTORIES / POOL_INIT_HASHES length mismatch");
+        if (factories.length == 0 && block.chainid == 30) {
+            factories = new address[](2);
+            hashes = new bytes32[](2);
+            (factories[0], hashes[0]) = (ROOTSTOCK_OKU_FACTORY, UNIV3_INIT_HASH);
+            (factories[1], hashes[1]) = (ROOTSTOCK_SUSHI_V3_FACTORY, UNIV3_INIT_HASH);
+        }
+        v = new PoolVenue[](factories.length);
+        for (uint256 i; i < factories.length; i++) {
+            require(factories[i].code.length != 0, "a POOL_FACTORIES entry has no code on this chain");
+            v[i] = PoolVenue({factory: factories[i], initCodeHash: hashes[i]});
+        }
+    }
+
+    address internal constant ROOTSTOCK_OKU_FACTORY = 0xaF37EC98A00FD63689CF3060BF3B6784E00caD82;
+    address internal constant ROOTSTOCK_SUSHI_V3_FACTORY = 0x46B3fDF7b5CDe91Ac049936bF0bDb12c5d22202e;
+    bytes32 internal constant UNIV3_INIT_HASH = 0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54;
+    address internal constant RSK_WRBTC = 0x542fDA317318eBF1d3DEAf76E0b632741A7e677d;
+    address internal constant RSK_USDT0 = 0x779Ded0c9e1022225f8E0630b35a9b54bE713736;
+
+    /// @dev Read every venue back, and prove each derives a pool its factory knows:
+    ///      on chain 30 the WRBTC/USDT0 0.3% pool (both default venues list it), and
+    ///      against `factory.getPool` — so a wrong init code hash fails HERE, not on
+    ///      the first fill. Off chain 30 the probe pair is POOL_PROBE
+    ///      ("tokenA,tokenB,fee"), skipped if unset.
+    function _assertVenues(AggregatorFillSolver agg, PoolVenue[] memory venues) internal view {
+        require(agg.POOL_VENUES() == venues.length, "POOL_VENUES mismatch");
+        (address a, address b, uint24 fee) = (RSK_WRBTC, RSK_USDT0, 3000);
+        bool probe = block.chainid == 30;
+        string memory raw = vm.envOr("POOL_PROBE", string(""));
+        if (bytes(raw).length != 0) {
+            string[] memory parts = vm.split(raw, ",");
+            require(parts.length == 3, "POOL_PROBE must be tokenA,tokenB,fee");
+            (a, b, fee) = (vm.parseAddress(parts[0]), vm.parseAddress(parts[1]), uint24(vm.parseUint(parts[2])));
+            probe = true;
+        }
+        for (uint256 i; i < venues.length; i++) {
+            (address f, bytes32 h) = agg.poolVenue(i);
+            require(f == venues[i].factory && h == venues[i].initCodeHash, "venue mismatch");
+            console.log("  venue factory", f);
+            if (!probe) continue;
+            address derived = agg.poolFor(i, a, b, fee);
+            require(derived == IV3FactoryMin(f).getPool(a, b, fee), "venue init code hash does not derive the factory's pool");
+            require(derived.code.length != 0, "probe pool has no code");
+            console.log("    probe pool  ", derived);
         }
     }
 

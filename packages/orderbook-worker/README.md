@@ -42,9 +42,9 @@ Same semantics and status codes as `orderbook-server` where it has the route.
 
 | Method | Path | Response |
 |---|---|---|
-| POST | `/orders` | body `{order, sig}` (SDK `Order`, bigints as decimal strings — the SDK's strict `orderFromJson`). `202 {orderHash}` · `202 {orderHash, duplicate: true}` for a live order · `422 {error}` (admission, Layer 1, Layer 2, soft-cancelled) · `503` capacity / verification unavailable / not configured · `400` bad JSON · `413` · `415` non-JSON · `429` |
+| POST | `/orders` | body `{order, sig, erc2612Permit?}` (SDK `Order`, bigints as decimal strings — the SDK's strict `orderFromJson` / `announceFromJson`). `erc2612Permit` is a maker-signed ERC-2612 permit to Settlement that funds the order gaslessly (`docs/gasless-permit-relay.md` §7): verified by `Verifier.checkErc2612`, it admits an order the lens reads as unfunded while it is live. `202 {orderHash}` · `202 {orderHash, duplicate: true}` for a live order · `422 {error}` (admission, Layer 1, Layer 2, soft-cancelled) · `503` capacity / verification unavailable / not configured · `400` bad JSON · `413` · `415` non-JSON · `429` |
 | POST | `/cancels` | body `{cancel, sig}`. `202 {evicted, requested}` · `403` signature is not the named maker's · `503` |
-| GET | `/orders` | `{orders: [{orderHash, order, sig, addedAt, filledAmount, pendingFill, state}], total, nextCursor?}`. `pendingFill` is `{txHash, sentAt}` (sentAt unix seconds, the book's clock at the report) while a trusted filler has reported a fill tx for the order as BROADCAST and it is not yet indexed / failed / older than 10 min; else `null`. Filters `maker`, `token`, `tokenIn`, `tokenOut`, `side`, `fillableOnly`, `expiresAfter`, `includeExpired`; `limit` (≤500) and keyset `cursor` (`<addedAt>~<hash>`, newest first; also in `x-next-cursor`). An unsupported filter is a `400`, never silently ignored. |
+| GET | `/orders` | `{orders: [{orderHash, order, sig, erc2612Permit?, addedAt, filledAmount, pendingFill, state}], total, nextCursor?}`. `erc2612Permit` is served verbatim when the order carries one, and `state.erc2612Live` is `true` while it is the order's only funding — a filler submits it inside its fill (`AggregatorFillSolver.executeFill`'s `permits`). `pendingFill` is `{txHash, sentAt}` (sentAt unix seconds, the book's clock at the report) while a trusted filler has reported a fill tx for the order as BROADCAST and it is not yet indexed / failed / older than 10 min; else `null`. Filters `maker`, `token`, `tokenIn`, `tokenOut`, `side`, `fillableOnly`, `expiresAfter`, `includeExpired`; `limit` (≤500) and keyset `cursor` (`<addedAt>~<hash>`, newest first; also in `x-next-cursor`). An unsupported filter is a `400`, never silently ignored. |
 | GET | `/orders/:hash` | the one live order in the same shape · `404` |
 | GET | `/orders/:hash/status` | `{live: true, …OrderSummary, pendingFill}` (`pendingFill` as on `/orders`), or the tombstone `{live: false, …lastSummary, reason, removedAt, txHash?}` with `reason` ∈ `filled` `cancelled` `soft-cancelled` `expired` `evicted` `displaced` · `404` |
 | GET | `/fills` | `?maker` `solver` `orderHash` `fromBlock` `limit` `cursor` → `{fills: [{orderHash, maker, solver, blockNumber, txHash, logIndex, at, cumulative, amount, order?}], total, nextCursor?, coverage}`, newest first. `order` is the signed order when this node held it. Every row is a MINED fill with a real `txHash` (from `eth_getLogs` or a reported receipt — the two produce identical rows); broadcast-only fills are `pendingFill` on the order, never a `/fills` row. |
@@ -147,18 +147,43 @@ log's block** gives the cumulative; the previous cumulative is the newest
 indexed row below that block, else `filled(hash)` at `block − 1`. Several fills
 of one order in one block share one cumulative; the delta goes on the last of
 them, the others report `amount: null`. The cancelled sentinel and a zero
-cumulative (fill-once orders keep progress in the nonce) are `null`, never an
-amount. A node that cannot serve the historical read falls back to `latest`
-for the cumulative and leaves the amount `null`.
+cumulative are `null`, never an amount. A node that cannot serve the historical
+read falls back to `latest` for the cumulative and leaves the amount `null`.
 
 Then the order: cumulative ≥ the anchor (fill total, else the SELL input /
 BUY output) ⇒ tombstone `Filled` with the fill's `txHash`; otherwise its
 `filledAmount` is updated and it is marked dirty for the lens re-check. A
-fill-once / proportional fill is found `Filled` by that re-check and its
-tombstone still names the indexed tx. A fill of an order already tombstoned
-(e.g. soft-cancelled, then filled by someone holding the signature) updates the
+proportional fill is found `Filled` by that re-check and its tombstone still
+names the indexed tx. A fill of an order already tombstoned (e.g.
+soft-cancelled, then filled by someone holding the signature) updates the
 tombstone. Fills of orders this node never held are indexed too (`/fills?maker=`
 covers the maker's whole history from the first scanned block).
+
+### Fill-once orders
+
+A FILL-ONCE order (`timing` bit 100; the app signs every market ticket this way)
+records its fill by consuming its nonce: `filled(hash)` stays 0, and the core only
+accepts the fill that closes the order (`FillOnceMustBeFull`). A nonce cancel
+leaves the same state, so `SettlementLens` reports a *completed* fill-once order as
+`Cancelled`. The book tells the two apart by the `OrderFilled` log:
+
+- An indexed `OrderFilled` (log scan or a confirmed `/fills/report`) for a fill-once
+  order this book holds is its whole fill: the row gets `amount = cumulative =` the
+  fixed anchor (no `filled()` read), and the order is tombstoned `Filled` with the
+  fill's `txHash`, without a lens call. The fill also consumed the nonce, so the
+  maker's other live orders on it (a shared-nonce OCO bracket's siblings) are
+  tombstoned `cancelled` at once, as `cancelOrders([nonce])` would do.
+- A lens re-check that answers `Cancelled` for a fill-once order maps to `filled`
+  when an indexed fill row for it exists, and to `cancelled` when none does.
+- A tombstone written as `cancelled` before the fill's log was indexed (the re-check
+  ran first) becomes `Filled` with the `txHash` when the log or receipt arrives.
+
+A genuine nonce cancel (an `OrdersCancelled` / `NonceWordInvalidated` /
+`NoncesRolledBack` event, or a lens `Cancelled` with no fill row) stays
+`cancelled`. A fill-once fill that no one reports, on an RPC without
+`eth_getLogs`, therefore reads as `cancelled`. The app's chain fallback covers
+that case: it reads `isNonceCancelled` and calls a consumed nonce it did not
+cancel itself a fill.
 
 ### Receipt-reported fills (`POST /fills/report`)
 

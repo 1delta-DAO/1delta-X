@@ -1,5 +1,6 @@
 import { isAddress, type Address, type Hex } from "viem";
 
+import type { Erc2612Permit } from "./erc2612";
 import type { SoftCancel } from "./softcancel";
 import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types";
 
@@ -10,7 +11,7 @@ import type { CurvePoint, Item, LegIn, LegOut, Order, Validator } from "./types"
  * protobuf codec — protobufjs compiles its encoders with `new Function` — so the
  * two maker-facing writes also accept `content-type: application/json`:
  *
- *   POST /orders   { "order": Order, "sig": "0x…" }
+ *   POST /orders   { "order": Order, "sig": "0x…", "erc2612Permit"?: Erc2612Permit }
  *   POST /cancels  { "cancel": SoftCancel, "sig": "0x…" }
  *
  * The shapes are the SDK's `Order` / `SoftCancel` with every `bigint` as a
@@ -167,6 +168,11 @@ export function orderFromJson(v: unknown, path = "order"): Order {
 export interface SignedOrderJson {
   order: Order;
   sig: Hex;
+  /**
+   * Optional maker-signed ERC-2612 permit that FUNDS the order without an on-chain
+   * approval (see ./erc2612.ts). Not covered by `sig`: a verifier must recover it.
+   */
+  erc2612Permit?: Erc2612Permit;
 }
 
 /** A maker-signed soft cancel as it travels in JSON. */
@@ -175,10 +181,60 @@ export interface SignedSoftCancelJson {
   sig: Hex;
 }
 
-/** `{ order, sig }` → `{ order, sig }` (structurally the orderbook's `OrderAnnounce`). Throws {@link JsonBodyError}. */
+function uint8(v: unknown, path: string): number {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 0xff) fail(path, "expected a uint8 number");
+  return v;
+}
+
+/** An {@link Erc2612Permit} from its JSON form (bigints as decimal strings, `v` a number). */
+export function erc2612PermitFromJson(v: unknown, path = "erc2612Permit"): Erc2612Permit {
+  const o = object(v, path, ["token", "spender", "value", "nonce", "deadline", "v", "r", "s"]);
+  return {
+    token: address(o.token, `${path}.token`),
+    spender: address(o.spender, `${path}.spender`),
+    value: uint256(o.value, `${path}.value`),
+    nonce: uint256(o.nonce, `${path}.nonce`),
+    deadline: uint256(o.deadline, `${path}.deadline`),
+    v: uint8(o.v, `${path}.v`),
+    r: bytes32(o.r, `${path}.r`),
+    s: bytes32(o.s, `${path}.s`),
+  };
+}
+
+/** An {@link Erc2612Permit} as the JSON value {@link erc2612PermitFromJson} accepts, in a FIXED key order. */
+export function erc2612PermitToJson(p: Erc2612Permit): Record<string, unknown> {
+  return {
+    token: p.token,
+    spender: p.spender,
+    value: p.value.toString(),
+    nonce: p.nonce.toString(),
+    deadline: p.deadline.toString(),
+    v: p.v,
+    r: p.r,
+    s: p.s,
+  };
+}
+
+/**
+ * `{ order, sig, erc2612Permit? }` → the same (structurally the orderbook's
+ * `OrderAnnounce`). Throws {@link JsonBodyError}.
+ */
 export function announceFromJson(v: unknown): SignedOrderJson {
-  const o = object(v, "body", ["order", "sig"]);
-  return { order: orderFromJson(o.order), sig: bytes(o.sig, "body.sig") };
+  const o = object(v, "body", ["order", "sig"], ["erc2612Permit"]);
+  return {
+    order: orderFromJson(o.order),
+    sig: bytes(o.sig, "body.sig"),
+    ...(o.erc2612Permit !== undefined ? { erc2612Permit: erc2612PermitFromJson(o.erc2612Permit, "body.erc2612Permit") } : {}),
+  };
+}
+
+/** The JSON body of `POST /orders` (and the book's stored form): fixed key order, permit last and only when present. */
+export function announceToJson(a: SignedOrderJson): Record<string, unknown> {
+  return {
+    order: orderToJson(a.order),
+    sig: a.sig,
+    ...(a.erc2612Permit ? { erc2612Permit: erc2612PermitToJson(a.erc2612Permit) } : {}),
+  };
 }
 
 /** `{ cancel, sig }` → `{ cancel, sig }` (structurally the orderbook's `SignedSoftCancel`). Throws {@link JsonBodyError}. */

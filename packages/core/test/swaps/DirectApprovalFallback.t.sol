@@ -21,6 +21,12 @@ import {CoreSettlementBase} from "../shared/CoreSettlementBase.t.sol";
 ///
 ///   tokenIn  = USDC   (maker gives, solver receives)
 ///   tokenOut = WETH   (solver gives, maker receives — straight to wallet)
+interface IERC2612Like {
+    function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external;
+    function nonces(address owner) external view returns (uint256);
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+}
+
 contract DirectApprovalFallbackTest is CoreSettlementBase {
     function _plainSwapOrder(uint256 nonce, uint256 usdcIn, uint256 wethOut) internal view returns (Order memory) {
         return _order(maker, nonce, USDC, WETH, usdcIn, wethOut, new Item[](0));
@@ -103,6 +109,58 @@ contract DirectApprovalFallbackTest is CoreSettlementBase {
         assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "solver received USDC via direct-approval fallback");
         assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH");
         assertEq(IERC20(USDC).balanceOf(address(settlement)), 0, "settlement USDC drained");
+    }
+
+    // ──────────────── Maker funds tokenIn GASLESSLY: a relayed ERC-2612 permit ────────────────
+
+    /// @dev The off-chain gasless-funding path (docs/gasless-permit-relay.md §7): the
+    ///      maker never sends a transaction. It signs an EIP-2612 permit with
+    ///      `spender = Settlement` next to the order; a THIRD PARTY (the filler, or
+    ///      anyone who saw it in the book) submits `permit`, which creates exactly the
+    ///      direct allowance the fallback pulls against. Mainnet USDC implements
+    ///      EIP-2612, like USD₮0 on Rootstock. Also pins: a replay of the spent permit
+    ///      reverts (the filler must re-read the nonce, not assume), and the fill uses
+    ///      the allowance up exactly.
+    function test_maker_tokenIn_relayedErc2612PermitToSettlement() public {
+        uint256 usdcIn = 2_000e6;
+        uint256 wethOut = 1 ether;
+        deal(USDC, maker, usdcIn);
+        deal(WETH, solver, wethOut);
+
+        Order memory order = _plainSwapOrder(3, usdcIn, wethOut);
+        bytes memory sig = _sign(order);
+
+        IERC2612Like t = IERC2612Like(USDC);
+        uint256 nonce = t.nonces(maker);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),
+                maker,
+                address(settlement),
+                usdcIn,
+                nonce,
+                deadline
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 s_) =
+            vm.sign(makerPk, keccak256(abi.encodePacked("\x19\x01", t.DOMAIN_SEPARATOR(), structHash)));
+
+        assertEq(IERC20(USDC).allowance(maker, address(settlement)), 0, "no allowance before the relay");
+        vm.prank(address(0xF00D)); // anyone may relay it
+        t.permit(maker, address(settlement), usdcIn, deadline, v, r, s_);
+        assertEq(IERC20(USDC).allowance(maker, address(settlement)), usdcIn, "the permit set exactly the order input");
+
+        vm.prank(address(0xF00D));
+        vm.expectRevert();
+        t.permit(maker, address(settlement), usdcIn, deadline, v, r, s_);
+
+        vm.prank(solver);
+        uint256 paid = settlement.fill(order, sig, usdcIn)[0];
+        assertEq(paid, wethOut, "solver paid exactly wethOut");
+        assertEq(IERC20(USDC).balanceOf(solver), usdcIn, "maker USDC pulled through the permit's direct allowance");
+        assertEq(IERC20(WETH).balanceOf(maker), wethOut, "maker received WETH");
+        assertEq(IERC20(USDC).allowance(maker, address(settlement)), 0, "the allowance is used up exactly");
     }
 
     // ──────────────── Fully Permit3-free swap (both legs fall back) ────────────────

@@ -56,11 +56,16 @@ describe("A-IMMUT-1 — the app creates BOTH funding legs", () => {
     const reader: Reader = {
       async readContract(a) {
         seen.push({ fn: a.functionName, args: a.args });
-        return a.functionName === "allowance" ? 7n : [9n, 123];
+        if (a.functionName === "allowance") return a.args?.[1] === PERMIT3 ? 7n : 5n;
+        if (a.functionName === "isStrict") return false;
+        return [9n, 123];
       },
     };
     const state = await readFundingState(reader, { token: TOKEN, owner: OWNER, permit3: PERMIT3, settlement: SETTLEMENT });
-    expect(state).toEqual({ erc20Allowance: 7n, grantAmount: 9n, grantExpiration: 123 });
+    // Plus the DIRECT surface a relayed gasless permit creates, and strict mode (lib/permit.ts).
+    expect(state).toEqual({ erc20Allowance: 7n, grantAmount: 9n, grantExpiration: 123, directAllowance: 5n, strict: false });
+    expect(seen).toContainEqual({ fn: "allowance", args: [OWNER, SETTLEMENT] });
+    expect(seen).toContainEqual({ fn: "isStrict", args: [OWNER, TOKEN] });
     expect(seen).toContainEqual({ fn: "tokenAllowance", args: [OWNER, SETTLEMENT, TOKEN] });
     expect(seen).toContainEqual({ fn: "allowance", args: [OWNER, PERMIT3] });
   });

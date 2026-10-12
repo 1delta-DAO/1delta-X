@@ -7,12 +7,13 @@ runs every order through up to two strategies, **inventory first, route second**
 | | **inventory** | **route** (DEX aggregator path) |
 |---|---|---|
 | What fills | the hot wallet itself: `Settlement.fillUpTo` | `AggregatorFillSolver.executeFill`, sent by the same EOA as operator |
-| Capital | wallet inventory (USDT0 / USDRIF) | none — the maker's input is swapped on Oku's Uniswap v3 SwapRouter02 |
-| Markets | `rsk-30-usdrif-usd0` only | every configured pool: `rsk-30-wrbtc-usd0`, `rsk-30-weth-wrbtc`, `rsk-30-usdrif-usd0` (+ optional multi-hop paths) |
+| Capital | wallet inventory (USDT0 / USDRIF) | none — the solver swaps the maker's input on the configured Uniswap-v3-style pools ITSELF (a *pool plan*: Oku = venue 0, SushiSwap v3 = venue 1), or — pull orders only — along a Sushi / Nordstern API route in its `RouteSandbox` (a *sandbox plan*) |
+| Markets | `rsk-30-usdrif-usd0` only | every configured pool: the Oku `rsk-30-wrbtc-usd0`, `rsk-30-weth-wrbtc`, `rsk-30-usdrif-usd0` pools and SushiSwap v3's WRBTC/USDT0 0.3 % pool (+ optional multi-hop paths) |
+| Gasless makers (ERC-2612 permit, *Gasless makers* below) | only once something else funded the order | **yes**: the maker's permit rides in the same `executeFill` |
 | Delta-verify orders (timing bit 104) | **no** (an EOA cannot run the fill callback) | **yes**, when `exclusiveFiller` = our solver: the route pays the maker directly |
 | Pull orders | `exclusiveFiller` 0, this wallet, or another filler whose window is over or **soft** (it pays the premium inside the window) | the same, measured against the **solver**. If a deployment opts in to the app's pull window, which names the solver, the route fills inside it with no premium |
 | Spread | the price we chose (`MAX_BUY_PRICE` …) minus fill gas, a share of the rebalance gas + MoC exec fee, and `INVENTORY_MIN_PROFIT_USDT0` | pool quote − owed − gas − `MIN_PROFIT_RBTC`; goes to `ROUTE_PROFIT_RECIPIENT` (default: the operator EOA) |
-| Gas per fill (fork-measured, see below) | ≈ 154.4k gross tx | ≈ 247.9k direct / ≈ 282.9k pull, net of refund |
+| Gas per fill (fork-measured, see below) | ≈ 154.4k gross tx | ≈ 247.9k direct / ≈ 282.9k pull, net of refund, through the SANDBOX; a pool plan is 24–35k cheaper (`SANDBOX_ROUTE_OVERHEAD_GAS`, below) |
 | Switch | `INVENTORY_ENABLED` (default on) | `ROUTE_ENABLED` (default on iff `AGGREGATOR_SOLVER` is set) |
 
 **What the gas row measures** (re-run 2026-10-06, `FOUNDRY_PROFILE=solvers` — legacy
@@ -137,6 +138,16 @@ Then per strategy:
 
 Anything else is skipped and logged once per order and reason.
 
+**Fill-once orders** (`timing` bit 100; the app signs every market ticket this way)
+are whole-or-nothing. The core reverts `FillOnceMustBeFull` on anything less than the
+full order, so neither strategy sends a partial for one (`fillOnceBlocker` in
+`src/policy.ts`). If the book's `fillable` is below the full size (the maker is
+under-funded), the order is skipped and marked resting, before any RPC. If the
+inventory strategy would cap the size to its balance, hourly budget or
+`MAX_FILL_USDT0` (`capFillAmount`), the order is skipped with a `fill-once order: …`
+reason instead of being sent at a partial size. A skip for being over
+`MAX_FILL_USDT0` is resting, because it is a verdict on the order's size.
+
 Intake is a candidate list, not a verdict. Each order from `GET /orders` is parsed
 strictly (the SDK's `orderFromJson`) and must hash to the `orderHash` the book gave;
 orders the book itself reports as not `ok` (or failing validators) are dropped. Every
@@ -146,7 +157,8 @@ sent.
 ## The inventory strategy (USDRIF/USDT0)
 
 1. **Sizes** the fill to the smallest of: `MAX_FILL_USDT0` of notional, the wallet
-   balance, and the hourly budget left.
+   balance, and the hourly budget left. A fill-once order that does not fit whole is
+   skipped, not scaled down (see above).
 2. **Previews** the fill on `SettlementLens.previewFill` as this wallet.
 3. **Prices** it.
    - Buy side (a maker sells USDRIF, we pay USDT0): the price must be ≤
@@ -301,28 +313,63 @@ ceiling.
 
 ## The route strategy (DEX aggregator path)
 
-One operator EOA calls `AggregatorFillSolver.executeFill(order, sig, fillAmount, plan, "")`.
+One operator EOA calls `AggregatorFillSolver.executeFill(order, sig, fillAmount, plan, "",
+permits)` (`permits` = the gasless maker's ERC-2612 permit, else empty — *Gasless makers*).
 The solver starts `Settlement.fillWithCallback(..., PostInputsDirect)`, receives the
-maker's input, PUSHES it to its `RouteSandbox`, which approves `plan.router`, fires
-`plan.data` and sweeps every token back (the solver has no router allowlist and never
-approves a router — any target works, see packages/solvers/README.md), and:
+maker's input and runs the plan — one of two KINDS:
 
-- **direct** (delta-verify order naming the solver): the route is an **exact-output**
-  swap paying the **maker** exactly the owed amount; the core verifies the maker's
-  balance delta. `amountInMaximum` = input − (gas + min profit, converted to input
-  units at the quoted rate), so a worse pool reverts instead of eating the margin;
-  the unconsumed input is our spread. `amountInOffset = NO_PATCH` (the bounded maximum
-  must survive); on a still-decaying SELL `amountOutOffset` points at `amountOut` so
-  the route pays the LIVE owed and keeps the decay (task 05, below).
-- **pull** (no bit 104, `exclusiveFiller` 0): the route is an **exact-input** swap paying
-  the **solver** — the default for aggregator routes, because exact-input pays the
-  surplus to the solver; Settlement then pulls the owed amount. `minOut` = owed + gas +
-  min profit, `maxPay` = the previewed owed amount, and `amountInOffset` points at the
-  calldata's `amountIn` word so the swap uses exactly what the fill delivered. The
-  surplus over the pull is our spread. Three route SOURCES compete (below): the local Oku
-  path (SwapRouter02 `exactInput(Single)`, `amountOutMinimum` = owed + gas + min profit),
-  the **Sushi API** and the **Nordstern API** (2026-10-11). The two API calls run in
-  parallel.
+- **pool plan** (`plan.router = POOL_ROUTE` = `address(0)`, the local candidates): the
+  solver swaps on the pools ITSELF. `plan.data` = `amountIn(32) ‖ amountOut(32) ‖ token0 ‖
+  fee(3) ‖ venue(1) ‖ token1 ‖ …` in swap order (SDK `encodePoolRoute`, 1–4 hops);
+  every pool is recomputed by CREATE2 from the solver's immutable venue allowlist
+  (`poolVenue(i)`: 0 = Uniswap v3 / Oku factory `0xaF37…cAD82`, 1 = SushiSwap v3 factory
+  `0x46B3…202e`) and paid only inside its `uniswapV3SwapCallback`. No sandbox, no router,
+  no approval. The PAYEE is the ORDER's, decided on-chain (direct → `legsOut[0]`'s
+  recipient, 0 = the maker; pull → the solver), so the plan names no recipient.
+- **sandbox plan** (the Sushi and Nordstern API routes): the solver PUSHES the input to
+  its `RouteSandbox`, which approves `plan.router`, fires `plan.data` and sweeps every
+  token back (the solver has no router allowlist and never approves a router — any
+  target works, see packages/solvers/README.md).
+
+Two delivery modes, decided by the order:
+
+- **direct** (delta-verify order naming the solver; pool plans only): an
+  **exact-output** pool plan paying the **maker** exactly the owed amount (`amountOut`
+  word = owed); the core verifies the maker's balance delta. The `amountIn` word is the
+  input CEILING = input − (gas + min profit, converted to input units at the quoted
+  rate) — the solver also caps it at the routed delta — so a worse pool reverts instead
+  of eating the margin; the unconsumed input is our spread. `amountInOffset = NO_PATCH`
+  (the bounded ceiling must survive); on a still-decaying SELL `amountOutOffset = 32`
+  (the `amountOut` word) so the route pays the LIVE owed and keeps the decay (task 05,
+  below); otherwise `NO_PATCH`.
+- **pull** (no bit 104, `exclusiveFiller` 0): an **exact-input** route paying the
+  **solver** — exact-input pays the surplus to the solver; Settlement then pulls the
+  owed amount. `minOut` = owed + gas + min profit, `maxPay` = the previewed owed amount,
+  and `amountInOffset` points at the route's `amountIn` word (0 on a pool plan) so the
+  swap uses exactly what the fill delivered. The surplus over the pull is our spread.
+  Three route SOURCES compete (below): the local pool paths (a pool plan, `amountOut`
+  word 0), the **Sushi API** and the **Nordstern API** (2026-10-11). The two API calls run
+  in parallel.
+
+**Pool venues and quoters.** Every pool hop names a `venue` — the pools DISCOVERED on
+every venue (*Pool routing* below), plus the configured ones (`ROUTE_POOLS`
+`tokenA/tokenB/fee[/venue]`, `ROUTE_PATHS` `…[@venue]` or per hop `fee:venue`, default
+0) — and each hop is quoted on its venue's QuoterV2: venue 0 on `QUOTER_V2` (Oku `0xb517…EB31`), venue 1 on
+`SUSHI_V3_QUOTER` (default on chain 30: SushiSwap v3's QuoterV2
+`0xE43ca1deE3f0fC1e2df73A0745674545f11A59f5` — created by the Sushi v3 factory's
+deployer `0x69ae…6327` per Blockscout; verified by `eth_call` 2026-10-12: `factory()` =
+`0x46B3fDF7b5CDe91Ac049936bF0bDb12c5d22202e`, `quoteExactInputSingle(WRBTC → USDT0,
+0.001 WRBTC, fee 3000)` = 82.965332 USDT0 on pool `0x6d77…Fd71`; `""` = venue 1 off).
+At start-up the filler reads the solver's `POOL_VENUES` (a solver without it predates
+pool plans and the `permits` argument: refused) and, for each venue with a quoter,
+requires the quoter's `factory()` to be the solver's `poolVenue(i)` factory — a quote
+must price the very pool the plan swaps on. A venue that fails, is missing from the
+solver or has no quoter is dropped with a warning, and its pools / paths are never
+quoted. Before anything is signed, a built pool plan is decoded (SDK `decodePoolRoute`)
+and checked against the order and the quoted path (`validatePoolPlan`): first token =
+`legsIn[0]`'s, last = `legsOut[0]`'s, tokens / fees / the venue of EVERY hop as quoted, and the amounts and
+offsets of its delivery mode — the pool-plan counterpart of the Sushi / Nordstern
+calldata validation.
 
 **The Sushi source (pull orders only).** `GET {SUSHI_API_URL}/swap/v7/30` with
 `tokenIn`, `tokenOut`, `amount` = the previewed input, `maxSlippage` =
@@ -392,31 +439,43 @@ Per order:
    `previewBump(order, AGGREGATOR_SOLVER)`, both as an `eth_call` at the gas price the
    fill will be SENT with (a priority / gas-bump tick reads `tx.gasprice`; at the default
    0 the preview was the no-bid tick). The bump becomes the plan's `minBumpBps`;
-4. **quote** the input → output on QuoterV2 (`quoteExactInput`) along every candidate
-   path (each matching pool fee tier, each configured multi-hop path) and, for a pull
-   order, fetch + validate a Sushi and a Nordstern route (in parallel); rank all
-   candidates by output NET of each route's own gas (QuoterV2's estimate / Sushi's
-   `gasSpent` / Nordstern's `gasEstimate` × 1.2, priced like the fill gas) — Nordstern's
-   output at its haircut figure;
+4. **quote** the pool candidates (*Pool routing* below: configured + enumerated over the
+   discovered graph, pruned to `ROUTE_MAX_CANDIDATES`) on each hop's venue QuoterV2 —
+   a pull order FORWARD (exact-input of the previewed input), a direct order BACKWARD
+   (the input an exact-output of the owed amount needs: the route the plan executes,
+   expressed as the equivalent output `owed × input / need` for the gate) — batched
+   through Multicall3, and, for a pull order, fetch + validate a Sushi and a
+   Nordstern route (in parallel); rank all candidates by output NET of each route's own
+   gas, priced like the fill gas: for a pool path the quoters' summed estimate, at least
+   `POOL_HOP_GAS` (65k) per hop; Sushi's
+   `gasSpent` / Nordstern's `gasEstimate` × 1.2 **+ `SANDBOX_ROUTE_OVERHEAD_GAS`** (30k,
+   `src/route.ts`) for an API route — the sandbox and router hops a pool plan does not
+   run (fork bench `packages/solvers/test/PoolRouteFork.t.sol`, block 9,295,925, net tx
+   gas: sandbox − pool = 24.3k / 30.5k for 1-hop pull / direct, 29.2k / 34.5k for
+   2-hop before the 2026-10-12 solver gas pass, 28.8k / 34.4k and 37.2k / 41.1k after
+   it — the constant was left at 30k). So an API route must beat a pool path by more
+   than that overhead to win.
+   Nordstern's output enters at its haircut figure;
 5. **gate** the best-ranked candidate (falling through to the next on failure):
    `quote × (1 − haircut) ≥ owed + gas + min profit`, all in output
-   units; haircut = `ROUTE_STABLE_SLIPPAGE_BPS` for a $1/$1 pair, else `ROUTE_SLIPPAGE_BPS`. Gas = send gas price × `ROUTE_GAS_ESTIMATE` × r (the learned receipt ratio); gas and `MIN_PROFIT_RBTC` are
-   converted from RBTC into the output token by a QuoterV2 quote of 0.001 WRBTC along a
-   configured WRBTC → output path (cached 60 s) and, for a $1 token (`USD_TOKENS`), by
+   units; haircut = `ROUTE_STABLE_SLIPPAGE_BPS` for a $1/$1 pair, else `ROUTE_SLIPPAGE_BPS`. Gas = send gas price × the plan kind's estimate × r (the learned receipt ratio): `ROUTE_GAS_ESTIMATE` for a sandbox plan, `ROUTE_GAS_ESTIMATE − SANDBOX_ROUTE_OVERHEAD_GAS` for a pool plan (`planGasEstimate`) + `POOL_HOP_GAS` per hop beyond the first (`extraHopGas`), + `TYPED_CALLBACK_GAS` on a live-output direct plan, + `PERMIT_IN_FILL_GAS` (60k) when the fill carries a maker permit; gas and `MIN_PROFIT_RBTC` are
+   converted from RBTC into the output token by a QuoterV2 quote of 0.001 WRBTC along the
+   best WRBTC → output pool path (configured or discovered; cached 60 s) and, for a $1 token (`USD_TOKENS`), by
    `RBTC_PRICE_USD` — the **higher** of the two when both exist, so a thin pool can only
    make gas dearer. "gas + min profit" is grossed up by the solver's surplus split,
    read at start-up (`MAKER_SURPLUS_PPM`, `PROTOCOL_SURPLUS_PPM`): the margin must be
    `(gas + profit) × 1e6 / (1e6 − maker − protocol)` so that OUR share covers it. An
    order whose output cannot be priced is skipped;
-6. **build** the RoutePlan: Oku — SwapRouter02 calldata (SDK `encodeExactInput(Single)` /
-   `encodeExactOutput(Single)`, `swapRouter02AmountInOffset`); Sushi — the validated
+6. **build** the RoutePlan: a pool path — a pool plan (SDK `encodePoolRoute`, each
+   hop's own venue; `buildPoolPlan`), decoded and checked against the order
+   before use (`validatePoolPlan`, above); Sushi — the validated
    snwap calldata, offset 36, refused if its `amountOutMin` < owed + gas + min profit;
    Nordstern — the validated guard calldata, `NO_PATCH`, refused if its `minAmountOut`
    < owed + gas + min profit;
-7. **simulate** `executeFill` by `eth_call` from the operator, decode `fillAmountsOut`
+7. **simulate** `executeFill` (with the maker's permit, if the fill carries one) by `eth_call` from the operator, decode `fillAmountsOut`
    (must be non-zero, and ≤ the previewed owed on the pull path) and take
    `eth_estimateGas`;
-8. **re-price at the measured gas**: P = ⌈max(`ROUTE_GAS_ESTIMATE`, simulated) × r⌉, r
+8. **re-price at the measured gas**: P = ⌈max(the plan kind's estimate (step 5), simulated) × r⌉, r
    the learned receipt/estimate ratio of the fill's shape (*Gas price and priced gas*).
    If P is above the gas the plan's floor was built at, the plan is **rebuilt** with gas
    priced at P (new `minOut` / `amountInMaximum`, gate re-run) and **re-simulated** —
@@ -435,11 +494,133 @@ Per order:
    reverts and timeouts).
 
 At start-up it checks the solver against the config — wired to our `SETTLEMENT`, our EOA
-is an operator, its `SANDBOX()` exists and is owned by it. (No router allowlist or
-primed tokens to check any more.)
+is an operator, its `SANDBOX()` exists and is owned by it, and its pool venues match the
+configured quoters (above). (No router allowlist or primed tokens to check any more.)
 
 What the hot key can lose here: only RBTC for gas. The solver holds no inventory, and
 every amount it moves is a delta of the current fill.
+
+## Pool routing: discovery, multi-hop, mixed venues (2026-10-12)
+
+The solver's pool plans take 1–4 hops, each `tokenIn ‖ fee ‖ venue ‖ tokenOut` with its
+OWN venue (0 = Oku / Uniswap v3, 1 = SushiSwap v3 — same init code hash). The filler no
+longer needs every route written into `ROUTE_POOLS` / `ROUTE_PATHS`: it finds the pools,
+enumerates the paths and quotes the promising ones ([`src/poolGraph.ts`](src/poolGraph.ts),
+[`src/poolQuote.ts`](src/poolQuote.ts)).
+
+**1. Discovery** (`discoverPools`). For every pair of the graph's tokens — `ROUTE_TOKENS` ∪
+`ROUTE_HUB_TOKENS` — × `ROUTE_FEE_TIERS` × every venue that has a verified quoter (the
+start-up `factory()` check, above): `factory.getPool(a, b, fee)`. Each pool that exists
+is checked against the address the SOLVER derives for it (SDK `v3PoolAddress` = the
+solver's `poolFor`: CREATE2 over its `poolVenue(i)` factory and init code hash) and
+**skipped with a warning on a mismatch** — the plan would swap on another address than
+the one quoted. Then `liquidity()` and `slot0()` of every pool; a pool is ACTIVE when its
+in-range liquidity is ≥ `ROUTE_MIN_LIQUIDITY` (default 1 = nonzero). Every read goes
+through Multicall3 `aggregate3` (`MULTICALL3`, the canonical `0xcA11…CA11`, code verified
+on chain 30): the default 6 tokens × 4 fees × 2 venues = 120 lookups are ONE `eth_call`,
+the state of ~17 pools one more. It runs at start-up (`init`) and again when the graph is
+older than `ROUTE_DISCOVERY_SECONDS` (default 3600), and it is **incremental**: a pool once
+found is never looked up again (a v3 pool cannot be destroyed) — a refresh re-reads its
+state and looks up only the slots still empty. The graph is persisted in the filler
+state (`poolGraph`; the Worker's DO storage), so a restart or an eviction does not
+rediscover a fresh graph. A failed discovery is never fatal: the old graph (or just
+`ROUTE_POOLS` / `ROUTE_PATHS`) keeps routing and the next attempt waits 5 min.
+`ROUTE_POOLS` / `ROUTE_PATHS` stay as additions: a configured pool discovery did not see
+is still quoted (unestimated), one it saw below the liquidity floor is dropped;
+configured paths are always quoted. `ROUTE_DISCOVERY=0` = exactly the pre-2026-10-12
+behaviour.
+
+**2. Enumeration** (`enumeratePaths`). Every simple path tokenIn → tokenOut of 1 …
+`ROUTE_MAX_HOPS` (default 3; the solver's limit is 4) hops whose INTERMEDIATE tokens are
+all hubs (`ROUTE_HUB_TOKENS`; an order's own tokens must still be in `ROUTE_TOKENS`),
+each hop on any active (fee, venue) pool of its pair — so mixed-venue paths come for free.
+Shorter paths first, hard cap 512 per pair. Zero RPC. Classification uses it too, so a
+pair joined only through discovered pools is routable (before the graph is first loaded
+`accepts` does not refuse a pair for lacking a path, and `consider` loads the solver and
+the graph before calling a pair unroutable).
+
+**3. Pruning** (`selectPaths`, zero RPC). Each path's output is ESTIMATED from its pools'
+in-range virtual reserves (`x = L·2⁹⁶/√P`, `y = L·√P/2⁹⁶`, x·y = L² — exact while a swap
+stays inside the current tick range), minus `POOL_HOP_GAS` per extra hop priced at the
+send gas price in the output token (itself estimated on the graph). The best
+`ROUTE_MAX_CANDIDATES` (default 5) are quoted for real, always including the best single
+hop. A hop whose input exceeds 1/10 of the pool's virtual input reserve makes the path
+**THIN** (`THIN_DIVISOR`): its estimate is meaningless and its quote can cost millions of
+gas, so a thin path is only quoted when no other path exists. Measured live: 0.01 WRBTC
+into the RIF/WRBTC 0.05 % pool (virtual 0.001 WRBTC) estimated 141 USD₮0 and quoted 0.27
+at 2.09M quoter gas; on every non-thin path the estimate matched the quote to ≥ 7 digits.
+
+**4. Quoting** (`quotePaths`). A single-venue path is one `quoteExactInput` (pull, forward)
+or `quoteExactOutput` (direct, the reversed path) on that venue's QuoterV2. A MIXED path
+cannot be (a quoter only prices its own factory's pools): it is quoted HOP BY HOP —
+`quoteExactInputSingle` forward from the first hop (each hop's output = the next one's
+input), `quoteExactOutputSingle` BACKWARD from the last hop for a direct fill (each hop's
+required input = the previous hop's output) — each hop on its own venue's quoter, the
+hops' `gasEstimate`s summed. All candidates are quoted in ROUNDS (round r = every
+single-venue path in round 0 + hop r of every mixed path), each round one Multicall3
+call in chunks of `QUOTES_PER_CALL` = 4: K candidates of ≤ 3 hops cost ≤ 3–4 `eth_call`s
+(live: 2–4 per pair below), not K × hops. A quote through a thin pool can run out of gas
+and take 63/64 of the call's gas with it, starving its neighbours (live: the USD₮0/DOC
+0.01 % pool made a whole batch return no data), so a call that fails inside a chunk is
+re-run alone, and a chunk that returns no data is re-run call by call; a network failure
+stays transient. `/quote` uses the same candidates, quoted forward (the ticket fixes the
+input); its gas adds `POOL_HOP_GAS` per extra hop to the single-hop fallback estimate.
+
+**5. Ranking and plans.** Candidates rank by output net of their own gas: for a pool path
+max(the quoters' summed estimate, `POOL_HOP_GAS` × hops). `POOL_HOP_GAS` = 65,000 is the
+measured marginal hop of a pool plan (fork bench `PoolRouteFork.t.sol`, net tx gas on the
+deployed via-IR solver after the 2026-10-12 gas pass and the `SurplusSplit` event
+removal: 1 hop direct 229,039 → 2 hops 293,338, pull 252,291 → 313,642 — the removal
+cut ~2.6k off every fill, not off the marginal hop; it was 62,500 from 2-hop figures the bench had
+under-stated by 4.5k — a `balanceOf(maker)` read inside the measured tx warmed the slots
+the fill then wrote), and the pre-simulation gate
+estimate adds it per extra hop too, so a second hop must earn its gas. `RoutePath` carries
+`venues: number[]` (one per hop; the old single `venue` is still read, `pathVenues`);
+`buildPoolPlan` encodes each hop's venue and `validatePoolPlan` refuses any plan whose
+tokens, fees or venue of ANY hop differ from the quoted path.
+
+**Live graph** (Rootstock mainnet, block 9,318,068, 2026-10-12; tokens WRBTC, USD₮0, WETH,
+USDRIF + hubs RIF, DOC; fees 0.01/0.05/0.3/1 %; 2 `eth_call`s): 17 pools, 14 active.
+
+| pair | fee | venue | in-range liquidity (virtual reserves) |
+| --- | --- | --- | --- |
+| WRBTC / USD₮0 | 0.3 % | Oku | 13.99 WRBTC / 1.168M USD₮0 |
+| WRBTC / USD₮0 | 0.3 % | Sushi | 11.31 WRBTC / 944.5k USD₮0 |
+| WRBTC / USD₮0 | 0.05 % | Oku | 0 (inactive) |
+| WETH / WRBTC | 0.3 % | Oku | 276.9 WETH / 8.46 WRBTC |
+| WETH / WRBTC | 0.3 % | Sushi | 424.4 WETH / 12.96 WRBTC |
+| RIF / WRBTC | 0.3 % | Oku | 4.02M RIF / 3.99 WRBTC |
+| RIF / WRBTC | 0.3 % | Sushi | 867k RIF / 0.87 WRBTC |
+| RIF / WRBTC | 0.05 % | Oku | 1,887 RIF / 0.001 WRBTC (thin) |
+| RIF / USD₮0 | 0.3 % | Oku | 2.46M RIF / 203k USD₮0 |
+| USDRIF / USD₮0 | 0.05 % | Oku | 659M / 658M (concentrated) |
+| USDRIF / USD₮0 | 0.01 % | Oku | 402k / 401k |
+| USDRIF / USD₮0 | 0.3 % | Oku | 0 (inactive) |
+| USD₮0 / DOC | 0.3 % | Oku | 21.9M / 22.0M |
+| USD₮0 / DOC | 0.3 % | Sushi | 13.2M / 13.2M |
+| USD₮0 / DOC | 0.01 % | Oku | 19.9k / 20.0k |
+| USDRIF / DOC | 0.3 % | Oku | 838 / 834 (thin) |
+| WRBTC / DOC | 0.3 % | Sushi | 0 (inactive) |
+
+No WRBTC/USDRIF, WETH/USD₮0 or WETH/USDRIF pool exists on either venue; rUSDT has none.
+RIF is the one useful extra hub; DOC only reaches USD₮0 (its USDRIF and WRBTC pools are
+dust or empty), so it costs a few lookups and is never selected.
+
+**Live quotes** (same block, gas price 24,406,880 wei = min × 1.03; "net" = out − the
+whole fill's gas, 264,020 + 62,500 per extra hop, in the output token — the figures of
+that day; the 2026-10-12 solver gas pass lowered them to 254,906 + 65,000, the
+`SurplusSplit` event removal to 252,291 + 65,000):
+
+| ticket | best single hop | best single-venue multi-hop | best mixed-venue | picked |
+| --- | --- | --- | --- | --- |
+| 0.01 WRBTC → USD₮0 | **831.755** (Oku 0.3 %), net 831.219 | 821.033 via RIF (Oku), net 820.370 | 805.382 (Sushi→RIF→Oku), net 804.719 | Oku single hop |
+| 100 USDRIF → WRBTC | — (no pool) | 0.00119135 via USD₮0 (Oku 0.05 %, Oku 0.3 %), net 0.00118338 | **0.00120306** USDRIF→USD₮0→RIF→WRBTC (Oku, Oku, **Sushi** RIF/WRBTC), net 0.00119356 | mixed 3-hop: +0.98 % gross, +0.86 % net — the extra hop costs 1.5e-6 WRBTC |
+| 100 USDRIF → WETH | — | 0.0388875 via USD₮0, WRBTC (all Oku), net 0.0385776 | **0.0388930** (Oku, Oku, Sushi WETH/WRBTC), net 0.0385831 | mixed 3-hop (+0.014 %) |
+| 0.01 WETH → USD₮0 | — | **25.3418** via WRBTC (Oku, Oku), net 24.6785 | 25.3420 (Oku, Sushi) | Oku-only: the mixed path is 0.0002 USD₮0 higher gross, but its quoter gas is 7k higher (≈ 0.014 USD₮0), so the ranking keeps Oku-only |
+
+Every winner was among the 4–5 selected candidates (2–4 batched `eth_call`s per ticket).
+The direct path's BACKWARD quote agrees: an exact-output of 99.5 % of the forward output
+needed 99.499 USDRIF on the mixed 3-hop and 0.0099499645 WRBTC on the WRBTC → USD₮0 pool.
 
 ## Indicative quotes (`POST /quote`, 2026-10-07)
 
@@ -453,10 +634,12 @@ amountOut = grossOut − ⌈gasCostOut × (1 + QUOTE_GAS_MARGIN_BPS / 1e4)⌉ �
 ```
 
 - **grossOut**: the filler's real pricing for that order shape. The route candidate
-  (`RouteFiller.quoteRoute`) quotes `amountIn` on every configured Oku path (QuoterV2)
-  and, for a PULL ticket, the Sushi and Nordstern API routes (Nordstern at
+  (`RouteFiller.quoteRoute`) quotes `amountIn` on every routable pool path (its venue's
+  QuoterV2) and, for a PULL ticket, the Sushi and Nordstern API routes (Nordstern at
   `toAmount × (1 − NORDSTERN_HAIRCUT_BPS)`, never its raw figure). Candidates are ranked
-  by output net of each route's own gas, as a fill ranks them. A BUY ticket (pay the quote token, receive the
+  by output net of each route's own gas (+ `SANDBOX_ROUTE_OVERHEAD_GAS` for an API
+  route), as a fill ranks them; `route.source` names the winner (`oku` / `sushi-v3` for a
+  pool plan on that venue, `sushi`, `nordstern`). A BUY ticket (pay the quote token, receive the
   base) is quoted the same way: exact input of the pay amount.
 - **gasCostOut**: one fill's cost in the output token, priced as the fill gate prices it.
   It is estimate × r (the receipt ratio learned per shape, `gasRatio.ts`) × the send gas
@@ -464,7 +647,7 @@ amountOut = grossOut − ⌈gasCostOut × (1 + QUOTE_GAS_MARGIN_BPS / 1e4)⌉ �
   grossed up for the solver's surplus split. No order exists yet, so nothing is
   simulated. The estimate is the largest `eth_estimateGas` among the shape's last 20
   successful fills (now also learned, `GasRatios.typicalEstimate`). Before any, it is
-  `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` (360k / 380k; × the 0.88 default ratio ≈ the e2e receipts), and never below `ROUTE_GAS_ESTIMATE`.
+  `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` (360k / 380k; × the 0.88 default ratio ≈ the e2e receipts), and never below the winning candidate's plan-kind estimate (`ROUTE_GAS_ESTIMATE`, less `SANDBOX_ROUTE_OVERHEAD_GAS` for a pool plan).
 - **Inventory** (USDRIF → USDT0, pull, `BUY_USDRIF`): `Filler.quoteInventory` bounds what
   the hot wallet would pay by the gates a fill must pass. Those are `MAX_BUY_PRICE`, the
   exit edge (`MIN_EXIT_EDGE_BPS` over the live redeem-and-sell value), and the all-in
@@ -516,6 +699,7 @@ Common:
 | `RECEIPT_TIMEOUT_MS` | `120000` | after this without a receipt, a sent tx's outflow / fill reservation is final (a late receipt still settles the gas) |
 | `RESTING_RECHECK_SECONDS` | `300` | an order every strategy passed on, or one we just filled, is not re-quoted for this long unless the book's fillable for it changes (≤ 30 s for a time-varying price, sooner when a strategy predicts its gate passes; `0` = off) |
 | `EXPIRY_MARGIN_SECONDS` | `90` | orders expiring within this are skipped (a tx cannot land in time on ~30 s blocks) |
+| `PERMIT_FILLS_ENABLED` | `1` | fill a gasless maker's order WITH its ERC-2612 permit inside `executeFill` (route strategy; see *Gasless makers*); `0` skips orders only such a permit funds. The permit's pre-simulation gas is the constant `PERMIT_IN_FILL_GAS` (`src/route.ts`), not a knob. **Removed** (2026-10-12): `PERMIT_RELAY_ENABLED`, `PERMIT_RELAY_GAS` (the separate relay tx is gone; both are ignored if still set) |
 
 Every numeric knob fails closed: a non-integer, `NaN`, empty or non-positive value (where
 a positive one is required) stops start-up instead of becoming `NaN`/`0`.
@@ -525,20 +709,29 @@ Route strategy:
 | Env | Default | Meaning |
 |---|---|---|
 | `AGGREGATOR_SOLVER` | — | the deployed, operator-gated `AggregatorFillSolver` |
-| `ROUTE_POOLS` | the app's 3 Rootstock Uniswap v3 pools | `;`-separated `tokenA/tokenB/fee` (fee in hundredths of a bip) |
-| `ROUTE_PATHS` | `USDRIF>500>USDT0>3000>WRBTC` | `;`-separated multi-hop paths in swap order, usable both ways (`""` = none) |
+| `ROUTE_POOLS` | the app's 3 Rootstock Oku pools (venue 0) + SushiSwap v3 WRBTC/USDT0 0.3 % (venue 1) | `;`-separated `tokenA/tokenB/fee[/venue]` (fee in hundredths of a bip; venue = index into the solver's pool-venue allowlist, default 0 = Oku, 1 = SushiSwap v3) |
+| `ROUTE_PATHS` | `USDRIF>500>USDT0>3000>WRBTC` | `;`-separated multi-hop paths in swap order, usable both ways, 1–4 hops, optional `@venue` suffix for the whole path (default 0) or a per-hop `fee:venue` (mixed venues), e.g. `0xWRBTC>3000>0xUSDT0@1`, `0xUSDRIF>500:0>0xUSDT0>3000:1>0xWRBTC` (`""` = none). Always quoted, on top of the discovered paths |
+| `ROUTE_DISCOVERY` | `1` | discover the pool graph and route multi-hop / mixed-venue over it (*Pool routing*); `0` = only `ROUTE_POOLS` / `ROUTE_PATHS` |
+| `ROUTE_HUB_TOKENS` | chain 30: `WRBTC,USDT0,RIF,DOC`; else none | the only tokens a discovered path may pass through (endpoints stay `ROUTE_TOKENS`); also discovered |
+| `ROUTE_FEE_TIERS` | `100,500,3000,10000` | fee tiers discovery looks up |
+| `ROUTE_MIN_LIQUIDITY` | `1` | a pool's in-range `liquidity()` must reach this to be routed |
+| `ROUTE_DISCOVERY_SECONDS` | `3600` | graph refresh period (incremental; the graph persists in the state) |
+| `ROUTE_MAX_HOPS` | `3` | longest enumerated path, 1..4 (the solver's `MAX_POOL_HOPS`) |
+| `ROUTE_MAX_CANDIDATES` | `5` | pool paths quoted per fill / quote (best estimated, net of the per-hop gas), 1..32 |
+| `MULTICALL3` | chain 30: `0xcA11bde05977b3631167028862bE2a173976CA11`; else unset | batches discovery and quotes; `""` = quotes one `eth_call` each and discovery off (it needs Multicall3) |
+| `SUSHI_V3_QUOTER` | chain 30: `0xE43ca1deE3f0fC1e2df73A0745674545f11A59f5`; else unset | SushiSwap v3 QuoterV2 for venue-1 pools / paths (start-up checks its `factory()` against the solver's venue 1); `""` = venue 1 never quoted, so never routed |
 | `ROUTE_SLIPPAGE_BPS` | `10` | haircut on the live quote in the gate (non-stable pairs). The quote is read on the simulated block and the plan's on-chain floor (`minOut` / `amountInMaximum`) bounds the output, so a price move before inclusion costs a revert's gas, never principal; 10 bps covers a ~30 s Rootstock block of BTC drift. Was 30 until 2026-10-07, which together with gas pushed the app's market fills to the floor |
 | `ROUTE_STABLE_SLIPPAGE_BPS` | `5` | the haircut instead when both tokens are in `USD_TOKENS` (e.g. USDRIF/USDT0 on the 0.05 % pool). The quote is read on the simulated block and the plan's on-chain floor bounds the output, so a miss costs a revert's gas, never principal; a $1/$1 pool barely moves before inclusion. At 30 bps the app's 300 USDRIF market never cleared its then-50 bps floor (task 15) |
-| `ROUTE_GAS_ESTIMATE` | `320000` | `eth_estimateGas` units assumed by the profitability gate before the simulation, and the FLOOR of the re-price loop: the plan is priced at P = ⌈max(`ROUTE_GAS_ESTIMATE`, simulated) × r⌉ (r = the learned receipt ratio) and sent with limit G = max(P, ⌈simulated × 1.25⌉) (`routeFiller.ts`, `GAS_LIMIT_PCT = 125` — headroom only, not priced since 2026-10-07). 320k sits above the net pull gas a fill pays (282.9k) and below the gross pull gas the node simulates (343.5k; execution 310.5k + 21k alone is 331.5k), so the gate never under-assumes a fill's real cost, and on today's sandboxed shapes the measured term wins (direct ⌈285.8k × 1.25⌉ ≈ 357k, pull ≈ 429k — one re-price round). Figures: `SandboxGasBench.test_sandbox_gas_*`, see *What the gas row measures* |
+| `ROUTE_GAS_ESTIMATE` | `320000` | `eth_estimateGas` units of a SANDBOX-plan fill (an API route) assumed by the profitability gate before the simulation, and the FLOOR of the re-price loop — a pool plan assumes this − `SANDBOX_ROUTE_OVERHEAD_GAS` (30k), a fill carrying a maker permit + `PERMIT_IN_FILL_GAS` (60k): the plan is priced at P = ⌈max(`ROUTE_GAS_ESTIMATE`, simulated) × r⌉ (r = the learned receipt ratio) and sent with limit G = max(P, ⌈simulated × 1.25⌉) (`routeFiller.ts`, `GAS_LIMIT_PCT = 125` — headroom only, not priced since 2026-10-07). 320k sits above the net pull gas a fill pays (282.9k) and below the gross pull gas the node simulates (343.5k; execution 310.5k + 21k alone is 331.5k), so the gate never under-assumes a fill's real cost, and on today's sandboxed shapes the measured term wins (direct ⌈285.8k × 1.25⌉ ≈ 357k, pull ≈ 429k — one re-price round). Figures: `SandboxGasBench.test_sandbox_gas_*`, see *What the gas row measures* |
 | `MAX_ROUTE_GAS` | `1200000` | refuse a route fill whose gas limit (simulated × 1.25) exceeds this. It bounds per-tx exposure, including the at-most `(limit − priced) × gasPrice` a fill can lose when it burns past what it was priced at (the floor is priced at the simulated gas × r). A live Sushi route measured ~554k simulated (693k priced) — one operator-observed `eth_estimateGas` (gross), no repo test, not re-run |
 | `ROUTE_TOKENS` | `WRBTC,USDT0,WETH,USDRIF` | comma-separated allowlist; both tokens of a route candidate must be in it |
 | `MIN_PROFIT_RBTC` | `0` | profit required on top of gas, in RBTC. 0: the operator's infra is near-free, so a fill that covers its gas and haircut is worth taking |
 | `RBTC_PRICE_USD`, `USD_TOKENS` | unset, `USDT0,USDRIF` | RBTC price for $1 tokens; the higher of it and the pool price is used (both strategies) |
 | `ROUTE_PROFIT_RECIPIENT` | `0x0` (= the operator EOA) | `RoutePlan.profitRecipient`; point it at a treasury |
 | `ROUTE_HOURLY_FILLS` | `60` | rolling one-hour cap on route fills (gas: `HOURLY_GAS_RBTC`) |
-| `WRBTC`, `SWAP_ROUTER`, `QUOTER_V2` | Rootstock mainnet | overrides |
+| `WRBTC`, `SWAP_ROUTER`, `QUOTER_V2` | Rootstock mainnet | overrides (`QUOTER_V2` = venue 0's quoter, also the rebalancer's; `SWAP_ROUTER` is the rebalancer's RIF sale only — route fills never call it) |
 | `SUSHI_ENABLED` | `1` | the Sushi API route source (pull orders only) |
-| `ROUTE_OKU_PULL` | `1` | whether local Oku routes compete on pull orders (`0` = Sushi-only pull fills; direct orders always use Oku) |
+| `ROUTE_OKU_PULL` | `1` | whether the local pool plans (every venue) compete on pull orders (`0` = API-only pull fills; direct orders always use a pool plan) |
 | `SUSHI_API_URL` | `https://api.sushi.com` | API base |
 | `SUSHI_ROUTER` | `0xAC4c6e212A361c968F1725b4d055b47E63F80b75` | the pinned RedSnwapper; any other `tx.to` is refused |
 | `SUSHI_TIMEOUT_MS` | `4000` | per-request timeout |
@@ -656,8 +849,10 @@ solver's constructor).
 exactly the fill's input, approved by nobody (the solver included) and ends every call
 empty, so its standing approvals to arbitrary targets grant nothing and a new venue (the
 Sushi API's RedSnwapper or Nordstern's AggregatorGuard, say) needs no redeploy. The solver never approves a router. The
-remaining trust is in the route calldata: Oku routes are built locally by this bot (SDK
-encoders); Sushi and Nordstern routes come from third-party APIs and are fully decoded and validated
+remaining trust is in the route calldata: pool plans are built locally by this bot (SDK
+`encodePoolRoute`) and need no sandbox at all — the solver derives every pool from its
+immutable venue allowlist (`POOL_FACTORIES` / `POOL_INIT_HASHES`, default on chain 30: venue 0 = Oku, venue 1 = SushiSwap v3 — the order this bot's `venue` indices assume) and pays
+only in the pool's callback; Sushi and Nordstern routes come from third-party APIs and are fully decoded and validated
 before use (above), on the pull path only, where a hostile route can at worst make the
 fill revert. Cost: ~+11.5k gas per fill against the old per-fill-approval instance
 (~+18k net against the old standing one; net tx gas, solver floor seeded, Rootstock
@@ -720,6 +915,50 @@ Then go live:
 Watch the first live fills on the explorer, and `GET /status` or `pnpm status` for the
 budgets.
 
+## Gasless makers: the ERC-2612 permit rides in the fill (2026-10-12)
+
+An order may carry `erc2612Permit` — the maker's signed `permit(maker, Settlement,
+value, deadline)` on its input token (USD₮0) instead of an approval tx
+(`docs/gasless-permit-relay.md` §7). The book admits it with `state.erc2612Live` and a
+lens `fillableAmount` of 0; nothing funds it until the permit runs. The route strategy
+runs it INSIDE the fill: `executeFill(…, permits = [toSolverPermit(maker, permit,
+Settlement)])` — the solver calls `token.permit(maker, SETTLEMENT, …)` and then fills, in
+one tx, simulated together. `src/permit.ts`:
+
+- **Stage** (engine, before dispatch; only orders a strategy takes by shape): four
+  reads — lens `getOrderRelevantState` + `remaining`, the token's `nonces` +
+  `balanceOf`. The permit must name Settlement as spender and an input-leg token, else
+  it is ignored (`none`). Funded already (someone ran the permit, or the maker approved)
+  → `funded`: dispatched on the lens's fillable, **without** the permit (the solver
+  would accept it, but it only costs gas). Unfunded with the permit live (nonce =
+  `nonces(maker)`, deadline > now + 60 s, maker balance > 0) → `permit`: dispatched on
+  the size it will have (`remaining`, capped by the maker's balance and the permit
+  value for a fixed-input sell) with the permit attached (`BookEntry.fillPermit`).
+  Spent / superseded with nothing funding the order, expiring, no balance, or
+  `PERMIT_FILLS_ENABLED=0` → `dead`: skipped and held like a resting verdict.
+- **Route**: the fill is gated, built and simulated as any other, with
+  `PERMIT_IN_FILL_GAS` (60k, `src/route.ts`; fork: +59.3k execution / +46.5k net) added
+  to the pre-simulation estimate — only when the fill carries the permit. The simulation
+  runs the permit, so its `eth_estimateGas` is what the tx is priced and sent at. No
+  extra tx and no extra block of latency (the replaced relay design sent the permit as
+  its own tx and filled on a later tick).
+- **Inventory** (EOA `fillUpTo`) cannot carry a permit: it skips an entry with
+  `fillPermit` (no RPC) and takes such an order only once it is `funded`.
+- **Races**: anyone may submit the permit first (it is public). That is harmless: the
+  solver accepts a failed `permit` call when Settlement's allowance from the maker
+  already covers `value`, and after it lands the stage says `funded`. `owner` must be the
+  maker (`PermitOwnerNotMaker`). A Permit3 strict-mode maker gets no direct-approval
+  fallback, so such an order cannot be funded this way (the fill reverts
+  `Permit3Denied`).
+
+Fork check (anvil fork of mainnet; not in CI; needs the pool-route + permits solver on the
+fork until the beta instance is redeployed):
+`RPC_URL=http://127.0.0.1:18645 AGGREGATOR_SOLVER=0x… npx tsx e2e/gasless-permit.ts` —
+book admission on the real token, the `permit` stage, ONE `executeFill` carrying the
+permit on an Oku pool plan (the same call without it reverts), then a front-run: a
+third party relays a second permit, the stage flips to `funded`, and an `executeFill`
+still carrying the spent permit succeeds — the maker never sending a tx.
+
 ## Fork end-to-end smoke (not in CI)
 
 ```sh
@@ -758,11 +997,14 @@ and `PORT` override the defaults.
   that window, not within a tick. A decaying order's re-quote time is predicted with
   the market held fixed: a market move in our favour is noticed within 30 s, not at once.
 - One host per key: the budgets live in that host's state store.
-- Route: local quotes are Uniswap v3 (Oku) only; Sushi and Nordstern liquidity is
-  reached through their APIs, and only for PULL orders (direct orders need an
-  exact-output route to the maker, which neither API offers). Gas for an API-only pair
+- Route: local quotes (pool plans) are the configured Uniswap-v3-style pools on the
+  solver's venues (Oku, SushiSwap v3) only; Sushi's aggregated and Nordstern liquidity
+  is reached through their APIs, and only for PULL orders (direct orders need an
+  exact-output route to the maker, which neither API offers). A configured path keeps
+  one venue for all its hops (the contract would take a venue per hop). Gas for an API-only pair
   is priced like any other (a WRBTC path or `RBTC_PRICE_USD`), else the order is skipped.
-- Route: on today's Rootstock pairs all three sources find the same Oku pools; Nordstern's
+- Route: on today's Rootstock pairs all three sources mostly find the same Oku pools (the
+  pool plan wins a tie: it does not pay `SANDBOX_ROUTE_OVERHEAD_GAS`); Nordstern's
   `toAmount` runs ~1 bp above Oku's QuoterV2 figure for the same pool, so after its
   2 bps haircut it ranks LAST unless it finds a genuinely better route. Its executor is
   unverified source: the guard's own balance check, the plan's `minOut` and the

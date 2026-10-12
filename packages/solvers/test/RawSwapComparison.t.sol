@@ -8,9 +8,10 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
 
 import {CallbackMode, Order} from "@core/settlement/Settlement.sol";
-import {AggregatorFillSolver, RoutePlan, SurplusPolicy, NO_PATCH} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {AggregatorFillSolver, RoutePlan, SurplusPolicy, NO_PATCH, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 
 import {UsdrifForkBase} from "../../modules/redeem/usdrif/test/shared/UsdrifForkBase.t.sol";
+import {newAgg} from "./shared/AggDeploy.sol";
 
 /// @dev `Settlement.fill` is overloaded, so `abi.encodeCall` cannot resolve it by
 ///      name — this pins the 3-argument one for the calldata measurement.
@@ -116,7 +117,7 @@ contract RawSwapComparisonTest is UsdrifForkBase {
         address[] memory ops = new address[](2);
         ops[0] = address(this);
         ops[1] = maker;
-        agg = new AggregatorFillSolver(address(settlement), ops, SurplusPolicy({makerPpm: 0, protocolPpm: 0, protocolRecipient: address(0)}));
+        agg = newAgg(address(settlement), ops, SurplusPolicy({makerPpm: 0, protocolPpm: 0, protocolRecipient: address(0)}), new PoolVenue[](0));
         vm.label(address(agg), "aggregatorSolver");
         vm.label(SWAP_ROUTER_02, "swapRouter02");
     }
@@ -248,10 +249,10 @@ contract RawSwapComparisonTest is UsdrifForkBase {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(maker);
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         uint256 used = g0 - gasleft();
         assertGe(IERC20(USDT0).balanceOf(maker), FLOOR_OUT, "maker paid");
-        _report("ORDER FILL - direct (solver's tx)", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "")));
+        _report("ORDER FILL - direct (solver's tx)", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "", new Permit2612[](0))));
     }
 
     /// @dev Pull delivery: the swap output lands on the solver and Settlement
@@ -265,10 +266,10 @@ contract RawSwapComparisonTest is UsdrifForkBase {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(address(agg));
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         uint256 used = g0 - gasleft();
         assertGe(IERC20(USDT0).balanceOf(maker), FLOOR_OUT, "maker paid");
-        _report("ORDER FILL - pull (solver's tx)", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "")));
+        _report("ORDER FILL - pull (solver's tx)", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "", new Permit2612[](0))));
     }
 
     /// @dev Q2, isolated: the same inventory fill with the solver ALREADY holding
@@ -308,7 +309,7 @@ contract RawSwapComparisonTest is UsdrifForkBase {
         o.timing |= uint256(1) << 100; // FILL-ONCE: all-or-nothing, nonce-recorded
         bytes memory sig = _sign(o);
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, _plan(maker), "");
+        agg.executeFill(o, sig, AMOUNT_IN, _plan(maker), "", new Permit2612[](0));
         console.log("state: fill-once, maker's FIRST order ", g0 - gasleft());
     }
 
@@ -319,7 +320,7 @@ contract RawSwapComparisonTest is UsdrifForkBase {
     function _fillOnce(uint256 nonce) internal {
         Order memory o = _order(nonce, true);
         o.timing |= uint256(1) << 100;
-        agg.executeFill(o, _sign(o), AMOUNT_IN, _plan(maker), "");
+        agg.executeFill(o, _sign(o), AMOUNT_IN, _plan(maker), "", new Permit2612[](0));
     }
 
     // ──────────────── Model 2: the USER sends the transaction ────────────────
@@ -451,10 +452,10 @@ contract RawSwapComparisonTest is UsdrifForkBase {
         RoutePlan memory p = _plan(maker);
         vm.startPrank(maker);
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         uint256 used = g0 - gasleft();
         vm.stopPrank();
-        _report("USER TX - self-serve via DEX", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "")));
+        _report("USER TX - self-serve via DEX", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "", new Permit2612[](0))));
     }
 
     // ──────────── Q1: how the route is funded, measured in isolation ────────────
@@ -562,9 +563,9 @@ contract RawSwapWarmNonceTest is RawSwapComparisonTest {
         o.timing |= uint256(1) << 100;
         bytes memory sig = _sign(o);
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, _plan(maker), "");
+        agg.executeFill(o, sig, AMOUNT_IN, _plan(maker), "", new Permit2612[](0));
         uint256 used = g0 - gasleft();
-        _report("DEX FILL - fill-once, warm nonce word", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, _plan(maker), "")));
+        _report("DEX FILL - fill-once, warm nonce word", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, _plan(maker), "", new Permit2612[](0))));
     }
 
     /// @dev The control: the same fill with the ordinary per-order counter, taken
@@ -574,9 +575,9 @@ contract RawSwapWarmNonceTest is RawSwapComparisonTest {
         Order memory o = _order(32, true);
         bytes memory sig = _sign(o);
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, _plan(maker), "");
+        agg.executeFill(o, sig, AMOUNT_IN, _plan(maker), "", new Permit2612[](0));
         uint256 used = g0 - gasleft();
-        _report("DEX FILL - filledAmountIn counter", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, _plan(maker), "")));
+        _report("DEX FILL - filledAmountIn counter", used, abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, _plan(maker), "", new Permit2612[](0))));
     }
 }
 
@@ -655,8 +656,8 @@ contract FreshTxComparisonTest is RawSwapComparisonTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(maker);
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
-        _report("FRESH - DEX-routed fill (solver tx)", g0 - gasleft(), abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "")));
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
+        _report("FRESH - DEX-routed fill (solver tx)", g0 - gasleft(), abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "", new Permit2612[](0))));
     }
 
     /// @dev Does the solver need to HOLD anything? Three variants of the same
@@ -670,7 +671,7 @@ contract FreshTxComparisonTest is RawSwapComparisonTest {
         RoutePlan memory p = _plan(maker);
         p.profitRecipient = profitTo;
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         console.log(label, g0 - gasleft());
     }
 
@@ -721,8 +722,8 @@ contract FreshTxComparisonTest is RawSwapComparisonTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(maker);
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
-        _report("FRESH - DEX fill, fill-once (cold word)", g0 - gasleft(), abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "")));
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
+        _report("FRESH - DEX fill, fill-once (cold word)", g0 - gasleft(), abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "", new Permit2612[](0))));
     }
 
     function test_fresh_inventoryFill() public {
@@ -1217,7 +1218,7 @@ contract NoFloorTest is FreshTxComparisonTest {
         RoutePlan memory p = _plan(maker);
         p.profitRecipient = TREASURY;
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         console.log("custody: holds NOTHING            ", g0 - gasleft());
         assertEq(IERC20(USDRIF).balanceOf(address(agg)), 0, "still holds nothing");
     }

@@ -91,7 +91,20 @@ ROUTE_GAS_ESTIMATE = "320000"
 MAX_ROUTE_GAS = "1200000"
 ROUTE_HOURLY_FILLS = "60"
 MIN_PROFIT_RBTC = "0"
-# Pull-order API route sources (exact-input only; direct orders always use Oku).
+# Local pool plans (Oku = venue 0, SushiSwap v3 = venue 1; the solver swaps on the pools
+# itself, no sandbox): QUOTER_V2 and SUSHI_V3_QUOTER default to Rootstock's in code
+# (SUSHI_V3_QUOTER = "" turns venue 1 off). Gasless makers' ERC-2612 permits ride in
+# executeFill (PERMIT_FILLS_ENABLED, default on).
+# Pool routing (2026-10-12): the pools between ROUTE_TOKENS and the hubs (WRBTC, USDT0,
+# RIF, DOC) are DISCOVERED on both venues (getPool + CREATE2 check + liquidity/slot0,
+# ~2 Multicall3 eth_calls, refreshed hourly and kept in the DO state) and routed
+# multi-hop / mixed-venue — at most ROUTE_MAX_CANDIDATES quoted per fill, batched
+# through Multicall3 (≤ 1 eth_call per hop round). All defaults live in code; see
+# "Pool routing" in packages/beta-filler/README.md.
+ROUTE_DISCOVERY = "1"
+ROUTE_MAX_HOPS = "3"
+ROUTE_MAX_CANDIDATES = "5"
+# Pull-order API route sources (exact-input only; direct orders always use a pool plan).
 # Each response is fully decoded and validated against the fill (beta-filler README).
 SUSHI_ENABLED = "1"
 ROUTE_OKU_PULL = "1"

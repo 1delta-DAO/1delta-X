@@ -55,8 +55,20 @@ export interface AllowanceView {
   required: number;
   /** ERC-20 allowance to Permit3 today. `undefined` means not read yet, never zero. */
   current: number | undefined;
-  /** Whether both legs are set to exactly this ticket. */
+  /** Whether both legs are set to exactly this ticket — or a gasless permit will fund it. */
   covered: boolean;
+  /**
+   * Gasless funding (lib/permit.ts): an ERC-2612 permit signed with the order instead
+   * of the approve + grant transactions. Null when the pay token has no permit.
+   */
+  gasless?: {
+    available: boolean;
+    /** The ticket will be funded by the permit (the sign button asks for it too). */
+    selected: boolean;
+    /** Why it is not available here, when the token supports it. */
+    reason: string | null;
+    select: (on: boolean) => void;
+  } | null;
   /** A standing approval or grant exceeds this ticket and the next step trims it. */
   trims: boolean;
   /** The funding button: the next transaction and its place, "Wrap 0.0123 RBTC → WRBTC (1 of 3)". */
@@ -712,8 +724,32 @@ export function OrderForm(props: OrderFormProps) {
             </button>
           ) : (
             <>
-              {allowance.spender !== null && (
+              {allowance.spender !== null && allowance.gasless?.selected && (
                 <>
+                  <button type="button" className="cta ok" disabled>
+                    {`✓ No gas: sign a permit for exactly ${fmtAmt(allowance.required)} ${payToken}`}
+                  </button>
+                  <span className="capnote dim">
+                    Your wallet asks for two signatures — the order, then an ERC-2612 permit letting Settlement take
+                    exactly this order&rsquo;s {payToken} until it expires. The filler submits the permit just before it
+                    fills and pays its gas; you send no transaction. A newer gasless {payToken} order replaces this
+                    one&rsquo;s allowance ·{" "}
+                    <button type="button" className="linkbtn" onClick={() => allowance.gasless?.select(false)}>
+                      use approvals instead
+                    </button>
+                  </span>
+                </>
+              )}
+              {allowance.spender !== null && !allowance.gasless?.selected && (
+                <>
+                  {allowance.gasless?.available && (
+                    <button type="button" className="cta line" onClick={() => allowance.gasless?.select(true)}>
+                      Sign permit (no gas)
+                    </button>
+                  )}
+                  {allowance.gasless && !allowance.gasless.available && allowance.gasless.reason && (
+                    <span className="capnote dim">No gasless permit: {allowance.gasless.reason}</span>
+                  )}
                   <button
                     type="button"
                     className={allowance.covered ? "cta ok" : "cta line"}
@@ -779,6 +815,12 @@ export function OrderForm(props: OrderFormProps) {
             ) : (
               <>
                 Network fee <b>0</b> — the filler pays
+              </>
+            )}
+            {allowance.gasless?.selected && !overBalance && (
+              <>
+                <br />
+                no transaction to send — the filler relays your permit
               </>
             )}
             {allowance.spender !== null && !allowance.covered && !overBalance && (

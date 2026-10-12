@@ -1,5 +1,6 @@
 import type { GasRatioState } from "./gasRatio";
 import type { GuardState } from "./guard";
+import type { PoolGraphState } from "./poolGraph";
 import type { QuoteBookState } from "./quote";
 import type { RebalanceState } from "./rebalance";
 
@@ -57,6 +58,8 @@ export interface FillerState {
   gasRatios?: GasRatioState;
   /** Indicative quotes issued and the orders matched to them (quote.ts; ≤ MAX_QUOTES). */
   quotes?: QuoteBookState;
+  /** The route strategy's discovered pool graph (poolGraph.ts): survives restarts, refreshed every ROUTE_DISCOVERY_SECONDS. */
+  poolGraph?: PoolGraphState;
 }
 
 /** An in-memory store (tests, one-shot runs). */

@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, ROOTSTOCK } from "../src/config";
 import { Engine } from "../src/engine";
 import { gasShape } from "../src/gasRatio";
+import { SANDBOX_ROUTE_OVERHEAD_GAS } from "../src/route";
 import { MAX_QUOTES, netQuote, parseQuoteRequest, QuoteBook, quoteMatches, quoteToJson, type IssuedQuote, type QuoteRequest } from "../src/quote";
 import { MemoryStateStore, STATE_KEY, type FillerState } from "../src/state";
 import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK } from "../src/nordstern";
@@ -73,6 +74,10 @@ function fake(o: { estimate?: bigint; usdt0Balance?: bigint } = {}) {
         case "GATED": return true;
         case "isOperator": return true;
         case "SANDBOX": return SANDBOX;
+        // One pool venue (Oku) whose QuoterV2 prices the same factory: venue 1 is dropped at init.
+        case "POOL_VENUES": return 1n;
+        case "poolVenue": return ["0xaF37EC98A00FD63689CF3060BF3B6784E00caD82", "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54"];
+        case "factory": return "0xaF37EC98A00FD63689CF3060BF3B6784E00caD82";
         case "OWNER": return SOLVER;
         case "MAKER_SURPLUS_PPM": case "PROTOCOL_SURPLUS_PPM": return 0;
         case "previewFill": return [0n, [w.received], [w.owed]];
@@ -214,10 +219,11 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     e.gasRatios.record(pullShape, 380_000n, 330_000n, 1);
     const p = await e.quote(sellReq({ amountIn: 2n * 10n ** 16n }));
     expect(p.ok && p.quote.gasUnits).toBe(e.gasRatios.priced(pullShape, 380_000n));
-    // …never below ROUTE_GAS_ESTIMATE (320k): a tiny learned estimate is floored.
+    // …never below the best candidate's plan-kind estimate — a pool plan: ROUTE_GAS_ESTIMATE
+    // (320k) less SANDBOX_ROUTE_OVERHEAD_GAS: a tiny learned estimate is floored.
     e.gasRatios.record(gasShape("route", "pull", USDT0, WRBTC), 100_000n, 90_000n, 2);
     const b = await e.quote(sellReq({ tokenIn: USDT0, tokenOut: WRBTC, amountIn: 20_000_000n, side: "buy" }));
-    expect(b.ok && b.quote.gasUnits).toBe(e.gasRatios.priced(gasShape("route", "pull", USDT0, WRBTC), 320_000n));
+    expect(b.ok && b.quote.gasUnits).toBe(e.gasRatios.priced(gasShape("route", "pull", USDT0, WRBTC), 320_000n - SANDBOX_ROUTE_OVERHEAD_GAS));
   });
 
   it("BUY (pay USDT0, receive WRBTC): exact-input of the pay amount, gas charged in the RECEIVE token", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getAddress, zeroAddress } from "viem";
 
 import { parseDeployments, solverForMarket } from "../src/config/deployments";
+import { pickOrderNonces } from "../src/lib/nonces";
 import { buildOrder, randomOrderNonce } from "../src/lib/order";
 
 /**
@@ -33,13 +34,18 @@ describe("APP-RIF4 — per-market delta-verify filler", () => {
   });
 });
 
-describe("G-TS_SIGN-3 — the app draws nonces through the SDK", () => {
-  it("test_audit_G_TS_SIGN_3_appNonceAboveWatermarkBelowReservedHalf", () => {
+describe("G-TS_SIGN-3 — every app nonce is above the watermark and below the reserved half", () => {
+  // The app now signs WORD-PACKED nonces (lib/nonces.ts, covered in nonces.test.ts);
+  // the SDK's uniform draw is its fallback (no wallet / failed bitmap read) and
+  // buildOrder's default, so it must still honour both bounds.
+  it("test_audit_G_TS_SIGN_3_appNonceAboveWatermarkBelowReservedHalf", async () => {
     const floor = (1n << 255n) - 1000n;
     for (let i = 0; i < 50; i++) {
       const n = randomOrderNonce(floor);
       expect(n >= floor && n < 1n << 255n).toBe(true);
     }
+    const packed = await pickOrderNonces({ count: 3, minValidNonce: floor, readWord: () => 0n });
+    for (const n of packed) expect(n >= floor && n < 1n << 255n).toBe(true);
     expect(typeof buildOrder).toBe("function");
   });
 });

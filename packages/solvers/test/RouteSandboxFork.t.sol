@@ -9,11 +9,12 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 
 import {Order} from "@core/settlement/Settlement.sol";
 import {SolverCallbackExecutor} from "@core/settlement/SolverCallbackExecutor.sol";
-import {AggregatorFillSolver, RoutePlan, SurplusPolicy, NO_PATCH} from "@solvers/aggregator/AggregatorFillSolver.sol";
+import {AggregatorFillSolver, RoutePlan, SurplusPolicy, NO_PATCH, Permit2612, PoolVenue} from "@solvers/aggregator/AggregatorFillSolver.sol";
 import {RouteSandbox} from "@solvers/aggregator/RouteSandbox.sol";
 
 import {UsdrifForkBase} from "../../modules/redeem/usdrif/test/shared/UsdrifForkBase.t.sol";
 import {FreshTxComparisonTest, ISwapRouter02} from "./RawSwapComparison.t.sol";
+import {newAgg} from "./shared/AggDeploy.sol";
 
 /// @title SandboxGasBench
 /// @notice The per-fill price of {RouteSandbox}, on the same live pool, block and
@@ -57,9 +58,9 @@ contract SandboxGasBench is FreshTxComparisonTest {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(direct ? maker : address(agg));
         p.profitRecipient = TREASURY;
-        bytes memory cd = abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, ""));
+        bytes memory cd = abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "", new Permit2612[](0)));
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         uint256 used = g0 - gasleft();
         _reportNet(label, used, cd);
         assertGe(IERC20(USDT0).balanceOf(maker), FLOOR_OUT, "maker paid");
@@ -152,11 +153,11 @@ contract SelfSeedColdBench is SandboxGasBench {
         Order memory o = _order(nonce, direct);
         bytes memory sig = _sign(o);
         RoutePlan memory p = _seedPlan(direct);
-        bytes memory cd = abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, ""));
+        bytes memory cd = abi.encodeCall(agg.executeFill, (o, sig, AMOUNT_IN, p, "", new Permit2612[](0)));
         // No balance read before the measurement: it would warm USDT0 (a proxy) and
         // the maker's slot and understate the fill by ~10k.
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, AMOUNT_IN, p, "");
+        agg.executeFill(o, sig, AMOUNT_IN, p, "", new Permit2612[](0));
         uint256 used = g0 - gasleft();
         _reportNet(label, used, cd);
         assertGe(IERC20(USDT0).balanceOf(maker), FLOOR_OUT, "maker paid");
@@ -191,7 +192,7 @@ contract SelfSeedSteadyBench is SelfSeedColdBench {
         Order memory o = _order(80 + 256 * 7, false);
         // (No require on the floors here: the same fixture, run against the pre-2026-10
         // contract, is how the "no floor after a prior fill" baseline was measured.)
-        agg.executeFill(o, _sign(o), AMOUNT_IN, _seedPlan(false), "");
+        agg.executeFill(o, _sign(o), AMOUNT_IN, _seedPlan(false), "", new Permit2612[](0));
         deal(USDRIF, maker, AMOUNT_IN);
         vm.prank(maker);
         permit3.approveToken(address(settlement), USDRIF, uint160(AMOUNT_IN), 0);
@@ -262,8 +263,9 @@ contract SushiRouteForkTest is UsdrifForkBase {
         super.setUp();
         address[] memory ops = new address[](1);
         ops[0] = address(this);
-        agg = new AggregatorFillSolver(
-            address(settlement), ops, SurplusPolicy({makerPpm: 0, protocolPpm: 0, protocolRecipient: address(0)})
+        agg = newAgg(
+            address(settlement), ops, SurplusPolicy({makerPpm: 0, protocolPpm: 0, protocolRecipient: address(0)}),
+            new PoolVenue[](0)
         );
         vm.label(address(agg), "aggregatorSolver");
         vm.label(address(agg.SANDBOX()), "routeSandbox");
@@ -350,7 +352,7 @@ contract SushiRouteForkTest is UsdrifForkBase {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(_forSolver(SUSHI_USDRIF_USDT0, address(agg)), 99e6, SNWAP_AMOUNT_IN_OFFSET);
         uint256 g0 = gasleft();
-        agg.executeFill(o, sig, 100e18, p, "");
+        agg.executeFill(o, sig, 100e18, p, "", new Permit2612[](0));
         console.log("sushi USDRIF->USDT0 pull fill, exec gas", g0 - gasleft());
         assertEq(IERC20(USDT0).balanceOf(maker), 99e6, "maker paid its signed output");
         assertEq(IERC20(USDT0).balanceOf(TREASURY), 99_756_478 - 99e6 - 1, "spread to the treasury, less the floor");
@@ -371,7 +373,7 @@ contract SushiRouteForkTest is UsdrifForkBase {
         // The USDT0 floor self-seeds only if no earlier fill on this instance did
         // (this test also runs second, from {test_oku_swapRouter02_pullFill_sameInstance}).
         uint256 seed = IERC20(USDT0).balanceOf(address(agg)) == 0 ? 1 : 0;
-        agg.executeFill(o, sig, 1e16, p, "");
+        agg.executeFill(o, sig, 1e16, p, "", new Permit2612[](0));
         assertEq(IERC20(USDT0).balanceOf(maker) - makerBefore, 840e6, "maker paid");
         assertEq(IERC20(USDT0).balanceOf(TREASURY) - treasuryBefore, 848_238_757 - 840e6 - seed, "spread to the treasury");
         assertEq(IERC20(WRBTC).balanceOf(address(agg)), 1, "the WRBTC floor self-seeded");
@@ -386,7 +388,7 @@ contract SushiRouteForkTest is UsdrifForkBase {
         bytes memory sig = _sign(o);
         RoutePlan memory p =
             _plan(_forSolver(SUSHI_USDRIF_USDT0, address(agg.SANDBOX())), 99e6, SNWAP_AMOUNT_IN_OFFSET);
-        agg.executeFill(o, sig, 100e18, p, "");
+        agg.executeFill(o, sig, 100e18, p, "", new Permit2612[](0));
         assertEq(IERC20(USDT0).balanceOf(maker), 99e6, "maker paid");
         assertEq(IERC20(USDT0).balanceOf(TREASURY), 99_756_478 - 99e6 - 1, "spread to the treasury, less the floor");
         _sandboxEmpty();
@@ -404,7 +406,7 @@ contract SushiRouteForkTest is UsdrifForkBase {
                 abi.encodeWithSelector(AggregatorFillSolver.InsufficientOutput.selector, uint256(0), uint256(99e6))
             )
         );
-        agg.executeFill(o, sig, 100e18, p, "");
+        agg.executeFill(o, sig, 100e18, p, "", new Permit2612[](0));
         assertEq(IERC20(USDRIF).balanceOf(maker), 1_000e18, "maker untouched");
     }
 
@@ -417,7 +419,7 @@ contract SushiRouteForkTest is UsdrifForkBase {
         bytes memory sig = _sign(o);
         RoutePlan memory p = _plan(_forSolver(SUSHI_USDRIF_USDT0, address(agg)), 98e6, SNWAP_AMOUNT_IN_OFFSET);
         vm.expectRevert(); // MinimalOutputBalanceViolation(USDT0, ~98.76e6), wrapped
-        agg.executeFill(o, sig, 99e18, p, "");
+        agg.executeFill(o, sig, 99e18, p, "", new Permit2612[](0));
     }
 
     /// @dev THE STANDING SANDBOX APPROVAL IS NOT EXPLOITABLE THROUGH SNWAP. After a
@@ -471,7 +473,7 @@ contract SushiRouteForkTest is UsdrifForkBase {
                 )
             )
         });
-        agg.executeFill(o, sig, 100e18, p, "");
+        agg.executeFill(o, sig, 100e18, p, "", new Permit2612[](0));
         assertEq(IERC20(USDT0).balanceOf(maker), 99e6, "maker paid");
         assertGt(IERC20(USDT0).balanceOf(TREASURY), 0, "spread to the treasury");
         _sandboxEmpty();

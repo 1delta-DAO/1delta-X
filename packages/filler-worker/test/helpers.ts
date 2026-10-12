@@ -193,6 +193,10 @@ function fakeChain(account: { address: Address; signTransaction: unknown }, coun
         case "GATED": return true;
         case "isOperator": return true;
         case "SANDBOX": return SANDBOX;
+        // One pool venue (Oku) whose QuoterV2 prices the same factory: venue 1 is dropped at init.
+        case "POOL_VENUES": return 1n;
+        case "poolVenue": return ["0xaF37EC98A00FD63689CF3060BF3B6784E00caD82", "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54"];
+        case "factory": return "0xaF37EC98A00FD63689CF3060BF3B6784E00caD82";
         case "OWNER": return SOLVER;
         case "MAKER_SURPLUS_PPM": case "PROTOCOL_SURPLUS_PPM": return 0;
         case "previewFill": {

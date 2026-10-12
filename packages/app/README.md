@@ -501,6 +501,81 @@ The filler-worker app-shape e2e (`packages/filler-worker/e2e/app-shape.ts`) buil
 its market tickets through the same `readGasPrice` → `floorInputsFor` → `planTicket`
 path, with the fork's block minimum (re-added by the rpc-proxy) and pool mid.
 
+## Order nonces: word-packed (2026-10-12)
+
+Orders no longer carry a uniform random 255-bit nonce. `lib/nonces.ts` hands a
+maker's orders consecutive bits of ONE word of Settlement's nonce bitmap
+(`nonceBitmap[maker][nonce >> 8]`, bit `nonce & 0xff`): the lowest bit, starting at
+`max(minValidNonce, 256, high-water + 1)`, that is clear on-chain (one
+`nonceBitmap(maker, word)` read through the wallet, right before the wallet prompt),
+not on any of the maker's signed orders the app still holds (open, hidden, or
+restored from `GET /orders?maker=`), and not handed out before. A full word rolls over
+to the next one, and each TWAP slice gets its own bit. Every nonce stays below 2^255
+(the reserved signer half; `assertOrderNonce` still runs in `buildOrder`). With no
+wallet, or when the bitmap read fails, the app falls back to the old random draw
+above the watermark; a failed `minValidNonce` read still fails the ticket.
+
+Reservations are serialised per (chain, Settlement, maker) inside a tab and
+persisted as a high-water mark in `localStorage`, shared by every tab of the origin,
+before the wallet prompt. A declined signature therefore leaves a gap, never a
+reused nonce. Two browsers with no shared storage can still pick the same bit when
+neither order is on the book yet. That costs no funds: the two orders share a nonce,
+so "Cancel on-chain" for one also cancels the other, and for fill-once orders (market
+tickets) only, filling one makes the other unfillable. In that rare collision the
+app's chain fallback cannot tell the dead sibling from a fill, and may show it as
+Filled.
+
+**Gas.** Measured with a throwaway `packages/core` bench (`forge test --isolate`, one
+plain `fill`, the maker's second order):
+
+| order | gas | vs today |
+| --- | --- | --- |
+| counter order, random nonce (today) | 151,382 | — |
+| counter order, packed nonce | 151,055 | −327 (calldata only) |
+| fill-once, random (fresh) word | 151,899 | +517 |
+| fill-once, packed (already non-zero) word | 134,460 | **−16,922** |
+
+The packed nonce saves storage gas **only for fill-once orders** (`timing` bit 100).
+An ordinary order records its progress in a fresh `filled[orderHash]` slot whatever
+its nonce, and only *reads* the bitmap word for the cancel gate. So on its own the
+packed nonce saves calldata: 1–2 non-zero bytes instead of about 31, which is −327
+gas at EIP-2028 pricing and about −1.9k at rskj's 68 gas per non-zero byte.
+
+**Fill-once is ON for market tickets** (`fillOnceFor` in `lib/nonces.ts`; quoted
+and gas-floor-fallback alike). Limit orders and TWAP slices stay ordinary counter
+orders and keep partial fills. A fill-once order is whole-or-nothing: the core
+reverts `FillOnceMustBeFull` on a partial, and a market ticket is meant to fill
+whole anyway. The live route, on the Rootstock fork (`PoolRouteFork.t.sol`
+`test_fillOnce_packedNonce_direct_exactOut_pool`, `--isolate`, the maker's second
+order in a word whose first already filled, direct 1-hop pool fill through
+`AggregatorFillSolver`):
+
+| order | execution | net tx gas |
+| --- | --- | --- |
+| counter order | 225,177 | 248,381 |
+| fill-once | 208,600 | 231,816 (**−16,565**) |
+
+A fill-once fill leaves `filled(hash)` at 0 and consumes the nonce, the same state
+a nonce cancel leaves. Three parts handle that:
+
+- **orderbook-worker** tombstones the order `Filled` (full anchor, with the
+  `txHash`) from its indexed `OrderFilled`, whether it came from the log scan or a
+  `/fills/report`. A lens `Cancelled` with a fill row maps to `filled`. See its
+  README, *Fill-once orders*.
+- **The app's chain fallback** (`lib/chain.ts` `readFillState`) reads
+  `isNonceCancelled(maker, nonce)` as well as `filled(hash)` for a fill-once order.
+  It treats a book `Cancelled` for that shape as unconfirmed and asks the chain.
+  If the nonce is consumed and the app did not broadcast an on-chain cancel for the
+  order (`markHardCancelSent`, recorded once the cancel tx is sent), the order
+  counts as **Filled**. Otherwise it counts as cancelled
+  (`lib/orderLifecycle.ts` `chainFillOutcome`). A soft cancel does not count as
+  the user's cancel here, because it never touches the nonce: the order stays
+  fillable on-chain, so a nonce consumed after a soft cancel is a fill. With no
+  wallet on the chain, the book's verdict stands.
+- **The beta filler** never sends a partial for a fill-once order. A
+  budget- or balance-capped fill (`capFillAmount`) or an under-funded maker is a
+  skip with a `fill-once order: …` reason (`policy.ts` `fillOnceBlocker`).
+
 ## What is real and what is not
 
 | Part | Status |
@@ -511,9 +586,10 @@ path, with the fork's block minimum (re-added by the rpc-proxy) and pool mid.
 | Token icons | **Live.** [1delta-DAO/token-lists](https://github.com/1delta-DAO/token-lists), looked up by pinned address, cached 3 days |
 | Wallet connection, chain switching, balances | **Live.** EIP-6963 + viem, read through the wallet |
 | Ladder merge, fill simulation, resting/crossing split | **Real.** `src/lib/univ3.ts`, `src/lib/ladder.ts` |
-| Order signing (EIP-712) | **Real.** Pinned tokens, nonce < 2^255 and above the on-chain `minValidNonce` |
+| Order signing (EIP-712) | **Real.** Pinned tokens, word-packed nonce < 2^255 and above the on-chain `minValidNonce` |
 | Order distribution: resting, soft cancels, fills | **Mocked in-browser** by default (`src/backend/mock.ts`; every fill flagged `simulated`). **Live** with `VITE_ORDERBOOK_URL` (`src/backend/remote.ts`): posted to `@1delta-x/orderbook-server`, fills only as reported from the chain |
 | Funding: ERC-20 approve to Permit3 + Permit3 grant to Settlement | **Live.** Both legs, each exactly the ticket's input; revocable from the form |
+| Gasless funding: ERC-2612 permit to Settlement, submitted by the filler inside its fill | **Live (USD₮0).** Signed with the order, exactly its input, until its expiry; no transaction, no RBTC |
 | Auto-wrap RBTC → WRBTC (selling WRBTC), unwrap | **Live.** `WRBTC.deposit` of exactly the shortfall before the approve; `WRBTC.withdraw` from the wallet strip |
 | On-chain cancel (`Settlement.cancelOrders`) | **Live** when a Settlement is configured |
 | Settlement transactions | **Simulated** with the mock. With `VITE_ORDERBOOK_URL`, real fillers settle on-chain; the app sends none itself |
@@ -552,6 +628,25 @@ on its own shortly after the order expires. Approving a new ticket for the same
 token replaces the previous one's funding. A TWAP funds its whole schedule up
 front (each slice is a separate order, signed when due), so a later slice needs
 no further approval.
+
+**Gasless funding: a permit instead of both transactions (2026-10-12).** When the
+pay token implements EIP-2612 — on Rootstock only **USD₮0** (`ERC2612_TOKENS` in the
+SDK; USDRIF, WRBTC, WETH, RIF, DOC and rUSDT have no permit) — the form offers
+**Sign permit (no gas)** and selects it by default. Signing then asks the wallet for
+two signatures: the order, then `Permit(owner, spender = Settlement, value = exactly
+the order's input, nonce = token.nonces(owner), deadline = the order's expiry)`
+(`lib/permit.ts`, which refuses to sign if the token's on-chain `DOMAIN_SEPARATOR()`
+is not the pinned `("USD₮0", "1", 30, token)` domain). The permit goes to the book
+with the order (`POST /orders {order, sig, erc2612Permit}`); the filler that takes the
+order submits `token.permit(...)` first and pays its gas, which creates a DIRECT
+ERC-20 allowance to Settlement — the surface Settlement's pull falls back to when
+there is no Permit3 grant. The maker sends no transaction and needs no RBTC. Not
+offered for a TWAP (slices are signed one at a time and would share the token nonce),
+when a wrap is needed, or when the maker is in Permit3 strict mode (which refuses the
+direct surface); **use approvals instead** switches back. Same exact-size rule: a
+permit SETS the allowance, so a newer gasless ticket in the same token replaces an
+older unfilled one's. The revoke now also clears a direct approval to Settlement.
+Design and risks: `docs/gasless-permit-relay.md` §7.
 
 **Gas price of the app's own transactions (2026-10-11).** Wrap, approve, Permit3 grant,
 unwrap and on-chain cancel are sent as legacy transactions at the latest block's
@@ -843,11 +938,12 @@ src/
   lib/poolbook.ts       every venue → one merged, venue-tagged PoolBook
   lib/ladder.ts         merge, walk, quote, clearing price, depth
   lib/tokens.ts         1delta token lists (icons only), lazily loaded, cached with a TTL
-  lib/order.ts          ticket → EIP-712 order: locale-free wei maths, nonce draw, input cap
+  lib/order.ts          ticket → EIP-712 order: locale-free wei maths, input cap
+  lib/nonces.ts         word-packed order nonces: bitmap read, reservations, random fallback
   lib/plan.ts           what one ticket signs and funds
   lib/ticketView.ts     what the form / book show: quote-first figures, quote marker, balances, Max
   lib/funding.ts        the funding steps (RBTC → WRBTC wrap, ERC-20 → Permit3, Permit3 grant → Settlement)
-  lib/chain.ts          on-chain reads: PERMIT3() check, minValidNonce, funding state
+  lib/chain.ts          on-chain reads: PERMIT3() check, minValidNonce, nonce bitmap, funding state
   backend/api.ts        the order-distribution seam
   backend/mock.ts       in-browser stand-in (default)
   backend/remote.ts     REST client of @1delta-x/orderbook-server (VITE_ORDERBOOK_URL)

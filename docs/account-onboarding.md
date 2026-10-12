@@ -114,6 +114,18 @@ solver tx:
 `fill` is permissionless and a solver's transaction may do anything before it —
 the same shape the CCTP path already uses for `receiveMessage` + `fill`.
 
+### Shipped instead (2026-10-12): the direct surface, off-chain only
+
+For item-free orders the contract change above is not needed: a 2612 permit whose
+spender is **Settlement** (not Permit3) creates the direct ERC-20 allowance that
+Settlement's pull already falls back to (see *Strict mode, and the two funding
+surfaces* below). The maker signs it next to the order, the book carries it
+(`erc2612Permit` on the announce), and the filler passes it into
+`AggregatorFillSolver.executeFill`'s `permits`, which runs `token.permit(...)` and the
+fill in one tx. One signature, no Permit3 grant, no core change — live on the Rootstock
+beta for USD₮0. Not for makers in strict mode. Details, token survey and risks:
+[gasless-permit-relay.md §7](gasless-permit-relay.md).
+
 ### Coverage
 
 Not universal. USDC and most modern tokens implement 2612; **DAI** uses the older
@@ -178,7 +190,7 @@ contract whose entire purpose is to look harmless.
 |---|---|
 | bridged user on a fresh chain | **Route 1** — the account is a `PositionFunnel`; solver calls `enableTokens`, user sends nothing |
 | any other contract account (Safe, 7579 account) | its own batch — two calls, one user operation |
-| EOA holding a 2612 token | **Route 2** — signature only, once Permit3 carries the replay |
+| EOA holding a 2612 token | **Route 2** — signature only: today via the direct surface (§7 of the relay doc), for every order shape once Permit3 carries the replay |
 | EOA holding a non-permit token (WETH) | **Route 3**, or the ordinary one-time `approve` |
 
 That last row is worth stating plainly rather than engineering around: one

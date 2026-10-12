@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { concat, decodeFunctionData, encodeFunctionData, hexToBigInt, size, sliceHex, toFunctionSelector, type Address, type Hex } from "viem";
+import { concat, decodeFunctionData, encodeFunctionData, hexToBigInt, hexToBytes, numberToHex, size, sliceHex, toFunctionSelector, type Address, type Hex } from "viem";
 
 import {
   AGGREGATOR_FILL_SOLVER_ABI,
   NO_PATCH,
+  isNoPatch,
   ROUTE_SANDBOX_ABI,
   SNWAP_AMOUNT_IN_OFFSET,
   decodeSnwap,
@@ -18,6 +19,13 @@ import {
   encodeV3Path,
   encodeV3PathReversed,
   patchAmountIn,
+  POOL_ROUTE,
+  ROOTSTOCK_POOL_VENUES,
+  decodePoolRoute,
+  encodePoolRoute,
+  toSolverPermit,
+  v3PoolAddress,
+  type Permit2612,
   swapRouter02AmountInOffset,
   swapRouter02AmountOutOffset,
   type RoutePlan,
@@ -35,15 +43,37 @@ const SENTINEL = 0x1234_5678_9abc_def0_1122_3344_5566_7788n;
 const word = (data: Hex, off: bigint) => hexToBigInt(sliceHex(data, Number(off), Number(off) + 32));
 
 describe("NO_PATCH", () => {
-  it("is type(uint256).max, the contract's sentinel", () => {
-    expect(NO_PATCH).toBe(2n ** 256n - 1n);
+  it("is 2^255, the contract's canonical sentinel (one non-zero calldata byte; 2026-10-12)", () => {
+    expect(NO_PATCH).toBe(2n ** 255n);
+  });
+  it("isNoPatch: any bit-255 value, including the pre-2026-10-12 type(uint256).max", () => {
+    expect(isNoPatch(NO_PATCH)).toBe(true);
+    expect(isNoPatch(2n ** 256n - 1n)).toBe(true);
+    expect(isNoPatch(2n ** 255n | 7n)).toBe(true);
+    expect(isNoPatch(2n ** 255n - 1n)).toBe(false);
+    expect(isNoPatch(0n)).toBe(false);
+    expect(isNoPatch(32n)).toBe(false);
+  });
+  it("a NO_PATCH offset word costs 140 calldata gas (was 512)", () => {
+    const gas = (v: bigint) => [...hexToBytes(numberToHex(v, { size: 32 }))].reduce((g, b) => g + (b === 0 ? 4 : 16), 0);
+    expect(gas(NO_PATCH)).toBe(140);
+    expect(gas(2n ** 256n - 1n)).toBe(512);
   });
 });
 
 describe("AggregatorFillSolver ABI", () => {
-  it("executeFill selector matches the compiled contract (forge inspect: 0x16997a3b — RoutePlan gained amountOutOffset + minBumpBps, 2026-10)", () => {
+  it("executeFill selector matches the compiled contract (forge inspect: 0xd828b11a — the `permits` argument, 2026-10-12; was 0x16997a3b)", () => {
     const fn = AGGREGATOR_FILL_SOLVER_ABI.find((x) => x.type === "function" && x.name === "executeFill")!;
-    expect(toFunctionSelector(fn as never)).toBe("0x16997a3b");
+    expect(toFunctionSelector(fn as never)).toBe("0xd828b11a");
+  });
+  it("executeItemFill / poolFor / poolVenue / POOL_VENUES / MAX_POOL_HOPS selectors match (forge inspect, 2026-10-12)", () => {
+    const sel = (name: string) =>
+      toFunctionSelector(AGGREGATOR_FILL_SOLVER_ABI.find((x) => x.type === "function" && x.name === name)! as never);
+    expect(sel("executeItemFill")).toBe("0x12272841");
+    expect(sel("poolFor")).toBe("0xee514e78");
+    expect(sel("poolVenue")).toBe("0x04ea3416");
+    expect(sel("POOL_VENUES")).toBe("0x76eeee66");
+    expect(sel("MAX_POOL_HOPS")).toBe("0xf65b5e71");
   });
   it("sweep / isOperator / SANDBOX selectors match; prime and the router set are gone", () => {
     const fn = (name: string) => AGGREGATOR_FILL_SOLVER_ABI.find((x) => x.type === "function" && x.name === name);
@@ -293,5 +323,108 @@ describe("Sushi RedSnwapper", () => {
     expect(isSnwapExecutorAllowed(EVIL, [])).toBe(true);
     expect(isSnwapExecutorAllowed(EVIL, [SOLVER])).toBe(false);
     expect(isSnwapExecutorAllowed(EVIL, [EVIL.toLowerCase() as Address, SOLVER])).toBe(true);
+  });
+});
+
+describe("direct pool routes", () => {
+  it("v3PoolAddress derives the live Rootstock pools for both default venues (checked on chain 30, 2026-10-12)", () => {
+    expect(v3PoolAddress(ROOTSTOCK_POOL_VENUES[0]!, WRBTC, USDT0, 3000)).toBe("0xaeF6fABf3b0C9e5F9d6D5170AfC703A633479Bbd");
+    expect(v3PoolAddress(ROOTSTOCK_POOL_VENUES[1]!, USDT0, WRBTC, 3000)).toBe("0x6d778c369cB386D50f4Ee676c5c264374C52Fd71");
+    expect(v3PoolAddress(ROOTSTOCK_POOL_VENUES[0]!, USDRIF, USDT0, 500)).toBe("0xD845702af381f0405661747a6a20bde0401A19d6");
+  });
+
+  it("encodePoolRoute lays out amountIn ‖ amountOut ‖ token ‖ fee ‖ venue ‖ token … and round-trips", () => {
+    const call = encodePoolRoute({ tokens: [USDRIF, USDT0, WRBTC], fees: [500, 3000], venues: [0, 1], amountIn: 7n, amountOut: 9n });
+    expect(size(call.data)).toBe(64 + 20 + 24 * 2);
+    expect(word(call.data, 0n)).toBe(7n);
+    expect(word(call.data, 32n)).toBe(9n);
+    expect(sliceHex(call.data, 64, 84).toLowerCase()).toBe(USDRIF.toLowerCase());
+    expect(sliceHex(call.data, 84, 88)).toBe("0x0001f400"); // fee 500, venue 0
+    expect(sliceHex(call.data, 108, 112)).toBe("0x000bb801"); // fee 3000, venue 1
+    expect(call.amountInOffset).toBe(0n);
+    expect(call.amountOutOffset).toBe(32n); // exact-output: the live output word
+    const d = decodePoolRoute(call.data);
+    expect(d.tokens.map((t) => t.toLowerCase())).toEqual([USDRIF, USDT0, WRBTC].map((t) => t.toLowerCase()));
+    expect(d.fees).toEqual([500, 3000]);
+    expect(d.venues).toEqual([0, 1]);
+    expect(d.amountIn).toBe(7n);
+    expect(d.amountOut).toBe(9n);
+  });
+
+  it("an exact-input pool route has no output word to patch", () => {
+    const call = encodePoolRoute({ tokens: [WRBTC, USDT0], fees: [3000], venues: [0], amountIn: 1n, amountOut: 0n });
+    expect(call.amountOutOffset).toBe(NO_PATCH);
+  });
+
+  it("refuses what the contract refuses", () => {
+    expect(() => encodePoolRoute({ tokens: [WRBTC], fees: [], venues: [], amountIn: 1n, amountOut: 0n })).toThrow();
+    const six = [WRBTC, USDT0, WRBTC, USDT0, WRBTC, USDT0];
+    expect(() => encodePoolRoute({ tokens: six, fees: [1, 1, 1, 1, 1], venues: [0, 0, 0, 0, 0], amountIn: 1n, amountOut: 0n })).toThrow();
+    expect(() => decodePoolRoute(concat([encodePoolRoute({ tokens: [WRBTC, USDT0], fees: [3000], venues: [0], amountIn: 1n, amountOut: 0n }).data, "0x00"]))).toThrow();
+    const plan: RoutePlan = {
+      router: POOL_ROUTE,
+      minOut: 0n,
+      maxPay: 0n,
+      amountInOffset: 4n, // not a pool-route word
+      amountOutOffset: NO_PATCH,
+      minBumpBps: 0n,
+      profitRecipient: SOLVER,
+      originator: SOLVER,
+      originatorPpm: 0,
+      data: encodePoolRoute({ tokens: [WRBTC, USDT0], fees: [3000], venues: [0], amountIn: 1n, amountOut: 0n }).data,
+    };
+    expect(() => encodeAggregatorExecuteFill({ order: CANONICAL_ORDER, sig: "0x", fillAmount: 1n, plan })).toThrow(/amountInOffset/);
+  });
+});
+
+describe("executeFill permits", () => {
+  const SETTLEMENT = "0x00000000000000000000000000000000000005e7" as Address;
+  const permit = {
+    token: USDT0,
+    spender: SETTLEMENT,
+    value: 5n,
+    nonce: 0n,
+    deadline: 99n,
+    v: 27,
+    r: ("0x" + "11".repeat(32)) as Hex,
+    s: ("0x" + "22".repeat(32)) as Hex,
+  };
+  const plan: RoutePlan = {
+    router: ROUTER,
+    minOut: 0n,
+    maxPay: 0n,
+    amountInOffset: NO_PATCH,
+    amountOutOffset: NO_PATCH,
+    minBumpBps: 0n,
+    profitRecipient: SOLVER,
+    originator: SOLVER,
+    originatorPpm: 0,
+    data: "0x1234",
+  };
+
+  it("toSolverPermit binds the owner to the maker and refuses another spender", () => {
+    const p = toSolverPermit(CANONICAL_ORDER.maker, permit, SETTLEMENT);
+    expect(p.owner).toBe(CANONICAL_ORDER.maker);
+    expect(p.value).toBe(5n);
+    expect(() => toSolverPermit(CANONICAL_ORDER.maker, { ...permit, spender: SOLVER }, SETTLEMENT)).toThrow(/spender/);
+  });
+
+  it("encodes the permits argument and round-trips it", () => {
+    const pm = toSolverPermit(CANONICAL_ORDER.maker, permit, SETTLEMENT);
+    const data = encodeAggregatorExecuteFill({ order: CANONICAL_ORDER, sig: "0x", fillAmount: 1n, plan, permits: [pm] });
+    const dec = decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data });
+    expect(dec.functionName).toBe("executeFill");
+    const permits = dec.args![5] as readonly Permit2612[];
+    expect(permits.length).toBe(1);
+    expect(permits[0]!.owner.toLowerCase()).toBe(CANONICAL_ORDER.maker.toLowerCase());
+    expect(permits[0]!.deadline).toBe(99n);
+    // No permits = an empty array, not an omitted argument (one entry, no overload).
+    const none = decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data: encodeAggregatorExecuteFill({ order: CANONICAL_ORDER, sig: "0x", fillAmount: 1n, plan }) });
+    expect((none.args![5] as readonly unknown[]).length).toBe(0);
+  });
+
+  it("refuses a permit whose owner is not the maker (the contract reverts PermitOwnerNotMaker)", () => {
+    const pm: Permit2612 = { ...toSolverPermit(CANONICAL_ORDER.maker, permit, SETTLEMENT), owner: SOLVER };
+    expect(() => encodeAggregatorExecuteFill({ order: CANONICAL_ORDER, sig: "0x", fillAmount: 1n, plan, permits: [pm] })).toThrow(/maker/);
   });
 });

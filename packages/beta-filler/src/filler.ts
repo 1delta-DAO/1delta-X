@@ -1,4 +1,4 @@
-import { decodeFillUpToResult, encodeFillUpTo, type Order } from "@1delta-x/sdk";
+import { decodeFillUpToResult, encodeFillUpTo, isFillOnce, type Order } from "@1delta-x/sdk";
 import type { BookEntry } from "./intake";
 import type { Address, Hex } from "viem";
 
@@ -17,6 +17,7 @@ import {
   classify,
   exclusivityFor,
   exitOk,
+  fillOnceBlocker,
   fixedPriceOk,
   isFixedPrice,
   fmt18,
@@ -121,9 +122,14 @@ export class Filler {
     return price.ok ? cls : price;
   }
 
-  /** Whether this strategy would even look at the order (cheap, no RPC). */
+  /**
+   * Whether this strategy would even look at the order (cheap, no RPC). Never an order
+   * funded only by its maker's ERC-2612 permit (`fillPermit`, ./permit.ts): `fillUpTo`
+   * from an EOA cannot run the permit, so such an order is the route strategy's —
+   * ours only once something else has funded it.
+   */
   accepts(entry: BookEntry): boolean {
-    return this.precheck(entry).ok && (entry.state?.fillableAmount ?? 0n) > 0n;
+    return !entry.fillPermit && this.precheck(entry).ok && (entry.state?.fillableAmount ?? 0n) > 0n;
   }
 
   async consider(entry: BookEntry): Promise<FillOutcome> {
@@ -131,8 +137,11 @@ export class Filler {
     const order = entry.announce.order;
     const cls = this.precheck(entry);
     if (!cls.ok) return this.skip(orderHash, cls.reason, true);
+    if (entry.fillPermit) return this.skip(orderHash, "funded only by the maker's ERC-2612 permit: an EOA fillUpTo cannot carry it (route strategy only)", true);
     const fillable = entry.state?.fillableAmount ?? 0n;
     if (fillable === 0n) return this.skip(orderHash, "nothing fillable", true);
+    const once = fillOnceBlocker(order, fillable);
+    if (once) return this.skip(orderHash, once, true);
     if (this.busy) return { orderHash, status: "skipped", reason: "busy", strategy: "inventory" };
     this.busy = true;
     try {
@@ -282,6 +291,17 @@ export class Filler {
     const capByNotional = notionalFull === 0n ? 0n : (paidFull * p.maxFillUsdt0) / notionalFull;
     const capPaid = [capByNotional, balance, budgetLeft].reduce((a, b) => (a < b ? a : b));
     let fillAmount = capFillAmount(fillable, paidFull, capPaid);
+    // A FILL-ONCE order takes the whole order or nothing (policy.ts `fillOnceBlocker`):
+    // a capped size would only revert FillOnceMustBeFull. `rest` when the order's own
+    // size is over MAX_FILL_USDT0 (a verdict about the order), not our balance / budget.
+    if (fillAmount !== fillable && isFillOnce(order)) {
+      const tooBig = capByNotional < paidFull;
+      return this.skip(
+        orderHash,
+        `fill-once order: the whole order (pay ${paidFull}) exceeds our cap ${capPaid} (${tooBig ? "MAX_FILL_USDT0" : `balance ${balance}, budget ${budgetLeft}`}) — a partial fill reverts FillOnceMustBeFull`,
+        tooBig,
+      );
+    }
     if (fillAmount === 0n) return this.skip(orderHash, `no capacity (balance ${balance}, budget ${budgetLeft})`);
     if (fillAmount !== fillable) full = await previewFill(chain, cfg.lens, order, fillAmount, chain.me, gasPrice);
     const paid = full.paid[0] ?? 0n;

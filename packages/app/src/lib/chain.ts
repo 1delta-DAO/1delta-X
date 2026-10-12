@@ -1,4 +1,4 @@
-import { PERMIT3_ABI } from "@1delta-x/sdk";
+import { isFillOnce, PERMIT3_ABI, type Order } from "@1delta-x/sdk";
 import { erc20Abi, isAddressEqual, parseAbi, type Address } from "viem";
 
 import type { FundingState } from "./funding";
@@ -19,7 +19,9 @@ export interface Reader {
 const SETTLEMENT_READS = parseAbi([
   "function PERMIT3() view returns (address)",
   "function minValidNonce(address) view returns (uint256)",
+  "function nonceBitmap(address,uint256) view returns (uint256)",
   "function filled(bytes32) view returns (uint256)",
+  "function isNonceCancelled(address,uint256) view returns (bool)",
 ]);
 
 /**
@@ -34,6 +36,42 @@ export async function readFilled(reader: Reader, settlement: Address, orderHash:
     functionName: "filled",
     args: [orderHash],
   })) as bigint;
+}
+
+/**
+ * What the chain says about one signed order (see `chainFillOutcome` in
+ * lib/orderLifecycle.ts for how it is read):
+ *   • `filled` — `Settlement.filled(hash)` (anchor wei; max = cancelled by hash);
+ *   • `nonceConsumed` — for a FILL-ONCE order only (`timing` bit 100):
+ *     `isNonceCancelled(maker, nonce)`. Such an order's fill sets the nonce bit
+ *     INSTEAD of writing `filled`, which stays 0 — the bit is the only on-chain
+ *     trace of the fill, and a nonce cancel leaves the very same trace.
+ */
+export interface ChainFillState {
+  filled: bigint;
+  nonceConsumed: boolean;
+}
+
+/** `filled(hash)`, plus the nonce bit for a fill-once order (one extra read, only then). */
+export async function readFillState(
+  reader: Reader,
+  settlement: Address,
+  order: Pick<Order, "maker" | "nonce" | "timing">,
+  orderHash: `0x${string}`,
+): Promise<ChainFillState> {
+  const once = isFillOnce(order as Order);
+  const [filled, nonceConsumed] = await Promise.all([
+    readFilled(reader, settlement, orderHash),
+    once
+      ? (reader.readContract({
+          address: settlement,
+          abi: SETTLEMENT_READS,
+          functionName: "isNonceCancelled",
+          args: [order.maker, order.nonce],
+        }) as Promise<boolean>)
+      : Promise.resolve(false),
+  ]);
+  return { filled, nonceConsumed };
 }
 
 /**
@@ -69,12 +107,25 @@ export async function readMinValidNonce(reader: Reader, settlement: Address, mak
   })) as bigint;
 }
 
+/**
+ * The maker's nonce-bitmap word `wordPos`: bit `b` set ⇔ order nonce `(wordPos << 8) | b`
+ * is cancelled (or consumed by a fill-once fill). NonceManager's public mapping getter.
+ */
+export async function readNonceWord(reader: Reader, settlement: Address, maker: Address, wordPos: bigint): Promise<bigint> {
+  return (await reader.readContract({
+    address: settlement,
+    abi: SETTLEMENT_READS,
+    functionName: "nonceBitmap",
+    args: [maker, wordPos],
+  })) as bigint;
+}
+
 /** Both funding legs for one (maker, token) — see `lib/funding.ts`. */
 export async function readFundingState(
   reader: Reader,
   p: { token: Address; owner: Address; permit3: Address; settlement: Address },
 ): Promise<FundingState> {
-  const [erc20Allowance, grant] = await Promise.all([
+  const [erc20Allowance, grant, directAllowance, strict] = await Promise.all([
     reader.readContract({
       address: p.token,
       abi: erc20Abi,
@@ -87,8 +138,23 @@ export async function readFundingState(
       functionName: "tokenAllowance",
       args: [p.owner, p.settlement, p.token],
     }) as Promise<readonly [bigint, number]>,
+    // The second funding surface: a DIRECT ERC-20 allowance to Settlement, which a
+    // relayed ERC-2612 permit creates (lib/permit.ts) and Settlement's pull falls
+    // back to unless the maker is in Permit3 strict mode.
+    reader.readContract({
+      address: p.token,
+      abi: erc20Abi,
+      functionName: "allowance",
+      args: [p.owner, p.settlement],
+    }) as Promise<bigint>,
+    reader.readContract({
+      address: p.permit3,
+      abi: PERMIT3_ABI,
+      functionName: "isStrict",
+      args: [p.owner, p.token],
+    }) as Promise<boolean>,
   ]);
-  return { erc20Allowance, grantAmount: grant[0], grantExpiration: Number(grant[1]) };
+  return { erc20Allowance, grantAmount: grant[0], grantExpiration: Number(grant[1]), directAllowance, strict };
 }
 
 /** The non-contract reads the market floor needs (a viem PublicClient satisfies it). */

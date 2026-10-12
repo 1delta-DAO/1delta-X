@@ -9,7 +9,9 @@ import {
   OrderSide,
   SUSHI_RED_SNWAPPER_ABI,
   packTiming,
+  SETTLEMENT_ABI,
   withDeltaVerifyOutputs,
+  withFillOnce,
   type Order,
 } from "@1delta-x/sdk";
 import {
@@ -32,11 +34,14 @@ import { loadConfig, parsePaths, parsePools, ROOTSTOCK } from "../src/config";
 import { dispatch, type Strategy } from "../src/dispatch";
 import { Filler, type FillOutcome } from "../src/filler";
 import { BACKOFF, GAS, Guard, resolvePending } from "../src/guard";
-import { Budget } from "../src/policy";
-import { grossUp, TYPED_CALLBACK_GAS } from "../src/route";
+import { Budget, fillOnceBlocker } from "../src/policy";
+import { grossUp, planGasEstimate, TYPED_CALLBACK_GAS } from "../src/route";
 import { ROUTE_FILLS, RouteFiller } from "../src/routeFiller";
 import { sanitize } from "../src/sanitize";
 import { SUSHI_RED_SNWAPPER_ROOTSTOCK, validateSushiRoute } from "../src/sushi";
+
+/** The pre-simulation estimate of a POOL plan (every local route fill here): ROUTE_GAS_ESTIMATE less the sandbox overhead. */
+const poolEstimate = (cfg: { route?: { gasEstimate: bigint } }) => planGasEstimate(cfg.route!.gasEstimate, "pool");
 
 const SOLVER = "0x00000000000000000000000000000000000050a1" as Address;
 const SANDBOX = "0x0000000000000000000000000000000000005a4d" as Address;
@@ -119,6 +124,10 @@ function fakeChain(o: { simGas: bigint | bigint[]; receipt: Receipt; gasPrice?: 
         case "GATED": return true;
         case "isOperator": return true;
         case "SANDBOX": return SANDBOX;
+        // One pool venue (Oku) whose QuoterV2 prices the same factory: venue 1 is dropped at init.
+        case "POOL_VENUES": return 1n;
+        case "poolVenue": return ["0xaF37EC98A00FD63689CF3060BF3B6784E00caD82", "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54"];
+        case "factory": return "0xaF37EC98A00FD63689CF3060BF3B6784E00caD82";
         case "OWNER": return SOLVER;
         case "MAKER_SURPLUS_PPM": return o.makerPpm ?? 0;
         case "PROTOCOL_SURPLUS_PPM": return o.protocolPpm ?? 0;
@@ -194,8 +203,8 @@ describe("M-1: the sent plan's floor is priced at the MEASURED gas; the limit ad
     const { rf, cfg } = routeFiller({}, chain);
     expect((await rf.consider(entry() as never)).status).toBe("pending");
     expect(counts.call).toBe(1);
-    expect(sent[0]!.gas).toBe(R(cfg.route!.gasEstimate)); // 281,600 > 200k × 1.25
-    expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(R(cfg.route!.gasEstimate) * GAS_PRICE));
+    expect(sent[0]!.gas).toBe(R(poolEstimate(cfg))); // (320k − 30k sandbox overhead) × 0.88 = 255,200 > 200k × 1.25
+    expect(planOf(sent[0]!.data).minOut - OWED).toBeGreaterThanOrEqual(rbtcToUsdt0(R(poolEstimate(cfg)) * GAS_PRICE));
   });
 
   it("a re-simulation that measures still more gas re-prices again (converges on the measured gas)", async () => {
@@ -478,7 +487,7 @@ describe("L-5: a receipt timeout charges conservatively and parks the order unti
     const t0 = Date.now();
     expect((await resolvePending(chain, guard, t0 + 1_000))?.status).toBe("waiting");
     expect((await resolvePending(chain, guard, t0 + cfg.gas.receiptTimeoutMs + 1))?.status).toBe("timeout");
-    expect(guard.gas.remaining(GAS, Date.now())).toBe(cfg.gas.hourlyWei - R(cfg.route!.gasEstimate) * GAS_PRICE); // the limit
+    expect(guard.gas.remaining(GAS, Date.now())).toBe(cfg.gas.hourlyWei - R(poolEstimate(cfg)) * GAS_PRICE); // the limit
     expect(budget.remaining(ROUTE_FILLS, Date.now())).toBe(59n);
     const b = await rf.consider(entry() as never);
     expect(b).toMatchObject({ status: "skipped", final: true });
@@ -657,7 +666,7 @@ describe("L-4: the profit gate accounts for the solver's maker/protocol surplus 
     const { chain, sent } = fakeChain({ simGas: 200_000n, receipt: "success", makerPpm: 150_000, protocolPpm: 50_000 });
     const { rf, cfg, logs } = routeFiller({}, chain);
     expect((await rf.consider(entry() as never)).status).toBe("pending");
-    const cost = rbtcToUsdt0(R(cfg.route!.gasEstimate) * GAS_PRICE) + rbtcToUsdt0(cfg.route!.minProfitWei);
+    const cost = rbtcToUsdt0(R(poolEstimate(cfg)) * GAS_PRICE) + rbtcToUsdt0(cfg.route!.minProfitWei);
     const floor = planOf(sent[0]!.data).minOut - OWED;
     expect(floor).toBe(grossUp(cost, 800_000n));
     expect((floor * 800_000n) / 1_000_000n).toBeGreaterThanOrEqual(cost); // OUR share still covers gas + profit
@@ -765,14 +774,14 @@ describe("task 05: a direct SELL still decaying patches the live owed; the typed
   const planFields = (data: Hex) =>
     decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data }).args[3] as { amountOutOffset: bigint; amountInOffset: bigint };
 
-  it("decaying direct SELL: amountOutOffset = the exactOutputSingle amountOut word; gas limit = (estimate + TYPED_CALLBACK_GAS) × r", async () => {
+  it("decaying direct SELL: amountOutOffset = the pool plan's amountOut word; gas limit = (estimate + TYPED_CALLBACK_GAS) × r", async () => {
     const { chain, sent } = fakeChain({ simGas: 200_000n, receipt: "success" });
     const { rf, cfg, logs } = routeFiller({}, chain);
     expect((await rf.consider(directEntry(true) as never)).status).toBe("pending");
     const plan = planFields(sent[0]!.data);
-    expect(plan.amountOutOffset).toBe(132n);
+    expect(plan.amountOutOffset).toBe(32n); // POOL_AMOUNT_OUT_OFFSET
     expect(plan.amountInOffset).toBe(NO_PATCH);
-    expect(sent[0]!.gas).toBe(R(cfg.route!.gasEstimate + TYPED_CALLBACK_GAS));
+    expect(sent[0]!.gas).toBe(R(poolEstimate(cfg) + TYPED_CALLBACK_GAS));
     expect(logs.some((l) => l.includes("direct+live"))).toBe(true);
   });
 
@@ -783,7 +792,7 @@ describe("task 05: a direct SELL still decaying patches the live owed; the typed
     const { rf, cfg, logs } = routeFiller({}, chain);
     expect((await rf.consider(directEntry(true, 904_999_000n) as never)).status).toBe("pending");
     expect(planFields(sent[0]!.data).amountOutOffset).toBe(NO_PATCH);
-    expect(sent[0]!.gas).toBe(R(cfg.route!.gasEstimate));
+    expect(sent[0]!.gas).toBe(R(poolEstimate(cfg)));
     expect(logs.some((l) => l.includes("direct+live"))).toBe(false);
   });
 
@@ -792,7 +801,7 @@ describe("task 05: a direct SELL still decaying patches the live owed; the typed
     const { rf, cfg } = routeFiller({}, chain);
     expect((await rf.consider(directEntry(false) as never)).status).toBe("pending");
     expect(planFields(sent[0]!.data).amountOutOffset).toBe(NO_PATCH);
-    expect(sent[0]!.gas).toBe(R(cfg.route!.gasEstimate));
+    expect(sent[0]!.gas).toBe(R(poolEstimate(cfg)));
   });
 
   it("pull orders never patch the output", async () => {
@@ -815,5 +824,85 @@ describe("I-3: route sends are explicit legacy transactions", () => {
     const out = await routeFiller({}, chain).rf.consider(entry() as never);
     expect(out.reason).toMatch(/MAX_GAS_PRICE_GWEI/);
     expect(sent).toHaveLength(0);
+  });
+});
+
+describe("fill-once orders (timing bit 100): the whole order or a skip — never a partial (2026-10-12)", () => {
+  // The core reverts FillOnceMustBeFull on anything short of the whole order, and the
+  // app now signs every MARKET ticket fill-once.
+  const once = <T extends { announce: { order: Order } }>(e: T, fillableAmount?: bigint) => ({
+    ...e,
+    announce: { ...e.announce, order: { ...e.announce.order, timing: withFillOnce(e.announce.order.timing) } },
+    ...(fillableAmount !== undefined ? { state: { ...(e as unknown as { state: object }).state, fillableAmount } } : {}),
+  });
+  const cfg = loadConfig({ ...ENV, MIN_EXIT_EDGE_BPS: "0" });
+  const invBudget = (usdt0 = 10n ** 12n) => new Budget({ [ROOTSTOCK.usdt0.toLowerCase()]: usdt0 });
+  const fillAmountOf = (data: Hex) => decodeFunctionData({ abi: SETTLEMENT_ABI, data }).args[2] as bigint;
+
+  it("fillOnceBlocker: a lens fillable below the full size is a skip reason; a plain order never is", () => {
+    const o = order({ timing: withFillOnce(0n) });
+    expect(fillOnceBlocker(o, RECEIVED)).toBeNull();
+    expect(fillOnceBlocker(o, RECEIVED - 1n)).toMatch(/fill-once order: only \d+ of \d+ fillable .*FillOnceMustBeFull/);
+    expect(fillOnceBlocker(order(), RECEIVED - 1n)).toBeNull();
+  });
+
+  it("inventory: a fill-once order the hourly budget would cap is SKIPPED (not budget-capped into a revert), not resting", async () => {
+    const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+    let previews = 0;
+    const pub = (chain as unknown as { pub: { readContract: (a: { functionName: string }) => Promise<unknown> } }).pub;
+    const inner = pub.readContract;
+    pub.readContract = async (a) => {
+      if (a.functionName === "previewFill") previews++;
+      return inner(a);
+    };
+    const logs: string[] = [];
+    const out = await new Filler(cfg, chain, invBudget(50_000_000n), (m) => logs.push(m)).consider(once(inventoryEntry()) as never);
+    expect(out).toMatchObject({ status: "skipped", strategy: "inventory" });
+    expect(out.rest).toBeUndefined(); // our budget, not the order's terms
+    expect(out.reason).toMatch(/fill-once order: the whole order \(pay 90000000\) exceeds our cap 50000000 \(balance .*budget .*FillOnceMustBeFull/);
+    expect(previews).toBe(1); // no re-preview at a partial size
+    expect(sent).toHaveLength(0);
+  });
+
+  it("inventory: a fill-once order above MAX_FILL_USDT0 is a RESTING skip (a verdict on the order's size)", async () => {
+    const small = loadConfig({ ...ENV, MIN_EXIT_EDGE_BPS: "0", MAX_FILL_USDT0: "50" });
+    const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+    const out = await new Filler(small, chain, invBudget(), () => {}).consider(once(inventoryEntry()) as never);
+    expect(out).toMatchObject({ status: "skipped", rest: true });
+    expect(out.reason).toMatch(/MAX_FILL_USDT0/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("inventory: an under-funded fill-once maker is skipped before any RPC", async () => {
+    const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+    const pub = (chain as unknown as { pub: { getGasPrice: () => Promise<bigint> } }).pub;
+    pub.getGasPrice = async () => {
+      throw new Error("no RPC expected");
+    };
+    const out = await new Filler(cfg, chain, invBudget(), () => {}).consider(once(inventoryEntry(), 60n * 10n ** 18n) as never);
+    expect(out).toMatchObject({ status: "skipped", rest: true });
+    expect(out.reason).toMatch(/only 60000000000000000000 of 100000000000000000000 fillable/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("inventory: with room for the whole order it fills the WHOLE order", async () => {
+    const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+    const out = await new Filler(cfg, chain, invBudget(), () => {}).consider(once(inventoryEntry()) as never);
+    expect(out.status).toBe("pending");
+    expect(fillAmountOf(sent[0]!.data)).toBe(100n * 10n ** 18n);
+  });
+
+  it("route: an under-funded fill-once maker is skipped with zero RPC; a fully fillable one routes the whole order", async () => {
+    const { chain, sent, counts } = fakeChain({ simGas: 200_000n, receipt: "success" });
+    const { rf } = routeFiller({}, chain);
+    const short = await rf.consider(once(entry("0a"), RECEIVED / 2n) as never);
+    expect(short).toMatchObject({ status: "skipped", strategy: "route", rest: true });
+    expect(short.reason).toMatch(/fill-once order: only \d+ of \d+ fillable/);
+    expect(counts.call).toBe(0);
+    expect(sent).toHaveLength(0);
+
+    const whole = await rf.consider(once(entry("0b")) as never);
+    expect(whole.status).toBe("pending");
+    expect(decodeFunctionData({ abi: AGGREGATOR_FILL_SOLVER_ABI, data: sent[0]!.data }).args[2]).toBe(RECEIVED);
   });
 });

@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { hashOrderStruct, ocoGroup, OrderSide, type Order } from "@1delta-x/sdk";
+import { hashOrderStruct, ocoGroup, ocoNonceGroup, OrderSide, withFillOnce, type Order } from "@1delta-x/sdk";
 import { zeroAddress, type Hex, type PublicClient } from "viem";
 
 import { Book } from "../src/book";
 import { CancelVerifier } from "../src/cancels";
 import { InMemoryTransport } from "../src/transport";
-import type { Layer2Result, Verifier } from "../src/verify";
+import { summarize } from "../src/query";
+import { OrderStatus, type Layer2Result, type Verifier } from "../src/verify";
 import { isOcoGroupLeg } from "../src/watcher";
 import type { OrderAnnounce } from "../src/messages";
 
@@ -155,6 +156,38 @@ describe("chain events evict with zero RPC", () => {
     expect(refreshed).toHaveBeenCalledOnce();
     expect(refreshed.mock.calls[0]![0]).toHaveLength(1);
     await book.stop();
+  });
+
+  it("a FILL-ONCE order's OrderFilled retires it as Filled at once — no lens read, which would say Cancelled", () => {
+    const fillOnce = { ...orderFor(MAKER, 5n), timing: withFillOnce(0n) };
+    const h = hashOrderStruct(fillOnce);
+    const book = bookWith([fillOnce]);
+    const removed: { hash: Hex; status?: number }[] = [];
+    book.onRemove((e) => removed.push({ hash: e.orderHash, status: e.state?.status }));
+    const res = book.applyChainEvent({ kind: "filled", orderHash: h, maker: MAKER });
+    expect(res).toEqual({ evicted: [h], dirty: [] });
+    expect(book.size).toBe(0);
+    expect(removed).toEqual([{ hash: h, status: OrderStatus.Filled }]);
+  });
+
+  it("a shared-nonce bracket: the filled leg is Filled, its siblings retired; another maker's same nonce untouched", () => {
+    const [tp, sl] = ocoNonceGroup([orderFor(MAKER, 1n), { ...orderFor(MAKER, 2n), legsIn: [{ token: "0x1111111111111111111111111111111111111111", start: 999n, end: 0n }] }], 77n);
+    const stranger = { ...orderFor(OTHER, 77n), timing: withFillOnce(0n) };
+    const book = bookWith([tp!, sl!, stranger]);
+    const res = book.applyChainEvent({ kind: "filled", orderHash: hashOrderStruct(tp!), maker: MAKER });
+    expect(res.evicted).toEqual([hashOrderStruct(tp!), hashOrderStruct(sl!)]);
+    expect(book.size).toBe(1);
+    expect(book.get(hashOrderStruct(stranger))).toBeDefined();
+  });
+
+  it("the filled summary of a fill-once order reports the whole anchor as filled", () => {
+    const fillOnce = { ...orderFor(MAKER, 6n), timing: withFillOnce(0n) };
+    const h = hashOrderStruct(fillOnce);
+    const book = bookWith([fillOnce]);
+    let summary: ReturnType<typeof summarize> | undefined;
+    book.onRemove((e) => (summary = summarize(e)));
+    book.applyChainEvent({ kind: "filled", orderHash: h, maker: MAKER });
+    expect(summary).toMatchObject({ status: "Filled", filledAmount: "1000", fillable: false });
   });
 
   it("an unknown hash is a no-op, never a pre-emptive block", () => {

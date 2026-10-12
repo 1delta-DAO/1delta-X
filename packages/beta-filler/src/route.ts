@@ -1,11 +1,12 @@
 import {
   BLOCK_CLOCK_BIT,
-  encodeExactInput,
-  encodeExactInputSingle,
-  encodeExactOutput,
-  encodeExactOutputSingle,
+  decodePoolRoute,
+  encodePoolRoute,
   NO_PATCH,
   OrderSide,
+  POOL_AMOUNT_IN_OFFSET,
+  POOL_AMOUNT_OUT_OFFSET,
+  POOL_ROUTE,
   unpackTiming,
   type Order,
   type RoutePlan,
@@ -14,15 +15,27 @@ import {
 import { zeroAddress, type Address } from "viem";
 
 import type { RouteConfig, RoutePath } from "./config";
+import { enumeratePaths, pathKey, pathVenues, type GraphPool } from "./poolGraph";
 import { exclusivityFor, isDeltaVerify, plainShape, type Verdict } from "./policy";
 
 /**
  * Pure decision logic of the ROUTE strategy: zero-inventory fills through the
- * operator-gated `AggregatorFillSolver`, swapping the maker's input on Uniswap v3
- * (Oku SwapRouter02, quoted locally on QuoterV2) or — pull orders only — along a
- * Sushi API route (./sushi.ts), whichever nets more after its own gas. The solver
- * runs every route in its `RouteSandbox`, so either target needs no allowlisting.
+ * operator-gated `AggregatorFillSolver`, swapping the maker's input either along a
+ * configured Uniswap-v3-style POOL path (Oku = venue 0, SushiSwap v3 = venue 1;
+ * quoted locally on each venue's QuoterV2) or — pull orders only — along an API route
+ * (Sushi ./sushi.ts, Nordstern ./nordstern.ts), whichever nets more after its own gas.
  * Everything chain-dependent (previews, quotes, gas price) is passed in.
+ *
+ * Two plan kinds:
+ *
+ *  • POOL plan (`RoutePlan.router = POOL_ROUTE`, data = SDK `encodePoolRoute`): the
+ *    solver swaps on the pools ITSELF — every pool recomputed (CREATE2) from its
+ *    immutable venue allowlist and paid inside `uniswapV3SwapCallback`. No sandbox,
+ *    no router, no approval: ~{@link SANDBOX_ROUTE_OVERHEAD_GAS} cheaper. The PAYEE is
+ *    decided on-chain from the ORDER (direct → `legsOut[0]`'s recipient / the maker;
+ *    pull → the solver), never by the plan.
+ *  • SANDBOX plan (an API route's router + calldata): the solver runs it in its
+ *    `RouteSandbox`, unchanged.
  *
  * Two delivery modes, decided by the ORDER (the maker signed it), never by us:
  *
@@ -35,22 +48,22 @@ import { exclusivityFor, isDeltaVerify, plainShape, type Verdict } from "./polic
  *    `amountInOffset` points at `amountIn` so the route swaps exactly what the fill
  *    delivered.
  *
- *  • DIRECT (bit 104, `exclusiveFiller` == the solver): an exact-OUTPUT route pays
- *    the MAKER exactly the owed amount, the core verifies the maker's balance
- *    delta, and the unconsumed INPUT is our spread. `amountInMaximum` = input −
- *    (grossUp(gas + min profit), in input units, gas at the sent gas LIMIT), so the
- *    route reverts rather than eat into the margin. No input patch (the bounded
- *    maximum must not be overwritten). On a SELL whose output is still DECAYING
- *    ({@link patchesLiveOutput}) `amountOutOffset` points at the router call's
- *    `amountOut` word: the solver runs the typed callback (~+{@link TYPED_CALLBACK_GAS}
- *    gas, priced into the plan) and writes the core's live `outputAt(t_incl)` there,
- *    so the route pays exactly what the core verifies and the decay since the
- *    preview stays on the solver as INPUT residue — our spread (task 05, option 3).
- *    The gate and `amountInMaximum` are still sized on the PREVIEWED owed, so the
- *    margin never counts on a decay that may not happen (the live owed is ≤ the
- *    preview on a falling leg; a maker-ward move reverts `BumpTooLow`). A BUY
- *    (fixed output) and an order past its decay window keep NO_PATCH: the live
- *    output equals the preview and the typed path would only cost gas.
+ *  • DIRECT (bit 104, `exclusiveFiller` == the solver): an exact-OUTPUT pool plan pays
+ *    the MAKER exactly the owed amount, the core verifies the maker's balance delta,
+ *    and the unconsumed INPUT is our spread. The plan's `amountIn` word is the input
+ *    CEILING = input − (grossUp(gas + min profit), in input units, gas at the sent gas
+ *    LIMIT), so the route reverts rather than eat into the margin (the solver also
+ *    caps it at the routed delta). No input patch (the bounded ceiling must not be
+ *    overwritten). On a SELL whose output is still DECAYING ({@link patchesLiveOutput})
+ *    `amountOutOffset` points at the plan's `amountOut` word: the solver runs the typed
+ *    callback (~+{@link TYPED_CALLBACK_GAS} gas, priced into the plan) and writes the
+ *    core's live `outputAt(t_incl)` there, so the route pays exactly what the core
+ *    verifies and the decay since the preview stays on the solver as INPUT residue —
+ *    our spread (task 05, option 3). The gate and the ceiling are still sized on the
+ *    PREVIEWED owed, so the margin never counts on a decay that may not happen (the
+ *    live owed is ≤ the preview on a falling leg; a maker-ward move reverts
+ *    `BumpTooLow`). A BUY (fixed output) and an order past its decay window keep
+ *    NO_PATCH: the live output equals the preview and the typed path would only cost gas.
  *
  * Both modes carry `minBumpBps` = the lens `previewBump` at the SEND gas price
  * (RouteFiller): the solver forwards it to `fillWithCallback` as the filler's price
@@ -64,9 +77,86 @@ const BPS = 10_000n;
 /**
  * Extra gas of the solver's TYPED callback path (`PostInputsTypedDirect` /
  * `onSettlementFill`), which a set `amountOutOffset` switches on: measured +5.9k in
- * `AggregatorFillGas.t.sol` (direct seeded 173,864 → typed 179,773), rounded up.
+ * `AggregatorFillGas.t.sol` (direct seeded 173,824 → typed 179,738) and +5.4k net on
+ * the Rootstock fork bench pool route (231,657 → 237,058; 2026-10-12 gas pass), rounded up.
  */
 export const TYPED_CALLBACK_GAS = 6_000n;
+
+/**
+ * Gas a SANDBOX plan (an API route: RouteSandbox + an external router) costs over a
+ * POOL plan for the same swap — the sandbox hop, the router's dispatch and approvals.
+ * Added to every API candidate's own gas when routes are RANKED ({@link rankRoutes}
+ * callers), and taken off ROUTE_GAS_ESTIMATE for a pool plan's pre-simulation
+ * estimate ({@link planGasEstimate}). Measured on the Rootstock fork bench,
+ * packages/solvers/test/PoolRouteFork.t.sol — see packages/solvers/README.md
+ * (block 9,295,925, net tx gas: 24.3k–34.5k over 1–2 hops, direct and pull, before
+ * the 2026-10-12 solver gas pass; 28.8k–41.1k after it — the pool path got cheaper
+ * faster than the sandbox path. Left at 30k: a ranking tie-breaker, not a price).
+ */
+export const SANDBOX_ROUTE_OVERHEAD_GAS = 30_000n;
+
+/**
+ * Extra gas of an `executeFill` that carries the maker's ERC-2612 permit (the solver
+ * calls `token.permit` before the fill — USD₮0: the allowance 0→value and nonce
+ * writes). Charged to the route gate's PRE-simulation estimate only when the fill
+ * carries a permit; the simulation (estimateGas, which runs the permit) stays the
+ * source of truth for what is sent. Measured on the Rootstock fork bench,
+ * packages/solvers/test/PoolRouteFork.t.sol (+58.7k execution / +45.8k net against a
+ * directly-approved maker, 2026-10-12; was +59.3k / +46.5k), rounded up.
+ */
+export const PERMIT_IN_FILL_GAS = 60_000n;
+
+/**
+ * Gas of one EXTRA pool hop in a pool plan, net tx gas: the Rootstock fork bench
+ * (packages/solvers/test/PoolRouteFork.t.sol, block 9,295,925) measures 1 hop direct
+ * 231,657 vs 2 hops 295,956 (+64.3k) and pull 254,906 vs 316,257 (+61.4k) on the
+ * deployed (via-IR) solver after the 2026-10-12 gas pass; rounded up. (Was 62,500 from
+ * 2-hop figures the bench under-stated by 4.5k: it read the maker's balance inside the
+ * measured transaction, warming the slots the fill then wrote — fixed the same day.)
+ * Added to a pool plan's pre-simulation estimate per hop beyond the first
+ * ({@link extraHopGas}) and the floor of a pool path's ranking gas
+ * ({@link poolRouteGasUnits}): a second hop must earn its own gas.
+ */
+export const POOL_HOP_GAS = 65_000n;
+
+/** Gas a pool plan of `hops` hops costs over a single hop ({@link POOL_HOP_GAS} per extra hop). */
+export function extraHopGas(hops: number): bigint {
+  return hops > 1 ? BigInt(hops - 1) * POOL_HOP_GAS : 0n;
+}
+
+/**
+ * A pool path's own gas for RANKING: the quoters' summed `gasEstimate`, but at least
+ * {@link POOL_HOP_GAS} per hop — the quoter measures a bare `pool.swap`, the solver
+ * also pays the callback and the transfer of each hop.
+ */
+export function poolRouteGasUnits(hops: number, quoterGas: bigint): bigint {
+  const floor = BigInt(hops) * POOL_HOP_GAS;
+  return quoterGas > floor ? quoterGas : floor;
+}
+
+/** The plan kinds a candidate builds: a direct pool plan, or an API route run in the sandbox. */
+export type PlanKind = "pool" | "sandbox";
+
+/**
+ * The pre-simulation gas estimate of a fill with this plan kind: ROUTE_GAS_ESTIMATE
+ * describes a SANDBOX plan; a pool plan skips the sandbox and the router
+ * ({@link SANDBOX_ROUTE_OVERHEAD_GAS}). Only a floor: the plan is priced at
+ * max(this, simulated) × r.
+ */
+export function planGasEstimate(sandboxEstimate: bigint, kind: PlanKind): bigint {
+  if (kind === "sandbox") return sandboxEstimate;
+  return sandboxEstimate > SANDBOX_ROUTE_OVERHEAD_GAS ? sandboxEstimate - SANDBOX_ROUTE_OVERHEAD_GAS : sandboxEstimate;
+}
+
+/** A pool venue's name for logs and the quote API's `route.source` (the app shows "Oku" / "Sushi"). */
+export function venueName(venue: number): string {
+  return venue === 0 ? "oku" : venue === 1 ? "sushi-v3" : `venue-${venue}`;
+}
+
+/** A path's venues for logs and `route.source`: "oku", "sushi-v3", or "oku+sushi-v3" for a mixed path (first-hop venue first). */
+export function pathLabel(path: Pick<RoutePath, "fees" | "venue" | "venues">): string {
+  return [...new Set(pathVenues(path))].map(venueName).join("+");
+}
 
 /**
  * Whether a direct fill should patch the core's LIVE output into the route
@@ -115,23 +205,61 @@ const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /**
  * Every configured way from `tokenIn` to `tokenOut`: each direct pool (any fee
- * tier) and each configured multi-hop path, in either direction. The caller
- * quotes them all and takes the best.
+ * tier, any venue) and each configured multi-hop path, in either direction, with
+ * its venue(s) (unset = 0). The caller quotes the ones whose venues it can quote and
+ * takes the best.
  */
 export function candidatePaths(tokenIn: Address, tokenOut: Address, rc: Pick<RouteConfig, "pools" | "paths">): RoutePath[] {
   const out: RoutePath[] = [];
   for (const p of rc.pools) {
-    if (eq(p.tokenA, tokenIn) && eq(p.tokenB, tokenOut)) out.push({ tokens: [tokenIn, tokenOut], fees: [p.fee] });
-    else if (eq(p.tokenB, tokenIn) && eq(p.tokenA, tokenOut)) out.push({ tokens: [tokenIn, tokenOut], fees: [p.fee] });
+    const venue = p.venue ?? 0;
+    if (eq(p.tokenA, tokenIn) && eq(p.tokenB, tokenOut)) out.push({ tokens: [tokenIn, tokenOut], fees: [p.fee], venue });
+    else if (eq(p.tokenB, tokenIn) && eq(p.tokenA, tokenOut)) out.push({ tokens: [tokenIn, tokenOut], fees: [p.fee], venue });
   }
   for (const p of rc.paths) {
     const first = p.tokens[0]!;
     const last = p.tokens[p.tokens.length - 1]!;
-    if (eq(first, tokenIn) && eq(last, tokenOut)) out.push({ tokens: [...p.tokens], fees: [...p.fees] });
-    else if (eq(first, tokenOut) && eq(last, tokenIn)) out.push({ tokens: [...p.tokens].reverse(), fees: [...p.fees].reverse() });
+    const mixed = p.venues !== undefined && p.venues.length === p.fees.length;
+    const venue = p.venue ?? 0;
+    if (eq(first, tokenIn) && eq(last, tokenOut)) {
+      out.push(mixed ? { tokens: [...p.tokens], fees: [...p.fees], venues: [...p.venues!] } : { tokens: [...p.tokens], fees: [...p.fees], venue });
+    } else if (eq(first, tokenOut) && eq(last, tokenIn)) {
+      const tokens = [...p.tokens].reverse();
+      const fees = [...p.fees].reverse();
+      out.push(mixed ? { tokens, fees, venues: [...p.venues!].reverse() } : { tokens, fees, venue });
+    }
   }
   return out;
 }
+
+/**
+ * Every pool path tokenIn → tokenOut: the configured ones ({@link candidatePaths})
+ * and — with a discovered pool graph — every path of ≤ `maxHops` hops through
+ * `hubTokens` over its pools (./poolGraph.ts `enumeratePaths`, mixed venues
+ * included). Deduplicated, configured first. Zero RPC.
+ */
+export function routePaths(
+  tokenIn: Address,
+  tokenOut: Address,
+  rc: Pick<RouteConfig, "pools" | "paths"> & Partial<Pick<RouteConfig, "maxHops">> & { discovery?: Pick<RouteConfig["discovery"], "hubTokens"> },
+  graph?: readonly GraphPool[],
+): RoutePath[] {
+  const out = candidatePaths(tokenIn, tokenOut, rc);
+  if (graph && graph.length) {
+    const seen = new Set(out.map(pathKey));
+    for (const p of enumeratePaths(graph, tokenIn, tokenOut, { maxHops: rc.maxHops ?? 1, hubs: rc.discovery?.hubTokens ?? [] })) {
+      const k = pathKey(p);
+      if (!seen.has(k)) {
+        seen.add(k);
+        out.push(p);
+      }
+    }
+  }
+  return out;
+}
+
+/** {@link classifyRoute}'s refusal when no pool path joins the pair (and no API may route it). */
+export const NO_ROUTE_REASON = "no configured pool/path for the pair";
 
 export interface RouteClass {
   /** Delta-verify order naming our solver: the route pays the maker. */
@@ -164,13 +292,16 @@ export interface RouteClass {
  *   • BOTH tokens must be in `ROUTE_TOKENS` (default: the Rootstock market tokens
  *     WRBTC, USDT0, WETH, USDRIF) — otherwise, with Sushi on, every pair in the
  *     book would pass and cost an API call per sweep;
- *   • the pair must be routable on a configured pool or path — or, for a PULL
- *     order with an API source enabled (Sushi, Nordstern), the API may find the route instead.
+ *   • the pair must be routable on a configured pool or path, or a path over the
+ *     discovered pool graph (`extras.graph`, ./poolGraph.ts) — or, for a PULL order
+ *     with an API source enabled (Sushi, Nordstern), the API may find the route
+ *     instead. (Zero RPC: whether the pool's venue is quotable is the filler's call.)
  */
 export function classifyRoute(
   order: Order,
-  rc: Pick<RouteConfig, "solver" | "pools" | "paths" | "routeTokens"> & { sushi?: { enabled: boolean }; nordstern?: { enabled: boolean } },
-  extras: { hasPermitBatch?: boolean; sigless?: boolean; nowS?: bigint } = {},
+  rc: Pick<RouteConfig, "solver" | "pools" | "paths" | "routeTokens"> &
+    Partial<Pick<RouteConfig, "maxHops">> & { discovery?: Pick<RouteConfig["discovery"], "hubTokens">; sushi?: { enabled: boolean }; nordstern?: { enabled: boolean } },
+  extras: { hasPermitBatch?: boolean; sigless?: boolean; nowS?: bigint; graph?: readonly GraphPool[]; anyPath?: boolean } = {},
 ): Verdict<RouteClass> {
   const shape = plainShape(order, extras);
   if (!shape.ok) return shape;
@@ -192,8 +323,9 @@ export function classifyRoute(
   if (!rc.routeTokens.some((t) => eq(t, tokenIn)) || !rc.routeTokens.some((t) => eq(t, tokenOut))) {
     return { ok: false, reason: "pair outside ROUTE_TOKENS" };
   }
-  const paths = candidatePaths(tokenIn, tokenOut, rc);
-  if (paths.length === 0 && (direct || !(rc.sushi?.enabled || rc.nordstern?.enabled))) return { ok: false, reason: "no configured pool/path for the pair" };
+  const paths = routePaths(tokenIn, tokenOut, rc, extras.graph);
+  // `anyPath`: the pool graph is not loaded yet, so "no path" would be a guess.
+  if (paths.length === 0 && !extras.anyPath && (direct || !(rc.sushi?.enabled || rc.nordstern?.enabled))) return { ok: false, reason: NO_ROUTE_REASON };
   return { ok: true, direct, tokenIn, tokenOut, paths };
 }
 
@@ -281,24 +413,33 @@ export interface BuiltRoute {
 }
 
 /**
- * The RoutePlan + SwapRouter02 calldata for one fill. See the module note for
- * the two delivery modes.
+ * The RoutePlan for one fill along a POOL path (`router = POOL_ROUTE`, data =
+ * `encodePoolRoute` with each hop's own venue — `pathVenues`). See the module note for the
+ * two delivery modes; the payee is the ORDER's (decided on-chain), so the plan names
+ * no recipient.
+ *
+ *  • pull: exact-input (`amountOut` word 0) of `received`, `amountInOffset` = the
+ *    amountIn word (the solver rewrites it with what the fill routed), minOut = owed +
+ *    costOut, maxPay = owed;
+ *  • direct: exact-output of `owed` with the `amountIn` word = the input ceiling
+ *    (received − the margin in input units), `amountInOffset` = NO_PATCH,
+ *    `amountOutOffset` = the amountOut word only when `liveOut`.
  *
  * @param received the input the solver receives (lens `previewFill(...).received[0]`)
  * @param owed     the output the maker is owed (lens `previewFill(...).paid[0]`)
- * @param quotedOut the exact-input quote of `received` along `path`
+ * @param quotedOut the output `received` buys along `path`: the exact-input quote
+ *        (pull) or, direct, `owed × received / need` where `need` is the backward
+ *        exact-output quote of `owed` — so the ceiling's margin is priced at the rate
+ *        the route actually executes
  * @param costOut  gas + min profit, in output units — the margin we keep
  * @param minBumpBps the lens `previewBump` at the send gas price — the filler's
  *        on-chain price floor (`0` = none; the order's tick cannot move)
- * @param liveOut  direct only: patch the live output into the route's `amountOut`
+ * @param liveOut  direct only: patch the live output into the plan's `amountOut`
  *        word ({@link patchesLiveOutput}); ignored (NO_PATCH) on the pull path
  */
-export function buildRoutePlan(a: {
+export function buildPoolPlan(a: {
   direct: boolean;
   path: RoutePath;
-  router: Address;
-  solver: Address;
-  maker: Address;
   received: bigint;
   owed: bigint;
   quotedOut: bigint;
@@ -307,82 +448,115 @@ export function buildRoutePlan(a: {
   minBumpBps: bigint;
   liveOut?: boolean;
 }): BuiltRoute {
-  const single = a.path.tokens.length === 2;
+  const route = { tokens: a.path.tokens, fees: a.path.fees, venues: pathVenues(a.path) };
+  const tail = { minBumpBps: a.minBumpBps, profitRecipient: a.profitRecipient, originator: zeroAddress, originatorPpm: 0 };
   if (!a.direct) {
     const minOut = a.owed + a.costOut;
-    const call = single
-      ? encodeExactInputSingle({
-          tokenIn: a.path.tokens[0]!,
-          tokenOut: a.path.tokens[1]!,
-          fee: a.path.fees[0]!,
-          recipient: a.solver,
-          amountIn: a.received,
-          amountOutMinimum: minOut,
-        })
-      : encodeExactInput({ tokens: a.path.tokens, fees: a.path.fees, recipient: a.solver, amountIn: a.received, amountOutMinimum: minOut });
+    const call = encodePoolRoute({ ...route, amountIn: a.received, amountOut: 0n });
     return {
       call,
       plan: {
-        router: a.router,
+        router: POOL_ROUTE,
         minOut,
         maxPay: a.owed,
-        amountInOffset: call.amountInOffset,
-        amountOutOffset: NO_PATCH, // exact-input: no output word to patch
-        minBumpBps: a.minBumpBps,
-        profitRecipient: a.profitRecipient,
-        originator: zeroAddress,
-        originatorPpm: 0,
+        amountInOffset: POOL_AMOUNT_IN_OFFSET, // swap exactly what the fill routed
+        amountOutOffset: NO_PATCH, // exact-input: setting it would turn the route exact-output
+        ...tail,
         data: call.data,
       },
     };
   }
-  if (a.quotedOut === 0n) throw new Error("buildRoutePlan: zero quote");
+  if (a.quotedOut === 0n) throw new Error("buildPoolPlan: zero quote");
   // The margin, in INPUT units at the quoted rate, stays on the solver as residue.
   const keepIn = mulDivUp(a.costOut, a.received, a.quotedOut);
-  if (keepIn >= a.received) throw new Error("buildRoutePlan: margin exceeds the input");
-  const amountInMaximum = a.received - keepIn;
-  const call = single
-    ? encodeExactOutputSingle({
-        tokenIn: a.path.tokens[0]!,
-        tokenOut: a.path.tokens[1]!,
-        fee: a.path.fees[0]!,
-        recipient: a.maker,
-        amountOut: a.owed,
-        amountInMaximum,
-      })
-    : encodeExactOutput({ tokens: a.path.tokens, fees: a.path.fees, recipient: a.maker, amountOut: a.owed, amountInMaximum });
+  if (keepIn >= a.received) throw new Error("buildPoolPlan: margin exceeds the input");
+  const call = encodePoolRoute({ ...route, amountIn: a.received - keepIn, amountOut: a.owed });
   return {
     call,
     plan: {
-      router: a.router,
+      router: POOL_ROUTE,
       minOut: 0n, // ignored on the direct path
       maxPay: 0n, // ignored on the direct path
-      amountInOffset: NO_PATCH, // the bounded amountInMaximum must survive
+      amountInOffset: NO_PATCH, // the bounded input ceiling must survive
       // A decaying SELL: pay the LIVE owed, keep the decay as input residue (task 05).
       // Otherwise pay the previewed owed — fixed output, nothing to reclaim.
-      amountOutOffset: a.liveOut ? call.amountOutOffset : NO_PATCH,
-      minBumpBps: a.minBumpBps,
-      profitRecipient: a.profitRecipient,
-      originator: zeroAddress,
-      originatorPpm: 0,
+      amountOutOffset: a.liveOut ? POOL_AMOUNT_OUT_OFFSET : NO_PATCH,
+      ...tail,
       data: call.data,
     },
   };
 }
 
-/** One executable route candidate for a PULL fill. */
+/**
+ * Pre-send check of a pool plan against the ORDER and the fill — the pool-plan
+ * counterpart of the Sushi/Nordstern calldata validation: decode `plan.data` and
+ * require the path to run from `legsIn[0]`'s token to `legsOut[0]`'s (the solver
+ * reverts `BadPoolRoute` otherwise), match the candidate's tokens / fees / venue of
+ * EVERY hop, and
+ * carry the amounts and offsets of its delivery mode.
+ */
+export function validatePoolPlan(
+  plan: RoutePlan,
+  order: Order,
+  a: { direct: boolean; path: RoutePath; received: bigint; owed: bigint },
+): Verdict<{ plan: RoutePlan }> {
+  const bad = (why: string): Verdict<{ plan: RoutePlan }> => ({ ok: false, reason: `pool plan: ${why}` });
+  if (plan.router !== POOL_ROUTE) return bad(`router ${plan.router} is not POOL_ROUTE`);
+  let d: ReturnType<typeof decodePoolRoute>;
+  try {
+    d = decodePoolRoute(plan.data);
+  } catch (e) {
+    return bad((e as Error).message);
+  }
+  const tokenIn = order.legsIn[0]?.token;
+  const tokenOut = order.legsOut[0]?.token;
+  if (!tokenIn || !eq(d.tokens[0]!, tokenIn)) return bad(`first token ${d.tokens[0]} is not the order's input ${tokenIn}`);
+  if (!tokenOut || !eq(d.tokens[d.tokens.length - 1]!, tokenOut)) return bad(`last token ${d.tokens[d.tokens.length - 1]} is not the order's output ${tokenOut}`);
+  const venues = pathVenues(a.path);
+  if (d.tokens.length !== a.path.tokens.length || d.tokens.some((t, i) => !eq(t, a.path.tokens[i]!))) return bad("tokens differ from the quoted path");
+  if (d.fees.length !== a.path.fees.length || d.fees.some((f, i) => f !== a.path.fees[i])) return bad("fees differ from the quoted path");
+  if (d.venues.length !== venues.length || d.venues.some((v, i) => v !== venues[i])) return bad(`venues ${d.venues.join(",")} differ from the quoted path's ${venues.join(",")}`);
+  if (!a.direct) {
+    if (d.amountOut !== 0n || d.amountIn !== a.received) return bad(`pull plan must be exact-input of ${a.received} (got in ${d.amountIn}, out ${d.amountOut})`);
+    if (plan.amountInOffset !== POOL_AMOUNT_IN_OFFSET || plan.amountOutOffset !== NO_PATCH) return bad("pull plan offsets");
+    if (plan.maxPay !== a.owed || plan.minOut < a.owed) return bad(`pull plan floor/cap (minOut ${plan.minOut}, maxPay ${plan.maxPay}, owed ${a.owed})`);
+  } else {
+    if (d.amountOut !== a.owed) return bad(`direct plan must pay exactly owed ${a.owed} (got ${d.amountOut})`);
+    if (d.amountIn === 0n || d.amountIn >= a.received) return bad(`direct plan input ceiling ${d.amountIn} must be below the input ${a.received}`);
+    if (plan.amountInOffset !== NO_PATCH) return bad("direct plan must not patch its input ceiling");
+    if (plan.amountOutOffset !== NO_PATCH && plan.amountOutOffset !== POOL_AMOUNT_OUT_OFFSET) return bad("direct plan output offset");
+  }
+  return { ok: true, plan };
+}
+
+/** One executable route candidate. */
 export interface RouteCandidate {
-  source: "oku" | "sushi" | "nordstern";
+  /** A local pool path (pool plan) or an API route (sandbox plan). */
+  source: "pool" | "sushi" | "nordstern";
   /** The quoted output for the fill's input. */
   out: bigint;
-  /** The route's OWN gas (not the whole fill), in output-token units. */
+  /**
+   * The route's OWN gas (not the whole fill), in output-token units: for a pool path
+   * the quoters' summed estimate, at least {@link POOL_HOP_GAS} per hop
+   * ({@link poolRouteGasUnits}); the API's figure + {@link SANDBOX_ROUTE_OVERHEAD_GAS}
+   * for an API route (the sandbox + router hops a pool plan does not run).
+   */
   routeGasOut: bigint;
+}
+
+/** The candidate's plan kind: pool paths build pool plans, API routes sandbox plans. */
+export const planKind = (c: Pick<RouteCandidate, "source">): PlanKind => (c.source === "pool" ? "pool" : "sandbox");
+
+/** A candidate's own gas units for ranking: a sandbox plan pays {@link SANDBOX_ROUTE_OVERHEAD_GAS} on top of its route. */
+export function rankingGasUnits(kind: PlanKind, routeGasUnits: bigint): bigint {
+  return kind === "sandbox" ? routeGasUnits + SANDBOX_ROUTE_OVERHEAD_GAS : routeGasUnits;
 }
 
 /**
  * Candidates best-first by NET output (`out − routeGasOut`): the fill overhead
  * around the route is the same whichever route runs, so only the route's own gas
- * separates them. Ties keep the input order (Oku first: no API dependency).
+ * (sandbox overhead included, {@link rankingGasUnits}) separates them. Ties keep the
+ * input order (pool paths first: no API dependency, no sandbox).
  */
 export function rankRoutes<T extends RouteCandidate>(cands: readonly T[]): T[] {
   return cands

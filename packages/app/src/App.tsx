@@ -27,10 +27,12 @@ import { useTicket, type TicketDeps } from "./hooks/useTicket";
 import { useTokenIndex } from "./hooks/useTokenIndex";
 import { fmtAmt, fmtPrice } from "./lib/format";
 import { depth, mergeLadder, quote as quoteOrder, restingLabel } from "./lib/ladder";
-import { readFilled, readMinValidNonce, userTxGas, type Reader } from "./lib/chain";
+import { readFillState, readMinValidNonce, readNonceWord, userTxGas, type Reader } from "./lib/chain";
+import { appNonces, fillOnceFor, openOrderNonces } from "./lib/nonces";
 import { orderPhase, phaseLine, type PhaseLine } from "./lib/orderLifecycle";
 import { IDLE, inFlight, runTx, txReducer } from "./lib/txFlow";
-import { fmtWei, fundingButtonLabel, hasLeftover, planFunding, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
+import { fmtWei, fundingButtonLabel, hasLeftover, planFunding, planGasless, unwrapCall, WRAP_GAS_RESERVE_WEI } from "./lib/funding";
+import { gaslessDomain, signGaslessPermit } from "./lib/permit";
 import { buildOrder, inputWei } from "./lib/order";
 import { exceedsBalance, marketFigures, maxSpendableWei, sourceName, wrappableWei, wrapSpendableWei } from "./lib/ticketView";
 import {
@@ -129,7 +131,7 @@ export default function App() {
   }, [wallet.address]);
 
   // When an order leaves the book without a reported fill, the book checks
-  // `Settlement.filled(hash)` — through the wallet's provider (the CSP allows no
+  // `Settlement.filled(hash)` (and a fill-once order's nonce bit) — through the wallet's provider (the CSP allows no
   // direct RPC), and only for orders signed on the chain the wallet is on.
   useEffect(() => {
     const provider = wallet.provider;
@@ -140,7 +142,9 @@ export default function App() {
     }
     const reader = createPublicClient({ chain: config.chain, transport: custom(provider) }) as unknown as Reader;
     orderbook.setFillReader?.(async (signed) =>
-      signed.deployed && signed.deployment.chainId === chainId ? readFilled(reader, signed.deployment.settlement, signed.hash) : null,
+      signed.deployed && signed.deployment.chainId === chainId
+        ? readFillState(reader, signed.deployment.settlement, signed.order, signed.hash)
+        : null,
     );
     return () => orderbook.setFillReader?.(null);
   }, [wallet.provider, onChain, chainId]);
@@ -346,6 +350,18 @@ export default function App() {
     funding && plan && (!autoWrap || wrapSource) ? planFunding(funding, requiredWei, plan.fundingTtlSeconds, nowSec, wrapSource) : undefined;
   const requiredHuman = payMeta.decimals !== undefined ? Number(formatUnits(requiredWei, payMeta.decimals)) : 0;
 
+  // GASLESS funding (lib/permit.ts): for a pay token with an EIP-2612 permit, a
+  // signature next to the order replaces the approve + grant transactions — the
+  // filler relays it. On by default where offered; "use approvals instead" opts out.
+  const [gaslessChosen, setGaslessChosen] = useState(true);
+  const gasless = planGasless(funding, {
+    permitSupported: deployment !== null && gaslessDomain(chainId, payMeta.address) !== undefined,
+    needsWrap: fundingPlan?.steps.some((st) => st.kind === "wrap") ?? false,
+    multiOrder: plan?.kind === "twap",
+    covered: fundingPlan?.covered ?? false,
+  });
+  const gaslessActive = gasless.available && gaslessChosen;
+
   const allowance: AllowanceView = {
     spender: deployment ? deployment.permit3 : null,
     required: requiredHuman,
@@ -353,7 +369,11 @@ export default function App() {
       funding !== undefined && payMeta.decimals !== undefined
         ? Number(formatUnits(funding.erc20Allowance, payMeta.decimals))
         : undefined,
-    covered: fundingPlan?.covered ?? false,
+    covered: (fundingPlan?.covered ?? false) || gaslessActive,
+    gasless:
+      gasless.available || gasless.reason
+        ? { available: gasless.available, selected: gaslessActive, reason: gasless.reason, select: setGaslessChosen }
+        : null,
     trims: fundingPlan?.trims ?? false,
     buttonLabel: fundingButtonLabel(fundingPlan ?? { steps: [], trims: false }, {
       amount: fmtAmt(requiredHuman),
@@ -401,7 +421,9 @@ export default function App() {
    * would compute, and the receipt says plainly that no filler can use it.
    */
   const signDraft = useCallback(
-    async (spec: SliceSpec & { marketId: string; side: Side; orders?: number; signedSlices?: number }): Promise<SignedOrder> => {
+    async (
+      spec: SliceSpec & { marketId: string; side: Side; orders?: number; signedSlices?: number; kind: "market" | "limit" | "twap" },
+    ): Promise<SignedOrder> => {
       if (!signer || !wallet.address) throw new Error("wallet not connected");
       const market = marketById(spec.marketId);
       const paySymbol = spec.side === "sell" ? market.base : market.quote;
@@ -410,16 +432,32 @@ export default function App() {
       const recv = pinnedToken(market.chainId, recvSymbol);
       if (!pay || !recv) throw new Error(`no pinned token for ${paySymbol}/${recvSymbol}`);
 
-      // After a `rollbackNonces`, a nonce below the maker's watermark is dead
-      // on arrival; read it so the draw lands above (G-TS_SIGN-3).
-      let minValidNonce = 0n;
-      if (deployment && wallet.provider) {
-        const config = chainById(chainId);
-        if (config) {
-          const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) }) as unknown as Reader;
-          minValidNonce = await readMinValidNonce(reader, deployment.settlement, wallet.address);
-        }
-      }
+      // WORD-PACKED NONCE (lib/nonces.ts): the lowest bit of the maker's current
+      // bitmap word that is clear on-chain, on none of their open orders, and not
+      // handed out before — read and reserved right here, just before the wallet
+      // prompt. At or above `minValidNonce` (a nonce below the watermark is dead on
+      // arrival, G-TS_SIGN-3) and below 2^255. No wallet / a failed bitmap read: the
+      // uniform random draw above the watermark, as before.
+      const maker = wallet.address;
+      const config = chainById(chainId);
+      const reader =
+        deployment && wallet.provider && config
+          ? (createPublicClient({ chain: config.chain, transport: custom(wallet.provider) }) as unknown as Reader)
+          : null;
+      const { nonces, minValidNonce } = await appNonces.allocate({
+        chainId,
+        settlement: deployment?.settlement ?? zeroAddress,
+        maker,
+        count: 1,
+        chain:
+          reader && deployment
+            ? {
+                minValidNonce: () => readMinValidNonce(reader, deployment.settlement, maker),
+                word: (w) => readNonceWord(reader, deployment.settlement, maker, w),
+              }
+            : null,
+        open: openOrderNonces(orderbook.orders(), maker),
+      });
       const raw = balanceWei(paySymbol);
 
       const draft = buildOrder({
@@ -440,6 +478,10 @@ export default function App() {
         // buildOrder scales the outputs if this cap binds (G-TS_SIGN-7).
         maxIn: sliceCap(raw, spec.orders ?? 1, spec.signedSlices ?? 0),
         minValidNonce,
+        nonce: nonces[0],
+        // FILL-ONCE for market tickets only (lib/nonces.ts `fillOnceFor`): all-or-nothing,
+        // and its fill flips a bit in the packed nonce word instead of a fresh slot.
+        fillOnce: fillOnceFor(spec.kind),
       });
 
       const domain = deployment ?? { chainId, settlement: zeroAddress, permit3: zeroAddress };
@@ -482,7 +524,7 @@ export default function App() {
         // is due can be signed now. Each later slice is signed — by the maker,
         // from the Open orders row — when it comes due, and only a signed
         // slice can fill.
-        const signed = await signDraft({ ...spec, marketId, side, orders: plan.orders });
+        const signed = await signDraft({ ...spec, marketId, side, orders: plan.orders, kind: "twap" });
         setSignPhase("posting");
         const order = await orderbook.place({
           marketId,
@@ -510,7 +552,22 @@ export default function App() {
       // Sign FIRST. Nothing is recorded — no fill, no row — until there is a
       // signature behind it, so a declined or failed signature leaves no
       // phantom trade in the history (G-TS_SIGN-3, G-TS_SIGN-15).
-      const signed = await signDraft({ ...spec, marketId, side });
+      let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind });
+      // Gasless funding: a second prompt, the ERC-2612 permit for exactly this order's
+      // input, valid until the order's own expiry. It rides with the order to the book.
+      if (gaslessActive && deployment && wallet.address && signer && wallet.provider && payMeta.address) {
+        const config = chainById(chainId);
+        if (!config) throw new Error(`no chain config for ${chainId}`);
+        const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) }) as unknown as Reader;
+        const erc2612Permit = await signGaslessPermit(signer, reader, {
+          chainId,
+          token: payMeta.address,
+          owner: wallet.address,
+          settlement: deployment.settlement,
+          order: signed.order,
+        });
+        signed = { ...signed, erc2612Permit };
+      }
       let hash: string = signed.hash;
       setSignPhase("posting");
 
@@ -579,7 +636,7 @@ export default function App() {
       setSigning(false);
       setSignPhase(null);
     }
-  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf, rawBalances]);
+  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf, rawBalances, gaslessActive, wallet.address, wallet.provider, signer, payMeta.address, chainId]);
 
   const [orderError, setOrderError] = useState<string | null>(null);
 
@@ -674,14 +731,19 @@ export default function App() {
         const client = createWalletClient({ account, chain: config.chain, transport: custom(wallet.provider) });
         const reader = createPublicClient({ chain: config.chain, transport: custom(wallet.provider) });
         await runTx(dispatchCancel, { label: `Cancel on-chain ${o.id.slice(0, 10)}…`, step: 1, of: 1 }, {
-          send: async () =>
-            client.sendTransaction({
+          send: async () => {
+            const tx = await client.sendTransaction({
               to: settlement as Address,
               data: encodeCancelOrders(signedOrders.map((x) => x.order.nonce)),
               chain: config.chain,
               account,
               ...(await userTxGas(reader, config.chain.id)),
-            }),
+            });
+            // Broadcast: from here a consumed nonce of these orders is OUR cancel,
+            // not a fill-once fill (lib/orderLifecycle.ts `chainFillOutcome`).
+            orderbook.markHardCancelSent?.(o.id);
+            return tx;
+          },
           wait: (hash) => reader.waitForTransactionReceipt({ hash }),
           blockNumber: () => reader.getBlockNumber(),
         });
@@ -706,6 +768,7 @@ export default function App() {
           side: o.side,
           orders: o.slices.total,
           signedSlices,
+          kind: "twap",
         });
         await orderbook.addSlice(o.id, signed);
       } catch (e) {

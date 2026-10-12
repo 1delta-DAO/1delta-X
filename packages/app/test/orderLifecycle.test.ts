@@ -4,8 +4,10 @@ import { zeroAddress, type Hex } from "viem";
 import type { SignedOrder } from "../src/backend/api";
 import { RemoteOrderbook, inferType } from "../src/backend/remote";
 import { pinnedToken } from "../src/config/markets";
+import { readFillState, type Reader } from "../src/lib/chain";
 import {
   CANCELLED_SENTINEL,
+  chainFillOutcome,
   fillStatusLabel,
   orderPhase,
   orderTypeLabel,
@@ -95,7 +97,7 @@ const MAKER = "0x00000000000000000000000000000000000000aa" as const;
 const TX = `0x${"7e".repeat(32)}`;
 const PENDING_TX = `0x${"5e".repeat(32)}`;
 
-function signedOrder(ttlSeconds = 300, nonce = 1n): SignedOrder {
+function signedOrder(ttlSeconds = 300, nonce = 1n, fillOnce = false): SignedOrder {
   const draft = buildOrder({
     maker: MAKER,
     side: "sell",
@@ -108,6 +110,7 @@ function signedOrder(ttlSeconds = 300, nonce = 1n): SignedOrder {
     decaySeconds: 0,
     solver: zeroAddress,
     nonce,
+    fillOnce,
     now: NOW / 1000,
   });
   return {
@@ -234,5 +237,102 @@ describe("remote book — filled / expired orders move to Recent fills (2026-10-
     const part = f.find((x) => x.status === "partial")!;
     expect(part.size).toBeCloseTo(40, 6);
     expect(orderPhase(s.hash, [], f, now)).toEqual({ kind: "expired", pct: 40 });
+  });
+});
+
+describe("fill-once orders: the nonce bit is the fill (timing bit 100)", () => {
+  const A = 1_000n;
+  it("chainFillOutcome: a consumed nonce is the fill unless the app cancelled it on-chain", () => {
+    expect(chainFillOutcome({ filled: 0n, nonceConsumed: true, fillOnce: true, anchor: A, userCancelled: false })).toEqual({ filledWei: A, cancelled: false });
+    expect(chainFillOutcome({ filled: 0n, nonceConsumed: true, fillOnce: true, anchor: A, userCancelled: true })).toEqual({ filledWei: 0n, cancelled: true });
+    expect(chainFillOutcome({ filled: 0n, nonceConsumed: false, fillOnce: true, anchor: A, userCancelled: false })).toEqual({ filledWei: 0n, cancelled: false });
+    expect(chainFillOutcome({ filled: CANCELLED_SENTINEL, nonceConsumed: false, fillOnce: true, anchor: A, userCancelled: false })).toEqual({ filledWei: 0n, cancelled: true });
+    // An ordinary order's nonce bit says nothing about fills: `filled` is the record.
+    expect(chainFillOutcome({ filled: 400n, nonceConsumed: true, fillOnce: false, anchor: A, userCancelled: false })).toEqual({ filledWei: 400n, cancelled: false });
+  });
+
+  it("readFillState reads isNonceCancelled for a fill-once order only", async () => {
+    const calls: string[] = [];
+    const reader: Reader = {
+      readContract: async ({ functionName }) => {
+        calls.push(functionName);
+        return functionName === "filled" ? 0n : true;
+      },
+    };
+    const once = signedOrder(300, 7n, true);
+    expect(await readFillState(reader, once.deployment.settlement, once.order, once.hash)).toEqual({ filled: 0n, nonceConsumed: true });
+    expect(calls.sort()).toEqual(["filled", "isNonceCancelled"]);
+    calls.length = 0;
+    const plain = signedOrder(300, 8n);
+    expect(await readFillState(reader, plain.deployment.settlement, plain.order, plain.hash)).toEqual({ filled: 0n, nonceConsumed: false });
+    expect(calls).toEqual(["filled"]);
+  });
+
+  it("the book's Cancelled for a fill-once market order is checked on-chain: nonce consumed, no cancel of ours → Filled", async () => {
+    const s = signedOrder(300, 9n, true);
+    const { state, fetch } = scripted(s);
+    const book = new RemoteOrderbook({ baseUrl: BASE, fetch, now: () => NOW });
+    book.setFillReader(async () => ({ filled: 0n, nonceConsumed: true }));
+    await book.place({ marketId: "rsk-30-usdrif-usd0", side: "sell", type: "market", size: 100, price: 1, ttlMs: 300_000, signed: s });
+    state.status = { live: false, status: "Cancelled", reason: "cancelled", filledAmount: null };
+    await book.poll();
+    expect(book.orders()).toHaveLength(0);
+    expect(book.fills()[0]).toMatchObject({ status: "filled", orderHash: s.hash, orderType: "market" });
+    expect(orderPhase(s.hash, [], book.fills(), NOW)).toEqual({ kind: "filled", tx: "" });
+  });
+
+  it("…but after the app BROADCAST its own on-chain cancel, the consumed nonce is that cancel → Cancelled", async () => {
+    const s = signedOrder(300, 10n, true);
+    const { state, fetch } = scripted(s);
+    const book = new RemoteOrderbook({ baseUrl: BASE, fetch, now: () => NOW });
+    const reads: string[] = [];
+    book.setFillReader(async (so) => {
+      reads.push(so.hash);
+      return { filled: 0n, nonceConsumed: true };
+    });
+    await book.place({ marketId: "rsk-30-usdrif-usd0", side: "sell", type: "market", size: 100, price: 1, ttlMs: 300_000, signed: s });
+    book.markHardCancelSent(s.hash); // tx sent; receipt not yet in
+    state.status = { live: false, status: "Cancelled", reason: "cancelled", filledAmount: null };
+    await book.poll();
+    expect(book.orders()).toHaveLength(0);
+    expect(book.fills()[0]).toMatchObject({ status: "cancelled", orderHash: s.hash });
+    expect(reads).toEqual([]);
+  });
+
+  it("…and with no chain reader (no wallet on the chain) the book's verdict stands", async () => {
+    const s = signedOrder(300, 11n, true);
+    const { state, fetch } = scripted(s);
+    const book = new RemoteOrderbook({ baseUrl: BASE, fetch, now: () => NOW });
+    book.setFillReader(async () => null);
+    await book.place({ marketId: "rsk-30-usdrif-usd0", side: "sell", type: "market", size: 100, price: 1, ttlMs: 300_000, signed: s });
+    state.status = { live: false, status: "Cancelled", reason: "cancelled", filledAmount: null };
+    await book.poll();
+    expect(book.fills()[0]).toMatchObject({ status: "cancelled", orderHash: s.hash });
+  });
+
+  it("a fill-once order the book lost (404) whose nonce is consumed ends Filled; an ordinary order's Cancelled is taken as is", async () => {
+    const once = signedOrder(300, 12n, true);
+    const a = scripted(once);
+    const bookA = new RemoteOrderbook({ baseUrl: BASE, fetch: a.fetch, now: () => NOW });
+    bookA.setFillReader(async () => ({ filled: 0n, nonceConsumed: true }));
+    await bookA.place({ marketId: "rsk-30-usdrif-usd0", side: "sell", type: "market", size: 100, price: 1, ttlMs: 300_000, signed: once });
+    a.state.statusCode = 404;
+    a.state.status = { error: "unknown order" };
+    await bookA.poll();
+    expect(bookA.fills()[0]).toMatchObject({ status: "filled", orderHash: once.hash });
+
+    const plain = signedOrder(3600, 13n);
+    const b = scripted(plain);
+    const bookB = new RemoteOrderbook({ baseUrl: BASE, fetch: b.fetch, now: () => NOW });
+    const reads: string[] = [];
+    bookB.setFillReader(async (so) => {
+      reads.push(so.hash);
+      return { filled: 0n, nonceConsumed: false };
+    });
+    await bookB.place({ marketId: "rsk-30-usdrif-usd0", side: "sell", type: "limit", size: 100, price: 1, ttlMs: 3_600_000, signed: plain });
+    b.state.status = { live: false, status: "Cancelled", reason: "cancelled", filledAmount: "0" };
+    await bookB.poll();
+    expect(bookB.fills()[0]).toMatchObject({ status: "cancelled", orderHash: plain.hash });
+    expect(reads).toEqual([]);
   });
 });

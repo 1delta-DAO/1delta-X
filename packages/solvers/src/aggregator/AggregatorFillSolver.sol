@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import {SafeTransferLib} from "@core/utils/SafeTransferLib.sol";
-import {PackedArraysMem} from "@core/settlement/PackedArraysMem.sol";
 import {PackedArrays} from "@core/settlement/PackedArrays.sol";
 import {Settlement, Order, CallbackMode, MatchPlan, MatchStep} from "@core/settlement/Settlement.sol";
 import {DutchAuction} from "@core/settlement/DutchAuction.sol";
@@ -131,7 +130,9 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///  load-bearing:
 ///
 ///    1. THE ROUTE RUNS IN {RouteSandbox}, NEVER AS THIS CONTRACT (2026-10, replaces
-///       the immutable router allowlist). The EXECUTOR check and the arming flag
+///       the immutable router allowlist) — every OPAQUE route; a POOL route
+///       ({POOL_ROUTE}) is the one exception, and it names no target at all (see
+///       "DIRECT POOL ROUTES" below for its own three rules). The EXECUTOR check and the arming flag
 ///       bound WHEN the callback runs, not what the route does: the route's target
 ///       and calldata are opaque here, and may come from a third-party API the
 ///       operator forwards (AGG-4 below). They run from an identity that owns
@@ -181,7 +182,19 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///  mode) keeps the filler's whole share here anyway — recoverable by the
 ///  operators with {sweep} (audit 2026-09-30 AGG-1: retain mode used to be refused
 ///  on open instances, where nothing could move it out; there are no open
-///  instances any more).
+///  instances any more). Retain mode is also the CHEAPER configuration: it skips the
+///  per-fill payout `transfer` (−5.2k net on the direct pool fill, −6.2k pull; fork
+///  bench, 2026-10-12) — recommended for a filler that sweeps in batches.
+///
+///  NO FLOOR FOR A POOL ROUTE'S INTERMEDIATE TOKENS (measured 2026-10-12, rejected).
+///  An exact-input multi-hop route parks each intermediate here between hops; it
+///  arrives and leaves in the same transaction, so its slot goes 0 → x → 0 (or
+///  1 → x+1 → 1 with a floor) and the EIP-3529 refund returns the difference either
+///  way: the Rootstock fork bench measures the unseeded and the seeded intermediate to
+///  the gas (316,257 both, 2 hops). Keeping a wei back (`amount − 1` to the next hop)
+///  only makes the slot END changed: +20.2k on the first fill, +3.1k on every later one.
+///  A floor pays only for a slot that would otherwise END the transaction at zero —
+///  the order's own tokens, which {_seedIn} / {_splitSurplus} seed.
 ///
 ///  THE OPERATOR SET — mandatory since 2026-10
 ///  ──────────────────────────────────────────
@@ -256,6 +269,65 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///  outside it that a route leaves in the sandbox (an intermediate hop's refund)
 ///  stays there; an operator recovers it with a route of `target = token, data =
 ///  transfer(thisSolver, balance)` and then {sweep}s it on (tested).
+///
+///  DIRECT POOL ROUTES (2026-10-12) — Uniswap-v3-style pools, no sandbox
+///  ─────────────────────────────────────────────────────────────────────
+///  `RoutePlan.router == POOL_ROUTE` swaps on the pools themselves: this contract
+///  calls `pool.swap` and pays inside `uniswapV3SwapCallback` with a plain `transfer`
+///  of exactly what the pool is owed. No push to the sandbox, no router, no sweep, no
+///  approval of anything (Rootstock fork, live pools, net of refunds, against the
+///  sandbox route on the deployed via-IR build after the 2026-10-12 gas pass: −34.4k
+///  per direct exact-output fill, −28.8k pull exact-input, −41.1k / −37.2k on two hops;
+///  `test/PoolRouteFork.t.sol`). Exact-input and exact-output, 1..{MAX_POOL_HOPS}
+///  hops; exact-output multi-hop uses the standard recursive callback (each pool's
+///  callback buys its input from the previous hop, paid straight to the calling
+///  pool; only hop 0 is paid from here). Every settlement rule stays as on an opaque
+///  route: the routed amount is the same delta, `minOut` / `maxPay` / the core's delta
+///  check / the surplus split / the self-seeded floor all run unchanged, and the
+///  amount words follow `amountInOffset` / `amountOutOffset` (0 / 32) exactly as an
+///  opaque route's calldata words do.
+///
+///  WHY THIS DOES NOT RE-OPEN THE PERMISSIONLESS-ARMING HOLE. The route is executed
+///  AS THIS CONTRACT again (the sandbox exists because opaque calldata must not be),
+///  so the three invariants are re-established for the pool path specifically:
+///    1. NOTHING IS CALLED THAT A PLAN NAMES. A pool route makes exactly one kind of
+///       external call — `swap` on an address this contract COMPUTES as
+///       `CREATE2(factory, keccak256(abi.encode(token0, token1, fee)), initCodeHash)`
+///       over an IMMUTABLE venue allowlist ({PoolVenue}, constructor-fixed, no setter).
+///       The init code hash pins the pool BYTECODE, so every derived address is
+///       either genuine pool code or empty (the call then reverts). Tokens, fee and
+///       venue index come from the plan; the target never does.
+///    2. THE CALLBACK PAYS ONLY THE POOL OF THE ARMED HOP, ONLY WHAT IT IS OWED, ONLY
+///       WITHIN THIS FILL'S DELTA. {uniswapV3SwapCallback} requires (a) `_active ==
+///       SWAPPING`, a state set only around the outermost `pool.swap` of a fill an
+///       OPERATOR started and the EXECUTOR called back (the existing 1/2/3 guard slot,
+///       no new storage, no transient storage); (b) `msg.sender ==` the derived pool
+///       of the hop its `data` names — a genuine pool calls back only the `msg.sender`
+///       of its OWN `swap`, i.e. this contract, echoing this contract's data, so a
+///       forged caller is never that address and forged data only names a pool the
+///       caller is not; (c) a positive delta of the hop's INPUT token, paid in that
+///       token only, and on hop 0 at most `budget` = the routed delta (exact-output:
+///       also ≤ the plan's ceiling). Retained value, the floor, a donation or another
+///       token are therefore unreachable, exactly as through the sandbox.
+///    3. NO ALLOWANCE IS CREATED. The pool validates payment by its own balance delta;
+///       the only allowance this contract ever sets is still Settlement's, cleared
+///       after the fill.
+///  The path must run from `legsIn[0]`'s token to the anchor output token, and on a
+///  direct order the last hop pays `legsOut[0]`'s recipient (from the ORDER — never a
+///  plan field), on a pull order this contract. The full rule list and the PoCs that
+///  pin it: `test/AggregatorPoolRoute.t.sol`.
+///
+///  ERC-2612 PERMITS (2026-10-12) — gasless makers, one transaction
+///  ───────────────────────────────────────────────────────────────
+///  Both entries take the maker's EIP-2612 permits ({Permit2612}) and run
+///  `token.permit(maker, SETTLEMENT, value, deadline, v, r, s)` before the fill, so a
+///  maker who signed one next to the order (it travels with the book announce) is
+///  funded inside the fill transaction instead of by a separate relay transaction:
+///  Settlement's direct-approval fallback pulls with the allowance it creates. The
+///  owner must be the order's maker; a failed call (relayed first, front-run) is
+///  accepted only when Settlement's allowance already covers `value` — see
+///  {_permits}. Strict-mode makers (Permit3 `setStrictMode`) have that fallback off
+///  by design: such a fill reverts `Permit3Denied`.
 /// @notice One aggregator route, as the solver received it off-chain.
 /// @param router the route's TARGET — the venue's entrypoint, from the quote. Any
 ///        contract: it is called by {RouteSandbox}, never by the solver. Settlement,
@@ -265,6 +337,8 @@ import {RouteSandbox} from "./RouteSandbox.sol";
 ///        first), but leaves the proceeds — spread included — in the sandbox for the
 ///        rest of the route call, where any holder of a sandbox approval that gains
 ///        control later in that call can take the part above `minOut`. Don't.
+///        {POOL_ROUTE} (`address(0)`) instead = a DIRECT POOL ROUTE: `data` is a pool
+///        plan (layout at {POOL_ROUTE}) this contract executes itself, no sandbox.
 /// @param minOut floor on the swap proceeds — SOLVER-side protection against a
 ///        stale route; the maker's own floor is the signed band Settlement enforces.
 ///        Measured in the ANCHOR OUTPUT TOKEN: the first output token no input leg
@@ -385,8 +459,70 @@ struct SurplusPolicy {
 uint256 constant PPM = 1_000_000;
 
 /// @dev `RoutePlan.amountInOffset` / `amountOutOffset` sentinel: leave that word of the
-///      aggregator's calldata as quoted.
-uint256 constant NO_PATCH = type(uint256).max;
+///      aggregator's calldata as quoted. ANY offset with bit 255 set means "no patch"
+///      (no calldata is that long); `2^255` is the canonical encoding because it is the
+///      cheapest such word in CALLDATA — one non-zero byte (16 + 31·4 = 140 gas) where
+///      `type(uint256).max` costs 32 (512 gas). 2026-10-12, was `type(uint256).max`,
+///      which still reads as "no patch".
+uint256 constant NO_PATCH = 1 << 255;
+
+/// @dev `RoutePlan.router` sentinel for a DIRECT POOL ROUTE (2026-10): `data` is then
+///      not calldata for a target but a pool plan the solver executes itself against
+///      Uniswap-v3-style pools it DERIVES from its immutable venue allowlist — see
+///      {AggregatorFillSolver} "DIRECT POOL ROUTES". `address(0)` was never a usable
+///      route target (the sandbox's call to it is a no-op that settles nothing).
+///
+///      `data` layout (all big-endian, no ABI head):
+///        [0:32)   amountIn  — exact-input: the amount swapped; exact-output: the
+///                             input ceiling (`amountInMaximum`). `amountInOffset = 0`
+///                             rewrites it with the routed delta, as on any route.
+///        [32:64)  amountOut — `0` = EXACT-INPUT; otherwise the exact output paid to
+///                             the payee. `amountOutOffset = 32` rewrites it with the
+///                             core's live `pricedOut[0]` (typed callback), as on any
+///                             route.
+///        [64:)    path, in SWAP order: token0 ‖ fee(3) ‖ venue(1) ‖ token1 ‖ fee ‖
+///                 venue ‖ token2 … — one 24-byte (fee, venue) pair per hop, 1 to
+///                 {AggregatorFillSolver.MAX_POOL_HOPS} hops. `token0` must be the
+///                 order's anchor input, the last token its anchor output.
+///      The offsets keep their meaning: on a pool route the only patchable words are
+///      0 (`amountInOffset`) and 32 (`amountOutOffset`); any other value but
+///      {NO_PATCH} reverts {AggregatorFillSolver.BadPoolRoute}.
+address constant POOL_ROUTE = address(0);
+
+/// @notice One Uniswap-v3-style deployment a pool route may swap on: pools are never
+///         taken from calldata, they are recomputed as
+///         `CREATE2(factory, keccak256(abi.encode(token0, token1, fee)), initCodeHash)`.
+/// @param factory      the venue's pool factory (the CREATE2 deployer of its pools)
+/// @param initCodeHash the keccak of the venue's pool creation code — pins the pool
+///                     BYTECODE, so every address it derives runs genuine pool code
+struct PoolVenue {
+    address factory;
+    bytes32 initCodeHash;
+}
+
+/// @notice A maker's signed ERC-2612 permit, executed by {AggregatorFillSolver.executeFill}
+///         / {AggregatorFillSolver.executeItemFill} BEFORE the fill: `token.permit(owner,
+///         SETTLEMENT, value, deadline, v, r, s)`. The spender is fixed to Settlement
+///         (not a field): Settlement's direct-approval fallback pulls the maker's input
+///         with it (`Base._pullViaPermit3` → plain `transferFrom` for a NON-STRICT maker).
+///         `owner` must be the order's maker.
+struct Permit2612 {
+    address token;
+    address owner;
+    uint256 value;
+    uint256 deadline;
+    uint8 v;
+    bytes32 r;
+    bytes32 s;
+}
+
+/// @dev The pool interface a pool route calls — Uniswap v3's, which SushiSwap v3 and
+///      Oku share (one callback name, `uniswapV3SwapCallback`).
+interface IUniswapV3PoolSwap {
+    function swap(address recipient, bool zeroForOne, int256 amountSpecified, uint160 sqrtPriceLimitX96, bytes calldata data)
+        external
+        returns (int256 amount0, int256 amount1);
+}
 
 /// @notice The resolved route handed to {AggregatorFillSolver.onSettlementFill} (as the
 ///         typed callback's `userData`) and to {AggregatorFillSolver.onMatchRoute}.
@@ -433,6 +569,10 @@ struct FillRoute {
     /// @dev The order carries {DutchAuction.deltaVerifyOutputs}: the route pays
     ///      the maker itself and this contract never approves Settlement.
     bool direct;
+    /// @dev Where a POOL route's last hop pays: `legsOut[0]`'s resolved recipient
+    ///      on a direct order, this contract otherwise. Set by {_plan} from the ORDER,
+    ///      never from the plan; unused (zero) on an opaque route.
+    address payee;
     bytes data;
 }
 
@@ -496,18 +636,33 @@ contract AggregatorFillSolver {
     ///      immutable instead of two compares on the seeding branch.
     bool private immutable SEED_INPUT;
 
-    /// @notice One fill's surplus split, per token. `toFiller` is what reached
-    ///         `RoutePlan.profitRecipient` — one wei short of the filler's share on
-    ///         the fill that self-seeds the token's balance floor (or the whole
-    ///         share, kept here, in retain mode).
-    event SurplusSplit(
-        address indexed token,
-        address indexed maker,
-        uint256 toMaker,
-        uint256 toProtocol,
-        uint256 toOriginator,
-        uint256 toFiller
-    );
+    /// @dev `_active` while a POOL ROUTE's swap is in flight — the only state in which
+    ///      {uniswapV3SwapCallback} pays. Set around the outermost `pool.swap` and
+    ///      restored to the fill's own state (3 or 5) after it, so it is reachable only
+    ///      from inside a fill an operator started (see {_poolRoute}).
+    uint256 private constant SWAPPING = 6;
+
+    /// @notice Most hops one pool route may take.
+    uint256 public constant MAX_POOL_HOPS = 4;
+    /// @notice How many {PoolVenue}s this instance derives pools from (0..{MAX_SET}).
+    uint256 public immutable POOL_VENUES;
+    /// @dev The venue allowlist, as immutables (same reason as the operator set: a
+    ///      compare and a bytecode constant per hop, never an SLOAD). Unused slots are
+    ///      zero and refused by {_venue}.
+    address private immutable FACTORY0;
+    address private immutable FACTORY1;
+    address private immutable FACTORY2;
+    address private immutable FACTORY3;
+    bytes32 private immutable INIT_HASH0;
+    bytes32 private immutable INIT_HASH1;
+    bytes32 private immutable INIT_HASH2;
+    bytes32 private immutable INIT_HASH3;
+
+    /// @dev Uniswap v3 `TickMath` bounds ± 1: the "no price limit" a router passes when
+    ///      the caller sets none. Slippage on a pool route is bounded by the hop budget,
+    ///      `minOut` and the core's delivery checks, never by a price limit.
+    uint160 private constant MIN_SQRT_RATIO_PLUS_1 = 4295128740;
+    uint160 private constant MAX_SQRT_RATIO_MINUS_1 = 1461446703485210103287273052203988822378723970341;
 
     /// @notice An operator took retained value out — see {sweep}.
     event Swept(address indexed token, address indexed to, uint256 amount);
@@ -550,19 +705,63 @@ contract AggregatorFillSolver {
     ///      anything moves. Fill it through {executeFill}.
     error DirectNotMatchable();
     /// @dev `legsIn[0]` / `legsOut[0]` must exist before their tokens can be read —
-    ///      {PackedArraysMem} is an unchecked reader, and a blob declaring zero
+    ///      {PackedArrays}' leg readers are unchecked, and a blob declaring zero
     ///      legs with trailing bytes would otherwise name an arbitrary token.
     error NoLegs();
+    /// @dev A {PoolVenue} with a zero factory or init code hash, or more than {MAX_SET}.
+    error BadVenue();
+    /// @dev A pool route named a venue index this instance does not have.
+    error UnknownVenue(uint256 venue);
+    /// @dev A malformed pool route: bad length, too many hops, a first token that is
+    ///      not the anchor input, a last token that is not the anchor output, a
+    ///      direct order whose `legsOut[0]` is not that anchor output, or an offset
+    ///      other than 0 / 32 / {NO_PATCH}.
+    error BadPoolRoute();
+    /// @dev {uniswapV3SwapCallback} from anything but the pool the armed hop derives.
+    error NotPool();
+    /// @dev A pool asked for more than the hop's budget — on the first hop, more of
+    ///      the maker's input than this fill routed — or an exact-input route asked
+    ///      to swap more than that.
+    error PoolOverBudget(uint256 owed, uint256 budget);
+    /// @dev A pool callback that owes nothing of the hop's input token, or a swap that
+    ///      did not consume / deliver its exact amount (a liquidity-exhausted pool).
+    error BadPoolSwap();
+    /// @dev A {Permit2612} whose `owner` is not the order's maker.
+    error PermitOwnerNotMaker(address owner);
+    /// @dev `token.permit` failed AND Settlement's allowance from the maker is still
+    ///      below the permit's value (it was neither relayed nor approved otherwise).
+    error PermitFailed(address token);
 
     /// @param operators who may call `executeFill`: 1..{MAX_SET} non-zero addresses.
     ///        EMPTY REVERTS ({NoOperators}) — see the trust-model note.
     /// @param policy    the immutable surplus split — see {SurplusPolicy}
+    /// @param venues    the Uniswap-v3-style deployments a POOL ROUTE may swap on,
+    ///        0..{MAX_SET} (`venue` index = position here). Empty = pool routes off.
     /// @dev   BREAKING (2026-10): the router set, the `standing` flag and the
     ///        prime list are gone. Routes run in the {RouteSandbox} this
     ///        constructor deploys, which may call any target. BREAKING (2026-10
     ///        quick audit): an empty operator set no longer means "permissionless";
-    ///        it reverts.
-    constructor(address settlement, address[] memory operators, SurplusPolicy memory policy) {
+    ///        it reverts. BREAKING (2026-10-12): the `venues` argument.
+    constructor(
+        address settlement,
+        address[] memory operators,
+        SurplusPolicy memory policy,
+        PoolVenue[] memory venues
+    ) {
+        if (venues.length > MAX_SET) revert BadSetSize();
+        for (uint256 i; i < venues.length; i++) {
+            if (venues[i].factory == address(0) || venues[i].initCodeHash == bytes32(0)) revert BadVenue();
+        }
+        POOL_VENUES = venues.length;
+        PoolVenue memory none;
+        PoolVenue memory v0 = venues.length > 0 ? venues[0] : none;
+        PoolVenue memory v1 = venues.length > 1 ? venues[1] : none;
+        PoolVenue memory v2 = venues.length > 2 ? venues[2] : none;
+        PoolVenue memory v3 = venues.length > 3 ? venues[3] : none;
+        (FACTORY0, INIT_HASH0) = (v0.factory, v0.initCodeHash);
+        (FACTORY1, INIT_HASH1) = (v1.factory, v1.initCodeHash);
+        (FACTORY2, INIT_HASH2) = (v2.factory, v2.initCodeHash);
+        (FACTORY3, INIT_HASH3) = (v3.factory, v3.initCodeHash);
         if (operators.length == 0) revert NoOperators();
         if (uint256(policy.makerPpm) + policy.protocolPpm > PPM) revert BadSurplusSplit();
         if (policy.protocolPpm != 0 && policy.protocolRecipient == address(0)) revert BadSurplusSplit();
@@ -591,6 +790,62 @@ contract AggregatorFillSolver {
         d = n > 3 ? set[3] : a;
     }
 
+    /// @notice Venue `i` of the pool-route allowlist — reverts {UnknownVenue} past
+    ///         {POOL_VENUES}.
+    function poolVenue(uint256 i) public view returns (address factory, bytes32 initCodeHash) {
+        if (i >= POOL_VENUES) revert UnknownVenue(i);
+        if (i == 0) return (FACTORY0, INIT_HASH0);
+        if (i == 1) return (FACTORY1, INIT_HASH1);
+        if (i == 2) return (FACTORY2, INIT_HASH2);
+        return (FACTORY3, INIT_HASH3);
+    }
+
+    /// @notice The pool a pool route's hop `(tokenA, tokenB, fee)` on `venue` swaps on —
+    ///         the ONLY address {uniswapV3SwapCallback} pays. Pure CREATE2 arithmetic over
+    ///         the immutable venue: nothing a caller supplies is trusted as a pool.
+    function poolFor(uint256 venue, address tokenA, address tokenB, uint24 fee) public view returns (address) {
+        (address factory, bytes32 initCodeHash) = poolVenue(venue);
+        return _derive(factory, initCodeHash, tokenA, tokenB, fee);
+    }
+
+    /// @dev The CREATE2 pool address, hashed in SCRATCH memory (no allocation).
+    ///      EQUIVALENT SOLIDITY (the pre-2026-10-12 body, pinned against the live
+    ///      factories' `getPool` in `test/PoolRouteFork.t.sol` and against the mock
+    ///      factory in `test/AggregatorPoolRoute.t.sol`):
+    ///
+    ///          (address t0, address t1) = a < b ? (a, b) : (b, a);
+    ///          return address(uint160(uint256(keccak256(abi.encodePacked(
+    ///              hex"ff", factory, keccak256(abi.encode(t0, t1, fee)), initCodeHash)))));
+    ///
+    ///      `a`, `b`, `factory` must be clean (upper 96 bits zero) and `fee < 2^24` —
+    ///      every caller passes Solidity-typed values or `shr`-extracted calldata
+    ///      fields, so `abi.encode`'s word cleaning is a no-op on them. The salt
+    ///      preimage borrows the free-memory-pointer word (0x40) and restores it;
+    ///      the CREATE2 preimage is Solady's `predictDeterministicAddress` layout
+    ///      (0xff ‖ factory ‖ salt ‖ initCodeHash over [0x00, 0x55)).
+    function _derive(address factory, bytes32 initCodeHash, address a, address b, uint256 fee)
+        private
+        pure
+        returns (address pool)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let m := mload(0x40)
+            let x := xor(a, b)
+            let t0 := xor(a, mul(x, gt(a, b))) // min(a, b)
+            mstore(0x00, t0)
+            mstore(0x20, xor(t0, x)) // max(a, b)
+            mstore(0x40, fee)
+            let salt := keccak256(0x00, 0x60)
+            mstore8(0x00, 0xff)
+            mstore(0x35, initCodeHash)
+            mstore(0x01, shl(96, factory))
+            mstore(0x15, salt)
+            pool := and(keccak256(0x00, 0x55), 0xffffffffffffffffffffffffffffffffffffffff)
+            mstore(0x40, m)
+        }
+    }
+
     /// @notice Fill `order` by routing the maker's input through `plan.router`.
     /// @param  plan the aggregator route — see {RoutePlan}. Bundled as a struct
     ///         rather than three parameters because the flat form pushes this
@@ -611,15 +866,32 @@ contract AggregatorFillSolver {
     ///         what lets this contract stay ownerless and hold nothing between
     ///         fills. "Whoever" is one of the constructor's operators; everyone else
     ///         reverts {NotOperator} before any token moves.
+    /// @param  permits the maker's ERC-2612 permits to execute BEFORE the fill (see
+    ///         {Permit2612}, {_permits}); empty for an order funded by an existing
+    ///         approval. BREAKING (2026-10-12): new argument, the 5-argument entry is gone.
     function executeFill(
         Order calldata order,
         bytes calldata sig,
         uint256 fillAmount,
         RoutePlan calldata plan,
-        bytes calldata takerData
+        bytes calldata takerData,
+        Permit2612[] calldata permits
     ) external returns (uint256[] memory fillAmountsOut) {
         if (!isOperator(msg.sender)) revert NotOperator(msg.sender);
         if (_active != 1) revert Reentrancy();
+        if (permits.length != 0) _permits(permits, order.maker);
+        return _executeFill(order, sig, fillAmount, plan, takerData);
+    }
+
+    /// @dev {executeFill}'s body, in its own frame: the `permits` array's two stack
+    ///      words push the fill past the legacy profile's stack limit otherwise.
+    function _executeFill(
+        Order calldata order,
+        bytes calldata sig,
+        uint256 fillAmount,
+        RoutePlan calldata plan,
+        bytes calldata takerData
+    ) private returns (uint256[] memory fillAmountsOut) {
         // Built BEFORE the fill, because its snapshots are balances that only mean
         // anything pre-fill — and reused afterwards for the sweep, so the callback
         // and the sweep can never disagree about what this fill created.
@@ -741,6 +1013,7 @@ contract AggregatorFillSolver {
     ///        fill (the asymmetry `Batch._stepPull` documents). A late TAKE whose
     ///        proceeds are not an input-leg token (borrow after the deposit) is fine:
     ///        the core refunds them to the maker.
+    /// @param permits as {executeFill}'s (BREAKING 2026-10-12, new last argument).
     /// @return fillAmountsOut the delivered amount per output leg (`matchSettle`'s
     ///         `outs[0]`).
     function executeItemFill(
@@ -749,10 +1022,14 @@ contract AggregatorFillSolver {
         uint256 fillAmount,
         RoutePlan calldata plan,
         bytes calldata takerData,
-        uint256 lateItems
+        uint256 lateItems,
+        Permit2612[] calldata permits
     ) external returns (uint256[] memory fillAmountsOut) {
         if (!isOperator(msg.sender)) revert NotOperator(msg.sender);
         if (_active != 1) revert Reentrancy();
+        // The netted path's PULL step draws through the same `Base._pullViaPermit3`
+        // fallback as {executeFill}'s, so a maker permit funds it identically.
+        if (permits.length != 0) _permits(permits, order.maker);
         FillRoute memory route = _plan(order, plan);
         if (route.direct) revert DirectNotMatchable();
         MatchPlan memory mp = _matchPlan(order, sig, fillAmount, takerData, route, lateItems);
@@ -860,9 +1137,74 @@ contract AggregatorFillSolver {
         emit Swept(token, to, amount);
     }
 
+    /// @dev Run the maker's ERC-2612 permits before the fill (2026-10-12) — the
+    ///      gasless-maker funding path, in the fill transaction itself instead of a
+    ///      separate relay transaction.
+    ///
+    ///      `token.permit(owner, SETTLEMENT, value, deadline, v, r, s)`: the spender is
+    ///      Settlement, never a caller choice, because Settlement's direct-approval
+    ///      fallback (`Base._pullViaPermit3`: the Permit3 leg fails → plain
+    ///      `transferFrom` from a NON-STRICT maker) is what pulls the input with it.
+    ///      A maker in Permit3 strict mode for that token gets no fallback: the permit
+    ///      lands, the pull reverts `Permit3Denied` and the fill with it.
+    ///
+    ///      `owner` MUST BE THE ORDER'S MAKER. This entry is operator-gated, but it
+    ///      should not become a relay for arbitrary third-party permits: only the
+    ///      party whose order is filling can be the one whose allowance it sets — and
+    ///      that party signed the permit for exactly this purpose.
+    ///
+    ///      The permit is PUBLIC (it travels with the order), so anyone may submit it
+    ///      first and the token's nonce then makes ours revert. That is success, not
+    ///      failure: a failed call is accepted when Settlement's allowance from the
+    ///      owner already covers `value` (relayed, front-run, or approved directly),
+    ///      and refused ({PermitFailed}) otherwise — before anything moves. A low-level
+    ///      call, so a token without `permit` (or that reverts) lands in that check
+    ///      rather than bubbling; the selector and arguments are fixed, so the call
+    ///      can make the named contract do nothing but what a `permit` from this
+    ///      address means to it (no core contract has that selector — pinned in
+    ///      `test/AggregatorPoolRoute.t.sol`).
+    function _permits(Permit2612[] calldata ps, address maker) private {
+        address spender = address(SETTLEMENT);
+        for (uint256 i; i < ps.length; ++i) {
+            Permit2612 calldata p = ps[i];
+            if (p.owner != maker) revert PermitOwnerNotMaker(p.owner);
+            address token = p.token;
+            uint256 value = p.value;
+            uint256 deadline = p.deadline;
+            uint8 v = p.v;
+            bytes32 r = p.r;
+            bytes32 s_ = p.s;
+            bool ok;
+            // EQUIVALENT SOLIDITY (the pre-2026-10-12 body): `(ok,) = token.call(
+            //   abi.encodeWithSelector(0xd505accf, maker, spender, value, deadline, v, r, s))`
+            // — the same 228 calldata bytes, encoded in free memory without allocating;
+            // the return data is not copied (it was discarded).
+            /// @solidity memory-safe-assembly
+            assembly {
+                let m := mload(0x40)
+                mstore(m, 0xd505accf00000000000000000000000000000000000000000000000000000000) // permit(...)
+                mstore(add(m, 0x04), maker)
+                mstore(add(m, 0x24), spender)
+                mstore(add(m, 0x44), value)
+                mstore(add(m, 0x64), deadline)
+                mstore(add(m, 0x84), v)
+                mstore(add(m, 0xa4), r)
+                mstore(add(m, 0xc4), s_)
+                ok := call(gas(), token, 0, m, 0xe4, 0x00, 0x00)
+            }
+            if (!ok && _allowance(token, maker, spender) < value) revert PermitFailed(token);
+        }
+    }
+
+    /// @dev `token.allowance(owner, spender)`; a failed or short read counts as zero.
+    function _allowance(address token, address owner, address spender) private view returns (uint256 a) {
+        (bool ok, bytes memory ret) = token.staticcall(abi.encodeWithSelector(0xdd62ed3e, owner, spender));
+        if (ok && ret.length >= 32) a = abi.decode(ret, (uint256));
+    }
+
     /// @dev Split this fill's INCREASE in `token` — the spread, in whichever
     ///      denomination it landed — per the {SurplusPolicy} and the plan's
-    ///      originator share. Silent when nothing was left over, which is the
+    ///      originator share. A no-op when nothing was left over, which is the
     ///      normal case for a route quoted at the maker's price. Shares floor;
     ///      the filler takes the rounding dust along with its remainder, so
     ///      nothing strands here — except, ONCE per token, the self-seeded 1-wei
@@ -871,6 +1213,10 @@ contract AggregatorFillSolver {
     ///      `plan.originatorPpm` was bounded in {_plan}, BEFORE the fill, so a
     ///      mis-set share fails the round rather than reverting after the maker
     ///      has already been paid.
+    ///
+    ///      NO EVENT (2026-10-12): the per-token `SurplusSplit` log (LOG3 + four
+    ///      words) cost 2,653 gas per fill and nothing read it. The shares are the
+    ///      ERC-20 `Transfer` logs this function's own transfers already emit.
     function _splitSurplus(address token, uint256 before, address maker, RoutePlan calldata plan, address filler)
         private
     {
@@ -878,16 +1224,25 @@ contract AggregatorFillSolver {
         if (bal <= before) return;
         uint256 surplus = bal - before;
 
-        uint256 toMaker = (surplus * MAKER_SURPLUS_PPM) / PPM;
-        uint256 toProtocol = (surplus * PROTOCOL_SURPLUS_PPM) / PPM;
-        uint256 toOriginator = (surplus * plan.originatorPpm) / PPM;
-        // The sum of the three ppm values is ≤ PPM (checked in `_plan`), so the
-        // three floors sum to ≤ surplus and this cannot underflow.
-        uint256 toFiller = surplus - toMaker - toProtocol - toOriginator;
+        uint256 toMaker;
+        uint256 toProtocol;
+        uint256 toOriginator;
+        uint256 toFiller = surplus;
+        // No share but the filler's (the beta configuration: no immutable policy, no
+        // originator) skips the three products — `SEED_INPUT` is exactly "maker and
+        // protocol ppm both 0", and a zero `originatorPpm` floors to zero anyway.
+        if (!SEED_INPUT || plan.originatorPpm != 0) {
+            toMaker = (surplus * MAKER_SURPLUS_PPM) / PPM;
+            toProtocol = (surplus * PROTOCOL_SURPLUS_PPM) / PPM;
+            toOriginator = (surplus * plan.originatorPpm) / PPM;
+            // The sum of the three ppm values is ≤ PPM (checked in `_plan`), so the
+            // three floors sum to ≤ surplus and this cannot underflow.
+            toFiller = surplus - toMaker - toProtocol - toOriginator;
 
-        if (toMaker != 0) SafeTransferLib.safeTransfer(token, maker, toMaker);
-        if (toProtocol != 0) SafeTransferLib.safeTransfer(token, PROTOCOL_RECIPIENT, toProtocol);
-        if (toOriginator != 0) SafeTransferLib.safeTransfer(token, plan.originator, toOriginator);
+            if (toMaker != 0) SafeTransferLib.safeTransfer(token, maker, toMaker);
+            if (toProtocol != 0) SafeTransferLib.safeTransfer(token, PROTOCOL_RECIPIENT, toProtocol);
+            if (toOriginator != 0) SafeTransferLib.safeTransfer(token, plan.originator, toOriginator);
+        }
         // RETAIN MODE: a `profitRecipient` of this contract keeps the filler's
         // share here instead of paying it out every fill. Safe because every
         // amount above is a delta — a retained balance is never re-split, never
@@ -912,7 +1267,6 @@ contract AggregatorFillSolver {
             }
             if (toFiller != 0) SafeTransferLib.safeTransfer(token, filler, toFiller);
         }
-        emit SurplusSplit(token, maker, toMaker, toProtocol, toOriginator, toFiller);
     }
 
     /// @dev Resolve the route against the order, in its OWN frame: the two decoded
@@ -921,16 +1275,18 @@ contract AggregatorFillSolver {
     ///      — the same split the settlement makes in its own fill helpers.
     ///
     ///      ⚠ THE LEG COUNTS ARE CHECKED HERE and nowhere else on this path.
-    ///      {PackedArraysMem} reads a leg without consulting the blob's count byte,
+    ///      {PackedArrays} reads a leg without consulting the blob's count byte,
     ///      and {PackedArrays.validateFixed} tolerates trailing bytes — so a
     ///      `legsOut` of `0x00 ‖ <104 bytes>` settles as ZERO output legs (the
     ///      caller owes the maker nothing) while still naming a token here. Reject
     ///      the empty blob and that shape cannot be built.
     function _plan(Order calldata order, RoutePlan calldata plan) private view returns (FillRoute memory r) {
-        bytes memory legsIn = order.legsIn;
-        bytes memory legsOut = order.legsOut;
-        uint256 nIn = PackedArraysMem.validateLegsIn(legsIn);
-        uint256 nOut = PackedArraysMem.validateLegsOut(legsOut);
+        // Read in place from CALLDATA (2026-10-12; was a memory copy of each blob via
+        // {PackedArraysMem} — the same validation and the same unchecked readers).
+        bytes calldata legsIn = order.legsIn;
+        bytes calldata legsOut = order.legsOut;
+        uint256 nIn = PackedArrays.validateFixed(legsIn, PackedArrays.LEG_IN_STRIDE);
+        uint256 nOut = PackedArrays.validateFixed(legsOut, PackedArrays.LEG_OUT_STRIDE);
         if (nIn == 0 || nOut == 0) revert NoLegs();
         // The originator's share is the caller's to give, but only out of its own
         // remainder: the maker's and the protocol's shares are fixed, so the three
@@ -952,7 +1308,7 @@ contract AggregatorFillSolver {
         uint256 n;
         for (uint256 i; i < nIn; ++i) {
             uint256 k;
-            (k, n) = _slot(toks, n, PackedArraysMem.legInToken(legsIn, i));
+            (k, n) = _slot(toks, n, PackedArrays.legInToken(legsIn, i));
             r.inMask |= 1 << k;
         }
         // THE ANCHOR OUTPUT — the token `minOut` and `maxPay` measure — is the first
@@ -965,7 +1321,7 @@ contract AggregatorFillSolver {
         bool anchored;
         for (uint256 j; j < nOut; ++j) {
             uint256 k;
-            (k, n) = _slot(toks, n, PackedArraysMem.legOutToken(legsOut, j));
+            (k, n) = _slot(toks, n, PackedArrays.legOutToken(legsOut, j));
             uint256 bit = 1 << k;
             r.outMask |= bit;
             if (k == 0) r.sameOut |= 1 << j; // an output leg in the anchor input token
@@ -986,6 +1342,7 @@ contract AggregatorFillSolver {
             if (r.direct && r.inMask & (1 << k) == 0) continue;
             r.before[k] = SafeTransferLib.balanceOf(toks[k], address(this));
         }
+        if (plan.router == POOL_ROUTE) r.payee = _payee(order, legsOut, toks[r.outAnchor], r.direct);
         r.router = plan.router;
         r.minOut = plan.minOut;
         r.maxPay = plan.maxPay;
@@ -1004,6 +1361,25 @@ contract AggregatorFillSolver {
         return (n, n + 1);
     }
 
+    /// @dev A pool route's final recipient, from the ORDER: on a direct order the
+    ///      recipient of `legsOut[0]` (`address(0)` = the maker) — the leg whose live
+    ///      price `amountOutOffset` patches in and whose delta the core verifies —
+    ///      which must be paid in the anchor output token the path ends in; on a pull
+    ///      order this contract, so the proceeds are measured, floored and approved
+    ///      exactly as on an opaque route. Never a plan field: a route cannot pay
+    ///      anyone the order does not.
+    function _payee(Order calldata order, bytes calldata legsOut, address anchorOut, bool direct)
+        private
+        view
+        returns (address to)
+    {
+        if (!direct) return address(this);
+        address token;
+        (token,,, to) = PackedArrays.legOut(legsOut, 0);
+        if (token != anchorOut) revert BadPoolRoute();
+        if (to == address(0)) to = order.maker;
+    }
+
     /// @dev Whether this fill needs the TYPED callback: only when the plan uses a
     ///      priced amount — an output leg in the anchor input token to keep back
     ///      (`sameOut`), or an output word to patch (`amountOutOffset`). Every other
@@ -1013,7 +1389,7 @@ contract AggregatorFillSolver {
     ///      benchmark (`test_gas_direct_seeded_liveAmountOut` vs `test_gas_direct_seeded`
     ///      in `test/AggregatorFillGas.t.sol`).
     function _typed(FillRoute memory route) private pure returns (bool) {
-        return route.sameOut != 0 || route.amountOutOffset != NO_PATCH;
+        return route.sameOut != 0 || route.amountOutOffset < NO_PATCH;
     }
 
     /// @dev The callback mode: `PostInputsDirect`, plus the TYPED bit when {_typed}.
@@ -1067,7 +1443,7 @@ contract AggregatorFillSolver {
 
     /// @dev Overwrite the 32-byte word at `offset` of `out` with `v`; {NO_PATCH} = leave it.
     function _patch(bytes memory out, uint256 offset, uint256 v) private pure {
-        if (offset == NO_PATCH) return;
+        if (offset >= NO_PATCH) return;
         if (offset + 32 > out.length) revert PatchOutOfBounds(offset, out.length);
         /// @solidity memory-safe-assembly
         assembly {
@@ -1241,14 +1617,298 @@ contract AggregatorFillSolver {
             amountIn = amountIn > kept ? amountIn - kept : 0;
         }
         if (before0 == 0) amountIn = _seedIn(r, amountIn);
-        if (amountIn != 0) SafeTransferLib.safeTransfer(tokenIn, address(SANDBOX), amountIn);
-        SANDBOX.exec(
-            tokenIn,
-            r.router,
-            _patched(r.data, r.amountInOffset, amountIn, outOffset, amountOut),
-            _sweepOrder(r.tokens, r.outMask)
-        );
+        if (r.router == POOL_ROUTE) {
+            // DIRECT POOL ROUTE: no push, no sandbox, no sweep — the pools are paid
+            // from here inside their callbacks, bounded by `amountIn` (the same delta
+            // the sandbox would have been pushed).
+            _poolRoute(r, amountIn, outOffset, amountOut);
+        } else {
+            if (amountIn != 0) SafeTransferLib.safeTransfer(tokenIn, address(SANDBOX), amountIn);
+            SANDBOX.exec(
+                tokenIn,
+                r.router,
+                _patched(r.data, r.amountInOffset, amountIn, outOffset, amountOut),
+                _sweepOrder(r.tokens, r.outMask)
+            );
+        }
         _checkInputs(r.tokens, r.before, r.inMask);
+    }
+
+    /// @dev Execute a POOL ROUTE (see {POOL_ROUTE} for the `data` layout and the
+    ///      contract note "DIRECT POOL ROUTES" for the security argument).
+    ///
+    ///      `routed` is the hop-0 BUDGET: this fill's measured input delta, less the
+    ///      in-kind legs kept back and the self-seeded wei — exactly what {_route}
+    ///      would have pushed to the sandbox. No pool is ever paid more of the anchor
+    ///      input than that, whatever the plan says, so the floor, retained value and
+    ///      every other fill's residue stay out of reach (invariant 2, delta-only).
+    ///
+    ///      Offsets keep their opaque-route meaning: `amountInOffset == 0` rewrites the
+    ///      amountIn word with `routed`, `outOffset == 32` the amountOut word with the
+    ///      live `pricedOut[0]`; any other value but {NO_PATCH} is refused.
+    function _poolRoute(FillRoute calldata r, uint256 routed, uint256 outOffset, uint256 liveOut) private {
+        (uint256 o, uint256 hops) = _poolShape(r);
+        (uint256 amountIn, uint256 amountOut) = _poolAmounts(o, r.amountInOffset, outOffset, routed, liveOut);
+
+        // Armed for the callback only while the swap is in flight; restored to the
+        // fill's own state (3, or 5 on the netted path) the moment it returns.
+        uint256 state = _active;
+        _active = SWAPPING;
+        if (amountOut == 0) {
+            if (amountIn > routed) revert PoolOverBudget(amountIn, routed);
+            _exactIn(o + 64, hops, amountIn, r.payee);
+        } else {
+            // The input ceiling: the plan's `amountInMaximum`, never above the delta.
+            _exactOut(o + 64, hops, amountOut, amountIn < routed ? amountIn : routed, r.payee);
+        }
+        _active = state;
+    }
+
+    /// @dev Validate a pool route's `data` and return its calldata offset and hop
+    ///      count: 64 bytes of amounts + 20 for the first token + 24 per hop, 1 to
+    ///      {MAX_POOL_HOPS} hops, from the anchor input to the anchor output — nothing
+    ///      else is ever paid from here on hop 0, and nothing else is measured at the
+    ///      end. The two token reads are in bounds (`len ≥ 108`). EQUIVALENT SOLIDITY:
+    ///      `address(bytes20(d[64:84])) == tokens[0] && address(bytes20(d[len - 20:len]))
+    ///      == tokens[outAnchor]`.
+    function _poolShape(FillRoute calldata r) private pure returns (uint256 o, uint256 hops) {
+        bytes calldata d = r.data;
+        uint256 len = d.length;
+        if (len < 108) revert BadPoolRoute();
+        unchecked {
+            hops = (len - 84) / 24;
+            if ((len - 84) % 24 != 0 || hops > MAX_POOL_HOPS) revert BadPoolRoute();
+        }
+        address first;
+        address last;
+        /// @solidity memory-safe-assembly
+        assembly {
+            o := d.offset
+            first := shr(96, calldataload(add(o, 64)))
+            last := shr(96, calldataload(sub(add(o, len), 20)))
+        }
+        if (first != r.tokens[0] || last != r.tokens[r.outAnchor]) revert BadPoolRoute();
+    }
+
+    /// @dev A pool route's two amount words (at calldata offset `o`, in bounds — see
+    ///      {_poolShape}), patched as on an opaque route: offset 0 takes the routed
+    ///      delta, offset 32 the live `pricedOut[0]`, {NO_PATCH} leaves the quoted word;
+    ///      anything else is refused. EQUIVALENT SOLIDITY for the quoted words:
+    ///      `uint256(bytes32(d[0:32]))`, `uint256(bytes32(d[32:64]))`.
+    function _poolAmounts(uint256 o, uint256 inOffset, uint256 outOffset, uint256 routed, uint256 liveOut)
+        private
+        pure
+        returns (uint256 amountIn, uint256 amountOut)
+    {
+        if (inOffset != 0 && inOffset < NO_PATCH) revert BadPoolRoute();
+        if (outOffset != 32 && outOffset < NO_PATCH) revert BadPoolRoute();
+        /// @solidity memory-safe-assembly
+        assembly {
+            amountIn := calldataload(o)
+            amountOut := calldataload(add(o, 32))
+        }
+        if (inOffset == 0) amountIn = routed;
+        if (outOffset == 32) amountOut = liveOut;
+        // It enters an `int256` (`amountSpecified`): a word past that range would flip
+        // the swap's direction. (`amountIn` is bounded by `routed` in the caller.)
+        if (amountOut > uint256(type(int256).max)) revert BadPoolRoute();
+    }
+
+    /// @dev Exact-input, hop by hop in swap order: each hop pays THIS contract
+    ///      (the last one the payee) and the next hop swaps exactly what it produced,
+    ///      paid from here in its callback with that output as its budget. Every hop
+    ///      must consume its whole input ({BadPoolSwap}) — a pool that stops at the
+    ///      price limit would otherwise strand an intermediate token here.
+    /// @param path the calldata OFFSET of the route's path (`data[64:]`), `hops` long —
+    ///        bounds proven by {_poolShape} (`len == 84 + 24 · hops`).
+    function _exactIn(uint256 path, uint256 hops, uint256 amount, address payee) private {
+        for (uint256 k; k < hops; ++k) {
+            uint256 hop;
+            unchecked {
+                hop = path + 24 * k; // ≤ 4 hops into a bounds-checked blob
+            }
+            (address pool, bool zeroForOne) = _hopPool(hop);
+            // Callback data: `amount ‖ hop` (76 bytes) — the hop's own budget.
+            (int256 paid, int256 got) =
+                _poolSwap(pool, k + 1 == hops ? payee : address(this), zeroForOne, int256(amount), amount, hop, 44);
+            if (paid != int256(amount) || got >= 0) revert BadPoolSwap();
+            amount = uint256(-got);
+        }
+    }
+
+    /// @dev Exact-output, the standard recursive pattern: swap the LAST hop for
+    ///      exactly `amountOut` to the payee; its callback buys the owed input from
+    ///      the previous hop paid straight to the calling pool, and so on down to hop
+    ///      0, whose callback alone pays from here — at most `budget` of the anchor.
+    /// @param path / hops as {_exactIn}; `len = 20 + 24 · hops`.
+    function _exactOut(uint256 path, uint256 hops, uint256 amountOut, uint256 budget, address payee) private {
+        uint256 len;
+        unchecked {
+            len = 20 + 24 * hops;
+        }
+        (address pool, bool zeroForOne) = _hopPool(path + len - 44);
+        // Callback data: `budget ‖ path` — the whole path, hop 0's budget first.
+        (, int256 got) = _poolSwap(pool, payee, zeroForOne, -int256(amountOut), budget, path, len);
+        if (uint256(-got) != amountOut) revert BadPoolSwap();
+    }
+
+    /// @dev `pool.swap(recipient, zeroForOne, amountSpecified, <no limit>, data)` with
+    ///      `data = head ‖ calldata[src : src + len]`, encoded straight into free memory
+    ///      (never allocated: the buffer is dead once the call returns, and the pool's
+    ///      callback runs in its own frame). Returns the pool's deltas ORIENTED by the
+    ///      swap direction: `(paid, got)` = (input delta, output delta — negative).
+    ///
+    ///      EQUIVALENT SOLIDITY (the pre-2026-10-12 body):
+    ///
+    ///          (int256 a0, int256 a1) = IUniswapV3PoolSwap(pool).swap(recipient, zeroForOne,
+    ///              amountSpecified, zeroForOne ? MIN_SQRT_RATIO_PLUS_1 : MAX_SQRT_RATIO_MINUS_1,
+    ///              abi.encodePacked(head, calldata[src : src + len]));
+    ///          (paid, got) = zeroForOne ? (a0, a1) : (a1, a0);
+    ///
+    ///      Same calldata byte for byte (the `bytes` tail zero-padded to a word), same
+    ///      revert bubbling. The high-level call's `extcodesize` pre-check is replaced by
+    ///      requiring a 64-byte return: an address without code returns nothing and the
+    ///      swap reverts {BadPoolSwap} (only genuine pool code can sit at a derived
+    ///      address — see "DIRECT POOL ROUTES").
+    function _poolSwap(
+        address pool,
+        address recipient,
+        bool zeroForOne,
+        int256 amountSpecified,
+        uint256 head,
+        uint256 src,
+        uint256 len
+    ) private returns (int256 paid, int256 got) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let m := mload(0x40)
+            mstore(m, 0x128acb0800000000000000000000000000000000000000000000000000000000) // swap(...)
+            mstore(add(m, 0x04), recipient)
+            mstore(add(m, 0x24), zeroForOne)
+            mstore(add(m, 0x44), amountSpecified)
+            // zeroForOne ? MIN_SQRT_RATIO_PLUS_1 : MAX_SQRT_RATIO_MINUS_1
+            mstore(
+                add(m, 0x64),
+                xor(MAX_SQRT_RATIO_MINUS_1, mul(xor(MAX_SQRT_RATIO_MINUS_1, MIN_SQRT_RATIO_PLUS_1), zeroForOne))
+            )
+            mstore(add(m, 0x84), 0xa0) // offset of `data`
+            mstore(add(m, 0xa4), add(len, 0x20)) // its length
+            mstore(add(m, 0xc4), head)
+            mstore(add(add(m, 0xe4), len), 0) // zero the tail's padding word
+            calldatacopy(add(m, 0xe4), src, len)
+            // 0xe4 bytes of head + `len` rounded up to a word
+            if iszero(call(gas(), pool, 0, m, add(0xe4, and(add(len, 0x1f), not(0x1f))), 0x00, 0x40)) {
+                returndatacopy(m, 0x00, returndatasize())
+                revert(m, returndatasize())
+            }
+            if lt(returndatasize(), 0x40) {
+                mstore(0x00, 0x17d3a782) // `BadPoolSwap()` (pinned in test/AggregatorPoolRoute.t.sol)
+                revert(0x1c, 0x04)
+            }
+            let a0 := mload(0x00)
+            let x := xor(a0, mload(0x20))
+            paid := xor(a0, mul(x, iszero(zeroForOne))) // zeroForOne ? a0 : a1
+            got := xor(paid, x) // the other one
+        }
+    }
+
+    /// @dev The absolute calldata offset of `b`'s first byte.
+    function _offsetOf(bytes calldata b) private pure returns (uint256 o) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            o := b.offset
+        }
+    }
+
+    /// @dev The pool of the 44-byte hop `tokenIn ‖ fee ‖ venue ‖ tokenOut` at calldata
+    ///      offset `p`, and its swap direction. The CALLER proves `p + 44` lies inside
+    ///      the blob it came from (raw `calldataload`s, no slice checks).
+    ///      EQUIVALENT SOLIDITY over `hop = calldata[p : p + 44]`:
+    ///          tokenIn = address(bytes20(hop[0:20])); tokenOut = address(bytes20(hop[24:44]));
+    ///          pool = poolFor(uint8(hop[23]), tokenIn, tokenOut, uint24(bytes3(hop[20:23])));
+    function _hopPool(uint256 p) private view returns (address pool, bool zeroForOne) {
+        address tokenIn;
+        address tokenOut;
+        uint256 fee;
+        uint256 venue;
+        /// @solidity memory-safe-assembly
+        assembly {
+            tokenIn := shr(96, calldataload(p))
+            let w := calldataload(add(p, 20))
+            fee := shr(232, w)
+            venue := byte(3, w)
+            tokenOut := shr(96, calldataload(add(p, 24)))
+        }
+        (address factory, bytes32 initCodeHash) = poolVenue(venue);
+        pool = _derive(factory, initCodeHash, tokenIn, tokenOut, fee);
+        zeroForOne = tokenIn < tokenOut;
+    }
+
+    /// @notice The pool-route swap callback (Uniswap v3, and its forks Oku / SushiSwap
+    ///         v3 that share the name). Pays only what a pool THIS contract is swapping
+    ///         on is owed, of the hop's input token, within the hop's budget.
+    /// @dev    `data` is this contract's own `abi.encodePacked(budget, hops 0..k)` as
+    ///         handed to `pool.swap` (a pool echoes it verbatim); hop k — the LAST 44
+    ///         bytes — is the swap now calling back. Three gates, all load-bearing:
+    ///
+    ///           1. ARMED: `_active == SWAPPING`, a state only {_poolRoute} sets, and
+    ///              only inside a fill an operator started and the EXECUTOR called
+    ///              back. Outside it the callback pays nobody.
+    ///           2. GENUINE POOL OF THE CURRENT HOP: `msg.sender` must equal the
+    ///              CREATE2 address of hop k on an IMMUTABLE venue — pool code is
+    ///              pinned by the venue's init code hash, and a genuine pool calls
+    ///              back only the `msg.sender` of ITS OWN `swap`, i.e. us, with our
+    ///              data. A forged caller cannot be that address; a forged `data`
+    ///              only names a different pool, which the caller then is not.
+    ///           3. EXACTLY THE OWED INPUT, WITHIN BUDGET: the positive delta of the
+    ///              hop's INPUT token (`tokenIn < tokenOut` ⇒ token0), nothing of any
+    ///              other token, and on hop 0 never more than `budget` — the fill's
+    ///              routed delta (exact-output: also ≤ the plan's ceiling).
+    ///
+    ///         Hop k > 0 of an EXACT-OUTPUT route pays nothing from here: it buys the
+    ///         owed amount from hop k−1 with `recipient = msg.sender` (the calling
+    ///         pool), which re-enters this callback for hop k−1 under the same gates.
+    ///         An exact-input route passes one hop per swap, so every callback it
+    ///         triggers is "hop 0" of its own data, paying ≤ that hop's input.
+    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {
+        if (_active != SWAPPING) revert NotArmed();
+        uint256 h = data.length - 44; // the current hop (checked: shorter data reverts)
+        uint256 o = _offsetOf(data);
+        (address pool, bool zeroForOne) = _hopPool(o + h);
+        if (msg.sender != pool) revert NotPool();
+        int256 owed = zeroForOne ? amount0Delta : amount1Delta;
+        if (owed <= 0) revert BadPoolSwap();
+        if (h == 32) {
+            // `data` is exactly 76 bytes here: budget = data[0:32], tokenIn = data[32:52].
+            uint256 budget;
+            address tokenIn;
+            /// @solidity memory-safe-assembly
+            assembly {
+                budget := calldataload(o)
+                tokenIn := shr(96, calldataload(add(o, 32)))
+            }
+            if (uint256(owed) > budget) revert PoolOverBudget(uint256(owed), budget);
+            SafeTransferLib.safeTransfer(tokenIn, msg.sender, uint256(owed));
+        } else {
+            _buyFromPrev(data, h, owed);
+        }
+    }
+
+    /// @dev Exact-output recursion: hop k−1 (`data[h−24 : h+20]`) pays `owed` of hop k's
+    ///      input token straight to the calling pool; its own callback carries
+    ///      `data[: h+20]` — the budget and hops 0..k−1.
+    function _buyFromPrev(bytes calldata data, uint256 h, int256 owed) private {
+        // `h − 24` is checked: data too short to hold a previous hop reverts. `h + 20`
+        // ≤ `data.length` (h = length − 44).
+        uint256 o = _offsetOf(data);
+        (address prevPool, bool zeroForOne) = _hopPool(o + (h - 24));
+        // `data[: h + 20]` = its first word (the budget) ‖ `data[32 : h + 20]`; h ≥ 24.
+        uint256 budget;
+        /// @solidity memory-safe-assembly
+        assembly {
+            budget := calldataload(o)
+        }
+        _poolSwap(prevPool, msg.sender, zeroForOne, -owed, budget, o + 32, h - 12);
     }
 
     /// @dev SELF-SEEDING FLOOR, INPUT SIDE — reached only when this contract held no
@@ -1277,7 +1937,7 @@ contract AggregatorFillSolver {
     ///      `minOut` or below the core's pull — i.e. a route quoted at zero margin.
     function _seedIn(FillRoute calldata r, uint256 amountIn) private view returns (uint256) {
         // Cheapest tests first: an immutable, a stack word, then the calldata reads.
-        if (!SEED_INPUT || amountIn < 2 || r.amountInOffset == NO_PATCH || r.direct) return amountIn;
+        if (!SEED_INPUT || amountIn < 2 || r.amountInOffset >= NO_PATCH || r.direct) return amountIn;
         unchecked {
             return amountIn - 1;
         }

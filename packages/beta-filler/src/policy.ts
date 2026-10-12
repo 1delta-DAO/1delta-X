@@ -1,4 +1,4 @@
-import { BLOCK_CLOCK_BIT, DELTA_VERIFY_OUTPUTS_BIT, isProportional, overrideHasCarrier, unpackTiming, type Order } from "@1delta-x/sdk";
+import { BLOCK_CLOCK_BIT, DELTA_VERIFY_OUTPUTS_BIT, isFillOnce, isProportional, OrderSide, overrideHasCarrier, unpackTiming, type Order } from "@1delta-x/sdk";
 import { zeroAddress, type Address } from "viem";
 
 import { MOC_FEE_BPS, type Config, type Policy } from "./config";
@@ -242,6 +242,27 @@ export function capFillAmount(fillAmount: bigint, paidAtFill: bigint, capPaid: b
   // Floor, then shave one unit so the rounded-up output of the re-preview still fits.
   const scaled = (fillAmount * capPaid) / paidAtFill;
   return scaled > 1n ? scaled - 1n : 0n;
+}
+
+/**
+ * FILL-ONCE (`timing` bit 100, `DutchAuction.useNonceInvalidator`): the core settles
+ * such an order by consuming its nonce, so it accepts ONLY the fill that closes it —
+ * `_openFill` reverts `FillOnceMustBeFull` unless `prevFilled + delta == total`, and
+ * `prevFilled` is always 0 (`filled[hash]` is never written). The app signs every
+ * market ticket this way. A partial is therefore never a smaller fill, only a revert:
+ * every strategy fills the WHOLE order or skips it.
+ *
+ * @returns why the order cannot be filled at the book's `fillable`, or null (also for
+ *   any non-fill-once order). A lens `fillable` below the full size means the maker's
+ *   balance / allowance cannot fund all of it.
+ */
+export function fillOnceBlocker(order: Order, fillable: bigint): string | null {
+  if (!isFillOnce(order)) return null;
+  const total = order.fillTotal !== 0n ? order.fillTotal : order.side === OrderSide.BUY ? order.legsOut[0]?.start : order.legsIn[0]?.start;
+  // A proportional anchor resolves on-chain; such orders are classified out anyway.
+  if (total === undefined || isProportional(total)) return null;
+  if (fillable < total) return `fill-once order: only ${fillable} of ${total} fillable (maker under-funded) — a partial fill reverts FillOnceMustBeFull`;
+  return null;
 }
 
 /**

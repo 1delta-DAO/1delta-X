@@ -115,7 +115,7 @@ One `FillerDO` instance (`idFromName("filler")`). Each alarm runs one tick of th
 | Bound | Var | Default |
 |---|---|---|
 | Orders evaluated per tick (only orders a strategy accepts count; the rest are skipped without RPC) | `MAX_ORDERS_PER_TICK` | 10 |
-| Subrequests per tick (every RPC call and the book fetch, counted through the transport); a new order starts only while `SUBREQUESTS_PER_ORDER` remain | `MAX_SUBREQUESTS_PER_TICK` / `SUBREQUESTS_PER_ORDER` | 500 / 40 |
+| Subrequests per tick (every RPC call and the book fetch, counted through the transport); a new order starts only while `SUBREQUESTS_PER_ORDER` remain. A route fill's pool quotes are batched through Multicall3 (≤ 1 `eth_call` per hop round, so ≤ `ROUTE_MAX_HOPS` + a few for ≤ `ROUTE_MAX_CANDIDATES` paths); the hourly pool-graph refresh costs ~2 more, inside whichever order or quote triggers it (beta-filler README, *Pool routing*) | `MAX_SUBREQUESTS_PER_TICK` / `SUBREQUESTS_PER_ORDER` | 500 / 40 |
 | Wall clock: no new order after | `TICK_BUDGET_MS` | 20 000 |
 | Book pages × page size per fetch (= the orderbook's `MAX_ORDERS`, 1000) | `INTAKE_MAX_PAGES` / `INTAKE_PAGE_SIZE` | 2 × 500 |
 | Resting / own-fill hold; expiry margin | `RESTING_RECHECK_SECONDS` / `EXPIRY_MARGIN_SECONDS` | 300 / 90 |
@@ -197,7 +197,7 @@ is false while the filler runs dry.
 
 A `pull` quote also asks the Sushi and Nordstern APIs (in parallel, when enabled);
 Nordstern's figure enters at `toAmount × (1 − NORDSTERN_HAIRCUT_BPS)`, and the response's
-`route.source` names the winner (`oku` | `sushi` | `nordstern` | `inventory`).
+`route.source` names the winner (`oku` | `sushi-v3` — a local pool plan on that venue — | `sushi` | `nordstern` | `inventory`).
 A quote's RPC calls share the engine's chain client, so they count against the running
 tick's subrequest meter. Identical requests within `QUOTE_CACHE_MS` (5 s) are priced
 once. Tests: `test/quote.test.ts`.
