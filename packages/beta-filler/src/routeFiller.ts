@@ -520,7 +520,7 @@ export class RouteFiller {
     const nowSec = BigInt(Math.floor(now / 1000));
     const liveCandidate = patchesLiveOutput(order, direct, nowSec);
     // Gas is PRICED at estimate × r, r learned per shape from our receipts (gasRatio.ts).
-    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, order.legsOut[0]!.token, rc.solver);
+    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, order.legsOut[0]!.token, rc.solver, fillPermit ? "permit" : undefined);
     const pricedGas = (estimate: bigint) => this.gasRatios.priced(shape, estimate);
     // A gasless maker's order (./permit.ts) carries its ERC-2612 permit IN the fill: the
     // solver runs it first, in the same tx (and the same simulation). Its gas is part of
@@ -825,20 +825,27 @@ export class RouteFiller {
     const cands: Array<RouteCandidate & { hops?: number; label: string }> = [];
     for (const r of raw) cands.push({ ...r, routeGasOut: (await this.nativeToToken(a.gasPrice * rankingGasUnits(planKind(r), r.gasUnits), a.tokenOut)) ?? 0n });
     const best = rankRoutes(cands)[0]!;
-    const shape = gasShape("route", a.direct ? "direct" : "pull", a.tokenIn, a.tokenOut, this.rc.solver);
+    const delivery = a.direct ? "direct" : "pull";
+    const plainShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver);
+    const permitShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver, "permit");
     // Hops beyond the first cost POOL_HOP_GAS each on top of the single-hop figures (the
     // fallback and the plan-kind floor); a LEARNED estimate is the pair's own receipts,
     // whatever route they took, so it is only floored.
     const hopGas = best.source === "pool" ? extraHopGas(best.hops ?? 1) : 0n;
-    const learned = this.gasRatios.typicalEstimate(shape);
+    // A permit-funded fill also runs the maker's ERC-2612 permit. Its own learned shape
+    // already contains it; otherwise the plain figure + PERMIT_IN_FILL_GAS, exactly what
+    // the fill gate adds — never both (that double count is what the split fixed).
+    const permitAdd = a.permit ? PERMIT_IN_FILL_GAS : 0n;
+    const learnedPermit = a.permit ? this.gasRatios.typicalEstimate(permitShape) : undefined;
+    const learnedPlain = this.gasRatios.typicalEstimate(plainShape);
     const fallback = (a.direct ? cfg.quote.gasEstimateDirect : cfg.quote.gasEstimatePull) + hopGas;
-    const base = learned ?? fallback;
-    const floor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas;
-    // A permit-funded order's fill also runs the maker's ERC-2612 permit — the same
-    // PERMIT_IN_FILL_GAS the fill gate adds, so quote and fill price the same gas.
-    const estimate = (base > floor ? base : floor) + (a.permit ? PERMIT_IN_FILL_GAS : 0n);
-    const gasUnits = this.gasRatios.priced(shape, estimate);
-    const permitGasUnits = a.permit ? gasUnits - this.gasRatios.priced(shape, estimate - PERMIT_IN_FILL_GAS) : 0n;
+    const base = learnedPermit ?? (learnedPlain ?? fallback) + permitAdd;
+    const floor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas + permitAdd;
+    const estimate = base > floor ? base : floor;
+    // r from the shape whose estimate was used (a learned one), else the funding's own.
+    const rShape = learnedPermit !== undefined ? permitShape : learnedPlain !== undefined ? plainShape : a.permit ? permitShape : plainShape;
+    const gasUnits = this.gasRatios.priced(rShape, estimate);
+    const permitGasUnits = a.permit ? this.gasRatios.priced(rShape, PERMIT_IN_FILL_GAS) : 0n;
     const gasOut = await this.nativeToToken(a.gasPrice * gasUnits, a.tokenOut);
     const profitOut = await this.nativeToToken(rc.minProfitWei, a.tokenOut);
     if (gasOut === undefined || profitOut === undefined) return { ok: false, reason: `route: cannot price RBTC in ${a.tokenOut}` };

@@ -230,6 +230,20 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(share).toBeLessThan(0.16);
   });
 
+  it("a LEARNED permit shape already contains the permit: no second PERMIT_IN_FILL_GAS; a plain-only shape gets it added once", async () => {
+    const { chain } = fake();
+    const e = await Engine.create({ cfg: loadConfig(ENV), chain, store: new MemoryStateStore(), log: () => {} });
+    const plain = gasShape("route", "direct", WRBTC, USDT0, SOLVER);
+    const permit = gasShape("route", "direct", WRBTC, USDT0, SOLVER, "permit");
+    expect(plain).not.toBe(permit);
+    e.gasRatios.record(plain, 400_000n, 340_000n, 1);
+    const onlyPlain = await e.quote({ ...sellReq({ delivery: "direct" }), funding: "permit" });
+    expect(onlyPlain.ok && onlyPlain.quote.gasUnits).toBe(e.gasRatios.priced(plain, 460_000n));
+    e.gasRatios.record(permit, 500_000n, 450_000n, 2);
+    const learned = await e.quote({ ...sellReq({ delivery: "direct", amountIn: 10n ** 16n + 7n }), funding: "permit" });
+    expect(learned.ok && learned.quote.gasUnits).toBe(e.gasRatios.priced(permit, 500_000n));
+  });
+
   it("parseQuoteRequest: a SYNTHETIC marketId (no pool of its own) resolves to its pinned tokens", () => {
     const cfg = loadConfig(ENV);
     const sell = parseQuoteRequest({ chainId: 30, side: "sell", amountIn: "1000", delivery: "direct", marketId: "rsk-30-wrbtc-usdrif" }, cfg);

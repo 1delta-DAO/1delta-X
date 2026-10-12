@@ -14,8 +14,9 @@
  *
  *   • before any receipt of that shape: the configured default
  *     (`DEFAULT_GAS_RECEIPT_RATIO`, 0.88 — the top of the fresh-solver e2e range);
- *   • after: the MAX of receipt/estimate over the last {@link WINDOW} successful
- *     receipts of that shape — conservative: one heavy fill holds r up for 20 fills;
+ *   • after: the MAX of receipt/estimate over the last {@link RECENT} successful
+ *     receipts of that shape (of {@link WINDOW} kept) — conservative, but a shape's
+ *     heavier first fill ages out after five;
  *   • always clamped to [{@link MIN_PPM}, {@link MAX_PPM}] = [0.6, 1.0].
  *
  * The tx gas LIMIT is NOT scaled: it stays max(priced, estimate × 1.25).
@@ -34,6 +35,13 @@
 export const PPM = 1_000_000n;
 /** Receipts kept per shape. */
 export const WINDOW = 20;
+/**
+ * r and the typical estimate are the MAX over only the most recent this-many receipts:
+ * a shape's first fill pays one-time zero→non-zero SSTOREs (the solver's balance
+ * floors, a maker's first balance / nonce word, a permit's first nonce) that later fills
+ * do not, and over the whole window it held every quote up for 20 fills.
+ */
+export const RECENT = 5;
 /** Shapes kept (least recently updated evicted first). */
 export const MAX_SHAPES = 64;
 /** Clamp: r never goes below 0.6 … */
@@ -66,8 +74,19 @@ export interface GasMeter {
  * profile: the v2 solver's direct fill is ~230k where the v1 receipts taught ~354k, and a
  * pair's learned figure must not carry over a redeploy (2026-10-12).
  */
-export function gasShape(strategy: string, delivery: "direct" | "pull" | "inventory", tokenIn: string, tokenOut: string, via: string): string {
-  return `${strategy}:${delivery}:${tokenIn.toLowerCase()}:${tokenOut.toLowerCase()}@${via.toLowerCase()}`;
+export function gasShape(
+  strategy: string,
+  delivery: "direct" | "pull" | "inventory",
+  tokenIn: string,
+  tokenOut: string,
+  via: string,
+  funding?: "permit",
+): string {
+  // `+permit` / `+plain`: a fill that runs the maker's ERC-2612 permit is its own shape.
+  // Learning it under the plain key made a plain quote carry the permit, and a permit
+  // quote add PERMIT_IN_FILL_GAS on top of it a second time (2026-10-12: 1.05 USDRIF on
+  // a $12.75 ticket). The suffix also retired every pre-split key.
+  return `${strategy}:${delivery}:${tokenIn.toLowerCase()}:${tokenOut.toLowerCase()}@${via.toLowerCase()}+${funding ?? "plain"}`;
 }
 
 const clamp = (v: bigint) => (v < MIN_PPM ? MIN_PPM : v > MAX_PPM ? MAX_PPM : v);
@@ -97,7 +116,7 @@ export class GasRatios {
     const e = this.shapes.get(shape);
     if (!e || e.s.length === 0) return this.defaultPpm;
     let m = 0;
-    for (const x of e.s) if (x > m) m = x;
+    for (const x of e.s.slice(-RECENT)) if (x > m) m = x;
     return clamp(BigInt(m));
   }
 
@@ -110,7 +129,7 @@ export class GasRatios {
     const e = this.shapes.get(shape)?.e;
     if (!e || e.length === 0) return undefined;
     let m = 0;
-    for (const x of e) if (x > m) m = x;
+    for (const x of e.slice(-RECENT)) if (x > m) m = x;
     return BigInt(m);
   }
 

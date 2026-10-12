@@ -41,8 +41,8 @@ describe("POST /quote — the math", () => {
     expect(res.status).toBe(200);
     const q = (await res.json()) as Record<string, string | number | boolean | Record<string, unknown>>;
     expect(q.grossOut).toBe("1000000000"); // 0.01 × $100k
-    expect(q.gasUnits).toBe("312400"); // QUOTE_GAS_ESTIMATE_PULL 355k (wrangler.toml, v2 solver) × 0.88 (no receipt learned yet)
-    const gasCost = rbtcToUsdt0(312_400n * GAS_PRICE);
+    expect(q.gasUnits).toBe("281600"); // QUOTE_GAS_ESTIMATE_PULL 320k (wrangler.toml, v2 solver) × 0.88 (no receipt learned yet)
+    const gasCost = rbtcToUsdt0(281_600n * GAS_PRICE);
     expect(q.gasCostOut).toBe(gasCost.toString());
     const charge = (gasCost * 11_000n + 9_999n) / 10_000n;
     expect(q.gasChargeOut).toBe(charge.toString());
@@ -56,14 +56,14 @@ describe("POST /quote — the math", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
-  it("BUY (pay $20 USDT0 for WRBTC): exact input of the pay amount, gas in the RECEIVE token (wei); direct = 330k × 0.88", async () => {
+  it("BUY (pay $20 USDT0 for WRBTC): exact input of the pay amount, gas in the RECEIVE token (wei); direct = 300k × 0.88", async () => {
     const res = await post({ chainId: 30, marketId: "rsk-30-wrbtc-usd0", side: "buy", amountIn: "20000000", delivery: "direct" });
     expect(res.status).toBe(200);
     const q = (await res.json()) as Record<string, string>;
     expect([q.tokenIn, q.tokenOut]).toEqual([USDT0, WRBTC]);
     expect(q.grossOut).toBe((2n * 10n ** 14n).toString());
-    expect(q.gasUnits).toBe("290400");
-    const charge = (290_400n * GAS_PRICE * 11_000n + 9_999n) / 10_000n;
+    expect(q.gasUnits).toBe("264000");
+    const charge = (264_000n * GAS_PRICE * 11_000n + 9_999n) / 10_000n;
     expect(q.amountOut).toBe((2n * 10n ** 14n - charge).toString());
   });
 

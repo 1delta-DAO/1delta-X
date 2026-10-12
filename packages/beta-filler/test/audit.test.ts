@@ -386,7 +386,7 @@ describe("2026-10-07: the inventory gate prices gas at estimate × r; the limit 
     expect((await f.consider(inventoryEntry() as never)).status).toBe("pending");
     expect(sent[0]!.gas).toBe(200_000n);
     expect(logs.some((l) => /estimate 160000, priced 140800/.test(l))).toBe(true);
-    expect(g.pending!.gasMeter).toEqual({ shape: `inventory:inventory:${ROOTSTOCK.usdrif.toLowerCase()}:${ROOTSTOCK.usdt0.toLowerCase()}@${cfg.settlement.toLowerCase()}`, estimate: "160000" });
+    expect(g.pending!.gasMeter).toEqual({ shape: `inventory:inventory:${ROOTSTOCK.usdrif.toLowerCase()}:${ROOTSTOCK.usdt0.toLowerCase()}@${cfg.settlement.toLowerCase()}+plain`, estimate: "160000" });
   });
 });
 

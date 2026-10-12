@@ -187,8 +187,12 @@ QUOTE_MATCH_GRACE_SECONDS = "120"
 # fill — Rootstock simulated a permit-funded pull at 424k on the unseeded solver, so
 # the gate needed 373k priced against the quote's 308k and the order expired. The
 # learned per-shape max replaces these after the first fill.
-QUOTE_GAS_ESTIMATE_DIRECT = "330000"
-QUOTE_GAS_ESTIMATE_PULL = "355000"
+# 2026-10-12 (later): the v2 fills' own estimates — direct ~280k, pull ~304k once the
+# solver's balances are seeded (retain mode keeps them) — so 300k / 320k. A pair's
+# heavier first fill (one-time SSTOREs) is covered by the gas-aware slippage band, and
+# the learned max of its last 5 fills replaces these.
+QUOTE_GAS_ESTIMATE_DIRECT = "300000"
+QUOTE_GAS_ESTIMATE_PULL = "320000"
 QUOTE_CACHE_MS = "5000"
 # Token buckets (DO SQLite): per visitor IP, and for everyone together (RPC cost bound).
 QUOTE_RATE_IP_CAPACITY = "30"

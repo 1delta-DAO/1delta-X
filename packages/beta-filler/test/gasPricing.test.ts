@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { quantity, readSendGasPrice, withSendGasPrice } from "../src/chain";
 import { DEFAULT_GAS_PRICE_MIN_MULT_BPS, loadConfig, ROOTSTOCK } from "../src/config";
 import { Engine } from "../src/engine";
-import { DEFAULT_RATIO_PPM, gasShape, GasRatios, MAX_SHAPES, WINDOW } from "../src/gasRatio";
+import { DEFAULT_RATIO_PPM, gasShape, GasRatios, MAX_SHAPES, RECENT, WINDOW } from "../src/gasRatio";
 import { GAS, Guard } from "../src/guard";
 import { Budget } from "../src/policy";
 import { ROUTE_FILLS, RouteFiller } from "../src/routeFiller";
@@ -247,14 +247,17 @@ describe("gas ratio learning (receipt / estimate per fill shape)", () => {
     expect(new GasRatios(100_000n).ratioPpm(A)).toBe(600_000n); // the default is clamped too
   });
 
-  it("a window of the last 20 receipts: a heavy outlier ages out after 20 lighter fills", () => {
+  it("r and the typical estimate are the max of the last RECENT receipts: a heavy first fill ages out after RECENT lighter ones", () => {
     const g = new GasRatios();
-    g.record(A, 100n, 95n, 0);
-    for (let i = 1; i < WINDOW; i++) g.record(A, 100n, 80n, i);
-    expect(g.ratioPpm(A)).toBe(950_000n);
-    g.record(A, 100n, 80n, WINDOW);
+    g.record(A, 424n, 409n, 0); // a shape's first fill: one-time SSTOREs
+    for (let i = 1; i < RECENT; i++) g.record(A, 300n, 240n, i);
+    expect(g.ratioPpm(A)).toBe((409n * 1_000_000n + 423n) / 424n);
+    expect(g.typicalEstimate(A)).toBe(424n);
+    g.record(A, 300n, 240n, RECENT);
     expect(g.ratioPpm(A)).toBe(800_000n);
-    expect(g.toJSON()[A]!.s).toHaveLength(WINDOW);
+    expect(g.typicalEstimate(A)).toBe(300n);
+    for (let i = RECENT + 1; i <= WINDOW + 2; i++) g.record(A, 300n, 240n, i);
+    expect(g.toJSON()[A]!.s).toHaveLength(WINDOW); // still KEPT for the window
   });
 
   it("bounded shapes: the least recently updated is evicted", () => {
