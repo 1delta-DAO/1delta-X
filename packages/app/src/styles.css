@@ -773,3 +773,8 @@ main.reading .md .mdquote { margin-bottom: 26px; }
   border: 1px solid var(--line2); color: var(--dim); font: italic 600 9.5px/1 Georgia, serif; cursor: help;
 }
 .info:hover, .info:focus-visible { color: var(--ink); border-color: var(--ink); outline: none; }
+
+/* USD reference value under an amount (lib/usdPrices) */
+.usdline { font-family: var(--mono); font-size: 11px; color: var(--faint); padding: 0 4px; margin-top: -2px; }
+.usdline .d { color: var(--dim); }
+.usdline .d.warn { color: var(--orange); }

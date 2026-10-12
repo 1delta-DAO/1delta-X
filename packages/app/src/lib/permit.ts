@@ -57,7 +57,9 @@ const DETECT_ABI = [
   },
 ] as const;
 
-const detected = new Map<string, Promise<Erc2612Domain | undefined>>();
+const detected = new Map<string, { at: number; run: Promise<Erc2612Domain | undefined> }>();
+/** A NEGATIVE answer is re-checked after this long: it may have been an RPC failure (a read error looks like "no permit"). */
+const NEGATIVE_TTL_MS = 5 * 60_000;
 
 /**
  * ANY token's EIP-2612 domain, proven against the chain (2026-10-12): the pinned one
@@ -68,14 +70,21 @@ const detected = new Map<string, Promise<Erc2612Domain | undefined>>();
  * That equality is the whole safety argument: a token whose fallback answers any call
  * (WRBTC, DOC) returns no bytes32, and a wrong name/version cannot hash to the live
  * separator, so a signature is only ever made under the domain the token verifies.
- * Cached per (chain, token) for the tab's life; a failed read is not cached.
+ * Cached per (chain, token): a found domain for the tab's life; "none" only for
+ * {@link NEGATIVE_TTL_MS}, because an RPC timeout reads the same as a token without a
+ * permit — the safe default meanwhile is approvals (no gasless offer), never a guess.
  */
 export function detectPermitDomain(reader: Reader, chainId: number, token: Address): Promise<Erc2612Domain | undefined> {
   const pinned = erc2612DomainOf(chainId, token);
   if (pinned) return Promise.resolve(pinned);
   const key = `${chainId}:${token.toLowerCase()}`;
   const hit = detected.get(key);
-  if (hit) return hit;
+  if (hit) {
+    const stale = Date.now() - hit.at > NEGATIVE_TTL_MS;
+    if (!stale) return hit.run;
+    // Stale: reuse a positive answer, re-check a negative one.
+    return hit.run.then((d) => (d ? d : (detected.delete(key), detectPermitDomain(reader, chainId, token))));
+  }
   const read = <T>(functionName: string, args?: readonly unknown[]) =>
     (reader.readContract({ address: token, abi: DETECT_ABI, functionName, ...(args ? { args } : {}) }) as Promise<T>).then(
       (v) => v,
@@ -95,7 +104,7 @@ export function detectPermitDomain(reader: Reader, chainId: number, token: Addre
     }
     return undefined;
   })();
-  detected.set(key, run);
+  detected.set(key, { at: Date.now(), run });
   run.catch(() => detected.delete(key));
   return run;
 }

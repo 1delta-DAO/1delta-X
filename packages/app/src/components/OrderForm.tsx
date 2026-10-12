@@ -26,6 +26,7 @@ import type { PhaseLine } from "../lib/orderLifecycle";
 import type { TxState } from "../lib/txFlow";
 import { TokenSelect } from "./TokenSelect";
 import { MarketFillTrack } from "./MarketFillTrack";
+import { fmtUsd } from "../lib/usdPrices";
 import { OrderStatusLine, TxStatus } from "./TxStatus";
 import type { TrackArgs } from "../lib/marketTrack";
 
@@ -147,6 +148,8 @@ interface OrderFormProps {
   autoWrap?: { symbol: string; value: number } | null;
   /** The wallet holds the wrapped native coin: offer turning it back (behind a confirm). */
   unwrap?: { symbol: string; busy: boolean; error: string | null; tx?: TxState; action: () => void } | null;
+  /** USD per one token (lib/usdPrices: Sushi's price API, else stables / the market mid); display only. */
+  usdOf?: (symbol: string) => number | undefined;
   onConnect: () => void;
   onSign: () => void;
 }
@@ -227,6 +230,7 @@ export function OrderForm(props: OrderFormProps) {
     wallet,
     autoWrap,
     unwrap,
+    usdOf,
     onConnect,
     onSign,
   } = props;
@@ -267,6 +271,14 @@ export function OrderForm(props: OrderFormProps) {
     }
   }
   const unfilledPct = quote && amount > 0 ? (quote.unfilledIn / amount) * 100 : 0;
+
+  // ---- USD reference values (lib/usdPrices; display only)
+  const payPx = usdOf?.(payToken);
+  const recvPx = usdOf?.(recvToken);
+  const recvAmount = isMarket ? (figures?.receive ?? 0) : quote && quote.totalOut > 0 ? quote.totalOut : 0;
+  const payUsd = payPx !== undefined && amount > 0 ? amount * payPx : undefined;
+  const recvUsd = recvPx !== undefined && recvAmount > 0 ? recvAmount * recvPx : undefined;
+  const usdDiff = payUsd !== undefined && recvUsd !== undefined && payUsd > 0 ? recvUsd / payUsd - 1 : undefined;
 
   // ---- what you receive
   /** A quote for this ticket is on its way and nothing else may stand in for it (App). */
@@ -422,6 +434,7 @@ export function OrderForm(props: OrderFormProps) {
               label="Token you pay with"
             />
           </div>
+          {payUsd !== undefined && <div className="usdline">≈ {fmtUsd(payUsd)}</div>}
           {overBalance && (
             <span className="capnote">
               exceeds your {autoWrap && autoWrap.value > 0 ? "spendable " : ""}balance of {fmtBalance(paySpendable ?? 0)} {payToken}
@@ -467,6 +480,18 @@ export function OrderForm(props: OrderFormProps) {
               label="Token you receive"
             />
           </div>
+          {recvUsd !== undefined && !awaitingQuote && (
+            <div className="usdline">
+              ≈ {fmtUsd(recvUsd)}
+              {usdDiff !== undefined && (
+                <span className={usdDiff < -0.01 ? "d warn" : "d"} title="What you receive vs what you pay, both at reference USD prices (network fee included)">
+                  {" "}
+                  ({usdDiff >= 0 ? "+" : "−"}
+                  {Math.abs(usdDiff * 100).toFixed(2)}%)
+                </span>
+              )}
+            </div>
+          )}
           {isMarket && amount > 0 && (
             <div className="qsum">
               {figures ? (

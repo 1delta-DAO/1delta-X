@@ -17,6 +17,8 @@ import { deploymentFor, exclusivityForMarket, solverForMarket } from "./config/d
 import { marketById, pinnedToken, symbolsOn, wrappedNativeSymbol } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
 import { useMarketFloorInputs } from "./hooks/useMarketFloor";
+import { useUsdPrices } from "./hooks/useUsdPrices";
+import { usdPrice } from "./lib/usdPrices";
 import { quoteUrl, useMarketQuote } from "./hooks/useMarketQuote";
 import { useFills, useRestingOrders } from "./hooks/useOrderbook";
 import { usePoolBook } from "./hooks/usePoolBook";
@@ -840,6 +842,23 @@ export default function App() {
     };
   })();
 
+  // USD reference prices (display only): Sushi's price API, else the heuristic.
+  const usdPrices = useUsdPrices(chainId);
+  const bookMid = pool.book?.mid ?? null;
+  const usdOf = useCallback(
+    (symbol: string) =>
+      usdPrice(
+        usdPrices.table,
+        {
+          chainId,
+          addressOf: (s) => pinnedToken(chainId, s)?.address,
+          market: { base: ticket.market.base, quote: ticket.market.quote, mid: bookMid },
+        },
+        symbol,
+      ),
+    [usdPrices.table, chainId, ticket.market.base, ticket.market.quote, bookMid],
+  );
+
   const tickOf = useCallback((marketId: string) => ticks[marketId] ?? 4, [ticks]);
 
   // Signing is gated on the wallet being connected and on the right chain — the
@@ -879,6 +898,7 @@ export default function App() {
 
         <div className="deck">
           <OrderForm
+            usdOf={usdOf}
             ticket={ticket}
             quote={q}
             tokens={tokens}

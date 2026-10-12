@@ -38,7 +38,8 @@ const PROXY_PREFIX = "/api/oku/";
  * subgraph hosts. Token logos come from arbitrary list-supplied hosts, hence
  * `img-src https:`; React's `style={…}` attributes need `'unsafe-inline'` for
  * styles only — scripts stay `'self'`. A self-hosted `VITE_OKU_BASE` on another
- * origin must be added to `connect-src`.
+ * origin must be added to `connect-src`. `api.sushi.com`: the USD reference prices
+ * (src/lib/usdPrices.ts, display only).
  */
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -46,7 +47,7 @@ const CONTENT_SECURITY_POLICY = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com",
+  "connect-src 'self' https://cdn.jsdelivr.net https://api.goldsky.com https://gateway-arbitrum.network.thegraph.com https://api.sushi.com",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
