@@ -288,7 +288,7 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     const off = await Engine.create({ cfg: loadConfig({ ...ENV, QUOTE_ENABLED: "0" }), chain, store: new MemoryStateStore(), log: () => {} });
     expect(await off.quote(sellReq())).toEqual({ ok: false, reason: "quotes disabled" });
     const e = await Engine.create({ cfg: loadConfig(ENV), chain, store: new MemoryStateStore(), log: () => {} });
-    const odd = await e.quote(sellReq({ tokenIn: RIF }));
+    const odd = await e.quote(sellReq({ tokenIn: ROOTSTOCK.doc as Address }));
     expect(!odd.ok && odd.reason).toMatch(/ROUTE_TOKENS/);
     const dust = await e.quote(sellReq({ amountIn: 10n ** 11n })); // $0.01 of WRBTC
     expect(!dust.ok && dust.reason).toMatch(/gas .* exceeds the output/);

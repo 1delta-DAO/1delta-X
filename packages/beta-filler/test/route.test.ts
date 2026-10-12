@@ -114,10 +114,10 @@ describe("route config", () => {
     expect(loadConfig({ ...ENV, ROUTE_OKU_PULL: "0" }).route!.okuPull).toBe(false);
     expect(() => loadConfig({ ...ENV, SUSHI_ROUTER: "nope" })).toThrow(/SUSHI_ROUTER/);
   });
-  it("defaults to the app's three Rootstock Oku pools + SushiSwap v3 WRBTC/USDT0 (venue 1) and the USDRIF→WRBTC path", () => {
+  it("defaults to the app's Rootstock Oku pools + SushiSwap v3 WRBTC/USDT0 and RIF/WRBTC (venue 1) and the USDRIF→WRBTC path", () => {
     expect(rc.pools).toEqual(ROOTSTOCK_POOLS);
-    expect(rc.pools.map((p) => p.market)).toEqual(["rsk-30-wrbtc-usd0", "rsk-30-weth-wrbtc", "rsk-30-usdrif-usd0", undefined]);
-    expect(rc.pools.map((p) => p.venue)).toEqual([VENUE_OKU, VENUE_OKU, VENUE_OKU, VENUE_SUSHI_V3]);
+    expect(rc.pools.map((p) => p.market)).toEqual(["rsk-30-wrbtc-usd0", "rsk-30-weth-wrbtc", "rsk-30-usdrif-usd0", undefined, "rsk-30-rif-usd0", "rsk-30-rif-wrbtc", undefined]);
+    expect(rc.pools.map((p) => p.venue)).toEqual([VENUE_OKU, VENUE_OKU, VENUE_OKU, VENUE_SUSHI_V3, VENUE_OKU, VENUE_OKU, VENUE_SUSHI_V3]);
     expect(rc.paths).toHaveLength(1);
     expect(rc.paths[0]!.fees).toEqual([500, 3000]);
     expect(rc.paths[0]!.venue).toBe(0);
@@ -238,22 +238,22 @@ describe("classifyRoute", () => {
     expect(classifyRoute(wrbtcOrder(over as Partial<Order>), rc).ok).toBe(true);
   });
   it("an unrouted pair: refused without Sushi; with Sushi only a PULL order is admitted", () => {
-    const rif = { legsOut: [{ token: ROOTSTOCK.rif, start: 1n, end: 0n, recipient: zeroAddress }] };
-    const withRif = { ...rc, routeTokens: [...rc.routeTokens, ROOTSTOCK.rif as Address] };
-    const noSushi = { ...withRif, sushi: { ...rc.sushi, enabled: false } };
-    const off = classifyRoute(wrbtcOrder(rif), noSushi);
+    const doc = { legsOut: [{ token: ROOTSTOCK.doc, start: 1n, end: 0n, recipient: zeroAddress }] };
+    const withDoc = { ...rc, routeTokens: [...rc.routeTokens, ROOTSTOCK.doc as Address] };
+    const noSushi = { ...withDoc, sushi: { ...rc.sushi, enabled: false } };
+    const off = classifyRoute(wrbtcOrder(doc), noSushi);
     expect(off.ok).toBe(false);
     if (!off.ok) expect(off.reason).toMatch(/no configured/);
-    const pull = classifyRoute(wrbtcOrder(rif), withRif);
+    const pull = classifyRoute(wrbtcOrder(doc), withDoc);
     expect(pull.ok && pull.paths.length).toBe(0); // admitted, Sushi-only
-    const direct = classifyRoute(wrbtcOrder({ ...rif, timing: withDeltaVerifyOutputs(0n), exclusiveFiller: SOLVER }), withRif);
+    const direct = classifyRoute(wrbtcOrder({ ...doc, timing: withDeltaVerifyOutputs(0n), exclusiveFiller: SOLVER }), withDoc);
     expect(direct.ok).toBe(false); // direct orders use the local Oku path only
   });
   it("ROUTE_TOKENS: with Sushi on, a pair outside the allowlist is refused before any quote (L-6)", () => {
-    const rif = { legsOut: [{ token: ROOTSTOCK.rif, start: 1n, end: 0n, recipient: zeroAddress }] };
-    expect(rc.routeTokens).toEqual([ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif]);
+    const doc = { legsOut: [{ token: ROOTSTOCK.doc, start: 1n, end: 0n, recipient: zeroAddress }] };
+    expect(rc.routeTokens).toEqual([ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif, ROOTSTOCK.rif]);
     expect(rc.sushi.enabled).toBe(true);
-    const v = classifyRoute(wrbtcOrder(rif), rc);
+    const v = classifyRoute(wrbtcOrder(doc), rc);
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.reason).toMatch(/ROUTE_TOKENS/);
     // An arbitrary unknown token on either side, too.

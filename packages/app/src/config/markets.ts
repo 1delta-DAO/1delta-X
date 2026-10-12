@@ -81,6 +81,8 @@ export const TOKENS: Record<number, Record<string, PinnedToken>> = {
     USD0: { address: "0x779ded0c9e1022225f8e0630b35a9b54be713736", decimals: 6 },
     WETH: { address: "0x2f6f07cdcf3588944bf4c42ac74ff24bf56e7590", decimals: 18 },
     USDRIF: { address: "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37", decimals: 18 },
+    // RIF (ERC-677, no ERC-2612 permit) — decimals() = 18, read on-chain 2026-10-12.
+    RIF: { address: "0x2acc95758f8b5f583470ba265eb685a8f45fc9d5", decimals: 18 },
   },
 };
 
@@ -215,6 +217,25 @@ export const MARKETS: Market[] = [
     pools: [{ dex: "uniswap-v3", address: "0xd845702af381f0405661747a6a20bde0401a19d6", feeBps: 500 }],
     base: "USDRIF",
     quote: "USD0",
+  },
+  // RIF markets (2026-10-12): the deepest tier on each factory — Oku RIF/USD₮0 0.3 %
+  // (~$85k), RIF/WRBTC 0.3 % on Oku (~$35k) and Sushi v3 (~$58k). Other tiers hold dust.
+  {
+    id: "rsk-30-rif-usd0",
+    chainId: 30,
+    pools: [{ dex: "uniswap-v3", address: "0x57079b2d3071eb06cce6dbafb9b0306bcc49b020", feeBps: 3000 }],
+    base: "RIF",
+    quote: "USD0",
+  },
+  {
+    id: "rsk-30-rif-wrbtc",
+    chainId: 30,
+    pools: [
+      { dex: "uniswap-v3", address: "0xfba1ca3f3f5eafa65c2a535a54fe11f1c3a5f416", feeBps: 3000 },
+      { dex: "sushiswap-v3", address: "0x7a110977b642b64ddde6c6d2d4d370ad48993a74", feeBps: 3000 },
+    ],
+    base: "RIF",
+    quote: "WRBTC",
   },
 ];
 

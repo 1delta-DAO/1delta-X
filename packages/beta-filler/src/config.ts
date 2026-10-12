@@ -50,6 +50,11 @@ export const ROOTSTOCK_POOLS: readonly RoutePool[] = [
   { market: "rsk-30-weth-wrbtc", tokenA: ROOTSTOCK.weth, tokenB: ROOTSTOCK.wrbtc, fee: 3000, venue: VENUE_OKU, pool: "0x7717364fa619fc22a8f8eae124e79a1b9a2cf3e6" },
   { market: "rsk-30-usdrif-usd0", tokenA: ROOTSTOCK.usdrif, tokenB: ROOTSTOCK.usdt0, fee: 500, venue: VENUE_OKU, pool: "0xd845702af381f0405661747a6a20bde0401a19d6" },
   { tokenA: ROOTSTOCK.wrbtc, tokenB: ROOTSTOCK.usdt0, fee: 3000, venue: VENUE_SUSHI_V3, pool: "0x6d778c369cb386d50f4ee676c5c264374c52fd71" },
+  // RIF markets (2026-10-12; getPool on both factories, the deepest tier each — ~$85k
+  // Oku RIF/USD₮0 0.3 %, ~$35k Oku + ~$58k Sushi RIF/WRBTC 0.3 %).
+  { market: "rsk-30-rif-usd0", tokenA: ROOTSTOCK.rif, tokenB: ROOTSTOCK.usdt0, fee: 3000, venue: VENUE_OKU, pool: "0x57079b2d3071eb06cce6dbafb9b0306bcc49b020" },
+  { market: "rsk-30-rif-wrbtc", tokenA: ROOTSTOCK.rif, tokenB: ROOTSTOCK.wrbtc, fee: 3000, venue: VENUE_OKU, pool: "0xfba1ca3f3f5eafa65c2a535a54fe11f1c3a5f416" },
+  { tokenA: ROOTSTOCK.rif, tokenB: ROOTSTOCK.wrbtc, fee: 3000, venue: VENUE_SUSHI_V3, pool: "0x7a110977b642b64ddde6c6d2d4d370ad48993a74" },
 ];
 
 /**
@@ -543,7 +548,7 @@ function loadRoute(env: Env): RouteConfig | undefined {
     stableSlippageBps: bps(env, "ROUTE_STABLE_SLIPPAGE_BPS", 5),
     gasEstimate,
     maxGas,
-    routeTokens: addrList(env, "ROUTE_TOKENS", [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif]),
+    routeTokens: addrList(env, "ROUTE_TOKENS", [ROOTSTOCK.wrbtc, ROOTSTOCK.usdt0, ROOTSTOCK.weth, ROOTSTOCK.usdrif, ROOTSTOCK.rif]),
     minProfitWei: fixed(env, "MIN_PROFIT_RBTC", "0", 18),
     rbtcUsd,
     discovery: loadDiscovery(env, onRootstock),
