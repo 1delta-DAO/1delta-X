@@ -52,14 +52,31 @@ export function isRejection(e: unknown): boolean {
   return false;
 }
 
+/** 0x… hashes / addresses in an error line → 0x1234…abcd (the tx link shows the full one). */
+function shortenHashes(t: string): string {
+  return t.replace(/0x[0-9a-fA-F]{24,}/g, (h) => `${h.slice(0, 8)}…${h.slice(-6)}`);
+}
+
+/** How long a sent transaction is waited on before the app gives up on it, ms. */
+export const CONFIRM_PATIENCE_MS = 15 * 60_000;
+
+/** viem's WaitForTransactionReceiptTimeoutError (or the same wording from elsewhere). */
+export function isReceiptTimeout(e: unknown): boolean {
+  const c = e as { name?: unknown; message?: unknown; shortMessage?: unknown } | null;
+  if (!c || typeof c !== "object") return false;
+  if (c.name === "WaitForTransactionReceiptTimeoutError") return true;
+  const m = `${typeof c.shortMessage === "string" ? c.shortMessage : ""} ${typeof c.message === "string" ? c.message : ""}`;
+  return /timed out while waiting for transaction/i.test(m);
+}
+
 /** First line of an error — wallets send multi-paragraph dumps. */
 export function errorReason(e: unknown): string {
   if (typeof e === "object" && e) {
     const c = e as { shortMessage?: unknown; message?: unknown };
     const m = typeof c.shortMessage === "string" && c.shortMessage ? c.shortMessage : typeof c.message === "string" ? c.message : "";
-    if (m) return m.split("\n")[0]!.slice(0, 160);
+    if (m) return shortenHashes(m.split("\n")[0]!).slice(0, 160);
   }
-  return String(e).split("\n")[0]!.slice(0, 160);
+  return shortenHashes(String(e).split("\n")[0]!).slice(0, 160);
 }
 
 function metaOf(s: TxState): TxMeta | null {
@@ -119,12 +136,21 @@ export async function runTx(dispatch: (e: TxEvent) => void, meta: TxMeta, io: Tx
     since = null;
   }
   dispatch({ type: "confirming", sinceBlock: since });
+  // A receipt wait that TIMES OUT is not a failure: on Rootstock (~30 s blocks, a tx
+  // sent at the minimum gas price) inclusion can take minutes, and the tx usually
+  // lands (2026-10-12: "failed: Timed out…" for an approval that succeeded). Keep
+  // waiting, still "confirming", up to {@link CONFIRM_PATIENCE_MS}.
   let receipt: Awaited<ReturnType<TxIo["wait"]>>;
-  try {
-    receipt = await io.wait(hash);
-  } catch (error) {
-    dispatch({ type: "error", error });
-    throw error;
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      receipt = await io.wait(hash);
+      break;
+    } catch (error) {
+      if (isReceiptTimeout(error) && Date.now() - startedAt < CONFIRM_PATIENCE_MS) continue;
+      dispatch({ type: "error", error });
+      throw error;
+    }
   }
   if (receipt.status !== "success") {
     const error = new Error("transaction reverted on-chain");

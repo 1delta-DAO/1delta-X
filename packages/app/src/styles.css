@@ -433,7 +433,9 @@ td.dim { color: var(--dim); }
 .st a, .txl a, a.txl { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 
 /* one-line transaction / order state: "Submitted · 0xab…cd ↗" */
-.txs { font-family: var(--mono); font-size: 11px; color: var(--dim); line-height: 1.5; display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+.txs { font-family: var(--mono); font-size: 11px; color: var(--dim); line-height: 1.5; display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
+.txs > span { min-width: 0; }
+.signerr { overflow-wrap: anywhere; }
 .txs[data-v="confirmed"], .txs[data-v="filled"] { color: var(--lime); }
 .txs[data-v="failed"], .txs[data-v="rejected"] { color: var(--ask); }
 .txs[data-v="expired"], .txs[data-v="cancelled"] { color: var(--faint); }

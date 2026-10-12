@@ -120,3 +120,39 @@ describe("limit expiry selector → plan ttl and funding ttl", () => {
     expect(p.fundingTtlSeconds).toBe(MARKET_TTL_SECONDS);
   });
 });
+
+describe("a receipt-wait timeout is not a failure (Rootstock inclusion can take minutes)", () => {
+  it("keeps waiting while confirming and confirms when the receipt lands", async () => {
+    const { runTx, txReducer, IDLE, isReceiptTimeout } = await import("../src/lib/txFlow");
+    let s = IDLE;
+    const states: string[] = [];
+    let waits = 0;
+    const timeout = Object.assign(new Error('Timed out while waiting for transaction with hash "0xa3e769f30381a4db65de41bed6c16bda321e84317d986fe20d8f663f2238412" to be confirmed.'), {
+      name: "WaitForTransactionReceiptTimeoutError",
+    });
+    expect(isReceiptTimeout(timeout)).toBe(true);
+    const hash = await runTx(
+      (e) => {
+        s = txReducer(s, e);
+        states.push(s.kind);
+      },
+      { label: "Approve", step: 1, of: 1 },
+      {
+        send: async () => "0x" + "ab".repeat(32) as `0x${string}`,
+        wait: async () => {
+          if (++waits < 3) throw timeout;
+          return { status: "success", blockNumber: 9n };
+        },
+      },
+    );
+    expect(hash).toBe("0x" + "ab".repeat(32));
+    expect(waits).toBe(3);
+    expect(states).not.toContain("failed");
+    expect(s.kind).toBe("confirmed");
+  });
+
+  it("error lines shorten hashes so they fit the panel", async () => {
+    const { errorReason } = await import("../src/lib/txFlow");
+    expect(errorReason(new Error('boom for "0xa3e769f30381a4db65de41bed6c16bda321e84317d986fe20d8f663f2238412"'))).toBe('boom for "0xa3e769…238412"');
+  });
+});
