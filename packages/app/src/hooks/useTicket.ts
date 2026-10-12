@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { defaultChain, marketById, marketFor, marketsOn, pairsWith } from "../config/markets";
 import { clearingPrice } from "../lib/ladder";
-import { plainDecimal } from "../lib/format";
 import { DEFAULT_EXPIRY, type ExpiryId } from "../lib/plan";
 import { priceSizingAmount } from "../lib/ticket";
 import type { Level, OrderType, Side } from "../lib/types";
@@ -32,7 +31,6 @@ export function useTicket(deps: TicketDeps) {
   const [side, setSide] = useState<Side>("sell");
   const [mode, setMode] = useState<OrderType>("market");
   const [amountStr, setAmountStr] = useState("");
-  const [amountTouched, setAmountTouched] = useState(false);
   const [limitStr, setLimitStr] = useState("");
   const [priceTouched, setPriceTouched] = useState(false);
   const [slices, setSlices] = useState(12);
@@ -88,7 +86,6 @@ export function useTicket(deps: TicketDeps) {
 
   const setAmount = useCallback((v: string) => {
     setAmountStr(v);
-    setAmountTouched(true);
   }, []);
 
   const setLimit = useCallback((v: string) => {
@@ -103,15 +100,8 @@ export function useTicket(deps: TicketDeps) {
    */
   const clearAmount = useCallback(() => {
     setAmountStr("");
-    setAmountTouched(true);
   }, []);
 
-  /** Give an untouched ticket a size worth quoting, once a balance is known. */
-  useEffect(() => {
-    if (amountTouched || payBalance === undefined || payBalance <= 0) return;
-    const suggested = payBalance * 0.25;
-    setAmountStr(plainDecimal(Number(suggested.toPrecision(3))));
-  }, [amountTouched, payBalance]);
 
   /**
    * Keep the limit sized to the book until the user names a price themselves —
