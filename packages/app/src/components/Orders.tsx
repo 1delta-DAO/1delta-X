@@ -181,7 +181,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                           )}
                         </td>
                         <td>{until(o.expiresAt)}</td>
-                        <td>
+                        <td className="acts">
                           {needsSliceSignature(o, now) && o.slices && (
                             <button type="button" className="x" onClick={() => onSignSlice(o)}>
                               Sign slice {o.slices.signed + 1}/{o.slices.total}
