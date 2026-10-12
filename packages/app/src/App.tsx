@@ -251,16 +251,27 @@ export default function App() {
     };
   }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit]);
   const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
+  // Defence in depth: a quote is only THE price for the request it answers (same pay
+  // amount and tokens) — never one left over from a previous amount or pair (it priced,
+  // and would have SIGNED, a 9 USD0 ticket at 99 USD0's 1,783 RIFP, 2026-10-12).
+  const fitQuote =
+    marketQuote.quote &&
+    quoteReq &&
+    marketQuote.quote.amountIn === quoteReq.amountIn &&
+    marketQuote.quote.tokenIn.toLowerCase() === quoteReq.tokenIn.toLowerCase() &&
+    marketQuote.quote.tokenOut.toLowerCase() === quoteReq.tokenOut.toLowerCase()
+      ? marketQuote.quote
+      : null;
   // Auto slippage = the pair's band + headroom for the gas estimate, scaled by gas's
   // share of THIS ticket (lib/quote autoSlippageBps): small tickets need more.
-  const autoSlippage = autoSlippageBps(defaultSlippageBps(chainId, ticket.market.base, ticket.market.quote), marketQuote.quote);
+  const autoSlippage = autoSlippageBps(defaultSlippageBps(chainId, ticket.market.base, ticket.market.quote), fitQuote);
   const slippageBps = slippageBpsFor(slippage, autoSlippage);
   const termsOf = useCallback(
     (fq: FillerQuote | null) =>
       fq && payPinned && recvPinned ? quotedTerms(fq, { payDecimals: payPinned.decimals, recvDecimals: recvPinned.decimals, slippageBps }) : undefined,
     [payPinned, recvPinned, slippageBps],
   );
-  const terms = useMemo(() => termsOf(marketQuote.quote), [termsOf, marketQuote.quote]);
+  const terms = useMemo(() => termsOf(fitQuote), [termsOf, fitQuote]);
 
   const planWith = useCallback(
     (quoted: ReturnType<typeof termsOf>) =>
@@ -282,7 +293,7 @@ export default function App() {
     [q, pool.book, ticket.amount, ticket.everyMin, ticket.limit, ticket.mode, ticket.side, ticket.slices, ticket.expiry, floorInputs],
   );
   const plan: TicketPlan | null = useMemo(() => planWith(terms), [planWith, terms]);
-  const rfq = plan?.kind === "market" && plan.quoted && marketQuote.quote && recvPinned ? quoteView(marketQuote.quote, plan.quoted, recvPinned.decimals) : null;
+  const rfq = plan?.kind === "market" && plan.quoted && fitQuote && recvPinned ? quoteView(fitQuote, plan.quoted, recvPinned.decimals) : null;
   const quoteStatus: "quoted" | "loading" | "fallback" | "off" = !quoteReq ? "off" : rfq ? "quoted" : marketQuote.loading ? "loading" : "fallback";
 
   /** The pay token itself, wei (WRBTC for a WRBTC ticket — what the wrap tops up). */

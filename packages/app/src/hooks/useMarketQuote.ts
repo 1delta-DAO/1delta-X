@@ -41,7 +41,11 @@ export function useMarketQuote(url: string | null, req: QuoteRequest | null): Ma
       const r = reqRef.current;
       const k = keyRef.current;
       if (!r || !url || !k) return null;
-      setState((s) => ({ ...s, key: k, loading: true }));
+      // A NEW request must not inherit the previous request's quote: keeping `s.quote`
+      // under the new key showed the last amount's quote as current (99 USD0's 1,783
+      // RIFP under a 9 USD0 ticket, 2026-10-12) until the new answer landed. A refresh
+      // of the SAME request keeps its quote on screen while it reloads.
+      setState((s) => (s.key === k ? { ...s, loading: true } : { key: k, quote: null, error: null, loading: true }));
       try {
         const q = await fetchQuote((u, i) => fetch(u, i), url, r, signal);
         if (keyRef.current === k) setState({ key: k, quote: q, error: null, loading: false });
