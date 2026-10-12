@@ -4,7 +4,7 @@
  * quotes, and the fill gate for such an order (no route haircut).
  */
 import { AGGREGATOR_FILL_SOLVER_ABI, NO_PATCH, OrderSide, SUSHI_RED_SNWAPPER_ABI, packTiming, type Order } from "@1delta-x/sdk";
-import { concat, decodeFunctionData, encodeFunctionData, encodeFunctionResult, keccak256, numberToHex, parseTransaction, zeroAddress, type Address, type Hex } from "viem";
+import { concat, decodeFunctionData, encodeFunctionData, encodeFunctionResult, getAddress, keccak256, numberToHex, parseTransaction, zeroAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -228,6 +228,14 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     const share = Number(permit.quote.permitChargeOut) / Number(permit.quote.gasChargeOut);
     expect(share).toBeGreaterThan(0.13);
     expect(share).toBeLessThan(0.16);
+  });
+
+  it("parseQuoteRequest: a SYNTHETIC marketId (no pool of its own) resolves to its pinned tokens", () => {
+    const cfg = loadConfig(ENV);
+    const sell = parseQuoteRequest({ chainId: 30, side: "sell", amountIn: "1000", delivery: "direct", marketId: "rsk-30-wrbtc-usdrif" }, cfg);
+    expect(sell.ok && [sell.req.tokenIn, sell.req.tokenOut]).toEqual([getAddress(ROOTSTOCK.wrbtc), getAddress(ROOTSTOCK.usdrif)]);
+    const buy = parseQuoteRequest({ chainId: 30, side: "buy", amountIn: "1000", delivery: "direct", marketId: "rsk-30-wrbtc-usdrif" }, cfg);
+    expect(buy.ok && [buy.req.tokenIn, buy.req.tokenOut]).toEqual([getAddress(ROOTSTOCK.usdrif), getAddress(ROOTSTOCK.wrbtc)]);
   });
 
   it("parseQuoteRequest: funding is optional, only permit|approval", () => {

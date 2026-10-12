@@ -7,6 +7,7 @@ import {
   assembleBook,
   fetchVenue,
   resolveMarket,
+  venueTokens,
   type ResolvedMarket,
   type VenueResult,
 } from "../lib/poolbook";
@@ -122,7 +123,9 @@ export function usePoolBook(market: Market, meta: PoolMeta | undefined): PoolBoo
       for (const pool of market.pools) {
         const key = pool.address.toLowerCase();
         const load = async () => {
-          const result = await fetchVenue(pool, config, resolved.base, controller.signal);
+          // On a synthetic market each pool is sized in its HOP's base (lib/poolbook venueTokens).
+          const t = venueTokens(market, resolved, pool.address);
+          const result = await fetchVenue(pool, config, t.base, controller.signal, t);
           if (!alive || controller.signal.aborted) return;
           setState((prev) => {
             if (prev.key !== market.id) return prev;

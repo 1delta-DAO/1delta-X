@@ -38,6 +38,8 @@ interface OrderBookProps {
   onRetry: () => void;
   /** A market ticket's active quote, drawn into the side it takes from. */
   marker: BookMarker | null;
+  /** Synthetic market: the hubs its route passes through; the book is composed (lib/synthetic). */
+  via?: string[];
 }
 
 /** The quote line drawn into the ladder. */
@@ -187,7 +189,7 @@ function LadderRow({
 }
 
 export function OrderBook(props: OrderBookProps) {
-  const { bids, asks, base, quote, tick, side, preview, onPickPrice, loading, error, block, venues, status, onRetry, marker } =
+  const { bids, asks, base, quote, tick, side, preview, onPickPrice, loading, error, block, venues, status, onRetry, marker, via } =
     props;
   const phaseOf = (pool: string) => status.find((s) => s.pool.toLowerCase() === pool.toLowerCase())?.phase;
   // A pool that has not answered yet has no `Venue` row of its own, so the
@@ -229,9 +231,17 @@ export function OrderBook(props: OrderBookProps) {
     <div className="box">
       <div className="boxhead">
         <div>
-          <span className="lbl">Aggregated book</span>
+          <span className="lbl">{via?.length ? "Routed book · no direct pool" : "Aggregated book"}</span>
           <div className="m" style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-.02em" }}>
             {base} / {quote}
+            {via?.length ? (
+              <span
+                className="viatag"
+                title={`No ${base}/${quote} pool exists: this book is composed from the route ${[base, ...via, quote].join(" → ")} over the pools below, net of every hop's fee`}
+              >
+                via {via.join(" → ")}
+              </span>
+            ) : null}
           </div>
         </div>
         <span className="pill pill-violet">{ratio}</span>
@@ -326,6 +336,7 @@ export function OrderBook(props: OrderBookProps) {
             {venues.map((v) => (
               <span key={v.pool} className={v.error ? "venue-down" : undefined} title={v.pool}>
                 <em style={{ background: `var(${SOURCE_VAR[v.source]})` }} />
+                {v.hop ? `${v.hop} · ` : ""}
                 {SOURCE_NAME[v.source]} {(v.feeBps / 10_000).toFixed(2)}%{" "}
                 <b className="m">{v.pool.slice(0, 6)}…{v.pool.slice(-4)}</b>
                 {v.error

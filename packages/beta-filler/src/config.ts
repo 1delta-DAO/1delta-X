@@ -58,6 +58,15 @@ export const ROOTSTOCK_POOLS: readonly RoutePool[] = [
 ];
 
 /**
+ * SYNTHETIC app markets (docs/synthetic-pairs.md): pairs with no pool of their own,
+ * quoted and filled as multi-hop routes. Listed only so `POST /quote` knows their
+ * `marketId`; the route itself comes from ROOTSTOCK_PATHS / discovery.
+ */
+export const ROOTSTOCK_SYNTHETIC_MARKETS: readonly { market: string; base: Address; quote: Address }[] = [
+  { market: "rsk-30-wrbtc-usdrif", base: ROOTSTOCK.wrbtc, quote: ROOTSTOCK.usdrif },
+];
+
+/**
  * Default multi-hop paths (swap order; each is usable in either direction).
  * USDRIF → USDT0 → WRBTC is what prices gas for a USDRIF-output fill; it also lets
  * the route strategy take a USDRIF↔WRBTC order should one appear.

@@ -927,6 +927,7 @@ export default function App() {
             status={pool.venues}
             onRetry={pool.refresh}
             marker={bookMarker}
+            {...(pool.book?.via ? { via: pool.book.via } : {})}
           />
         </div>
 

@@ -9,14 +9,16 @@ export type Side = "buy" | "sell";
  * than a single "DEX" bucket — the whole point of aggregating two pools is being
  * able to see which one a rung is actually in.
  */
-export type Source = "UNI" | "SUSHI" | "LMT";
+export type Source = "UNI" | "SUSHI" | "ROUTE" | "LMT";
 
-export const SOURCES: readonly Source[] = ["UNI", "SUSHI", "LMT"];
+export const SOURCES: readonly Source[] = ["UNI", "SUSHI", "ROUTE", "LMT"];
 
-export const SOURCE_VAR: Record<Source, string> = { UNI: "--uni", SUSHI: "--sushi", LMT: "--lmt" };
+export const SOURCE_VAR: Record<Source, string> = { UNI: "--uni", SUSHI: "--sushi", ROUTE: "--route", LMT: "--lmt" };
 export const SOURCE_NAME: Record<Source, string> = {
   UNI: "Uniswap v3",
   SUSHI: "SushiSwap v3",
+  /** A synthetic market's composed rungs: the multi-hop route over its hops' pools (lib/synthetic). */
+  ROUTE: "Routed pools",
   LMT: "Limit orders",
 };
 
@@ -61,6 +63,8 @@ export interface Venue {
   rungs: number;
   /** Why it contributed nothing, when it failed. */
   error?: string;
+  /** Synthetic markets: the hop this pool serves, e.g. "WRBTC/USD0". */
+  hop?: string;
 }
 
 /** The pool side of the book, as fetched and priced. */
@@ -79,6 +83,8 @@ export interface PoolBook {
   bids: Level[];
   asks: Level[];
   mid: number;
+  /** Synthetic markets: the hub tokens the route passes through (["USD0"]). Absent on a pool market. */
+  via?: string[];
 }
 
 export type OrderType = "market" | "limit" | "twap";

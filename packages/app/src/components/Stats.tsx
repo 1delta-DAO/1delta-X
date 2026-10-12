@@ -29,12 +29,19 @@ export function Stats({ bids, asks, base, venues }: StatsProps) {
   // Every AMM venue gets its own tile: the point of aggregating two pools is
   // seeing how much each one actually brought, not a combined "DEX" number.
   const amm = venues.filter((v) => !v.error);
-  const pooled = amm.reduce((n, v) => n + (bid.bySource[v.source] ?? 0), 0);
+  // A synthetic market's rungs are all ROUTE (composed over its hops' pools): one
+  // route tile, with the hops it walks, instead of per-pool tiles that would read 0.
+  const routed = amm.some((v) => v.hop);
+  const pooled = routed ? bid.bySource.ROUTE : amm.reduce((n, v) => n + (bid.bySource[v.source] ?? 0), 0);
   const ratio = pooled > 0 ? `${(bid.total / pooled).toFixed(2)}×` : "—";
+  const hops = [...new Set(amm.map((v) => v.hop).filter(Boolean))];
 
   return (
     <div className="stats">
-      {amm.map((v) => (
+      {routed && (
+        <Stat cap="Routed bid depth" value={fmtAmt(bid.bySource.ROUTE)} sub={`${base} · ${hops.join(" → ")} · ${amm.length} pools`} />
+      )}
+      {!routed && amm.map((v) => (
         <Stat
           key={v.pool}
           cap={`${SOURCE_NAME[v.source]} bid depth`}

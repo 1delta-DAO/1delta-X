@@ -143,7 +143,7 @@ describe("remote orderbook client — 202 / 422 / 503", () => {
     expect(book.orders()).toHaveLength(1);
     expect(emitted).toBe(1);
     // The mock books the crossing part as a simulated fill; the real book must not.
-    book.recordTake({ marketId: row.marketId, side: "sell", size: 40, price: 1, bySource: { UNI: 40, SUSHI: 0, LMT: 0 } });
+    book.recordTake({ marketId: row.marketId, side: "sell", size: 40, price: 1, bySource: { UNI: 40, SUSHI: 0, ROUTE: 0, LMT: 0 } });
     expect(book.fills()).toHaveLength(0);
   });
 

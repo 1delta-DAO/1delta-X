@@ -139,7 +139,7 @@ describe("G-TS_SIGN-15 — nothing unsigned is shown as traded; mock fills are l
 
   it("test_audit_G_TS_SIGN_15_recordedTakesAreSimulated", () => {
     const book = new MockOrderbook();
-    book.recordTake({ marketId: "m", side: "sell", size: 1, price: 100, bySource: { UNI: 1, SUSHI: 0, LMT: 0 } });
+    book.recordTake({ marketId: "m", side: "sell", size: 1, price: 100, bySource: { UNI: 1, SUSHI: 0, ROUTE: 0, LMT: 0 } });
     expect(book.fills().every((f) => f.simulated)).toBe(true);
   });
 

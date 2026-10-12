@@ -1,7 +1,7 @@
 import type { Order } from "@1delta-x/sdk";
 import { getAddress, isAddress, type Address, type Hex } from "viem";
 
-import { ROOTSTOCK_POOLS, type Config, type QuotePolicy, type RoutePool } from "./config";
+import { ROOTSTOCK_POOLS, ROOTSTOCK_SYNTHETIC_MARKETS, type Config, type QuotePolicy, type RoutePool } from "./config";
 import type { Filler } from "./filler";
 import type { Guard } from "./guard";
 import { isDeltaVerify, type Verdict } from "./policy";
@@ -138,6 +138,7 @@ export function quoteMarkets(cfg: Pick<Config, "route">): Map<string, { base: Ad
   const out = new Map<string, { base: Address; quote: Address }>();
   const pools: readonly RoutePool[] = cfg.route?.pools?.some((p) => p.market) ? cfg.route.pools : ROOTSTOCK_POOLS;
   for (const p of pools) if (p.market) out.set(p.market, { base: getAddress(p.tokenA), quote: getAddress(p.tokenB) });
+  for (const m of ROOTSTOCK_SYNTHETIC_MARKETS) if (!out.has(m.market)) out.set(m.market, { base: getAddress(m.base), quote: getAddress(m.quote) });
   return out;
 }
 

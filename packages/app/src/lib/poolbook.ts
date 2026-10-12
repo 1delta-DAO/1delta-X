@@ -1,10 +1,11 @@
 import { sushiEndpoint, type ChainConfig } from "../config/chains";
-import { assertPoolTokens, pinnedToken, primaryPool, type Market, type PoolRef } from "../config/markets";
+import { assertPoolTokens, hopOfPool, hubsOf, isSynthetic, pinnedToken, primaryPool, type Market, type PoolRef } from "../config/markets";
 import { fetchPoolLiquidity, fetchPoolMeta, type PoolMeta, type TokenRef } from "./oku";
 import { fetchSushiPool } from "./sushi";
 import { DEX_SOURCE, type Level, type PoolBook, type Venue } from "./types";
 import { buildLadder, type PoolLiquidity } from "./univ3";
 import { topOfBook } from "./ladder";
+import { composeBook, type HopBook } from "./synthetic";
 
 /** Rungs walked out from mid per side, per venue, before the ladder is truncated. */
 const MAX_RUNGS = 90;
@@ -88,6 +89,9 @@ export async function fetchMarketMeta(
   chain: ChainConfig,
   signal?: AbortSignal,
 ): Promise<PoolMeta> {
+  // A synthetic market has no pool to name it: its identity IS the pinned pair
+  // (each hop's pools are checked against their own pinned pair in fetchVenue).
+  if (isSynthetic(market)) return syntheticMeta(market);
   const reasons: string[] = [];
   for (const ref of market.pools) {
     try {
@@ -102,6 +106,29 @@ export async function fetchMarketMeta(
     }
   }
   throw new Error(reasons.join("; ") || "no pool configured");
+}
+
+/** A pinned token as a TokenRef (symbol = the config symbol). */
+function pinnedRef(market: Market, symbol: string): TokenRef {
+  const t = pinnedToken(market.chainId, symbol);
+  if (!t) throw new Error(`market ${market.id}: ${symbol} is not pinned`);
+  return { address: t.address, symbol, name: symbol, decimals: t.decimals };
+}
+
+/** The identity of a synthetic market, from its pins alone. */
+function syntheticMeta(market: Market): PoolMeta {
+  return { pool: primaryPool(market).address, fee: 0, token0: pinnedRef(market, market.base), token1: pinnedRef(market, market.quote), tvlUsd: 0 };
+}
+
+/**
+ * The token a pool's ladder is sized in: the market's base, or on a synthetic market
+ * the base of the HOP the pool serves — plus the hop's other token, which the pool
+ * must hold too.
+ */
+export function venueTokens(market: Market, resolved: ResolvedMarket, pool: string): { base: TokenRef; other?: TokenRef; hop?: string } {
+  const hop = hopOfPool(market, pool);
+  if (!hop) return { base: resolved.base };
+  return { base: pinnedRef(market, hop.base), other: pinnedRef(market, hop.quote), hop: `${hop.base}/${hop.quote}` };
 }
 
 /**
@@ -197,9 +224,11 @@ export async function fetchVenue(
   chain: ChainConfig,
   base: TokenRef,
   parentSignal?: AbortSignal,
+  /** Synthetic hops: the pool's other pinned token (checked by address) and the hop label. */
+  hopOf?: { other?: TokenRef; hop?: string },
 ): Promise<VenueResult> {
   const source = DEX_SOURCE[ref.dex];
-  const blank: Venue = { source, dex: ref.dex, pool: ref.address, feeBps: ref.feeBps, block: 0, rungs: 0 };
+  const blank: Venue = { source, dex: ref.dex, pool: ref.address, feeBps: ref.feeBps, block: 0, rungs: 0, ...(hopOf?.hop ? { hop: hopOf.hop } : {}) };
   try {
     return await withDeadline(parentSignal, VENUE_TIMEOUT_MS, async (signal) => {
       const { meta, liquidity } = await fetchPool(ref, chain, signal);
@@ -207,6 +236,10 @@ export async function fetchVenue(
       const isToken0 = meta.token0.address.toLowerCase() === baseAddress;
       if (!isToken0 && meta.token1.address.toLowerCase() !== baseAddress) {
         throw new Error(`pool does not hold ${base.symbol}`);
+      }
+      if (hopOf?.other) {
+        const counter = (isToken0 ? meta.token1 : meta.token0).address.toLowerCase();
+        if (counter !== hopOf.other.address.toLowerCase()) throw new Error(`pool is not the pinned ${base.symbol}/${hopOf.other.symbol} pair — refusing it`);
       }
 
       // Rungs are priced net of the pool's fee (task 15), so a market quote — and the
@@ -245,8 +278,21 @@ export function assembleBook(
   results: readonly VenueResult[],
 ): PoolBook | null {
   const venues = results.map((r) => r.venue);
-  const bids = results.flatMap((r) => r.bids).sort((a, b) => b.price - a.price);
-  const asks = results.flatMap((r) => r.asks).sort((a, b) => a.price - b.price);
+  let bids: Level[];
+  let asks: Level[];
+  if (isSynthetic(market)) {
+    // Every hop needs at least one answered pool; a hop with none leaves no route.
+    const hops: HopBook[] = [];
+    for (const h of market.via) {
+      const mine = results.filter((r) => !r.venue.error && h.pools.some((p) => p.address.toLowerCase() === r.venue.pool.toLowerCase()));
+      if (!mine.length) return null;
+      hops.push({ base: h.base, quote: h.quote, bids: mine.flatMap((r) => r.bids), asks: mine.flatMap((r) => r.asks) });
+    }
+    ({ bids, asks } = composeBook(hops, market.base, market.quote));
+  } else {
+    bids = results.flatMap((r) => r.bids).sort((a, b) => b.price - a.price);
+    asks = results.flatMap((r) => r.asks).sort((a, b) => a.price - b.price);
+  }
   if (!bids.length || !asks.length) return null;
 
   // Mid is the midpoint of what a taker can actually get across all venues, not
@@ -268,6 +314,7 @@ export function assembleBook(
     bids,
     asks,
     mid,
+    ...(isSynthetic(market) ? { via: hubsOf(market) } : {}),
   };
 }
 
@@ -293,7 +340,12 @@ export interface FetchBookResult {
 export async function fetchPoolBook(args: FetchBookArgs): Promise<FetchBookResult> {
   const { market, chain, signal } = args;
   const resolved = await resolveMarket(market, chain, args.meta, signal);
-  const results = await Promise.all(market.pools.map((p) => fetchVenue(p, chain, resolved.base, signal)));
+  const results = await Promise.all(
+    market.pools.map((p) => {
+      const t = venueTokens(market, resolved, p.address);
+      return fetchVenue(p, chain, t.base, signal, t);
+    }),
+  );
   const book = assembleBook(market, resolved, results);
   if (!book) {
     const why = results.map((r) => r.venue.error).filter(Boolean).join("; ");

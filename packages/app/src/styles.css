@@ -24,6 +24,7 @@
   --uni:    #8E8E93;
   --sushi:  var(--pink);
   --lmt:    var(--violet);
+  --route:  #4FD1C5;
 
   --hair:   rgba(255, 255, 255, .04);
 
@@ -36,7 +37,7 @@
   --bg: #FFFFFF; --card: #FFFFFF; --raise: #F4F4F2; --line: #E2E2DF; --line2: #C9C9C5;
   --ink: #000000; --dim: #6A6A70; --faint: #96969C;
   --lime: #8FBE0C; --violet: #7C5CF0; --orange: #E8811A; --pink: #E0459F;
-  --uni: #7A7A80;
+  --uni: #7A7A80; --route: #1E9E92;
   --hair: rgba(0, 0, 0, .05);
 }
 
@@ -325,6 +326,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .sr[data-k="UNI"] { color: var(--uni); }
 .sr[data-k="SUSHI"] { color: var(--sushi); }
 .sr[data-k="LMT"] { color: var(--lmt); }
+.sr[data-k="ROUTE"] { color: var(--route); }
 .sr[data-k="MIX"] { color: var(--dim); }
 
 .lvl.hit { background: var(--raise); }
@@ -770,3 +772,18 @@ main.reading .md .mdquote { margin-bottom: 26px; }
 .qsum > div.qload { align-items: center; }
 @keyframes qskel { from { background-position: 120% 0; } to { background-position: -120% 0; } }
 @media (prefers-reduced-motion: reduce) { .qskel { animation: none; } }
+
+/* synthetic (routed) market: the hub badge next to the pair */
+.viatag {
+  margin-left: 9px; padding: 2px 8px; border-radius: 999px; vertical-align: middle;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--route); border: 1px solid color-mix(in srgb, var(--route) 45%, transparent);
+}
+
+/* a one-line note with its long explanation behind an (i) */
+.capnote.oneline { display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+.info {
+  display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%;
+  border: 1px solid var(--line2); color: var(--dim); font: italic 600 9.5px/1 Georgia, serif; cursor: help;
+}
+.info:hover, .info:focus-visible { color: var(--ink); border-color: var(--ink); outline: none; }

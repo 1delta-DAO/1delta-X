@@ -1,6 +1,8 @@
 # Synthetic pairs: an order book for a pair with no direct pool (PLAN)
 
-Status: **plan, nothing built yet** (2026-10-12). This document covers pairs such as
+Status: **v1 shipped 2026-10-12, WRBTC/USDRIF.** It is implemented as planned (phases 1–3); the
+"Implementation" section at the end describes what landed and where. Path splitting and
+more pairs (phase 4) are still open. This document covers pairs such as
 USDRIF/WRBTC, which has no pool of its own and only trades through a hub (here
 USD₮0). The aim is to show such a pair as a normal market: an aggregated order book
 laid over Uniswap/Sushi liquidity, market and limit tickets, and filler quotes.
@@ -131,3 +133,39 @@ a direct market. The book marks them `LMT` as usual.
 - How to show route depth that is actually the hub's depth: a big USDRIF/WRBTC
   order moves the USD₮0/WRBTC pool that the direct market also shows. A note in the
   book ("depth shared with WRBTC/USD0") is the minimum.
+
+## Implementation (v1, 2026-10-12)
+
+- **Composer:** `packages/app/src/lib/synthetic.ts` (`composeBook`).
+  - The input runs on a geometric grid: 360 points per side, from capacity × 1e-6 (at
+    least 1e-7 token units, above `walk()`'s 1e-9 dust cut-off) up to the largest input
+    the whole route fills.
+  - Samples merge into `ROUTE` rungs at most 5 bps wide, with `start` / `end` at their
+    edges.
+  - A side stops 20 % from its touch, or where a hop runs out.
+  - Tests: `test/synthetic.test.ts`. They cover the touch as the compounded fee-net
+    hop touches, the spread as the route fee, and a composed walk matching a
+    sequential hop walk within 2 bps at every size. They also cover the thin-hop cap,
+    an empty hop side, and the time budget.
+- **Config:** `Market.via` holds the hops (`packages/app/src/config/markets.ts`,
+  `synthetic()`); `pools` is derived from the hops.
+  - `fetchMarketMeta` names a synthetic market from its pins.
+  - `venueTokens` sizes each pool in its hop's base. `fetchVenue` checks the pool's
+    OTHER token against the hop's pin, so a hop pool cannot be swapped for another
+    pair.
+  - `assembleBook` composes the hops once every hop has an answered pool.
+- **UI:**
+  - the book header reads "Routed book · no direct pool" with a `VIA USD0` badge;
+  - every legend entry is prefixed with its hop;
+  - a single "Routed bid depth" tile replaces the per-pool tiles;
+  - the picker sub-line reads "via USD0 · Uni v3 0.30% + Sushi v3 0.30% → Uni v3 0.05%".
+- **Filler:** `ROOTSTOCK_SYNTHETIC_MARKETS` (`packages/beta-filler/src/config.ts`) lets
+  `POST /quote` resolve the `marketId`. The route is ROOTSTOCK_PATHS / discovery, a
+  2-hop pool plan.
+- **Book:** `ALLOWED_TOKENS` (orderbook-worker) gained RIF, which the RIF markets
+  needed anyway.
+- **Validation (the listing gate):**
+  - Command: `LIVE_RSK=1 VITE_OKU_BASE=https://omni.icarus.tools npx vitest run test/synthetic.live.test.ts`.
+  - Result on 2026-10-12: the composed book (Uniswap pools only) vs QuoterV2
+    `quoteExactInput` on WRBTC →0.3 %→ USD₮0 →0.05 %→ USDRIF stayed within **0.02 bps**
+    at $10 / $100 / $1k / $10k, on both sides.

@@ -18,6 +18,14 @@ export interface PoolRef {
   feeBps: number;
 }
 
+/** One leg of a SYNTHETIC market's route: a pool pair, in its own orientation. */
+export interface MarketHop {
+  /** Pinned symbols (TOKENS) of the hop's pair; the route visits them in either order. */
+  base: string;
+  quote: string;
+  pools: PoolRef[];
+}
+
 export interface Market {
   id: string;
   chainId: number;
@@ -30,13 +38,49 @@ export interface Market {
   pools: PoolRef[];
   base: string;
   quote: string;
+  /**
+   * SYNTHETIC market (docs/synthetic-pairs.md): no pool holds this pair, so the book
+   * is composed from these hops, ordered base → quote (lib/synthetic). `pools` is then
+   * every hop's pools, flattened, so venue loading / status / legend work unchanged.
+   */
+  via?: MarketHop[];
+}
+
+/** Whether a market's book is composed from hops rather than read from its own pools. */
+export function isSynthetic(market: Market): market is Market & { via: MarketHop[] } {
+  return !!market.via && market.via.length > 0;
+}
+
+/** The hop a pool belongs to on a synthetic market. */
+export function hopOfPool(market: Market, pool: string): MarketHop | undefined {
+  const p = pool.toLowerCase();
+  return market.via?.find((h) => h.pools.some((r) => r.address.toLowerCase() === p));
+}
+
+/** The hub tokens a synthetic market's route passes through, in order. */
+export function hubsOf(market: Market): string[] {
+  if (!isSynthetic(market)) return [];
+  const out: string[] = [];
+  let cur = market.base;
+  for (const h of market.via.slice(0, -1)) {
+    cur = cur === h.base ? h.quote : h.base;
+    out.push(cur);
+  }
+  return out;
+}
+
+/** A synthetic market from its hops: `pools` is derived, so the two cannot drift. */
+function synthetic(m: Omit<Market, "pools"> & { via: MarketHop[] }): Market {
+  return { ...m, pools: m.via.flatMap((h) => h.pools) };
 }
 
 const DEX_LABEL: Record<Dex, string> = { "uniswap-v3": "Uni v3", "sushiswap-v3": "Sushi v3" };
 
 /** "Uni v3 0.05% · Sushi v3 0.30%" — what the picker shows under the pair. */
 export function venueLabel(market: Market): string {
-  return market.pools.map((p) => `${DEX_LABEL[p.dex]} ${(p.feeBps / 10_000).toFixed(2)}%`).join(" · ");
+  const pools = (ps: PoolRef[]) => ps.map((p) => `${DEX_LABEL[p.dex]} ${(p.feeBps / 10_000).toFixed(2)}%`);
+  if (market.via?.length) return `via ${hubsOf(market).join(" → ")} · ${market.via.map((h) => pools(h.pools).join(" + ")).join(" → ")}`;
+  return pools(market.pools).join(" · ");
 }
 
 /** The pool whose metadata defines the pair. */
@@ -237,6 +281,26 @@ export const MARKETS: Market[] = [
     base: "RIF",
     quote: "WRBTC",
   },
+  // SYNTHETIC (2026-10-12, docs/synthetic-pairs.md): no WRBTC/USDRIF pool exists; the
+  // book is composed over WRBTC → USD₮0 (Uni + Sushi 0.3 %) → USDRIF (Uni 0.05 %), the
+  // route the filler takes (ROOTSTOCK_PATHS).
+  synthetic({
+    id: "rsk-30-wrbtc-usdrif",
+    chainId: 30,
+    base: "WRBTC",
+    quote: "USDRIF",
+    via: [
+      {
+        base: "WRBTC",
+        quote: "USD0",
+        pools: [
+          { dex: "uniswap-v3", address: "0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd", feeBps: 3000 },
+          { dex: "sushiswap-v3", address: "0x6d778c369cb386d50f4ee676c5c264374c52fd71", feeBps: 3000 },
+        ],
+      },
+      { base: "USDRIF", quote: "USD0", pools: [{ dex: "uniswap-v3", address: "0xd845702af381f0405661747a6a20bde0401a19d6", feeBps: 500 }] },
+    ],
+  }),
 ];
 
 export function marketById(id: string): Market {

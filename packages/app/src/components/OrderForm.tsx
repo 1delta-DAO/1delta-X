@@ -793,13 +793,20 @@ export function OrderForm(props: OrderFormProps) {
                   <button type="button" className="cta ok" disabled>
                     {`✓ No gas: sign a permit for exactly ${fmtAmt(allowance.required)} ${payToken}`}
                   </button>
-                  <span className="capnote dim">
-                    Your wallet asks for two signatures — the order, then an ERC-2612 permit letting Settlement take
-                    exactly this order&rsquo;s {payToken} until it expires. The filler submits the permit just before it
-                    fills and pays its gas; you send no transaction. A newer gasless {payToken} order replaces this
-                    one&rsquo;s allowance ·{" "}
+                  <span className="capnote dim oneline">
+                    Two signatures, no transaction
+                    <span
+                      className="info"
+                      tabIndex={0}
+                      role="img"
+                      aria-label="How gasless funding works"
+                      title={`Your wallet asks for two signatures: the order, then an ERC-2612 permit letting Settlement take exactly this order's ${payToken} until it expires. The filler submits the permit just before it fills and pays its gas; you send no transaction. A newer gasless ${payToken} order replaces this one's allowance.`}
+                    >
+                      i
+                    </span>
+                    ·{" "}
                     <button type="button" className="linkbtn" onClick={() => allowance.gasless?.select(false)}>
-                      use approvals instead
+                      use approvals
                     </button>
                   </span>
                 </>
