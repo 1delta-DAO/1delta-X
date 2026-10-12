@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { defaultChain, marketById, marketFor, marketsOn, pairsWith } from "../config/markets";
 import { clearingPrice } from "../lib/ladder";
+import { plainDecimal } from "../lib/format";
 import { DEFAULT_EXPIRY, type ExpiryId } from "../lib/plan";
 import { priceSizingAmount } from "../lib/ticket";
 import type { Level, OrderType, Side } from "../lib/types";
@@ -109,7 +110,7 @@ export function useTicket(deps: TicketDeps) {
   useEffect(() => {
     if (amountTouched || payBalance === undefined || payBalance <= 0) return;
     const suggested = payBalance * 0.25;
-    setAmountStr(String(Number(suggested.toPrecision(3))));
+    setAmountStr(plainDecimal(Number(suggested.toPrecision(3))));
   }, [amountTouched, payBalance]);
 
   /**

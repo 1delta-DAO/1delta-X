@@ -232,3 +232,13 @@ describe("exceedsBalance — the TYPED amount, not the balance-capped commitment
     expect(exceedsBalance("", 18, bal)).toBe(false);
   });
 });
+
+describe("plainDecimal: amount fields never show scientific notation", () => {
+  it("dust, normal and integral values", async () => {
+    const { plainDecimal } = await import("../src/lib/format");
+    expect(plainDecimal(2.2e-8)).toBe("0.000000022");
+    expect(plainDecimal(Number((8e-8 * 0.25).toPrecision(3)))).toBe("0.00000002");
+    expect(plainDecimal(12.5)).toBe("12.5");
+    expect(plainDecimal(1e21)).not.toMatch(/e/);
+  });
+});

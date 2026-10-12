@@ -223,6 +223,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .field .bal { font-family: var(--mono); font-size: 11px; color: var(--faint); }
 .field .top > .lbl { white-space: nowrap; }
 .field .bal { text-align: right; }
+.field .bal .linkbtn { margin-left: 7px; font-size: 11px; }
 .field .bal button {
   border: 0; background: none; color: var(--lime); font-family: var(--mono);
   font-size: 11px; padding: 0 0 0 7px; font-weight: 700;
@@ -585,28 +586,13 @@ main.reading .md h2 { margin-bottom: 14px; }
 main.reading .md .mdquote { margin-bottom: 26px; }
 
 /* ── order form: balances, quote summary, details ─────── */
-/* The wallet is READ-ONLY information: chips on the card, no box — nothing that
-   looks like the bordered amount fields below it. */
-.wstrip {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px 10px; flex-wrap: wrap;
-  padding: 2px 2px 4px; border-bottom: 1px dashed var(--line);
-}
-.wstrip .m { font-size: 11px; color: var(--dim); }
-.wbals { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-.wbals b { color: var(--ink); font-weight: 700; }
-.wchip {
-  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 4px;
-  border-radius: 999px; background: var(--raise); font-family: var(--mono); white-space: nowrap;
-}
-.wchip.native { padding-left: 9px; background: none; border: 1px solid var(--line); }
-.wchip .linkbtn { margin-left: 2px; }
 .balconnect {
   border: 0; background: none; padding: 0; color: var(--lime); font-family: var(--mono);
   font-size: 11px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px;
 }
 .field .bal .balconnect { padding: 0; }
 .field .bal .m { color: var(--dim); }
-.field .bal .m.warn, .wstrip .m.warn { color: var(--orange); }
+.field .bal .m.warn { color: var(--orange); }
 .field .bal button:disabled { opacity: .35; cursor: not-allowed; }
 .inp.over { border-color: var(--orange); }
 

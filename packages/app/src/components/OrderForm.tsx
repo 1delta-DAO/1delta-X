@@ -26,7 +26,6 @@ import type { PhaseLine } from "../lib/orderLifecycle";
 import type { TxState } from "../lib/txFlow";
 import { TokenSelect } from "./TokenSelect";
 import { MarketFillTrack } from "./MarketFillTrack";
-import { TokenIcon } from "./TokenIcon";
 import { OrderStatusLine, TxStatus } from "./TxStatus";
 import type { TrackArgs } from "../lib/marketTrack";
 
@@ -171,6 +170,22 @@ function storage(): Storage | undefined {
 }
 
 /** One balance readout: a number only when it can be one. */
+/** "unwrap" next to a wrapped-native balance: the whole WRBTC balance back to RBTC (App asks to confirm). */
+function UnwrapLink({ unwrap, symbol, native }: { unwrap: OrderFormProps["unwrap"]; symbol: string; native: string }) {
+  if (!unwrap || unwrap.symbol !== symbol) return null;
+  return (
+    <button
+      type="button"
+      className="linkbtn"
+      disabled={unwrap.busy}
+      title={`Turn all your ${symbol} back into ${native} (asks to confirm first)`}
+      onClick={unwrap.action}
+    >
+      {unwrap.busy ? "unwrapping…" : "unwrap"}
+    </button>
+  );
+}
+
 function Bal({ state, onConnect }: { state: BalanceState; onConnect: () => void }) {
   if (state.kind === "disconnected") {
     return (
@@ -367,42 +382,6 @@ export function OrderForm(props: OrderFormProps) {
           ))}
         </div>
 
-        <div className="wstrip" aria-label="Wallet balances">
-          <span className="lbl">Wallet</span>
-          {!wallet.connected ? (
-            <button type="button" className="balconnect" onClick={onConnect}>
-              Connect wallet
-            </button>
-          ) : !wallet.onChain ? (
-            <span className="m warn">wrong network — switch to {domain.chainLabel}</span>
-          ) : (
-            <span className="wbals">
-              {[market.base, market.quote].map((sym) => (
-                <span key={sym} className="m wchip" title={sym}>
-                  <TokenIcon {...tokens.view(sym)} small />
-                  <b>{balances[sym] === undefined ? "…" : fmtBalance(balances[sym]!)}</b> {sym}
-                  {unwrap && unwrap.symbol === sym && (
-                    <>
-                      {" "}
-                      <button
-                        type="button"
-                        className="linkbtn"
-                        disabled={unwrap.busy}
-                        title={`Turn all your ${sym} back into ${wallet.native.symbol} (asks to confirm first)`}
-                        onClick={unwrap.action}
-                      >
-                        {unwrap.busy ? "unwrapping…" : "unwrap"}
-                      </button>
-                    </>
-                  )}
-                </span>
-              ))}
-              <span className="m wchip native" title="Native coin, pays gas for approvals">
-                <b>{wallet.native.balance === undefined ? "…" : fmtBalance(wallet.native.balance)}</b> {wallet.native.symbol}
-              </span>
-            </span>
-          )}
-        </div>
         {unwrap?.error && <div className="signerr">{unwrap.error}</div>}
         {unwrap?.tx && <TxStatus state={unwrap.tx} chainId={chainId} onRetry={unwrap.action} />}
 
@@ -421,6 +400,7 @@ export function OrderForm(props: OrderFormProps) {
                   Max
                 </button>
               )}
+              {payBal.kind === "ok" && <UnwrapLink unwrap={unwrap} symbol={payToken} native={wallet.native.symbol} />}
             </span>
           </div>
           <div className={`inp${overBalance ? " over" : ""}`}>
@@ -469,6 +449,7 @@ export function OrderForm(props: OrderFormProps) {
             <span className="bal">
               {recvBal.kind === "ok" ? <>Balance </> : null}
               {recvBal.kind === "disconnected" ? null : <Bal state={recvBal} onConnect={onConnect} />}
+              {recvBal.kind === "ok" && <UnwrapLink unwrap={unwrap} symbol={recvToken} native={wallet.native.symbol} />}
             </span>
           </div>
           <div className="inp">

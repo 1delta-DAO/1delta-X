@@ -48,3 +48,13 @@ export function symbolHue(symbol: string): number {
   for (let i = 0; i < symbol.length; i++) h = (h * 31 + symbol.charCodeAt(i)) % 360;
   return h;
 }
+
+/**
+ * A number as a PLAIN decimal string for an input field — never scientific notation
+ * (`String(2.2e-8)` is "2.2e-8", which an amount field must not show). Trailing zeros
+ * trimmed; up to 18 decimals, the most any token here has.
+ */
+export function plainDecimal(n: number): string {
+  if (!Number.isFinite(n)) return "";
+  return n.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 18 });
+}

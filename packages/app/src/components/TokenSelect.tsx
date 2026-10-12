@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { fmtAmt } from "../lib/format";
+import { fmtBalance } from "../lib/ticketView";
 import type { TokenIndex } from "../hooks/useTokenIndex";
 import { TokenIcon } from "./TokenIcon";
 
@@ -65,7 +65,7 @@ export function TokenSelect({ value, options, tokens, balances, onChange, label 
               >
                 <TokenIcon {...tokens.view(symbol)} small />
                 {symbol}
-                <span className="b2">{balance === undefined ? "—" : fmtAmt(balance)}</span>
+                {balance !== undefined && balance > 0 && <span className="b2">{fmtBalance(balance)}</span>}
               </button>
             );
           })}
