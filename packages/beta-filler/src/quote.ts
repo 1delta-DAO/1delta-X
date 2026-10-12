@@ -117,6 +117,9 @@ export interface QuoteResult {
  * The quote arithmetic. `capOut` (inventory) bounds the result independently of gas.
  * Returns `amountOut` 0 when the costs eat the whole output (unquotable).
  */
+/** How long a quote may reuse the last good gas-price read when the RPC fails, ms. */
+export const GAS_PRICE_STALE_MS = 10 * 60_000;
+
 export function netQuote(a: { grossOut: bigint; costOut: bigint; gasMarginBps: bigint; toleranceBps: bigint; capOut?: bigint }): {
   amountOut: bigint;
   chargeOut: bigint;
@@ -323,6 +326,7 @@ function randomId(): string {
  */
 export class Quoter {
   private readonly cache = new Map<string, { at: number; priced: PricedCandidate[]; gasPrice: bigint }>();
+  private lastGasPrice: { at: number; wei: bigint } | undefined;
 
   constructor(
     private readonly cfg: Config,
@@ -343,7 +347,17 @@ export class Quoter {
     const at = this.now();
     const hit = this.cache.get(key);
     if (hit && at - hit.at < this.policy().cacheMs) return { priced: hit.priced, gasPrice: hit.gasPrice, reasons: [] };
-    const gasPrice = await this.chain.pub.getGasPrice();
+    // An RPC hiccup on the gas price must not sink the quote: reuse the last good read
+    // for up to {@link GAS_PRICE_STALE_MS} (Rootstock's minimum gas price moves rarely
+    // and slowly; the FILL re-reads it live before sending anything).
+    let gasPrice: bigint;
+    try {
+      gasPrice = await this.chain.pub.getGasPrice();
+      this.lastGasPrice = { at, wei: gasPrice };
+    } catch (e) {
+      if (!this.lastGasPrice || at - this.lastGasPrice.at > GAS_PRICE_STALE_MS) throw e;
+      gasPrice = this.lastGasPrice.wei;
+    }
     const err = this.guard.checkGasPrice(gasPrice);
     if (err) return { priced: [], gasPrice, reasons: [err] };
     const priced: PricedCandidate[] = [];
