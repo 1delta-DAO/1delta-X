@@ -227,6 +227,10 @@ export default function App() {
   const slippageBps = slippageBpsFor(slippage, autoSlippageBps);
   const payPinned = pinnedToken(chainId, ticket.payToken);
   const recvPinned = pinnedToken(chainId, ticket.recvToken);
+  // Gasless funding adds the permit's gas to the fill, so the quote must know about it.
+  // `gaslessActive` is derived further down (from the funding plan, which follows the
+  // quote), so it reaches the quote request one render later through this state.
+  const [quoteWithPermit, setQuoteWithPermit] = useState(false);
   const quoteReq: QuoteRequest | null = useMemo(() => {
     if (ticket.mode !== "market" || !deployment || !quotesSupported(chainId) || ticket.amount <= 0 || !payPinned || !recvPinned) return null;
     // The exact input the order will commit: the typed amount, capped at the balance —
@@ -244,8 +248,9 @@ export default function App() {
       amountIn,
       delivery: quoteDelivery(deployment, ticket.marketId),
       ...(wallet.address ? { maker: wallet.address } : {}),
+      ...(quoteWithPermit ? { funding: "permit" as const } : {}),
     };
-  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address]);
+  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit]);
   const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
   const termsOf = useCallback(
     (fq: FillerQuote | null) =>
@@ -361,6 +366,7 @@ export default function App() {
     covered: fundingPlan?.covered ?? false,
   });
   const gaslessActive = gasless.available && gaslessChosen;
+  useEffect(() => setQuoteWithPermit(gaslessActive), [gaslessActive]);
 
   const allowance: AllowanceView = {
     spender: deployment ? deployment.permit3 : null,

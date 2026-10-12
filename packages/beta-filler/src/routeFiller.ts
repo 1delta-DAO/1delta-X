@@ -800,7 +800,7 @@ export class RouteFiller {
    * quoted FORWARD for both deliveries: the ticket fixes the input (a direct fill then
    * quotes the backward chain of what it owes).
    */
-  async quoteRoute(a: { tokenIn: Address; tokenOut: Address; amountIn: bigint; direct: boolean; gasPrice: bigint }): Promise<Verdict<{ candidate: PricedCandidate }>> {
+  async quoteRoute(a: { tokenIn: Address; tokenOut: Address; amountIn: bigint; direct: boolean; gasPrice: bigint; permit?: boolean }): Promise<Verdict<{ candidate: PricedCandidate }>> {
     const { cfg, rc } = this;
     await this.init();
     await this.ensureGraph();
@@ -834,8 +834,11 @@ export class RouteFiller {
     const fallback = (a.direct ? cfg.quote.gasEstimateDirect : cfg.quote.gasEstimatePull) + hopGas;
     const base = learned ?? fallback;
     const floor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas;
-    const estimate = base > floor ? base : floor;
+    // A permit-funded order's fill also runs the maker's ERC-2612 permit — the same
+    // PERMIT_IN_FILL_GAS the fill gate adds, so quote and fill price the same gas.
+    const estimate = (base > floor ? base : floor) + (a.permit ? PERMIT_IN_FILL_GAS : 0n);
     const gasUnits = this.gasRatios.priced(shape, estimate);
+    const permitGasUnits = a.permit ? gasUnits - this.gasRatios.priced(shape, estimate - PERMIT_IN_FILL_GAS) : 0n;
     const gasOut = await this.nativeToToken(a.gasPrice * gasUnits, a.tokenOut);
     const profitOut = await this.nativeToToken(rc.minProfitWei, a.tokenOut);
     if (gasOut === undefined || profitOut === undefined) return { ok: false, reason: `route: cannot price RBTC in ${a.tokenOut}` };
@@ -846,6 +849,7 @@ export class RouteFiller {
         grossOut: best.out,
         costOut: grossUp(gasOut + profitOut, this.keepPpm),
         gasUnits,
+        ...(permitGasUnits > 0n ? { permitGasUnits } : {}),
         source: best.label,
         ...(best.hops !== undefined ? { hops: best.hops } : {}),
       },

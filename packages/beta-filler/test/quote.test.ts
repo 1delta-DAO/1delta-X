@@ -211,6 +211,35 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(JSON.stringify(j)).not.toMatch(/11111111/);
   });
 
+  it("funding: permit adds PERMIT_IN_FILL_GAS (as the fill gate does) and never quotes the inventory EOA", async () => {
+    const { chain } = fake();
+    const e = await Engine.create({ cfg: loadConfig(ENV), chain, store: new MemoryStateStore(), log: () => {} });
+    const plain = await e.quote(sellReq({ delivery: "direct" }));
+    const permit = await e.quote({ ...sellReq({ delivery: "direct", amountIn: 10n ** 16n + 1n }), funding: "permit" });
+    expect(plain.ok && permit.ok).toBe(true);
+    if (!plain.ok || !permit.ok) return;
+    const shape = gasShape("route", "direct", WRBTC, USDT0, SOLVER);
+    expect(permit.quote.gasUnits).toBe(e.gasRatios.priced(shape, 360_000n + 60_000n));
+    expect(permit.quote.gasUnits > plain.quote.gasUnits).toBe(true);
+    expect(permit.quote.strategy).toBe("route");
+    // The permit's share of the charge, for the app's fee breakdown: 60k of the 420k
+    // estimate (same ratio both sides), so about 1/7 of the charge; 0 without a permit.
+    expect(plain.quote.permitChargeOut).toBe(0n);
+    const share = Number(permit.quote.permitChargeOut) / Number(permit.quote.gasChargeOut);
+    expect(share).toBeGreaterThan(0.13);
+    expect(share).toBeLessThan(0.16);
+  });
+
+  it("parseQuoteRequest: funding is optional, only permit|approval", () => {
+    const cfg = loadConfig(ENV);
+    const base = { chainId: 30, side: "sell", amountIn: "1000", delivery: "pull", marketId: "rsk-30-wrbtc-usd0" };
+    const p = parseQuoteRequest({ ...base, funding: "permit" }, cfg);
+    expect(p.ok && p.req.funding).toBe("permit");
+    const a = parseQuoteRequest({ ...base, funding: "approval" }, cfg);
+    expect(a.ok && a.req.funding).toBeUndefined();
+    expect(parseQuoteRequest({ ...base, funding: "free" }, cfg).ok).toBe(false);
+  });
+
   it("direct delivery prices QUOTE_GAS_ESTIMATE_DIRECT; a LEARNED estimate for the shape replaces the default", async () => {
     const { chain } = fake();
     const e = await Engine.create({ cfg: loadConfig(ENV), chain, store: new MemoryStateStore(), log: () => {} });

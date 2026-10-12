@@ -614,6 +614,9 @@ main.reading .md .mdquote { margin-bottom: 26px; }
 .qsum > div.minor { font-size: 11.5px; color: var(--faint); }
 .qsum > div.minor .m { color: var(--dim); }
 .qsum > div.warn { color: var(--orange); }
+.qsum > div.sub { padding-left: 12px; }
+.qsum > div.total { border-top: 1px dashed var(--line); padding-top: 5px; margin-top: 1px; color: var(--ink); }
+.qsum > div.total .m { font-weight: 600; }
 .qspin {
   display: inline-block; width: 7px; height: 7px; margin-left: 7px; border-radius: 50%;
   background: var(--violet); animation: venue-pulse 1.1s ease-in-out infinite; vertical-align: middle;

@@ -55,6 +55,12 @@ export interface QuoteRequest {
   maker?: Address;
   /** How the app will sign the order (its deployment config): direct = delta-verify to our solver. */
   delivery: Delivery;
+  /**
+   * How the maker funds it: `permit` = a gasless ERC-2612 permit the fill must execute
+   * (+ PERMIT_IN_FILL_GAS on the route, and never the inventory EOA, which cannot carry
+   * one); absent / `approval` = standing allowances.
+   */
+  funding?: "permit" | "approval";
 }
 
 /** One priced way to fill: before the gas margin and tolerance. */
@@ -68,6 +74,8 @@ export interface PricedCandidate {
   costOut: bigint;
   /** The gas units the cost is priced at (estimate × r). */
   gasUnits: bigint;
+  /** Of `gasUnits`, the part a permit-funded fill spends on the maker's ERC-2612 permit (0 otherwise). */
+  permitGasUnits?: bigint;
   /** Where the price comes from: `oku` (n hops), `sushi`, `nordstern`, `inventory`. */
   source: string;
   hops?: number;
@@ -91,6 +99,8 @@ export interface QuoteResult {
   gasCostOut: bigint;
   /** What the quote charges for it: ⌈gasCostOut × (1 + margin)⌉. */
   gasChargeOut: bigint;
+  /** Of `gasChargeOut`, the in-fill ERC-2612 permit's share (`funding: "permit"`; else 0) — display only. */
+  permitChargeOut: bigint;
   gasMarginBps: bigint;
   toleranceBps: bigint;
   toleranceOut: bigint;
@@ -119,7 +129,7 @@ export function netQuote(a: { grossOut: bigint; costOut: bigint; gasMarginBps: b
 
 // ──────────────────── request parsing ────────────────────
 
-const KEYS = new Set(["chainId", "marketId", "tokenIn", "tokenOut", "side", "amountIn", "maker", "delivery"]);
+const KEYS = new Set(["chainId", "marketId", "tokenIn", "tokenOut", "side", "amountIn", "maker", "delivery", "funding"]);
 const MAX_AMOUNT = 2n ** 128n;
 const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
@@ -174,9 +184,10 @@ export function parseQuoteRequest(raw: unknown, cfg: Pick<Config, "chainId" | "r
   }
   if (!tokenIn || !tokenOut) return { ok: false, reason: "give tokenIn/tokenOut or a marketId" };
   if (eq(tokenIn, tokenOut)) return { ok: false, reason: "tokenIn equals tokenOut" };
+  if (o.funding !== undefined && o.funding !== "permit" && o.funding !== "approval") return { ok: false, reason: 'funding must be "permit" or "approval"' };
   return {
     ok: true,
-    req: { chainId: cfg.chainId, tokenIn, tokenOut, amountIn, side: o.side, delivery: o.delivery, ...(marketId ? { marketId } : {}), ...(maker ? { maker } : {}) },
+    req: { chainId: cfg.chainId, tokenIn, tokenOut, amountIn, side: o.side, delivery: o.delivery, ...(marketId ? { marketId } : {}), ...(maker ? { maker } : {}), ...(o.funding === "permit" ? { funding: "permit" as const } : {}) },
   };
 }
 
@@ -325,7 +336,7 @@ export class Quoter {
 
   /** Price every applicable strategy for `req` (cached for QUOTE_CACHE_MS per identical request). */
   private async price(req: QuoteRequest): Promise<{ priced: PricedCandidate[]; gasPrice: bigint; reasons: string[] }> {
-    const key = `${req.tokenIn}:${req.tokenOut}:${req.amountIn}:${req.delivery}`.toLowerCase();
+    const key = `${req.tokenIn}:${req.tokenOut}:${req.amountIn}:${req.delivery}:${req.funding ?? "approval"}`.toLowerCase();
     const at = this.now();
     const hit = this.cache.get(key);
     if (hit && at - hit.at < this.policy().cacheMs) return { priced: hit.priced, gasPrice: hit.gasPrice, reasons: [] };
@@ -336,12 +347,13 @@ export class Quoter {
     const reasons: string[] = [];
     const { route, inventory } = this.strategies;
     if (route) {
-      const r = await route.quoteRoute({ tokenIn: req.tokenIn, tokenOut: req.tokenOut, amountIn: req.amountIn, direct: req.delivery === "direct", gasPrice }).catch((e: unknown) => ({ ok: false as const, reason: `route: ${(e as Error).message?.split("\n")[0] ?? e}` }));
+      const r = await route.quoteRoute({ tokenIn: req.tokenIn, tokenOut: req.tokenOut, amountIn: req.amountIn, direct: req.delivery === "direct", gasPrice, permit: req.funding === "permit" }).catch((e: unknown) => ({ ok: false as const, reason: `route: ${(e as Error).message?.split("\n")[0] ?? e}` }));
       if (r.ok) priced.push(r.candidate);
       else reasons.push(r.reason);
     }
     // The inventory EOA fills PULL orders only (an EOA cannot run a delta-verify callback).
-    if (inventory && req.delivery === "pull") {
+    // ...nor a permit-funded one (no executeFill to carry the permit).
+    if (inventory && req.delivery === "pull" && req.funding !== "permit") {
       const r = await inventory.quoteInventory(req.tokenIn, req.tokenOut, req.amountIn, gasPrice).catch((e: unknown) => ({ ok: false as const, reason: `inventory: ${(e as Error).message?.split("\n")[0] ?? e}` }));
       if (r.ok) priced.push(r.candidate);
       else reasons.push(r.reason);
@@ -383,6 +395,7 @@ export class Quoter {
       gasPriceWei: gasPrice,
       gasCostOut: best.c.costOut,
       gasChargeOut: best.n.chargeOut,
+      permitChargeOut: best.c.permitGasUnits && best.c.gasUnits > 0n ? (best.n.chargeOut * best.c.permitGasUnits) / best.c.gasUnits : 0n,
       gasMarginBps: p.gasMarginBps,
       toleranceBps: p.toleranceBps,
       toleranceOut: best.n.toleranceOut,

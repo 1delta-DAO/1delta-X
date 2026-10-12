@@ -84,7 +84,10 @@ DO_LOCATION_HINT = ""
 # ── strategies (see packages/beta-filler/README.md for every knob) ──────────
 INVENTORY_ENABLED = "1"
 # ROUTE_ENABLED defaults to on iff AGGREGATOR_SOLVER is set.
-ROUTE_PROFIT_RECIPIENT = "0x0000000000000000000000000000000000000000"
+# Retain mode: the spread stays on the solver (== AGGREGATOR_SOLVER), skipping the
+# per-fill payout transfer (−5.2k gas direct, −6.2k pull). Operators batch-recover it
+# with AggregatorFillSolver.sweep(token, to, amount).
+ROUTE_PROFIT_RECIPIENT = "0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1"
 ROUTE_SLIPPAGE_BPS = "10"
 ROUTE_STABLE_SLIPPAGE_BPS = "5"
 # v2 solver (2026-10-12): a pool plan assumes this − 30k = 265k (fork: 229k net direct).

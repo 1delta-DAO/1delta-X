@@ -30,7 +30,7 @@ export interface MarketQuoteState {
  */
 export function useMarketQuote(url: string | null, req: QuoteRequest | null): MarketQuoteState {
   const [state, setState] = useState<{ key: string; quote: FillerQuote | null; error: string | null; loading: boolean }>({ key: "", quote: null, error: null, loading: false });
-  const key = req && url ? `${url}|${req.chainId}|${req.marketId}|${req.side}|${req.tokenIn}|${req.tokenOut}|${req.amountIn}|${req.delivery}|${req.maker ?? ""}` : "";
+  const key = req && url ? `${url}|${req.chainId}|${req.marketId}|${req.side}|${req.tokenIn}|${req.tokenOut}|${req.amountIn}|${req.delivery}|${req.maker ?? ""}|${req.funding ?? ""}` : "";
   const reqRef = useRef<QuoteRequest | null>(req);
   reqRef.current = req;
   const keyRef = useRef(key);

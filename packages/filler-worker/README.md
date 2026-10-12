@@ -183,7 +183,10 @@ curl -s -X POST https://filler.example.com/quote -H 'content-type: application/j
 The request takes `chainId`, `side` (`sell` | `buy`, the app's side against the base),
 `amountIn` (wei of the PAY token, decimal string), `delivery` (`direct` | `pull`, from
 the app's deployment config), and a `marketId` or `tokenIn` / `tokenOut`. An optional
-`maker` restricts the quote to that maker's order. Amounts are decimal strings. `live`
+`maker` restricts the quote to that maker's order. `funding: "permit"` (optional) marks a
+ticket whose input arrives by an ERC-2612 permit the fill executes first: the quote adds
+`PERMIT_IN_FILL_GAS` (60k) to the estimate and skips the inventory candidate; the answer's
+`permitChargeOut` is that permit's share of `gasChargeOut` (the app shows it in the fee breakdown). Amounts are decimal strings. `live`
 is false while the filler runs dry.
 
 | Guard | |

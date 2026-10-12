@@ -32,6 +32,7 @@ const rfq: QuoteView = {
   gross: 8246.706367,
   gas: 0.706367,
   gasBps: 1,
+  permitGas: 0,
   gasMarginBps: 2000,
   minOut: 8246 * 0.997,
   slippageBps: 30,
@@ -64,6 +65,20 @@ describe("marketFigures — the quote is THE price", () => {
     expect(f.networkFee).toBeCloseTo(0.706367, 9);
     expect(f.source).toBe("sushi");
     expect(ladder.avg).toBeCloseTo(78202.2, 6); // the contradicting walk is NOT what is shown
+  });
+
+  it("a quote breaks the receive down: swap output − network fee (permit share shown) = receive", () => {
+    const plain = marketFigures({ side: "sell", rfq, ladder, mid: null })!;
+    expect(plain.grossReceive).toBeCloseTo(8246.706367, 9);
+    expect(plain.grossReceive! - plain.networkFee!).toBeCloseTo(plain.receive, 9);
+    expect(plain.permitFee).toBeNull();
+    // The 2026-10-12 gasless USDRIF ticket: 15.91 out, 0.58 fee of which ~0.11 the permit.
+    const gasless: QuoteView = { ...rfq, receive: 15.33, gross: 15.91, gas: 0.58, permitGas: 0.107 };
+    const g = marketFigures({ side: "buy", rfq: gasless, ladder: null, mid: null })!;
+    expect(g.permitFee).toBe(0.107);
+    expect(g.grossReceive! - g.networkFee!).toBeCloseTo(g.receive, 9);
+    // The ladder estimate has no gross/net split to show.
+    expect(marketFigures({ side: "sell", rfq: null, ladder, fallbackGas: 0.7, mid: null })!.grossReceive).toBeNull();
   });
 
   it("a BUY's effective price is input per output (quote per base)", () => {

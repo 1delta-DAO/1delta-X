@@ -647,7 +647,7 @@ amountOut = grossOut − ⌈gasCostOut × (1 + QUOTE_GAS_MARGIN_BPS / 1e4)⌉ �
   grossed up for the solver's surplus split. No order exists yet, so nothing is
   simulated. The estimate is the largest `eth_estimateGas` among the shape's last 20
   successful fills (now also learned, `GasRatios.typicalEstimate`). Before any, it is
-  `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` (production 265k / 290k since the v2 solver, 2026-10-12 — code defaults 360k / 380k: × the 0.88 default ratio ≈ the v2 pool-route fork receipts, 229k direct / 252k pull), and never below the winning candidate's plan-kind estimate (`ROUTE_GAS_ESTIMATE`, less `SANDBOX_ROUTE_OVERHEAD_GAS` for a pool plan).
+  `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` (production 265k / 290k since the v2 solver, 2026-10-12 — code defaults 360k / 380k: × the 0.88 default ratio ≈ the v2 pool-route fork receipts, 229k direct / 252k pull), and never below the winning candidate's plan-kind estimate (`ROUTE_GAS_ESTIMATE`, less `SANDBOX_ROUTE_OVERHEAD_GAS` for a pool plan). A `funding: "permit"` request adds `PERMIT_IN_FILL_GAS` (60k) to that estimate before × r: the fill executes the maker's ERC-2612 permit first, and a quote without it under-priced the user's first gasless order (2026-10-12) so it could not fill at the start of its decay.
 - **Inventory** (USDRIF → USDT0, pull, `BUY_USDRIF`): `Filler.quoteInventory` bounds what
   the hot wallet would pay by the gates a fill must pass. Those are `MAX_BUY_PRICE`, the
   exit edge (`MIN_EXIT_EDGE_BPS` over the live redeem-and-sell value), and the all-in
@@ -727,7 +727,7 @@ Route strategy:
 | `ROUTE_TOKENS` | `WRBTC,USDT0,WETH,USDRIF` | comma-separated allowlist; both tokens of a route candidate must be in it |
 | `MIN_PROFIT_RBTC` | `0` | profit required on top of gas, in RBTC. 0: the operator's infra is near-free, so a fill that covers its gas and haircut is worth taking |
 | `RBTC_PRICE_USD`, `USD_TOKENS` | unset, `USDT0,USDRIF` | RBTC price for $1 tokens; the higher of it and the pool price is used (both strategies) |
-| `ROUTE_PROFIT_RECIPIENT` | `0x0` (= the operator EOA) | `RoutePlan.profitRecipient`; point it at a treasury |
+| `ROUTE_PROFIT_RECIPIENT` | `0x0` (= the operator EOA) | `RoutePlan.profitRecipient`; point it at a treasury, or at `AGGREGATOR_SOLVER` itself for retain mode (no per-fill payout transfer, −5.2k gas direct / −6.2k pull; recover with `sweep`) — production runs retain mode since 2026-10-12 |
 | `ROUTE_HOURLY_FILLS` | `60` | rolling one-hour cap on route fills (gas: `HOURLY_GAS_RBTC`) |
 | `WRBTC`, `SWAP_ROUTER`, `QUOTER_V2` | Rootstock mainnet | overrides (`QUOTER_V2` = venue 0's quoter, also the rebalancer's; `SWAP_ROUTER` is the rebalancer's RIF sale only — route fills never call it) |
 | `SUSHI_ENABLED` | `1` | the Sushi API route source (pull orders only) |

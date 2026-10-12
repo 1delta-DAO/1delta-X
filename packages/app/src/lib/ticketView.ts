@@ -33,6 +33,10 @@ export interface MarketFigures {
   networkFee: number | null;
   /** That fee as bps of the gross output. */
   networkFeeBps: number | null;
+  /** Quoted tickets: the route's output BEFORE the network fee (receive = gross − fee); null for the ladder estimate. */
+  grossReceive: number | null;
+  /** Of `networkFee`, the in-fill ERC-2612 permit (gasless tickets); null when there is none. */
+  permitFee: number | null;
   /** The route the filler quoted ("sushi", "uniswap"…); null for the ladder estimate. */
   source: string | null;
   /** False while the filler quotes in dry-run mode (it will not fill). */
@@ -73,6 +77,8 @@ export function marketFigures(a: FigureArgs): MarketFigures | null {
       vsMidPct: vs(price),
       networkFee: r.gas,
       networkFeeBps: r.gasBps,
+      grossReceive: r.gross,
+      permitFee: r.permitGas > 0 ? r.permitGas : null,
       source: r.source,
       live: r.live,
     };
@@ -92,6 +98,8 @@ export function marketFigures(a: FigureArgs): MarketFigures | null {
     vsMidPct: vs(price),
     networkFee: gas,
     networkFeeBps: gas !== null && q.crossedOut > 0 ? Math.round((gas / q.crossedOut) * 10_000) : null,
+    grossReceive: null,
+    permitFee: null,
     source: null,
     live: true,
   };

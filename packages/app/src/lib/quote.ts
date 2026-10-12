@@ -76,6 +76,8 @@ export interface QuoteRequest {
   amountIn: bigint;
   maker?: Address;
   delivery: "direct" | "pull";
+  /** `permit`: the order will be funded by a gasless ERC-2612 permit the fill executes (more gas). */
+  funding?: "permit";
 }
 
 /** A validated filler quote. */
@@ -92,6 +94,8 @@ export interface FillerQuote {
   gasCostOut: bigint;
   /** Gas incl. the filler's margin: grossOut − amountOut (+ any tolerance). */
   gasChargeOut: bigint;
+  /** Of `gasChargeOut`, the in-fill ERC-2612 permit's share (`funding: "permit"`); 0 otherwise / from an older filler. */
+  permitChargeOut: bigint;
   gasMarginBps: number;
   issuedAt: number;
   /** Unix seconds. */
@@ -140,6 +144,7 @@ export function parseQuote(raw: unknown, req: Pick<QuoteRequest, "chainId" | "to
     gasUnits: big(o.gasUnits, "gasUnits"),
     gasCostOut: big(o.gasCostOut, "gasCostOut"),
     gasChargeOut: big(o.gasChargeOut, "gasChargeOut"),
+    permitChargeOut: o.permitChargeOut === undefined ? 0n : big(o.permitChargeOut, "permitChargeOut"),
     gasMarginBps: Number(big(o.gasMarginBps, "gasMarginBps")),
     issuedAt: Number(o.issuedAt),
     validUntil: Number(o.validUntil),
@@ -152,6 +157,7 @@ export function parseQuote(raw: unknown, req: Pick<QuoteRequest, "chainId" | "to
   if (q.tokenIn !== getAddress(req.tokenIn) || q.tokenOut !== getAddress(req.tokenOut)) throw new QuoteError(0, "quote: wrong tokens");
   if (q.amountIn !== req.amountIn) throw new QuoteError(0, "quote: wrong amountIn");
   if (q.amountOut === 0n || q.amountOut > q.grossOut) throw new QuoteError(0, "quote: bad amountOut");
+  if (q.permitChargeOut > q.gasChargeOut) throw new QuoteError(0, "quote: bad permitChargeOut");
   if (!Number.isFinite(q.validUntil) || q.validUntil < nowS) throw new QuoteError(0, "quote: expired");
   return q;
 }
@@ -169,6 +175,7 @@ export async function fetchQuote(doFetch: FetchLike, url: string, req: QuoteRequ
     amountIn: req.amountIn.toString(),
     delivery: req.delivery,
     ...(req.maker ? { maker: req.maker } : {}),
+    ...(req.funding === "permit" ? { funding: "permit" } : {}),
   });
   let res: Response;
   try {
@@ -219,6 +226,8 @@ export interface QuoteView {
   gas: number;
   /** That gas as a share of the ticket, bps of the gross. */
   gasBps: number;
+  /** Of `gas`, the part the in-fill ERC-2612 permit costs (gasless tickets); 0 otherwise. */
+  permitGas: number;
   gasMarginBps: number;
   minOut: number;
   slippageBps: number;
@@ -237,6 +246,7 @@ export function quoteView(q: FillerQuote, terms: QuotedTerms, recvDecimals: numb
     gross,
     gas,
     gasBps: gross > 0 ? Math.round((gas / gross) * 10_000) : 0,
+    permitGas: Number(formatUnits(q.permitChargeOut, recvDecimals)),
     gasMarginBps: q.gasMarginBps,
     minOut: terms.minOut,
     slippageBps: terms.slippageBps,

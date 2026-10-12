@@ -452,7 +452,7 @@ export function OrderForm(props: OrderFormProps) {
 
         <div className="field">
           <div className="top">
-            <span className="lbl">You receive{isMarket && figures ? " ≈" : ""}</span>
+            <span className="lbl">You receive{isMarket && figures ? (figures.grossReceive !== null ? " ≈ · after network fee" : " ≈") : ""}</span>
             <span className="bal">
               {recvBal.kind === "ok" ? <>Balance </> : null}
               {recvBal.kind === "disconnected" ? null : <Bal state={recvBal} onConnect={onConnect} />}
@@ -473,6 +473,39 @@ export function OrderForm(props: OrderFormProps) {
             <div className="qsum">
               {figures ? (
                 <>
+                  {figures.grossReceive !== null && figures.networkFee !== null && (
+                    <div>
+                      <span>Swap output · via {sourceName(figures.source)}</span>
+                      <span className="m">
+                        {fmtAmt(figures.grossReceive)} {recvToken}
+                      </span>
+                    </div>
+                  )}
+                  {figures.grossReceive !== null && figures.networkFee !== null ? (
+                    <div>
+                      <span>Network fee{figures.permitFee !== null ? " · incl. permit" : ""}</span>
+                      <span className="m">
+                        − {fmtFee(figures.networkFee)} {recvToken}
+                        {quoteStatus === "loading" && <em className="qspin" aria-label="refreshing quote" />}
+                      </span>
+                    </div>
+                  ) : null}
+                  {figures.permitFee !== null && (
+                    <div className="minor sub">
+                      <span>of which your gasless permit</span>
+                      <span className="m">
+                        {fmtFee(figures.permitFee)} {recvToken}
+                      </span>
+                    </div>
+                  )}
+                  {figures.grossReceive !== null && figures.networkFee !== null ? (
+                    <div className="total">
+                      <span>You receive</span>
+                      <span className="m">
+                        ≈ {fmtAmt(figures.receive)} {recvToken}
+                      </span>
+                    </div>
+                  ) : (
                   <div>
                     <span>Network fee</span>
                     <span className="m">
@@ -480,6 +513,7 @@ export function OrderForm(props: OrderFormProps) {
                       {quoteStatus === "loading" && <em className="qspin" aria-label="refreshing quote" />}
                     </span>
                   </div>
+                  )}
                   <div className="minor">
                     <span>Minimum received</span>
                     <span className="m">{minLine}</span>
@@ -810,7 +844,7 @@ export function OrderForm(props: OrderFormProps) {
           <div className="gas">
             {isMarket && figures?.networkFee !== null && figures?.networkFee !== undefined ? (
               <>
-                Signing is <b>free</b> — the network fee above comes out of what you receive
+                Signing is <b>free</b> — the network fee above{allowance.gasless?.selected ? ", your permit included," : ""} is already taken out of what you receive
               </>
             ) : (
               <>

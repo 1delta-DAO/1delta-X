@@ -110,6 +110,25 @@ describe("fetchQuote: the request the app sends, the errors it maps", () => {
     expect(seen!.init.method).toBe("POST");
     expect(JSON.parse(String(seen!.init.body))).toEqual({ chainId: 30, marketId: "rsk-30-wrbtc-usd0", side: "sell", tokenIn: WRBTC, tokenOut: USD0, amountIn: "10000000000000000", delivery: "direct", maker: MAKER });
   });
+  it("a permit-funded (gasless) ticket asks for funding: \"permit\" so the quote prices the in-fill permit gas", async () => {
+    const bodies: unknown[] = [];
+    const capture = async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init!.body)));
+      return Response.json({ ...sellJson(), validUntil: Math.floor(Date.now() / 1000) + 30 });
+    };
+    await fetchQuote(capture, "/api/quote", { ...sellReq, funding: "permit" });
+    await fetchQuote(capture, "/api/quote", sellReq);
+    expect(bodies[0]).toMatchObject({ funding: "permit" });
+    expect(bodies[1]).not.toHaveProperty("funding");
+  });
+  it("permitChargeOut: optional (older filler → 0), never above the whole gas charge", () => {
+    const now = Math.floor(Date.now() / 1000);
+    expect(parseQuote({ ...sellJson(), validUntil: now + 30 }, sellReq).permitChargeOut).toBe(0n);
+    const j = sellJson() as Record<string, unknown>;
+    const ok = parseQuote({ ...j, validUntil: now + 30, permitChargeOut: "1" }, sellReq);
+    expect(ok.permitChargeOut).toBe(1n);
+    expect(() => parseQuote({ ...j, validUntil: now + 30, permitChargeOut: (BigInt(String(j.gasChargeOut)) + 1n).toString() }, sellReq)).toThrow(/permitChargeOut/);
+  });
   it("a non-2xx answer is a QuoteError with its status and reason; a network failure is status 0", async () => {
     const e1 = await fetchQuote(async () => Response.json({ error: "no quote", reason: "gas exceeds the output" }, { status: 422 }), "/api/quote", sellReq).catch((e) => e);
     expect(e1).toBeInstanceOf(QuoteError);

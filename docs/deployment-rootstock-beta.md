@@ -43,6 +43,12 @@ Read back: `SETTLEMENT()` = Settlement, `EXECUTOR()` = `0x9685D6c5…8bA0`, `POO
 The v1 solver `0x33ccAcb24DA5c7f335819Da877FC03E4bf62E287` (table above) is SUPERSEDED: the
 filler no longer drives it; delta-verify orders signed naming it can only be filled by it.
 
+**Retain mode (2026-10-12).** The filler sets `ROUTE_PROFIT_RECIPIENT` = the solver itself,
+so its spread stays on `0x48dbdC43…32F1` (no per-fill payout transfer: −5.2k gas direct,
+−6.2k pull). Recover it in batches from the operator:
+`cast send 0x48dbdC43507767BD51ec0AF2cb9bfa5E35B332F1 'sweep(address,address,uint256)' <token> <to> <amount>`.
+Leave one wei of each token behind — the solver's balance floor keeps the slot warm.
+
 ## Read back on mainnet (2026-10-09)
 
 Settlement `PERMIT3()` = Permit3; lens `SETTLEMENT()` and `CHECKS()` as above; solver
