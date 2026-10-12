@@ -164,8 +164,6 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .pair-ico .tok-ico + .tok-ico { margin-left: -9px; box-shadow: 0 0 0 2px var(--card); }
 .tok-ico.sm { width: 18px; height: 18px; font-size: 8px; }
 
-/* ── stats ─────────────────────────────────────────────── */
-
 /* ── main grid ─────────────────────────────────────────── */
 .deck { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 20px; align-items: start; }
 
