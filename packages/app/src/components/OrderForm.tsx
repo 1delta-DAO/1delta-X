@@ -720,7 +720,11 @@ export function OrderForm(props: OrderFormProps) {
                   </div>
                   <span className="capnote dim">
                     {quoteStatus === "quoted"
-                      ? "The order starts at the filler's quote and can only decay to this much below it, over 3.5 minutes."
+                      ? `The order starts at the filler's quote and can only decay to this much below it, over 3.5 minutes.${
+                          slippage.setting.mode === "auto" && figures?.networkFeeBps && figures.networkFeeBps > 50
+                            ? " Auto is wider on small orders: gas is a bigger share, and the band has to absorb a gas estimate that comes in high."
+                            : ""
+                        }`
                       : quoteStatus === "loading"
                         ? "Asking the filler for a quote…"
                         : `Filler quote unavailable${quoteError ? ` (${quoteError.slice(0, 80)})` : ""} — the order uses the gas-sized floor.`}

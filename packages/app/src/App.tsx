@@ -42,6 +42,7 @@ import {
   quotesSupported,
   quoteView,
   slippageBpsFor,
+  autoSlippageBps,
   type FillerQuote,
   type QuoteRequest,
   type SlippageSetting,
@@ -223,8 +224,6 @@ export default function App() {
   // and decays to the maker's slippage protection. No quote (mock book, no filler on the
   // chain, endpoint down) → the gas-sized floor above, unchanged.
   const [slippage, setSlippage] = useState<SlippageSetting>({ mode: "auto" });
-  const autoSlippageBps = defaultSlippageBps(chainId, ticket.market.base, ticket.market.quote);
-  const slippageBps = slippageBpsFor(slippage, autoSlippageBps);
   const payPinned = pinnedToken(chainId, ticket.payToken);
   const recvPinned = pinnedToken(chainId, ticket.recvToken);
   // Gasless funding adds the permit's gas to the fill, so the quote must know about it.
@@ -252,6 +251,10 @@ export default function App() {
     };
   }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit]);
   const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
+  // Auto slippage = the pair's band + headroom for the gas estimate, scaled by gas's
+  // share of THIS ticket (lib/quote autoSlippageBps): small tickets need more.
+  const autoSlippage = autoSlippageBps(defaultSlippageBps(chainId, ticket.market.base, ticket.market.quote), marketQuote.quote);
+  const slippageBps = slippageBpsFor(slippage, autoSlippage);
   const termsOf = useCallback(
     (fq: FillerQuote | null) =>
       fq && payPinned && recvPinned ? quotedTerms(fq, { payDecimals: payPinned.decimals, recvDecimals: recvPinned.decimals, slippageBps }) : undefined,
@@ -880,7 +883,7 @@ export default function App() {
             figures={figures}
             quoteStatus={quoteStatus}
             quoteError={marketQuote.error}
-            slippage={{ setting: slippage, bps: slippageBps, autoBps: autoSlippageBps, set: setSlippage }}
+            slippage={{ setting: slippage, bps: slippageBps, autoBps: autoSlippage, set: setSlippage }}
             recvAddress={tokens.view(ticket.recvToken).address ?? null}
             signError={signError}
             domain={{

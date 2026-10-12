@@ -50,6 +50,29 @@ export function defaultSlippageBps(chainId: number, base: string, quote: string)
   return usd.includes(base) && usd.includes(quote) ? SLIPPAGE_DEFAULT_BPS.stable : SLIPPAGE_DEFAULT_BPS.volatile;
 }
 
+/**
+ * Of the quote's gas charge, the share the AUTO slippage adds as headroom (2026-10-12).
+ * The filler's fill gate prices the fill from Rootstock's simulation, the quote from a
+ * learned / default estimate; they can differ by tens of thousands of gas (the first v2
+ * fill: simulated 424k vs quoted 350k, +10 % of the charge), and the band must absorb
+ * that or the order expires. In bps of the ticket that headroom only matters where gas
+ * is a big share — a $16 USDRIF ticket pays ~4.3 % gas (→ +109 bps), $1,000 ~0.07 %
+ * (→ +2 bps) — so it scales with the gas share instead of one flat band.
+ */
+export const GAS_SLIPPAGE_SHARE = 0.25;
+/** The auto band never goes above this (3 %); a custom one may, up to MAX_SLIPPAGE_BPS. */
+export const AUTO_SLIPPAGE_CAP_BPS = 300;
+
+/**
+ * Auto slippage for a quoted ticket: the pair's base band + {@link GAS_SLIPPAGE_SHARE}
+ * of the quote's gas charge (bps of its gross output). No quote → the base band.
+ */
+export function autoSlippageBps(baseBps: number, q: Pick<FillerQuote, "gasChargeOut" | "grossOut"> | null | undefined): number {
+  if (!q || q.grossOut <= 0n) return baseBps;
+  const gasBps = Number((q.gasChargeOut * 10_000n) / q.grossOut);
+  return Math.min(AUTO_SLIPPAGE_CAP_BPS, Math.max(baseBps, baseBps + Math.ceil(gasBps * GAS_SLIPPAGE_SHARE)));
+}
+
 /** The maker's slippage choice. */
 export type SlippageSetting = { mode: "auto" } | { mode: "custom"; bps: number };
 

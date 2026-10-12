@@ -17,6 +17,9 @@ import { buildOrder } from "../src/lib/order";
 import { MARKET_DECAY_SECONDS, QUOTED_DECAY_SECONDS, MARKET_SLIPPAGE_BPS, MARKET_TTL_SECONDS, planTicket } from "../src/lib/plan";
 import {
   defaultSlippageBps,
+  autoSlippageBps,
+  GAS_SLIPPAGE_SHARE,
+  AUTO_SLIPPAGE_CAP_BPS,
   fetchQuote,
   MAX_SLIPPAGE_BPS,
   parseQuote,
@@ -149,6 +152,17 @@ describe("slippage: auto 10 bps on stable pairs, 30 bps otherwise; custom within
     expect(defaultSlippageBps(30, "USDRIF", "USD0")).toBe(10);
     expect(defaultSlippageBps(30, "WRBTC", "USD0")).toBe(30);
     expect(defaultSlippageBps(30, "WETH", "WRBTC")).toBe(30);
+  });
+  it("auto widens with gas's share of the ticket: the 2026-10-12 $16 USDRIF ticket vs $1,000", () => {
+    // 15.90 gross, 0.69 gas (434 bps): the 10 bps band + ⌈434 × 0.25⌉ = 119 bps. The
+    // gate's simulation came in 0.07 above the quote's charge (44 bps) — inside it now.
+    const small = { grossOut: 15_904_726_652_260_632_868n, gasChargeOut: 690_948_070_102_916_934n };
+    expect(autoSlippageBps(10, small)).toBe(10 + Math.ceil(434 * GAS_SLIPPAGE_SHARE));
+    expect(((small.grossOut - small.gasChargeOut) * BigInt(autoSlippageBps(10, small))) / 10_000n).toBeGreaterThan(762_277_115_385_349_088n - small.gasChargeOut);
+    const big = { grossOut: 1_000n * 10n ** 18n, gasChargeOut: 7n * 10n ** 17n }; // 7 bps gas
+    expect(autoSlippageBps(10, big)).toBe(12);
+    expect(autoSlippageBps(30, null)).toBe(30);
+    expect(autoSlippageBps(30, { grossOut: 100n, gasChargeOut: 90n })).toBe(AUTO_SLIPPAGE_CAP_BPS);
   });
   it("custom values are clamped", () => {
     expect(slippageBpsFor({ mode: "auto" }, 30)).toBe(30);

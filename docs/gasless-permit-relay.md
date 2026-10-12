@@ -253,6 +253,35 @@ the permitted input through the fallback —
 | DOC `0xe700…D9Db` | no | — | fallback answers with empty data, like WRBTC |
 | rUSDT `0xEf21…BB96` | no | — | |
 
+**Sweep of the 100 most-held Rootstock ERC-20s (Blockscout, 2026-10-12).** Each token was
+probed for `DOMAIN_SEPARATOR()`, `nonces()`, ERC-5267 `eip712Domain()`, `name()` /
+`version()`; the domain was reconstructed (versions 1–3, chainId 30) until it matched the
+on-chain separator, and then a real `permit` signed by a throwaway key was `eth_call`ed —
+only tokens where that call SUCCEEDS are listed as supported. Pinned in the SDK
+(`ERC2612_TOKENS`, test `erc2612.test.ts` replays each separator):
+
+| token | address | domain (name, version) | notes |
+|---|---|---|---|
+| USD₮0 | `0x779d…3736` | `("USD₮0", "1")` | above |
+| USDC.e | `0x74c9…de67` | `("Bridged USDC (Stargate)", "2")` | 6 decimals, not a proxy |
+| USDT | `0xaf36…bebf` | `("USDT", "1")` | upgradeable proxy (impl `0xe9ab…7de7`): re-check after an upgrade |
+| USDC | `0xb44a…663c` | `("USD Coin", "1")` | 6 decimals, few holders |
+| DLLR (Sovryn Dollar) | `0xc141…50aa` | `("Sovryn Dollar", "1")` | |
+| stRIF | `0x5db9…d459` | `("StRIFToken", "1")` | RootstockCollective staked RIF; proxy, exposes `eip712Domain()` |
+| ETH | `0xe3f5…ad7d` | `("Ethereum", "1")` | not the app's WETH `0x2f6f…7590` (which has none) |
+| BNB | `0x6ab6…91a8` | `("Binance", "1")` | |
+| ELK | `0xeeee…eeee` | `("Elk", "1")` | |
+
+Also permit-capable but NOT pinned (receipt / LP tokens nothing here trades): LayerBank
+`lRooWRBTC` `0xb87c…c1bd`, `lRooUSDT0` `0x6be7…230e`, `lRooDOC` `0x3f04…caa2`; Avalon
+`aRootstockWRBTC` `0x5c80…1198`, `aRootstockUSDT0` `0x1ea0…63b0`,
+`aRootstock-innovativeWRBTC` `0xe3b7…d6d3`; Elk LP `ELP` `0xab50…bbe4`; a Uniswap-v2 LP
+`0x818c…f287`. Debt tokens (`variableDebtRoo*`) answer `DOMAIN_SEPARATOR` but are not
+transferable. `SYBTC` `0xb52e…e9ba` has a separator + `nonces` but no domain we could
+reconstruct (unverified). Everything else in the top 100 — RIF, USDRIF, DOC, rUSDT, WRBTC,
+WETH, SOV, BPRO, XUSD, MOC, ZUSD (has `nonces`, no separator), the Sovryn i-/k- tokens,
+SolvBTC, uniBTC, BRZ, LINK … — has no ERC-2612 permit.
+
 No DAI-style `permit(holder, spender, nonce, expiry, allowed, …)` on any of them. The
 SDK pins the one supported domain (`ERC2612_TOKENS`, `erc2612DomainOf`), and the app
 refuses to sign when the token's on-chain `DOMAIN_SEPARATOR()` differs from it.

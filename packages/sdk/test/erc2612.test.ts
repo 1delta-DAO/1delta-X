@@ -4,6 +4,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 import {
   ERC2612_ABI,
+  ERC2612_TOKENS,
   JsonBodyError,
   announceFromJson,
   announceToJson,
@@ -33,6 +34,23 @@ describe("ERC-2612 permit helpers", () => {
     expect(erc2612DomainSeparator(d)).toBe("0x69a2c0bf1ca3b4903002efdc61f26c645d95c99c053fa05844259a47d2cc97ef");
     expect(erc2612DomainOf(30, "0x3A15461d8aE0F0Fb5Fa2629e9DA7D66A794a6e37")).toBeUndefined(); // USDRIF: no permit
     expect(erc2612DomainOf(1, USDT0)).toBeUndefined();
+  });
+
+  it("every pinned Rootstock domain reproduces the token's on-chain DOMAIN_SEPARATOR (2026-10-12 sweep)", () => {
+    // `cast call <token> 'DOMAIN_SEPARATOR()(bytes32)' -r https://rpc-gateway.1delta.io/30`, 2026-10-12.
+    const live: Record<string, string> = {
+      "0x779ded0c9e1022225f8e0630b35a9b54be713736": "0x69a2c0bf1ca3b4903002efdc61f26c645d95c99c053fa05844259a47d2cc97ef",
+      "0x74c9f2b00581f1b11aa7ff05aa9f608b7389de67": "0x953be1115ff67a39caa3dac6d1bd73a60d9421b56db2d70542d6301c9e3048ea",
+      "0xaf368c91793cb22739386dfcbbb2f1a9e4bcbebf": "0x5d844905be3707eacaa756e79d682e47642a7c8f2bfbba291555f5fd072f4c54",
+      "0xb44a9b6905af7c801311e8f4e76932ee959c663c": "0x5d64b7c3849deb44a010d6a04e947961d263072c5ecb26d58c21b3e99feee482",
+      "0xc1411567d2670e24d9c4daaa7cda95686e1250aa": "0xb3daecbe32fbc79f792a02321cb27d0b6c9defe52a0ffb1bde5e214191d1425e",
+      "0x5db91e24bd32059584bbdb831a901f1199f3d459": "0x2fbc08edc20aecc17d93a1ebd58b9f8a0f6434c9776700413969e0b3301aee63",
+      "0xe3f5a90f9cb311505cd691a46596599aa1a0ad7d": "0xdf33f5b6a513f6fc42b67336fb462ebed50a9c9e5a0b6c868d4db27560869348",
+      "0x6ab6d61428fde76768d7b45d8bfeec19c6ef91a8": "0x76cb917933708e138f6c8b92b8e1fa1ee92217c483c8d6d56bc22b7feddb8ff0",
+      "0xeeeeeb57642040be42185f49c52f7e9b38f8eeee": "0x328c019efe5fdc83cbfe87f3afaf0e91e8f150513e0d08bf73e0a875def4202e",
+    };
+    expect(Object.keys(ERC2612_TOKENS[30]!).sort()).toEqual(Object.keys(live).sort());
+    for (const [token, ds] of Object.entries(live)) expect(erc2612DomainSeparator(erc2612DomainOf(30, token as Address)!), token).toBe(ds);
   });
 
   it("the digest from the ON-CHAIN separator equals the wallet's typed-data hash, and recovers the signer", async () => {

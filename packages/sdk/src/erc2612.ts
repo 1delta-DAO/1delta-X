@@ -188,14 +188,33 @@ export function isCanonicalPermitSig(p: Pick<Erc2612Permit, "v" | "s">): boolean
  * value, deadline, v, r, s)` shape, and the domain they sign under — by chain id and
  * LOWERCASE address. Verified on-chain (docs/gasless-permit-relay.md, 2026-10-12):
  * the `DOMAIN_SEPARATOR()` each returns equals {@link erc2612DomainSeparator} of the
- * name/version here. Everything else on Rootstock that the app lists (USDRIF, WRBTC,
- * WETH, RIF, DOC, rUSDT) has no permit at all.
+ * name/version here, AND a real `permit` signed for a throwaway key succeeds in an
+ * `eth_call` (2026-10-12 sweep of the 100 most-held Rootstock ERC-20s). Everything
+ * else on Rootstock that the app lists (USDRIF, WRBTC, WETH, RIF, DOC, rUSDT) has no
+ * permit at all. Lending receipt tokens with permit (LayerBank lRoo*, Avalon a*) are
+ * listed in docs/gasless-permit-relay.md but not pinned: nothing trades them here.
  */
 export const ERC2612_TOKENS: Record<number, Record<string, { name: string; version: string }>> = {
   30: {
     // USD₮0 — TransparentUpgradeableProxy → TetherTokenOFTExtension (impl 0x1ec7…b6a3):
     // OZ ERC20PermitUpgradeable + EIP-3009; the domain name is the live `name()`.
     "0x779ded0c9e1022225f8e0630b35a9b54be713736": { name: "USD₮0", version: "1" },
+    // USDC.e — Stargate "Bridged USDC (Stargate)", FiatToken-style; version "2".
+    "0x74c9f2b00581f1b11aa7ff05aa9f608b7389de67": { name: "Bridged USDC (Stargate)", version: "2" },
+    // USDT 0xaf36… — upgradeable proxy (impl 0xe9ab…7de7): the domain follows the impl.
+    "0xaf368c91793cb22739386dfcbbb2f1a9e4bcbebf": { name: "USDT", version: "1" },
+    // USDC 0xb44a… — "USD Coin".
+    "0xb44a9b6905af7c801311e8f4e76932ee959c663c": { name: "USD Coin", version: "1" },
+    // DLLR — Sovryn Dollar.
+    "0xc1411567d2670e24d9c4daaa7cda95686e1250aa": { name: "Sovryn Dollar", version: "1" },
+    // stRIF — RootstockCollective staked RIF (proxy, impl 0xc92b…be03; ERC-5267 `eip712Domain()`).
+    "0x5db91e24bd32059584bbdb831a901f1199f3d459": { name: "StRIFToken", version: "1" },
+    // ETH 0xe3f5… — "Ethereum".
+    "0xe3f5a90f9cb311505cd691a46596599aa1a0ad7d": { name: "Ethereum", version: "1" },
+    // BNB 0x6ab6… — "Binance".
+    "0x6ab6d61428fde76768d7b45d8bfeec19c6ef91a8": { name: "Binance", version: "1" },
+    // ELK.
+    "0xeeeeeb57642040be42185f49c52f7e9b38f8eeee": { name: "Elk", version: "1" },
   },
 };
 
