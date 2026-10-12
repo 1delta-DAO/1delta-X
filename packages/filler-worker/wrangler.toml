@@ -182,9 +182,13 @@ QUOTE_MATCH_GRACE_SECONDS = "120"
 # learned). × the 0.88 default receipt ratio ≈ the production e2e receipts (2026-10-07:
 # 318k–343k direct, 324k pull); was 400k / 420k, which over-priced a fresh filler's
 # small-ticket quotes by ~1 %.
-# v2 solver pool routes (2026-10-12): × 0.88 ≈ the fork receipts (229k direct / 252k pull).
-QUOTE_GAS_ESTIMATE_DIRECT = "265000"
-QUOTE_GAS_ESTIMATE_PULL = "290000"
+# These are eth_estimateGas units (the fill gate prices simulate × r), NOT receipts:
+# 265k / 290k (2026-10-12, from post-refund fork receipts) under-quoted the first v2
+# fill — Rootstock simulated a permit-funded pull at 424k on the unseeded solver, so
+# the gate needed 373k priced against the quote's 308k and the order expired. The
+# learned per-shape max replaces these after the first fill.
+QUOTE_GAS_ESTIMATE_DIRECT = "330000"
+QUOTE_GAS_ESTIMATE_PULL = "355000"
 QUOTE_CACHE_MS = "5000"
 # Token buckets (DO SQLite): per visitor IP, and for everyone together (RPC cost bound).
 QUOTE_RATE_IP_CAPACITY = "30"

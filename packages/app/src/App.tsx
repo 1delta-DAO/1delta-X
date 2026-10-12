@@ -612,8 +612,12 @@ export default function App() {
         orderbook.recordTake({ marketId, side, size: plan.crossedBase, price: q.avg, bySource: q.bySource });
       }
 
+      const postedAt = Date.now();
       setReceipt({
         hash,
+        ...(BOOK_IS_REMOTE && plan.kind !== "limit"
+          ? { market: { createdAt: postedAt, expiresAt: postedAt + plan.ttlSeconds * 1000, decaySeconds: plan.decaySeconds } }
+          : {}),
         headline: quoted
           ? `${fmtAmt(plan.amountIn)} ${payToken} → ≈ ${fmtAmt(plan.targetOut)} ${recvToken} (at least ${fmtAmt(plan.minOut)})`
           : `${fmtAmt(plan.amountIn)} ${payToken} → at least ${fmtAmt(plan.minOut)} ${recvToken}`,
@@ -792,6 +796,21 @@ export default function App() {
       ? phaseLine(orderPhase(receipt.hash, allOrders, fills))
       : null;
 
+  // A market order's live track (Posted → Matching → Fill sent → Filled + ETA): the
+  // book row's own times when it still has one, else what the ticket recorded.
+  const marketTrackArgs = (() => {
+    if (!receipt?.market) return null;
+    const h = receipt.hash.toLowerCase();
+    const row = allOrders.find((o) => o.id.toLowerCase() === h);
+    return {
+      phase: orderPhase(receipt.hash, allOrders, fills),
+      createdAt: row?.createdAt ?? receipt.market.createdAt,
+      expiresAt: row?.expiresAt ?? receipt.market.expiresAt,
+      decaySeconds: receipt.market.decaySeconds,
+      ...(row?.pendingFill?.sentAt ? { sentAt: row.pendingFill.sentAt } : {}),
+    };
+  })();
+
   const tickOf = useCallback((marketId: string) => ticks[marketId] ?? 4, [ticks]);
 
   // Signing is gated on the wallet being connected and on the right chain — the
@@ -850,6 +869,7 @@ export default function App() {
             ready={ready}
             signing={signing}
             receipt={receipt}
+            marketTrack={marketTrackArgs}
             orderLine={orderLine}
             chainId={chainId}
             gate={gate}

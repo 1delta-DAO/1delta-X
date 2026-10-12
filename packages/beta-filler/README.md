@@ -647,7 +647,7 @@ amountOut = grossOut − ⌈gasCostOut × (1 + QUOTE_GAS_MARGIN_BPS / 1e4)⌉ �
   grossed up for the solver's surplus split. No order exists yet, so nothing is
   simulated. The estimate is the largest `eth_estimateGas` among the shape's last 20
   successful fills (now also learned, `GasRatios.typicalEstimate`). Before any, it is
-  `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` (production 265k / 290k since the v2 solver, 2026-10-12 — code defaults 360k / 380k: × the 0.88 default ratio ≈ the v2 pool-route fork receipts, 229k direct / 252k pull), and never below the winning candidate's plan-kind estimate (`ROUTE_GAS_ESTIMATE`, less `SANDBOX_ROUTE_OVERHEAD_GAS` for a pool plan). A `funding: "permit"` request adds `PERMIT_IN_FILL_GAS` (60k) to that estimate before × r: the fill executes the maker's ERC-2612 permit first, and a quote without it under-priced the user's first gasless order (2026-10-12) so it could not fill at the start of its decay.
+  `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` (production 330k / 355k, code defaults 360k / 380k). These are `eth_estimateGas` units — the fill gate prices the SIMULATION × r — so they must not be set from post-refund receipts: 265k / 290k (2026-10-12, from the 229k / 252k fork receipts) under-quoted the first v2 fill, which Rootstock simulated at 424k (permit-funded pull, unseeded solver), and the order expired, and never below the winning candidate's plan-kind estimate (`ROUTE_GAS_ESTIMATE`, less `SANDBOX_ROUTE_OVERHEAD_GAS` for a pool plan). A `funding: "permit"` request adds `PERMIT_IN_FILL_GAS` (60k) to that estimate before × r: the fill executes the maker's ERC-2612 permit first, and a quote without it under-priced the user's first gasless order (2026-10-12) so it could not fill at the start of its decay.
 - **Inventory** (USDRIF → USDT0, pull, `BUY_USDRIF`): `Filler.quoteInventory` bounds what
   the hot wallet would pay by the gates a fill must pass. Those are `MAX_BUY_PRICE`, the
   exit edge (`MIN_EXIT_EDGE_BPS` over the live redeem-and-sell value), and the all-in
@@ -755,7 +755,7 @@ Indicative quotes (`POST /quote` on the Worker, *Indicative quotes* above):
 | `QUOTE_TOLERANCE_BPS` | `0` | optional extra price tolerance taken off the quoted output, bps of grossOut |
 | `QUOTE_TTL_SECONDS` | `30` | quote validity (one Rootstock block), 1..600 |
 | `QUOTE_MATCH_GRACE_SECONDS` | `120` | an order first seen this long after `validUntil` still matches its quote (wallet prompt, book post) |
-| `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` | `360000` / `380000` (production `wrangler.toml`: `265000` / `290000` since the v2 solver) | `eth_estimateGas` assumed per route fill before one is learned for the shape (then the max learned) |
+| `QUOTE_GAS_ESTIMATE_DIRECT` / `_PULL` | `360000` / `380000` (production `wrangler.toml`: `330000` / `355000` — simulation units, see *Indicative quotes*) | `eth_estimateGas` assumed per route fill before one is learned for the shape (then the max learned) |
 | `QUOTE_CACHE_MS` | `5000` | identical requests reuse the priced result |
 
 Inventory strategy:

@@ -681,3 +681,81 @@ main.reading .md .mdquote { margin-bottom: 26px; }
   font-family: var(--mono); font-size: 11px; padding: 4px 11px; cursor: pointer;
 }
 .expiry button[aria-checked="true"] { border-color: var(--ink); color: var(--ink); }
+
+/* ── market order live track (lib/marketTrack) ─────────── */
+.mtrack { display: flex; flex-direction: column; gap: 10px; padding: 2px 0 4px; }
+.mt-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.mt-title { display: inline-flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 600; color: var(--ink); }
+.mt-eta {
+  font-family: var(--mono); font-size: 12px; color: var(--lime); padding: 2px 8px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--lime) 45%, transparent); font-variant-numeric: tabular-nums;
+}
+.mtrack[data-late] .mt-eta { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 45%, transparent); }
+.mt-orb {
+  position: relative; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--lime); flex: none;
+}
+.mt-orb::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--lime);
+  animation: mt-ping 1.4s cubic-bezier(0, 0, .2, 1) infinite;
+}
+.mtrack[data-late] .mt-orb, .mtrack[data-late] .mt-orb::after, .mrow[data-late] .mt-orb, .mrow[data-late] .mt-orb::after { background: var(--orange); }
+.mtrack[data-stage="sent"] .mt-orb, .mtrack[data-stage="sent"] .mt-orb::after { background: var(--violet); }
+@keyframes mt-ping { 0% { transform: scale(1); opacity: .7; } 80%, 100% { transform: scale(2.8); opacity: 0; } }
+.mt-check {
+  display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--lime); color: #000; font-style: normal; font-size: 12px; font-weight: 800;
+  animation: mt-pop .55s cubic-bezier(.2, 1.6, .4, 1) both;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--lime) 60%, transparent);
+}
+.mtrack[data-stage="filled"] .mt-check { animation: mt-pop .55s cubic-bezier(.2, 1.6, .4, 1) both, mt-halo 1.2s ease-out .2s both; }
+@keyframes mt-pop { from { transform: scale(0) rotate(-40deg); } to { transform: none; } }
+@keyframes mt-halo { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lime) 60%, transparent); } to { box-shadow: 0 0 0 14px transparent; } }
+
+.mt-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); }
+.mt-steps li { position: relative; display: flex; flex-direction: column; align-items: center; gap: 5px; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); font-family: var(--mono); }
+.mt-steps li i { position: relative; z-index: 1; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--line2); background: var(--card); transition: all .4s; }
+.mt-steps li + li::before {
+  content: ""; position: absolute; top: 5px; right: 50%; width: 100%; height: 2px; background: var(--line2);
+  transition: background .5s;
+}
+.mt-steps li[data-s="done"], .mt-steps li[data-s="now"] { color: var(--ink); }
+.mt-steps li[data-s="done"] i { border-color: var(--lime); background: var(--lime); }
+.mt-steps li[data-s="done"]::before, .mt-steps li[data-s="now"]::before { background: var(--lime); }
+.mt-steps li[data-s="now"] i { border-color: var(--lime); background: var(--card); animation: mt-step 1.2s ease-in-out infinite; }
+.mtrack[data-stage="filled"] .mt-steps li[data-s="now"] i { background: var(--lime); animation: none; }
+.mt-steps li[data-s="dead"] i { border-color: var(--line2); }
+@keyframes mt-step { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lime) 55%, transparent); } 50% { box-shadow: 0 0 0 6px transparent; } }
+
+.mt-bar { position: relative; height: 4px; border-radius: 999px; overflow: hidden; background: var(--line); }
+.mt-bar b {
+  position: absolute; inset: 0 auto 0 0; border-radius: inherit; transition: width .9s linear;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--lime) 55%, transparent), var(--lime));
+}
+.mt-bar::after {
+  content: ""; position: absolute; inset: 0; width: 35%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .55), transparent);
+  animation: mt-shimmer 1.6s ease-in-out infinite;
+}
+.mtrack[data-late] .mt-bar b { background: linear-gradient(90deg, color-mix(in srgb, var(--orange) 55%, transparent), var(--orange)); }
+.mtrack[data-stage="filled"] .mt-bar::after, .mtrack[data-stage="ended"] .mt-bar::after { display: none; }
+.mtrack[data-stage="ended"] .mt-bar b { background: var(--line2); }
+@keyframes mt-shimmer { from { transform: translateX(-120%); } to { transform: translateX(320%); } }
+.mt-sub { display: flex; justify-content: space-between; gap: 10px; font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
+.mt-auction { color: var(--faint); white-space: nowrap; }
+
+.st.mrow { display: inline-flex; align-items: center; gap: 7px; color: var(--lime); }
+.st.mrow[data-late] { color: var(--orange); }
+.st.mrow .mt-orb { width: 7px; height: 7px; }
+.st.mrow[data-v="sent"] .mt-orb, .st.mrow[data-v="sent"] .mt-orb::after { background: var(--violet); }
+.st.mrow em { font-style: normal; color: var(--dim); font-variant-numeric: tabular-nums; }
+.prog .mini.seek { position: relative; }
+.prog .mini.seek::after {
+  content: ""; position: absolute; inset: 0; width: 30%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--lime) 70%, transparent), transparent);
+  animation: mt-shimmer 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mt-orb::after, .mt-bar::after, .prog .mini.seek::after, .mt-steps li i, .mt-check { animation: none !important; }
+  .mt-bar b { transition: none; }
+}

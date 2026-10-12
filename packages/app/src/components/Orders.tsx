@@ -6,6 +6,8 @@ import { ago, fmtAmt, fmtPrice, shortHex, until } from "../lib/format";
 import { fillStatusLabel, orderTypeLabel, rowStatus, rowStatusLabel } from "../lib/orderLifecycle";
 import type { TxState } from "../lib/txFlow";
 import { SOURCE_NAME, dueSlices, needsSliceSignature, type Fill, type RestingOrder } from "../lib/types";
+import { QUOTED_DECAY_SECONDS } from "../lib/plan";
+import { MarketRowStatus } from "./MarketFillTrack";
 import { TxLink, TxStatus } from "./TxStatus";
 import type { TokenIndex } from "../hooks/useTokenIndex";
 import { PairIcon } from "./TokenIcon";
@@ -138,7 +140,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                         <td>{fmtPrice(o.price, tickOf(o.marketId))}</td>
                         <td>
                           <div className="prog">
-                            <div className="mini">
+                            <div className={o.type === "market" && (status === "open" || status === "fill-pending") ? "mini seek" : "mini"}>
                               <i style={{ width: `${pct}%`, background: "var(--lmt)" }} />
                             </div>
                             <div className="t">
@@ -147,6 +149,15 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                           </div>
                         </td>
                         <td>
+                          {o.type === "market" && (status === "open" || status === "fill-pending") ? (
+                            <MarketRowStatus
+                              phase={status === "fill-pending" ? { kind: "fill-pending", tx: o.pendingFill!.txHash } : { kind: "posted", simulated: o.book !== "remote" }}
+                              createdAt={o.createdAt}
+                              expiresAt={o.expiresAt}
+                              decaySeconds={QUOTED_DECAY_SECONDS}
+                              {...(o.pendingFill?.sentAt ? { sentAt: o.pendingFill.sentAt } : {})}
+                            />
+                          ) : (
                           <span
                             className="st"
                             data-v={status}
@@ -162,6 +173,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                           >
                             {rowStatusLabel(status)}
                           </span>
+                          )}
                           {status === "fill-pending" && o.pendingFill && (
                             <div className="txl" style={{ fontSize: 10.5 }}>
                               <TxLink chainId={chainId} hash={o.pendingFill.txHash} />

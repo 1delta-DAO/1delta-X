@@ -25,13 +25,17 @@ import { SOURCE_NAME, SOURCE_VAR, SOURCES, type Source } from "../lib/types";
 import type { PhaseLine } from "../lib/orderLifecycle";
 import type { TxState } from "../lib/txFlow";
 import { TokenSelect } from "./TokenSelect";
+import { MarketFillTrack } from "./MarketFillTrack";
 import { OrderStatusLine, TxStatus } from "./TxStatus";
+import type { TrackArgs } from "../lib/marketTrack";
 
 export interface Receipt {
   hash: string;
   headline: string;
   detail?: string;
   note: string;
+  /** A posted MARKET order: drives the live fill track (lib/marketTrack). */
+  market?: { createdAt: number; expiresAt: number; decaySeconds: number };
 }
 
 /** Replaces the sign button when something has to happen first. */
@@ -102,6 +106,8 @@ interface OrderFormProps {
   ready: boolean;
   signing: boolean;
   receipt: Receipt | null;
+  /** The posted market order's live track inputs (App), null otherwise. */
+  marketTrack?: Omit<TrackArgs, "now"> | null;
   /** The signed ticket's live status: Signing… → Posted → Fill submitted → Filled / Expired. */
   orderLine?: PhaseLine | null;
   /** For explorer links. */
@@ -186,6 +192,7 @@ export function OrderForm(props: OrderFormProps) {
     ready,
     signing,
     receipt,
+    marketTrack,
     orderLine,
     chainId,
     gate,
@@ -883,7 +890,14 @@ export function OrderForm(props: OrderFormProps) {
             <span className="lbl" style={{ color: "var(--lime)" }}>
               {BOOK_IS_REMOTE ? "Order signed · posted to the orderbook" : "Order signed · simulated book, nothing broadcast"}
             </span>
-            {orderLine && <OrderStatusLine line={orderLine} chainId={chainId} />}
+            {marketTrack ? (
+              <>
+                <MarketFillTrack {...marketTrack} />
+                {orderLine?.tx && <OrderStatusLine line={orderLine} chainId={chainId} />}
+              </>
+            ) : (
+              orderLine && <OrderStatusLine line={orderLine} chainId={chainId} />
+            )}
             <div>{receipt.headline}</div>
             {receipt.detail && <div className="k">{receipt.detail}</div>}
             <div className="k">{shortHex(receipt.hash, 12, 8)}</div>
