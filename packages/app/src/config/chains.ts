@@ -1,4 +1,4 @@
-import { bsc, mainnet, rootstock } from "viem/chains";
+import { rootstock } from "viem/chains";
 import type { Chain } from "viem";
 
 /**
@@ -28,15 +28,12 @@ export interface ChainConfig {
 }
 
 const GOLDSKY = "https://api.goldsky.com/api/public/project_clslspm3c0knv01wvgfb2fqyq/subgraphs";
-const GATEWAY = "https://gateway-arbitrum.network.thegraph.com/api/${GRAPH_KEY}/deployments/id";
 
 /** Listed in selector order, which is why Rootstock leads: it is the default. */
 export const CHAINS: ChainConfig[] = [
   // Rootstock is the one chain here whose Sushi subgraph is public, so it is
   // the only one where the aggregated two-venue book works with no API key.
   { chainId: 30, oku: "rootstock", label: "Rootstock", chain: rootstock, sushi: `${GOLDSKY}/sushiswap/v3-rootstock-3/gn` },
-  { chainId: 1, oku: "ethereum", label: "Ethereum", chain: mainnet, sushi: `${GATEWAY}/QmP1FMFsU4wNcui1eezwuvBjxrbLPucKrKZ9Kftn34nULw` },
-  { chainId: 56, oku: "bsc", label: "BNB Chain", chain: bsc, sushi: `${GATEWAY}/QmWQcbEg7J9gWBWfuqnknj5pdYZTp4U31JxQrmjWNEmpTM` },
 ];
 
 /**

@@ -41,6 +41,15 @@ function ChainSelect({ chainId, onChange }: { chainId: number; onChange: (id: nu
   const [open, setOpen] = useState(false);
   const ref = useDismiss(open, () => setOpen(false));
   const options = tradableChains();
+  // One chain (the Rootstock beta): a plain badge, no menu to open.
+  if (options.length <= 1) {
+    return (
+      <span className="netpill" title="The beta runs on Rootstock only">
+        <i className="dot" />
+        {chainLabel(chainId)}
+      </span>
+    );
+  }
 
   return (
     <div className="menu" ref={ref}>

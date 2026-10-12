@@ -107,19 +107,6 @@ export interface PinnedToken {
  * change what is signed.
  */
 export const TOKENS: Record<number, Record<string, PinnedToken>> = {
-  1: {
-    ETH: { address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", decimals: 18 },
-    USDC: { address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", decimals: 6 },
-    USDT: { address: "0xdac17f958d2ee523a2206206994597c13d831ec7", decimals: 6 },
-    WBTC: { address: "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", decimals: 8 },
-    LINK: { address: "0x514910771af9ca656af840dff83e8264ecf986ca", decimals: 18 },
-  },
-  56: {
-    WBNB: { address: "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", decimals: 18 },
-    USDT: { address: "0x55d398326f99059ff775485246999027b3197955", decimals: 18 },
-    BTCB: { address: "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c", decimals: 18 },
-    ETH: { address: "0x2170ed0880ac9a755fd29b2688956bd959f933f8", decimals: 18 },
-  },
   30: {
     WRBTC: { address: "0x542fda317318ebf1d3deaf76e0b632741a7e677d", decimals: 18 },
     USD0: { address: "0x779ded0c9e1022225f8e0630b35a9b54be713736", decimals: 6 },
@@ -184,66 +171,6 @@ export function assertPoolTokens(
 }
 
 export const MARKETS: Market[] = [
-  // ── Ethereum ───────────────────────────────────────────
-  {
-    id: "eth-1-eth-usdc",
-    chainId: 1,
-    pools: [{ dex: "uniswap-v3", address: "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640", feeBps: 500 }],
-    base: "ETH",
-    quote: "USDC",
-  },
-  {
-    id: "eth-1-eth-usdt",
-    chainId: 1,
-    pools: [{ dex: "uniswap-v3", address: "0x11b815efb8f581194ae79006d24e0d814b7697f6", feeBps: 500 }],
-    base: "ETH",
-    quote: "USDT",
-  },
-  {
-    id: "eth-1-wbtc-eth",
-    chainId: 1,
-    pools: [{ dex: "uniswap-v3", address: "0x4585fe77225b41b697c938b018e2ac67ac5a20c0", feeBps: 500 }],
-    base: "WBTC",
-    quote: "ETH",
-  },
-  {
-    id: "eth-1-usdc-usdt",
-    chainId: 1,
-    pools: [{ dex: "uniswap-v3", address: "0x3416cf6c708da44db2624d63ea0aaef7113527c6", feeBps: 100 }],
-    base: "USDC",
-    quote: "USDT",
-  },
-  {
-    id: "eth-1-link-eth",
-    chainId: 1,
-    pools: [{ dex: "uniswap-v3", address: "0xa6cc3c2531fdaa6ae1a3ca84c2855806728693e8", feeBps: 3000 }],
-    base: "LINK",
-    quote: "ETH",
-  },
-
-  // ── BNB Chain ──────────────────────────────────────────
-  {
-    id: "bsc-56-bnb-usdt",
-    chainId: 56,
-    pools: [{ dex: "uniswap-v3", address: "0x47a90a2d92a8367a91efa1906bfc8c1e05bf10c4", feeBps: 100 }],
-    base: "WBNB",
-    quote: "USDT",
-  },
-  {
-    id: "bsc-56-btcb-bnb",
-    chainId: 56,
-    pools: [{ dex: "uniswap-v3", address: "0x28df0835942396b7a1b7ae1cd068728e6ddbbafd", feeBps: 500 }],
-    base: "BTCB",
-    quote: "WBNB",
-  },
-  {
-    id: "bsc-56-eth-bnb",
-    chainId: 56,
-    pools: [{ dex: "uniswap-v3", address: "0x0f338ec12d3f7c3d77a4b9fcc1f95f3fb6ad0ea6", feeBps: 500 }],
-    base: "ETH",
-    quote: "WBNB",
-  },
-
   // ── Rootstock ──────────────────────────────────────────
   // The only chain here whose SushiSwap subgraph is public, so it is where the
   // aggregated two-venue book actually runs without an API key.

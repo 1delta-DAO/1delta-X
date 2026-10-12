@@ -149,6 +149,8 @@ interface OrderFormProps {
   autoWrap?: { symbol: string; value: number } | null;
   /** The wallet holds the wrapped native coin: offer turning it back (behind a confirm). */
   unwrap?: { symbol: string; busy: boolean; error: string | null; tx?: TxState; action: () => void } | null;
+  /** Set when the ticket is worth less than one fill's network gas (App): refused, never quoted. */
+  tooSmall?: { ticketUsd: number; gasUsd: number } | null;
   /** USD per one token (lib/usdPrices: Sushi's price API, else stables / the market mid); display only. */
   usdOf?: (symbol: string) => number | undefined;
   onConnect: () => void;
@@ -232,6 +234,7 @@ export function OrderForm(props: OrderFormProps) {
     autoWrap,
     unwrap,
     usdOf,
+    tooSmall,
     onConnect,
     onSign,
   } = props;
@@ -378,7 +381,7 @@ export function OrderForm(props: OrderFormProps) {
     quoting: quoteStatus === "loading",
     priced: isMarket ? !!figures : !!quote && quote.totalIn > 0,
   });
-  const canSign = !sb.disabled && !needsApproval;
+  const canSign = !sb.disabled && !needsApproval && !tooSmall;
 
   return (
     <div className="box ticketbox">
@@ -436,6 +439,12 @@ export function OrderForm(props: OrderFormProps) {
             />
           </div>
           {payUsd !== undefined && <div className="usdline">≈ {fmtUsd(payUsd)}</div>}
+          {tooSmall && (
+            <span className="capnote">
+              Too small to fill: one fill&rsquo;s network fee is ≈ {fmtUsd(tooSmall.gasUsd)}, more than this ≈ {fmtUsd(tooSmall.ticketUsd)}
+              {mode === "twap" ? " slice" : " ticket"}. Enter at least {fmtUsd(tooSmall.gasUsd * 2)} or so.
+            </span>
+          )}
           {overBalance && (
             <span className="capnote">
               exceeds your {autoWrap && autoWrap.value > 0 ? "spendable " : ""}balance of {fmtBalance(paySpendable ?? 0)} {payToken}
@@ -844,7 +853,8 @@ export function OrderForm(props: OrderFormProps) {
                       allowance.approving ||
                       allowance.required <= 0 ||
                       allowance.mismatch !== null ||
-                      allowance.blocked !== null
+                      allowance.blocked !== null ||
+                      !!tooSmall
                     }
                     onClick={allowance.approve}
                   >
@@ -896,7 +906,7 @@ export function OrderForm(props: OrderFormProps) {
                 </>
               )}
               <button type="button" className="cta" disabled={!canSign} onClick={onSign}>
-                {sb.label}
+                {tooSmall ? "Amount too small to fill" : sb.label}
               </button>
             </>
           )}

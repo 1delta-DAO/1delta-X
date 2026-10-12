@@ -19,6 +19,7 @@ import { useChainPools } from "./hooks/useChainPools";
 import { useMarketFloorInputs } from "./hooks/useMarketFloor";
 import { useUsdPrices } from "./hooks/useUsdPrices";
 import { usdPrice } from "./lib/usdPrices";
+import { FLOOR_PROFILES, fillGasFor } from "./lib/marketFloor";
 import { quoteUrl, useMarketQuote } from "./hooks/useMarketQuote";
 import { useFills, useRestingOrders } from "./hooks/useOrderbook";
 import { usePoolBook } from "./hooks/usePoolBook";
@@ -219,6 +220,38 @@ export default function App() {
     mid: pool.book?.mid ?? null,
   });
 
+  // USD reference prices (display only): Sushi's price API, else the heuristic.
+  const usdPrices = useUsdPrices(chainId);
+  const bookMid = pool.book?.mid ?? null;
+  const usdOf = useCallback(
+    (symbol: string) =>
+      usdPrice(
+        usdPrices.table,
+        {
+          chainId,
+          addressOf: (s) => pinnedToken(chainId, s)?.address,
+          market: { base: ticket.market.base, quote: ticket.market.quote, mid: bookMid },
+        },
+        symbol,
+      ),
+    [usdPrices.table, chainId, ticket.market.base, ticket.market.quote, bookMid],
+  );
+
+
+  // TOO SMALL TO FILL: a ticket worth less than one fill's network gas can never be
+  // filled at a positive price — refuse it up front instead of quoting a loss or
+  // waiting for a quote that comes back 422 (2026-10-12: 0.000000022 WRBTC).
+  const nativeSym = wrappedNativeSymbol(chainId);
+  const nativeUsd = nativeSym ? usdOf(nativeSym) : undefined;
+  const fillGasUnits = fillGasFor(deployment, ticket.marketId);
+  const profile = FLOOR_PROFILES[chainId];
+  const gasPriceForMin = floorInputs?.gasPriceWei ?? (profile ? profile.minGasPriceWei : undefined);
+  const fillGasUsd =
+    nativeUsd !== undefined && gasPriceForMin !== undefined ? (fillGasUnits * Number(gasPriceForMin) * nativeUsd) / 1e18 : undefined;
+  const payPx = usdOf(ticket.payToken);
+  const ticketUsd = payPx !== undefined && ticket.amount > 0 ? (ticket.amount / (ticket.mode === "twap" ? Math.max(1, ticket.slices) : 1)) * payPx : undefined;
+  const tooSmall = ticketUsd !== undefined && fillGasUsd !== undefined && ticketUsd < fillGasUsd ? { ticketUsd, gasUsd: fillGasUsd } : null;
+
   // MARKET tickets are priced by the FILLER's indicative quote (lib/quote.ts): the order
   // starts at what the filler would deliver now (route output − gas − its gas margin)
   // and decays to the maker's slippage protection. No quote (mock book, no filler on the
@@ -231,7 +264,7 @@ export default function App() {
   // quote), so it reaches the quote request one render later through this state.
   const [quoteWithPermit, setQuoteWithPermit] = useState(false);
   const quoteReq: QuoteRequest | null = useMemo(() => {
-    if (ticket.mode !== "market" || !deployment || !quotesSupported(chainId) || ticket.amount <= 0 || !payPinned || !recvPinned) return null;
+    if (ticket.mode !== "market" || !deployment || !quotesSupported(chainId) || ticket.amount <= 0 || !payPinned || !recvPinned || tooSmall) return null;
     // The exact input the order will commit: the typed amount, capped at the balance —
     // unless the typed amount is over it: then quote what was typed (the form shows
     // "insufficient" and will not sign) rather than silently pricing a smaller ticket.
@@ -249,7 +282,7 @@ export default function App() {
       ...(wallet.address ? { maker: wallet.address } : {}),
       ...(quoteWithPermit ? { funding: "permit" as const } : {}),
     };
-  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit]);
+  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit, tooSmall !== null]);
   const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
   // Defence in depth: a quote is only THE price for the request it answers (same pay
   // amount and tokens) — never one left over from a previous amount or pair (it priced,
@@ -329,7 +362,7 @@ export default function App() {
       // number, and flashing it before the quote replaced it read as a wrong quote.
       // The form shows a loader instead; the ladder is only the fallback once the
       // quote has failed.
-      ticket.mode !== "market" || ticket.amount <= 0 || quoteStatus === "loading"
+      ticket.mode !== "market" || ticket.amount <= 0 || quoteStatus === "loading" || tooSmall
         ? null
         : marketFigures({
             side: ticket.side,
@@ -339,7 +372,7 @@ export default function App() {
             fallbackGas: plan?.kind === "market" && !plan.quoted && plan.floor ? plan.floor.gasCostOut : null,
             mid: pool.book?.mid ?? null,
           }),
-    [ticket.mode, ticket.amount, ticket.side, rfq, q, plan, pool.book?.mid, quoteStatus],
+    [ticket.mode, ticket.amount, ticket.side, rfq, q, plan, pool.book?.mid, quoteStatus, tooSmall],
   );
   const bookMarker: BookMarker | null = figures
     ? {
@@ -853,23 +886,6 @@ export default function App() {
     };
   })();
 
-  // USD reference prices (display only): Sushi's price API, else the heuristic.
-  const usdPrices = useUsdPrices(chainId);
-  const bookMid = pool.book?.mid ?? null;
-  const usdOf = useCallback(
-    (symbol: string) =>
-      usdPrice(
-        usdPrices.table,
-        {
-          chainId,
-          addressOf: (s) => pinnedToken(chainId, s)?.address,
-          market: { base: ticket.market.base, quote: ticket.market.quote, mid: bookMid },
-        },
-        symbol,
-      ),
-    [usdPrices.table, chainId, ticket.market.base, ticket.market.quote, bookMid],
-  );
-
   const tickOf = useCallback((marketId: string) => ticks[marketId] ?? 4, [ticks]);
 
   // Signing is gated on the wallet being connected and on the right chain — the
@@ -910,6 +926,7 @@ export default function App() {
         <div className="deck">
           <OrderForm
             usdOf={usdOf}
+            tooSmall={tooSmall}
             ticket={ticket}
             quote={q}
             tokens={tokens}
