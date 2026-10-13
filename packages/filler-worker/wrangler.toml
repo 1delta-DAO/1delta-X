@@ -224,7 +224,10 @@ MAX_ORDERS_PER_TICK = "10"
 # An order every strategy passed on (unprofitable, out of price, below minimum) — or
 # one we just filled — is not re-quoted for this long unless the book reports a
 # different fillable for it (a resting book used to cost ~67 RPC calls per tick).
-RESTING_RECHECK_SECONDS = "300"
+# 60 s (was 300) — the limit-order "cron": a resting limit is re-quoted every ~2 Rootstock
+# blocks, so a market that reaches it is caught within a minute, not five. Cost: one
+# quote (≈ 2–4 batched RPC calls) per resting order per minute.
+RESTING_RECHECK_SECONDS = "60"
 # Orders expiring within this many seconds are skipped: a tx cannot land in time on
 # ~30 s blocks (the orderbook refuses TTLs under 120 s).
 EXPIRY_MARGIN_SECONDS = "90"

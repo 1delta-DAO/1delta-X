@@ -191,7 +191,13 @@ export function planTicket(a: PlanArgs): TicketPlan | null {
   // not booked as a fill no signature backs. Its floor is the limit price over
   // the full size; a short opening auction from the book's own price lets the
   // crossing part fill near the book rather than hand the filler the spread.
-  if (mode === "limit" && q.resting && limit) {
+  //
+  // That holds for a limit that crosses ENTIRELY too (no resting part): it is still a
+  // LIMIT order — floor = the limit price, life = the chosen expiry. It used to fall
+  // through to the market path below and sign the book walk's output with a market
+  // floor: no room for the filler's gas, a 5-minute life, shown as a market order
+  // (2026-10-13: 8.53 USD0 → "at least 100.88 RIF", never fillable).
+  if (mode === "limit" && limit) {
     const amountIn = q.totalIn;
     const minOut = side === "sell" ? amountIn * limit : amountIn / limit;
     const targetOut = Math.max(q.totalOut, minOut);
@@ -207,7 +213,7 @@ export function planTicket(a: PlanArgs): TicketPlan | null {
       orders: 1,
       fundingTtlSeconds: ttl,
       crossedBase: q.crossedBase,
-      restingBase: q.resting.size,
+      restingBase: q.resting?.size ?? 0,
     };
   }
 

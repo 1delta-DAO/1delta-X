@@ -697,7 +697,7 @@ Common:
 | `GAS_PRICE_MIN_MULT_BPS` | `10300` | send (and price) every tx at ⌈latest block `minimumGasPrice` × this / 10000⌉; `eth_gasPrice` when the block has no such field. 10000..20000 (see *Gas price and priced gas*) |
 | `DEFAULT_GAS_RECEIPT_RATIO` | `0.88` | receipt / estimate ratio a fill shape is priced at before its first receipt; afterwards the max of its last 20, clamped to [0.6, 1.0]. 0.6..1.0 |
 | `RECEIPT_TIMEOUT_MS` | `120000` | after this without a receipt, a sent tx's outflow / fill reservation is final (a late receipt still settles the gas) |
-| `RESTING_RECHECK_SECONDS` | `300` | an order every strategy passed on, or one we just filled, is not re-quoted for this long unless the book's fillable for it changes (≤ 30 s for a time-varying price, sooner when a strategy predicts its gate passes; `0` = off) |
+| `RESTING_RECHECK_SECONDS` | `300` (production `wrangler.toml`: `60` since 2026-10-13) | an order every strategy passed on, or one we just filled, is not re-quoted for this long unless the book's fillable for it changes (≤ 30 s for a time-varying price, sooner when a strategy predicts its gate passes; `0` = off) |
 | `EXPIRY_MARGIN_SECONDS` | `90` | orders expiring within this are skipped (a tx cannot land in time on ~30 s blocks) |
 | `PERMIT_FILLS_ENABLED` | `1` | fill a gasless maker's order WITH its ERC-2612 permit inside `executeFill` (route strategy; see *Gasless makers*); `0` skips orders only such a permit funds. The permit's pre-simulation gas is the constant `PERMIT_IN_FILL_GAS` (`src/route.ts`), not a knob. **Removed** (2026-10-12): `PERMIT_RELAY_ENABLED`, `PERMIT_RELAY_GAS` (the separate relay tx is gone; both are ignored if still set) |
 

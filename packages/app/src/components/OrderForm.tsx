@@ -149,6 +149,8 @@ interface OrderFormProps {
   autoWrap?: { symbol: string; value: number } | null;
   /** The wallet holds the wrapped native coin: offer turning it back (behind a confirm). */
   unwrap?: { symbol: string; busy: boolean; error: string | null; tx?: TxState; action: () => void } | null;
+  /** One fill's network gas in USD (App), for a limit's net fill threshold. */
+  fillGasUsd?: number;
   /** Set when the ticket is worth less than one fill's network gas (App): refused, never quoted. */
   tooSmall?: { ticketUsd: number; gasUsd: number } | null;
   /** USD per one token (lib/usdPrices: Sushi's price API, else stables / the market mid); display only. */
@@ -235,6 +237,7 @@ export function OrderForm(props: OrderFormProps) {
     unwrap,
     usdOf,
     tooSmall,
+    fillGasUsd,
     onConnect,
     onSign,
   } = props;
@@ -283,6 +286,18 @@ export function OrderForm(props: OrderFormProps) {
   const payUsd = payPx !== undefined && amount > 0 ? amount * payPx : undefined;
   const recvUsd = recvPx !== undefined && recvAmount > 0 ? recvAmount * recvPx : undefined;
   const usdDiff = payUsd !== undefined && recvUsd !== undefined && payUsd > 0 ? recvUsd / payUsd - 1 : undefined;
+
+  // ---- a limit's fill threshold, net of the filler's gas (the fee comes out of the fill)
+  const sliceUsd = payUsd !== undefined ? payUsd / (mode === "twap" ? Math.max(1, ticket.slices) : 1) : undefined;
+  const limitFee =
+    !isMarket && fillGasUsd !== undefined && sliceUsd !== undefined && sliceUsd > 0 && ticket.limit && ticket.limit > 0
+      ? (() => {
+          const share = fillGasUsd / sliceUsd;
+          // SELL (receive quote): market ≥ limit·(1+g); BUY (receive base): market ≤ limit/(1+g).
+          const fillsAt = ticket.side === "sell" ? ticket.limit * (1 + share) : ticket.limit / (1 + share);
+          return { gasUsd: fillGasUsd, share, fillsAt };
+        })()
+      : null;
 
   // ---- what you receive
   /** A quote for this ticket is on its way and nothing else may stand in for it (App). */
@@ -619,6 +634,14 @@ export function OrderForm(props: OrderFormProps) {
                 </div>
               </div>
             )}
+            {limitFee && (
+              <span className={limitFee.share > 0.03 ? "capnote" : "capnote dim"}>
+                The filler&rsquo;s network fee (≈ {fmtUsd(limitFee.gasUsd)}, {(limitFee.share * 100).toFixed(1)}% of this{" "}
+                {mode === "twap" ? "slice" : "order"}) comes out of the fill: it fills once the market reaches ≈{" "}
+                {fmtPrice(limitFee.fillsAt, tick)} {market.quote}/{market.base}
+                {limitFee.share > 0.03 ? " — a larger order wastes less of its price on gas" : ""}
+              </span>
+            )}
             {mode === "limit" && (
               <div className="expiry" role="radiogroup" aria-label="Order expires after">
                 <span className="lbl">Expires</span>
@@ -917,7 +940,7 @@ export function OrderForm(props: OrderFormProps) {
               </>
             ) : (
               <>
-                Network fee <b>0</b> — the filler pays
+                Signing is <b>free</b> — the filler&rsquo;s network fee comes out of the fill, not your wallet
               </>
             )}
             {allowance.gasless?.selected && !overBalance && (

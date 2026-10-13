@@ -48,7 +48,7 @@ import {
   type QuoteRequest,
   type SlippageSetting,
 } from "./lib/quote";
-import { MARKET_SLIPPAGE_BPS, planTicket, requiredInputWei, sliceCap, type TicketPlan } from "./lib/plan";
+import { MARKET_SLIPPAGE_BPS, expiryLabel, planTicket, requiredInputWei, sliceCap, type TicketPlan } from "./lib/plan";
 import type { RestingOrder, Side, SliceSpec } from "./lib/types";
 import { useAllowance } from "./wallet/useAllowance";
 import { useBalances } from "./wallet/useBalances";
@@ -652,7 +652,7 @@ export default function App() {
       let hash: string = signed.hash;
       setSignPhase("posting");
 
-      if (plan.kind === "limit" && q.resting && ticket.limit) {
+      if (plan.kind === "limit" && ticket.limit) {
         const order = await orderbook.place({
           marketId,
           side,
@@ -703,7 +703,9 @@ export default function App() {
           BOOK_IS_REMOTE
             ? quoted
               ? "signed at the filler's quote · posted to the orderbook — it fills at the quote within a block or two, down to your minimum if the price moves; not filled after ~2 blocks? cancel and re-quote"
-              : "signed · posted to the orderbook · awaiting a filler — fills appear when they settle on-chain"
+              : plan.kind === "limit"
+                ? `signed · posted to the orderbook at your limit — fills whenever the market, net of the filler's network fee, reaches it (lives ${expiryLabel(ticket.expiry)})`
+                : "signed · posted to the orderbook · awaiting a filler — fills appear when they settle on-chain"
             : plan.kind === "limit"
               ? "signed · resting in the simulated book"
               : "signed · settlement simulated — nothing was broadcast"
@@ -927,6 +929,7 @@ export default function App() {
           <OrderForm
             usdOf={usdOf}
             tooSmall={tooSmall}
+            {...(fillGasUsd !== undefined ? { fillGasUsd } : {})}
             ticket={ticket}
             quote={q}
             tokens={tokens}
