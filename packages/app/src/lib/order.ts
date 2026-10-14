@@ -1,16 +1,21 @@
 import {
+  ItemOp,
+  ItemPolicy,
   OrderSide,
+  forLegPreFund,
   hashOrderStruct,
   overrideHasCarrier,
   packTiming,
   randomOrderNonce as sdkRandomOrderNonce,
   withDeltaVerifyOutputs,
   withFillOnce,
+  withItemPolicy,
+  type Item,
   type LegIn,
   type LegOut,
   type Order,
 } from "@1delta-x/sdk";
-import { parseUnits, zeroAddress, type Address, type Hex } from "viem";
+import { encodeAbiParameters, parseUnits, zeroAddress, type Address, type Hex } from "viem";
 
 import type { Side } from "./types";
 
@@ -72,7 +77,31 @@ export interface BuildOrderArgs {
    * Off unless asked for; the app asks for MARKET tickets only (`fillOnceFor` in lib/nonces.ts).
    */
   fillOnce?: boolean;
+  /**
+   * NATIVE-OUT (task 28): the maker receives the RAW native coin instead of the wrapped
+   * token `recv` (which must be it — WRBTC). The output leg is delivered to `module`
+   * (the deployed NativeUnwrapModule), and one MAKE item on it unwraps exactly what the
+   * fill delivered and sends it to the maker, inside the same fill. PULL delivery only
+   * (no `solver`, no `exclusivity`: the module, not the maker, is the leg's recipient,
+   * so neither a delta-verify check nor a window carrier would hold).
+   */
+  nativeOut?: { module: Address };
   now?: number;
+}
+
+/**
+ * The native-out item: MAKE on the NativeUnwrapModule, amount 0 (the settler sizes it
+ * from what this fill delivered for leg 0), data = (forLegPreFund(0, wrapped), payout 0x0 =
+ * the maker). Mirrors packages/modules/transfer/test/NativeUnwrapModule.t.sol.
+ */
+export function nativeOutItem(module: Address, wrapped: Address): Item {
+  return {
+    op: ItemOp.MAKE,
+    module,
+    amount: 0n,
+    recipient: zeroAddress,
+    data: encodeAbiParameters([{ type: "uint256" }, { type: "address" }], [forLegPreFund(0, wrapped, 0), zeroAddress]),
+  };
 }
 
 /**
@@ -248,6 +277,11 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
 
   const solver = args.solver ?? zeroAddress;
   const direct = solver !== zeroAddress;
+  if (args.nativeOut) {
+    if (direct || args.exclusivity) throw new Error("a native-out order is pull delivery: no solver, no exclusivity window");
+    // The leg goes to the module; its item pays the maker the raw coin.
+    legsOut = legsOut.map((l) => ({ ...l, recipient: args.nativeOut!.module }));
+  }
   // SOFT EXCLUSIVITY WINDOW (pull only, B13). A direct order needs none: the core
   // already fills it for its named filler only, for its whole life (F30).
   const win = !direct && args.exclusivity && args.exclusivity.seconds > 0 && args.exclusivity.filler !== zeroAddress ? args.exclusivity : undefined;
@@ -257,7 +291,9 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
   // `exclusivityEndTime` is on the order's own clock — unix seconds here.
   const windowEnd = win ? now + win.seconds : 0;
   const clock = decaying ? packTiming(now, decaySeconds, windowEnd) : packTiming(0, 0, windowEnd);
-  const timing = args.fillOnce ? withFillOnce(clock) : clock;
+  const once = args.fillOnce ? withFillOnce(clock) : clock;
+  // CANONICAL: the unwrap runs after this order's own delivery, never hoisted ahead of it.
+  const timing = args.nativeOut ? withItemPolicy(once, ItemPolicy.CANONICAL) : once;
 
   const order: Order = {
     maker,
@@ -295,7 +331,7 @@ export function buildOrder(args: BuildOrderArgs): OrderDraft {
     gasBumpBps: 0n,
     gasPriceRef: 0n,
     priorityScale: 0n,
-    items: [],
+    items: args.nativeOut ? [nativeOutItem(args.nativeOut.module, recv.address)] : [],
     validators: [],
     invariants: [],
     fillModule: zeroAddress,

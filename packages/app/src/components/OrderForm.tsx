@@ -147,6 +147,11 @@ interface OrderFormProps {
   wallet: { connected: boolean; onChain: boolean; native: { symbol: string; balance: number | undefined } };
   /** The pay token is the wrapped native coin: RBTC above the gas reserve counts as spendable (human units). */
   autoWrap?: { symbol: string; value: number } | null;
+  /**
+   * The ticket receives the wrapped native coin and the deployment has a NativeUnwrapModule:
+   * offer receiving the raw coin instead (unwrapped inside the fill). Null otherwise.
+   */
+  nativeOut?: { native: string; on: boolean; set: (on: boolean) => void } | null;
   /** The wallet holds the wrapped native coin: offer turning it back (behind a confirm). */
   unwrap?: { symbol: string; busy: boolean; error: string | null; tx?: TxState; action: () => void } | null;
   /** One fill's network gas in USD (App), for a limit's net fill threshold. */
@@ -234,6 +239,7 @@ export function OrderForm(props: OrderFormProps) {
     delivery,
     wallet,
     autoWrap,
+    nativeOut,
     unwrap,
     usdOf,
     tooSmall,
@@ -526,6 +532,15 @@ export function OrderForm(props: OrderFormProps) {
               "\u00a0"
             )}
           </div>
+          {nativeOut && (
+            <label
+              className="nativeout"
+              title={`The filler delivers ${recvToken}, and the same transaction unwraps it to ${nativeOut.native} in your wallet (a little more network gas). Off: you receive ${recvToken}.`}
+            >
+              <input type="checkbox" checked={nativeOut.on} onChange={(e) => nativeOut.set(e.target.checked)} />
+              Receive as {nativeOut.native}
+            </label>
+          )}
           {isMarket && amount > 0 && (
             <div className="qsum">
               {figures ? (

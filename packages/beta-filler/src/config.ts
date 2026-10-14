@@ -38,6 +38,11 @@ export const ROOTSTOCK = {
   rifp: "0xf4d27c56595Ed59B66cC7F03CFF5193e4bd74a61",
   /** Money on Chain's DOC — a hub with live USD₮0 pools on both venues (verified 2026-10-12). */
   doc: "0xe700691dA7b9851F2F35f8b8182c69c53CcaD9Db",
+  /**
+   * NativeUnwrapModule (task 28, deployed 2026-10-14, verified): the MAKE item that turns
+   * an order's WRBTC output leg into raw RBTC for the maker, inside the fill.
+   */
+  nativeUnwrap: "0xB6107a1DEa7Ae04129aBc27ce607249049f3C735",
   /** Multicall3 (canonical address; code verified on chain 30 2026-10-12). */
   multicall3: "0xcA11bde05977b3631167028862bE2a173976CA11",
 } as const satisfies Record<string, string | number>;
@@ -206,6 +211,12 @@ export interface RouteConfig {
    * and DIRECT orders always use a pool plan (the only exact-output source).
    */
   okuPull: boolean;
+  /**
+   * The NativeUnwrapModule orders may name to receive raw RBTC (`NATIVE_UNWRAP_MODULE`,
+   * default the Rootstock deployment; "" = refuse such orders). The route fills exactly one
+   * shape with it (policy.ts `nativeOutShape`): the WRBTC leg to the module + one MAKE item.
+   */
+  nativeUnwrap?: Address;
 }
 
 export const USDRIF_DECIMALS = 18;
@@ -517,6 +528,15 @@ export function parseFee(raw: string, what: string): number {
   return f;
 }
 
+/** `NATIVE_UNWRAP_MODULE`: unset = the Rootstock deployment, "" = none. */
+function nativeUnwrapOf(env: Env): Address | undefined {
+  const raw = env.NATIVE_UNWRAP_MODULE;
+  if (raw === undefined) return getAddress(ROOTSTOCK.nativeUnwrap);
+  if (raw.trim() === "") return undefined;
+  if (!isAddress(raw.trim(), { strict: false })) throw new Error("env NATIVE_UNWRAP_MODULE: not an address");
+  return getAddress(raw.trim());
+}
+
 function bps(env: Env, key: string, fallback: number): bigint {
   const v = uint(env, key, fallback);
   if (v > 10_000n) throw new Error(`env ${key} must be 0..10000 bps`);
@@ -639,6 +659,7 @@ function loadRoute(env: Env): RouteConfig | undefined {
     profitRecipient: addr(env, "ROUTE_PROFIT_RECIPIENT", "0x0000000000000000000000000000000000000000"),
     hourlyFills: uint(env, "ROUTE_HOURLY_FILLS", 60),
     okuPull: flag(env, "ROUTE_OKU_PULL", true),
+    ...(nativeUnwrapOf(env) ? { nativeUnwrap: nativeUnwrapOf(env)! } : {}),
     sushi: {
       enabled: flag(env, "SUSHI_ENABLED", true),
       baseUrl: env.SUSHI_API_URL ?? "https://api.sushi.com",

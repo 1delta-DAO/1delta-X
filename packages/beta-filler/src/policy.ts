@@ -1,5 +1,5 @@
-import { BLOCK_CLOCK_BIT, DELTA_VERIFY_OUTPUTS_BIT, isFillOnce, isProportional, OrderSide, overrideHasCarrier, unpackTiming, type Order } from "@1delta-x/sdk";
-import { zeroAddress, type Address } from "viem";
+import { BLOCK_CLOCK_BIT, DELTA_VERIFY_OUTPUTS_BIT, forLegPreFund, isFillOnce, isProportional, ItemOp, OrderSide, overrideHasCarrier, unpackTiming, type Order } from "@1delta-x/sdk";
+import { decodeAbiParameters, zeroAddress, type Address } from "viem";
 
 import { MOC_FEE_BPS, type Config, type Policy } from "./config";
 import type { SpendEntry } from "./state";
@@ -45,13 +45,17 @@ const USDT0_TO_18 = 10n ** 12n;
  */
 export function plainShape(
   order: Order,
-  extras: { hasPermitBatch?: boolean; sigless?: boolean } = {},
-): Verdict<{}> {
+  extras: { hasPermitBatch?: boolean; sigless?: boolean; nativeUnwrap?: { module: Address; wrapped: Address } } = {},
+): Verdict<{ nativeOut?: boolean }> {
   if (extras.hasPermitBatch) return { ok: false, reason: "single-signature permit orders not supported" };
   if (extras.sigless) return { ok: false, reason: "on-chain-approved (sigless) orders not supported" };
   if (order.legsIn.length !== 1 || order.legsOut.length !== 1) return { ok: false, reason: "not one-in/one-out" };
-  if (order.items.length || order.validators.length || order.invariants.length) {
-    return { ok: false, reason: "items/validators/invariants not supported" };
+  if (order.validators.length || order.invariants.length) return { ok: false, reason: "validators/invariants not supported" };
+  // The ONE item shape we take: native-out (the maker receives raw RBTC, task 28).
+  if (order.items.length) {
+    if (!extras.nativeUnwrap) return { ok: false, reason: "items not supported" };
+    const n = nativeOutShape(order, extras.nativeUnwrap.module, extras.nativeUnwrap.wrapped);
+    if (!n.ok) return n;
   }
   if (order.fillModule !== zeroAddress || order.pricingModule !== zeroAddress) {
     return { ok: false, reason: "fill/pricing modules not supported" };
@@ -59,9 +63,40 @@ export function plainShape(
   const legIn = order.legsIn[0]!;
   const legOut = order.legsOut[0]!;
   if (isProportional(legIn.start)) return { ok: false, reason: "proportional (balance-relative) leg" };
+  if (order.items.length) return { ok: true, nativeOut: true }; // the leg goes to the module, checked above
   if (legOut.recipient !== zeroAddress && legOut.recipient.toLowerCase() !== order.maker.toLowerCase()) {
     return { ok: false, reason: "output goes to a third party" };
   }
+  return { ok: true };
+}
+
+/**
+ * NATIVE-OUT (task 28): the maker receives raw RBTC. Exactly the shape the app signs:
+ * the single output leg is the wrapped native coin, addressed to `module` (the deployed
+ * NativeUnwrapModule), plus ONE MAKE item on that module — amount 0 (sized from the
+ * fill's delivery ledger), the pre-fund leg reference `forLegPreFund(0, wrapped, 0)` and a
+ * payout of the maker (`0x0` or the maker's own address; never a third party). PULL only:
+ * a delta-verify order would measure the module's balance, which the item empties.
+ */
+export function nativeOutShape(order: Order, module: Address, wrapped: Address): Verdict<{}> {
+  const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  if (order.items.length !== 1 || order.legsOut.length !== 1) return { ok: false, reason: "native-out: one item and one output leg" };
+  const it = order.items[0]!;
+  const leg = order.legsOut[0]!;
+  if (it.op !== ItemOp.MAKE || !eq(it.module, module)) return { ok: false, reason: "item is not our NativeUnwrapModule's MAKE" };
+  if (it.amount !== 0n || it.recipient !== zeroAddress) return { ok: false, reason: "native-out: item amount/recipient must be 0" };
+  if (!eq(leg.token, wrapped) || !eq(leg.recipient, module)) return { ok: false, reason: "native-out: the leg must deliver the wrapped native coin to the module" };
+  if (isDeltaVerify(order)) return { ok: false, reason: "native-out orders are pull delivery" };
+  let desc: bigint;
+  let payout: Address;
+  try {
+    [desc, payout] = decodeAbiParameters([{ type: "uint256" }, { type: "address" }], it.data);
+  } catch {
+    return { ok: false, reason: "native-out: undecodable item data" };
+  }
+  if (it.data.length !== 2 + 128) return { ok: false, reason: "native-out: item data must be exactly (descriptor, payout)" };
+  if (desc !== forLegPreFund(0, wrapped as `0x${string}`, 0)) return { ok: false, reason: "native-out: wrong leg reference" };
+  if (payout !== zeroAddress && !eq(payout, order.maker)) return { ok: false, reason: "native-out: payout to a third party" };
   return { ok: true };
 }
 

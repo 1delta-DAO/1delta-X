@@ -267,7 +267,22 @@ export interface RouteClass {
   tokenIn: Address;
   tokenOut: Address;
   paths: RoutePath[];
+  /** The maker receives raw RBTC: the WRBTC leg goes to the NativeUnwrapModule (policy.ts `nativeOutShape`). */
+  nativeOut?: boolean;
 }
+
+/**
+ * Extra gas of a NATIVE-OUT fill (task 28): the module's MAKE item — WRBTC `withdraw` and
+ * the native send to the maker — on top of the plain pull fill. Measured on the Rootstock
+ * fork against the live Settlement (packages/modules/transfer/test/fork, 2026-10-14:
+ * ~33k), rounded up. Charged to the pre-simulation estimate and to quotes until the
+ * native shape's own receipts are learned.
+ */
+export const NATIVE_OUT_GAS = 40_000n;
+
+/** Why the route refuses a native-out order (see {@link classifyRoute}). */
+export const NATIVE_OUT_NOT_ROUTABLE =
+  "native-out: the AggregatorFillSolver cannot fill a pre-funded MAKE item (executeFill is item-free, matchSettle refuses it) — inventory only";
 
 /**
  * The inventory strategy's strictness (plain one-in/one-out, no items, validators,
@@ -301,10 +316,24 @@ export function classifyRoute(
   order: Order,
   rc: Pick<RouteConfig, "solver" | "pools" | "paths" | "routeTokens"> &
     Partial<Pick<RouteConfig, "maxHops">> & { discovery?: Pick<RouteConfig["discovery"], "hubTokens">; sushi?: { enabled: boolean }; nordstern?: { enabled: boolean } },
-  extras: { hasPermitBatch?: boolean; sigless?: boolean; nowS?: bigint; graph?: readonly GraphPool[]; anyPath?: boolean } = {},
+  extras: {
+    hasPermitBatch?: boolean;
+    sigless?: boolean;
+    nowS?: bigint;
+    graph?: readonly GraphPool[];
+    anyPath?: boolean;
+    nativeUnwrap?: { module: Address; wrapped: Address };
+  } = {},
 ): Verdict<RouteClass> {
   const shape = plainShape(order, extras);
   if (!shape.ok) return shape;
+  // NATIVE-OUT orders are recognised but NOT the route's (2026-10-14, fork-proven): the
+  // deployed AggregatorFillSolver's `executeFill` drives `PostInputs`, which is item-free
+  // (`ReverseModeRequiresNoItems`), and its `executeItemFill` goes through `matchSettle`,
+  // which refuses a pre-funded MAKE item — the NativeUnwrapModule's shape. Such an order
+  // fills through a plain `fill` by a filler that HOLDS the WRBTC (inventory), or a
+  // future solver with a PreDelivery entry. Refused here rather than simulated and reverted.
+  if (shape.nativeOut) return { ok: false, reason: NATIVE_OUT_NOT_ROUTABLE };
   const direct = isDeltaVerify(order);
   const ex = order.exclusiveFiller;
   if (direct) {
@@ -326,7 +355,7 @@ export function classifyRoute(
   const paths = routePaths(tokenIn, tokenOut, rc, extras.graph);
   // `anyPath`: the pool graph is not loaded yet, so "no path" would be a guess.
   if (paths.length === 0 && !extras.anyPath && (direct || !(rc.sushi?.enabled || rc.nordstern?.enabled))) return { ok: false, reason: NO_ROUTE_REASON };
-  return { ok: true, direct, tokenIn, tokenOut, paths };
+  return { ok: true, direct, tokenIn, tokenOut, paths, ...(shape.nativeOut ? { nativeOut: true } : {}) };
 }
 
 /** `ceil(a * b / c)`. */

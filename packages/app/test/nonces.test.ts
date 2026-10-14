@@ -256,7 +256,7 @@ describe("buildOrder with a packed nonce", () => {
     expect(app).toContain("nonce: nonces[0]");
     expect(app).toContain("fillOnce: fillOnceFor(spec.kind)");
     // The market / limit ticket passes its plan kind; every TWAP slice says "twap".
-    expect(app).toContain("signDraft({ ...spec, marketId, side, kind: plan.kind, pull })");
+    expect(app).toContain("signDraft({ ...spec, marketId, side, kind: plan.kind, pull, nativeOut })");
     expect(app.split('kind: "twap"').length - 1).toBe(2); // slice 1 and every later slice
     expect(app).not.toContain("FILL_ONCE_ORDERS");
   });

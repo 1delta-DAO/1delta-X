@@ -81,12 +81,14 @@ export function gasShape(
   tokenOut: string,
   via: string,
   funding?: "permit",
+  /** `+native`: a native-out fill (task 28) — the NativeUnwrapModule's item on top. */
+  native?: boolean,
 ): string {
   // `+permit` / `+plain`: a fill that runs the maker's ERC-2612 permit is its own shape.
   // Learning it under the plain key made a plain quote carry the permit, and a permit
   // quote add PERMIT_IN_FILL_GAS on top of it a second time (2026-10-12: 1.05 USDRIF on
   // a $12.75 ticket). The suffix also retired every pre-split key.
-  return `${strategy}:${delivery}:${tokenIn.toLowerCase()}:${tokenOut.toLowerCase()}@${via.toLowerCase()}+${funding ?? "plain"}`;
+  return `${strategy}:${delivery}:${tokenIn.toLowerCase()}:${tokenOut.toLowerCase()}@${via.toLowerCase()}+${funding ?? "plain"}${native ? "+native" : ""}`;
 }
 
 const clamp = (v: bigint) => (v < MIN_PPM ? MIN_PPM : v > MAX_PPM ? MAX_PPM : v);

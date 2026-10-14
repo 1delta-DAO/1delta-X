@@ -152,12 +152,34 @@ export default function App() {
   }, [wallet.provider, onChain, chainId]);
 
   const resting = useRestingOrders(ticket.marketId);
+  // NATIVE-OUT (task 28): receiving the wrapped native coin, the maker may ask for the raw
+  // coin instead — unwrapped by the deployed NativeUnwrapModule inside the fill (pull
+  // delivery, + ~40k gas). Market and limit tickets; a TWAP's later slices sign WRBTC.
+  const [nativeOutChosen, setNativeOutChosen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("x.nativeOut") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const chooseNativeOut = useCallback((on: boolean) => {
+    setNativeOutChosen(on);
+    try {
+      window.localStorage.setItem("x.nativeOut", on ? "1" : "0");
+    } catch {
+      /* a private window: the choice lasts this session */
+    }
+  }, []);
+  const nativeOutModule = deployment?.nativeUnwrap;
+  const nativeOutAvailable = !!nativeOutModule && !!wrappedSymbol && ticket.recvToken === wrappedSymbol && ticket.mode !== "twap";
+  const nativeOutActive = nativeOutAvailable && nativeOutChosen;
   // Who may fill this market's orders, as they will be signed (shown on the form).
   const marketDelivery = useMemo(() => {
+    if (nativeOutActive) return { direct: false, windowSeconds: 0, overrideBps: 0 };
     const solver = solverForMarket(deployment, ticket.marketId);
     const win = exclusivityForMarket(deployment, ticket.marketId);
     return { direct: !!solver && solver !== zeroAddress, windowSeconds: win?.seconds ?? 0, overrideBps: win?.overrideBps ?? 0 };
-  }, [deployment, ticket.marketId]);
+  }, [deployment, ticket.marketId, nativeOutActive]);
   const fills = useFills();
   const allOrders = useRestingOrders();
 
@@ -278,11 +300,13 @@ export default function App() {
       tokenIn: payPinned.address,
       tokenOut: recvPinned.address,
       amountIn,
-      delivery: quoteDelivery(deployment, ticket.marketId),
+      // A native-out order is pull delivery (lib/order.ts `nativeOut`).
+      delivery: nativeOutActive ? ("pull" as const) : quoteDelivery(deployment, ticket.marketId),
       ...(wallet.address ? { maker: wallet.address } : {}),
       ...(quoteWithPermit ? { funding: "permit" as const } : {}),
+      ...(nativeOutActive ? { nativeOut: true } : {}),
     };
-  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit, tooSmall !== null]);
+  }, [ticket.mode, ticket.amount, ticket.amountStr, ticket.marketId, ticket.side, ticket.payToken, deployment, chainId, payPinned, recvPinned, spendableWei, wallet.address, quoteWithPermit, tooSmall !== null, nativeOutActive]);
   const marketQuote = useMarketQuote(QUOTE_URL, quoteReq);
   // Defence in depth: a quote is only THE price for the request it answers (same pay
   // amount and tokens) — never one left over from a previous amount or pair (it priced,
@@ -511,6 +535,8 @@ export default function App() {
         kind: "market" | "limit" | "twap";
         /** Sign plain PULL delivery whatever the market's default: the filler's quote was its inventory's (the RIF rail). */
         pull?: boolean;
+        /** Receive the raw native coin: the NativeUnwrapModule shape (pull delivery). */
+        nativeOut?: Address | undefined;
       },
     ): Promise<SignedOrder> => {
       if (!signer || !wallet.address) throw new Error("wallet not connected");
@@ -554,9 +580,10 @@ export default function App() {
         side: spec.side,
         pay,
         recv,
-        solver: spec.pull ? zeroAddress : solverForMarket(deployment, spec.marketId),
+        solver: spec.pull || spec.nativeOut ? zeroAddress : solverForMarket(deployment, spec.marketId),
         // Pull markets: the solver's ~2-block soft window, then open to all (B13).
-        exclusivity: spec.pull ? undefined : exclusivityForMarket(deployment, spec.marketId),
+        exclusivity: spec.pull || spec.nativeOut ? undefined : exclusivityForMarket(deployment, spec.marketId),
+        ...(spec.nativeOut ? { nativeOut: { module: spec.nativeOut } } : {}),
         amountIn: spec.amountIn,
         targetOut: spec.targetOut,
         minOut: spec.minOut,
@@ -645,7 +672,8 @@ export default function App() {
       // Sign FIRST. Nothing is recorded — no fill, no row — until there is a
       // signature behind it, so a declined or failed signature leaves no
       // phantom trade in the history (G-TS_SIGN-3, G-TS_SIGN-15).
-      let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind, pull });
+      const nativeOut = nativeOutActive ? nativeOutModule : undefined;
+      let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind, pull, nativeOut });
       // Gasless funding: a second prompt, the ERC-2612 permit for exactly this order's
       // input, valid until the order's own expiry. It rides with the order to the book.
       if (gaslessActive && deployment && wallet.address && signer && wallet.provider && payMeta.address) {
@@ -735,7 +763,7 @@ export default function App() {
       setSigning(false);
       setSignPhase(null);
     }
-  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf, rawBalances, gaslessActive, wallet.address, wallet.provider, signer, payMeta.address, chainId]);
+  }, [allowanceState, deployment, planNow, q, signDraft, tick, ticket, quoteReq, marketQuote, planWith, termsOf, rawBalances, gaslessActive, wallet.address, wallet.provider, signer, payMeta.address, chainId, nativeOutActive, nativeOutModule]);
 
   const [orderError, setOrderError] = useState<string | null>(null);
 
@@ -977,6 +1005,7 @@ export default function App() {
                 ? { symbol: nativeSymbol, value: Number(formatUnits(wrappableWei(rawBalances.native), 18)) }
                 : null
             }
+            nativeOut={nativeOutAvailable ? { native: nativeSymbol, on: nativeOutChosen, set: chooseNativeOut } : null}
             unwrap={
               wrappedSymbol && wrappedWei !== undefined && wrappedWei > 0n
                 ? { symbol: wrappedSymbol, busy: unwrapping, error: null, tx: unwrapTx, action: () => void unwrap() }

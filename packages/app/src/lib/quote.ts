@@ -107,6 +107,8 @@ export interface QuoteRequest {
   delivery: "direct" | "pull" | "auto";
   /** `permit`: the order will be funded by a gasless ERC-2612 permit the fill executes (more gas). */
   funding?: "permit";
+  /** The maker receives the raw native coin (lib/order.ts `nativeOut`): pull delivery + the unwrap's gas. */
+  nativeOut?: boolean;
 }
 
 /** A validated filler quote. */
@@ -132,6 +134,8 @@ export interface FillerQuote {
   strategy: string;
   source: string;
   delivery: "direct" | "pull";
+  /** Priced for a native-out order (the filler echoes it). */
+  nativeOut: boolean;
   /** False while the filler runs dry (it quotes but does not fill). */
   live: boolean;
   /** A pool route's hops (tokens in swap order, fee tiers, venues `oku` / `sushi-v3`); absent for an API route. */
@@ -159,7 +163,7 @@ const big = (v: unknown, what: string): bigint => {
  */
 export function parseQuote(
   raw: unknown,
-  req: Pick<QuoteRequest, "chainId" | "tokenIn" | "tokenOut" | "amountIn"> & Partial<Pick<QuoteRequest, "delivery">>,
+  req: Pick<QuoteRequest, "chainId" | "tokenIn" | "tokenOut" | "amountIn"> & Partial<Pick<QuoteRequest, "delivery" | "nativeOut">>,
   nowS: number = Math.floor(Date.now() / 1000),
 ): FillerQuote {
   if (!raw || typeof raw !== "object") throw new QuoteError(0, "quote: not an object");
@@ -186,6 +190,7 @@ export function parseQuote(
     strategy: typeof o.strategy === "string" ? o.strategy.slice(0, 20) : "?",
     source: typeof (o.route as { source?: unknown } | undefined)?.source === "string" ? String((o.route as { source: string }).source).slice(0, 20) : "?",
     delivery: o.delivery === "direct" ? "direct" : "pull",
+    nativeOut: o.nativeOut === true,
     live: o.live !== false,
     ...(parsePath((o.route as { path?: unknown } | undefined)?.path) ?? {}),
   };
@@ -194,6 +199,8 @@ export function parseQuote(
   if (q.amountIn !== req.amountIn) throw new QuoteError(0, "quote: wrong amountIn");
   // A quote priced for another delivery than asked prices a different order (gas, filler).
   if (req.delivery && req.delivery !== "auto" && q.delivery !== req.delivery) throw new QuoteError(0, "quote: wrong delivery");
+  // A native-out order costs the unwrap's gas: only a quote priced for it is its price.
+  if (!!req.nativeOut !== q.nativeOut) throw new QuoteError(0, "quote: not priced for the native-out shape");
   if (q.amountOut === 0n || q.amountOut > q.grossOut) throw new QuoteError(0, "quote: bad amountOut");
   if (q.permitChargeOut > q.gasChargeOut) throw new QuoteError(0, "quote: bad permitChargeOut");
   if (!Number.isFinite(q.validUntil) || q.validUntil < nowS) throw new QuoteError(0, "quote: expired");
@@ -243,6 +250,7 @@ async function fetchQuoteOnce(doFetch: FetchLike, url: string, req: QuoteRequest
     delivery: req.delivery,
     ...(req.maker ? { maker: req.maker } : {}),
     ...(req.funding === "permit" ? { funding: "permit" } : {}),
+    ...(req.nativeOut ? { nativeOut: true } : {}),
   });
   let res: Response;
   try {

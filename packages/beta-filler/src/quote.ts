@@ -68,6 +68,12 @@ export interface QuoteRequest {
    * one); absent / `approval` = standing allowances.
    */
   funding?: "permit" | "approval";
+  /**
+   * The maker receives raw RBTC (task 28): the order's WRBTC leg goes to the
+   * NativeUnwrapModule, whose MAKE item unwraps it in the fill. Always PULL delivery
+   * (an `auto` request resolves to pull); route only, at + NATIVE_OUT_GAS.
+   */
+  nativeOut?: boolean;
 }
 
 /** One priced way to fill: before the gas margin and tolerance. */
@@ -119,6 +125,8 @@ export interface QuoteResult {
   /** Unix seconds. */
   validUntil: number;
   strategy: "route" | "inventory";
+  /** Priced for a native-out order (echo of the request): sign the NativeUnwrapModule shape. */
+  nativeOut?: boolean;
   route: { source: string; hops?: number; path?: { tokens: Address[]; fees: number[]; venues: string[] } };
 }
 
@@ -147,7 +155,7 @@ export function netQuote(a: { grossOut: bigint; costOut: bigint; gasMarginBps: b
 
 // ──────────────────── request parsing ────────────────────
 
-const KEYS = new Set(["chainId", "marketId", "tokenIn", "tokenOut", "side", "amountIn", "maker", "delivery", "funding"]);
+const KEYS = new Set(["chainId", "marketId", "tokenIn", "tokenOut", "side", "amountIn", "maker", "delivery", "funding", "nativeOut"]);
 const MAX_AMOUNT = 2n ** 128n;
 const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
@@ -204,9 +212,23 @@ export function parseQuoteRequest(raw: unknown, cfg: Pick<Config, "chainId" | "r
   if (!tokenIn || !tokenOut) return { ok: false, reason: "give tokenIn/tokenOut or a marketId" };
   if (eq(tokenIn, tokenOut)) return { ok: false, reason: "tokenIn equals tokenOut" };
   if (o.funding !== undefined && o.funding !== "permit" && o.funding !== "approval") return { ok: false, reason: 'funding must be "permit" or "approval"' };
+  if (o.nativeOut !== undefined && typeof o.nativeOut !== "boolean") return { ok: false, reason: "nativeOut must be a boolean" };
+  if (o.nativeOut === true && o.delivery === "direct") return { ok: false, reason: "nativeOut orders are pull delivery" };
   return {
     ok: true,
-    req: { chainId: cfg.chainId, tokenIn, tokenOut, amountIn, side: o.side, delivery: o.delivery, ...(marketId ? { marketId } : {}), ...(maker ? { maker } : {}), ...(o.funding === "permit" ? { funding: "permit" as const } : {}) },
+    req: {
+      chainId: cfg.chainId,
+      tokenIn,
+      tokenOut,
+      amountIn,
+      side: o.side,
+      // Native-out is pull delivery: an `auto` request resolves to it.
+      delivery: o.nativeOut === true ? "pull" : o.delivery,
+      ...(marketId ? { marketId } : {}),
+      ...(maker ? { maker } : {}),
+      ...(o.funding === "permit" ? { funding: "permit" as const } : {}),
+      ...(o.nativeOut === true ? { nativeOut: true } : {}),
+    },
   };
 }
 
@@ -223,6 +245,8 @@ export interface IssuedQuote {
   delivery: Delivery;
   issuedAt: number;
   validUntil: number;
+  /** Quoted for a native-out order (the WRBTC leg to the NativeUnwrapModule + its item). */
+  nativeOut?: boolean;
   /** The order this quote was matched to (one quote → one order). */
   order?: string;
   /** That order's expiry (unix s): a bound quote is kept until then. */
@@ -248,6 +272,8 @@ export function quoteMatches(q: IssuedQuote, order: Order, nowS: number, graceS:
   if (!eq(legIn.token, q.tokenIn) || !eq(legOut.token, q.tokenOut)) return false;
   if (q.maker && !eq(order.maker, q.maker)) return false;
   if ((q.delivery === "direct") !== isDeltaVerify(order)) return false;
+  // A native-out order costs the item's gas: only a native-out quote prices it.
+  if (!!q.nativeOut !== order.items.length > 0) return false;
   if (nowS > q.validUntil + graceS) return false;
   const qIn = BigInt(q.amountIn);
   const qOut = BigInt(q.amountOut);
@@ -357,7 +383,7 @@ export class Quoter {
 
   /** Price every applicable strategy for `req` (cached for QUOTE_CACHE_MS per identical request). */
   private async price(req: QuoteRequest): Promise<{ priced: PricedCandidate[]; gasPrice: bigint; reasons: string[] }> {
-    const key = `${req.tokenIn}:${req.tokenOut}:${req.amountIn}:${req.delivery}:${req.funding ?? "approval"}`.toLowerCase();
+    const key = `${req.tokenIn}:${req.tokenOut}:${req.amountIn}:${req.delivery}:${req.funding ?? "approval"}:${req.nativeOut ? "native" : "wrapped"}`.toLowerCase();
     const at = this.now();
     const hit = this.cache.get(key);
     if (hit && at - hit.at < this.policy().cacheMs) return { priced: hit.priced, gasPrice: hit.gasPrice, reasons: [] };
@@ -391,13 +417,22 @@ export class Quoter {
     const [rr, ri] = await Promise.all([
       route
         ? route
-            .quoteRoute({ tokenIn: req.tokenIn, tokenOut: req.tokenOut, amountIn: req.amountIn, direct: req.delivery !== "pull", gasPrice, permit: req.funding === "permit" })
+            .quoteRoute({
+              tokenIn: req.tokenIn,
+              tokenOut: req.tokenOut,
+              amountIn: req.amountIn,
+              direct: req.delivery !== "pull",
+              gasPrice,
+              permit: req.funding === "permit",
+              ...(req.nativeOut ? { nativeOut: true } : {}),
+            })
             .then((r) => (r.ok ? { ...r, candidate: { ...r.candidate, delivery: req.delivery === "pull" ? ("pull" as const) : ("direct" as const) } } : r))
             .catch((e: unknown) => ({ ok: false as const, reason: `route: ${(e as Error).message?.split("\n")[0] ?? e}` }))
         : undefined,
       // The inventory EOA fills PULL orders only (an EOA cannot run a delta-verify callback).
       // ...nor a permit-funded one (no executeFill to carry the permit).
-      inventory && req.delivery !== "direct" && req.funding !== "permit"
+      // ...nor a native-out one (its item shape is the route's alone).
+      inventory && req.delivery !== "direct" && req.funding !== "permit" && !req.nativeOut
         ? inventory
             .quoteInventory(req.tokenIn, req.tokenOut, req.amountIn, gasPrice)
             .then((r) => (r.ok ? { ...r, candidate: { ...r.candidate, delivery: "pull" as const } } : r))
@@ -456,6 +491,7 @@ export class Quoter {
       issuedAt,
       validUntil,
       strategy: best.c.strategy,
+      ...(req.nativeOut ? { nativeOut: true } : {}),
       route: { source: best.c.source, ...(best.c.hops !== undefined ? { hops: best.c.hops } : {}), ...(best.c.path ? { path: best.c.path } : {}) },
     };
     this.book.issue(
@@ -467,6 +503,7 @@ export class Quoter {
         amountOut: quote.amountOut.toString(),
         ...(req.maker ? { maker: req.maker.toLowerCase() } : {}),
         delivery,
+        ...(req.nativeOut ? { nativeOut: true } : {}),
         issuedAt,
         validUntil,
       },

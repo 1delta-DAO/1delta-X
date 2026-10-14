@@ -98,6 +98,11 @@ export interface DeploymentConfig extends Deployment {
   marketExclusivity: Record<string, ExclusivityWindow>;
   /** Net gas per filler fill, by delivery — sizes small tickets' market floor. Defaults when absent. */
   fillGas?: FillGas;
+  /**
+   * The deployed NativeUnwrapModule (task 28), or absent: orders receiving the wrapped
+   * native coin may then ask for the raw coin instead (lib/order.ts `nativeOut`).
+   */
+  nativeUnwrap?: Address;
 }
 
 /** Net gas of one filler fill, per delivery (lib/marketFloor.ts). */
@@ -191,7 +196,7 @@ export const PULL_MODE = "pull";
 
 type RawDeployments = Record<
   string,
-  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers" | "pullExclusivity" | "marketExclusivity" | "fillGas", unknown>>
+  Partial<Record<"settlement" | "permit3" | "lens" | "solver" | "marketSolvers" | "pullExclusivity" | "marketExclusivity" | "fillGas" | "nativeUnwrap", unknown>>
 >;
 
 /**
@@ -283,7 +288,24 @@ export function parseDeployments(raw: string | undefined): Record<number, Deploy
       console.warn(`VITE_DEPLOYMENTS[${key}].fillGas is invalid — treating chain ${key} as not deployed`);
       continue;
     }
-    out[chainId] = { chainId, settlement, permit3, lens, solver, marketSolvers, pullExclusivity, marketExclusivity, fillGas };
+    // Optional, strict like the others: a malformed module address drops the deployment.
+    const nativeUnwrap = addr(entry.nativeUnwrap, false);
+    if (nativeUnwrap === null) {
+      console.warn(`VITE_DEPLOYMENTS[${key}].nativeUnwrap is invalid — treating chain ${key} as not deployed`);
+      continue;
+    }
+    out[chainId] = {
+      chainId,
+      settlement,
+      permit3,
+      lens,
+      solver,
+      marketSolvers,
+      pullExclusivity,
+      marketExclusivity,
+      fillGas,
+      ...(nativeUnwrap !== zeroAddress ? { nativeUnwrap } : {}),
+    };
   }
   return out;
 }

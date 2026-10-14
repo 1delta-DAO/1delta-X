@@ -16,12 +16,18 @@
  *   NONCE     the order nonce (packed: word = nonce >> 8); a maker's 2nd order in the same word
  *   FUND      1 = deal TOKEN_IN to the maker first (default 1)
  *   PRICE_PCT owed output as % of the live route quote (default 50 — anvil prices gas at 1 gwei)
+ *   NATIVE_OUT 1 = receive raw RBTC: the WRBTC leg to NATIVE_UNWRAP (the module) + its MAKE
+ *             item, pull delivery — the app's lib/order.ts `nativeOut` shape (task 28)
  */
 import { writeFileSync } from "node:fs";
 
 import {
   ERC2612_ABI,
+  ItemOp,
+  ItemPolicy,
   OrderSide,
+  forLegPreFund,
+  withItemPolicy,
   QUOTER_V2_ABI,
   encodeV3Path,
   erc2612DomainOf,
@@ -36,7 +42,7 @@ import {
   withFillOnce,
   type Order,
 } from "@1delta-x/sdk";
-import { createPublicClient, createWalletClient, erc20Abi, getAddress, http, maxUint256, parseUnits, zeroAddress, type Address, type Hex } from "viem";
+import { createPublicClient, createWalletClient, encodeAbiParameters, erc20Abi, getAddress, http, maxUint256, parseUnits, zeroAddress, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { ROOTSTOCK } from "../src/config";
@@ -131,15 +137,18 @@ const owed = (result[0] * pricePct) / 100n;
 
 // 3. The app's market shape: fixed legs here (a Dutch decay changes no storage), FILL-ONCE
 //    on a packed nonce, direct = delta-verify to the solver.
+const nativeOut = env("NATIVE_OUT", "0") === "1";
+const nativeModule = nativeOut ? getAddress(env("NATIVE_UNWRAP", ROOTSTOCK.nativeUnwrap)) : zeroAddress;
+if (nativeOut && (mode === "direct" || tOut.address.toLowerCase() !== ROOTSTOCK.wrbtc.toLowerCase())) throw new Error("NATIVE_OUT needs MODE=pull and TOKEN_OUT=WRBTC");
 const direct = mode === "direct";
-const clock = withFillOnce(packTiming(0, 0, 0));
+const clock = nativeOut ? withItemPolicy(withFillOnce(packTiming(0, 0, 0)), ItemPolicy.CANONICAL) : withFillOnce(packTiming(0, 0, 0));
 const order: Order = {
   maker: maker.address,
   side: OrderSide.SELL,
   nonce,
   expiry: now + 3600n,
   legsIn: [{ token: tIn.address, start: amountIn, end: 0n }],
-  legsOut: [{ token: tOut.address, start: owed, end: 0n, recipient: zeroAddress }],
+  legsOut: [{ token: tOut.address, start: owed, end: 0n, recipient: nativeOut ? nativeModule : zeroAddress }],
   timing: direct ? withDeltaVerifyOutputs(clock) : clock,
   exclusiveFiller: direct ? solver : zeroAddress,
   minFillAnchor: 0n,
@@ -148,7 +157,9 @@ const order: Order = {
   gasBumpBps: 0n,
   gasPriceRef: 0n,
   priorityScale: 0n,
-  items: [],
+  items: nativeOut
+    ? [{ op: ItemOp.MAKE, module: nativeModule, amount: 0n, recipient: zeroAddress, data: encodeAbiParameters([{ type: "uint256" }, { type: "address" }], [forLegPreFund(0, tOut.address, 0), zeroAddress]) }]
+    : [],
   validators: [],
   invariants: [],
   fillModule: zeroAddress,

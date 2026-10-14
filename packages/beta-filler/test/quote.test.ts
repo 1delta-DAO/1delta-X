@@ -425,6 +425,17 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     expect(r.ok && [r.quote.strategy, r.quote.delivery]).toEqual(["route", "direct"]);
   });
 
+  it("native-out (task 28): no strategy can fill it yet, so it is never quoted (the app then never signs it)", async () => {
+    const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1" });
+    const { chain } = fake();
+    const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
+    const req = sellReq({ tokenIn: USDT0, tokenOut: WRBTC, amountIn: 500_000_000n, side: "buy" });
+    expect((await e.quote(req)).ok).toBe(true);
+    const native = await e.quote({ ...req, nativeOut: true });
+    expect(native.ok).toBe(false);
+    if (!native.ok) expect(native.reason).toMatch(/pre-funded MAKE/);
+  });
+
   it("inventory refuses what it could not fill (wallet balance): the route quote stands", async () => {
     const { chain } = fake({ usdt0Balance: 1_000_000n });
     const e = await Engine.create({ cfg: loadConfig({ ...ENV, INVENTORY_ENABLED: "1" }), chain, store: new MemoryStateStore(), log: () => {} });

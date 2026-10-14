@@ -50,6 +50,8 @@ import {
   liveDecayPerBlock,
   pathLabel,
   patchesLiveOutput,
+  NATIVE_OUT_GAS,
+  NATIVE_OUT_NOT_ROUTABLE,
   PERMIT_IN_FILL_GAS,
   planGasEstimate,
   planKind,
@@ -510,7 +512,13 @@ export class RouteFiller {
   }
 
   private extras(entry: BookEntry) {
-    return { hasPermitBatch: !!entry.announce.permitBatch, sigless: !!entry.announce.sigless, graph: this.edges() };
+    return {
+      hasPermitBatch: !!entry.announce.permitBatch,
+      sigless: !!entry.announce.sigless,
+      graph: this.edges(),
+      // Native-out orders (task 28): the one item shape the route takes.
+      ...(this.rc.nativeUnwrap ? { nativeUnwrap: { module: this.rc.nativeUnwrap, wrapped: this.cfg.wrbtc } } : {}),
+    };
   }
 
   /** A failure before anything was sent: short strategy-scoped backoff (or a skip while the auction has not started). */
@@ -597,14 +605,18 @@ export class RouteFiller {
     const nowSec = BigInt(Math.floor(now / 1000));
     const liveCandidate = patchesLiveOutput(order, direct, nowSec);
     // Gas is PRICED at estimate × r, r learned per shape from our receipts (gasRatio.ts).
-    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, order.legsOut[0]!.token, rc.solver, fillPermit ? "permit" : undefined);
+    // A native-out order (classified: its only item is the NativeUnwrapModule's MAKE) is
+    // its own gas shape, and its item's gas is part of the pre-simulation estimate.
+    const nativeOut = order.items.length > 0;
+    const nativeGas = nativeOut ? NATIVE_OUT_GAS : 0n;
+    const shape = gasShape("route", direct ? "direct" : "pull", order.legsIn[0]!.token, order.legsOut[0]!.token, rc.solver, fillPermit ? "permit" : undefined, nativeOut);
     const pricedGas = (estimate: bigint) => this.gasRatios.priced(shape, estimate);
     // A gasless maker's order (./permit.ts) carries its ERC-2612 permit IN the fill: the
     // solver runs it first, in the same tx (and the same simulation). Its gas is part of
     // the pre-simulation estimate; the simulation then measures it for real.
     const permits: Permit2612[] = fillPermit ? [toSolverPermit(order.maker, fillPermit, cfg.settlement)] : [];
     const permitGas = permits.length > 0 ? PERMIT_IN_FILL_GAS : 0n;
-    const earlyGas = rc.gasEstimate + (liveCandidate ? TYPED_CALLBACK_GAS : 0n) + permitGas;
+    const earlyGas = rc.gasEstimate + (liveCandidate ? TYPED_CALLBACK_GAS : 0n) + permitGas + nativeGas;
 
     // 0. Fills per hour, the gas-price ceiling, and a cheap early look at the shared
     //    gas budget (the binding check is against the final gas LIMIT, step 7).
@@ -682,7 +694,7 @@ export class RouteFiller {
     // extra pool hop adds POOL_HOP_GAS), with the typed path's and the in-fill permit's
     // extra gas — only a floor: the plan is re-priced at the simulated figure below.
     const estimateFor = (c: Pick<Candidate, "source"> & { path?: RoutePath }) =>
-      planGasEstimate(rc.gasEstimate, planKind(c)) + (c.source === "pool" && c.path ? extraHopGas(c.path.fees.length) : 0n) + (liveOut ? TYPED_CALLBACK_GAS : 0n) + permitGas;
+      planGasEstimate(rc.gasEstimate, planKind(c)) + (c.source === "pool" && c.path ? extraHopGas(c.path.fees.length) : 0n) + (liveOut ? TYPED_CALLBACK_GAS : 0n) + permitGas + nativeGas;
     const cands: Candidate[] = [];
     const gasOutOf = new Map<Candidate, bigint>();
     for (const r of raw) {
@@ -877,8 +889,19 @@ export class RouteFiller {
    * quoted FORWARD for both deliveries: the ticket fixes the input (a direct fill then
    * quotes the backward chain of what it owes).
    */
-  async quoteRoute(a: { tokenIn: Address; tokenOut: Address; amountIn: bigint; direct: boolean; gasPrice: bigint; permit?: boolean }): Promise<Verdict<{ candidate: PricedCandidate }>> {
+  async quoteRoute(a: {
+    tokenIn: Address;
+    tokenOut: Address;
+    amountIn: bigint;
+    direct: boolean;
+    gasPrice: bigint;
+    permit?: boolean;
+    /** The maker receives raw RBTC (task 28): a pull fill plus the NativeUnwrapModule item. */
+    nativeOut?: boolean;
+  }): Promise<Verdict<{ candidate: PricedCandidate }>> {
     const { cfg, rc } = this;
+    // The solver cannot fill the native-out shape (route.ts `classifyRoute`): never quote it.
+    if (a.nativeOut) return { ok: false, reason: `route: ${NATIVE_OUT_NOT_ROUTABLE}` };
     await this.init();
     await this.ensureGraph();
     const inList = (t: Address) => rc.routeTokens.some((x) => x.toLowerCase() === t.toLowerCase());
@@ -903,8 +926,9 @@ export class RouteFiller {
     for (const r of raw) cands.push({ ...r, routeGasOut: (await this.nativeToToken(a.gasPrice * rankingGasUnits(planKind(r), r.gasUnits), a.tokenOut)) ?? 0n });
     const best = rankRoutes(cands)[0]!;
     const delivery = a.direct ? "direct" : "pull";
-    const plainShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver);
-    const permitShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver, "permit");
+    // A native-out quote learns from its own shapes; before any, the plain figure + NATIVE_OUT_GAS.
+    const plainShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver, undefined, a.nativeOut);
+    const permitShape = gasShape("route", delivery, a.tokenIn, a.tokenOut, this.rc.solver, "permit", a.nativeOut);
     // Hops beyond the first cost POOL_HOP_GAS each on top of the single-hop figures (the
     // fallback and the plan-kind floor); a LEARNED estimate is the pair's own receipts,
     // whatever route they took, so it is only floored.
@@ -915,9 +939,10 @@ export class RouteFiller {
     const permitAdd = a.permit ? PERMIT_IN_FILL_GAS : 0n;
     const learnedPermit = a.permit ? this.gasRatios.typicalEstimate(permitShape) : undefined;
     const learnedPlain = this.gasRatios.typicalEstimate(plainShape);
-    const fallback = (a.direct ? cfg.quote.gasEstimateDirect : cfg.quote.gasEstimatePull) + hopGas;
+    const nativeAdd = a.nativeOut ? NATIVE_OUT_GAS : 0n;
+    const fallback = (a.direct ? cfg.quote.gasEstimateDirect : cfg.quote.gasEstimatePull) + hopGas + nativeAdd;
     const base = learnedPermit ?? (learnedPlain ?? fallback) + permitAdd;
-    const floor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas + permitAdd;
+    const floor = planGasEstimate(rc.gasEstimate, planKind(best)) + hopGas + permitAdd + nativeAdd;
     const estimate = base > floor ? base : floor;
     // r from the shape whose estimate was used (a learned one), else the funding's own.
     const rShape = learnedPermit !== undefined ? permitShape : learnedPlain !== undefined ? plainShape : a.permit ? permitShape : plainShape;

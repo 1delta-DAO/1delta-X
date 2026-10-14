@@ -71,7 +71,7 @@ describe("G-TS_SIGN-3 — order nonces stay below 2^255", () => {
     // A failed or declined signature must not leave a phantom fill behind:
     // the crossing part is recorded only after signDraft resolved.
     const app = src("src/App.tsx");
-    const signedAt = app.indexOf("let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind, pull });");
+    const signedAt = app.indexOf("let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind, pull, nativeOut });");
     const recordAt = app.indexOf("orderbook.recordTake(");
     expect(signedAt).toBeGreaterThan(0);
     expect(recordAt).toBeGreaterThan(signedAt);

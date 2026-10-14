@@ -1,6 +1,6 @@
 # 28. App: receive native RBTC from a fill (in-fill unwrap)
 
-- **Status:** open: steps 1–2 DONE (2026-10-14). The module is DEPLOYED at `0xB6107a1DEa7Ae04129aBc27ce607249049f3C735` (verified; docs/deployment-rootstock-beta.md). Still to do: steps 3–4 (app + filler) and the first live smoke fill.
+- **Status:** open: steps 1–2 DONE (2026-10-14). The module is DEPLOYED at `0xB6107a1DEa7Ae04129aBc27ce607249049f3C735` (verified; docs/deployment-rootstock-beta.md). The app and filler shapes are wired but DORMANT: the deployed solver cannot fill this shape (see "Blocker" below), so a FILLER is needed first.
 - **Layer:** contracts (deploy) + app + filler
 - **Package:** `packages/modules/transfer` (`NativeUnwrapModule`), `packages/app`, `packages/beta-filler`
 - **Severity:** feature — UX
@@ -55,3 +55,36 @@ user needs RBTC for it. That RBTC requirement also breaks the gasless flow.
 
 Deploy:
 `SETTLEMENT=0xe6EDbb5c49Fb4CFb313476e3B78E274D3584ddf5 make deploy-native-unwrap RPC=https://public-node.rsk.co DEPLOY_ARGS="--account deployer --sender 0x00001d4754680958E7f8fe42D60842Ebde4Cb30D --legacy --slow" VERIFY_ARGS="--verify --verifier blockscout --verifier-url https://rootstock.blockscout.com/api/"`
+
+## Blocker found while wiring (2026-10-14): the route solver cannot fill it
+
+The app now signs the shape (`lib/order.ts` `nativeOut`, pinned by `test/nativeOut.test.ts`).
+The filler recognises it exactly (`policy.ts` `nativeOutShape`). On a fork run of the REAL
+filler against the live Settlement and module (`e2e/native-out-fork.sh`), the deployed
+`AggregatorFillSolver` cannot fill it:
+
+- `executeFill` drives `fillWithCallback(PostInputs*)`, which is item-free and reverted
+  `ReverseModeRequiresNoItems`;
+- `executeItemFill` drives `matchSettle`, which refuses a pre-funded MAKE item — the
+  module's shape.
+
+A plain `fill` by a filler that already HOLDS the WRBTC does work: it is the forge fork
+test against the live contracts. So, until one of the options below exists:
+
+- the route refuses native-out orders and never quotes them (`NATIVE_OUT_NOT_ROUTABLE`);
+- the app toggle stays hidden: `VITE_DEPLOYMENTS` carries no `nativeUnwrap`, so no
+  unfillable order is ever signed.
+
+Options:
+
+1. **Inventory (no contract change).** The operator EOA keeps a small WRBTC float. It
+   fills native-out orders with `fillUpTo` and buys the WRBTC back with the input it
+   received (a pool swap right after). The exposure is the float, held for minutes. Needs
+   a new inventory direction (X → WRBTC, native-out only), a float band like the RIF rail's,
+   and quotes at pool price + fill gas + the rebuy swap.
+2. **Solver v3.** An entry that fills item orders through `PreDelivery` (callback first,
+   then delivery and items, then input pull) with a flash or JIT source. That means a
+   contract change, a redeploy and a review.
+
+Then: set `nativeUnwrap` in `VITE_DEPLOYMENTS` to show the toggle (the app side is done),
+and drop the route refusal for whichever strategy fills it.
