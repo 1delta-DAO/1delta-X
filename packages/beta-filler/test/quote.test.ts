@@ -53,6 +53,7 @@ function rate(tin: string, tout: string, amt: bigint): bigint {
   if (eqa(tin, USDT0) && eqa(tout, USDRIF)) return (amt * 999n * 10n ** 9n);
   if (eqa(tin, USDT0) && eqa(tout, RIF)) return amt * 24n * 10n ** 12n;
   if (eqa(tin, WRBTC) && eqa(tout, RIF)) return amt * 2_400_000n; // $100k at the pool's 24 RIF per USDT0
+  if (eqa(tin, USDRIF) && eqa(tout, RIF)) return (amt * 2_395n) / 100n; // via USDT0: 0.998 × 24
   return 0n;
 }
 /** WRBTC wei → USDT0 units at $100k, rounded up (the route's nativeToToken). */
@@ -90,6 +91,8 @@ function fake(o: { estimate?: bigint; usdt0Balance?: bigint; balances?: Record<s
         case "decimals": return 6;
         case "getPACtp": return 4n * 10n ** 16n; // $0.04 per RIF
         case "getExecFee": return 0n;
+        case "paused": case "liquidated": return false;
+        case "getTotalACavailable": return 10n ** 30n;
         case "balanceOf": return o.balances?.[address.toLowerCase()] ?? o.usdt0Balance ?? 10n ** 12n;
       }
       throw new Error(`unexpected read ${functionName}`);
@@ -389,6 +392,20 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     const empty = await Engine.create({ cfg, chain: fake({ balances: { [RIF.toLowerCase()]: 0n } }).chain, store: new MemoryStateStore(), log: () => {} });
     const r = await empty.quote(sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn, side: "buy", delivery: "auto" }));
     expect(r.ok && [r.quote.strategy, r.quote.delivery]).toEqual(["route", "direct"]);
+  });
+
+  it("USDRIF→RIF `auto`: the RIF RAIL quotes one redemption's rate (no pool leg) and beats the pools", async () => {
+    const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1", SELL_RIF: "1" });
+    const { chain } = fake({ balances: { [RIF.toLowerCase()]: 3_000n * 10n ** 18n } });
+    const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
+    const amountIn = 50n * 10n ** 18n; // 50 USDRIF: 1197.5 RIF on the pools, 1245 on the rail
+    const v = await e.quote(sellReq({ tokenIn: USDRIF, tokenOut: RIF, amountIn, side: "buy", delivery: "auto" }));
+    if (!v.ok) throw new Error(v.reason);
+    expect(v.quote).toMatchObject({ strategy: "inventory", delivery: "pull", route: { source: "moc-rail" } });
+    // 50 ÷ $0.04 × (1 − 0.2 % MoC − 0.2 % haircut) = 1245 RIF, − the min profit at that rate.
+    const railRif = railRifOut(amountIn, 4n * 10n ** 16n, 20n);
+    expect(railRif).toBe(1_245n * 10n ** 18n);
+    expect(v.quote.grossOut).toBe(railRif - (cfg.policy.minProfitUsdt0 * railRif + 50_000_000n - 1n) / 50_000_000n);
   });
 
   it("RIF→USDT0 `auto`: while RIF is below its target share, the rail BUYS at the replacement cost and beats the pool", async () => {

@@ -51,6 +51,9 @@ export const MOC_CORE_ABI = [
     inputs: [{ name: "tp_", type: "address" }],
     outputs: [{ type: "uint256" }],
   },
+  { type: "function", name: "paused", stateMutability: "view", inputs: [], outputs: [{ type: "bool" }] },
+  { type: "function", name: "liquidated", stateMutability: "view", inputs: [], outputs: [{ type: "bool" }] },
+  { type: "function", name: "getTotalACavailable", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
 ] as const;
 
 export const MOC_QUEUE_ABI = [
@@ -391,6 +394,21 @@ export async function mocPACtp(c: Chain, cfg: Config): Promise<bigint> {
   const pACtp = await c.pub.readContract({ address: cfg.moc.core, abi: MOC_CORE_ABI, functionName: "getPACtp", args: [cfg.tokens.usdrif] });
   if (pACtp === 0n) throw new Error("MoC getPACtp returned 0");
   return pACtp;
+}
+
+/**
+ * Whether MoC can redeem USDRIF for `rif` RIF now — the rail's replacement leg. Not
+ * paused, not liquidated, and its reserve holds well over `rif` (×10: other redemptions
+ * may queue ahead of ours). Redeeming TP only raises MoC's coverage, so coverage is no
+ * limit on it (2026-10-14: 304.9M RIF available, coverage 10.97 vs threshold 2).
+ */
+export async function mocRedeemBlocker(c: Chain, cfg: Config, rif: bigint): Promise<string | undefined> {
+  const read = (functionName: "paused" | "liquidated" | "getTotalACavailable") => c.pub.readContract({ address: cfg.moc.core, abi: MOC_CORE_ABI, functionName });
+  const [paused, liquidated, available] = (await Promise.all([read("paused"), read("liquidated"), read("getTotalACavailable")])) as [boolean, boolean, bigint];
+  if (paused) return "MoC is paused";
+  if (liquidated) return "MoC is liquidated";
+  if (available < rif * 10n) return `MoC holds ${available} RIF, too little to redeem ${rif} safely`;
+  return undefined;
 }
 
 /** USDRIF out of the 0.05 % USDRIF/USDT0 pool for `amountIn` USDT0 (the RIF rail's refill leg), quoted live. */

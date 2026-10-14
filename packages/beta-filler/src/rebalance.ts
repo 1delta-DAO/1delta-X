@@ -93,9 +93,10 @@ export class Rebalancer {
    * RIF_SHARE_TARGET_BPS of the wallet's value (policy.ts `rifBand`) — a minority, RIF is
    * volatile. One tx per step, in this order:
    *   1. a MoC op (redeem / mint) in the queue → hold (its tokens have not arrived);
-   *   2. USDRIF on hand (a refill swap's output, a drain's mint, the USDRIF buy side) →
-   *      below target: redeem what reaches it (`redeemTP`, → RIF); at or above: swap it
-   *      to USDT0 on the 0.05 % pool;
+   *   2. USDRIF on hand (a refill swap's output, a drain's mint, USDRIF → RIF fills, the
+   *      USDRIF buy side) → below target: redeem what reaches it (`redeemTP`, → RIF); at
+   *      or above: swap it to USDT0 on the 0.05 % pool — each once RAIL_USDRIF_BATCH has
+   *      collected (a MoC op costs ~$2.4), or at once below LOW;
    *   3. RIF below RIF_SHARE_LOW_BPS → swap USDT0 → USDRIF for the gap to target (step 2
    *      redeems it next);
    *   4. RIF above RIF_SHARE_HIGH_BPS → `mintTP` the excess RIF into USDRIF (step 2 swaps
@@ -113,8 +114,9 @@ export class Rebalancer {
     const dust18 = p.minFillUsdt0 * 10n ** 12n;
     const where = `RIF ${fmtUnits(m.rif, 18)} = ${band.shareBps} bps of $${fmtUnits(band.total18, 18)}`;
     const usdrifFree = m.usdrif > p.usdrifReserve ? m.usdrif - p.usdrifReserve : 0n;
-    // 2. USDRIF on hand.
-    if (usdrifFree >= dust18) {
+    // 2. USDRIF on hand: in batches, or at once when RIF is below the band.
+    const urgent = band.gap18 >= dust18 && band.shareBps < p.rifShareLowBps;
+    if (usdrifFree >= dust18 && (urgent || force || usdrifFree >= p.railUsdrifBatch)) {
       if (band.gap18 >= dust18) {
         // Redeem what fills the gap (the MoC fee comes off the RIF paid out).
         const want = (band.gap18 * 10_000n) / (10_000n - MOC_FEE_BPS);

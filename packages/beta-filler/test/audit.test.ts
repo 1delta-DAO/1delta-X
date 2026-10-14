@@ -319,6 +319,8 @@ function inventoryChain(o: { gasPrice: bigint; receipt: Receipt }) {
         case "previewFill": return [0n, [100n * 10n ** 18n], [90_000_000n]];
         case "balanceOf": return 10_000n * 10n ** 6n;
         case "getPACtp": return 10n ** 17n;
+        case "paused": case "liquidated": return false;
+        case "getTotalACavailable": return 10n ** 30n;
         case "previewBump": return 0n;
         case "allowance": return 10n ** 30n;
       }
@@ -546,6 +548,37 @@ describe("the RIF rail (2026-10-14): USDT0 → RIF filled from the float, gated 
     expect(full.out).toMatchObject({ status: "skipped" });
     expect(full.out.reason).toMatch(/RIF_SHARE_HIGH_BPS/);
     expect(full.sent).toHaveLength(0);
+  });
+
+  it("USDRIF → RIF: 46 USDRIF for 450 RIF fills (one redemption buys it back for 45.18 USDRIF); MoC paused → skipped", async () => {
+    const run = async (paused: boolean) => {
+      const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+      const pub = (chain as unknown as { pub: Record<string, unknown> }).pub;
+      const read = pub.readContract as (a: { functionName: string }) => Promise<unknown>;
+      pub.readContract = async (a: { functionName: string }) => {
+        if (a.functionName === "previewFill") return [0n, [46n * 10n ** 18n], [450n * 10n ** 18n]];
+        if (a.functionName === "balanceOf") return 10_000n * 10n ** 18n; // the RIF float
+        if (a.functionName === "paused") return paused;
+        return read(a);
+      };
+      pub.call = async () => ({ data: encodeAbiParameters([{ type: "int256" }, { type: "uint256[]" }, { type: "uint256[]" }], [0n, [46n * 10n ** 18n], [450n * 10n ** 18n]]) });
+      const guard = new Guard(cfg.gas);
+      const e = {
+        orderHash: ("0x" + "06".repeat(32)) as Hex,
+        announce: { order: order({ legsIn: [{ token: ROOTSTOCK.usdrif, start: 46n * 10n ** 18n, end: 0n }], legsOut: [{ token: ROOTSTOCK.rif, start: 450n * 10n ** 18n, end: 0n, recipient: zeroAddress }] }), sig: "0x" as Hex },
+        state: { ok: true, status: "Fillable", fillableAmount: 46n * 10n ** 18n, validatorsPass: true },
+      };
+      const out = await new Filler(cfg, chain, new Budget({ [ROOTSTOCK.rif.toLowerCase()]: 10n ** 30n }), () => {}, () => {}, guard).consider(e as never);
+      return { out, sent, guard };
+    };
+    const ok = await run(false);
+    expect(ok.out, ok.out.reason).toMatchObject({ status: "pending", strategy: "inventory" });
+    // 450 × $0.10 ÷ (1 − 0.2 % − 0.2 %) = 45.180722891566265061 USDRIF; the margin in USDT0 units.
+    const replace = 45_180_722_891_566_265_061n;
+    expect(ok.guard.pending!.info).toMatchObject({ payToken: ROOTSTOCK.rif, recvToken: ROOTSTOCK.usdrif, profitEst: String((46n * 10n ** 18n) / 10n ** 12n - (replace + 10n ** 12n - 1n) / 10n ** 12n) });
+    const stop = await run(true);
+    expect(stop.out).toMatchObject({ status: "skipped", reason: "MoC is paused" });
+    expect(stop.sent).toHaveLength(0);
   });
 
   it("refuses when the RIF costs more to replace than the maker pays", async () => {

@@ -189,8 +189,10 @@ volatile, so it stays a minority:
 - below `RIF_SHARE_LOW_BPS` (15 %): swap USD₮0 → USDRIF on the 0.05 % pool for the gap, then
   `redeemTP` it (→ RIF);
 - above `RIF_SHARE_HIGH_BPS` (25 %): `mintTP` the excess RIF into USDRIF, then swap that to USD₮0;
-- in between, user flow on both sides moves it: makers buying RIF (we deliver it, priced
-  at its MoC replacement cost) and makers selling RIF (we keep it — at its replacement
+- in between, user flow on both sides moves it: makers buying RIF with USD₮0 or USDRIF
+  (we deliver it, priced at its MoC replacement cost — for USDRIF a single `redeemTP`,
+  no pool leg; the USDRIF collected is redeemed in batches of `RAIL_USDRIF_BATCH`, or at
+  once below the band) and makers selling RIF (we keep it — at its replacement
   cost while RIF is below target, at its MoC exit above, and never past 25 %);
 - `USDT0_RESERVE` is never spent by the rail; a pool more than `USDRIF_PEG_TOLERANCE_BPS`
   off $1 is refused; RIF is never auto-sold; `beta-filler rebalance-rif` (Worker:
@@ -805,6 +807,7 @@ Inventory strategy:
 | `RIF_SHARE_LOW_BPS`, `RIF_SHARE_TARGET_BPS`, `RIF_SHARE_HIGH_BPS` | `1500`, `2000`, `2500` | the RIF band, as a share of the wallet's value |
 | `HOURLY_RIF`, `RIF_RAIL_HAIRCUT_BPS`, `USDT0_RESERVE` | `20000`, `20`, `0` | RIF outflow cap per hour; the haircut on async MoC conversions; USD₮0 the rail never spends |
 | `RAIL_SWAP_SLIPPAGE_BPS`, `USDRIF_PEG_TOLERANCE_BPS` | `30`, `50` | the band's USD₮0 ⇄ USDRIF pool swaps |
+| `RAIL_USDRIF_BATCH` | `100` | USDRIF collected before the band redeems / swaps it (a MoC op costs ~$2.4); at once below the band |
 | `USDRIF`, `USDT0`, `RIF`, `MOC_CORE`, `MOC_QUEUE` | Rootstock mainnet | overrides |
 
 ## Commands

@@ -54,6 +54,11 @@ describe("the rail's shape and arithmetic", () => {
     expect(classify(sell, off, ACCOUNT.address)).toEqual({ ok: false, reason: "RIF buy side disabled" });
     expect(legsFor("sellRif", T)).toEqual({ pay: T.rif, receive: T.usdt0 });
     expect(legsFor("buyRif", T)).toEqual({ pay: T.usdt0, receive: T.rif });
+    // USDRIF → RIF (the maker pays USDRIF): delivered from the float, replaced by one redemption.
+    const viaUsdrif = railOrder({ legsIn: [{ token: T.usdrif, start: 50n * 10n ** 18n, end: 0n }] });
+    expect(classify(viaUsdrif, cfg, ACCOUNT.address)).toEqual({ ok: true, direction: "sellRifUsdrif" });
+    expect(classify(viaUsdrif, off, ACCOUNT.address).ok).toBe(false);
+    expect(legsFor("sellRifUsdrif", T)).toEqual({ pay: T.rif, receive: T.usdrif });
   });
 
   it("the band: RIF's share of USDT0 + USDRIF + RIF at the oracle, and the gap to the target", () => {
@@ -165,6 +170,19 @@ describe("the RIF band: RIF stays a minority (15–25 %, target 20 %) of the wal
     expect(await rebalancer(after.chain).step()).toMatchObject({ action: "drain", status: "sent" });
     const s = swapArgs(after.sent[0]!.data);
     expect([s.tokenIn, s.tokenOut, s.amountIn]).toEqual([T.usdrif, T.usdt0, 100n * E18]);
+  });
+
+  it("USDRIF from USDRIF → RIF fills is batched (RAIL_USDRIF_BATCH 100): held below it, redeemed from it, at once below LOW", async () => {
+    // 300 USDT0 + 30 USDRIF + 875 RIF ($70) = $400: 17.5 % — in the band, below target.
+    const held = fakeChain(wallet(300_000_000n, 30n * E18, 875n * E18));
+    expect(await rebalancer(held.chain).step()).toBeUndefined();
+    // 120 USDRIF collected (RIF $70 of $490 = 14.3 % — below LOW anyway): redeem the gap to 20 %.
+    const batch = fakeChain(wallet(300_000_000n, 120n * E18, 875n * E18));
+    expect(await rebalancer(batch.chain).step()).toMatchObject({ action: "redeem", status: "sent" });
+    expect(decodeFunctionData({ abi: MOC_CORE_ABI, data: batch.sent[0]!.data }).args[1]).toBe(28_056_112_224_448_897_795n); // ($98 − $70) ÷ 0.998
+    // Below LOW with only 10 USDRIF on hand: redeemed at once (it is part of the refill).
+    const urgent = fakeChain(wallet(330_000_000n, 10n * E18, 500n * E18));
+    expect(await rebalancer(urgent.chain).step()).toMatchObject({ action: "redeem", status: "sent" });
   });
 
   it("USDT0_RESERVE is never spent; a MoC op in the queue holds everything", async () => {

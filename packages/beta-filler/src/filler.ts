@@ -11,6 +11,7 @@ import {
   balanceOf,
   MOC_QUEUE_ABI,
   mocPACtp,
+  mocRedeemBlocker,
   OPER_REDEEM_TP,
   previewBump,
   previewFill,
@@ -45,6 +46,7 @@ import {
   type Verdict,
   inventoryProfitOk,
   paysUsdt0,
+  sellsRif,
   railRifOut,
   railUsdrifFor,
   rebalanceShare,
@@ -221,7 +223,8 @@ export class Filler {
     const { cfg, chain } = this;
     const p = cfg.policy;
     const t = cfg.tokens;
-    if (tokenIn.toLowerCase() === t.usdt0.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice);
+    if (tokenIn.toLowerCase() === t.usdt0.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice, "usdt0");
+    if (tokenIn.toLowerCase() === t.usdrif.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice, "usdrif");
     if (tokenIn.toLowerCase() === t.rif.toLowerCase() && tokenOut.toLowerCase() === t.usdt0.toLowerCase()) return this.quoteRailBuy(amountIn, gasPrice);
     if (tokenIn.toLowerCase() !== t.usdrif.toLowerCase() || tokenOut.toLowerCase() !== t.usdt0.toLowerCase()) return { ok: false, reason: "inventory: not USDRIF→USDT0" };
     if (!p.buyUsdrif) return { ok: false, reason: "inventory: buy side disabled" };
@@ -257,26 +260,35 @@ export class Filler {
    * MoC fee and RIF_RAIL_HAIRCUT_BPS (`railRif`). The cost (gas + the refill's share)
    * and the minimum profit, in USDT0, are converted to RIF at that same rate. Capped
    * by the RIF float and the hourly RIF budget.
+   *
+   * `via: "usdrif"` (USDRIF → RIF): the maker pays USDRIF, which IS the replacement —
+   * one `redeemTP`, no pool leg: railRif = amountIn at the oracle − fee − haircut. Costs
+   * convert at the same rate (USDRIF ≈ $1).
    */
-  private async quoteRail(amountIn: bigint, gasPrice: bigint): Promise<Verdict<{ candidate: PricedCandidate }>> {
+  private async quoteRail(amountIn: bigint, gasPrice: bigint, via: "usdt0" | "usdrif"): Promise<Verdict<{ candidate: PricedCandidate }>> {
     const { cfg, chain } = this;
     const p = cfg.policy;
     const t = cfg.tokens;
     if (!p.sellRif) return { ok: false, reason: "inventory: RIF rail disabled" };
-    if (amountIn < p.minFillUsdt0) return { ok: false, reason: "inventory: below minimum fill" };
-    if (amountIn > p.maxFillUsdt0) return { ok: false, reason: "inventory: above maximum fill" };
-    const [usdrif, mix] = await Promise.all([quoteUsdt0ToUsdrif(chain, cfg, amountIn), walletMix(chain, cfg)]);
+    // Size limits in USDT0 units; USDRIF counts at $1 (and 1 USDT0 unit = 1e12 USDRIF wei).
+    const notional = via === "usdrif" ? amountIn / 10n ** 12n : amountIn;
+    if (notional < p.minFillUsdt0) return { ok: false, reason: "inventory: below minimum fill" };
+    if (notional > p.maxFillUsdt0) return { ok: false, reason: "inventory: above maximum fill" };
+    const [usdrif, mix] = await Promise.all([via === "usdrif" ? amountIn : quoteUsdt0ToUsdrif(chain, cfg, amountIn), walletMix(chain, cfg)]);
     const bal = mix.rif;
     const railRif = railRifOut(usdrif, mix.pACtp, p.rifRailHaircutBps);
     if (railRif === 0n) return { ok: false, reason: "inventory: no rail output" };
-    const shape = gasShape("inventory", "inventory", t.usdt0, t.rif, cfg.settlement);
+    const blocked = await mocRedeemBlocker(chain, cfg, railRif);
+    if (blocked) return { ok: false, reason: `inventory: ${blocked}` };
+    const shape = gasShape("inventory", "inventory", via === "usdrif" ? t.usdrif : t.usdt0, t.rif, cfg.settlement);
     const learned = this.gasRatios.typicalEstimate(shape);
     const estimate = learned !== undefined && learned > p.inventoryGasEstimate ? learned : p.inventoryGasEstimate;
     const gasUnits = this.gasRatios.priced(shape, estimate);
     const rebalanceWei = await this.rebalanceShareWei(gasPrice, railRif, this.railBatch("sellRif", mix));
     const costUsdt0 = await this.rbtcToUsdt0(gasPrice * gasUnits + rebalanceWei);
     if (costUsdt0 === undefined) return { ok: false, reason: "inventory: cannot price gas in USDT0" };
-    const toRif = (u: bigint) => (u * railRif + amountIn - 1n) / amountIn; // USDT0 units → RIF wei at the rail rate, rounded up
+    // USDT0 units → RIF wei at the rail rate, rounded up.
+    const toRif = (u: bigint) => (u * railRif + notional - 1n) / notional;
     const grossOut = railRif - toRif(p.minProfitUsdt0);
     const room = this.budget.remaining(t.rif, Date.now());
     const capOut = bal < room ? bal : room;
@@ -359,6 +371,11 @@ export class Filler {
   /** What the fill earns before gas, in USDT0 units. */
   private async edgeUsdt0(direction: Direction, paid: bigint, received: bigint): Promise<bigint> {
     if (direction === "sellRif") return received - (await this.railReplaceUsdt0(paid));
+    if (direction === "sellRifUsdrif") {
+      // The USDRIF received buys the RIF back with one redemption: no pool leg (USDRIF ≈ $1).
+      const replace = railUsdrifFor(paid, await mocPACtp(this.chain, this.cfg), this.cfg.policy.rifRailHaircutBps);
+      return (received - replace) / 10n ** 12n;
+    }
     if (direction === "buyRif") return (await this.rifMarkUsdt0(received, await walletMix(this.chain, this.cfg))) - paid;
     if (direction === "buyUsdrif") {
       const rif = ((await rifForUsdrif(this.chain, this.cfg, received)) * (10_000n - MOC_FEE_BPS)) / 10_000n;
@@ -461,6 +478,12 @@ export class Filler {
       return this.skip(orderHash, `RIF share would exceed RIF_SHARE_HIGH_BPS ${p.rifShareHighBps}`);
     }
 
+    // 2c. Delivering RIF: MoC must be able to redeem its replacement (not paused / liquidated).
+    if (sellsRif(direction)) {
+      const blocked = await mocRedeemBlocker(chain, cfg, paid);
+      if (blocked) return this.skip(orderHash, blocked);
+    }
+
     // 3. Buy side: the live exit (redeem at oracle − MoC fee, sell RIF on the pool) must beat what we pay.
     if (direction === "buyUsdrif") {
       const rif = ((await rifForUsdrif(chain, cfg, received)) * (10_000n - MOC_FEE_BPS)) / 10_000n;
@@ -482,8 +505,8 @@ export class Filler {
     const rebalanceWei =
       direction === "buyRif"
         ? await this.railBuyRebalanceWei(gasPrice, received, await walletMix(chain, cfg))
-        : direction === "sellRif"
-          ? await this.rebalanceShareWei(gasPrice, paid, this.railBatch(direction, await walletMix(chain, cfg)))
+        : sellsRif(direction)
+          ? await this.rebalanceShareWei(gasPrice, paid, this.railBatch("sellRif", await walletMix(chain, cfg)))
           : await this.rebalanceShareWei(gasPrice, direction === "buyUsdrif" ? received : paid);
     const preCost = await this.rbtcToUsdt0(gasPrice * this.gasRatios.priced(shape, p.inventoryGasEstimate) + rebalanceWei);
     if (preCost === undefined) return this.skip(orderHash, "cannot price gas in USDT0 (no pool quote and no RBTC_PRICE_USD)");
@@ -495,7 +518,9 @@ export class Filler {
         ? scaleUp(edgeUsdt0 + paid, rv, received) - pd
         : direction === "sellRif"
           ? rv - scaleUp(received - edgeUsdt0, pd, paid)
-          : rv - mintReplaceUsdt0(pd);
+          : direction === "sellRifUsdrif"
+            ? rv / 10n ** 12n - scaleUp(received / 10n ** 12n - edgeUsdt0, pd, paid)
+            : rv - mintReplaceUsdt0(pd);
     const pre = inventoryProfitOk(edgeUsdt0, preCost, p.minProfitUsdt0);
     if (!pre.ok) {
       const at = await this.recheckAt(order, gasPrice, paid, received, (pd, rv) => inventoryProfitOk(edgeAt(pd, rv), preCost, p.minProfitUsdt0).ok);
@@ -508,7 +533,7 @@ export class Filler {
 
     // 5. Allowance for Settlement to pull what we pay (direct-approval path, bounded).
     //    Live, a missing approval is its own tx: send it and come back next tick.
-    const hourly = pay.toLowerCase() === cfg.tokens.usdt0.toLowerCase() ? p.hourlyUsdt0 : direction === "sellRif" ? p.hourlyRif : p.hourlyUsdrif;
+    const hourly = pay.toLowerCase() === cfg.tokens.usdt0.toLowerCase() ? p.hourlyUsdt0 : sellsRif(direction) ? p.hourlyRif : p.hourlyUsdrif;
     const appr = await allowanceCall(chain, pay, cfg.settlement, paid, hourly);
     if (appr) {
       if (cfg.dryRun) this.log(`[dry-run] would approve ${cfg.settlement} for ${appr.amount} of ${pay}`);
@@ -570,6 +595,8 @@ export class Filler {
           ? scaleUp(edgeUsdt0 + paid, simReceived, received) - simPaid // the mark, as the gate above
         : direction === "sellRif"
           ? simReceived - scaleUp(received - edgeUsdt0, simPaid, paid) // the rail's replacement cost, as the gate above
+        : direction === "sellRifUsdrif"
+          ? simReceived / 10n ** 12n - scaleUp(received / 10n ** 12n - edgeUsdt0, simPaid, paid) // USDRIF at $1, in USDT0 units
           : simReceived - mintReplaceUsdt0(simPaid); // the mint fee too, as the gate above
     const r = await broadcast(chain, this.guard, {
       to: cfg.settlement,

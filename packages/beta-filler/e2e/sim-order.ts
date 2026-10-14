@@ -64,6 +64,7 @@ const PATHS: Record<string, { tokens: string[]; fees: number[] }> = {
   "USDRIF>WRBTC": { tokens: ["USDRIF", "USDT0", "WRBTC"], fees: [500, 3000] },
   "USDT0>RIF": { tokens: ["USDT0", "RIF"], fees: [3000] },
   "RIF>USDT0": { tokens: ["RIF", "USDT0"], fees: [3000] },
+  "USDRIF>RIF": { tokens: ["USDRIF", "USDT0", "RIF"], fees: [500, 3000] },
 };
 
 const rpc = env("RPC_URL");

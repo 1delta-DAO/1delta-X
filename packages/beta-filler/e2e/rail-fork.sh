@@ -2,10 +2,14 @@
 # RIF RAIL fork smoke test (LOCAL ONLY). On an anvil fork of Rootstock mainnet, against the
 # LIVE beta contracts (Settlement / Lens), with a fresh operator key:
 #   1. the band below 15 %: `rebalance-rif` swaps USDT0 → USDRIF and queues `redeemTP`;
-#   2. SELL_RIF: a maker's USDT0 → RIF pull order, filled from the wallet's RIF;
-#   3. BUY_RIF:  a maker's RIF → USDT0 pull order, bought with the wallet's USDT0;
-#   4. the band above 25 %: `rebalance-rif` queues `mintTP` for the excess RIF.
-# MoC's queue never executes on a fork, so each MoC step gets a fresh filler state file.
+#   2. the band above 25 %: `rebalance-rif` queues `mintTP` for the excess RIF;
+#   3. SELL_RIF: a maker's USDT0 → RIF pull order, filled from the wallet's RIF;
+#   4. SELL_RIF: a maker's USDRIF → RIF pull order (replaced by one redeemTP of the USDRIF);
+#   5. BUY_RIF:  a maker's RIF → USDT0 pull order, bought with the wallet's USDT0.
+# MoC's queue never executes on a fork, so each MoC step gets a fresh filler state file. MoC's
+# price is valid only ~20 blocks past the fork (then `MissingProviderPrice`; mainnet refreshes it
+# every few blocks), and every sequential tx is a block: the band steps (1–2) and the fills (3–5)
+# each run on a fresh fork of the latest block (`anvil_reset`).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "$HERE/.." && pwd)"
@@ -31,6 +35,7 @@ for url in ${FORK_URL:-} https://public-node.rsk.co https://rpc-gateway.1delta.i
   anvil --fork-url "$url" --fork-block-number "$FORK_BLOCK" --port "$PORT" --silent --retries 10 --timeout 120000 \
     --gas-price 26065600 --block-base-fee-per-gas 0 --disable-min-priority-fee >"$WORK/anvil.log" 2>&1 &
   ANVIL_PID=$!
+  FORK_FROM=$url
   for _ in $(seq 1 90); do cast chain-id --rpc-url "$RPC" >/dev/null 2>&1 && break 2; sleep 1; done
   kill $ANVIL_PID 2>/dev/null || true; ANVIL_PID=""
 done
@@ -46,9 +51,12 @@ deal() { # token holder to amount
 bal() { cast call "$1" "balanceOf(address)(uint256)" "$OPERATOR" --rpc-url "$RPC" | awk '{print $1}'; }
 ops() { cast call $QUEUE "operIdCount()(uint256)" --rpc-url "$RPC" | awk '{print $1}'; }
 show() { echo "   wallet: USDT0 $(bal $USDT0)  USDRIF $(bal $USDRIF)  RIF $(bal $RIF)"; }
-cast rpc anvil_setBalance "$OPERATOR" 0xDE0B6B3A7640000 --rpc-url "$RPC" >/dev/null
-# anvil checks the sender's balance on an eth_call with a gas price (the lens previews run from 0x0).
-cast rpc anvil_setBalance 0x0000000000000000000000000000000000000000 0xDE0B6B3A7640000 --rpc-url "$RPC" >/dev/null
+setup() {
+  cast rpc anvil_setBalance "$OPERATOR" 0xDE0B6B3A7640000 --rpc-url "$RPC" >/dev/null
+  # anvil checks the sender's balance on an eth_call with a gas price (the lens previews run from 0x0).
+  cast rpc anvil_setBalance 0x0000000000000000000000000000000000000000 0xDE0B6B3A7640000 --rpc-url "$RPC" >/dev/null
+}
+setup
 deal $USDT0 $USDT0_HOLDER "$OPERATOR" 400000000 # 400 USDT0, no RIF
 
 filler() { # state-file label, args…
@@ -68,18 +76,25 @@ order() { # label maker-idx tokenIn tokenOut amount
 }
 
 echo ">> 1. RIF at 0 % of the wallet: rebalance-rif → swap + redeemTP"
-o0=$(ops); filler band-low rebalance-rif | grep -E "sent|held" | grep -v approval | cut -c1-220 || true
+o0=$(ops); filler band-low rebalance-rif 2>&1 | tee "$WORK/band-low.out" | grep -E "sent|held" | grep -v approval | cut -c1-220 || true
 [ "$(ops)" -gt "$o0" ] || { echo "!! no MoC redemption queued"; exit 1; }; show
 
-echo ">> 2. SELL_RIF: maker buys RIF with 25 USDT0 (the wallet is dealt 1000 RIF as if the redemption executed)"
+echo ">> 2. RIF well above 25 % (dealt 3000): rebalance-rif → mintTP of the excess"
+deal $RIF $RIF_HOLDER "$OPERATOR" 3000000000000000000000
+o1=$(ops); filler band-high rebalance-rif 2>&1 | tee "$WORK/band-high.out" | grep -E "sent|held" | grep -v approval | cut -c1-220 || true
+[ "$(ops)" -gt "$o1" ] || { echo "!! no MoC mint queued"; exit 1; }; show
+echo ">> fresh fork of the latest block for the fills (400 USDT0 + 1000 RIF)"
+cast rpc anvil_reset "{\"forking\":{\"jsonRpcUrl\":\"$FORK_FROM\"}}" --rpc-url "$RPC" >/dev/null
+setup
+deal $USDT0 $USDT0_HOLDER "$OPERATOR" 400000000
 deal $RIF $RIF_HOLDER "$OPERATOR" 1000000000000000000000
+echo ">> 3. SELL_RIF: maker buys RIF with 25 USDT0"
 order sell-rif 9 USDT0 RIF 25; show
 
-echo ">> 3. BUY_RIF: maker sells 200 RIF for USDT0"
+echo ">> 4. SELL_RIF: maker buys RIF with 25 USDRIF (pools quote it via USD₮0; the rail redeems)"
+order sell-rif-usdrif 11 USDRIF RIF 25; show
+
+echo ">> 5. BUY_RIF: maker sells 200 RIF for USDT0"
 order buy-rif 10 RIF USDT0 200; show
 
-echo ">> 4. RIF well above 25 %: rebalance-rif → mintTP of the excess"
-deal $RIF $RIF_HOLDER "$OPERATOR" 3000000000000000000000
-o1=$(ops); filler band-high rebalance-rif | grep -E "sent|held" | grep -v approval | cut -c1-220 || true
-[ "$(ops)" -gt "$o1" ] || { echo "!! no MoC mint queued"; exit 1; }; show
 echo "OK"

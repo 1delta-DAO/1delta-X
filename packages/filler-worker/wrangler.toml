@@ -170,7 +170,9 @@ RIF_SELL_SLIPPAGE_BPS = "50"
 RIF_SELL_MAX_DISCOUNT_BPS = "150"
 # THE RIF RAIL (2026-10-14): the wallet makes a two-sided RIF market against USD₮0 (pull orders).
 #  • SELL_RIF: makers buy RIF — delivered from the wallet, priced at its MoC replacement cost
-#    (USD₮0 → USDRIF on the 0.05 % pool → redeemTP, fee + haircut);
+#    (USD₮0 → USDRIF on the 0.05 % pool → redeemTP, fee + haircut). Makers paying USDRIF
+#    are replaced by one redeemTP of it (no pool leg); that USDRIF is redeemed in batches
+#    of RAIL_USDRIF_BATCH (a MoC op costs ~$2.4), or at once below LOW;
 #  • BUY_RIF: makers sell RIF — we pay USD₮0 and keep it, at its replacement cost while RIF is
 #    below the target share, at its MoC exit (mintTP → USDRIF → pool) above.
 # THE BAND: RIF is volatile, so it is a MINORITY of the wallet's value (USD₮0 + USDRIF + RIF at
@@ -186,6 +188,7 @@ HOURLY_RIF = "10000"
 RIF_RAIL_HAIRCUT_BPS = "20"
 USDT0_RESERVE = "100"
 RAIL_SWAP_SLIPPAGE_BPS = "30"
+RAIL_USDRIF_BATCH = "100"
 USDRIF_PEG_TOLERANCE_BPS = "50"
 
 # ── gas policy (shared by both strategies and the rebalancer) ───────────────

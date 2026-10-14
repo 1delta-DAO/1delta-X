@@ -83,7 +83,7 @@ describe("classify", () => {
     ["pricing module", { pricingModule: OTHER }, /modules/],
     ["validator", { validators: [{ target: OTHER, data: "0x" as const }] }, /validators/],
     ["proportional leg", { legsIn: [{ token: ROOTSTOCK.usdrif, start: 2n ** 256n - 1n, end: 0n }] }, /proportional/],
-    ["wrong pair", { legsOut: [{ ...exitOrder().legsOut[0]!, token: ROOTSTOCK.rif }] }, /pair/],
+    ["wrong pair", { legsOut: [{ ...exitOrder().legsOut[0]!, token: ROOTSTOCK.wrbtc }] }, /pair/],
   ] as const)("refuses %s", (_name, over, reason) => {
     const v = classify(exitOrder(over as Partial<Order>), both, ME);
     expect(v.ok).toBe(false);

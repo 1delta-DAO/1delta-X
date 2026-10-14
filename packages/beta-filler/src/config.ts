@@ -287,6 +287,12 @@ export interface Policy {
   rifShareHighBps: bigint;
   /** USDT0 never spent by the rail (refills, RIF buys) — kept for the USDRIF buy side, 6 dec. */
   usdt0Reserve: bigint;
+  /**
+   * USDRIF the band collects before it acts on it (18 dec): a MoC op costs ~$2.4 (exec fee +
+   * gas), so the USDRIF that USDRIF → RIF fills bring in is redeemed (below target) or
+   * swapped out (above) in batches of at least this — or at once when RIF is below LOW.
+   */
+  railUsdrifBatch: bigint;
   /** Slippage tolerance on the rail's USDT0 ⇄ USDRIF pool swaps (bps). */
   railSwapSlippageBps: bigint;
   /** Refuse a rail swap whose pool price is more than this away from $1 per USDRIF (bps) — the peg guard. */
@@ -764,6 +770,7 @@ export function loadConfig(env: Env): Config {
     rifShareHighBps: bps(env, "RIF_SHARE_HIGH_BPS", 2500),
     usdt0Reserve: fixed(env, "USDT0_RESERVE", "0", USDT0_DECIMALS),
     railSwapSlippageBps: bps(env, "RAIL_SWAP_SLIPPAGE_BPS", 30),
+    railUsdrifBatch: fixed(env, "RAIL_USDRIF_BATCH", "100", USDRIF_DECIMALS),
     usdrifPegToleranceBps: bps(env, "USDRIF_PEG_TOLERANCE_BPS", 50),
   };
   if (!(policy.rifShareLowBps <= policy.rifShareTargetBps && policy.rifShareTargetBps <= policy.rifShareHighBps && policy.rifShareHighBps <= 10_000n)) {
