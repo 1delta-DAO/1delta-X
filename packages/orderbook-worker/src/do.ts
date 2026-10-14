@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { CancelVerifier, Verifier } from "@1delta-x/orderbook/pure";
-import { createPublicClient, http, type PublicClient } from "viem";
+import { createPublicClient, fallback, http, type PublicClient } from "viem";
 
 import { viemChainReader } from "./chain";
 import { loadConfig, RPC_TIMEOUT_MS, type Env, type WorkerConfig } from "./config";
@@ -26,7 +26,13 @@ export type DepsFactory = (cfg: WorkerConfig) => CoreDeps;
 export const defaultDeps: DepsFactory = (cfg) => {
   let client: PublicClient | undefined;
   const getClient = (): PublicClient =>
-    (client ??= createPublicClient({ transport: http(cfg.chain.rpcUrl, { batch: false, retryCount: 1, timeout: RPC_TIMEOUT_MS }) }) as PublicClient);
+    (client ??= createPublicClient({
+      // Primary first; an error, timeout or 429 moves the call to the next endpoint.
+      transport:
+        (cfg.rpcFallbackUrls ?? []).length > 0
+          ? fallback([cfg.chain.rpcUrl, ...cfg.rpcFallbackUrls].map((u) => http(u, { batch: false, retryCount: 1, timeout: RPC_TIMEOUT_MS })), { rank: false })
+          : http(cfg.chain.rpcUrl, { batch: false, retryCount: 1, timeout: RPC_TIMEOUT_MS }),
+    }) as PublicClient);
   return {
     verifier: new Verifier(getClient(), cfg.chain, { maxRecheckCalls: cfg.verifier.maxRecheckCalls, maxSweepMs: cfg.verifier.maxSweepMs }),
     cancelVerifier: new CancelVerifier(getClient, cfg.chain),

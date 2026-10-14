@@ -18,6 +18,12 @@ export interface Env {
    * stay. It must serve `eth_getLogs`: Rootstock's public node does not.
    */
   RPC_URL_SECRET?: string;
+  /**
+   * Further RPC endpoints tried in order when the primary errors, times out or rate-limits
+   * (comma-separated). 2026-10-13: the 1delta gateway answered 429 under the filler's load
+   * and every POST /orders failed "verification unavailable".
+   */
+  RPC_FALLBACK_URLS?: string;
   /** Optional Durable Object location hint (`wnam`, `enam`, `weur`, …); only affects object CREATION. */
   DO_LOCATION_HINT?: string;
   DEFAULT_FILLER?: string;
@@ -53,6 +59,8 @@ export interface Env {
 
 export interface WorkerConfig {
   chain: OrderbookConfig;
+  /** Backup RPC endpoints, in order (RPC_FALLBACK_URLS). */
+  rpcFallbackUrls: string[];
   /** Which binding `chain.rpcUrl` came from (status only; the URL itself is never echoed). */
   rpcSource: "RPC_URL_SECRET" | "RPC_URL" | "none";
   /** False while SETTLEMENT / PERMIT3 / LENS are still placeholders: writes 503, the alarm skips chain work. */
@@ -191,6 +199,10 @@ export function loadConfig(env: Env): WorkerConfig {
 
   return {
     chain: { chainId, settlement, permit3, lens, rpcUrl: rpc.url, ...(defaultFiller ? { defaultFiller } : {}) },
+    rpcFallbackUrls: (env.RPC_FALLBACK_URLS ?? "")
+      .split(",")
+      .map((u) => u.trim())
+      .filter((u) => /^https?:\/\//.test(u) && u !== rpc.url),
     rpcSource: rpc.source,
     configured,
     ocoModules: addrList(env.OCO_MODULES, "OCO_MODULES"),
