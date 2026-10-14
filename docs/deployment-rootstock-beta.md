@@ -61,7 +61,13 @@ Plain CREATE from the same deployer (nonce 5), `make deploy-native-unwrap`, prof
 | NativeUnwrapModule | `0xB6107a1DEa7Ae04129aBc27ce607249049f3C735` | weth = WRBTC `0x542fDA317318eBF1d3DEAf76E0b632741A7e677d`, settlement = Settlement |
 
 Read back: `WETH()` = WRBTC, `SETTLEMENT()` = Settlement, runtime 1,633 B. Stateless, no
-owner. Order shape and fork proof: tasks/28 and
+owner.
+
+⚠ **Not fillable by the route solver** (2026-10-14, fork-proven). Its MAKE item needs
+outputs delivered before inputs, which `AggregatorFillSolver` (PostInputs; `matchSettle`
+refuses pre-funded MAKE) cannot do without capital. It serves fillers that hold WRBTC. The
+app's RBTC receipts move to the capital-free `NativeBalance` + solver v3 design:
+docs/native-rbtc-delivery-plan.md. Order shape and fork proof: tasks/28 and
 `packages/modules/transfer/test/fork/NativeUnwrapRootstock.fork.t.sol`.
 
 ## Read back on mainnet (2026-10-09)

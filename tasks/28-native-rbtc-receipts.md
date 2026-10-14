@@ -1,6 +1,6 @@
 # 28. App: receive native RBTC from a fill (in-fill unwrap)
 
-- **Status:** open: steps 1–2 DONE (2026-10-14). The module is DEPLOYED at `0xB6107a1DEa7Ae04129aBc27ce607249049f3C735` (verified; docs/deployment-rootstock-beta.md). The app and filler shapes are wired but DORMANT: the deployed solver cannot fill this shape (see "Blocker" below), so a FILLER is needed first.
+- **Status:** SUPERSEDED for the app by task 30 (docs/native-rbtc-delivery-plan.md); module kept for capital-holding fillers. Steps 1–2 DONE (2026-10-14). The module is DEPLOYED at `0xB6107a1DEa7Ae04129aBc27ce607249049f3C735` (verified; docs/deployment-rootstock-beta.md). The app and filler shapes are wired but DORMANT: the deployed solver cannot fill this shape (see "Blocker" below), so a FILLER is needed first.
 - **Layer:** contracts (deploy) + app + filler
 - **Package:** `packages/modules/transfer` (`NativeUnwrapModule`), `packages/app`, `packages/beta-filler`
 - **Severity:** feature — UX

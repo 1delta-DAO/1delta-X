@@ -490,6 +490,14 @@ references the new module address in the order it signs.
   preview, `getOrderRelevantStates` (one call returning everything an off-chain
   book needs to decide whether an order is still live and funded), signature
   check, `validateOrder` with a human-readable reason.
+- **Known limitation (2026-10-14): native OUTPUT needs filler capital today.** The
+  in-fill unwrap (`NativeUnwrapModule`, a pre-funded MAKE item) runs only where outputs are
+  delivered before inputs are paid. The zero-capital route solver fills the other way round
+  (`PostInputs`: item-free) and its `matchSettle` entry refuses pre-funded MAKE items, so
+  every native fill would need inventory or a flash loan. Fix planned without capital and
+  without a Settlement change: a `NativeBalance` view token on DIRECT orders, with the solver
+  unwrapping and sending RBTC in its callback —
+  [docs/native-rbtc-delivery-plan.md](docs/native-rbtc-delivery-plan.md), task 30.
 - [`NativeSettler`](packages/periphery/src/NativeSettler.sol) +
   [`NativeForwarderFactory`](packages/periphery/src/NativeForwarderFactory.sol)
   — native ETH handled entirely at the edge: the core and Permit3 stay
