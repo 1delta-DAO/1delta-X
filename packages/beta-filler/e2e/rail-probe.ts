@@ -127,7 +127,9 @@ const main = async () => {
   const RAIL_FILL = 200_000;
   const REBAL = 450_000;
   type Row = { src: string; out: bigint; gas: number; extraUsd?: number };
-  const pairs: [Sym, Sym][] = [["USD0", "RIF"], ["RIF", "USD0"], ["USD0", "RIFP"], ["RIFP", "USD0"]];
+  const only = process.env.PAIRS?.split(",");
+  const all: [Sym, Sym][] = [["USD0", "RIF"], ["RIF", "USD0"], ["USD0", "RIFP"], ["RIFP", "USD0"], ["USDRIF", "USD0"], ["USD0", "USDRIF"]];
+  const pairs = only ? all.filter(([a, b]) => only.includes(`${a}>${b}`)) : all;
   for (const [from, to] of pairs) {
     console.log(`── ${from} → ${to}`);
     for (const usdIn of [10, 100, 1_000, 10_000]) {
@@ -155,6 +157,14 @@ const main = async () => {
       } else if (from === "RIFP" && to === "USD0") {
         rail = (await poolBest("USDRIF", "USD0", mintTP(redeemTC(amt)))).out; // RIFP → RIF → USDRIF → USD0
         exec = execMintTP + execTC;
+      } else if (from === "USDRIF" && to === "USD0") {
+        // The inventory strategy's exit: redeem USDRIF → RIF at the oracle, sell RIF → USD0 on the pools.
+        rail = (await poolBest("RIF", "USD0", redeemTP(amt))).out;
+        exec = execRedeemTP;
+      } else if (from === "USD0" && to === "USDRIF") {
+        // The mirror: buy RIF on the pools, mint USDRIF at the oracle.
+        rail = mintTP((await poolBest("USD0", "RIF", amt)).out);
+        exec = execMintTP;
       }
       if (rail) {
         rows.push({ src: "rail/trade", out: rail, gas: RAIL_FILL + REBAL, extraUsd: weiUsd(exec) });
