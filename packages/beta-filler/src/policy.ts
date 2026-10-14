@@ -10,8 +10,12 @@ import type { SpendEntry } from "./state";
  * whole policy is unit-testable.
  */
 
-/** `buyUsdrif`: the maker sells USDRIF, we pay USDT0. `sellUsdrif`: the maker buys USDRIF, we deliver it. */
-export type Direction = "buyUsdrif" | "sellUsdrif";
+/**
+ * `buyUsdrif`: the maker sells USDRIF, we pay USDT0. `sellUsdrif`: the maker buys USDRIF,
+ * we deliver it. `sellRif`: the maker buys RIF with USDT0, we deliver RIF from the float
+ * (the RIF rail — priced at its MoC replacement cost, {@link railUsdrifFor}).
+ */
+export type Direction = "buyUsdrif" | "sellUsdrif" | "sellRif";
 
 export type Verdict<T> = ({ ok: true } & T) | { ok: false; reason: string };
 
@@ -110,7 +114,7 @@ export function windowEndMs(order: Order, nowMs: number): number | undefined {
  */
 export function classify(
   order: Order,
-  cfg: Pick<Config, "tokens"> & { policy: Pick<Policy, "buyUsdrif" | "sellUsdrif"> },
+  cfg: Pick<Config, "tokens"> & { policy: Pick<Policy, "buyUsdrif" | "sellUsdrif"> & Partial<Pick<Policy, "sellRif">> },
   me: Address,
   extras: { hasPermitBatch?: boolean; sigless?: boolean; nowS?: bigint } = {},
 ): Verdict<{ direction: Direction }> {
@@ -133,17 +137,19 @@ export function classify(
   if (tin === usdt0 && tout === usdrif) {
     return cfg.policy.sellUsdrif ? { ok: true, direction: "sellUsdrif" } : { ok: false, reason: "sell side disabled" };
   }
-  return { ok: false, reason: "not the USDRIF/USDT0 pair" };
+  if (tin === usdt0 && tout === cfg.tokens.rif.toLowerCase()) {
+    return cfg.policy.sellRif ? { ok: true, direction: "sellRif" } : { ok: false, reason: "RIF rail disabled" };
+  }
+  return { ok: false, reason: "not an inventory pair (USDRIF/USDT0, USDT0→RIF)" };
 }
 
 /** The token we pay and the token we receive, for a direction. */
 export function legsFor(direction: Direction, tokens: Config["tokens"]): { pay: Address; receive: Address } {
-  return direction === "buyUsdrif"
-    ? { pay: tokens.usdt0, receive: tokens.usdrif }
-    : { pay: tokens.usdrif, receive: tokens.usdt0 };
+  if (direction === "buyUsdrif") return { pay: tokens.usdt0, receive: tokens.usdrif };
+  return { pay: direction === "sellRif" ? tokens.rif : tokens.usdrif, receive: tokens.usdt0 };
 }
 
-/** USDT0 per USDRIF, 1e18-scaled, for one fill's `paid`/`received` (each in its own token's units). */
+/** USDT0 per USDRIF (per RIF on the rail), 1e18-scaled, for one fill's `paid`/`received` (each in its own token's units). */
 export function fillPrice(direction: Direction, paid: bigint, received: bigint): bigint {
   // buy: we pay USDT0 (paid) for USDRIF (received); sell: we receive USDT0 for USDRIF paid.
   const usdt0 = direction === "buyUsdrif" ? paid : received;
@@ -155,6 +161,8 @@ export function fillPrice(direction: Direction, paid: bigint, received: bigint):
 export function priceOk(direction: Direction, paid: bigint, received: bigint, p: Policy): Verdict<{ price: bigint }> {
   if (paid === 0n || received === 0n) return { ok: false, reason: "zero-sized leg" };
   const price = fillPrice(direction, paid, received);
+  // The rail has no fixed price bound: its gate is the live replacement cost (filler.ts).
+  if (direction === "sellRif") return { ok: true, price };
   if (direction === "buyUsdrif" && price > p.maxBuyPrice) {
     return { ok: false, reason: `price ${fmt18(price)} above max ${fmt18(p.maxBuyPrice)}` };
   }
@@ -224,6 +232,21 @@ export function rebalanceShare(costWei: bigint, usdrif: bigint, redeemMin: bigin
  */
 export function mintReplaceUsdt0(usdrif: bigint): bigint {
   return (usdrif * (10_000n + MOC_FEE_BPS) + 10n ** 16n - 1n) / 10n ** 16n;
+}
+
+/** RIF out of MoC's `redeemTP` for `usdrif`, after its fee and the rail haircut (rounded down). */
+export function railRifOut(usdrif: bigint, pACtp: bigint, haircutBps: bigint): bigint {
+  return (usdrif * ONE * (10_000n - MOC_FEE_BPS - haircutBps)) / pACtp / 10_000n;
+}
+
+/**
+ * The USDRIF that buys back `rif` through `redeemTP` (its fee and the rail haircut
+ * on top), rounded up — the inverse of {@link railRifOut}. Pool-priced into USDT0 by
+ * the caller (exact output on the 0.05 % pool).
+ */
+export function railUsdrifFor(rif: bigint, pACtp: bigint, haircutBps: bigint): bigint {
+  const keep = 10_000n - MOC_FEE_BPS - haircutBps;
+  return (rif * pACtp * 10_000n + ONE * keep - 1n) / (ONE * keep);
 }
 
 /** USDT0 notional of a fill (the USDT0 side, whichever direction). */

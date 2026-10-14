@@ -503,7 +503,15 @@ export default function App() {
    */
   const signDraft = useCallback(
     async (
-      spec: SliceSpec & { marketId: string; side: Side; orders?: number; signedSlices?: number; kind: "market" | "limit" | "twap" },
+      spec: SliceSpec & {
+        marketId: string;
+        side: Side;
+        orders?: number;
+        signedSlices?: number;
+        kind: "market" | "limit" | "twap";
+        /** Sign plain PULL delivery whatever the market's default: the filler's quote was its inventory's (the RIF rail). */
+        pull?: boolean;
+      },
     ): Promise<SignedOrder> => {
       if (!signer || !wallet.address) throw new Error("wallet not connected");
       const market = marketById(spec.marketId);
@@ -546,9 +554,9 @@ export default function App() {
         side: spec.side,
         pay,
         recv,
-        solver: solverForMarket(deployment, spec.marketId),
+        solver: spec.pull ? zeroAddress : solverForMarket(deployment, spec.marketId),
         // Pull markets: the solver's ~2-block soft window, then open to all (B13).
-        exclusivity: exclusivityForMarket(deployment, spec.marketId),
+        exclusivity: spec.pull ? undefined : exclusivityForMarket(deployment, spec.marketId),
         amountIn: spec.amountIn,
         targetOut: spec.targetOut,
         minOut: spec.minOut,
@@ -586,10 +594,14 @@ export default function App() {
       // gas-floor fallback rather than a stale quote.
       let plan = planNow;
       let quoted = false;
+      // The delivery the quote was priced for: an `auto` request may come back PULL (the
+      // filler's inventory beat its route), and the order must then be signed as pull.
+      let pull = false;
       if (plan.kind === "market" && quoteReq) {
         const fresh = await marketQuote.refresh();
         plan = planWith(termsOf(fresh)) ?? plan;
         quoted = !!plan.quoted;
+        pull = quoted && quoteReq.delivery === "auto" && fresh?.delivery === "pull";
       }
       const undeployed = deployment === null ? " · domain not deployed" : "";
       const spec: SliceSpec = {
@@ -633,7 +645,7 @@ export default function App() {
       // Sign FIRST. Nothing is recorded — no fill, no row — until there is a
       // signature behind it, so a declined or failed signature leaves no
       // phantom trade in the history (G-TS_SIGN-3, G-TS_SIGN-15).
-      let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind });
+      let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind, pull });
       // Gasless funding: a second prompt, the ERC-2612 permit for exactly this order's
       // input, valid until the order's own expiry. It rides with the order to the book.
       if (gaslessActive && deployment && wallet.address && signer && wallet.provider && payMeta.address) {

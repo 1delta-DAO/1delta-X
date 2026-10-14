@@ -478,6 +478,49 @@ describe("review 2026-10-05 §6: the sell side's recorded profit_est includes th
   });
 });
 
+describe("the RIF rail (2026-10-14): USDT0 → RIF filled from the float, gated on the MoC replacement cost", () => {
+  const cfg = loadConfig({ ...ENV, SELL_RIF: "1", INVENTORY_MIN_PROFIT_USDT0: "0" });
+  /** Maker pays 50 USDT0 for `rif` RIF; oracle $0.10 per RIF; the pool sells USDRIF 1:1. */
+  function rail(rif: bigint) {
+    const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+    const pub = (chain as unknown as { pub: Record<string, unknown> }).pub;
+    const read = pub.readContract as (a: { functionName: string }) => Promise<unknown>;
+    pub.readContract = async (a: { functionName: string }) => {
+      if (a.functionName === "previewFill") return [0n, [50_000_000n], [rif]];
+      if (a.functionName === "balanceOf") return 10_000n * 10n ** 18n; // the RIF float
+      return read(a);
+    };
+    const sim = pub.simulateContract as (a: { functionName: string; args: [{ amount?: bigint }] }) => Promise<unknown>;
+    pub.simulateContract = async (a: { functionName: string; args: [{ amount?: bigint }] }) =>
+      a.functionName === "quoteExactOutputSingle" ? { result: [a.args[0].amount! / 10n ** 12n + 1n, 0n, 0, 0n] } : sim(a);
+    pub.call = async () => ({ data: encodeAbiParameters([{ type: "int256" }, { type: "uint256[]" }, { type: "uint256[]" }], [0n, [50_000_000n], [rif]]) });
+    const guard = new Guard(cfg.gas);
+    const e = {
+      orderHash: ("0x" + "04".repeat(32)) as Hex,
+      announce: { order: order({ legsIn: [{ token: ROOTSTOCK.usdt0, start: 50_000_000n, end: 0n }], legsOut: [{ token: ROOTSTOCK.rif, start: rif, end: 0n, recipient: zeroAddress }] }), sig: "0x" as Hex },
+      state: { ok: true, status: "Fillable", fillableAmount: 50_000_000n, validatorsPass: true },
+    };
+    return { e, sent, guard, filler: new Filler(cfg, chain, new Budget({ [ROOTSTOCK.rif.toLowerCase()]: 10n ** 30n }), () => {}, () => {}, guard) };
+  }
+
+  it("fills when 50 USDT0 beats buying the RIF back (pool → redeemTP, fee + haircut on top); profitEst is that margin", async () => {
+    const { e, sent, guard, filler } = rail(450n * 10n ** 18n);
+    const out = await filler.consider(e as never);
+    expect(out, out.reason).toMatchObject({ status: "pending", strategy: "inventory" });
+    expect(sent).toHaveLength(1);
+    // 450 RIF × $0.10 ÷ (1 − 0.2 % − 0.2 %) = 45.180722… USDRIF ≈ 45.180723 USDT0 on the pool.
+    expect(guard.pending!.info).toMatchObject({ payToken: ROOTSTOCK.rif, recvToken: ROOTSTOCK.usdt0, profitEst: String(50_000_000n - 45_180_723n) });
+  });
+
+  it("refuses when the RIF costs more to replace than the maker pays", async () => {
+    const { e, sent, filler } = rail(500n * 10n ** 18n); // 50.2 USDRIF to replace > 50 USDT0
+    const out = await filler.consider(e as never);
+    expect(out).toMatchObject({ status: "skipped", rest: true });
+    expect(out.reason).toMatch(/unprofitable after gas/);
+    expect(sent).toHaveLength(0);
+  });
+});
+
 describe("L-5: a receipt timeout charges conservatively and parks the order until its tx status is known", () => {
   it("route: pending → charged at the full limit → blocked while unmined → a revert becomes a strike", async () => {
     const { chain, sent, state } = fakeChain({ simGas: 200_000n, receipt: "timeout" });

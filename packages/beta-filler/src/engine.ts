@@ -166,7 +166,7 @@ export class Engine {
     this.quotes = new QuoteBook(state.quotes ?? [], mark);
     this.guard = new Guard(cfg.gas, state.guard ?? {}, mark, () => this.save());
     this.budget = new Budget(
-      { [cfg.tokens.usdt0.toLowerCase()]: cfg.policy.hourlyUsdt0, [cfg.tokens.usdrif.toLowerCase()]: cfg.policy.hourlyUsdrif },
+      { [cfg.tokens.usdt0.toLowerCase()]: cfg.policy.hourlyUsdt0, [cfg.tokens.usdrif.toLowerCase()]: cfg.policy.hourlyUsdrif, [cfg.tokens.rif.toLowerCase()]: cfg.policy.hourlyRif },
       state.spends ?? [],
     );
     this.routeBudget = new Budget({ [ROUTE_FILLS]: cfg.route?.hourlyFills ?? 0n }, state.routeSpends ?? []);
@@ -510,6 +510,21 @@ export class Engine {
     const r = await this.rebalancer.step();
     if (r) await this.emit({ type: "rebalance", outcome: r });
     if (this.guard.pending) await this.emit({ type: "sent", pending: this.guard.pending });
+    return r;
+  }
+
+  /**
+   * Admin: start a RIF-rail refill now (USDT0 → USDRIF swap to RIF_FLOAT_TARGET, or
+   * `usdt0` units of USDT0). It sends at most one tx — the swap, or the approval it
+   * needs first (call again once mined) — and the redemption follows on the regular
+   * rebalancer steps. Refused while another tx is outstanding.
+   */
+  async refillNow(usdt0?: bigint): Promise<RebalanceOutcome | undefined> {
+    if (this.guard.pending) return { action: "refill", status: "skipped", reason: `tx ${this.guard.pending.hash} outstanding` };
+    const r = await this.rebalancer.refillRifIfNeeded(true, usdt0);
+    if (r) await this.emit({ type: "rebalance", outcome: r });
+    if (this.guard.pending) await this.emit({ type: "sent", pending: this.guard.pending });
+    await this.saveIfDirty();
     return r;
   }
 

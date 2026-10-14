@@ -92,6 +92,30 @@ export const QUOTER_V2_ABI = [
       { name: "gasEstimate", type: "uint256" },
     ],
   },
+  {
+    type: "function",
+    name: "quoteExactOutputSingle",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "params",
+        type: "tuple",
+        components: [
+          { name: "tokenIn", type: "address" },
+          { name: "tokenOut", type: "address" },
+          { name: "amount", type: "uint256" },
+          { name: "fee", type: "uint24" },
+          { name: "sqrtPriceLimitX96", type: "uint160" },
+        ],
+      },
+    ],
+    outputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "sqrtPriceX96After", type: "uint160" },
+      { name: "initializedTicksCrossed", type: "uint32" },
+      { name: "gasEstimate", type: "uint256" },
+    ],
+  },
 ] as const;
 
 /** SwapRouter02: `ExactInputSingleParams` has no deadline. */
@@ -359,6 +383,37 @@ export async function rifForUsdrif(c: Chain, cfg: Config, qTP: bigint): Promise<
   });
   if (pACtp === 0n) throw new Error("MoC getPACtp returned 0");
   return (qTP * 10n ** 18n) / pACtp;
+}
+
+/** MoC's oracle price: USDRIF (18 dec) per RIF, 1e18-scaled. */
+export async function mocPACtp(c: Chain, cfg: Config): Promise<bigint> {
+  const pACtp = await c.pub.readContract({ address: cfg.moc.core, abi: MOC_CORE_ABI, functionName: "getPACtp", args: [cfg.tokens.usdrif] });
+  if (pACtp === 0n) throw new Error("MoC getPACtp returned 0");
+  return pACtp;
+}
+
+/** USDRIF out of the 0.05 % USDRIF/USDT0 pool for `amountIn` USDT0 (the RIF rail's refill leg), quoted live. */
+export async function quoteUsdt0ToUsdrif(c: Chain, cfg: Config, amountIn: bigint): Promise<bigint> {
+  if (amountIn === 0n) return 0n;
+  const { result } = await c.pub.simulateContract({
+    address: cfg.uniswap.quoter,
+    abi: QUOTER_V2_ABI,
+    functionName: "quoteExactInputSingle",
+    args: [{ tokenIn: cfg.tokens.usdt0, tokenOut: cfg.tokens.usdrif, amountIn, fee: cfg.uniswap.usdrifUsdt0Fee, sqrtPriceLimitX96: 0n }],
+  });
+  return result[0];
+}
+
+/** USDT0 the 0.05 % pool wants for exactly `amountOut` USDRIF, quoted live. */
+export async function quoteUsdt0ForUsdrif(c: Chain, cfg: Config, amountOut: bigint): Promise<bigint> {
+  if (amountOut === 0n) return 0n;
+  const { result } = await c.pub.simulateContract({
+    address: cfg.uniswap.quoter,
+    abi: QUOTER_V2_ABI,
+    functionName: "quoteExactOutputSingle",
+    args: [{ tokenIn: cfg.tokens.usdt0, tokenOut: cfg.tokens.usdrif, amount: amountOut, fee: cfg.uniswap.usdrifUsdt0Fee, sqrtPriceLimitX96: 0n }],
+  });
+  return result[0];
 }
 
 /** USDT0 out of the RIF/USDT0 pool for `amountIn` RIF, quoted live. */

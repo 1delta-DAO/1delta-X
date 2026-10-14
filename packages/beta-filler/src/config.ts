@@ -26,6 +26,8 @@ export const ROOTSTOCK = {
   sushiV3Quoter: "0xE43ca1deE3f0fC1e2df73A0745674545f11A59f5",
   /** RIF/USDT0 0.3% pool fee tier. */
   rifUsdt0Fee: 3000,
+  /** USDRIF/USDT0 0.05% pool fee tier (0xd845…19d6) — the RIF rail's refill leg. */
+  usdrifUsdt0Fee: 500,
   wrbtc: "0x542fDA317318eBF1d3DEAf76E0b632741A7e677d",
   weth: "0x2F6F07CDcf3588944Bf4C42aC74ff24bF56e7590",
   /** USDT 0xaf36… (ERC-2612) — pools vs WRBTC and RIF (2026-10-12). */
@@ -255,6 +257,27 @@ export interface Policy {
   rifSellMaxDiscountBps: bigint;
   /** Slippage tolerance on the quoted RIF→USDT0 swap (bps). */
   rifSellSlippageBps: bigint;
+  /**
+   * THE RIF RAIL (2026-10-14): fill orders where a maker BUYS RIF with USDT0 — we
+   * deliver RIF from the wallet's float and price it at what replacing it costs
+   * through MoC: USDT0 → USDRIF on the 0.05 % pool, then `redeemTP` at the oracle
+   * (− the MoC fee). That beats the RIF pools on buys from ~$100 (rail probe).
+   */
+  sellRif: boolean;
+  /** Rolling one-hour RIF outflow cap (18 dec). */
+  hourlyRif: bigint;
+  /** Charged on the rail's replacement cost (bps): the oracle can move while the async redemption waits in the MoC queue. */
+  rifRailHaircutBps: bigint;
+  /** Refill the float when the wallet's RIF is below this (18 dec; 0 = never refill automatically). */
+  rifRefillBelow: bigint;
+  /** …back up to this much RIF (18 dec). */
+  rifFloatTarget: bigint;
+  /** USDT0 never spent on a refill (kept for the USDRIF buy side), 6 dec. */
+  usdt0Reserve: bigint;
+  /** Slippage tolerance on the refill's USDT0 → USDRIF swap (bps). */
+  refillSlippageBps: bigint;
+  /** Refuse a refill swap that pays more than this premium over $1 per USDRIF (bps) — the oracle guard. */
+  refillMaxPremiumBps: bigint;
 }
 
 export interface Config {
@@ -285,7 +308,7 @@ export interface Config {
   orderbookUrl: string;
   tokens: { usdrif: Address; usdt0: Address; rif: Address };
   moc: { core: Address; queue: Address };
-  uniswap: { router: Address; quoter: Address; rifUsdt0Fee: number };
+  uniswap: { router: Address; quoter: Address; rifUsdt0Fee: number; usdrifUsdt0Fee: number };
   /** Wrapped RBTC — the native-price anchor for gas costing. */
   wrbtc: Address;
   policy: Policy;
@@ -719,7 +742,16 @@ export function loadConfig(env: Env): Config {
     rifSellMin: fixed(env, "RIF_SELL_MIN", "200", 18),
     rifSellMaxDiscountBps: bps(env, "RIF_SELL_MAX_DISCOUNT_BPS", 150),
     rifSellSlippageBps: bps(env, "RIF_SELL_SLIPPAGE_BPS", 50),
+    sellRif: flag(env, "SELL_RIF", false),
+    hourlyRif: fixed(env, "HOURLY_RIF", "20000", 18),
+    rifRailHaircutBps: bps(env, "RIF_RAIL_HAIRCUT_BPS", 20),
+    rifRefillBelow: fixed(env, "RIF_REFILL_BELOW", "0", 18),
+    rifFloatTarget: fixed(env, "RIF_FLOAT_TARGET", "0", 18),
+    usdt0Reserve: fixed(env, "USDT0_RESERVE", "0", USDT0_DECIMALS),
+    refillSlippageBps: bps(env, "REFILL_SLIPPAGE_BPS", 30),
+    refillMaxPremiumBps: bps(env, "REFILL_MAX_PREMIUM_BPS", 50),
   };
+  if (policy.rifRefillBelow > policy.rifFloatTarget) throw new Error("RIF_REFILL_BELOW must not exceed RIF_FLOAT_TARGET");
   if (policy.buyUsdrif && policy.maxBuyPrice >= 10n ** 18n) {
     throw new Error("MAX_BUY_PRICE must be below 1.0: redemption returns $1 of RIF minus the MoC fee");
   }
@@ -762,6 +794,7 @@ export function loadConfig(env: Env): Config {
       router: addr(env, "SWAP_ROUTER", ROOTSTOCK.swapRouter),
       quoter: addr(env, "QUOTER_V2", ROOTSTOCK.quoterV2),
       rifUsdt0Fee: parseFee(env.RIF_USDT0_FEE ?? String(ROOTSTOCK.rifUsdt0Fee), "RIF_USDT0_FEE"),
+      usdrifUsdt0Fee: parseFee(env.USDRIF_USDT0_FEE ?? String(ROOTSTOCK.usdrifUsdt0Fee), "USDRIF_USDT0_FEE"),
     },
     wrbtc: addr(env, "WRBTC", ROOTSTOCK.wrbtc),
     policy,

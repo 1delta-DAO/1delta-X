@@ -168,6 +168,19 @@ REDEEM_SLIPPAGE_BPS = "50"
 RIF_SELL_MIN = "1000000000"
 RIF_SELL_SLIPPAGE_BPS = "50"
 RIF_SELL_MAX_DISCOUNT_BPS = "150"
+# THE RIF RAIL (2026-10-14): USD₮0 → RIF pull orders filled from the wallet's RIF float,
+# priced at the MoC replacement cost (USD₮0 → USDRIF on the 0.05 % pool → redeemTP, fee +
+# haircut). The float refills itself below RIF_REFILL_BELOW back to RIF_FLOAT_TARGET
+# (swap, then redeem — ~2.5 min in the MoC queue), never spending USDT0_RESERVE.
+# Admin: `scripts/admin.sh refill [usdt0]` starts one now.
+SELL_RIF = "1"
+HOURLY_RIF = "10000"
+RIF_RAIL_HAIRCUT_BPS = "20"
+RIF_FLOAT_TARGET = "3000"
+RIF_REFILL_BELOW = "1500"
+USDT0_RESERVE = "100"
+REFILL_SLIPPAGE_BPS = "30"
+REFILL_MAX_PREMIUM_BPS = "50"
 
 # ── gas policy (shared by both strategies and the rebalancer) ───────────────
 HOURLY_GAS_RBTC = "0.002"

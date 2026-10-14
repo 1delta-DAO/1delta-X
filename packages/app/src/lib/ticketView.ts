@@ -119,6 +119,8 @@ export function sourceName(source: string | null): string {
   // Oku runs a Uniswap v3 deployment (and is our tick indexer, not a quote source): the venue is Uniswap.
   if (s.startsWith("oku")) return "Uniswap";
   if (s.startsWith("inventory")) return "filler inventory";
+  // The RIF rail: RIF from the filler's inventory, priced at Money on Chain's redemption rate.
+  if (s.startsWith("moc")) return "Money on Chain";
   return source.charAt(0).toUpperCase() + source.slice(1);
 }
 
@@ -312,6 +314,7 @@ export function routeVenueName(v: string): string {
  * "Filled by the 1delta solver: USD0 → RIF on Uniswap v3 (0.30 %) → RIFP on SushiSwap v3 (0.30 %)".
  */
 export function routeHover(source: string | null, path: { tokens: string[]; fees: number[]; venues: string[] } | undefined, symbolOf: (address: string) => string): string {
+  if (source?.toLowerCase().startsWith("moc")) return "Filled from the 1delta filler's RIF inventory, priced at the Money on Chain redemption rate (USD₮0 → USDRIF → RIF)";
   if (!path) return `Filled by the 1delta solver via ${sourceName(source)}`;
   const hops = path.fees.map((f, i) => `${symbolOf(path.tokens[i + 1]!)} on ${routeVenueName(path.venues[i] ?? "")} (${(f / 10_000).toFixed(2)} %)`);
   return `Filled by the 1delta solver: ${symbolOf(path.tokens[0]!)} → ${hops.join(" → ")}`;

@@ -83,6 +83,10 @@ function ladder(mid: number, side: "sell" | "buy", amount: number) {
 }
 
 describe("parseQuote: a quote the app cannot trust is no quote", () => {
+  it("an `auto` request takes whichever delivery the filler names (the RIF rail answers pull)", () => {
+    expect(parseQuote(sellJson({ delivery: "pull", strategy: "inventory", route: { source: "moc-rail" } }), { ...sellReq, delivery: "auto" }, NOW)).toMatchObject({ delivery: "pull", source: "moc-rail" });
+    expect(parseQuote(sellJson(), { ...sellReq, delivery: "auto" }, NOW).delivery).toBe("direct");
+  });
   it("parses the filler's JSON (bigints from decimal strings)", () => {
     const q = sellQuote();
     expect(q).toMatchObject({ amountOut: 998_898_988n, grossOut: 1_000_000_000n, gasChargeOut: 1_101_012n, gasMarginBps: 2000, source: "oku", delivery: "direct", live: true });
@@ -96,6 +100,7 @@ describe("parseQuote: a quote the app cannot trust is no quote", () => {
     ["an expired quote", { validUntil: NOW - 1 }, /expired/],
     ["a non-numeric amount", { amountOut: "1e9" }, /bad amountOut/],
     ["a bad id", { quoteId: "<script>" }, /quoteId/],
+    ["another delivery than asked", { delivery: "pull" }, /wrong delivery/],
   ])("refuses %s", (_w, over, why) => {
     expect(() => parseQuote(sellJson(over), sellReq, NOW)).toThrow(why);
   });
@@ -177,10 +182,10 @@ describe("slippage: auto 10 bps on stable pairs, 30 bps otherwise; custom within
     expect(slippageBpsFor({ mode: "custom", bps: 10_000 }, 30)).toBe(MAX_SLIPPAGE_BPS);
     expect(slippageBpsFor({ mode: "custom", bps: Number.NaN }, 30)).toBe(30);
   });
-  it("quotes only where a filler runs; delivery follows the deployment (direct = named solver, else pull)", () => {
+  it("quotes only where a filler runs; delivery follows the deployment (a named solver = `auto`: the filler picks, else pull)", () => {
     expect(quotesSupported(30)).toBe(true);
     expect(quotesSupported(1)).toBe(false);
-    expect(quoteDelivery(deployment, "rsk-30-wrbtc-usd0")).toBe("direct");
+    expect(quoteDelivery(deployment, "rsk-30-wrbtc-usd0")).toBe("auto");
     expect(quoteDelivery(deployment, "rsk-30-usdrif-usd0")).toBe("pull");
     expect(quoteDelivery(null, "rsk-30-wrbtc-usd0")).toBe("pull");
   });

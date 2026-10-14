@@ -83,10 +83,15 @@ export function slippageBpsFor(s: SlippageSetting, autoBps: number): number {
   return Number.isFinite(v) ? Math.min(MAX_SLIPPAGE_BPS, Math.max(1, v)) : autoBps;
 }
 
-/** How the app signs a market's orders: direct (delta-verify to a named solver) or pull. */
-export function quoteDelivery(deployment: DeploymentConfig | null, marketId: string): "direct" | "pull" {
+/**
+ * How the app asks for a market's quote: a PULL market asks for pull; a market that
+ * signs DIRECT (delta-verify to a named solver) asks for `auto` — the filler prices
+ * its route on direct and its inventory (the RIF rail) on pull and answers the better,
+ * naming the delivery; the app signs that one (App.tsx `sign`).
+ */
+export function quoteDelivery(deployment: DeploymentConfig | null, marketId: string): "auto" | "pull" {
   const s = solverForMarket(deployment, marketId);
-  return s && s !== zeroAddress ? "direct" : "pull";
+  return s && s !== zeroAddress ? "auto" : "pull";
 }
 
 export interface QuoteRequest {
@@ -98,7 +103,8 @@ export interface QuoteRequest {
   /** Exact input, wei of the PAY token (a buy pays the quote token). */
   amountIn: bigint;
   maker?: Address;
-  delivery: "direct" | "pull";
+  /** `auto`: the filler picks (route on direct, inventory on pull) and names it in the answer. */
+  delivery: "direct" | "pull" | "auto";
   /** `permit`: the order will be funded by a gasless ERC-2612 permit the fill executes (more gas). */
   funding?: "permit";
 }
@@ -151,7 +157,11 @@ const big = (v: unknown, what: string): bigint => {
  * and input; a positive output no larger than the gross; a validity in the future.
  * Anything else throws — a quote the app cannot trust is no quote (Dutch fallback).
  */
-export function parseQuote(raw: unknown, req: Pick<QuoteRequest, "chainId" | "tokenIn" | "tokenOut" | "amountIn">, nowS: number = Math.floor(Date.now() / 1000)): FillerQuote {
+export function parseQuote(
+  raw: unknown,
+  req: Pick<QuoteRequest, "chainId" | "tokenIn" | "tokenOut" | "amountIn"> & Partial<Pick<QuoteRequest, "delivery">>,
+  nowS: number = Math.floor(Date.now() / 1000),
+): FillerQuote {
   if (!raw || typeof raw !== "object") throw new QuoteError(0, "quote: not an object");
   const o = raw as Record<string, unknown>;
   const addr = (v: unknown, what: string): Address => {
@@ -182,6 +192,8 @@ export function parseQuote(raw: unknown, req: Pick<QuoteRequest, "chainId" | "to
   if (q.chainId !== req.chainId) throw new QuoteError(0, "quote: wrong chain");
   if (q.tokenIn !== getAddress(req.tokenIn) || q.tokenOut !== getAddress(req.tokenOut)) throw new QuoteError(0, "quote: wrong tokens");
   if (q.amountIn !== req.amountIn) throw new QuoteError(0, "quote: wrong amountIn");
+  // A quote priced for another delivery than asked prices a different order (gas, filler).
+  if (req.delivery && req.delivery !== "auto" && q.delivery !== req.delivery) throw new QuoteError(0, "quote: wrong delivery");
   if (q.amountOut === 0n || q.amountOut > q.grossOut) throw new QuoteError(0, "quote: bad amountOut");
   if (q.permitChargeOut > q.gasChargeOut) throw new QuoteError(0, "quote: bad permitChargeOut");
   if (!Number.isFinite(q.validUntil) || q.validUntil < nowS) throw new QuoteError(0, "quote: expired");

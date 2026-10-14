@@ -6,7 +6,21 @@ import type { PricedCandidate } from "./quote";
 
 import { sanitize } from "./sanitize";
 
-import { allowanceCall, balanceOf, MOC_QUEUE_ABI, OPER_REDEEM_TP, previewBump, previewFill, quoteRifToUsdt0, quoteWrbtcToUsdt0, rifForUsdrif, type Chain } from "./chain";
+import {
+  allowanceCall,
+  balanceOf,
+  MOC_QUEUE_ABI,
+  mocPACtp,
+  OPER_REDEEM_TP,
+  previewBump,
+  previewFill,
+  quoteRifToUsdt0,
+  quoteUsdt0ForUsdrif,
+  quoteUsdt0ToUsdrif,
+  quoteWrbtcToUsdt0,
+  rifForUsdrif,
+  type Chain,
+} from "./chain";
 import { MOC_FEE_BPS, type Config } from "./config";
 import { gasShape, GasRatios } from "./gasRatio";
 import { broadcast, estimateAndBroadcast, Guard } from "./guard";
@@ -28,6 +42,8 @@ import {
   type Direction,
   type Verdict,
   inventoryProfitOk,
+  railRifOut,
+  railUsdrifFor,
   rebalanceShare,
 } from "./policy";
 
@@ -181,7 +197,7 @@ export class Filler {
   }
 
   /**
-   * The inventory candidate for an indicative quote (./quote.ts) — BUY side only (the
+   * The inventory candidate for an indicative quote (./quote.ts) — the BUY side (the
    * maker sells USDRIF for USDT0; we pay USDT0 out of inventory). What we would pay for
    * `amountIn` USDRIF is bounded three ways, exactly the gates a fill must pass:
    *   • the price cap: amountIn × MAX_BUY_PRICE (`capOut`);
@@ -192,12 +208,13 @@ export class Filler {
    *     learned for the shape)) + its share of the rebalance — `grossOut` is
    *     exit − min profit and `costOut` the cost, so the quote's gas margin applies.
    * Refused when the ticket is outside MIN_FILL / MAX_FILL, or the wallet or the hourly
-   * budget could not pay it.
+   * budget could not pay it. USDT0 → RIF is the RIF rail ({@link quoteRail}).
    */
   async quoteInventory(tokenIn: Address, tokenOut: Address, amountIn: bigint, gasPrice: bigint): Promise<Verdict<{ candidate: PricedCandidate }>> {
     const { cfg, chain } = this;
     const p = cfg.policy;
     const t = cfg.tokens;
+    if (tokenIn.toLowerCase() === t.usdt0.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice);
     if (tokenIn.toLowerCase() !== t.usdrif.toLowerCase() || tokenOut.toLowerCase() !== t.usdt0.toLowerCase()) return { ok: false, reason: "inventory: not USDRIF→USDT0" };
     if (!p.buyUsdrif) return { ok: false, reason: "inventory: buy side disabled" };
     const ONE = 10n ** 18n;
@@ -225,8 +242,49 @@ export class Filler {
     return { ok: true, candidate: { strategy: "inventory", grossOut, capOut, costOut: cost, gasUnits, source: "inventory" } };
   }
 
+  /**
+   * The RIF RAIL's quote candidate (USDT0 → RIF, delivered from the float). The RIF
+   * the maker's `amountIn` USDT0 is worth is what the same USDT0 buys through the
+   * rail: USDT0 → USDRIF on the 0.05 % pool, then `redeemTP` at the oracle minus the
+   * MoC fee and RIF_RAIL_HAIRCUT_BPS (`railRif`). The cost (gas + the refill's share)
+   * and the minimum profit, in USDT0, are converted to RIF at that same rate. Capped
+   * by the RIF float and the hourly RIF budget.
+   */
+  private async quoteRail(amountIn: bigint, gasPrice: bigint): Promise<Verdict<{ candidate: PricedCandidate }>> {
+    const { cfg, chain } = this;
+    const p = cfg.policy;
+    const t = cfg.tokens;
+    if (!p.sellRif) return { ok: false, reason: "inventory: RIF rail disabled" };
+    if (amountIn < p.minFillUsdt0) return { ok: false, reason: "inventory: below minimum fill" };
+    if (amountIn > p.maxFillUsdt0) return { ok: false, reason: "inventory: above maximum fill" };
+    const [usdrif, pACtp, bal] = await Promise.all([quoteUsdt0ToUsdrif(chain, cfg, amountIn), mocPACtp(chain, cfg), balanceOf(chain, t.rif)]);
+    const railRif = railRifOut(usdrif, pACtp, p.rifRailHaircutBps);
+    if (railRif === 0n) return { ok: false, reason: "inventory: no rail output" };
+    const shape = gasShape("inventory", "inventory", t.usdt0, t.rif, cfg.settlement);
+    const learned = this.gasRatios.typicalEstimate(shape);
+    const estimate = learned !== undefined && learned > p.inventoryGasEstimate ? learned : p.inventoryGasEstimate;
+    const gasUnits = this.gasRatios.priced(shape, estimate);
+    const rebalanceWei = await this.rebalanceShareWei(gasPrice, railRif, "sellRif");
+    const costUsdt0 = await this.rbtcToUsdt0(gasPrice * gasUnits + rebalanceWei);
+    if (costUsdt0 === undefined) return { ok: false, reason: "inventory: cannot price gas in USDT0" };
+    const toRif = (u: bigint) => (u * railRif + amountIn - 1n) / amountIn; // USDT0 units → RIF wei at the rail rate, rounded up
+    const grossOut = railRif - toRif(p.minProfitUsdt0);
+    const room = this.budget.remaining(t.rif, Date.now());
+    const capOut = bal < room ? bal : room;
+    if (grossOut <= 0n) return { ok: false, reason: "inventory: no edge at this size" };
+    if (capOut < grossOut - toRif(costUsdt0)) return { ok: false, reason: "inventory: no capacity (RIF float / hourly budget)" };
+    return { ok: true, candidate: { strategy: "inventory", grossOut, capOut, costOut: toRif(costUsdt0), gasUnits, source: "moc-rail" } };
+  }
+
+  /** USDT0 units it costs to buy back `rif` through the rail (pool → redeemTP, fee + haircut on top). */
+  private async railReplaceUsdt0(rif: bigint): Promise<bigint> {
+    const pACtp = await mocPACtp(this.chain, this.cfg);
+    return quoteUsdt0ForUsdrif(this.chain, this.cfg, railUsdrifFor(rif, pACtp, this.cfg.policy.rifRailHaircutBps));
+  }
+
   /** What the fill earns before gas, in USDT0 units. */
   private async edgeUsdt0(direction: Direction, paid: bigint, received: bigint): Promise<bigint> {
+    if (direction === "sellRif") return received - (await this.railReplaceUsdt0(paid));
     if (direction === "buyUsdrif") {
       const rif = ((await rifForUsdrif(this.chain, this.cfg, received)) * (10_000n - MOC_FEE_BPS)) / 10_000n;
       return (await quoteRifToUsdt0(this.chain, this.cfg, rif)) - paid;
@@ -235,12 +293,19 @@ export class Filler {
     return received - mintReplaceUsdt0(paid);
   }
 
-  /** This fill's share (wei) of the rebalance it causes: redeem/sell gas + the MoC exec fee. */
-  private async rebalanceShareWei(gasPrice: bigint, usdrif: bigint): Promise<bigint> {
+  /**
+   * This fill's share (wei) of the rebalance it causes: redeem/sell gas + the MoC exec
+   * fee. `amount` is the USDRIF received (buy side, batched by REDEEM_MIN_USDRIF) or,
+   * on the rail, the RIF paid out (the refill — swap + redeem — batches the float's
+   * RIF_FLOAT_TARGET − RIF_REFILL_BELOW).
+   */
+  private async rebalanceShareWei(gasPrice: bigint, amount: bigint, direction: Direction = "buyUsdrif"): Promise<bigint> {
+    const p = this.cfg.policy;
     const execFee = await this.chain.pub
       .readContract({ address: this.cfg.moc.queue, abi: MOC_QUEUE_ABI, functionName: "getExecFee", args: [OPER_REDEEM_TP] })
       .catch(() => 0n);
-    return rebalanceShare(gasPrice * this.cfg.policy.rebalanceGas + execFee, usdrif, this.cfg.policy.redeemMin);
+    const batch = direction === "sellRif" ? p.rifFloatTarget - p.rifRefillBelow : p.redeemMin;
+    return rebalanceShare(gasPrice * p.rebalanceGas + execFee, amount, batch);
   }
 
   /** `rest`: a verdict about the order's terms (see FillOutcome.rest), not our transient state. */
@@ -334,12 +399,18 @@ export class Filler {
     //     The fill's gas is priced at estimate × r (gasRatio.ts), r learned per shape.
     const shape = gasShape("inventory", "inventory", receive, pay, cfg.settlement);
     const edgeUsdt0 = await this.edgeUsdt0(direction, paid, received);
-    const rebalanceWei = await this.rebalanceShareWei(gasPrice, direction === "buyUsdrif" ? received : paid);
+    const rebalanceWei = await this.rebalanceShareWei(gasPrice, direction === "buyUsdrif" ? received : paid, direction);
     const preCost = await this.rbtcToUsdt0(gasPrice * this.gasRatios.priced(shape, p.inventoryGasEstimate) + rebalanceWei);
     if (preCost === undefined) return this.skip(orderHash, "cannot price gas in USDT0 (no pool quote and no RBTC_PRICE_USD)");
     // The edge at another (paid, received), the market held: buy — the exit value
     // (edge + paid) scales with the USDRIF received; sell — received − mint cost.
-    const edgeAt = (pd: bigint, rv: bigint) => (direction === "buyUsdrif" ? scaleUp(edgeUsdt0 + paid, rv, received) - pd : rv - mintReplaceUsdt0(pd));
+    // rail — received − the replacement cost, which scales with the RIF paid.
+    const edgeAt = (pd: bigint, rv: bigint) =>
+      direction === "buyUsdrif"
+        ? scaleUp(edgeUsdt0 + paid, rv, received) - pd
+        : direction === "sellRif"
+          ? rv - scaleUp(received - edgeUsdt0, pd, paid)
+          : rv - mintReplaceUsdt0(pd);
     const pre = inventoryProfitOk(edgeUsdt0, preCost, p.minProfitUsdt0);
     if (!pre.ok) {
       const at = await this.recheckAt(order, gasPrice, paid, received, (pd, rv) => inventoryProfitOk(edgeAt(pd, rv), preCost, p.minProfitUsdt0).ok);
@@ -352,7 +423,7 @@ export class Filler {
 
     // 5. Allowance for Settlement to pull what we pay (direct-approval path, bounded).
     //    Live, a missing approval is its own tx: send it and come back next tick.
-    const hourly = pay.toLowerCase() === cfg.tokens.usdt0.toLowerCase() ? p.hourlyUsdt0 : p.hourlyUsdrif;
+    const hourly = pay.toLowerCase() === cfg.tokens.usdt0.toLowerCase() ? p.hourlyUsdt0 : direction === "sellRif" ? p.hourlyRif : p.hourlyUsdrif;
     const appr = await allowanceCall(chain, pay, cfg.settlement, paid, hourly);
     if (appr) {
       if (cfg.dryRun) this.log(`[dry-run] would approve ${cfg.settlement} for ${appr.amount} of ${pay}`);
@@ -410,7 +481,9 @@ export class Filler {
     const profitEst =
       direction === "buyUsdrif"
         ? (usdt0Eq(simReceived, receive) * (10_000n - MOC_FEE_BPS)) / 10_000n - simPaid
-        : simReceived - mintReplaceUsdt0(simPaid); // the mint fee too, as the gate above
+        : direction === "sellRif"
+          ? simReceived - scaleUp(received - edgeUsdt0, simPaid, paid) // the rail's replacement cost, as the gate above
+          : simReceived - mintReplaceUsdt0(simPaid); // the mint fee too, as the gate above
     const r = await broadcast(chain, this.guard, {
       to: cfg.settlement,
       data,

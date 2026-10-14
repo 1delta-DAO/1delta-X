@@ -10,7 +10,7 @@
  * Env:
  *   RPC_URL, SETTLEMENT, PERMIT3, AGGREGATOR_SOLVER, MAKER_KEY, OUT
  *   MODE      direct | pull
- *   TOKEN_IN  WRBTC | USDRIF | USDT0      TOKEN_OUT  USDT0 | WRBTC | USDRIF
+ *   TOKEN_IN  WRBTC | USDRIF | USDT0      TOKEN_OUT  USDT0 | WRBTC | USDRIF | RIF
  *   AMOUNT    human units of TOKEN_IN
  *   FUNDING   direct (approve Settlement) | permit3 (approve Permit3 + grant) | permit2612
  *   NONCE     the order nonce (packed: word = nonce >> 8); a maker's 2nd order in the same word
@@ -52,6 +52,7 @@ const TOKENS: Record<string, { address: Address; decimals: number; holder: Addre
   WRBTC: { address: ROOTSTOCK.wrbtc as Address, decimals: 18, holder: getAddress("0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd") },
   USDT0: { address: ROOTSTOCK.usdt0 as Address, decimals: 6, holder: getAddress("0xaef6fabf3b0c9e5f9d6d5170afc703a633479bbd") },
   USDRIF: { address: ROOTSTOCK.usdrif as Address, decimals: 18, holder: getAddress("0xd845702af381f0405661747a6a20bde0401a19d6") },
+  RIF: { address: ROOTSTOCK.rif as Address, decimals: 18, holder: getAddress("0x57079b2d3071eb06cce6dbafb9b0306bcc49b020") },
 };
 /** Quoter paths (swap order) per pair, on the Oku pools. */
 const PATHS: Record<string, { tokens: string[]; fees: number[] }> = {
@@ -61,6 +62,7 @@ const PATHS: Record<string, { tokens: string[]; fees: number[] }> = {
   "USDT0>USDRIF": { tokens: ["USDT0", "USDRIF"], fees: [500] },
   "WRBTC>USDRIF": { tokens: ["WRBTC", "USDT0", "USDRIF"], fees: [3000, 500] },
   "USDRIF>WRBTC": { tokens: ["USDRIF", "USDT0", "WRBTC"], fees: [500, 3000] },
+  "USDT0>RIF": { tokens: ["USDT0", "RIF"], fees: [3000] },
 };
 
 const rpc = env("RPC_URL");

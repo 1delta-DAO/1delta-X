@@ -187,6 +187,11 @@ switch (cmd) {
   case "sell-rif":
     await rebalanceAction(() => engine.rebalancer.sellRifIfNeeded(true));
     break;
+  case "refill":
+    // The RIF rail's float: swap USDT0 → USDRIF (to RIF_FLOAT_TARGET, or `arg` USDT0), then redeem it.
+    await rebalanceAction(() => engine.rebalancer.refillRifIfNeeded(true, arg ? parseFixed(arg, 6) : undefined));
+    await rebalanceAction(() => engine.rebalancer.refillRifIfNeeded());
+    break;
   case "mint":
     if (!arg) throw new Error("usage: mint <USDRIF amount, e.g. 250>");
     await rebalanceAction(() => engine.rebalancer.mint(parseFixed(arg, 18)));
@@ -198,5 +203,5 @@ switch (cmd) {
     break;
   }
   default:
-    throw new Error(`unknown command ${cmd} (run | status | fill-json <file> | redeem | sell-rif | mint <amount> | settle)`);
+    throw new Error(`unknown command ${cmd} (run | status | fill-json <file> | redeem | sell-rif | refill [usdt0] | mint <amount> | settle)`);
 }

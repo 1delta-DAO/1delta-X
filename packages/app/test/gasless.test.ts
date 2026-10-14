@@ -116,7 +116,7 @@ describe("revoke clears the direct surface a relayed permit leaves", () => {
 describe("App wiring", () => {
   const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
   it("signs the permit AFTER the order (its deadline is the order's expiry) and before posting", () => {
-    const signedAt = app.indexOf("let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind });");
+    const signedAt = app.indexOf("let signed = await signDraft({ ...spec, marketId, side, kind: plan.kind, pull });");
     const permitAt = app.indexOf("await signGaslessPermit(");
     const postAt = app.indexOf('setSignPhase("posting");', permitAt);
     expect(signedAt).toBeGreaterThan(0);

@@ -41,6 +41,13 @@ import type { RouteFiller } from "./routeFiller";
  */
 
 export type Delivery = "direct" | "pull";
+/**
+ * What a request may ask for: a delivery, or `auto` — the filler prices the route on
+ * DIRECT delivery and the inventory on PULL (the inventory EOA cannot fill a direct
+ * order; a route fill on pull only costs more gas) and answers the better, naming its
+ * delivery: the app then signs that one (2026-10-14, the RIF rail).
+ */
+export type RequestDelivery = Delivery | "auto";
 export type QuoteSide = "sell" | "buy";
 
 export interface QuoteRequest {
@@ -53,8 +60,8 @@ export interface QuoteRequest {
   marketId?: string;
   /** Optional: when given, only an order by this maker matches the quote. */
   maker?: Address;
-  /** How the app will sign the order (its deployment config): direct = delta-verify to our solver. */
-  delivery: Delivery;
+  /** How the app will sign the order (its deployment config): direct = delta-verify to our solver; `auto` = whichever quotes better. */
+  delivery: RequestDelivery;
   /**
    * How the maker funds it: `permit` = a gasless ERC-2612 permit the fill must execute
    * (+ PERMIT_IN_FILL_GAS on the route, and never the inventory EOA, which cannot carry
@@ -66,6 +73,8 @@ export interface QuoteRequest {
 /** One priced way to fill: before the gas margin and tolerance. */
 export interface PricedCandidate {
   strategy: "route" | "inventory";
+  /** The delivery this candidate was priced for (set by the quoter; route = the request's, inventory = pull). */
+  delivery?: Delivery;
   /** What the fill would deliver before gas (route output, or the inventory price), wei of tokenOut. */
   grossOut: bigint;
   /** A hard cap on the delivered amount independent of gas (inventory: MAX_BUY_PRICE / exit edge). */
@@ -164,7 +173,7 @@ export function parseQuoteRequest(raw: unknown, cfg: Pick<Config, "chainId" | "r
   if (extra) return { ok: false, reason: `unknown field ${JSON.stringify(extra.slice(0, 40))}` };
   if (o.chainId !== cfg.chainId) return { ok: false, reason: `chainId must be ${cfg.chainId}` };
   if (o.side !== "sell" && o.side !== "buy") return { ok: false, reason: 'side must be "sell" or "buy"' };
-  if (o.delivery !== "direct" && o.delivery !== "pull") return { ok: false, reason: 'delivery must be "direct" or "pull"' };
+  if (o.delivery !== "direct" && o.delivery !== "pull" && o.delivery !== "auto") return { ok: false, reason: 'delivery must be "direct", "pull" or "auto"' };
   if (typeof o.amountIn !== "string" || !/^\d{1,40}$/.test(o.amountIn)) return { ok: false, reason: "amountIn must be a decimal string (wei)" };
   const amountIn = BigInt(o.amountIn);
   if (amountIn === 0n || amountIn >= MAX_AMOUNT) return { ok: false, reason: "amountIn out of range" };
@@ -382,14 +391,16 @@ export class Quoter {
     const [rr, ri] = await Promise.all([
       route
         ? route
-            .quoteRoute({ tokenIn: req.tokenIn, tokenOut: req.tokenOut, amountIn: req.amountIn, direct: req.delivery === "direct", gasPrice, permit: req.funding === "permit" })
+            .quoteRoute({ tokenIn: req.tokenIn, tokenOut: req.tokenOut, amountIn: req.amountIn, direct: req.delivery !== "pull", gasPrice, permit: req.funding === "permit" })
+            .then((r) => (r.ok ? { ...r, candidate: { ...r.candidate, delivery: req.delivery === "pull" ? ("pull" as const) : ("direct" as const) } } : r))
             .catch((e: unknown) => ({ ok: false as const, reason: `route: ${(e as Error).message?.split("\n")[0] ?? e}` }))
         : undefined,
       // The inventory EOA fills PULL orders only (an EOA cannot run a delta-verify callback).
       // ...nor a permit-funded one (no executeFill to carry the permit).
-      inventory && req.delivery === "pull" && req.funding !== "permit"
+      inventory && req.delivery !== "direct" && req.funding !== "permit"
         ? inventory
             .quoteInventory(req.tokenIn, req.tokenOut, req.amountIn, gasPrice)
+            .then((r) => (r.ok ? { ...r, candidate: { ...r.candidate, delivery: "pull" as const } } : r))
             .catch((e: unknown) => ({ ok: false as const, reason: `inventory: ${(e as Error).message?.split("\n")[0] ?? e}` }))
         : undefined,
     ]);
@@ -422,12 +433,13 @@ export class Quoter {
     if (!best) return { ok: false, reason: reasons.length ? reasons.join("; ") : "no route" };
     const issuedAt = this.now();
     const validUntil = Math.floor(issuedAt / 1000) + p.ttlSeconds;
+    const delivery: Delivery = best.c.delivery ?? (req.delivery === "direct" ? "direct" : "pull");
     const quote: QuoteResult = {
       quoteId: randomId(),
       chainId: this.cfg.chainId,
       side: req.side,
       ...(req.marketId ? { marketId: req.marketId } : {}),
-      delivery: req.delivery,
+      delivery,
       tokenIn: req.tokenIn,
       tokenOut: req.tokenOut,
       amountIn: req.amountIn,
@@ -454,7 +466,7 @@ export class Quoter {
         amountIn: req.amountIn.toString(),
         amountOut: quote.amountOut.toString(),
         ...(req.maker ? { maker: req.maker.toLowerCase() } : {}),
-        delivery: req.delivery,
+        delivery,
         issuedAt,
         validUntil,
       },

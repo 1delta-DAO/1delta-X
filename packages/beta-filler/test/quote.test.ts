@@ -9,6 +9,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { loadConfig, ROOTSTOCK } from "../src/config";
+import { railRifOut } from "../src/policy";
 import { Engine } from "../src/engine";
 import { gasShape } from "../src/gasRatio";
 import { SANDBOX_ROUTE_OVERHEAD_GAS } from "../src/route";
@@ -48,12 +49,16 @@ function rate(tin: string, tout: string, amt: bigint): bigint {
   if (eqa(tin, USDT0) && eqa(tout, WRBTC)) return amt * 10n ** 7n;
   if (eqa(tin, USDRIF) && eqa(tout, USDT0)) return (amt * 998n) / 10n ** 15n;
   if (eqa(tin, RIF) && eqa(tout, USDT0)) return (amt * 399n) / 10n ** 16n;
+  // The rail's refill leg (0.999 USDRIF per USDT0) and the RIF pool's ask (24 RIF per USDT0).
+  if (eqa(tin, USDT0) && eqa(tout, USDRIF)) return (amt * 999n * 10n ** 9n);
+  if (eqa(tin, USDT0) && eqa(tout, RIF)) return amt * 24n * 10n ** 12n;
+  if (eqa(tin, WRBTC) && eqa(tout, RIF)) return amt * 2_400_000n; // $100k at the pool's 24 RIF per USDT0
   return 0n;
 }
 /** WRBTC wei → USDT0 units at $100k, rounded up (the route's nativeToToken). */
 const rbtcToUsdt0 = (wei: bigint) => (wei * 10n ** 8n + 10n ** 15n - 1n) / 10n ** 15n;
 
-function fake(o: { estimate?: bigint; usdt0Balance?: bigint } = {}) {
+function fake(o: { estimate?: bigint; usdt0Balance?: bigint; balances?: Record<string, bigint> } = {}) {
   const w = { owed: 0n, received: 0n, sent: [] as Array<{ data: Hex; gas?: bigint }>, quoterCalls: 0 };
   const pub: Record<string, unknown> = {
     getCode: async () => "0x60",
@@ -68,7 +73,7 @@ function fake(o: { estimate?: bigint; usdt0Balance?: bigint } = {}) {
       throw new Error("Transaction receipt could not be found");
     },
     getTransaction: async () => ({}),
-    readContract: async ({ functionName }: { functionName: string }) => {
+    readContract: async ({ functionName, address }: { functionName: string; address: string }) => {
       switch (functionName) {
         case "SETTLEMENT": return ENV.SETTLEMENT;
         case "GATED": return true;
@@ -85,7 +90,7 @@ function fake(o: { estimate?: bigint; usdt0Balance?: bigint } = {}) {
         case "decimals": return 6;
         case "getPACtp": return 4n * 10n ** 16n; // $0.04 per RIF
         case "getExecFee": return 0n;
-        case "balanceOf": return o.usdt0Balance ?? 10n ** 12n;
+        case "balanceOf": return o.balances?.[address.toLowerCase()] ?? o.usdt0Balance ?? 10n ** 12n;
       }
       throw new Error(`unexpected read ${functionName}`);
     },
@@ -354,6 +359,31 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     // Direct delivery never quotes inventory (an EOA cannot fill a delta-verify order).
     const direct = await e.quote(sellReq({ tokenIn: USDRIF, tokenOut: USDT0, amountIn, delivery: "direct" }));
     expect(direct.ok && direct.quote.strategy).toBe("route");
+  });
+
+  it("USDT0→RIF `auto`: the RIF RAIL quotes on PULL when it beats the route (direct); an empty float leaves the route", async () => {
+    const RAIL_ENV = { ...ENV, INVENTORY_ENABLED: "1", SELL_RIF: "1", RIF_FLOAT_TARGET: "3000", RIF_REFILL_BELOW: "1500" };
+    const cfg = loadConfig(RAIL_ENV);
+    const { chain } = fake({ balances: { [RIF.toLowerCase()]: 3_000n * 10n ** 18n } });
+    const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
+    const amountIn = 50_000_000n; // 50 USDT0
+    const v = await e.quote(sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn, side: "buy", delivery: "auto" }));
+    if (!v.ok) throw new Error(v.reason);
+    expect(v.quote).toMatchObject({ strategy: "inventory", delivery: "pull", route: { source: "moc-rail" } });
+    // 50 USDT0 → 49.95 USDRIF → ÷ $0.04 → × (1 − 0.2 % MoC − 0.2 % haircut).
+    const railRif = railRifOut(amountIn * 999n * 10n ** 9n, 4n * 10n ** 16n, 20n);
+    expect(railRif).toBe(1_243_755_000_000_000_000_000n);
+    expect(v.quote.grossOut).toBe(railRif - (cfg.policy.minProfitUsdt0 * railRif + amountIn - 1n) / amountIn);
+    // The quote book binds a pull order to it (the app signs the delivery the quote names).
+    expect(e.quotes.toJSON().at(-1)?.delivery).toBe("pull");
+    // Asked for DIRECT: the inventory EOA cannot fill one, so the route answers.
+    const direct = await e.quote(sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn, side: "buy", delivery: "direct" }));
+    if (!direct.ok) throw new Error(direct.reason);
+    expect([direct.quote.strategy, direct.quote.delivery]).toEqual(["route", "direct"]);
+    // No float: `auto` falls back to the route on direct delivery.
+    const empty = await Engine.create({ cfg, chain: fake({ balances: { [RIF.toLowerCase()]: 0n } }).chain, store: new MemoryStateStore(), log: () => {} });
+    const r = await empty.quote(sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn, side: "buy", delivery: "auto" }));
+    expect(r.ok && [r.quote.strategy, r.quote.delivery]).toEqual(["route", "direct"]);
   });
 
   it("inventory refuses what it could not fill (wallet balance): the route quote stands", async () => {

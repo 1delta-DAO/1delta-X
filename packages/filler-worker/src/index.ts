@@ -17,6 +17,7 @@ const ADMIN_ROUTES: Record<string, string> = {
   "/resume": "POST",
   "/dry-run": "POST",
   "/tick": "POST",
+  "/refill": "POST",
 };
 
 const json = (v: unknown, status: number, headers: Record<string, string> = {}) =>
