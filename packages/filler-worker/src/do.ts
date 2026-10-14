@@ -157,6 +157,22 @@ function redactOne(text: string, rpcUrl: unknown): string {
  * Ticks are serialised in memory (an alarm and a manual /tick never overlap: the
  * second joins the first), so there is never more than one send in flight.
  */
+/** Rootstock token symbols for operator reports (unknown addresses print shortened). */
+const SYMBOLS: Record<string, string> = {
+  "0x542fda317318ebf1d3deaf76e0b632741a7e677d": "WRBTC",
+  "0x779ded0c9e1022225f8e0630b35a9b54be713736": "USDT0",
+  "0x3a15461d8ae0f0fb5fa2629e9da7d66a794a6e37": "USDRIF",
+  "0x2acc95758f8b5f583470ba265eb685a8f45fc9d5": "RIF",
+  "0x2f6f07cdcf3588944bf4c42ac74ff24bf56e7590": "WETH",
+  "0xe700691da7b9851f2f35f8b8182c69c53ccad9db": "DOC",
+  "0xaf368c91793cb22739386dfcbbb2f1a9e4bcbebf": "USDT",
+  "0x74c9f2b00581f1b11aa7ff05aa9f608b7389de67": "USDC.e",
+  "0xf4d27c56595ed59b66cc7f03cff5193e4bd74a61": "RIFP",
+};
+function symbolOfAddress(a: string): string {
+  return SYMBOLS[a.toLowerCase()] ?? `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
+
 export class FillerDO extends DurableObject<Env> {
   private wcfg: WorkerConfig | undefined;
   private wcfgError: string | undefined;
@@ -608,6 +624,13 @@ export class FillerDO extends DurableObject<Env> {
       }
       if (path === "/tick" && method === "POST") return json(await this.runTick("manual"));
       if (path === "/fills" && method === "GET") return this.fills(url);
+      if (path === "/pools" && method === "GET") {
+        // The route strategy's pool graph; `?refresh=1` re-discovers it first (~3 eth_calls).
+        const engine = await this.getEngine();
+        if (!engine.route) return json({ error: "route strategy off" }, 404);
+        if (url.searchParams.get("refresh") === "1") await engine.route.ensureGraph(true);
+        return json(engine.route.poolsReport((a) => symbolOfAddress(a)));
+      }
       return json({ error: "not found" }, 404);
     } catch (e) {
       return json({ error: `internal error: ${errMsg(e)}` }, 500);

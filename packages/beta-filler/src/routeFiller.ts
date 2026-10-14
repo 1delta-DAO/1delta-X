@@ -196,6 +196,37 @@ export class RouteFiller {
   }
 
   /**
+   * Every pool the route strategy knows, for the operator (`GET /pools`): the discovered
+   * graph (each pool's venue, pair, fee tier, in-range liquidity and whether it passes
+   * ROUTE_MIN_LIQUIDITY) plus the configured pools and paths.
+   */
+  poolsReport(symbolOf: (a: string) => string): Record<string, unknown> {
+    const g = this.graph;
+    const floor = this.rc.discovery.minLiquidity > 0n ? this.rc.discovery.minLiquidity : 1n;
+    const pool = (p: { tokenA: string; tokenB: string; fee: number; venue: number; pool: string; liquidity?: bigint; sqrtPriceX96?: bigint }) => ({
+      pair: `${symbolOf(p.tokenA)}/${symbolOf(p.tokenB)}`,
+      venue: venueName(p.venue),
+      feeBps: p.fee / 100,
+      pool: p.pool,
+      liquidity: p.liquidity?.toString() ?? null,
+      active: p.liquidity !== undefined && p.liquidity >= floor,
+    });
+    return {
+      discovery: {
+        enabled: this.rc.discovery.enabled,
+        refreshedAt: g ? new Date(g.at).toISOString() : null,
+        maxHops: this.rc.maxHops,
+        hubs: this.rc.discovery.hubTokens.map(symbolOf),
+        routeTokens: this.rc.routeTokens.map(symbolOf),
+        feeTiers: this.rc.discovery.feeTiers,
+      },
+      discovered: (g?.pools ?? []).map(pool).sort((a, b) => Number(b.active) - Number(a.active) || a.pair.localeCompare(b.pair)),
+      configured: this.rc.pools.map((p) => pool({ ...p, venue: p.venue ?? 0, pool: p.pool ?? "", liquidity: undefined })).map(({ active: _a, liquidity: _l, ...rest }) => rest),
+      paths: this.rc.paths.map((p) => p.tokens.map(symbolOf).join(" → ") + ` (${p.fees.map((f) => f / 100).join(" / ")} bps)`),
+    };
+  }
+
+  /**
    * Discover / refresh the pool graph when it is missing, stale (ROUTE_DISCOVERY_SECONDS)
    * or built for other inputs — at most one refresh in flight, and after a failure not
    * before {@link DISCOVERY_RETRY_MS}. Never throws: a failed refresh keeps the old
