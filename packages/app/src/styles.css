@@ -797,8 +797,6 @@ main.reading .md .mdquote { margin-bottom: 26px; }
 .qsum { min-height: 66px; }
 .usdline .d { color: var(--dim); }
 .usdline .d.warn { color: var(--orange); }
-.nativeout { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); padding: 2px 4px 0; cursor: pointer; user-select: none; }
-.nativeout input { margin: 0; accent-color: var(--accent, currentColor); }
 
 /* "Swap output · solver via …": the route is in the hover */
 .qsum .hov { cursor: help; text-decoration: underline dotted var(--line2); text-underline-offset: 3px; }

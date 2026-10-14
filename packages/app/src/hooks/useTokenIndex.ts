@@ -1,6 +1,9 @@
 import { useMemo } from "react";
 
-import { TOKENS } from "../config/markets";
+import { TOKENS, WRAPPED_NATIVE } from "../config/markets";
+
+/** The chain's native coin symbol, where a wrapped one is configured. */
+const NATIVE_SYMBOL: Record<number, string> = { 30: "RBTC" };
 import type { TokenMeta } from "../lib/tokens";
 import { useTokenMeta } from "./useTokens";
 
@@ -40,7 +43,12 @@ export function buildTokenIndex(chainId: number, listed: ReadonlyArray<TokenMeta
   return {
     view(symbol: string): TokenView {
       const pin = TOKENS[chainId]?.[symbol];
-      if (!pin) return { symbol };
+      if (!pin) {
+        // The native coin (RBTC, receivable through the NativeUnwrapModule) wears its wrapped token's logo.
+        const wrapped = WRAPPED_NATIVE[chainId];
+        const wpin = wrapped && symbol === NATIVE_SYMBOL[chainId] ? TOKENS[chainId]?.[wrapped] : undefined;
+        return wpin ? { symbol, logoURI: logoOf.get(wpin.address) } : { symbol };
+      }
       return { symbol, address: pin.address, decimals: pin.decimals, logoURI: logoOf.get(pin.address) };
     },
     tokens: pinned.map(([, t]) => ({ address: t.address, decimals: t.decimals })),

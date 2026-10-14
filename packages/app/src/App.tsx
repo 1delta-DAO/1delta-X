@@ -14,7 +14,7 @@ import { RaffleNotice } from "./components/Raffle";
 import { TermsLink } from "./components/TermsLink";
 import { chainById, chainLabel } from "./config/chains";
 import { deploymentFor, exclusivityForMarket, solverForMarket } from "./config/deployments";
-import { marketById, pinnedToken, symbolsOn, wrappedNativeSymbol } from "./config/markets";
+import { marketById, pairsWith, pinnedToken, symbolsOn, wrappedNativeSymbol } from "./config/markets";
 import { useChainPools } from "./hooks/useChainPools";
 import { useMarketFloorInputs } from "./hooks/useMarketFloor";
 import { useUsdPrices } from "./hooks/useUsdPrices";
@@ -171,8 +171,13 @@ export default function App() {
     }
   }, []);
   const nativeOutModule = deployment?.nativeUnwrap;
-  const nativeOutAvailable = !!nativeOutModule && !!wrappedSymbol && ticket.recvToken === wrappedSymbol && ticket.mode !== "twap";
-  const nativeOutActive = nativeOutAvailable && nativeOutChosen;
+  // Offered as its own entry in the RECEIVE dropdown wherever WRBTC could be received.
+  const nativeOutAvailable =
+    !!nativeOutModule &&
+    !!wrappedSymbol &&
+    ticket.mode !== "twap" &&
+    (ticket.recvToken === wrappedSymbol || pairsWith(chainId, ticket.payToken).includes(wrappedSymbol));
+  const nativeOutActive = nativeOutAvailable && nativeOutChosen && ticket.recvToken === wrappedSymbol;
   // Who may fill this market's orders, as they will be signed (shown on the form).
   const marketDelivery = useMemo(() => {
     if (nativeOutActive) return { direct: false, windowSeconds: 0, overrideBps: 0 };
@@ -1005,7 +1010,7 @@ export default function App() {
                 ? { symbol: nativeSymbol, value: Number(formatUnits(wrappableWei(rawBalances.native), 18)) }
                 : null
             }
-            nativeOut={nativeOutAvailable ? { native: nativeSymbol, on: nativeOutChosen, set: chooseNativeOut } : null}
+            nativeOut={nativeOutAvailable && wrappedSymbol ? { native: nativeSymbol, wrapped: wrappedSymbol, on: nativeOutActive, set: chooseNativeOut } : null}
             unwrap={
               wrappedSymbol && wrappedWei !== undefined && wrappedWei > 0n
                 ? { symbol: wrappedSymbol, busy: unwrapping, error: null, tx: unwrapTx, action: () => void unwrap() }

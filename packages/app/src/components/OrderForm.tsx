@@ -148,10 +148,11 @@ interface OrderFormProps {
   /** The pay token is the wrapped native coin: RBTC above the gas reserve counts as spendable (human units). */
   autoWrap?: { symbol: string; value: number } | null;
   /**
-   * The ticket receives the wrapped native coin and the deployment has a NativeUnwrapModule:
-   * offer receiving the raw coin instead (unwrapped inside the fill). Null otherwise.
+   * The deployment has a NativeUnwrapModule and WRBTC is receivable here: the raw coin
+   * (RBTC) is its own entry in the RECEIVE dropdown — picking it receives `wrapped`,
+   * unwrapped inside the fill (`on` = it is picked). Null otherwise.
    */
-  nativeOut?: { native: string; on: boolean; set: (on: boolean) => void } | null;
+  nativeOut?: { native: string; wrapped: string; on: boolean; set: (on: boolean) => void } | null;
   /** The wallet holds the wrapped native coin: offer turning it back (behind a confirm). */
   unwrap?: { symbol: string; busy: boolean; error: string | null; tx?: TxState; action: () => void } | null;
   /** One fill's network gas in USD (App), for a limit's net fill threshold. */
@@ -271,7 +272,24 @@ export function OrderForm(props: OrderFormProps) {
   // Selling WRBTC: RBTC above the gas reserve is spendable too (auto-wrapped at funding).
   const payBal = balOf(payToken, payBalance, autoWrap);
   const paySpendable = payBal.kind === "ok" ? payBal.value : payBalance;
-  const recvBal = balOf(recvToken, balances[recvToken]);
+  // RBTC picked in the receive dropdown (native-out): the order still receives WRBTC, unwrapped in the fill.
+  const recvShown = nativeOut?.on ? nativeOut.native : recvToken;
+  const recvBal = nativeOut?.on ? balOf(nativeOut.native, wallet.native.balance) : balOf(recvToken, balances[recvToken]);
+  const recvOptions = (() => {
+    const base = pairsWith(ticket.chainId, payToken);
+    if (!nativeOut) return base;
+    const i = base.indexOf(nativeOut.wrapped);
+    return i < 0 ? base : [...base.slice(0, i + 1), nativeOut.native, ...base.slice(i + 1)];
+  })();
+  const pickRecv = (symbol: string) => {
+    if (nativeOut && symbol === nativeOut.native) {
+      nativeOut.set(true);
+      if (recvToken !== nativeOut.wrapped) ticket.setRecv(nativeOut.wrapped);
+      return;
+    }
+    nativeOut?.set(false);
+    if (symbol !== recvToken) ticket.setRecv(symbol);
+  };
 
   // ---- the limit / TWAP route bar (a market ticket's source is a chip in Details)
   const bar: Array<{ key: string; pct: number; color: string; label: string }> = [];
@@ -505,14 +523,14 @@ export function OrderForm(props: OrderFormProps) {
             {awaitingQuote ? (
               <span className="qskel big" role="status" aria-label="Fetching a quote" />
             ) : (
-              <input type="text" readOnly placeholder="0.0" aria-label={`Amount of ${recvToken} you receive`} value={receiveValue} />
+              <input type="text" readOnly placeholder="0.0" aria-label={`Amount of ${recvShown} you receive`} value={receiveValue} />
             )}
             <TokenSelect
-              value={recvToken}
-              options={pairsWith(ticket.chainId, payToken)}
+              value={recvShown}
+              options={recvOptions}
               tokens={tokens}
-              balances={balances}
-              onChange={ticket.setRecv}
+              balances={nativeOut ? { ...balances, [nativeOut.native]: wallet.native.balance } : balances}
+              onChange={pickRecv}
               label="Token you receive"
             />
           </div>
@@ -532,15 +550,6 @@ export function OrderForm(props: OrderFormProps) {
               "\u00a0"
             )}
           </div>
-          {nativeOut && (
-            <label
-              className="nativeout"
-              title={`The filler delivers ${recvToken}, and the same transaction unwraps it to ${nativeOut.native} in your wallet (a little more network gas). Off: you receive ${recvToken}.`}
-            >
-              <input type="checkbox" checked={nativeOut.on} onChange={(e) => nativeOut.set(e.target.checked)} />
-              Receive as {nativeOut.native}
-            </label>
-          )}
           {isMarket && amount > 0 && (
             <div className="qsum">
               {figures ? (
