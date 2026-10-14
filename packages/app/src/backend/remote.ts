@@ -898,6 +898,7 @@ export class RemoteOrderbook implements OrderbookApi {
       tx,
       at: typeof f.at === "number" ? f.at * 1000 : this.now(),
       mine: true,
+      maker: order.maker,
       simulated: false,
       status: cumulative !== null && anchor > 0n && cumulative >= anchor ? "filled" : "partial",
     });
@@ -939,6 +940,7 @@ export class RemoteOrderbook implements OrderbookApi {
       tx,
       at,
       mine: true,
+      maker: t.maker,
       simulated: false,
       status,
     });

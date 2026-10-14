@@ -300,6 +300,7 @@ export class MockOrderbook implements OrderbookApi {
             tx: hex(this.rand, 32),
             at: now,
             mine: true,
+            ...(o.signed ? { maker: o.signed.order.maker } : {}),
             simulated: true,
             orderHash: o.id,
             orderType: o.type,

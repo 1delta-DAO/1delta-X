@@ -129,12 +129,13 @@ export function retireReason(
 
 /** The row an order leaves in Recent fills when it finishes with nothing (more) to show as a fill. */
 export function outcomeEntry(
-  o: Pick<RestingOrder, "id" | "marketId" | "side" | "type" | "size" | "filled" | "price">,
+  o: Pick<RestingOrder, "id" | "marketId" | "side" | "type" | "size" | "filled" | "price" | "signed">,
   outcome: Outcome,
   at: number,
 ): Fill {
   return {
     id: `${o.id}-${outcome}`,
+    ...(o.signed ? { maker: o.signed.order.maker } : {}),
     orderHash: o.id,
     orderType: o.type,
     marketId: o.marketId,
@@ -240,4 +241,14 @@ export function phaseLine(p: OrderPhase): PhaseLine {
     case "unknown":
       return { text: "Signed", tone: "dim" };
   }
+}
+
+/**
+ * Whether an Orders-panel entry belongs to `account`. The book holds every wallet
+ * this tab restored or signed with (switching wallets does not clear it), so the
+ * panel scopes to the connected one. An entry with no known maker, or no
+ * connected account, matches.
+ */
+export function belongsTo(maker: string | undefined, account: string | undefined): boolean {
+  return !maker || !account || maker.toLowerCase() === account.toLowerCase();
 }

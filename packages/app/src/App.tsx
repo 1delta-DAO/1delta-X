@@ -1005,6 +1005,7 @@ export default function App() {
           cancelTx={cancelTx}
           onRetryCancel={cancelling ? () => void hardCancel(cancelling) : undefined}
           cancelChainId={cancelling ? marketById(cancelling.marketId).chainId : chainId}
+          account={wallet.address ?? undefined}
         />
       </main>
 

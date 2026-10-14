@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { BOOK_IS_REMOTE } from "../backend/book";
 import { marketById } from "../config/markets";
 import { ago, fmtAmt, fmtPrice, shortHex, until } from "../lib/format";
-import { fillStatusLabel, orderTypeLabel, rowStatus, rowStatusLabel } from "../lib/orderLifecycle";
+import { belongsTo, fillStatusLabel, orderTypeLabel, rowStatus, rowStatusLabel } from "../lib/orderLifecycle";
 import type { TxState } from "../lib/txFlow";
 import { SOURCE_NAME, dueSlices, needsSliceSignature, type Fill, type RestingOrder } from "../lib/types";
 import { QUOTED_DECAY_SECONDS } from "../lib/plan";
@@ -33,11 +33,25 @@ interface OrdersProps {
   cancelTx?: TxState;
   onRetryCancel?: () => void;
   cancelChainId?: number;
+  /** The connected wallet: the panel shows only its orders and fills unless "All wallets" is picked. */
+  account?: string | undefined;
 }
 
 /** Explains, per row, what a cancel has and has not done. */
 export const SOFT_CANCEL_NOTE =
   "hidden from the book; still fillable on-chain until expiry by anyone holding the signed order — cancel on-chain to stop that";
+
+/** The wallet column, shown only while "All wallets" is picked. */
+function Wallet({ maker, account }: { maker: string | undefined; account: string | undefined }) {
+  if (!maker) return <span className="faint">—</span>;
+  const you = !!account && maker.toLowerCase() === account.toLowerCase();
+  return (
+    <span className={you ? "" : "faint"} title={maker}>
+      {shortHex(maker)}
+      {you ? " · you" : ""}
+    </span>
+  );
+}
 
 function Pair({ marketId, tokens }: { marketId: string; tokens: TokenIndex }) {
   const m = marketById(marketId);
@@ -49,8 +63,9 @@ function Pair({ marketId, tokens }: { marketId: string; tokens: TokenIndex }) {
   );
 }
 
-export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, onSignSlice, error, cancelTx, onRetryCancel, cancelChainId }: OrdersProps) {
+export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, onSignSlice, error, cancelTx, onRetryCancel, cancelChainId, account }: OrdersProps) {
   const [tab, setTab] = useState<"open" | "fills">("open");
+  const [scope, setScope] = useState<"wallet" | "all">("wallet");
   // Due TWAP slices appear on a clock, not on a book event.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -60,8 +75,12 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
 
   // Only orders this account signed belong under "your activity"; the rest of
   // the book is other makers' resting size and is already visible in the ladder.
-  const mine = orders.filter((o) => o.mine);
-  const myFills = fills.filter((f) => f.mine);
+  // The book keeps every wallet this tab restored or signed with — switching
+  // wallets does not clear it — so scope to the connected one unless asked not to.
+  const all = scope === "all" || !account;
+  const mine = orders.filter((o) => o.mine && (all || belongsTo(o.signed?.order.maker, account)));
+  const myFills = fills.filter((f) => f.mine && (all || belongsTo(f.maker, account)));
+  const showWallet = scope === "all" && !!account;
 
   return (
     <div className="box">
@@ -73,6 +92,21 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
           <button type="button" aria-selected={tab === "fills"} onClick={() => setTab("fills")}>
             Recent fills <span className="c">{myFills.length}</span>
           </button>
+          {account && (
+            <div className="oscope" role="group" aria-label="Whose orders and fills to show">
+              <button type="button" aria-pressed={scope === "wallet"} onClick={() => setScope("wallet")} title={`Only ${account}`}>
+                This wallet
+              </button>
+              <button
+                type="button"
+                aria-pressed={scope === "all"}
+                onClick={() => setScope("all")}
+                title="Every wallet this browser tab has signed with or restored"
+              >
+                All wallets
+              </button>
+            </div>
+          )}
         </div>
         <span className="lbl">
           {tab === "open"
@@ -102,6 +136,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
               <>
                 <thead>
                   <tr>
+                    {showWallet && <th>Wallet</th>}
                     <th>Market</th>
                     <th>Type</th>
                     <th>Side</th>
@@ -118,8 +153,16 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                     const pct = Math.min(100, (o.filled / o.size) * 100);
                     const status = rowStatus(o, now);
                     const chainId = marketById(o.marketId).chainId;
+                    const maker = o.signed?.order.maker;
+                    // Another wallet's row: the connected wallet cannot sign its cancel or slices.
+                    const own = belongsTo(maker, account);
                     return (
                       <tr key={o.id}>
+                        {showWallet && (
+                          <td>
+                            <Wallet maker={maker} account={account} />
+                          </td>
+                        )}
                         <td className="pc">
                           <Pair marketId={o.marketId} tokens={tokens} />
                         </td>
@@ -182,13 +225,14 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                         </td>
                         <td>{until(o.expiresAt)}</td>
                         <td className="acts">
-                          {needsSliceSignature(o, now) && o.slices && (
+                          {!own && <span className="faint">connect this wallet to manage</span>}
+                          {own && needsSliceSignature(o, now) && o.slices && (
                             <button type="button" className="x" onClick={() => onSignSlice(o)}>
                               Sign slice {o.slices.signed + 1}/{o.slices.total}
                               {dueSlices(o, now) > o.slices.signed + 1 ? ` (${dueSlices(o, now) - o.slices.signed} due)` : ""}
                             </button>
                           )}
-                          {!o.cancelled && !o.offBook && status !== "filled" && (
+                          {own && !o.cancelled && !o.offBook && status !== "filled" && (
                             <button
                               type="button"
                               className="x"
@@ -198,7 +242,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                               Hide
                             </button>
                           )}
-                          {o.signed?.deployed && status !== "filled" && (
+                          {own && o.signed?.deployed && status !== "filled" && (
                             <button
                               type="button"
                               className="x"
@@ -233,6 +277,7 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
               <>
                 <thead>
                   <tr>
+                    {showWallet && <th>Wallet</th>}
                     <th>When</th>
                     <th>Market</th>
                     <th>Type</th>
@@ -247,6 +292,11 @@ export function Orders({ orders, fills, tickOf, tokens, onCancel, onHardCancel, 
                 <tbody>
                   {myFills.map((f) => (
                     <tr key={f.id}>
+                      {showWallet && (
+                        <td>
+                          <Wallet maker={f.maker} account={account} />
+                        </td>
+                      )}
                       <td className="faint">{ago(f.at)}</td>
                       <td className="pc">
                         <Pair marketId={f.marketId} tokens={tokens} />

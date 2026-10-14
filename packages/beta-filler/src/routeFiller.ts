@@ -155,6 +155,8 @@ export class RouteFiller {
   private graph: PoolGraph | undefined;
   /** No discovery attempt before this (ms): set after a failure. */
   private graphRetryAt = 0;
+  /** The last indexer-discovery failure (status), cleared by a success. */
+  private lastIndexerError: string | undefined;
   private graphRefresh: Promise<void> | undefined;
   private ready = false;
   /** Our share of each fill's surplus after the solver's maker/protocol split, ppm. */
@@ -217,6 +219,8 @@ export class RouteFiller {
       discovery: {
         enabled: this.rc.discovery.enabled,
         source: this.rc.discovery.source,
+        graphFrom: g && g.pools.some((p) => p.tvlUsd !== undefined) ? "indexers" : g ? "rpc" : null,
+        ...(this.lastIndexerError ? { lastIndexerError: this.lastIndexerError } : {}),
         refreshedAt: g ? new Date(g.at).toISOString() : null,
         maxHops: this.rc.maxHops,
         hubs: this.rc.discovery.hubTokens.map(symbolOf),
@@ -249,9 +253,11 @@ export class RouteFiller {
         // indexer failure falls through to the RPC probe below.
         if (d.source === "indexers") {
           const viaIndexers = await this.discoverViaIndexers().catch((e: unknown) => {
+            this.lastIndexerError = `${new Date().toISOString()} ${sanitize(errorReason(e))}`;
             this.log(`⚠ [route] indexer discovery failed, probing on-chain instead: ${sanitize(errorReason(e))}`);
             return undefined;
           });
+          if (viaIndexers) this.lastIndexerError = undefined;
           if (viaIndexers) {
             this.graph = viaIndexers;
             this.graphRetryAt = 0;

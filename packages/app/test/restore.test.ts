@@ -123,7 +123,9 @@ describe("RemoteOrderbook.restore", () => {
     const fills = book.fills();
     expect(fills.map((f) => f.tx).sort()).toEqual([TX1, TX2].sort());
     const historical = fills.find((f) => f.tx === TX1)!;
-    expect(historical).toMatchObject({ side: "sell", size: 50, simulated: false, mine: true });
+    expect(historical).toMatchObject({ side: "sell", size: 50, simulated: false, mine: true, maker: MAKER });
+    // Every fill row carries its maker, so the Orders panel can scope to the connected wallet.
+    expect(fills.find((f) => f.tx === TX2)).toMatchObject({ maker: MAKER });
     expect(notified).toBeGreaterThan(0);
 
     // The restored rows' live status is read RIGHT AWAY (2026-10-12: after a reload a

@@ -391,6 +391,12 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
 .otabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .otabs .c { font-size: 9px; padding: 1px 6px; border-radius: 999px; background: var(--line); color: var(--ink); }
 .otabs button[aria-selected="true"] .c { background: var(--lime); color: #000; }
+.oscope { display: flex; margin-left: 7px; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.oscope button {
+  border: 0; background: none; color: var(--faint); padding: 7px 12px; cursor: pointer;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; font-weight: 700;
+}
+.oscope button[aria-pressed="true"] { background: var(--raise); color: var(--ink); }
 
 .sx { overflow-x: auto; }
 table.o { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }

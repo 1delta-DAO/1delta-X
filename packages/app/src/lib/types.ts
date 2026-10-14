@@ -172,6 +172,12 @@ export interface Fill {
   at: number;
   mine: boolean;
   /**
+   * The order's maker (signer address) when known. The book keeps every wallet
+   * this tab restored or signed with, so the Orders panel scopes rows to the
+   * connected wallet by this ({@link belongsTo}). Absent = not tied to a wallet.
+   */
+  maker?: string;
+  /**
    * True for every fill the in-browser mock produces: nothing was broadcast and
    * `tx` is not a transaction hash. The UI must never present one as settled
    * on-chain (G-TS_SIGN-15).

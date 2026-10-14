@@ -7,6 +7,7 @@ import { pinnedToken } from "../src/config/markets";
 import { readFillState, type Reader } from "../src/lib/chain";
 import {
   CANCELLED_SENTINEL,
+  belongsTo,
   chainFillOutcome,
   fillStatusLabel,
   orderPhase,
@@ -334,5 +335,20 @@ describe("fill-once orders: the nonce bit is the fill (timing bit 100)", () => {
     await bookB.poll();
     expect(bookB.fills()[0]).toMatchObject({ status: "cancelled", orderHash: plain.hash });
     expect(reads).toEqual([]);
+  });
+});
+
+describe("Orders panel wallet scope", () => {
+  const A = "0x00000000000000000000000000000000000000aA";
+  const B = "0x00000000000000000000000000000000000000bb";
+
+  it("keeps the connected wallet's entries, case-insensitively, and drops another wallet's", () => {
+    expect(belongsTo(A, A.toLowerCase())).toBe(true);
+    expect(belongsTo(B, A)).toBe(false);
+  });
+
+  it("keeps entries with no known maker, and everything when no wallet is connected", () => {
+    expect(belongsTo(undefined, A)).toBe(true);
+    expect(belongsTo(B, undefined)).toBe(true);
   });
 });
