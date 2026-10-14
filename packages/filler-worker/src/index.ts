@@ -12,6 +12,7 @@ export { FillerDO };
 const ADMIN_ROUTES: Record<string, string> = {
   "/status": "GET",
   "/fills": "GET",
+  "/pools": "GET",
   "/pause": "POST",
   "/resume": "POST",
   "/dry-run": "POST",
