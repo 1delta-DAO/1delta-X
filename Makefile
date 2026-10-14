@@ -68,7 +68,7 @@ FORK_PACKAGES := \
 
 ALL_PACKAGES := $(PACKAGES) $(FORK_PACKAGES)
 
-.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
+.PHONY: print-packages test test-sdk test-ts workers-smoke build test-all test-fork test-invariant test-deployed build-all gas gas-check gas-diff size-check docs-check modules-check predict-core deploy-core deploy-aggregator-fill simulate-native-unwrap deploy-native-unwrap size-check-solvers test-solvers-deployed $(addprefix test-,$(ALL_PACKAGES)) $(addprefix build-,$(ALL_PACKAGES))
 
 # ── CI matrix source ──────────────────────────────────────────────────────────
 
@@ -418,6 +418,25 @@ deploy-aggregator-fill:
 ## `solvers-deploy` profile: via-IR, Cancun, runs 1e6). The suite itself compiles under
 ## the legacy `solvers` profile; every test deploys the solver through `newAgg`
 ## (packages/solvers/test/shared/AggDeploy.sol), which loads `AGG_ARTIFACT` instead.
+# ── NativeUnwrapModule (task 28: receive native RBTC from a fill) ────────────────
+#
+# Plain CREATE under `modules-transfer-deploy` (Cancun). Simulate first (no --broadcast):
+#   SETTLEMENT=0xe6EDbb5c49Fb4CFb313476e3B78E274D3584ddf5 make simulate-native-unwrap \
+#     RPC=https://public-node.rsk.co DEPLOY_ARGS="--sender 0x<deployer> --legacy"
+# then the same with `deploy-native-unwrap` and DEPLOY_ARGS="--account deployer --sender 0x… --legacy --slow".
+NATIVE_UNWRAP_SCRIPT := packages/modules/transfer/script/DeployNativeUnwrap.s.sol:DeployNativeUnwrap
+
+simulate-native-unwrap:
+	@test -n "$(RPC)" || { echo "RPC is required"; exit 1; }
+	@test -n "$$SETTLEMENT" || { echo "SETTLEMENT (env) is required"; exit 1; }
+	FOUNDRY_PROFILE=modules-transfer-deploy $(FORGE) script $(NATIVE_UNWRAP_SCRIPT) --rpc-url $(RPC) $(DEPLOY_ARGS)
+
+deploy-native-unwrap:
+	@test -n "$(RPC)" || { echo "RPC is required"; exit 1; }
+	@test -n "$$SETTLEMENT" || { echo "SETTLEMENT (env) is required"; exit 1; }
+	FOUNDRY_PROFILE=modules-transfer-deploy $(FORGE) script $(NATIVE_UNWRAP_SCRIPT) \
+		--rpc-url $(RPC) --broadcast $(DEPLOY_ARGS) $(VERIFY_ARGS)
+
 AGG_DEPLOYED_ARTIFACT := out/solvers-deploy/AggregatorFillSolver.sol/AggregatorFillSolver.json
 test-solvers-deployed:
 	FOUNDRY_PROFILE=solvers-deploy $(FORGE) build --quiet --skip '*.s.sol'

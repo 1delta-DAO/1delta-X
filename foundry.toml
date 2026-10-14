@@ -518,6 +518,16 @@ test   = "packages/modules/transfer/test"
 script = "packages/modules/transfer/script"
 out    = "out/modules-permit-transfer"
 
+# The DEPLOYED NativeUnwrapModule (Rootstock, task 28): same sources, Cancun pinned —
+# Rootstock does not run Prague (the [profile.default] target). Its own `out` keeps
+# the deployed artifact apart from the test build.
+[profile.modules-transfer-deploy]
+src         = "packages/modules/transfer/src"
+test        = "packages/modules/transfer/test"
+script      = "packages/modules/transfer/script"
+out         = "out/modules-transfer-deploy"
+evm_version = "cancun"
+
 [profile.modules-usdrif]
 src    = "packages/modules/redeem/usdrif/src"
 test   = "packages/modules/redeem/usdrif/test"
