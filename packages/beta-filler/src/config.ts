@@ -264,20 +264,33 @@ export interface Policy {
    * (− the MoC fee). That beats the RIF pools on buys from ~$100 (rail probe).
    */
   sellRif: boolean;
+  /**
+   * …and orders where a maker SELLS RIF for USDT0: we pay USDT0 and keep the RIF. Valued
+   * at its replacement cost while the wallet is below RIF_SHARE_TARGET_BPS (it saves a
+   * refill), else at its MoC exit (mintTP at the oracle, USDRIF → USDT0 on the pool).
+   */
+  buyRif: boolean;
   /** Rolling one-hour RIF outflow cap (18 dec). */
   hourlyRif: bigint;
-  /** Charged on the rail's replacement cost (bps): the oracle can move while the async redemption waits in the MoC queue. */
+  /** Charged on the rail's MoC conversions (bps): the oracle can move while an async MoC op waits in the queue. */
   rifRailHaircutBps: bigint;
-  /** Refill the float when the wallet's RIF is below this (18 dec; 0 = never refill automatically). */
-  rifRefillBelow: bigint;
-  /** …back up to this much RIF (18 dec). */
-  rifFloatTarget: bigint;
-  /** USDT0 never spent on a refill (kept for the USDRIF buy side), 6 dec. */
+  /**
+   * The RIF BAND, as a share of the wallet's value (USDT0 + USDRIF at $1 + RIF at the
+   * MoC oracle; RBTC is gas, not counted), bps. RIF is volatile: the wallet holds a
+   * minority of it. Below `low` the rebalancer buys RIF back to `target` (USDT0 →
+   * USDRIF → redeemTP); above `high` it sells down to `target` (mintTP → USDRIF → USDT0);
+   * between, user flow on both sides moves it. Buys from makers that would push the
+   * share above `high` are refused.
+   */
+  rifShareLowBps: bigint;
+  rifShareTargetBps: bigint;
+  rifShareHighBps: bigint;
+  /** USDT0 never spent by the rail (refills, RIF buys) — kept for the USDRIF buy side, 6 dec. */
   usdt0Reserve: bigint;
-  /** Slippage tolerance on the refill's USDT0 → USDRIF swap (bps). */
-  refillSlippageBps: bigint;
-  /** Refuse a refill swap that pays more than this premium over $1 per USDRIF (bps) — the oracle guard. */
-  refillMaxPremiumBps: bigint;
+  /** Slippage tolerance on the rail's USDT0 ⇄ USDRIF pool swaps (bps). */
+  railSwapSlippageBps: bigint;
+  /** Refuse a rail swap whose pool price is more than this away from $1 per USDRIF (bps) — the peg guard. */
+  usdrifPegToleranceBps: bigint;
 }
 
 export interface Config {
@@ -745,13 +758,17 @@ export function loadConfig(env: Env): Config {
     sellRif: flag(env, "SELL_RIF", false),
     hourlyRif: fixed(env, "HOURLY_RIF", "20000", 18),
     rifRailHaircutBps: bps(env, "RIF_RAIL_HAIRCUT_BPS", 20),
-    rifRefillBelow: fixed(env, "RIF_REFILL_BELOW", "0", 18),
-    rifFloatTarget: fixed(env, "RIF_FLOAT_TARGET", "0", 18),
+    buyRif: flag(env, "BUY_RIF", false),
+    rifShareLowBps: bps(env, "RIF_SHARE_LOW_BPS", 1500),
+    rifShareTargetBps: bps(env, "RIF_SHARE_TARGET_BPS", 2000),
+    rifShareHighBps: bps(env, "RIF_SHARE_HIGH_BPS", 2500),
     usdt0Reserve: fixed(env, "USDT0_RESERVE", "0", USDT0_DECIMALS),
-    refillSlippageBps: bps(env, "REFILL_SLIPPAGE_BPS", 30),
-    refillMaxPremiumBps: bps(env, "REFILL_MAX_PREMIUM_BPS", 50),
+    railSwapSlippageBps: bps(env, "RAIL_SWAP_SLIPPAGE_BPS", 30),
+    usdrifPegToleranceBps: bps(env, "USDRIF_PEG_TOLERANCE_BPS", 50),
   };
-  if (policy.rifRefillBelow > policy.rifFloatTarget) throw new Error("RIF_REFILL_BELOW must not exceed RIF_FLOAT_TARGET");
+  if (!(policy.rifShareLowBps <= policy.rifShareTargetBps && policy.rifShareTargetBps <= policy.rifShareHighBps && policy.rifShareHighBps <= 10_000n)) {
+    throw new Error("RIF_SHARE_LOW_BPS ≤ RIF_SHARE_TARGET_BPS ≤ RIF_SHARE_HIGH_BPS ≤ 10000");
+  }
   if (policy.buyUsdrif && policy.maxBuyPrice >= 10n ** 18n) {
     throw new Error("MAX_BUY_PRICE must be below 1.0: redemption returns $1 of RIF minus the MoC fee");
   }

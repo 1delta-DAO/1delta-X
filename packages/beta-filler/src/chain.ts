@@ -15,6 +15,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 
 import type { Config } from "./config";
+import type { WalletMix } from "./policy";
 
 export const MOC_CORE_ABI = [
   {
@@ -402,6 +403,24 @@ export async function quoteUsdt0ToUsdrif(c: Chain, cfg: Config, amountIn: bigint
     args: [{ tokenIn: cfg.tokens.usdt0, tokenOut: cfg.tokens.usdrif, amountIn, fee: cfg.uniswap.usdrifUsdt0Fee, sqrtPriceLimitX96: 0n }],
   });
   return result[0];
+}
+
+/** USDT0 out of the 0.05 % pool for `amountIn` USDRIF (the rail's exit leg), quoted live. */
+export async function quoteUsdrifToUsdt0(c: Chain, cfg: Config, amountIn: bigint): Promise<bigint> {
+  if (amountIn === 0n) return 0n;
+  const { result } = await c.pub.simulateContract({
+    address: cfg.uniswap.quoter,
+    abi: QUOTER_V2_ABI,
+    functionName: "quoteExactInputSingle",
+    args: [{ tokenIn: cfg.tokens.usdrif, tokenOut: cfg.tokens.usdt0, amountIn, fee: cfg.uniswap.usdrifUsdt0Fee, sqrtPriceLimitX96: 0n }],
+  });
+  return result[0];
+}
+
+/** The wallet's USDT0 / USDRIF / RIF and MoC's oracle, for the RIF band (policy.ts `rifBand`). */
+export async function walletMix(c: Chain, cfg: Config): Promise<WalletMix> {
+  const [usdt0, usdrif, rif, pACtp] = await Promise.all([balanceOf(c, cfg.tokens.usdt0), balanceOf(c, cfg.tokens.usdrif), balanceOf(c, cfg.tokens.rif), mocPACtp(c, cfg)]);
+  return { usdt0, usdrif, rif, pACtp };
 }
 
 /** USDT0 the 0.05 % pool wants for exactly `amountOut` USDRIF, quoted live. */

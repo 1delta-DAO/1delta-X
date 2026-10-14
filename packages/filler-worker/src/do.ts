@@ -6,8 +6,9 @@ import {
   fetchOrders,
   fillReporter,
   fmtUnits,
-  parseFixed,
   parseQuoteRequest,
+  rifBand,
+  walletMix,
   quoteToJson,
   ROOTSTOCK,
   sanitize,
@@ -625,21 +626,12 @@ export class FillerDO extends DurableObject<Env> {
       }
       if (path === "/tick" && method === "POST") return json(await this.runTick("manual"));
       if (path === "/fills" && method === "GET") return this.fills(url);
-      if (path === "/refill" && method === "POST") {
-        // The RIF rail's float: swap USDT0 → USDRIF now (to RIF_FLOAT_TARGET, or {"usdt0": "100"}),
-        // the redemption follows on the rebalancer steps. One tx per call (an approval first).
-        const text = await request.text();
-        let body: unknown = {};
-        try {
-          body = text.trim() ? JSON.parse(text) : {};
-        } catch {
-          return json({ error: 'body must be JSON {"usdt0"?: "100"}' }, 400);
-        }
-        const raw = (body as { usdt0?: unknown } | null)?.usdt0;
-        if (raw !== undefined && (typeof raw !== "string" || !/^\d{1,9}(\.\d{1,6})?$/.test(raw))) return json({ error: "usdt0 must be a decimal string" }, 400);
+      if (path === "/rebalance-rif" && method === "POST") {
+        // The RIF band to its target now (one tx per call: an approval, a swap or a MoC op;
+        // the next legs follow on the rebalancer steps).
         const engine = await this.getEngine();
-        const r = await engine.refillNow(raw === undefined ? undefined : parseFixed(raw, 6));
-        this.log(`admin: refill ${raw ?? "to target"} → ${r ? `${r.status}${r.reason ? ` (${r.reason})` : ""}` : "nothing to do"}`);
+        const r = await engine.rebalanceRifNow();
+        this.log(`admin: rebalance-rif → ${r ? `${r.status}${r.reason ? ` (${r.reason})` : ""}` : "nothing to do"}`);
         return json(r ? { ...r, ...(r.reason ? { reason: redact(r.reason, rpcUrls(this.env)) } : {}) } : { status: "nothing to do" });
       }
       if (path === "/pools" && method === "GET") {
@@ -792,14 +784,21 @@ export class FillerDO extends DurableObject<Env> {
         ? (({ raw, ...rest }) => ({ ...rest, rawKept: !!raw, ageSeconds: Math.round((now - p.sentAt) / 1000), sentAt: new Date(p.sentAt).toISOString() }))(p)
         : null,
       mocRedemption: moc ? { opId: moc.opId.toString(), ageSeconds: Math.round(moc.ageMs / 1000) } : null,
-      rifRail: cfg.policy.sellRif
-        ? {
-            floatTarget: fmtUnits(cfg.policy.rifFloatTarget, 18),
-            refillBelow: fmtUnits(cfg.policy.rifRefillBelow, 18),
-            usdt0Reserve: fmtUnits(cfg.policy.usdt0Reserve, 6),
-            refillPending: !!engine.rebalancer.state.refillPending,
-          }
-        : null,
+      rifRail:
+        cfg.policy.sellRif || cfg.policy.buyRif
+          ? {
+              sellRif: cfg.policy.sellRif,
+              buyRif: cfg.policy.buyRif,
+              shareBps: { low: Number(cfg.policy.rifShareLowBps), target: Number(cfg.policy.rifShareTargetBps), high: Number(cfg.policy.rifShareHighBps) },
+              ...(await walletMix(engine.chain, cfg)
+                .then((m) => {
+                  const b = rifBand(m, cfg.policy);
+                  return { nowBps: Number(b.shareBps), walletUsd: fmtUnits(b.total18, 18), rifUsd: fmtUnits(b.rif18, 18) };
+                })
+                .catch((e: unknown) => ({ error: redact(errMsg(e), rpcUrls(this.env)) }))),
+              usdt0Reserve: fmtUnits(cfg.policy.usdt0Reserve, 6),
+            }
+          : null,
       recent: {
         fills: listFills(this.sql, { limit: 20, status: "filled" }),
         reverts: listFills(this.sql, { limit: 20, status: "reverted" }),

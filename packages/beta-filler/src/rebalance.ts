@@ -10,15 +10,17 @@ import {
   OPER_REDEEM_TP,
   mocPACtp,
   quoteRifToUsdt0,
+  quoteUsdrifToUsdt0,
   quoteUsdt0ForUsdrif,
   quoteUsdt0ToUsdrif,
+  walletMix,
   rifForUsdrif,
   SWAP_ROUTER02_ABI,
   type Chain,
 } from "./chain";
 import { MOC_FEE_BPS, type Config } from "./config";
 import { estimateAndBroadcast, type Guard, type TxKind } from "./guard";
-import { fmtUnits, railUsdrifFor } from "./policy";
+import { fmtUnits, rifBand } from "./policy";
 import { sanitize } from "./sanitize";
 
 /** The rebalancer's durable state: the MoC redemption we are waiting on. */
@@ -27,11 +29,6 @@ export interface RebalanceState {
   pendingOp?: string;
   /** When that redemption tx was mined, ms. */
   pendingOpAt?: number;
-  /**
-   * A RIF-rail refill swap (USDT0 → USDRIF) was sent: the USDRIF it bought is the
-   * float's, and is redeemed for RIF on the next step whatever REDEEM_MIN_USDRIF says.
-   */
-  refillPending?: boolean;
 }
 
 /** Approval headroom, in batches: an approval covers this many REDEEM_MIN_USDRIF / RIF_SELL_MIN (bounded, never unlimited). */
@@ -42,7 +39,7 @@ const minOf = (a: bigint, b: bigint) => (a < b ? a : b);
 
 /** What one rebalancer action did. */
 export interface RebalanceOutcome {
-  action: "redeem" | "sell-rif" | "mint" | "refill";
+  action: "redeem" | "sell-rif" | "mint" | "refill" | "drain";
   status: "sent" | "dry-run" | "held" | "skipped" | "failed";
   /** The tx sent (the action itself, or the approval it needs first). */
   tx?: Hex;
@@ -79,78 +76,95 @@ export class Rebalancer {
     private readonly persist: () => void = () => {},
   ) {}
 
-  /** One step: redeem if needed, else refill the RIF float if needed, else sell RIF if needed. Sends at most one tx. */
+  /**
+   * One step, at most one tx: with the RIF band on (SELL_RIF / BUY_RIF) the band
+   * ({@link railStep}) owns USDRIF and RIF; else redeem USDRIF if needed, then sell RIF if needed.
+   */
   async step(): Promise<RebalanceOutcome | undefined> {
+    if (this.cfg.policy.sellRif || this.cfg.policy.buyRif) return this.railStep();
     const r = await this.redeemIfNeeded();
     if (r && (r.status === "sent" || r.status === "failed")) return r;
-    const f = await this.refillRifIfNeeded();
-    if (f && (f.status === "sent" || f.status === "failed")) return f;
     const s = await this.sellRifIfNeeded();
-    return s ?? f ?? r;
+    return s ?? r;
   }
 
   /**
-   * Refill the RIF RAIL's float (the RIF that USDT0 → RIF fills deliver) the way the
-   * rail prices it: USDT0 → USDRIF on the 0.05 % pool, then `redeemTP` at MoC's oracle
-   * (async, ~2.5 min). Two steps, one tx each:
-   *   1. a refill swap was sent ({@link RebalanceState.refillPending}) → redeem the
-   *      USDRIF it bought (forced, whatever REDEEM_MIN_USDRIF says);
-   *   2. the wallet's RIF is below RIF_REFILL_BELOW (or `force`) → swap the USDT0 that
-   *      buys back up to RIF_FLOAT_TARGET (`usdt0` overrides the amount), never
-   *      touching USDT0_RESERVE.
-   * Held while a redemption is in the MoC queue (its RIF has not arrived yet). The swap
-   * refuses a pool that charges over REFILL_MAX_PREMIUM_BPS above $1 per USDRIF.
+   * THE RIF BAND (the RIF rail's inventory, `SELL_RIF` / `BUY_RIF`): keep RIF at about
+   * RIF_SHARE_TARGET_BPS of the wallet's value (policy.ts `rifBand`) — a minority, RIF is
+   * volatile. One tx per step, in this order:
+   *   1. a MoC op (redeem / mint) in the queue → hold (its tokens have not arrived);
+   *   2. USDRIF on hand (a refill swap's output, a drain's mint, the USDRIF buy side) →
+   *      below target: redeem what reaches it (`redeemTP`, → RIF); at or above: swap it
+   *      to USDT0 on the 0.05 % pool;
+   *   3. RIF below RIF_SHARE_LOW_BPS → swap USDT0 → USDRIF for the gap to target (step 2
+   *      redeems it next);
+   *   4. RIF above RIF_SHARE_HIGH_BPS → `mintTP` the excess RIF into USDRIF (step 2 swaps
+   *      it to USDT0 next).
+   * `force` (admin) rebalances to target from anywhere inside the band too. Nothing
+   * smaller than MIN_FILL_USDT0 is moved; USDT0_RESERVE is never spent; a pool more than
+   * USDRIF_PEG_TOLERANCE_BPS off $1 is refused. With the band on, RIF is never auto-sold.
    */
-  async refillRifIfNeeded(force = false, usdt0?: bigint): Promise<RebalanceOutcome | undefined> {
+  async railStep(force = false): Promise<RebalanceOutcome | undefined> {
     const { cfg, chain } = this;
     const p = cfg.policy;
-    if (this.state.refillPending) {
-      if (await this.queueBusy()) return { action: "refill", status: "held", reason: `MoC op ${this.state.pendingOp} not executed yet` };
-      const r = await this.redeemIfNeeded(true);
-      // Sent (the redemption itself, not its approval) or nothing left to redeem: leg 2 is done.
-      if (!r || (r.status === "sent" && !r.approval)) {
-        delete this.state.refillPending;
-        this.persist();
+    if (await this.queueBusy()) return { action: "refill", status: "held", reason: `MoC op ${this.state.pendingOp} not executed yet` };
+    const m = await walletMix(chain, cfg);
+    const band = rifBand(m, p);
+    const dust18 = p.minFillUsdt0 * 10n ** 12n;
+    const where = `RIF ${fmtUnits(m.rif, 18)} = ${band.shareBps} bps of $${fmtUnits(band.total18, 18)}`;
+    const usdrifFree = m.usdrif > p.usdrifReserve ? m.usdrif - p.usdrifReserve : 0n;
+    // 2. USDRIF on hand.
+    if (usdrifFree >= dust18) {
+      if (band.gap18 >= dust18) {
+        // Redeem what fills the gap (the MoC fee comes off the RIF paid out).
+        const want = (band.gap18 * 10_000n) / (10_000n - MOC_FEE_BPS);
+        return this.redeem(minOf(usdrifFree, want), `toward the RIF target (${where})`);
       }
-      return r;
+      return this.swap("drain", cfg.tokens.usdrif, cfg.tokens.usdt0, usdrifFree, `USDRIF to USDT0 (${where})`);
     }
-    if (!force && (!p.sellRif || p.rifFloatTarget === 0n)) return undefined;
-    if (await this.queueBusy()) return force ? { action: "refill", status: "held", reason: `MoC op ${this.state.pendingOp} not executed yet` } : undefined;
-    const rif = await balanceOf(chain, cfg.tokens.rif);
-    if (!force && rif >= p.rifRefillBelow) return undefined;
-    const usdt0Bal = await balanceOf(chain, cfg.tokens.usdt0);
-    const spendable = usdt0Bal > p.usdt0Reserve ? usdt0Bal - p.usdt0Reserve : 0n;
-    let amountIn = usdt0;
-    if (amountIn === undefined) {
-      if (rif >= p.rifFloatTarget) return force ? { action: "refill", status: "held", reason: "RIF float already at RIF_FLOAT_TARGET (give an amount)" } : undefined;
-      amountIn = await quoteUsdt0ForUsdrif(chain, cfg, railUsdrifFor(p.rifFloatTarget - rif, await mocPACtp(chain, cfg), 0n));
+    // 3. Below the band (or forced below target): buy RIF back to target.
+    if (band.gap18 >= dust18 && (force || band.shareBps < p.rifShareLowBps)) {
+      const usdt0Free = m.usdt0 > p.usdt0Reserve ? m.usdt0 - p.usdt0Reserve : 0n;
+      const usdrifNeed = (band.gap18 * 10_000n) / (10_000n - MOC_FEE_BPS);
+      const amountIn = minOf(await quoteUsdt0ForUsdrif(chain, cfg, usdrifNeed), usdt0Free);
+      if (amountIn < p.minFillUsdt0) {
+        const reason = `refill held: ${fmtUnits(usdt0Free, 6)} USDT0 spendable (reserve ${fmtUnits(p.usdt0Reserve, 6)}; ${where})`;
+        return force ? { action: "refill", status: "held", reason } : undefined;
+      }
+      return this.swap("refill", cfg.tokens.usdt0, cfg.tokens.usdrif, amountIn, `refill (${where})`);
     }
-    amountIn = minOf(amountIn, spendable);
-    if (amountIn < p.minFillUsdt0) {
-      const reason = `refill held: ${fmtUnits(amountIn, 6)} USDT0 spendable for it (balance ${fmtUnits(usdt0Bal, 6)}, reserve ${fmtUnits(p.usdt0Reserve, 6)})`;
-      return force ? { action: "refill", status: "held", reason } : undefined;
+    // 4. Above the band (or forced above target): mint the excess RIF into USDRIF.
+    if (-band.gap18 >= dust18 && (force || band.shareBps > p.rifShareHighBps)) {
+      // Mint USDRIF worth the excess net of the fee and slippage, so ≤ the excess RIF is pulled.
+      const qTP = (-band.gap18 * (10_000n - MOC_FEE_BPS - p.redeemSlippageBps)) / 10_000n;
+      return this.mint(qTP, p.redeemSlippageBps, `drain (${where})`);
     }
-    const quote = await quoteUsdt0ToUsdrif(chain, cfg, amountIn);
-    // The oracle guard: USDRIF redeems at $1 of RIF — paying the pool more than that by
-    // REFILL_MAX_PREMIUM_BPS means the pool is off (or drained), not a refill price.
-    if (quote * (10_000n + p.refillMaxPremiumBps) < amountIn * 10n ** 12n * 10_000n) {
-      const reason = `refill held: the pool gives ${fmtUnits(quote, 18)} USDRIF for ${fmtUnits(amountIn, 6)} USDT0 (over ${p.refillMaxPremiumBps} bps above $1)`;
+    return force ? { action: "refill", status: "held", reason: `nothing to move (${where})` } : undefined;
+  }
+
+  /** A rail pool swap USDT0 ⇄ USDRIF (exact in), refused off the peg, `RAIL_SWAP_SLIPPAGE_BPS` floor. */
+  private async swap(action: "refill" | "drain", tokenIn: Address, tokenOut: Address, amountIn: bigint, why: string): Promise<RebalanceOutcome> {
+    const { cfg, chain } = this;
+    const p = cfg.policy;
+    const toUsdrif = tokenOut.toLowerCase() === cfg.tokens.usdrif.toLowerCase();
+    const quote = toUsdrif ? await quoteUsdt0ToUsdrif(chain, cfg, amountIn) : await quoteUsdrifToUsdt0(chain, cfg, amountIn);
+    // The peg guard, in USDRIF terms (18 dec): what we give vs what we get, either way.
+    const give18 = toUsdrif ? amountIn * 10n ** 12n : amountIn;
+    const get18 = toUsdrif ? quote : quote * 10n ** 12n;
+    if (get18 * (10_000n + p.usdrifPegToleranceBps) < give18 * 10_000n) {
+      const reason = `${action} held: the pool gives ${fmtUnits(get18, 18)} for ${fmtUnits(give18, 18)} (over ${p.usdrifPegToleranceBps} bps off $1)`;
       this.log(reason);
-      return { action: "refill", status: "held", reason };
+      return { action, status: "held", reason };
     }
-    const minOut = (quote * (10_000n - p.refillSlippageBps)) / 10_000n;
-    const msg = `refill: swap ${fmtUnits(amountIn, 6)} USDT0 → ≥${fmtUnits(minOut, 18)} USDRIF (quote ${fmtUnits(quote, 18)}; RIF float ${fmtUnits(rif, 18)})`;
+    const minOut = (quote * (10_000n - p.railSwapSlippageBps)) / 10_000n;
+    const [dIn, dOut, sIn, sOut] = toUsdrif ? [6, 18, "USDT0", "USDRIF"] : [18, 6, "USDRIF", "USDT0"];
+    const msg = `${why}: swap ${fmtUnits(amountIn, dIn)} ${sIn} → ≥${fmtUnits(minOut, dOut)} ${sOut} (quote ${fmtUnits(quote, dOut)})`;
     const data = encodeFunctionData({
       abi: SWAP_ROUTER02_ABI,
       functionName: "exactInputSingle",
-      args: [{ tokenIn: cfg.tokens.usdt0, tokenOut: cfg.tokens.usdrif, fee: cfg.uniswap.usdrifUsdt0Fee, recipient: chain.me, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
+      args: [{ tokenIn, tokenOut, fee: cfg.uniswap.usdrifUsdt0Fee, recipient: chain.me, amountIn, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n }],
     });
-    const r = await this.act("refill", "refill", msg, { token: cfg.tokens.usdt0, spender: cfg.uniswap.router, needed: amountIn, target: amountIn }, cfg.uniswap.router, data);
-    if (r.status === "sent" && !r.approval) {
-      this.state.refillPending = true;
-      this.persist();
-    }
-    return r;
+    return this.act(action, action, msg, { token: tokenIn, spender: cfg.uniswap.router, needed: amountIn, target: amountIn }, cfg.uniswap.router, data);
   }
 
   /** The MoC redemption we wait on, if any: its op id and how long ago it was mined. */
@@ -205,6 +219,13 @@ export class Rebalancer {
     const need = force ? avail : maxOf(p.redeemMin, 1n);
     const allowance = await allowanceOf(chain, cfg.tokens.usdrif, cfg.moc.core);
     const qTP = allowance >= need ? minOf(avail, allowance) : avail;
+    return this.redeem(qTP, undefined, { current: allowance, needed: need, target: maxOf(bal, APPROVAL_BATCHES * p.redeemMin) });
+  }
+
+  /** `redeemTP` `qTP` USDRIF → RIF at the oracle (an approval first if the allowance is short). */
+  private async redeem(qTP: bigint, why?: string, appr?: { current: bigint; needed: bigint; target: bigint }): Promise<RebalanceOutcome> {
+    const { cfg, chain } = this;
+    const p = cfg.policy;
     const expectedRif = await rifForUsdrif(chain, cfg, qTP);
     // MoC deducts its 0.2% fee from the RIF paid out; tolerate `redeemSlippageBps` of oracle move on top.
     const qACmin = (expectedRif * (10_000n - MOC_FEE_BPS - p.redeemSlippageBps)) / 10_000n;
@@ -214,10 +235,10 @@ export class Rebalancer {
       functionName: "getExecFee",
       args: [OPER_REDEEM_TP],
     });
-    const msg = `redeem ${fmtUnits(qTP, 18)} USDRIF → ≥${fmtUnits(qACmin, 18)} RIF (exec fee ${fee} wei)`;
+    const msg = `${why ? `${why}: ` : ""}redeem ${fmtUnits(qTP, 18)} USDRIF → ≥${fmtUnits(qACmin, 18)} RIF (exec fee ${fee} wei)`;
     const data = encodeFunctionData({ abi: MOC_CORE_ABI, functionName: "redeemTP", args: [cfg.tokens.usdrif, qTP, qACmin, chain.me, zeroAddress] });
-    const target = maxOf(bal, APPROVAL_BATCHES * p.redeemMin);
-    return this.act("redeem", "redeem", msg, { token: cfg.tokens.usdrif, spender: cfg.moc.core, needed: need, target, current: allowance }, cfg.moc.core, data, fee);
+    const a = appr ?? { needed: qTP, target: qTP };
+    return this.act("redeem", "redeem", msg, { token: cfg.tokens.usdrif, spender: cfg.moc.core, ...a }, cfg.moc.core, data, fee);
   }
 
   async sellRifIfNeeded(force = false): Promise<RebalanceOutcome | undefined> {
@@ -225,7 +246,7 @@ export class Rebalancer {
     const p = cfg.policy;
     // With the RIF rail on, the wallet's RIF IS the rail's float: never auto-sell it
     // (2026-10-14: the old rule sold a fresh 1,251 RIF float within a minute).
-    if (p.sellRif && !force) return undefined;
+    if ((p.sellRif || p.buyRif) && !force) return undefined;
     const bal = await balanceOf(chain, cfg.tokens.rif);
     if (bal === 0n || (!force && bal < p.rifSellMin)) return undefined;
     // The same allowance rule as the redemption (a MoC execution adds RIF between steps).
@@ -267,7 +288,7 @@ export class Rebalancer {
    * Manual: mint `qTP` USDRIF from RIF already in the wallet (sell-side inventory).
    * MoC pulls `qACmax` RIF up front and refunds the surplus at execution.
    */
-  async mint(qTP: bigint, slippageBps = 50n): Promise<RebalanceOutcome> {
+  async mint(qTP: bigint, slippageBps = 50n, why?: string): Promise<RebalanceOutcome> {
     const { cfg, chain } = this;
     const needed = await rifForUsdrif(chain, cfg, qTP);
     const qACmax = (needed * (10_000n + MOC_FEE_BPS + slippageBps)) / 10_000n;
@@ -279,7 +300,7 @@ export class Rebalancer {
       functionName: "getExecFee",
       args: [OPER_MINT_TP],
     });
-    const msg = `mint ${fmtUnits(qTP, 18)} USDRIF for ≤${fmtUnits(qACmax, 18)} RIF (exec fee ${fee} wei)`;
+    const msg = `${why ? `${why}: ` : ""}mint ${fmtUnits(qTP, 18)} USDRIF for ≤${fmtUnits(qACmax, 18)} RIF (exec fee ${fee} wei)`;
     const data = encodeFunctionData({ abi: MOC_CORE_ABI, functionName: "mintTP", args: [cfg.tokens.usdrif, qTP, qACmax, chain.me, zeroAddress] });
     return (await this.act("mint", "mint", msg, { token: cfg.tokens.rif, spender: cfg.moc.core, needed: qACmax, target: qACmax }, cfg.moc.core, data, fee))!;
   }

@@ -301,7 +301,8 @@ export class Engine {
           this.holds.set(p.orderHash.toLowerCase(), { until: now + this.cfg.sweep.restingRecheckMs, fillable: p.bookFillable, why: "filled" });
           this.dirty = true;
         }
-        if (p.kind === "redeem") {
+        // A redemption or a mint waits in the MoC queue: the rebalancer holds until it executes.
+        if (p.kind === "redeem" || p.kind === "mint") {
           try {
             await this.rebalancer.onRedeemMined(now);
           } catch (e) {
@@ -514,14 +515,13 @@ export class Engine {
   }
 
   /**
-   * Admin: start a RIF-rail refill now (USDT0 → USDRIF swap to RIF_FLOAT_TARGET, or
-   * `usdt0` units of USDT0). It sends at most one tx — the swap, or the approval it
-   * needs first (call again once mined) — and the redemption follows on the regular
-   * rebalancer steps. Refused while another tx is outstanding.
+   * Admin: move the RIF band to its target now (rebalance.ts `railStep(force)`), even
+   * from inside the band. At most one tx — the next leg (an approval, the swap, the MoC
+   * op) follows on the regular rebalancer steps. Refused while another tx is outstanding.
    */
-  async refillNow(usdt0?: bigint): Promise<RebalanceOutcome | undefined> {
+  async rebalanceRifNow(): Promise<RebalanceOutcome | undefined> {
     if (this.guard.pending) return { action: "refill", status: "skipped", reason: `tx ${this.guard.pending.hash} outstanding` };
-    const r = await this.rebalancer.refillRifIfNeeded(true, usdt0);
+    const r = await this.rebalancer.railStep(true);
     if (r) await this.emit({ type: "rebalance", outcome: r });
     if (this.guard.pending) await this.emit({ type: "sent", pending: this.guard.pending });
     await this.saveIfDirty();

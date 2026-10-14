@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { MOC_CORE_ABI, SWAP_ROUTER02_ABI } from "../src/chain";
 import { loadConfig, ROOTSTOCK } from "../src/config";
 import { Guard } from "../src/guard";
-import { classify, legsFor, railRifOut, railUsdrifFor } from "../src/policy";
+import { classify, legsFor, railRifOut, railUsdrifFor, rifBand, shareAfterBuy } from "../src/policy";
 import { Rebalancer, type RebalanceState } from "../src/rebalance";
 
 const KEY = ("0x" + "11".repeat(32)) as Hex;
@@ -25,8 +25,7 @@ const ENV = {
   ORDERBOOK_URL: "http://unused.invalid",
   DRY_RUN: "0",
   SELL_RIF: "1",
-  RIF_FLOAT_TARGET: "3000",
-  RIF_REFILL_BELOW: "1500",
+  BUY_RIF: "1",
   USDT0_RESERVE: "100",
 };
 const cfg = loadConfig(ENV);
@@ -46,13 +45,24 @@ function railOrder(over: Partial<Order> = {}): Order {
 }
 
 describe("the rail's shape and arithmetic", () => {
-  it("USDT0 → RIF is an inventory order only with SELL_RIF; we pay RIF and receive USDT0", () => {
+  it("USDT0 → RIF (SELL_RIF: we pay RIF) and RIF → USDT0 (BUY_RIF: we pay USDT0, keep the RIF) are inventory orders", () => {
+    const off = loadConfig({ ...ENV, SELL_RIF: "0", BUY_RIF: "0" });
     expect(classify(railOrder(), cfg, ACCOUNT.address)).toEqual({ ok: true, direction: "sellRif" });
-    expect(classify(railOrder(), loadConfig({ ...ENV, SELL_RIF: "0", RIF_FLOAT_TARGET: "0", RIF_REFILL_BELOW: "0" }), ACCOUNT.address)).toEqual({ ok: false, reason: "RIF rail disabled" });
-    // RIF → USDT0 (the maker SELLS RIF) is not the rail's.
+    expect(classify(railOrder(), off, ACCOUNT.address)).toEqual({ ok: false, reason: "RIF rail disabled" });
     const sell = railOrder({ legsIn: [{ token: T.rif, start: 10n ** 21n, end: 0n }], legsOut: [{ token: T.usdt0, start: 1n, end: 0n, recipient: zeroAddress }] });
-    expect(classify(sell, cfg, ACCOUNT.address).ok).toBe(false);
+    expect(classify(sell, cfg, ACCOUNT.address)).toEqual({ ok: true, direction: "buyRif" });
+    expect(classify(sell, off, ACCOUNT.address)).toEqual({ ok: false, reason: "RIF buy side disabled" });
     expect(legsFor("sellRif", T)).toEqual({ pay: T.rif, receive: T.usdt0 });
+    expect(legsFor("buyRif", T)).toEqual({ pay: T.usdt0, receive: T.rif });
+  });
+
+  it("the band: RIF's share of USDT0 + USDRIF + RIF at the oracle, and the gap to the target", () => {
+    // 300 USDT0 + 20 USDRIF + 1000 RIF × $0.08 = $400; RIF = 20 %.
+    const m = { usdt0: 300_000_000n, usdrif: 20n * 10n ** 18n, rif: 1_000n * 10n ** 18n, pACtp: PACTP };
+    expect(rifBand(m, cfg.policy)).toEqual({ total18: 400n * 10n ** 18n, rif18: 80n * 10n ** 18n, shareBps: 2_000n, gap18: 0n });
+    expect(rifBand({ ...m, rif: 0n }, cfg.policy).gap18).toBe(64n * 10n ** 18n); // 20 % of $320
+    // Buying 500 RIF ($40) for 40 USDT0: $120 of $400.
+    expect(shareAfterBuy(m, 500n * 10n ** 18n, 40_000_000n)).toBe(3_000n);
   });
 
   it("railUsdrifFor buys back at least what railRifOut paid out (rounded against us)", () => {
@@ -66,12 +76,13 @@ describe("the rail's shape and arithmetic", () => {
     expect(railRifOut(100n * 10n ** 18n, PACTP, 20n)).toBe(1_245n * 10n ** 18n);
   });
 
-  it("config: RIF_REFILL_BELOW above RIF_FLOAT_TARGET is a typo", () => {
-    expect(() => loadConfig({ ...ENV, RIF_REFILL_BELOW: "4000" })).toThrow(/RIF_REFILL_BELOW/);
+  it("config: the band must be ordered (low ≤ target ≤ high)", () => {
+    expect(() => loadConfig({ ...ENV, RIF_SHARE_LOW_BPS: "2500" })).toThrow(/RIF_SHARE_LOW_BPS/);
+    expect(cfg.policy).toMatchObject({ rifShareLowBps: 1_500n, rifShareTargetBps: 2_000n, rifShareHighBps: 2_500n });
   });
 });
 
-/** A chain where the wallet holds `bal` and the MoC queue's head is `head`; records sent txs. */
+/** A chain where the wallet holds `bal` and the MoC queue's head is `head`; records sent txs. The pool: 0.999 USDRIF per USDT0, both ways. */
 function fakeChain(bal: Record<string, bigint>, q: { head: bigint; count: bigint } = { head: 0n, count: 0n }) {
   const sent: Array<{ to: Address; data: Hex; value: bigint }> = [];
   const pub: Record<string, unknown> = {
@@ -96,69 +107,86 @@ function fakeChain(bal: Record<string, bigint>, q: { head: bigint; count: bigint
     },
     simulateContract: async ({ functionName, args }: { functionName: string; args: [{ tokenIn: string; tokenOut: string; amountIn?: bigint; amount?: bigint }] }) => {
       const p = args[0];
+      if (eqa(p.tokenIn, T.usdrif) && eqa(p.tokenOut, T.usdt0) && functionName === "quoteExactInputSingle") return { result: [(p.amountIn! * 999n) / 10n ** 15n, 0n, 0, 0n] };
       if (!eqa(p.tokenIn, T.usdt0) || !eqa(p.tokenOut, T.usdrif)) throw new Error("unexpected quote");
-      // The pool: 0.999 USDRIF per USDT0, both ways.
-      if (functionName === "quoteExactInputSingle") return { result: [(p.amountIn! * 999n * 10n ** 9n), 0n, 0, 0n] };
+      if (functionName === "quoteExactInputSingle") return { result: [p.amountIn! * 999n * 10n ** 9n, 0n, 0, 0n] };
       return { result: [p.amount! / (999n * 10n ** 9n) + 1n, 0n, 0, 0n] };
     },
   };
   return { sent, chain: { pub, account: ACCOUNT, me: ACCOUNT.address, chainId: 30 } as never };
 }
 
-const rebalancer = (chain: never, state: RebalanceState, c = cfg) => new Rebalancer(c, chain, () => {}, new Guard(c.gas), state);
+const rebalancer = (chain: never, state: RebalanceState = {}, c = cfg) => new Rebalancer(c, chain, () => {}, new Guard(c.gas), state);
+const wallet = (usdt0: bigint, usdrif: bigint, rif: bigint) => ({ [T.usdt0.toLowerCase()]: usdt0, [T.usdrif.toLowerCase()]: usdrif, [T.rif.toLowerCase()]: rif });
+const E18 = 10n ** 18n;
+const swapArgs = (data: Hex) => decodeFunctionData({ abi: SWAP_ROUTER02_ABI, data }).args[0];
 
-describe("the float's refill: swap USDT0 → USDRIF, then redeem it for RIF", () => {
-  it("below RIF_REFILL_BELOW: swaps what buys back to RIF_FLOAT_TARGET, then redeems the USDRIF it bought", async () => {
-    const bal = { [T.rif.toLowerCase()]: 1_000n * 10n ** 18n, [T.usdt0.toLowerCase()]: 500_000_000n };
+describe("the RIF band: RIF stays a minority (15–25 %, target 20 %) of the wallet", () => {
+  it("below the band: swap USDT0 → USDRIF for the gap to 20 %, then redeem it for RIF", async () => {
+    const bal = wallet(400_000_000n, 0n, 0n);
     const { sent, chain } = fakeChain(bal);
-    const state: RebalanceState = {};
-    const r = await rebalancer(chain, state).step();
-    expect(r).toMatchObject({ action: "refill", status: "sent" });
-    expect(state.refillPending).toBe(true);
-    const swap = decodeFunctionData({ abi: SWAP_ROUTER02_ABI, data: sent[0]!.data });
-    const p = swap.args[0];
+    expect(await rebalancer(chain).step()).toMatchObject({ action: "refill", status: "sent" });
+    const p = swapArgs(sent[0]!.data);
     expect([sent[0]!.to.toLowerCase(), p.tokenIn, p.tokenOut, p.fee, p.recipient]).toEqual([cfg.uniswap.router.toLowerCase(), T.usdt0, T.usdrif, 500, ACCOUNT.address]);
-    // 2000 RIF × $0.08 ÷ (1 − 0.2 % MoC fee) = 160.32 USDRIF (no haircut on the refill itself) ≈ 160.48 USDT0.
-    expect(p.amountIn).toBe(160_481_123n);
+    // 20 % of $400 = $80 of RIF ÷ (1 − 0.2 % MoC fee) = 80.160320… USDRIF ≈ 80.240562 USDT0 at 0.999 (rounded up).
+    expect(p.amountIn).toBe(80_240_562n);
     expect(p.amountOutMinimum).toBe((p.amountIn * 999n * 10n ** 9n * 9_970n) / 10_000n);
 
-    // The swap is mined: the USDRIF is redeemed (forced — below REDEEM_MIN_USDRIF 1000).
-    bal[T.usdrif.toLowerCase()] = 160n * 10n ** 18n;
-    const r2 = await rebalancer(chain, state).step();
-    expect(r2).toMatchObject({ action: "redeem", status: "sent" });
+    // The swap is mined: the USDRIF on hand is redeemed (RIF still below target).
+    bal[T.usdt0.toLowerCase()] = 400_000_000n - p.amountIn;
+    bal[T.usdrif.toLowerCase()] = 80_160_320_641_282_565_130n;
+    expect(await rebalancer(chain).step()).toMatchObject({ action: "redeem", status: "sent" });
     const redeem = decodeFunctionData({ abi: MOC_CORE_ABI, data: sent[1]!.data });
     expect(redeem.functionName).toBe("redeemTP");
-    expect(redeem.args[1]).toBe(160n * 10n ** 18n);
+    // The swap cost a little ($399.92 now): it redeems what reaches 20 % of that, the dust stays.
+    expect(redeem.args[1]).toBe(80_144_240_208_673_860_747n);
     expect(sent[1]!.value).toBe(9n * 10n ** 12n); // the MoC exec fee
-    expect(state.refillPending).toBeUndefined();
   });
 
-  it("never spends USDT0_RESERVE; holds while a redemption waits in the MoC queue; at the target it does nothing", async () => {
-    // 150 USDT0, reserve 100: only 50 are spendable.
-    const { sent, chain } = fakeChain({ [T.rif.toLowerCase()]: 0n, [T.usdt0.toLowerCase()]: 150_000_000n });
-    await rebalancer(chain, {}).step();
-    expect(decodeFunctionData({ abi: SWAP_ROUTER02_ABI, data: sent[0]!.data }).args[0].amountIn).toBe(50_000_000n);
+  it("inside the band nothing moves — unless forced (admin), which goes to the target", async () => {
+    // 330 USDT0 + 875 RIF ($70) = $400: 17.5 %.
+    const { sent, chain } = fakeChain(wallet(330_000_000n, 0n, 875n * E18));
+    expect(await rebalancer(chain).step()).toBeUndefined();
+    expect(await rebalancer(chain).railStep(true)).toMatchObject({ action: "refill", status: "sent" });
+    expect(swapArgs(sent[0]!.data).amountIn).toBe(10_030_071n); // the $10 gap
+  });
 
-    const busy = fakeChain({ [T.rif.toLowerCase()]: 0n, [T.usdt0.toLowerCase()]: 500_000_000n }, { head: 7n, count: 9n });
-    const held = await rebalancer(busy.chain, { pendingOp: "8", pendingOpAt: 0 }).refillRifIfNeeded(true);
-    expect(held).toMatchObject({ action: "refill", status: "held" });
+  it("above the band: mintTP the excess RIF into USDRIF; USDRIF at or above target is swapped to USDT0", async () => {
+    // 300 USDT0 + 2000 RIF ($160) = $460: 34.8 % > 25 %. Target $92: mint (160 − 92) × (1 − 0.2 % − 0.5 %).
+    const { sent, chain } = fakeChain(wallet(300_000_000n, 0n, 2_000n * E18));
+    expect(await rebalancer(chain).step()).toMatchObject({ action: "mint", status: "sent" });
+    const mint = decodeFunctionData({ abi: MOC_CORE_ABI, data: sent[0]!.data });
+    expect(mint.functionName).toBe("mintTP");
+    expect(mint.args[1]).toBe(67_524n * 10n ** 15n);
+    expect(mint.args[2]).toBeLessThanOrEqual(2_000n * E18 - 1_150n * E18); // ≤ the excess RIF is pulled
+
+    // The mint executed (or the USDRIF buy side filled): RIF at 23 %, USDRIF → USDT0.
+    const after = fakeChain(wallet(300_000_000n, 100n * E18, 1_500n * E18));
+    expect(await rebalancer(after.chain).step()).toMatchObject({ action: "drain", status: "sent" });
+    const s = swapArgs(after.sent[0]!.data);
+    expect([s.tokenIn, s.tokenOut, s.amountIn]).toEqual([T.usdrif, T.usdt0, 100n * E18]);
+  });
+
+  it("USDT0_RESERVE is never spent; a MoC op in the queue holds everything", async () => {
+    // 110 USDT0, reserve 100: a $22 gap, but only 10 spendable.
+    const { sent, chain } = fakeChain(wallet(110_000_000n, 0n, 0n));
+    await rebalancer(chain).step();
+    expect(swapArgs(sent[0]!.data).amountIn).toBe(10_000_000n);
+
+    const busy = fakeChain(wallet(400_000_000n, 0n, 0n), { head: 7n, count: 9n });
+    expect(await rebalancer(busy.chain, { pendingOp: "8", pendingOpAt: 0 }).step()).toMatchObject({ status: "held" });
     expect(busy.sent).toHaveLength(0);
-
-    const full = fakeChain({ [T.rif.toLowerCase()]: 3_000n * 10n ** 18n, [T.usdt0.toLowerCase()]: 500_000_000n });
-    expect(await rebalancer(full.chain, {}).step()).toBeUndefined();
-    // …unless an admin names an amount.
-    expect(await rebalancer(full.chain, {}).refillRifIfNeeded(true, 20_000_000n)).toMatchObject({ action: "refill", status: "sent" });
   });
 
-  it("the oracle guard: a pool charging over REFILL_MAX_PREMIUM_BPS above $1 per USDRIF is refused", async () => {
-    const { sent, chain } = fakeChain({ [T.rif.toLowerCase()]: 0n, [T.usdt0.toLowerCase()]: 500_000_000n });
-    const strict = loadConfig({ ...ENV, REFILL_MAX_PREMIUM_BPS: "5" }); // the fake pool charges ~10 bps
+  it("the peg guard: a pool more than USDRIF_PEG_TOLERANCE_BPS off $1 is refused", async () => {
+    const { sent, chain } = fakeChain(wallet(400_000_000n, 0n, 0n));
+    const strict = loadConfig({ ...ENV, USDRIF_PEG_TOLERANCE_BPS: "5" }); // the fake pool is 10 bps off
     expect(await rebalancer(chain, {}, strict).step()).toMatchObject({ action: "refill", status: "held" });
     expect(sent).toHaveLength(0);
   });
 
-  it("with the rail on, the wallet's RIF is never auto-sold (the 2026-10-14 incident)", async () => {
-    const { sent, chain } = fakeChain({ [T.rif.toLowerCase()]: 5_000n * 10n ** 18n, [T.usdt0.toLowerCase()]: 0n });
+  it("with the band on, the wallet's RIF is never auto-sold (the 2026-10-14 incident)", async () => {
+    const { sent, chain } = fakeChain(wallet(0n, 0n, 5_000n * E18));
     const c = loadConfig({ ...ENV, RIF_SELL_MIN: "200" });
     expect(await rebalancer(chain, {}, c).sellRifIfNeeded()).toBeUndefined();
     expect(sent).toHaveLength(0);

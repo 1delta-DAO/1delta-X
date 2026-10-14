@@ -15,10 +15,12 @@ import {
   previewBump,
   previewFill,
   quoteRifToUsdt0,
+  quoteUsdrifToUsdt0,
   quoteUsdt0ForUsdrif,
   quoteUsdt0ToUsdrif,
   quoteWrbtcToUsdt0,
   rifForUsdrif,
+  walletMix,
   type Chain,
 } from "./chain";
 import { MOC_FEE_BPS, type Config } from "./config";
@@ -42,9 +44,14 @@ import {
   type Direction,
   type Verdict,
   inventoryProfitOk,
+  paysUsdt0,
   railRifOut,
   railUsdrifFor,
   rebalanceShare,
+  rifBand,
+  rifValue18,
+  shareAfterBuy,
+  type WalletMix,
 } from "./policy";
 
 /** Headroom on the simulation's gas estimate for the tx gas limit. */
@@ -215,6 +222,7 @@ export class Filler {
     const p = cfg.policy;
     const t = cfg.tokens;
     if (tokenIn.toLowerCase() === t.usdt0.toLowerCase() && tokenOut.toLowerCase() === t.rif.toLowerCase()) return this.quoteRail(amountIn, gasPrice);
+    if (tokenIn.toLowerCase() === t.rif.toLowerCase() && tokenOut.toLowerCase() === t.usdt0.toLowerCase()) return this.quoteRailBuy(amountIn, gasPrice);
     if (tokenIn.toLowerCase() !== t.usdrif.toLowerCase() || tokenOut.toLowerCase() !== t.usdt0.toLowerCase()) return { ok: false, reason: "inventory: not USDRIF→USDT0" };
     if (!p.buyUsdrif) return { ok: false, reason: "inventory: buy side disabled" };
     const ONE = 10n ** 18n;
@@ -257,14 +265,15 @@ export class Filler {
     if (!p.sellRif) return { ok: false, reason: "inventory: RIF rail disabled" };
     if (amountIn < p.minFillUsdt0) return { ok: false, reason: "inventory: below minimum fill" };
     if (amountIn > p.maxFillUsdt0) return { ok: false, reason: "inventory: above maximum fill" };
-    const [usdrif, pACtp, bal] = await Promise.all([quoteUsdt0ToUsdrif(chain, cfg, amountIn), mocPACtp(chain, cfg), balanceOf(chain, t.rif)]);
-    const railRif = railRifOut(usdrif, pACtp, p.rifRailHaircutBps);
+    const [usdrif, mix] = await Promise.all([quoteUsdt0ToUsdrif(chain, cfg, amountIn), walletMix(chain, cfg)]);
+    const bal = mix.rif;
+    const railRif = railRifOut(usdrif, mix.pACtp, p.rifRailHaircutBps);
     if (railRif === 0n) return { ok: false, reason: "inventory: no rail output" };
     const shape = gasShape("inventory", "inventory", t.usdt0, t.rif, cfg.settlement);
     const learned = this.gasRatios.typicalEstimate(shape);
     const estimate = learned !== undefined && learned > p.inventoryGasEstimate ? learned : p.inventoryGasEstimate;
     const gasUnits = this.gasRatios.priced(shape, estimate);
-    const rebalanceWei = await this.rebalanceShareWei(gasPrice, railRif, "sellRif");
+    const rebalanceWei = await this.rebalanceShareWei(gasPrice, railRif, this.railBatch("sellRif", mix));
     const costUsdt0 = await this.rbtcToUsdt0(gasPrice * gasUnits + rebalanceWei);
     if (costUsdt0 === undefined) return { ok: false, reason: "inventory: cannot price gas in USDT0" };
     const toRif = (u: bigint) => (u * railRif + amountIn - 1n) / amountIn; // USDT0 units → RIF wei at the rail rate, rounded up
@@ -276,15 +285,81 @@ export class Filler {
     return { ok: true, candidate: { strategy: "inventory", grossOut, capOut, costOut: toRif(costUsdt0), gasUnits, source: "moc-rail" } };
   }
 
-  /** USDT0 units it costs to buy back `rif` through the rail (pool → redeemTP, fee + haircut on top). */
-  private async railReplaceUsdt0(rif: bigint): Promise<bigint> {
-    const pACtp = await mocPACtp(this.chain, this.cfg);
-    return quoteUsdt0ForUsdrif(this.chain, this.cfg, railUsdrifFor(rif, pACtp, this.cfg.policy.rifRailHaircutBps));
+  /**
+   * The RIF rail's BUY candidate (RIF → USDT0: we pay USDT0, keep the RIF). What the
+   * maker's `amountIn` RIF is worth to us is {@link rifMarkUsdt0} — its replacement cost
+   * while the band is below target, its MoC exit above. Refused when the buy would lift
+   * RIF above RIF_SHARE_HIGH_BPS of the wallet, or the spendable USDT0 (above
+   * USDT0_RESERVE) / the hourly budget could not pay it.
+   */
+  private async quoteRailBuy(amountIn: bigint, gasPrice: bigint): Promise<Verdict<{ candidate: PricedCandidate }>> {
+    const { cfg, chain } = this;
+    const p = cfg.policy;
+    const t = cfg.tokens;
+    if (!p.buyRif) return { ok: false, reason: "inventory: RIF buy side disabled" };
+    const mix = await walletMix(chain, cfg);
+    const mark = await this.rifMarkUsdt0(amountIn, mix);
+    if (mark < p.minFillUsdt0) return { ok: false, reason: "inventory: below minimum fill" };
+    if (mark > p.maxFillUsdt0) return { ok: false, reason: "inventory: above maximum fill" };
+    if (shareAfterBuy(mix, amountIn, mark) > p.rifShareHighBps) return { ok: false, reason: "inventory: RIF share would exceed RIF_SHARE_HIGH_BPS" };
+    const shape = gasShape("inventory", "inventory", t.rif, t.usdt0, cfg.settlement);
+    const learned = this.gasRatios.typicalEstimate(shape);
+    const estimate = learned !== undefined && learned > p.inventoryGasEstimate ? learned : p.inventoryGasEstimate;
+    const gasUnits = this.gasRatios.priced(shape, estimate);
+    const rebalanceWei = await this.railBuyRebalanceWei(gasPrice, amountIn, mix);
+    const cost = await this.rbtcToUsdt0(gasPrice * gasUnits + rebalanceWei);
+    if (cost === undefined) return { ok: false, reason: "inventory: cannot price gas in USDT0" };
+    const grossOut = mark - p.minProfitUsdt0;
+    if (grossOut <= 0n) return { ok: false, reason: "inventory: no edge at this size" };
+    const spendable = mix.usdt0 > p.usdt0Reserve ? mix.usdt0 - p.usdt0Reserve : 0n;
+    const room = this.budget.remaining(t.usdt0, Date.now());
+    const capOut = spendable < room ? spendable : room;
+    if (capOut < grossOut - cost) return { ok: false, reason: "inventory: no capacity (USDT0 above the reserve / hourly budget)" };
+    return { ok: true, candidate: { strategy: "inventory", grossOut, capOut, costOut: cost, gasUnits, source: "moc-rail" } };
+  }
+
+  /** USDT0 units it costs to buy back `rif` through the rail (pool → redeemTP, the fee and `haircutBps` on top). */
+  private async railReplaceUsdt0(rif: bigint, haircutBps: bigint = this.cfg.policy.rifRailHaircutBps, pACtp?: bigint): Promise<bigint> {
+    const price = pACtp ?? (await mocPACtp(this.chain, this.cfg));
+    return quoteUsdt0ForUsdrif(this.chain, this.cfg, railUsdrifFor(rif, price, haircutBps));
+  }
+
+  /**
+   * What `rif` RIF bought from a maker is worth to us, USDT0 units. While RIF stays at or
+   * below RIF_SHARE_TARGET_BPS after the buy, it replaces a refill we would otherwise pay
+   * for: its replacement cost (pool → redeemTP + the MoC fee; no haircut — the RIF is in
+   * hand, nothing waits in a queue). Above target it is excess the band will sell: its
+   * MoC exit — `mintTP` at the oracle (− the fee and the haircut), USDRIF → USDT0 on the pool.
+   */
+  private async rifMarkUsdt0(rif: bigint, mix: WalletMix): Promise<bigint> {
+    const p = this.cfg.policy;
+    const usd18 = rifValue18(rif, mix.pACtp);
+    if (shareAfterBuy(mix, rif, usd18 / 10n ** 12n) <= p.rifShareTargetBps) return this.railReplaceUsdt0(rif, 0n, mix.pACtp);
+    return quoteUsdrifToUsdt0(this.chain, this.cfg, (usd18 * (10_000n - MOC_FEE_BPS - p.rifRailHaircutBps)) / 10_000n);
+  }
+
+  /**
+   * A RIF buy's rebalance share: none while RIF stays at or below target after it (the
+   * buy REPLACES a refill — it causes no rebalance), else its share of the drain.
+   */
+  private async railBuyRebalanceWei(gasPrice: bigint, rif: bigint, mix: WalletMix): Promise<bigint> {
+    const usd6 = rifValue18(rif, mix.pACtp) / 10n ** 12n;
+    if (shareAfterBuy(mix, rif, usd6) <= this.cfg.policy.rifShareTargetBps) return 0n;
+    return this.rebalanceShareWei(gasPrice, rif, this.railBatch("buyRif", mix));
+  }
+
+  /** The rebalance batch a rail fill shares (RIF units): the band leg it moves toward — refill (target − low) or drain (high − target). */
+  private railBatch(direction: "sellRif" | "buyRif", mix: WalletMix): bigint {
+    const p = this.cfg.policy;
+    const widthBps = direction === "sellRif" ? p.rifShareTargetBps - p.rifShareLowBps : p.rifShareHighBps - p.rifShareTargetBps;
+    const { total18 } = rifBand(mix, p);
+    return mix.pACtp === 0n ? 0n : (total18 * widthBps * 10n ** 18n) / 10_000n / mix.pACtp;
   }
 
   /** What the fill earns before gas, in USDT0 units. */
   private async edgeUsdt0(direction: Direction, paid: bigint, received: bigint): Promise<bigint> {
     if (direction === "sellRif") return received - (await this.railReplaceUsdt0(paid));
+    if (direction === "buyRif") return (await this.rifMarkUsdt0(received, await walletMix(this.chain, this.cfg))) - paid;
     if (direction === "buyUsdrif") {
       const rif = ((await rifForUsdrif(this.chain, this.cfg, received)) * (10_000n - MOC_FEE_BPS)) / 10_000n;
       return (await quoteRifToUsdt0(this.chain, this.cfg, rif)) - paid;
@@ -296,15 +371,13 @@ export class Filler {
   /**
    * This fill's share (wei) of the rebalance it causes: redeem/sell gas + the MoC exec
    * fee. `amount` is the USDRIF received (buy side, batched by REDEEM_MIN_USDRIF) or,
-   * on the rail, the RIF paid out (the refill — swap + redeem — batches the float's
-   * RIF_FLOAT_TARGET − RIF_REFILL_BELOW).
+   * on the rail, the RIF moved (batched by the band leg it moves toward, {@link railBatch}).
    */
-  private async rebalanceShareWei(gasPrice: bigint, amount: bigint, direction: Direction = "buyUsdrif"): Promise<bigint> {
+  private async rebalanceShareWei(gasPrice: bigint, amount: bigint, batch: bigint = this.cfg.policy.redeemMin): Promise<bigint> {
     const p = this.cfg.policy;
     const execFee = await this.chain.pub
       .readContract({ address: this.cfg.moc.queue, abi: MOC_QUEUE_ABI, functionName: "getExecFee", args: [OPER_REDEEM_TP] })
       .catch(() => 0n);
-    const batch = direction === "sellRif" ? p.rifFloatTarget - p.rifRefillBelow : p.redeemMin;
     return rebalanceShare(gasPrice * p.rebalanceGas + execFee, amount, batch);
   }
 
@@ -350,7 +423,9 @@ export class Filler {
     const paidFull = full.paid[0] ?? 0n;
     const receivedFull = full.received[0] ?? 0n;
     const notionalFull = notionalUsdt0(direction, paidFull, receivedFull);
-    const balance = await balanceOf(chain, pay);
+    const held = await balanceOf(chain, pay);
+    // The rail never spends USDT0_RESERVE (it backs the USDRIF buy side).
+    const balance = direction === "buyRif" ? (held > p.usdt0Reserve ? held - p.usdt0Reserve : 0n) : held;
     const budgetLeft = this.budget.remaining(pay, now);
     // The USDT0-notional cap, converted into units of the token we pay.
     const capByNotional = notionalFull === 0n ? 0n : (paidFull * p.maxFillUsdt0) / notionalFull;
@@ -381,6 +456,11 @@ export class Filler {
       return this.skip(orderHash, price.reason, true, await this.recheckAt(order, gasPrice, paid, received, (pd, rv) => priceOk(direction, pd, rv, p).ok));
     }
 
+    // 2b. RIF buys: never past the band's ceiling (RIF is volatile: the wallet holds a minority).
+    if (direction === "buyRif" && shareAfterBuy(await walletMix(chain, cfg), received, paid) > p.rifShareHighBps) {
+      return this.skip(orderHash, `RIF share would exceed RIF_SHARE_HIGH_BPS ${p.rifShareHighBps}`);
+    }
+
     // 3. Buy side: the live exit (redeem at oracle − MoC fee, sell RIF on the pool) must beat what we pay.
     if (direction === "buyUsdrif") {
       const rif = ((await rifForUsdrif(chain, cfg, received)) * (10_000n - MOC_FEE_BPS)) / 10_000n;
@@ -399,14 +479,19 @@ export class Filler {
     //     The fill's gas is priced at estimate × r (gasRatio.ts), r learned per shape.
     const shape = gasShape("inventory", "inventory", receive, pay, cfg.settlement);
     const edgeUsdt0 = await this.edgeUsdt0(direction, paid, received);
-    const rebalanceWei = await this.rebalanceShareWei(gasPrice, direction === "buyUsdrif" ? received : paid, direction);
+    const rebalanceWei =
+      direction === "buyRif"
+        ? await this.railBuyRebalanceWei(gasPrice, received, await walletMix(chain, cfg))
+        : direction === "sellRif"
+          ? await this.rebalanceShareWei(gasPrice, paid, this.railBatch(direction, await walletMix(chain, cfg)))
+          : await this.rebalanceShareWei(gasPrice, direction === "buyUsdrif" ? received : paid);
     const preCost = await this.rbtcToUsdt0(gasPrice * this.gasRatios.priced(shape, p.inventoryGasEstimate) + rebalanceWei);
     if (preCost === undefined) return this.skip(orderHash, "cannot price gas in USDT0 (no pool quote and no RBTC_PRICE_USD)");
     // The edge at another (paid, received), the market held: buy — the exit value
     // (edge + paid) scales with the USDRIF received; sell — received − mint cost.
     // rail — received − the replacement cost, which scales with the RIF paid.
     const edgeAt = (pd: bigint, rv: bigint) =>
-      direction === "buyUsdrif"
+      paysUsdt0(direction)
         ? scaleUp(edgeUsdt0 + paid, rv, received) - pd
         : direction === "sellRif"
           ? rv - scaleUp(received - edgeUsdt0, pd, paid)
@@ -481,6 +566,8 @@ export class Filler {
     const profitEst =
       direction === "buyUsdrif"
         ? (usdt0Eq(simReceived, receive) * (10_000n - MOC_FEE_BPS)) / 10_000n - simPaid
+        : direction === "buyRif"
+          ? scaleUp(edgeUsdt0 + paid, simReceived, received) - simPaid // the mark, as the gate above
         : direction === "sellRif"
           ? simReceived - scaleUp(received - edgeUsdt0, simPaid, paid) // the rail's replacement cost, as the gate above
           : simReceived - mintReplaceUsdt0(simPaid); // the mint fee too, as the gate above

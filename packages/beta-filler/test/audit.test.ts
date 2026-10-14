@@ -512,6 +512,42 @@ describe("the RIF rail (2026-10-14): USDT0 → RIF filled from the float, gated 
     expect(guard.pending!.info).toMatchObject({ payToken: ROOTSTOCK.rif, recvToken: ROOTSTOCK.usdt0, profitEst: String(50_000_000n - 45_180_723n) });
   });
 
+  it("BUY_RIF: a maker selling 450 RIF for 44 USDT0 is bought (worth its $45.09 replacement while below target) — refused past 25 %", async () => {
+    const buyCfg = loadConfig({ ...ENV, BUY_RIF: "1", INVENTORY_MIN_PROFIT_USDT0: "0" });
+    const run = async (rifHeld: bigint) => {
+      const { chain, sent } = inventoryChain({ gasPrice: GAS_PRICE, receipt: "success" });
+      const pub = (chain as unknown as { pub: Record<string, unknown> }).pub;
+      const read = pub.readContract as (a: { functionName: string; address?: string }) => Promise<unknown>;
+      pub.readContract = async (a: { functionName: string; address?: string }) => {
+        if (a.functionName === "previewFill") return [0n, [450n * 10n ** 18n], [44_000_000n]];
+        if (a.functionName === "balanceOf") return a.address?.toLowerCase() === ROOTSTOCK.rif.toLowerCase() ? rifHeld : 1_000_000_000n; // 1000 USDT0 / 1000e-12 USDRIF
+        return read(a);
+      };
+      const sim = pub.simulateContract as (a: { functionName: string; args: [{ amount?: bigint }] }) => Promise<unknown>;
+      pub.simulateContract = async (a: { functionName: string; args: [{ amount?: bigint }] }) =>
+        a.functionName === "quoteExactOutputSingle" ? { result: [a.args[0].amount! / 10n ** 12n + 1n, 0n, 0, 0n] } : sim(a);
+      pub.call = async () => ({ data: encodeAbiParameters([{ type: "int256" }, { type: "uint256[]" }, { type: "uint256[]" }], [0n, [450n * 10n ** 18n], [44_000_000n]]) });
+      const guard = new Guard(buyCfg.gas);
+      const e = {
+        orderHash: ("0x" + "05".repeat(32)) as Hex,
+        announce: { order: order({ legsIn: [{ token: ROOTSTOCK.rif, start: 450n * 10n ** 18n, end: 0n }], legsOut: [{ token: ROOTSTOCK.usdt0, start: 44_000_000n, end: 0n, recipient: zeroAddress }] }), sig: "0x" as Hex },
+        state: { ok: true, status: "Fillable", fillableAmount: 450n * 10n ** 18n, validatorsPass: true },
+      };
+      const out = await new Filler(buyCfg, chain, new Budget({ [ROOTSTOCK.usdt0.toLowerCase()]: 10n ** 30n }), () => {}, () => {}, guard).consider(e as never);
+      return { out, sent, guard };
+    };
+    const ok = await run(0n);
+    expect(ok.out, ok.out.reason).toMatchObject({ status: "pending", strategy: "inventory" });
+    // 450 RIF × $0.10 ÷ (1 − 0.2 %) = 45.090180… USDRIF ≈ 45.090181 USDT0: we pay 44.
+    expect(ok.guard.pending!.info).toMatchObject({ payToken: ROOTSTOCK.usdt0, recvToken: ROOTSTOCK.rif, profitEst: String(45_090_181n - 44_000_000n) });
+    // Holding 2000 RIF ($200) next to 1000 USDT0: +$45 lifts RIF to ~21 % → above target the mark is the
+    // MoC exit; holding 3000 ($300 of $1300 → 26 % after) the buy is refused outright.
+    const full = await run(3_000n * 10n ** 18n);
+    expect(full.out).toMatchObject({ status: "skipped" });
+    expect(full.out.reason).toMatch(/RIF_SHARE_HIGH_BPS/);
+    expect(full.sent).toHaveLength(0);
+  });
+
   it("refuses when the RIF costs more to replace than the maker pays", async () => {
     const { e, sent, filler } = rail(500n * 10n ** 18n); // 50.2 USDRIF to replace > 50 USDT0
     const out = await filler.consider(e as never);

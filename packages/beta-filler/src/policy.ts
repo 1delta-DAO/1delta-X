@@ -13,9 +13,15 @@ import type { SpendEntry } from "./state";
 /**
  * `buyUsdrif`: the maker sells USDRIF, we pay USDT0. `sellUsdrif`: the maker buys USDRIF,
  * we deliver it. `sellRif`: the maker buys RIF with USDT0, we deliver RIF from the float
- * (the RIF rail — priced at its MoC replacement cost, {@link railUsdrifFor}).
+ * (the RIF rail — priced at its MoC replacement cost, {@link railUsdrifFor}). `buyRif`:
+ * the maker sells RIF for USDT0, we pay USDT0 and keep the RIF ({@link rifBand}).
  */
-export type Direction = "buyUsdrif" | "sellUsdrif" | "sellRif";
+export type Direction = "buyUsdrif" | "sellUsdrif" | "sellRif" | "buyRif";
+
+/** Whether we PAY USDT0 in this direction (the maker sells us USDRIF / RIF). */
+export function paysUsdt0(direction: Direction): boolean {
+  return direction === "buyUsdrif" || direction === "buyRif";
+}
 
 export type Verdict<T> = ({ ok: true } & T) | { ok: false; reason: string };
 
@@ -114,7 +120,7 @@ export function windowEndMs(order: Order, nowMs: number): number | undefined {
  */
 export function classify(
   order: Order,
-  cfg: Pick<Config, "tokens"> & { policy: Pick<Policy, "buyUsdrif" | "sellUsdrif"> & Partial<Pick<Policy, "sellRif">> },
+  cfg: Pick<Config, "tokens"> & { policy: Pick<Policy, "buyUsdrif" | "sellUsdrif"> & Partial<Pick<Policy, "sellRif" | "buyRif">> },
   me: Address,
   extras: { hasPermitBatch?: boolean; sigless?: boolean; nowS?: bigint } = {},
 ): Verdict<{ direction: Direction }> {
@@ -140,21 +146,26 @@ export function classify(
   if (tin === usdt0 && tout === cfg.tokens.rif.toLowerCase()) {
     return cfg.policy.sellRif ? { ok: true, direction: "sellRif" } : { ok: false, reason: "RIF rail disabled" };
   }
+  if (tin === cfg.tokens.rif.toLowerCase() && tout === usdt0) {
+    return cfg.policy.buyRif ? { ok: true, direction: "buyRif" } : { ok: false, reason: "RIF buy side disabled" };
+  }
   return { ok: false, reason: "not an inventory pair (USDRIF/USDT0, USDT0→RIF)" };
 }
 
 /** The token we pay and the token we receive, for a direction. */
 export function legsFor(direction: Direction, tokens: Config["tokens"]): { pay: Address; receive: Address } {
   if (direction === "buyUsdrif") return { pay: tokens.usdt0, receive: tokens.usdrif };
+  if (direction === "buyRif") return { pay: tokens.usdt0, receive: tokens.rif };
   return { pay: direction === "sellRif" ? tokens.rif : tokens.usdrif, receive: tokens.usdt0 };
 }
 
 /** USDT0 per USDRIF (per RIF on the rail), 1e18-scaled, for one fill's `paid`/`received` (each in its own token's units). */
 export function fillPrice(direction: Direction, paid: bigint, received: bigint): bigint {
   // buy: we pay USDT0 (paid) for USDRIF (received); sell: we receive USDT0 for USDRIF paid.
-  const usdt0 = direction === "buyUsdrif" ? paid : received;
-  const usdrif = direction === "buyUsdrif" ? received : paid;
-  if (usdrif === 0n) return direction === "buyUsdrif" ? 2n ** 255n : 0n;
+  const buy = paysUsdt0(direction);
+  const usdt0 = buy ? paid : received;
+  const usdrif = buy ? received : paid;
+  if (usdrif === 0n) return buy ? 2n ** 255n : 0n;
   return (usdt0 * USDT0_TO_18 * ONE) / usdrif;
 }
 
@@ -162,7 +173,7 @@ export function priceOk(direction: Direction, paid: bigint, received: bigint, p:
   if (paid === 0n || received === 0n) return { ok: false, reason: "zero-sized leg" };
   const price = fillPrice(direction, paid, received);
   // The rail has no fixed price bound: its gate is the live replacement cost (filler.ts).
-  if (direction === "sellRif") return { ok: true, price };
+  if (direction === "sellRif" || direction === "buyRif") return { ok: true, price };
   if (direction === "buyUsdrif" && price > p.maxBuyPrice) {
     return { ok: false, reason: `price ${fmt18(price)} above max ${fmt18(p.maxBuyPrice)}` };
   }
@@ -251,7 +262,37 @@ export function railUsdrifFor(rif: bigint, pACtp: bigint, haircutBps: bigint): b
 
 /** USDT0 notional of a fill (the USDT0 side, whichever direction). */
 export function notionalUsdt0(direction: Direction, paid: bigint, received: bigint): bigint {
-  return direction === "buyUsdrif" ? paid : received;
+  return paysUsdt0(direction) ? paid : received;
+}
+
+/** The wallet as the RIF band sees it: balances and MoC's oracle (USDRIF per RIF, 1e18). */
+export interface WalletMix {
+  usdt0: bigint;
+  usdrif: bigint;
+  rif: bigint;
+  pACtp: bigint;
+}
+
+/** USD value (18 dec) of `rif` at the MoC oracle (USDRIF ≈ $1). */
+export function rifValue18(rif: bigint, pACtp: bigint): bigint {
+  return (rif * pACtp) / ONE;
+}
+
+/**
+ * Where the wallet stands in the RIF band: its value (18-dec USD: USDT0, USDRIF at $1,
+ * RIF at the oracle), RIF's share of it (bps) and how far RIF's value is from the target
+ * share (`gap18` > 0: below target, buy that much; < 0: above, sell).
+ */
+export function rifBand(m: WalletMix, p: Pick<Policy, "rifShareTargetBps">): { total18: bigint; rif18: bigint; shareBps: bigint; gap18: bigint } {
+  const rif18 = rifValue18(m.rif, m.pACtp);
+  const total18 = m.usdt0 * USDT0_TO_18 + m.usdrif + rif18;
+  const shareBps = total18 === 0n ? 0n : (rif18 * 10_000n) / total18;
+  return { total18, rif18, shareBps, gap18: (total18 * p.rifShareTargetBps) / 10_000n - rif18 };
+}
+
+/** RIF's share (bps) after `rifIn` more RIF is bought for `usdt0Out` USDT0 units. */
+export function shareAfterBuy(m: WalletMix, rifIn: bigint, usdt0Out: bigint): bigint {
+  return rifBand({ ...m, rif: m.rif + rifIn, usdt0: m.usdt0 > usdt0Out ? m.usdt0 - usdt0Out : 0n }, { rifShareTargetBps: 0n }).shareBps;
 }
 
 /**

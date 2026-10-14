@@ -100,6 +100,11 @@ function fake(o: { estimate?: bigint; usdt0Balance?: bigint; balances?: Record<s
         const p = args[0] as { tokenIn: string; tokenOut: string; amountIn: bigint };
         return { result: [rate(p.tokenIn, p.tokenOut, p.amountIn), 0n, 0, 90_000n] };
       }
+      if (functionName === "quoteExactOutputSingle") {
+        // Only the rail's refill leg: USDT0 for an exact USDRIF out at 0.999.
+        const p = args[0] as { amount: bigint };
+        return { result: [p.amount / (999n * 10n ** 9n) + 1n, 0n, 0, 90_000n] };
+      }
       const path = args[0] as Hex;
       const tin = `0x${path.slice(2, 42)}`;
       const tout = `0x${path.slice(-40)}`;
@@ -362,7 +367,7 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
   });
 
   it("USDT0→RIF `auto`: the RIF RAIL quotes on PULL when it beats the route (direct); an empty float leaves the route", async () => {
-    const RAIL_ENV = { ...ENV, INVENTORY_ENABLED: "1", SELL_RIF: "1", RIF_FLOAT_TARGET: "3000", RIF_REFILL_BELOW: "1500" };
+    const RAIL_ENV = { ...ENV, INVENTORY_ENABLED: "1", SELL_RIF: "1" };
     const cfg = loadConfig(RAIL_ENV);
     const { chain } = fake({ balances: { [RIF.toLowerCase()]: 3_000n * 10n ** 18n } });
     const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
@@ -383,6 +388,23 @@ describe("Quoter: the filler's real pricing for the order shape", () => {
     // No float: `auto` falls back to the route on direct delivery.
     const empty = await Engine.create({ cfg, chain: fake({ balances: { [RIF.toLowerCase()]: 0n } }).chain, store: new MemoryStateStore(), log: () => {} });
     const r = await empty.quote(sellReq({ tokenIn: USDT0, tokenOut: RIF, amountIn, side: "buy", delivery: "auto" }));
+    expect(r.ok && [r.quote.strategy, r.quote.delivery]).toEqual(["route", "direct"]);
+  });
+
+  it("RIF→USDT0 `auto`: while RIF is below its target share, the rail BUYS at the replacement cost and beats the pool", async () => {
+    const cfg = loadConfig({ ...ENV, INVENTORY_ENABLED: "1", BUY_RIF: "1" });
+    // 1M USDT0, no RIF: far below the 20 % target, so the RIF is worth what a refill costs.
+    const { chain } = fake({ balances: { [RIF.toLowerCase()]: 0n } });
+    const e = await Engine.create({ cfg, chain, store: new MemoryStateStore(), log: () => {} });
+    const amountIn = 1_000n * 10n ** 18n; // 1000 RIF: $39.90 on the pool, $40.08 to replace
+    const v = await e.quote(sellReq({ tokenIn: RIF, tokenOut: USDT0, amountIn, delivery: "auto" }));
+    if (!v.ok) throw new Error(v.reason);
+    expect(v.quote).toMatchObject({ strategy: "inventory", delivery: "pull", route: { source: "moc-rail" } });
+    // 1000 × $0.04 ÷ (1 − 0.2 %) = 40.080160… USDRIF → 40.120280 USDT0 at 0.999, − min profit.
+    expect(v.quote.grossOut).toBe(40_120_281n - cfg.policy.minProfitUsdt0);
+    // A buy that would lift RIF over 25 % of the wallet is refused: the route answers.
+    const small = fake({ balances: { [RIF.toLowerCase()]: 0n, [USDT0.toLowerCase()]: 100_000_000n } }); // $100 wallet, a $40 buy
+    const r = await (await Engine.create({ cfg, chain: small.chain, store: new MemoryStateStore(), log: () => {} })).quote(sellReq({ tokenIn: RIF, tokenOut: USDT0, amountIn, delivery: "auto" }));
     expect(r.ok && [r.quote.strategy, r.quote.delivery]).toEqual(["route", "direct"]);
   });
 

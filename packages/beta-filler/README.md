@@ -181,7 +181,22 @@ sent.
    Settlement approval is sent first, as its own tx; the fill follows on a later tick,
    once the approval is mined.
 
-Rebalancing (inventory only):
+Rebalancing (inventory only). **With the RIF rail on (`SELL_RIF` / `BUY_RIF`) the RIF
+band replaces the two rules below:** RIF is kept at about `RIF_SHARE_TARGET_BPS` (20 %)
+of the wallet's value (USD₮0 + USDRIF at $1 + RIF at the MoC oracle; RBTC is gas). RIF is
+volatile, so it stays a minority:
+
+- below `RIF_SHARE_LOW_BPS` (15 %): swap USD₮0 → USDRIF on the 0.05 % pool for the gap, then
+  `redeemTP` it (→ RIF);
+- above `RIF_SHARE_HIGH_BPS` (25 %): `mintTP` the excess RIF into USDRIF, then swap that to USD₮0;
+- in between, user flow on both sides moves it: makers buying RIF (we deliver it, priced
+  at its MoC replacement cost) and makers selling RIF (we keep it — at its replacement
+  cost while RIF is below target, at its MoC exit above, and never past 25 %);
+- `USDT0_RESERVE` is never spent by the rail; a pool more than `USDRIF_PEG_TOLERANCE_BPS`
+  off $1 is refused; RIF is never auto-sold; `beta-filler rebalance-rif` (Worker:
+  `POST /rebalance-rif`) moves the band to its target now. Fork proof: `e2e/rail-fork.sh`.
+
+Without the rail:
 
 - USDRIF above `USDRIF_RESERVE` is redeemed through MoC (`redeemTP`, ~2.5 min queue).
 - RIF ≥ `RIF_SELL_MIN` is sold on the RIF/USDT0 pool, refusing a quote more than
@@ -785,7 +800,11 @@ Inventory strategy:
 | `INVENTORY_GAS_ESTIMATE` | `260000` | `eth_estimateGas` units assumed for an inventory fill before estimation, priced × r (re-checked at the real estimate × r) |
 | `REBALANCE_GAS` | `450000` | gas of the redeem + RIF sale a fill eventually causes, charged pro rata (fill ÷ `REDEEM_MIN_USDRIF`, capped at 1) plus the MoC exec fee |
 | `INVENTORY_MIN_PROFIT_USDT0` | `0.02` | absolute profit floor per inventory fill, on top of gas |
-| `RIF_SELL_MIN`, `RIF_SELL_SLIPPAGE_BPS`, `RIF_SELL_MAX_DISCOUNT_BPS` | `200`, `50`, `150` | RIF sale |
+| `RIF_SELL_MIN`, `RIF_SELL_SLIPPAGE_BPS`, `RIF_SELL_MAX_DISCOUNT_BPS` | `200`, `50`, `150` | RIF sale (off while the RIF rail is on) |
+| `SELL_RIF`, `BUY_RIF` | `0`, `0` | the RIF rail: makers buy RIF from / sell RIF to the wallet (USD₮0, pull orders) |
+| `RIF_SHARE_LOW_BPS`, `RIF_SHARE_TARGET_BPS`, `RIF_SHARE_HIGH_BPS` | `1500`, `2000`, `2500` | the RIF band, as a share of the wallet's value |
+| `HOURLY_RIF`, `RIF_RAIL_HAIRCUT_BPS`, `USDT0_RESERVE` | `20000`, `20`, `0` | RIF outflow cap per hour; the haircut on async MoC conversions; USD₮0 the rail never spends |
+| `RAIL_SWAP_SLIPPAGE_BPS`, `USDRIF_PEG_TOLERANCE_BPS` | `30`, `50` | the band's USD₮0 ⇄ USDRIF pool swaps |
 | `USDRIF`, `USDT0`, `RIF`, `MOC_CORE`, `MOC_QUEUE` | Rootstock mainnet | overrides |
 
 ## Commands

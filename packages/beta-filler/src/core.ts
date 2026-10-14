@@ -3,7 +3,7 @@
  * blocking waits. The Node CLI (./bin.ts, with ./fileStore.ts) and the Cloudflare
  * Worker (packages/filler-worker) both run it.
  */
-export { connect, balanceOf, type Chain, type ConnectOptions } from "./chain";
+export { connect, balanceOf, walletMix, type Chain, type ConnectOptions } from "./chain";
 export { loadConfig, parseFixed, ROOTSTOCK, type Config } from "./config";
 export { dispatch, type Strategy } from "./dispatch";
 export { Engine, roundRobin, type EngineEvent, type EngineOptions, type Log, type TickLimits, type TickOptions, type TickReport } from "./engine";
@@ -11,7 +11,7 @@ export type { FillOutcome } from "./filler";
 export { BACKOFF, GAS, Guard, broadcast, resolvePending, type PendingTx, type Resolution, type TxInfo, type TxKind } from "./guard";
 export { BINDING_KEY_HEADER, fillReporter, fillReportOf, REPORT_TIMEOUT_MS, type FillReport, type ReporterOptions } from "./bookReport";
 export { entryFromJson, fetchOrders, type BookEntry, type IntakeOptions, type IntakeResult } from "./intake";
-export { Budget, fmtUnits } from "./policy";
+export { Budget, fmtUnits, rifBand } from "./policy";
 export type { RebalanceOutcome, RebalanceState } from "./rebalance";
 export { ROUTE_FILLS } from "./routeFiller";
 export { netQuote, parseQuoteRequest, quoteMatches, quoteMarkets, quoteToJson, QuoteBook, Quoter, MAX_QUOTES, type Delivery, type IssuedQuote, type QuoteRequest, type QuoteResult } from "./quote";
