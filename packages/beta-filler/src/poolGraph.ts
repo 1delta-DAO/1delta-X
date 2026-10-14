@@ -35,6 +35,8 @@ export interface GraphPool {
   pool: Address;
   liquidity?: bigint;
   sqrtPriceX96?: bigint;
+  /** TVL in USD, when the pool came from an indexer (./poolIndexers.ts). */
+  tvlUsd?: number;
 }
 
 /** The discovered graph: every pool that exists (any liquidity) and when it was read. */

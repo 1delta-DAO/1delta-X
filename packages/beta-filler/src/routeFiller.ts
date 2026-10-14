@@ -14,7 +14,7 @@ import {
 import { decodeErrorResult, erc20Abi, type Address, type Hex } from "viem";
 
 import { previewBump, previewFill, type Chain } from "./chain";
-import type { Config, RouteConfig, RoutePath } from "./config";
+import { VENUE_OKU, VENUE_SUSHI_V3, type Config, type RouteConfig, type RoutePath } from "./config";
 import type { FillOutcome } from "./filler";
 import { gasShape, GasRatios } from "./gasRatio";
 import type { BookEntry } from "./intake";
@@ -69,6 +69,7 @@ import {
 import { sanitize } from "./sanitize";
 import { buildNordsternPlan, fetchNordsternRoute, type NordsternQuote } from "./nordstern";
 import { buildSushiPlan, fetchSushiRoute, type SushiQuote } from "./sushi";
+import { okuPools, sushiPools } from "./poolIndexers";
 
 /** A validated API route (pull orders only), with the output it is priced at. */
 type ApiRaw =
@@ -203,17 +204,19 @@ export class RouteFiller {
   poolsReport(symbolOf: (a: string) => string): Record<string, unknown> {
     const g = this.graph;
     const floor = this.rc.discovery.minLiquidity > 0n ? this.rc.discovery.minLiquidity : 1n;
-    const pool = (p: { tokenA: string; tokenB: string; fee: number; venue: number; pool: string; liquidity?: bigint; sqrtPriceX96?: bigint }) => ({
+    const pool = (p: { tokenA: string; tokenB: string; fee: number; venue: number; pool: string; liquidity?: bigint; sqrtPriceX96?: bigint; tvlUsd?: number }) => ({
       pair: `${symbolOf(p.tokenA)}/${symbolOf(p.tokenB)}`,
       venue: venueName(p.venue),
       feeBps: p.fee / 100,
       pool: p.pool,
       liquidity: p.liquidity?.toString() ?? null,
+      ...(p.tvlUsd !== undefined ? { tvlUsd: Math.round(p.tvlUsd) } : {}),
       active: p.liquidity !== undefined && p.liquidity >= floor,
     });
     return {
       discovery: {
         enabled: this.rc.discovery.enabled,
+        source: this.rc.discovery.source,
         refreshedAt: g ? new Date(g.at).toISOString() : null,
         maxHops: this.rc.maxHops,
         hubs: this.rc.discovery.hubTokens.map(symbolOf),
@@ -242,6 +245,22 @@ export class RouteFiller {
     if (this.graphRefresh) return this.graphRefresh;
     this.graphRefresh = (async () => {
       try {
+        // Indexers first when configured (TVL-filtered, CREATE2-verified, zero RPC); any
+        // indexer failure falls through to the RPC probe below.
+        if (d.source === "indexers") {
+          const viaIndexers = await this.discoverViaIndexers().catch((e: unknown) => {
+            this.log(`⚠ [route] indexer discovery failed, probing on-chain instead: ${sanitize(errorReason(e))}`);
+            return undefined;
+          });
+          if (viaIndexers) {
+            this.graph = viaIndexers;
+            this.graphRetryAt = 0;
+            const active = activePools(viaIndexers, d.minLiquidity);
+            this.log(`[route] pool graph (indexers, TVL ≥ $${d.indexers.minTvlUsd}): ${active.length} active / ${viaIndexers.pools.length} pool(s) over ${this.graphTokens().length} tokens, venues ${[...this.venueInfo.keys()].map(venueName).join("+")} (0 eth_call)`);
+            this.onSpend();
+            return;
+          }
+        }
         if (!d.multicall) throw new Error("MULTICALL3 is unset: pool discovery needs Multicall3 (set it, or ROUTE_DISCOVERY=0)");
         const r = await discoverPools(this.chain.pub as unknown as QuoteClient, {
           tokens: this.graphTokens(),
@@ -265,6 +284,27 @@ export class RouteFiller {
       }
     })();
     return this.graphRefresh;
+  }
+
+  /**
+   * The graph from the venues' indexers (./poolIndexers.ts): venue 0 (Uniswap v3 / Oku)
+   * from Oku's API, venue 1 (SushiSwap v3) from its subgraph. Throws when any venue's
+   * indexer fails (the caller then probes on-chain for the whole graph).
+   */
+  private async discoverViaIndexers(): Promise<PoolGraph> {
+    const d = this.rc.discovery;
+    const tokens = this.graphTokens();
+    const fees = new Set(d.feeTiers);
+    const warnings: string[] = [];
+    const pools: GraphPool[] = [];
+    for (const [venue, v] of this.venueInfo) {
+      if (venue === VENUE_OKU) pools.push(...(await okuPools(d.indexers, venue, v, tokens, fees, fetch, warnings)));
+      else if (venue === VENUE_SUSHI_V3 && d.indexers.sushiSubgraph) pools.push(...(await sushiPools(d.indexers, venue, v, tokens, fees, fetch, warnings)));
+      else throw new Error(`no indexer for venue ${venue}`);
+    }
+    for (const w of warnings) this.log(`⚠ [route] ${sanitize(w)}`);
+    if (pools.length === 0) throw new Error("the indexers returned no pool among the graph tokens");
+    return { at: Date.now(), key: this.graphKey(), pools };
   }
 
   /** Every token the graph spans: ROUTE_TOKENS ∪ ROUTE_HUB_TOKENS. */

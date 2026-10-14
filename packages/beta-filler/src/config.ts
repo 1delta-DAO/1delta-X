@@ -3,6 +3,7 @@ import { getAddress, isAddress, type Address, type Hex } from "viem";
 
 import { NORDSTERN_EXECUTOR_ROOTSTOCK, NORDSTERN_GUARD_ROOTSTOCK, type NordsternConfig } from "./nordstern";
 import { SUSHI_RED_SNWAPPER_ROOTSTOCK, SUSHI_SNWAP_EXECUTOR_ROOTSTOCK, type SushiConfig } from "./sushi";
+import type { IndexerConfig } from "./poolIndexers";
 
 /** Rootstock mainnet addresses (chain 30). Verified on-chain — see the repo's MoC notes. */
 export const ROOTSTOCK = {
@@ -131,6 +132,13 @@ export interface DiscoveryConfig {
   hubTokens: Address[];
   /** `MULTICALL3` (Rootstock default: the canonical 0xcA11…CA11; "" = none: one `eth_call` per read). */
   multicall?: Address;
+  /**
+   * `ROUTE_DISCOVERY_SOURCE`: `rpc` (factory.getPool probe, the default) or `indexers`
+   * (Oku API + Sushi subgraph, ./poolIndexers.ts — TVL-filtered, CREATE2-verified, and
+   * the RPC probe as the fallback when an indexer fails).
+   */
+  source: "rpc" | "indexers";
+  indexers: IndexerConfig;
 }
 
 /** The "route" strategy: fills through `AggregatorFillSolver.executeFill` from the operator EOA. */
@@ -632,6 +640,15 @@ function loadDiscovery(env: Env, onRootstock: boolean): DiscoveryConfig {
     refreshMs: 1000 * posNum(env, "ROUTE_DISCOVERY_SECONDS", 3600),
     hubTokens: addrList(env, "ROUTE_HUB_TOKENS", hubDefault),
     multicall: optAddr(env, "MULTICALL3", onRootstock ? ROOTSTOCK.multicall3 : undefined),
+    source: env.ROUTE_DISCOVERY_SOURCE === "indexers" ? "indexers" : "rpc",
+    indexers: {
+      okuBase: env.OKU_API_BASE ?? "https://omni.icarus.tools",
+      okuChain: env.OKU_CHAIN ?? (onRootstock ? "rootstock" : ""),
+      sushiSubgraph:
+        env.SUSHI_V3_SUBGRAPH ?? (onRootstock ? "https://api.goldsky.com/api/public/project_clslspm3c0knv01wvgfb2fqyq/subgraphs/sushiswap/v3-rootstock-3/gn" : ""),
+      minTvlUsd: Number(env.ROUTE_MIN_TVL_USD ?? "1000"),
+      timeoutMs: posNum(env, "INDEXER_TIMEOUT_MS", 6000),
+    },
   };
 }
 

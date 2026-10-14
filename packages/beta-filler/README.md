@@ -502,6 +502,19 @@ every amount it moves is a delta of the current fill.
 
 ## Pool routing: discovery, multi-hop, mixed venues (2026-10-12)
 
+**Discovery source (2026-10-14).** With `ROUTE_DISCOVERY_SOURCE=indexers` (production), the
+graph comes from the venues' indexers ([src/poolIndexers.ts](src/poolIndexers.ts)):
+- **Venue 0 (Uniswap v3):** Oku's `searchPoolsByAddress`, one call per graph token.
+- **Venue 1 (SushiSwap v3):** its v3 subgraph, one GraphQL query.
+- **Filters:** pools below `ROUTE_MIN_TVL_USD` (1000) are dropped. Each pool is re-derived
+  locally with CREATE2 and dropped on a mismatch. Both tokens must be graph tokens and the
+  fee a configured tier.
+- **RPC:** none.
+
+Any indexer failure falls back to the on-chain `getPool` probe. TVL is not in-range
+depth, so a pool also needs in-range `liquidity` to be active. Admin `GET /pools`
+(`scripts/admin.sh pools [refresh]`) lists the graph with each pool's TVL.
+
 The solver's pool plans take 1–4 hops, each `tokenIn ‖ fee ‖ venue ‖ tokenOut` with its
 OWN venue (0 = Oku / Uniswap v3, 1 = SushiSwap v3 — same init code hash). The filler no
 longer needs every route written into `ROUTE_POOLS` / `ROUTE_PATHS`: it finds the pools,

@@ -118,6 +118,11 @@ MIN_PROFIT_RBTC = "0"
 # through Multicall3 (≤ 1 eth_call per hop round). All defaults live in code; see
 # "Pool routing" in packages/beta-filler/README.md.
 ROUTE_DISCOVERY = "1"
+# Discover from the venues' indexers (Oku API + Sushi v3 subgraph, 2026-10-14): TVL-
+# filtered (ROUTE_MIN_TVL_USD), every pool CREATE2-verified, zero RPC; the RPC probe is
+# the fallback when an indexer fails. `GET /pools` (admin) shows the graph with TVL.
+ROUTE_DISCOVERY_SOURCE = "indexers"
+ROUTE_MIN_TVL_USD = "1000"
 ROUTE_MAX_HOPS = "3"
 ROUTE_MAX_CANDIDATES = "5"
 # Pull-order API route sources (exact-input only; direct orders always use a pool plan).

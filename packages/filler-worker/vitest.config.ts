@@ -32,6 +32,8 @@ export default defineConfig({
                 RPC_MULTICALL: "0",
                 RPC_FALLBACK_URLS: "",
                 RPC_PROBE_SECONDS: "0",
+                // Offline suite: the pool graph comes from the fake chain, not the live indexers.
+                ROUTE_DISCOVERY_SOURCE: "rpc",
                 GAS_PRICE_TTL_MS: "10000",
                 // The book's binding key: fills are reported to the (fake) book's /fills/report.
                 ORDERBOOK_BINDING_KEY: "test-book-key",

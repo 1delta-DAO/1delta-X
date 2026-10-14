@@ -540,14 +540,14 @@ describe("config: discovery knobs and per-hop ROUTE_PATHS", () => {
   };
   it("defaults: discovery on, fees 100/500/3000/10000, hourly, hubs WRBTC/USD₮0/RIF/DOC, Multicall3, ≤3 hops, 5 candidates", () => {
     const rc = loadConfig(ENV).route!;
-    expect(rc.discovery).toEqual({ enabled: true, feeTiers: [100, 500, 3000, 10000], minLiquidity: 1n, refreshMs: 3_600_000, hubTokens: [WRBTC, USDT0, RIF, DOC], multicall: MC });
+    expect(rc.discovery).toMatchObject({ source: "rpc",  enabled: true, feeTiers: [100, 500, 3000, 10000], minLiquidity: 1n, refreshMs: 3_600_000, hubTokens: [WRBTC, USDT0, RIF, DOC], multicall: MC });
     expect(rc.maxHops).toBe(3);
     expect(rc.maxCandidates).toBe(5);
     expect(loadConfig({ ...ENV, CHAIN_ID: "31" }).route!.discovery).toMatchObject({ hubTokens: [], multicall: undefined });
   });
   it("overrides and fail-closed validation", () => {
     const rc = loadConfig({ ...ENV, ROUTE_DISCOVERY: "0", ROUTE_FEE_TIERS: "500, 3000", ROUTE_MIN_LIQUIDITY: "1000", ROUTE_DISCOVERY_SECONDS: "600", ROUTE_HUB_TOKENS: USDT0, MULTICALL3: "", ROUTE_MAX_HOPS: "4", ROUTE_MAX_CANDIDATES: "8" }).route!;
-    expect(rc.discovery).toEqual({ enabled: false, feeTiers: [500, 3000], minLiquidity: 1000n, refreshMs: 600_000, hubTokens: [USDT0], multicall: undefined });
+    expect(rc.discovery).toMatchObject({ source: "rpc",  enabled: false, feeTiers: [500, 3000], minLiquidity: 1000n, refreshMs: 600_000, hubTokens: [USDT0], multicall: undefined });
     expect(rc.maxHops).toBe(4);
     expect(rc.maxCandidates).toBe(8);
     expect(() => loadConfig({ ...ENV, ROUTE_MAX_HOPS: "5" })).toThrow(/ROUTE_MAX_HOPS/);
