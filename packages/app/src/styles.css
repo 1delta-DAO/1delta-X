@@ -233,8 +233,11 @@ main { max-width: 1240px; margin: 0 auto; padding: 0 24px 120px; display: flex; 
   border-radius: 10px; padding: 3px 14px 3px 16px; background: var(--bg); transition: border-color .16s;
 }
 .inp:focus-within { border-color: var(--lime); }
+/* A fixed input height (not padding-derived) so the quote skeleton that replaces the receive
+   input, and .inp's min-height, are the same box: no jump when the quote lands. */
+.inp { min-height: 66px; }
 .inp input {
-  flex: 1; min-width: 0; border: 0; background: none; padding: 14px 0;
+  flex: 1; min-width: 0; border: 0; background: none; padding: 0; height: 60px;
   font-family: var(--mono); font-size: 21px; font-variant-numeric: tabular-nums; letter-spacing: -.02em;
 }
 .inp input:focus { outline: none; }
@@ -762,7 +765,7 @@ main.reading .md .mdquote { margin-bottom: 26px; }
   background: linear-gradient(90deg, var(--raise) 0%, var(--line2) 45%, var(--raise) 90%);
   background-size: 220% 100%; animation: qskel 1.15s ease-in-out infinite;
 }
-.qskel.big { flex: 1; height: 26px; max-width: 170px; margin: 4px 0; border-radius: 8px; }
+.qskel.big { flex: 1; height: 26px; max-width: 170px; margin: 0; border-radius: 8px; }
 .qsum > div.qload { align-items: center; }
 @keyframes qskel { from { background-position: 120% 0; } to { background-position: -120% 0; } }
 @media (prefers-reduced-motion: reduce) { .qskel { animation: none; } }
@@ -783,7 +786,15 @@ main.reading .md .mdquote { margin-bottom: 26px; }
 .info:hover, .info:focus-visible { color: var(--ink); border-color: var(--ink); outline: none; }
 
 /* USD reference value under an amount (lib/usdPrices) */
-.usdline { font-family: var(--mono); font-size: 11px; color: var(--faint); padding: 0 4px; margin-top: -2px; }
+.usdline { font-family: var(--mono); font-size: 11px; color: var(--faint); padding: 0 4px; margin-top: -2px; min-height: 16.5px; }
+/* Reserved slots under an amount: the USD line and one note line are always in the flow so
+   notes like "exceeds your balance" replace empty space instead of pushing content down. */
+.fieldfoot { display: flex; flex-direction: column; gap: 4px; }
+.fieldfoot .noteline { min-height: 16px; line-height: 1.5; }
+.fieldfoot .noteline .capnote { display: block; }
+/* The market quote summary never collapses below its three-row (ladder) shape; the loading
+   skeleton mirrors the filler quote's four rows so that shape is held from the first keystroke. */
+.qsum { min-height: 66px; }
 .usdline .d { color: var(--dim); }
 .usdline .d.warn { color: var(--orange); }
 

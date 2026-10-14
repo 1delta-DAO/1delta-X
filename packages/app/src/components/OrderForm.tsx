@@ -453,24 +453,29 @@ export function OrderForm(props: OrderFormProps) {
               label="Token you pay with"
             />
           </div>
-          {payUsd !== undefined && <div className="usdline">≈ {fmtUsd(payUsd)}</div>}
-          {tooSmall && (
-            <span className="capnote">
-              Too small to fill: one fill&rsquo;s network fee is ≈ {fmtUsd(tooSmall.gasUsd)}, more than this ≈ {fmtUsd(tooSmall.ticketUsd)}
-              {mode === "twap" ? " slice" : " ticket"}. Enter at least {fmtUsd(tooSmall.gasUsd * 2)} or so.
-            </span>
-          )}
-          {overBalance && (
-            <span className="capnote">
-              exceeds your {autoWrap && autoWrap.value > 0 ? "spendable " : ""}balance of {fmtBalance(paySpendable ?? 0)} {payToken}
-              {autoWrap && autoWrap.value > 0 ? ` (incl. ${autoWrap.symbol} to wrap)` : ""}
-            </span>
-          )}
-          {!overBalance && quote && isMarket && figures?.basis !== "quote" && quote.unfilledIn > 0 && amount > 0 && (
-            <span className="capnote">
-              book depth is {fmtAmt(quote.filledIn)} {payToken} — sweeping all of it at {quote.avg > 0 ? fmtPrice(quote.avg, tick) : "—"}
-            </span>
-          )}
+          {/* Always-rendered foot: the USD line and ONE note slot keep their height whether or
+              not they have content, so typing an amount (or exceeding the balance) never pushes
+              the receive field down. The notes are exclusive — the most actionable one wins. */}
+          <div className="fieldfoot">
+            <div className="usdline">{payUsd !== undefined ? <>≈ {fmtUsd(payUsd)}</> : "\u00a0"}</div>
+            <div className="noteline">
+              {overBalance ? (
+                <span className="capnote">
+                  exceeds {autoWrap && autoWrap.value > 0 ? "spendable" : "your balance of"} {fmtBalance(paySpendable ?? 0)} {payToken}
+                  {autoWrap && autoWrap.value > 0 ? ` (incl. ${autoWrap.symbol} to wrap)` : ""}
+                </span>
+              ) : tooSmall ? (
+                <span className="capnote">
+                  fee ≈ {fmtUsd(tooSmall.gasUsd)} &gt; this ≈ {fmtUsd(tooSmall.ticketUsd)}
+                  {mode === "twap" ? " slice" : " ticket"} — enter ≥ {fmtUsd(tooSmall.gasUsd * 2)}
+                </span>
+              ) : quote && isMarket && figures?.basis !== "quote" && quote.unfilledIn > 0 && amount > 0 ? (
+                <span className="capnote">
+                  book depth {fmtAmt(quote.filledIn)} {payToken} — sweeping all at {quote.avg > 0 ? fmtPrice(quote.avg, tick) : "—"}
+                </span>
+              ) : null}
+            </div>
+          </div>
         </div>
 
         <div className="flip">
@@ -505,18 +510,22 @@ export function OrderForm(props: OrderFormProps) {
               label="Token you receive"
             />
           </div>
-          {recvUsd !== undefined && !awaitingQuote && (
-            <div className="usdline">
-              ≈ {fmtUsd(recvUsd)}
-              {usdDiff !== undefined && (
-                <span className={usdDiff < -0.01 ? "d warn" : "d"} title="What you receive vs what you pay, both at reference USD prices (network fee included)">
-                  {" "}
-                  ({usdDiff >= 0 ? "+" : "−"}
-                  {Math.abs(usdDiff * 100).toFixed(2)}%)
-                </span>
-              )}
-            </div>
-          )}
+          <div className="usdline">
+            {recvUsd !== undefined && !awaitingQuote ? (
+              <>
+                ≈ {fmtUsd(recvUsd)}
+                {usdDiff !== undefined && (
+                  <span className={usdDiff < -0.01 ? "d warn" : "d"} title="What you receive vs what you pay, both at reference USD prices (network fee included)">
+                    {" "}
+                    ({usdDiff >= 0 ? "+" : "−"}
+                    {Math.abs(usdDiff * 100).toFixed(2)}%)
+                  </span>
+                )}
+              </>
+            ) : (
+              "\u00a0"
+            )}
+          </div>
           {isMarket && amount > 0 && (
             <div className="qsum">
               {figures ? (
@@ -574,14 +583,24 @@ export function OrderForm(props: OrderFormProps) {
                 </>
               ) : (
                 awaitingQuote ? (
+                  // The loading skeleton mirrors the loaded shape row for row (output, fee,
+                  // total, minimum) so the quote landing does not grow the box.
                   <>
                     <div className="qload">
                       <span>Finding the best route…</span>
                       <span className="qskel" style={{ width: 92 }} />
                     </div>
-                    <div className="qload minor">
+                    <div className="qload">
                       <span>Network fee</span>
                       <span className="qskel" style={{ width: 64 }} />
+                    </div>
+                    <div className="qload total">
+                      <span>You receive</span>
+                      <span className="qskel" style={{ width: 92 }} />
+                    </div>
+                    <div className="qload minor">
+                      <span>Minimum received</span>
+                      <span className="qskel" style={{ width: 72 }} />
                     </div>
                   </>
                 ) : (
