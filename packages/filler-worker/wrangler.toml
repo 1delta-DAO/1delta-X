@@ -163,7 +163,9 @@ HOURLY_USDRIF = "2000"
 USDRIF_RESERVE = "0"
 REDEEM_MIN_USDRIF = "1000"   # batch size: one redeem+sell (~450k gas ≈ $1) per 1000 USDRIF
 REDEEM_SLIPPAGE_BPS = "50"
-RIF_SELL_MIN = "200"
+# 2026-10-14: the RIF in the wallet is now INVENTORY for the RIF rail — never auto-sold.
+# (200 sold any RIF ≥ 200; a huge threshold keeps the old redeem→sell exit off.)
+RIF_SELL_MIN = "1000000000"
 RIF_SELL_SLIPPAGE_BPS = "50"
 RIF_SELL_MAX_DISCOUNT_BPS = "150"
 
